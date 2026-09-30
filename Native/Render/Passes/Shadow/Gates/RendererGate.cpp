@@ -19,6 +19,28 @@
 // --luminance-log FILE.csv: per frame (warm-up included) the mean luminance of the gate output (GateLuminance.hlsl:
 // exposed-linear source before display encoding), "frame,mean_linear_exposed,invalid_pixels".
 // The logger reads the upscale output when active; native runs request linear output. GI split history stays opt-in.
+//
+// Motion, cuts, lighting changes and several captures per run (RENDERER_REDESIGN_V2 3.3, P0): the camera follows a pose
+// function P(t) of a time t: path 0 of the scene (--moving), or a synthetic motion of the chosen camera
+// (--path-rotate deg/s: yaw about world up; --path-translate v[,strafe]: m/s along the horizontal forward and to the
+// right). t = (frame - --motion-start F) / 60 while moving; --path-time T holds the camera still at P(T) (the reference of a
+// moving sequence's frame at that time: 600 still frames there). --cut-at F[:T2]: from frame F on, t = T2 (+ the frames
+// since F while moving), and frame F is a camera cut (FrameContext::discontinuity kDiscontinuityCut, no previous view).
+// --light-toggle-at F,i: at frame F light i goes off (on again when it was off; GpuScene::setLights). --sun-step-at F,deg:
+// the sun turns by deg at frame F (about the same axis as --sun-deg-per-s).
+// --capture-frames a,b,c: captures of these frame indices (the files get _f<frame> before .pfm) instead of the last
+// frame; --capture-layers final,gi,refl,shadow,reflmode,depth: besides the capture (final), the main view's internal
+// layers of the same frames as PFM (_<layer>): gi = view.giIrradiance (E x near occlusion x exposure; an _alpha file with
+// its data flag), refl = view.reflection (radiance, weight in _alpha), shadow = the first three light slots of
+// view.shadowVisibility (0..1), reflmode = R's per-pixel mode texture (r = mode 0 K 1 M 2 G 3 planar, g = log2 of the G
+// spacing, b = own job bit), depth = device depth (reversed Z).
+// --frame-log FILE.csv: per frame the camera, the camera-motion disocclusion d (GateDisocclusion.hlsl: surface pixels the
+// previous frame did not see) and the tracks' counters of their last completed frame (GI: live, requested, selected,
+// created, resets, evicted; reflection: jobs, mirror, glossy, planar pixels; VSM: dirty, requested) - blocking readbacks
+// every frame: correctness runs only, never with timings.
+// --gi-cache-stats FILE.json: after the last frame, R's GI cache read back and analysed on the CPU (GateGiCache.h: parent
+// against child converged irradiance, the entries read in the last frame by their updates).
+#include "GateGiCache.h"
 #if __has_include("unx/clusterbuilder/ClusterBuilder.h") && defined(UNX_HAS_SCENEGEN)
 #define S_RENDERER_GATE 1
 #include "unx/clusterbuilder/ClusterBuilder.h"
@@ -74,6 +96,48 @@ scene::Camera cameraAt(const scene::Scene& s, bool moving, double time, const st
     c.up = normalize(keys[k].up + (keys[k + 1].up - keys[k].up) * u);
     return c;
 }
+
+// Synthetic game-speed motion of a camera (3.3 --path-rotate / --path-translate): yaw about world up by rate x t, then a
+// move along the turned camera's horizontal forward (and right: strafe) at the given speeds.
+scene::Camera cameraMotion(scene::Camera c, double t, float yawDegPerS, float forwardMps, float strafeMps)
+{
+    const float a = yawDegPerS * 0.01745329252f * (float)t, ca = std::cos(a), sa = std::sin(a);
+    auto yaw = [&](float3 v) { return float3{ v.x * ca + v.z * sa, v.y, -v.x * sa + v.z * ca }; };
+    c.forward = normalize(yaw(c.forward));
+    c.up = normalize(yaw(c.up));
+    float3 f{ c.forward.x, 0, c.forward.z };
+    const float fl = std::sqrt(f.x * f.x + f.z * f.z);
+    f = fl > 1e-6f ? f * (1.0f / fl) : float3{ 0, 0, -1 };
+    const float3 right = normalize(cross(f, float3{ 0, 1, 0 }));
+    c.position = c.position + f * (forwardMps * (float)t) + right * (strafeMps * (float)t);
+    return c;
+}
+
+std::vector<uint64_t> parseFrameList(const std::string& v)
+{
+    std::vector<uint64_t> r;
+    size_t at = 0;
+    while (at < v.size())
+    {
+        const size_t comma = v.find(',', at);
+        r.push_back(std::stoull(v.substr(at, comma == std::string::npos ? std::string::npos : comma - at)));
+        if (comma == std::string::npos) break;
+        at = comma + 1;
+    }
+    return r;
+}
+
+// A texture read back for a capture (--capture, --capture-frames, --capture-layers): its copy footprint and file.
+struct CaptureSlot
+{
+    std::string layer, path;
+    uint64_t frame = UINT64_MAX;  // UINT64_MAX: every frame copies (the last one wins)
+    ComPtr<ID3D12Resource> buffer;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    uint32_t width = 0, height = 0;
+    bool written = false;
+};
 } // namespace
 #endif
 
@@ -104,6 +168,89 @@ float halfToFloat(uint16_t h)
     float f;
     std::memcpy(&f, &bits, 4);
     return f;
+}
+
+// PFM ("PF", width height, -1 = little endian, rows bottom to top, RGB float).
+void writePfm(const std::string& path, uint32_t w, uint32_t h, const std::vector<float>& rgbTopDown)
+{
+    const std::string header = "PF\n" + std::to_string(w) + " " + std::to_string(h) + "\n-1.0\n";
+    std::ofstream file(path, std::ios::binary);
+    if (!file) fail("cannot write %s", path.c_str());
+    file.write(header.data(), (std::streamsize)header.size());
+    for (uint32_t y = h; y-- > 0;) file.write(reinterpret_cast<const char*>(&rgbTopDown[(size_t)y * w * 3]), (std::streamsize)w * 3 * sizeof(float));
+}
+
+// A capture slot's readback as RGB floats (and the fourth channel when the format has one): RGBA32F and RGBA16F as they
+// are, R32_UINT as the 8-bit fields 0..2 (shadow slots / 255) - or, for the reflection mode texture, its mode, spacing and
+// own-job bit - and one-channel floats (depth) repeated.
+void convertCapture(const CaptureSlot& c, const uint8_t* mapped, std::vector<float>& rgb, std::vector<float>& alpha)
+{
+    rgb.assign((size_t)c.width * c.height * 3, 0.0f);
+    alpha.clear();
+    const bool four = c.format == DXGI_FORMAT_R32G32B32A32_FLOAT || c.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+    if (four) alpha.assign((size_t)c.width * c.height, 0.0f);
+    for (uint32_t y = 0; y < c.height; ++y)
+    {
+        const uint8_t* row = mapped + c.footprint.Offset + (size_t)y * c.footprint.Footprint.RowPitch;
+        for (uint32_t x = 0; x < c.width; ++x)
+        {
+            float* o = &rgb[((size_t)y * c.width + x) * 3];
+            float a = 0;
+            switch (c.format)
+            {
+            case DXGI_FORMAT_R32G32B32A32_FLOAT:
+                std::memcpy(o, row + (size_t)x * 16, 12);
+                std::memcpy(&a, row + (size_t)x * 16 + 12, 4);
+                break;
+            case DXGI_FORMAT_R16G16B16A16_FLOAT:
+            {
+                uint16_t hv[4];
+                std::memcpy(hv, row + (size_t)x * 8, 8);
+                for (int k = 0; k < 3; ++k) o[k] = halfToFloat(hv[k]);
+                a = halfToFloat(hv[3]);
+                break;
+            }
+            case DXGI_FORMAT_R32_UINT:
+            {
+                uint32_t v;
+                std::memcpy(&v, row + (size_t)x * 4, 4);
+                if (c.layer == "reflmode")
+                {
+                    o[0] = (float)(v & 3u);
+                    o[1] = (float)((v >> 2) & 7u);
+                    o[2] = (float)((v >> 5) & 1u);
+                }
+                else
+                    for (int k = 0; k < 3; ++k) o[k] = (float)((v >> (8 * k)) & 0xFFu) / 255.0f;
+                break;
+            }
+            case DXGI_FORMAT_R32_FLOAT:
+            case DXGI_FORMAT_D32_FLOAT:
+            case DXGI_FORMAT_R32_TYPELESS:
+                std::memcpy(o, row + (size_t)x * 4, 4);
+                o[1] = o[2] = o[0];
+                break;
+            default:
+                fail("capture of layer %s: format %d is not handled", c.layer.c_str(), (int)c.format);
+            }
+            if (four) alpha[(size_t)y * c.width + x] = a;
+        }
+    }
+}
+
+std::string capturePathFor(const std::string& base, const std::string& layer, uint64_t frame, bool perFrame)
+{
+    std::string stem = base, ext;
+    if (base.size() > 4 && base.compare(base.size() - 4, 4, ".pfm") == 0)
+    {
+        stem = base.substr(0, base.size() - 4);
+        ext = ".pfm";
+    }
+    else
+        ext = ".pfm";
+    if (layer != "final") stem += "_" + layer;
+    if (perFrame) stem += "_f" + std::to_string(frame);
+    return stem + ext;
 }
 } // namespace
 #endif
@@ -138,6 +285,22 @@ int main(int argc, char** argv)
         uint64_t shiftAt = UINT64_MAX;  // --origin-shift-at F --origin-shift x,y,z: a C9 rebase at frame F (repros)
         float cloudCoverage = 0;         // --clouds C: B5 cloud layer (FrameContext::clouds) with coverage C, other fields default
         float3 shiftBy{};  // --time YYYY-MM-DDTHH:MM (UT), --place lat,lon: sun, moon, stars (B4)
+        // P0 motion and change options (see the head comment).
+        double pathTime = -1;  // --path-time T: still at P(T); negative = not given
+        // --path-time-list T1,T2,.. --segment-frames N: still references of several times in one run (N frames at P(T1),
+        // then a cut to P(T2), ...; the world-space caches carry over, a converged still does not depend on its history).
+        std::vector<double> pathTimes;
+        uint64_t segmentFrames = 600;
+        float rotateDegPerS = 0, translateMps = 0, strafeMps = 0;
+        bool synthetic = false;
+        uint64_t motionStart = 0, cutAt = UINT64_MAX, lightToggleAt = UINT64_MAX, sunStepAt = UINT64_MAX;
+        double cutTime = 0;
+        uint32_t lightToggleIndex = 0;
+        float sunStepDeg = 0;
+        std::vector<uint64_t> captureFrames;
+        std::vector<std::string> captureLayers{ "final" };
+        std::string frameLogPath, giCacheStatsPath;
+        bool listLights = false;
         for (int i = 1; i < argc; ++i)
         {
             const std::string a = argv[i];
@@ -170,6 +333,77 @@ int main(int argc, char** argv)
             else if (a == "--auto-exposure") autoExposure = true;
             else if (a == "--origin-shift-at") shiftAt = std::stoull(next());
             else if (a == "--clouds") cloudCoverage = std::stof(next());
+            else if (a == "--path-time") pathTime = std::stod(next());
+            else if (a == "--path-time-list")
+            {
+                const std::string v = next();
+                size_t at = 0;
+                while (at < v.size())
+                {
+                    const size_t comma = v.find(',', at);
+                    pathTimes.push_back(std::stod(v.substr(at, comma == std::string::npos ? std::string::npos : comma - at)));
+                    if (comma == std::string::npos) break;
+                    at = comma + 1;
+                }
+            }
+            else if (a == "--segment-frames") segmentFrames = std::stoull(next());
+            else if (a == "--path-rotate")
+            {
+                rotateDegPerS = std::stof(next());
+                synthetic = true;
+            }
+            else if (a == "--path-translate")
+            {
+                const std::string v = next();
+                const size_t comma = v.find(',');
+                translateMps = std::stof(v.substr(0, comma));
+                if (comma != std::string::npos) strafeMps = std::stof(v.substr(comma + 1));
+                synthetic = true;
+            }
+            else if (a == "--motion-start") motionStart = std::stoull(next());
+            else if (a == "--cut-at")
+            {
+                const std::string v = next();
+                const size_t colon = v.find(':');
+                cutAt = std::stoull(v.substr(0, colon));
+                if (colon != std::string::npos) cutTime = std::stod(v.substr(colon + 1));
+            }
+            else if (a == "--light-toggle-at")
+            {
+                const std::string v = next();
+                const size_t comma = v.find(',');
+                if (comma == std::string::npos) fail("--light-toggle-at F,light");
+                lightToggleAt = std::stoull(v.substr(0, comma));
+                lightToggleIndex = (uint32_t)std::stoul(v.substr(comma + 1));
+            }
+            else if (a == "--sun-step-at")
+            {
+                const std::string v = next();
+                const size_t comma = v.find(',');
+                if (comma == std::string::npos) fail("--sun-step-at F,deg");
+                sunStepAt = std::stoull(v.substr(0, comma));
+                sunStepDeg = std::stof(v.substr(comma + 1));
+            }
+            else if (a == "--capture-frames") captureFrames = parseFrameList(next());
+            else if (a == "--capture-layers")
+            {
+                captureLayers.clear();
+                const std::string v = next();
+                size_t at = 0;
+                while (at <= v.size())
+                {
+                    const size_t comma = v.find(',', at);
+                    const std::string l = v.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+                    if (l != "final" && l != "gi" && l != "refl" && l != "shadow" && l != "reflmode" && l != "depth")
+                        fail("--capture-layers: unknown layer '%s' (final, gi, refl, shadow, reflmode, depth)", l.c_str());
+                    captureLayers.push_back(l);
+                    if (comma == std::string::npos) break;
+                    at = comma + 1;
+                }
+            }
+            else if (a == "--list-lights") listLights = true;  // print the scene's lights and cameras and stop (no GPU)
+            else if (a == "--frame-log") frameLogPath = next();
+            else if (a == "--gi-cache-stats") giCacheStatsPath = next();
             else if (a == "--origin-shift")
             {
                 const std::string v = next();
@@ -178,6 +412,28 @@ int main(int argc, char** argv)
                 shiftBy = { std::stof(v.substr(0, c0)), std::stof(v.substr(c0 + 1, c1 - c0 - 1)), std::stof(v.substr(c1 + 1)) };
             }  // A4 metering instead of the camera's EV100
             else fail("unknown argument %s", a.c_str());
+        }
+        if (capturePath.empty() && (!captureFrames.empty() || captureLayers.size() != 1 || captureLayers[0] != "final"))
+            fail("--capture-frames / --capture-layers name files after --capture or --capture-output");
+        if (moving && synthetic) fail("--moving (path 0) and --path-rotate / --path-translate are two different motions");
+        std::sort(captureFrames.begin(), captureFrames.end());
+        captureFrames.erase(std::unique(captureFrames.begin(), captureFrames.end()), captureFrames.end());
+        if (listLights)
+        {
+            const scene::Scene ls = scene::load(sceneName);
+            for (size_t i = 0; i < ls.lights.size(); ++i)
+            {
+                const scene::Light& l = ls.lights[i];
+                logf("light %zu: type %u at (%.3f, %.3f, %.3f), intensity %g, colour (%.3f, %.3f, %.3f), range %g, size (%.3f, %.3f), shadow %d\n", i, (uint32_t)l.type,
+                     l.position.x, l.position.y, l.position.z, l.intensity, l.color.x, l.color.y, l.color.z, l.range, l.size.x, l.size.y, (int)l.castShadow);
+            }
+            for (const scene::Camera& c : ls.cameras)
+                logf("camera '%s' at (%.3f, %.3f, %.3f) forward (%.3f, %.3f, %.3f), ev100 %.2f\n", c.name.c_str(), c.position.x, c.position.y, c.position.z, c.forward.x,
+                     c.forward.y, c.forward.z, c.ev100);
+            for (const scene::CameraPath& p : ls.paths)
+                logf("path '%s': %zu keys over %.2f s\n", p.name.c_str(), p.keys.size(), p.keys.empty() ? 0.0f : p.keys.back().time - p.keys.front().time);
+            logf("sun direction (%.4f, %.4f, %.4f), %g lux\n", ls.sun.direction.x, ls.sun.direction.y, ls.sun.direction.z, ls.sun.illuminance);
+            return 0;
         }
         requireGpuLock("unx_gate_shadow_renderergate");
         QualityConfig quality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
@@ -246,12 +502,45 @@ int main(int argc, char** argv)
         const float3 sunAxis = normalize(cross(sun0, float3{ 0, 1, 0 }));
         const float wind0 = s.windSpeed;
         const float3 windDir0 = s.windDirection;
+        if (lightToggleAt != UINT64_MAX && lightToggleIndex >= s.lights.size())
+            fail("--light-toggle-at: light %u of %zu", lightToggleIndex, s.lights.size());
+        const std::vector<scene::Light> lights0 = s.lights;
+        if (lightToggleAt != UINT64_MAX)
+        {
+            const scene::Light& l = s.lights[lightToggleIndex];
+            logf("light %u: type %u at (%.3f, %.3f, %.3f), intensity %g, range %g, shadow %d; toggled at frame %llu\n", lightToggleIndex, (uint32_t)l.type, l.position.x,
+                 l.position.y, l.position.z, l.intensity, l.range, (int)l.castShadow, (unsigned long long)lightToggleAt);
+        }
+        if (moving && (s.paths.empty() || s.paths[0].keys.size() < 2))
+            logf("--moving: the scene has no camera path 0: the camera stays still (use --path-rotate / --path-translate for motion)
+");
+        // The pose function and its time per frame (head comment).
+        if (!pathTimes.empty() && (pathTime >= 0 || cutAt != UINT64_MAX)) fail("--path-time-list replaces --path-time and --cut-at");
+        if (!pathTimes.empty() && segmentFrames == 0) fail("--segment-frames 0");
+        if (!pathTimes.empty()) pathTime = pathTimes[0];
+        const bool advancing = (moving || synthetic) && pathTime < 0;
+        const double baseTime = pathTime < 0 ? 0.0 : pathTime;
+        auto timeOf = [&](uint64_t frame) {
+            if (!pathTimes.empty()) return pathTimes[std::min<uint64_t>(frame / segmentFrames, pathTimes.size() - 1)];
+            const bool cut = frame >= cutAt;
+            const double base = cut ? cutTime : baseTime;
+            const int64_t since = (int64_t)frame - (int64_t)(cut ? cutAt : motionStart);
+            return advancing ? base + (double)std::max<int64_t>(since, 0) / 60.0 : base;
+        };
+        auto cameraFor = [&](uint64_t frame) {
+            const double t = timeOf(frame);
+            if (synthetic)
+            {
+                scene::Camera c = cameraAt(s, false, 0, cameraName);
+                return cameraMotion(c, t, rotateDegPerS, translateMps, strafeMps);
+            }
+            return cameraAt(s, moving || pathTime >= 0 || cutAt != UINT64_MAX ? !s.paths.empty() && s.paths[0].keys.size() >= 2 : false, t, cameraName);
+        };
         ClusterData clusters = clusterbuilder::build(s, clusterbuilder::Settings::fromQuality(quality));
         logf("scene %s (%s), %zu instances, %zu clusters, camera %s\n", sceneName.c_str(), scene::contentHash(s).substr(0, 16).c_str(), s.instances.size(),
              clusters.clusters.size(), moving ? "path 0 (moving)" : (cameraName.empty() ? "0 (static)" : cameraName.c_str()));
         Device device({});
-        ComPtr<ID3D12Resource> captureBuffer;  // --capture: readback of the gate output (last frame wins)
-        D3D12_PLACED_SUBRESOURCE_FOOTPRINT captureFootprint{};
+        std::vector<CaptureSlot> captures;  // --capture (last frame wins) or --capture-frames, per layer
         float captureEv100 = 0;  // the captured frame's exposure (the output is radiance x exposure)
         ShaderLibrary shaders(device, executableDirectory() / "shaders");
         GpuScene gpuScene(device);
@@ -286,7 +575,37 @@ int main(int argc, char** argv)
             if (!luminancePath.empty()) luminanceSums = s_detail::createBuffer(device, L"gate luminance sums", (uint64_t)kLuminanceSlots * 16);
             options.label = "S " + sceneName + (moving ? " moving " : " static ") + (sunDegPerS != 0 ? "sun " + std::to_string(sunDegPerS) + " deg/s " : "") + (gustPeriodS > 0 ? "gusts " : "") + rs;
             if (!out.empty()) options.outputDirectory = out;
-            float4x4 prev = ViewDesc::fromCamera(cameraAt(s, moving, 0, cameraName), res.width, res.height, {}).viewProj;
+            float4x4 prev = ViewDesc::fromCamera(cameraFor(0), res.width, res.height, {}).viewProj;
+            // Each resolution starts from the scene's own lights and sun (--light-toggle-at changed the source).
+            {
+                std::vector<uint32_t> changed;
+                for (uint32_t i = 0; i < (uint32_t)s.lights.size(); ++i)
+                    if (s.lights[i].intensity != lights0[i].intensity)
+                    {
+                        s.lights[i] = lights0[i];
+                        changed.push_back(i);
+                    }
+                if (!changed.empty()) gpuScene.setLights(changed);
+            }
+            captures.clear();
+            // --frame-log: camera-motion disocclusion counts per frame (GateDisocclusion.hlsl) into slots read after the run,
+            // the tracks' counters read every frame (blocking).
+            constexpr uint32_t kFrameSlots = 1u << 14;
+            ComPtr<ID3D12Resource> disoccCounts, depthCopy[2];
+            uint32_t depthCopyW = 0, depthCopyH = 0;
+            bool depthCopyValid = false;
+            float4x4 prevInternalViewProj{};
+            struct FrameLogRow
+            {
+                uint64_t frame = 0;
+                double t = 0;
+                float3 position{}, forward{};
+                uint32_t cut = 0, lightOn = 1;
+                float sunDeg = 0;
+                std::string tracks;
+            };
+            std::vector<FrameLogRow> frameLog;
+            if (!frameLogPath.empty()) disoccCounts = s_detail::createBuffer(device, L"gate disocclusion counts", (uint64_t)kFrameSlots * 16);
             // Dirty pages and T_sun averaged over the measured frames (the counters lag the frame by two).
             double dirtySum = 0, trianglesSum = 0, requestedSum = 0;
             uint32_t samples = 0, exhausted = 0, requestedMax = 0, overTiles = 0, overflowWordsMax = 0, overflowLightsMax = 0;
@@ -330,7 +649,21 @@ int main(int argc, char** argv)
                 fc.frameIndex = frame;
                 fc.time = frame / 60.0;
                 fc.deltaTime = 1.0f / 60;
-                scene::Camera cam = cameraAt(s, moving, fc.time, cameraName);
+                scene::Camera cam = cameraFor(frame);
+                const bool cutNow = frame == cutAt || (!pathTimes.empty() && frame > 0 && frame % segmentFrames == 0 && frame / segmentFrames < pathTimes.size());
+                if (cutNow)
+                {
+                    fc.discontinuity |= kDiscontinuityCut;
+                    prev = ViewDesc::fromCamera(cam, rr.width, rr.height, {}).viewProj;  // no previous view
+                }
+                if (frame == lightToggleAt)
+                {
+                    scene::Light& l = s.lights[lightToggleIndex];
+                    l.intensity = l.intensity > 0 ? 0.0f : lights0[lightToggleIndex].intensity;
+                    const uint32_t index = lightToggleIndex;
+                    gpuScene.setLights(std::span<const uint32_t>(&index, 1));
+                    logf("frame %llu: light %u intensity -> %g\n", (unsigned long long)frame, index, l.intensity);
+                }
                 if (frame == shiftAt)
                 {
                     // The rebase (C9): the GPU scene moves by -delta, the frame says so, and the camera is given in the new
@@ -349,13 +682,27 @@ int main(int argc, char** argv)
                     s.windSpeed = gust ? wind0 * 1.3f : wind0;
                     s.windDirection = float3{ windDir0.x * std::cos(a) - windDir0.z * std::sin(a), windDir0.y, windDir0.x * std::sin(a) + windDir0.z * std::cos(a) };
                 }
-                if (sunDegPerS != 0)
+                float sunTurnDeg = 0;
+                if (sunDegPerS != 0 || sunStepAt != UINT64_MAX)
                 {
-                    // Rodrigues rotation of the initial sun direction (the axis is normal to it).
-                    const float a = sunDegPerS * 0.01745329252f * (float)fc.time, ca = std::cos(a), sa = std::sin(a);
+                    // Rodrigues rotation of the initial sun direction (the axis is normal to it); --sun-step-at adds a step.
+                    sunTurnDeg = sunDegPerS * (float)fc.time + (frame >= sunStepAt ? sunStepDeg : 0.0f);
+                    const float a = sunTurnDeg * 0.01745329252f, ca = std::cos(a), sa = std::sin(a);
                     s.sun.direction = normalize(sun0 * ca + cross(sunAxis, sun0) * sa);
                 }
                 prev = fc.mainView.viewProj;
+                if (!frameLogPath.empty())
+                {
+                    FrameLogRow row;
+                    row.frame = frame;
+                    row.t = timeOf(frame);
+                    row.position = cam.position;
+                    row.forward = cam.forward;
+                    row.cut = cutNow ? 1u : 0u;
+                    row.lightOn = lightToggleAt != UINT64_MAX ? (s.lights[lightToggleIndex].intensity > 0 ? 1u : 0u) : 1u;
+                    row.sunDeg = sunTurnDeg;
+                    frameLog.push_back(row);
+                }
                 fc.outputLinearHdr = !capturePath.empty() && !captureUpscaled;
                 if (luminanceSums && !fc.outputLinearHdr)
                 {
@@ -397,51 +744,173 @@ int main(int argc, char** argv)
                                       c.cmd->Dispatch(clear ? 1 : (w + 7) / 8, clear ? 1 : (h + 7) / 8, 1);
                                   });
                 }
-                if (!capturePath.empty())
+                const bool captureThisFrame = captureFrames.empty() || std::binary_search(captureFrames.begin(), captureFrames.end(), frame);
+                if (!capturePath.empty() && captureThisFrame)
                 {
                     if (captureUpscaled && !rendered.upscaled.valid())
                         fail("--capture-output: the frame renders at its output resolution (output.render_scale / render_scale_min_height): use --capture");
-                    const TextureRef source = captureUpscaled ? rendered.upscaled : output;
-                    if (!captureBuffer)
+                    for (const std::string& layer : captureLayers)
                     {
-                        D3D12_RESOURCE_DESC td{};
-                        td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-                        td.Width = rr.width;
-                        td.Height = rr.height;
-                        td.DepthOrArraySize = 1;
-                        td.MipLevels = 1;
-                        td.Format = captureUpscaled ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R32G32B32A32_FLOAT;
-                        td.SampleDesc.Count = 1;
-                        UINT rows;
-                        UINT64 rowBytes, total;
-                        device.d3d()->GetCopyableFootprints(&td, 0, 1, 0, &captureFootprint, &rows, &rowBytes, &total);
-                        D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_READBACK };
-                        D3D12_RESOURCE_DESC bd{};
-                        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-                        bd.Width = total;
-                        bd.Height = 1;
-                        bd.DepthOrArraySize = 1;
-                        bd.MipLevels = 1;
-                        bd.SampleDesc.Count = 1;
-                        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-                        check(device.d3d()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                                    IID_PPV_ARGS(&captureBuffer)),
-                              "capture readback");
+                        TextureRef source;
+                        if (layer == "final") source = captureUpscaled ? rendered.upscaled : output;
+                        else if (layer == "gi") source = rendered.giIrradiance;
+                        else if (layer == "refl") source = rendered.reflection;
+                        else if (layer == "shadow") source = rendered.shadowVisibility;
+                        else if (layer == "depth") source = rendered.depth;
+#if __has_include("unx/refl/ReflectionSystem.h")
+                        else if (layer == "reflmode")
+                        {
+                            if (refl::ReflectionSystem* rsys = refl::ReflectionSystem::find(renderer.trackState())) source = rsys->modes();
+                        }
+#endif
+                        if (!source.valid())
+                        {
+                            if (frame == (captureFrames.empty() ? frame : captureFrames.front())) logf("capture layer %s: no such texture this frame (skipped)\n", layer.c_str());
+                            continue;
+                        }
+                        const uint64_t key = captureFrames.empty() ? UINT64_MAX : frame;
+                        CaptureSlot* slot = nullptr;
+                        for (CaptureSlot& c : captures)
+                            if (c.layer == layer && c.frame == key) slot = &c;
+                        if (!slot)
+                        {
+                            captures.emplace_back();
+                            slot = &captures.back();
+                            slot->layer = layer;
+                            slot->frame = key;
+                            slot->path = capturePathFor(capturePath, layer, frame, !captureFrames.empty());
+                            const TextureDesc& td = g.desc(source);
+                            slot->format = td.format;
+                            slot->width = td.width;
+                            slot->height = td.height;
+                            D3D12_RESOURCE_DESC rd{};
+                            rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+                            rd.Width = td.width;
+                            rd.Height = td.height;
+                            rd.DepthOrArraySize = 1;
+                            rd.MipLevels = 1;
+                            rd.Format = td.format;
+                            rd.SampleDesc.Count = 1;
+                            UINT rows;
+                            UINT64 rowBytes, total;
+                            device.d3d()->GetCopyableFootprints(&rd, 0, 1, 0, &slot->footprint, &rows, &rowBytes, &total);
+                            D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_READBACK };
+                            D3D12_RESOURCE_DESC bd{};
+                            bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                            bd.Width = total;
+                            bd.Height = 1;
+                            bd.DepthOrArraySize = 1;
+                            bd.MipLevels = 1;
+                            bd.SampleDesc.Count = 1;
+                            bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                            check(device.d3d()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                                        IID_PPV_ARGS(&slot->buffer)),
+                                  "capture readback");
+                        }
+                        slot->written = true;
+                        ID3D12Resource* rb = slot->buffer.Get();
+                        const D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = slot->footprint;
+                        g.addPass("s.gate.capture", QueueType::Graphics,
+                                  [&](PassBuilder& b) {
+                                      b.use(source, Use::CopySrc);
+                                      b.keep();
+                                  },
+                                  [=](PassContext& ctx) {
+                                      D3D12_TEXTURE_COPY_LOCATION dst{ rb, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
+                                      dst.PlacedFootprint = fp;
+                                      D3D12_TEXTURE_COPY_LOCATION src{ ctx.resource(source), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+                                      src.SubresourceIndex = 0;
+                                      ctx.cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                                  });
                     }
-                    ID3D12Resource* rb = captureBuffer.Get();
-                    const D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = captureFootprint;
-                    g.addPass("s.gate.capture", QueueType::Graphics,
-                              [&](PassBuilder& b) {
-                                  b.use(source, Use::CopySrc);
-                                  b.keep();
-                              },
-                              [=](PassContext& ctx) {
-                                  D3D12_TEXTURE_COPY_LOCATION dst{ rb, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
-                                  dst.PlacedFootprint = fp;
-                                  D3D12_TEXTURE_COPY_LOCATION src{ ctx.resource(source), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
-                                  src.SubresourceIndex = 0;
-                                  ctx.cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-                              });
+                }
+                if (disoccCounts && rendered.depth.valid())
+                {
+                    // --frame-log: the camera-motion disocclusion of this frame (GateDisocclusion.hlsl).
+                    const uint32_t w = rendered.view.width, h = rendered.view.height;
+                    if (w != depthCopyW || h != depthCopyH)
+                    {
+                        D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+                        D3D12_RESOURCE_DESC1 d{};
+                        d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+                        d.Width = w;
+                        d.Height = h;
+                        d.DepthOrArraySize = d.MipLevels = 1;
+                        d.Format = DXGI_FORMAT_R32_FLOAT;
+                        d.SampleDesc.Count = 1;
+                        d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+                        for (ComPtr<ID3D12Resource>& t : depthCopy)
+                        {
+                            if (t) device.deferRelease(t);
+                            check(device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0,
+                                                                         nullptr, IID_PPV_ARGS(&t)),
+                                  "gate depth copy");
+                        }
+                        depthCopyW = w;
+                        depthCopyH = h;
+                        depthCopyValid = false;
+                    }
+                    const bool hasPrev = depthCopyValid && !cutNow;
+                    const uint32_t parity = (uint32_t)(frame & 1);
+                    const TextureDesc cd{ "gate depth copy", w, h, 1, 1, DXGI_FORMAT_R32_FLOAT };
+                    const TextureRef copyNow = g.importTexture(depthCopy[parity].Get(), cd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+                    const TextureRef copyPrev = g.importTexture(depthCopy[parity ^ 1].Get(), cd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+                    const BufferRef counts = g.importBuffer(disoccCounts.Get(), { "gate disocclusion counts", (uint64_t)kFrameSlots * 16, 0 });
+                    const float4x4 m = mul(prevInternalViewProj, rendered.view.invViewProj);
+                    const uint32_t slot = (uint32_t)(frame % kFrameSlots);
+                    const TextureRef depth = rendered.depth;
+                    for (const uint32_t clear : { 1u, 0u })
+                        g.addPass(clear ? "s.gate.disocclusion.clear" : "s.gate.disocclusion", QueueType::Compute,
+                                  [&](PassBuilder& b) {
+                                      if (!clear)
+                                      {
+                                          b.use(depth, Use::SrvCompute);
+                                          b.use(copyNow, Use::UavCompute);
+                                          b.use(copyPrev, Use::UavCompute);
+                                      }
+                                      b.use(counts, Use::UavCompute);
+                                      b.keep();
+                                  },
+                                  [&shaders, depth, copyNow, copyPrev, counts, slot, w, h, clear, hasPrev, m](PassContext& c) {
+                                      uint32_t k[24] = { clear ? 0u : c.srv(depth), clear || !hasPrev ? 0xFFFFFFFFu : c.uav(copyPrev), clear ? 0u : c.uav(copyNow), c.uav(counts),
+                                                         w, h, slot, clear };
+                                      std::memcpy(&k[8], &m.m[0][0], 64);
+                                      c.cmd->SetPipelineState(shaders.compute("Passes/Shadow/Gates/GateDisocclusion"));
+                                      c.computeConstants(k, 24);
+                                      c.cmd->Dispatch(clear ? 1 : (w + 7) / 8, clear ? 1 : (h + 7) / 8, 1);
+                                  });
+                    depthCopyValid = true;
+                    prevInternalViewProj = rendered.view.viewProj;
+                }
+                if (!frameLogPath.empty())
+                {
+                    // The tracks' counters of their last completed frame (blocking readbacks).
+                    std::string tr;
+                    const shadow::VsmStats& vst = shadow::stats(renderer.trackState());
+                    tr += format(",%llu,%u,%u", (unsigned long long)vst.frame, vst.dirty, vst.requested);
+#if __has_include("unx/gi/GiSystem.h")
+                    if (gi::GiSystem* gs = gi::GiSystem::find(renderer.trackState()))
+                    {
+                        const gi::GiStats gst = gs->readStats();
+                        tr += format(",%u,%u,%u,%u,%u,%u,%u", gst.live, gst.requested, gst.selected, gst.created, gst.resets, gst.evicted, gst.epoch);
+                    }
+                    else
+                        tr += ",,,,,,,";
+#else
+                    tr += ",,,,,,,";
+#endif
+#if __has_include("unx/refl/ReflectionSystem.h")
+                    if (refl::ReflectionSystem* rsys = refl::ReflectionSystem::find(renderer.trackState()))
+                    {
+                        const refl::ReflectionSystem::Stats rst = rsys->readStats();
+                        tr += format(",%u,%u,%u,%u,%u", rst.jobs, rst.mirrorJobs, rst.glossyJobs, rst.glossyPixels, rst.planarPixels);
+                    }
+                    else
+                        tr += ",,,,,";
+#else
+                    tr += ",,,,,";
+#endif
+                    frameLog.back().tracks = tr;
                 }
                 const shadow::VsmStats& st = shadow::stats(renderer.trackState());
                 if (frame > 8 && st.frame != lastStatsFrame)
@@ -491,46 +960,94 @@ int main(int argc, char** argv)
                 logf("luminance of frames %llu..%llu -> %s\n", (unsigned long long)first, (unsigned long long)lastFrame, luminancePath.c_str());
             }
             if (!capturePath.empty()) logf("captured frame index %llu (warm-up %llu frames)\n", (unsigned long long)lastFrame, (unsigned long long)r.firstMeasuredFrame);
-            if (!capturePath.empty() && captureBuffer)
+            // The harness waits for the GPU at its end: every readback holds its frame. The linear-HDR output is radiance x
+            // exposure (Frame.h; 1 / (1.2 2^ev100)), the same units as C's unx_reference images: written as it is.
+            for (CaptureSlot& c : captures)
             {
-                // The harness waits for the GPU at its end: the readback holds the last frame. PFM: "PF", width height,
-                // -1 (little endian), rows bottom to top, RGB float.
+                if (!c.written) continue;
                 void* mapped = nullptr;
-                check(captureBuffer->Map(0, nullptr, &mapped), "map capture");
-                std::string header = "PF\n" + std::to_string(res.width) + " " + std::to_string(res.height) + "\n-1.0\n";
-                std::vector<float> rgb((size_t)res.width * res.height * 3);
-                // The linear-HDR output is radiance x exposure (Frame.h; 1 / (1.2 2^ev100)), the same units as C's
-                // unx_reference images (their json records the camera's ev100): written as it is.
-                const float toRadiance = 1.0f;
-                for (uint32_t y = 0; y < res.height; ++y)
+                check(c.buffer->Map(0, nullptr, &mapped), "map capture");
+                std::vector<float> rgb, alpha;
+                convertCapture(c, static_cast<const uint8_t*>(mapped), rgb, alpha);
+                D3D12_RANGE none{ 0, 0 };
+                c.buffer->Unmap(0, &none);
+                writePfm(c.path, c.width, c.height, rgb);
+                const bool withAlpha = !alpha.empty() && (c.layer == "gi" || c.layer == "refl" || (c.layer == "final" && captureUpscaled));
+                if (withAlpha)
                 {
-                    const uint8_t* rowBytes = static_cast<const uint8_t*>(mapped) + captureFootprint.Offset + (size_t)y * captureFootprint.Footprint.RowPitch;
-                    float* dstRow = &rgb[(size_t)(res.height - 1 - y) * res.width * 3];
-                    for (uint32_t x = 0; x < res.width; ++x)
-                        for (int c = 0; c < 3; ++c)
-                        {
-                            float v;
-                            if (captureUpscaled)  // RGBA16F
-                            {
-                                uint16_t hv;
-                                std::memcpy(&hv, rowBytes + (x * 4 + c) * 2, 2);
-                                v = halfToFloat(hv);
-                            }
-                            else
-                                std::memcpy(&v, rowBytes + (x * 4 + c) * 4, 4);
-                            dstRow[x * 3 + c] = v * toRadiance;
-                        }
+                    std::vector<float> a3(alpha.size() * 3);
+                    for (size_t k = 0; k < alpha.size(); ++k) a3[k * 3] = a3[k * 3 + 1] = a3[k * 3 + 2] = alpha[k];
+                    writePfm(c.path.substr(0, c.path.size() - 4) + "_alpha.pfm", c.width, c.height, a3);
+                }
+                logf("captured %s %ux%u (%s, frame %s, ev100 %.2f) -> %s\n", c.layer.c_str(), c.width, c.height,
+                     c.layer != "final" ? "internal layer" : captureUpscaled ? "after the temporal upscale" : "native",
+                     c.frame == UINT64_MAX ? std::to_string(lastFrame).c_str() : std::to_string(c.frame).c_str(), captureEv100, c.path.c_str());
+                c.buffer.Reset();
+            }
+            for (uint64_t f : captureFrames)
+                if (f > lastFrame) logf("capture frame %llu was not rendered (last frame %llu)\n", (unsigned long long)f, (unsigned long long)lastFrame);
+            if (!frameLogPath.empty())
+            {
+                // Disocclusion counts from the slots, the rest as recorded.
+                const uint64_t bytes = (uint64_t)kFrameSlots * 16;
+                ComPtr<ID3D12Resource> rb = s_detail::createBuffer(device, L"gate disocclusion readback", bytes, D3D12_HEAP_TYPE_READBACK);
+                CommandList cl = device.acquireCommandList(QueueType::Graphics);
+                D3D12_BUFFER_BARRIER bb{ D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS, D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                                         disoccCounts.Get(), 0, UINT64_MAX };
+                D3D12_BARRIER_GROUP group{ D3D12_BARRIER_TYPE_BUFFER, 1 };
+                group.pBufferBarriers = &bb;
+                cl.list->Barrier(1, &group);
+                cl.list->CopyBufferRegion(rb.Get(), 0, disoccCounts.Get(), 0, bytes);
+                device.queue(QueueType::Graphics).waitCpu(device.submit(cl));
+                void* mapped = nullptr;
+                check(rb->Map(0, nullptr, &mapped), "map disocclusion counts");
+                const uint32_t* counts = static_cast<const uint32_t*>(mapped);
+                std::ofstream file(frameLogPath);
+                if (!file) fail("cannot write %s", frameLogPath.c_str());
+                file << "frame,t,px,py,pz,fx,fy,fz,cut,light_on,sun_turn_deg,surface_px,disoccluded_px,offscreen_px,sky_px,d,"
+                        "vsm_stats_frame,vsm_dirty,vsm_requested,gi_live,gi_requested,gi_selected,gi_created,gi_resets,gi_evicted,gi_epoch,"
+                        "refl_jobs,refl_mirror_jobs,refl_glossy_jobs,refl_glossy_pixels,refl_planar_pixels\n";
+                for (const FrameLogRow& row : frameLog)
+                {
+                    const uint64_t slot = row.frame % kFrameSlots;
+                    const bool fresh = row.frame + kFrameSlots > lastFrame;
+                    const uint32_t sp = fresh ? counts[slot * 4] : 0, dp = fresh ? counts[slot * 4 + 1] : 0, op = fresh ? counts[slot * 4 + 2] : 0,
+                                   kp = fresh ? counts[slot * 4 + 3] : 0;
+                    file << format("%llu,%.5f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%u,%u,%.3f,%u,%u,%u,%u,%.5f", (unsigned long long)row.frame, row.t, row.position.x, row.position.y,
+                                   row.position.z, row.forward.x, row.forward.y, row.forward.z, row.cut, row.lightOn, row.sunDeg, sp, dp, op, kp,
+                                   sp ? (double)dp / sp : 0.0)
+                         << row.tracks << "\n";
                 }
                 D3D12_RANGE none{ 0, 0 };
-                captureBuffer->Unmap(0, &none);
-                std::ofstream file(capturePath, std::ios::binary);
-                if (!file) fail("cannot write %s", capturePath.c_str());
-                file.write(header.data(), (std::streamsize)header.size());
-                file.write(reinterpret_cast<const char*>(rgb.data()), (std::streamsize)(rgb.size() * sizeof(float)));
-                logf("captured %ux%u linear radiance x exposure (ev100 %.2f, %s) -> %s\n", res.width, res.height, captureEv100,
-                     captureUpscaled ? "after the temporal upscale" : "native", capturePath.c_str());
-                captureBuffer.Reset();
+                rb->Unmap(0, &none);
+                logf("frame log of %zu frames -> %s\n", frameLog.size(), frameLogPath.c_str());
             }
+#if __has_include("unx/gi/GiSystem.h")
+            if (!giCacheStatsPath.empty())
+            {
+                gi::GiSystem* gs = gi::GiSystem::find(renderer.trackState());
+                if (!gs || !gs->cache()) fail("--gi-cache-stats: no GI cache in this renderer");
+                const uint64_t bytes = gs->cacheBytes();
+                ComPtr<ID3D12Resource> rb = s_detail::createBuffer(device, L"gate GI cache readback", bytes, D3D12_HEAP_TYPE_READBACK);
+                CommandList cl = device.acquireCommandList(QueueType::Graphics);
+                D3D12_BUFFER_BARRIER bb{ D3D12_BARRIER_SYNC_ALL, D3D12_BARRIER_SYNC_COPY, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS, D3D12_BARRIER_ACCESS_COPY_SOURCE,
+                                         gs->cache(), 0, UINT64_MAX };
+                D3D12_BARRIER_GROUP group{ D3D12_BARRIER_TYPE_BUFFER, 1 };
+                group.pBufferBarriers = &bb;
+                cl.list->Barrier(1, &group);
+                cl.list->CopyBufferRegion(rb.Get(), 0, gs->cache(), 0, bytes);
+                device.queue(QueueType::Graphics).waitCpu(device.submit(cl));
+                void* mapped = nullptr;
+                check(rb->Map(0, nullptr, &mapped), "map GI cache");
+                const std::string js = "{" + gate_gi::analyse(static_cast<const uint8_t*>(mapped), (size_t)bytes) + "}";
+                D3D12_RANGE none{ 0, 0 };
+                rb->Unmap(0, &none);
+                std::ofstream file(giCacheStatsPath);
+                if (!file) fail("cannot write %s", giCacheStatsPath.c_str());
+                file << js << "\n";
+                logf("GI cache stats (frame %llu) -> %s\n%s\n", (unsigned long long)lastFrame, giCacheStatsPath.c_str(), js.c_str());
+            }
+#endif
             const shadow::VsmStats& st = shadow::stats(renderer.trackState());
             double sPasses = 0, raster = 0;
             for (const auto& [name, d] : r.passMs)
