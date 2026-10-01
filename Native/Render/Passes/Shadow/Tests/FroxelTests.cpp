@@ -273,7 +273,8 @@ int main(int argc, char** argv)
         std::vector<gpu::Light> gpuLights;  // the scene's light records of the last read frame (froxelListBound)
         bool wantDepth = false;
         std::function<TextureRef(FramePassContext&)> injectMedia;  // section 7: the view's volumeSlices before froxels()
-        std::function<void(FramePassContext&)> beforeFroxels;      // section 1b: writes the FX light tail
+        std::function<void(FramePassContext&)> beforeFroxels;      // section 1: reads the page table before the froxels
+        std::function<void(FramePassContext&)> beforeShadowPages;  // section 1b: writes the FX light tail (the lists are recorded by shadowPages, L3)
         // Node-by-node comparisons need every slice integrated (production integrates only the slices a reader reaches;
         // section 6 checks that those are the same numbers).
         shadow::setFroxelFullDepth(tf.trackState, true);
@@ -295,6 +296,7 @@ int main(int argc, char** argv)
                     tracks::lightFunctions(fc);  // E (A8): FrameResources::lightFunctions (invalid when none is set)
                     tracks::atmosphere(fc);
                     raster.mainView(fc, main);
+                    if (beforeShadowPages) beforeShadowPages(fc);
                     tracks::shadowPages(fc, main);
                     if (injectMedia) main.volumeSlices = injectMedia(fc);
                     if (beforeFroxels) beforeFroxels(fc);
@@ -1338,7 +1340,7 @@ int main(int argc, char** argv)
             tf.setScene(sc);
             if (!tf.gpuScene.setFxLightCapacity(16)) fail("FX light capacity refused");
             const uint32_t fxCount = (uint32_t)records.size();
-            beforeFroxels = [&](FramePassContext& fc) {
+            beforeShadowPages = [&](FramePassContext& fc) {  // the lists (recorded by shadowPages) read the tail this frame
                 const GpuScene::FxLightRange r = tf.gpuScene.fxLightRange();
                 fc.resources.fxLights = fc.graph.importBuffer(r.lightBuffer, BufferDesc{ "scene lights (FX tail)", (uint64_t)(r.first + r.capacity) * sizeof(gpu::Light), (uint32_t)sizeof(gpu::Light) });
                 fc.resources.fxLightCount = fc.graph.importBuffer(r.countBuffer, BufferDesc{ "FX light count", 16, 4 });
@@ -1364,7 +1366,7 @@ int main(int argc, char** argv)
             tf.quality.applyOverride("atmosphere.froxels.list_fallback_forced=0");
             const Lists fbLists{ lastLists };
             run(sc, 1);
-            beforeFroxels = nullptr;
+            beforeShadowPages = nullptr;
             const Lists lists{ lastLists };
             const uint32_t N = (uint32_t)sc.lights.size(), indexBase = lists.word(36);
             uint32_t flagged = 0, outOfRange = 0, fxEntries = 0, missing = 0, points = 0, fxReaching = 0;
