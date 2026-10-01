@@ -813,3 +813,30 @@ accdiag 조각이 12분 걸렸다(시험 1회 2분 × 6). 10분 규칙을 넘겼
 
 깊이 피라미드와 추적 include가 돈다. `LgTrace`의 호출 지점에 붙이는 법은 `Docs/Status/SCREEN_TRACE_INTERFACE_KO.md`: C++에서 `refl::ReflectionSystem::get(fc).screenTraceInputs(fc, main)`(피라미드 + 이전 프레임 색, 프레임당 1회 기록), HLSL에서 `sctTrace` → `sctWorld` → `sctPreviousColour`(`Passes/Reflection/ScreenTrace.hlsli`). 이전 색이 무효면(이력 없음) 건너뛰고 월드 광선만. 반사 쪽 사용 예는 `ReflectionScreenTrace.hlsl`.
 
+
+## 세션 13 이어서 (10) — gi.lumen: Lumen 화면 프로브 최종 수집 재구성 (2026-10-01 밤)
+
+사용자 결정(조정 세션 전달): 조명 경로를 언리얼 구조의 재구성으로 대체. 먼저 전부 쓰고 한 번씩 돌린 뒤, 품질 판정과 수정은 세 세션 결과가 모인 다음. 그래서 아래는 "빌드되고 잠금 안에서 한 번 돌았다"까지만이다(품질 비교 없음).
+
+- 끝: origin/redesign-v2 **bd2d4f9**. 항목·스위치·언리얼과 다른 점·품질을 내주는 값: `Docs/Status/LUMEN_GATHER_KO.md`.
+- 스위치: `gi.lumen`(기본 꺼짐), `gi.lumen_hit_surface_cache`(켬), `gi.lumen_screen_traces`(켬), `gi.lumen_temporal_filter_probes`(꺼짐), 수치 `gi.lumen_*`. A의 `lumen.radiance_cache`, `lumen.short_range_ao`, S2의 `surface_cache.enabled`와 같이 켠다.
+- 출력: `view.giIrradiance`, `view.giRoughSpecular`(새로). 새 진입점 `tracks::surfaceCache`, `tracks::screenTraceInputs`(FrameRenderer가 GI 앞에서 부름; 구현은 `ReflectionTrack.cpp`).
+
+| 커밋 | 내용 | 첫 실행 (로비 또는 라운지 1080p, 40프레임) |
+|---|---|---|
+| e9bf789 | (a)(b)(c)(e)(g)(i) | first_lounge: exit 0, TDR 없음, 오류 비트 0, 검지 않음 |
+| cc5500f | (f) 프로브 시간 누적(꺼짐) | ptemp_lobby(켠 상태): 통과 |
+| 350b54c | hit 조명 = 표면 캐시 | sc_lobby: 통과 |
+| 747b0b0 | (d) radiance cache 연결 | rc_lobby: 통과(r.gi.rc.* 패스가 돌았는지는 이 로그로 확인 못 함) |
+| 78debc6 | (h) 짧은 거리 AO 연결 | ao_lobby: 통과 |
+| bd2d4f9 | 화면 추적(S2 공용) | st3_lobby(`--capture-output`, 내부 720p → 1080p): 통과 |
+
+그림: `Results/Local/Redesign/lumen/*.png`(위 최종, 아래 GI 층, f1/f16/f39).
+
+주의: 게이트는 `--capture`면 업스케일을 끄고 네이티브로 그린다. 화면 추적은 업스케일러의 색 이력이 있어야 돌므로 `--capture-output` 실행만 그 커널을 실제로 돌린다. st3 이전의 실행은 전부 네이티브였다.
+
+판정 단계에 넘기는 관찰(가르는 실행은 하지 않음):
+1. 로비 GI 층 평균(f39): gi.lumen만 1.42 → +표면 캐시 0.29 → +radiance cache 0.63 → +AO 0.85 → +화면 추적(업스케일 경로) 1.94.
+2. "gi.lumen + 표면 캐시"에서 GI 층에 큰 얼룩이 f39에도 남는다(ao_lobby.png). gi.lumen만 켠 f39는 매끈하다(ptemp_lobby.png).
+3. 화면 추적을 켜면 GI 층 색이 회청색으로 바뀐다(화면 적중이 이전 프레임 최종 색을 읽음).
+4. 컷 직후 f1은 어느 조합에서도 얼룩이 심하다.
