@@ -307,3 +307,21 @@
 
 - VSM 통계 버퍼는 512 B(128 단어)다. 단어 64 이상은 L3/L4 카운터다.
 - 3단계(혼합 목록 같은 프레임 할당)·4단계(분류 페이지 정적/동적 층)·5단계(활성 집합 가상 슬롯, 조정 결정 (c))는 조정 세션에 크기·의존성 질문을 보낸 상태다(2026-10-01 저녁).
+
+### 11.1 추가 커밋 (2026-10-01 저녁, 조정 지시)
+
+| 항목 | 커밋 | 게임 뒤 실행 |
+|---|---|---|
+| L3 3단계: 오버플로 목록 할당을 타일 순서 접두 합으로(`ShadowOverflow.MODE0/1`, `ShadowOverflowScan`), 할당 카운터 폐지, INTERFACES v1.89 | 33776ea | LocalShadowTests(overflow queued/inline, 용량 1 강제), ShadingTests, 욕탕 켬/끔, timing |
+| 큐 10번: `updateLocalLights` 교체 루프 break | R의 ecdba03이 이미 `continue` → `break`로 고침(확인) | — |
+| 큐 10번: 수조 η 통계 호스트 API(`PoolStats.hlsl`, `UnxPoolStatsLatest`, C# `TryPoolStats`/`TryGetStats`), INTERFACES v1.90 | b6fc560, Unravel dcb43ec8 | PoolTests 8, HostPools 3b |
+
+**L3 4단계(분류 페이지 정적/동적 층) 비용식 [예상]:** 지금은 활성 그림자 광원마다 6면을 매 프레임 그린다(항상 맞음). 뷰 수 = 6 × N_active(스파 300 → 1,800 뷰; 지금 128 상한 → 768), 면당 128² 텍셀의 보수 래스터 + 쌍둥이 표준 래스터, 삼각형은 V의 cull mask가 걸러낸 캐스터(광원 범위 안)뿐. 기존 고운 페이지 래스터 뷰 42(14.3 표 기준)에 +6/42 = **+14 %** 뷰 [예상]; 텍셀 수는 고운 페이지(mip 0~6)에 견줘 작다. 정적 캐시 + 동적 층 분리는 게임 뒤 `s.vsm.raster.cls*` 실측으로 정한다(14.3-6: 바뀐 캐스터 목록이 GPU에 있어 CPU 래스터 요청에 못 쓰므로 분리는 V의 래스터 요청에 GPU 목록 소비가 들어가야 한다).
+
+**자기 코드 재검토 (데이터 의존 루프 상한·DXIL 여유):**
+- 구조 상한 안: `LocalTileClassify`(슬라이스 ≤ 4, 목록 ≤ 64 아니면 기록 무효), `TileLights`(목록 ≤ 64 × 4, 중복 제거 O(n²) ≤ 256), `CoverageTileLights`(구간 ≤ 16, 목록 > 64이면 그 구간은 장 없음), `airClsSegmentLit`(블록 ≤ 16), `ShadowOverflowScan`·`PoolStats`·`VsmClsBlocks`(고정), 발광 쿼드트리 순회(스택 `EMISSIVE_STACK` 초과 시 하강 없이 그 노드 평가 — 품질 저하지만 유한).
+- 장면 의존(설계상 상한 없음, 14.1): 프록셀 목록 길이를 도는 루프(`ShadowOverflow` 재계수·채움, `FroxelIntegrate` 광원 루프)는 광원 밀도에 선형. 14.1이 상한 없음을 정했으므로 설계 그대로.
+- **발견(설계 보완 필요):** `emissiveLightsIrradiance`는 타일·셀마다 **모든 발광 평면**을 돈다(평면마다 뒤·노출 바닥 검사 뒤 루트부터 순회). 평면 수 P에 선형: 램프 1,000개가 각각 평면이면 타일당 1,000 × (검사 + 루트 노드)가 된다. 구조 상한은 평면의 노출 바닥 반경 R_l로 만든 평면 격자/BVH(타일이 닿는 평면만). 스파(천장 패널 묶음, P 작음)에서는 비용이 작아 게임 뒤 실측 뒤 넣는다. 14.1b 설계 메모 대상.
+- DXIL 여유: `ShadeOpaque` FALLBACK1 변종 204,260 / 204,800 B(**540 B 여유** — 다음 ShadeOpaque 변경은 FALLBACK 변종에서 코드를 빼야 들어간다), FALLBACK0 189,504; `CoverageComposite` 192,972; `FroxelIntegrate` 66,404; 새 커널 전부 < 36 KB.
+
+**게임 뒤 검증 사슬(`run_chain4.sh`, HOLD 해제를 기다렸다가 한 번에 한 홀드, 각 ≤ 10 분, -WaitMinutes 600):** tests2(4개 suite) → city_block 정확성 A/B → 욕탕 층 A/B → 수조 시험 → 욕탕 1080p 스위치별 정지 캡처(off / cls / tile / covtl / emis / omit / all, 끝 8프레임) → 라운지 off/all → 욕탕 회전 45°/s + 150프레임 컷(컷 뒤 1·2·4·16 프레임 캡처) off/all → timing 기준 대 새 빌드(1080p·1440p) → 스위치별 timing(1080p·1440p). 결과 `Results/Local/Fix-11/postgame/`, 사슬 로그 `chain4.log`. chain 3은 GpuLock 기본 -WaitMinutes 120을 넘겨 실패했으므로 chain 4가 그 단계를 다시 한다.
