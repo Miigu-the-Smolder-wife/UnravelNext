@@ -10,7 +10,9 @@ $out = Join-Path $root "Results\Local\Refl\tests\$Tag"
 New-Item -ItemType Directory -Force $out | Out-Null
 $on = @("--set", "reflection.layers=true")
 $tests = @(
+  @{ name = "reflectionanalytic_prev"; exe = "unx_test_reflection_reflectionanalytic.exe"; args = @("--set", "reflection.layers=false", "--set", "reflection.hit_cone_lobes=false") },
   @{ name = "reflectionanalytic_off"; exe = "unx_test_reflection_reflectionanalytic.exe"; args = @("--set", "reflection.layers=false") },
+  @{ name = "reflectionanalytic_oriented"; exe = "unx_test_reflection_reflectionanalytic.exe"; args = @("--set", "reflection.layers=false", "--set", "reflection.hit_oriented_lights=true") },
   @{ name = "reflectionanalytic_on"; exe = "unx_test_reflection_reflectionanalytic.exe"; args = $on },
   @{ name = "reflectionanalytic_on_nohistory"; exe = "unx_test_reflection_reflectionanalytic.exe"; args = $on + @("--set", "reflection.layer_history_frames=1") },
   @{ name = "planarmirror"; exe = "unx_test_reflection_planarmirror.exe"; args = @() },

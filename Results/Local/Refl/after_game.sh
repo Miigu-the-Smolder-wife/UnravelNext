@@ -20,11 +20,11 @@ python Results/Local/Refl/queue.py after1 \
  "$J --tag A --modes still $OFF" \
  "$J --tag B --modes still $ON" \
  "$J --tag C --modes still $ON $LOBE" \
- "$T reflectionanalytic_off" "$T reflectionanalytic_on" "$T planarmirror" "$T hostmotion" \
+ "$T reflectionanalytic_prev" "$T reflectionanalytic_off" "$T reflectionanalytic_on" "$T planarmirror" "$T hostmotion" \
  "$J --tag AO --modes still $OFF --set reflection.hit_oriented_lights=true" \
  "$J --tag BD --modes still $ON --set reflection.layer_residual_whole=false" \
  "$J --tag N --modes still $ON $NOB" \
  "$J --tag CN --modes still $ON $LOBE $NOB" \
  "$J --tag Bv7 --modes diag $ON --set reflection.layer_view=7" "$J --tag Bv2 --modes diag $ON --set reflection.layer_view=2" \
  "$J --tag Bv4 --modes diag $ON --set reflection.layer_view=4" "$J --tag Bv6 --modes diag $ON --set reflection.layer_view=6" \
- "$T reflectionanalytic_on_nohistory" "$T gianalytic"
+ "$T reflectionanalytic_oriented" "$T reflectionanalytic_on_nohistory" "$T gianalytic"
