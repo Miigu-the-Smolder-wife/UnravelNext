@@ -27,6 +27,7 @@
 //                          no random point on the light, so a cell's value does not change between updates and
 //                          neighbouring cells agree (area lights cast hard shadows in the cache, as in the
 //                          reference). Without it: one random point on each light, one shadow ray to it.
+// P[4].z = the first thread index of the dispatch (SurfaceCacheCellsGen: the frame's budget goes in several dispatches).
 // P[0] = { cache UAV, budget, frame, flags (bit 0: local lights and sun, bit 1: radiosity, bit 3: the remainder light,
 //          bit 4: stochastic local lights, bit 5: feedback order, bit 6: analytic local lights) }, P[4] = { asuint(stochastic max frames), asuint(min sample weight), 0, 0 }
 // P[1].xyz = constant sky radiance (SKY1), P[1].w = ray length, P[2] = atmosphere SRVs (SKY0), P[3].xyz = constant sun
@@ -47,6 +48,18 @@ float3 scAlbedoOf(GpuMaterial m)
     const float3 specular = lerp(float3(0.04, 0.04, 0.04), m.baseColor, m.metallic);
     return saturate(diffuse + 0.45 * specular);
 }
+
+// Whether a ray may be launched: finite origin, a finite direction of unit length. (Traversal of a ray with a NaN or an
+// infinite component is undefined: every ray of this library is checked - a cell or a probe holds a point other passes
+// wrote.)
+bool scRayOk(float3 origin, float3 direction)
+{
+    const float d = dot(direction, direction);
+    return all(abs(origin) < 1e9) && d > 0.98 && d < 1.02;  // (comparisons are false for NaN)
+}
+
+// A sampled light point's shadow ray under the GI mask (the sampled-point direct light: surface_cache.direct_analytic=false).
+bool scShadowVisible(RtSceneSrvs scene, RayDesc ray) { return scRayOk(ray.Origin, ray.Direction) && rtVisible(scene, ray, RT_MASK_GI); }
 
 // An orthonormal frame around n (Duff et al. 2017).
 void scFrame(float3 n, out float3 t, out float3 bt)
@@ -98,6 +111,7 @@ bool scCentreVisible(RtSceneSrvs scene, float3 x, float3 n, GpuLight g, float bi
     ray.Direction = wi;
     ray.TMin = bias;
     ray.TMax = max(bias, dist - radius - 0.05);
+    if (!scRayOk(ray.Origin, ray.Direction)) return false;
     return rtVisible(scene, ray, RT_MASK_SHADOW);
 }
 
@@ -149,6 +163,7 @@ void SurfaceCacheSeedGen()
     const uint bounces = P[3].w;
     [loop] for (uint depth = 0; depth <= bounces; ++depth)
     {
+        if (!scRayOk(ray.Origin, ray.Direction)) return;
         const RtHit hit = rtTraceClosest(scene, ray, RAY_FLAG_NONE, RT_MASK_GI);
         if (hit.t < 0) return;
         float3 position, face;
@@ -167,10 +182,12 @@ void SurfaceCacheCellsGen()
     const ScLayout l = scLayout(b);
     const uint n = l.entries;
     if (n == 0) return;
-    const uint slot = scPickCell(b, DispatchRaysIndex().x, P[0].y, P[0].z, n, (P[0].w & 32u) != 0);
+    // (P[4].z: the first thread of this dispatch - the cells of a frame go in bands, ReflectionSystem.cpp kCellBand)
+    const uint slot = scPickCell(b, DispatchRaysIndex().x + P[4].z, P[0].y, P[0].z, n, (P[0].w & 32u) != 0);
     if (slot == SC_NONE) return;
     const uint4 data = b.Load4(scDataOffset(n, slot));
     const float3 position = asfloat(data.xyz), normal = scUnpackOct(data.w);
+    if (!scRayOk(position, normal)) return;  // (a cell without a valid point: no rays from it)
     const RtSceneSrvs scene = rtScene();
     const float bias = 1e-3 + 2e-4 * distance(position, l.camera);
     const float size = scCellSize(l, position);
@@ -257,7 +274,7 @@ void SurfaceCacheCellsGen()
                 const RtLocalSample ls = rtLocalLightFinish(scene, c, position, giUnit(seed + 4 + 2 * i), giUnit(seed + 5 + 2 * i), size);
                 if (!ls.valid) continue;
                 const float mu = dot(normal, ls.wi);
-                if (mu > 0 && (!ls.castShadow || rtVisible(scene, rtLocalShadowRay(position, normal, ls, bias), RT_MASK_GI))) direct += ls.weight * mu;
+                if (mu > 0 && (!ls.castShadow || scShadowVisible(scene, rtLocalShadowRay(position, normal, ls, bias)))) direct += ls.weight * mu;
             }
             if ((P[0].w & 8u) != 0 && gridCell != ~0u && total > kept * (1 + 1e-6))
             {
@@ -287,7 +304,7 @@ void SurfaceCacheCellsGen()
                     c.probability = share / (total - kept);
                     const RtLocalSample ls = rtLocalLightFinish(scene, c, position, giUnit(seed + 41), giUnit(seed + 42), size);
                     const float mu = ls.valid ? dot(normal, ls.wi) : 0;
-                    if (mu > 0 && (!ls.castShadow || rtVisible(scene, rtLocalShadowRay(position, normal, ls, bias), RT_MASK_GI))) direct += ls.weight * mu;
+                    if (mu > 0 && (!ls.castShadow || scShadowVisible(scene, rtLocalShadowRay(position, normal, ls, bias)))) direct += ls.weight * mu;
                 }
             }
         }
@@ -303,7 +320,7 @@ void SurfaceCacheCellsGen()
                 r.Direction = toSun;
                 r.TMin = 0;
                 r.TMax = giRayLength();
-                if (rtVisible(scene, r, RT_MASK_GI)) sun = e * muS;
+                if (scRayOk(r.Origin, r.Direction) && rtVisible(scene, r, RT_MASK_GI)) sun = e * muS;
             }
         }
     }
@@ -351,6 +368,7 @@ void SurfaceCacheProbesGen()
     if (slot == SC_NONE) return;
     const uint4 data = b.Load4(scProbeDataOffset(n, slot));
     const float3 position = asfloat(data.xyz), normal = scUnpackOct(data.w);
+    if (!scRayOk(position, normal)) return;  // (a probe without a valid point: no rays from it)
     const RtSceneSrvs scene = rtScene();
     const float3 origin = position + normal * (1e-3 + 2e-4 * distance(position, l.camera));
     const uint seed = giRandom(slot * 9781u + P[0].z * 6271u + 29u);
@@ -364,6 +382,7 @@ void SurfaceCacheProbesGen()
         ray.Direction = scCosineDirection(normal, u);
         ray.TMin = 0;
         ray.TMax = giRayLength();
+        if (!scRayOk(ray.Origin, ray.Direction)) continue;
         const RtHit hit = rtTraceClosest(scene, ray, RAY_FLAG_NONE, RT_MASK_GI);
         float3 radiance = 0;
         if (hit.t < 0) radiance = giSkyRadiance(ray.Direction);

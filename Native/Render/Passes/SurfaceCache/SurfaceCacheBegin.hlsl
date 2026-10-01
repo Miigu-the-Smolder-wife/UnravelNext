@@ -11,20 +11,21 @@ void main(uint3 id : SV_DispatchThreadID)
 {
     RWByteAddressBuffer b = ResourceDescriptorHeap[P[0].x];
     const uint n = P[0].y;
+    const uint slot = id.y * SC_ROW_THREADS + id.x;
     if (P[0].w != 0)
     {
-        if (id.x < n)
+        if (slot < n)
         {
-            b.Store(scKeysOffset(id.x), 0u);
-            b.Store(scHeadsOffset(n, id.x), 0u);
+            b.Store(scKeysOffset(slot), 0u);
+            b.Store(scHeadsOffset(n, slot), 0u);
         }
-        if (id.x < scProbeCount(n))
+        if (slot < scProbeCount(n))
         {
-            b.Store(scProbeKeysOffset(n, id.x), 0u);
-            b.Store(scProbeHeadsOffset(n, id.x), 0u);
+            b.Store(scProbeKeysOffset(n, slot), 0u);
+            b.Store(scProbeHeadsOffset(n, slot), 0u);
         }
     }
-    if (id.x != 0) return;
+    if (slot != 0) return;
     b.Store4(0, uint4(n, P[0].z, 0, 0));
     b.Store4(16, uint4(asuint(g_cameraPosition), P[1].x));
     b.Store4(32, uint4(0, 0, P[1].y, P[1].z));

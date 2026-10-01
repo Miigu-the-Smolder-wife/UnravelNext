@@ -16,7 +16,7 @@
 [shader("raygeneration")]
 void ReflectionLocalShadowGen()
 {
-    const uint slot = DispatchRaysIndex().x;
+    const uint slot = DispatchRaysIndex().x + reflBand() * REFL_BAND;
     RWByteAddressBuffer rays = ResourceDescriptorHeap[P[5].y];
     const uint capacity = rays.Load(4);
     const uint4 record = rays.Load4(reflRaysHitOffset(slot));

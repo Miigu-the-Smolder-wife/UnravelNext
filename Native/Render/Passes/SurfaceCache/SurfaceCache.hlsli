@@ -43,6 +43,9 @@
 
 #define SC_HEADER 64u
 #define SC_NONE 0xFFFFFFFFu
+// The per-slot passes (begin's clear, the upkeep) are dispatched in rows of SC_ROW_THREADS threads (16384 groups of 64:
+// a dispatch dimension holds at most 65535 groups, and 2^22 slots are 65536 groups): slot = row x SC_ROW_THREADS + x.
+#define SC_ROW_THREADS 1048576u
 #define SC_PROBES_STEPS 8u  // (the reference probes 4; at Lumen's texel density a room fills the table to 0.5-0.9 and 4 steps then fail often)
 #define SC_STORE_SCALE (1.0 / 64.0)
 #define SC_HEAD_MARKED 1u

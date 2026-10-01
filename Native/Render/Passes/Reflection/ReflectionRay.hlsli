@@ -4,7 +4,8 @@
 //
 // Root constants, the same in every pass: P[0] = { jobs SRV, results UAV (uint3 per job), mode SRV, probes SRV },
 // P[1], P[2], P[3].xyz = sky and sun (GiSky.hlsli), ray length in P[1].w, P[3].w = view.screenProbeMaps SRV,
-// P[4] = { depth SRV, gbuffer SRV, GI cache UAV (raw), rays per G sample }, P[5] = { frame | experiment << 24, rays buffer
+// P[4] = { depth SRV, gbuffer SRV, GI cache UAV (raw), rays per G sample (bits 0-7) | the dispatch's band << 8 | the
+// ray-reuse pipeline's GGX sampling bias unorm16 << 16 }, P[5] = { frame | experiment << 24, rays buffer
 // UAV (raw), ShadowSrvs buffer (ReflectionShade.hlsli), exact set counts }, P[6], P[7] = RtSceneSrvs. Frame constants
 // b1 = main view.
 //
@@ -32,6 +33,13 @@
 #include "Passes/GI/GiSky.hlsli"  // giRandom, giUnit (the includer defines SKY)
 
 #define REFL_SAMPLE_ATTEMPTS 8u
+// Bands: no DispatchRays of these passes launches more than REFL_BAND threads (the inline pass: REFL_INLINE_BAND jobs,
+// each up to its rays and their shadow rays) - a frame's jobs / slots / shadow rays go in consecutive dispatches of one
+// band each (ReflectionArgs / ReflectionRayArgs write each band's width; ReflectionSystem.cpp kBand, kInlineBand), so
+// one dispatch's time is bounded whatever the frame's counts are. The band of a dispatch: bits 8-15 of P[4].w.
+#define REFL_BAND 262144u
+#define REFL_INLINE_BAND 65536u
+uint reflBand() { return (P[4].w >> 8) & 0xFFu; }
 #define REFL_RAY_MISS 0xFFFFFFFFu
 #define REFL_RAY_NONE 0xFFFFFFFEu  // no unmasked direction was drawn
 #define REFL_JOB_SPLIT 0xFFFFFFFFu  // results[job].y of a job whose rays are in the rays buffer (never a packed fp16 pair)
@@ -93,7 +101,7 @@ ReflJob reflLoadJob(uint job)
     j.mode = reflMode(modes.Load(int3(j.pixel, 0)));
     j.s = reflSurface(depth, gbuffer, j.pixel);
     j.alpha = max(j.s.roughness * j.s.roughness, 1e-4);
-    j.rays = j.mode == REFL_M ? 1u : (P[4].w & 0xFFFFu);
+    j.rays = j.mode == REFL_M ? 1u : (P[4].w & 0xFFu);
     j.lobe = reflectionLobeHalfAngle(j.s.roughness, dot(j.s.normal, j.s.view));
     // Ray cone of the pixel (ReflectionShade.hlsli): its width at this surface and its spread after the lobe.
     const float pixelSpread = 2 * g_tanHalfFovY / g_viewHeight;

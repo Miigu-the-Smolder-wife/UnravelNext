@@ -15,7 +15,7 @@ void main(uint3 id : SV_DispatchThreadID)
     const uint n = P[0].y;
     const bool probes = P[0].z != 0;
     const uint count = probes ? scProbeCount(n) : n;
-    const uint slot = id.x;
+    const uint slot = id.y * SC_ROW_THREADS + id.x;
     if (slot >= count) return;
     const uint keyOffset = probes ? scProbeKeysOffset(n, slot) : scKeysOffset(slot);
     const uint key = b.Load(keyOffset);

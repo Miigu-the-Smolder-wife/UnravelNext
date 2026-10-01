@@ -53,6 +53,13 @@ constexpr uint32_t kLocalDescOffset = kCombineArgsOffset + 16;  // local-light s
 constexpr uint32_t kInlineDescOffset = kLocalDescOffset + kDescStride;  // jobs over the ray capacity (ReflectionTraceInline, 2 x 2 variants)
 constexpr uint32_t kPenumbraArgsOffset = kInlineDescOffset + 4 * kDescStride;  // ReflectionPenumbra Dispatch arguments
 constexpr uint32_t kArgumentsBytes = kPenumbraArgsOffset + 16;
+// Bands (ReflectionRay.hlsli REFL_BAND, REFL_INLINE_BAND): one DispatchRays launches at most kBand threads (the inline
+// pass kInlineBand jobs), so its time is bounded whatever a frame's counts are; the arguments buffer holds kMaxBands
+// copies of the descriptions, one per band (band b's at b x kArgumentsBytes). The surface cache's direct light:
+// kCellBand cells a dispatch (each up to 8 shadow rays, the sun's and the remainder light's).
+constexpr uint32_t kSlotRowGroups = 16384;  // SurfaceCache.hlsli SC_ROW_THREADS / 64: the per-slot passes' dispatch rows
+constexpr uint32_t kBand = 262144, kInlineBand = 65536, kMaxBands = 128, kCellBand = 16384;
+constexpr uint32_t bandsFor(uint64_t count, uint32_t band) { return (uint32_t)std::clamp<uint64_t>((count + band - 1) / band, 1, kMaxBands); }
 const char* const kTraceLibrary[2] = { "Passes/Reflection/ReflectionTrace.SKY0", "Passes/Reflection/ReflectionTrace.SKY1" };
 const char* const kInlineLibrary[2][2][2] = {
     { { "Passes/Reflection/ReflectionTraceInline.SKY0.JOB1.CORNERS0", "Passes/Reflection/ReflectionTraceInline.SKY0.JOB1.CORNERS1" },
@@ -194,7 +201,7 @@ ReflectionSystem::ReflectionSystem(Device& device, ShaderLibrary& shaders, const
     D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT }, upload{ D3D12_HEAP_TYPE_UPLOAD };
     D3D12_RESOURCE_DESC1 d{};
     d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    d.Width = kArgumentsBytes;
+    d.Width = (uint64_t)kMaxBands * kArgumentsBytes;
     d.Height = d.DepthOrArraySize = d.MipLevels = 1;
     d.SampleDesc.Count = 1;
     d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
@@ -239,10 +246,10 @@ ReflectionSystem::ReflectionSystem(Device& device, ShaderLibrary& shaders, const
     void* mapped = nullptr;
     D3D12_RANGE none{ 0, 0 };
     check(staging->Map(0, &none, &mapped), "map arguments staging");
-    std::memcpy(mapped, image, sizeof image);
+    for (uint32_t band = 0; band < kMaxBands; ++band) std::memcpy(static_cast<uint8_t*>(mapped) + band * kArgumentsBytes, image, sizeof image);
     staging->Unmap(0, nullptr);
     CommandList cl = device.acquireCommandList(QueueType::Graphics);
-    cl.list->CopyBufferRegion(m_arguments.Get(), 0, staging.Get(), 0, sizeof image);
+    cl.list->CopyBufferRegion(m_arguments.Get(), 0, staging.Get(), 0, (uint64_t)kMaxBands * kArgumentsBytes);
     device.queue(QueueType::Graphics).waitCpu(device.submit(cl));
 
     // Planar reflector parameters: CPU-written upload ring, read by classify/resolve through a raw SRV.
@@ -731,7 +738,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const uint32_t samplingBias16 = lumen ? (uint32_t)std::lround(s.lumenSamplingBias * 65535.0f) : 0u;
     const bool layers = s.layers && !lumen;
     const BufferRef jobLayers = layers ? g.createBuffer({ "R reflection job layers", (uint64_t)width * height * 24, 0 }) : BufferRef{};  // REFL_LAYER_JOB_BYTES
-    const BufferRef args = g.importBuffer(m_arguments.Get(), { "R reflection dispatch arguments", kArgumentsBytes, 0 });
+    const BufferRef args = g.importBuffer(m_arguments.Get(), { "R reflection dispatch arguments", (uint64_t)kMaxBands * kArgumentsBytes, 0 });
     const BufferRef cache = fc.resources.giCache;
     const D3D12_GPU_VIRTUAL_ADDRESS frameConstants = main.frameConstants;
     ShaderLibrary& shaders = fc.shaders;
@@ -1057,6 +1064,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     // Rays buffer of the split passes (ReflectionRay.hlsli): header, hit records, ray -> job, values, shadow rays.
     const uint32_t rayCapacity = (s.experimentDisable & 64) ? 0 : m_rayCapacity;
     static_assert(48 + (1ull << 24) * 60 < (1ull << 30), "the rays buffer stays under 1 GiB");  // 64: every job inline (A/B of the split)
+    // (bands of the ray passes: by what the frame can hold - a job per pixel, a slot per unit of capacity)
+    const uint32_t jobBands = bandsFor((uint64_t)width * height, kBand), slotBands = bandsFor(rayCapacity, kBand),
+                   inlineBands = bandsFor((uint64_t)width * height, kInlineBand);
     const BufferRef raysBuffer = g.createBuffer({ "R reflection rays", 48 + (uint64_t)rayCapacity * 60, 0 });  // REFL_RAYS_HEADER + REFL_RAYS_SLOT_BYTES
     // The GI hit accumulator pool (GiAccPool.hlsli; valid when gi.hit_accumulator's pool runs): reflection hits read it.
     const BufferRef accPool = s.hitAccumulator ? fc.resources.giAccumulator : BufferRef{};
@@ -1117,16 +1127,17 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   if (accPool.valid()) b.use(accPool, Use::SrvCompute);
                   if (hitsUseSurfaceCache) b.use(surfaceCache, Use::UavCompute);
               },
-              [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, accPool, surfaceCache, hitsUseSurfaceCache,
+              [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, accPool, surfaceCache, hitsUseSurfaceCache, jobBands,
                hitFlags = (s.hitConeLobes ? 1u : 0u) | (s.hitOrientedLights ? 2u : 0u) | (layers && s.layerFilter && s.hitStrictRead ? 4u : 0u) |
                           (s.lumenSurfaceCacheView ? 8u | ((s.lumenSurfaceCacheViewComponent & 7u) << 8) : 0u) | (screenContinue ? 16u : 0u)](PassContext& c) {
                   // (the layer buffers' UAVs and the hit shading's flags into the rays header: the shade, combine and inline
                   // passes find them there)
-                  const uint32_t k[12] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(raysBuffer), rayCapacity,
+                  const uint32_t k[16] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(raysBuffer), rayCapacity,
                                            layers ? c.uav(rayLayers) : 0xFFFFFFFFu, layers ? c.uav(jobLayers) : 0xFFFFFFFFu, hitFlags,
-                                           accPool.valid() ? c.srv(accPool) : 0xFFFFFFFFu, hitsUseSurfaceCache ? c.uav(surfaceCache) : 0xFFFFFFFFu, 0 };
+                                           accPool.valid() ? c.srv(accPool) : 0xFFFFFFFFu, hitsUseSurfaceCache ? c.uav(surfaceCache) : 0xFFFFFFFFu, jobBands,
+                                           kArgumentsBytes, kBand, 0, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionArgs"));
-                  c.computeConstants(k, 12);
+                  c.computeConstants(k, 16);
                   c.cmd->Dispatch(1, 1, 1);
               });
 
@@ -1163,7 +1174,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     // gi = false (the traversal and the local-light shadow rays): GI's cache and screen probes are not bound (UNX_NONE)
     // nor declared, so those passes do not wait for GI's block (output.async_compute_passes).
     auto constantsFor = [jobs, results, modes, probes, depth, gbuffer, cache, luts, atmosphere, sky, sun, rayLength, s, frame, scene, experiment, exactCounts, samplingBias16,
-                         probeMaps, vsm, rayScene, frameIndex, raysBuffer](PassContext& c, uint32_t k[32], bool gi = true) {
+                         probeMaps, vsm, rayScene, frameIndex, raysBuffer](PassContext& c, uint32_t k[32], bool gi = true, uint32_t band = 0) {
         k[0] = c.srv(jobs);
         k[1] = c.uav(results);
         k[2] = c.srv(modes);
@@ -1180,7 +1191,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         k[16] = c.srv(depth);
         k[17] = c.srv(gbuffer);
         k[18] = gi ? c.uav(cache) : 0xFFFFFFFFu;
-        k[19] = (s.raysPerSample & 0xFFFFu) | (samplingBias16 << 16);  // (the bias: ReflectionRay.hlsli reflNextDirection)
+        // (the band of a ray dispatch: ReflectionRay.hlsli reflBand; the bias: reflNextDirection)
+        k[19] = (s.raysPerSample & 0xFFu) | ((band & 0xFFu) << 8) | (samplingBias16 << 16);
         k[20] = (frame & 0xFFFFFFu) | (experiment << 24);
         k[21] = c.uav(raysBuffer);
         k[22] = rayScene->vsmSrvs(c, vsm, frameIndex, 1);  // S's VSM for sun visibility at hits (UNX_NONE: rays)
@@ -1248,13 +1260,16 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   b.use(args, Use::IndirectArgs);
                   declareShared(b, false);
               },
-              [&pipeline, constantsFor, frameConstants, argumentResource, variant, timestamps, firstTick](PassContext& c) {
-                  uint32_t k[32] = {};
-                  constantsFor(c, k, false);
-                  c.computeConstants(k, 32);
+              [&pipeline, constantsFor, frameConstants, argumentResource, variant, timestamps, firstTick, jobBands](PassContext& c) {
                   c.bindFrameConstants(frameConstants);
                   c.cmd->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, firstTick);
-                  pipeline.dispatchIndirect(c.cmd, argumentResource, 16 + variant * kDescStride);
+                  for (uint32_t band = 0; band < jobBands; ++band)
+                  {
+                      uint32_t k[32] = {};
+                      constantsFor(c, k, false, band);
+                      c.computeConstants(k, 32);
+                      pipeline.dispatchIndirect(c.cmd, argumentResource, (uint64_t)band * kArgumentsBytes + 16 + variant * kDescStride);
+                  }
               });
     if (screenTraces && s.lumenSceneColorAtHit)
     {
@@ -1294,13 +1309,14 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       b.use(args, Use::UavCompute);
                       b.use(raysBuffer, Use::UavCompute);
                   },
-                  [&shaders, args, raysBuffer, stage](PassContext& c) {
-                      const uint32_t k[12] = { c.uav(args), c.uav(raysBuffer), stage, kPenumbraArgsOffset, kShadeArgsOffset, kCombineArgsOffset,
+                  [&shaders, args, raysBuffer, stage, slotBands, inlineBands](PassContext& c) {
+                      const uint32_t k[16] = { c.uav(args), c.uav(raysBuffer), stage, kPenumbraArgsOffset, kShadeArgsOffset, kCombineArgsOffset,
                                                kShadowDescOffset + (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width),
                                                kLocalDescOffset + (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width),
-                                               kInlineDescOffset + (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), kDescStride, 4, 0 };
+                                               kInlineDescOffset + (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), kDescStride, 4, inlineBands,
+                                               kArgumentsBytes, kBand, slotBands, kInlineBand };
                       c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionRayArgs"));
-                      c.computeConstants(k, 12);
+                      c.computeConstants(k, 16);
                       c.cmd->Dispatch(1, 1, 1);
                   });
     };
@@ -1319,7 +1335,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/SurfaceCacheBegin"));
                       c.computeConstants(k, 8);
                       c.bindFrameConstants(frameConstants);
-                      c.cmd->Dispatch(surfaceCacheClear ? (n + 63) / 64 : 1, 1, 1);
+                      // (rows of kSlotRowGroups groups: 2^22 slots are 65536 groups, one over a dispatch dimension's limit)
+                      const uint32_t groups = surfaceCacheClear ? (n + 63) / 64 : 1;
+                      c.cmd->Dispatch(std::min(groups, kSlotRowGroups), (groups + kSlotRowGroups - 1) / kSlotRowGroups, 1);
                   });
         for (uint32_t table = 0; table < 2; ++table)
             g.addPass(table ? "r.sc.update.probes" : "r.sc.update.cells", QueueType::Compute, [&](PassBuilder& b) { b.use(surfaceCache, Use::UavCompute); },
@@ -1328,7 +1346,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/SurfaceCacheUpdate"));
                           c.computeConstants(k, 4);
                           c.bindFrameConstants(frameConstants);
-                          c.cmd->Dispatch(((table ? n / 4 : n) + 63) / 64, 1, 1);
+                          const uint32_t groups = ((table ? n / 4 : n) + 63) / 64;
+                          c.cmd->Dispatch(std::min(groups, kSlotRowGroups), (groups + kSlotRowGroups - 1) / kSlotRowGroups, 1);
                       });
         rt::RayPipeline& surfaceCacheLight = rt::RayPipeline::get(
             fc.device, shaders, rt::standardRayPipeline(kSurfaceCacheLightLibrary[variant], { "SurfaceCacheSeedGen", "SurfaceCacheCellsGen", "SurfaceCacheProbesGen" }));
@@ -1356,9 +1375,16 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           k[15] = bounces;
                           k[16] = asU(stochasticFrames);
                           k[17] = asU(minWeight);
-                          c.computeConstants(k, 32);
                           c.bindFrameConstants(frameConstants);
-                          surfaceCacheLight.dispatch(c.cmd, pass, budget, 1);
+                          // One dispatch of the capture paths (budget x (1 + bounces) rays: N / 64) and of the radiosity
+                          // (budget x 16 rays: N / 64); the direct light in bands of kCellBand cells (each up to 10 rays).
+                          const uint32_t band = pass == 1 ? kCellBand : budget;
+                          for (uint32_t first = 0; first < budget; first += band)
+                          {
+                              k[18] = first;  // (SurfaceCacheCellsGen: the dispatch's first thread)
+                              c.computeConstants(k, 32);
+                              surfaceCacheLight.dispatch(c.cmd, pass, std::min(band, budget - first), 1);
+                          }
                       });
         }
     }
@@ -1371,12 +1397,15 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   b.use(args, Use::IndirectArgs);
                   declareShared(b, false);
               },
-              [&localShadowPipeline, constantsFor, frameConstants, argumentResource](PassContext& c) {
-                  uint32_t k[32] = {};
-                  constantsFor(c, k, false);
-                  c.computeConstants(k, 32);
+              [&localShadowPipeline, constantsFor, frameConstants, argumentResource, slotBands](PassContext& c) {
                   c.bindFrameConstants(frameConstants);
-                  localShadowPipeline.dispatchIndirect(c.cmd, argumentResource, kLocalDescOffset);
+                  for (uint32_t band = 0; band < slotBands; ++band)
+                  {
+                      uint32_t k[32] = {};
+                      constantsFor(c, k, false, band);
+                      c.computeConstants(k, 32);
+                      localShadowPipeline.dispatchIndirect(c.cmd, argumentResource, (uint64_t)band * kArgumentsBytes + kLocalDescOffset);
+                  }
               });
     // Jobs over the ray capacity: traced, shaded and combined in their own ray generation library.
     for (uint32_t mode = 0; mode < 2; ++mode)
@@ -1388,12 +1417,15 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       b.use(args, Use::IndirectArgs);
                       declareShared(b);
                   },
-                  [&inlinePipeline, constantsFor, frameConstants, argumentResource, variant, mode](PassContext& c) {
-                      uint32_t k[32] = {};
-                      constantsFor(c, k);
-                      c.computeConstants(k, 32);
+                  [&inlinePipeline, constantsFor, frameConstants, argumentResource, variant, mode, inlineBands](PassContext& c) {
                       c.bindFrameConstants(frameConstants);
-                      inlinePipeline.dispatchIndirect(c.cmd, argumentResource, kInlineDescOffset + (variant * 2 + mode) * kDescStride);
+                      for (uint32_t band = 0; band < inlineBands; ++band)
+                      {
+                          uint32_t k[32] = {};
+                          constantsFor(c, k, true, band);
+                          c.computeConstants(k, 32);
+                          inlinePipeline.dispatchIndirect(c.cmd, argumentResource, (uint64_t)band * kArgumentsBytes + kInlineDescOffset + (variant * 2 + mode) * kDescStride);
+                      }
                   });
     }
     ID3D12CommandSignature* dispatchSignature = m_dispatchSignature.Get();
@@ -1417,12 +1449,15 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   b.use(args, Use::IndirectArgs);
                   declareShared(b);
               },
-              [&shadowPipeline, constantsFor, frameConstants, argumentResource](PassContext& c) {
-                  uint32_t k[32] = {};
-                  constantsFor(c, k);
-                  c.computeConstants(k, 32);
+              [&shadowPipeline, constantsFor, frameConstants, argumentResource, slotBands](PassContext& c) {
                   c.bindFrameConstants(frameConstants);
-                  shadowPipeline.dispatchIndirect(c.cmd, argumentResource, kShadowDescOffset);
+                  for (uint32_t band = 0; band < slotBands; ++band)
+                  {
+                      uint32_t k[32] = {};
+                      constantsFor(c, k, true, band);
+                      c.computeConstants(k, 32);
+                      shadowPipeline.dispatchIndirect(c.cmd, argumentResource, (uint64_t)band * kArgumentsBytes + kShadowDescOffset);
+                  }
               });
     // The penumbra filter of the hits the shade pass queued (ReflectionPenumbra.hlsl; the args from r.refl.shadowargs).
     g.addPass("r.refl.penumbra", QueueType::Compute,
