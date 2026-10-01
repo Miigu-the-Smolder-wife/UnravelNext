@@ -35,6 +35,9 @@ layer_filter = true                    # the layers' spatial reconstruction ever
 layer_history_frames = 8               # the layers' running mean (LayerTemporal) in place of temporal_history_max's 32: the
                                        # spatial reconstruction is the frame's value, the history removes what it leaves
                                        # (design 10.5: 32 without the spatial filter against 8 with it). 1 = no history
+layer_residual_whole = true            # a G pixel's residual layer is its lobe estimate minus the stochastic share (true), or that
+                                       # minus the control variate's lobe integral gbar, which then stays unfiltered per pixel
+                                       # (false: design 1.2's L_g). Not settled by measurement (ReflectionInternal.hlsli): A/B
 layer_mirror_lobe = false              # DECISION ITEM, off: an M pixel's value without its stochastic share (its "identity") is also
                                        # a layer, reconstructed inside its lobe's footprint (Gaussian sigma blur_px / 2 over
                                        # receiver-guided taps, as G's residual). Design 1.2 keeps M's identity out of every

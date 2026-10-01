@@ -5,7 +5,8 @@
 //
 // The reflection layers (written by ReflectionResolve, ReflectionInternal.hlsli):
 //   stochastic  RGBA16F  rgb = L_rs: the hits' stochastic light over the hits' albedo (nits), a = the frames in its history (LayerTemporal; 0 before)
-//   residual    RGBA16F  rgb = L_g: a G pixel's lobe estimate without the stochastic share (nits; 0 for M), a as above
+//   residual    RGBA16F  rgb = L_g: a G pixel's residual (nits, signed; ReflectionInternal.hlsli: the lobe estimate without
+//                        the stochastic share, or that minus gbar; 0 for M unless reflection.layer_mirror_lobe), a as above
 //   guide       RGBA32UI x = receiver device depth (float bits)
 //                        y = receiver normal oct 11 + 11 | roughness unorm7 << 22 | no cache data at the hits << 29 | mode << 30
 //                        z = M: hit normal oct 8 + 8, G: log2 of the sample spacing | hit distance fp16 << 16 (M: its ray's;

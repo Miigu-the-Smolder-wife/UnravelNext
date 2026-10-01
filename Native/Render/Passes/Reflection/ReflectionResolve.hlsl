@@ -12,7 +12,8 @@
 // window by it).
 // Planar mirror pixels read their reflection camera's colour at (pixel - rectangle origin), divided by the exposure.
 // P[0] = { mode SRV, results SRV, depth SRV, gbuffer SRV }, P[1] = { reflection UAV, history UAV, rows H, planar SRV }
-// P[2] = { width, height, planar byte offset, flags (bit 0: reflection.layer_mirror_lobe) }, P[3] = planar colour SRVs;
+// P[2] = { width, height, planar byte offset, flags (bit 0: reflection.layer_mirror_lobe, bit 1:
+// reflection.layer_residual_whole - a G pixel's residual is its value minus the stochastic share) }, P[3] = planar colour SRVs;
 // frame constants b1 = main view.
 // Reconstruction layers (reflection.layers; ReflectionInternal.hlsli): P[4] = { job layers SRV (raw; UNX_NONE: off),
 // stochastic layer UAV, residual layer UAV, guide UAV }. Every pixel of the view gets its guide (mode 0: no layer value -
@@ -172,6 +173,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         {
             ResolveLayers own = loadJobLayers(reflJob(m));
             own.hitGuide = 0;  // its own job: every pixel around it is a sample or interpolates finer ones
+            if (P[2].w & 2u) own.residual = reflResultRadiance(r) - own.share;
             storeLayers(pixel, s, deviceDepth, LAYER_MODE_G, own, reflResultDistance(r));
         }
         return;
@@ -191,6 +193,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         sumLayers.albedo /= weight;
         sumLayers.residual /= weight;
         sumLayers.noData /= weight;
+        if (P[2].w & 2u) sumLayers.residual = sum / weight - sumLayers.share;
         sumLayers.hitGuide = (m >> 2) & 7u;
         storeLayers(pixel, s, deviceDepth, LAYER_MODE_G, sumLayers, dist / weight);
     }

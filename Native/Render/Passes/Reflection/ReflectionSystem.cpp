@@ -97,6 +97,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.layerHistoryBound = !q.has("reflection.layer_history_bound") || q.boolean("reflection.layer_history_bound");
     s.layerMirrorLobe = q.has("reflection.layer_mirror_lobe") && q.boolean("reflection.layer_mirror_lobe");
     s.hitConeLobes = !q.has("reflection.hit_cone_lobes") || q.boolean("reflection.hit_cone_lobes");
+    s.layerResidualWhole = !q.has("reflection.layer_residual_whole") || q.boolean("reflection.layer_residual_whole");
     s.deterministic = q.has("debug.deterministic") && q.boolean("debug.deterministic");
     s.planarRayNs = (float)q.number("reflection.planar_ray_ns");
     return s;
@@ -1179,9 +1180,10 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   }
               },
               [&shaders, modes, results, depth, gbuffer, reflection, history, width, height, tilesX, tilesY, frameConstants, planarSrv, planarOffset, planarCount,
-               planarColor, layers, jobLayers, layerStochastic, layerResidual, layerGuide, mirrorLobe = s.layerMirrorLobe](PassContext& c) {
+               planarColor, layers, jobLayers, layerStochastic, layerResidual, layerGuide,
+               layerFlags = (s.layerMirrorLobe ? 1u : 0u) | (s.layerResidualWhole ? 2u : 0u)](PassContext& c) {
                   uint32_t k[20] = { c.srv(modes), c.srv(results), c.srv(depth), c.srv(gbuffer), c.uav(reflection), c.uav(history), height, planarSrv,
-                                     width, height, planarOffset, mirrorLobe ? 1u : 0u, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
+                                     width, height, planarOffset, layerFlags, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
                   for (uint32_t v = 0; v < planarCount; ++v) k[12 + v] = c.srv(planarColor[v]);
                   if (layers) k[16] = c.srv(jobLayers), k[17] = c.uav(layerStochastic), k[18] = c.uav(layerResidual), k[19] = c.uav(layerGuide);
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionResolve"));
