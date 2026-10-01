@@ -175,6 +175,7 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     if (q.has("gi.lumen_ray_directions")) s.lumen.rayDirections = (uint32_t)q.integer("gi.lumen_ray_directions");
     if (q.has("gi.lumen_moving_speed")) s.lumen.movingSpeed = (float)q.number("gi.lumen_moving_speed");
     if (q.has("gi.lumen_normal_bias")) s.lumen.normalBias = (float)q.number("gi.lumen_normal_bias");
+    if (q.has("gi.lumen_hit_surface_cache")) s.lumen.hitSurfaceCache = q.boolean("gi.lumen_hit_surface_cache");
     if (s.lumen.enabled)
     {
         if (s.lumen.tile < 8 || s.lumen.tile > 32) fail("gi.lumen_tile must be in 8..32");

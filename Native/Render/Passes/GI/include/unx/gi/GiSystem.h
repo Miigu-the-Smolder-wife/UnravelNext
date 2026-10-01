@@ -81,6 +81,7 @@ struct GiSettings  // from Config/quality/gi.toml
         uint32_t rayDirections = 8;        // the frames the direction jitter cycles through
         float movingSpeed = 0.005f;        // relative speed difference that makes a trace "moving"
         float normalBias = 0.001f;         // m: the rays' origin off the surface (Unreal: 0.1 cm)
+        bool hitSurfaceCache = true;       // the hits read the surface cache when it exists (surface_cache.enabled)
     } lumen;
     uint32_t bounceSplitUpdates = 1;
     bool anchorResample = false;

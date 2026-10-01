@@ -321,6 +321,8 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     const float3 sky = m_skyRadiance, sun = m_sunIlluminance;
     const float skyBand = m_skyBand, rayLength = m_settings.rayLength;
     const uint32_t experiment = m_settings.experimentDisable;
+    // gi.lumen_hit_surface_cache: the hits read the surface cache (tracks::surfaceCache published it before GI).
+    const BufferRef surfaceCache = L.hitSurfaceCache ? fc.resources.surfaceCache : BufferRef{};
     g.addPass("r.gi.lg.trace", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(cache, Use::SrvGraphics);
@@ -331,6 +333,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   b.use(rayInfo, Use::SrvGraphics);
                   b.use(traceRadiance, Use::UavGraphics);
                   b.use(traceWord, Use::UavGraphics);
+                  if (surfaceCache.valid()) b.use(surfaceCache, Use::UavGraphics);
                   rays.declareTraversal(b);
                   rays.declareDecals(b);
                   if (atmosphere)
@@ -355,6 +358,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   k[17] = 0;
                   k[18] = bits(L.normalBias);
                   k[19] = bits(L.movingSpeed);
+                  k[20] = surfaceCache.valid() ? c.uav(surfaceCache) : 0xFFFFFFFFu;
                   std::memcpy(&k[24], scene, sizeof scene);
                   std::memcpy(&k[32], common.k, sizeof common.k);
                   k[42] = c.srv(adaptive);

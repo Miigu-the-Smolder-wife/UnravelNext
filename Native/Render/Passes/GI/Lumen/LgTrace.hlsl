@@ -4,15 +4,19 @@
 // trace texel). The trace's direction: its texel and level from LgGenerateRays.hlsl (level 1: 8 x 8 map, level 0:
 // 16 x 16), the point inside the texel from this frame's ray index of the probe's tile, through the equal-area sphere
 // mapping, world space. From the probe's position, lifted off the surface along its normal.
-// Hit lighting (P[4].y bit 0 = 0, until the surface cache's read exists - S2's scRead): the hit shaded as the GI cache's
-// own hits are - the full material model with the sun (one shadow ray into the disk), one local-light sample with its
-// shadow ray, and the world cache's irradiance and mirror radiance at the hit (read only). A ray that meets an
-// analytic area light's proxy returns 0 (M shades those lights; the proxy still occludes). A miss returns the sky.
+// Hit lighting: with the surface cache (SurfaceCache.hlsli, as the reflection hits use it) the hit marks its cell and,
+// where the cell has been lit, takes the cell's irradiance (local lights + multi-bounce) - no light sample, no shadow
+// ray, no world-cache read; its own material, emission and sun term stay. Without the cache, or at a cell not lit yet,
+// the hit is shaded as the GI cache's own hits are - the sun (one shadow ray into the disk), one local-light sample
+// with its shadow ray, and the world cache's irradiance and mirror radiance at the hit (read only). A ray that meets
+// an analytic area light's proxy returns 0 (M shades those lights; the proxy still occludes). A miss returns the sky.
 // Output: radiance x exposure (RGBA16F, a unused) and the trace word (lgEncodeTrace: distance, hit, moving: the hit
 // moves relative to the probe, |probe speed - hit speed| / max(probe depth, 1 m) > P[4].w).
 // P[0] = { world cache SRV, ray info SRV (R16_UINT), trace radiance UAV, trace word UAV (R32_UINT) },
 // P[1], P[2], P[3] = sky and sun (GiSky.hlsli), ray length; P[3].w = gi.experiment_disable bits (8, 16, 128 as GiTrace),
-// P[4] = { sky band (tests), flags, normal bias (float, m), moving threshold (float) }, P[6], P[7] = RtSceneSrvs,
+// P[4] = { sky band (tests), flags, normal bias (float, m), moving threshold (float) }, P[5].x = surface cache UAV
+// (0xFFFFFFFF: none - gi.lumen_hit_surface_cache off, surface_cache.enabled off or before its first frame),
+// P[6], P[7] = RtSceneSrvs,
 // P[8..11] = the common block (P[10].z adaptive SRV, P[10].w / P[11].x / P[11].y probe depth / normal / position SRVs).
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
@@ -21,6 +25,7 @@
 #include "Passes/GI/GiCache.hlsli"
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/GI/Lumen/LgCommon.hlsli"
+#include "Passes/SurfaceCache/SurfaceCache.hlsli"
 
 float lgBias(float3 p) { return 1e-3 + 2e-4 * distance(p, g_cameraPosition); }
 
@@ -64,6 +69,11 @@ void LgTraceGen()
     r.Origin = positionSpeed.xyz + normal * (asfloat(P[4].z) + bias);
     r.TMin = 0;
     r.TMax = giRayLength();
+    // CALL SITE (S2's shared screen trace, as Lumen's LumenScreenTracing: the probes' rays and the reflection rays use one):
+    // the ray first walks the depth pyramid; a certain hit takes last frame's lit colour there and skips the ray below (the
+    // trace word then carries its distance and hit); otherwise r.TMin = the distance the screen trace cleared.
+    // CALL SITE (A's radiance cache, LumenRadianceCache): r.TMax = min(r.TMax, the cache's coverage distance at the probe),
+    // a miss then reads the cache in r.Direction and the trace word's bit 31 (reached the cache) is set.
     const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_GI | RT_MASK_EMITTER);
     const uint seed = giRandom(coord.x * 9781u + coord.y * 6271u + lgFrame() * 26699u);
 
@@ -118,7 +128,24 @@ void LgTraceGen()
         if (s.frontFace || twoSided)
         {
             RtHitLighting L = (RtHitLighting)0;
+            bool fromSurfaceCache = false;
+            if (P[5].x != 0xFFFFFFFFu && (m.classFlags & 0xFFu) != MATERIAL_FOLIAGE)
+            {
+                RWByteAddressBuffer surfaceCache = ResourceDescriptorHeap[P[5].x];
+                const ScLayout layout = scLayout(surfaceCache);
+                const float3 face = dot(s.geometricNormal, r.Direction) > 0 ? -s.geometricNormal : s.geometricNormal;
+                const float3 bounceAlbedo = saturate(m.baseColor * (1 - m.metallic) + 0.45 * lerp(float3(0.04, 0.04, 0.04), m.baseColor, m.metallic));
+                scMark(surfaceCache, layout, s.position, face, bounceAlbedo, m.emissive);
+                const ScSample cell = scRead(surfaceCache, layout, s.position, face);
+                if (cell.valid)
+                {
+                    L.irradiance = cell.direct + cell.indirect;
+                    L.specularRadiance = L.irradiance / LG_PI;
+                    fromSurfaceCache = true;
+                }
+            }
             // indirect light at the hit: the world cache (read only)
+            if (!fromSurfaceCache)
             {
                 ByteAddressBuffer cache = ResourceDescriptorHeap[P[0].x];
                 const GiHeader h = giHeader(cache);
@@ -141,7 +168,7 @@ void LgTraceGen()
                     L.sunVisibility = rtVisible(scene, sr, RT_MASK_GI) ? 1.0 : 0.0;
                 }
             }
-            if ((P[3].w & 128) == 0)
+            if ((P[3].w & 128) == 0 && !fromSurfaceCache)
             {
                 const bool oriented = (m.classFlags & 0xFFu) != MATERIAL_FOLIAGE;
                 const RtLocalSample ls = rtLocalLightFinish(scene, rtLocalLightChooseOriented(scene, s.position, s.normal, !oriented, giUnit(seed + 11)), s.position,

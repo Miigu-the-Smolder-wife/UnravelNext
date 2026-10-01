@@ -213,3 +213,4 @@ lumen_disocclusion_fraction = 0.4          # SpatialFilter.DisocclusionFraction
 lumen_ray_directions = 8                   # Temporal.MaxRayDirections
 lumen_moving_speed = 0.005                 # RelativeSpeedDifferenceToConsiderLightingMoving
 lumen_normal_bias = 0.001                  # m; Unreal's HardwareRayTracing.NormalBias is 0.1 cm
+lumen_hit_surface_cache = true             # the probes' ray hits read the surface cache (surface_cache.enabled) where a cell is lit; false or no cache: hit shading
