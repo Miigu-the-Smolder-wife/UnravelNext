@@ -3,7 +3,8 @@
 // grain -> sRGB OETF -> 10-bit triangular dither -> the display output (RGB10A2).
 // P[0] = { HDR SRV, bloom SRV (half resolution; UNX_NONE: off), output UAV, LUT SRV (UNX_NONE: none) },
 // P[1] = { asfloat bloom strength, asfloat vignette, asfloat grain, frame index }, P[2] = { width, height, asfloat display
-// peak, tone curve (0 film shFilm, 1 PBR Neutral) }: peak 0 = SDR (above); peak >= 1 = an HDR display (peak over paper
+// peak, tone curve (0 film shFilm, 1 PBR Neutral) }, P[3] = { exposure correction SRV (raw: float c; UNX_NONE: none: a
+// snap frame's own metering, Exposure.cpp), 0, 0, 0 }: peak 0 = SDR (above); peak >= 1 = an HDR display (peak over paper
 // white): the curve generalised to that peak,
 // the LUT on its output over the peak, grain, then linear light with 1 = paper white (RGBA16F output, no OETF, no dither).
 // Frame constants of the view (its projection gives the field angle).
@@ -38,6 +39,11 @@ void main(uint2 id : SV_DispatchThreadID)
         const float3 t00 = tail.Load(int3(clamp(b, int2(0, 0), hi), 0)).rgb, t10 = tail.Load(int3(clamp(b + int2(1, 0), int2(0, 0), hi), 0)).rgb;
         const float3 t01 = tail.Load(int3(clamp(b + int2(0, 1), int2(0, 0), hi), 0)).rgb, t11 = tail.Load(int3(clamp(b + int2(1, 1), int2(0, 0), hi), 0)).rgb;
         e = lerp(e, lerp(lerp(t00, t10, f.x), lerp(t01, t11, f.x), f.y), bloom);  // PSF = (1 - s) delta + s tail
+    }
+    if (P[3].x != UNX_NONE)
+    {
+        ByteAddressBuffer correction = ResourceDescriptorHeap[P[3].x];
+        e *= asfloat(correction.Load(0));  // a snap frame exposed for itself (Exposure.cpp, ExposureMeter.hlsl)
     }
     const float vignette = asfloat(P[1].y);
     if (vignette > 0)

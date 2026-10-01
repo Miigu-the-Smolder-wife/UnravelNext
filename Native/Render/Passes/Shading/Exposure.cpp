@@ -7,6 +7,10 @@
 // (dark -> bright and bright -> dark time constants). After a cut or a restore the EV holds until the first histogram of
 // the new view, then snaps to its target. The EV is a frame constant:
 // every pass of the frame sees one exposure (one frame of meter latency, deterministic).
+// Snap frames (the renderer's first frames before any histogram came back, and the frames after a cut or restore until a
+// histogram of the new view came back): their EV was not metered on what they show, so each of them meters its own
+// histogram on the GPU after its shading (exposureMeter, ExposureMeter.hlsl) and its output applies the correction
+// (PostFinal; the gate's captures): the first frame after a cut is exposed for itself, not 2-3 frames later.
 #include "unx/shading/Exposure.h"
 
 #include "unx/core/Config.h"
@@ -37,6 +41,9 @@ struct ExposureState
     bool snapPending = false;
     uint64_t snapFrom = 0;
     float ev = 14.0f;
+    // This frame: its EV is not metered on its view (snap frames, above); the EV and compensation it renders with.
+    bool snapping = false;
+    float evUsed = 14.0f, compensation = 0;
     uint64_t importFrame = UINT64_MAX;  // the frame whose graph imported the histogram (one import per graph)
     BufferRef imported;
     ~ExposureState()
@@ -161,7 +168,41 @@ float autoExposureEv100(TrackState& state, Device& device, const QualityConfig& 
     }
     else if (!s.initialized)
         s.ev = std::clamp(frame.mainView.ev100, p.minEv, p.maxEv);  // before the first histogram: the host's starting value
+    s.snapping = !s.initialized || s.snapPending;
+    s.evUsed = s.ev;
+    s.compensation = frame.exposureCompensation;
     return s.ev;
+}
+
+bool exposureSnapping(FramePassContext& fc)
+{
+    if (!fc.frame.autoExposure) return false;
+    return fc.state<ExposureState>("M.exposure").snapping;
+}
+
+BufferRef exposureMeter(FramePassContext& fc, const ExposureHistogram& h)
+{
+    if (!exposureSnapping(fc) || !h.buffer.valid()) return {};
+    ExposureState& s = fc.state<ExposureState>("M.exposure");
+    const Params p = params(fc.quality);
+    const BufferRef correction = fc.graph.createBuffer({ "M exposure correction", 16, 0 });
+    const BufferRef histogram = h.buffer;
+    ID3D12PipelineState* meter = fc.shaders.compute("Passes/Shading/ExposureMeter");
+    const float evUsed = s.evUsed, compensation = s.compensation;
+    fc.graph.addPass("m.exposure.meter", QueueType::Graphics,
+                     [&](PassBuilder& b) {
+                         b.use(histogram, Use::SrvCompute);
+                         b.use(correction, Use::UavCompute);
+                     },
+                     [=](PassContext& c) {
+                         auto u = [](float f) { uint32_t v; std::memcpy(&v, &f, 4); return v; };
+                         const uint32_t k[12] = { c.srv(histogram), c.uav(correction), u(p.targetGrey), u(p.cutLow), u(p.cutHigh), u(evUsed), u(compensation), 0,
+                                                  u(p.minEv), u(p.maxEv), 0, 0 };
+                         c.cmd->SetPipelineState(meter);
+                         c.computeConstants(k, 12);
+                         c.cmd->Dispatch(1, 1, 1);
+                     });
+    return correction;
 }
 
 ExposureHistogram exposureHistogram(FramePassContext& fc)

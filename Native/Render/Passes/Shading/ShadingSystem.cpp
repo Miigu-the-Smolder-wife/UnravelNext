@@ -345,7 +345,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     const bool particles = v.particleLayer.valid() && v.particleEdges.valid();
     // Automatic exposure: the main view's shading kernels fill M's luminance histogram (Exposure.cpp); read back below.
     const bool meter = v.view.kind == gpu::ViewKind::Main && part != Part::Composite;
-    const ExposureHistogram histogram = meter ? exposureHistogram(fc) : ExposureHistogram{};
+    // (the main view's histogram in both parts: the composite part's fallback kernel meters its tiles too)
+    const ExposureHistogram histogram = v.view.kind == gpu::ViewKind::Main ? exposureHistogram(fc) : ExposureHistogram{};
     auto useParticles = [=](PassBuilder& b) {
         if (!particles) return;
         b.use(v.particleLayer, Use::SrvCompute);
@@ -661,6 +662,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              b.use(v.shadowOverflowFallbackTiles, Use::SrvCompute);
                              b.use(fallbackArgs, Use::IndirectArgs);
                              b.use(v.color, Use::UavComputeDisjoint);
+                             if (histogram.buffer.valid()) b.use(histogram.buffer, Use::UavCompute);
                              if (v.shadowVisibility.valid()) b.use(v.shadowVisibility, Use::SrvCompute);
                              if (r.lightFunctions.valid()) b.use(r.lightFunctions, Use::SrvCompute);  // A8 light functions (E)
                              if (v.screenProbes.valid()) b.use(v.screenProbes, Use::SrvCompute);
@@ -717,7 +719,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              k32[37] = o.anisoWord.valid() ? c.srv(o.anisoWord) : gpu::kNone;  // P[9].y (A9 anisotropy word)
                              particleConstants(c, k32 + 22);  // P[5].zw
                              k32[16] = r.areaLightStable;     // P[4].x (B2)
-                             k32[19] = gpu::kNone;            // P[4].w: overflow tiles are shaded twice; the main kernel metered them
+                             // P[4].w, P[6].z: the exposure histogram and its centre weight. The main kernel leaves the tiles over S's
+                             // overflow capacity before shading or metering them, so the fallback meters its tiles itself (they
+                             // were not metered at all: the first frames' and steady overflow frames' EV left those pixels out).
+                             k32[19] = histogram.buffer.valid() ? c.uav(histogram.buffer) : gpu::kNone;
+                             k32[26] = asUint(histogram.centreSigma);
                              k32[27] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : none;  // P[6].w (A8)
                              k32[38] = areaLobes.valid() ? c.uav(areaLobes) : none;  // P[9].z (A9 area-light lobes)
                              k32[39] = v.giIrradiance.valid() ? c.srv(v.giIrradiance) : none;  // P[9].w
@@ -1143,8 +1149,14 @@ std::vector<RenderGraph::BandedPass> shadingPasses(FramePassContext& fc, ViewRes
 void shadingComposite(FramePassContext& fc, ViewResources& view)
 {
     record(fc, view, Part::Composite);
-    // The main view's luminance histogram, filled by its shading kernels, into the readback ring (automatic exposure).
-    if (view.view.kind == gpu::ViewKind::Main) exposureReadback(fc, exposureHistogram(fc));
+    // The main view's luminance histogram, filled by its shading kernels, into the readback ring (automatic exposure);
+    // on a snap frame first metered on the GPU for this frame's own output (Exposure.cpp exposureMeter).
+    if (view.view.kind == gpu::ViewKind::Main)
+    {
+        const ExposureHistogram histogram = exposureHistogram(fc);
+        view.exposureCorrection = exposureMeter(fc, histogram);
+        exposureReadback(fc, histogram);
+    }
 }
 
 // A10 glass over V's translucent layer (FEATURES_GAME 14.1): class 1 pixels composited in place on the float image.
@@ -1307,6 +1319,7 @@ void shade(FramePassContext& fc, ViewResources& view)
     fc.graph.addBandedGroup(view.view.kind != gpu::ViewKind::Main ? "m.lit.planar" : "m.lit", o.height, o.bands, passes);
     tracks::water(fc, target);  // W (engine 1): the water surfaces' refraction targets are the shaded opaque scene and its depth
     shadingComposite(fc, target);
+    view.exposureCorrection = target.exposureCorrection;  // a snap frame's own metering (Exposure.cpp): the chain and the caller
     if (translucentActive(fc, view)) translucentComposite(fc, view, target.color);  // A10 glass over the composited image
     TextureRef image = target.color;
     if (haze)

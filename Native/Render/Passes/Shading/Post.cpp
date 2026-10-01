@@ -9,6 +9,7 @@
 // SDR curve exactly), the LUT on the curve's output over the peak, grain, then display-referred linear light
 // (1 = paper white) into the RGBA16F output without OETF or dither; the host encodes it (scRGB or PQ).
 #include "unx/shading/Post.h"
+#include "unx/shading/Exposure.h"
 #include "unx/shading/DepthOfField.h"
 #include "unx/shading/MotionBlur.h"
 
@@ -194,6 +195,7 @@ bool postActive(FramePassContext& fc, const ViewResources& view)
     if (view.waterVis.valid()) return true;  // B8/W: tracks::water refracts the float band A image and writes water into it
     if (depthOfFieldActive(fc, view)) return true;  // A5: the lens integral's float image is encoded by the chain
     if (motionBlurActive(fc, view) || distortionActive(fc, view)) return true;  // their float image is encoded by the chain
+    if (exposureSnapping(fc)) return true;  // a snap frame's exposure correction (Exposure.cpp) is applied by the chain
     const PostParams p = params(fc.quality);
     // (the shading kernels' own display encoding is the film curve: another curve needs the chain)
     return p.bloom > 0 || p.vignette > 0 || p.grain > 0 || !p.lut.empty() || p.curve != 0;
@@ -281,18 +283,21 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
     const TextureRef output = view.color;
     const uint32_t lutSrv = lut ? lut->srv : 0xFFFFFFFFu, frame = (uint32_t)fc.frame.frameIndex;
     const float peak = fc.frame.displayPeak;  // 0: SDR
+    const BufferRef correction = view.exposureCorrection;  // a snap frame's own metering (Exposure.cpp)
     g.addPass("m.post.final", QueueType::Graphics,
               [&](PassBuilder& b) {
                   b.use(hdr, Use::SrvCompute);
                   if (bloom.valid()) b.use(bloom, Use::SrvCompute);
                   b.use(output, Use::UavCompute);
+                  if (correction.valid()) b.use(correction, Use::SrvCompute);
               },
               [=](PassContext& c) {
-                  const uint32_t k[12] = { c.srv(hdr), bloom.valid() ? c.srv(bloom) : 0xFFFFFFFFu, c.uav(output), lutSrv,
-                                           asUint(p.bloom), asUint(p.vignette), asUint(p.grain), frame, w, h, asUint(peak), p.curve };
+                  const uint32_t k[16] = { c.srv(hdr), bloom.valid() ? c.srv(bloom) : 0xFFFFFFFFu, c.uav(output), lutSrv,
+                                           asUint(p.bloom), asUint(p.vignette), asUint(p.grain), frame, w, h, asUint(peak), p.curve,
+                                           correction.valid() ? c.srv(correction) : 0xFFFFFFFFu, 0, 0, 0 };
                   c.cmd->SetPipelineState(final);
                   c.bindFrameConstants(cb);
-                  c.computeConstants(k, 12);
+                  c.computeConstants(k, 16);
                   c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
               });
 }

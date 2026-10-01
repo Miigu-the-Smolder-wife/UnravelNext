@@ -136,7 +136,13 @@ struct CaptureSlot
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     uint32_t width = 0, height = 0;
+    uint32_t imageRows = 0;  // refl: the image's rows (the texture holds the per-tile flags below them); 0 = all rows
     bool written = false;
+    // final: a snap frame's exposure correction (ViewResources::exposureCorrection, 16 B), copied with the image and
+    // applied to it (the output the display shows: PostFinal applies it); none on other frames
+    ComPtr<ID3D12Resource> correction;
+    bool corrected = false;
+    float ev100 = 0;  // the EV100 the captured frame rendered with (FrameRenderer::lastEv100: the automatic exposure's)
 };
 } // namespace
 #endif
@@ -183,7 +189,30 @@ void writePfm(const std::string& path, uint32_t w, uint32_t h, const std::vector
 // A capture slot's readback as RGB floats (and the fourth channel when the format has one): RGBA32F and RGBA16F as they
 // are, R32_UINT as the 8-bit fields 0..2 (shadow slots / 255) - or, for the reflection mode texture, its mode, spacing and
 // own-job bit - and one-channel floats (depth) repeated.
+void convertCaptureRows(const CaptureSlot& c, const uint8_t* mapped, std::vector<float>& rgb, std::vector<float>& alpha);
+// view.reflection: the image, then a row per 8 x 8 tile row whose alpha flags the tiles R classified this frame
+// (ReflectionResolve: an untouched tile's pixels are not written - "all K" - and hold whatever the memory held). The layer
+// is the image with the untouched tiles' pixels 0 (alpha 0): the stale values made the refl layer metrics thousands of
+// percent under fast rotation, where many tiles are untouched (1080p and 1440p, Verify-6863829).
 void convertCapture(const CaptureSlot& c, const uint8_t* mapped, std::vector<float>& rgb, std::vector<float>& alpha)
+{
+    convertCaptureRows(c, mapped, rgb, alpha);
+    if (c.imageRows == 0 || c.imageRows >= c.height || alpha.empty()) return;
+    const uint32_t rows = c.imageRows;
+    for (uint32_t y = 0; y < rows; ++y)
+        for (uint32_t x = 0; x < c.width; ++x)
+        {
+            const size_t flag = (size_t)(rows + y / 8) * c.width + x / 8;
+            if (alpha[flag] >= 0.5f) continue;
+            const size_t i = (size_t)y * c.width + x;
+            rgb[i * 3] = rgb[i * 3 + 1] = rgb[i * 3 + 2] = 0;
+            alpha[i] = 0;
+        }
+    rgb.resize((size_t)rows * c.width * 3);
+    alpha.resize((size_t)rows * c.width);
+}
+
+void convertCaptureRows(const CaptureSlot& c, const uint8_t* mapped, std::vector<float>& rgb, std::vector<float>& alpha)
 {
     rgb.assign((size_t)c.width * c.height * 3, 0.0f);
     alpha.clear();
@@ -465,6 +494,36 @@ int main(int argc, char** argv)
                 logf("material %zu '%s': class %u, baseColor (%.3f, %.3f, %.3f), roughness %.3f, metallic %.2f, specular %.2f, base texture %s, normal %u, roughMetal %u, emissive (%g, %g, %g)\n", i,
                      m.name.c_str(), (uint32_t)m.cls, m.baseColor.x, m.baseColor.y, m.baseColor.z, m.roughness, m.metallic, m.specular, tex.c_str(), m.normalTexture,
                      m.roughMetalTexture, m.emissive.x, m.emissive.y, m.emissive.z);
+                if (m.cls == scene::MaterialClass::Glass || m.cls == scene::MaterialClass::Water)
+                {
+                    logf("    ior %.3f, attenuation distance %.4f m, two-sided %d\n", m.ior, m.attenuationDistance, m.twoSided ? 1 : 0);
+                    // the world bounds of the submeshes drawn with it (the first 12)
+                    uint32_t shown = 0;
+                    for (size_t ii = 0; ii < ls.instances.size() && shown < 12; ++ii)
+                    {
+                        const scene::Instance& in = ls.instances[ii];
+                        const scene::Mesh& mesh = ls.meshes[in.mesh];
+                        for (size_t sm = 0; sm < mesh.submeshes.size() && shown < 12; ++sm)
+                        {
+                            const uint32_t mat = sm < in.materialOverrides.size() && in.materialOverrides[sm] != scene::kNone ? in.materialOverrides[sm] : mesh.submeshes[sm].material;
+                            if (mat != i) continue;
+                            float3 lo{ 1e30f, 1e30f, 1e30f }, hi{ -1e30f, -1e30f, -1e30f };
+                            const scene::Submesh& sub = mesh.submeshes[sm];
+                            for (uint32_t k = sub.indexOffset; k < sub.indexOffset + sub.indexCount; ++k)
+                            {
+                                const float3 q = mesh.positions[mesh.indices[k]];
+                                const float3x4& t = in.transform;
+                                const float3 w{ t.m[0][0] * q.x + t.m[0][1] * q.y + t.m[0][2] * q.z + t.m[0][3], t.m[1][0] * q.x + t.m[1][1] * q.y + t.m[1][2] * q.z + t.m[1][3],
+                                                t.m[2][0] * q.x + t.m[2][1] * q.y + t.m[2][2] * q.z + t.m[2][3] };
+                                lo = { std::min(lo.x, w.x), std::min(lo.y, w.y), std::min(lo.z, w.z) };
+                                hi = { std::max(hi.x, w.x), std::max(hi.y, w.y), std::max(hi.z, w.z) };
+                            }
+                            logf("    instance %zu submesh %zu: world bounds (%.3f, %.3f, %.3f) - (%.3f, %.3f, %.3f), %u triangles\n", ii, sm, lo.x, lo.y, lo.z, hi.x,
+                                 hi.y, hi.z, sub.indexCount / 3);
+                            ++shown;
+                        }
+                    }
+                }
                 if (m.clearcoat > 0 || m.sheenColor.x > 0 || m.sheenColor.y > 0 || m.sheenColor.z > 0 || m.anisotropy > 0)
                     logf("    layers: clearcoat %.3f (roughness %.3f, ior %.2f), sheen (%.3f, %.3f, %.3f), anisotropy %.3f\n", m.clearcoat, m.clearcoatRoughness,
                          m.clearcoatIor, m.sheenColor.x, m.sheenColor.y, m.sheenColor.z, m.anisotropy);
@@ -622,7 +681,6 @@ int main(int argc, char** argv)
              clusters.clusters.size(), moving ? "path 0 (moving)" : (cameraName.empty() ? "0 (static)" : cameraName.c_str()));
         Device device({});
         std::vector<CaptureSlot> captures;  // --capture (last frame wins) or --capture-frames, per layer
-        float captureEv100 = 0;  // the captured frame's exposure (the output is radiance x exposure)
         ShaderLibrary shaders(device, executableDirectory() / "shaders");
         GpuScene gpuScene(device);
         gpuScene.upload(s);
@@ -721,6 +779,9 @@ int main(int argc, char** argv)
                     js += format(", \"gi_live_entries\": %u, \"gi_requested\": %u, \"gi_selected_updates\": %u, \"gi_primary_rays\": %u, \"gi_background\": %u, "
                                  "\"gi_reflection_hit_lookups\": %u",
                                  st.live, st.requested, st.selected, st.selected * 64u, st.background, st.hitLookups);
+                    if (st.accAudit[0] != 0)
+                        logf("GI hit accumulator audit: point diffuse direct %.6g, accumulator %.6g (ratio %.5f) over the hits that read it\n", st.accAudit[0] / 1024.0,
+                             st.accAudit[1] / 1024.0, (double)st.accAudit[1] / st.accAudit[0]);
                     if (st.audit[0] != 0 || st.audit[4] != 0)
                     {
                         // gi.experiment_disable 32768: point term against footprint mean over the same GI hits (GI_AUDIT_SUMS)
@@ -808,8 +869,15 @@ int main(int argc, char** argv)
                     if (cap < 0 || height >= rr.height) fc.outputLinearHdr = true;
                 }
                 fc.celestial = celestial;
-                fc.autoExposure = autoExposure;
-                captureEv100 = fc.mainView.ev100;
+                // A camera without an EV100 (NaN: the Unity bridge's convention for automatic exposure, scenes exported by
+                // --save-scene from the games) is metered (A4) as the bridge does; it rendered black before.
+                if (!autoExposure && !std::isfinite(fc.mainView.ev100))
+                {
+                    static bool told = false;
+                    if (!told) logf("camera EV100 is not set (NaN): automatic exposure, as the bridge\n");
+                    told = true;
+                }
+                fc.autoExposure = autoExposure || !std::isfinite(fc.mainView.ev100);
                 const TextureRef output = g.createTexture({ "gate output", rr.width, rr.height, 1, 1,
                                                             fc.outputLinearHdr ? DXGI_FORMAT_R32G32B32A32_FLOAT : DXGI_FORMAT_R10G10B10A2_UNORM });
                 const ViewResources rendered = renderer.record(g, fc, output);
@@ -875,9 +943,10 @@ int main(int argc, char** argv)
                             const TextureDesc& td = g.desc(source);
                             slot->format = td.format;
                             slot->width = td.width;
-                            // view.reflection holds per-tile rows below the image (ReflectionSystem: height + tiles):
-                            // only the view's rows are the layer
-                            slot->height = layer == "refl" ? std::min(td.height, rendered.view.height) : td.height;
+                            // view.reflection holds per-tile rows below the image (ReflectionSystem: height + tiles): all
+                            // rows are copied, the conversion masks the untouched tiles and keeps the image rows
+                            slot->height = td.height;
+                            slot->imageRows = layer == "refl" ? std::min(td.height, rendered.view.height) : 0;
                             D3D12_RESOURCE_DESC rd{};
                             rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
                             rd.Width = slot->width;
@@ -903,15 +972,36 @@ int main(int argc, char** argv)
                                   "capture readback");
                         }
                         slot->written = true;
+                        const BufferRef correction = layer == "final" ? rendered.exposureCorrection : BufferRef{};
+                        slot->corrected = correction.valid();
+                        slot->ev100 = renderer.lastEv100();
+                        if (slot->corrected && !slot->correction)
+                        {
+                            D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_READBACK };
+                            D3D12_RESOURCE_DESC bd{};
+                            bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                            bd.Width = 256;
+                            bd.Height = 1;
+                            bd.DepthOrArraySize = 1;
+                            bd.MipLevels = 1;
+                            bd.SampleDesc.Count = 1;
+                            bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                            check(device.d3d()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                                        IID_PPV_ARGS(&slot->correction)),
+                                  "capture exposure correction readback");
+                        }
+                        ID3D12Resource* rbc = slot->correction.Get();
                         ID3D12Resource* rb = slot->buffer.Get();
                         const D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = slot->footprint;
                         const D3D12_BOX box{ 0, 0, 0, slot->width, slot->height, 1 };
                         g.addPass("s.gate.capture", QueueType::Graphics,
                                   [&](PassBuilder& b) {
                                       b.use(source, Use::CopySrc);
+                                      if (correction.valid()) b.use(correction, Use::CopySrc);
                                       b.keep();
                                   },
                                   [=](PassContext& ctx) {
+                                      if (correction.valid()) ctx.cmd->CopyBufferRegion(rbc, 0, ctx.resource(correction), 0, 16);
                                       D3D12_TEXTURE_COPY_LOCATION dst{ rb, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
                                       dst.PlacedFootprint = fp;
                                       D3D12_TEXTURE_COPY_LOCATION src{ ctx.resource(source), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
@@ -1068,17 +1158,34 @@ int main(int argc, char** argv)
                 convertCapture(c, static_cast<const uint8_t*>(mapped), rgb, alpha);
                 D3D12_RANGE none{ 0, 0 };
                 c.buffer->Unmap(0, &none);
-                writePfm(c.path, c.width, c.height, rgb);
+                float exposureScale = 1, meteredEv = c.ev100;
+                if (c.corrected && c.correction)
+                {
+                    float words[2] = {};
+                    void* cm = nullptr;
+                    check(c.correction->Map(0, nullptr, &cm), "map capture exposure correction");
+                    std::memcpy(words, cm, sizeof words);
+                    c.correction->Unmap(0, &none);
+                    if (std::isfinite(words[0]) && words[0] > 0)
+                    {
+                        exposureScale = words[0];
+                        meteredEv = words[1];
+                        for (float& v : rgb) v *= exposureScale;
+                    }
+                }
+                const uint32_t outH = c.imageRows && c.imageRows < c.height ? c.imageRows : c.height;  // (refl: the image rows)
+                writePfm(c.path, c.width, outH, rgb);
                 const bool withAlpha = !alpha.empty() && (c.layer == "gi" || c.layer == "refl" || (c.layer == "final" && captureUpscaled));
                 if (withAlpha)
                 {
                     std::vector<float> a3(alpha.size() * 3);
                     for (size_t k = 0; k < alpha.size(); ++k) a3[k * 3] = a3[k * 3 + 1] = a3[k * 3 + 2] = alpha[k];
-                    writePfm(c.path.substr(0, c.path.size() - 4) + "_alpha.pfm", c.width, c.height, a3);
+                    writePfm(c.path.substr(0, c.path.size() - 4) + "_alpha.pfm", c.width, outH, a3);
                 }
-                logf("captured %s %ux%u (%s, frame %s, ev100 %.2f) -> %s\n", c.layer.c_str(), c.width, c.height,
+                logf("captured %s %ux%u (%s, frame %s, ev100 %.2f%s) -> %s\n", c.layer.c_str(), c.width, outH,
                      c.layer != "final" ? "internal layer" : captureUpscaled ? "after the temporal upscale" : "native",
-                     c.frame == UINT64_MAX ? std::to_string(lastFrame).c_str() : std::to_string(c.frame).c_str(), captureEv100, c.path.c_str());
+                     c.frame == UINT64_MAX ? std::to_string(lastFrame).c_str() : std::to_string(c.frame).c_str(), c.corrected ? meteredEv : c.ev100,
+                     c.corrected ? format(", snap frame metered on itself: x %.4g", exposureScale).c_str() : "", c.path.c_str());
                 c.buffer.Reset();
             }
             for (uint64_t f : captureFrames)
@@ -1199,6 +1306,12 @@ int main(int argc, char** argv)
             // shadow.vsm.fragment_check the settled pixels' values against the per-record SMRT (limit 1/255).
             logf("  coverage fragments: %u pixels with records, %u pair (%.1f %%)\n", st.fragmentPixels, st.fragmentPairs,
                  100.0 * st.fragmentPairs / std::max(st.fragmentPixels, 1u));
+            {
+                // V's coverage layer of the last frame (what M's coverage composite walks: its cost's measure)
+                const visibility::Stats vs = visibility::latestStats(renderer.trackState());
+                logf("  coverage layer: %u records in %u tiles (%u blocks, %u heavy tiles), %u special, pool %u\n", vs.coverageFragments, vs.coverageTiles,
+                     vs.coverageBlocks, vs.coverageHeavyTiles, vs.coverageSpecial, vs.coveragePoolRecords);
+            }
             if (quality.integer("shadow.vsm.fragment_check") != 0)
             {
                 logf("  fragment check: %u records of settled pixels, %u differ by more than 1/255 (largest %u/255) %s\n", st.fragmentChecked,

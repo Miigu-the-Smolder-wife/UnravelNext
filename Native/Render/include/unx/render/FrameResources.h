@@ -12,6 +12,8 @@ namespace unx::render
 struct ViewResources
 {
     ViewDesc view;
+    BufferRef exposureCorrection;  // raw 16 B { float c, metered EV100, metered, 0 }: a snap frame's own metering; the  [M]
+                                   // output multiplies the exposed image by c (Exposure.h exposureMeter); invalid otherwise
     uint32_t viewId = 0;           // A14: the view's stable id (0 = main; FrameContext::auxViews ids); tracks key their
                                    // per-view histories and persistent resources by it (Requests/20260926_C_per_view_history)
     D3D12_GPU_VIRTUAL_ADDRESS frameConstants = 0;  // root CBV b1 for passes of this view [core]
