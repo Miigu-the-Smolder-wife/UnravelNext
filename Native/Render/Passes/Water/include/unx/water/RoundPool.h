@@ -44,6 +44,7 @@ struct RoundPoolSource
 struct RoundPoolOutput
 {
     render::TextureRef field;               // RGBA32F N_theta x N_r: (eta, d eta / dr, (1 / r) d eta / d theta, phi) at (theta_i, r_j)
+    render::BufferRef centre;               // raw float4: (eta, phi, previous eta, 0) at r = 0
     render::TriangleStream stream;          // layer 1 (the caller sets the material)
 };
 

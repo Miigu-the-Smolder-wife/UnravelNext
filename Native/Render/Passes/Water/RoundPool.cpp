@@ -511,6 +511,7 @@ RoundPoolOutput RoundPool::record(RenderGraph& g, uint64_t frame, const RoundPoo
               });
     RoundPoolOutput out;
     out.field = refs.field;
+    out.centre = refs.centre;
     TriangleStream& st = out.stream;
     st.vertices = vertices;
     st.velocities = velocities;
