@@ -692,3 +692,65 @@ GPU HOLD 중, 코드와 빌드만.
    - `gi.miss_closure`만 끄면(`gi.bounce_visibility`는 켬) 그 hit은 확산·스펙큘러 모두 0이다. 즉 두 스위치는 같이 켜거나 같이 꺼야 하고, 가시성만 켠 상태는 A/B 진단용이다(postgame_slice.ps1의 `visonly`).
    - 반사 hit(S2 382ed71: 층 경로에서만 엄격 읽기)과 달리 GI는 기본 경로에서도 엄격 읽기다. 닫기가 기본 켬이라 확산은 메워지지만, 위의 스펙큘러 몫과 "가시성 판정의 거짓 불가시"(젊은 엔트리의 텍셀 거리 1~2광선)로 닫기가 과하게 쓰이는지는 게임 뒤 A/B(냉시작 4번)로 본다.
 4. 발광 면 변환 규칙(조정 요청 3)은 (6)절의 네 가지 이유로 여전히 미적용이다.
+
+## 세션 13 이어서 (8) — 게임 뒤 검증: 통합 브랜치 "전부 켬" 대 "전부 끔" (2026-10-01 17:30~)
+
+통합 브랜치 8fcd53d, build\dev2, 조각마다 락 1회. [실측]. 게임은 끝났고 League 클라이언트만 떠 있다. correctness 조각이라 프레임 시간은 참고값이다. 세션 간 메시지가 막혀 있어 조각이 끝날 때마다 이 절에 적고 푸시한다. 그림은 `C:\Users\USER\UnravelNext-redesign\Results\Local\Redesign\items\p2\`.
+
+- 전부 켬(allon) = 기본값(넓은 층, 냉시작 가시성·닫기, hit cone lobes) + `gi.hit_accumulator=true`(풀) + `reflection.layers=true` + `reflection.layer_mirror_lobe=true`.
+- 전부 끔(alloff) = `gi.screen_filter_adaptive=false`, `gi.screen_temporal_frames=0`, `gi.screen_wide_filter=false`, `gi.bounce_visibility=false`, `gi.miss_closure=false`, `reflection.layers=false`, `reflection.hit_cone_lobes=false`, `reflection.hit_accumulator=false`(누적기 끔은 기본).
+
+### 조각 1 — bath lounge 1080p (17:29~17:34)
+
+새 커널 첫 실행(GiAccFold, 풀을 읽고 쓰는 GiTrace, 반사 hit의 풀 읽기 포함): 종료 코드 0, 장치 제거 없음, S 오류 비트 0x0, "GI accumulator pool: 524288 slots, 134.0 MB".
+
+| | f1 | f3 | f4 | f15 | f16 |
+|---|---|---|---|---|---|
+| 최종 화면 타일 오차 P50 / P95, 전부 끔 | 41 / 196 % | 46 / 431 % | 41 / 342 % | 22 / 92 % | 22 / 89 % |
+| 최종 화면 타일 오차 P50 / P95, 전부 켬 | 21 / 98 % | 15 / 70 % | 14 / 66 % | 10 / 50 % | 9 / 46 % |
+| GI 층 수준(자기 f299 대비), 전부 끔 | 0.59 | 1.46 | 1.46 | 1.20 | 1.19 |
+| GI 층 수준, 전부 켬 | 0.97 | 1.00 | 1.00 | 1.00 | 1.01 |
+| GI 층 타일 오차 P50, 전부 끔 → 켬 | 62 → 31 % | 58 → 21 % | 56 → 19 % | 37 → 9 % | 36 → 8 % |
+
+- 눈: 전부 켬은 f1부터 밝기가 f299와 같고(끔은 f3~f16에 1.2~1.5배로 튀는 실행이었다), 벽·천장 얼룩이 없고, 바닥·탁자 반짝이가 크게 줄었다. f1·f4의 바닥과 천장에 밝은 네모 점이 일부 남는다. 회전(f63/f75/f120/f179)에서도 석벽 얼룩이 없다.
+- 목표 8 / 5 / 3 %에는 아직 못 미친다(f1 21 %, f4 14 %, f16 9 %).
+- GPU 프레임 중앙값(참고): 전부 끔 18.39 ms, 전부 켬 21.79 ms(+3.4 ms). 비용 분해는 timing 조각에서 한다.
+- 그림: `show_lounge_1920x1080_final.png`(행 = 끔 / 켬, 열 = f1 / f4 / f16 / f299), `show_lounge_1920x1080_gi.png`, `show_lounge_1920x1080_rot.png`(열 = f59 / f63 / f75 / f120 / f179).
+
+### 조각 2 — 회귀 시험(기본값 그대로, 통합 8fcd53d)
+
+- 통과: reflectionanalytic, hostmotion, volumetests.
+- **gianalytic 실패 1줄(R)**: "light near surfaces (9, hit accumulator), lampshade (open bottom), light inside: −23.03 % (P99 33.78 %)". 시험 9가 켜는 누적기가 이제 풀 형태로 돈다. 같은 시험의 다른 줄(큰 천장 −0.37 %, 20 cm 판 −0.26 %, configured estimator 줄)은 통과했다. 다시 돌린 한 번에서는 configured estimator 한 줄이 −0.59 %로 실패했다. 누적기 없는 줄은 모두 PASS. 진단(min_samples / alpha / fine_scale / 이전 엔트리 형태)은 대기 중이다.
+- shadingtests 실패 2줄(A 쪽: "emissive panel: quadtree area lights vs the rect light" 오차 1.000), froxeltests 실패 2줄(A 또는 FX: "FX lights reach the probed froxels (list entries) 0", "… missing from a non-full list 2.296e+04"). A의 단독 결과와 비교가 필요하다.
+
+### 조각 3~5 — 전부 켬 대 전부 끔 (최종 화면 타일 오차 P50 / P95, 자기 f299 대비)
+
+| 장면 | | f1 | f4 | f16 | GI 층 수준 f1 / f4 / f16 |
+|---|---|---|---|---|---|
+| bath hall 1080p | 끔 | 30 / 70 % | 16 / 49 % | 7 / 39 % | 0.81 / 0.89 / 0.94 |
+| | 켬 | 23 / 75 % | 12 / 48 % | 6 / 36 % | 1.12 / 0.94 / 0.96 |
+| train lounge 1080p | 끔 | 75 / 205 % | 31 / 104 % | 14 / 57 % | 0.68 / 0.87 / 1.02 |
+| | 켬 | 52 / 180 % | 22 / 178 % | 10 / 50 % | 0.88 / 1.23 / 1.00 |
+| bath lounge 1440p | 끔 | 41 / 216 % | 29 / 135 % | 19 / 97 % | 0.61 / 0.76 / 0.96 |
+| | 켬 | 26 / 161 % | 12 / 61 % | 9 / 42 % | 1.06 / 0.99 / 1.01 |
+
+그림: `show_hall_1920x1080_*.png`, `show_train_1920x1080_*.png`, `show_lounge_2560x1440_*.png`.
+
+- **기차에서 켬이 나빠지는 곳**: f3~f4의 바닥 GI 층에 40~60 px 블록 무늬(밝은 블록은 수렴값의 약 3배, GI 타일 P95 295~303 %). f16에는 없다.
+
+### 조각 6 — 기차 블록의 원인 가르기(전부 켬에서 하나씩 뺌, 각 1회)
+
+| 뺀 것 | GI 수준 f3 / f4 | GI 타일 P95 f3 / f4 |
+|---|---|---|
+| (없음) | 1.20 / 1.23 | 295 / 303 % |
+| 닫기(`gi.miss_closure`) | 0.90 / 0.91 | 64 / 60 % |
+| 누적기 | 1.14 / 1.13 | 177 / 162 % |
+| 반사 층 | 1.43 / 1.41 | 497 / 463 % (실행 간 편차로 보임) |
+| 넓은 패스 3 → 1 | 0.99 / 0.99 | 85 / 82 % |
+
+- 원인은 넓은 필터의 휘도 정지였다. (1) 정지가 중심 프로브의 σ만 써서 비대칭: 수렴한 밝은 프로브는 값을 지키고 젊은 이웃은 그 값을 받아 평균이 오른다(패스 1개면 수준 0.99, 3개면 1.23). (2) 패스마다 σ를 줄이는 것(bc05387에 눈 감고 넣은 부분)이 젊은 셀의 차이를 블록으로 남기고, 수렴 화면에 경계가 보이는 평탄 구간을 만든다. 닫기는 기차에서 밝은 엔트리를 더 밝게 해 블록을 밝게 보이게 했다. 패스 1개는 블록이 없지만 잔 얼룩이 남아 답이 아니다.
+- 수정(작업 트리, 빌드 완료): 정지에 두 프로브 σ의 큰 쪽을 쓰고(대칭), 패스별 σ 축소를 뺐다. 재확인 조각(기차·라운지)이 줄에 있다.
+
+### 디스크
+
+18:05쯤 C: 여유가 2.3 GB까지 내려가 누적기 진단 조각이 "not enough space on the disk"로 죽었다. R의 캡처 폴더(items\p2, 26 GB)를 NTFS 압축(LZX)해 9.8 GB로 줄였다(삭제 없음, 여유 약 15 GB). 이후 캡처는 프레임 4개 × 층 2개로 줄였다. 오래된 캡처 삭제는 사용자 결정으로 남긴다.
