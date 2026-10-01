@@ -55,6 +55,8 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     // reflection.lumen: the ray-reuse pipeline (ReflectionReuse.hlsli) in place of the G path, the accumulation and the layers
     bool lumen = false;
     float lumenMaxRoughness = 0.4f, lumenFadeLength = 0.1f, lumenMaxRayIntensity = 40.0f, lumenTonemapRange = 10.0f;
+    bool lumenScreenContinue = true;   // reflection.lumen_screen_trace_continue: world rays start where their screen traces ended
+    float lumenScreenPullback = 0.08f; // ... less this distance (m)
     bool lumenSceneColorAtHit = true;  // reflection.lumen_sample_scene_color_at_hit (with lumen_screen_traces)
     float lumenSceneColorThickness = 0.01f;
     float lumenSceneColorNormalDegrees = 85.0f;

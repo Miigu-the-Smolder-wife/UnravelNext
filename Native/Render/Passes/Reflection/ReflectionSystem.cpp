@@ -132,6 +132,8 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.lumenDisocclusionTonemap = flag("reflection.lumen_disocclusion_tonemap", true);
     s.lumenRoughFromGather = flag("reflection.lumen_rough_specular_from_gather", true);
     s.lumenScreenTraces = flag("reflection.lumen_screen_traces", true);
+    s.lumenScreenContinue = flag("reflection.lumen_screen_trace_continue", true);
+    s.lumenScreenPullback = num("reflection.lumen_screen_trace_pullback", 0.08);
     s.lumenSceneColorAtHit = flag("reflection.lumen_sample_scene_color_at_hit", true);
     s.lumenSceneColorThickness = num("reflection.lumen_sample_scene_color_relative_depth_thickness", 0.01);
     s.lumenSceneColorNormalDegrees = num("reflection.lumen_sample_scene_color_normal_threshold", 85.0);
@@ -1090,6 +1092,13 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         surfaceCache = surfaceCacheBuffer(fc);
     }
     const bool hitsUseSurfaceCache = surfaceCache.valid() && lumen && s.lumenHitSurfaceCache;
+    // Screen traces before the world rays (ReflectionScreenTrace.hlsl): a ray that meets a visible surface takes the
+    // previous frame's colour there and its job traces no world ray. Without that colour (no upscale history) every
+    // ray is a world ray.
+    ScreenTraceInputs screen;
+    if (lumen && s.lumenScreenTraces) screen = screenTraceInputs(fc, main);
+    const bool screenTraces = screen.hzb.valid() && screen.prevColor.valid();
+    const bool screenContinue = screenTraces && s.lumenScreenContinue;  // world rays start at their screen traces' ends
     const BufferRef rayLayers = layers ? g.createBuffer({ "R reflection ray layers", std::max<uint64_t>((uint64_t)rayCapacity * 16, 16), 0 }) : BufferRef{};  // REFL_LAYER_RAY_BYTES
     g.addPass("r.refl.args", QueueType::Compute,
               [&](PassBuilder& b) {
@@ -1105,7 +1114,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
               },
               [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, accPool, surfaceCache, hitsUseSurfaceCache,
                hitFlags = (s.hitConeLobes ? 1u : 0u) | (s.hitOrientedLights ? 2u : 0u) | (layers && s.layerFilter && s.hitStrictRead ? 4u : 0u) |
-                          (s.lumenSurfaceCacheView ? 8u : 0u)](PassContext& c) {
+                          (s.lumenSurfaceCacheView ? 8u : 0u) | (screenContinue ? 16u : 0u)](PassContext& c) {
                   // (the layer buffers' UAVs and the hit shading's flags into the rays header: the shade, combine and inline
                   // passes find them there)
                   const uint32_t k[12] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(raysBuffer), rayCapacity,
@@ -1200,13 +1209,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         if (atmosphere)
             for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
     };
-    if (lumen && s.lumenScreenTraces)
     {
-        // Screen traces before the world rays (ReflectionScreenTrace.hlsl): a ray that meets a visible surface takes the
-        // previous frame's colour there and its job traces no world ray. Without that colour (no upscale history) every
-        // ray is a world ray.
-        const ScreenTraceInputs screen = screenTraceInputs(fc, main);
-        if (screen.hzb.valid() && screen.prevColor.valid())
+        if (screenTraces)
         {
             const FrameContext::Upscale& up = fc.frame.upscale;
             g.addPass("r.refl.screentrace", QueueType::Compute,
@@ -1219,10 +1223,10 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           b.use(screen.hzb, Use::SrvCompute);
                           b.use(screen.prevColor, Use::SrvCompute);
                       },
-                      [&shaders, modes, results, depth, gbuffer, jobs, screen, frame, width, height, rayLength, frameConstants, s, samplingBias16, outW = up.outputWidth,
-                       outH = up.outputHeight, ratio = up.exposureRatio, prevViewProj = up.prevViewProj](PassContext& c) {
+                      [&shaders, modes, results, depth, gbuffer, jobs, screen, frame, width, height, rayLength, frameConstants, s, samplingBias16, screenContinue,
+                       outW = up.outputWidth, outH = up.outputHeight, ratio = up.exposureRatio, prevViewProj = up.prevViewProj](PassContext& c) {
                           uint32_t k[32] = { c.srv(modes), c.uav(results), c.srv(depth), c.srv(gbuffer), c.uav(jobs), c.srv(screen.hzb), c.srv(screen.prevColor), frame,
-                                             width, height, outW, outH, asU(rayLength), (s.lumenScreenIterations & 0xFFFFu) | (samplingBias16 << 16), asU(s.lumenScreenThickness),
+                                             width, height, (outW & 0xFFFFu) | (outH << 16), asU(screenContinue ? std::max(s.lumenScreenPullback, 0.0f) : -1.0f), asU(rayLength), (s.lumenScreenIterations & 0xFFFFu) | (samplingBias16 << 16), asU(s.lumenScreenThickness),
                                              asU(ratio) };
                           for (int r = 0; r < 4; ++r)
                               for (int col = 0; col < 4; ++col) k[16 + 4 * r + col] = asU(prevViewProj.m[r][col]);
@@ -1246,12 +1250,10 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   c.cmd->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, firstTick);
                   pipeline.dispatchIndirect(c.cmd, argumentResource, 16 + variant * kDescStride);
               });
-    if (lumen && s.lumenScreenTraces && s.lumenSceneColorAtHit)
+    if (screenTraces && s.lumenSceneColorAtHit)
     {
         // The world rays' hits on surfaces the view sees take the previous frame's colour (ReflectionSceneColorAtHit.hlsl)
         // and are not shaded.
-        const ScreenTraceInputs screen = screenTraceInputs(fc, main);
-        if (screen.prevColor.valid())
         {
             const FrameContext::Upscale& up = fc.frame.upscale;
             g.addPass("r.refl.scenecolor", QueueType::Compute,

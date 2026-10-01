@@ -52,6 +52,9 @@ uint reflRaysPenumbraOffset(uint capacity, uint i) { return reflRaysShadowOffset
 // the layers are off (ReflectionArgs writes them with the header).
 uint reflRayLayersUav(RWByteAddressBuffer rays) { return rays.Load(20); }
 uint reflHitFlags(RWByteAddressBuffer rays) { return rays.Load(28); }
+// (a flag of that word read by the traversal, not the hit shading:) results[job].x holds the distance at which the
+// job's world ray starts - the end of its screen trace (ReflectionScreenTrace.hlsl), M jobs of the ray-reuse pipeline
+#define REFL_TRACE_SCREEN_START 16u
 uint reflAccPoolSrv(RWByteAddressBuffer rays) { return rays.Load(32); }
 uint reflSurfaceCacheUav(RWByteAddressBuffer rays) { return rays.Load(36); }  // the surface cache (SurfaceCache.hlsli), UNX_NONE: hits do not use it
 uint reflJobLayersUav(RWByteAddressBuffer rays) { return rays.Load(24); }
