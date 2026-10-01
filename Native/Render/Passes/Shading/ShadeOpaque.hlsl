@@ -1,5 +1,13 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: OUTPUT=0,1 FALLBACK=0,1 AREA=0,1 PLANAR=0,1 LAYERED=0,1,2
+// unx-variants: FALLBACK=0,1 AREA=0,1 PLANAR=0,1 LAYERED=0,1,2
+// Two kernels since 2026-10-01 (the DXIL limit: the one kernel's FALLBACK variants stood at 204,260 of 204,800 B):
+//   part 1 (this file as compiled, SHADE_PART 1): the per-pixel setup, emission, the sun, the local lights (slots, the
+//          overflow list or S's VSM in fallback tiles), L2's tile FAR term and the 14.1b emissive irradiance -> the
+//          direct radiance texture P[10].x (RGBA32F UAV: linear radiance before exposure, written for active pixels);
+//   part 2 (ShadeIndirect.hlsl, SHADE_PART 2): the same setup, then R's indirect light, the A9 lobe texture, the air
+//          and the output (OUTPUT, the exposure histogram, particles, edge / coverage radiance).
+// The sum continues where part 1 stopped through a float32 store and load, so the two kernels equal the one kernel bit
+// for bit; the setup is recomputed (deterministic) rather than stored.
 // (14.1 NEAR/FAR: Passes/Common/LightNearFar.hlsli is the shared classification; the tile FAR term comes with L2.)
 // Shading kernel of the opaque classes (ARCHITECTURE 2.11; INTERFACES 5.6, 7, 8): one 8 x 8 tile of the class's tile
 // list per group (ExecuteIndirect), pixels of other classes skipped. Per pixel, from the G-buffer, depth and material
@@ -54,6 +62,12 @@
 #ifndef AREA_LOBES
 #define AREA_LOBES 0  // AreaLobes.hlsl compiles this file with 1: the area-light lobe terms alone (see there)
 #endif
+#ifndef SHADE_PART
+#define SHADE_PART 1  // ShadeIndirect.hlsl compiles this file with 2 (see the header)
+#endif
+#ifndef OUTPUT
+#define OUTPUT 0      // (part 1 writes no output)
+#endif
 #if LAYERED == 1
 #define MODEL_FILM 1  // A9 thin film (MaterialModel.hlsli modelFresnel)
 #endif
@@ -107,7 +121,7 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     // [measured, city 4K: shading 1.257 -> 1.191 ms against loading the tile, then the pixel]. The probe condition is
     // uniform (root constants), so the whole group reaches the barrier.
     const uint lane = tid.y * M_TILE + tid.x;
-#if !PLANAR
+#if SHADE_PART == 2 && !PLANAR
     const bool probeTile = !AREA_LOBES && P[2].y != UNX_NONE && (P[4].z & 6) != 6;
     ProbeSrvs probes;
     probes.probes = P[2].y;
@@ -140,7 +154,7 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
         if (overflowHead == 0xFFFFFFFFu) return;  // over the list's capacity: the fallback kernel shades this tile
     }
 #endif
-#if !PLANAR
+#if SHADE_PART == 2 && !PLANAR
     if (probeTile)
     {
         giProbeTileStore(lane, probeRecord);
@@ -157,6 +171,15 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     if (active) sp = shadeSurface(pixel, word, materialIndex, m, words, gbPacked, depthValue, overflowHead);
 #if AREA_LOBES
     return;  // (the lobe texture is written; edges keep the full kernel's radiance)
+#endif
+#if SHADE_PART == 1
+    // part 1's result: the direct radiance of this class's pixels (other classes' pixels are left to their own runs)
+    if (active)
+    {
+        RWTexture2D<float4> direct = ResourceDescriptorHeap[P[10].x];
+        direct[pixel] = float4(sp.radiance, 1);
+    }
+    return;
 #endif
 
     // ---- edge (E) pixels (EdgeDetect.hlsl marked them in the tile's mask) and the pixels of coverage tiles keep their
@@ -297,18 +320,27 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     atm.skyView = UNX_NONE;  // P[3].z carries the shadow overflow heads: this kernel reads no sky view
     atm.aerial = P[3].w;
     const bool haveAtmosphere = atm.transmittance != UNX_NONE;
+    const uint experiment = P[4].z;
 
-#if AREA_LOBES
+#if SHADE_PART == 2
+    float3 radiance;
+    {
+        RWTexture2D<float4> direct = ResourceDescriptorHeap[P[10].x];  // part 1's direct radiance (ShadeOpaque.hlsl)
+        radiance = direct[pixel].rgb;
+    }
+#elif AREA_LOBES
     float3 radiance = 0;
     if (false)
 #else
     float3 radiance = m.emissive;
     if (P[1].w != UNX_NONE && mLoadTextureSet(P[4].y, materialIndex).emissive != UNX_NONE)
 #endif
+#if SHADE_PART == 1
     {
         Texture2D<float4> emissive = ResourceDescriptorHeap[P[1].w];
         radiance = emissive[pixel].rgb;  // material emissive x texture, resolved at the footprint
     }
+#endif
 
     // ---- sun (INTERFACES 8.1: reflection on the viewer's side of the shading normal, Foliage transmission across it)
     float3 l0 = normalize(g_sunDirection);
@@ -322,6 +354,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
             atmosphereAirView(atm, (float2(pixel) + 0.5) / float2(g_viewWidth, g_viewHeight), linearZ, airInscatter, airTransmittance, E);
         else E = atmosphereSunIlluminance(atm, worldPos);
     }
+#if SHADE_PART == 1
     float sunVisibility = 1;
     if (P[2].x != UNX_NONE && (P[4].z & 2048) == 0)
     {
@@ -340,7 +373,6 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         }
     }
     const float NoL = dot(n, l0);
-    const uint experiment = P[4].z;
     if (!AREA_LOBES && sunVisibility > 0 && (experiment & 16) == 0)
     {
         const float3 cap = E * (2 / (1 + cos(g_sunAngularRadius)));  // L_sun x solid angle of the disk
@@ -659,13 +691,14 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         radiance += front * (emissiveE[pixel].rgb / g_exposure);
     }
 #endif
+#endif  // SHADE_PART == 1 (the sun, the local lights, the tile term, the emissive irradiance)
 
 #if AREA_LOBES
     {
         RWTexture2D<float4> lobes = ResourceDescriptorHeap[P[9].z];
         lobes[pixel] = float4(radiance * g_exposure, 0);  // (exposed: f16 range)
     }
-#else
+#elif SHADE_PART == 2
     // ---- indirect (R): screen probes (main view) or the world cache (planar views). The viewer's side of the shading
     // normal reflects; Foliage also transmits what arrives on the other side.
     const float3 nv = NoV > 0 ? n : -n;
@@ -779,8 +812,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     if (NoV > 0) radiance += front * irradiance + incident * baseAlbedo;
     radiance += back * irradianceBack;
 
-#if LAYERED && AREA
-    // A9: the area-light lobes no LTC represents (AreaLobes.hlsl, dispatched before this kernel on the same tiles)
+#if LAYERED
+    // A9: the area-light lobes no LTC represents (AreaLobes.hlsl, dispatched before this kernel on the same tiles;
+    // area-lit scenes only: P[9].z)
     if (P[9].z != UNX_NONE)
     {
         RWTexture2D<float4> lobes = ResourceDescriptorHeap[P[9].z];
