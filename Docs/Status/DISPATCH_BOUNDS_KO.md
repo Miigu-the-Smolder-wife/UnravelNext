@@ -25,6 +25,9 @@
 | `r.gi.rc.filter / store` | 청크당 (4,4,프로브) 그룹 | 0 | 0 | 고정(이웃 6) | 통과 |
 | `r.gi.sao`, `r.gi.sao.temporal` | 화소당 | 0 | 0 | 고정(슬라이스 2 × 스텝 3 × 양방향, 3×3) | 통과 |
 | `fx.layer.setup` ML1, `volume.setup`(표본 볼륨 읽기) | 입자당 | 0 | 0 | 볼륨 조회 2회(고정). ML0·옛 경로는 **D**(프록셀 목록 루프 + VSM 보행) | 통과(켬) |
+| `r.sc.pairs.select` (S2의 표면 캐시용, A 작성; `surface_cache.direct_pairs`) | 셀당 compute 스레드 | 0 | 0 | 격자 칸 광원 루프 1회 **D**(R의 격자), 고른 광원 ≤ 8 고정 | 통과(광선 없음) |
+| `r.sc.pairs.trace` | 쌍 레코드당 스레드(셀 × 9), 띠 262,144 | 1 | 262,144 | 없음(인라인 변종: 비불투명 후보 ≤ 64) | 통과 |
+| `r.sc.pairs.store` | 셀당 compute 스레드 | 0 | 0 | 고정(쌍 9, 프로브 9) | 통과 |
 
 A가 고친 것(d936d28): `m.ml.trace` 행 띠, `s.ml.volume` 슬라이스 띠, radiance cache 청크를 "텍셀당 광선 3"으로 계산.
 

@@ -504,3 +504,17 @@ S의 국소 그림자 맵이 꺼지는 켬 상태에서 국소광에 그림자�
 - 1번 주 뷰 외 뷰의 표본 볼륨: 코드·빌드 끝(평면 반사 뷰가 자기 표본 볼륨을 이력 없이 가짐 — 공기 적분과 lit 입자가 읽음). 잠금 안 첫 실행(스모크 8 → watergate 평면 뷰 → 호스트 입자 테스트 → 로비 60) 대기.
 - 2번 dispatch 구조 상한 감사: `Docs/Status/DISPATCH_BOUNDS_KO.md`. A의 위반 3건 고침(코드는 1번과 같이 첫 실행 대기): `m.ml.trace` 행 띠, `s.ml.volume` 슬라이스 띠, radiance cache 청크 ÷3. R·S2에게 각자 항목 전달(R은 `r.gi.lg.trace` 띠를 광선 기준으로 고친다고 답함).
 - 3번 MegaLights 코브 띠 판정 자료: `Docs/Status/MEGALIGHTS_COVE_MEMO_KO.md`(광원·옛 규칙·언리얼 소스 정리 끝, 끝 바이어스 스윕 실행 대기).
+
+## 17. 조정 07:10 / 07:20 목록 진행 (2026-10-02 아침)
+- **① 광원별 Ray End Bias** (INTERFACES v1.93): a02773d — `scene::Light::rayEndBias`, 장면 파일 선택 블록 `LEND`, GPU 광원 `revision` 워드 상위 16비트, 호스트 ABI `UnxLightDesc` v2(v1도 받음), 게이트 `--light-ray-end-bias`. 전역 기본 0.05 → 0.01 m(언리얼 값). CPU 시험 `unx_test_scene_lightendbias` 통과, 로비 8프레임 스모크 통과. 60프레임 비교(광원별 0.4 m vs 전역 0.4 m)는 순서 변경으로 아직. C# 브리지(Unravel 저장소) 수정은 미커밋. 하우징 메시의 그림자 끄기는 기존 인스턴스 플래그로 됨(확인).
+- **② 표면 캐시 직접광 쌍 경로** `surface_cache.direct_pairs`(기본 false): 새 파일 `Passes/SurfaceCache/SurfaceCacheLightPairs.hlsli`, `...PairsSelect.hlsl`(compute, 광선 없음), `...PairsTrace.hlsl`(raygen, 쌍당 그림자 광선 1개) / `...PairsTraceInline.hlsl`(compute, 인라인 질의; `direct_pairs_inline`), `...PairsStore.hlsl`(compute), `Passes/Reflection/SurfaceCacheLightPairs.cpp`. S2의 `ReflectionSystem.cpp`에는 호출 한 곳과 설정 한 줄만. redesign-v2-refl cd6452c 병합(412d641) 위에서 빌드됨. 패스: `r.sc.pairs.select` → `r.sc.pairs.trace`(dispatch당 ≤ 262,144 스레드, 스레드당 광선 ≤ 1) → `r.sc.pairs.store`. `r.sc.cells`의 direct_analytic 조명과 같은 값(8광원 해석 적분 × 중심 그림자 광선 + 태양)이고, stochastic·remainder_light·비해석 모드는 이 경로에 없음. 광원 광선의 끝은 광원별 끝 바이어스(없으면 `shading.mega_lights_ray_end_bias_m`)를 따름 — 옛 경로의 5 cm 고정과 다른 점.
+- **라운지 실행** [실측, 잠금 안, 1080p, UNX_DRED=1, 표면 캐시 2^22]: 조정이 전한 승인으로는 A 세션의 권한 판정이 거부해 멈췄고, 사용자가 A 세션에 직접 "라운지 돌려"라고 한 뒤 돌림.
+  | 실행 | 설정 | 결과 |
+  |---|---|---|
+  | 로비 8프레임 (기본 / 인라인) | `reflection.lumen` + `surface_cache.enabled` + `direct_pairs` | 종료 0. `r.sc.pairs.select` 0.37 / `.trace` 0.10(인라인 0.05) / `.store` 0.13 ms(중앙값), `r.sc.cells` 없음 |
+  | **라운지 8프레임** | 같음 | **종료 0, 장치 제거 없음**, S 오류 비트 0, NaN·검은 화소 없음. select 0.44 / trace 0.10 / store 0.11 ms |
+  | 라운지 60프레임 | 같음 | 종료 0. select 0.42(최대 1.52) / trace 0.11(최대 1.05) / store 0.15 ms |
+  | 라운지 8프레임 전부 켬 | + `gi.lumen`, `shading.mega_lights`, `lumen.radiance_cache`, `lumen.short_range_ao` | 종료 0. `r.gi.rc.trace` 최대 1.50, `r.gi.lg.trace` 최대 4.11, `m.ml.trace` 최대 0.78 ms |
+  로그·CSV·캡처: `Results/Local/Fix-11/postgame/pairs_lounge8*`, `pairs_lounge60*`, `pairs_lounge_all*`. 값은 정확도 홀드의 참고값이다. 옛 `r.sc.cells` 경로는 라운지에서 돌리지 않았으므로 "hang의 원인"은 여전히 확정되지 않았다 — 같은 조명을 쌍 구조로 하면 라운지가 돈다는 것까지가 사실이다. 인라인 변종은 라운지에서 돌리지 않았다.
+- **③ 광원 격자 칸 목록 상한 제안**: bfc3cdd `Docs/Status/LIGHT_GRID_BOUND_PROPOSAL_KO.md`(R에게 전달). R은 `r.gi.lg.trace` 띠를 광선 기준으로 고침(redesign-v2 c4d2060).
+- 관찰: `unx_test_host_hostabi`가 "S VSM: sun level 0 can reach 4089109318 cluster entries"로 실패(장면 커밋 뒤, 첫 프레임). 값은 GPU 인스턴스 용량 × 가장 큰 메시의 클러스터 수 꼴이라 광원과 무관해 보이나, 이 변경 전에도 실패했는지는 확인하지 않았다.
