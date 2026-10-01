@@ -84,6 +84,8 @@ struct State
     uint32_t localWithoutSlot = 0;
     ComPtr<ID3D12Resource> localRing, localMask, localSlots;
     ComPtr<ID3D12Resource> clsAtlas;  // L3: classification pages (VsmCls.hlsli), kLocalLights x 6 pages of 128^2 x 4 B
+    BufferRef clsBlocksRef;  // this frame's block maxima (frameRefs); invalid when the classification is off
+    uint32_t clsActiveCount = 0;
     uint64_t clsAtlasBytes = 0;
     uint32_t clsAtlasUav = UINT32_MAX;  // raw UAV descriptor (V's pixel kernel root constant)
     uint8_t* localMapped = nullptr;
@@ -500,6 +502,8 @@ bool frameRefs(FramePassContext& fc, VsmFrameRefs& out)
     out.constantsCbv = s.ringCbv[s.constantsOffset / kRingStride];
     out.stats = s.statsRef;
     out.use = s.useRef;
+    out.clsBlocks = s.clsBlocksRef;
+    out.clsActive = s.clsActiveCount;
     return true;
 }
 
@@ -1539,6 +1543,8 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     // (LocalTileClassify) - shadow.vsm.classification_pages. Every active light's six faces are drawn each frame (the
     // static / dynamic layers of 14.3-6 follow).
     fc.resources.vsmTileLit = {};
+    s.clsBlocksRef = {};
+    s.clsActiveCount = 0;
     if (fc.services.rasterizeDepth && activeLocal > 0 && main.depth.valid() && q.boolean("shadow.vsm.classification_pages"))
     {
         const uint32_t clsPages = activeLocal * 6, clsRows = (clsPages + 47) / 48, clsWidth = 48 * 128, clsHeight = clsRows * 128;
@@ -1629,6 +1635,8 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.cmd->Dispatch(tilesX, tilesY, 1);
                   });
         fc.resources.vsmTileLit = tileLit;
+        s.clsBlocksRef = clsBlocks;
+        s.clsActiveCount = activeLocal;
     }
 
     {

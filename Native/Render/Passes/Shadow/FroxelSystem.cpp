@@ -386,12 +386,13 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
         {
             b.use(vsm.table, Use::SrvCompute); b.use(vsm.atlas, Use::SrvCompute);
             b.use(vsm.blocks, Use::SrvCompute); b.use(vsm.bound, Use::SrvCompute);
+            if (vsm.clsBlocks.valid()) b.use(vsm.clsBlocks, Use::SrvCompute);  // L3 classification blocks
             b.use(vsm.stats, Use::UavCompute);
             if (vsm.use.valid()) b.use(vsm.use, Use::UavCompute);
         }
     };
     auto bind = [=](PassContext& ctx, uint32_t workDescriptor, uint32_t airDescriptor) {
-        uint32_t k[20] = { ctx.srv(lights), workDescriptor == 0xFFFFFFFFu ? ctx.uav(volume) : 0xFFFFFFFFu, ctx.srv(tlut), ctx.srv(mlut), 0, 0, 0, 0xFFFFFFFFu, 0, 0, 0, 0, localLights, slotOfLight,
+        uint32_t k[24] = { ctx.srv(lights), workDescriptor == 0xFFFFFFFFu ? ctx.uav(volume) : 0xFFFFFFFFu, ctx.srv(tlut), ctx.srv(mlut), 0, 0, 0, 0xFFFFFFFFu, 0, 0, 0, 0, localLights, slotOfLight,
                            bounded ? ctx.srv(readers) : 0xFFFFFFFFu, 0xFFFFFFFFu, media.valid() ? ctx.srv(media) : 0xFFFFFFFFu,
                            functions.valid() ? ctx.srv(functions) : 0xFFFFFFFFu, workDescriptor, airDescriptor };
         if (shadows)
@@ -402,7 +403,9 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
         }
         std::memcpy(&k[10], &stepAltitude, 4);
         k[11] = experiment | (walkStats ? 0x10000u : 0u);
-        ctx.bindFrameConstants(constants); ctx.computeConstants(k, 20);
+        k[20] = shadows && vsm.clsBlocks.valid() ? ctx.srv(vsm.clsBlocks) : 0xFFFFFFFFu;  // P[5].x: L3 classification blocks (14.4 lit segments)
+        k[21] = k[22] = k[23] = 0;
+        ctx.bindFrameConstants(constants); ctx.computeConstants(k, 24);
     };
     if (queued)
     {

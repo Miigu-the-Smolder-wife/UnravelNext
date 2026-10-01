@@ -117,6 +117,8 @@ struct VsmFrameRefs
     TextureRef atlas;  // the page atlas (D32; SrvCompute / SrvGraphics for readers)
     BufferRef table, blocks, bound, stats;  // stats: raw VSM counters (walk statistics, words 20..24)
     BufferRef use;  // read bits (shadow.vsm.use_stats; invalid when off): readers declare it as UAV
+    BufferRef clsBlocks;  // L3 (14.3-1): the classification pages' 8-texel block maxima (VsmCls.hlsli; invalid = off)
+    uint32_t clsActive = 0;  // raster-active lights with classification pages this frame
     uint32_t constantsCbv = UINT32_MAX;  // ConstantBuffer<VsmConstants> of this frame
 };
 bool frameRefs(FramePassContext& fc, VsmFrameRefs& out);

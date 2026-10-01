@@ -64,6 +64,7 @@
 // by them, the air in front is not.
 // Frame constants of the view (main, or a planar reflection view).
 #include "Passes/Atmosphere/FroxelSlice.hlsli"
+#include "Passes/Shadow/VsmCls.hlsli"
 groupshared float3 gs_tau[64];
 groupshared float3 gs_source[64];
 groupshared float4 gs_hat[64];  // L / (1 - T) of node s + 1, .w = 1 where the node has air
@@ -73,6 +74,31 @@ groupshared uint gs_scan[64];   // shadowed local-light items of the slices (inc
 groupshared uint gs_item[64];   // a batch's items: slice | list position << 6
 groupshared float gs_moments[64][8];  // each lane's piece of a shadowed item: its lit set's Legendre moments
 groupshared uint gs_runs[64];         // and its lit runs | 0x80000000 unless fully lit
+
+// L3 (14.3-1, 14.4): the segment o + dir [0, len] is lit by the local light of shadow slot 'slot' when both ends project
+// onto one cube face, beyond the near plane, and every 8-texel block the projected segment's bounding box covers (<= 16
+// blocks, else undecided) holds no caster nearer than the segment's farthest face depth (reversed Z: block max <= that
+// depth's device value x (1 + 2e-3)). Sufficient, never wrong: an occluder of a segment point lies on its ray, nearer.
+bool airClsSegmentLit(uint blocksSrv, uint localsSrv, uint slot, float3 o, float3 dir, float len)
+{
+    StructuredBuffer<VsmLocalLight> locals = ResourceDescriptorHeap[localsSrv];
+    const VsmLocalLight l = locals[slot];
+    if (l.activeIndex == 0xFFFFFFFFu) return false;
+    const VsmLocalPoint q0 = vsmLocalProject(l, o), q1 = vsmLocalProject(l, o + dir * len);
+    if (q0.face != q1.face || q0.z <= l.nearM || q1.z <= l.nearM) return false;
+    const float zFar = max(q0.z, q1.z);
+    const float limit = saturate(l.nearM * (l.farM - zFar) / ((l.farM - l.nearM) * zFar) * (1 + 2e-3));
+    const int2 t0 = clamp(int2(floor(vsmLocalTexel(q0.xy, 0))), 0, 127), t1 = clamp(int2(floor(vsmLocalTexel(q1.xy, 0))), 0, 127);
+    const int2 b0 = min(t0, t1) / 8, b1 = max(t0, t1) / 8;
+    if ((b1.x - b0.x + 1) * (b1.y - b0.y + 1) > 16) return false;
+    ByteAddressBuffer blocks = ResourceDescriptorHeap[blocksSrv];
+    const uint page = l.activeIndex * 6 + q0.face;
+    float nearest = 0;
+    for (int by = b0.y; by <= b1.y; ++by)
+        for (int bx = b0.x; bx <= b1.x; ++bx)
+            nearest = max(nearest, asfloat(blocks.Load((page * 256 + by * 16 + bx) * 4)));
+    return nearest <= limit;
+}
 
 [numthreads(64, 1, 1)]
 void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
@@ -196,6 +222,10 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         // and the total; pass 2: the shadowed lights' decisions. The (slice interval, light) lit / umbra / mixed
         // classification over the coarse pages follows 14.3 (L3).
         const bool omission = (experiment & 1024) != 0;
+        // L3 (14.4 with 14.3-1): a shadowed light whose segment is lit over the classification pages (no caster nearer
+        // than the segment's farthest face depth in the blocks the segment's projection covers; one face, <= 16 blocks)
+        // is added lit without its walk - exact, not an omission.
+        const bool cls = P[5].x != 0xFFFFFFFFu;
         float total = 0;
         for (uint i = 0; i < myCount; ++i)
         {
@@ -206,7 +236,8 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             // whose sphere meets the froxel, about a tenth of the depth beside the tile's centre ray.)
             const GpuLight light = loadLight(li);
             if (airLocalMap(light, o, dir, len).h >= light.range) continue;
-            const bool shadowed = slot != VSM_LOCAL_NONE;
+            bool shadowed = slot != VSM_LOCAL_NONE;
+            if (shadowed && cls && airClsSegmentLit(P[5].x, P[3].x, slot, o, dir, len)) shadowed = false;
             if (shadowed && !omission)
             {
                 if (i < 32) myReach.x |= 1u << i;
@@ -230,6 +261,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
                 if (slot == VSM_LOCAL_NONE) continue;
                 const GpuLight light = loadLight(li);
                 if (airLocalMap(light, o, dir, len).h >= light.range) continue;
+                if (cls && airClsSegmentLit(P[5].x, P[3].x, slot, o, dir, len)) continue;  // (added lit in pass 1)
                 const float3 local = airLocalLight(light, o, dir, len, cm, a.mieG, P[4].y, li, froxelTileWidth(g, 0.5 * (z0 + z1)));
                 const float lum = dot(local, float3(0.2126, 0.7152, 0.0722));
                 if (omitted + lum <= 1e-3 * total)

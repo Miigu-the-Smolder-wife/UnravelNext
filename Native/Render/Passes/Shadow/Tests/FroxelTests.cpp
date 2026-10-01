@@ -752,7 +752,39 @@ int main(int argc, char** argv)
                          sumDo / std::max(sumWo, 1e-30), worstO);
                     report(nodesO > 1000 && sumDo / std::max(sumWo, 1e-30) <= 1e-3, "shadowed air: bounded walk omission vs every walk (mean relative to the local share)", sumDo / std::max(sumWo, 1e-30), 1e-3);
                     report(worstO <= 2e-3, "shadowed air: bounded walk omission vs every walk (largest node, relative to the local share)", worstO, 2e-3);
-                }            }
+                }
+                {
+                    // L3 (14.3-1 with 14.4): segments lit over the classification pages skip their walk (exact: no caster
+                    // nearer than the segment in the blocks its projection covers); the air with the classification on
+                    // against every walk, relative to the local share.
+                    tf.quality.applyOverride("shadow.vsm.classification_pages=true");
+                    run(sc, 6, -2.0f, false);
+                    const std::vector<uint8_t> classified = lastVolume;
+                    tf.quality.applyOverride("shadow.vsm.classification_pages=false");
+                    run(sc, 6, -2.0f, false);
+                    const std::vector<uint8_t> walkedAll = lastVolume;
+                    double worstC = 0, sumDc = 0, sumWc = 0;
+                    uint32_t nodesC = 0, changedC = 0;
+                    for (uint32_t ty = 0; ty < fg.gridY; ++ty)
+                        for (uint32_t tx = 0; tx < fg.gridX; ++tx)
+                            for (uint32_t n = 1; n <= fg.slices; ++n)
+                            {
+                                const ref::D3 o = nodeOf(classified, tx, ty, n) - nodeOf(walkedAll, tx, ty, n);
+                                const ref::D3 w = nodeOf(walkedAll, tx, ty, n) - nodeOf(without, tx, ty, n);
+                                const double r = w.x + w.y + w.z, e = std::abs(o.x) + std::abs(o.y) + std::abs(o.z);
+                                if (e > 0) ++changedC;
+                                if (r * exposure <= 1e-3) continue;
+                                worstC = std::max(worstC, e / r);
+                                sumDc += e;
+                                sumWc += r;
+                                ++nodesC;
+                            }
+                    logf("shadowed air, classification pages (lit segments without a walk) vs every walk: %u nodes, %u changed, mean relative difference %.3g, largest %.3g\n",
+                         nodesC, changedC, sumDc / std::max(sumWc, 1e-30), worstC);
+                    report(nodesC > 1000 && sumDc / std::max(sumWc, 1e-30) <= 1e-3, "shadowed air: classification pages vs every walk (mean relative to the local share)", sumDc / std::max(sumWc, 1e-30), 1e-3);
+                    report(worstC <= 5e-3, "shadowed air: classification pages vs every walk (largest node, relative to the local share)", worstC, 5e-3);
+                }
+            }
 #if defined(FROXEL_TEST_LIGHT_FUNCTIONS)
             for (uint32_t i = 0; i < sc.lights.size(); ++i) lfSet.clear(i);
 #endif
