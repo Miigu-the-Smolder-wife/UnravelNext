@@ -74,6 +74,7 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     bool surfaceCache = false, scDirect = true, scRadiosity = true, scRemainderLight = false;
     uint32_t scEntriesLog2 = 22, scMaxUnused = 255, scCaptureFactor = 64, scCaptureBounces = 3, scDirectFactor = 32, scRadiosityFactor = 64;
     float scRadiosityCap = 40.0f, scRadiosityFrames = 4.0f;
+    bool scBilinearRead = true;       // surface_cache.bilinear_read: a read blends the four cells around the point
     bool scDirectAnalytic = true;     // surface_cache.direct_analytic: the 8 lights by their integrals, shadow ray to the centre
     bool scLightingFeedback = true;   // surface_cache.lighting_feedback: cells consumers read are relit first
     bool scDirectStochastic = false;  // surface_cache.direct_stochastic: A's world-point light sampler in place of the 8 strongest lights

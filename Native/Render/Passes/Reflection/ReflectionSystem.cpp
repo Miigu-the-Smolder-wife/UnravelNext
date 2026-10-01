@@ -159,6 +159,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.scDirectStochastic = flag("surface_cache.direct_stochastic", false);
     s.scLightingFeedback = flag("surface_cache.lighting_feedback", true);
     s.scDirectAnalytic = flag("surface_cache.direct_analytic", true);
+    s.scBilinearRead = flag("surface_cache.bilinear_read", true);
     s.scDirectStochasticFrames = num("surface_cache.direct_stochastic_max_frames", 12.0);
     s.scDirectMinWeight = num("surface_cache.direct_stochastic_min_sample_weight", 0.001);
     s.lumenHitSurfaceCache = flag("reflection.lumen_hit_surface_cache", true);
@@ -1313,7 +1314,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         const uint32_t n = surfaceCacheEntries;
         g.addPass("r.sc.begin", QueueType::Compute, [&](PassBuilder& b) { b.use(surfaceCache, Use::UavCompute); },
                   [&shaders, surfaceCache, n, surfaceCacheClear, frame, frameConstants, s](PassContext& c) {
-                      const uint32_t k[8] = { c.uav(surfaceCache), n, frame, surfaceCacheClear ? 1u : 0u, s.scMaxUnused, 1u, asU(s.scRadiosityCap), asU(s.scRadiosityFrames) };
+                      const uint32_t k[8] = { c.uav(surfaceCache), n, frame, surfaceCacheClear ? 1u : 0u, s.scMaxUnused, 1u | (s.scBilinearRead ? 2u : 0u), asU(s.scRadiosityCap),
+                                              asU(s.scRadiosityFrames) };
                       c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/SurfaceCacheBegin"));
                       c.computeConstants(k, 8);
                       c.bindFrameConstants(frameConstants);
