@@ -21,8 +21,14 @@
 //                          the cell's lights by A's world-point sampler (MegaLightsWorld.hlsli: the light drawn by its
 //                          unshadowed contribution, area lights by their integral), one shadow ray, and the cell keeps
 //                          a running mean of it over at most P[4].x frames.
+//                          With flag bit 6 (surface_cache.direct_analytic; the reference's default path) each of the 8
+//                          lights gives its unshadowed irradiance by its integral over the light (A's
+//                          mlLightUnshadowed: the same value every update) times one shadow ray to the light's centre -
+//                          no random point on the light, so a cell's value does not change between updates and
+//                          neighbouring cells agree (area lights cast hard shadows in the cache, as in the
+//                          reference). Without it: one random point on each light, one shadow ray to it.
 // P[0] = { cache UAV, budget, frame, flags (bit 0: local lights and sun, bit 1: radiosity, bit 3: the remainder light,
-//          bit 4: stochastic local lights) }, P[4] = { asuint(stochastic max frames), asuint(min sample weight), 0, 0 }
+//          bit 4: stochastic local lights, bit 5: feedback order, bit 6: analytic local lights) }, P[4] = { asuint(stochastic max frames), asuint(min sample weight), 0, 0 }
 // P[1].xyz = constant sky radiance (SKY1), P[1].w = ray length, P[2] = atmosphere SRVs (SKY0), P[3].xyz = constant sun
 // illuminance (SKY1) (GiSky.hlsli), P[3].w = seed bounces; P[6], P[7] = RtSceneSrvs. Frame constants b1 = main view.
 #include "RayTracing/RayShaders.hlsli"
@@ -75,6 +81,24 @@ bool scMeet(RWByteAddressBuffer b, ScLayout l, RtSceneSrvs scene, RtHit hit, Ray
     scMarkQuiet(b, l, position, face, scAlbedoOf(m), m.emissive);
     cell = scRead(b, l, position, face);
     return true;
+}
+
+// Whether the centre of a light is seen from x (n: the surface's normal): the reference's shadow ray of a card texel.
+// The ray ends 5 cm before the light's surface (S's rule: what lies within 5 cm of a light casts no shadow).
+bool scCentreVisible(RtSceneSrvs scene, float3 x, float3 n, GpuLight g, float bias)
+{
+    const float3 d = g.position - x;
+    const float dist = length(d);
+    if (!(dist > 0)) return true;
+    const uint type = lightType(g);
+    const float radius = type == LIGHT_SPHERE ? g.size.x : type == LIGHT_TUBE ? g.size.y : 0.0;
+    const float3 wi = d / dist;
+    RayDesc ray;
+    ray.Origin = x + n * (dot(n, wi) < 0 ? -bias : bias);
+    ray.Direction = wi;
+    ray.TMin = bias;
+    ray.TMax = max(bias, dist - radius - 0.05);
+    return rtVisible(scene, ray, RT_MASK_SHADOW);
 }
 
 // The item a thread of a lighting pass works on: the entries not lit yet first, then a window over the lit ones.
@@ -214,9 +238,18 @@ void SurfaceCacheCellsGen()
                 }
             }
             float kept = 0;
+            const bool analytic = (P[0].w & 64u) != 0;
+            const MlPoint lambert = mlPointLambert(position, normal, float3(1, 1, 1));  // (its radiance is irradiance / pi)
             [loop] for (uint i = 0; i < held; ++i)
             {
                 kept += weight[i];
+                if (analytic)
+                {
+                    const GpuLight g = loadLight(chosen[i]);
+                    const float3 e = 3.14159265 * mlLightUnshadowed(lambert, g, chosen[i], UNX_NONE);
+                    if (any(e > 0) && (!lightCastsShadow(g) || scCentreVisible(scene, position, normal, g, bias))) direct += e;
+                    continue;
+                }
                 RtLocalChoice c;
                 c.valid = true;
                 c.li = chosen[i];

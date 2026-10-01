@@ -23,3 +23,7 @@ direct_stochastic_max_frames = 12.0   # (reference: Stochastic.Temporal.MaxFrame
 direct_stochastic_min_sample_weight = 0.001
 lighting_feedback = true              # cells a reflection or GI hit read since the last frame are relit ahead of the others
                                       # (reference: r.LumenScene.Lighting.Feedback 1); half of the budget left after new cells
+direct_analytic = true                # each of the cell's 8 lights: its unshadowed irradiance by the light's integral, one shadow
+                                      # ray to the light's centre (the reference's default path: a cell's value is the same at
+                                      # every update; area lights cast hard shadows in the cache). false: one random point on
+                                      # each light per update (soft shadows over updates, cells differ from update to update)
