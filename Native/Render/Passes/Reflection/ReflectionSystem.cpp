@@ -704,12 +704,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     // Exact threshold of the cost choice: a view costs at least a + b x pixels, rays c x pixels, so a plane can pay off
     // only when c > b and pixels > a / (c - b). Until the trace has been measured no plane is chosen.
     const float rayNs = m_rayNs, viewNs = m_viewNsPerPixel, viewFixedNs = m_viewFixedNs;
-    // reflection.lumen: every planar mirror with pixels on screen gets its camera, as when forced - the measured cost per
-    // ray falls when every pixel under the roughness limit traces (the lobby: 5 % planar pixels went to rays [measured]),
-    // and a raster mirror is the direct view's exact image where a ray's is one lobe sample.
-    const bool planarForced = m_planarForced || s.lumen;
-    const bool planarCanWin = fc.services.renderView && (planarForced || rayNs > viewNs);
-    const double minPixels = planarForced ? 1.0 : planarCanWin ? viewFixedNs / (rayNs - viewNs) : 1e30;
+    const bool planarCanWin = fc.services.renderView && (m_planarForced || rayNs > viewNs);
+    const double minPixels = m_planarForced ? 1.0 : planarCanWin ? viewFixedNs / (rayNs - viewNs) : 1e30;
     const auto selectStart = std::chrono::steady_clock::now();
     if (m_planarEnabled && !m_planes.empty() && planarCanWin)
     {
@@ -778,7 +774,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
             const double rayCost = (double)rayNs * m_planePixels[k];
             const bool hadCamera = m_planeCameraFrame[k] + 1 == frame;
             const bool cheaper = hadCamera ? viewCost < rayCost * 1.1 : viewCost * 1.1 < rayCost;  // hysteresis
-            candidates.push_back({ k, ix0, iy0, ix1 - ix0, iy1 - iy0, current && (planarForced ? m_planePixels[k] > 0 : cheaper), current });
+            candidates.push_back({ k, ix0, iy0, ix1 - ix0, iy1 - iy0, current && (m_planarForced ? m_planePixels[k] > 0 : cheaper), current });
         };
         uint32_t stack[64], top = 0;
         stack[top++] = 0;
