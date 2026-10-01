@@ -96,6 +96,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.layerView = q.has("reflection.layer_view") ? (uint32_t)q.integer("reflection.layer_view") : 0u;
     s.layerHistoryBound = !q.has("reflection.layer_history_bound") || q.boolean("reflection.layer_history_bound");
     s.layerMirrorLobe = q.has("reflection.layer_mirror_lobe") && q.boolean("reflection.layer_mirror_lobe");
+    s.hitConeLobes = !q.has("reflection.hit_cone_lobes") || q.boolean("reflection.hit_cone_lobes");
     s.deterministic = q.has("debug.deterministic") && q.boolean("debug.deterministic");
     s.planarRayNs = (float)q.number("reflection.planar_ray_ns");
     return s;
@@ -937,12 +938,13 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       b.use(jobLayers, Use::UavCompute);
                   }
               },
-              [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers](PassContext& c) {
-                  // (the layer buffers' UAVs into the rays header: the shade, combine and inline passes find them there)
-                  const uint32_t k[8] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(raysBuffer), rayCapacity,
-                                          layers ? c.uav(rayLayers) : 0xFFFFFFFFu, layers ? c.uav(jobLayers) : 0xFFFFFFFFu };
+              [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, hitFlags = (s.hitConeLobes ? 1u : 0u)](PassContext& c) {
+                  // (the layer buffers' UAVs and the hit shading's flags into the rays header: the shade, combine and inline
+                  // passes find them there)
+                  const uint32_t k[12] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(raysBuffer), rayCapacity,
+                                           layers ? c.uav(rayLayers) : 0xFFFFFFFFu, layers ? c.uav(jobLayers) : 0xFFFFFFFFu, hitFlags, 0, 0, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionArgs"));
-                  c.computeConstants(k, 8);
+                  c.computeConstants(k, 12);
                   c.cmd->Dispatch(1, 1, 1);
               });
 

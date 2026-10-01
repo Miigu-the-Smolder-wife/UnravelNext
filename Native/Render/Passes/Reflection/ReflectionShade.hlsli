@@ -87,6 +87,21 @@ ShadowSrvs reflShadowSrvs()
     return vsm;
 }
 
+// Flags of the hit shading (the rays header's word 7, ReflectionSystem; the passes that have the rays buffer set
+// g_reflHitFlags from it before they shade - other users of reflShadeHit, refraction and test views, keep 0):
+//   REFL_HIT_CONE_LOBES  reflection.hit_cone_lobes: the hit's specular lobes toward its lights are widened by the ray
+//                        cone, alpha' = sqrt(alpha^2 + (cone spread / 2)^2) - the base lobe for the local-light sample
+//                        and the coat lobe for the local lights and the sun (HitLayers.hlsli g_rtHitCone). A reflection
+//                        value is the mean over its ray cone of what leaves the hit toward the reflector; for a
+//                        specular lobe at the hit that mean is the lobe widened by the cone. GI hits have done both
+//                        since 2026-09-27 (GiTrace: "a glossy hit's point-light highlight came in as rare huge
+//                        samples that stayed ... as bright dots"), and the sun's base highlight is filtered by the
+//                        cone here too (rtHitRadianceSplit's pixelAngle); the reflection hits' local-light lobe and
+//                        coat lobe were evaluated at the single ray direction - a G ray (cone of several degrees)
+//                        meeting a glazed tile near a lamp's mirror direction returned the unfiltered highlight.
+#define REFL_HIT_CONE_LOBES 1u
+static uint g_reflHitFlags = 0;
+
 // Local lights (HitLocalLights.hlsli): one next-event sample drawn with localSeed; its visibility is localVisible (the
 // compute path: ReflectionLocalShadow traced it before, same seed and hit point) or, with REFL_LOCAL_TRACE (the ray
 // generation paths), traced here. Lights that cast no shadow: visible.
@@ -147,6 +162,7 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     }
     if (!s.frontFace && (m.classFlags & MATERIAL_TWO_SIDED) == 0) return o;  // inside closed geometry
     const uint footprintLevel = giLevelForSize(h, footprint);
+    if (g_reflHitFlags & REFL_HIT_CONE_LOBES) g_rtHitCone = 0.5 * coneSpread;
     RtHitLighting L;
     L.irradiance = L.specularRadiance = L.local = 0;
     {
@@ -160,7 +176,13 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
         const RtLocalSample ls = rtLocalLightFinish(scene, choice, s.position, giUnit(localSeed + 1), giUnit(localSeed + 2), footprint);
         if (ls.valid)
         {
-            const float3 f = rtLocalLightBrdfCos(m, s.normal, -direction, ls.wi, false);
+            GpuMaterial mc = m;  // the base lobe widened by the ray cone (REFL_HIT_CONE_LOBES; the coat lobe: g_rtHitCone)
+            if (g_reflHitFlags & REFL_HIT_CONE_LOBES)
+            {
+                const float alpha = modelAlpha(m.roughness), cone = 0.5 * coneSpread;
+                mc.roughness = sqrt(sqrt(alpha * alpha + cone * cone));
+            }
+            const float3 f = rtLocalLightBrdfCos(mc, s.normal, -direction, ls.wi, false);
             bool visible = !ls.castShadow || localVisible;
 #if REFL_LOCAL_TRACE
             if (any(f > 0))  // (f = 0: the visibility multiplies nothing, no ray)

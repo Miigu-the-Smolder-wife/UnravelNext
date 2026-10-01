@@ -19,6 +19,11 @@ temporal_history_max = 32             # time integration (ReflectionAccumulate, 
 temporal_lobe_shift = 0.1              # the history window is limited so the reflected direction travels at most this share of the
                                        # lobe half-angle over it (view-dependence of the lobe integral; mirrors: still views only),
                                        # and the reflected hits move at most this share of the ray footprint there
+hit_cone_lobes = true                  # the hits' specular lobes toward their lights widened by the ray cone (base lobe for the
+                                       # local-light sample, coat lobe for local lights and the sun; ReflectionShade.hlsli), as GI
+                                       # hits do: a reflection value is a mean over its cone. false = the lobes at the single ray
+                                       # direction (the path before 2026-10-01: rare huge highlight samples on glazed and glossy
+                                       # hits). A/B
 # Redesign V2 P2 (RENDERER_REDESIGN_V2 1.2, reconstruction A; Native/Render/Passes/Reconstruct). The previous path
 # (the value integrated over temporal_history_max frames by ReflectionAccumulate) stays behind layers = false for A/B.
 layers = false                         # the values as base + residual + albedo x stochastic (ReflectionInternal.hlsli): the hits'

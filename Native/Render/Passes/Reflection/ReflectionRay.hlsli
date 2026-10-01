@@ -9,7 +9,7 @@
 // b1 = main view.
 //
 // Rays buffer (raw): header { rays allocated (atomic), capacity, shadow rays (atomic), jobs; penumbra hits (atomic), ray
-// layers UAV, job layers UAV, 0 } (32 B), then per ray slot:
+// layers UAV, job layers UAV, hit shading flags (REFL_HIT_*, ReflectionShade.hlsli) } (32 B), then per ray slot:
 //   hit records    uint4 at 32 + slot x 16: { instance | front face << 31 (REFL_RAY_MISS, REFL_RAY_NONE), geometry, primitive,
 //                  t }; after the shade pass a penumbra hit's record holds { geometric normal xyz, filter reach }
 //   barycentrics   uint  at 32 + capacity x 16 + slot x 4: 2 x unorm16 (attributes only; the position comes from t)
@@ -50,6 +50,7 @@ uint reflRaysPenumbraOffset(uint capacity, uint i) { return reflRaysShadowOffset
 // layers buffer (REFL_LAYER_RAY_BYTES per slot) and the job layers buffer (REFL_LAYER_JOB_BYTES per job), UNX_NONE when
 // the layers are off (ReflectionArgs writes them with the header).
 uint reflRayLayersUav(RWByteAddressBuffer rays) { return rays.Load(20); }
+uint reflHitFlags(RWByteAddressBuffer rays) { return rays.Load(28); }
 uint reflJobLayersUav(RWByteAddressBuffer rays) { return rays.Load(24); }
 // flags: REFL_LAYER_SURFACE (the job has surface hits), REFL_LAYER_NO_DATA (half or more of them found no cache data).
 void reflStoreJobLayers(uint uav, uint job, ReflJobLayers l, float3 hitNormal, uint hitInstance, uint flags)

@@ -24,6 +24,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     const uint4 record = rays.Load4(reflRaysHitOffset(slot));
     const uint valueOffset = reflRaysValueOffset(capacity, slot);
     const uint layersUav = reflRayLayersUav(rays);  // reconstruction layers (UNX_NONE: off)
+    g_reflHitFlags = reflHitFlags(rays);
     if (record.x == REFL_RAY_NONE)
     {
         rays.Store4(valueOffset, uint4(0, 0, 0, 0));  // valid bit clear

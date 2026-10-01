@@ -29,6 +29,7 @@ void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer
     float motion = 0;
     RWByteAddressBuffer rays = ResourceDescriptorHeap[P[5].y];
     const uint jobLayersUav = reflJobLayersUav(rays);  // reconstruction layers, as ReflectionCombine
+    g_reflHitFlags = reflHitFlags(rays);
     float3 sumS = 0, sumA = 0;
     uint hits = 0, guide = 0, guideInstance = 0, hitsNoData = 0;
     [loop] for (uint i = 0; i < j.rays; ++i)
