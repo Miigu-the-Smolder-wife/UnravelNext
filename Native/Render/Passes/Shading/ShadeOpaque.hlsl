@@ -1,5 +1,6 @@
 // unx-kernel: cs_6_6 main
 // unx-variants: OUTPUT=0,1 FALLBACK=0,1 AREA=0,1 PLANAR=0,1 LAYERED=0,1,2
+// (14.1 NEAR/FAR: Passes/Common/LightNearFar.hlsli is the shared classification; the tile FAR term comes with L2.)
 // Shading kernel of the opaque classes (ARCHITECTURE 2.11; INTERFACES 5.6, 7, 8): one 8 x 8 tile of the class's tile
 // list per group (ExecuteIndirect), pixels of other classes skipped. Per pixel, from the G-buffer, depth and material
 // word (no vis-buffer re-derivation):
