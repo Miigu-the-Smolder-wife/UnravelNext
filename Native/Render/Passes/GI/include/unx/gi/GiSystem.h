@@ -45,6 +45,11 @@ struct GiSettings  // from Config/quality/gi.toml
     uint32_t bounceSplitUpdates = 1;
     bool anchorResample = false;
     bool anchorCentroid = false;  // gi.anchor_centroid (V2.3 12.2, P1''-b): the anchor is the lookups' centroid (GiInternal giCentroidOffer)
+    bool screenFilterAdaptive = false;  // gi.screen_filter_adaptive (V2 1.2 L_gi): filter radius x clamp(sigma / sigma0, 0.5, 3)
+    bool screenWideFilter = false;  // gi.screen_wide_filter (V2 1.2 L_gi): the probes' SH filtered over many cells (GiProbeFilter.hlsl)
+    uint32_t screenWidePasses = 3;  // gi.screen_wide_passes: a-trous passes (tap spacing x 1, 2, 4: reach +-2, 6, 14 spacings)
+    float screenWideSigmaLo = 0.02f, screenWideSigmaHi = 0.06f;  // gi.screen_wide_sigma_lo / _hi: the narrow value's sigma where the wide share is 0 / 1
+    uint32_t screenTemporalFrames = 0;  // gi.screen_temporal_frames (V2 1.2 L_gi's history, GiLayerTemporal.hlsl; 0 = off)
     // gi.history_window_rule "lighting": the running mean's window from the scene (history_updates_max while the sun
     // changed within lightingRecentFrames, else the static window); "samples": from the entry's own statistics.
     bool windowByLighting = true;
@@ -170,6 +175,12 @@ private:
     float4x4 m_screenPrevInvViewProj{};
     float m_screenPrevExposure = 0;
     void ensureScreenHistory(uint32_t width, uint32_t height);
+    // L_gi's temporal step (GiLayerTemporal.hlsl): value and keys, ping-pong
+    ComPtr<ID3D12Resource> m_layerValue[2], m_layerKeys[2];
+    uint32_t m_layerX = 0, m_layerY = 0, m_layerParity = 0, m_layerRevision = 0, m_layerEpoch = 0;
+    bool m_layerValid = false;
+    float4x4 m_layerPrevInvViewProj{};
+    float m_layerPrevExposure = 0;
     TextureRef recordScreen(FramePassContext& fc, ViewResources& view, BufferRef cache);
     // Change boxes for GiInvalidate (B3): a mapped upload ring, one slot per frame of kChangeSlots, raw SRVs.
     static constexpr uint32_t kChangeSlots = 4, kChangeBoxesMax = 256, kChangeSlotBytes = 16 + kChangeBoxesMax * 32 + 240;

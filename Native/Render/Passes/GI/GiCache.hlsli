@@ -584,24 +584,49 @@ uint giScreenCell(B b, GiHeader h, uint64_t key, out uint anchor)
     uint updates;
     return giScreenCellUpdates(b, h, key, anchor, updates);
 }
+// The relative standard deviation of the lookup's value (redesign V2 1.1 (d), P2 L_gi): each entry's map is the running
+// mean of its updates, and GiIntegrate keeps the entry's own statistics (GI_SH_WINDOW: F, the fast mean of an update's
+// anchor irradiance, and D, the mean of its per-update sample spread), so an entry whose mean holds n samples
+// (giHistorySamples) has the relative variance (D / F)^2 / n - measured, not assumed: under a large bright emitter an
+// update spreads far more than the 19 % of an evenly lit room (GI_UPDATE_SIGMA, used while an entry has no statistics).
+// The lookup's blend of entries (corner and level weights) takes their weighted mean - an upper bound of the blend's
+// variance (sum w^2 v <= sum w v for w <= 1).
+#define GI_UPDATE_SIGMA 0.19
+#define GI_SIGMA_WINDOW 32u
+// An entry's relative variance: measured from its statistics of this lighting epoch, else assumed from its updates.
+// (Called from the cell loop: a declaration added to the lookup's second corner loop crashed the shader compiler
+// [observed 2026-10-01, dxcompiler access violation, no message].)
 template <typename B>
-float3 giCacheIrradianceScreen(B b, GiHeader h, float3 worldPos, float3 normal, out float weight)
+float giScreenEntryVariance(B b, GiHeader h, uint entry, uint updates)
+{
+    const float assumed = GI_UPDATE_SIGMA * GI_UPDATE_SIGMA / (float)max(min(updates, GI_SIGMA_WINDOW), 1u);
+    if (entry == GI_ENTRY_PENDING) return assumed;
+    const uint3 words = b.Load3(h.offSh + entry * GI_SH_STRIDE + GI_SH_HISTORY);  // history, epoch, window
+    const float fastMean = f16tof32(words.z), spreadMean = f16tof32(words.z >> 16);
+    if (words.y != h.epoch || !(fastMean > 0)) return assumed;
+    const float relative = clamp(spreadMean / fastMean, 0.02, 4.0);
+    return relative * relative / (float)max((words.x >> 12) & 0xFFFu, 1u);  // / the mean's samples (GiInternal giHistorySamples)
+}
+template <typename B>
+float3 giCacheIrradianceScreen(B b, GiHeader h, float3 worldPos, float3 normal, out float weight, out float sigma)
 {
     uint level;
     const float beta = giLevelBand(h, worldPos, level);
     const uint nc = giNormalClass(normal);
     float3 result = 0;
-    float remain = 1;
+    float remain = 1, variance = 0;
     [loop] for (uint k = 0; k < GI_FILL_LEVELS && remain > 1e-3 && level <= h.maxLevel; ++k, ++level)
     {
         const float3 f = worldPos / giCellSize(h, level) - 0.5;
         const int3 c0 = int3(floor(f));
         uint4 entryLo, entryHi, anchorLo, anchorHi;
         uint has = 0, judged = GI_VIS_JUDGED;
+        float cornerVariance[8];
         [unroll] for (uint c = 0; c < 8; ++c)
         {
             uint anchor, updates;
             const uint entry = giScreenCellUpdates(b, h, giKey(level, nc, c0 + int3(c & 1, (c >> 1) & 1, c >> 2)), anchor, updates);
+            cornerVariance[c] = giScreenEntryVariance(b, h, entry, updates);
             if (c < 4) entryLo[c] = entry, anchorLo[c] = anchor;
             else entryHi[c - 4] = entry, anchorHi[c - 4] = anchor;
             if (entry != GI_ENTRY_PENDING) has |= 1u << c;
@@ -614,11 +639,30 @@ float3 giCacheIrradianceScreen(B b, GiHeader h, float3 worldPos, float3 normal, 
         giScreenLevel(b, h, entryLo, entryHi, anchorLo, anchorHi, has, f - floor(f), normal, s, w);
         giScreenVisRenorm(hasData, has, f - floor(f), normal, s, w);
         const float take = k == 0 ? 1 - beta : 1.0;  // the band passes beta of the point on to the next level
+        {
+            const float3 fr = f - floor(f);
+            float tw = 0, tv = 0;
+            [unroll] for (uint c = 0; c < 8; ++c)
+            {
+                if (((has >> c) & 1u) == 0) continue;
+                const float cw = ((c & 1) ? fr.x : 1 - fr.x) * (((c >> 1) & 1) ? fr.y : 1 - fr.y) * ((c >> 2) ? fr.z : 1 - fr.z);
+                tw += cw;
+                tv += cw * cornerVariance[c];
+            }
+            variance += (remain * take * w) * (tw > 0 ? tv / tw : 1.0);
+        }
         result += (remain * take) * s;
         remain *= 1 - take * w;
     }
     weight = 1 - remain;
+    sigma = weight > 0 ? sqrt(variance / weight) : GI_UPDATE_SIGMA;
     return weight > 0 ? result / weight : 0;
+}
+template <typename B>
+float3 giCacheIrradianceScreen(B b, GiHeader h, float3 worldPos, float3 normal, out float weight)
+{
+    float sigma;
+    return giCacheIrradianceScreen(b, h, worldPos, normal, weight, sigma);
 }
 
 float3 giCacheIrradiance(GiSrvs s, float3 worldPos, float3 normal)
