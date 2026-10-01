@@ -822,7 +822,7 @@ GPU 재현은 멈춘 상태다(조정 세션 지시). 아래는 GPU 없이 한 �
 | 1 | DRED 패스 이름 | 작성·전 트랙 빌드. DRED 1.1 설정 인터페이스를 직접 요청하도록 고침. **미검증**: 문자열은 장치 제거 때만 나오고 그 실행은 하지 않았다. 시작 줄에 `pass names on / NOT available`이 찍히므로 다음 허용된 실행에서 설정이 걸렸는지는 보인다 | b30745a |
 | 2 | 직접광 그림자 광선의 "반복 횟수 고정 + 인라인 RayQuery" 변형 | 작성·빌드(146 KB). `surface_cache.direct_shadow_inline`(기본 꺼짐): 고정 8회 루프로 광원 적분만 → 고정 8회 루프에서 인라인 RayQuery(정적·동적 TLAS, 알파 테스트 후보 최대 64). **GPU 실행 안 함** | 36a2ff7 |
 | 3 | A의 검토 | A가 물으면 답한다. 호출부: `Native/Render/Passes/SurfaceCache/SurfaceCacheLight.hlsl` `scCentreVisible`(셀 점 x, 법선 n, 광원 g → 원점 x ± n·bias, 방향 광원 중심, TMin = bias, TMax = 거리 − 반지름 − 5 cm, `rtVisible(scene, ray, RT_MASK_SHADOW, flags)`), `SurfaceCacheCellsGen`의 `for (i < held)` 루프 안. bias = 1e-3 + 2e-4 × 카메라까지 거리 | |
-| 4 | radiosity 광선이 조명 안 된 셀에서 0을 읽는 비율 진단 | 아직 안 함 | |
+| 4 | radiosity 광선이 조명 안 된 셀에서 0을 읽는 비율 진단 | 작성·빌드. `surface_cache.debug_count=true` + `reflection.lumen_surface_cache_view=true` + `lumen_surface_cache_view_component=7`: 반사 층의 r = 그 프레임 radiosity 광선 중 기하에 맞고도 빛을 못 읽은 비율, g = 맞은 광선 수 / 65536. 로비에서 한 번 돌리면 된다(표면 캐시는 로비에서 통과하는 설정). **GPU 실행 안 함** | 94a8369 |
 | 4 | `unx_reference`가 차폐 텍스처를 무시 | 됨(3b041c2). 로비는 그다음 "water with sun caustics (the light tracer does not refract)"에서 멈춘다 — 기준 영상 없음. 넘는 방법은 태양을 끄거나(`--sun-illuminance 0`, 장면이 달라짐) 태양 caustics 설정을 끄는 것인데 결정이 필요하다 | 3b041c2 |
 | 5 | PrevSceneColor를 포스트프로세스 직전 장면 색으로 | 아직 안 함 | |
 
@@ -834,3 +834,5 @@ GPU 재현은 멈춘 상태다(조정 세션 지시). 아래는 GPU 없이 한 �
 - 5번(인덱스 공간): RayScene의 광원 레코드는 `scene.lights`를 순서 그대로 1:1로 만든다(`RayScene.cpp` updateLightGrid, 필터·재정렬 없음). GpuScene 쪽 버퍼가 같은 순서인지는 S2가 확인하지 못했다 — `mlWorldSamples`도 같은 가정이다.
 - 1번(루프 + 큰 연속 상태): 그대로 변형을 만들었다(36a2ff7, 위 표 2번). 실행은 보류.
 - 3·4번(광원 중심이 지평선 아래일 때의 광선, 사각·원반의 반지름 0): hang과 무관한 차이로 남긴다. A의 헬퍼는 바꿀 것이 없다.
+
+- A의 정정(격자 인덱스 == 장면 광원 인덱스, `RayScene.cpp` 1912–1998행 확인)을 받았다. 5번 후보는 닫는다.
