@@ -29,7 +29,7 @@
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitDecals.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
-#include "Passes/GI/GiCache.hlsli"
+#include "Passes/GI/GiInternal.hlsli"
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/GI/Lumen/LgCommon.hlsli"
 #include "Passes/SurfaceCache/SurfaceCache.hlsli"
@@ -112,7 +112,9 @@ void LgTraceGen()
     }
     else if (hit.t < 0)
     {
-        radiance = giSkyRadiance(r.Direction);
+        // (experiment 1048576, diagnostic: a probe ray that leaves the scene takes 0, not the sky - how much of an
+        // interior's GI layer is sky light through openings or leaks)
+        radiance = (P[3].w & 1048576u) != 0 ? float3(0, 0, 0) : giSkyRadiance(r.Direction);
 #if SKY != SKY_ATMOSPHERE
         if (r.Direction.y > asfloat(P[4].x)) radiance = 0;
 #endif
@@ -174,13 +176,20 @@ void LgTraceGen()
                     fromSurfaceCache = true;
                 }
             }
-            // indirect light at the hit: the world cache (read only)
-            if (!fromSurfaceCache)
+            // indirect light at the hit: the world cache (read only; experiment 512, attribution: none - one bounce)
+            if (!fromSurfaceCache && (P[3].w & 512u) == 0)
             {
                 ByteAddressBuffer cache = ResourceDescriptorHeap[P[0].x];
                 const GiHeader h = giHeader(cache);
                 const float3 mirror = reflect(r.Direction, s.normal);
+                // gi.bounce_visibility (GI_P1_FLAGS bit 6; as GiTrace's fallback read and the reflection hits'): only cells
+                // whose anchor sees the hit count. A footprint-level cell is metres wide for a long ray: the lobby's floor
+                // and the sunlit ground outside share one, anchored inside or outside by the order of the first frames -
+                // without the rule the probes' hits read daylight or not from run to run (lobby GI layer 22-28 warm or
+                // 41-65 grey-blue with the same settings [measured 2026-10-02]).
+                g_giStrictVisibility = (cache.Load(GI_P1_FLAGS) & 64u) != 0;
                 giCacheLightingAt(cache, h, s.position, s.normal, mirror, giLevelForSize(h, footprint), L.irradiance, L.specularRadiance);
+                g_giStrictVisibility = false;
             }
             const float3 l = normalize(g_sunDirection);
             const float cosSun = dot(s.normal, l);
