@@ -194,18 +194,16 @@ bool reusedPid(uint32_t pid, const std::string& since)
     return ok && ticks(created) > ticks(sinceTime) + 5ull * 10000000ull;
 }
 
-// Whether a waiter (kind, since, pid) takes its turn before this one: timing before correctness, then first come
-// ("since", then pid) - GpuLock.ps1 v1.83.
-bool turnBefore(const std::string& kind, const std::string& since, uint32_t pid, const std::string& selfKind, const std::string& selfSince, uint32_t self)
+// Whether a waiter (kind, since, pid) takes its turn before this one: first come ("since", then pid), whatever the kind
+// - GpuLock.ps1 v1.85 (v1.83 put timing first: a 31-minute timing batch held four sessions up).
+bool turnBefore(const std::string&, const std::string& since, uint32_t pid, const std::string&, const std::string& selfSince, uint32_t self)
 {
-    const int rank = kind == "timing" ? 0 : 1, selfRank = selfKind == "timing" ? 0 : 1;
-    if (rank != selfRank) return rank < selfRank;
     const int order = since.compare(selfSince);
     return order < 0 || (order == 0 && pid < self);
 }
 
-// A live waiter in .gpulock/waiting whose turn comes before this correctness slice's (INTERFACES 3.3 v1.83: timing first,
-// then "since", then pid); removes the records of waiters whose process is gone or whose pid was reused.
+// A live waiter in .gpulock/waiting whose turn comes before this correctness slice's (INTERFACES 3.3 v1.85: first come -
+// "since", then pid - whatever the kind); removes the records of waiters whose process is gone or whose pid was reused.
 bool waiterAhead(const std::filesystem::path& dir, uint32_t self, const std::string& selfSince)
 {
     std::error_code ec;

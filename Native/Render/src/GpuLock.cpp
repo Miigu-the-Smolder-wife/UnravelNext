@@ -177,12 +177,10 @@ bool reusedPid(uint32_t pid, const std::string& since)
     return ok && ticks(created) > ticks(sinceTime) + 5ull * 10000000ull;
 }
 
-// Whether a waiter (kind, since, pid) takes its turn before this one: timing before correctness, then first come
-// ("since", then pid) - GpuLock.ps1 v1.83.
-bool turnBefore(const std::string& kind, const std::string& since, uint32_t pid, const std::string& selfKind, const std::string& selfSince, uint32_t self)
+// Whether a waiter (kind, since, pid) takes its turn before this one: first come ("since", then pid), whatever the kind
+// - GpuLock.ps1 v1.85 (v1.83 put timing first: a 31-minute timing batch held four sessions up).
+bool turnBefore(const std::string&, const std::string& since, uint32_t pid, const std::string&, const std::string& selfSince, uint32_t self)
 {
-    const int rank = kind == "timing" ? 0 : 1, selfRank = selfKind == "timing" ? 0 : 1;
-    if (rank != selfRank) return rank < selfRank;
     const int order = since.compare(selfSince);
     return order < 0 || (order == 0 && pid < self);
 }
@@ -244,8 +242,8 @@ void GpuLockSlice::appendHistory(const std::string& line)
     logf("GpuLockSlice: could not append to %s\n", p.string().c_str());
 }
 
-// Why this process must not take the lock now (empty: it may): HOLD, or a live waiter whose turn comes first (v1.83:
-// timing before correctness, then "since", then pid). Waiting files of dead processes and of reused pids are removed.
+// Why this process must not take the lock now (empty: it may): HOLD, or a live waiter whose turn comes first (v1.85:
+// first come - "since", then pid - whatever the kind). Waiting files of dead processes and of reused pids are removed.
 std::string GpuLockSlice::blocker(const std::string& since)
 {
     std::error_code ec;
