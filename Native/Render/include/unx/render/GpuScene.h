@@ -5,6 +5,8 @@
 #include "unx/render/GpuSceneLayout.h"
 #include "unx/scene/SceneData.h"
 
+#include <algorithm>
+#include <cmath>
 #include <functional>
 #include <span>
 #include <string>
@@ -38,6 +40,43 @@ struct ClusterData  // V's builder output for the whole scene (per-mesh ranges g
         // group's simplification made no more clusters than the group had - then no cut exceeds the leaves; else every
         // cluster). 0 = not known (clusterCount). Bounds V's raster lists (S's request packing).
         uint32_t cutBound = 0;
+        // The cut bound of a view (defect queue 1b). A view draws cluster c of an instance only when its group's error
+        // (Cluster::parentLodError) projects above the LOD threshold and its own (lodError) at most to it. With the
+        // object-space thresholds of the view over the instance in [lo, hi] (threshold px / (pixels per metre x instance
+        // scale), x the distance for perspective views), the cut is within { parent > lo and own <= hi }, and as a
+        // parent's error is never below its cluster's, that set has above(parent, lo) - above(own, hi) clusters. The
+        // tables count the clusters above log-spaced edges e_k = cutErrorBase x 2^(k / 2): parentAbove[k] = parent
+        // error > e_k, ownAbove[k] = own error > e_k (the builder; base 0 = no table: cutBound). lodBounds = an
+        // object-space sphere holding every LOD sphere of the mesh (the spheres the projected distance is measured to).
+        static constexpr uint32_t kCutBins = 64;
+        float cutErrorBase = 0;
+        uint32_t parentAbove[kCutBins] = {}, ownAbove[kCutBins] = {};
+        float4 lodBounds{};
+        uint32_t cutBoundAt(float lo, float hi) const
+        {
+            const uint32_t whole = cutBound != 0 ? cutBound : clusterCount;
+            if (!(cutErrorBase > 0) || !(lo >= 0) || !(hi >= lo)) return whole;
+            auto edge = [&](int k) { return cutErrorBase * std::exp2(0.5f * (float)k); };
+            // the largest edge <= lo (parent > that edge counts every parent > lo); none: every cluster
+            uint32_t parent = clusterCount;
+            if (lo >= cutErrorBase)
+            {
+                int k = std::min((int)std::floor(2.0f * std::log2(lo / cutErrorBase)), (int)kCutBins - 1);
+                while (k + 1 < (int)kCutBins && edge(k + 1) <= lo) ++k;
+                while (k >= 0 && edge(k) > lo) --k;
+                if (k >= 0) parent = parentAbove[k];
+            }
+            // the smallest edge >= hi (own > that edge counts only clusters with own > hi); none: 0
+            uint32_t own = 0;
+            if (hi <= edge((int)kCutBins - 1))
+            {
+                int k = hi <= cutErrorBase ? 0 : std::max((int)std::ceil(2.0f * std::log2(hi / cutErrorBase)), 0);
+                while (k > 0 && edge(k - 1) >= hi) --k;
+                while (k < (int)kCutBins && edge(k) < hi) ++k;
+                if (k < (int)kCutBins) own = ownAbove[k];
+            }
+            return std::min(parent > own ? parent - own : 0u, whole);
+        }
     };
     std::vector<MeshRange> meshes;  // one per scene mesh
     // V-internal buffers (hierarchy nodes, ...): uploaded as StructuredBuffers, found with GpuScene::srv(name).

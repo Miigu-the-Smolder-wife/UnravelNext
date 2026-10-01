@@ -255,6 +255,30 @@ void checkStructure(const Built& b)
         uint32_t leaves = 0;
         for (uint32_t c = m.clusterOffset; c < m.clusterOffset + m.clusterCount; ++c) leaves += d.clusters[c].lodError == 0 ? 1u : 0u;
         CHECK(m.cutBound == leaves && leaves > 0);
+        // the view cut bound (MeshRange::cutBoundAt): at least the clusters a uniform threshold selects, for thresholds
+        // across the errors' range and for threshold intervals; never above the leaf count
+        if (m.cutErrorBase > 0)
+        {
+            float top = 0;
+            for (uint32_t c = m.clusterOffset; c < m.clusterOffset + m.clusterCount; ++c)
+                if (d.clusters[c].parentLodError < 3.0e38f) top = std::max(top, d.clusters[c].parentLodError);
+            for (int k = -4; k < 140; ++k)
+            {
+                const float t = m.cutErrorBase * std::exp2(0.25f * (float)k - 0.1f);
+                uint32_t cut = 0, range = 0;
+                for (uint32_t c = m.clusterOffset; c < m.clusterOffset + m.clusterCount; ++c)
+                {
+                    cut += d.clusters[c].parentLodError > t && d.clusters[c].lodError <= t ? 1u : 0u;
+                    range += d.clusters[c].parentLodError > t && d.clusters[c].lodError <= 3 * t ? 1u : 0u;
+                }
+                CHECK(m.cutBoundAt(t, t) >= cut && m.cutBoundAt(t, t) <= leaves);
+                // (thresholds over an interval: the superset { parent > t, own <= 3 t } can hold a cluster and its
+                // ancestors; what a view draws is still one cut, so the bound is that set or the leaves)
+                CHECK(m.cutBoundAt(t, 3 * t) >= std::min(range, leaves) && m.cutBoundAt(t, 3 * t) >= m.cutBoundAt(t, t));
+                if (t > 4 * top) CHECK(m.cutBoundAt(t, t) <= cut + m.clusterCount / 8 + 1);  // (far past every finite error: the terminal clusters)
+            }
+            CHECK(m.cutBoundAt(0, 0) == leaves);
+        }
     }
     CHECK(roots.size() == d.meshes.size());
     const Settings st = settings();

@@ -28,5 +28,7 @@ overflow_filter_queue = true   # same filter in two stages; excess queue items e
 raster_split = true            # V raster requests packed so the views' structural bounds (casters each view can reach x their
                                # hierarchies' clusters) fit visibility.max_visible_clusters; false = one sun request, 6 lights
                                # per local request (A/B: their lists can overflow)
+raster_lod_bound = true        # the packing bound per view: a caster adds the clusters its LOD cut can hold at that view's texel
+                               # size (the builder's error tables, MeshRange::cutBoundAt), not its leaves in every view; false = leaves (A/B)
 overflow_capacity_words = 0     # overflow list capacity (INTERFACES 7.3): 0 = automatic (1.5 x need); > 0 forces it (tests: 1 sends every
                                 # overflow tile to M's fallback). A size, not a quality: results are exact either way
