@@ -36,6 +36,7 @@ struct PostParams
     uint32_t levels = 6;
     std::string lut;
     uint32_t curve = 0;  // 0 film (shFilm), 1 PBR Neutral
+    bool whiteBalance = false;  // v1.91: adapt the frame's white point (FrameContext::whiteBalance*) to D65
 };
 
 PostParams params(const QualityConfig& q)
@@ -47,6 +48,7 @@ PostParams params(const QualityConfig& q)
     p.grain = num("shading.post_grain", 0);
     p.levels = q.has("shading.post_bloom_levels") ? (uint32_t)q.integer("shading.post_bloom_levels") : 6u;
     p.lut = q.has("shading.post_lut") ? q.string("shading.post_lut") : std::string();
+    p.whiteBalance = q.has("shading.post_white_balance") && q.boolean("shading.post_white_balance");
     const std::string curve = q.has("shading.post_tone_curve") ? q.string("shading.post_tone_curve") : std::string("film");
     if (curve == "film") p.curve = 0;
     else if (curve == "neutral") p.curve = 1;
@@ -186,9 +188,19 @@ bool translucentActive(FramePassContext&, const ViewResources& view)
     return view.view.kind == gpu::ViewKind::Main && view.translucentVis.valid() && view.translucentClass.valid();
 }
 
+// A frame whose white balance is on and not D65 (the post chain then adapts it).
+bool whiteBalanceOn(const PostParams& p, const FrameContext& frame, float m[9])
+{
+    return p.whiteBalance && whiteBalanceMatrix(frame.whiteBalanceKelvin, frame.whiteBalanceTint, m);
+}
+
 bool postActive(FramePassContext& fc, const ViewResources& view)
 {
     if (view.view.kind != gpu::ViewKind::Main || fc.frame.outputLinearHdr) return false;
+    {
+        float m[9];
+        if (whiteBalanceOn(params(fc.quality), fc.frame, m)) return true;  // v1.91: the adaptation runs in the chain
+    }
     if (fc.frame.displayPeak > 0) return true;  // an HDR display: the chain writes its encoding
     if (fc.frame.upscale.outputWidth != 0) return true;  // the temporal upscale's float output (Upscale.cpp) is encoded by the chain
     if (translucentActive(fc, view)) return true;  // A10: glass composited over the float image
@@ -284,6 +296,8 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
     const uint32_t lutSrv = lut ? lut->srv : 0xFFFFFFFFu, frame = (uint32_t)fc.frame.frameIndex;
     const float peak = fc.frame.displayPeak;  // 0: SDR
     const BufferRef correction = view.exposureCorrection;  // a snap frame's own metering (Exposure.cpp)
+    float wb[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    const uint32_t wbOn = whiteBalanceOn(p, fc.frame, wb) ? 1u : 0u;  // v1.91 (PostFinal P[3].y, P[4..6])
     g.addPass("m.post.final", QueueType::Graphics,
               [&](PassBuilder& b) {
                   b.use(hdr, Use::SrvCompute);
@@ -292,13 +306,112 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
                   if (correction.valid()) b.use(correction, Use::SrvCompute);
               },
               [=](PassContext& c) {
-                  const uint32_t k[16] = { c.srv(hdr), bloom.valid() ? c.srv(bloom) : 0xFFFFFFFFu, c.uav(output), lutSrv,
-                                           asUint(p.bloom), asUint(p.vignette), asUint(p.grain), frame, w, h, asUint(peak), p.curve,
-                                           correction.valid() ? c.srv(correction) : 0xFFFFFFFFu, 0, 0, 0 };
+                  uint32_t k[28] = { c.srv(hdr), bloom.valid() ? c.srv(bloom) : 0xFFFFFFFFu, c.uav(output), lutSrv,
+                                     asUint(p.bloom), asUint(p.vignette), asUint(p.grain), frame, w, h, asUint(peak), p.curve,
+                                     correction.valid() ? c.srv(correction) : 0xFFFFFFFFu, wbOn, 0, 0 };
+                  for (uint32_t i = 0; i < 3; ++i)
+                      for (uint32_t j = 0; j < 3; ++j) k[16 + i * 4 + j] = asUint(wb[i * 3 + j]);  // P[4..6].xyz: the rows
                   c.cmd->SetPipelineState(final);
                   c.bindFrameConstants(cb);
-                  c.computeConstants(k, 16);
+                  c.computeConstants(k, 28);
                   c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
               });
+}
+
+// ---- v1.91 white balance (defect queue 6 / game request 83): the camera's white point and the Bradford adaptation to D65.
+// White point of a correlated colour temperature T: the CIE daylight locus for T >= 4000 K (CIE 15:2004 x_D(T), y_D(x_D):
+// the daylight illuminants the camera presets name, D50 .. D75), the Planckian locus below it (Kim et al. 2002 cubic
+// rational fits of the blackbody chromaticity, 1667..4000 K: tungsten, candles), both CIE 1931 2 degree. A tint moves the
+// point by Duv along the normal of the locus in the CIE 1960 uv diagram (the standard definition; + above the locus =
+// green, - below = magenta), the normal from the locus's tangent at T (T +- 1 %). D65 itself is the sRGB white
+// (0.3127, 0.3290): the matrix is the identity there (checked by the caller: 1 K, tint 0).
+void whiteBalanceChromaticity(double kelvin, double duv, double& x, double& y)
+{
+    auto locus = [](double T, double& lx, double& ly) {
+        if (T >= 4000)
+        {
+            const double t = 1e3 / T, t2 = t * t, t3 = t2 * t;
+            lx = T <= 7000 ? -4.6070 * t3 + 2.9678 * t2 + 0.09911 * t + 0.244063 : -2.0064 * t3 + 1.9018 * t2 + 0.24748 * t + 0.237040;
+            ly = -3.000 * lx * lx + 2.870 * lx - 0.275;
+        }
+        else
+        {
+            const double t = 1e3 / T, t2 = t * t, t3 = t2 * t;
+            lx = -0.2661239 * t3 - 0.2343589 * t2 + 0.8776956 * t + 0.179910;  // 1667..4000 K
+            const double x2 = lx * lx, x3 = x2 * lx;
+            ly = T <= 2222 ? -1.1063814 * x3 - 1.34811020 * x2 + 2.18555832 * lx - 0.20219683
+                           : -0.9549476 * x3 - 1.37418593 * x2 + 2.09137015 * lx - 0.16748867;  // 2222..4000 K
+        }
+    };
+    double lx, ly;
+    locus(kelvin, lx, ly);
+    if (duv == 0)
+    {
+        x = lx;
+        y = ly;
+        return;
+    }
+    // CIE 1960 uv of the locus point and of its neighbours (the tangent), the normal, the shift by Duv, back to xy
+    auto uv = [](double px, double py, double& u, double& v) {
+        const double d = -2 * px + 12 * py + 3;
+        u = 4 * px / d;
+        v = 6 * py / d;
+    };
+    double ax, ay, bx, by, u0, v0, ua, va, ub, vb;
+    locus(kelvin * 0.99, ax, ay);
+    locus(kelvin * 1.01, bx, by);
+    uv(lx, ly, u0, v0);
+    uv(ax, ay, ua, va);
+    uv(bx, by, ub, vb);
+    double tx = ub - ua, ty = vb - va;  // the tangent towards higher T (lower u)
+    const double len = std::sqrt(tx * tx + ty * ty);
+    tx /= len;
+    ty /= len;
+    // the normal above the locus (towards + v, green): rotate the tangent by -90 degrees when T rises leftwards
+    double nx = ty, ny = -tx;
+    if (ny < 0)
+    {
+        nx = -nx;
+        ny = -ny;
+    }
+    const double u = u0 + duv * nx, v = v0 + duv * ny;
+    const double d = 2 * u - 8 * v + 4;
+    x = 3 * u / d;
+    y = 2 * v / d;
+}
+
+bool whiteBalanceMatrix(float kelvin, float duv, float m[9])
+{
+    for (int i = 0; i < 9; ++i) m[i] = (i % 4 == 0) ? 1.0f : 0.0f;
+    if (!(kelvin > 0) || (std::abs(kelvin - 6504.0f) < 1.0f && duv == 0)) return false;
+    double x, y;
+    whiteBalanceChromaticity(kelvin, duv, x, y);
+    // XYZ of the source white (Y = 1) and of D65 (the sRGB white, x 0.3127 y 0.3290)
+    const double ws[3] = { x / y, 1.0, (1 - x - y) / y };
+    const double wd[3] = { 0.3127 / 0.3290, 1.0, (1 - 0.3127 - 0.3290) / 0.3290 };
+    // Bradford cone responses (Lam 1985)
+    const double B[9] = { 0.8951, 0.2664, -0.1614, -0.7502, 1.7135, 0.0367, 0.0389, -0.0685, 1.0296 };
+    const double Bi[9] = { 0.9869929, -0.1470543, 0.1599627, 0.4323053, 0.5183603, 0.0492912, -0.0085287, 0.0400428, 0.9684867 };
+    auto mul3 = [](const double a[9], const double b[9], double o[9]) {
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j) o[i * 3 + j] = a[i * 3] * b[j] + a[i * 3 + 1] * b[3 + j] + a[i * 3 + 2] * b[6 + j];
+    };
+    double rs[3], rd[3];
+    for (int i = 0; i < 3; ++i)
+    {
+        rs[i] = B[i * 3] * ws[0] + B[i * 3 + 1] * ws[1] + B[i * 3 + 2] * ws[2];
+        rd[i] = B[i * 3] * wd[0] + B[i * 3 + 1] * wd[1] + B[i * 3 + 2] * wd[2];
+    }
+    const double D[9] = { rd[0] / rs[0], 0, 0, 0, rd[1] / rs[1], 0, 0, 0, rd[2] / rs[2] };
+    // M_xyz = Bi D B; M_rgb = (XYZ -> sRGB) M_xyz (sRGB -> XYZ), sRGB primaries with the D65 white (IEC 61966-2-1)
+    const double toXyz[9] = { 0.4124564, 0.3575761, 0.1804375, 0.2126729, 0.7151522, 0.0721750, 0.0193339, 0.1191920, 0.9503041 };
+    const double toRgb[9] = { 3.2404542, -1.5371385, -0.4985314, -0.9692660, 1.8760108, 0.0415560, 0.0556434, -0.2040259, 1.0572252 };
+    double t0[9], t1[9], t2[9], t3[9];
+    mul3(D, B, t0);
+    mul3(Bi, t0, t1);
+    mul3(t1, toXyz, t2);
+    mul3(toRgb, t2, t3);
+    for (int i = 0; i < 9; ++i) m[i] = (float)t3[i];
+    return true;
 }
 } // namespace unx::render::shading

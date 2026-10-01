@@ -775,6 +775,15 @@ void HostRenderer::setLens(float aperture, float focus)
     m_lensFocus = focus;
 }
 
+void HostRenderer::setWhiteBalance(float kelvin, float tint)
+{
+    if (!std::isfinite(kelvin) || !std::isfinite(tint) || !(kelvin == 0 || (kelvin >= 1000 && kelvin <= 40000)) || !(std::abs(tint) <= 0.1f))
+        fail("white balance: temperature %g K (0, or 1000..40000) and tint %g (|tint| <= 0.1)", kelvin, tint);
+    std::lock_guard lock(m_mutex);
+    m_whiteBalanceKelvin = kelvin;
+    m_whiteBalanceTint = tint;
+}
+
 void HostRenderer::mapMeshAsset(uint64_t asset, uint32_t mesh)
 {
     requireCommitted();
@@ -1268,6 +1277,8 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.discontinuity = m_pending.discontinuity;
     packet.lensAperture = m_lensAperture;
     packet.lensFocus = m_lensFocus;
+    packet.whiteBalanceKelvin = m_whiteBalanceKelvin;
+    packet.whiteBalanceTint = m_whiteBalanceTint;
     if (m_meshAssetsChanged)
     {
         packet.meshAssets.emplace(m_meshAssetMap.begin(), m_meshAssetMap.end());
@@ -1607,6 +1618,8 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     fc.displayPeak = p.displayPeak;
     fc.lensAperture = p.lensAperture;
     fc.lensFocus = p.lensFocus;
+    fc.whiteBalanceKelvin = p.whiteBalanceKelvin;
+    fc.whiteBalanceTint = p.whiteBalanceTint;
     fc.timing = m_profiler ? m_profiler->lastCompleted() : nullptr;  // (the debug HUD, E)
     fc.originShift = p.originShift;  // C9
     for (int a = 0; a < 3; ++a)
@@ -1732,6 +1745,8 @@ void HostRenderer::photoBegin(const scene::Camera& camera, const PhotoSettings& 
         std::lock_guard lock(m_mutex);
         request->lensAperture = m_lensAperture;
         request->lensFocus = m_lensFocus;
+        request->whiteBalanceKelvin = m_whiteBalanceKelvin;
+        request->whiteBalanceTint = m_whiteBalanceTint;
         request->time = m_lastTime;
     }
     std::lock_guard lock(m_photoMutex);

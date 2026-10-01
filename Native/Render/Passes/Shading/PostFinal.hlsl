@@ -4,7 +4,9 @@
 // P[0] = { HDR SRV, bloom SRV (half resolution; UNX_NONE: off), output UAV, LUT SRV (UNX_NONE: none) },
 // P[1] = { asfloat bloom strength, asfloat vignette, asfloat grain, frame index }, P[2] = { width, height, asfloat display
 // peak, tone curve (0 film shFilm, 1 PBR Neutral) }, P[3] = { exposure correction SRV (raw: float c; UNX_NONE: none: a
-// snap frame's own metering, Exposure.cpp), 0, 0, 0 }: peak 0 = SDR (above); peak >= 1 = an HDR display (peak over paper
+// snap frame's own metering, Exposure.cpp), white balance on (v1.91: P[4..6].xyz = the rows of the 3 x 3 Bradford
+// adaptation of the camera's white point to D65 in linear Rec.709, Post.cpp whiteBalanceMatrix; 0 = no multiply),
+// 0, 0 }: peak 0 = SDR (above); peak >= 1 = an HDR display (peak over paper
 // white): the curve generalised to that peak,
 // the LUT on its output over the peak, grain, then linear light with 1 = paper white (RGBA16F output, no OETF, no dither).
 // Frame constants of the view (its projection gives the field angle).
@@ -44,6 +46,13 @@ void main(uint2 id : SV_DispatchThreadID)
     {
         ByteAddressBuffer correction = ResourceDescriptorHeap[P[3].x];
         e *= asfloat(correction.Load(0));  // a snap frame exposed for itself (Exposure.cpp, ExposureMeter.hlsl)
+    }
+    if (P[3].y != 0)
+    {
+        // v1.91 camera white balance: the scene's white (the illuminant the camera is set to) to the display's D65, a
+        // linear 3 x 3 before the non-linear curve (defect queue 6: a D65-fixed display left tungsten rooms orange)
+        const float3x3 wb = float3x3(asfloat(P[4].xyz), asfloat(P[5].xyz), asfloat(P[6].xyz));
+        e = mul(wb, e);
     }
     const float vignette = asfloat(P[1].y);
     if (vignette > 0)

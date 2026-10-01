@@ -165,6 +165,11 @@ struct FrameContext
     // diameter (m; 0 = pinhole, no depth of field - the gate camera) and focus distance (m, along the view axis). The
     // circle of confusion of a depth z is f_px A |1/z - 1/z_focus| pixels (f_px = (H/2) proj[1][1]).
     float lensAperture = 0, lensFocus = 0;
+    // v1.91 (A, defect queue 6 / game request 83): the camera's white balance - the scene illuminant the camera is set to,
+    // as a correlated colour temperature (K; 0 = D65: no adaptation) and a tint (Duv in CIE 1960 uv: + green, - magenta).
+    // M's post chain adapts the exposed image from it to the display's D65 (Bradford, Post.cpp) when
+    // shading.post_white_balance is on; otherwise the frame is bit-identical to the D65 output.
+    float whiteBalanceKelvin = 0, whiteBalanceTint = 0;
     // v1.50 (A15, E): GPU pass timings of the last completed frame (GpuProfiler::lastCompleted), shown by the debug HUD
     // (quality key debug.hud); null = no timings (the HUD says so). The host keeps it valid until record() returns.
     const FrameTiming* timing = nullptr;

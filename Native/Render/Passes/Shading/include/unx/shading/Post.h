@@ -15,4 +15,12 @@ TextureRef postTarget(FramePassContext& fc, const ViewResources& view);
 TextureRef postBloomTail(FramePassContext& fc, TextureRef hdr, uint32_t levels);
 // Bloom, vignetting, tone curve, grading, grain, dither and encoding from 'hdr' into view.color.
 void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr);
+// v1.91 camera white balance (defect queue 6): the 3 x 3 matrix (row-major, linear Rec.709 -> linear Rec.709) that
+// adapts a scene lit by the illuminant of correlated colour temperature 'kelvin' and tint 'duv' (CIE 1960 Duv) to the
+// display's D65 by the Bradford transform (XYZ scaling in the Bradford cone space; CIE 1931 2 degree, daylight locus
+// from 4000 K, Planckian locus below). False with the identity when kelvin is 0 or the white is D65 with no tint
+// (within 1 K): the chain then skips the multiply, bit-identical to the output without white balance.
+bool whiteBalanceMatrix(float kelvin, float duv, float m[9]);
+// The chromaticity (CIE 1931 xy) of that white point (tests).
+void whiteBalanceChromaticity(double kelvin, double duv, double& x, double& y);
 } // namespace unx::render::shading

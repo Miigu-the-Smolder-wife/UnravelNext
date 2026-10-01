@@ -13,6 +13,7 @@
 #include "unx/render/GpuLock.h"
 #include "unx/render/Harness.h"
 #include "unx/scene/MaterialModel.h"
+#include "unx/shading/Post.h"
 #if UNX_HAS_CLUSTERBUILDER
 #include "unx/clusterbuilder/ClusterBuilder.h"
 #endif
@@ -2022,6 +2023,37 @@ UNX_TEST(zz_device_removed_throw_policy)
     testDevice().waitIdle();
     setDeviceRemovedPolicy(DeviceRemovedPolicy::Exit);
 }
+
+UNX_TEST(white_balance_matrix)
+{
+    // v1.91 camera white balance (Post.cpp): D65 and 0 K give the identity (the chain skips the multiply); the locus
+    // chromaticities match the CIE values (D65 (0.3127, 0.3290) from the daylight locus, illuminant A 2856 K
+    // (0.4476, 0.4074) from the Planckian fit); the Bradford matrix maps the source white's linear sRGB to (1, 1, 1)
+    // (a grey card under tungsten comes out grey); + tint moves the white towards green.
+    float m[9];
+    CHECK(!shading::whiteBalanceMatrix(0, 0, m) && m[0] == 1 && m[1] == 0 && m[2] == 0 && m[4] == 1 && m[8] == 1);
+    CHECK(!shading::whiteBalanceMatrix(6504, 0, m));
+    double x, y;
+    shading::whiteBalanceChromaticity(6504, 0, x, y);
+    CHECK(std::abs(x - 0.3127) < 1e-3 && std::abs(y - 0.3290) < 1e-3);
+    shading::whiteBalanceChromaticity(2856, 0, x, y);
+    CHECK(std::abs(x - 0.4476) < 3e-3 && std::abs(y - 0.4074) < 3e-3);
+    CHECK(shading::whiteBalanceMatrix(2856, 0, m));
+    const double X = x / y, Y = 1, Z = (1 - x - y) / y;
+    const double rgb[3] = { 3.2404542 * X - 1.5371385 * Y - 0.4985314 * Z, -0.9692660 * X + 1.8760108 * Y + 0.0415560 * Z,
+                            0.0556434 * X - 0.2040259 * Y + 1.0572252 * Z };
+    for (int i = 0; i < 3; ++i)
+    {
+        const double o = m[i * 3] * rgb[0] + m[i * 3 + 1] * rgb[1] + m[i * 3 + 2] * rgb[2];
+        CHECK(std::abs(o - 1) < 2e-3);
+    }
+    CHECK(m[0] < 1 && m[8] > 1);  // tungsten: red scaled down, blue up
+    double xg, yg;
+    shading::whiteBalanceChromaticity(6504, 0.02, xg, yg);
+    CHECK(yg > 0.3290 + 0.01);
+    CHECK(shading::whiteBalanceMatrix(6504, 0.02f, m));
+}
+
 
 int main(int argc, char** argv)
 {
