@@ -1,6 +1,6 @@
 // unx-kernel: cs_6_6 main
 // gi.hit_accumulator_pool (GiAccPool.hlsli, RENDERER_REDESIGN_V2 12.8): the accumulator's per-frame passes.
-// P[0] = { pool UAV, mode, list (fold), 0 }, P[1] = { slots, frame, lighting epoch, exposure scale (float) },
+// P[0] = { pool UAV, mode, list (fold), levels (gi.hit_accumulator_levels) }, P[1] = { slots, frame, lighting epoch, exposure scale (float) },
 // P[2] = { keep = 1 - alpha (float), min samples (float), fine scale (float), GI cellSize0 (float) } (modes 0, 2: the header)
 //
 // mode 0, r.gi.acc.begin (before the GI rays; one thread per slot): thread 0 writes the frame's header and resets the list
@@ -46,10 +46,12 @@ void main(uint id : SV_DispatchThreadID)
         n.minSamples = asfloat(P[2].y);
         n.fineScale = asfloat(P[2].z);
         n.cellSize0 = asfloat(P[2].w);
+        n.levels = clamp(P[0].w, 1u, GI_ACCP_LEVELS);
         if (id == 0)
         {
             pool.Store4(0, P[1]);
             pool.Store4(16, P[2]);
+            pool.Store(40, P[0].w);
             pool.Store4(48, uint4(0, 0, 0, 0));
         }
         if (id >= n.slots) return;
@@ -85,7 +87,7 @@ void main(uint id : SV_DispatchThreadID)
     [unroll] for (uint q = 0; q < GI_ACCP_SUMS; ++q) any |= raw[q].x | raw[q].y;
     if (any == 0) return;
     // Up one level.
-    if (list + 1 < GI_ACCP_LEVELS)
+    if (list + 1 < h.levels)
     {
         const uint parent = giAccpFindOrCreate(pool, h, giAccpParentKey(giAccpLoadKey(pool, giAccpKeyAddress(h, slot))));
         if (parent != GI_ACCP_NONE)

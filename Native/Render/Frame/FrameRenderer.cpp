@@ -398,6 +398,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     tracks::froxels(fc, main);
     main.froxelLights = resources.froxelLights;  // the main view's per-view S products (v1.22)
     main.airVolume = resources.aerialPerspective;
+    tracks::surfaceCache(fc);
     tracks::globalIllumination(fc, main);
     // S's screen visibility reads the resolve and the shadow pages only and is read only by M's shading: declared right
     // after GI, the graphics queue runs it while GI's passes run on the async queue (output.async_compute_passes), before

@@ -35,10 +35,15 @@
 // Levels (12.8 (2)): hits write the finest level only; r.gi.acc.fold adds a cell's frame sums to its parent (exact:
 // sums), so four levels hold N, D over cells of x 1, 2, 4, 8; the reader's bias is the width of the level it reads, its
 // variance is bounded by minSamples.
+// gi.hit_accumulator_levels = 1 (header word 10): no pass-up and no coarser read - a cell's window holds exactly the hits
+// that read it (rays of one footprint class), the population the ratio's energy statement is about. With the pass-up
+// a coarse cell also holds the hits of finer-footprint rays (other anchors, nearer and brighter or darker spots), which
+// read their own cells: GiAnalytic 9 measured +138 % (corner) and -23 % (lampshade) with 4 levels, +-0.5 % with the
+// per-frame entry form that has no such mixing [measured 2026-10-01].
 //
 // Buffer (raw), S = slots (a power of two):
 //   header 64 B: { S, frame, lighting epoch, exposure scale (float) }, { keep = 1 - alpha (float), minSamples (float),
-//     fineScale (float), GI cellSize0 (float) }, { 0, hits left out (statistics), 0, 0 }, { touched count of list 0..3 }
+//     fineScale (float), GI cellSize0 (float) }, { 0, hits left out (statistics), levels, 0 }, { touched count of list 0..3 }
 //     (bytes 48-63)
 //   keys      at 64:        S x 8 B (0 = never used, 1 = evicted; open addressing, at most GI_ACCP_PROBES linear probes: a
 //                           search ends at a never-used slot and passes evicted ones, a new key takes the first
@@ -77,6 +82,7 @@ struct GiAccPoolHeader
 {
     uint slots, frame, epoch;
     float exposure, keep, minSamples, fineScale, cellSize0;
+    uint levels;  // gi.hit_accumulator_levels: the levels a reader may take (1: its own cell only) and the folds fill
 };
 struct GiAccMeans
 {
@@ -98,6 +104,7 @@ GiAccPoolHeader giAccPoolHeader(B pool)
     h.minSamples = asfloat(b.y);
     h.fineScale = asfloat(b.z);
     h.cellSize0 = asfloat(b.w);
+    h.levels = clamp(pool.Load(40), 1u, GI_ACCP_LEVELS);
     return h;
 }
 uint giAccpKeyAddress(GiAccPoolHeader h, uint slot) { return GI_ACCP_HEADER + slot * 8; }
@@ -236,7 +243,7 @@ bool giAccPoolRead(B pool, float3 position, float3 normal, float footprint, out 
     const uint fine = giAccpFineLevel(h, footprint);
     uint chosen = GI_ACCP_NONE, chosenLevel = 0;
     float chosenSamples = 0;
-    [loop] for (uint k = 0; k < GI_ACCP_LEVELS && !(chosenSamples >= h.minSamples); ++k)
+    [loop] for (uint k = 0; k < h.levels && !(chosenSamples >= h.minSamples); ++k)
     {
         const uint slot = giAccpFind(pool, h, giAccpKeyAt(h, position, normal, fine + k));
         if (slot == GI_ACCP_NONE) continue;

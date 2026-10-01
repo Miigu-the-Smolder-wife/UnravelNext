@@ -1,0 +1,4 @@
+﻿reflectionanalytic_lumen: exit 1, 9 s
+planarmirror_lumen: exit 2, 0 s
+planarmirror: exit 0, 50 s
+hostmotion: exit 0, 20 s

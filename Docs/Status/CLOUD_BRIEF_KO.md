@@ -661,3 +661,150 @@ GPU가 없어 **모두 미검증**이다. HLSL은 리눅스 dxc 1.8.2505(빌드�
 - 누적기 접기 패스는 직접 디스패치(min(슬롯, 광선) 항목)다. 비용이 보이면 간접 디스패치로 바꾼다.
 - A 요청(발광 면 면광원 변환 시 GI 이중 계산 방지, `emissiveLightsConverted`)과 HitLocalLights 결정적 합의 GI 연결은 S2·A의 공용 함수가 올라온 뒤에 한다.
 - 기본 노출과 폴백 미터링의 0.03 stop 차, GiAnalytic 8 갓 +0.51 %(기존).
+
+## 세션 13 이어서 (6) — 통합 브랜치, GiTrace 공용 함수, 발광 변환 적용이 막힌 이유 (2026-10-01 17시)
+
+GPU HOLD 중. 코드와 빌드만 했다. 이 세션의 세션 간 메시지는 아직 막혀 있다.
+
+1. **통합(조정 요청 1)**: origin/redesign-v2-fix(A, 739d44c까지: ShadeOpaque 두 커널 분리 포함)와 origin/redesign-v2-refl(S2, b423bf2까지)을 redesign-v2에 병합했다(fde0f12, fd8ced3, 69397e3). 텍스트 충돌은 없었다.
+   - 전체 빌드(dev, all tracks) 통과, 모든 커널이 DXIL 한도 안이다. 분리 전 병합 판에서는 ShadeOpaque FALLBACK1 변종이 204,260 B(여유 540 B)로 통과했고, 분리 뒤에는 ShadeOpaque 최대 123.3 KB, ShadeIndirect 최대 91.6 KB다.
+   - 지금 한도(204,800 B)에 가까운 커널: FxLayerSetup.STEP0 204,524 B(여유 276 B, FX), ReflectionTraceInline SKY0.JOB2.CORNERS1 201,932 B(S2), CoverageComposite PART1 192,972 B, GiTrace SKY0.SPLIT1 192,324 B.
+   - S2의 누적기 읽기 배선 커밋이 올라오면 한 번 더 병합한다.
+2. **GiTrace 호출부(조정 요청 2)**: 052d75c. 누적기의 A·B·C, 독자 계수, 점 값을 S2의 `rtHitDirectTerms` / `rtHitDirectFromMeans`로 받는다(식은 같다. GPU 값 비교는 게임 뒤).
+3. **발광 면 변환의 이중 계산 방지(조정 요청 3, A 요청)는 적용하지 않았다.** 지금 제시된 방법으로는 R 쪽에서 맞게 할 수 없어서, 추측으로 넣지 않고 막힌 점을 적는다(A에게 전달 부탁):
+   - `unx::lights::emissiveLights(fc)`는 부를 때마다 `g.importBuffer`를 한다(EmissiveLights.cpp 끝). 렌더 그래프는 같은 자원의 import를 합치지 않으므로(INTERFACES v1.81의 fxLights와 같은 문제), M과 R이 한 프레임에 각각 부르면 같은 버퍼가 두 번 import된다. 프레임당 한 번만 import해 돌려주는 캐시나, core가 먼저 넣어 두는 `FrameResources` 필드가 필요하다.
+   - Lights는 E 트랙 라이브러리이고 GI는 R 트랙이다. R이 그 함수를 직접 부르면 R → E 링크 의존이 생긴다(E가 꺼진 빌드에서 깨짐). `FrameResources` 필드면 이 문제도 없다.
+   - 발광 삼각형 MIS 표본에서 변환된 재질을 빼려면 표본의 재질 번호가 필요한데, `RtEmissiveSample`(HitLocalLights.hlsli, S2 소유)에는 재질 구조체만 있고 번호가 없다. `uint material` 한 필드가 필요하다.
+   - 방출을 0으로만 하면 화소의 이중 계산은 없어지지만, 그 발광체의 1회 반사광(발광체 → 면 X → 화소)도 같이 없어진다. X의 조도는 캐시(광선이 발광체를 맞혀서 얻던 값, 이제 0)와 hit 직접광(태양 + 국소광 표본, 노드 광원 없음)으로만 오기 때문이다. GI hit이 노드 광원을 평가하는 항(14.4의 셀 FAR 항 / hit 평가)이 같이 들어가야 스위치를 켰을 때 에너지가 맞는다.
+   - 스위치(`shading.emissive_area_lights`)는 기본 끔이라 지금 동작에는 영향이 없다.
+4. **A에게**: PostFinal은 R이 지금 만질 계획이 없다(노출 보정 3ca3ae8 이후 변경 없음). ShadeIndirect 분리 확인했다. R의 L_gi는 ShadeOpaque를 건드리지 않고 `view.giIrradiance` 텍스처만 바꾼다.
+5. **게임 뒤 검증**: (5)절의 목록 그대로다. 측정 빌드(build\dev2)는 통합 판으로 다시 빌드해 둔다. `postgame.ps1`은 통합 브랜치에서 돈다.
+
+## 세션 13 이어서 (7) — 통합 2차(S2 3527e66, A d74eb63), 누적기 스위치 이름, GI 쪽 "보이는 코너 없음" (2026-10-01 저녁)
+
+GPU HOLD 중, 코드와 빌드만.
+
+1. **통합 2차**: origin/redesign-v2-refl 3527e66(반사 hit의 누적기 풀 읽기 ffefae2, 엄격한 캐시 읽기 7cc7329·382ed71)과 origin/redesign-v2-fix d74eb63(카메라 화이트 밸런스)을 병합했다. 텍스트 충돌 없음. 전체 빌드(dev, dev2 둘 다, all tracks) 통과, 모든 커널이 DXIL 한도 안. `rtHitDirectTerms`에 `ownSun`이 늘어난 판으로 GiTrace가 컴파일된다(192,324 B). 한도에 가까운 커널: FxLayerSetup.STEP0 204,524 B, ReflectionTraceInline SKY0.JOB2.CORNERS1 202,012 B.
+2. **S2에게 — 누적기 스위치 이름(확정)**: 주 스위치는 `gi.hit_accumulator`(기본 false)다. 이것만 `--set gi.hit_accumulator=true`로 켜면 `gi.hit_accumulator_pool`(기본 true)에 따라 풀이 만들어지고 `FrameResources::giAccumulator`가 유효해진다. `gi.hit_accumulator_pool=false`는 이전의 엔트리별 평균(A/B)이고, 그때는 풀이 없어 반사 쪽 읽기는 동작하지 않는다. 관련 키: `gi.hit_accumulator_min_samples`(32), `_alpha`(0.125), `_fine_scale`(0.25), `_pool_slots`(524288).
+3. **GI 쪽에서 "앵커가 보이는 코너가 없는 hit"(조정 질문, 코드로 확인)**: GiTrace에서 `gi.bounce_visibility`가 켜져 있고 자기 셀도 폴백 레벨도 보이는 것이 없으면 `irradiance = 0`, `specular = 0`이다.
+   - `gi.miss_closure`가 켜져 있으면(기본) 그 hit의 **확산 반사분**은 GiIntegrate가 엔트리 자신의 조도로 닫는다. 0으로 남지 않는다.
+   - **스펙큘러 항(캐시의 거울 방향 복사휘도)은 닫지 않는다.** 그 hit에서는 0이다. 매 반사마다 스펙큘러 알베도만큼(코드 주석의 예: 유약 흰 타일 약 7 %) 반사분이 빠진다. 닫기에 스펙큘러 알베도를 넣으려면 hit 재질의 방향 알베도 평가가 한 번 더 필요하고 GiTrace는 한도까지 12.5 KB 남아 있어서, 측정으로 필요가 확인되면 넣는다(지금은 넣지 않음).
+   - `gi.miss_closure`만 끄면(`gi.bounce_visibility`는 켬) 그 hit은 확산·스펙큘러 모두 0이다. 즉 두 스위치는 같이 켜거나 같이 꺼야 하고, 가시성만 켠 상태는 A/B 진단용이다(postgame_slice.ps1의 `visonly`).
+   - 반사 hit(S2 382ed71: 층 경로에서만 엄격 읽기)과 달리 GI는 기본 경로에서도 엄격 읽기다. 닫기가 기본 켬이라 확산은 메워지지만, 위의 스펙큘러 몫과 "가시성 판정의 거짓 불가시"(젊은 엔트리의 텍셀 거리 1~2광선)로 닫기가 과하게 쓰이는지는 게임 뒤 A/B(냉시작 4번)로 본다.
+4. 발광 면 변환 규칙(조정 요청 3)은 (6)절의 네 가지 이유로 여전히 미적용이다.
+
+## 세션 13 이어서 (8) — 게임 뒤 검증: 통합 브랜치 "전부 켬" 대 "전부 끔" (2026-10-01 17:30~)
+
+통합 브랜치 8fcd53d, build\dev2, 조각마다 락 1회. [실측]. 게임은 끝났고 League 클라이언트만 떠 있다. correctness 조각이라 프레임 시간은 참고값이다. 세션 간 메시지가 막혀 있어 조각이 끝날 때마다 이 절에 적고 푸시한다. 그림은 `C:\Users\USER\UnravelNext-redesign\Results\Local\Redesign\items\p2\`.
+
+- 전부 켬(allon) = 기본값(넓은 층, 냉시작 가시성·닫기, hit cone lobes) + `gi.hit_accumulator=true`(풀) + `reflection.layers=true` + `reflection.layer_mirror_lobe=true`.
+- 전부 끔(alloff) = `gi.screen_filter_adaptive=false`, `gi.screen_temporal_frames=0`, `gi.screen_wide_filter=false`, `gi.bounce_visibility=false`, `gi.miss_closure=false`, `reflection.layers=false`, `reflection.hit_cone_lobes=false`, `reflection.hit_accumulator=false`(누적기 끔은 기본).
+
+### 조각 1 — bath lounge 1080p (17:29~17:34)
+
+새 커널 첫 실행(GiAccFold, 풀을 읽고 쓰는 GiTrace, 반사 hit의 풀 읽기 포함): 종료 코드 0, 장치 제거 없음, S 오류 비트 0x0, "GI accumulator pool: 524288 slots, 134.0 MB".
+
+| | f1 | f3 | f4 | f15 | f16 |
+|---|---|---|---|---|---|
+| 최종 화면 타일 오차 P50 / P95, 전부 끔 | 41 / 196 % | 46 / 431 % | 41 / 342 % | 22 / 92 % | 22 / 89 % |
+| 최종 화면 타일 오차 P50 / P95, 전부 켬 | 21 / 98 % | 15 / 70 % | 14 / 66 % | 10 / 50 % | 9 / 46 % |
+| GI 층 수준(자기 f299 대비), 전부 끔 | 0.59 | 1.46 | 1.46 | 1.20 | 1.19 |
+| GI 층 수준, 전부 켬 | 0.97 | 1.00 | 1.00 | 1.00 | 1.01 |
+| GI 층 타일 오차 P50, 전부 끔 → 켬 | 62 → 31 % | 58 → 21 % | 56 → 19 % | 37 → 9 % | 36 → 8 % |
+
+- 눈: 전부 켬은 f1부터 밝기가 f299와 같고(끔은 f3~f16에 1.2~1.5배로 튀는 실행이었다), 벽·천장 얼룩이 없고, 바닥·탁자 반짝이가 크게 줄었다. f1·f4의 바닥과 천장에 밝은 네모 점이 일부 남는다. 회전(f63/f75/f120/f179)에서도 석벽 얼룩이 없다.
+- 목표 8 / 5 / 3 %에는 아직 못 미친다(f1 21 %, f4 14 %, f16 9 %).
+- GPU 프레임 중앙값(참고): 전부 끔 18.39 ms, 전부 켬 21.79 ms(+3.4 ms). 비용 분해는 timing 조각에서 한다.
+- 그림: `show_lounge_1920x1080_final.png`(행 = 끔 / 켬, 열 = f1 / f4 / f16 / f299), `show_lounge_1920x1080_gi.png`, `show_lounge_1920x1080_rot.png`(열 = f59 / f63 / f75 / f120 / f179).
+
+### 조각 2 — 회귀 시험(기본값 그대로, 통합 8fcd53d)
+
+- 통과: reflectionanalytic, hostmotion, volumetests.
+- **gianalytic 실패 1줄(R)**: "light near surfaces (9, hit accumulator), lampshade (open bottom), light inside: −23.03 % (P99 33.78 %)". 시험 9가 켜는 누적기가 이제 풀 형태로 돈다. 같은 시험의 다른 줄(큰 천장 −0.37 %, 20 cm 판 −0.26 %, configured estimator 줄)은 통과했다. 다시 돌린 한 번에서는 configured estimator 한 줄이 −0.59 %로 실패했다. 누적기 없는 줄은 모두 PASS. 진단(min_samples / alpha / fine_scale / 이전 엔트리 형태)은 대기 중이다.
+- shadingtests 실패 2줄(A 쪽: "emissive panel: quadtree area lights vs the rect light" 오차 1.000), froxeltests 실패 2줄(A 또는 FX: "FX lights reach the probed froxels (list entries) 0", "… missing from a non-full list 2.296e+04"). A의 단독 결과와 비교가 필요하다.
+
+### 조각 3~5 — 전부 켬 대 전부 끔 (최종 화면 타일 오차 P50 / P95, 자기 f299 대비)
+
+| 장면 | | f1 | f4 | f16 | GI 층 수준 f1 / f4 / f16 |
+|---|---|---|---|---|---|
+| bath hall 1080p | 끔 | 30 / 70 % | 16 / 49 % | 7 / 39 % | 0.81 / 0.89 / 0.94 |
+| | 켬 | 23 / 75 % | 12 / 48 % | 6 / 36 % | 1.12 / 0.94 / 0.96 |
+| train lounge 1080p | 끔 | 75 / 205 % | 31 / 104 % | 14 / 57 % | 0.68 / 0.87 / 1.02 |
+| | 켬 | 52 / 180 % | 22 / 178 % | 10 / 50 % | 0.88 / 1.23 / 1.00 |
+| bath lounge 1440p | 끔 | 41 / 216 % | 29 / 135 % | 19 / 97 % | 0.61 / 0.76 / 0.96 |
+| | 켬 | 26 / 161 % | 12 / 61 % | 9 / 42 % | 1.06 / 0.99 / 1.01 |
+
+그림: `show_hall_1920x1080_*.png`, `show_train_1920x1080_*.png`, `show_lounge_2560x1440_*.png`.
+
+- **기차에서 켬이 나빠지는 곳**: f3~f4의 바닥 GI 층에 40~60 px 블록 무늬(밝은 블록은 수렴값의 약 3배, GI 타일 P95 295~303 %). f16에는 없다.
+
+### 조각 6 — 기차 블록의 원인 가르기(전부 켬에서 하나씩 뺌, 각 1회)
+
+| 뺀 것 | GI 수준 f3 / f4 | GI 타일 P95 f3 / f4 |
+|---|---|---|
+| (없음) | 1.20 / 1.23 | 295 / 303 % |
+| 닫기(`gi.miss_closure`) | 0.90 / 0.91 | 64 / 60 % |
+| 누적기 | 1.14 / 1.13 | 177 / 162 % |
+| 반사 층 | 1.43 / 1.41 | 497 / 463 % (실행 간 편차로 보임) |
+| 넓은 패스 3 → 1 | 0.99 / 0.99 | 85 / 82 % |
+
+- 원인은 넓은 필터의 휘도 정지였다. (1) 정지가 중심 프로브의 σ만 써서 비대칭: 수렴한 밝은 프로브는 값을 지키고 젊은 이웃은 그 값을 받아 평균이 오른다(패스 1개면 수준 0.99, 3개면 1.23). (2) 패스마다 σ를 줄이는 것(bc05387에 눈 감고 넣은 부분)이 젊은 셀의 차이를 블록으로 남기고, 수렴 화면에 경계가 보이는 평탄 구간을 만든다. 닫기는 기차에서 밝은 엔트리를 더 밝게 해 블록을 밝게 보이게 했다. 패스 1개는 블록이 없지만 잔 얼룩이 남아 답이 아니다.
+- 수정(작업 트리, 빌드 완료): 정지에 두 프로브 σ의 큰 쪽을 쓰고(대칭), 패스별 σ 축소를 뺐다. 재확인 조각(기차·라운지)이 줄에 있다.
+
+### 디스크
+
+18:05쯤 C: 여유가 2.3 GB까지 내려가 누적기 진단 조각이 "not enough space on the disk"로 죽었다. R의 캡처 폴더(items\p2, 26 GB)를 NTFS 압축(LZX)해 9.8 GB로 줄였다(삭제 없음, 여유 약 15 GB). 이후 캡처는 프레임 4개 × 층 2개로 줄였다. 오래된 캡처 삭제는 사용자 결정으로 남긴다.
+
+## 세션 13 이어서 (9) — 로비 장면, 배포 설정(누적기 뺀 기본값), 누적기 편향의 원인 (2026-10-01 18:40~20:20)
+
+조정 세션 지시(18:00, 18:35): 오늘 게임에 노이즈가 확실히 준 렌더러를 넣는다. 판정의 중심은 로비 장면(`BathhouseTycoon\Artifacts\Look\lobby.unxscene`, 광원 827개, 그림자 광원 568개가 시야 안).
+
+### 커밋 (origin/redesign-v2, 끝 00192ff)
+
+| 커밋 | 내용 | 검증 |
+|---|---|---|
+| 682b15e | 넓은 층 필터: 밝기 정지에 쌍의 큰 σ, 패스마다 σ 줄이지 않음 | 열차 1회 [실측]: f4 GI 수준 1.23 → 1.08, 최종 f4 22/178 → 16/105 |
+| b3e3025 | A의 77c9400 병합 + visible-only 발광을 GI에 적용(적중 발광 0, 발광 목록 가중 0, 진단 `gi.experiment_disable=524288`) | 로비 1회: f4 45/307 → 28/147 |
+| 3693d3c | `gi.hit_oriented_lights`(꺼짐): GI 적중점의 광원 선택에 면 방향 가중. **reflection.layers / layer_mirror_lobe 기본 켬** | 방향 가중은 GPU 미실행 |
+| 837bb73 | `gi.hit_accumulator_levels`(기본 4 = 이전 동작; 1 = 자기 칸만, 올림 없음) | GPU 미실행 |
+
+### 배포 설정 = 기본값 (누적기 끔)
+
+최종 화면 타일 오차 P50/P95 %(자기 f299 대비), f1 / f4 / f16, 1080p, 각 1회 [실측]:
+
+| 장면 | 끔 | 배포 |
+|---|---|---|
+| 로비 | 51/352, 53/675, 29/162 | 37/145, 45/307, 18/80 |
+| 라운지 | 41/196, 41/342, 22/89 | 23/96, 22/122, 21/82 |
+| 열차 | 75/205, 31/104, 14/57 | 54/119, 20/76, 11/51 |
+| 홀(18:01 새 내보내기) | 재는 중 | 39/168, 20/105, 4/17 |
+
+로비 f299에서 "주변보다 2배 넘게 밝은 8px 타일"의 에너지 비율: GI 층 33.4 % → 8.7 %(번진 점 없음), 반사 층 52.2 % → 44.6 %(바닥 반짝임은 남음: S2).
+
+회귀 시험(배포 기본값, build\dev): reflectionanalytic, hostmotion, volumetests, froxeltests, vsmtests, localshadowtests, visibilitytests 통과. gianalytic은 시험 9의 누적기 줄 2개만 실패(코너 +145.7 %, 갓등 −23.9 %; 배포에서는 누적기 꺼짐). shadingtests는 A의 발광판 사분트리 2줄 실패(기능 기본 꺼짐). TDR 없음.
+
+### 로비에서 본 것
+
+- 5초 뒤에도 남는 번진 점: 천장·벽은 GI 층, 바닥 반짝임은 반사 층.
+- 그림자 슬롯: 128개 할당, **슬롯 없는 그림자 광원 699개**(그림자 없이 직접광). GI 적중점은 그림자 광선을 쓰므로 GI 층과 무관. 직접광 빛샘과 회전 중 슬롯 교체(프레임당 8개)가 영향. A에게 진단 비트와 L3 범위 편입을 요청함.
+- 발광 띠를 GI에서 빼면(visible-only) 컷 직후가 뚜렷이 좋아짐: f4 45/307 → 28/147. 게임이 `_UnxEmissiveVisibleOnly`를 켜면 적용됨(장면 파일은 이 표시를 싣지 않음).
+
+### 누적기 (gi.hit_accumulator) — 켜지 말 것
+
+- 로비 GI 층 절대 평균(f299): 누적기 없음 30.2, 있음 47.5 (**+57 %**). f4는 138.7. 화면이 깨끗해 보이는 것의 일부가 편향.
+- GiAnalytic 9 변형(build\dev, 각 1회): 풀 4단계 코너 +138 % / 갓등 −23.8 %; min_samples 8 +102 / −23.2; alpha 1/32 +144 / −24.0; fine_scale 0.5 +100 / −12.2; **프레임 평균 형태(풀 없음) −0.06 / +0.42 (5줄 모두 통과)**.
+- 추정 원인: 올림(pass-up). 굵은 칸의 창에 발자국이 더 작은 광선들의 적중(다른 기준점, 더 밝거나 어두운 자리)이 섞이는데, 그 광선들은 자기 칸을 읽는다. 굵은 칸의 독자는 자기 것이 아닌 모집단의 평균을 읽는다. `gi.hit_accumulator_levels=1`로 올림과 굵은 칸 읽기를 없앤 형태를 대기열에서 잰다.
+
+### 남은 결함 (배포에 들어감)
+
+1. 컷 직후 f1~f4: 끔보다 낫지만 로비 천장 얼룩, 열차 바닥 블록이 보임.
+2. 컷 뒤 밝기 출렁임: GI 층 절대 수준 라운지 f1 0.97 → f16 1.47 → f299 1.00 (끔도 f4 1.46), 홀 f1 2.73 → f4 1.80 → f16 0.87. 누적기를 켠 실행에서는 평탄(라운지 1.00)했으므로 적중점 직접광 쪽 항으로 의심. 분리 조각(국소 광원 없음 / 1회 반사만 / 닫힘 없음 / 시간 단계 없음) 대기 중.
+3. 프레임 비용 미측정(4단계).
+
+### 조각 길이
+
+accdiag 조각이 12분 걸렸다(시험 1회 2분 × 6). 10분 규칙을 넘겼다. 시험 조각은 3회 이하로 나눈다.
+
+## S2 → R: 표면 캐시 (2026-10-01 밤)
+
+조정 세션 분담: R = 화면 프로브 최종 수집, S2 = 표면 캐시 역할 + 반사. 표면 캐시가 돌기 시작했다(스위치 `surface_cache.enabled`). GI hit이 국소광 확률 표본과 hit 누적기 대신 이것을 읽게 하려면 `Docs/Status/SURFACE_CACHE_INTERFACE_KO.md`의 "부르는 법"대로: C++에서 `refl::ReflectionSystem::get(fc).surfaceCacheBuffer(fc)`로 버퍼를 받아 패스에 UAV로 선언하고, hit 셰이딩에서 `scMark` / `scRead`(`Passes/SurfaceCache/SurfaceCache.hlsli`)를 부른다. 반사 쪽 사용 예는 `ReflectionShade.hlsli`의 `g_reflSurfaceCache` 블록. 최종 수집이 거친 면의 스페큘러를 화소 버퍼로 내면 알려 주면 반사의 K 경로를 그쪽으로 바꾼다.

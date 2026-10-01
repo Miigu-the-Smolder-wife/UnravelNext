@@ -10,6 +10,12 @@ void refraction(FramePassContext& fc, BufferRef jobs, BufferRef results, uint32_
 {
     refl::ReflectionSystem::get(fc).recordRefraction(fc, jobs, results, maxJobs);
 }
+// (R, gi.lumen: the probes' ray hits read the surface cache; FrameResources::surfaceCache)
+void surfaceCache(FramePassContext& fc)
+{
+    if (!fc.trackState) return;
+    fc.resources.surfaceCache = refl::ReflectionSystem::get(fc).surfaceCacheBuffer(fc);
+}
 void reflections(FramePassContext& fc, ViewResources& main)
 {
     // Inputs: V's depth, M's G-buffer (and reflection lobe tiles when M provides them), R's GI of this frame.

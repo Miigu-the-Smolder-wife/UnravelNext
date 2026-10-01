@@ -22,6 +22,8 @@
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
+#include "Passes/GI/GiAccPool.hlsli"
+#include "Passes/SurfaceCache/SurfaceCache.hlsli"
 
 // Motion of a hit since the previous tick, in units of the ray's footprint there: |x - x_prev| / footprint, x_prev the
 // same barycentric point of the triangle's previous-tick vertices (deformed instances: the pool's per-vertex world -
@@ -69,6 +71,11 @@ struct ReflHitShade
     float3 penumbraNormal;
     uint penumbraLevel;
     float penumbraReach;
+    // Reconstruction layers (HitShading.hlsli rtHitRadianceSplit): the part of 'radiance' that is the hit's stochastic
+    // light, its demodulation albedo and the hit's shading normal; surface = false: an emitter, or no value (all in base).
+    float3 stochastic, albedo, hitNormal;
+    bool surface;
+    bool noData;  // the cache lookup at the hit found nothing (its indirect light is 0)
 };
 
 // This frame's ShadowSrvs (P[5].z raw buffer; P[5].z = UNX_NONE: none).
@@ -81,6 +88,53 @@ ShadowSrvs reflShadowSrvs()
     vsm.constants = c.x; vsm.lights = c.y; vsm.pad0 = c.z; vsm.layers = c.w;
     return vsm;
 }
+
+// Flags of the hit shading (the rays header's word 7, ReflectionSystem; the passes that have the rays buffer set
+// g_reflHitFlags from it before they shade - other users of reflShadeHit, refraction and test views, keep 0):
+//   REFL_HIT_CONE_LOBES  reflection.hit_cone_lobes: the hit's specular lobes toward its lights are widened by the ray
+//                        cone, alpha' = sqrt(alpha^2 + (cone spread / 2)^2) - the base lobe for the local-light sample
+//                        and the coat lobe for the local lights and the sun (HitLayers.hlsli g_rtHitCone). A reflection
+//                        value is the mean over its ray cone of what leaves the hit toward the reflector; for a
+//                        specular lobe at the hit that mean is the lobe widened by the cone. GI hits have done both
+//                        since 2026-09-27 (GiTrace: "a glossy hit's point-light highlight came in as rare huge
+//                        samples that stayed ... as bright dots"), and the sun's base highlight is filtered by the
+//                        cone here too (rtHitRadianceSplit's pixelAngle); the reflection hits' local-light lobe and
+//                        coat lobe were evaluated at the single ray direction - a G ray (cone of several degrees)
+//                        meeting a glazed tile near a lamp's mirror direction returned the unfiltered highlight.
+//   REFL_HIT_ORIENTED    reflection.hit_oriented_lights: the hit's one local-light sample is chosen with the hit's
+//                        orientation in the weights (HitLocalLights.hlsli rtLocalLightChooseOriented): lights below
+//                        the hit's horizon are not drawn. Same estimator count (one sample, one shadow ray), unbiased.
+//   REFL_HIT_STRICT_READ the hit's cache read follows gi.bounce_visibility (only corners whose anchor sees the hit). Set
+//                        with the reconstruction layers and their filter only: a hit that then finds no corner has no
+//                        data, and it is the layers' filter that gives such a pixel its neighbours' value - without
+//                        it the hit's indirect light would be 0 (black reflection samples after a cut).
+#define REFL_HIT_CONE_LOBES 1u
+#define REFL_HIT_ORIENTED 2u
+#define REFL_HIT_STRICT_READ 4u
+#define REFL_HIT_SC_VIEW 8u  // diagnostics (reflection.lumen_surface_cache_view): the hit's value is its surface cache state
+static uint g_reflHitFlags = 0;
+// The GI hit accumulator pool (GiAccPool.hlsli; RENDERER_REDESIGN_V2 12.1 / 12.8), UNX_NONE: none - set with the flags
+// from the rays header (word 8). A hit's diffuse direct light (sun and the local-light sample on the hit's diffuse and
+// coat-transmitted terms) is the light of one point; where a lamp's 1 / d^2 hotspot lies inside the ray's footprint, the
+// point value is heavy-tailed (measured: half of a glossy wall's reflected energy in 1.5-5 % of its samples). With the
+// pool, the hit takes the mean of those terms over the surface cell its footprint covers (the GI rays' hits of the last
+// frames) with its own albedo and layers: radiance += weight x (kA mA + kB mB + kC mC - the point's diffuse direct term).
+// Read only: the pool's ratio estimator keeps energy for the population that recorded (the GI rays). A ray whose
+// footprint is far below the cell read (a mirror ray near its surface: cell > 4 x footprint) keeps its point value - the
+// cell mean would blur the direct light's edges in the mirror image to the cell's size. Foliage keeps the point value
+// (its transmission has no accumulator term).
+// REFL_NO_ACCUMULATOR (ReflectionTraceInline's G library): the read is compiled out - that kernel has no room for it under
+// the DXIL limit (with it: 207-208 KB of 200). G jobs over the ray capacity (the first frames after a cut, until the
+// capacity has grown) therefore keep the point value: the same expectation, the point value's variance. To remove: the
+// control variate and the job's combination out of that library (the combine pass can finish its jobs), about 20 KB.
+static uint g_reflAccPool = UNX_NONE;
+// The surface cache (Passes/SurfaceCache/SurfaceCache.hlsli; the rays header's word 9), UNX_NONE: not used. With it a hit
+// marks its cell (the cell stays alive and lit every frame from then on) and, where the cell has lighting, takes its
+// local-light and bounce irradiance from the cell: no one-light sample, no cache lookup noise - the hit's light is what
+// the cell accumulated, as a Lumen reflection ray reads the surface cache at its hit. The hit keeps its own material
+// (textures at the ray's footprint), emission and sun term. Until the cell is lit (one frame after its first mark) the
+// hit is shaded as before. Compiled out with REFL_NO_ACCUMULATOR (the inline G library: no room).
+static uint g_reflSurfaceCache = UNX_NONE;
 
 // Local lights (HitLocalLights.hlsli): one next-event sample drawn with localSeed; its visibility is localVisible (the
 // compute path: ReflectionLocalShadow traced it before, same seed and hit point) or, with REFL_LOCAL_TRACE (the ray
@@ -98,6 +152,11 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     o.penumbraNormal = 0;
     o.penumbraLevel = 0;
     o.penumbraReach = 0;
+    o.stochastic = 0;
+    o.albedo = 1;
+    o.hitNormal = -direction;
+    o.surface = false;
+    o.noData = false;
     const uint experiment = P[5].x >> 24;
     if (hit.instance == RT_INSTANCE_EMITTER)
     {
@@ -137,27 +196,42 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     }
     if (!s.frontFace && (m.classFlags & MATERIAL_TWO_SIDED) == 0) return o;  // inside closed geometry
     const uint footprintLevel = giLevelForSize(h, footprint);
+    if (g_reflHitFlags & REFL_HIT_CONE_LOBES) g_rtHitCone = 0.5 * coneSpread;
     RtHitLighting L;
     L.irradiance = L.specularRadiance = L.local = 0;
+    float3 localE = 0;  // the local-light sample's irradiance on the hit (n.l x weight; 0 when shadowed) and its cosine
+    float localMu = 0;
     {
         RtLocalChoice choice;
 #if REFL_CHOICE_GIVEN
         choice = rtUnpackLocalChoice(localChoice);  // (r.refl.shade: ReflectionLocalShadow chose for every hit)
 #else
-        if (localChoice.x == REFL_NO_CHOICE) choice = rtLocalLightChoose(scene, s.position, giUnit(localSeed));
-        else choice = rtUnpackLocalChoice(localChoice);
+        // (one function for both settings: without REFL_HIT_ORIENTED its weights and arithmetic are rtLocalLightChoose's)
+        if (localChoice.x != REFL_NO_CHOICE) choice = rtUnpackLocalChoice(localChoice);
+        else choice = rtLocalLightChooseOriented(scene, s.position, s.normal, (g_reflHitFlags & REFL_HIT_ORIENTED) == 0 || materialClass(m) == MATERIAL_FOLIAGE, giUnit(localSeed));
 #endif
         const RtLocalSample ls = rtLocalLightFinish(scene, choice, s.position, giUnit(localSeed + 1), giUnit(localSeed + 2), footprint);
         if (ls.valid)
         {
-            const float3 f = rtLocalLightBrdfCos(m, s.normal, -direction, ls.wi, false);
+            GpuMaterial mc = m;  // the base lobe widened by the ray cone (REFL_HIT_CONE_LOBES; the coat lobe: g_rtHitCone)
+            if (g_reflHitFlags & REFL_HIT_CONE_LOBES)
+            {
+                const float alpha = modelAlpha(m.roughness), cone = 0.5 * coneSpread;
+                mc.roughness = sqrt(sqrt(alpha * alpha + cone * cone));
+            }
+            const float3 f = rtLocalLightBrdfCos(mc, s.normal, -direction, ls.wi, false);
             bool visible = !ls.castShadow || localVisible;
 #if REFL_LOCAL_TRACE
             if (any(f > 0))  // (f = 0: the visibility multiplies nothing, no ray)
                 visible = !ls.castShadow ||
                           rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, 1e-3 + 2e-4 * distance(s.position, g_cameraPosition)), RT_MASK_REFLECTION);
 #endif
-            if (visible) L.local = f * ls.weight;
+            if (visible)
+            {
+                L.local = f * ls.weight;
+                localMu = max(dot(s.normal, ls.wi), 0.0);
+                localE = localMu * ls.weight;
+            }
         }
     }
     if ((experiment & 16) == 0)
@@ -178,9 +252,16 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
         g_giKeepReads = (experiment & 256) == 0;
         float3 sumE, sumL;
         float weight;
+        // gi.bounce_visibility (GI_P1_FLAGS bit 6; GiCache.hlsli g_giStrictVisibility, as GiTrace's fallback read): only
+        // the corners whose anchor sees the hit - after a cut every level is young, and the coarse cells then carried light
+        // from behind walls into the hits (R: lounge, daylight from outside at 1.5-1.8 x [measured]). A hit that finds
+        // no such corner has no data (the layers' filter gives it its neighbours' value: REFL_HIT_STRICT_READ).
+        g_giStrictVisibility = (g_reflHitFlags & REFL_HIT_STRICT_READ) != 0 && (cache.Load(GI_P1_FLAGS) & 64u) != 0;
         giCacheLevels(cache, h, s.position, s.normal, reflect(direction, s.normal), true, footprintLevel, sumE, sumL, weight);
+        g_giStrictVisibility = false;
         L.irradiance = weight > 0 ? sumE / weight : 0;
         L.specularRadiance = weight > 0 ? sumL / weight : 0;
+        o.noData = weight <= 0;
         // Diagnostics: lookups and misses (no updated cell at any level searched), one atomic per wave.
         const uint lookups = WaveActiveCountBits(true), misses = WaveActiveCountBits(weight <= 0);
         if (WaveIsFirstLane())
@@ -189,6 +270,34 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
             if (misses) cache.InterlockedAdd(GI_H_STAT_HIT_MISSES, misses);
         }
     }
+    bool fromSurfaceCache = false;
+#if !REFL_NO_ACCUMULATOR
+    if (g_reflSurfaceCache != UNX_NONE && materialClass(m) != MATERIAL_FOLIAGE)
+    {
+        RWByteAddressBuffer surfaceCache = ResourceDescriptorHeap[g_reflSurfaceCache];
+        const ScLayout layout = scLayout(surfaceCache);
+        const float3 face = dot(s.geometricNormal, direction) > 0 ? -s.geometricNormal : s.geometricNormal;
+        const float3 bounceAlbedo = saturate(m.baseColor * (1 - m.metallic) + 0.45 * lerp(float3(0.04, 0.04, 0.04), m.baseColor, m.metallic));
+        scMark(surfaceCache, layout, s.position, face, bounceAlbedo, m.emissive);
+        const ScSample cell = scRead(surfaceCache, layout, s.position, face);
+        if (g_reflHitFlags & REFL_HIT_SC_VIEW)
+        {
+            // r: 16 = the hit found no lit cell, g: 16 = it found one, b: lit cells / 65536 (the same everywhere)
+            o.radiance = float3(cell.valid ? 0.0 : 16.0, cell.valid ? 16.0 : 0.0, surfaceCache.Load(8) / 65536.0);
+            return o;
+        }
+        if (cell.valid)
+        {
+            L.irradiance = cell.direct + cell.indirect;
+            L.specularRadiance = L.irradiance / MODEL_PI;  // (the lobe at the hit sees the cell's light as uniform)
+            L.local = 0;
+            localE = 0;
+            localMu = 0;
+            o.noData = false;
+            fromSurfaceCache = true;
+        }
+    }
+#endif
     const float3 v = -direction;
     L.sunIlluminance = 0;
     L.sunVisibility = 0;
@@ -247,8 +356,32 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     // the penumbra deferral, 1db06e4 [measured]).
     if (split) L.sunVisibility = 0;
     float3 sunFull;
-    o.radiance = rtHitRadianceParts(m, s.normal, v, L, coneSpread, split, sunFull);
+    RtHitSplit parts;
+    o.radiance = rtHitRadianceSplit(m, s.normal, v, L, coneSpread, split, sunFull, parts);
     if (split) o.sunTerm = sunFull * splitScale;
+#if !REFL_NO_ACCUMULATOR
+    if (g_reflAccPool != UNX_NONE && materialClass(m) != MATERIAL_FOLIAGE && !fromSurfaceCache)
+    {
+        ByteAddressBuffer pool = ResourceDescriptorHeap[g_reflAccPool];
+        GiAccMeans means;
+        if (giAccPoolRead(pool, s.position, s.normal, footprint, means) && means.cellSize <= 4 * footprint)
+        {
+            // the point's terms with the sun at full visibility; its visibility multiplies the sun's share (linear)
+            const float muS = max(dot(s.normal, l), 0.0);
+            const RtHitDirect d = rtHitDirectTerms(m, s.normal, v, L.sunIlluminance * muS, muS, localE, localMu, false);
+            const float3 fromCell = means.weight * (rtHitDirectFromMeans(d, means.A, means.B, means.C) - (d.own - d.ownSun));
+            const float3 sunShare = means.weight * d.ownSun;
+            o.radiance += fromCell;
+            parts.stochastic += fromCell;
+            if (split) o.sunTerm -= sunShare * splitScale;
+            else o.radiance -= sunShare * L.sunVisibility;
+        }
+    }
+#endif
+    o.stochastic = parts.stochastic;
+    o.albedo = parts.albedo;
+    o.hitNormal = s.normal;
+    o.surface = true;
     return o;
 }
 

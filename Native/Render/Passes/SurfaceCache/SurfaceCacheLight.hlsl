@@ -1,0 +1,311 @@
+// unx-kernel: lib_6_6 main
+// unx-variants: SKY=0,1
+// The surface cache's capture and lighting (SurfaceCache.hlsli), three ray generation shaders, each one thread per item
+// of its frame budget (the dispatch width, P[0].y):
+//   SurfaceCacheSeedGen    capture. A path leaves the camera position in a direction uniform over the sphere and bounces
+//                          P[3].w times (cosine distribution); every surface it meets marks its cell with its material.
+//                          No view direction enters: the cells around the camera exist whether or not the view looks at
+//                          them (the reference captures cards around the camera; this engine has no cards to capture).
+//   SurfaceCacheCellsGen   direct lighting and the cell's indirect light. Cells not lit yet first, then a window over the
+//                          lit ones that moves on every frame. Local lights: the 8 with the largest unshadowed
+//                          irradiance on the cell (the reference's lights per tile; flag bit 3: one more, drawn from the
+//                          rest by its share, so no light is dropped - not the reference's), one point on each, one
+//                          shadow ray each. The sun: one shadow ray. Indirect: the 3 x 3 probes around the cell (on its
+//                          face), weighted by distance and by how far they are off the cell's plane.
+//   SurfaceCacheProbesGen  radiosity. A probe traces 4 x 4 cosine-stratified rays; a ray takes the final lighting of the
+//                          cell it meets (its largest channel held to the header's cap in exposed units; the cell is
+//                          marked: it is in use) or the sky; the probe's irradiance is a running mean over at most the
+//                          header's probe frames.
+// P[0] = { cache UAV, budget, frame, flags (bit 0: local lights and sun, bit 1: radiosity, bit 3: the remainder light) }
+// P[1].xyz = constant sky radiance (SKY1), P[1].w = ray length, P[2] = atmosphere SRVs (SKY0), P[3].xyz = constant sun
+// illuminance (SKY1) (GiSky.hlsli), P[3].w = seed bounces; P[6], P[7] = RtSceneSrvs. Frame constants b1 = main view.
+#include "RayTracing/RayShaders.hlsli"
+#include "Passes/GI/GiSky.hlsli"
+#include "RayTracing/HitShading.hlsli"
+#include "RayTracing/HitLocalLights.hlsli"
+#include "Passes/SurfaceCache/SurfaceCache.hlsli"
+
+#define SC_LIGHTS_PER_CELL 8u
+
+// The reflectance a diffuse bounce carries: the diffuse colour and a fully rough share of the specular colour.
+float3 scAlbedoOf(GpuMaterial m)
+{
+    const float3 diffuse = m.baseColor * (1 - m.metallic);
+    const float3 specular = lerp(float3(0.04, 0.04, 0.04), m.baseColor, m.metallic);
+    return saturate(diffuse + 0.45 * specular);
+}
+
+// An orthonormal frame around n (Duff et al. 2017).
+void scFrame(float3 n, out float3 t, out float3 bt)
+{
+    const float sg = n.z >= 0 ? 1.0 : -1.0;
+    const float a = -1.0 / (sg + n.z);
+    const float c = n.x * n.y * a;
+    t = float3(1 + sg * n.x * n.x * a, sg * c, -sg * n.x);
+    bt = float3(c, sg + n.y * n.y * a, -n.y);
+}
+float3 scCosineDirection(float3 n, float2 u)
+{
+    float3 t, bt;
+    scFrame(n, t, bt);
+    const float r = sqrt(u.x), phi = 6.28318530718 * u.y;
+    return normalize(t * (r * cos(phi)) + bt * (r * sin(phi)) + n * sqrt(max(1 - u.x, 0.0)));
+}
+
+// The surface a ray met: marked in the cache (its cell stays in use, and exists from now on) and read. False when the
+// ray met the inside of closed geometry or an analytic emitter (nothing to mark).
+bool scMeet(RWByteAddressBuffer b, ScLayout l, RtSceneSrvs scene, RtHit hit, RayDesc ray, out float3 position, out float3 face, out ScSample cell)
+{
+    position = face = 0;
+    cell = (ScSample)0;
+    if (hit.instance == RT_INSTANCE_EMITTER) return false;
+    const RtSurface s = rtSurface(scene, hit, ray.Origin, ray.Direction);
+    GpuMaterial m = loadMaterial(s.material);
+    if (!s.frontFace && (m.classFlags & MATERIAL_TWO_SIDED) == 0) return false;
+    position = s.position;
+    face = dot(s.geometricNormal, ray.Direction) > 0 ? -s.geometricNormal : s.geometricNormal;
+    m = rtHitMaterial(m, s, scCellSize(l, s.position), dot(s.normal, ray.Direction));
+    scMark(b, l, position, face, scAlbedoOf(m), m.emissive);
+    cell = scRead(b, l, position, face);
+    return true;
+}
+
+// The item a thread of a lighting pass works on: the entries not lit yet first, then a window over the lit ones.
+uint scPick(RWByteAddressBuffer b, uint index, uint budget, uint frame, uint lit, uint fresh, uint count, uint listBase)
+{
+    if (index < fresh) return b.Load(listBase + (count - 1 - index) * 4);
+    const uint j = index - fresh;
+    if (j >= lit) return SC_NONE;
+    const uint room = budget - min(fresh, budget);
+    const uint at = lit > room ? (j + (frame % lit) * (room % lit)) % lit : j;
+    return b.Load(listBase + at * 4);
+}
+
+[shader("raygeneration")]
+void SurfaceCacheSeedGen()
+{
+    RWByteAddressBuffer b = ResourceDescriptorHeap[P[0].x];
+    const ScLayout l = scLayout(b);
+    if (l.entries == 0) return;
+    const RtSceneSrvs scene = rtScene();
+    uint seed = giRandom(DispatchRaysIndex().x * 7919u + P[0].z * 15485863u + 3u);
+    const float z = 1 - 2 * giUnit(seed), phi = 6.28318530718 * giUnit(seed + 1);
+    const float r = sqrt(max(1 - z * z, 0.0));
+    RayDesc ray;
+    ray.Origin = l.camera;
+    ray.Direction = float3(r * cos(phi), r * sin(phi), z);
+    ray.TMin = 0;
+    ray.TMax = giRayLength();
+    const uint bounces = P[3].w;
+    [loop] for (uint depth = 0; depth <= bounces; ++depth)
+    {
+        const RtHit hit = rtTraceClosest(scene, ray, RAY_FLAG_NONE, RT_MASK_GI);
+        if (hit.t < 0) return;
+        float3 position, face;
+        ScSample cell;
+        if (!scMeet(b, l, scene, hit, ray, position, face, cell)) return;
+        seed = giRandom(seed + 2);
+        ray.Origin = position + face * (1e-3 + 2e-4 * distance(position, l.camera));
+        ray.Direction = scCosineDirection(face, float2(giUnit(seed), giUnit(seed + 1)));
+    }
+}
+
+[shader("raygeneration")]
+void SurfaceCacheCellsGen()
+{
+    RWByteAddressBuffer b = ResourceDescriptorHeap[P[0].x];
+    const ScLayout l = scLayout(b);
+    const uint n = l.entries;
+    if (n == 0) return;
+    const uint slot = scPick(b, DispatchRaysIndex().x, P[0].y, P[0].z, b.Load(8), b.Load(12), n, scListOffset(n, 0));
+    if (slot == SC_NONE) return;
+    const uint4 data = b.Load4(scDataOffset(n, slot));
+    const float3 position = asfloat(data.xyz), normal = scUnpackOct(data.w);
+    const RtSceneSrvs scene = rtScene();
+    const float bias = 1e-3 + 2e-4 * distance(position, l.camera);
+    const float size = scCellSize(l, position);
+    const uint seed = giRandom(slot * 9781u + P[0].z * 6271u + 17u);
+    const uint3 before = b.Load3(scLightOffset(n, slot));
+    float3 direct = scUnpackRgb(before.x), sun = scUnpackRgb(before.y), indirect = scUnpackRgb(before.z);
+    if (P[0].w & 1u)
+    {
+        direct = 0;
+        sun = 0;
+        if (scene.pad != 0xFFFFFFFFu)
+        {
+            // the lights of the cell's place in the light grid, the strongest SC_LIGHTS_PER_CELL kept
+            g_rtLightData = scene.pad;
+            ByteAddressBuffer lights = ResourceDescriptorHeap[scene.pad];
+            const RtLightGrid grid = lights.Load<RtLightGrid>(0);
+            const uint gridCell = rtLightCell(grid, position);
+            uint chosen[SC_LIGHTS_PER_CELL];
+            float weight[SC_LIGHTS_PER_CELL];
+            uint held = 0;
+            float total = 0;
+            if (gridCell != ~0u)
+            {
+                const uint k0 = rtLightCellStart(gridCell), k1 = rtLightCellStart(gridCell + 1);
+                [loop] for (uint k = k0; k < k1; ++k)
+                {
+                    const uint li = rtLightCellLight(k);
+                    const float w = rtLightOrientedImportance(rtLightFetch(li), position, normal, false);
+                    if (!(w > 0)) continue;
+                    total += w;
+                    // insertion by weight, the weakest falls out
+                    uint at = held;
+                    if (held == SC_LIGHTS_PER_CELL)
+                    {
+                        if (w <= weight[SC_LIGHTS_PER_CELL - 1]) continue;
+                        at = SC_LIGHTS_PER_CELL - 1;
+                    }
+                    else ++held;
+                    [loop] while (at > 0 && weight[at - 1] < w)
+                    {
+                        weight[at] = weight[at - 1];
+                        chosen[at] = chosen[at - 1];
+                        --at;
+                    }
+                    weight[at] = w;
+                    chosen[at] = li;
+                }
+            }
+            float kept = 0;
+            [loop] for (uint i = 0; i < held; ++i)
+            {
+                kept += weight[i];
+                RtLocalChoice c;
+                c.valid = true;
+                c.li = chosen[i];
+                c.probability = 1;
+                const RtLocalSample ls = rtLocalLightFinish(scene, c, position, giUnit(seed + 4 + 2 * i), giUnit(seed + 5 + 2 * i), size);
+                if (!ls.valid) continue;
+                const float mu = dot(normal, ls.wi);
+                if (mu > 0 && (!ls.castShadow || rtVisible(scene, rtLocalShadowRay(position, normal, ls, bias), RT_MASK_GI))) direct += ls.weight * mu;
+            }
+            if ((P[0].w & 8u) != 0 && gridCell != ~0u && total > kept * (1 + 1e-6))
+            {
+                // one light of the rest, drawn by its share of what the kept ones leave
+                const float target = giUnit(seed + 40) * (total - kept);
+                const uint k0 = rtLightCellStart(gridCell), k1 = rtLightCellStart(gridCell + 1);
+                float run = 0, share = 0;
+                uint pick = ~0u;
+                [loop] for (uint k = k0; k < k1; ++k)
+                {
+                    const uint li = rtLightCellLight(k);
+                    bool isKept = false;
+                    for (uint i = 0; i < held; ++i) isKept = isKept || chosen[i] == li;
+                    if (isKept) continue;
+                    const float w = rtLightOrientedImportance(rtLightFetch(li), position, normal, false);
+                    if (!(w > 0)) continue;
+                    run += w;
+                    pick = li;
+                    share = w;
+                    if (run > target) break;
+                }
+                if (pick != ~0u)
+                {
+                    RtLocalChoice c;
+                    c.valid = true;
+                    c.li = pick;
+                    c.probability = share / (total - kept);
+                    const RtLocalSample ls = rtLocalLightFinish(scene, c, position, giUnit(seed + 41), giUnit(seed + 42), size);
+                    const float mu = ls.valid ? dot(normal, ls.wi) : 0;
+                    if (mu > 0 && (!ls.castShadow || rtVisible(scene, rtLocalShadowRay(position, normal, ls, bias), RT_MASK_GI))) direct += ls.weight * mu;
+                }
+            }
+        }
+        const float3 toSun = giSunDirection(seed + 3);
+        const float muS = dot(normal, toSun);
+        if (muS > 0)
+        {
+            const float3 e = giSunIlluminance(position);
+            if (any(e > 0))
+            {
+                RayDesc r;
+                r.Origin = position + normal * bias;
+                r.Direction = toSun;
+                r.TMin = 0;
+                r.TMax = giRayLength();
+                if (rtVisible(scene, r, RT_MASK_GI)) sun = e * muS;
+            }
+        }
+    }
+    if (P[0].w & 2u)
+    {
+        // the 3 x 3 probes around the cell on its face
+        const uint level = scLevel(l, position);
+        const uint face = scFace(normal);
+        const int3 centre = scCoord(level, position, SC_PROBE_SPACING);
+        const int3 du = face < 2 ? int3(0, 1, 0) : int3(1, 0, 0), dv = face < 4 ? int3(0, 0, 1) : int3(0, 1, 0);
+        const float reach = 1.5 * scLevelSize(level) * SC_PROBE_SPACING;
+        const uint probes = scProbeCount(n);
+        float3 sum = 0;
+        float weights = 0;
+        [loop] for (int k = 0; k < 9; ++k)
+        {
+            const uint probe = scFind(b, scProbeKeysOffset(n, 0), probes, scKeyAt(level, centre + du * (k % 3 - 1) + dv * (k / 3 - 1), face));
+            if (probe == SC_NONE) continue;
+            if (((b.Load(scProbeHeadsOffset(n, probe)) >> 8) & 0xFFu) == 0) continue;  // not lit yet
+            const uint4 pd = b.Load4(scProbeDataOffset(n, probe));
+            const float3 offset = asfloat(pd.xyz) - position;
+            const float off = abs(dot(offset, normal));
+            const float w = saturate(1 - length(offset - normal * dot(offset, normal)) / reach) * exp2(-8.0 * off / reach) * saturate(dot(normal, scUnpackOct(pd.w)));
+            if (!(w > 0)) continue;
+            sum += w * scUnpackRgb(b.Load(scProbeLightOffset(n, probe)));
+            weights += w;
+        }
+        if (weights > 0) indirect = sum / weights;
+    }
+    if (any(isnan(direct)) || any(isinf(direct)) || any(isnan(sun)) || any(isinf(sun)) || any(isnan(indirect)) || any(isinf(indirect))) return;
+    b.Store3(scLightOffset(n, slot), uint3(scPackRgb(direct), scPackRgb(sun), scPackRgb(indirect)));
+    const uint headOffset = scHeadsOffset(n, slot);
+    if (((b.Load(headOffset) >> 8) & 0xFFu) == 0) b.InterlockedAdd(headOffset, 1u << 8);  // lit (atomic: marks set bit 0 of this word)
+}
+
+[shader("raygeneration")]
+void SurfaceCacheProbesGen()
+{
+    RWByteAddressBuffer b = ResourceDescriptorHeap[P[0].x];
+    const ScLayout l = scLayout(b);
+    const uint n = l.entries;
+    if (n == 0) return;
+    const uint probes = scProbeCount(n);
+    const uint slot = scPick(b, DispatchRaysIndex().x, P[0].y, P[0].z, b.Load(32), b.Load(36), probes, scProbeListOffset(n, 0));
+    if (slot == SC_NONE) return;
+    const uint4 data = b.Load4(scProbeDataOffset(n, slot));
+    const float3 position = asfloat(data.xyz), normal = scUnpackOct(data.w);
+    const RtSceneSrvs scene = rtScene();
+    const float3 origin = position + normal * (1e-3 + 2e-4 * distance(position, l.camera));
+    const uint seed = giRandom(slot * 9781u + P[0].z * 6271u + 29u);
+    const float cap = asfloat(b.Load(44));
+    float3 sum = 0;
+    [loop] for (uint i = 0; i < 16; ++i)
+    {
+        const float2 u = (float2(i & 3u, i >> 2) + float2(giUnit(seed + 2 * i), giUnit(seed + 1 + 2 * i))) * 0.25;
+        RayDesc ray;
+        ray.Origin = origin;
+        ray.Direction = scCosineDirection(normal, u);
+        ray.TMin = 0;
+        ray.TMax = giRayLength();
+        const RtHit hit = rtTraceClosest(scene, ray, RAY_FLAG_NONE, RT_MASK_GI);
+        float3 radiance = 0;
+        if (hit.t < 0) radiance = giSkyRadiance(ray.Direction);
+        else
+        {
+            float3 at, face;
+            ScSample cell;
+            if (scMeet(b, l, scene, hit, ray, at, face, cell) && cell.valid) radiance = scFinalLighting(cell);
+        }
+        const float brightest = max(radiance.r, max(radiance.g, radiance.b)) * g_exposure;
+        if (cap > 0 && brightest > cap) radiance *= cap / brightest;
+        sum += radiance;
+    }
+    float3 e = 3.14159265 * sum / 16.0;  // E = pi x the mean radiance of cosine-distributed rays
+    const uint headOffset = scProbeHeadsOffset(n, slot);
+    const uint had = (b.Load(headOffset) >> 8) & 0xFFu;
+    const float frames = min((float)had + 1, max(asfloat(b.Load(48)), 1.0));
+    if (frames > 1) e = lerp(scUnpackRgb(b.Load(scProbeLightOffset(n, slot))), e, 1 / frames);
+    if (any(isnan(e)) || any(isinf(e))) return;
+    b.Store(scProbeLightOffset(n, slot), scPackRgb(max(e, 0.0)));
+    if ((float)had < frames) b.InterlockedAdd(headOffset, 1u << 8);
+}

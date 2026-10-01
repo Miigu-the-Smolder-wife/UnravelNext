@@ -83,6 +83,108 @@ float3 reflResultRadiance(uint3 v) { return float3(f16tof32(v.x), f16tof32(v.x >
 float reflResultDistance(uint3 v) { return f16tof32(v.y >> 16); }
 float reflResultMotion(uint3 v) { return asfloat(v.z); }
 
+// ---- Reconstruction layers (RENDERER_REDESIGN_V2 1.2, P2; reflection.layers). A reflection value is kept as
+//     value = base + residual + albedo x stochastic,
+//   stochastic  L_rs: the hits' stochastic light (HitShading.hlsli rtHitRadianceSplit) over 'albedo', the hits'
+//               directional reflectance - the part a filter guided by the hit geometry reconstructs every frame;
+//   residual    L_g (band-limited by the lobe's footprint blur_px); 0 for M. Two definitions, chosen where the pixels'
+//               layers are written (ReflectionResolve, reflection.layer_residual_whole):
+//               whole (true)       a G pixel's lobe estimate without the stochastic share: the control variate's lobe
+//                                  integral plus the rays' deterministic difference to it; the base is 0 for G;
+//               difference (false) the estimate - gbar - the stochastic share (design 1.2's L_g); the base holds gbar.
+//               The job records hold the difference (the resolve has the value and the share, so both follow from it).
+//               Which is right is not settled by measurement: with the difference form the second hardware run showed
+//               coloured blobs beside lamps; the suspected cause is that the difference carries the negative of the
+//               control variate's own error (a probe map that sees a lamp the lobe does not), which a filter over
+//               neighbours half corrects while gbar stays per pixel [suspected, to decide by capture];
+//   base        what no spatial filter touches: an M hit's identity (emission, sun); for G see residual.
+// Records. Per ray slot (the ray layers buffer, 16 B; ReflectionShadeRays): { stochastic rg, stochastic b | hit normal
+// oct 8 + 8, albedo, hit instance | bit 31 a surface hit | bit 30 no cache data at the hit }. Per job (the job layers
+// buffer, 24 B; ReflectionCombine and the inline path): { stochastic / albedo rg, b | hit normal, albedo, hit instance |
+// bit 31 valid | bit 30 no cache data at half or more of its hits, residual rg, residual b }. Radiances are fp16 x
+// REFL_STORE_SCALE as the results.
+// No cache data: the lookup at the hit found no updated cell at any level it searches (ReflectionShade: the hit's
+// indirect light is then 0 - after a cut, before the hit tier's first update). Such a pixel's stochastic layer is not an
+// estimate of its light, so the spatial filter gives it its neighbours' value and does not spread its own (LayerDenoise;
+// as GiScreenFilter treats pixels whose lookup found nothing).
+#define REFL_LAYER_RAY_BYTES 16u
+#define REFL_LAYER_JOB_BYTES 24u
+#define REFL_LAYER_SURFACE 0x80000000u
+#define REFL_LAYER_NO_DATA 0x40000000u
+// Unit vector <-> octahedral 8 + 8 bits (a guide for agreement tests: 1.4 deg steps).
+uint reflPackOct16(float3 n)
+{
+    const float3 a = n / max(abs(n.x) + abs(n.y) + abs(n.z), 1e-20);
+    float2 o = a.xy;
+    if (a.z < 0) o = (1 - abs(a.yx)) * float2(a.x >= 0 ? 1 : -1, a.y >= 0 ? 1 : -1);
+    const uint2 q = uint2(round(saturate(o * 0.5 + 0.5) * 255.0));
+    return q.x | (q.y << 8);
+}
+float3 reflUnpackOct16(uint v)
+{
+    const float2 o = float2(v & 0xFFu, (v >> 8) & 0xFFu) / 255.0 * 2 - 1;
+    float3 n = float3(o, 1 - abs(o.x) - abs(o.y));
+    const float t = saturate(-n.z);
+    n.xy += float2(n.x >= 0 ? -t : t, n.y >= 0 ? -t : t);
+    return normalize(n);
+}
+// The demodulation albedo in 11 + 11 + 10 bits over [REFL_ALBEDO_MIN, 2] (diffuse + specular albedo can pass 1).
+// The stored value is the one used on both sides (stochastic / albedo, albedo x filtered): its rounding cancels.
+#define REFL_ALBEDO_MIN 0.03
+uint reflPackAlbedo(float3 a)
+{
+    const float3 u = saturate(clamp(a, REFL_ALBEDO_MIN, 2.0) * 0.5);
+    return (uint)round(u.r * 2047.0) | ((uint)round(u.g * 2047.0) << 11) | ((uint)round(u.b * 1023.0) << 22);
+}
+float3 reflUnpackAlbedo(uint v)
+{
+    return max(float3((v & 0x7FFu) / 2047.0, ((v >> 11) & 0x7FFu) / 2047.0, (v >> 22) / 1023.0) * 2.0, REFL_ALBEDO_MIN);
+}
+float3 reflLayerRadiance(uint2 v) { return float3(f16tof32(v.x), f16tof32(v.x >> 16), f16tof32(v.y)) / (1.0 / 64.0); }
+uint2 reflLayerPackRadiance(float3 r, uint high)
+{
+    const float3 s = clamp(r, -65504.0 * 64.0, 65504.0 * 64.0) * (1.0 / 64.0);
+    return uint2(f32tof16(s.r) | (f32tof16(s.g) << 16), f32tof16(s.b) | (high << 16));
+}
+// A ray's layer record: its hit's stochastic part (modulated), albedo, shading normal and instance.
+uint4 reflLayerRay(float3 stochastic, float3 albedo, float3 hitNormal, uint hitInstance, bool surface, bool noData = false)
+{
+    return uint4(reflLayerPackRadiance(stochastic, reflPackOct16(hitNormal)), reflPackAlbedo(albedo),
+                 (hitInstance & 0x00FFFFFFu) | (surface ? REFL_LAYER_SURFACE : 0u) | (surface && noData ? REFL_LAYER_NO_DATA : 0u));
+}
+// A job's layers from its rays' sums (ReflectionCombine and the inline path: the same arithmetic). total = the job's value
+// (reflLobeEstimate), gbar = the control variate's lobe integral (0 for M), sumS / sumA = the stochastic parts and albedos
+// of its 'hits' surface hits among n unmasked rays, sumL / sumG as reflLobeEstimate takes them. The stochastic part's
+// share of the value: mean(S) in the difference branch (the estimate is linear in the rays), mean(S) x gbar / mean(g)
+// in a channel on the ratio branch (the estimate there is gbar mean(L) / mean(g)). The albedo is the hits' mean (the
+// branch factor stays in the stochastic layer: a sample's branch is a noisy decision, averaged with the layer).
+// residual = total - gbar - share (G: the difference form), 0 (M: base = total - share).
+struct ReflJobLayers
+{
+    float3 stochastic;  // demodulated: share / albedo (the stored, quantised albedo)
+    float3 residual;
+    uint albedo;        // reflPackAlbedo
+};
+ReflJobLayers reflJobLayers(float3 total, float3 gbar, float3 sumL, float3 sumG, float3 sumS, float3 sumA, uint n, uint hits, bool glossy)
+{
+    ReflJobLayers o;
+    o.stochastic = 0;
+    o.residual = glossy ? total - gbar : float3(0, 0, 0);
+    o.albedo = reflPackAlbedo(1.0);
+    if (n == 0 || hits == 0) return o;
+    float3 scale = 1;
+    if (glossy && ((P[5].x >> 24) & 128) == 0)
+    {
+        const float3 meanG = sumG / n;
+        scale = select(gbar + (sumL - sumG) / n >= 0, 1.0, gbar / max(meanG, 1e-8));
+    }
+    const float3 share = sumS / n * scale;
+    o.albedo = reflPackAlbedo(sumA / hits);
+    o.stochastic = share / reflUnpackAlbedo(o.albedo);
+    if (glossy) o.residual = total - gbar - share;
+    return o;
+}
+
 // Surface of a pixel (main view): world position, shading normal, perceptual roughness, unit vector to the eye.
 struct ReflSurface
 {

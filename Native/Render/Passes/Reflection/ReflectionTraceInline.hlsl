@@ -9,6 +9,7 @@
 // Root constants: ReflectionRay.hlsli.
 #define SHADOW_RESIDENCY_LOOP 1  // (the overflow path is at the DXIL limit: ShadowVisibility.hlsli's loop form)
 #define REFL_OVERFLOW 1  // use the same stored attributes/values as the split passes
+#define REFL_NO_ACCUMULATOR (JOB == 2)  // (the G library is at the DXIL limit: ReflectionShade.hlsli g_reflAccPool)
 #define GI_BATCH_CORNERS CORNERS
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/Reflection/ReflectionRay.hlsli"
@@ -27,6 +28,13 @@ void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer
     float nearest = 65000;  // the lobe's nearest hit (as ReflectionCombine)
     uint valid = 0;
     float motion = 0;
+    RWByteAddressBuffer rays = ResourceDescriptorHeap[P[5].y];
+    const uint jobLayersUav = reflJobLayersUav(rays);  // reconstruction layers, as ReflectionCombine
+    g_reflHitFlags = reflHitFlags(rays);
+    g_reflAccPool = reflAccPoolSrv(rays);
+    g_reflSurfaceCache = reflSurfaceCacheUav(rays);
+    float3 sumS = 0, sumA = 0;
+    uint hits = 0, guide = 0, guideInstance = 0, hitsNoData = 0;
     [loop] for (uint i = 0; i < j.rays; ++i)
     {
         float3 dir;
@@ -38,8 +46,18 @@ void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer
         r.TMax = giRayLength();
         float d;
         float hitMotion;
-        const float3 L = reflHitRadiance(scene, cache, h, r, j.coneWidth, j.coneSpread, reflLocalSeed(j, i), reflSunSeed(j.seed, i), d, hitMotion);
+        uint4 l;
+        const float3 L = reflHitRadiance(scene, cache, h, r, j.coneWidth, j.coneSpread, reflLocalSeed(j, i), reflSunSeed(j.seed, i), d, hitMotion, l);
         motion = max(motion, hitMotion);
+        if (l.w & REFL_LAYER_SURFACE)
+        {
+            sumS += reflLayerRadiance(l.xy);
+            sumA += reflUnpackAlbedo(l.z);
+            guide = l.y >> 16;
+            guideInstance = l.w & 0x00FFFFFFu;
+            ++hits;
+            hitsNoData += (l.w >> 30) & 1u;
+        }
         const float3 g = j.mode == REFL_G ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, dir, 0.1763, P[3].w) : 0;
         sumL += L;
         sumG += g;
@@ -48,7 +66,11 @@ void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer
     }
     const float3 gbar = j.mode == REFL_G ? reflLobeControl(j, probeTexture, footprint, probeCount)
                                          : valid == 0 ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, reflect(-j.s.view, j.s.normal), j.lobe, P[3].w) : 0;
-    results[job] = reflPackResult(reflLobeEstimate(sumL, sumG, valid, gbar), valid > 0 ? nearest : 0, motion);
+    const float3 total = reflLobeEstimate(sumL, sumG, valid, gbar);
+    results[job] = reflPackResult(total, valid > 0 ? nearest : 0, motion);
+    if (jobLayersUav != UNX_NONE)
+        reflStoreJobLayers(jobLayersUav, job, reflJobLayers(total, gbar, sumL, sumG, sumS, sumA, valid, hits, j.mode == REFL_G), reflUnpackOct16(guide), guideInstance,
+                           (hits > 0 ? REFL_LAYER_SURFACE : 0u) | (hits > 0 && 2 * hitsNoData >= hits ? REFL_LAYER_NO_DATA : 0u));
     // Diagnostics: G samples and those estimated by the ratio branch, one atomic per wave (GI header).
     const uint gSamples = WaveActiveCountBits(j.mode == REFL_G), gRatio = WaveActiveCountBits(j.mode == REFL_G && reflLobeRatio(sumL, sumG, valid, gbar));
     if (WaveIsFirstLane() && gSamples)

@@ -37,6 +37,35 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     uint32_t statsLogFrames = 0;     // reflection.stats_log_frames: log the GI/reflection counters every N frames (0 = off)
     uint32_t temporalHistoryMax = 0; // reflection.temporal_history_max: running mean over at most this many frames
     float temporalLobeShift = 0;     // reflection.temporal_lobe_shift: reflected-direction travel over the window / lobe
+    // Reconstruction layers (RENDERER_REDESIGN_V2 1.2, P2; Passes/Reconstruct): the values split into base + residual +
+    // albedo x stochastic, the layers rebuilt every frame (layerFilter: LayerDenoise) with a short history
+    // (layerHistoryFrames > 1: LayerTemporal, in place of ReflectionAccumulate) and composed back (LayerCompose).
+    bool layers = false;              // reflection.layers
+    bool layerFilter = false;         // reflection.layer_filter: the spatial reconstruction (off: the split and composition alone)
+    uint32_t layerHistoryFrames = 0;  // reflection.layer_history_frames (1 = no history)
+    uint32_t layerView = 0;           // reflection.layer_view: diagnostics (LayerCompose.hlsl), 0 in the shipped configuration
+    bool layerHistoryBound = true;    // reflection.layer_history_bound: the history bounded by the frame's reconstruction (A/B)
+    // reflection.lumen: the ray-reuse pipeline (ReflectionReuse.hlsli) in place of the G path, the accumulation and the layers
+    bool lumen = false;
+    float lumenMaxRoughness = 0.4f, lumenFadeLength = 0.1f, lumenMaxRayIntensity = 40.0f, lumenTonemapRange = 10.0f;
+    bool lumenReconstruction = true, lumenTemporal = true, lumenBilateral = true, lumenDisocclusionTonemap = true;
+    uint32_t lumenReconstructionSamples = 5, lumenBilateralSamples = 4;
+    float lumenReconstructionRadius = 8.0f, lumenTemporalMaxFrames = 12.0f, lumenClampScale = 1.0f, lumenDistanceThreshold = 0.03f;
+    float lumenBilateralRadius = 8.0f, lumenBilateralDepthWeight = 10000.0f, lumenDisocclusionFrames = 2.0f;
+    // surface_cache.*: the world-space lighting store (Passes/SurfaceCache/SurfaceCache.hlsli), recorded by this system
+    bool surfaceCache = false, scDirect = true, scRadiosity = true, scRemainderLight = false;
+    uint32_t scEntriesLog2 = 22, scMaxUnused = 255, scCaptureFactor = 64, scCaptureBounces = 3, scDirectFactor = 32, scRadiosityFactor = 64;
+    float scRadiosityCap = 40.0f, scRadiosityFrames = 4.0f;
+    bool lumenSurfaceCacheView = false;  // reflection.lumen_surface_cache_view: diagnostics (ReflectionShade.hlsli REFL_HIT_SC_VIEW)
+    bool lumenHitSurfaceCache = true;  // reflection.lumen_hit_surface_cache: the ray-reuse pipeline's hits read and mark it
+    bool layerWholeValue = true;      // reflection.layer_whole_value: lobe pixels' whole value is one layer (LAYER_MODE_L)
+    bool layerCrossMode = true;       // reflection.layer_cross_mode: with layerMirrorLobe, residual taps across M and G pixels
+    bool layerMirrorLobe = false;     // reflection.layer_mirror_lobe: M's base as a layer inside its lobe footprint (decision item)
+    bool layerResidualWhole = true;   // reflection.layer_residual_whole: G residual = value - stochastic share (false: also - gbar)
+    bool hitOrientedLights = false;   // reflection.hit_oriented_lights: the hits' light choice weighs the hit's orientation
+    bool hitAccumulator = true;       // reflection.hit_accumulator: hits read GI's hit accumulator pool when it runs
+    bool hitStrictRead = true;        // reflection.hit_strict_read: with the layers' filter, hits read the cache as GI's bounces do (gi.bounce_visibility)
+    bool hitConeLobes = true;         // reflection.hit_cone_lobes: the hits' specular lobes widened by the ray cone (ReflectionShade.hlsli)
     // debug.deterministic: the planar view / ray choice from the priors alone (planarRayNs, the view's prior a + b x),
     // never from measured GPU times (they differ between runs, and a plane drawn by a camera or by rays differs in value).
     bool deterministic = false;
@@ -85,6 +114,9 @@ public:
     // Planar reflectors of the scene (built on first use). Tests disable the planar path to compare it with rays.
     void setPlanarEnabled(bool enabled) { m_planarEnabled = enabled; }
     // Tests and capture modes: every counted candidate plane gets a camera (up to planar_views_max), without the cost choice.
+    // The surface cache's buffer in this frame's graph (Passes/SurfaceCache/SurfaceCache.hlsli: scMark, scRead), for
+    // passes of other tracks whose ray hits use it; declare it Use::UavCompute / UavGraphics. Invalid when off.
+    BufferRef surfaceCacheBuffer(FramePassContext& fc);
     void setPlanarForced(bool forced) { m_planarForced = forced; }
     size_t planarReflectorCount() const { return m_planes.size(); }
     // Counters of the last completed frame (blocking readback).
@@ -127,6 +159,13 @@ private:
     // (scene instance + 1, linear depth). m_accumReset: the next frame ignores the history (new textures, a scene
     // revision, a discontinuity).
     ComPtr<ID3D12Resource> m_accum[2], m_accumKeys[2];
+    // The layers' history (LayerTemporal.hlsl), ping-pong by m_accumParity as the above (which the layers replace):
+    // RGBA16F stochastic and residual (mean, frames), RG32_UINT keys.
+    ComPtr<ID3D12Resource> m_layerStochastic[2], m_layerResidual[2], m_layerKeys[2];
+    ComPtr<ID3D12Resource> m_surfaceCache;  // SurfaceCache.hlsli: header + cells + probes (raw)
+    uint32_t m_surfaceCacheEntries = 0, m_surfaceCacheRevision = 0;
+    BufferRef m_surfaceCacheRef;            // its import into the frame's graph (surfaceCacheBuffer)
+    uint64_t m_surfaceCacheFrame = ~0ull;
     uint32_t m_accumParity = 0, m_accumSceneRevision = 0;
     bool m_accumReset = true;
     float3 m_prevCamera{};

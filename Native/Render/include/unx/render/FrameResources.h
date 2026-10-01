@@ -112,6 +112,11 @@ struct ViewResources
     // xyz = world bent normal x AO, a = accumulated frames + 1 (0: no surface). Invalid = off. Readers use
     // lumenShortRangeAO / lumenAoMultibounce / lumenAoSpecular of that header.                                       [A]
     TextureRef shortRangeAO;
+    // gi.lumen (v1.93, LumenGather.cpp): RGBA16F W x H of the main view, the mean incident radiance x g_exposure of the
+    // pixel's rough specular lobe from the screen probes (rgb; a = the pixel filter's fast-update amount). From roughness
+    // 0.6 the lobe fades to irradiance / pi, which it is from 0.8 (gi.lumen_max_roughness_rough_specular). The reader
+    // multiplies its specular albedo. Invalid without gi.lumen.  [R]
+    TextureRef giRoughSpecular;
     TextureRef reflectionLobeTiles;  // R8_UNORM ceil(W/8) x ceil(H/8): min over the tile's      [M]
                                      // surface pixels of reflectionLobeHalfAngle(r, NoV) / pi
                                      // (Reflection.hlsli; sky-only tile = 1); R skips ray
@@ -260,6 +265,9 @@ struct FrameResources
                                    // every pixel (VsmCls.hlsli VsmClsTile; invalid = classification off)
     BufferRef tlasStatic, tlasDynamic;  // acceleration structures                          [R]
     BufferRef giCache;             // world radiance cache                                  [R]
+    BufferRef surfaceCache;        // the surface cache (Passes/SurfaceCache, SURFACE_CACHE_INTERFACE_KO.md): this frame's  [R]
+                                   // import, published by tracks::surfaceCache before GI; ray hits mark and read it as a
+                                   // UAV (DispatchRays passes: UavGraphics). Invalid: off, or before its first frame
     BufferRef giAccumulator;       // hit direct-light accumulator pool (GiAccPool.hlsli;   [R]
                                    // invalid: gi.hit_accumulator_pool off). Readers after
                                    // globalIllumination: SrvCompute (giAccPoolRead)

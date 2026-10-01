@@ -1,0 +1,19 @@
+# Owner: S2 (reflection session). The surface cache: lighting of the surfaces around the camera kept in world space
+# (Native/Render/Passes/SurfaceCache/SurfaceCache.hlsli), the part Lumen's surface cache plays for ray hits. Rules and
+# defaults follow ue6-main's card surface cache (LumenSceneRendering.cpp, LumenSceneLighting.cpp,
+# LumenSceneDirectLighting.cpp, LumenRadiosity.cpp); the texels are cells of a hashed world grid.
+[surface_cache]
+enabled = false
+entries_log2 = 22                     # cell slots (2^22; 52 B each, with the probes 255 MB). The reference's atlas: 4096^2 = 2^24
+                                      # texels. The lobby lit 1.9 M cells of 2^21 (table 91 % full: marks failed) [measured]
+max_unused_frames = 255               # a cell is kept this long past its last mark (reference: unused pages 256 frames)
+capture_factor = 64                   # cells marked per frame by the capture rays = slots / this (reference: texels / 64)
+capture_bounces = 3                   # a capture path's bounces after its first hit
+direct_update_factor = 32             # cells relit per frame = slots / this (reference: texels / 32)
+radiosity_update_factor = 64          # probes updated per frame = slots / this / 16 (reference: texels / 64, a probe per 4 x 4)
+radiosity_max_ray_intensity = 40.0    # QUALITY TRADE (user decision): a radiosity ray's exposed radiance is capped here; 0 = no cap
+radiosity_max_frames_accumulated = 4.0
+direct_lighting = true
+radiosity = true
+remainder_light = false               # QUALITY TRADE (user decision) when false, as the reference: a cell's direct light is its 8
+                                      # strongest lights and the rest are dropped; true = one more light drawn from the rest

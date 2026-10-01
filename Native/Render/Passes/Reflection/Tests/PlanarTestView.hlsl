@@ -31,6 +31,7 @@ void PlanarTestViewGen()
     const float pixelSpread = 2 * g_tanHalfFovY / g_viewHeight;  // the ray cone from the mirrored eye (as ReflectionTrace)
     float d;
     float motion;
-    const float3 radiance = reflHitRadiance(rtScene(), cache, h, r, pixelSpread * tPlane, pixelSpread + 2 * tan(lobe), giRandom((pixel.x * 7919u + pixel.y * 104729u) * 3u + 101u), pixel.x * 7919u + pixel.y * 104729u, d, motion);
+    uint4 layer;  // (reconstruction layers: not used here)
+    const float3 radiance = reflHitRadiance(rtScene(), cache, h, r, pixelSpread * tPlane, pixelSpread + 2 * tan(lobe), giRandom((pixel.x * 7919u + pixel.y * 104729u) * 3u + 101u), pixel.x * 7919u + pixel.y * 104729u, d, motion, layer);
     colour[pixel] = float4(radiance * g_exposure, 1);
 }

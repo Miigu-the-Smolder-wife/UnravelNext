@@ -14,10 +14,21 @@
 // followed by a clamp of the history to the frame's own estimate +- 3 sigma of its 16-point binomial spread (UE5 Lumen's
 // screen probe gather integrates its probes over time the same way: concept only, Engine/Shaders/Private/Lumen/
 // LumenScreenProbeGather.usf, temporal reprojection of the probes with depth and normal rejection).
+// Spatial reconstruction (redesign V2 1.2, layer L_occ; gi.screen_occlusion_spatial, P[4].x bit 1): where the history is
+// rejected (a cut, a disocclusion, the first frames) the 16-point estimate alone showed that mosaic again. Each probe now
+// takes this frame's estimates of the 3 x 3 probes around it (their own points, recomputed here: 144 points) with a
+// 1-2-1 tent, each neighbour weighted by
+//   plane, normal: it lies on the probe's tangent plane (2 % of the depth) and faces its way (power 4) - the history's rule;
+//   value:         exp(-(difference / 3 sigma)^2), sigma the probe's 16-point binomial spread (floor 1/16): neighbours
+//                  that differ by noise are averaged, a real occlusion gradient (a crease, a contact: differences of
+//                  several sigma between probes 8 px apart) keeps the probe's own value.
+// The history then integrates the reconstructed value and is clamped to it within 3 sigma of the reconstruction's own
+// spread (sigma x sqrt(sum w^2) / sum w): a frame without history is already the 144-point value.
 // P[0] = { cache UAV (raw), depth SRV, gbuffer SRV, probes UAV }, P[1] = { probesX, probesY, width, height },
 // P[2] = { spacing, near occlusion radius (float bits), map owner list UAV, map dispatch args UAV } (reset here for
 // GiProbeMapOwners), P[3] = { vis id SRV (UNX_NONE: no history), visible clusters SRV, previous probe history UAV, probe
-// history UAV }, P[4] = { flags (bit 0: reset the history), history frames, previous probesX, previous probesY };
+// history UAV }, P[4] = { flags (bit 0: reset the history, bit 1: spatial reconstruction), history frames, previous probesX,
+// previous probesY };
 // frame constants b1 = main view.
 // Probe history (persistent, RGBA32_UINT (2 probesX) x probesY): texel (2i, j) = { world position (f32 x 3), packed
 // normal (0 = no surface) }, texel (2i + 1, j) = { occlusion mean (f32), frames in it, 0, 0 }.
@@ -102,6 +113,24 @@ float nearOcclusion(Texture2D<float> depth, float3 p, float3 n, float radius, ui
     return total > 0 ? 1 - occluded / total : 1;
 }
 
+// This frame's 16-point occlusion estimate of probe 'probe' with its surface point and normal (false: no surface there).
+bool giProbeOcclusionEstimate(Texture2D<float> depth, Texture2D<uint2> gbuffer, GiHeader h, int2 probe, uint2 count, uint spacing, uint2 size, bool turning,
+                              out float3 p, out float3 n, out float raw)
+{
+    p = n = 0;
+    raw = 1;
+    if (any(probe < 0) || any(probe >= int2(count))) return false;
+    uint2 pixel;
+    float d;
+    if (!giProbePixel(depth, uint2(probe), spacing, size, pixel, d)) return false;
+    p = worldFromDepth(float2(pixel), d);
+    n = decodeGBuffer(gbuffer.Load(int3(pixel, 0))).normal;
+    const float radius = min(asfloat(P[2].y), giCellSize(h, giLevel(h, p)));
+    const uint rotation = (uint)probe.x * 7919u + (uint)probe.y * 104729u + (turning ? h.frame * 633u : 0u);
+    raw = nearOcclusion(depth, p + n * (1e-3 * linearDepth(d)), n, radius, rotation, size);
+    return true;
+}
+
 [numthreads(8, 8, 1)]
 void main(uint2 probe : SV_DispatchThreadID)
 {
@@ -146,7 +175,32 @@ void main(uint2 probe : SV_DispatchThreadID)
     const float radius = min(asfloat(P[2].y), giCellSize(h, giLevel(h, p)));
     // the points turn by 633 / 1024 of a turn per frame (golden ratio): successive frames fill the circle evenly
     const uint rotation = probe.x * 7919u + probe.y * 104729u + (keepHistory ? h.frame * 633u : 0u);
-    const float raw = nearOcclusion(depth, p + n * (1e-3 * linearDepth(d)), n, radius, rotation, size);
+    float raw = nearOcclusion(depth, p + n * (1e-3 * linearDepth(d)), n, radius, rotation, size);
+    // one frame's 16 points: binomial spread, floor 1/16 (the estimate's step)
+    float sigma = sqrt(max(raw * (1 - raw), 1.0 / 16.0) / 16.0);
+    if (P[4].x & 2u)
+    {
+        const float linearZ = linearDepth(d);
+        float sum = 4 * raw, weight = 4, weight2 = 16;
+        [loop] for (uint k = 0; k < 9; ++k)
+        {
+            if (k == 4) continue;
+            const int2 o = int2(k % 3, k / 3) - 1;
+            float3 pk, nk;
+            float rawK;
+            if (!giProbeOcclusionEstimate(depth, gbuffer, h, int2(probe) + o, count, spacing, size, keepHistory, pk, nk, rawK)) continue;
+            const float plane = saturate(1 - abs(dot(n, pk - p)) / max(linearZ, 1e-6) / 0.02);
+            const float agree = saturate(dot(n, nk));
+            const float agree2 = agree * agree;
+            const float difference = (rawK - raw) / (3 * sigma);
+            const float w = (o.x == 0 || o.y == 0 ? 2.0 : 1.0) * (plane * plane) * (agree2 * agree2) * exp(-difference * difference);
+            sum += w * rawK;
+            weight += w;
+            weight2 += w * w;
+        }
+        raw = sum / weight;
+        sigma *= sqrt(weight2) / weight;
+    }
     float occlusion = raw;
     uint frames = 0;
     if (keepHistory)
@@ -155,8 +209,7 @@ void main(uint2 probe : SV_DispatchThreadID)
         const float previous = giProbeOcclusionHistory(pixel, p, n, spacing, n0);
         if (n0 > 0)
         {
-            // a moving occluder: the history within 3 sigma of this frame's 16-point estimate (binomial, floor 1/16)
-            const float sigma = sqrt(max(raw * (1 - raw), 1.0 / 16.0) / 16.0);
+            // a moving occluder: the history within 3 sigma of this frame's estimate (16 points, or the reconstruction's)
             const uint m = min(n0, max(P[4].y, 1u) - 1);
             occlusion = lerp(clamp(previous, raw - 3 * sigma, raw + 3 * sigma), raw, 1.0 / (m + 1));
             frames = m + 1;

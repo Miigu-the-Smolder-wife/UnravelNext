@@ -8,18 +8,19 @@
 // UAV (raw), ShadowSrvs buffer (ReflectionShade.hlsli), exact set counts }, P[6], P[7] = RtSceneSrvs. Frame constants
 // b1 = main view.
 //
-// Rays buffer (raw): header { rays allocated (atomic), capacity, shadow rays (atomic), jobs; penumbra hits (atomic), 0, 0,
-// 0 } (32 B), then per ray slot:
-//   hit records    uint4 at 32 + slot x 16: { instance | front face << 31 (REFL_RAY_MISS, REFL_RAY_NONE), geometry, primitive,
+// Rays buffer (raw): header { rays allocated (atomic), capacity, shadow rays (atomic), jobs; penumbra hits (atomic), ray
+// layers UAV, job layers UAV, hit shading flags (REFL_HIT_*, ReflectionShade.hlsli); GI hit accumulator pool SRV
+// (UNX_NONE: none), 0, 0, 0 } (48 B = H), then per ray slot:
+//   hit records    uint4 at H + slot x 16: { instance | front face << 31 (REFL_RAY_MISS, REFL_RAY_NONE), geometry, primitive,
 //                  t }; after the shade pass a penumbra hit's record holds { geometric normal xyz, filter reach }
-//   barycentrics   uint  at 32 + capacity x 16 + slot x 4: 2 x unorm16 (attributes only; the position comes from t)
-//   ray -> job     uint  at 32 + capacity x 20 + slot x 4: job | ray index << 28
-//   shaded value   uint4 at 32 + capacity x 24 + slot x 16: { radiance rg, radiance b | hit distance, sun term rg, sun
+//   barycentrics   uint  at H + capacity x 16 + slot x 4: 2 x unorm16 (attributes only; the position comes from t)
+//   ray -> job     uint  at H + capacity x 20 + slot x 4: job | ray index << 28
+//   shaded value   uint4 at H + capacity x 24 + slot x 16: { radiance rg, radiance b | hit distance, sun term rg, sun
 //                  term b | valid << 16 } (fp16, radiance and sun term x REFL_STORE_SCALE)
-//   sun queue      uint4 at 32 + capacity x 40 + index x 16: shadow rays from index 0 up { origin xyz, slot }, penumbra
+//   sun queue      uint4 at H + capacity x 40 + index x 16: shadow rays from index 0 up { origin xyz, slot }, penumbra
 //                  hits from index capacity - 1 down { hit point xyz, slot | filter level << 24 } (ReflectionShadeRays; a
 //                  slot queues at most one of the two, so both fit)
-//   VNDF seed      uint at 32 + capacity x 56 + slot x 4: before this ray's first attempt (60 B per slot in all)
+//   VNDF seed      uint at H + capacity x 56 + slot x 4: before this ray's first attempt (60 B per slot in all)
 // A job whose rays do not fit (header capacity) is traced and shaded inline by the trace pass (ReflectionHit.hlsli) and
 // its result written there; results[job] = { first slot, REFL_JOB_SPLIT } marks the split jobs for the combine pass.
 #ifndef UNX_REFLECTION_RAY_HLSLI
@@ -36,7 +37,7 @@
 #define REFL_JOB_SPLIT 0xFFFFFFFFu  // results[job].y of a job whose rays are in the rays buffer (never a packed fp16 pair)
 #define REFL_JOB_INLINE 0xFFFFFFFEu  // results[job].y of a job left to ReflectionTraceInline (the distance half is >= 0: never)
 
-#define REFL_RAYS_HEADER 32u
+#define REFL_RAYS_HEADER 48u
 uint reflRaysHitOffset(uint slot) { return REFL_RAYS_HEADER + slot * 16; }
 uint reflRaysBaryOffset(uint capacity, uint slot) { return REFL_RAYS_HEADER + capacity * 16 + slot * 4; }
 uint reflRaysJobOffset(uint capacity, uint slot) { return REFL_RAYS_HEADER + capacity * 20 + slot * 4; }
@@ -46,6 +47,21 @@ uint reflRaysSeedOffset(uint capacity, uint slot) { return REFL_RAYS_HEADER + ca
 #define REFL_RAYS_SLOT_BYTES 60u
 // Penumbra hit i (0 = the first queued) in the sun queue, from its top.
 uint reflRaysPenumbraOffset(uint capacity, uint i) { return reflRaysShadowOffset(capacity, capacity - 1 - i); }
+// Reconstruction layers (reflection.layers; ReflectionInternal.hlsli): header words 5 and 6 hold the UAVs of the ray
+// layers buffer (REFL_LAYER_RAY_BYTES per slot) and the job layers buffer (REFL_LAYER_JOB_BYTES per job), UNX_NONE when
+// the layers are off (ReflectionArgs writes them with the header).
+uint reflRayLayersUav(RWByteAddressBuffer rays) { return rays.Load(20); }
+uint reflHitFlags(RWByteAddressBuffer rays) { return rays.Load(28); }
+uint reflAccPoolSrv(RWByteAddressBuffer rays) { return rays.Load(32); }
+uint reflSurfaceCacheUav(RWByteAddressBuffer rays) { return rays.Load(36); }  // the surface cache (SurfaceCache.hlsli), UNX_NONE: hits do not use it
+uint reflJobLayersUav(RWByteAddressBuffer rays) { return rays.Load(24); }
+// flags: REFL_LAYER_SURFACE (the job has surface hits), REFL_LAYER_NO_DATA (half or more of them found no cache data).
+void reflStoreJobLayers(uint uav, uint job, ReflJobLayers l, float3 hitNormal, uint hitInstance, uint flags)
+{
+    RWByteAddressBuffer b = ResourceDescriptorHeap[uav];
+    b.Store4(job * REFL_LAYER_JOB_BYTES, uint4(reflLayerPackRadiance(l.stochastic, reflPackOct16(hitNormal)), l.albedo, (hitInstance & 0x00FFFFFFu) | flags));
+    b.Store2(job * REFL_LAYER_JOB_BYTES + 16, reflLayerPackRadiance(l.residual, 0));
+}
 
 struct ReflJob
 {

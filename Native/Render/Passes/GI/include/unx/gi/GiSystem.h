@@ -52,6 +52,37 @@ struct GiSettings  // from Config/quality/gi.toml
     // (GiIntegrate.hlsl). gi.bounce_visibility: GiTrace's bounce reads (the hit's own cell and the fallback levels) count
     // only cells whose anchor sees the hit.
     bool missClosure = false, bounceVisibility = false;
+    bool hitOrientedLights = false;  // gi.hit_oriented_lights (GI_P1_FLAGS bit 7)
+    // gi.lumen (LumenGather.cpp, Passes/GI/Lumen): the screen-probe final gather in the structure of Unreal's Lumen in
+    // place of r.gi.screen and its filters. The values are Unreal's defaults (ue6-main); the ones marked (Q) trade
+    // accuracy for stability and are the user's to decide (Docs/Status/LUMEN_GATHER_KO.md).
+    struct Lumen
+    {
+        bool enabled = false;
+        uint32_t tile = 16;                // screen probe spacing (px)
+        float adaptiveFraction = 0.5f;     // adaptive probes over uniform probes, at most
+        float minPdfToTrace = 0.1f;        // structured importance sampling: rays under it are given to the brightest
+        bool importanceSampleLighting = true;
+        float maxRayIntensity = 10.0f;     // (Q) a trace's largest exposed channel after its share of the texel
+        uint32_t filterPasses = 3;         // probe-space spatial filter
+        float filterMaxHitAngleDeg = 10.0f;
+        float filterPositionWeight = 1000.0f;
+        float temporalMaxFrames = 10.0f;   // (Q) pixel history length
+        bool temporalFilterProbes = false; // probe-space blend with last frame's probes before the spatial filter
+        float temporalFilterProbesWeight = 0.5f;
+        float temporalDistanceThreshold = 0.01f;
+        float temporalFastFraction = 0.1f; // share of moving lighting at which the history is at its shortest
+        float temporalMaxFast = 0.9f;
+        float jitterWidth = 1.0f;          // per-pixel offset of the probe interpolation, in tiles
+        bool stochasticInterpolation = true;
+        float maxRoughnessRoughSpecular = 0.8f;  // (Q) above it the rough specular is irradiance / pi
+        float disocclusionMaxFrames = 4.0f;
+        float disocclusionFraction = 0.4f;
+        uint32_t rayDirections = 8;        // the frames the direction jitter cycles through
+        float movingSpeed = 0.005f;        // relative speed difference that makes a trace "moving"
+        float normalBias = 0.001f;         // m: the rays' origin off the surface (Unreal: 0.1 cm)
+        bool hitSurfaceCache = true;       // the hits read the surface cache when it exists (surface_cache.enabled)
+    } lumen;
     uint32_t bounceSplitUpdates = 1;
     bool anchorResample = false;
     bool anchorCentroid = false;  // gi.anchor_centroid (V2.3 12.2, P1''-b): the anchor is the lookups' centroid (GiInternal giCentroidOffer)
@@ -71,6 +102,7 @@ struct GiSettings  // from Config/quality/gi.toml
     // hitAccumulatorMinSamples; the means' window in samples (hitAccumulatorWindowRecent while the sun changes).
     bool hitAccumulator = false;
     uint32_t hitAccumulatorMinSamples = 32;
+    uint32_t hitAccumulatorLevels = 4;  // gi.hit_accumulator_levels (pool form): 1 = a reader's own cell only, no pass-up
     float hitAccumulatorWindow = 1024, hitAccumulatorWindowRecent = 128;
     float hitAccumulatorCellScale = 2;  // gi.hit_accumulator_cell_scale (default: the bounce cell's, gi.hit_cell_footprint_scale)
     bool hitAccumulatorFrame = false;   // gi.hit_accumulator_frame: this frame's cell means (GiAccFix), not a window's
@@ -196,6 +228,18 @@ private:
     float4x4 m_layerPrevInvViewProj{};
     float m_layerPrevExposure = 0;
     TextureRef recordScreen(FramePassContext& fc, ViewResources& view, BufferRef cache);
+    // gi.lumen (LumenGather.cpp): the probes of the last two frames (depth, position, filtered radiance: the next frame's
+    // lighting density) and the pixels' histories (diffuse, rough specular, keys), ping-pong by parity.
+    struct LumenState
+    {
+        ComPtr<ID3D12Resource> probeDepth[2], probePosition[2], probeRadiance[2], diffuse[2], specular[2], keys[2];
+        uint32_t width = 0, height = 0, parity = 0, revision = 0, epoch = 0, prevTemporalIndex = 0;
+        bool valid = false;
+        float prevExposure = 0;
+        float4x4 prevInvViewProj{};
+    } m_lumen;
+    void ensureLumen(uint32_t width, uint32_t height, uint32_t atlasX, uint32_t atlasY);
+    void recordLumen(FramePassContext& fc, ViewResources& view, BufferRef cache, rt::RayScene& rays);
     // Change boxes for GiInvalidate (B3): a mapped upload ring, one slot per frame of kChangeSlots, raw SRVs.
     static constexpr uint32_t kChangeSlots = 4, kChangeBoxesMax = 256, kChangeSlotBytes = 16 + kChangeBoxesMax * 32 + 240;
     ComPtr<ID3D12Resource> m_changeRing;

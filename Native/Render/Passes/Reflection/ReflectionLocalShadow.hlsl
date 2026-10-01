@@ -40,7 +40,19 @@ void ReflectionLocalShadowGen()
     const float3 origin = reflRayOrigin(j.s);
     const uint seed = reflLocalSeed(j, owner >> 28);
     const float3 x = origin + dir * hit.t;
-    const RtLocalChoice choice = rtLocalLightChoose(scene, x, giUnit(seed));
+    // reflection.hit_oriented_lights (the rays header's flags, ReflectionShade.hlsli REFL_HIT_ORIENTED = 2): the choice
+    // weighs the lights by the hit's orientation, so the surface is rebuilt before it (every hit, not only those whose
+    // sample casts a shadow: the pass's work grows by those rebuilds).
+    // (one function for both settings: with transmits = true it is rtLocalLightChoose's choice, bit for bit)
+    float3 orientation = 0;
+    bool transmits = true;
+    if ((reflHitFlags(rays) & 2u) != 0)
+    {
+        const RtSurface so = rtSurface(scene, hit, origin, dir);
+        orientation = so.normal;
+        transmits = materialClass(loadMaterial(so.material)) == MATERIAL_FOLIAGE;
+    }
+    const RtLocalChoice choice = rtLocalLightChooseOriented(scene, x, orientation, transmits, giUnit(seed));
     // The choice to the shading pass through the slot's value words (not written before r.refl.shade stores the value):
     // it draws on the same light without walking the cell's lights again (ReflectionShade.hlsli).
     rays.Store2(reflRaysValueOffset(capacity, slot), rtPackLocalChoice(choice));
