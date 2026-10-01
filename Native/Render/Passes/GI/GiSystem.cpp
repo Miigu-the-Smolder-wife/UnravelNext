@@ -31,7 +31,8 @@ uint32_t asU(float f)
 // Cache buffer layout (GiCache.hlsli header fields 4..11, 24..27).
 struct Layout
 {
-    uint32_t table, freeList, meta, anchor, sh, texels, update, selected, hitStamp, hitList, shTable, mapOwner, anchorMin, irr, slotAnchor, emit, split, bsplit, resample, acc, accSums, end;
+    uint32_t table, freeList, meta, anchor, sh, texels, update, selected, hitStamp, hitList, shTable, mapOwner, anchorMin, irr, slotAnchor, emit, split, bsplit, resample, acc, accSums,
+        centroid, end;
 };
 
 Layout layoutOf(const GiSettings& s)
@@ -63,7 +64,9 @@ Layout layoutOf(const GiSettings& s)
     l.acc = (uint32_t)acc;
     const uint64_t accSums = acc + (s.hitAccumulator ? (uint64_t)s.capacity * 48 : 0);  // gi.hit_accumulator means (GI_ACC_OFFSET)
     l.accSums = (uint32_t)accSums;
-    const uint64_t end = accSums + (s.hitAccumulator ? (uint64_t)s.capacity * 144 : 0);  // and frame sums (GI_ACC_SUMS, GI_ACC_SUMS_BYTES)
+    const uint64_t centroid = accSums + (s.hitAccumulator ? (uint64_t)s.capacity * 144 : 0);  // and frame sums (GI_ACC_SUMS, GI_ACC_SUMS_BYTES)
+    l.centroid = (uint32_t)centroid;
+    const uint64_t end = centroid + (s.anchorCentroid ? (uint64_t)s.capacity * 48 : 0);  // gi.anchor_centroid (GI_CENTROID_OFFSET)
     if (end >= (1ull << 32)) fail("GI cache exceeds raw-buffer address space");
     l.end = (uint32_t)end;
     return l;
@@ -137,6 +140,8 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.hitLightFootprintScale = q.has("gi.hit_light_footprint_scale") ? (float)q.number("gi.hit_light_footprint_scale") : 1.0f;
     s.bounceSplit = q.has("gi.bounce_split") && q.boolean("gi.bounce_split");
     s.anchorResample = q.has("gi.anchor_resample") && q.boolean("gi.anchor_resample");
+    s.anchorCentroid = q.has("gi.anchor_centroid") && q.boolean("gi.anchor_centroid");
+    if (s.anchorResample && s.anchorCentroid) fail("gi.anchor_resample and gi.anchor_centroid both move the anchor: choose one");
     if (q.has("gi.history_window_rule"))
     {
         const std::string rule = q.string("gi.history_window_rule");
@@ -258,6 +263,7 @@ GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(devi
     h[235] = m_settings.hitAccumulator ? l.accSums : 0;                            // GI_ACC_SUMS
     h[236] = m_settings.hitAccumulatorMinSamples;                                  // GI_ACC_MIN
     h[237] = asU(m_settings.hitAccumulatorCellScale);                              // GI_ACC_CELL_SCALE
+    h[242] = m_settings.anchorCentroid ? l.centroid : 0;                           // GI_CENTROID_OFFSET
     h[233] = (m_settings.hitAccumulatorFrame ? 1u : 0u) | ((m_settings.experimentDisable & 32768u) ? 2u : 0u) |
              (m_settings.hitAccumulatorRatio ? 4u : 0u);  // GI_ACC_MODE
     for (uint32_t e = 0; e < m_settings.capacity; ++e) head[l.freeList / 4 + e] = m_settings.capacity - 1 - e;  // pops 0, 1, 2 ...

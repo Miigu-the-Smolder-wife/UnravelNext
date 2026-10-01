@@ -44,6 +44,7 @@ struct GiSettings  // from Config/quality/gi.toml
     bool bounceSplit = false;
     uint32_t bounceSplitUpdates = 1;
     bool anchorResample = false;
+    bool anchorCentroid = false;  // gi.anchor_centroid (V2.3 12.2, P1''-b): the anchor is the lookups' centroid (GiInternal giCentroidOffer)
     // gi.history_window_rule "lighting": the running mean's window from the scene (history_updates_max while the sun
     // changed within lightingRecentFrames, else the static window); "samples": from the entry's own statistics.
     bool windowByLighting = true;

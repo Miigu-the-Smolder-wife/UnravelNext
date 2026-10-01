@@ -51,6 +51,9 @@ path_guiding = false               # V2.2 D-12 (decision item): each GI ray's te
                                    # proportional to the texels' irradiance share in the history (GiGuide.hlsl), weighted by
                                    # 1 / pdf (balance heuristic); texels average the rays that landed in them. Same ray count
 path_guiding_uniform_share = 0.5
+anchor_centroid = false            # V2.3 12.2 (P1''-b): the anchor is the centroid of the surface points the entry is looked up at
+                                   # (an exponential mean over lookups, weight 1/64; moved only beyond 1/8 cell, onto the nearest
+                                   # lookup when the centroid leaves the surface; the running mean's count halves on a move)
 hit_accumulator = false            # V2.3 12.1 (P1''-a): every GI hit adds its direct light to its cell's sums; hits read the
                                    # cell's means for their diffuse direct term (the point value's lamp hotspots made the coarse
                                    # hit cells heavy-tailed and the room's multi-bounce level walk: SD 3.1 pp between runs)
