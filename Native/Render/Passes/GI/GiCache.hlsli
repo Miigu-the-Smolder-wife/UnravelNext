@@ -265,6 +265,11 @@ bool giAnchorSeesPointAt(B b, GiHeader h, uint entry, float3 anchor, float3 anch
     const float reach = f16tof32(b.Load(h.offTexels + (entry * GI_TEXEL_COUNT + tx.y * GI_TEXELS + tx.x) * 8 + 4) >> 16);
     return dist <= 1.5 * reach + slack;
 }
+// gi.bounce_visibility (GiTrace's bounce fallback sets it around its read): a level's corners count only when their
+// anchor sees the point, young or not - a level read without the test reaches through walls, and after a cut every level
+// is young (the bath lounge's first 16 frames took daylight from the ground outside in some runs: 1.5-1.8 x its level,
+// blue-white [measured 2026-10-01]). What the test leaves out is then missing (gi.miss_closure: GiIntegrate closes it).
+static bool g_giStrictVisibility = false;
 template <typename B>
 bool giAnchorSeesPoint(B b, GiHeader h, uint entry, float3 anchorNormal, float3 p, float cellSize)
 {
@@ -397,7 +402,7 @@ void giAccumulateLevel(B b, GiHeader h, float3 worldPos, float3 normal, float3 d
             hiddenW += w;
         }
     }
-    if ((seenW <= 0 || young) && hiddenW > 0)
+    if ((seenW <= 0 || young) && hiddenW > 0 && !g_giStrictVisibility)
     {
         sumE += hiddenE;
         if (wantRadiance) sumL += hiddenL;

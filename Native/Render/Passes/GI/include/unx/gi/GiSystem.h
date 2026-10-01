@@ -42,6 +42,10 @@ struct GiSettings  // from Config/quality/gi.toml
     // Redesign V2.2 11.2 (P1'-b): gi.bounce_split (the bounce part as a current L1 pair beside the long mean) and the
     // current bounce part's window (gi.bounce_split_updates, 1 = replacement).
     bool bounceSplit = false;
+    // gi.miss_closure (V2 1.3, cold start): bounce reads without data are closed with the entry's own irradiance
+    // (GiIntegrate.hlsl). gi.bounce_visibility: GiTrace's bounce reads (the hit's own cell and the fallback levels) count
+    // only cells whose anchor sees the hit.
+    bool missClosure = false, bounceVisibility = false;
     uint32_t bounceSplitUpdates = 1;
     bool anchorResample = false;
     bool anchorCentroid = false;  // gi.anchor_centroid (V2.3 12.2, P1''-b): the anchor is the lookups' centroid (GiInternal giCentroidOffer)

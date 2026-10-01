@@ -107,7 +107,8 @@ uint giAgeBucket(RWByteAddressBuffer b, GiHeader h, uint entry)
 
 // ---- Redesign V2 P1 (RENDERER_REDESIGN_V2 1.1): update tiers, the parent prior, relight restarts.
 // Header words (the spare bytes after the admission word, GiSystem.cpp h[195..]):
-#define GI_P1_FLAGS 780         // bit 0 gi.update_tiers, bit 1 gi.parent_prior, bit 2 gi.relight_restart, bit 3 gi.hit_light_footprint
+#define GI_P1_FLAGS 780         // bit 0 gi.update_tiers, bit 1 gi.parent_prior, bit 2 gi.relight_restart, bit 3 gi.hit_light_footprint,
+                                // bit 4 gi.bounce_split, bit 5 gi.miss_closure, bit 6 gi.bounce_visibility
 #define GI_P1_T0_SHARE 784      // gi.young_update_share (float): the most of a tier's updates the young (T0) entries take
 #define GI_P1_DELTA2 788        // running estimate of the parent-child relative squared difference (float), kept by GiBegin
 #define GI_P1_DELTA_SUM 792     // this frame's samples of it: sum of min(d^2, 1) x 2^16, count (GiIntegrate)

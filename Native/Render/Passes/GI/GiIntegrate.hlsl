@@ -58,6 +58,17 @@ groupshared float gs_bounceIrradiance[GI_TEXEL_COUNT];  // per texel ray: its bo
 groupshared uint gs_emitted[GI_TEXEL_COUNT];  // per emitter sample: 1 when its value is not 0
 groupshared uint gs_rayTexel[GI_TEXEL_COUNT];   // gi.path_guiding: each texel ray's texel
 groupshared float4 gs_rayTexelValue[GI_TEXEL_COUNT];  // its texel sample (radiance, hit distance)
+// gi.miss_closure (GI_P1_FLAGS bit 5): a ray whose hit found no bounce data (GiTrace: no cell with an update - after a
+// cut, where the view opens - or, with gi.bounce_visibility, none whose anchor sees the hit) read irradiance 0 there: the entry
+// started at its first bounce alone, 50-80 % of its level in the bath and train scenes, and rose over ~16 frames as the
+// hit cells got their updates [measured 2026-10-01]. The closure takes the entry's own irradiance E for the missing
+// irradiance at those hits (the surfaces an entry sees are lit by the same room as the entry; the ambient term of
+// progressive radiosity, per entry): E = E_measured + sum over the missing rays of (albedo / pi) w cos x E, so
+// E = E_measured / (1 - R), R = sum (albedo / pi) w cos <= 0.9 per channel, and each missing ray's radiance gets
+// (albedo / pi) x E before the sums below (map, SH, texels, statistics: all as if the ray had read E). No missing ray:
+// nothing changes. Hit cells with data are read as before, so the closure fades as the cache fills.
+groupshared float3 gs_miss[GI_TEXEL_COUNT];  // per texel ray: albedo / pi of a hit without bounce data, else 0
+groupshared float3 gs_closure;               // E
 groupshared float3 gs_rayEmitted[GI_TEXEL_COUNT];     // its emitter texel sample
 #if !SPLIT
 groupshared float3 gs_bounceRay[GI_TEXEL_COUNT];  // gi.bounce_split: each texel ray's cache-fed radiance
@@ -82,6 +93,7 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     const uint p1 = b.Load(GI_P1_FLAGS);
 #endif
     const bool bsplit = (p1 & 16u) != 0;
+    const bool closure = (p1 & 32u) != 0;
     const uint restartWord = b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_RESTART);
     const uint restartCount = giRestartUpdates(b, h, entry);
     const bool prior = (p1 & 2u) != 0 && (restartWord & 0x10000u) != 0 && history == 0 && b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES) == 0;
@@ -149,7 +161,10 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         const float lum = dot(asfloat(texelSample.xyz), float3(0.2126, 0.7152, 0.0722));
         gs_bounceIrradiance[lane] = finite && lum < 3.0e38 ? ((w >> 18) & 4095u) / 4095.0 * lum * gs_sample[lane].w * gs_local[lane].z : 0.0;
         texelOld = b.Load2(texelAddress);
-        emitted = asfloat(samples[3 * P[0].y * GI_TEXEL_COUNT + slot * GI_TEXEL_COUNT + lane].xyz);
+        const uint4 emitterSample = samples[3 * P[0].y * GI_TEXEL_COUNT + slot * GI_TEXEL_COUNT + lane];
+        emitted = asfloat(emitterSample.xyz);
+        gs_miss[lane] = closure && finite && (emitterSample.w >> 31) != 0
+                            ? float3(emitterSample.w & 1023u, (emitterSample.w >> 10) & 1023u, (emitterSample.w >> 20) & 1023u) / (1023.0 * GI_PI) : float3(0, 0, 0);
         emitOld = b.Load(emitAddress);
         gs_rayTexelValue[lane] = float4(asfloat(texelSample.xyz), f16tof32(texelSample.w & 0xFFFFu));
         gs_rayEmitted[lane] = emitted;
@@ -179,6 +194,29 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         [unroll] for (uint j = 0; j < 9; ++j) gs_shWeight[lane * 9 + j] = y[j] * w;
     }
     GroupMemoryBarrierWithGroupSync();
+    if (closure)  // (uniform over the group)
+    {
+        if (lane < WaveGetLaneCount())
+        {
+            float3 measured = 0, transfer = 0;
+            [loop] for (uint k = 0; k < 2 * GI_TEXEL_COUNT; ++k) measured += gs_sample[k].xyz * (gs_sample[k].w * max(gs_local[k].z, 0.0));
+            [loop] for (uint k = 0; k < GI_TEXEL_COUNT; ++k) transfer += gs_miss[k] * (gs_sample[k].w * max(gs_local[k].z, 0.0));
+            if (WaveIsFirstLane()) gs_closure = measured / (1 - min(transfer, 0.9));
+        }
+        GroupMemoryBarrierWithGroupSync();
+        if (lane < GI_TEXEL_COUNT)
+        {
+            const float3 add = gs_miss[lane] * gs_closure;
+            gs_sample[lane].xyz += add;
+            gs_rayTexelValue[lane].xyz += add;
+            texelSample.xyz = asuint(asfloat(texelSample.xyz) + add);
+            gs_bounceIrradiance[lane] += dot(add, float3(0.2126, 0.7152, 0.0722)) * gs_sample[lane].w * gs_local[lane].z;
+#if !SPLIT
+            if (bsplit) gs_bounceRay[lane] += add;
+#endif
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
     // The loops run over the texel samples, then the emitter samples unless all of these are 0 (no emissive triangles,
     // or none visible from the anchor): every term they would add is then +0, which leaves each sum as it is (a sum that
     // starts at +0 never becomes -0), so the sums are the full loops' bit for bit.

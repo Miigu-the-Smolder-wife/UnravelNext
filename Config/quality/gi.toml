@@ -38,6 +38,19 @@ bounce_split = false               # V2.2 11.2 (P1'-b): the map, SH and texels a
                                    # 48 B per entry): weights by update count only, no Jacobi phase; the bounce part follows
                                    # its neighbours' current values (the running mean converged as n^-(1 - rho))
 bounce_split_updates = 1           # the current bounce part's window (1 = replacement: contraction rho per update)
+bounce_visibility = true           # V2 1.3: a GI ray's bounce read counts only cells whose anchor sees the hit (GiCache anchor visibility:
+                                   # the texel hit distance) - the hit's own footprint cell, and the coarser / finer levels read in its
+                                   # place. Before, the own cell was read without the test (a room's floor and the ground outside share a
+                                   # coarse cell, anchored wherever its first ray landed), and young levels were read without it (after a
+                                   # cut every level is young). Observed in the bath lounge [measured 2026-10-01]: x 1.5-1.8 of the
+                                   # converged level, blue-white, for ~16 frames in 3 of 9 runs, and a converged level of -7..+17 %
+                                   # between runs; attributed to these reads by the tint and the code, not yet isolated by an A/B of
+                                   # this switch alone. false: the previous reads (A/B)
+miss_closure = true                # V2 1.3 (cold start: cuts, newly seen regions). A ray whose bounce read finds no data read irradiance 0
+                                   # there: entries started at 50-80 % of their level and rose over ~16 frames [measured]. true: the
+                                   # missing irradiance is the entry's own, E = E_measured / (1 - sum albedo / pi w cos) (GiIntegrate.hlsl;
+                                   # frame-1 level 0.52-0.62 -> 0.90-1.04 of converged in the bath lounge, converged level unchanged
+                                   # within the runs' spread [measured with the strict fallback alone]). false: A/B
 anchor_resample = false            # V2.2 P1'-b: each update moves the entry's anchor to a random point among the surface
                                    # points that looked it up since its last update (the value = the mean over where the cell is
                                    # read, not the irradiance at its creator's point: the level depended on the history)
