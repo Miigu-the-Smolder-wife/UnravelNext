@@ -90,7 +90,7 @@ ReflJob reflLoadJob(uint job)
     j.mode = reflMode(modes.Load(int3(j.pixel, 0)));
     j.s = reflSurface(depth, gbuffer, j.pixel);
     j.alpha = max(j.s.roughness * j.s.roughness, 1e-4);
-    j.rays = j.mode == REFL_M ? 1u : P[4].w;
+    j.rays = j.mode == REFL_M ? 1u : (P[4].w & 0xFFFFu);
     j.lobe = reflectionLobeHalfAngle(j.s.roughness, dot(j.s.normal, j.s.view));
     // Ray cone of the pixel (ReflectionShade.hlsli): its width at this surface and its spread after the lobe.
     const float pixelSpread = 2 * g_tanHalfFovY / g_viewHeight;
@@ -108,7 +108,11 @@ bool reflNextDirection(ReflJob j, inout uint seed, out float3 dir)
     dir = 0;
     [loop] for (uint attempt = 0; attempt < REFL_SAMPLE_ATTEMPTS; ++attempt)
     {
-        const float2 u = float2(giUnit(seed), giUnit(seed + 1));
+        float2 u = float2(giUnit(seed), giUnit(seed + 1));
+        // reflection.lumen_ggx_sampling_bias (P[4].w's high half, unorm16; 0 outside the ray-reuse pipeline): the outer
+        // share of the sample disk - the lobe's tail, its rare far-off directions - is not drawn (the reference's
+        // GGXSamplingBias: quieter, and the lobe a little narrower than the material's).
+        u.x *= 1 - (P[4].w >> 16) / 65535.0;
         seed = giRandom(seed + 2);
         dir = reflSampleGgx(j.s.normal, j.s.view, j.alpha, u);
         if (dot(dir, j.s.normal) > 0) return true;

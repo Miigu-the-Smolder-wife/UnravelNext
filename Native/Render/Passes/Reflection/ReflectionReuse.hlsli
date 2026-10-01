@@ -93,7 +93,7 @@ float reuseGgxD(float a2, float NoH)
 // The ray an M job of 'pixel' traced this frame (ReflectionRay.hlsli: reflPixelSeed, reflNextDirection - the same draws)
 // and its density over the reflected directions (the visible-normal distribution's: G1(v) D(h) / (4 n.v)).
 // False when every attempt was masked (no ray).
-bool reuseRay(ReflSurface s, uint2 pixel, uint frame, out float3 dir, out float pdf)
+bool reuseRay(ReflSurface s, uint2 pixel, uint frame, float samplingBias, out float3 dir, out float pdf)
 {
     const float alpha = max(s.roughness * s.roughness, 1e-4);
     uint seed = reuseHash(pixel.x * 7919u + pixel.y * 104729u + (frame & 0xFFFFFFu) * 15485863u);
@@ -102,7 +102,8 @@ bool reuseRay(ReflSurface s, uint2 pixel, uint frame, out float3 dir, out float 
     bool found = false;
     [loop] for (uint attempt = 0; attempt < 8 && !found; ++attempt)
     {
-        const float2 u = float2(reuseUnit(seed), reuseUnit(seed + 1));
+        float2 u = float2(reuseUnit(seed), reuseUnit(seed + 1));
+        u.x *= 1 - samplingBias;  // (reflNextDirection's tail cut: the same value, or the replay is another ray)
         seed = reuseHash(seed + 2);
         dir = reflSampleGgx(s.normal, s.view, alpha, u);
         found = dot(dir, s.normal) > 0;

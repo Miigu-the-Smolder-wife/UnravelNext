@@ -9,7 +9,7 @@
 // the surface for the history), a < 0 where the pixel traced nothing.
 // P[0] = { modes SRV, results SRV, depth SRV, gbuffer SRV }, P[1] = { reflection SRV (tile rows), resolved UAV, rows H, frame }
 // P[2] = { width, height, samples, flags (bit 0: no reconstruction - each pixel's own ray) }
-// P[3] = { asuint(radius px), asuint(ray intensity cap), asuint(tone-map range), 0 }; frame constants b1 = main view.
+// P[3] = { asuint(radius px), asuint(ray intensity cap), asuint(tone-map range), asuint(GGX sampling bias) }; frame constants b1 = main view.
 #include "Passes/Reflection/ReflectionReuse.hlsli"
 
 [numthreads(8, 8, 1)]
@@ -52,7 +52,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         // this pixel's own ray under the same weight (never dropped)
         float3 ownDir;
         float ownPdf;
-        if (reuseRay(s, pixel, frame, ownDir, ownPdf))
+        if (reuseRay(s, pixel, frame, asfloat(P[3].w), ownDir, ownPdf))
         {
             weight = max(reuseGgxD(a2, saturate(dot(s.normal, normalize(s.view + ownDir)))) / ownPdf, 1e-3);
             sum *= weight;
@@ -69,7 +69,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
             if (!t.valid) continue;
             float3 dir;
             float pdf;
-            if (!reuseRay(t, uint2(q), frame, dir, pdf)) continue;
+            if (!reuseRay(t, uint2(q), frame, asfloat(P[3].w), dir, pdf)) continue;
             const uint3 r = results[reflJob(mq)];
             const float d = min(reflResultDistance(r), ownDistance);
             const float3 toHit = t.position + dir * d - s.position;

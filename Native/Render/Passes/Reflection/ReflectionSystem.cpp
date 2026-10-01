@@ -132,6 +132,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.lumenDisocclusionTonemap = flag("reflection.lumen_disocclusion_tonemap", true);
     s.lumenRoughFromGather = flag("reflection.lumen_rough_specular_from_gather", true);
     s.lumenScreenTraces = flag("reflection.lumen_screen_traces", true);
+    s.lumenSamplingBias = std::clamp(num("reflection.lumen_ggx_sampling_bias", 0.1), 0.0f, 0.99f);
     s.lumenScreenIterations = (uint32_t)num("reflection.lumen_screen_trace_max_iterations", 50);
     s.lumenScreenThickness = num("reflection.lumen_screen_trace_relative_depth_thickness", 0.005);
     // The surface cache (Passes/SurfaceCache/SurfaceCache.hlsli); defaults are the reference's (ue6-main LumenScene*.cpp,
@@ -716,6 +717,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const BufferRef results = g.createBuffer({ "R reflection results", (uint64_t)width * height * 12, 12 });
     // Reconstruction layers (ReflectionInternal.hlsli): per-job records beside the results, per-ray records beside the rays.
     const bool lumen = s.lumen;  // the ray-reuse pipeline (ReflectionReuse.hlsli): its own resolve, history and filter
+    // the lobe tail's share that is not sampled, as the trace, its screen traces and the resolve's replays read it
+    const uint32_t samplingBias16 = lumen ? (uint32_t)std::lround(s.lumenSamplingBias * 65535.0f) : 0u;
     const bool layers = s.layers && !lumen;
     const BufferRef jobLayers = layers ? g.createBuffer({ "R reflection job layers", (uint64_t)width * height * 24, 0 }) : BufferRef{};  // REFL_LAYER_JOB_BYTES
     const BufferRef args = g.importBuffer(m_arguments.Get(), { "R reflection dispatch arguments", kArgumentsBytes, 0 });
@@ -1141,7 +1144,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     // Root constants shared by the trace, shade, shadow and combine passes (ReflectionRay.hlsli).
     // gi = false (the traversal and the local-light shadow rays): GI's cache and screen probes are not bound (UNX_NONE)
     // nor declared, so those passes do not wait for GI's block (output.async_compute_passes).
-    auto constantsFor = [jobs, results, modes, probes, depth, gbuffer, cache, luts, atmosphere, sky, sun, rayLength, s, frame, scene, experiment, exactCounts,
+    auto constantsFor = [jobs, results, modes, probes, depth, gbuffer, cache, luts, atmosphere, sky, sun, rayLength, s, frame, scene, experiment, exactCounts, samplingBias16,
                          probeMaps, vsm, rayScene, frameIndex, raysBuffer](PassContext& c, uint32_t k[32], bool gi = true) {
         k[0] = c.srv(jobs);
         k[1] = c.uav(results);
@@ -1159,7 +1162,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         k[16] = c.srv(depth);
         k[17] = c.srv(gbuffer);
         k[18] = gi ? c.uav(cache) : 0xFFFFFFFFu;
-        k[19] = s.raysPerSample;
+        k[19] = (s.raysPerSample & 0xFFFFu) | (samplingBias16 << 16);  // (the bias: ReflectionRay.hlsli reflNextDirection)
         k[20] = (frame & 0xFFFFFFu) | (experiment << 24);
         k[21] = c.uav(raysBuffer);
         k[22] = rayScene->vsmSrvs(c, vsm, frameIndex, 1);  // S's VSM for sun visibility at hits (UNX_NONE: rays)
@@ -1213,10 +1216,11 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           b.use(screen.hzb, Use::SrvCompute);
                           b.use(screen.prevColor, Use::SrvCompute);
                       },
-                      [&shaders, modes, results, depth, gbuffer, jobs, screen, frame, width, height, rayLength, frameConstants, s, outW = up.outputWidth,
+                      [&shaders, modes, results, depth, gbuffer, jobs, screen, frame, width, height, rayLength, frameConstants, s, samplingBias16, outW = up.outputWidth,
                        outH = up.outputHeight, ratio = up.exposureRatio, prevViewProj = up.prevViewProj](PassContext& c) {
                           uint32_t k[32] = { c.srv(modes), c.uav(results), c.srv(depth), c.srv(gbuffer), c.uav(jobs), c.srv(screen.hzb), c.srv(screen.prevColor), frame,
-                                             width, height, outW, outH, asU(rayLength), s.lumenScreenIterations, asU(s.lumenScreenThickness), asU(ratio) };
+                                             width, height, outW, outH, asU(rayLength), (s.lumenScreenIterations & 0xFFFFu) | (samplingBias16 << 16), asU(s.lumenScreenThickness),
+                                             asU(ratio) };
                           for (int r = 0; r < 4; ++r)
                               for (int col = 0; col < 4; ++col) k[16 + 4 * r + col] = asU(prevViewProj.m[r][col]);
                           c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionScreenTrace"));
@@ -1595,10 +1599,11 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       b.use(reflection, Use::SrvCompute);
                       b.use(resolved, Use::UavCompute);
                   },
-                  [&shaders, modes, results, depth, gbuffer, reflection, resolved, width, height, tilesX, tilesY, frameConstants, reuseFrame, s](PassContext& c) {
+                  [&shaders, modes, results, depth, gbuffer, reflection, resolved, width, height, tilesX, tilesY, frameConstants, reuseFrame, s, samplingBias16](PassContext& c) {
                       const uint32_t k[16] = { c.srv(modes), c.srv(results), c.srv(depth), c.srv(gbuffer), c.srv(reflection), c.uav(resolved), height, reuseFrame,
                                                width, height, s.lumenReconstructionSamples, s.lumenReconstruction ? 0u : 1u,
-                                               asU(s.lumenReconstructionRadius), asU(s.lumenMaxRayIntensity), asU(s.lumenTonemapRange), 0 };
+                                               asU(s.lumenReconstructionRadius), asU(s.lumenMaxRayIntensity), asU(s.lumenTonemapRange),
+                                               asU(samplingBias16 / 65535.0f) };
                       c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionReuseResolve"));
                       c.computeConstants(k, 16);
                       c.bindFrameConstants(frameConstants);

@@ -7,7 +7,8 @@
 // (The reference continues a missed screen trace's world ray from where the screen trace ended; here it starts over.)
 // P[0] = { modes SRV, results UAV, depth SRV, gbuffer SRV }, P[1] = { jobs UAV, HZB atlas SRV, previous colour SRV, frame }
 // P[2] = { width, height, previous colour width, height }
-// P[3] = { asuint(max trace distance), max iterations, asuint(relative depth thickness), asuint(exposure ratio) }
+// P[3] = { asuint(max trace distance), max iterations | GGX sampling bias unorm16 << 16, asuint(relative depth thickness),
+//          asuint(exposure ratio) }
 // P[4..7] = the previous view-projection of the previous colour (rows). Frame constants b1 = main view.
 #include "Passes/Reflection/ReflectionReuse.hlsli"
 #include "Passes/Reflection/ScreenTrace.hlsli"
@@ -25,12 +26,12 @@ void main(uint2 pixel : SV_DispatchThreadID)
     const ReflSurface s = reflSurface(depth, gbuffer, pixel);
     float3 direction;
     float pdf;
-    if (!s.valid || !reuseRay(s, pixel, P[1].w, direction, pdf)) return;
+    if (!s.valid || !reuseRay(s, pixel, P[1].w, (P[3].y >> 16) / 65535.0, direction, pdf)) return;
     Texture2D<float> hzb = ResourceDescriptorHeap[P[1].y];
     // off the surface by its slope across a pixel (the depth buffer's own steps must not stop the ray)
     const float pixelWorld = s.linearDepth * 2 * g_tanHalfFovY / g_viewHeight;
     const float3 origin = s.position + s.normal * (2 * pixelWorld * sqrt(max(1 - pow(dot(s.normal, s.view), 2), 0.0)) + 1e-3);
-    const SctResult r = sctTrace(depth, hzb, size, origin, direction, asfloat(P[3].x), P[3].y, asfloat(P[3].z), 0);
+    const SctResult r = sctTrace(depth, hzb, size, origin, direction, asfloat(P[3].x), P[3].y & 0xFFFFu, asfloat(P[3].z), 0);
     if (!r.hit || r.uncertain) return;
     const float3 hit = sctWorld(r.at);
     Texture2D<float4> previous = ResourceDescriptorHeap[P[1].z];

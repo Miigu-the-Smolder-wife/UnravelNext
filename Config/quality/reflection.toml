@@ -116,3 +116,5 @@ lumen_screen_traces = true             # a traced ray is first followed across t
                                        # takes the previous frame's colour and no world ray (needs the upscale's colour history)
 lumen_screen_trace_max_iterations = 50
 lumen_screen_trace_relative_depth_thickness = 0.005
+lumen_ggx_sampling_bias = 0.1          # QUALITY TRADE (user decision): this share of the GGX sample domain - the lobe's tail - is not
+                                       # drawn (reference: GGXSamplingBias 0.1); 0 = the whole lobe
