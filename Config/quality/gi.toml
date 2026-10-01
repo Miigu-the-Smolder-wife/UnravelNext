@@ -165,5 +165,7 @@ experiment_disable = 0             # cost attribution only (recorded in the qual
                                    # its shadow ray instead of one sample (diagnostic), 32768 = energy audit (point term against
                                    # footprint mean over the same hits, printed by renderergate --out), 65536 = GI rays from random points of
                                    # their cell's tangent square, 131072 = bounce reads from the cell's irradiance map (not its SH),
-                                   # 262144 = every bounce read through the interpolated level search (diagnostics). Never nonzero outside
+                                   # 262144 = every bounce read through the interpolated level search (diagnostics),
+                                   # 524288 = every emissive material as visible-only (v1.92: GI hits and emitter samples take
+                                   # no emission; what the bridge's _UnxEmissiveVisibleOnly does, for scene files without the flag). Never nonzero outside
                                    # measurements and those tests.

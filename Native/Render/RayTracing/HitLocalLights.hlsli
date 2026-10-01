@@ -448,6 +448,8 @@ RtEmissiveSample rtEmissiveSample(RtSceneSrvs scene, float3 x, float u0, float u
     const uint e = min(lo, count - 1);
     const uint4 entry = list.Load4(16 + e * 16);
     const RtEmissiveTriangle tri = rtEmissiveTriangleOf(entry.x, entry.y, entry.z);
+    // (v1.92 visible-only emitters have weight 0 in the list; the last entry can still be drawn at u0 = 1)
+    if ((tri.m.classFlags & MATERIAL_EMISSIVE_VISIBLE_ONLY) != 0) return o;
     const float su = sqrt(u1), b0 = 1 - su, b1 = u2 * su, b2 = 1 - b0 - b1;
     const float3 p = tri.p0 * b0 + tri.p1 * b1 + tri.p2 * b2;
     const float3 d = p - x;

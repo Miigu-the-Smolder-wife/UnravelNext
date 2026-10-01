@@ -1,9 +1,10 @@
-$ErrorActionPreference = "Continue"
+﻿$ErrorActionPreference = "Continue"
 # One GPU lock hold (<= ~10 min) of the post-game verification (CLOUD_BRIEF "세션 13 이어서 (5)"). Environment: PG_TURN,
 # PG_SCENE (lounge | hall | train), PG_RES. Called by postgame.ps1 through Tools\CI\GpuLock.ps1; the binaries are
 # build\dev2 (rebuilt from the committed tree before the queue starts). CPU-only tests are not run here.
 Set-Location 'C:\Users\USER\UnravelNext-redesign'
 $bin = 'C:\Users\USER\UnravelNext-redesign\build\dev2\bin'
+if ($env:PG_BIN) { $bin = $bin.Replace('dev2', $env:PG_BIN) }
 $p2 = 'C:\Users\USER\UnravelNext-redesign\Results\Local\Redesign\items\p2'
 $out = $p2
 function Step($name, $exe, [string[]]$a) {
@@ -36,6 +37,10 @@ $modes = @{
   allon_noacc = (S @('reflection.layers=true', 'reflection.layer_mirror_lobe=true'))
   allon_nolayers = (S @('gi.hit_accumulator=true'))
   allon_passes1 = (S @('gi.hit_accumulator=true', 'reflection.layers=true', 'reflection.layer_mirror_lobe=true', 'gi.screen_wide_passes=1'))
+  # gi.experiment_disable 524288: every emissive material as visible-only (what the bridge's flag does; scene files do not carry it)
+  allon_vis = (S @('gi.hit_accumulator=true', 'reflection.layers=true', 'reflection.layer_mirror_lobe=true', 'gi.experiment_disable=524288'))
+  noacc_vis = (S @('reflection.layers=true', 'reflection.layer_mirror_lobe=true', 'gi.experiment_disable=524288'))
+  alloff_vis = ($filterOff + $coldOff + (S @('reflection.layers=false', 'reflection.hit_cone_lobes=false', 'reflection.hit_accumulator=false', 'gi.experiment_disable=524288')))
   alloff = ($filterOff + $coldOff + (S @('reflection.layers=false', 'reflection.hit_cone_lobes=false', 'reflection.hit_accumulator=false')))
 }
 $k = $env:PG_SCENE; $res = $env:PG_RES; $turn = $env:PG_TURN
