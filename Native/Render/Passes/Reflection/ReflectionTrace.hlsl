@@ -21,11 +21,14 @@
 [shader("raygeneration")]
 void ReflectionTraceGen()
 {
-    const uint job = DispatchRaysIndex().x;
+    const uint job = DispatchRaysIndex().x + reflBand() * REFL_BAND;
+    StructuredBuffer<uint> jobList = ResourceDescriptorHeap[P[0].x];
+    if (jobList[job] & REFL_JOB_DONE) return;  // its value came from the screen trace
     RWStructuredBuffer<uint3> results = ResourceDescriptorHeap[P[0].y];
     RWByteAddressBuffer rays = ResourceDescriptorHeap[P[5].y];
     const RtSceneSrvs scene = rtScene();
     const ReflJob j = reflLoadJob(job);
+    const float start = (reflHitFlags(rays) & REFL_TRACE_SCREEN_START) != 0 && j.mode == REFL_M ? asfloat(results[job].x) : 0.0;
     const uint capacity = rays.Load(4);
     uint base;
     rays.InterlockedAdd(0, j.rays, base);
@@ -52,7 +55,7 @@ void ReflectionTraceGen()
         RayDesc r;
         r.Origin = reflRayOrigin(j.s);
         r.Direction = dir;
-        r.TMin = 0;
+        r.TMin = min(start, giRayLength());
         r.TMax = giRayLength();
         const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_REFLECTION | RT_MASK_EMITTER);
         rays.Store4(reflRaysHitOffset(slot), hit.t < 0 ? uint4(REFL_RAY_MISS, 0, 0, 0)

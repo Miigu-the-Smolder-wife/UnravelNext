@@ -23,7 +23,9 @@
 // (reflection.g_sample_spacing_px, at most 3 = 8 px); frame constants b1 = main view.
 // reflection.lumen (ReflectionReuse.hlsli): P[4].z != 0 - a pixel traces exactly when its roughness is below P[4].w
 // (float: reflection.lumen_max_roughness_to_trace), with one ray (an M job), whatever the view angle; there are no G
-// pixels, and the caller passes no lobe tiles (their early exit is the K threshold's).
+// pixels, and the caller passes no lobe tiles (their early exit is the K threshold's). P[4].z bit 1: the untraced
+// pixels get GI's rough specular written into view.reflection (ReflectionReuseFilter), so a tile with any surface pixel
+// is marked valid, not only one with traced or planar pixels.
 // Mirror-smooth pixels on a planar candidate (inside its rectangle, on its plane, facing along its normal) are counted per
 // candidate (the CPU's raster-or-rays choice framesInFlight frames later) and are REFL_PLANAR (no job) when it has a camera.
 // P[5] = mirror mask UAVs, P[6] = tile mask UAVs of views 0-3 (ViewDesc::planarMask / planarTileMask, INTERFACES v1.22;
@@ -170,7 +172,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : S
     }
     if (job) jobs[index] = reflPackPixel(pixel);
     if (all(pixel < size)) modes[pixel] = reflPackMode(mode, spacingLog2, index);
-    if (mode != REFL_K) g_any = 1;
+    if (mode != REFL_K || ((P[4].z & 2u) != 0 && all(pixel < size) && depth.Load(int3(pixel, 0)) > 0)) g_any = 1;
     if (planar.y != 0) writePlanarMasks(tile, pixel, lane, planar.y, mode == REFL_PLANAR ? spacingLog2 : 0xFFFFFFFFu);  // has a barrier
     else GroupMemoryBarrierWithGroupSync();
     if (g_planarCounts[lane] != 0)

@@ -121,6 +121,13 @@ struct ViewResources
     // 0.6 the lobe fades to irradiance / pi, which it is from 0.8 (gi.lumen_max_roughness_rough_specular). The reader
     // multiplies its specular albedo. Invalid without gi.lumen.  [R]
     TextureRef giRoughSpecular;
+    // The previous frame's scene colour for screen-space traces (shading::upscalePreviousColor, Passes/Shading/Upscale.cpp:
+    // M's temporal upscale history of the frame before): RGBA16F at the OUTPUT resolution (FrameContext::upscale
+    // outputWidth x outputHeight), rgb = linear radiance x the PREVIOUS frame's exposure (x FrameContext::upscale
+    // exposureRatio = the same radiance at this frame's exposure), no jitter; a point's place in it is its projection by
+    // FrameContext::upscale.prevViewProj. Invalid = no history: the first frame, a reset, or a frame that renders at its
+    // output resolution (no upscale) - readers then skip their screen traces.  [M; added by S2 on the coordinator's decision]
+    TextureRef prevSceneColor;
     TextureRef reflectionLobeTiles;  // R8_UNORM ceil(W/8) x ceil(H/8): min over the tile's      [M]
                                      // surface pixels of reflectionLobeHalfAngle(r, NoV) / pi
                                      // (Reflection.hlsli; sky-only tile = 1); R skips ray
@@ -269,6 +276,8 @@ struct FrameResources
                                    // every pixel (VsmCls.hlsli VsmClsTile; invalid = classification off)
     BufferRef tlasStatic, tlasDynamic;  // acceleration structures                          [R]
     BufferRef giCache;             // world radiance cache                                  [R]
+    TextureRef screenTraceHzb;     // the shared screen trace's depth pyramid (ScreenTrace.hlsli sctLevelOrigin) of the main  [R]
+                                   // view, published by tracks::screenTraceInputs before GI; invalid: not asked for
     BufferRef surfaceCache;        // the surface cache (Passes/SurfaceCache, SURFACE_CACHE_INTERFACE_KO.md): this frame's  [R]
                                    // import, published by tracks::surfaceCache before GI; ray hits mark and read it as a
                                    // UAV (DispatchRays passes: UavGraphics). Invalid: off, or before its first frame

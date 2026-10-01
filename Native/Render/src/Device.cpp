@@ -138,6 +138,106 @@ DeviceRemovedPolicy g_removedPolicy = DeviceRemovedPolicy::Exit;
 bool g_policySet = false;
 std::atomic<bool> g_removed{ false };
 
+// UNX_DRED=1 (environment, read when the first device is created; off: nothing here runs and the device is created as
+// before): D3D12's device-removed extended data - auto-breadcrumbs (every command list's operations and how many of
+// them completed) and page fault data. When the device is removed the lists that did not finish are printed before the
+// UNX_DEVICE_REMOVED line: the pass in force (the render graph marks its passes with BeginEvent while this is on) and the
+// operations around the first one that did not complete - the dispatch a hang was in.
+bool g_dred = false;
+bool g_dredPrinted = false;
+
+bool dredRequested()
+{
+    char b[8] = {};
+    size_t n = 0;
+    return getenv_s(&n, b, sizeof b, "UNX_DRED") == 0 && n > 1 && b[0] != '0';
+}
+
+const char* dredOpName(D3D12_AUTO_BREADCRUMB_OP op)
+{
+    switch (op)
+    {
+    case D3D12_AUTO_BREADCRUMB_OP_SETMARKER: return "SetMarker";
+    case D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT: return "BeginEvent";
+    case D3D12_AUTO_BREADCRUMB_OP_ENDEVENT: return "EndEvent";
+    case D3D12_AUTO_BREADCRUMB_OP_DRAWINSTANCED: return "DrawInstanced";
+    case D3D12_AUTO_BREADCRUMB_OP_DRAWINDEXEDINSTANCED: return "DrawIndexedInstanced";
+    case D3D12_AUTO_BREADCRUMB_OP_EXECUTEINDIRECT: return "ExecuteIndirect";
+    case D3D12_AUTO_BREADCRUMB_OP_DISPATCH: return "Dispatch";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYBUFFERREGION: return "CopyBufferRegion";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYTEXTUREREGION: return "CopyTextureRegion";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYRESOURCE: return "CopyResource";
+    case D3D12_AUTO_BREADCRUMB_OP_RESOLVESUBRESOURCE: return "ResolveSubresource";
+    case D3D12_AUTO_BREADCRUMB_OP_CLEARRENDERTARGETVIEW: return "ClearRenderTargetView";
+    case D3D12_AUTO_BREADCRUMB_OP_CLEARUNORDEREDACCESSVIEW: return "ClearUnorderedAccessView";
+    case D3D12_AUTO_BREADCRUMB_OP_CLEARDEPTHSTENCILVIEW: return "ClearDepthStencilView";
+    case D3D12_AUTO_BREADCRUMB_OP_RESOURCEBARRIER: return "ResourceBarrier";
+    case D3D12_AUTO_BREADCRUMB_OP_EXECUTEBUNDLE: return "ExecuteBundle";
+    case D3D12_AUTO_BREADCRUMB_OP_PRESENT: return "Present";
+    case D3D12_AUTO_BREADCRUMB_OP_RESOLVEQUERYDATA: return "ResolveQueryData";
+    case D3D12_AUTO_BREADCRUMB_OP_BEGINSUBMISSION: return "BeginSubmission";
+    case D3D12_AUTO_BREADCRUMB_OP_ENDSUBMISSION: return "EndSubmission";
+    case D3D12_AUTO_BREADCRUMB_OP_ATOMICCOPYBUFFERUINT: return "AtomicCopyBufferUINT";
+    case D3D12_AUTO_BREADCRUMB_OP_ATOMICCOPYBUFFERUINT64: return "AtomicCopyBufferUINT64";
+    case D3D12_AUTO_BREADCRUMB_OP_BUILDRAYTRACINGACCELERATIONSTRUCTURE: return "BuildRaytracingAccelerationStructure";
+    case D3D12_AUTO_BREADCRUMB_OP_EMITRAYTRACINGACCELERATIONSTRUCTUREPOSTBUILDINFO: return "EmitRaytracingAccelerationStructurePostbuildInfo";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYRAYTRACINGACCELERATIONSTRUCTURE: return "CopyRaytracingAccelerationStructure";
+    case D3D12_AUTO_BREADCRUMB_OP_DISPATCHRAYS: return "DispatchRays";
+    case D3D12_AUTO_BREADCRUMB_OP_DISPATCHMESH: return "DispatchMesh";
+    case D3D12_AUTO_BREADCRUMB_OP_BARRIER: return "Barrier";
+    default: return "op";
+    }
+}
+
+void printDred()
+{
+    if (!g_dred || g_dredPrinted || !g_reasonDevice) return;
+    g_dredPrinted = true;
+    ComPtr<ID3D12DeviceRemovedExtendedData1> dred;
+    if (FAILED(g_reasonDevice->QueryInterface(IID_PPV_ARGS(&dred))))
+    {
+        logf("UNX_DRED: no extended data interface\n");
+        return;
+    }
+    D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 out{};
+    if (FAILED(dred->GetAutoBreadcrumbsOutput1(&out))) logf("UNX_DRED: no auto-breadcrumbs\n");
+    uint32_t lists = 0, open = 0;
+    for (const D3D12_AUTO_BREADCRUMB_NODE1* node = out.pHeadAutoBreadcrumbNode; node; node = node->pNext)
+    {
+        ++lists;
+        const uint32_t count = node->BreadcrumbCount, done = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
+        if (count == 0 || done >= count) continue;  // (a list that finished)
+        ++open;
+        // the pass in force at the first operation that did not complete: the last BeginEvent at or before it
+        const wchar_t* pass = L"(no pass marker)";
+        for (uint32_t i = 0; i < node->BreadcrumbContextsCount; ++i)
+        {
+            const D3D12_DRED_BREADCRUMB_CONTEXT& c = node->pBreadcrumbContexts[i];
+            if (c.BreadcrumbIndex <= done && c.pContextString && node->pCommandHistory[c.BreadcrumbIndex] == D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT) pass = c.pContextString;
+        }
+        logf("UNX_DRED list '%ls' on queue '%ls': %u of %u operations completed; not completed: [%u] %s in pass '%ls' (%u pass names recorded)\n",
+             node->pCommandListDebugNameW ? node->pCommandListDebugNameW : L"", node->pCommandQueueDebugNameW ? node->pCommandQueueDebugNameW : L"", done, count, done,
+             dredOpName(node->pCommandHistory[done]), pass, node->BreadcrumbContextsCount);
+        const uint32_t first = done > 12 ? done - 12 : 0, last = std::min(done + 4, count - 1);
+        for (uint32_t i = first; i <= last; ++i)
+        {
+            const wchar_t* text = L"";
+            for (uint32_t k = 0; k < node->BreadcrumbContextsCount; ++k)
+                if (node->pBreadcrumbContexts[k].BreadcrumbIndex == i && node->pBreadcrumbContexts[k].pContextString) text = node->pBreadcrumbContexts[k].pContextString;
+            logf("UNX_DRED   %s[%u] %s %ls\n", i < done ? "  " : i == done ? "> " : ". ", i, dredOpName(node->pCommandHistory[i]), text);
+        }
+    }
+    logf("UNX_DRED: %u command lists recorded, %u unfinished\n", lists, open);
+    D3D12_DRED_PAGE_FAULT_OUTPUT1 fault{};
+    if (SUCCEEDED(dred->GetPageFaultAllocationOutput1(&fault)) && fault.PageFaultVA != 0)
+    {
+        logf("UNX_DRED page fault at VA 0x%llx\n", (unsigned long long)fault.PageFaultVA);
+        for (const D3D12_DRED_ALLOCATION_NODE1* n = fault.pHeadExistingAllocationNode; n; n = n->pNext) logf("UNX_DRED   existing allocation '%ls'\n", n->ObjectNameW ? n->ObjectNameW : L"");
+        for (const D3D12_DRED_ALLOCATION_NODE1* n = fault.pHeadRecentFreedAllocationNode; n; n = n->pNext) logf("UNX_DRED   recently freed '%ls'\n", n->ObjectNameW ? n->ObjectNameW : L"");
+    }
+    std::fflush(stdout);
+}
+
 std::string removedLine(const char* what, HRESULT hr, HRESULT reason)
 {
     char b[256];
@@ -169,9 +269,12 @@ void setDeviceRemovedPolicy(DeviceRemovedPolicy policy)
 DeviceRemovedPolicy deviceRemovedPolicy() { return g_removedPolicy; }
 bool deviceWasRemoved() { return g_removed.load(); }
 
+bool dredEnabled() { return g_dred; }
+
 void deviceRemoved(const char* what, HRESULT hr)
 {
     const HRESULT reason = g_reasonDevice ? g_reasonDevice->GetDeviceRemovedReason() : S_OK;
+    printDred();
     const std::string line = removedLine(what, hr, reason);
     if (g_removedPolicy == DeviceRemovedPolicy::Exit) exitRemoved(line);
     if (!g_removed.exchange(true)) logf("%s\n", line.c_str());
@@ -181,6 +284,7 @@ void deviceRemoved(const char* what, HRESULT hr)
 void noteDeviceRemoved(const char* what, HRESULT hr)
 {
     const HRESULT reason = g_reasonDevice ? g_reasonDevice->GetDeviceRemovedReason() : S_OK;
+    printDred();
     const std::string line = removedLine(what, hr, reason);
     if (g_removedPolicy == DeviceRemovedPolicy::Exit) exitRemoved(line);
     if (!g_removed.exchange(true)) logf("%s\n", line.c_str());
@@ -245,6 +349,31 @@ Device::Device(const DeviceOptions& options) : m_options(options)
     const bool external = m_options.externalDevice != nullptr;
     if (external && m_options.debugLayer) fail("DeviceOptions: the debug layer cannot be enabled on an external (host) device");
     if (m_options.externalGraphicsQueue && !external) fail("DeviceOptions: externalGraphicsQueue needs externalDevice");
+    if (!external && !g_dred && dredRequested())
+    {
+        // (before the device is created: the settings apply to devices created after them)
+        ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dredSettings;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dredSettings))))
+        {
+            dredSettings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            dredSettings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            // The BeginEvent strings - the render graph's pass names - are kept only with the context setting (DRED 1.1).
+            // The interface is asked for by itself: a QueryInterface from the 1.0 settings object did not give the
+            // strings (2026-10-02: the lounge hang's breadcrumbs came without them).
+            ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> dredSettings1;
+            const bool contexts = SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dredSettings1)));
+            if (contexts)
+            {
+                dredSettings1->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dredSettings1->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dredSettings1->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            }
+            g_dred = true;
+            logf("UNX_DRED on: auto-breadcrumbs and page fault data, pass names %s (diagnostics: not for timings)\n",
+                 contexts ? "on" : "NOT available (no DRED 1.1 settings interface)");
+        }
+        else logf("UNX_DRED requested, but the settings interface is not available\n");
+    }
     if (m_options.debugLayer)
     {
         ComPtr<ID3D12Debug1> debug;

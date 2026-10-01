@@ -13,9 +13,13 @@
 // 0 = no probe: no lighting here); rough specular RGBA16F = radiance x exposure, a = 1 with data.
 // P[0] = LgSurface inputs, P[1] = { diffuse UAV, rough specular UAV, irradiance map SRV (atlas x 8), radiance with border
 // SRV (atlas x 10) }, P[2] = { jitter width in tiles (float), stochastic interpolation, max roughness for the lobe
-// (float), probe moving SRV }, P[3] = { short-range AO SRV (R8/R16F; 0xFFFFFFFF: none), 0, 0, 0 },
+// (float), probe moving SRV }, P[3] = { short-range AO SRV (A's ViewResources::shortRangeAO, RGBA16F: world bent normal
+// x AO; 0xFFFFFFFF: none - lumen.short_range_ao off), max multibounce albedo (float), 0, 0 }: the irradiance is read
+// along normalize(lerp(bent normal, normal, AO)) and multiplied by lumenAoMultibounce(base colour, AO), the rough
+// specular lobe by lumenAoSpecular (LumenShortRangeAO.hlsli),
 // P[10].z adaptive SRV, P[10].w / P[11].y probe depth / position SRVs. b1 = the view.
 #include "Passes/GI/Lumen/LgInterpolate.hlsli"
+#include "Passes/GI/LumenShortRangeAO.hlsli"
 
 float3 lgIrradianceAt(Texture2D<float4> map, uint2 atlas, float3 n)
 {
@@ -103,12 +107,10 @@ void main(uint3 id : SV_DispatchThreadID)
         [unroll] for (uint c = 0; c < 4; ++c) ps.atlas[c] = picked;
         ps.weights = float4(lit ? 1.0 : 0.0, 0, 0, 0);
     }
-    float ao = 1;
-    if (P[3].x != 0xFFFFFFFFu)
-    {
-        Texture2D<float> shortRangeAo = ResourceDescriptorHeap[P[3].x];
-        ao = shortRangeAo[id.xy];
-    }
+    const float4 bent = lumenShortRangeAO(P[3].x, id.xy, s.normal);  // xyz = unit bent normal, w = AO ((n, 1) without the texture)
+    const float ao = bent.w;
+    const float3 lightingNormal = normalize(lerp(bent.xyz, s.normal, ao));
+    const float3 aoDiffuse = P[3].x != 0xFFFFFFFFu ? lumenAoMultibounce(s.baseColor, ao, asfloat(P[3].y)) : float3(1, 1, 1);
     float3 D, Dx, Dy;
     mPixelRay(pixel + 0.5, D, Dx, Dy);
     const float3 v = -normalize(D);
@@ -116,10 +118,10 @@ void main(uint3 id : SV_DispatchThreadID)
     [unroll] for (uint c1 = 0; c1 < 4; ++c1)
     {
         if (!(ps.weights[c1] > 0)) continue;
-        e += lgIrradianceAt(irradiance, ps.atlas[c1], s.normal) * ps.weights[c1];
+        e += lgIrradianceAt(irradiance, ps.atlas[c1], lightingNormal) * ps.weights[c1];
         moving.x += probeMoving[ps.atlas[c1]] * ps.weights[c1];
     }
-    e *= ao;
+    e *= aoDiffuse;
     diffuseOut[id.xy] = float4(e, lit ? max(moving.x, 0.004) : 0.0);
 
     // rough specular
@@ -143,7 +145,8 @@ void main(uint3 id : SV_DispatchThreadID)
             sum += value / (1 + dot(value, float3(0.2126, 0.7152, 0.0722)));
         }
         sum /= 4.0;
-        const float3 lobe = sum / max(1 - dot(sum, float3(0.2126, 0.7152, 0.0722)), 1e-3) * ao;
+        const float aoSpecular = P[3].x != 0xFFFFFFFFu ? lumenAoSpecular(s.normal, roughness, ao, v, bent.xyz * ao) : 1.0;
+        const float3 lobe = sum / max(1 - dot(sum, float3(0.2126, 0.7152, 0.0722)), 1e-3) * aoSpecular;
         specular = lerp(lobe, specular, diffuseLerp);
     }
     specularOut[id.xy] = float4(specular, lit ? 1.0 : 0.0);

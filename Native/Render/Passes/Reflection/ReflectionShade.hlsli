@@ -284,6 +284,23 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
         {
             // r: 16 = the hit found no lit cell, g: 16 = it found one, b: lit cells / 65536 (the same everywhere)
             o.radiance = float3(cell.valid ? 0.0 : 16.0, cell.valid ? 16.0 : 0.0, surfaceCache.Load(8) / 65536.0);
+            // reflection.lumen_surface_cache_view_component (bits 8-10 of the flags) 1..4: an irradiance at the hit as
+            // E / pi, 0 where the hit has no lit cell (the same hits in every component, so their means compare): the
+            // cell's direct light, the cell's indirect light, the world GI cache's irradiance there (what the hit
+            // shading without the surface cache reads) and that shading's one-sample local-light irradiance; 5, 6: the
+            // cell's stored emission and the hit material's emission (radiance).
+            const uint component = (g_reflHitFlags >> 8) & 7u;
+            if (component != 0)
+            {
+                const float3 e = component == 1 ? cell.direct : component == 2 ? cell.indirect : component == 3 ? L.irradiance : localE;
+                o.radiance = cell.valid ? e / MODEL_PI : 0;
+                // 5, 6: the emission the cell holds and the hit material's own (radiance)
+                if (component == 5) o.radiance = cell.valid ? cell.emission : 0;
+                if (component == 6) o.radiance = cell.valid ? m.emissive : 0;
+                // 7 (with surface_cache.debug_count): r = the share of this frame's radiosity rays that met geometry and
+                // read no light, g = those rays / 65536 (the same in every pixel)
+                if (component == 7) o.radiance = float3(surfaceCache.Load(60) / max((float)surfaceCache.Load(56), 1.0), surfaceCache.Load(56) / 65536.0, 0);
+            }
             return o;
         }
         if (cell.valid)

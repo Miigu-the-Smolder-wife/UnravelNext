@@ -11,6 +11,11 @@
 //       While Cache/Reference/LIGHT exists (the user is gaming but work may continue lightly): 8 processors, below normal.
 //       --also-hold <file>: an extra pause file (the render queue passes Cache/Reference/PAUSE_QUEUE so ad-hoc renders can
 //       pause it instead of running beside it).
+//       --ev100 X: the exposure of the image (radiance x 1 / (1.2 x 2^X)) for a camera that has none of its own
+//       (automatic exposure: the image would be NaN); the value goes into the cache file's camera label.
+//       --no-sun-caustics (diagnostics): the sun is not light traced - for scenes the light tracer refuses (water with
+//       the sun on: "the light tracer does not refract"), when what is asked is a level away from the water. Sunlight
+//       that reaches a surface only through a specular path is then missing or noisy; the image has its own hash.
 //       --volume-order MIN:MAX (diagnostics, MAX may be inf) keeps only light with MIN..MAX atmosphere scattering events;
 //       surface and ground bounces are not counted (pure single scattering needs black surfaces and ground).
 //       --surface-order MIN:MAX the same for surface scattering events (1 = reflected once, at the visible surface);
@@ -33,6 +38,7 @@
 // holder) or while the manual marker .gpulock/HOLD exists (e.g. the user plays a game); --no-hold disables.
 // Scenes by name come from Tools/SceneGen (seed 1, scale 1 unless given). --no-wind sets the wind speed to 0 before
 // hashing (a different scene identity); --write-scene saves the exact scene that was rendered for the engine to use.
+#include <limits>
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
 #include "unx/core/Log.h"
@@ -75,6 +81,8 @@ struct Args
     bool noHold = false;
     uint32_t orderMin = 0, orderMax = 0xFFFFFFFFu;  // --volume-order MIN:MAX (diagnostics)
     uint32_t surfMin = 0, surfMax = 0xFFFFFFFFu;    // --surface-order MIN:MAX (diagnostics)
+    bool noSunCaustics = false;                     // --no-sun-caustics (diagnostics)
+    float ev100 = std::numeric_limits<float>::quiet_NaN();  // --ev100 (a camera without a fixed exposure)
     uint32_t threads = 0;                            // --threads N (0 = 3/4 of the logical processors)
     float wcap = 0.0f;                               // scenemeta --wcap: face-on sheets below this width are band B (design default 0)
     std::vector<std::string> alsoHold;               // --also-hold <file> (repeatable)
@@ -123,6 +131,8 @@ Args parse(int argc, char** argv)
         else if (k == "--no-hold") a.noHold = true;
         else if (k == "--sun-illuminance") a.sunIlluminance = std::stof(next());
         else if (k == "--force") a.force = true;
+        else if (k == "--no-sun-caustics") a.noSunCaustics = true;
+        else if (k == "--ev100") a.ev100 = std::stof(next());
         else if (k == "--out") a.out = next();
         else if (k == "--engine") a.engine = next();
         else if (k == "--test") a.test = next();
@@ -280,7 +290,7 @@ std::filesystem::path renderCached(const Args& a, const scene::Scene& s, const s
         for (const scene::Material& m : s.materials)
             if (m.clearcoat > 0 || m.sheenColor.x > 0 || m.sheenColor.y > 0 || m.sheenColor.z > 0 || m.cls == scene::MaterialClass::Glass)
                 fail("--device gpu/warp: the GPU tracer has no A9 clearcoat, sheen or A10 glass (material '%s'); render this scene on the CPU", m.name.c_str());
-    const ReferenceKeys k = referenceKeys(q, a.spp, reference::hasSunCausticSurfaces(s), a.orderMin, a.orderMax, a.surfMin, a.surfMax, a.gpu, a.renderSeed);
+    const ReferenceKeys k = referenceKeys(q, a.spp, reference::hasSunCausticSurfaces(s) && !a.noSunCaustics, a.orderMin, a.orderMax, a.surfMin, a.surfMax, a.gpu, a.renderSeed);
     std::filesystem::path pfm = cachePath(s, label, a.width, a.height, k);
     if (a.warp) pfm.replace_filename(pfm.stem().string() + "_warp.pfm");  // never mistaken for a GPU reference
     if (std::filesystem::exists(pfm) && !a.force)
@@ -303,6 +313,11 @@ std::filesystem::path renderCached(const Args& a, const scene::Scene& s, const s
     rs.width = a.width;
     rs.height = a.height;
     rs.samplesPerPixel = k.spp;
+    if (a.noSunCaustics)
+    {
+        rs.sunCaustics = false;
+        logf("reference: --no-sun-caustics: no light tracing of the sun (sunlight through specular surfaces and through water is missing or left to the camera paths; a diagnostic image, named by its own quality hash)\n");
+    }
     rs.russianRouletteStart = k.rrStart;
     rs.samplesPerPass = std::max(1u, std::min(32u, k.spp / 64));
     rs.checkpoint = pfm.string() + ".checkpoint";
@@ -720,7 +735,15 @@ int main(int argc, char** argv)
             return 0;
         }
         std::string label;
-        const reference::ResolvedCamera cam = pickCamera(s, a, label);
+        reference::ResolvedCamera cam = pickCamera(s, a, label);
+        if (std::isfinite(a.ev100))
+        {
+            // (the image is radiance x 1 / (1.2 x 2^ev100): a camera with automatic exposure has no ev100 of its own)
+            cam.ev100 = a.ev100;
+            label += format("_ev%g", a.ev100);
+        }
+        else if (!std::isfinite(cam.ev100) && a.command == "render")
+            fail("reference: camera '%s' has no fixed exposure (automatic exposure); give --ev100", label.c_str());
         if (a.command == "render")
         {
             renderCached(a, s, label, cam, q);

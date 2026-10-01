@@ -176,6 +176,10 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     if (q.has("gi.lumen_moving_speed")) s.lumen.movingSpeed = (float)q.number("gi.lumen_moving_speed");
     if (q.has("gi.lumen_normal_bias")) s.lumen.normalBias = (float)q.number("gi.lumen_normal_bias");
     if (q.has("gi.lumen_hit_surface_cache")) s.lumen.hitSurfaceCache = q.boolean("gi.lumen_hit_surface_cache");
+    if (q.has("gi.lumen_screen_traces")) s.lumen.screenTraces = q.boolean("gi.lumen_screen_traces");
+    if (q.has("gi.lumen_screen_trace_iterations")) s.lumen.screenTraceIterations = (uint32_t)q.integer("gi.lumen_screen_trace_iterations");
+    if (q.has("gi.lumen_screen_trace_thickness")) s.lumen.screenTraceThickness = (float)q.number("gi.lumen_screen_trace_thickness");
+    if (q.has("gi.lumen_screen_trace_thickness_steps")) s.lumen.screenTraceThicknessSteps = (uint32_t)q.integer("gi.lumen_screen_trace_thickness_steps");
     if (s.lumen.enabled)
     {
         if (s.lumen.tile < 8 || s.lumen.tile > 32) fail("gi.lumen_tile must be in 8..32");

@@ -7,9 +7,11 @@
 // the texel is 1 (uniform). Output: the texel's value over the probe's sum (a density over the 64 texels).
 // P[0] = LgSurface inputs, P[1] = { output UAV (R16F, atlas x 8), previous probe depth SRV, previous probe position SRV,
 // previous probe radiance SRV (atlas x 8) }, P[2] = { previous temporal index, previous exposure / this exposure (float),
-// history distance threshold (unused: the plane test decides), 0 }, P[10].z = adaptive SRV, P[10].w / P[11].x / P[11].y =
+// history distance threshold (unused: the plane test decides), 0 }, P[3] = { radiance cache params (raw SRV; 0xFFFFFFFF:
+// none), indirection SRV, atlas SRV, 0 }, P[10].z = adaptive SRV, P[10].w / P[11].x / P[11].y =
 // probe depth / normal / position SRVs. b1 = the view.
 #include "Passes/GI/Lumen/LgInterpolate.hlsli"
+#include "Passes/GI/Lumen/LgRadianceCache.hlsli"
 
 groupshared float gs_value[64];
 
@@ -63,8 +65,18 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
                 transparency = 1 - saturate(weight / 4.0);
             }
         }
-        // (the radiance cache's share goes here once it covers the probe: LgRadianceCache; without it the texel is uniform)
-        if (transparency > 0) lighting = 1;
+        // What the history does not cover: the radiance cache in the texel's direction (x exposure, as the history), where
+        // its 8 probes around the probe exist; else the texel is uniform (Unreal: lighting = 1 without coverage).
+        if (transparency > 0)
+        {
+            LrcCoverage coverage = (LrcCoverage)0;
+            if (P[3].x != 0xFFFFFFFFu) coverage = lrcCoverageChecked(lrcParams(P[3].x), P[3].y, probePosition[atlas].xyz, lgRcDither(atlas));
+            if (coverage.valid)
+                lighting += lrcSample(lrcParams(P[3].x), P[3].y, P[3].z, coverage, probePosition[atlas].xyz,
+                                      lgSphere((float2(thread.xy) + lgTexelCentre(lgTileOfPixel(lgProbePixel(adaptive, probe)))) / (float)LG_TRACE_RES), -1.0) *
+                            (g_exposure * transparency);
+            else lighting = 1;
+        }
         value = dot(lighting, float3(0.2126, 0.7152, 0.0722));
     }
     gs_value[index] = value;

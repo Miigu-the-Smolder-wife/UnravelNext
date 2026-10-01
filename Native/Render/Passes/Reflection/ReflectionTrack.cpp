@@ -16,6 +16,15 @@ void surfaceCache(FramePassContext& fc)
     if (!fc.trackState) return;
     fc.resources.surfaceCache = refl::ReflectionSystem::get(fc).surfaceCacheBuffer(fc);
 }
+// (R, gi.lumen_screen_traces: the probes' rays use the shared screen trace; only when GI asks for it)
+void screenTraceInputs(FramePassContext& fc, ViewResources& main)
+{
+    const QualityConfig& q = fc.quality;
+    if (!fc.trackState || !main.depth.valid() || !q.has("gi.lumen") || !q.boolean("gi.lumen") || !q.has("gi.lumen_screen_traces") ||
+        !q.boolean("gi.lumen_screen_traces"))
+        return;
+    fc.resources.screenTraceHzb = refl::ReflectionSystem::get(fc).screenTraceInputs(fc, main).hzb;
+}
 void reflections(FramePassContext& fc, ViewResources& main)
 {
     // Inputs: V's depth, M's G-buffer (and reflection lobe tiles when M provides them), R's GI of this frame.

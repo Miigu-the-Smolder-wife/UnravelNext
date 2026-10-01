@@ -67,7 +67,9 @@ bool reflLobeRatio(float3 sumL, float3 sumG, uint n, float3 gbar) { return n > 0
 
 // A job = a pixel that traces: an M pixel (1 ray) or a G sample (4 rays). Encoded as x | y << 16.
 uint reflPackPixel(uint2 p) { return p.x | (p.y << 16); }
-uint2 reflUnpackPixel(uint v) { return uint2(v & 0xFFFFu, v >> 16); }
+// (bit 31: the job has its value already - a screen trace's, ReflectionScreenTrace.hlsl - and traces no world ray)
+#define REFL_JOB_DONE 0x80000000u
+uint2 reflUnpackPixel(uint v) { return uint2(v & 0xFFFFu, (v >> 16) & 0x7FFFu); }
 
 // Job result: lobe-normalised radiance (fp16 RGB, x 1/64 like the GI cache) and hit distance (fp16).
 #define REFL_STORE_SCALE (1.0 / 64.0)

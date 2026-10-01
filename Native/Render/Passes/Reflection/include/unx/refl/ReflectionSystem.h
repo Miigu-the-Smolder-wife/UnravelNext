@@ -23,6 +23,13 @@
 
 namespace unx::render::refl
 {
+// What a pass that traces rays across the screen binds (ReflectionSystem::screenTraceInputs).
+struct ScreenTraceInputs
+{
+    TextureRef hzb;        // R32F atlas of the depth pyramid (ScreenTrace.hlsli sctLevelOrigin)
+    TextureRef prevColor;  // ViewResources::prevSceneColor (output resolution); invalid = no history
+};
+
 struct ReflectionSettings  // from Config/quality/reflection.toml
 {
     float kHalfAngle = 0;        // radians: narrow-lobe half-angle at or above which the K path applies
@@ -48,6 +55,17 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     // reflection.lumen: the ray-reuse pipeline (ReflectionReuse.hlsli) in place of the G path, the accumulation and the layers
     bool lumen = false;
     float lumenMaxRoughness = 0.4f, lumenFadeLength = 0.1f, lumenMaxRayIntensity = 40.0f, lumenTonemapRange = 10.0f;
+    bool lumenRefractionSurfaceCache = true;  // reflection.lumen_refraction_hit_surface_cache: water's and glass's ray hits read it too
+    bool lumenScreenContinue = true;   // reflection.lumen_screen_trace_continue: world rays start where their screen traces ended
+    float lumenScreenPullback = 0.08f; // ... less this distance (m)
+    bool lumenSceneColorAtHit = true;  // reflection.lumen_sample_scene_color_at_hit (with lumen_screen_traces)
+    float lumenSceneColorThickness = 0.01f;
+    float lumenSceneColorNormalDegrees = 85.0f;
+    float lumenSamplingBias = 0.1f;    // reflection.lumen_ggx_sampling_bias: the lobe tail's share that is not sampled
+    bool lumenScreenTraces = true;     // reflection.lumen_screen_traces: screen traces before the world rays (ScreenTrace.hlsli)
+    uint32_t lumenScreenIterations = 50;
+    float lumenScreenThickness = 0.005f;
+    bool lumenRoughFromGather = true;  // reflection.lumen_rough_specular_from_gather: untraced pixels take view.giRoughSpecular
     bool lumenReconstruction = true, lumenTemporal = true, lumenBilateral = true, lumenDisocclusionTonemap = true;
     uint32_t lumenReconstructionSamples = 5, lumenBilateralSamples = 4;
     float lumenReconstructionRadius = 8.0f, lumenTemporalMaxFrames = 12.0f, lumenClampScale = 1.0f, lumenDistanceThreshold = 0.03f;
@@ -56,6 +74,17 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     bool surfaceCache = false, scDirect = true, scRadiosity = true, scRemainderLight = false;
     uint32_t scEntriesLog2 = 22, scMaxUnused = 255, scCaptureFactor = 64, scCaptureBounces = 3, scDirectFactor = 32, scRadiosityFactor = 64;
     float scRadiosityCap = 40.0f, scRadiosityFrames = 4.0f;
+    uint32_t scDebugCount = 0;              // surface_cache.debug_count: radiosity ray hits / empty reads in the header (view component 7)
+    bool scDirectShadowInline = false;  // surface_cache.direct_shadow_inline: the lights' shadow rays as inline queries, after the evaluation
+    bool scShadowRaysOpaque = false;  // surface_cache.shadow_rays_opaque: the cells' shadow rays run no alpha test
+    uint32_t scDebugSkip = 0;         // surface_cache.debug_skip (diagnostics): 1 no local lights, 2 no sun, 4 lights chosen only, 8 no light shadow rays, 16 light shadow rays under the GI mask
+    bool scBaseCells = true;          // surface_cache.base_cells: marks also keep a cell 8 x coarser; reads fall back to it
+    bool scBilinearRead = true;       // surface_cache.bilinear_read: a read blends the four cells around the point
+    bool scDirectAnalytic = true;     // surface_cache.direct_analytic: the 8 lights by their integrals, shadow ray to the centre
+    bool scLightingFeedback = true;   // surface_cache.lighting_feedback: cells consumers read are relit first
+    bool scDirectStochastic = false;  // surface_cache.direct_stochastic: A's world-point light sampler in place of the 8 strongest lights
+    float scDirectStochasticFrames = 12.0f, scDirectMinWeight = 0.001f;
+    uint32_t lumenSurfaceCacheViewComponent = 0;  // 0 validity colours, 1 cell direct, 2 cell indirect, 3 GI cache irradiance, 4 local-light sample
     bool lumenSurfaceCacheView = false;  // reflection.lumen_surface_cache_view: diagnostics (ReflectionShade.hlsli REFL_HIT_SC_VIEW)
     bool lumenHitSurfaceCache = true;  // reflection.lumen_hit_surface_cache: the ray-reuse pipeline's hits read and mark it
     bool layerWholeValue = true;      // reflection.layer_whole_value: lobe pixels' whole value is one layer (LAYER_MODE_L)
@@ -114,6 +143,10 @@ public:
     // Planar reflectors of the scene (built on first use). Tests disable the planar path to compare it with rays.
     void setPlanarEnabled(bool enabled) { m_planarEnabled = enabled; }
     // Tests and capture modes: every counted candidate plane gets a camera (up to planar_views_max), without the cost choice.
+    // The screen traces' inputs of this frame (Passes/Reflection/ScreenTrace.hlsli: sctTrace, sctPreviousColour), recorded
+    // once per frame on the first call; also sets main.prevSceneColor. hzb: the depth pyramid atlas of main.depth (R32F);
+    // prevColor: invalid when there is no colour history (skip the screen traces then).
+    ScreenTraceInputs screenTraceInputs(FramePassContext& fc, ViewResources& main);
     // The surface cache's buffer in this frame's graph (Passes/SurfaceCache/SurfaceCache.hlsli: scMark, scRead), for
     // passes of other tracks whose ray hits use it; declare it Use::UavCompute / UavGraphics. Invalid when off.
     BufferRef surfaceCacheBuffer(FramePassContext& fc);
@@ -141,6 +174,7 @@ private:
         float rayLength = 0;
         TextureRef luts[4];
         BufferRef cache;
+        BufferRef surfaceCache;  // valid: the refraction service's hits read the surface cache
         rt::RayScene::VsmRefs vsm;
         uint32_t frame = 0, experiment = 0, scene[8] = {};
         rt::RayScene* rays = nullptr;
@@ -164,6 +198,8 @@ private:
     ComPtr<ID3D12Resource> m_layerStochastic[2], m_layerResidual[2], m_layerKeys[2];
     ComPtr<ID3D12Resource> m_surfaceCache;  // SurfaceCache.hlsli: header + cells + probes (raw)
     uint32_t m_surfaceCacheEntries = 0, m_surfaceCacheRevision = 0;
+    ScreenTraceInputs m_screenInputs;       // screenTraceInputs of frame m_screenFrame
+    uint64_t m_screenFrame = ~0ull;
     BufferRef m_surfaceCacheRef;            // its import into the frame's graph (surfaceCacheBuffer)
     uint64_t m_surfaceCacheFrame = ~0ull;
     uint32_t m_accumParity = 0, m_accumSceneRevision = 0;
