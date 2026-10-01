@@ -325,3 +325,18 @@
 - DXIL 여유: `ShadeOpaque` FALLBACK1 변종 204,260 / 204,800 B(**540 B 여유** — 다음 ShadeOpaque 변경은 FALLBACK 변종에서 코드를 빼야 들어간다), FALLBACK0 189,504; `CoverageComposite` 192,972; `FroxelIntegrate` 66,404; 새 커널 전부 < 36 KB.
 
 **게임 뒤 검증 사슬(`run_chain4.sh`, HOLD 해제를 기다렸다가 한 번에 한 홀드, 각 ≤ 10 분, -WaitMinutes 600):** tests2(4개 suite) → city_block 정확성 A/B → 욕탕 층 A/B → 수조 시험 → 욕탕 1080p 스위치별 정지 캡처(off / cls / tile / covtl / emis / omit / all, 끝 8프레임) → 라운지 off/all → 욕탕 회전 45°/s + 150프레임 컷(컷 뒤 1·2·4·16 프레임 캡처) off/all → timing 기준 대 새 빌드(1080p·1440p) → 스위치별 timing(1080p·1440p). 결과 `Results/Local/Fix-11/postgame/`, 사슬 로그 `chain4.log`. chain 3은 GpuLock 기본 -WaitMinutes 120을 넘겨 실패했으므로 chain 4가 그 단계를 다시 한다.
+
+### 11.2 ShadeOpaque 두 커널 분할 (2026-10-01 저녁, 조정 지시: FALLBACK1 변종 DXIL 여유 540 B)
+
+구조: `ShadeOpaque.hlsl`(1부, `SHADE_PART 1`) = 화소 설정 + 방출 + 태양 + 국소광(슬롯·오버플로 목록·fallback VSM) + L2 타일 FAR + 14.1b 발광 조도 → **direct 복사 텍스처 P[10].x**(RGBA32F, 노출 전 선형, 활성 화소만 기록); `ShadeIndirect.hlsl`(2부, `SHADE_PART 2`, ShadeOpaque를 include) = 같은 설정 + R 간접광 + A9 lobe 텍스처 + 공기 + 출력(OUTPUT·히스토그램·입자·가장자리/coverage 복사). float32 저장·적재로 한 커널의 합을 그 자리에서 이어 가므로 **비트 동일**(설정은 저장 대신 결정적으로 재계산). 1부 변종 FALLBACK×AREA×PLANAR×LAYERED(24), 2부 OUTPUT×FALLBACK×PLANAR×LAYERED(24; AREA 없음, lobe 텍스처는 P[9].z 유무로 읽음). 디스패치: 클래스마다 1부(+ lobe 커널) → UAV 배리어 1회 → 클래스마다 2부(fallback 패스도 같은 구조). 비용 [예상]: 화소당 RGBA32F 쓰기·읽기 32 B(1080p 내부 720p ≈ 30 MB → 0.04 ms) + 설정 재계산; 게임 뒤 `m.shade` 전후 실측. **R·S2 주의**: ShadeOpaque를 고칠 때 1부/2부 어느 쪽 코드인지 `#if SHADE_PART` 구간을 보고 넣을 것 — 간접광·층 소비는 2부, 광원 루프·비트맵 조회(14.3-7)는 1부.
+
+| 변종 (B) | 1부 ShadeOpaque | 2부 ShadeIndirect (OUTPUT0 / OUTPUT1) | 분할 전 (한 커널) |
+|---|---:|---:|---:|
+| FALLBACK1.AREA1.LAYERED2 (PLANAR0) | 123,344 | 88,092 / 86,384 | 204,260 (OUTPUT0) |
+| FALLBACK0.AREA1.LAYERED2 | 109,192 | 88,208 / 86,496 | ≈ 200,000 |
+| FALLBACK1.AREA1.LAYERED1 | 104,316 | 91,476 / 89,768 | 188,408 |
+| FALLBACK1.AREA1.LAYERED0 | 98,976 | 84,492 / 82,804 | — |
+| FALLBACK0.AREA1.LAYERED0 | 84,604 | 84,588 / 82,900 | 189,504 |
+| FALLBACK0.AREA0.LAYERED0 | 52,804 | (같음) | — |
+| PLANAR1 (최대) | 123,212 | 66,800 / 65,148 | — |
+한도 204,800 B. 가장 큰 변종 여유: 1부 **81 KB**, 2부 **113 KB**. 미검증: 게임 뒤 ShadingTests(비트 동일 조건 포함)·욕탕 1080p 분할 전후 캡처 비교(비트 동일 기대).
