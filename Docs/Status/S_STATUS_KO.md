@@ -340,3 +340,13 @@
 | FALLBACK0.AREA0.LAYERED0 | 52,804 | (같음) | — |
 | PLANAR1 (최대) | 123,212 | 66,800 / 65,148 | — |
 한도 204,800 B. 가장 큰 변종 여유: 1부 **81 KB**, 2부 **113 KB**. 미검증: 게임 뒤 ShadingTests(비트 동일 조건 포함)·욕탕 1080p 분할 전후 캡처 비교(비트 동일 기대).
+
+### 11.3 게임 뒤 첫 실측 (2026-10-01 17:29, chain 4 tests2, 빌드 120bd7d 시점)
+
+| 시험 | 결과 |
+|---|---|
+| LocalShadowTests | **PASS**: 분류 lit 13,624 (타일, 광원) 쌍 · 784,192 화소 검사 · 기준 추적 위반 0; 쌍둥이 umbra 199쌍 · 8,384 화소 · 위반 0 · lit·umbra 동시 0; 3단계 오버플로 queued = inline 0 차이, 용량 1 강제 fallback 5,679 타일 전부 fallback·헤드 블록 0 |
+| VsmTests | PASS |
+| FroxelTests | 2 실패(FX 1b: 시험 훅이 shadowPages 뒤에 FX 꼬리를 복사 → 목록이 못 봄; c8a0531에서 훅을 앞으로). 통과: 용량 상한 ≥ 필요(5.83 M ≥ 2.50 M), 강제 fallback(FX 없음/있음) 정확, **L4 유계 생략 A/B 평균 5.76e-7·최대 8.5e-4(한도 1e-3/2e-3)**, **분류 페이지 lit 구간 A/B 평균 3.28e-7·최대 4.0e-4**, 독자 상한 비트 동일 |
+| ShadingTests | 14.1b 쿡 뒤 업로드 버퍼 final-release 오류로 중단(c8a0531: 상태 소멸 시 deferRelease). 그 앞 전부 ok: coverage 타일 광원 FAR 장 |ΔE|/E P99 **0**, 최악 0 |
+| 추가 커밋 | e99166d 둥근 욕조(74) + 보이는 면 비트(76); 단위 시험 `round_pool_modes` PASS [실측 CPU]; PoolTests 9(둥근 욕조) 추가 → chain 5(`run_chain5.sh`, chain 4 뒤 한 홀드)가 FroxelTests·ShadingTests·PoolTests·HostPools·HostAbi·단위 시험을 다시 돈다 |
