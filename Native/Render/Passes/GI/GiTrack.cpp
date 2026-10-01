@@ -14,11 +14,13 @@ void globalIllumination(FramePassContext& fc, ViewResources& main)
         pending("R.globalIllumination (waits for V depth and M G-buffer)");
         return;
     }
-    gi::GiSystem::get(fc).record(fc, main, rt::RayScene::get(fc));
-    // A's Lumen modules for the final gather (lumen.toml; invalid = off): the short-range AO / bent normal of this frame
+    // A's Lumen modules for the final gather (lumen.toml; invalid = off). The short-range AO / bent normal needs only V's
+    // depth and M's G-buffer, so it is recorded first and the gather's pixel integration (LgIntegrate) reads it this frame.
     main.shortRangeAO = gi::lumenShortRangeAO(fc, main);
-    // and the far-field radiance cache: when the gather did not run it itself (Begin / Update are idempotent per frame),
-    // it is updated here from the screen marker alone, with the hit lighting's sources of this frame
+    gi::GiSystem::get(fc).record(fc, main, rt::RayScene::get(fc));
+    // The far-field radiance cache: the gather runs it inside its record (after the world cache's update, before its
+    // rays). When it did not (Begin / Update are idempotent per frame), the cache is updated here from the screen marker
+    // alone, with the hit lighting's sources of this frame.
     if (gi::LumenRcFrame rc = gi::lumenRadianceCacheBegin(fc, main); rc.on && !rc.updated)
     {
         gi::LumenRcInputs in;
