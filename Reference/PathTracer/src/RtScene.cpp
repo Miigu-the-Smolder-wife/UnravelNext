@@ -206,6 +206,7 @@ DeformedGeometry deformInstanceAt(const scene::Scene& s, uint32_t instance, floa
 RtScene::RtScene(const scene::Scene& s, float time, uint32_t threads) : m_scene(s)
 {
     scene::validate(s);
+    uint32_t occlusionTextures = 0;
     for (const scene::Material& m : s.materials)
     {
         if (m.cls != scene::MaterialClass::Standard && m.cls != scene::MaterialClass::Foliage && m.cls != scene::MaterialClass::Cut &&
@@ -216,9 +217,11 @@ RtScene::RtScene(const scene::Scene& s, float time, uint32_t threads) : m_scene(
         if (m.cls == scene::MaterialClass::Glass && m.twoSided) m_hasPanes = true;
         if (m.cls == scene::MaterialClass::Water && m.twoSided)
             fail("reference: water material '%s' is two-sided (Dielectric.h: its front faces point out of the water)", m.name.c_str());
-        if (m.occlusionTexture != scene::kNone)
-            fail("reference: material '%s' has an occlusion texture; its use is not defined in INTERFACES 8.1 v1", m.name.c_str());
+        // (the renderer's rule, M: "occlusion textures are not used (their use is not defined in INTERFACES 8.1 v1)" - the
+        // reference reads the same scenes and leaves the texture out the same way)
+        if (m.occlusionTexture != scene::kNone) ++occlusionTextures;
     }
+    if (occlusionTextures) logf("reference: occlusion textures are not used (%u materials; their use is not defined in INTERFACES 8.1 v1)\n", occlusionTextures);
     // Dielectric.h: a light sample from under water must be blocked by the interface, never pass it straight.
     for (const scene::Instance& in : s.instances)
         for (const scene::Submesh& sm : s.meshes[in.mesh].submeshes)
