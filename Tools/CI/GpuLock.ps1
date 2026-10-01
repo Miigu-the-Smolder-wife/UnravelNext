@@ -840,10 +840,18 @@ function Write-Waiting {
   [IO.File]::WriteAllText($tmp, ($w | ConvertTo-Json -Compress), $utf8)
   if (-not [UnxGpuLockJob]::ReplaceFile($tmp, $waitFile)) { Remove-Item $tmp -ErrorAction SilentlyContinue }
 }
-function Get-Rank([string]$kind) { return 0 }  # (v1.85: one queue; v1.83 ranked timing 0, correctness 1)
+# Priority tracks (v1.86, coordination 2026-10-01 14:10): .gpulock/PRIORITY lists tracks, one per line ("#" comments),
+# whose waiters go before the others; within each group first come. Set by the coordinator from the user's priorities
+# (today: the two noise sessions R and S2 - their judge slices waited 30 minutes behind Unity runs). No file = one queue.
+function Get-PriorityTracks {
+  $f = Join-Path $lockDir "PRIORITY"
+  if (-not (Test-Path $f)) { return @() }
+  try { return @([IO.File]::ReadAllLines($f) | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith("#") }) } catch { return @() }
+}
+function Get-Rank([string]$track) { if ((Get-PriorityTracks) -contains $track) { return 0 } return 1 }
 # The first live waiter whose turn comes before this one's (null: none).
 function Get-WaiterAhead {
-  $rank = Get-Rank $Kind
+  $rank = Get-Rank $Track
   foreach ($f in @(Get-ChildItem $waitDir -Filter *.json -ErrorAction SilentlyContinue)) {
     $w = $null
     try { $w = [IO.File]::ReadAllText($f.FullName) | ConvertFrom-Json } catch { continue }
@@ -852,7 +860,7 @@ function Get-WaiterAhead {
     $reused = $false
     if ($p) { try { $reused = $p.StartTime -gt ([datetime]$w.since).AddSeconds(5) } catch { } }
     if (-not $p -or $reused) { Remove-Item $f.FullName -ErrorAction SilentlyContinue; continue }
-    $r = Get-Rank ([string]$w.kind)
+    $r = Get-Rank ([string]$w.track)
     if ($r -lt $rank) { return $w }
     if ($r -gt $rank) { continue }
     $order = [string]::CompareOrdinal([string]$w.since, $waitSince)
