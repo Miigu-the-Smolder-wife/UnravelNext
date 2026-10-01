@@ -22,7 +22,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")
 sys.path.insert(0, os.path.join(ROOT, "Tools", "Verify"))
 import motion_metrics as mm  # noqa: E402
 
-FRAMES = {"still": [0, 3, 15, 299], "rot": [59, 63, 75, 120, 179], "cut": [60, 63, 75, 359]}
+FRAMES = {"still": [0, 3, 15, 299], "rot": [59, 63, 75, 120, 179], "cut": [60, 63, 75, 359], "diag": [3, 15]}
 
 
 def tonemap(x):
