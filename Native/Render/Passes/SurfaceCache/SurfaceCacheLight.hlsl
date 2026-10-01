@@ -88,7 +88,8 @@ float3 scCosineDirection(float3 n, float2 u)
 
 // The surface a ray met: marked in the cache (its cell stays in use, and exists from now on) and read. False when the
 // ray met the inside of closed geometry or an analytic emitter (nothing to mark).
-bool scMeet(RWByteAddressBuffer b, ScLayout l, RtSceneSrvs scene, RtHit hit, RayDesc ray, out float3 position, out float3 face, out ScSample cell)
+bool scMeet(RWByteAddressBuffer b, ScLayout l, RtSceneSrvs scene, RtHit hit, RayDesc ray, out float3 position, out float3 face, out ScSample cell,
+            uint markBits = SC_HEAD_MARKED)
 {
     position = face = 0;
     cell = (ScSample)0;
@@ -99,7 +100,7 @@ bool scMeet(RWByteAddressBuffer b, ScLayout l, RtSceneSrvs scene, RtHit hit, Ray
     position = s.position;
     face = dot(s.geometricNormal, ray.Direction) > 0 ? -s.geometricNormal : s.geometricNormal;
     m = rtHitMaterial(m, s, scCellSize(l, s.position), dot(s.normal, ray.Direction));
-    scMarkQuiet(b, l, position, face, scAlbedoOf(m), m.emissive);
+    scMarkAs(b, l, position, face, scAlbedoOf(m), m.emissive, markBits);
     cell = scRead(b, l, position, face);
     return true;
 }
@@ -482,7 +483,7 @@ void SurfaceCacheProbesGen()
         {
             float3 at, face;
             ScSample cell;
-            const bool met = scMeet(b, l, scene, hit, ray, at, face, cell);
+            const bool met = scMeet(b, l, scene, hit, ray, at, face, cell, SC_HEAD_MARKED | SC_MARK_BASE_ONLY);
             const bool lit = met && cell.valid;
             if (lit) radiance = scFinalLighting(cell);
             if (P[0].w & 16384u)

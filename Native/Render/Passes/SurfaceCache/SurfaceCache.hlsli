@@ -73,6 +73,10 @@ struct ScLayout
 // their lowest resolution whether or not a ray met it.
 #define SC_FLAG_BASE 4u
 #define SC_BASE_LEVEL_STEP 3u
+// (a mark's bit, not stored: only the base cell is marked - the radiosity rays' marks. Their hits are spread over
+// everything the probes see, each fine cell met too seldom to stay lit, and kept for 255 frames they fill the table;
+// the base cell is what those rays read. The reference raises a card's resolution on its consumers' feedback only.)
+#define SC_MARK_BASE_ONLY 0x80000000u
 uint scKeysOffset(uint i) { return SC_HEADER + i * 4; }
 uint scHeadsOffset(uint n, uint i) { return SC_HEADER + n * 4 + i * 4; }
 uint scDataOffset(uint n, uint i) { return SC_HEADER + n * 8 + i * 16; }
@@ -300,7 +304,8 @@ uint scMark(RWByteAddressBuffer b, ScLayout l, float3 position, float3 normal, f
 {
     return scMarkAs(b, l, position, normal, albedo, emission, SC_HEAD_MARKED | SC_HEAD_FEEDBACK);
 }
-// The cache's own rays (capture, radiosity): the cell exists and stays, with no claim on the relighting order.
+// The cache's capture rays: the cell exists and stays, with no claim on the relighting order. (The radiosity rays:
+// scMarkAs with SC_HEAD_MARKED | SC_MARK_BASE_ONLY.)
 uint scMarkQuiet(RWByteAddressBuffer b, ScLayout l, float3 position, float3 normal, float3 albedo, float3 emission)
 {
     return scMarkAs(b, l, position, normal, albedo, emission, SC_HEAD_MARKED);
@@ -311,14 +316,19 @@ uint scMarkAs(RWByteAddressBuffer b, ScLayout l, float3 position, float3 normal,
     if (n == 0 || (l.flags & SC_FLAG_MARKING) == 0) return SC_NONE;
     const uint level = scLevel(l, position);
     const uint face = scFace(normal);
-    const uint slot = scFindOrInsert(b, scKeysOffset(0), n, scKeyAt(level, scCoord(level, position, 1.0), face));
-    if (slot == SC_NONE) return SC_NONE;
-    uint before;
-    b.InterlockedOr(scHeadsOffset(n, slot), bits, before);
-    if ((before & SC_HEAD_MARKED) == 0)
+    const bool baseOnly = (bits & SC_MARK_BASE_ONLY) != 0 && (l.flags & SC_FLAG_BASE) != 0;
+    bits &= ~SC_MARK_BASE_ONLY;
+    uint slot = SC_NONE, before;
+    if (!baseOnly)
     {
-        b.Store4(scDataOffset(n, slot), uint4(asuint(position), scPackOct(normal)));
-        b.Store2(scMaterialOffset(n, slot), uint2(scPackAlbedo(albedo), scPackRgb(emission)));
+        slot = scFindOrInsert(b, scKeysOffset(0), n, scKeyAt(level, scCoord(level, position, 1.0), face));
+        if (slot == SC_NONE) return SC_NONE;
+        b.InterlockedOr(scHeadsOffset(n, slot), bits, before);
+        if ((before & SC_HEAD_MARKED) == 0)
+        {
+            b.Store4(scDataOffset(n, slot), uint4(asuint(position), scPackOct(normal)));
+            b.Store2(scMaterialOffset(n, slot), uint2(scPackAlbedo(albedo), scPackRgb(emission)));
+        }
     }
     const uint probes = scProbeCount(n);
     const uint probe = scFindOrInsert(b, scProbeKeysOffset(n, 0), probes, scKeyAt(level, scCoord(level, position, SC_PROBE_SPACING), face));
@@ -342,6 +352,7 @@ uint scMarkAs(RWByteAddressBuffer b, ScLayout l, float3 position, float3 normal,
                 b.Store2(scMaterialOffset(n, base), uint2(scPackAlbedo(albedo), scPackRgb(emission)));
             }
         }
+        if (baseOnly) slot = base;
     }
     return slot;
 }
