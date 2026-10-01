@@ -498,3 +498,8 @@ S의 국소 그림자 맵이 꺼지는 켬 상태에서 국소광에 그림자�
 실행(잠금 안, 라운지 1080p 8프레임씩): `lumen.radiance_cache`만 종료 0(r.gi.rc.trace 중앙값 0.44 / 최대 1.80 ms), `shading.mega_lights`만 종료 0, 둘 + AO 종료 0. 그 뒤 watergate `--planar on` 60프레임(평면 뷰는 sets 패스 없이 실행: m.ml.sample 182회 / m.ml.sets 120회)과 로비 전 스위치 60프레임 종료 0.
 **입증되지 않은 것**: hang은 재현하지 않았고 나누기 전 dispatch를 라운지에서 돌리지 않았다. "A의 스위치만으로는(수정 뒤) 라운지가 죽지 않는다"까지가 사실이다. 참고: A의 스위치만 켠 라운지에서는 평면 뷰가 렌더되지 않았고, 가장 느린 패스는 옛 반사 경로 `r.refl.inline.g` 최대 30 ms.
 실수 기록: transient 패치 첫 판에서 `&st->diffuse[n]`(ComPtr의 operator&가 포인터를 해제)로 "imported without a resource" 실패 — GPU 작업 전에 멈춤, `std::addressof`로 고침.
+
+## 16. 조정 06:30 목록 진행 (2026-10-02)
+- 1번 주 뷰 외 뷰의 표본 볼륨: 코드·빌드 끝(평면 반사 뷰가 자기 표본 볼륨을 이력 없이 가짐 — 공기 적분과 lit 입자가 읽음). 잠금 안 첫 실행(스모크 8 → watergate 평면 뷰 → 호스트 입자 테스트 → 로비 60) 대기.
+- 2번 dispatch 구조 상한 감사: `Docs/Status/DISPATCH_BOUNDS_KO.md`. A의 위반 3건 고침(코드는 1번과 같이 첫 실행 대기): `m.ml.trace` 행 띠, `s.ml.volume` 슬라이스 띠, radiance cache 청크 ÷3. R·S2에게 각자 항목 전달(R은 `r.gi.lg.trace` 띠를 광선 기준으로 고친다고 답함).
+- 3번 MegaLights 코브 띠 판정 자료: `Docs/Status/MEGALIGHTS_COVE_MEMO_KO.md`(광원·옛 규칙·언리얼 소스 정리 끝, 끝 바이어스 스윕 실행 대기).

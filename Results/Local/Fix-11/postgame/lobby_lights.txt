@@ -1,0 +1,998 @@
+light 0: type 0 at (-44.865, -2.350, 29.250), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 1: type 0 at (-6.135, -2.350, 29.250), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 2: type 0 at (-44.865, -2.350, 23.250), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 3: type 0 at (-6.135, -2.350, 23.250), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 4: type 0 at (-44.865, -2.350, 17.250), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 5: type 0 at (-6.135, -2.350, 17.250), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 6: type 0 at (-44.865, -2.350, 11.250), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 7: type 0 at (-6.135, -2.350, 11.250), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 8: type 0 at (-44.865, -2.350, 5.250), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 9: type 0 at (-6.135, -2.350, 5.250), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 10: type 0 at (-44.865, -2.350, -0.750), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 11: type 0 at (-6.135, -2.350, -0.750), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 12: type 0 at (-44.865, -2.350, -6.750), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 13: type 0 at (-6.135, -2.350, -6.750), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 14: type 0 at (-44.865, -2.350, -12.750), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 15: type 0 at (-6.135, -2.350, -12.750), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 16: type 0 at (-44.865, -2.350, -18.750), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 17: type 0 at (-6.135, -2.350, -18.750), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 18: type 0 at (6.135, -2.350, 29.250), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 19: type 0 at (44.865, -2.350, 29.250), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 20: type 0 at (6.135, -2.350, 23.250), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 21: type 0 at (44.865, -2.350, 23.250), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 22: type 0 at (6.135, -2.350, 17.250), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 23: type 0 at (44.865, -2.350, 17.250), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 24: type 0 at (6.135, -2.350, 11.250), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 25: type 0 at (44.865, -2.350, 11.250), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 26: type 0 at (6.135, -2.350, 5.250), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 27: type 0 at (44.865, -2.350, 5.250), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 28: type 0 at (6.135, -2.350, -0.750), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 29: type 0 at (44.865, -2.350, -0.750), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 30: type 0 at (6.135, -2.350, -6.750), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 31: type 0 at (44.865, -2.350, -6.750), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 32: type 0 at (6.135, -2.350, -12.750), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 33: type 0 at (44.865, -2.350, -12.750), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 34: type 0 at (6.135, -2.350, -18.750), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 35: type 0 at (44.865, -2.350, -18.750), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 36: type 1 at (4.800, 4.080, 37.500), intensity 808.612, colour (1.855, 0.818, 0.289), range 9, size (0.000, 0.000), shadow 1
+light 37: type 1 at (1.600, 4.080, 37.500), intensity 808.612, colour (1.855, 0.818, 0.289), range 9, size (0.000, 0.000), shadow 1
+light 38: type 1 at (-1.600, 4.080, 37.500), intensity 808.612, colour (1.855, 0.818, 0.289), range 9, size (0.000, 0.000), shadow 1
+light 39: type 1 at (-4.800, 4.080, 37.500), intensity 808.612, colour (1.855, 0.818, 0.289), range 9, size (0.000, 0.000), shadow 1
+light 40: type 2 at (-42.000, 2.020, 34.870), intensity 2138.92, colour (1.636, 0.868, 0.435), range 4, size (1.900, 0.080), shadow 1
+light 41: type 2 at (-39.500, 2.020, 34.870), intensity 2138.92, colour (1.636, 0.868, 0.435), range 4, size (1.900, 0.080), shadow 1
+light 42: type 2 at (-37.000, 2.020, 34.870), intensity 2138.92, colour (1.636, 0.868, 0.435), range 4, size (1.900, 0.080), shadow 1
+light 43: type 2 at (-34.500, 2.020, 34.870), intensity 2138.92, colour (1.636, 0.868, 0.435), range 4, size (1.900, 0.080), shadow 1
+light 44: type 2 at (-32.000, 2.020, 34.870), intensity 2138.92, colour (1.636, 0.868, 0.435), range 4, size (1.900, 0.080), shadow 1
+light 45: type 2 at (-29.500, 2.020, 34.870), intensity 2138.92, colour (1.636, 0.868, 0.435), range 4, size (1.900, 0.080), shadow 1
+light 46: type 2 at (-27.000, 2.020, 34.870), intensity 2138.92, colour (1.636, 0.868, 0.435), range 4, size (1.900, 0.080), shadow 1
+light 47: type 2 at (-24.500, 2.020, 34.870), intensity 2138.92, colour (1.636, 0.868, 0.435), range 4, size (1.900, 0.080), shadow 1
+light 48: type 2 at (-22.000, 2.020, 34.870), intensity 2138.92, colour (1.636, 0.868, 0.435), range 4, size (1.900, 0.080), shadow 1
+light 49: type 2 at (-19.500, 2.020, 34.870), intensity 2138.92, colour (1.636, 0.868, 0.435), range 4, size (1.900, 0.080), shadow 1
+light 50: type 2 at (18.000, 2.020, 34.870), intensity 2138.92, colour (1.636, 0.868, 0.435), range 4, size (1.900, 0.080), shadow 1
+light 51: type 2 at (20.500, 2.020, 34.870), intensity 2138.92, colour (1.636, 0.868, 0.435), range 4, size (1.900, 0.080), shadow 1
+light 52: type 2 at (23.000, 2.020, 34.870), intensity 2138.92, colour (1.636, 0.868, 0.435), range 4, size (1.900, 0.080), shadow 1
+light 53: type 2 at (25.500, 2.020, 34.870), intensity 2138.92, colour (1.636, 0.868, 0.435), range 4, size (1.900, 0.080), shadow 1
+light 54: type 2 at (28.000, 2.020, 34.870), intensity 2138.92, colour (1.636, 0.868, 0.435), range 4, size (1.900, 0.080), shadow 1
+light 55: type 2 at (30.500, 2.020, 34.870), intensity 2138.92, colour (1.636, 0.868, 0.435), range 4, size (1.900, 0.080), shadow 1
+light 56: type 2 at (33.000, 2.020, 34.870), intensity 2138.92, colour (1.636, 0.868, 0.435), range 4, size (1.900, 0.080), shadow 1
+light 57: type 2 at (35.500, 2.020, 34.870), intensity 2138.92, colour (1.636, 0.868, 0.435), range 4, size (1.900, 0.080), shadow 1
+light 58: type 2 at (38.000, 2.020, 34.870), intensity 2138.92, colour (1.636, 0.868, 0.435), range 4, size (1.900, 0.080), shadow 1
+light 59: type 2 at (40.500, 2.020, 34.870), intensity 2138.92, colour (1.636, 0.868, 0.435), range 4, size (1.900, 0.080), shadow 1
+light 60: type 0 at (-11.850, 1.450, -14.330), intensity 3.60286, colour (2.220, 0.728, 0.102), range 1.5, size (0.000, 0.000), shadow 1
+light 61: type 0 at (10.590, 1.450, -15.000), intensity 20.3016, colour (1.231, 0.955, 0.759), range 1.6, size (0.000, 0.000), shadow 1
+light 62: type 0 at (8.590, 1.450, -15.000), intensity 20.3016, colour (1.231, 0.955, 0.759), range 1.6, size (0.000, 0.000), shadow 1
+light 63: type 0 at (-17.500, 6.600, 19.075), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 64: type 0 at (-17.500, 6.600, 19.925), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 65: type 0 at (17.500, 6.600, 19.075), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 66: type 0 at (17.500, 6.600, 19.925), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 67: type 0 at (-17.500, 6.600, -3.925), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 68: type 0 at (-17.500, 6.600, -3.075), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 69: type 0 at (17.500, 6.600, -3.925), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 70: type 0 at (17.500, 6.600, -3.075), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 71: type 0 at (-0.500, 6.600, -5.925), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 72: type 0 at (-0.500, 6.600, -5.075), intensity 74.2346, colour (2.021, 0.778, 0.194), range 5, size (0.000, 0.000), shadow 1
+light 73: type 0 at (-26.750, 6.600, -21.740), intensity 25.2438, colour (2.377, 0.687, 0.049), range 4, size (0.000, 0.000), shadow 1
+light 74: type 0 at (-19.250, 6.600, -21.740), intensity 25.2438, colour (2.377, 0.687, 0.049), range 4, size (0.000, 0.000), shadow 1
+light 75: type 0 at (-11.750, 6.600, -21.740), intensity 25.2438, colour (2.377, 0.687, 0.049), range 4, size (0.000, 0.000), shadow 1
+light 76: type 0 at (-4.250, 6.600, -21.740), intensity 25.2438, colour (2.377, 0.687, 0.049), range 4, size (0.000, 0.000), shadow 1
+light 77: type 0 at (3.250, 6.600, -21.740), intensity 25.2438, colour (2.377, 0.687, 0.049), range 4, size (0.000, 0.000), shadow 1
+light 78: type 0 at (10.750, 6.600, -21.740), intensity 25.2438, colour (2.377, 0.687, 0.049), range 4, size (0.000, 0.000), shadow 1
+light 79: type 0 at (18.250, 6.600, -21.740), intensity 25.2438, colour (2.377, 0.687, 0.049), range 4, size (0.000, 0.000), shadow 1
+light 80: type 0 at (25.750, 6.600, -21.740), intensity 25.2438, colour (2.377, 0.687, 0.049), range 4, size (0.000, 0.000), shadow 1
+light 81: type 0 at (35.650, 5.950, 16.670), intensity 3.60286, colour (2.220, 0.728, 0.102), range 1.5, size (0.000, 0.000), shadow 1
+light 82: type 0 at (42.590, 5.950, 17.000), intensity 20.3016, colour (1.231, 0.955, 0.759), range 1.6, size (0.000, 0.000), shadow 1
+light 83: type 1 at (-27.750, -7.460, 31.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 84: type 1 at (-27.750, -7.460, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 85: type 1 at (-27.750, -7.460, 17.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 86: type 1 at (-27.750, -7.460, 10.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 87: type 1 at (-27.750, -7.460, 3.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 88: type 1 at (-27.750, -7.460, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 89: type 1 at (-27.750, -7.460, -10.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 90: type 1 at (-20.750, -7.460, 31.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 91: type 1 at (-20.750, -7.460, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 92: type 1 at (-20.750, -7.460, 17.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 93: type 1 at (-20.750, -7.160, 10.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 94: type 1 at (-20.750, -7.160, 3.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 95: type 1 at (-20.750, -7.160, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 96: type 1 at (-20.750, -7.460, -10.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 97: type 1 at (-13.750, -7.460, 31.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 98: type 1 at (-13.750, -7.460, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 99: type 1 at (-13.750, -7.460, 17.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 100: type 1 at (-13.750, -7.160, 10.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 101: type 1 at (-13.750, -7.160, 3.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 102: type 1 at (-13.750, -7.160, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 103: type 1 at (-13.750, -7.460, -10.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 104: type 1 at (-6.750, -7.460, 31.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 105: type 1 at (-6.750, -7.460, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 106: type 1 at (-6.750, -7.460, 17.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 107: type 1 at (-6.750, -7.160, 10.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 108: type 1 at (-6.750, -7.160, 3.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 109: type 1 at (-6.750, -7.160, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 110: type 1 at (-6.750, -7.460, -10.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 111: type 1 at (0.250, -7.460, 31.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 112: type 1 at (0.250, -4.610, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 113: type 1 at (0.250, -4.610, 17.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 114: type 1 at (0.250, -7.160, 10.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 115: type 1 at (0.250, -7.160, 3.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 116: type 1 at (0.250, -7.160, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 117: type 1 at (0.250, -7.460, -10.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 118: type 1 at (7.250, -7.460, 31.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 119: type 1 at (7.250, -7.460, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 120: type 1 at (7.250, -7.460, 17.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 121: type 1 at (7.250, -7.160, 10.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 122: type 1 at (7.250, -7.160, 3.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 123: type 1 at (7.250, -7.160, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 124: type 1 at (7.250, -7.460, -10.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 125: type 1 at (14.250, -7.460, 31.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 126: type 1 at (14.250, -7.460, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 127: type 1 at (14.250, -7.460, 17.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 128: type 1 at (14.250, -7.160, 10.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 129: type 1 at (14.250, -7.160, 3.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 130: type 1 at (14.250, -7.160, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 131: type 1 at (14.250, -7.460, -10.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 132: type 1 at (21.250, -7.460, 31.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 133: type 1 at (21.250, -7.460, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 134: type 1 at (21.250, -7.460, 17.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 135: type 1 at (21.250, -7.160, 10.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 136: type 1 at (21.250, -7.160, 3.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 137: type 1 at (21.250, -7.160, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 138: type 1 at (21.250, -7.460, -10.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 139: type 1 at (-39.750, -1.460, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 140: type 1 at (-39.750, -1.460, 22.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 141: type 1 at (-39.750, -1.460, 15.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 142: type 1 at (-39.750, -1.460, 8.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 143: type 1 at (-39.750, -1.460, 1.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 144: type 1 at (-39.750, -1.460, -5.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 145: type 1 at (-39.750, -1.460, -12.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 146: type 1 at (-39.750, -1.460, -19.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 147: type 1 at (-33.750, -1.460, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 148: type 1 at (-33.750, -1.460, 22.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 149: type 1 at (-33.750, -1.160, 15.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 150: type 1 at (-33.750, -1.160, 8.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 151: type 1 at (-33.750, -1.160, 1.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 152: type 1 at (-33.750, -1.160, -5.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 153: type 1 at (-33.750, -1.460, -12.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 154: type 1 at (-33.750, -1.460, -19.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 155: type 1 at (-27.750, -1.460, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 156: type 1 at (-27.750, -1.460, 22.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 157: type 1 at (-27.750, -1.160, 15.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 158: type 1 at (-27.750, -0.110, 8.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 159: type 1 at (-27.750, -1.160, 1.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 160: type 1 at (-27.750, -1.160, -5.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 161: type 1 at (-27.750, -1.460, -12.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 162: type 1 at (-27.750, -1.460, -19.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 163: type 1 at (-21.750, -1.460, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 164: type 1 at (-21.750, -1.460, 22.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 165: type 1 at (-21.750, -1.160, 15.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 166: type 1 at (-21.750, -1.160, 8.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 167: type 1 at (-21.750, -1.160, 1.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 168: type 1 at (-21.750, -1.160, -5.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 169: type 1 at (-21.750, -1.460, -12.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 170: type 1 at (-21.750, -1.460, -19.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 171: type 1 at (-15.750, -1.460, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 172: type 1 at (-15.750, -1.460, 22.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 173: type 1 at (-15.750, -1.160, 15.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 174: type 1 at (-15.750, -1.160, 8.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 175: type 1 at (-15.750, -1.160, 1.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 176: type 1 at (-15.750, -1.160, -5.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 177: type 1 at (-15.750, -1.460, -12.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 178: type 1 at (-15.750, -1.460, -19.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 179: type 1 at (11.250, -1.460, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 180: type 1 at (11.250, -1.460, 22.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 181: type 1 at (11.250, -1.460, 15.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 182: type 1 at (11.250, -1.460, 8.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 183: type 1 at (11.250, -1.460, 1.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 184: type 1 at (11.250, -1.460, -5.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 185: type 1 at (11.250, -1.460, -12.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 186: type 1 at (11.250, -1.460, -19.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 187: type 1 at (17.250, -1.460, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 188: type 1 at (17.250, -1.460, 22.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 189: type 1 at (17.250, -1.160, 15.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 190: type 1 at (17.250, -1.160, 8.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 191: type 1 at (17.250, -1.160, 1.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 192: type 1 at (17.250, -1.160, -5.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 193: type 1 at (17.250, -1.460, -12.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 194: type 1 at (17.250, -1.460, -19.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 195: type 1 at (23.250, -1.460, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 196: type 1 at (23.250, -1.460, 22.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 197: type 1 at (23.250, -1.160, 15.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 198: type 1 at (23.250, -1.160, 8.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 199: type 1 at (23.250, -1.160, 1.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 200: type 1 at (23.250, -1.160, -5.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 201: type 1 at (23.250, -1.460, -12.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 202: type 1 at (23.250, -1.460, -19.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 203: type 1 at (29.250, -1.460, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 204: type 1 at (29.250, -1.460, 22.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 205: type 1 at (29.250, -1.160, 15.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 206: type 1 at (29.250, -0.110, 8.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 207: type 1 at (29.250, -1.160, 1.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 208: type 1 at (29.250, -1.160, -5.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 209: type 1 at (29.250, -1.460, -12.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 210: type 1 at (29.250, -1.460, -19.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 211: type 1 at (35.250, -1.460, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 212: type 1 at (35.250, -1.460, 22.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 213: type 1 at (35.250, -1.160, 15.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 214: type 1 at (35.250, -1.160, 8.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 215: type 1 at (35.250, -1.160, 1.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 216: type 1 at (35.250, -1.160, -5.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 217: type 1 at (35.250, -1.460, -12.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 218: type 1 at (35.250, -1.460, -19.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 219: type 1 at (-4.250, -1.460, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 220: type 1 at (-4.250, -1.460, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 221: type 1 at (-4.250, -1.460, 19.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 222: type 1 at (-4.250, -1.460, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 223: type 1 at (-4.250, -1.460, 9.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 224: type 1 at (-4.250, -1.460, 4.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 225: type 1 at (-4.250, -1.460, -0.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 226: type 1 at (-4.250, -1.460, -5.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 227: type 1 at (-4.250, -1.460, -10.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 228: type 1 at (-4.250, -1.460, -15.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 229: type 1 at (-4.250, -1.460, -20.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 230: type 1 at (-40.750, 3.040, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 231: type 1 at (-40.750, 3.040, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 232: type 1 at (-40.750, 3.040, 19.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 233: type 1 at (-40.750, 3.040, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 234: type 1 at (-40.750, 3.040, 9.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 235: type 1 at (-40.750, 3.040, 4.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 236: type 1 at (-36.750, 3.040, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 237: type 1 at (-36.750, 3.040, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 238: type 1 at (-36.750, 3.040, 19.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 239: type 1 at (-36.750, 3.040, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 240: type 1 at (-36.750, 3.040, 9.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 241: type 1 at (-36.750, 3.040, 4.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 242: type 1 at (-32.750, 3.040, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 243: type 1 at (-32.750, 3.040, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 244: type 1 at (-32.750, 3.040, 19.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 245: type 1 at (-32.750, 3.040, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 246: type 1 at (-32.750, 3.040, 9.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 247: type 1 at (-32.750, 3.040, 4.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 248: type 1 at (-28.750, 3.040, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 249: type 1 at (-28.750, 3.040, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 250: type 1 at (-28.750, 3.040, 19.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 251: type 1 at (-28.750, 4.390, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 252: type 1 at (-28.750, 4.390, 9.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 253: type 1 at (-28.750, 3.040, 4.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 254: type 1 at (-24.750, 3.040, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 255: type 1 at (-24.750, 3.040, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 256: type 1 at (-24.750, 3.040, 19.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 257: type 1 at (-24.750, 3.040, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 258: type 1 at (-24.750, 3.040, 9.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 259: type 1 at (-24.750, 3.040, 4.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 260: type 1 at (-20.750, 3.040, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 261: type 1 at (-20.750, 3.040, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 262: type 1 at (-20.750, 3.040, 19.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 263: type 1 at (-20.750, 3.040, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 264: type 1 at (-20.750, 3.040, 9.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 265: type 1 at (-20.750, 3.040, 4.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 266: type 1 at (19.250, 3.040, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 267: type 1 at (19.250, 3.040, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 268: type 1 at (19.250, 3.040, 19.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 269: type 1 at (19.250, 3.040, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 270: type 1 at (19.250, 3.040, 9.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 271: type 1 at (19.250, 3.040, 4.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 272: type 1 at (23.250, 3.040, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 273: type 1 at (23.250, 3.040, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 274: type 1 at (23.250, 3.040, 19.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 275: type 1 at (23.250, 3.040, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 276: type 1 at (23.250, 3.040, 9.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 277: type 1 at (23.250, 3.040, 4.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 278: type 1 at (27.250, 3.040, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 279: type 1 at (27.250, 3.040, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 280: type 1 at (27.250, 3.040, 19.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 281: type 1 at (27.250, 4.390, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 282: type 1 at (27.250, 4.390, 9.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 283: type 1 at (27.250, 3.040, 4.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 284: type 1 at (31.250, 3.040, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 285: type 1 at (31.250, 3.040, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 286: type 1 at (31.250, 3.040, 19.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 287: type 1 at (31.250, 3.040, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 288: type 1 at (31.250, 3.040, 9.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 289: type 1 at (31.250, 3.040, 4.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 290: type 1 at (35.250, 3.040, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 291: type 1 at (35.250, 3.040, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 292: type 1 at (35.250, 3.040, 19.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 293: type 1 at (35.250, 3.040, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 294: type 1 at (35.250, 3.040, 9.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 295: type 1 at (35.250, 3.040, 4.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 296: type 1 at (39.250, 3.040, 29.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 297: type 1 at (39.250, 3.040, 24.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 298: type 1 at (39.250, 3.040, 19.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 299: type 1 at (39.250, 3.040, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 300: type 1 at (39.250, 3.040, 9.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 301: type 1 at (39.250, 3.040, 4.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 302: type 0 at (-11.250, 2.200, 1.750), intensity 15.8367, colour (2.021, 0.778, 0.194), range 6, size (0.000, 0.000), shadow 1
+light 303: type 0 at (-11.250, 2.200, -2.250), intensity 15.8367, colour (2.021, 0.778, 0.194), range 6, size (0.000, 0.000), shadow 1
+light 304: type 0 at (-11.250, 2.200, -6.250), intensity 15.8367, colour (2.021, 0.778, 0.194), range 6, size (0.000, 0.000), shadow 1
+light 305: type 0 at (-11.250, 2.200, -10.250), intensity 15.8367, colour (2.021, 0.778, 0.194), range 6, size (0.000, 0.000), shadow 1
+light 306: type 0 at (-8.250, 2.200, 1.750), intensity 15.8367, colour (2.021, 0.778, 0.194), range 6, size (0.000, 0.000), shadow 1
+light 307: type 0 at (-8.250, 2.200, -2.250), intensity 15.8367, colour (2.021, 0.778, 0.194), range 6, size (0.000, 0.000), shadow 1
+light 308: type 0 at (-8.250, 2.200, -6.250), intensity 15.8367, colour (2.021, 0.778, 0.194), range 6, size (0.000, 0.000), shadow 1
+light 309: type 0 at (-8.250, 2.200, -10.250), intensity 15.8367, colour (2.021, 0.778, 0.194), range 6, size (0.000, 0.000), shadow 1
+light 310: type 0 at (-5.250, 2.200, 1.750), intensity 15.8367, colour (2.021, 0.778, 0.194), range 6, size (0.000, 0.000), shadow 1
+light 311: type 0 at (-5.250, 2.200, -2.250), intensity 15.8367, colour (2.021, 0.778, 0.194), range 6, size (0.000, 0.000), shadow 1
+light 312: type 0 at (-5.250, 2.200, -6.250), intensity 15.8367, colour (2.021, 0.778, 0.194), range 6, size (0.000, 0.000), shadow 1
+light 313: type 0 at (-5.250, 2.200, -10.250), intensity 15.8367, colour (2.021, 0.778, 0.194), range 6, size (0.000, 0.000), shadow 1
+light 314: type 0 at (6.750, 2.200, 1.750), intensity 15.8367, colour (2.021, 0.778, 0.194), range 6, size (0.000, 0.000), shadow 1
+light 315: type 0 at (6.750, 2.200, -2.250), intensity 15.8367, colour (2.021, 0.778, 0.194), range 6, size (0.000, 0.000), shadow 1
+light 316: type 0 at (6.750, 2.200, -6.250), intensity 15.8367, colour (2.021, 0.778, 0.194), range 6, size (0.000, 0.000), shadow 1
+light 317: type 0 at (6.750, 2.200, -10.250), intensity 15.8367, colour (2.021, 0.778, 0.194), range 6, size (0.000, 0.000), shadow 1
+light 318: type 1 at (-11.750, 3.040, -0.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 319: type 1 at (-11.750, 3.040, -8.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 320: type 1 at (-3.750, 3.040, -0.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 321: type 1 at (-3.750, 3.040, -8.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 322: type 1 at (4.250, 3.040, -0.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 323: type 1 at (4.250, 3.040, -8.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 324: type 1 at (12.250, 3.040, -0.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 325: type 1 at (12.250, 3.040, -8.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 326: type 1 at (-12.750, 4.390, 26.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 327: type 1 at (-12.750, 4.390, 6.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 328: type 1 at (-8.750, 4.390, 26.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 329: type 1 at (-8.750, 4.390, 6.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 330: type 1 at (-4.750, 4.390, 26.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 331: type 1 at (-4.750, 4.390, 6.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 332: type 1 at (-0.750, 4.390, 26.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 333: type 1 at (-0.750, 4.390, 6.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 334: type 1 at (3.250, 4.390, 26.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 335: type 1 at (3.250, 4.390, 6.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 336: type 1 at (7.250, 4.390, 26.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 337: type 1 at (7.250, 4.390, 6.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 338: type 1 at (11.250, 4.390, 26.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 339: type 1 at (11.250, 4.390, 6.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 340: type 2 at (-27.500, 7.705, 34.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 341: type 2 at (-29.440, 7.705, 32.250), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 342: type 2 at (-25.560, 7.705, 32.250), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 343: type 2 at (-27.500, 7.705, 30.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 344: type 2 at (-27.500, 7.705, 29.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 345: type 2 at (-29.440, 7.705, 27.250), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 346: type 2 at (-25.560, 7.705, 27.250), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 347: type 2 at (-27.500, 7.705, 25.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 348: type 2 at (-27.500, 7.705, 24.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 349: type 2 at (-29.440, 7.705, 22.250), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 350: type 2 at (-25.560, 7.705, 22.250), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 351: type 2 at (-27.500, 7.705, 20.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 352: type 2 at (-27.500, 7.705, 19.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 353: type 2 at (-29.440, 7.705, 17.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 354: type 2 at (-25.560, 7.705, 17.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 355: type 2 at (-27.500, 7.705, 15.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 356: type 2 at (-22.500, 7.705, 34.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 357: type 2 at (-18.000, 7.705, 34.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 358: type 2 at (-13.500, 7.705, 34.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 359: type 2 at (-9.000, 7.705, 34.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 360: type 2 at (-4.500, 7.705, 34.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 361: type 2 at (0.000, 7.705, 34.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 362: type 2 at (4.500, 7.705, 34.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 363: type 2 at (9.000, 7.705, 34.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 364: type 2 at (13.500, 7.705, 34.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 365: type 2 at (18.000, 7.705, 34.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 366: type 2 at (22.500, 7.705, 34.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 367: type 2 at (-24.440, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 368: type 2 at (-20.560, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 369: type 2 at (-19.940, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 370: type 2 at (-16.060, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 371: type 2 at (-15.440, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 372: type 2 at (-11.560, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 373: type 2 at (-10.940, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 374: type 2 at (-7.060, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 375: type 2 at (-6.440, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 376: type 2 at (-2.560, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 377: type 2 at (-1.940, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 378: type 2 at (1.940, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 379: type 2 at (2.560, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 380: type 2 at (6.440, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 381: type 2 at (7.060, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 382: type 2 at (10.940, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 383: type 2 at (11.560, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 384: type 2 at (15.440, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 385: type 2 at (16.060, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 386: type 2 at (19.940, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 387: type 2 at (20.560, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 388: type 2 at (24.440, 7.705, 32.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.900, 0.040), shadow 1
+light 389: type 2 at (-22.500, 7.705, 29.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 390: type 2 at (-18.000, 7.705, 29.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 391: type 2 at (-13.500, 7.705, 29.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 392: type 2 at (-9.000, 7.705, 29.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 393: type 2 at (-4.500, 7.705, 29.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 394: type 2 at (0.000, 7.705, 29.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 395: type 2 at (4.500, 7.705, 29.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 396: type 2 at (9.000, 7.705, 29.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 397: type 2 at (13.500, 7.705, 29.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 398: type 2 at (18.000, 7.705, 29.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 399: type 2 at (22.500, 7.705, 29.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 400: type 2 at (-22.250, 7.705, 28.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 401: type 2 at (-17.500, 7.705, 28.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 402: type 2 at (17.750, 7.705, 28.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 403: type 2 at (22.500, 7.705, 28.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 404: type 2 at (-24.440, 7.705, 26.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 405: type 2 at (-20.060, 7.705, 26.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 406: type 2 at (-19.440, 7.705, 26.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 407: type 2 at (-15.560, 7.705, 26.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 408: type 2 at (15.560, 7.705, 26.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 409: type 2 at (19.940, 7.705, 26.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 410: type 2 at (20.560, 7.705, 26.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 411: type 2 at (24.440, 7.705, 26.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 412: type 2 at (-22.250, 7.705, 24.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 413: type 2 at (-17.500, 7.705, 24.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 414: type 2 at (17.750, 7.705, 24.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 415: type 2 at (22.500, 7.705, 24.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 416: type 2 at (-22.250, 7.705, 23.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 417: type 2 at (-17.500, 7.705, 23.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 418: type 2 at (17.750, 7.705, 23.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 419: type 2 at (22.500, 7.705, 23.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 420: type 2 at (-24.440, 7.705, 22.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 421: type 2 at (-20.060, 7.705, 22.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 422: type 2 at (-19.440, 7.705, 22.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 423: type 2 at (-15.560, 7.705, 22.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 424: type 2 at (15.560, 7.705, 22.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 425: type 2 at (19.940, 7.705, 22.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 426: type 2 at (20.560, 7.705, 22.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 427: type 2 at (24.440, 7.705, 22.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 428: type 2 at (-22.250, 7.705, 20.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 429: type 2 at (-18.750, 7.705, 20.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (1.400, 0.040), shadow 1
+light 430: type 2 at (-16.250, 7.705, 20.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (1.400, 0.040), shadow 1
+light 431: type 2 at (16.250, 7.705, 20.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (1.400, 0.040), shadow 1
+light 432: type 2 at (19.000, 7.705, 20.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (1.900, 0.040), shadow 1
+light 433: type 2 at (22.500, 7.705, 20.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 434: type 2 at (-22.250, 7.705, 19.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 435: type 2 at (-18.750, 7.705, 19.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (1.400, 0.040), shadow 1
+light 436: type 2 at (-16.250, 7.705, 19.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (1.400, 0.040), shadow 1
+light 437: type 2 at (16.250, 7.705, 19.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (1.400, 0.040), shadow 1
+light 438: type 2 at (19.000, 7.705, 19.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (1.900, 0.040), shadow 1
+light 439: type 2 at (22.500, 7.705, 19.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 440: type 2 at (-24.440, 7.705, 17.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 441: type 2 at (-20.060, 7.705, 17.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 442: type 2 at (-19.440, 7.705, 17.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 443: type 2 at (-15.560, 7.705, 17.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 444: type 2 at (15.560, 7.705, 17.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 445: type 2 at (19.940, 7.705, 17.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 446: type 2 at (20.560, 7.705, 17.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 447: type 2 at (24.440, 7.705, 17.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 448: type 2 at (-22.250, 7.705, 15.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 449: type 2 at (-17.500, 7.705, 15.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 450: type 2 at (17.750, 7.705, 15.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 451: type 2 at (22.500, 7.705, 15.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 452: type 2 at (-22.250, 7.705, 14.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 453: type 2 at (-17.500, 7.705, 14.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 454: type 2 at (17.750, 7.705, 14.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 455: type 2 at (22.500, 7.705, 14.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 456: type 2 at (-27.500, 7.705, 14.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 457: type 2 at (-24.440, 7.705, 13.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 458: type 2 at (-20.060, 7.705, 13.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 459: type 2 at (-19.440, 7.705, 13.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 460: type 2 at (-15.560, 7.705, 13.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 461: type 2 at (15.560, 7.705, 13.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 462: type 2 at (19.940, 7.705, 13.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 463: type 2 at (20.560, 7.705, 13.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 464: type 2 at (24.440, 7.705, 13.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 465: type 2 at (27.500, 7.705, 14.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 466: type 2 at (-29.440, 7.705, 12.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 467: type 2 at (-25.560, 7.705, 12.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 468: type 2 at (25.560, 7.705, 12.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 469: type 2 at (29.440, 7.705, 12.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 470: type 2 at (-22.250, 7.705, 11.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 471: type 2 at (-17.500, 7.705, 11.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 472: type 2 at (17.750, 7.705, 11.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 473: type 2 at (22.500, 7.705, 11.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 474: type 2 at (-27.500, 7.705, 10.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 475: type 2 at (-22.250, 7.705, 10.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 476: type 2 at (-17.500, 7.705, 10.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 477: type 2 at (17.750, 7.705, 10.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 478: type 2 at (22.500, 7.705, 10.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 479: type 2 at (27.500, 7.705, 10.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 480: type 2 at (-27.500, 7.705, 9.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 481: type 2 at (-24.440, 7.705, 8.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 482: type 2 at (-20.060, 7.705, 8.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 483: type 2 at (-19.440, 7.705, 8.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 484: type 2 at (-15.560, 7.705, 8.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 485: type 2 at (15.560, 7.705, 8.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 486: type 2 at (19.940, 7.705, 8.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 487: type 2 at (20.560, 7.705, 8.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 488: type 2 at (24.440, 7.705, 8.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 489: type 2 at (27.500, 7.705, 9.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 490: type 2 at (-29.440, 7.705, 8.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 491: type 2 at (-25.560, 7.705, 8.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 492: type 2 at (25.560, 7.705, 8.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 493: type 2 at (29.440, 7.705, 8.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 494: type 2 at (-22.250, 7.705, 6.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 495: type 2 at (-17.500, 7.705, 6.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 496: type 2 at (17.750, 7.705, 6.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 497: type 2 at (22.500, 7.705, 6.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 498: type 2 at (-27.500, 7.705, 6.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 499: type 2 at (-22.250, 7.705, 5.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 500: type 2 at (-17.500, 7.705, 5.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 501: type 2 at (17.750, 7.705, 5.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 502: type 2 at (22.500, 7.705, 5.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 503: type 2 at (27.500, 7.705, 6.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 504: type 2 at (-27.500, 7.705, 5.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 505: type 2 at (-24.440, 7.705, 4.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 506: type 2 at (-20.060, 7.705, 4.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 507: type 2 at (-19.440, 7.705, 4.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 508: type 2 at (-15.560, 7.705, 4.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 509: type 2 at (15.560, 7.705, 4.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 510: type 2 at (19.940, 7.705, 4.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 511: type 2 at (20.560, 7.705, 4.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 512: type 2 at (24.440, 7.705, 4.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 513: type 2 at (27.500, 7.705, 5.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 514: type 2 at (-29.440, 7.705, 3.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 515: type 2 at (-25.560, 7.705, 3.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 516: type 2 at (25.560, 7.705, 3.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 517: type 2 at (29.440, 7.705, 3.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 518: type 2 at (-12.500, 7.705, 4.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 519: type 2 at (-8.000, 7.705, 4.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 520: type 2 at (-3.500, 7.705, 4.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 521: type 2 at (0.750, 7.705, 4.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 522: type 2 at (4.750, 7.705, 4.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 523: type 2 at (8.750, 7.705, 4.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 524: type 2 at (12.750, 7.705, 4.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 525: type 2 at (-14.440, 7.705, 2.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 526: type 2 at (-10.560, 7.705, 2.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 527: type 2 at (-9.940, 7.705, 2.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 528: type 2 at (-6.060, 7.705, 2.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 529: type 2 at (-5.440, 7.705, 2.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 530: type 2 at (-1.560, 7.705, 2.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 531: type 2 at (-0.940, 7.705, 2.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 532: type 2 at (2.440, 7.705, 2.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 533: type 2 at (3.060, 7.705, 2.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 534: type 2 at (6.440, 7.705, 2.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 535: type 2 at (7.060, 7.705, 2.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 536: type 2 at (10.440, 7.705, 2.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 537: type 2 at (11.060, 7.705, 2.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 538: type 2 at (14.440, 7.705, 2.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 539: type 2 at (-22.250, 7.705, 2.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 540: type 2 at (-17.500, 7.705, 2.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 541: type 2 at (17.750, 7.705, 2.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 542: type 2 at (22.500, 7.705, 2.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 543: type 2 at (-27.500, 7.705, 1.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 544: type 2 at (-22.250, 7.705, 1.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 545: type 2 at (-17.500, 7.705, 1.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 546: type 2 at (17.750, 7.705, 1.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 547: type 2 at (22.500, 7.705, 1.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 548: type 2 at (27.500, 7.705, 1.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 549: type 2 at (-27.500, 7.705, 0.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 550: type 2 at (-24.440, 7.705, -0.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 551: type 2 at (-20.060, 7.705, -0.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 552: type 2 at (-19.440, 7.705, -0.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 553: type 2 at (-15.560, 7.705, -0.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 554: type 2 at (15.560, 7.705, -0.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 555: type 2 at (19.940, 7.705, -0.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 556: type 2 at (20.560, 7.705, -0.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 557: type 2 at (24.440, 7.705, -0.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 558: type 2 at (27.500, 7.705, 0.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 559: type 2 at (-29.440, 7.705, -1.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 560: type 2 at (-25.560, 7.705, -1.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 561: type 2 at (-12.500, 7.705, 0.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 562: type 2 at (-8.000, 7.705, 0.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 563: type 2 at (-3.500, 7.705, 0.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 564: type 2 at (0.750, 7.705, 0.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 565: type 2 at (4.750, 7.705, 0.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 566: type 2 at (8.750, 7.705, 0.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 567: type 2 at (12.750, 7.705, 0.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 568: type 2 at (25.560, 7.705, -1.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 569: type 2 at (29.440, 7.705, -1.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 570: type 2 at (-12.500, 7.705, -0.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 571: type 2 at (-8.000, 7.705, -0.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 572: type 2 at (-3.500, 7.705, -0.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 573: type 2 at (0.750, 7.705, -0.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 574: type 2 at (4.750, 7.705, -0.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 575: type 2 at (8.750, 7.705, -0.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 576: type 2 at (12.750, 7.705, -0.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 577: type 2 at (-14.440, 7.705, -1.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 578: type 2 at (-10.560, 7.705, -1.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 579: type 2 at (-9.940, 7.705, -1.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 580: type 2 at (-6.060, 7.705, -1.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 581: type 2 at (-5.440, 7.705, -1.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 582: type 2 at (-1.560, 7.705, -1.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 583: type 2 at (-0.940, 7.705, -1.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 584: type 2 at (2.440, 7.705, -1.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 585: type 2 at (3.060, 7.705, -1.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 586: type 2 at (6.440, 7.705, -1.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 587: type 2 at (7.060, 7.705, -1.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 588: type 2 at (10.440, 7.705, -1.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 589: type 2 at (11.060, 7.705, -1.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 590: type 2 at (14.440, 7.705, -1.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 591: type 2 at (-22.250, 7.705, -2.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 592: type 2 at (-17.500, 7.705, -2.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 593: type 2 at (17.750, 7.705, -2.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 594: type 2 at (22.500, 7.705, -2.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 595: type 2 at (-27.500, 7.705, -2.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 596: type 2 at (-22.250, 7.705, -3.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 597: type 2 at (-18.750, 7.705, -3.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (1.400, 0.040), shadow 1
+light 598: type 2 at (-16.250, 7.705, -3.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (1.400, 0.040), shadow 1
+light 599: type 2 at (16.250, 7.705, -3.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (1.400, 0.040), shadow 1
+light 600: type 2 at (19.000, 7.705, -3.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (1.900, 0.040), shadow 1
+light 601: type 2 at (22.500, 7.705, -3.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 602: type 2 at (27.500, 7.705, -2.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 603: type 2 at (-27.500, 7.705, -3.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 604: type 2 at (-24.440, 7.705, -5.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 605: type 2 at (-20.060, 7.705, -5.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 606: type 2 at (-19.440, 7.705, -5.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 607: type 2 at (-15.560, 7.705, -5.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 608: type 2 at (-12.500, 7.705, -3.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 609: type 2 at (-8.000, 7.705, -3.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 610: type 2 at (-3.500, 7.705, -3.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 611: type 2 at (0.750, 7.705, -3.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 612: type 2 at (4.750, 7.705, -3.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 613: type 2 at (8.750, 7.705, -3.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 614: type 2 at (12.750, 7.705, -3.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 615: type 2 at (15.560, 7.705, -5.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 616: type 2 at (19.940, 7.705, -5.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 617: type 2 at (20.560, 7.705, -5.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 618: type 2 at (24.440, 7.705, -5.000), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 619: type 2 at (27.500, 7.705, -3.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 620: type 2 at (-29.440, 7.705, -5.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 621: type 2 at (-25.560, 7.705, -5.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 622: type 2 at (-12.500, 7.705, -4.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 623: type 2 at (-8.000, 7.705, -4.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 624: type 2 at (-3.500, 7.705, -4.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 625: type 2 at (0.750, 7.705, -4.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 626: type 2 at (4.750, 7.705, -4.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 627: type 2 at (8.750, 7.705, -4.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 628: type 2 at (12.750, 7.705, -4.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 629: type 2 at (25.560, 7.705, -5.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 630: type 2 at (29.440, 7.705, -5.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 631: type 2 at (-14.440, 7.705, -5.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 632: type 2 at (-10.560, 7.705, -5.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 633: type 2 at (-9.940, 7.705, -5.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 634: type 2 at (-6.060, 7.705, -5.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 635: type 2 at (-5.440, 7.705, -5.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 636: type 2 at (-1.560, 7.705, -5.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 637: type 2 at (-0.940, 7.705, -4.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (0.900, 0.040), shadow 1
+light 638: type 2 at (2.440, 7.705, -5.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 639: type 2 at (3.060, 7.705, -5.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 640: type 2 at (6.440, 7.705, -5.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 641: type 2 at (7.060, 7.705, -5.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 642: type 2 at (10.440, 7.705, -5.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 643: type 2 at (11.060, 7.705, -5.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 644: type 2 at (14.440, 7.705, -5.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 645: type 2 at (-0.940, 7.705, -6.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (1.400, 0.040), shadow 1
+light 646: type 2 at (-22.250, 7.705, -6.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 647: type 2 at (-17.500, 7.705, -6.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 648: type 2 at (17.750, 7.705, -6.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 649: type 2 at (22.500, 7.705, -6.940), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 650: type 2 at (-27.500, 7.705, -7.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 651: type 2 at (-22.250, 7.705, -7.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 652: type 2 at (-17.500, 7.705, -7.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 653: type 2 at (-12.500, 7.705, -7.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 654: type 2 at (-8.000, 7.705, -7.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 655: type 2 at (-3.500, 7.705, -7.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 656: type 2 at (0.750, 7.705, -7.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 657: type 2 at (4.750, 7.705, -7.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 658: type 2 at (8.750, 7.705, -7.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 659: type 2 at (12.750, 7.705, -7.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 660: type 2 at (17.750, 7.705, -7.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 661: type 2 at (22.500, 7.705, -7.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 662: type 2 at (27.500, 7.705, -7.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 663: type 2 at (-27.500, 7.705, -8.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 664: type 2 at (-24.440, 7.705, -9.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 665: type 2 at (-20.060, 7.705, -9.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 666: type 2 at (-19.440, 7.705, -9.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 667: type 2 at (-15.560, 7.705, -9.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 668: type 2 at (-12.500, 7.705, -8.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 669: type 2 at (-8.000, 7.705, -8.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 670: type 2 at (-3.500, 7.705, -8.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 671: type 2 at (0.750, 7.705, -8.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 672: type 2 at (4.750, 7.705, -8.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 673: type 2 at (8.750, 7.705, -8.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 674: type 2 at (12.750, 7.705, -8.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 675: type 2 at (15.560, 7.705, -9.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 676: type 2 at (19.940, 7.705, -9.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 677: type 2 at (20.560, 7.705, -9.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 678: type 2 at (24.440, 7.705, -9.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 679: type 2 at (27.500, 7.705, -8.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 680: type 2 at (-29.440, 7.705, -9.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 681: type 2 at (-25.560, 7.705, -9.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 682: type 2 at (-14.440, 7.705, -9.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 683: type 2 at (-10.560, 7.705, -9.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 684: type 2 at (-9.940, 7.705, -9.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 685: type 2 at (-6.060, 7.705, -9.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 686: type 2 at (-5.440, 7.705, -9.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 687: type 2 at (-1.560, 7.705, -9.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 688: type 2 at (-0.940, 7.705, -9.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 689: type 2 at (2.440, 7.705, -9.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 690: type 2 at (3.060, 7.705, -9.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 691: type 2 at (6.440, 7.705, -9.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 692: type 2 at (7.060, 7.705, -9.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 693: type 2 at (10.440, 7.705, -9.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 694: type 2 at (11.060, 7.705, -9.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 695: type 2 at (14.440, 7.705, -9.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 696: type 2 at (25.560, 7.705, -9.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 697: type 2 at (29.440, 7.705, -9.750), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 698: type 2 at (-27.500, 7.705, -11.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 699: type 2 at (-22.250, 7.705, -11.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 700: type 2 at (-17.500, 7.705, -11.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 701: type 2 at (-12.500, 7.705, -11.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 702: type 2 at (-8.000, 7.705, -11.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 703: type 2 at (-3.500, 7.705, -11.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 704: type 2 at (0.750, 7.705, -11.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 705: type 2 at (4.750, 7.705, -11.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 706: type 2 at (8.750, 7.705, -11.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 707: type 2 at (12.750, 7.705, -11.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.400, 0.040), shadow 1
+light 708: type 2 at (17.750, 7.705, -11.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 709: type 2 at (22.500, 7.705, -11.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 710: type 2 at (27.500, 7.705, -11.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 711: type 2 at (27.500, 7.705, 34.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 712: type 2 at (25.560, 7.705, 32.250), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 713: type 2 at (29.440, 7.705, 32.250), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 714: type 2 at (27.500, 7.705, 30.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 715: type 2 at (27.500, 7.705, 29.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 716: type 2 at (25.560, 7.705, 27.250), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 717: type 2 at (29.440, 7.705, 27.250), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 718: type 2 at (27.500, 7.705, 25.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 719: type 2 at (27.500, 7.705, 24.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 720: type 2 at (25.560, 7.705, 22.250), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 721: type 2 at (29.440, 7.705, 22.250), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (4.400, 0.040), shadow 1
+light 722: type 2 at (27.500, 7.705, 20.060), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 723: type 2 at (27.500, 7.705, 19.440), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 724: type 2 at (25.560, 7.705, 17.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 725: type 2 at (29.440, 7.705, 17.500), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 726: type 2 at (27.500, 7.705, 15.560), intensity 4043.06, colour (1.855, 0.818, 0.289), range 5, size (3.900, 0.040), shadow 1
+light 727: type 1 at (-42.750, 7.540, 32.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 728: type 1 at (-42.750, 7.540, 26.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 729: type 1 at (-42.750, 7.540, 20.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 730: type 1 at (-42.750, 7.540, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 731: type 1 at (-42.750, 7.540, 8.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 732: type 1 at (-42.750, 7.540, 2.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 733: type 1 at (-42.750, 7.540, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 734: type 1 at (-42.750, 7.540, -9.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 735: type 1 at (-36.750, 7.540, 32.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 736: type 1 at (-36.750, 7.540, 26.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 737: type 1 at (-36.750, 7.540, 20.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 738: type 1 at (-36.750, 7.540, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 739: type 1 at (-36.750, 7.540, 8.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 740: type 1 at (-36.750, 7.540, 2.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 741: type 1 at (-36.750, 7.540, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 742: type 1 at (-36.750, 7.540, -9.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 743: type 1 at (-30.750, 7.540, 32.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 744: type 1 at (-30.750, 7.540, 26.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 745: type 1 at (-30.750, 7.540, 20.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 746: type 1 at (-30.750, 7.540, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 747: type 1 at (-30.750, 7.540, 8.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 748: type 1 at (-30.750, 7.540, 2.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 749: type 1 at (-30.750, 7.540, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 750: type 1 at (-30.750, 7.540, -9.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 751: type 1 at (-24.750, 7.540, 32.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 752: type 1 at (-24.750, 7.540, 26.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 753: type 1 at (-24.750, 7.540, 20.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 754: type 1 at (-24.750, 7.540, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 755: type 1 at (-24.750, 7.540, 8.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 756: type 1 at (-24.750, 7.540, 2.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 757: type 1 at (-24.750, 7.540, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 758: type 1 at (-24.750, 7.540, -9.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 759: type 1 at (-18.750, 7.890, 32.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 760: type 1 at (-18.750, 7.890, 26.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 761: type 1 at (-18.750, 7.890, 20.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 762: type 1 at (-18.750, 7.890, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 763: type 1 at (-18.750, 7.890, 8.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 764: type 1 at (-18.750, 7.890, 2.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 765: type 1 at (-18.750, 7.890, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 766: type 1 at (-18.750, 7.890, -9.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 767: type 1 at (-12.750, 7.890, 32.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 768: type 1 at (-12.750, 7.890, 2.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 769: type 1 at (-12.750, 7.890, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 770: type 1 at (-12.750, 7.890, -9.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 771: type 1 at (-6.750, 7.540, 32.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 772: type 1 at (-6.750, 7.890, 2.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 773: type 1 at (-6.750, 7.890, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 774: type 1 at (-6.750, 7.890, -9.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 775: type 1 at (-0.750, 7.890, 32.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 776: type 1 at (-0.750, 7.890, 2.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 777: type 1 at (-0.750, 7.890, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 778: type 1 at (-0.750, 7.890, -9.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 779: type 1 at (5.250, 7.890, 32.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 780: type 1 at (5.250, 7.890, 2.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 781: type 1 at (5.250, 7.890, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 782: type 1 at (5.250, 7.890, -9.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 783: type 1 at (11.250, 7.540, 32.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 784: type 1 at (11.250, 7.890, 2.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 785: type 1 at (11.250, 7.890, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 786: type 1 at (11.250, 7.890, -9.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 787: type 1 at (17.250, 7.890, 32.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 788: type 1 at (17.250, 7.890, 26.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 789: type 1 at (17.250, 7.890, 20.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 790: type 1 at (17.250, 7.890, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 791: type 1 at (17.250, 7.890, 8.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 792: type 1 at (17.250, 7.890, 2.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 793: type 1 at (17.250, 7.540, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 794: type 1 at (17.250, 7.890, -9.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 795: type 1 at (23.250, 7.890, 32.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 796: type 1 at (23.250, 7.890, 26.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 797: type 1 at (23.250, 7.890, 20.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 798: type 1 at (23.250, 7.890, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 799: type 1 at (23.250, 7.890, 8.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 800: type 1 at (23.250, 7.890, 2.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 801: type 1 at (23.250, 7.890, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 802: type 1 at (23.250, 7.890, -9.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 803: type 1 at (29.250, 7.890, 32.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 804: type 1 at (29.250, 7.890, 26.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 805: type 1 at (29.250, 7.890, 20.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 806: type 1 at (29.250, 7.540, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 807: type 1 at (29.250, 7.890, 8.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 808: type 1 at (29.250, 7.890, 2.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 809: type 1 at (29.250, 7.540, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 810: type 1 at (29.250, 7.890, -9.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 811: type 1 at (35.250, 7.540, 32.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 812: type 1 at (35.250, 7.540, 26.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 813: type 1 at (35.250, 7.540, 20.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 814: type 1 at (35.250, 7.540, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 815: type 1 at (35.250, 7.540, 8.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 816: type 1 at (35.250, 7.540, 2.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 817: type 1 at (35.250, 7.540, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 818: type 1 at (35.250, 7.540, -9.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 819: type 1 at (41.250, 7.540, 32.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 820: type 1 at (41.250, 7.540, 26.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 821: type 1 at (41.250, 7.540, 20.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 822: type 1 at (41.250, 7.540, 14.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 823: type 1 at (41.250, 7.540, 8.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 824: type 1 at (41.250, 7.540, 2.750), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 825: type 1 at (41.250, 7.540, -3.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+light 826: type 1 at (41.250, 7.540, -9.250), intensity 672.233, colour (1.636, 0.868, 0.435), range 7, size (0.000, 0.000), shadow 1
+camera 'host' at (0.000, 1.750, 27.500) forward (0.000, 0.074, -0.997), ev100 -nan(ind)
+camera 'host' vertical fov 1.117011 rad, near 0.0500 m
+sun direction (-0.4568, 0.4067, 0.7912), 128000 lux
+material 0 '21_마당': class 0, baseColor (0.604, 0.604, 0.604), roughness 0.850, metallic 0.00, specular 0.50, base texture 'Asphalt_Albedo Color' 2048x2048 format 0, mean texel (0.518, 0.497, 0.470), normal 1, roughMetal 4294967295, emissive (0, 0, 0)
+material 1 '00_콘크리트': class 0, baseColor (0.477, 0.462, 0.420), roughness 0.750, metallic 0.00, specular 0.50, base texture 'Concrete_Albedo Color' 2048x2048 format 0, mean texel (0.729, 0.730, 0.728), normal 3, roughMetal 4294967295, emissive (0, 0, 0)
+material 2 '05_황토': class 0, baseColor (0.507, 0.187, 0.059), roughness 0.880, metallic 0.00, specular 0.50, base texture 'Stone_Albedo Color' 2048x2048 format 0, mean texel (0.636, 0.626, 0.605), normal 5, roughMetal 4294967295, emissive (0, 0, 0)
+material 3 '14_스테인리스': class 0, baseColor (0.570, 0.570, 0.604), roughness 0.280, metallic 1.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    layers: clearcoat 0.000 (roughness 0.050, ior 1.50), sheen (0.000, 0.000, 0.000), anisotropy 0.700
+material 4 '18_빨간 방석': class 0, baseColor (0.604, 0.013, 0.010), roughness 0.750, metallic 0.00, specular 0.50, base texture 'Cotton_Albedo Color' 2048x2048 format 0, mean texel (0.501, 0.474, 0.472), normal 7, roughMetal 4294967295, emissive (0, 0, 0)
+    layers: clearcoat 0.000 (roughness 0.050, ior 1.50), sheen (0.263, 0.040, 0.033), anisotropy 0.000
+material 5 '19_잎': class 0, baseColor (0.020, 0.095, 0.012), roughness 0.580, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 6 '22_조명 확산판': class 0, baseColor (1.000, 1.000, 1.000), roughness 0.500, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (3030.93, 1166.9, 291.661)
+material 7 '25_화강석 바닥': class 0, baseColor (1.000, 1.000, 1.000), roughness 1.000, metallic 1.00, specular 0.50, base texture 'GraniteFloor_Albedo Color' 2048x2048 format 0, mean texel (0.621, 0.578, 0.521), normal 10, roughMetal 9, emissive (0, 0, 0)
+material 8 '27_화강석': class 0, baseColor (1.000, 1.000, 1.000), roughness 1.000, metallic 1.00, specular 0.50, base texture 'Granite_Albedo Color' 2048x2048 format 0, mean texel (0.479, 0.475, 0.468), normal 13, roughMetal 12, emissive (0, 0, 0)
+    layers: clearcoat 0.400 (roughness 0.050, ior 1.33), sheen (0.000, 0.000, 0.000), anisotropy 0.000
+material 9 '34_노란 플라스틱': class 0, baseColor (0.955, 0.477, 0.013), roughness 0.380, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 10 '35_파란 플라스틱': class 0, baseColor (0.013, 0.107, 0.604), roughness 0.380, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 11 '38_검은 금속': class 0, baseColor (0.003, 0.003, 0.003), roughness 0.550, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 12 '39_빨간 표시등': class 0, baseColor (0.033, 0.002, 0.002), roughness 0.400, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (3711.84, 14.6096, 5.74588)
+material 13 '41_흰 플라스틱': class 0, baseColor (0.828, 0.828, 0.787), roughness 0.450, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 14 '54_어두운 유리': class 0, baseColor (0.003, 0.003, 0.004), roughness 0.050, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 15 '57_잎 카드': class 0, baseColor (1.000, 1.000, 1.000), roughness 0.550, metallic 0.00, specular 0.50, base texture 'LeafCard_Albedo Color' 512x512 format 0, mean texel (0.083, 0.192, 0.059), normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 16 '50_붉은 벽돌': class 0, baseColor (0.828, 0.787, 0.787), roughness 0.780, metallic 0.00, specular 0.50, base texture 'Brick_Albedo Color' 1024x1024 format 0, mean texel (0.585, 0.318, 0.245), normal 17, roughMetal 4294967295, emissive (0, 0, 0)
+material 17 '51_굴뚝 글씨': class 0, baseColor (0.828, 0.787, 0.787), roughness 0.780, metallic 0.00, specular 0.50, base texture 'ChimneyFace_Albedo Color' 128x2048 format 0, mean texel (0.581, 0.285, 0.208), normal 19, roughMetal 4294967295, emissive (0, 0, 0)
+material 18 '06_크림 페인트': class 0, baseColor (0.911, 0.828, 0.674), roughness 1.000, metallic 1.00, specular 0.50, base texture 'Stucco_Albedo Color' 2048x2048 format 0, mean texel (0.821, 0.822, 0.821), normal 22, roughMetal 21, emissive (0, 0, 0)
+material 19 '08_흰 벽타일': class 0, baseColor (1.000, 1.000, 0.955), roughness 1.000, metallic 1.00, specular 0.50, base texture 'TileGlaze_Albedo Color' 2048x2048 format 0, mean texel (0.936, 0.941, 0.926), normal 25, roughMetal 24, emissive (0, 0, 0)
+    layers: clearcoat 1.000 (roughness 0.050, ior 1.50), sheen (0.000, 0.000, 0.000), anisotropy 0.000
+material 20 '13_주홍 가림막': class 0, baseColor (0.711, 0.064, 0.033), roughness 0.800, metallic 0.00, specular 0.50, base texture 'Cotton_Albedo Color' 2048x2048 format 0, mean texel (0.501, 0.474, 0.472), normal 7, roughMetal 4294967295, emissive (0, 0, 0)
+    layers: clearcoat 0.000 (roughness 0.050, ior 1.50), sheen (0.319, 0.100, 0.064), anisotropy 0.000
+material 21 '16_짙은 목재': class 0, baseColor (0.233, 0.179, 0.147), roughness 1.000, metallic 1.00, specular 0.50, base texture 'WoodFloor_Albedo Color' 2048x2048 format 0, mean texel (0.465, 0.357, 0.272), normal 28, roughMetal 27, emissive (0, 0, 0)
+    layers: clearcoat 0.500 (roughness 0.050, ior 1.50), sheen (0.000, 0.000, 0.000), anisotropy 0.000
+material 22 '28_돌 블록': class 0, baseColor (1.000, 1.000, 1.000), roughness 1.000, metallic 1.00, specular 0.50, base texture 'StoneBlock_Albedo Color' 2048x2048 format 0, mean texel (0.517, 0.489, 0.442), normal 31, roughMetal 30, emissive (0, 0, 0)
+material 23 '37_자판기 전면': class 0, baseColor (1.000, 1.000, 1.000), roughness 0.600, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (514.866, 438.085, 377.029)
+material 24 '43_종이': class 0, baseColor (0.507, 0.263, 0.119), roughness 0.800, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 25 '55_상점 간판': class 0, baseColor (1.000, 1.000, 1.000), roughness 0.450, metallic 0.00, specular 0.50, base texture 'ShopSigns_Albedo Color' 2048x2048 format 0, mean texel (0.631, 0.535, 0.405), normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 26 '58_돌출 간판': class 0, baseColor (1.000, 1.000, 1.000), roughness 0.500, metallic 0.00, specular 0.50, base texture 'VSigns_Albedo Color' 2048x2048 format 0, mean texel (0.516, 0.391, 0.382), normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 27 '07_민트 페인트': class 0, baseColor (0.477, 0.828, 0.674), roughness 1.000, metallic 1.00, specular 0.50, base texture 'Stucco_Albedo Color' 2048x2048 format 0, mean texel (0.821, 0.822, 0.821), normal 22, roughMetal 21, emissive (0, 0, 0)
+material 28 '12_남색 가림막': class 0, baseColor (0.033, 0.084, 0.393), roughness 0.800, metallic 0.00, specular 0.50, base texture 'Cotton_Albedo Color' 2048x2048 format 0, mean texel (0.501, 0.474, 0.472), normal 7, roughMetal 4294967295, emissive (0, 0, 0)
+    layers: clearcoat 0.000 (roughness 0.050, ior 1.50), sheen (0.100, 0.147, 0.319), anisotropy 0.000
+material 29 '56_먼 산': class 0, baseColor (0.010, 0.017, 0.008), roughness 0.920, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 30 '02_미끄럼 방지 타일': class 0, baseColor (0.507, 0.604, 0.692), roughness 1.000, metallic 1.00, specular 0.50, base texture 'TileAntiSlip_Albedo Color' 2048x2048 format 0, mean texel (0.903, 0.913, 0.907), normal 37, roughMetal 36, emissive (0, 0, 0)
+    layers: clearcoat 0.550 (roughness 0.050, ior 1.33), sheen (0.000, 0.000, 0.000), anisotropy 0.000
+material 31 '09_하늘 모자이크': class 0, baseColor (1.000, 1.000, 1.000), roughness 1.000, metallic 1.00, specular 0.50, base texture 'TileMosaic_Albedo Color' 2048x2048 format 0, mean texel (0.481, 0.677, 0.838), normal 40, roughMetal 39, emissive (0, 0, 0)
+    layers: clearcoat 1.000 (roughness 0.050, ior 1.50), sheen (0.000, 0.000, 0.000), anisotropy 0.000
+material 32 '26_조약돌 모자이크': class 0, baseColor (1.000, 1.000, 1.000), roughness 1.000, metallic 1.00, specular 0.50, base texture 'Pebble_Albedo Color' 2048x2048 format 0, mean texel (0.372, 0.369, 0.372), normal 43, roughMetal 42, emissive (0, 0, 0)
+    layers: clearcoat 0.600 (roughness 0.050, ior 1.33), sheen (0.000, 0.000, 0.000), anisotropy 0.000
+material 33 'steel_frame_shelves_01': class 0, baseColor (1.000, 1.000, 1.000), roughness 1.000, metallic 1.00, specular 0.50, base texture 'steel_frame_shelves_01_Albedo Color' 2048x2048 format 0, mean texel (0.518, 0.412, 0.303), normal 47, roughMetal 46, emissive (0, 0, 0)
+material 34 '44_젖은 화강석': class 0, baseColor (1.000, 1.000, 1.000), roughness 1.000, metallic 1.00, specular 0.50, base texture 'GraniteFloor_Albedo Color' 2048x2048 format 0, mean texel (0.621, 0.578, 0.521), normal 10, roughMetal 49, emissive (0, 0, 0)
+    layers: clearcoat 0.800 (roughness 0.050, ior 1.33), sheen (0.000, 0.000, 0.000), anisotropy 0.000
+material 35 '47_밝은 대리석': class 0, baseColor (1.000, 1.000, 1.000), roughness 1.000, metallic 1.00, specular 0.50, base texture 'MarbleWarm_Albedo Color' 2048x2048 format 0, mean texel (0.540, 0.469, 0.394), normal 52, roughMetal 51, emissive (0, 0, 0)
+material 36 '30_크롬': class 0, baseColor (0.604, 0.604, 0.638), roughness 0.040, metallic 1.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 37 '03_짙은 대리석': class 0, baseColor (1.000, 1.000, 1.000), roughness 1.000, metallic 1.00, specular 0.50, base texture 'MarbleDark_Albedo Color' 2048x2048 format 0, mean texel (0.279, 0.260, 0.242), normal 55, roughMetal 54, emissive (0, 0, 0)
+material 38 '29_거울': class 0, baseColor (0.955, 0.955, 0.933), roughness 0.000, metallic 1.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 39 'Plastic': class 0, baseColor (0.890, 0.319, 0.420), roughness 0.450, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 40 'Plastic': class 0, baseColor (0.955, 0.604, 0.064), roughness 0.400, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 41 '04_나무 마루': class 0, baseColor (1.000, 0.933, 0.869), roughness 1.000, metallic 1.00, specular 0.50, base texture 'WoodFloor_Albedo Color' 2048x2048 format 0, mean texel (0.465, 0.357, 0.272), normal 28, roughMetal 27, emissive (0, 0, 0)
+    layers: clearcoat 0.400 (roughness 0.050, ior 1.50), sheen (0.000, 0.000, 0.000), anisotropy 0.000
+material 42 '11_유리': class 4, baseColor (0.828, 0.911, 0.911), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.500, attenuation distance 0.0100 m, two-sided 0
+    instance 3387 submesh 0: world bounds (-15.000, 0.150, 34.985) - (-14.500, 4.400, 35.015), 10 triangles
+    instance 3387 submesh 1: world bounds (-15.000, 0.150, 34.985) - (-14.500, 4.400, 34.985), 2 triangles
+    instance 3392 submesh 0: world bounds (-14.500, 0.150, 34.985) - (-14.000, 4.400, 35.015), 10 triangles
+    instance 3392 submesh 1: world bounds (-14.500, 0.150, 34.985) - (-14.000, 4.400, 34.985), 2 triangles
+    instance 3396 submesh 0: world bounds (-14.000, 0.150, 34.985) - (-13.500, 4.400, 35.015), 10 triangles
+    instance 3396 submesh 1: world bounds (-14.000, 0.150, 34.985) - (-13.500, 4.400, 34.985), 2 triangles
+    instance 3400 submesh 0: world bounds (-13.500, 0.150, 34.985) - (-13.000, 4.400, 35.015), 10 triangles
+    instance 3400 submesh 1: world bounds (-13.500, 0.150, 34.985) - (-13.000, 4.400, 34.985), 2 triangles
+    instance 3405 submesh 0: world bounds (-13.000, 0.150, 34.985) - (-12.500, 4.400, 35.015), 10 triangles
+    instance 3405 submesh 1: world bounds (-13.000, 0.150, 34.985) - (-12.500, 4.400, 34.985), 2 triangles
+    instance 3409 submesh 0: world bounds (-12.500, 0.150, 34.985) - (-12.000, 4.400, 35.015), 10 triangles
+    instance 3409 submesh 1: world bounds (-12.500, 0.150, 34.985) - (-12.000, 4.400, 34.985), 2 triangles
+material 43 '10_편백': class 0, baseColor (1.000, 0.933, 0.787), roughness 1.000, metallic 1.00, specular 0.50, base texture 'Hinoki_Albedo Color' 2048x2048 format 0, mean texel (0.588, 0.459, 0.326), normal 59, roughMetal 58, emissive (0, 0, 0)
+material 44 '40_다운라이트 렌즈': class 0, baseColor (1.000, 1.000, 1.000), roughness 0.500, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (4637.58, 2044.08, 721.964)
+material 45 '45_간판': class 0, baseColor (1.000, 1.000, 1.000), roughness 0.450, metallic 0.00, specular 0.50, base texture 'Sign_Albedo Color' 2048x512 format 0, mean texel (0.872, 0.789, 0.725), normal 4294967295, roughMetal 4294967295, emissive (350, 350, 350)
+material 46 '17_락커 목재': class 0, baseColor (1.000, 0.848, 0.692), roughness 1.000, metallic 1.00, specular 0.50, base texture 'WoodFloor_Albedo Color' 2048x2048 format 0, mean texel (0.465, 0.357, 0.272), normal 28, roughMetal 27, emissive (0, 0, 0)
+    layers: clearcoat 0.300 (roughness 0.050, ior 1.50), sheen (0.000, 0.000, 0.000), anisotropy 0.000
+material 47 '23_화면': class 0, baseColor (0.002, 0.002, 0.002), roughness 0.100, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (70.4295, 119.844, 267.515)
+material 48 '24_수건': class 0, baseColor (0.869, 0.869, 0.890), roughness 0.900, metallic 0.00, specular 0.50, base texture 'Cotton_Albedo Color' 2048x2048 format 0, mean texel (0.501, 0.474, 0.472), normal 7, roughMetal 4294967295, emissive (0, 0, 0)
+    layers: clearcoat 0.000 (roughness 0.050, ior 1.50), sheen (0.214, 0.214, 0.214), anisotropy 0.000
+material 49 '36_황동': class 0, baseColor (0.748, 0.507, 0.147), roughness 0.220, metallic 1.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 50 'DarkWood': class 0, baseColor (0.073, 0.027, 0.010), roughness 1.000, metallic 1.00, specular 0.50, base texture 'dark_wood_Albedo Color' 2048x2048 format 0, mean texel (0.364, 0.164, 0.091), normal 65, roughMetal 64, emissive (0, 0, 0)
+material 51 'Black': class 0, baseColor (0.002, 0.002, 0.002), roughness 0.700, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 52 'Brass': class 0, baseColor (0.692, 0.393, 0.107), roughness 0.250, metallic 1.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 53 'Tag': class 0, baseColor (0.787, 0.570, 0.263), roughness 1.000, metallic 1.00, specular 0.50, base texture 'fine_grained_wood_Albedo Color' 2048x2048 format 0, mean texel (0.259, 0.186, 0.127), normal 69, roughMetal 68, emissive (0, 0, 0)
+material 54 'potted_plant_01_leaves': class 0, baseColor (1.000, 1.000, 1.000), roughness 1.000, metallic 1.00, specular 0.50, base texture 'potted_plant_01_leaves_Albedo Color' 2048x2048 format 0, mean texel (0.248, 0.284, 0.148), normal 73, roughMetal 72, emissive (0, 0, 0)
+material 55 'potted_plant_01_pot': class 0, baseColor (1.000, 1.000, 1.000), roughness 1.000, metallic 1.00, specular 0.50, base texture 'potted_plant_01_pot_Albedo Color' 2048x2048 format 0, mean texel (0.609, 0.428, 0.299), normal 76, roughMetal 75, emissive (0, 0, 0)
+material 56 'Sofa_01': class 0, baseColor (1.000, 1.000, 1.000), roughness 1.000, metallic 1.00, specular 0.50, base texture 'Sofa_01_Albedo Color' 2048x2048 format 0, mean texel (0.449, 0.405, 0.370), normal 79, roughMetal 78, emissive (0, 0, 0)
+material 57 'CoffeeTable_01': class 0, baseColor (1.000, 1.000, 1.000), roughness 1.000, metallic 1.00, specular 0.50, base texture 'CoffeeTable_01_Albedo Color' 2048x2048 format 0, mean texel (0.387, 0.465, 0.402), normal 83, roughMetal 82, emissive (0, 0, 0)
+material 58 '52_요금표': class 0, baseColor (1.000, 1.000, 1.000), roughness 0.500, metallic 0.00, specular 0.50, base texture 'PriceBoard_Albedo Color' 1024x1024 format 0, mean texel (0.279, 0.193, 0.136), normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    layers: clearcoat 0.400 (roughness 0.050, ior 1.50), sheen (0.000, 0.000, 0.000), anisotropy 0.000
+material 59 'wall_clock_glass': class 4, baseColor (0.828, 0.911, 0.911), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.500, attenuation distance 0.0100 m, two-sided 0
+    instance 5168 submesh 0: world bounds (2.090, 2.290, 5.060) - (2.410, 2.610, 5.095), 2852 triangles
+    instance 5168 submesh 1: world bounds (2.107, 2.307, 5.095) - (2.393, 2.593, 5.107), 528 triangles
+    instance 5169 submesh 0: world bounds (2.173, 2.440, 5.088) - (2.262, 2.505, 5.088), 10 triangles
+    instance 5170 submesh 0: world bounds (2.233, 2.438, 5.089) - (2.350, 2.514, 5.089), 10 triangles
+    instance 5171 submesh 0: world bounds (2.243, 2.317, 5.085) - (2.273, 2.479, 5.091), 258 triangles
+material 60 'DarkWood': class 0, baseColor (0.073, 0.027, 0.010), roughness 1.000, metallic 1.00, specular 0.50, base texture 'dark_wood_Albedo Color' 2048x2048 format 0, mean texel (0.364, 0.164, 0.091), normal 65, roughMetal 64, emissive (0, 0, 0)
+material 61 'Black': class 0, baseColor (0.002, 0.002, 0.002), roughness 0.700, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 62 'Brass': class 0, baseColor (0.692, 0.393, 0.107), roughness 0.250, metallic 1.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 63 'Chrome': class 0, baseColor (0.787, 0.787, 0.828), roughness 0.080, metallic 1.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 64 'Rubber': class 0, baseColor (0.890, 0.147, 0.013), roughness 0.650, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 65 'wicker_basket_01': class 0, baseColor (1.000, 1.000, 1.000), roughness 1.000, metallic 1.00, specular 0.50, base texture 'wicker_basket_01_Albedo Color' 2048x2048 format 0, mean texel (0.310, 0.236, 0.155), normal 88, roughMetal 87, emissive (0, 0, 0)
+material 66 'wicker_basket_02': class 0, baseColor (1.000, 1.000, 1.000), roughness 1.000, metallic 1.00, specular 0.50, base texture 'wicker_basket_02_Albedo Color' 2048x2048 format 0, mean texel (0.658, 0.474, 0.300), normal 92, roughMetal 91, emissive (0, 0, 0)
+material 67 '15_흰 도기': class 0, baseColor (0.890, 0.890, 0.869), roughness 0.080, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    layers: clearcoat 1.000 (roughness 0.050, ior 1.50), sheen (0.000, 0.000, 0.000), anisotropy 0.000
+material 68 'drawer_cabinet': class 0, baseColor (1.000, 1.000, 1.000), roughness 1.000, metallic 1.00, specular 0.50, base texture 'drawer_cabinet_Albedo Color' 2048x2048 format 0, mean texel (0.473, 0.359, 0.252), normal 96, roughMetal 95, emissive (0, 0, 0)
+material 69 '33_노란 돗자리': class 0, baseColor (0.955, 0.711, 0.179), roughness 1.000, metallic 1.00, specular 0.50, base texture 'Woven_Albedo Color' 2048x2048 format 0, mean texel (0.760, 0.718, 0.664), normal 100, roughMetal 99, emissive (0, 0, 0)
+    layers: clearcoat 0.000 (roughness 0.050, ior 1.50), sheen (0.133, 0.084, 0.020), anisotropy 0.000
+material 70 '48_인조 가죽': class 0, baseColor (0.073, 0.078, 0.084), roughness 0.580, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    layers: clearcoat 0.250 (roughness 0.050, ior 1.50), sheen (0.000, 0.000, 0.000), anisotropy 0.000
+material 71 '46_TV 화면': class 0, baseColor (0.002, 0.002, 0.002), roughness 0.100, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (200, 200, 200)
+material 72 '49_가마 돌': class 0, baseColor (0.214, 0.214, 0.243), roughness 1.000, metallic 1.00, specular 0.50, base texture 'StoneBlock_Albedo Color' 2048x2048 format 0, mean texel (0.517, 0.489, 0.442), normal 31, roughMetal 30, emissive (0, 0, 0)
+material 73 '20_천장': class 0, baseColor (0.911, 0.890, 0.828), roughness 1.000, metallic 1.00, specular 0.50, base texture 'Stucco_Albedo Color' 2048x2048 format 0, mean texel (0.821, 0.822, 0.821), normal 22, roughMetal 21, emissive (0, 0, 0)
+material 74 '31_어두운 천장': class 0, baseColor (0.022, 0.017, 0.015), roughness 1.000, metallic 1.00, specular 0.50, base texture 'Stucco_Albedo Color' 2048x2048 format 0, mean texel (0.821, 0.822, 0.821), normal 22, roughMetal 21, emissive (0, 0, 0)
+material 75 '32_광천장': class 0, baseColor (1.000, 1.000, 1.000), roughness 0.700, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (401.246, 279.955, 200.427)
+material 76 'modern_ceiling_lamp_01': class 0, baseColor (1.000, 1.000, 1.000), roughness 1.000, metallic 1.00, specular 0.50, base texture 'modern_ceiling_lamp_01_Albedo Color' 2048x2048 format 0, mean texel (0.674, 0.649, 0.616), normal 104, roughMetal 103, emissive (0, 0, 0)
+material 77 'ceiling_fan_emissive_2k.jpg': class 4, baseColor (0.828, 0.911, 0.911), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.500, attenuation distance 0.0100 m, two-sided 0
+    instance 8331 submesh 0: world bounds (-20.410, 7.384, 0.092) - (-20.092, 7.900, 0.409), 11736 triangles
+    instance 8332 submesh 0: world bounds (-20.931, 7.472, -0.431) - (-19.569, 7.545, 0.931), 4620 triangles
+    instance 8333 submesh 0: world bounds (-9.410, 7.034, 0.092) - (-9.092, 7.550, 0.409), 11736 triangles
+    instance 8334 submesh 0: world bounds (-9.931, 7.122, -0.431) - (-8.569, 7.195, 0.931), 4620 triangles
+    instance 8335 submesh 0: world bounds (8.590, 7.034, 0.092) - (8.908, 7.550, 0.409), 11736 triangles
+    instance 8336 submesh 0: world bounds (8.069, 7.122, -0.431) - (9.431, 7.195, 0.931), 4620 triangles
+    instance 8337 submesh 0: world bounds (20.590, 7.384, 0.092) - (20.908, 7.900, 0.409), 11736 triangles
+    instance 8338 submesh 0: world bounds (20.069, 7.472, -0.431) - (21.431, 7.545, 0.931), 4620 triangles
+material 78 'water water': class 3, baseColor (0.660, 0.900, 0.930), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.333, attenuation distance 0.0100 m, two-sided 0
+material 79 'water water': class 3, baseColor (0.620, 0.880, 0.970), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.333, attenuation distance 0.0100 m, two-sided 0
+material 80 'water water': class 3, baseColor (0.260, 0.620, 0.120), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.333, attenuation distance 0.0100 m, two-sided 0
+material 81 'water water': class 3, baseColor (0.680, 0.900, 0.960), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.333, attenuation distance 0.0100 m, two-sided 0
+material 82 'water water': class 3, baseColor (0.700, 0.900, 0.900), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.333, attenuation distance 0.0100 m, two-sided 0
+material 83 'water water': class 3, baseColor (0.620, 0.880, 0.970), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.333, attenuation distance 0.0100 m, two-sided 0
+material 84 'water water': class 3, baseColor (0.620, 0.880, 0.970), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.333, attenuation distance 0.0100 m, two-sided 0
+material 85 'water water': class 3, baseColor (0.660, 0.900, 0.930), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.333, attenuation distance 0.0100 m, two-sided 0
+material 86 'water water': class 3, baseColor (0.700, 0.900, 0.900), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.333, attenuation distance 0.0100 m, two-sided 0
+material 87 'water water': class 3, baseColor (0.620, 0.860, 0.950), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.333, attenuation distance 0.0100 m, two-sided 0
+material 88 'water water': class 3, baseColor (0.660, 0.900, 0.930), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.333, attenuation distance 0.0100 m, two-sided 0
+material 89 'water water': class 3, baseColor (0.620, 0.880, 0.970), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.333, attenuation distance 0.0100 m, two-sided 0
+material 90 'library 0': class 0, baseColor (0.180, 0.200, 0.230), roughness 0.650, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 91 'library 1': class 0, baseColor (0.040, 0.320, 0.650), roughness 0.300, metallic 0.85, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 92 'library 2': class 0, baseColor (0.000, 0.000, 0.000), roughness 0.600, metallic 0.00, specular 0.00, base texture none, normal 4294967295, roughMetal 4294967295, emissive (85333.3, 85333.3, 85333.3)
+material 93 'library 3': class 0, baseColor (0.750, 0.120, 0.035), roughness 0.800, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 94 'library 4': class 0, baseColor (0.580, 0.360, 0.120), roughness 0.750, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 95 'library 5': class 0, baseColor (0.080, 0.450, 0.300), roughness 0.450, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+material 96 'water water': class 3, baseColor (0.300, 0.100, 0.420), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.333, attenuation distance 0.0100 m, two-sided 0
+material 97 'water water': class 3, baseColor (0.300, 0.100, 0.420), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.333, attenuation distance 0.0100 m, two-sided 0
+material 98 'water water': class 3, baseColor (0.620, 0.860, 0.950), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.333, attenuation distance 0.0100 m, two-sided 0
+material 99 'water water': class 3, baseColor (0.260, 0.620, 0.120), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.333, attenuation distance 0.0100 m, two-sided 0
+material 100 'water water': class 3, baseColor (0.660, 0.900, 0.930), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.333, attenuation distance 0.0100 m, two-sided 0
+material 101 'water water': class 3, baseColor (0.700, 0.900, 0.900), roughness 0.000, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.333, attenuation distance 0.0100 m, two-sided 0
+material 102 'fountain water': class 3, baseColor (0.712, 0.945, 0.991), roughness 0.020, metallic 0.00, specular 0.50, base texture none, normal 4294967295, roughMetal 4294967295, emissive (0, 0, 0)
+    ior 1.333, attenuation distance 0.0100 m, two-sided 0
