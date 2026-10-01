@@ -139,3 +139,55 @@ const refl::MeshCardsFrame& mc = refl::meshCards(fc);   // 꺼져 있으면 mc.v
 - ②: 생성기(`Native/Scene`, CPU) + 테스트(상자·ㄷ자·방 껍데기 메시에서 카드 수와 덮임). 씬 파일 선택 블록 `CARD`(없으면 로드 때 생성).
 - ③a: 등록·상주 단계 할당·캡처·복사·업로드 + `--capture-cards`(아틀라스 층 덤프). ③b: 피드백·고해상도 페이지·퇴출·재캡처·resample 목록.
 - ④: S2 조명이 붙으면 로비 "데운 뒤 컷 f60·f61·f63".
+
+## 9. S2 쪽: 조명 아틀라스·갱신·읽기 (2026-10-02, S2)
+
+읽은 원본(ue6-main): `LumenSceneLighting.usf`(갱신 선택·합성·resample), `LumenSceneDirectLighting.usf`, `LumenSceneDirectLightingCulling.usf`, `LumenSceneDirectLightingHardwareRayTracing.usf`, `LumenCardTileShadowDownsampleFactor.ush`, `Radiosity/LumenRadiosity.ush`·`.usf`, `LumenRadiosity.cpp`, `LumenSceneLighting.cpp`. 값은 원본 기본값.
+
+### 9.1 S2가 갖는 자료
+
+| 이름 | 형식·크기 | 내용 |
+|---|---|---|
+| `cardDirect` | R11G11B10_FLOAT 4096² | 텍셀의 직접광 조도(국소광 + 태양), lux × `SC_STORE_SCALE`(1/64) |
+| `cardIndirect` | R11G11B10_FLOAT 4096² | radiosity 조도(RadiosityAtlas, 다운샘플 1) |
+| `cardFinal` | R11G11B10_FLOAT 4096² | (직접 + 간접) × 알베도 / π + 방출, nits × 1/16. hit이 읽는 값 |
+| `cardRadiosityFrames` | R8_UNORM 512² | 8텍셀 타일당 누적 프레임 수 / 255 (최대 4) |
+| `cardShadowUniform` | Buffer<uint> 512² × 8 | 타일 × 광원(번호 & 255) 비트: 지난 갱신에서 그 광원에 대한 가시성이 타일 전체에서 같았다(다음 갱신은 2×2에 광선 1개) |
+| `cardPageLight` | Buffer 16 B × `cardPageCapacity` | 페이지별: 마지막 직접광 갱신 프레임, 마지막 간접광 갱신 프레임, 직접·간접 시간 번호(지터용) |
+| 프레임 임시 | | 갱신 페이지 목록 2개, 카드 타일 목록, 광원 타일(타일당 ≤ 8), 그림자 추적 목록·마스크, radiosity 추적 아틀라스(프로브 × 4×4), 필터된 것, 프로브 SH 3장 |
+
+메모리: 조명 아틀라스 3장 × 4 B × 4096² = 201 MB + 작은 것들. A의 기하 201 MB와 합쳐 약 410 MB(언리얼은 압축으로 더 작다 — 차이 목록에 추가).
+
+### 9.2 프레임 순서 (A의 6번 뒤)
+
+1. **resample**(A의 3번 갈고리): 재할당된 페이지의 `cardDirect`·`cardIndirect`·누적 프레임·균일 가시 비트를 옛 사각형에서 새 사각형으로(쌍선형), `cardFinal`은 새 알베도·방출로 다시 합성. 옛 카드가 없으면 0.
+2. **갱신 선택**(페이지당 스레드): 우선순위 통 = 127 − clamp(log2(4 × 마지막 갱신 뒤 프레임 수 × 속도)), 한 번도 안 갱신된 페이지는 2048프레임으로 친다. 속도 = 1 / (1 + 거리 / 첫 클립맵 반크기) × (시야 절두체 근처면 2) 또는 최근 고해상도로 쓰인 페이지는 4(피드백). 히스토그램 → 예산까지 통을 채움 → 목록. 예산(8텍셀 타일 수): 직접 = 아틀라스 타일 / 32(`DirectLighting.UpdateFactor`), 간접 = / 64(`Radiosity.UpdateFactor`). **시야와 무관하게 범위 안 전부가 돈다**(절두체는 속도만 2배).
+3. **직접광**: 목록의 타일마다 가장 센 8광원(가중 = 휘도 × 감쇠 × 면광원 적분, 타일 중심·타일 깊이 범위로 컬링) → (타일, 광원)마다 그림자 추적 목록: 균일 비트가 있으면 2×2당 1텍셀(4배 적음), 없으면 텍셀마다 → 광선 = 텍셀에서 광원 중심으로 1개(A의 `direct_pairs` 구조: 쌍마다 스레드 하나, 262,144 띠) → 텍셀 조도 = Σ 해석적 조도 × 가시. 태양도 광원 하나로 같은 목록에. 균일 비트 갱신.
+4. **radiosity**: 목록의 페이지를 4텍셀 타일로, 타일당 프로브 1개(텍셀 위치는 시간 번호로 지터), 프로브당 4×4 균등 반구 광선(지터) → hit의 `cardFinal`을 9.3으로 읽음(없으면 0, miss는 하늘), 세기 상한 40(노출 단위) → 이웃 프로브 4개와 평면 가중 필터(가운데 가중 2) → SH2 → 텍셀마다 프로브 4개 쌍선형(1텍셀 확장) × 평면 가중 → 시간 누적 alpha = 1 / (1 + 프레임 수), 최대 4. 광선은 원점 5 cm 안 뒷면 hit을 건너뛴다(`AvoidSelfIntersections`).
+5. **합성**: 갱신된 타일의 `cardFinal`.
+6. 소비자(반사·GI·radiance cache·물/유리 hit)의 읽기와 피드백.
+
+### 9.3 hit 읽기 (S2 본체, `Passes/SurfaceCache/CardLighting.hlsli`)
+
+```hlsl
+// A의 4절 1~7. 유효하지 않으면 valid = false(원본과 같이 0).
+struct ScSample { bool valid; float3 direct, sun, indirect; float3 albedo, emission; };  // 지금과 같은 모양
+ScSample scReadCards(McFrame mc, uint sceneInstance, float3 position, float3 normal, float sampleRadius, uint2 ditherCoord);
+float3 scFinalLighting(ScSample s);
+```
+- `direct`에 태양이 들어 있다(`sun` = 0). `albedo`·`emission`은 카드의 것.
+- **R·반사 호출부가 바꿀 것 한 줄**: `scRead(surfaceCache, layout, s.position, face)` → `scReadCards(mc, s.sceneInstance, s.position, face, footprint, coord)`. 위치만으로는 인스턴스를 알 수 없어서 서명이 달라진다. `scMark`는 카드 경로에서 필요 없다(피드백이 대신한다) — `surface_cache.mesh_cards`가 켜지면 호출부에서 건너뛴다. 옛 해시 셀 경로(`scRead`/`scMark`)는 스위치가 꺼졌을 때만 남는다.
+- hit 셰이딩의 받는 값은 지금과 같다: `L.irradiance = cell.direct + cell.indirect`, 다만 태양이 `direct`에 들어 있으므로 hit에서 태양을 따로 더하던 코드는 카드가 유효할 때 건너뛴다(이중 계산 방지).
+
+### 9.4 A에게 필요한 것 (3절에 더해)
+
+- `McCardPage`에 그 페이지의 마지막 캡처 프레임(resample·새 페이지 우선에 씀)이 있거나 `mc.captured`로 충분한지 — `mc.captured`면 된다(목록에 든 페이지는 `cardPageLight`를 0으로 돌려 "한 번도 안 갱신됨"으로 만든다).
+- 첫 클립맵 반크기에 해당하는 값(갱신 속도의 거리 척도): 없으면 S2가 `surface_cache.toml`에 `mesh_cards.update_distance_m = 25`(언리얼 첫 클립맵 2500 cm)로 둔다.
+- 카드의 월드 상자(광원 컬링): `McCard.cardToWorld` + `extent`로 S2가 계산한다. 추가 요청 없음.
+- 캡처에서 표면이 없는 텍셀은 깊이 1.0: S2는 그 텍셀을 조명·radiosity·읽기에서 뺀다.
+
+### 9.5 단계 (S2)
+
+- S-a: `CardLighting.hlsli`(읽기 본체) + 합성 패스. A의 ③a가 올라오면 방출만 있는 `cardFinal`로 읽기를 확인.
+- S-b: 갱신 선택 + 직접광(쌍 구조, 균일 비트). S-c: radiosity. S-d: resample·피드백 쓰기.
+- 판정: A의 ④와 같이 — 데운 뒤 컷 f60·f61·f63과 회전 중 그림(로비·라운지·기차).

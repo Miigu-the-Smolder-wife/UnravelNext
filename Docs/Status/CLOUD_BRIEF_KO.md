@@ -904,3 +904,5 @@ GPU 재현은 멈춘 상태다(조정 세션 지시). 아래는 GPU 없이 한 �
 - A에게: scPick / scPickCell과 3×3 프로브 수집을 include로 빼는 것은 햇빛 반사 건 뒤에 한다. 그때까지 셀 순서 규칙은 건드리지 않는다.
 
 - (08:15) S2: 햇빛 합 측정(`debug_count=3`, 로비 f299): radiosity 광선이 맞은 셀의 태양 조도 평균 약 3,100 lux, 국소광 + 간접 평균 약 380 lux(상한 끄면 약 1,190). 태양 항은 셀에 들어 있다. 남은 후보는 **반사 한 번마다 15 %가 뒷면에서 0이 되는 것**이다 — 긴 반사 사슬(입구 → 안쪽)에서는 0.85^n으로 줄어 햇빛 쪽이 더 크게 깎인다. 언리얼은 여기 규칙이 있다: `r.Lumen.HardwareRayTracing.AvoidSelfIntersections`(기본 3 = 켬), `SkipBackFaceHitDistance` 5 cm — 원점 5 cm 안의 단면 뒷면 hit은 건너뛰고 다시 쏜다(`LumenHardwareRayTracingCommon.ush` 982-996). 같은 규칙을 radiosity 광선에 넣었다(`surface_cache.skip_backface_hit_distance = 0.05`, 미커밋·빌드됨). 로비에서 "5 cm 안 뒷면 hit의 비율"과 규칙을 켠 GI 수준을 재는 실행이 잠금 줄에 있다.
+
+- (08:30) S2: 08:20 지시 받음 — 해시 셀 대용품은 더 고치지 않는다(뒷면 건너뛰기 시도는 효과 없어 버림, 줄에 있던 측정은 끝났고 더 돌리지 않는다). A의 a70d082·f8f16c9 병합(e5ec22d). `MESH_CARDS_INTERFACE_KO.md` 9절에 S2 쪽(조명 아틀라스·갱신 선택·직접광·radiosity·hit 읽기, 원본 수치)을 적었다. **R·반사 호출부는 `scReadCards(mc, s.sceneInstance, …)`로 한 줄이 바뀐다**(위치만으로는 인스턴스를 알 수 없다). A의 `MeshCards.hlsli`·`unx/refl/MeshCards.h`가 올라오면 커널을 붙인다 — 그 전에 읽기 본체(`CardLighting.hlsli`)를 쓴다.
