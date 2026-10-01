@@ -1,6 +1,9 @@
 #include "unx/refl/ReflectionSystem.h"
 
 #include "unx/rt/RayPipeline.h"
+#if UNX_R_HAS_SHADING
+#include "unx/shading/Upscale.h"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -65,6 +68,7 @@ const char* const kRefractLibrary[2] = { "Passes/Reflection/RefractionTrace.SKY0
 constexpr const char* kShadowLibrary = "Passes/Reflection/ReflectionShadow";
 constexpr const char* kLocalShadowLibrary = "Passes/Reflection/ReflectionLocalShadow";
 const char* const kSurfaceCacheLightLibrary[2] = { "Passes/SurfaceCache/SurfaceCacheLight.SKY0", "Passes/SurfaceCache/SurfaceCacheLight.SKY1" };
+constexpr uint32_t kScreenTraceLevels = 6;  // ScreenTrace.hlsli SCT_LEVELS
 constexpr uint32_t kSurfaceCacheHeaderBytes = 64, kSurfaceCacheCellBytes = 52, kSurfaceCacheProbeBytes = 36;  // SurfaceCache.hlsli
 } // namespace
 
@@ -127,6 +131,9 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.lumenDisocclusionFrames = num("reflection.lumen_bilateral_disocclusion_frames", 2.0);
     s.lumenDisocclusionTonemap = flag("reflection.lumen_disocclusion_tonemap", true);
     s.lumenRoughFromGather = flag("reflection.lumen_rough_specular_from_gather", true);
+    s.lumenScreenTraces = flag("reflection.lumen_screen_traces", true);
+    s.lumenScreenIterations = (uint32_t)num("reflection.lumen_screen_trace_max_iterations", 50);
+    s.lumenScreenThickness = num("reflection.lumen_screen_trace_relative_depth_thickness", 0.005);
     // The surface cache (Passes/SurfaceCache/SurfaceCache.hlsli); defaults are the reference's (ue6-main LumenScene*.cpp,
     // LumenRadiosity.cpp).
     s.surfaceCache = flag("surface_cache.enabled", false);
@@ -473,6 +480,47 @@ BufferRef ReflectionSystem::surfaceCacheBuffer(FramePassContext& fc)
         m_surfaceCacheFrame = fc.frame.frameIndex;
     }
     return m_surfaceCacheRef;
+}
+
+// The screen traces' inputs of this frame (Passes/Reflection/ScreenTrace.hlsli), made once per frame by whoever asks
+// first - GI's probe trace or this system's record: the depth pyramid of the main view's depth (ReflectionHzb.hlsl: one
+// pass per level into one atlas) and the previous frame's colour (ViewResources::prevSceneColor, set here from M's
+// upscale history; invalid without it - the caller then skips its screen traces).
+ScreenTraceInputs ReflectionSystem::screenTraceInputs(FramePassContext& fc, ViewResources& main)
+{
+    if (m_screenFrame == fc.frame.frameIndex) return m_screenInputs;
+    m_screenFrame = fc.frame.frameIndex;
+    m_screenInputs = ScreenTraceInputs{};
+    if (!main.depth.valid()) return m_screenInputs;
+#if UNX_R_HAS_SHADING
+    main.prevSceneColor = shading::upscalePreviousColor(fc, main);
+#endif
+    m_screenInputs.prevColor = main.prevSceneColor;
+    const uint32_t width = main.view.width, height = main.view.height;
+    auto levelSize = [&](uint32_t level, uint32_t extent) { return std::max((extent + ((1u << level) - 1u)) >> level, 1u); };  // sctLevelSize
+    uint32_t tall = 0;
+    for (uint32_t level = 2; level <= kScreenTraceLevels; ++level) tall += levelSize(level, height);
+    const TextureRef atlas = fc.graph.createTexture({ "R screen trace depth pyramid", levelSize(1, width) + levelSize(2, width), std::max(levelSize(1, height), tall), 1, 1,
+                                                      DXGI_FORMAT_R32_FLOAT });
+    const TextureRef depth = main.depth;
+    ShaderLibrary& shaders = fc.shaders;
+    for (uint32_t level = 1; level <= kScreenTraceLevels; ++level)
+    {
+        const uint32_t lw = levelSize(level, width), lh = levelSize(level, height);
+        fc.graph.addPass("r.hzb", QueueType::Compute,
+                         [&](PassBuilder& b) {
+                             b.use(depth, Use::SrvCompute);
+                             b.use(atlas, Use::UavCompute);
+                         },
+                         [&shaders, depth, atlas, level, width, height, lw, lh](PassContext& c) {
+                             const uint32_t k[8] = { c.srv(depth), c.uav(atlas), level, 0, width, height, 0, 0 };
+                             c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionHzb"));
+                             c.computeConstants(k, 8);
+                             c.cmd->Dispatch((lw + 7) / 8, (lh + 7) / 8, 1);
+                         });
+    }
+    m_screenInputs.hzb = atlas;
+    return m_screenInputs;
 }
 
 void ReflectionSystem::ensureHistory(uint32_t width, uint32_t height)
@@ -1145,6 +1193,38 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         if (atmosphere)
             for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
     };
+    if (lumen && s.lumenScreenTraces)
+    {
+        // Screen traces before the world rays (ReflectionScreenTrace.hlsl): a ray that meets a visible surface takes the
+        // previous frame's colour there and its job traces no world ray. Without that colour (no upscale history) every
+        // ray is a world ray.
+        const ScreenTraceInputs screen = screenTraceInputs(fc, main);
+        if (screen.hzb.valid() && screen.prevColor.valid())
+        {
+            const FrameContext::Upscale& up = fc.frame.upscale;
+            g.addPass("r.refl.screentrace", QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          b.use(modes, Use::SrvCompute);
+                          b.use(results, Use::UavCompute);
+                          b.use(depth, Use::SrvCompute);
+                          b.use(gbuffer, Use::SrvCompute);
+                          b.use(jobs, Use::UavCompute);
+                          b.use(screen.hzb, Use::SrvCompute);
+                          b.use(screen.prevColor, Use::SrvCompute);
+                      },
+                      [&shaders, modes, results, depth, gbuffer, jobs, screen, frame, width, height, rayLength, frameConstants, s, outW = up.outputWidth,
+                       outH = up.outputHeight, ratio = up.exposureRatio, prevViewProj = up.prevViewProj](PassContext& c) {
+                          uint32_t k[32] = { c.srv(modes), c.uav(results), c.srv(depth), c.srv(gbuffer), c.uav(jobs), c.srv(screen.hzb), c.srv(screen.prevColor), frame,
+                                             width, height, outW, outH, asU(rayLength), s.lumenScreenIterations, asU(s.lumenScreenThickness), asU(ratio) };
+                          for (int r = 0; r < 4; ++r)
+                              for (int col = 0; col < 4; ++col) k[16 + 4 * r + col] = asU(prevViewProj.m[r][col]);
+                          c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionScreenTrace"));
+                          c.computeConstants(k, 32);
+                          c.bindFrameConstants(frameConstants);
+                          c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                      });
+        }
+    }
     g.addPass("r.refl.trace", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(args, Use::IndirectArgs);

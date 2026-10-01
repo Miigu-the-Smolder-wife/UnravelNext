@@ -23,6 +23,13 @@
 
 namespace unx::render::refl
 {
+// What a pass that traces rays across the screen binds (ReflectionSystem::screenTraceInputs).
+struct ScreenTraceInputs
+{
+    TextureRef hzb;        // R32F atlas of the depth pyramid (ScreenTrace.hlsli sctLevelOrigin)
+    TextureRef prevColor;  // ViewResources::prevSceneColor (output resolution); invalid = no history
+};
+
 struct ReflectionSettings  // from Config/quality/reflection.toml
 {
     float kHalfAngle = 0;        // radians: narrow-lobe half-angle at or above which the K path applies
@@ -48,6 +55,9 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     // reflection.lumen: the ray-reuse pipeline (ReflectionReuse.hlsli) in place of the G path, the accumulation and the layers
     bool lumen = false;
     float lumenMaxRoughness = 0.4f, lumenFadeLength = 0.1f, lumenMaxRayIntensity = 40.0f, lumenTonemapRange = 10.0f;
+    bool lumenScreenTraces = true;     // reflection.lumen_screen_traces: screen traces before the world rays (ScreenTrace.hlsli)
+    uint32_t lumenScreenIterations = 50;
+    float lumenScreenThickness = 0.005f;
     bool lumenRoughFromGather = true;  // reflection.lumen_rough_specular_from_gather: untraced pixels take view.giRoughSpecular
     bool lumenReconstruction = true, lumenTemporal = true, lumenBilateral = true, lumenDisocclusionTonemap = true;
     uint32_t lumenReconstructionSamples = 5, lumenBilateralSamples = 4;
@@ -117,6 +127,10 @@ public:
     // Planar reflectors of the scene (built on first use). Tests disable the planar path to compare it with rays.
     void setPlanarEnabled(bool enabled) { m_planarEnabled = enabled; }
     // Tests and capture modes: every counted candidate plane gets a camera (up to planar_views_max), without the cost choice.
+    // The screen traces' inputs of this frame (Passes/Reflection/ScreenTrace.hlsli: sctTrace, sctPreviousColour), recorded
+    // once per frame on the first call; also sets main.prevSceneColor. hzb: the depth pyramid atlas of main.depth (R32F);
+    // prevColor: invalid when there is no colour history (skip the screen traces then).
+    ScreenTraceInputs screenTraceInputs(FramePassContext& fc, ViewResources& main);
     // The surface cache's buffer in this frame's graph (Passes/SurfaceCache/SurfaceCache.hlsli: scMark, scRead), for
     // passes of other tracks whose ray hits use it; declare it Use::UavCompute / UavGraphics. Invalid when off.
     BufferRef surfaceCacheBuffer(FramePassContext& fc);
@@ -167,6 +181,8 @@ private:
     ComPtr<ID3D12Resource> m_layerStochastic[2], m_layerResidual[2], m_layerKeys[2];
     ComPtr<ID3D12Resource> m_surfaceCache;  // SurfaceCache.hlsli: header + cells + probes (raw)
     uint32_t m_surfaceCacheEntries = 0, m_surfaceCacheRevision = 0;
+    ScreenTraceInputs m_screenInputs;       // screenTraceInputs of frame m_screenFrame
+    uint64_t m_screenFrame = ~0ull;
     BufferRef m_surfaceCacheRef;            // its import into the frame's graph (surfaceCacheBuffer)
     uint64_t m_surfaceCacheFrame = ~0ull;
     uint32_t m_accumParity = 0, m_accumSceneRevision = 0;

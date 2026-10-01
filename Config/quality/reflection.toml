@@ -112,3 +112,7 @@ lumen_hit_surface_cache = true         # with surface_cache.enabled: the traced 
 lumen_surface_cache_view = false       # diagnostics: a traced hit's value is its cell's state (r: no lit cell, g: frames, b: live cells)
 lumen_rough_specular_from_gather = true  # with gi.lumen: pixels above the roughness limit (and the fade's other side) take the
                                        # final gather's rough specular (view.giRoughSpecular); false or no gather = the K path
+lumen_screen_traces = true             # a traced ray is first followed across the depth buffer (ScreenTrace.hlsli); a visible hit
+                                       # takes the previous frame's colour and no world ray (needs the upscale's colour history)
+lumen_screen_trace_max_iterations = 50
+lumen_screen_trace_relative_depth_thickness = 0.005
