@@ -72,7 +72,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     if (skyRead && hasAir)
     {
         ByteAddressBuffer lists = ResourceDescriptorHeap[P[0].x];
-        bool active = (lists.Load(g.headerBase + froxelIndex(g, tile, s) * 4) & 63u) != 0;
+        bool active = lists.Load(g.headerBase + froxelIndex(g, tile, s) * 8 + 4) != 0;
         if (P[1].w != 0xFFFFFFFFu)
         {
             ConstantBuffer<VsmConstants> vcs = ResourceDescriptorHeap[P[1].w];

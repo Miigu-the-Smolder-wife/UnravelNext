@@ -757,7 +757,7 @@ void testLocalLights(TestFrame& tf, Report& report)
     s.cameras.push_back(cam);
     tf.setScene(s);
 
-    // S's froxel list buffer: header, one froxel (first entry 0, count 7), indices 0..6 as 16-bit pairs.
+    // S's froxel list buffer: header, one froxel (first entry 0, count 7: two words), indices 0..6 as 16-bit pairs.
     std::vector<uint32_t> list(64, 0);
     const float nearM = 0.01f, farM = 1000.0f, logRatio = std::log2(farM / nearM);
     list[0] = 1;
@@ -769,9 +769,10 @@ void testLocalLights(TestFrame& tf, Report& report)
     std::memcpy(&list[6], &logRatio, 4);
     list[8] = 64;   // headerBase
     list[9] = 128;  // indexBase
-    list[10] = 64;  // indexStride
+    list[10] = 64;  // capacity (entries)
     list[11] = 7;   // indexCount
-    list[16] = (0u << 6) | 7u;
+    list[16] = 0;   // first entry
+    list[17] = 7;   // count
     list[32] = 0 | (1u << 16);
     list[33] = 2 | (3u << 16);
     list[34] = 4 | (5u << 16);
@@ -3672,7 +3673,7 @@ void testAreaLobesFrame(TestFrame& tf, Report& report)
     std::memcpy(&list[5], &farM, 4);
     std::memcpy(&list[6], &logRatio, 4);
     list[8] = 64, list[9] = 128, list[10] = 64, list[11] = 1;
-    list[16] = (0u << 6) | 1u;
+    list[16] = 0, list[17] = 1;  // header (first entry, count)
     list[32] = 0;
     ComPtr<ID3D12Resource> listBuffer = uploadStatic(tf.device, list.data(), list.size() * 4, L"test froxel list (area lobes)");
     const uint32_t W = 640, H = 360;

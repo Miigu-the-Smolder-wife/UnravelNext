@@ -292,9 +292,6 @@ int main(int argc, char** argv)
             tf.frame.mainView.prevViewProj = tf.frame.mainView.viewProj;
 
             const shadow::FroxelGridCpu fg = shadow::froxelGridFor(tf.quality, W, H);
-            const uint32_t F = fg.gridX * fg.gridY * fg.slices;
-            const uint32_t listMax = (uint32_t)tf.quality.integer("atmosphere.froxels.lights_max");
-            const uint32_t listBytes = 64 + F * 4 + F * ((listMax + 1) & ~1u) * 2;
             const uint32_t tilesX = (W + 7) / 8;
             std::vector<uint8_t> vis, depth, gbuffer, heads, overflow, lists;
             uint32_t capacity = 0;
@@ -319,7 +316,7 @@ int main(int argc, char** argv)
                         rg = tf.readback(fc, main.gbuffer);
                         rh = tf.readback(fc, main.shadowOverflowTiles);
                         ro = tf.readbackBuffer(fc, main.shadowOverflow, (uint64_t)capacity * 4);
-                        rl = tf.readbackBuffer(fc, fc.resources.froxelLights, listBytes);
+                        rl = tf.readbackBuffer(fc, fc.resources.froxelLights, shadow::froxelListBytes(fg, shadow::froxelListCapacity(tf.trackState)));
                     }
                 });
                 tf.frame.time += tf.frame.deltaTime;
@@ -371,8 +368,8 @@ int main(int argc, char** argv)
                     if (std::abs(slc - std::round(slc)) < 1e-3) continue;
                     const uint32_t slice = (uint32_t)std::clamp(std::floor(slc), 0.0, (double)fg.slices - 1);
                     const uint32_t tx = std::min(x / fg.tilePx, fg.gridX - 1), ty = std::min(y / fg.tilePx, fg.gridY - 1);
-                    const uint32_t h = word(lists, headerBase + ((slice * fg.gridY + ty) * fg.gridX + tx) * 4ull);
-                    const uint32_t first = h >> 6, count = h & 63;
+                    const uint32_t froxel = (slice * fg.gridY + ty) * fg.gridX + tx;
+                    const uint32_t first = word(lists, headerBase + froxel * 8ull), count = word(lists, headerBase + froxel * 8ull + 4);
                     const uint32_t past = count > 3 ? count - 3 : 0;  // every light of this scene casts shadows
                     const uint32_t head = word(heads, (y / 8) * ph + (x / 8) * 4ull);
                     uint32_t block = 0, pw = 0;

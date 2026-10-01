@@ -4,14 +4,19 @@
 // Grid: screen tiles of tilePx pixels x `slices` depth slices, exponential in view depth between nearM and farM
 // (slice s spans z_s = near (far / near)^(s / S) .. z_(s+1)); the last slice extends to infinity for light lists.
 //
-// FrameResources::froxelLights is one raw buffer:
+// FrameResources::froxelLights is one raw buffer (RENDERER_REDESIGN_V2 14.1: variable-length lists, no per-froxel cap):
 //   bytes [0, 64)        FroxelGrid (below)
-//   bytes [64, ...)      one uint per froxel: first index entry << 6 | count (count <= lights_max <= 32)
-//   bytes [indexBase, ..) light indices, 16 bit, two per uint; froxel f's run starts at entry f x indexStride (lights_max
-//                        rounded up to even): every list fits (no allocation, no overflow; the bytes a frame touches
-//                        are the lights actually listed)
-// Froxel index = (slice * gridY + tileY) * gridX + tileX. Lists are ordered by importance at the froxel centre
-// (descending), so the first shading.analytic_lights_max are the strongest.
+//   bytes [64, ...)      two uints per froxel: (first index entry, count); runs are allocated by a prefix sum of the
+//                        counts rounded up to even (FroxelScan.hlsl), so every run starts at an even entry
+//   bytes [indexBase, ..) light indices, 16 bit, two per uint, `capacity` entries. The capacity is an upper bound of the
+//                        scene lights' entries this frame (FroxelSystem.cpp froxelListBound, from the lights' reach and
+//                        the grid) plus an allowance for the FX particle lights (grown from the measured need). A frame
+//                        needing more (`needed` > capacity: FX lights past the allowance) allocates the scene lights'
+//                        lists alone (a second prefix sum, inside the bound) and leaves the FX lights out, counted as
+//                        lost entries in cut lists (gates: 0); the allowance then grows.
+// Froxel index = (slice * gridY + tileY) * gridX + tileX. The first lights_max entries of a list are ordered by importance
+// at the froxel centre (descending: the strongest first, the shadow slots 1-3 go to the first casters); the rest follow
+// in a deterministic order. No light reaching a froxel is left out or merged.
 #ifndef UNX_FROXEL_COMMON_HLSLI
 #define UNX_FROXEL_COMMON_HLSLI
 #include "Frame.hlsli"
@@ -20,12 +25,13 @@
 struct FroxelGrid
 {
     uint gridX, gridY, slices, tilePx;
-    float nearM, farM, logRatio, pad0;       // logRatio = log2(far / near)
-    uint headerBase, indexBase, indexStride, indexCount;    // byte offsets; entries per froxel; entries listed this frame
-    uint overflowLists, droppedLights, maxCount, candidateOverflow;  // statistics: lists truncated at lights_max, light
-                                                                     // entries dropped by truncation, largest count before
-                                                                     // truncation, tiles whose frustum held more lights
-                                                                     // than FROXEL_CANDIDATES
+    float nearM, farM, logRatio;             // logRatio = log2(far / near)
+    uint needed;                             // entries the frame's lists take (FroxelScan.hlsl; > capacity: scene lights only)
+    uint headerBase, indexBase, capacity, indexCount;       // byte offsets; entry capacity; entries stored this frame
+    uint cutLists, droppedLights, maxCount, candidateOverflow;  // statistics: lists cut by the capacity, light entries
+                                                                // lost to the cut, largest count reaching one froxel,
+                                                                // tiles whose frustum held more lights than
+                                                                // FROXEL_CANDIDATES
 };
 
 FroxelGrid froxelGrid(uint lightsBuffer)

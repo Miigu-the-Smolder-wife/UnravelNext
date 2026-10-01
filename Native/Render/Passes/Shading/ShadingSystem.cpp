@@ -141,7 +141,6 @@ void checkQuality(const QualityConfig& q)
 {
     if (q.string("shading.tonemap") != "pbr_neutral") fail("shading.tonemap: only \"pbr_neutral\" (INTERFACES 8.4) is implemented");
     if (q.string("shading.output_encoding") != "srgb") fail("shading.output_encoding: only \"srgb\" (INTERFACES 7.5) is implemented");
-    (void)q.integer("shading.analytic_lights_max");  // S reads it for the froxel lists (INTERFACES 9); local lights come with them
 }
 
 // Edge (E) detection and composite (Edge.hlsli, EdgeComposite.hlsl), shading.edge_* keys.

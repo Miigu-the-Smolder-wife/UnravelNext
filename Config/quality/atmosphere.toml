@@ -23,7 +23,14 @@ sky_view_segments = 128              # quadratic segments x Gauss-Legendre 4 alo
 integration_queue = true             # same air-slice estimator in dense waves; false is the tile-scheduled A/B path
 tile_px = 24
 depth_slices = 64                    # exponential in view depth between near_m and far_m (<= 64: one thread per slice)
-lights_max = 32                      # per froxel list (<= 32, FROXEL_LIST_MAX); more reaching a froxel are counted
+lights_max = 32                      # ordered head of each froxel list (even, <= 96, FROXEL_SORTED_MAX): the strongest lights by
+                                     # importance come first; every other light reaching the froxel follows (nothing is dropped
+                                     # or merged, RENDERER_REDESIGN_V2 14.1)
+list_capacity_forced = 0             # tests only (0: off): entry capacity of the lists buffer. Normally the capacity is an upper
+                                     # bound of the scene lights' entries (FroxelSystem.cpp froxelListBound) + an allowance for FX
+                                     # particle lights grown from the measured need; a frame needing more lists the scene lights alone
+                                     # (their own allocation, inside the bound) and leaves the FX lights out, counted (gates require 0)
+list_fallback_forced = 0             # tests only (0: off): 1 makes the fill pass list the scene lights alone, as a frame over the capacity does
 near_m = 0.5                         # slice 0 spans the camera .. near_m (far / near)^(1/64)
 far_m = 65536                        # last node of the air volume (air perspective to 64 km; depths beyond clamp)
 experiment_disable = 0               # cost attribution only (never in a verdict): 1 air shadows, 2 local lights, 4 air integration,

@@ -142,7 +142,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     if (skyRead && hasAir)
     {
         ByteAddressBuffer lists = ResourceDescriptorHeap[P[0].x];
-        bool active = (lists.Load(g.headerBase + froxelIndex(g, tile, s) * 4) & 63u) != 0;
+        bool active = lists.Load(g.headerBase + froxelIndex(g, tile, s) * 8 + 4) != 0;
         if (P[1].w != 0xFFFFFFFFu)
         {
             ConstantBuffer<VsmConstants> vcs = ResourceDescriptorHeap[P[1].w];
@@ -184,9 +184,9 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         const float3 pm = airLiftToSurface(a, o + dir * (0.5 * len));
         const AirCoefficients cm = airCoefficients(a, max(0.0, airAltitude(a, pm)));
         ByteAddressBuffer lists = ResourceDescriptorHeap[P[0].x];
-        const uint h = lists.Load(g.headerBase + froxelIndex(g, tile, s) * 4);
-        myFirst = h >> 6;
-        myCount = (experiment & 2) ? 0u : h & 63u;
+        const uint2 h = lists.Load2(g.headerBase + froxelIndex(g, tile, s) * 8);
+        myFirst = h.x;
+        myCount = (experiment & 2) ? 0u : h.y;
         const float width = froxelTileWidth(g, 0.5 * (z0 + z1)) / asfloat(P[2].y);
         for (uint i = 0; i < myCount; ++i)
         {
@@ -256,8 +256,8 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             const float t0 = max(z0 * toRay, tStart);
             len = z1 * toRay - t0;
             o = g_cameraPosition + dir * t0;
-            const uint h = lists.Load(g.headerBase + froxelIndex(g, tile, is) * 4);
-            const uint slot = airLocalSlot(lists, g, (h >> 6) + (it >> 6), localShadows, li);
+            const uint h = lists.Load(g.headerBase + froxelIndex(g, tile, is) * 8);  // the run's first entry
+            const uint slot = airLocalSlot(lists, g, h + (it >> 6), localShadows, li);
             l = loadLight(li);
             mp = airLocalMap(l, o, dir, len);
             StructuredBuffer<VsmLocalLight> locals = ResourceDescriptorHeap[P[3].x];

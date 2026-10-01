@@ -19,8 +19,8 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     if (s >= g.slices) return;
     const uint2 tile = gid.xy;
     ByteAddressBuffer lists = ResourceDescriptorHeap[P[0].y];
-    const uint h = lists.Load(g.headerBase + froxelIndex(g, tile, s) * 4);
-    const uint first = h >> 6, count = h & 63u;
+    const uint2 h = lists.Load2(g.headerBase + froxelIndex(g, tile, s) * 8);
+    const uint first = h.x, count = h.y;
     if (count == 0) return;
     RWByteAddressBuffer requests = ResourceDescriptorHeap[P[0].x];
     StructuredBuffer<VsmLocalLight> locals = ResourceDescriptorHeap[P[0].z];

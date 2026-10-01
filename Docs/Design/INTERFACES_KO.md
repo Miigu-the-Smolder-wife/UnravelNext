@@ -539,7 +539,7 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - `shadowFragmentSun`(raw, `coverageRecords` 원소당 1 B): pair 플래그가 선 픽셀의 fragment만 유효하다. 바이트 e = 원소 e 레코드의 태양 가시성(unorm8). 플래그 없는 픽셀의 바이트는 그 프레임에 쓰이지 않으니 플래그 없이 읽지 않는다.
 
 ### 7.4 프록셀 광원 리스트 (S)
-프록셀(24 px × 64 깊이 슬라이스) 당 광원 인덱스 목록, 최대 `atmosphere.froxels.lights_max`개. 초과 시 중요도 상위 `shading.analytic_lights_max`개를 해석 평가하고 나머지는 프록셀 조도로 합친다(합친 에너지를 통계로 기록). 소비자는 `froxelLightRange/froxelLight`로만 읽는다. 리스트는 뷰 단위다(v1.22, `ViewResources::froxelLights`). 메인 뷰는 `FrameResources::froxelLights`와 같고, 평면 반사 뷰는 S `shadowVisibility`가 그 뷰 크기의 격자로 만든다. 호출자는 그 뷰의 SRV를 넘기고 그 뷰의 프레임 상수를 바인딩한다. 항목의 bit 15는 "그 광원에 S의 그림자 슬롯이 있음"이다(v1.19, `froxelLightShadowed`). `froxelLight`는 그 비트를 뺀 광원 인덱스를 돌려주고, 장면 광원 한도는 32767이다.
+프록셀(24 px × 64 깊이 슬라이스) 당 광원 인덱스 목록, **가변 길이**(v1.80, RENDERER_REDESIGN_V2 14.1 L1): 개수 패스, 접두 합(FroxelScan), 채우기 패스로 같은 프레임 안에 정확히 할당되며, 프록셀에 닿는 광원은 모두 목록에 든다(잘림·합침 없음). 헤더는 프록셀당 두 워드(첫 항목, 개수), 런은 짝수 항목에서 시작한다. 목록의 앞 `atmosphere.froxels.lights_max`개(짝수, 96 이하)는 중요도 순(그림자 슬롯 1~3은 그중 첫 캐스터), 나머지는 결정적 순서. 버퍼 용량은 CPU가 같은 프레임에 계산한 장면 광원 항목 수의 상한(`FroxelSystem.cpp froxelListBound`: 광원마다 슬라이스별로 도달 검사를 통과할 수 있는 타일 수) + FX 입자 광원 몫(GPU가 범위를 계산하므로 실측 초과분에서 자라는 몫) 이다. 그래서 장면 광원은 잘릴 수 없고, FX 광원이 몫을 넘긴 프레임만(`needed` > `capacity`) 장면 광원만의 접두합(FroxelScan의 둘째 합, 상한 안)으로 런을 잡아 장면 광원은 그대로(머리+꼬리) 싣고 FX 광원만 그 프레임에 뺀다. 뺀 항목은 잘린 목록·잃은 항목 통계로 세고(게이트는 0을 요구) 다음 프레임부터 몫이 자란다. FX 입자 광원은 수(슬롯 용량)는 정해져 있지만 범위를 GPU가 밝기에서 계산하므로 구조 상한이 없다. `list_capacity_forced`는 시험용이다. 소비자는 `froxelLightRange/froxelLight`로만 읽는다. 리스트는 뷰 단위다(v1.22, `ViewResources::froxelLights`). 메인 뷰는 `FrameResources::froxelLights`와 같고, 평면 반사 뷰는 S `shadowVisibility`가 그 뷰 크기의 격자로 만든다. 호출자는 그 뷰의 SRV를 넘기고 그 뷰의 프레임 상수를 바인딩한다. 항목의 bit 15는 "그 광원에 S의 그림자 슬롯이 있음"이다(v1.19, `froxelLightShadowed`). `froxelLight`는 그 비트를 뺀 광원 인덱스를 돌려주고, 장면 광원 한도는 32767이다.
 
 ### 7.5 출력
 - 메인 뷰(표시): RGB10A2_UNORM, 값 = sRGB OETF(PBR Neutral 톤맵(광도 × 노출)).
@@ -611,7 +611,7 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 ## 9. 품질 설정 키 (`Config/quality/<이름>.toml`)
 - 파일 `<이름>.toml`은 `<이름>.`으로 시작하는 키만 가질 수 있다(`QualityConfig::loadDirectory`가 강제). 파일 소유는 1절 표.
 - 코드는 품질 키에 기본값을 두지 않는다(없으면 오류). 모든 보고는 병합된 키 집합의 SHA-256을 남긴다. 실험용 덮어쓰기(`applyOverride`)도 해시에 들어간다.
-- 다른 트랙이 읽는 키(이 목록 밖의 키를 다른 트랙이 읽으려면 0절 요청): `output.resolutions`(코어), `atmosphere.froxels.tile_px`, `atmosphere.froxels.depth_slices`, `atmosphere.froxels.lights_max`(S → M), `shading.analytic_lights_max`(M → S), `gi.screen_probe_spacing_px`(R → M), `shadow.vsm.page_texels`(S → V 래스터 LOD), `visibility.cluster_triangles`(V → R).
+- 다른 트랙이 읽는 키(이 목록 밖의 키를 다른 트랙이 읽으려면 0절 요청): `output.resolutions`(코어), `atmosphere.froxels.tile_px`, `atmosphere.froxels.depth_slices`, `atmosphere.froxels.lights_max`(S → M), `gi.screen_probe_spacing_px`(R → M), `shadow.vsm.page_texels`(S → V 래스터 LOD), `visibility.cluster_triangles`(V → R).
 
 ## 10. C 트랙 API
 
