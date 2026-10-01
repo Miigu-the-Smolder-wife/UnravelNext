@@ -104,7 +104,7 @@ Unreal의 반사가 조용한 이유는 필터가 더 좋아서가 아니라, **
 | MegaLights가 켜지면 표면 캐시 직접광이 확률판으로 바뀌는가 | 아니다. `r.LumenScene.DirectLighting.Stochastic` 기본 0, MegaLights 분기 없음(`LumenSceneDirectLightingStochastic.inl` 3-5, 57-60). 기본은 타일당 가장 센 8개, 나머지는 버림(`LumenSceneDirectLighting.cpp` 89-91, `LumenSceneDirectLightingCulling.usf` BuildLightTilesCS) | 같다(`remainder_light=false`) |
 | 기본 경로의 직접광 계산 | 결정적. 조도 = 광원의 해석적 적분(`DeferredLightingCommon.ush` 518 GetIrradianceForLight), 그림자 = 광원 위치로 쏜 광선 1개(`LumenSceneDirectLightingHardwareRayTracing.usf` 154-180). 광원 위 무작위 점은 확률판에서만 | 무작위 점 1개 + GI 마스크 그림자 광선이었다 → **`surface_cache.direct_analytic`(기본 true)로 고침** |
 | hit이 읽는 값 | FinalLighting = (직접 + 간접) × 알베도 / π + 방출(`LumenSurfaceCache.ush` 50-55) | 같다(`scFinalLighting`; R의 hit은 직접 + 간접을 조도로 받아 실제 재질로 셰이딩) |
-| hit에서의 보간 | 카드 최대 3장(법선 축 가중) × 텍셀 4개 이중선형 × 깊이 가시성(`LumenSurfaceCacheSampling.ush` 235-311) | 셀 하나(최근접). **차이로 남아 있다** |
+| hit에서의 보간 | 카드 최대 3장(법선 축 가중) × 텍셀 4개 이중선형 × 깊이 가시성(`LumenSurfaceCacheSampling.ush` 235-311) | 셀 하나(최근접)였다 → **`surface_cache.bilinear_read`(기본 true)로 네 셀 이중선형**. 축 가중은 없음 |
 | 방출면 | 카드 캡처의 EmissiveAtlas → FinalLighting → radiosity 광선이 읽어 퍼짐. 광선 세기 상한 40 × 1/PreExposure(`LumenRadiosity.usf` 188-190) | 같다(셀의 방출, 상한 40) |
 
 ### 7.2 실측
@@ -145,4 +145,5 @@ Unreal의 반사가 조용한 이유는 필터가 더 좋아서가 아니라, **
 1. 고친 것: 직접광을 언리얼 기본 구조로(d4d97e3). 수준 0.21 → 0.30, 계단·카운터의 얼룩이 줄었다.
 2. radiosity 광선 세기 상한 40(언리얼 기본값, QUALITY TRADE)이 이 장면에서 간접광의 절반 가까이를 자른다. 로비는 ev100 3.5라 상한이 약 540 nits이고 발광면이 그보다 밝다. 사용자 결정 항목.
 3. 상한을 꺼도 hit의 간접광은 8.3 대 19.3이다. 퍼니스에서는 두 경로가 같은 값을 내므로 차이는 광원·방출면이 있는 이 장면에서 기존 GI 캐시가 무엇을 더 담는가의 문제다. **어느 쪽이 맞는지 미확인**: 기준 경로 추적기(`unx_reference`)는 이 장면을 읽지 못한다(재질의 차폐 텍스처 정의가 없다는 오류).
-4. 셀 보간(7.1 넷째 줄)은 아직 최근접이다.
+4. 셀 보간: `surface_cache.bilinear_read`(기본 true, 4aefa4d)로 hit 주변 네 셀을 이중선형으로 섞는다. 로비 GI 수준 0.842 → 0.864(노출 단위, 1회), 퍼니스 0.9995 유지. 카드 3장의 축 가중은 이식하지 않았다(셀은 면이 하나다).
+5. 방출면은 원인이 아니다: 반사 hit에서 셀에 저장된 방출 0.032, 재질의 방출 0.033 nits(진단 뷰 5, 6). 이 장면의 빛은 해석적 면광원에서 오고, 상한 40이 자르는 것은 광원 바로 옆 표면의 반사광이다.
