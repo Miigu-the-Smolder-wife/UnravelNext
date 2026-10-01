@@ -89,10 +89,11 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.planarViewNsPerPixel = (float)q.number("reflection.planar_view_ns_per_px");
     s.temporalHistoryMax = (uint32_t)q.integer("reflection.temporal_history_max");
     s.temporalLobeShift = (float)q.number("reflection.temporal_lobe_shift");
-    s.layers = q.boolean("reflection.layers");
-    s.layerFilter = q.boolean("reflection.layer_filter");
-    s.layerHistoryFrames = (uint32_t)std::max<int64_t>(q.integer("reflection.layer_history_frames"), 1);
-    s.layerView = (uint32_t)q.integer("reflection.layer_view");
+    // (keys newer than deployed configurations: absent = the previous path, as GiSystem's newer keys)
+    s.layers = q.has("reflection.layers") && q.boolean("reflection.layers");
+    s.layerFilter = !q.has("reflection.layer_filter") || q.boolean("reflection.layer_filter");
+    s.layerHistoryFrames = q.has("reflection.layer_history_frames") ? (uint32_t)std::max<int64_t>(q.integer("reflection.layer_history_frames"), 1) : 8u;
+    s.layerView = q.has("reflection.layer_view") ? (uint32_t)q.integer("reflection.layer_view") : 0u;
     s.deterministic = q.has("debug.deterministic") && q.boolean("debug.deterministic");
     s.planarRayNs = (float)q.number("reflection.planar_ray_ns");
     return s;

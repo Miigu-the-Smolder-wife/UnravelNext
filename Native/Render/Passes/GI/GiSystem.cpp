@@ -1003,7 +1003,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     const bool probeHistory = main.visId.valid() && main.visibleClusters.valid() && s.screenOcclusionHistory > 1;
     TextureRef historyPrev, historyNext;
     uint32_t historyFlags = 0, historyPrevX = 0, historyPrevY = 0;
-    const uint32_t occlusionSpatial = fc.quality.boolean("gi.screen_occlusion_spatial") ? 2u : 0u;  // GiProbeGather P[4].x bit 1 (S2, L_occ)
+    const uint32_t occlusionSpatial = fc.quality.has("gi.screen_occlusion_spatial") && fc.quality.boolean("gi.screen_occlusion_spatial") ? 2u : 0u;  // GiProbeGather P[4].x bit 1 (S2, L_occ)
     if (probeHistory)
     {
         const uint32_t oldX = m_probeHistoryX, oldY = m_probeHistoryY;
