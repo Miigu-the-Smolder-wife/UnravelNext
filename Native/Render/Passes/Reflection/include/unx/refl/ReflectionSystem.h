@@ -56,6 +56,8 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     bool surfaceCache = false, scDirect = true, scRadiosity = true, scRemainderLight = false;
     uint32_t scEntriesLog2 = 22, scMaxUnused = 255, scCaptureFactor = 64, scCaptureBounces = 3, scDirectFactor = 32, scRadiosityFactor = 64;
     float scRadiosityCap = 40.0f, scRadiosityFrames = 4.0f;
+    bool scDirectStochastic = false;  // surface_cache.direct_stochastic: A's world-point light sampler in place of the 8 strongest lights
+    float scDirectStochasticFrames = 12.0f, scDirectMinWeight = 0.001f;
     bool lumenSurfaceCacheView = false;  // reflection.lumen_surface_cache_view: diagnostics (ReflectionShade.hlsli REFL_HIT_SC_VIEW)
     bool lumenHitSurfaceCache = true;  // reflection.lumen_hit_surface_cache: the ray-reuse pipeline's hits read and mark it
     bool layerWholeValue = true;      // reflection.layer_whole_value: lobe pixels' whole value is one layer (LAYER_MODE_L)

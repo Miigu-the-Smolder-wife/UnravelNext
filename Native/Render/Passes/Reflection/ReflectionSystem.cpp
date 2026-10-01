@@ -141,6 +141,9 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.scDirect = flag("surface_cache.direct_lighting", true);
     s.scRadiosity = flag("surface_cache.radiosity", true);
     s.scRemainderLight = flag("surface_cache.remainder_light", false);
+    s.scDirectStochastic = flag("surface_cache.direct_stochastic", false);
+    s.scDirectStochasticFrames = num("surface_cache.direct_stochastic_max_frames", 12.0);
+    s.scDirectMinWeight = num("surface_cache.direct_stochastic_min_sample_weight", 0.001);
     s.lumenHitSurfaceCache = flag("reflection.lumen_hit_surface_cache", true);
     s.lumenSurfaceCacheView = flag("reflection.lumen_surface_cache_view", false);
     s.deterministic = q.has("debug.deterministic") && q.boolean("debug.deterministic");
@@ -1197,7 +1200,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       });
         rt::RayPipeline& surfaceCacheLight = rt::RayPipeline::get(
             fc.device, shaders, rt::standardRayPipeline(kSurfaceCacheLightLibrary[variant], { "SurfaceCacheSeedGen", "SurfaceCacheCellsGen", "SurfaceCacheProbesGen" }));
-        const uint32_t lightFlags = (s.scDirect ? 1u : 0u) | (s.scRadiosity ? 2u : 0u) | (s.scRemainderLight ? 8u : 0u);
+        const uint32_t lightFlags = (s.scDirect ? 1u : 0u) | (s.scRadiosity ? 2u : 0u) | (s.scRemainderLight ? 8u : 0u) | (s.scDirectStochastic ? 16u : 0u);
         const uint32_t budgets[3] = { std::max(n / s.scCaptureFactor / (s.scCaptureBounces + 1), 1u), std::max(n / s.scDirectFactor, 1u),
                                       std::max(n / s.scRadiosityFactor / 16, 1u) };
         static const char* const kLightNames[3] = { "r.sc.seed", "r.sc.cells", "r.sc.probes" };
@@ -1209,7 +1212,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           b.use(surfaceCache, Use::UavGraphics);
                           declareShared(b, false);
                       },
-                      [&surfaceCacheLight, constantsFor, frameConstants, surfaceCache, frame, pass, lightFlags, budget = budgets[pass], bounces = s.scCaptureBounces](PassContext& c) {
+                      [&surfaceCacheLight, constantsFor, frameConstants, surfaceCache, frame, pass, lightFlags, budget = budgets[pass], bounces = s.scCaptureBounces,
+                       stochasticFrames = s.scDirectStochasticFrames, minWeight = s.scDirectMinWeight](PassContext& c) {
                           uint32_t k[32] = {};
                           constantsFor(c, k, false);
                           k[0] = c.uav(surfaceCache);
@@ -1217,6 +1221,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           k[2] = frame;
                           k[3] = lightFlags;
                           k[15] = bounces;
+                          k[16] = asU(stochasticFrames);
+                          k[17] = asU(minWeight);
                           c.computeConstants(k, 32);
                           c.bindFrameConstants(frameConstants);
                           surfaceCacheLight.dispatch(c.cmd, pass, budget, 1);

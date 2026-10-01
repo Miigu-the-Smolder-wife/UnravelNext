@@ -29,7 +29,8 @@
 // indirect as R11G11B10 x SC_STORE_SCALE, 0), list 4 B; then probes, per slot of N / 4: keys 4 B, heads 4 B, data 16 B,
 // light 8 B (irradiance R11G11B10 x SC_STORE_SCALE, 0), list 4 B.
 // heads: bit 0 marked since the last upkeep, bit 1 has data, bits 8-15 lighting updates (cells: 0 = not lit yet, else 1;
-//        probes: frames in the running mean), bits 16-23 frames since the last mark.
+//        probes: frames in the running mean), bits 16-23 frames since the last mark, bits 24-31 (cells) frames in the
+//        stochastic direct light's running mean (surface_cache.direct_stochastic).
 // lists (written by SurfaceCacheUpdate): the lit entries from index 0 up, the entries not lit yet from the last index down.
 // Header words: 0 N, 1 frame, 2 lit cells, 3 new cells, 4-6 camera xyz (float), 7 max unused frames, 8 lit probes, 9 new
 // probes, 10 flags (bit 0: marking on), 11 asuint(radiosity ray cap, exposed), 12 asuint(probe max frames).

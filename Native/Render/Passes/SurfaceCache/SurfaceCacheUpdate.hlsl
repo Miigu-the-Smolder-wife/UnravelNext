@@ -33,7 +33,7 @@ void main(uint3 id : SV_DispatchThreadID)
         b.Store(keyOffset, 0u);
         return;
     }
-    b.Store(headOffset, SC_HEAD_VALID | (lit << 8) | (unused << 16));
+    b.Store(headOffset, SC_HEAD_VALID | (lit << 8) | (unused << 16) | (head & 0xFF000000u));  // (bits 24-31: the stochastic direct light's frames)
     uint index;
     b.InterlockedAdd((probes ? 32u : 8u) + (lit != 0 ? 0u : 4u), 1u, index);
     const uint at = lit != 0 ? index : count - 1 - index;
