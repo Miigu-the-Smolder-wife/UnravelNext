@@ -124,9 +124,25 @@ int main(int argc, char** argv)
             h.addPoolSources(std::vector<FramePacket::PoolSource>{ hit });
             frames(1);
         }
+        if (!warp)
+        {
+            // 3b. the basin's surface statistics (UnxPoolStatsLatest): valid after framesInFlight + 1 records, finite, the
+            // splashes seen (RMS > 0); a basin not in the set has none.
+            water::PoolStats st;
+            expect("pool statistics of the bath are valid after 12 frames", h.poolStats(7, st) && st.valid);
+            expect("pool statistics are finite and the splashes left a non-zero RMS and deviation",
+                   std::isfinite(st.mean) && std::isfinite(st.rms) && std::isfinite(st.maxDeviation) && st.rms > 0 && st.maxDeviation >= st.rms);
+            expect("pool statistics name a frame of the run", st.frame < 12);
+            expect("a basin not in the set has no statistics", !h.poolStats(8, st));
+        }
         h.setPools({});
         expect("an empty set clears the basins", h.queuedPools().first.empty());
         frames(2);
+        if (!warp)
+        {
+            water::PoolStats st;
+            expect("a basin removed from the set loses its statistics", !h.poolStats(7, st));
+        }
 
         // 4.
         auto refused = [&](const char* what, auto change) {

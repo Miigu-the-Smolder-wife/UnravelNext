@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.89, 2026-10-01)
+# UnravelNext 인터페이스 (v1.90, 2026-10-01)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -748,6 +748,10 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.90 (2026-10-01, A: 결함 큐 10번, B 요청 — 수조 η 통계 호스트 API; 미검증 — 빌드까지):
+  - W2 `PoolStats.hlsl`(행 부분합 → 고정 순서 축약: 평균, 평균 기준 RMS, max|η − η̄|), `Pool::latestStats()`(framesInFlight 기록 뒤 읽기), `water::poolStatsSnapshot`(렌더 스레드, 트랙 상태 → 호스트 사본).
+  - 호스트: `HostRenderer::poolStats(id)`, ABI 6 선택 export `UnxPoolStatsLatest(UnxPoolStats*)`(48 B: pool 입력, valid·frameIndex·time·mean·rms·maxDeviation 출력). C# `UnravelNextRenderer.TryPoolStats`, `UnravelNextPool.TryGetStats`.
+  - 시험: PoolTests 8(GPU 통계 = CPU 통계, 전달 지연 framesInFlight), HostPools 3b.
 - v1.89 (2026-10-01, A: 오버플로 목록 할당을 타일 순서 접두 합으로, RENDERER_REDESIGN_V2 14.3-3 L3 3단계; 미검증 — 빌드까지):
   - 7.3 할당: `ShadowOverflow.MODE0`(개수) → `ShadowOverflowScan.MODE0/1`(타일 순서 접두 합) → `ShadowOverflow.MODE1`(채우기). 할당 카운터 버퍼 폐지. M의 소비(헤드·블록 배치·fallback 목록)는 그대로.
 - v1.88 (2026-10-01, R: hit 직접광 누적기 풀, 설계 V2.3 12.8; 미검증 — 빌드까지):

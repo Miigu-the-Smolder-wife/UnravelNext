@@ -1697,6 +1697,26 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     draw.glyphs.insert(draw.glyphs.end(), p.debugGlyphs.begin(), p.debugGlyphs.end());
     if (photoFrame(fc, p, output)) return;  // B11: the photo's image instead of the scene
     m_frameRenderer->record(*m_graph, fc, output);
+    {
+        // W2: the basins' statistics (read back by the record, framesInFlight records behind) for UnxPoolStatsLatest
+        std::vector<std::pair<uint32_t, water::PoolStats>> stats;
+        water::poolStatsSnapshot(m_frameRenderer->trackState(), stats);
+        std::lock_guard lock(m_mutex);
+        m_poolStats = std::move(stats);
+    }
+}
+
+bool HostRenderer::poolStats(uint32_t id, water::PoolStats& out) const
+{
+    requireCommitted();
+    std::lock_guard lock(m_mutex);
+    for (const auto& [pool, s] : m_poolStats)
+        if (pool == id && s.valid)
+        {
+            out = s;
+            return true;
+        }
+    return false;
 }
 
 void HostRenderer::photoBegin(const scene::Camera& camera, const PhotoSettings& settings)

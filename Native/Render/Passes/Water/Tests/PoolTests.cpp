@@ -698,6 +698,41 @@ int main(int argc, char** argv)
                             rmsFirst, rmsLast, volumeWorst);
             }
         }
+        // 8. statistics (PoolStats.hlsl; the host's UnxPoolStatsLatest): the GPU's mean, RMS about the mean and
+        //    max |eta - mean| of a record equal the CPU's over the read-back field (mean 1e-7 m, RMS 1e-5 relative, max
+        //    deviation 1e-6 m), delivered framesInFlight records later with that record's frame index and time.
+        {
+            Pool pool(gpu.device, gpu.shaders, bath);
+            PoolSource s;
+            s.x = at.centre[0] + 0.4; s.z = at.centre[2] + 0.2; s.radius = 0.1f; s.impulse = 2.0f; s.volume = 5e-4f;
+            struct Cpu { double mean, rms, dev; };
+            std::vector<Cpu> cpu;
+            uint32_t delivered = 0;
+            for (int n = 0; n < 8; ++n)
+            {
+                const Frame f = step(gpu, pool, uint64_t(n), at, n * (1.0 / 60), 1.0f / 60, n == 0 ? std::vector<PoolSource>{ s } : std::vector<PoolSource>{}, true);
+                double sum = 0, sq = 0, mx = -1e300, mn = 1e300;
+                for (size_t i = 0; i < kSamples; ++i)
+                {
+                    const double e = f.field[4 * i];
+                    sum += e; sq += e * e; mx = std::max(mx, e); mn = std::min(mn, e);
+                }
+                const double mean = sum / double(kSamples);
+                cpu.push_back({ mean, std::sqrt(std::max(sq / double(kSamples) - mean * mean, 0.0)), std::max(mx - mean, mean - mn) });
+                const unx::water::PoolStats& st = pool.latestStats();
+                if (n + 1 < int(bath.framesInFlight) + 1) W_CHECK(!st.valid, "statistics: valid after %d records (framesInFlight %u)", n + 1, bath.framesInFlight);
+                if (!st.valid) continue;
+                W_CHECK(st.frame == uint64_t(n) - bath.framesInFlight, "statistics: frame %llu after record %d", (unsigned long long)st.frame, n);
+                const Cpu& c = cpu[size_t(st.frame)];
+                W_CHECK(std::abs(st.mean - c.mean) <= 1e-7 && std::abs(st.rms - c.rms) <= 1e-5 * c.rms + 1e-9 && std::abs(st.maxDeviation - c.dev) <= 1e-6,
+                        "statistics of frame %llu: GPU mean %.6g rms %.6g dev %.6g, CPU %.6g %.6g %.6g", (unsigned long long)st.frame, st.mean, st.rms, st.maxDeviation, c.mean, c.rms, c.dev);
+                W_CHECK(std::abs(st.time - double(st.frame) * (1.0 / 60)) <= 1e-9, "statistics: time %.9g of frame %llu", st.time, (unsigned long long)st.frame);
+                ++delivered;
+            }
+            W_CHECK(delivered == 8 - bath.framesInFlight, "statistics: %u delivered of 8 records", delivered);
+            std::printf("statistics: GPU mean / RMS / max deviation equal the CPU's over %u records (last: %.4g / %.4g / %.4g m)\n", delivered, pool.latestStats().mean,
+                        pool.latestStats().rms, pool.latestStats().maxDeviation);
+        }
         std::printf("pool tests passed\n");
         return 0;
     }

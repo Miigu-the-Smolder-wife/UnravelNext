@@ -92,6 +92,13 @@ Pool::Pool(Device& device, ShaderLibrary& shaders, const PoolDesc& desc) : m_dev
     t.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     check(device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &t, D3D12_BARRIER_LAYOUT_COMMON, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_output)), "pool output");
     m_output->SetName(L"pool field");
+    m_stats = makeBuffer(device, uint64_t(kQ + 1) * 16, D3D12_HEAP_TYPE_DEFAULT, L"pool statistics");
+    for (uint32_t s = 0; s <= desc.framesInFlight; ++s)
+    {
+        m_statsReadback.push_back(makeBuffer(device, 256, D3D12_HEAP_TYPE_READBACK, L"pool statistics readback"));
+        m_statsFrame.push_back(UINT64_MAX);
+        m_statsTime.push_back(0);
+    }
     for (uint32_t s = 0; s < desc.framesInFlight; ++s)
     {
         m_sourceUpload.push_back(makeBuffer(device, uint64_t(desc.maxSources) * 32 + kN * 4, D3D12_HEAP_TYPE_UPLOAD, L"pool upload"));
@@ -112,9 +119,10 @@ Pool::Pool(Device& device, ShaderLibrary& shaders, const PoolDesc& desc) : m_dev
 Pool::~Pool()
 {
     for (auto& u : m_sourceUpload) u->Unmap(0, nullptr);
-    for (const ComPtr<ID3D12Resource>& r : { m_modes, m_input, m_accum, m_previous, m_twiddles, m_table, m_tableUpload, m_output, m_stateUpload })
+    for (const ComPtr<ID3D12Resource>& r : { m_modes, m_input, m_accum, m_previous, m_twiddles, m_table, m_tableUpload, m_output, m_stateUpload, m_stats })
         if (r) m_device.deferRelease(r);
     for (auto& u : m_sourceUpload) m_device.deferRelease(u);
+    for (auto& u : m_statsReadback) m_device.deferRelease(u);
     for (uint32_t srv : m_sourceSrv) m_device.descriptors().freeResource(srv);
 }
 
@@ -299,6 +307,53 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
     }
     m_time = time;
     m_started = true;
+
+    // Surface statistics (PoolStats.hlsl; the host's UnxPoolStatsLatest): per row the sum, sum of squares, max and min of
+    // eta, then one group reduces the rows in order (mean, RMS about the mean, max |eta - mean|), copied to this record's
+    // readback slot. Read back: the slot written framesInFlight records ago (the host waited for that frame; a record
+    // is at most one per frame).
+    {
+        const BufferRef stats = import(m_stats.Get(), "pool statistics");
+        ID3D12PipelineState* rows = m_shaders.compute("Passes/Water/PoolStats.MODE0");
+        ID3D12PipelineState* reduce = m_shaders.compute("Passes/Water/PoolStats.MODE1");
+        g.addPass("pool stats rows", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(field, Use::SrvCompute); pb.use(stats, Use::UavCompute); },
+                  [=](PassContext& c) {
+                      const uint32_t k[4] = { c.srv(field), c.uav(stats), 0, 0 };
+                      c.cmd->SetPipelineState(rows);
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch(kQ, 1, 1);
+                  });
+        g.addPass("pool stats reduce", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(stats, Use::UavCompute); },
+                  [=](PassContext& c) {
+                      const uint32_t k[4] = { 0, c.uav(stats), 0, 0 };
+                      c.cmd->SetPipelineState(reduce);
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch(1, 1, 1);
+                  });
+        const uint32_t ring = uint32_t(m_statsReadback.size()), writeSlot = uint32_t(m_records % ring), readSlot = uint32_t((m_records + 1) % ring);
+        ID3D12Resource* rb = m_statsReadback[writeSlot].Get();
+        g.addPass("pool stats readback", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(stats, Use::CopySrc); pb.keep(); },
+                  [=](PassContext& c) { c.cmd->CopyBufferRegion(rb, 0, c.resource(stats), uint64_t(kQ) * 16, 16); });
+        m_statsFrame[writeSlot] = frame;
+        m_statsTime[writeSlot] = time;
+        if (m_records + 1 >= ring && m_statsFrame[readSlot] != UINT64_MAX)  // written ring - 1 = framesInFlight records ago
+        {
+            const uint8_t* m = nullptr;
+            D3D12_RANGE all{ 0, 16 };
+            check(m_statsReadback[readSlot]->Map(0, &all, (void**)&m), "map pool statistics");
+            float v[4];
+            std::memcpy(v, m, 16);
+            D3D12_RANGE none{ 0, 0 };
+            m_statsReadback[readSlot]->Unmap(0, &none);
+            m_latestStats.valid = true;
+            m_latestStats.frame = m_statsFrame[readSlot];
+            m_latestStats.time = m_statsTime[readSlot];
+            m_latestStats.mean = v[0];
+            m_latestStats.rms = v[1];
+            m_latestStats.maxDeviation = v[2];
+        }
+        ++m_records;
+    }
 
     // The surface's triangle stream: frame buffers (the graph's transient memory; only the drawn basins hold any).
     const BufferRef vertices = g.createBuffer({ "pool surface vertices", kVertices * 32, 0 }), velocities = g.createBuffer({ "pool surface velocities", kVertices * 16, 0 }),
