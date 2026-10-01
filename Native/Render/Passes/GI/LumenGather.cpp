@@ -8,6 +8,9 @@
 
 #include "unx/gi/LumenRadianceCache.h"
 #include "unx/rt/RayPipeline.h"
+#if defined(UNX_GI_HAS_SHADING)
+#include "unx/shading/Exposure.h"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -478,9 +481,57 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     // Probe radiance stages after the composite: the optional probe-space temporal blend, then the spatial filter passes.
     // They alternate between two transient textures; the last one writes the persistent texture (next frame's history).
     const uint32_t stages = (L.temporalFilterProbes ? 1u : 0u) + L.filterPasses;
+    // The intensity cap's exposure on a snap frame (gi.lumen_cap_snap_exposure, LgMeter.hlsl): the frame's exposure
+    // was not metered on what it shows, so the cap is taken in the exposure metered on the frame's own traces.
+    BufferRef capReference;
+#if defined(UNX_GI_HAS_SHADING)
+    if (L.capSnapExposure && shading::exposureSnapping(fc))
+    {
+        const QualityConfig& q = fc.quality;
+        const float grey = (float)q.number("shading.exposure_target_grey"), cutDark = (float)q.number("shading.exposure_cut_dark");
+        const float cutBright = (float)q.number("shading.exposure_cut_bright"), minEv = (float)q.number("shading.exposure_min_ev");
+        const float maxEv = (float)q.number("shading.exposure_max_ev"), compensation = fc.frame.exposureCompensation;
+        const float centreSigma = (float)q.number("shading.exposure_centre_sigma");
+        const BufferRef histogram = g.createBuffer({ "lumen meter histogram", 256, 0 });
+        capReference = g.createBuffer({ "lumen cap exposure", 16, 0 });
+        const BufferRef reference = capReference;
+        static const char* const meterNames[3] = { "r.gi.lg.meter.clear", "r.gi.lg.meter.bins", "r.gi.lg.meter" };
+        for (uint32_t mode = 0; mode < 3; ++mode)
+            g.addPass(meterNames[mode], QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          probes(b);
+                          b.use(histogram, mode == 2 ? Use::SrvCompute : Use::UavCompute);
+                          if (mode == 1) b.use(traceRadiance, Use::SrvCompute);
+                          if (mode == 1) b.use(rayInfo, Use::SrvCompute);
+                          if (mode == 2) b.use(reference, Use::UavCompute);
+                      },
+                      [=, &shaders](PassContext& c) {
+                          uint32_t k[48] = {};
+                          k[0] = mode == 1 ? c.srv(traceRadiance) : 0xFFFFFFFFu;
+                          k[1] = mode == 2 ? c.srv(histogram) : c.uav(histogram);
+                          k[2] = mode == 2 ? c.uav(reference) : 0xFFFFFFFFu;
+                          k[3] = mode;
+                          k[4] = bits(grey);
+                          k[5] = bits(cutDark);
+                          k[6] = bits(cutBright);
+                          k[7] = bits(compensation);
+                          k[8] = bits(minEv);
+                          k[9] = bits(maxEv);
+                          k[10] = bits(centreSigma);
+                          k[11] = mode == 1 ? c.srv(rayInfo) : 0xFFFFFFFFu;
+                          probeWords(c, k);
+                          c.cmd->SetPipelineState(shaders.compute("Passes/GI/Lumen/LgMeter"));
+                          c.computeConstants(k, 48);
+                          c.bindFrameConstants(frameConstants);
+                          if (mode == 1) c.cmd->Dispatch(probesX, atlasRows, 1);
+                          else c.cmd->Dispatch(1, 1, 1);
+                      });
+    }
+#endif
     g.addPass("r.gi.lg.composite", QueueType::Compute,
               [&](PassBuilder& b) {
                   probes(b);
+                  if (capReference.valid()) b.use(capReference, Use::SrvCompute);
                   b.use(traceRadiance, Use::SrvCompute);
                   b.use(traceWord, Use::SrvCompute);
                   b.use(rayInfo, Use::SrvCompute);
@@ -493,6 +544,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   k[0] = c.srv(traceRadiance);
                   k[1] = c.srv(traceWord);
                   k[2] = c.srv(rayInfo);
+                  k[3] = capReference.valid() ? c.srv(capReference) : 0xFFFFFFFFu;
                   k[4] = c.uav(stages == 0 ? probeRadiance : radianceA);
                   k[5] = c.uav(hitDistance);
                   k[6] = c.uav(probeMoving);

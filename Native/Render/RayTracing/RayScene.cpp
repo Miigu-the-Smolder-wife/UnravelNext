@@ -1,4 +1,6 @@
 #include "unx/rt/RayScene.h"
+
+#include "unx/core/Log.h"
 #if defined(UNX_HAS_MATERIAL)
 #include "unx/material/MaterialSystem.h"  // M's texture table for decals at hits (recordDecals)
 #endif
@@ -2002,6 +2004,20 @@ void RayScene::updateLightGrid(FramePassContext& fc)
                 cellLights.insert(cellLights.end(), lists[c].begin(), lists[c].end());
             }
             cellStart[cells] = (uint32_t)cellLights.size();
+            // The longest cell list is the length of the hit kernels' light loops (rtLocalLightChooseOriented): logged
+            // when it changes, so a scene's worst case is on record (no structural bound on it yet).
+            uint32_t longest = 0, used = 0;
+            for (size_t c = 0; c < cells; ++c)
+            {
+                longest = std::max(longest, (uint32_t)lists[c].size());
+                used += lists[c].empty() ? 0u : 1u;
+            }
+            if (longest != m_lightCellLongestLogged)
+            {
+                m_lightCellLongestLogged = longest;
+                logf("R light grid: %u lights in %u x %u x %u cells of %.2f x %.2f x %.2f m; longest cell list %u, mean of the %u used cells %.1f\n", (uint32_t)n,
+                     head.dim[0], head.dim[1], head.dim[2], cs[0], cs[1], cs[2], longest, used, used ? (double)cellLights.size() / used : 0.0);
+            }
         }
         if (cellLights.empty()) cellLights.push_back(0);
         head.pad2 = m_emissiveSrv;  // word 15: emissive triangles (0xFFFFFFFF: none)

@@ -389,6 +389,7 @@ private:
     uint32_t m_emissiveSrv = 0xFFFFFFFFu, m_emissiveRevision = 0xFFFFFFFFu;
     std::vector<uint8_t> m_lightImage;       // header 80 B, lights (96 B each), cell starts (cells + 1), cell lights
     uint64_t m_lightHash = 0, m_lightVersion = 0;
+    uint32_t m_lightCellLongestLogged = 0xFFFFFFFFu;  // the light grid's longest cell list at the last log line
     uint64_t m_lightSlotVersion[4] = {};     // kDescSlots
     ComPtr<ID3D12Resource> m_lightRing;
     uint8_t* m_lightRingMapped = nullptr;

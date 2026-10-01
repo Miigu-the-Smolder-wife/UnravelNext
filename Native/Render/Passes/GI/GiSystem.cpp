@@ -176,6 +176,7 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     if (q.has("gi.lumen_moving_speed")) s.lumen.movingSpeed = (float)q.number("gi.lumen_moving_speed");
     if (q.has("gi.lumen_normal_bias")) s.lumen.normalBias = (float)q.number("gi.lumen_normal_bias");
     if (q.has("gi.lumen_hit_surface_cache")) s.lumen.hitSurfaceCache = q.boolean("gi.lumen_hit_surface_cache");
+    if (q.has("gi.lumen_cap_snap_exposure")) s.lumen.capSnapExposure = q.boolean("gi.lumen_cap_snap_exposure");
     if (q.has("gi.lumen_hit_fallback")) s.lumen.hitFallback = q.boolean("gi.lumen_hit_fallback");
     if (q.has("gi.lumen_screen_traces")) s.lumen.screenTraces = q.boolean("gi.lumen_screen_traces");
     if (q.has("gi.lumen_screen_trace_skip_after_cut")) s.lumen.screenTraceSkipAfterCut = q.boolean("gi.lumen_screen_trace_skip_after_cut");

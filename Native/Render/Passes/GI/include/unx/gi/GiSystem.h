@@ -81,8 +81,10 @@ struct GiSettings  // from Config/quality/gi.toml
         uint32_t rayDirections = 8;        // the frames the direction jitter cycles through
         float movingSpeed = 0.005f;        // relative speed difference that makes a trace "moving"
         float normalBias = 0.001f;         // m: the rays' origin off the surface (Unreal: 0.1 cm)
+        bool capSnapExposure = true;       // on a snap frame (first frames, cut, restore) the intensity cap is taken in
+                                           // the exposure metered on the frame's traces (LgMeter.hlsl; not Unreal's)
         bool hitSurfaceCache = true;       // the hits read the surface cache when it exists (surface_cache.enabled)
-        bool hitFallback = true;           // a hit without a lit cell is shaded from the world cache and a light sample;
+        bool hitFallback = false;          // a hit without a lit cell is shaded from the world cache and a light sample;
                                            // false: it takes no cached light (Unreal's rule for an invalid sample)
         uint32_t raysPerDispatch = 262144; // the probe rays are traced in row bands of at most this many rays per DispatchRays
         bool screenTraces = true;          // the rays walk the depth pyramid first (ScreenTraces; needs the colour history)
