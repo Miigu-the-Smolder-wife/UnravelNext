@@ -30,6 +30,11 @@ enum class DeviceRemovedPolicy
 void setDeviceRemovedPolicy(DeviceRemovedPolicy policy);
 DeviceRemovedPolicy deviceRemovedPolicy();
 bool deviceWasRemoved();
+// UNX_DRED=1 in the environment when the first device is created: D3D12 device-removed extended data (auto-breadcrumbs,
+// page fault data). On a device removal the unfinished command lists are printed before the UNX_DEVICE_REMOVED line:
+// the render graph pass in force and the operations around the first one that did not complete. Off (the default):
+// nothing changes. Diagnostics only (breadcrumbs cost time): never with timings.
+bool dredEnabled();
 
 struct DeviceRemovedError : Error
 {
