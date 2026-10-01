@@ -14,7 +14,8 @@
 // moves relative to the probe, |probe speed - hit speed| / max(probe depth, 1 m) > P[4].w).
 // P[0] = { world cache SRV, ray info SRV (R16_UINT), trace radiance UAV, trace word UAV (R32_UINT) },
 // P[1], P[2], P[3] = sky and sun (GiSky.hlsli), ray length; P[3].w = gi.experiment_disable bits (8, 16, 128 as GiTrace),
-// P[4] = { sky band (tests), flags, normal bias (float, m), moving threshold (float) }, P[5].x = surface cache UAV
+// P[4] = { sky band (tests), flags (bit 0: LgScreenTrace ran before - gi.lumen_screen_traces), normal bias (float, m),
+// moving threshold (float) }, P[5].x = surface cache UAV
 // (0xFFFFFFFF: none - gi.lumen_hit_surface_cache off, surface_cache.enabled off or before its first frame),
 // P[5].y / .z / .w = radiance cache params (raw SRV) / indirection SRV / atlas SRV (P[5].y = 0xFFFFFFFF: none -
 // lumen.radiance_cache off): where all 8 cache probes around the screen probe exist the ray stops at the cache's
@@ -33,6 +34,9 @@
 #include "Passes/GI/Lumen/LgRadianceCache.hlsli"
 
 float lgBias(float3 p) { return 1e-3 + 2e-4 * distance(p, g_cameraPosition); }
+// The world ray after a screen trace starts this much before the point the screen walk reached (m; Unreal's hardware
+// ray tracing pull-back bias is 8 cm).
+#define LG_SCREEN_PULLBACK 0.08
 
 [shader("raygeneration")]
 void LgTraceGen()
@@ -74,9 +78,15 @@ void LgTraceGen()
     r.Origin = positionSpeed.xyz + normal * (asfloat(P[4].z) + bias);
     r.TMin = 0;
     r.TMax = giRayLength();
-    // CALL SITE (S2's shared screen trace, as Lumen's LumenScreenTracing: the probes' rays and the reflection rays use one):
-    // the ray first walks the depth pyramid; a certain hit takes last frame's lit colour there and skips the ray below (the
-    // trace word then carries its distance and hit); otherwise r.TMin = the distance the screen trace cleared.
+    // Screen traces first (P[4].y bit 0; LgScreenTrace.hlsl wrote this texel's radiance and word): a screen hit is
+    // final - no world ray; otherwise the world ray starts where the screen walk got to, pulled back by
+    // LG_SCREEN_PULLBACK (the walk's last step is a pixel wide).
+    if ((P[4].y & 1u) != 0)
+    {
+        const uint screened = traceWord[coord];
+        if (lgTraceHit(screened)) return;
+        r.TMin = max(lgTraceDistance(screened) - LG_SCREEN_PULLBACK, 0.0);
+    }
     // The far field: A's radiance cache (the position is the probe's, as marked by LgRcMark).
     LrcCoverage coverage = (LrcCoverage)0;
     if (P[5].y != 0xFFFFFFFFu)

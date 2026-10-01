@@ -65,6 +65,10 @@ void accelerationStructures(FramePassContext& fc);                // static/dyna
 // read it (GI records before reflections, where the cache's own passes run). Invalid: surface_cache.enabled off, or
 // before its first frame.
 void surfaceCache(FramePassContext& fc);
+// The shared screen trace's inputs for GI's probe rays (gi.lumen with gi.lumen_screen_traces): the depth pyramid into
+// fc.resources.screenTraceHzb and the previous frame's colour into main.prevSceneColor, before globalIllumination
+// (refl::ReflectionSystem::screenTraceInputs records them once per frame, whoever asks first).
+void screenTraceInputs(FramePassContext& fc, ViewResources& main);
 void globalIllumination(FramePassContext& fc, ViewResources& main);  // cache update rays, screen probes, near occlusion
 void reflections(FramePassContext& fc, ViewResources& main);      // K/G/M rays, planar mirrors (via renderView)
 // A secondary view's per-pixel GI cache irradiance (view.giIrradiance: r.gi.screen and its filter, as the main view's),

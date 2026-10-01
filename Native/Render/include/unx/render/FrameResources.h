@@ -272,6 +272,8 @@ struct FrameResources
                                    // every pixel (VsmCls.hlsli VsmClsTile; invalid = classification off)
     BufferRef tlasStatic, tlasDynamic;  // acceleration structures                          [R]
     BufferRef giCache;             // world radiance cache                                  [R]
+    TextureRef screenTraceHzb;     // the shared screen trace's depth pyramid (ScreenTrace.hlsli sctLevelOrigin) of the main  [R]
+                                   // view, published by tracks::screenTraceInputs before GI; invalid: not asked for
     BufferRef surfaceCache;        // the surface cache (Passes/SurfaceCache, SURFACE_CACHE_INTERFACE_KO.md): this frame's  [R]
                                    // import, published by tracks::surfaceCache before GI; ray hits mark and read it as a
                                    // UAV (DispatchRays passes: UavGraphics). Invalid: off, or before its first frame
