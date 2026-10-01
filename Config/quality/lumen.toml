@@ -1,0 +1,19 @@
+# Owner: A (render A). Lumen modules written by A for R's gi.lumen final gather (user decision 2026-10-01: the lighting is
+# rebuilt on Unreal's structure). Values are Unreal's defaults (r.Lumen.*); (Q) marks the ones that trade accuracy.
+[lumen]
+# Short-range AO and bent normal (Passes/GI/LumenShortRangeAO.hlsli): the occlusion nearer than the screen probes resolve,
+# from the depth buffer. false (default): not computed; the final gather then applies no short-range occlusion.
+short_range_ao = false
+short_range_ao_downsample = 2                # ShortRangeAO.DownsampleFactor (1 or 2)
+short_range_ao_slices = 2                    # (Q) HorizonSearch.SliceCount
+short_range_ao_steps = 3                     # (Q) HorizonSearch.StepsPerSlice
+short_range_ao_radius_px = 32.0              # 2 x the screen probe spacing (ScreenProbeDownsampleFactor 16 x 2)
+short_range_ao_hzb = true                    # HorizonSearch.HZB: samples from the depth pyramid's half-resolution level
+short_range_ao_foreground_fraction = 0.3     # HorizonSearch.ForegroundSampleRejectDistanceFraction
+short_range_ao_foreground_power = 1.0        # HorizonSearch.ForegroundSampleRejectPower
+short_range_ao_temporal = true               # ShortRangeAO.Temporal
+short_range_ao_clamp_scale = 1.0             # ShortRangeAO.Temporal.NeighborhoodClampScale
+short_range_ao_max_frames = 10.0             # (Q) the gather's Temporal.MaxFramesAccumulated
+short_range_ao_history_distance = 0.01       # the gather's Temporal.DistanceThreshold (relative view depth)
+short_range_ao_max_multibounce_albedo = 0.5  # ShortRangeAO.MaxMultibounceAlbedo (the integration's lumenAoMultibounce)
+short_range_ao_foliage_strength = 0.7        # ShortRangeAO.FoliageOcclusionStrength (the integration's, Foliage pixels)

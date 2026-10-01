@@ -108,6 +108,10 @@ struct ViewResources
     // the main view's rgb carries the screen probes' near occlusion too (E x occlusion x exposure: M gathers the probes
     // only for the K path and Foliage's back side).
     TextureRef giIrradiance;
+    // lumen.short_range_ao (A, for R's gi.lumen; Passes/GI/LumenShortRangeAO.hlsli): RGBA16F W x H of the main view,
+    // xyz = world bent normal x AO, a = accumulated frames + 1 (0: no surface). Invalid = off. Readers use
+    // lumenShortRangeAO / lumenAoMultibounce / lumenAoSpecular of that header.                                       [A]
+    TextureRef shortRangeAO;
     TextureRef reflectionLobeTiles;  // R8_UNORM ceil(W/8) x ceil(H/8): min over the tile's      [M]
                                      // surface pixels of reflectionLobeHalfAngle(r, NoV) / pi
                                      // (Reflection.hlsli; sky-only tile = 1); R skips ray
