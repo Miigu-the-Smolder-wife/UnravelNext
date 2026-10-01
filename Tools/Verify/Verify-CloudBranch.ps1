@@ -5,7 +5,7 @@
 #   powershell ... -File Tools\Verify\Verify-CloudBranch.ps1 -Phases tests,caps        (only some phases)
 #   powershell ... -File Tools\Verify\Verify-CloudBranch.ps1 -Quick                    (a short smoke run of every phase)
 #   powershell ... -File Tools\Verify\Verify-CloudBranch.ps1 -Phases publish              (evidence to origin/local/verify-<sha>)
-# Safety: every GPU run happens under Tools/CI/GpuLock.ps1; the script stops when a game runs or a device is removed;
+# Safety: every GPU run happens under Tools/CI/GpuLock.ps1; a running game is only noted (user 2026-10-01); the script stops when a device is removed;
 # it never kills processes and never edits engine code (the gate worktree is checked out by Build.ps1 -Committed).
 [CmdletBinding()]
 param(
@@ -25,7 +25,9 @@ if ($Phases.Count -eq 1 -and $Phases[0] -match ",") { $Phases = $Phases[0] -spli
 
 function Test-Game {
   $g = Get-Process -Name $games -ErrorAction SilentlyContinue
-  if ($g) { throw "게임 실행 중($($g[0].Name)): GPU 작업을 하지 않는다. 게임을 끝낸 뒤 다시 실행한다." }
+  # User instruction 2026-10-01: GPU work continues while a game runs; the game is only noted (timings taken then are
+  # labelled "during a game" in the report and re-measured for verdicts).
+  if ($g) { Write-Host "게임 실행 중($($g[0].Name)): 계속 진행한다(사용자 지시 2026-10-01). 이때 잰 timing은 게임 중 측정으로 본다." }
 }
 $gpuPhases = @($Phases | Where-Object { $_ -in @("build", "tests", "caps", "convergence", "determinism", "luminance", "timing") }).Count -gt 0
 if ($gpuPhases -and -not $DryRun) { Test-Game }
@@ -48,7 +50,7 @@ function Invoke-Locked([string]$kind, [string[]]$lines) {
     "Set-Location '$gate'",
     ("`$games = @('" + ($games -join "','") + "')"),
     'function Invoke-Step($name, $file, [string[]]$a) {',
-    '  if (Get-Process -Name $games -ErrorAction SilentlyContinue) { "STOP game"; exit 3 }',
+    '  if (Get-Process -Name $games -ErrorAction SilentlyContinue) { "game running: continuing (user instruction 2026-10-01)" }',
     '  $sw = [Diagnostics.Stopwatch]::StartNew()',
     "  `$log = Join-Path '$Out' (`$name + '.log')",
     '  & $file @a *> $log',
