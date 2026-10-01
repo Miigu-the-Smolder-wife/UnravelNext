@@ -37,7 +37,7 @@ shadow_rays_opaque = false            # QUALITY TRADE (user decision; the refere
                                       # hardware rays): true = the cells' shadow rays (lights, sun) take alpha-tested casters as
                                       # solid - no any-hit work per ray. Off here: it changes the cached shadows and did not
                                       # cure the lounge hang it was tried for (2026-10-02)
-direct_pairs = false                  # (A, 2026-10-02) the cells direct light as (cell, light) pairs in three passes: select
+direct_pairs = true                   # (A, 2026-10-02) the cells direct light as (cell, light) pairs in three passes: select
                                       # (compute, no ray: the 8 strongest lights, their integrals, the sun), trace (one shadow
                                       # ray per pair record, dispatches of at most 262,144), store. The same lighting as
                                       # direct_analytic; in place of r.sc.cells. Passes/SurfaceCache/SurfaceCacheLightPairs.hlsli

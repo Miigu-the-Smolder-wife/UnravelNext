@@ -173,7 +173,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.scDebugSkip = (uint32_t)num("surface_cache.debug_skip", 0);
     s.scShadowRaysOpaque = flag("surface_cache.shadow_rays_opaque", false);
     s.scDirectShadowInline = flag("surface_cache.direct_shadow_inline", false);
-    s.scDirectPairs = flag("surface_cache.direct_pairs", false);
+    s.scDirectPairs = flag("surface_cache.direct_pairs", true);
     s.scDebugCount = (uint32_t)num("surface_cache.debug_count", 0);
     s.scDirectStochasticFrames = num("surface_cache.direct_stochastic_max_frames", 12.0);
     s.scDirectMinWeight = num("surface_cache.direct_stochastic_min_sample_weight", 0.001);
@@ -1073,7 +1073,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const uint32_t rayCapacity = (s.experimentDisable & 64) ? 0 : m_rayCapacity;
     static_assert(48 + (1ull << 24) * 60 < (1ull << 30), "the rays buffer stays under 1 GiB");  // 64: every job inline (A/B of the split)
     // (bands of the ray passes: by what the frame can hold - a job per pixel, a slot per unit of capacity)
-    const uint32_t jobBands = bandsFor((uint64_t)width * height, kBand), slotBands = bandsFor(rayCapacity, kBand),
+    // (the trace pass: a job traces up to raysPerSample rays in its thread, so its band is kBand rays, not kBand jobs)
+    const uint32_t jobBand = kBand / std::max(s.raysPerSample & 0xFFu, 1u);
+    const uint32_t jobBands = bandsFor((uint64_t)width * height, jobBand), slotBands = bandsFor(rayCapacity, kBand),
                    inlineBands = bandsFor((uint64_t)width * height, kInlineBand);
     const BufferRef raysBuffer = g.createBuffer({ "R reflection rays", 48 + (uint64_t)rayCapacity * 60, 0 });  // REFL_RAYS_HEADER + REFL_RAYS_SLOT_BYTES
     // The GI hit accumulator pool (GiAccPool.hlsli; valid when gi.hit_accumulator's pool runs): reflection hits read it.
@@ -1135,7 +1137,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   if (accPool.valid()) b.use(accPool, Use::SrvCompute);
                   if (hitsUseSurfaceCache) b.use(surfaceCache, Use::UavCompute);
               },
-              [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, accPool, surfaceCache, hitsUseSurfaceCache, jobBands,
+              [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, accPool, surfaceCache, hitsUseSurfaceCache, jobBands, jobBand,
                hitFlags = (s.hitConeLobes ? 1u : 0u) | (s.hitOrientedLights ? 2u : 0u) | (layers && s.layerFilter && s.hitStrictRead ? 4u : 0u) |
                           (s.lumenSurfaceCacheView ? 8u | ((s.lumenSurfaceCacheViewComponent & 7u) << 8) : 0u) | (screenContinue ? 16u : 0u)](PassContext& c) {
                   // (the layer buffers' UAVs and the hit shading's flags into the rays header: the shade, combine and inline
@@ -1143,7 +1145,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   const uint32_t k[16] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(raysBuffer), rayCapacity,
                                            layers ? c.uav(rayLayers) : 0xFFFFFFFFu, layers ? c.uav(jobLayers) : 0xFFFFFFFFu, hitFlags,
                                            accPool.valid() ? c.srv(accPool) : 0xFFFFFFFFu, hitsUseSurfaceCache ? c.uav(surfaceCache) : 0xFFFFFFFFu, jobBands,
-                                           kArgumentsBytes, kBand, 0, 0 };
+                                           kArgumentsBytes, jobBand, 0, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionArgs"));
                   c.computeConstants(k, 16);
                   c.cmd->Dispatch(1, 1, 1);
