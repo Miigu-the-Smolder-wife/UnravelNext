@@ -137,7 +137,13 @@ powershell -File Tools/CI/GpuLock.ps1 -Track <트랙> -- <성능 측정 명령> 
   - **대기자 표시**: 기다리는 쪽은 첫 대기 전에 `.gpulock/waiting/<pid>.json`(`{track, kind, pid, since, command}`, tmp 뒤 `MoveFileEx` 교체)을 쓰고, 얻거나 포기하면 지운다. 죽은 pid의 파일은 보는 쪽이 지운다.
   - **correctness 양보**: kind = correctness인 획득은 살아 있는 timing 대기자가 있으면 250 ms마다 다시 보며 기다린다. 뮤텍스를 얻은 직후에도 한 번 더 보고, 그 사이 timing 대기자나 HOLD가 생겼으면 다시 놓는다. timing끼리는 뮤텍스 순서를 따른다.
   - **HOLD**: `.gpulock/HOLD`가 있으면 아무도 새로 얻지 않는다(사용자가 게임할 때 두는 표지, 내용 = 사유; 조율 규칙).
-  - (v1.83, 조율 세션 2026-10-01) **차례와 공용 폴더**:
+  - (v1.85, 조율 세션 2026-10-01 13:30, 사용자 지적) **종류와 무관한 선착순, 한 번에 10분**:
+    - timing 우선을 없앤다. 차례는 종류와 상관없이 `since` 순, 같으면 pid 순이다. kind는 배경 CPU 작업 정지 여부와 경합 판정에만 쓴다.
+    - 한 번 잡는 시간은 약 10분 이하로 한다. 더 긴 묶음은 나눠서 조각 사이에 다시 줄을 선다.
+    - 이유: timing 한 묶음이 31분 동안(12:35~13:06) 다섯 세션을 세워 두었다.
+    - 프로세스 안 조각(`GpuLock.cpp`, `GpuSlice.cpp`)도 같은 순서로 맞춘다.
+    - [실측] 별도 뮤텍스 사본 시험: correctness A, timing T, correctness B, timing U가 차례로 오자 H→A→T→B→U 순서로 얻었다.
+  - (v1.83, 조율 세션 2026-10-01) **차례와 공용 폴더**(아래 "timing이 먼저"는 v1.85가 대체한다):
     - 기다리는 쪽은 차례대로 얻는다. timing이 correctness보다 먼저이고, 같은 종류 안에서는 `since` 순, 같으면 pid 순이다. 자기보다 앞선 살아 있는 대기자가 있으면 얻지 않는다. 뮤텍스를 얻은 직후에도 다시 본다.
     - 대기 파일의 pid가 `since`보다 5 s 넘게 늦게 시작한 프로세스의 것이면(재사용된 pid) 그 파일은 낡은 것으로 지운다.
     - 잠금 폴더는 **주 체크아웃의 `.gpulock` 하나**다. worktree의 `.git` 파일 → 그 git 폴더의 `commondir` → 공용 git 폴더의 부모를 따른다. `UNX_GPU_LOCK_DIR`가 있으면 그것을 쓴다.
