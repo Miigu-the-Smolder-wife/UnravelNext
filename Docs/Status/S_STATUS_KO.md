@@ -500,6 +500,7 @@ S의 국소 그림자 맵이 꺼지는 켬 상태에서 국소광에 그림자�
 실수 기록: transient 패치 첫 판에서 `&st->diffuse[n]`(ComPtr의 operator&가 포인터를 해제)로 "imported without a resource" 실패 — GPU 작업 전에 멈춤, `std::addressof`로 고침.
 
 ## 16. 조정 06:30 목록 진행 (2026-10-02)
+- **d936d28 (07시)**: 1번과 2번의 A 수정 첫 실행 통과 — 로비 8프레임 스모크, watergate 평면 뷰 60프레임(`s.ml.volume` 122회 = 주 뷰 + 평면 뷰, `s.froxel.integrate.planar` 62회), 호스트 입자 테스트 ok(디버그 레이어 오류 0), 로비 60프레임 종료 0. 3번의 끝 바이어스 스윕은 줄에 걸림.
 - 1번 주 뷰 외 뷰의 표본 볼륨: 코드·빌드 끝(평면 반사 뷰가 자기 표본 볼륨을 이력 없이 가짐 — 공기 적분과 lit 입자가 읽음). 잠금 안 첫 실행(스모크 8 → watergate 평면 뷰 → 호스트 입자 테스트 → 로비 60) 대기.
 - 2번 dispatch 구조 상한 감사: `Docs/Status/DISPATCH_BOUNDS_KO.md`. A의 위반 3건 고침(코드는 1번과 같이 첫 실행 대기): `m.ml.trace` 행 띠, `s.ml.volume` 슬라이스 띠, radiance cache 청크 ÷3. R·S2에게 각자 항목 전달(R은 `r.gi.lg.trace` 띠를 광선 기준으로 고친다고 답함).
 - 3번 MegaLights 코브 띠 판정 자료: `Docs/Status/MEGALIGHTS_COVE_MEMO_KO.md`(광원·옛 규칙·언리얼 소스 정리 끝, 끝 바이어스 스윕 실행 대기).
