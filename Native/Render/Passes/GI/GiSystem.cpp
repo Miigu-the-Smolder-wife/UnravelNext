@@ -31,7 +31,7 @@ uint32_t asU(float f)
 // Cache buffer layout (GiCache.hlsli header fields 4..11, 24..27).
 struct Layout
 {
-    uint32_t table, freeList, meta, anchor, sh, texels, update, selected, hitStamp, hitList, shTable, mapOwner, anchorMin, irr, slotAnchor, emit, split, bsplit, resample, end;
+    uint32_t table, freeList, meta, anchor, sh, texels, update, selected, hitStamp, hitList, shTable, mapOwner, anchorMin, irr, slotAnchor, emit, split, bsplit, resample, acc, accSums, end;
 };
 
 Layout layoutOf(const GiSettings& s)
@@ -59,7 +59,11 @@ Layout layoutOf(const GiSettings& s)
     l.bsplit = (uint32_t)bsplit;
     const uint64_t resample = bsplit + (s.bounceSplit ? (uint64_t)s.capacity * 48 : 0);  // gi.bounce_split (GiInternal GI_BSPLIT_OFFSET)
     l.resample = (uint32_t)resample;
-    const uint64_t end = resample + (s.anchorResample ? (uint64_t)s.capacity * 8 : 0);  // gi.anchor_resample (GI_RESAMPLE_OFFSET)
+    const uint64_t acc = resample + (s.anchorResample ? (uint64_t)s.capacity * 8 : 0);  // gi.anchor_resample (GI_RESAMPLE_OFFSET)
+    l.acc = (uint32_t)acc;
+    const uint64_t accSums = acc + (s.hitAccumulator ? (uint64_t)s.capacity * 48 : 0);  // gi.hit_accumulator means (GI_ACC_OFFSET)
+    l.accSums = (uint32_t)accSums;
+    const uint64_t end = accSums + (s.hitAccumulator ? (uint64_t)s.capacity * 144 : 0);  // and frame sums (GI_ACC_SUMS, GI_ACC_SUMS_BYTES)
     if (end >= (1ull << 32)) fail("GI cache exceeds raw-buffer address space");
     l.end = (uint32_t)end;
     return l;
@@ -142,6 +146,14 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     }
     if (q.has("gi.lighting_recent_frames")) s.lightingRecentFrames = (uint32_t)q.integer("gi.lighting_recent_frames");
     s.pathGuiding = q.has("gi.path_guiding") && q.boolean("gi.path_guiding");
+    s.hitAccumulator = q.has("gi.hit_accumulator") && q.boolean("gi.hit_accumulator");
+    if (q.has("gi.hit_accumulator_min_samples")) s.hitAccumulatorMinSamples = (uint32_t)q.integer("gi.hit_accumulator_min_samples");
+    if (q.has("gi.hit_accumulator_window")) s.hitAccumulatorWindow = (float)q.number("gi.hit_accumulator_window");
+    if (q.has("gi.hit_accumulator_window_recent")) s.hitAccumulatorWindowRecent = (float)q.number("gi.hit_accumulator_window_recent");
+    s.hitAccumulatorCellScale = q.has("gi.hit_accumulator_cell_scale") ? (float)q.number("gi.hit_accumulator_cell_scale") : s.hitCellFootprintScale;
+    s.hitAccumulatorFrame = q.has("gi.hit_accumulator_frame") && q.boolean("gi.hit_accumulator_frame");
+    s.hitAccumulatorRatio = q.has("gi.hit_accumulator_ratio") && q.boolean("gi.hit_accumulator_ratio");
+    if (!(s.hitAccumulatorWindow >= 1 && s.hitAccumulatorWindowRecent >= 1)) fail("gi.hit_accumulator windows must be >= 1 sample");
     if (q.has("gi.path_guiding_uniform_share")) s.pathGuidingUniformShare = (float)q.number("gi.path_guiding_uniform_share");
     if (!(s.pathGuidingUniformShare > 0 && s.pathGuidingUniformShare <= 1)) fail("gi.path_guiding_uniform_share must be in (0, 1] (unbiased only with a uniform share)");
     if (s.pathGuiding && (s.splitBounceHistory || s.bounceSplit)) fail("gi.path_guiding is not combined with the split histories");
@@ -242,6 +254,12 @@ GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(devi
     h[230] = m_settings.bounceSplit ? l.bsplit : 0;                                // GI_BSPLIT_OFFSET
     h[231] = m_settings.bounceSplitUpdates;                                        // GI_BSPLIT_WINDOW
     h[232] = m_settings.anchorResample ? l.resample : 0;                           // GI_RESAMPLE_OFFSET
+    h[234] = m_settings.hitAccumulator ? l.acc : 0;                                // GI_ACC_OFFSET
+    h[235] = m_settings.hitAccumulator ? l.accSums : 0;                            // GI_ACC_SUMS
+    h[236] = m_settings.hitAccumulatorMinSamples;                                  // GI_ACC_MIN
+    h[237] = asU(m_settings.hitAccumulatorCellScale);                              // GI_ACC_CELL_SCALE
+    h[233] = (m_settings.hitAccumulatorFrame ? 1u : 0u) | ((m_settings.experimentDisable & 32768u) ? 2u : 0u) |
+             (m_settings.hitAccumulatorRatio ? 4u : 0u);  // GI_ACC_MODE
     for (uint32_t e = 0; e < m_settings.capacity; ++e) head[l.freeList / 4 + e] = m_settings.capacity - 1 - e;  // pops 0, 1, 2 ...
     for (uint32_t t = 0; t < m_settings.tableSlots; ++t) head[l.table / 4 + t * 4 + 2] = 0xFFFFFFFFu;
     std::memcpy(&tail[(l.shTable - l.hitStamp) / 4], shTable.data(), shTable.size() * 4);
@@ -895,18 +913,22 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     // Each ray's radiance and hemispherical octahedral coordinates, for the per-ray irradiance map and SH (GiIntegrate).
     // Four blocks: texel samples (irradiance), emitter samples, texel values (radiance, distance, bounce; GiIntegrate blends),
     // the texel's analytic-emitter radiance (the emitter texels, K path only).
+    // gi.hit_accumulator_frame (GiAccFix.hlsl): the rays' records, written by the trace
+    BufferRef accRecords{};
+    if (s.hitAccumulator && s.hitAccumulatorFrame) accRecords = g.createBuffer({ "GI accumulator records", (uint64_t)rayCount * 48, 0 });
     const BufferRef samples = g.createBuffer({ "GI ray samples", (uint64_t)rayCount * (s.splitBounceHistory ? 7 : s.bounceSplit ? 5 : 4) * 16, 16 });
     g.addPass("r.gi.trace", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(cache, Use::UavGraphics);
                   b.use(samples, Use::UavGraphics);
                   if (guide.valid()) b.use(guide, Use::SrvGraphics);
+                  if (accRecords.valid()) b.use(accRecords, Use::UavGraphics);
                   rays.declareTraversal(b);
                   rays.declareDecals(b);
                   if (atmosphere)
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
               },
-              [&pipeline, cache, samples, guide, rayCount, s, sky, sun, skyBand, scene, frameConstants, atmosphere, luts](PassContext& c) {
+              [&pipeline, cache, samples, guide, accRecords, rayCount, s, sky, sun, skyBand, scene, frameConstants, atmosphere, luts](PassContext& c) {
                   uint32_t k[32] = {};
                   k[0] = c.uav(cache);
                   k[1] = rayCount;
@@ -924,11 +946,40 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   k[16] = asU(skyBand);
                   k[17] = c.uav(samples);
                   k[18] = guide.valid() ? c.srv(guide) : 0xFFFFFFFFu;  // gi.path_guiding (P[4].z)
+                  k[19] = accRecords.valid() ? c.uav(accRecords) : 0xFFFFFFFFu;  // gi.hit_accumulator_frame (P[4].w)
                   std::memcpy(&k[24], scene, sizeof scene);
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
                   pipeline.dispatch(c.cmd, 0, rayCount, 1, 1);
               });
+    if (s.hitAccumulator)
+    {
+        // gi.hit_accumulator (GiAccumulate.hlsl): this frame's hit cells fold their direct-light sums into their means; the
+        // window in samples, shorter while the sun changes (the same scene rule as the running means' window)
+        const float window = windowRule == 2u ? s.hitAccumulatorWindowRecent : s.hitAccumulatorWindow;
+        g.addPass("r.gi.accumulate", QueueType::Compute, [&](PassBuilder& b) { b.use(cache, Use::UavCompute); },
+                  [&shaders, cache, window, capacity = s.capacity](PassContext& c) {
+                      uint32_t w;
+                      std::memcpy(&w, &window, 4);
+                      const uint32_t k[4] = { c.uav(cache), w, 0, 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiAccumulate"));
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch((capacity + 63) / 64, 1, 1);
+                  });
+        if (accRecords.valid())
+            g.addPass("r.gi.accfix", QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          b.use(cache, Use::UavCompute);
+                          b.use(samples, Use::UavCompute);
+                          b.use(accRecords, Use::SrvCompute);
+                      },
+                      [&shaders, cache, samples, accRecords, rayCount](PassContext& c) {
+                          const uint32_t k[4] = { c.uav(cache), rayCount, c.uav(samples), c.srv(accRecords) };
+                          c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiAccFix"));
+                          c.computeConstants(k, 4);
+                          c.cmd->Dispatch((rayCount + 63) / 64, 1, 1);
+                      });
+    }
     g.addPass("r.gi.integrate", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(cache, Use::UavCompute);
@@ -1173,6 +1224,7 @@ GiStats GiSystem::readStats()
     std::memcpy(&d2, &h[197], 4);
     st.parentDelta = std::sqrt(std::max(d2, 0.0f));
     std::memcpy(st.audit, &h[214], sizeof(st.audit));  // GI_AUDIT_SUMS 856
+    std::memcpy(st.accAudit, &h[238], sizeof(st.accAudit));  // GI_ACC_AUDIT 952
     return st;
 }
 } // namespace unx::render::gi

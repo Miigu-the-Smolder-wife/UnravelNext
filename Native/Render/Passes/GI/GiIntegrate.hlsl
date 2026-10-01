@@ -446,6 +446,7 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     b.Store4(address + 32, uint4(word[8], word[9], word[10], word[11]));
     b.Store2(address + 48, uint2(word[12], word[13]));
     if (history == 0) b.InterlockedAdd(GI_H_STAT_RESETS, 1u);
+    if (history == 0 && !prior) giAccClear(b, entry);  // gi.hit_accumulator: a restart (the means of an older state)
     if (restart) b.InterlockedAdd(GI_P1_STAT_RESTARTS, 1u);
     b.Store(address + GI_SH_RESTART, history == 0 || restart ? 1u : min(restartCount + 1, 65535u));
     b.Store(address + GI_SH_UPDATES, b.Load(address + GI_SH_UPDATES) + 1);

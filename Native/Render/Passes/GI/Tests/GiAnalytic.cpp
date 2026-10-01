@@ -10,6 +10,7 @@
 //  5. Horizon band sky: a ground plane under a constant sky only between elevation 0 and 10 deg (a sunset sky is brightest
 //     there). E = pi L cos^2(80 deg) exactly. The cache's irradiance comes from order-2 SH, whose truncated cosine kernel
 //     overestimates light near the horizon (at 85 deg from the normal 0.141 against cos = 0.087): this measures it.
+//  9. Test 8 with the hit-cell direct-light accumulator (gi.hit_accumulator): the same energy (+-0.5 %).
 //  8. A point light beside white surfaces over a black floor (a large ceiling, a small panel, a corner, a lampshade): the
 //     floor's single bounce against the exact integral over the light's directions (lightNearExpected), +-0.5 %.
 //  4. A single sunlit plane (albedo 0.5, no sky), level and tilted 25 deg: a plane cannot see itself, so its indirect
@@ -927,6 +928,16 @@ int main(int argc, char** argv)
                 fp.applyOverride("gi.hit_light_footprint=true");
                 const Outcome o8 = run(device, shaders, q8, sc, { 0, 0, 0 }, { 0, 0, 0 }, expected8, -1, lightNearFrames, 1920, 1080);
                 const Outcome f8 = run(device, shaders, fp, sc, { 0, 0, 0 }, { 0, 0, 0 }, expected8, -1, lightNearFrames, 1920, 1080);
+                // 9. The hit-cell direct-light accumulator (gi.hit_accumulator, V2.3 12.1): the same energy as the point path
+                QualityConfig qa = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+                qa.applyOverride("gi.experiment_disable=1536");
+                for (const std::string& o : overrides) qa.applyOverride(o);
+                qa.applyOverride("gi.hit_accumulator=true");
+                const Outcome a9 = run(device, shaders, qa, sc, { 0, 0, 0 }, { 0, 0, 0 }, expected8, -1, lightNearFrames, 1920, 1080);
+                const double e9 = a9.mapMean / a9.mapExpectedMean - 1;
+                const bool ok9 = a9.mapProbes > 1000 && std::fabs(e9) <= 0.005;
+                logf("light near surfaces (9, hit accumulator), %s: %+.2f %% (P99 %.2f %%) -> %s\n", k.name, 100 * e9, 100 * a9.mapP99, ok9 ? "PASS" : "FAIL");
+                pass = pass && ok9;
                 const double e8 = o8.mapMean / o8.mapExpectedMean - 1, ef = f8.mapMean / f8.mapExpectedMean - 1;
                 const bool ok8 = o8.mapProbes > 1000 && std::fabs(e8) <= 0.005;
                 logf("light near surfaces, %s (%u frames): %u probe points, expected mean E %.5f; configured estimator %+.2f %% (P99 %.2f %%) -> %s; footprint mean %+.2f %% "

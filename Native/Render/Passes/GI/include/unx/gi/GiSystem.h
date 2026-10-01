@@ -51,7 +51,15 @@ struct GiSettings  // from Config/quality/gi.toml
     // gi.path_guiding (D-12, off: a decision item): the rays' texels from a mixture of the uniform choice
     // (pathGuidingUniformShare) and one proportional to the texels' irradiance share (GiGuide.hlsl).
     bool pathGuiding = false;
-    float pathGuidingUniformShare = 0.5f;  // gi.anchor_resample: each update moves the anchor to a random lookup point (GiInternal giAnchorOffer)
+    // gi.hit_accumulator (V2.2 12.1, P1''-a): hits read their cell's direct-light means (GiInternal GI_ACC_*) once it holds
+    // hitAccumulatorMinSamples; the means' window in samples (hitAccumulatorWindowRecent while the sun changes).
+    bool hitAccumulator = false;
+    uint32_t hitAccumulatorMinSamples = 32;
+    float hitAccumulatorWindow = 1024, hitAccumulatorWindowRecent = 128;
+    float hitAccumulatorCellScale = 2;  // gi.hit_accumulator_cell_scale (default: the bounce cell's, gi.hit_cell_footprint_scale)
+    bool hitAccumulatorFrame = false;   // gi.hit_accumulator_frame: this frame's cell means (GiAccFix), not a window's
+    bool hitAccumulatorRatio = false;   // gi.hit_accumulator_ratio: each term's mean weighted by its readers' factors
+    float pathGuidingUniformShare = 0.5f;
     float youngUpdateShare = 0.6f, parentDeltaInitial = 0.05f;
     static GiSettings fromQuality(const QualityConfig& q);
 };
@@ -69,7 +77,8 @@ struct GiStats  // header counters of the last completed frame (tests, diagnosti
     // the running estimate of the parent-child relative difference (sqrt of GI_P1_DELTA2).
     uint32_t priors = 0, restarts = 0, selectedYoung = 0, selectedT1 = 0;
     float parentDelta = 0;
-    uint64_t audit[8] = {};  // energy audit sums (GiInternal.hlsli GI_AUDIT_SUMS, x 1024; gi.experiment_disable 32768)
+    uint64_t audit[8] = {};
+    uint64_t accAudit[2] = {};  // gi.hit_accumulator audit: sum of lum(point) and lum(accumulator) diffuse direct x 1024 (GI_ACC_AUDIT)  // energy audit sums (GiInternal.hlsli GI_AUDIT_SUMS, x 1024; gi.experiment_disable 32768)
 };
 
 // The information quantity of M's per-pixel cache lookup on the main view (Gates/GiLookupStats.hlsl; gates only).

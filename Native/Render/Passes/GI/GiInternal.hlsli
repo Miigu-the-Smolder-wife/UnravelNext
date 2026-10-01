@@ -277,6 +277,62 @@ void giDetAnchorCandidate(RWByteAddressBuffer b, GiHeader h, uint entry, uint64_
 // choice among the lookups since the entry's last update, and the history averages the irradiance over where the cell
 // is read. The normal stays the entry's (a cell is one normal class). A plain load first: a lower priority adds no atomic.
 #define GI_RESAMPLE_OFFSET 928  // header word: the candidates (8 B per entry), 0 = off
+// Hit-cell direct-light accumulator (gi.hit_accumulator; RENDERER_REDESIGN_V2 12.1, P1''-a). The room's multi-bounce
+// light is carried by the coarse hit cells, whose updates took the direct light of one point per texel ray - a lamp's
+// 1/d^2 hotspot made them heavy-tailed, the running means walked, and the room's level differed between runs (SD 3.1 pp).
+// Every GI hit adds its direct light to its cell's sums (A = sum of E_i, B = sum of E_i t_l,i, C = sum of E_i t_l,i
+// returned_i / pi: the irradiance of the sun and the local light sample, E_i = n.l E vis, and the coat's light-side
+// factors - HitShading's coat split), in 64-bit fixed point (integer sums: the same total in any order, deterministic);
+// GiAccumulate folds each listed cell's frame sums into its means (samples-weighted, window gi.hit_accumulator_window
+// samples, fewer while the sun changes). A hit whose cell holds gi.hit_accumulator_min_samples reads the means for its
+// diffuse direct term: plain (1 - cover) keep_sheen(v) albedo A + cover t_v / eta^2 (albedo B + C), with its own albedo,
+// normal and view (texture detail kept); the specular terms stay the point values. Unbiased in total over the cell's
+// hits (the mean of the same population), the cell's light leaves it at the right level; per reader the hotspot moves
+// within the cell (<= 2 texel cones).
+#define GI_ACC_MODE 932         // bit 0: gi.hit_accumulator_frame (the rays' direct terms from this frame's cell means, GiAccFix),
+                                // bit 1: energy audit (experiment 32768), bit 2: gi.hit_accumulator_ratio (response-weighted means)
+#define GI_ACC_OFFSET 936       // header words: the means (48 B per entry: A, B, C float3, n float, epoch; 0 = off),
+#define GI_ACC_SUMS 940         // the frame sums (GI_ACC_SUMS_BYTES per entry: per term T = A, B, C the numerator sum k_T T and
+                                // the weight sum k_T, uint64 x 2^16 - A, B rgb, C's weight scalar - then the count),
+#define GI_ACC_MIN 944          // the samples a cell needs before hits read it
+#define GI_ACC_CELL_SCALE 948   // the accumulator's cell: this x the ray footprint (float; the bounce cell's scale: the bounce
+                                // cell itself; smaller: its own finer entry, kept alive by the hits, never updated by rays)
+#define GI_ACC_AUDIT 952        // energy audit (experiment 32768): 2 x uint64, sum of lum(point) and lum(accumulator) x 1024
+#define GI_ACC_SCALE 65536.0
+#define GI_ACC_SUMS_BYTES 144u  // 16 x uint64 (A: 3 + 3, B: 3 + 3, C: 3 + 1) + count, padded to 16 B
+#define GI_ACC_COUNT 128u
+// One hit's direct terms with the reader's factors k_T (D = k_A A + k_B B + k_C C): the cell's mean of a term is
+// sum(k_T T) / sum(k_T), so that its readers' corrected values sum, over the frame's hits, to their point values exactly
+// (gi.hit_accumulator_ratio; the plain mean sum(T) / n lost the energy where albedo and light vary together within a cell:
+// bath audit 0.98). Without the ratio rule the weights are 1 (the plain mean).
+void giAccRecord(RWByteAddressBuffer b, uint entry, float3 A, float3 B, float3 C, float3 kA, float3 kB, float kC)
+{
+    const uint base = b.Load(GI_ACC_SUMS) + entry * GI_ACC_SUMS_BYTES;
+    if ((b.Load(GI_ACC_MODE) & 4u) == 0) kA = kB = 1, kC = 1;
+    const float3 nA = kA * A, nB = kB * B, nC = kC * C;
+    const float v[16] = { nA.x, nA.y, nA.z, kA.x, kA.y, kA.z, nB.x, nB.y, nB.z, kB.x, kB.y, kB.z, nC.x, nC.y, nC.z, kC };
+    uint64_t prev;
+    [unroll] for (uint k = 0; k < 16; ++k)
+        if (v[k] > 0) b.InterlockedAdd64(base + k * 8, (uint64_t)(v[k] * GI_ACC_SCALE + 0.5), prev);
+    uint prevCount;
+    b.InterlockedAdd(base + GI_ACC_COUNT, 1u, prevCount);
+}
+bool giAccRead(RWByteAddressBuffer b, GiHeader h, uint entry, out float3 A, out float3 B, out float3 C)
+{
+    const uint a = b.Load(GI_ACC_OFFSET) + entry * 48;
+    const uint4 w0 = b.Load4(a), w1 = b.Load4(a + 16), w2 = b.Load4(a + 32);
+    A = asfloat(w0.xyz);
+    B = asfloat(uint3(w0.w, w1.x, w1.y));
+    C = asfloat(uint3(w1.z, w1.w, w2.x));
+    return w2.z == h.epoch && asfloat(w2.y) >= (float)b.Load(GI_ACC_MIN);
+}
+void giAccClear(RWByteAddressBuffer b, uint entry)
+{
+    if (b.Load(GI_ACC_OFFSET) == 0) return;
+    b.Store4(b.Load(GI_ACC_OFFSET) + entry * 48 + 32, uint4(0, 0, 0, 0));  // n = 0, epoch 0
+    const uint s = b.Load(GI_ACC_SUMS) + entry * GI_ACC_SUMS_BYTES;
+    [unroll] for (uint k = 0; k < GI_ACC_SUMS_BYTES / 16; ++k) b.Store4(s + k * 16, uint4(0, 0, 0, 0));
+}
 void giAnchorOffer(RWByteAddressBuffer b, GiHeader h, uint entry, uint64_t key, float3 p)
 {
     const uint base = b.Load(GI_RESAMPLE_OFFSET);
@@ -366,6 +422,7 @@ uint giFindOrCreate(RWByteAddressBuffer b, GiHeader h, uint64_t key, float3 anch
             [loop] for (uint t = 0; t < GI_TEXEL_COUNT * 4 / 16; ++t) b.Store4(giEmitterOffset(h) + entry * GI_TEXEL_COUNT * 4 + t * 16, 0u);
             b.Store(h.offHitStamp + entry * 4, 0u);
             if (b.Load(GI_RESAMPLE_OFFSET) != 0) b.Store2(b.Load(GI_RESAMPLE_OFFSET) + entry * 8, uint2(0, 0));  // no offer of a previous occupant
+            giAccClear(b, entry);  // (gi.hit_accumulator: not a previous occupant's light)
             if (h.flags & 1u)
             {
                 b.Store2(h.offAnchorMin + entry * 8, uint2(0xFFFFFFFFu, 0xFFFFFFFFu));

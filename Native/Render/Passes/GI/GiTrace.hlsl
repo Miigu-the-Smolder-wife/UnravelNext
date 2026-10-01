@@ -167,6 +167,10 @@ void GiTraceGen()
 
     float3 radiance, sampleRadiance;
     float3 bounceRadiance = 0;  // the cache-fed part of the radiance (SPLIT, and gi.bounce_split: GI_P1_FLAGS bit 4)
+    // gi.hit_accumulator_frame (GiAccFix.hlsl): this ray's record - its accumulator cell, the reader's factors, its point value
+    uint accCell = 0xFFFFFFFFu;
+    float3 accKA = 0, accKB = 0, accPoint = 0;
+    float accKC = 0;
 #if SPLIT
     float3 nonBounceRadiance = 0;
 #endif
@@ -283,6 +287,7 @@ void GiTraceGen()
             }
             // Local lights: one next-event sample and its shadow ray (experiment 128: none).
             float3 local = 0;
+            float3 localE = 0, localWi = float3(0, 0, 1);  // gi.hit_accumulator: the sample's irradiance (n.l x weight, visible) and direction
             if ((P[3].w & 128) == 0 && (P[3].w & 4096) != 0 && scene.pad != 0xFFFFFFFFu)
             {
                 // Experiment 4096 (diagnostic, redesign V2 P1 cause search): every light of the hit's cell, each with its own
@@ -350,6 +355,11 @@ void GiTraceGen()
                                          (!ls.castShadow || rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, giBias(h, s.position)), RT_MASK_GI));
                     if (visible && any(f > 0))
                         local = f * ls.weight;
+                    if (visible)
+                    {
+                        localE = max(dot(s.normal, ls.wi), 0.0) * ls.weight;
+                        localWi = ls.wi;
+                    }
                     if (audit)
                     {
                         // Energy audit (GI_AUDIT_SUMS): the same hits, point term against footprint mean, visibility apart
@@ -379,6 +389,73 @@ void GiTraceGen()
             L.irradiance = irradiance;
             L.specularRadiance = specular;
             L.local = local;
+            // gi.hit_accumulator (GiInternal.hlsli GI_ACC_*): this hit's direct terms (sun, local sample) in the accumulator's
+            // light-side form, its point diffuse-direct radiance D_point, and the cell's means when they hold enough samples.
+            float3 accDelta = 0;
+            uint ea = e;  // the accumulator's cell (GI_ACC_CELL_SCALE: the bounce cell, or a finer one of its own)
+            if (b.Load(GI_ACC_OFFSET) != 0 && e != GI_ENTRY_PENDING && asfloat(b.Load(GI_ACC_CELL_SCALE)) != asfloat(P[0].z))
+            {
+                bool createdA;
+                const uint levelA = giLevelForSize(h, hit.t * GI_FOOTPRINT_PER_METRE * asfloat(b.Load(GI_ACC_CELL_SCALE)));
+                ea = giFindOrCreate(b, h, giSurfaceKey(h, s.position, s.normal, levelA), giAnchorAtHit(h, s.position, r.Direction, hit.t), s.normal, createdA);
+                if (ea != GI_ENTRY_PENDING) giTouch(b, h, ea);
+            }
+            if (b.Load(GI_ACC_OFFSET) != 0 && ea != GI_ENTRY_PENDING && (m.classFlags & 0xFFu) != MATERIAL_FOLIAGE && (P[3].w & 4096u) == 0)
+            {
+                const bool lambert = (P[3].w & 1024u) != 0;
+                ModelSurface ms;
+                ms.cls = m.classFlags & 0xFFu;
+                ms.baseColor = m.baseColor;
+                ms.roughness = m.roughness;
+                ms.metallic = m.metallic;
+                ms.specular = m.specular;
+                ms.transmission = m.transmission;
+                ModelCoat coat = (ModelCoat)0;
+                ModelSheen sheen = (ModelSheen)0;
+                if (!lambert)
+                {
+                    coat = rtHitCoat(m);
+                    sheen = modelSheenOf(m);
+                }
+                const float3 eSun = L.sunIlluminance * max(cosSun, 0.0) * L.sunVisibility;
+                const float muS = max(cosSun, 0.0), muL = max(dot(s.normal, localWi), 0.0);
+                float3 A = eSun + localE, B = A, C = 0;
+                if (coat.cover > 0)
+                {
+                    const float tS = 1 - modelCoatEms(coat, muS), tL = 1 - modelCoatEms(coat, muL);
+                    B = tS * eSun + tL * localE;
+                    C = (tS * eSun * modelCoatReturned(ms, coat, modelCoatRefractedCos(muS, coat.eta)) +
+                         tL * localE * modelCoatReturned(ms, coat, modelCoatRefractedCos(muL, coat.eta))) / GI_PI;
+                }
+                const float NoV = max(dot(s.normal, -r.Direction), 1e-4);
+                const float3 albedo = m.baseColor * ((1 - m.metallic) / GI_PI);
+                const float plain = (1 - coat.cover) * (any(sheen.color > 0) ? modelSheenKeep(sheen, NoV) : 1.0);
+                const float coated = coat.cover > 0 ? coat.cover * (1 - modelCoatEms(coat, NoV)) / (coat.eta * coat.eta) : 0.0;
+                const float3 dPoint = plain * albedo * A + coated * (albedo * B + C);
+                float3 mA, mB, mC;
+                const bool frameMode = (b.Load(GI_ACC_MODE) & 1u) != 0;
+                if (frameMode)
+                {
+                    accCell = ea;
+                    accKA = plain * albedo;
+                    accKB = coated * albedo;
+                    accKC = coated;
+                    accPoint = dPoint;
+                }
+                else if (giAccRead(b, h, ea, mA, mB, mC))
+                {
+                    const float3 dAcc = plain * albedo * mA + coated * (albedo * mB + mC);
+                    accDelta = dAcc - dPoint;
+                    if ((P[3].w & 32768u) != 0)
+                    {
+                        const float3 Y = float3(0.2126, 0.7152, 0.0722);
+                        uint64_t prev;
+                        b.InterlockedAdd64(GI_ACC_AUDIT, (uint64_t)(max(dot(dPoint, Y), 0.0) * 1024), prev);
+                        b.InterlockedAdd64(GI_ACC_AUDIT + 8, (uint64_t)(max(dot(dAcc, Y), 0.0) * 1024), prev);
+                    }
+                }
+                if (all(A == A) && all(B == B) && all(C == C) && all(A < 3.0e38) && all(C < 3.0e38)) giAccRecord(b, ea, A, B, C, plain * albedo, coated * albedo, coated);
+            }
             // The texel cone's angular width filters the sun's highlight (GI_FOOTPRINT_PER_METRE: footprint / distance).
             float3 unbounced;
             if ((P[3].w & 1024) == 0)
@@ -398,11 +475,13 @@ void GiTraceGen()
                     bounceRadiance = rtHitRadiance(bounceMaterial, s.normal, -r.Direction, bounceLight, GI_FOOTPRINT_PER_METRE);
                 }
                 L.irradiance = L.specularRadiance = 0;
-                unbounced = rtHitRadiance(m, s.normal, -r.Direction, L, GI_FOOTPRINT_PER_METRE);
+                unbounced = rtHitRadiance(m, s.normal, -r.Direction, L, GI_FOOTPRINT_PER_METRE) + accDelta;
+                radiance += accDelta;
             }
             else  // 1024 (analytic tests): Lambert hits, the closed forms of GiAnalytic (the v1 model's Schlick lobe has none)
             {
                 unbounced = m.emissive + m.baseColor * (1 - m.metallic) / GI_PI * (L.sunIlluminance * max(cosSun, 0.0) * L.sunVisibility) + local;
+                unbounced += accDelta;
                 radiance = unbounced + m.baseColor * (1 - m.metallic) / GI_PI * irradiance;
                 bounceRadiance = m.baseColor * (1 - m.metallic) / GI_PI * irradiance;
             }
@@ -456,6 +535,14 @@ void GiTraceGen()
         emitterSamples[P[0].y + thread] = uint4(asuint(emitted), octEncode(normalize(emitLocal)));
     }
     samples[thread] = uint4(asuint(sampleRadiance), (uint)round(saturate(uv.x) * 65535.0) | ((uint)round(saturate(uv.y) * 65535.0) << 16));
+    if (P[4].w != 0xFFFFFFFFu)
+    {
+        RWByteAddressBuffer records = ResourceDescriptorHeap[P[4].w];
+        const bool live = accCell != 0xFFFFFFFFu && !emitter;
+        records.Store4(thread * 48, uint4(live ? accCell : 0xFFFFFFFFu, asuint(accKA)));
+        records.Store4(thread * 48 + 16, uint4(asuint(accKB), asuint(accKC)));
+        records.Store4(thread * 48 + 32, uint4(asuint(accPoint), 0));
+    }
     samples[3 * P[0].y + thread] = uint4(asuint(emitterRadiance), 0);  // the emitter texel's value (GiIntegrate)
 #if SPLIT
     if (!readsBounce) nonBounceRadiance = radiance; // sky, emitters, closed back faces

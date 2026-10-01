@@ -52,5 +52,6 @@ void main(uint lane : SV_GroupIndex, uint2 group : SV_GroupID)
     GroupMemoryBarrierWithGroupSync();
     if (lane != 0 || gs_seen == 0) return;
     b.Store(h.offSh + entry * GI_SH_STRIDE + GI_SH_HISTORY, 0u);
+    giAccClear(b, entry);  // gi.hit_accumulator: its direct light changed
     giRequestUpdate(b, h, entry, 0);
 }

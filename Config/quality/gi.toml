@@ -51,6 +51,19 @@ path_guiding = false               # V2.2 D-12 (decision item): each GI ray's te
                                    # proportional to the texels' irradiance share in the history (GiGuide.hlsl), weighted by
                                    # 1 / pdf (balance heuristic); texels average the rays that landed in them. Same ray count
 path_guiding_uniform_share = 0.5
+hit_accumulator = false            # V2.3 12.1 (P1''-a): every GI hit adds its direct light to its cell's sums; hits read the
+                                   # cell's means for their diffuse direct term (the point value's lamp hotspots made the coarse
+                                   # hit cells heavy-tailed and the room's multi-bounce level walk: SD 3.1 pp between runs)
+hit_accumulator_min_samples = 32   # samples a cell holds before hits read it (fewer: the point value)
+hit_accumulator_window = 1024      # the means' window in samples (~10 frames at ~100 hits per cell and frame)
+hit_accumulator_window_recent = 128  # while the sun changed within lighting_recent_frames
+hit_accumulator_cell_scale = 2.0   # the accumulator's cell over the ray footprint: 2.0 = the bounce cell itself; smaller = its own
+                                   # finer cell (V2.3 12.5 "1x footprint A/B": the cell mean moves a lamp's hotspot within the cell)
+hit_accumulator_frame = false      # the rays' direct terms from this frame's cell means (GiAccFix), not a window of frames: a
+                                   # window mean lost ~2 % of the energy (the frames with many hits in a cell are its bright frames)
+hit_accumulator_ratio = false      # each term's cell mean weighted by its readers' factors: sum(k T) / sum(k) (the hits' corrected
+                                   # values then sum to their point values; the plain mean lost ~2 % where albedo and light vary
+                                   # together within a cell)
 history_updates_max_static = 256   # the running mean's window while the entry's light is steady: a fast mean (1/16) of its
                                    # anchor irradiance within 4 sigma (the update's own ray spread) of the history; a change
                                    # beyond that cuts the window to history_updates_max at once (moving sun, lights: any speed).
