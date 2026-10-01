@@ -350,3 +350,4 @@
 | FroxelTests | 2 실패(FX 1b: 시험 훅이 shadowPages 뒤에 FX 꼬리를 복사 → 목록이 못 봄; c8a0531에서 훅을 앞으로). 통과: 용량 상한 ≥ 필요(5.83 M ≥ 2.50 M), 강제 fallback(FX 없음/있음) 정확, **L4 유계 생략 A/B 평균 5.76e-7·최대 8.5e-4(한도 1e-3/2e-3)**, **분류 페이지 lit 구간 A/B 평균 3.28e-7·최대 4.0e-4**, 독자 상한 비트 동일 |
 | ShadingTests | 14.1b 쿡 뒤 업로드 버퍼 final-release 오류로 중단(c8a0531: 상태 소멸 시 deferRelease). 그 앞 전부 ok: coverage 타일 광원 FAR 장 |ΔE|/E P99 **0**, 최악 0 |
 | 추가 커밋 | e99166d 둥근 욕조(74) + 보이는 면 비트(76); 단위 시험 `round_pool_modes` PASS [실측 CPU]; PoolTests 9(둥근 욕조) 추가 → chain 5(`run_chain5.sh`, chain 4 뒤 한 홀드)가 FroxelTests·ShadingTests·PoolTests·HostPools·HostAbi·단위 시험을 다시 돈다 |
+- (18:55, R 요청) `shading.experiment_disable` **16384**: VSM 슬롯 없는 그림자 광원(프록셀 항목 비트 15 없음)의 직접광을 주 셰이딩 커널에서 0 — 로비 "699 shadowed lights without a slot"의 기여량 측정용. **128 슬롯 한계 자체(슬롯 없는 광원은 그림자 없음, 프레임당 8 교체)는 품질 결함 → L3 5단계(활성 집합 가상 슬롯, 상한 없음)의 범위**로 확정 기록. R의 (76) GI 게이트 b3e3025 [R 실측 로비 f4 45/307 → 28/147 %].

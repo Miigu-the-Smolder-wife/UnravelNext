@@ -27,6 +27,8 @@ edge_groups_max = 3
 # coverage geometry, 256 = no edge detection (no edge pixels), 512 = edge composite without subsample masks, 1024 = edge
 # composite without cut-out coverage, 2048 = no shadow visibility reads (slots lit), 4096 = no tone map (raw value),
 # 8192 = coverage composite in a frame with S's shadows but without S's fragment visibility (its fragments unshadowed).
+# 16384 = shadow-casting local lights without a VSM slot (the 128-slot limit) add no direct light in the main shading kernel
+# (their share; L3 stage 5 removes the limit).
 experiment_disable = 0
 # Automatic exposure (FEATURES_GAME 6.2, A4; Exposure.cpp), for cameras without an EV100: the metered log-mean luminance
 # between the darkest and brightest cut fractions of the centre-weighted histogram maps onto the target grey; the EV

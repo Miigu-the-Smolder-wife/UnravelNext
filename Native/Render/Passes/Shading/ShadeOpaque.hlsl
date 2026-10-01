@@ -536,6 +536,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
             // the side it lights): the others added exactly 0.
             const bool casts = lightCastsShadow(light);
             if (casts) ++shadowOrdinal;
+            // diagnostic 16384 (R's request 2026-10-01, the 128-slot limit's share): a shadow-casting light that has no VSM slot
+            // this frame (froxel entry bit 15 clear: S lit it unshadowed) adds nothing; L3 stage 5 removes the limit
+            if ((experiment & 16384) != 0 && casts && (froxelEntryAt(froxels, indexBase, range.x + i) & 0x8000u) == 0) continue;
             const bool area = lightType(light) > LIGHT_SPOT;
             float3 p = 0, toLight = 0, l = 0, E = 0;
             float window = 0, cosL = 0;
