@@ -22,12 +22,21 @@
 - A/B: `reflection.layers = false`면 기존 경로(ReflectionAccumulate, 이력 32) 그대로다. `layer_filter`, `layer_history_frames`, `layer_history_bound`(이력 범위 켬/끔), `layer_mirror_lobe`(4절, 기본 끔), `layer_view`(진단 1~7)가 따로 있다. 키가 없는 옛 설정 폴더에서는 기존 경로로 돈다.
 - L_occ: `GI/GiProbeGather.hlsl` — `gi.screen_occlusion_spatial`(기본 false)이면 프로브마다 주변 3×3 프로브의 이번 프레임 16점 추정(144점)을 평면·법선·값 가중으로 평균하고, 이력은 그 값을 누적한다.
 
+### 원천 잡음 수정 (층과 별개, hit 셰이딩)
+
+| 스위치 | 기본 | 내용 | 근거 |
+|---|---|---|---|
+| `reflection.hit_cone_lobes` (9209fcd) | 켬 | 반사 hit의 광원 쪽 스펙큘러 lobe(국소광 표본의 기본 lobe, 국소광·태양의 코팅 lobe)를 광선 원뿔만큼 넓힌다: α' = sqrt(α² + (원뿔 퍼짐 / 2)²) | 코드 확인: GI hit은 둘 다 넓히고(GiTrace, g_rtHitCone) 반사 hit의 태양 기본 하이라이트도 원뿔로 필터되는데, 반사 hit의 국소광 lobe와 코팅 lobe만 한 방향으로 평가했다. lobe 원뿔이 몇 도인 G 광선이 유약 타일을 등의 거울 방향 근처에서 맞으면 드문 큰 표본이 된다 |
+| `reflection.hit_oriented_lights` (a7997f7) | 끔 | 국소광 표본 1개를 고를 때 hit 방향을 가중치에 넣는다(지평선 아래 광원은 뽑지 않음). 불편, 표본·그림자 광선 수 그대로 | 선택이 중요도(I·창/d²) 비례라 뒤쪽 광원을 제 무게로 뽑고 0을 받았다. 켜면 r.refl.localshadow가 모든 hit의 표면을 다시 만들어 작업량이 늘므로 timing 뒤에 켠다 |
+| hit 셀 누적기 읽기 (미구현) | — | 발자국이 큰 반사 광선의 국소광·태양 확산 직접 항을 셀 평균으로(V2.3 12.1). 공용 함수 `rtHitDirectTerms`만 넣었다(92f0a01) | R의 12.8 누적기 API를 기다린다 |
+| hit 국소광 결정적 합 D-1 (미구현) | — | 도달 광원 전부 평가 | 거친 분류 페이지(14.3-1) 전에는 그림자 광원이 전부 NEAR라 hit당 가시성 평가가 도달 광원 수만큼이다: 720p f0에서 [예상] 0.9 M hit × 30 × 0.4 ns ≈ 11 ms. 그리고 선택 분산은 O(1)이라 반짝이의 주원인이 아니다(R 실측 V2.2 11.0) |
+
 ### 설계와 다르게 한 것 (이유)
 
 1. **hit instance를 안내 자료에서 뺐다.** 타일 한 장 한 장이 인스턴스인 바닥처럼 같은 평면의 이웃 인스턴스는 조명이 이어진다. instance로 끊으면 타일마다 필터가 멈춘다. 대신 허상 깊이(눈 → 거울 → hit 경로 길이)와 hit 법선으로 "거울 속 같은 면"을 가른다.
 2. **D-1(반사 hit 국소광 LTC + VSM)은 넣지 않았다.** 화면 밖 hit의 국소광 그림자 페이지 요청·상주가 Shadow/*(R 소유, V2.5 L2~L6)에 걸린다. 층 구조는 D-1이 오면 stochastic에서 국소광 항만 빠지게 나눠 두었다.
 3. **태양 그림자 광선 항(VSM이 hit를 갖지 않을 때)은 base에 두었다.** 반그림자 안에서만 0/1 잡음이 있고, 필터에 넣으면 거울 속 태양 그림자 경계가 흐려진다.
-4. **L_g는 "추정값 − gbar"가 아니라 확률 몫을 뺀 추정값 전체다.** 차이만 필터하면, 제어변량(프로브 지도)이 lobe가 보지 않는 등을 보는 곳에서 잔차가 그 오차의 음수를 담는데 gbar는 화소별로 남아 절반만 상쇄된다(2절 둘째 판의 색 얼룩).
+4. **L_g의 정의는 두 가지를 스위치로 둔다(`reflection.layer_residual_whole`, 기본 켬 = 확률 몫을 뺀 추정값 전체, 끔 = 설계의 "추정값 − gbar").** 차이만 필터하면, 제어변량(프로브 지도)이 lobe가 보지 않는 등을 보는 곳에서 잔차가 그 오차의 음수를 담는데 gbar는 화소별로 남아 절반만 상쇄된다는 것이 2절 둘째 판 색 얼룩의 원인 추정이다. 확인된 것이 아니라 게임 뒤 캡처로 가린다.
 5. **분산 안내 값 가중(exp(−|ΔL|/kσ))을 뺐다.** 2절 참조. G 층은 lobe 발자국으로 대역 제한돼 있어 값 차이는 잡음이고, 이 잡음은 꼬리가 두껍다.
 6. 층 σ(알파)를 쓰지 않는다. 이력 가중은 `1/(n+1)`이고 분산 비 가중(설계 1.2)은 넣지 않았다.
 
@@ -76,7 +85,9 @@
 7. 결함 큐 5(25471c1): 욕탕 샤워 거울 시점에서 거울 평면이 후보·카메라를 받는지(`ReflectionSystem::readStats` planarViews, 화면).
 8. 10.5 A/B(32·공간 없음 대 8·공간): 1·4가 통과한 뒤 정지 수렴 σ와 회전 중 프레임별 σ.
 
-9. `reflection.layer_mirror_lobe` 켬/끔(4절 결정 항목), `reflection.layer_history_bound` 켬/끔: 욕탕 정지·회전에서 반사 층 σ와 거울(샤워 거울) 윤곽 크롭.
+9. `reflection.layer_mirror_lobe` 켬/끔(조정 승인: A/B 뒤 눈 판정으로 기본값 결정), `reflection.layer_history_bound` 켬/끔, `reflection.layer_residual_whole` 켬/끔: 욕탕 정지·회전에서 반사 층 σ, 기둥 옆 색 얼룩 크롭, 거울(샤워 거울·젖은 바닥·유약 타일) 윤곽 크롭.
+10. `reflection.hit_cone_lobes` 켬/끔(layers=false로, 기존 경로에서): 욕탕·라운지·기차 f0/f3/f15와 회전의 반사 층 σ·화소별 표준편차/평균, reflectionanalytic 전부. 끔이 이전 값과 비트 동일한지(결정론 모드 두 실행).
+11. `reflection.hit_oriented_lights` 켬/끔: 같은 A/B + reflectionanalytic 5번(국소광 hit), r.refl.localshadow timing. 끔일 때 값이 이전과 비트 동일한지(선택 함수를 하나로 합쳤다).
 
 ## 4. 결정이 필요한 것 (조정 세션에 올림)
 
