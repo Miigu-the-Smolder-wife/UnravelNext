@@ -680,6 +680,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         {
             uint32_t plane, x, y, w, h;
             bool eligible;  // a current read-back count whose rays cost more than the plane's view
+            bool current;   // its read-back count is of this run of candidate frames (m_planePixels is its size on screen)
         };
         std::vector<Candidate> candidates;
         const float4x4& vp = main.view.viewProj;
@@ -740,7 +741,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
             const double rayCost = (double)rayNs * m_planePixels[k];
             const bool hadCamera = m_planeCameraFrame[k] + 1 == frame;
             const bool cheaper = hadCamera ? viewCost < rayCost * 1.1 : viewCost * 1.1 < rayCost;  // hysteresis
-            candidates.push_back({ k, ix0, iy0, ix1 - ix0, iy1 - iy0, current && (m_planarForced ? m_planePixels[k] > 0 : cheaper) });
+            candidates.push_back({ k, ix0, iy0, ix1 - ix0, iy1 - iy0, current && (m_planarForced ? m_planePixels[k] > 0 : cheaper), current });
         };
         uint32_t stack[64], top = 0;
         stack[top++] = 0;
@@ -757,13 +758,25 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                 stack[top++] = node.second;
             }
         }
-        // Eligible planes by count, then the others by rectangle (they get counted and may qualify framesInFlight later).
+        // The kCandidatesMax planes counted this frame are the largest on screen: by the read-back pixel count where it
+        // is current, else by the rectangle (an upper bound: a plane that just came into view, or whose count has not
+        // come back yet - framesInFlight frames - competes with its rectangle, so it stays in the list until it is
+        // counted). Defect queue 5 (game request 78): with eligible planes first and the cut after that order, the first
+        // 64 counted planes (a bath's glazed tiles) kept the list for good, and a larger plane that came into view later
+        // (the shower mirror) was never counted, so never eligible.
+        auto screenSize = [&](const Candidate& c) { return c.current ? (uint64_t)m_planePixels[c.plane] : (uint64_t)c.w * c.h; };
         std::sort(candidates.begin(), candidates.end(), [&](const Candidate& a, const Candidate& b) {
+            const uint64_t sa = screenSize(a), sb = screenSize(b);
+            return sa != sb ? sa > sb : a.plane < b.plane;
+        });
+        if (candidates.size() > kCandidatesMax) candidates.resize(kCandidatesMax);
+        // Among them: eligible planes by count first (the leading ones get the cameras), then the others by rectangle
+        // (they are counted and may qualify framesInFlight later).
+        std::stable_sort(candidates.begin(), candidates.end(), [&](const Candidate& a, const Candidate& b) {
             if (a.eligible != b.eligible) return a.eligible;
             if (a.eligible && m_planePixels[a.plane] != m_planePixels[b.plane]) return m_planePixels[a.plane] > m_planePixels[b.plane];
             return (uint64_t)a.w * a.h > (uint64_t)b.w * b.h;
         });
-        if (candidates.size() > kCandidatesMax) candidates.resize(kCandidatesMax);
         for (const Candidate& c : candidates)
         {
             const bool view = fc.services.renderView && c.eligible && planar.views == planar.candidates && planar.views < s.planarViewsMax;
