@@ -9,6 +9,7 @@
 // Root constants: ReflectionRay.hlsli.
 #define SHADOW_RESIDENCY_LOOP 1  // (the overflow path is at the DXIL limit: ShadowVisibility.hlsli's loop form)
 #define REFL_OVERFLOW 1  // use the same stored attributes/values as the split passes
+#define REFL_NO_ACCUMULATOR (JOB == 2)  // (the G library is at the DXIL limit: ReflectionShade.hlsli g_reflAccPool)
 #define GI_BATCH_CORNERS CORNERS
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/Reflection/ReflectionRay.hlsli"
@@ -30,6 +31,7 @@ void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer
     RWByteAddressBuffer rays = ResourceDescriptorHeap[P[5].y];
     const uint jobLayersUav = reflJobLayersUav(rays);  // reconstruction layers, as ReflectionCombine
     g_reflHitFlags = reflHitFlags(rays);
+    g_reflAccPool = reflAccPoolSrv(rays);
     float3 sumS = 0, sumA = 0;
     uint hits = 0, guide = 0, guideInstance = 0, hitsNoData = 0;
     [loop] for (uint i = 0; i < j.rays; ++i)
