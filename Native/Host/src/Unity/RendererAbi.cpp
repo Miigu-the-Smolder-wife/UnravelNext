@@ -248,6 +248,7 @@ static scene::Material toMaterial(const UnxMaterialDesc* d)
     {
         m.waterScattering = f3(d->waterScattering);
         m.waterAnisotropy = d->waterAnisotropy;
+        m.emissiveVisibleOnly = d->emissiveVisibleOnly != 0;
     }
     return m;
 }
@@ -639,7 +640,7 @@ UNX_API int32_t UNX_CALL UnxFrameSetPools(UnxRenderer r, const UnxPoolDesc* pool
             const UnxPoolDesc& d = pools[i];
             if (d.size != sizeof(UnxPoolDesc) || d.version != 1) fail("UnxFrameSetPools: UnxPoolDesc %u size %u version %u", i, d.size, d.version);
             HostRenderer::PoolInput& p = in[i];
-            p.id = d.id, p.material = d.material;
+            p.id = d.id, p.material = d.material, p.shape = d.shape;
             p.sizeX = d.sizeX, p.sizeZ = d.sizeZ, p.depth = d.depth, p.surfaceFilm = d.surfaceFilm;
             p.centre[0] = d.centre[0], p.centre[1] = d.centre[1], p.centre[2] = d.centre[2];
             p.yaw = d.yaw;

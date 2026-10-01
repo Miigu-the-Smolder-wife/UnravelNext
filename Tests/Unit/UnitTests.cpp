@@ -14,6 +14,7 @@
 #include "unx/render/Harness.h"
 #include "unx/scene/MaterialModel.h"
 #include "unx/shading/Post.h"
+#include "unx/water/RoundPool.h"
 #if UNX_HAS_CLUSTERBUILDER
 #include "unx/clusterbuilder/ClusterBuilder.h"
 #endif
@@ -2052,6 +2053,49 @@ UNX_TEST(white_balance_matrix)
     shading::whiteBalanceChromaticity(6504, 0.02, xg, yg);
     CHECK(yg > 0.3290 + 0.01);
     CHECK(shading::whiteBalanceMatrix(6504, 0.02f, m));
+}
+
+
+UNX_TEST(round_pool_modes)
+{
+    // W2-R round basins (RoundPool.cpp, defect queue 13 (74)): Bessel values against tables, the Dini roots J_m' = 0, and
+    // the per-order least-squares tables: synthesis then analysis recovers the amplitudes; frequencies rise with the
+    // radial index, damping is positive, the order-0 k = 0 mode is the mean level.
+    using namespace unx::water;
+    CHECK(std::abs(roundBesselJ(0, 1.0) - 0.7651976866) < 1e-7);
+    CHECK(std::abs(roundBesselJ(1, 1.0) - 0.4400505857) < 1e-7);
+    CHECK(std::abs(roundBesselJ(5, 10.0) - (-0.2340615282)) < 1e-6);
+    CHECK(std::abs(roundBesselJ(10, 5.0) - 0.0014678026) < 1e-7);
+    CHECK(std::abs(roundBesselJ(2, 30.0) - roundBesselJ(2, 30.0)) == 0 && std::abs(roundBesselJ(40, 45.0)) < 0.2);
+    const std::vector<double> r1 = roundDiniRoots(1, 20, 8);
+    CHECK(r1.size() >= 3 && std::abs(r1[0] - 1.8411837813) < 1e-8 && std::abs(r1[1] - 5.3314427735) < 1e-8 && std::abs(r1[2] - 8.5363163663) < 1e-8);
+    const std::vector<double> r0 = roundDiniRoots(0, 20, 8);
+    CHECK(r0.size() >= 3 && r0[0] == 0 && std::abs(r0[1] - 3.8317059702) < 1e-8 && std::abs(r0[2] - 7.0155866698) < 1e-8);
+    RoundPoolDesc d;
+    d.radius = 1;
+    d.depth = 0.5f;
+    const RoundTables t = roundTables(d);
+    CHECK(t.modeTotal > 8000 && t.modeCount[0] >= 100 && t.modeCount[255] >= 1 && t.modes.size() == t.modeTotal * 4);
+    const uint32_t m = 3, count = t.modeCount[m], an = t.modeStart[256 + m], sy = t.modeStart[512 + m];
+    std::vector<double> a(count, 0.0);
+    a[0] = 1.0;
+    a[2] = -0.5;
+    a[std::min<uint32_t>(10, count - 1)] = 0.25;
+    std::vector<double> ring(128, 0.0);
+    for (uint32_t j = 0; j < 128; ++j)
+        for (uint32_t n = 0; n < count; ++n) ring[j] += t.synthesis[sy + j * count + n] * a[n];
+    double worst = 0;
+    for (uint32_t n = 0; n < count; ++n)
+    {
+        double s = 0;
+        for (uint32_t j = 0; j < 128; ++j) s += t.analysis[an + n * 128 + j] * ring[j];
+        worst = std::max(worst, std::abs(s - a[n]));
+    }
+    CHECK(worst < 1e-3);
+    CHECK(t.modes[0] == 0 && t.modes[4] > 0 && t.modes[8] > t.modes[4] && t.modes[7] > 0 && t.modes[11] > 0);
+    // the sloshing mode (1, 0) of a 1 m, 0.5 m deep tub: k = 1.8412 / m, w^2 = k tanh(k d) g -> about 3.7 rad/s
+    const uint32_t s1 = t.modeStart[1];
+    CHECK(std::abs(t.modes[4 * s1] - std::sqrt(1.8411837813 * std::tanh(1.8411837813 * 0.5) * 9.81)) < 1e-3);
 }
 
 

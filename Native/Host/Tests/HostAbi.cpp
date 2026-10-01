@@ -248,6 +248,7 @@ void pushScene(const Api& api, UnxRenderer r, const scene::Scene& s)
         d.version = 6;  // v1.92: + the water scattering fields (a version 5 description of 216 B is still accepted)
         d.waterScattering[0] = m.waterScattering.x, d.waterScattering[1] = m.waterScattering.y, d.waterScattering[2] = m.waterScattering.z;
         d.waterAnisotropy = m.waterAnisotropy;
+        d.emissiveVisibleOnly = m.emissiveVisibleOnly ? 1u : 0u;
         d.thinFilmThickness = m.thinFilmThickness;
         d.thinFilmIor = m.thinFilmIor;
         d.thinFilmCoverage = m.thinFilmCoverage;

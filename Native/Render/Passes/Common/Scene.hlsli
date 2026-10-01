@@ -157,6 +157,7 @@ struct GpuVisibleCluster
 #define MATERIAL_SHEEN (1u << 11)    // A9: the record's layer is a sheen (shade class Sheen), else a clearcoat
 #define MATERIAL_ANISOTROPIC (1u << 12)  // A9: the record's anisotropy is used (with MATERIAL_LAYERED)
 #define MATERIAL_THIN_FILM (1u << 13)    // A9: the record's thin film is used (with MATERIAL_LAYERED)
+#define MATERIAL_EMISSIVE_VISIBLE_ONLY (1u << 14)  // v1.92 (defect queue 13 (76)): the emission is seen by primary and reflection rays only; GI update rays and the emissive cache take 0 (rtEmissionAt's GI callers)
 // scene::LightType
 #define LIGHT_POINT 0u
 #define LIGHT_SPOT 1u

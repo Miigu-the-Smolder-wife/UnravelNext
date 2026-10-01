@@ -77,6 +77,10 @@ struct Material
     float3 waterScattering{ 0.0f, 0.0f, 0.0f };
     float waterAnisotropy = 0.0f;
     bool twoSided = false;
+    // v1.92 (defect queue 13 (76), transitional until V2.5 14.1b lights every emissive face): an emissive surface that is
+    // seen as emissive by primary and reflection rays (it shows in mirrors) but adds nothing to the GI update rays'
+    // emissive samples and the emissive cache channel, so the analytic light it belongs to lights the scene once.
+    bool emissiveVisibleOnly = false;
     uint32_t baseColorTexture = kNone;       // Rgba8Srgb; multiplies baseColor, alpha = coverage
     uint32_t normalTexture = kNone;          // Rg8Normal
     uint32_t roughMetalTexture = kNone;      // Rg8RoughMetal; multiplies roughness/metallic

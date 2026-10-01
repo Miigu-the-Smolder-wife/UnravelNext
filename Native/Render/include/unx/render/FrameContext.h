@@ -95,6 +95,7 @@ struct PoolFrame
 {
     uint32_t id = 0;              // nonzero, unique in the frame
     uint32_t material = 0;        // scene material of the surface (M's Water class)
+    uint32_t shape = 0;           // v1.92 (W2-R): 0 rectangle; 1 round (sizeX = the diameter, sizeZ unused; RoundPool)
     float sizeX = 0, sizeZ = 0;   // inner basin (m): walls at local 0 and size
     float depth = 0;              // uniform water depth (m); 0 = deep water
     float surfaceFilm = 0;        // 0: a clean surface; 1: an inextensible film (bathers, soap)

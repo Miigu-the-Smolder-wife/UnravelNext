@@ -218,6 +218,7 @@ enum MaterialFlags : uint32_t
     MaterialSheen = 1u << 3,    // A9: the record's layer is a sheen (shade class Sheen; else a clearcoat)
     MaterialAnisotropic = 1u << 4,  // A9: the record's anisotropy is used (with MaterialLayered; a coat may also be present)
     MaterialThinFilm = 1u << 5,     // A9: the record's film is used (with MaterialLayered; no coat, sheen or anisotropy)
+    MaterialEmissiveVisibleOnly = 1u << 6,  // v1.92 (defect queue 13 (76)): emissive for primary and reflection rays only (GI: 0)
 };
 
 struct Light  // 80 B

@@ -3,6 +3,7 @@
 // triangle streams before V. Called by W's waterGeometry.
 #include "unx/water/FluidSurface.h"
 #include "unx/water/Pool.h"
+#include "unx/water/RoundPool.h"
 #include "unx/water/WaterSurface.h"
 
 #include "unx/render/Frame.h"
@@ -26,9 +27,15 @@ struct PoolSlot
     std::unique_ptr<Pool> pool;
     PoolDesc desc;
 };
+struct RoundSlot
+{
+    std::unique_ptr<RoundPool> pool;
+    RoundPoolDesc desc;
+};
 struct PoolState
 {
     std::unordered_map<uint32_t, PoolSlot> slots;
+    std::unordered_map<uint32_t, RoundSlot> roundSlots;  // W2-R (v1.92): the round basins (PoolFrame::shape 1)
     std::vector<std::pair<uint32_t, PoolStats>> stats;  // the latest valid statistics of the basins in the set (render thread)
 };
 bool sameBasin(const PoolDesc& a, const PoolDesc& b)
@@ -49,18 +56,72 @@ void poolGeometry(FramePassContext& fc)
     std::vector<FluidSurfaceInput::Basin>& basins = fc.state<std::vector<FluidSurfaceInput::Basin>>("W.poolBasins");
     basins.clear();  // this frame's recorded basins (the fluids' seam, WaterTrack waterFluids)
     // A restore (save load, snapshot) starts every basin calm: the ripples are not World state.
-    if (frame.discontinuity & kDiscontinuityRestore) state.slots.clear();
+    if (frame.discontinuity & kDiscontinuityRestore)
+    {
+        state.slots.clear();
+        state.roundSlots.clear();
+    }
     std::unordered_set<uint32_t> present;
     for (uint32_t i = 0; i < frame.poolCount; ++i) present.insert(frame.pools[i].id);
     if (present.size() != frame.poolCount || present.count(0)) fail("W: the frame's %u basins need unique nonzero ids", frame.poolCount);
     for (auto it = state.slots.begin(); it != state.slots.end();)  // basins no longer in the list (the GPU release is deferred)
         it = present.count(it->first) ? std::next(it) : state.slots.erase(it);
+    for (auto it = state.roundSlots.begin(); it != state.roundSlots.end();)
+        it = present.count(it->first) ? std::next(it) : state.roundSlots.erase(it);
     std::erase_if(state.stats, [&](const auto& e) { return !present.count(e.first); });
 
     std::vector<PoolSource> sources;
     for (uint32_t i = 0; i < frame.poolCount; ++i)
     {
         const PoolFrame& in = frame.pools[i];
+        if (in.shape == 1)
+        {
+            // W2-R round basin (defect queue 13 (74); RoundPool): Bessel modes in a circle of diameter sizeX. No fluid
+            // seam (FluidSurface clips to rectangles) and no statistics yet.
+            state.slots.erase(in.id);  // (a basin that changed shape)
+            RoundPoolDesc rd;
+            rd.radius = 0.5f * in.sizeX;
+            rd.depth = in.depth;
+            rd.surfaceFilm = in.surfaceFilm;
+            RoundSlot& rs = state.roundSlots[in.id];
+            if (!rs.pool || rs.desc.radius != rd.radius || rs.desc.depth != rd.depth || rs.desc.surfaceFilm != rd.surfaceFilm || (rs.pool->started() && frame.time < rs.pool->time()))
+            {
+                rs.pool.reset();
+                rs.pool = std::make_unique<RoundPool>(fc.device, fc.shaders, rd);
+                rs.desc = rd;
+            }
+            PoolDesc visDesc;
+            visDesc.sizeX = visDesc.sizeZ = in.sizeX;
+            visDesc.depth = in.depth;
+            PoolPlacement vp;
+            vp.centre[0] = in.centre[0], vp.centre[1] = in.centre[1], vp.centre[2] = in.centre[2];
+            vp.yaw = in.yaw;
+            bool rvisible = Pool::visible(visDesc, vp, frame.mainView.viewProj);
+            for (const AuxView& a : frame.auxViews) rvisible = rvisible || Pool::visible(visDesc, vp, a.view.viewProj);
+            if (!rvisible && !in.sourceCount) continue;
+            if (fc.resources.triangleStreams.size() >= kMaxTriangleStreams) fail("W: basin %u exceeds the frame's %u triangle streams", in.id, kMaxTriangleStreams);
+            std::vector<RoundPoolSource> rsources(in.sourceCount);
+            for (uint32_t s = 0; s < in.sourceCount; ++s)
+            {
+                const PoolSourceFrame& f = in.sources[s];
+                rsources[s] = RoundPoolSource{ f.x, f.z, f.radius, f.impulse, f.volume };
+            }
+            RoundPoolPlacement rp;
+            rp.centre[0] = in.centre[0], rp.centre[1] = in.centre[1], rp.centre[2] = in.centre[2];
+            rp.yaw = in.yaw;
+            RoundPoolOutput rout = rs.pool->record(fc.graph, frame.frameIndex, rp, frame.time, frame.deltaTime, rsources);
+            rout.stream.material = in.material;
+            WaterPlane rest;
+            rest.stream = uint32_t(fc.resources.triangleStreams.size());
+            rest.plane = { 0, 1, 0, -float(in.centre[1]) };
+            const float3 lo = rout.stream.boundsMin, hi = rout.stream.boundsMax;
+            const float y = float(in.centre[1]);
+            rest.corners[0] = { lo.x, y, lo.z }, rest.corners[1] = { hi.x, y, lo.z }, rest.corners[2] = { lo.x, y, hi.z }, rest.corners[3] = { hi.x, y, hi.z };
+            addWaterPlane(fc, rest);
+            fc.resources.triangleStreams.push_back(rout.stream);
+            continue;
+        }
+        state.roundSlots.erase(in.id);  // (a basin that changed shape)
         PoolDesc desc;
         desc.sizeX = in.sizeX;
         desc.sizeZ = in.sizeZ;
