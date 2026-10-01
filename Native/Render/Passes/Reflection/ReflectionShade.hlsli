@@ -238,7 +238,13 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
         g_giKeepReads = (experiment & 256) == 0;
         float3 sumE, sumL;
         float weight;
+        // gi.bounce_visibility (GI_P1_FLAGS bit 6; GiCache.hlsli g_giStrictVisibility, as GiTrace's fallback read): only
+        // the corners whose anchor sees the hit - after a cut every level is young, and the coarse cells then carried light
+        // from behind walls into the hits (R: lounge, daylight from outside at 1.5-1.8 x [measured]). A hit that finds
+        // no such corner has no data (the layers' filter gives it its neighbours' value).
+        g_giStrictVisibility = (cache.Load(GI_P1_FLAGS) & 64u) != 0;
         giCacheLevels(cache, h, s.position, s.normal, reflect(direction, s.normal), true, footprintLevel, sumE, sumL, weight);
+        g_giStrictVisibility = false;
         L.irradiance = weight > 0 ? sumE / weight : 0;
         L.specularRadiance = weight > 0 ? sumL / weight : 0;
         o.noData = weight <= 0;
