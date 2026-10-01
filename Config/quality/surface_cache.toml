@@ -40,9 +40,14 @@ shadow_rays_opaque = false            # QUALITY TRADE (user decision; the refere
 direct_pairs = true                   # (A, 2026-10-02) the cells direct light as (cell, light) pairs in three passes: select
                                       # (compute, no ray: the 8 strongest lights, their integrals, the sun), trace (one shadow
                                       # ray per pair record, dispatches of at most 262,144), store. The same lighting as
-                                      # direct_analytic; in place of r.sc.cells. Passes/SurfaceCache/SurfaceCacheLightPairs.hlsli
+                                      # direct_analytic. Passes/SurfaceCache/SurfaceCacheLightPairs.hlsli.
+                                      # false: r.sc.cells lights the cell inside one ray generation thread (up to 18 TraceRay
+                                      # calls in loops) - THAT PATH STOPS THE DEVICE IN THE BATH LOUNGE (device hung,
+                                      # 2026-10-02); it also holds the modes the pairs do not: direct_stochastic,
+                                      # remainder_light, direct_analytic = false.
 direct_pairs_inline = false           # (with direct_pairs) the pair rays as inline queries in a compute kernel (no ray pipeline);
-                                      # false: a ray generation shader with rtVisible, as MegaLights traces
+                                      # false: a ray generation shader with rtVisible, as MegaLights traces - the variant that ran
+                                      # in the bath lounge. The inline variant ran in the lobby only (trace 0.05 ms against 0.10).
 direct_shadow_inline = false          # (with direct_analytic) the cell's lights are evaluated first and their shadow rays follow
                                       # as inline ray queries in a loop of a fixed count - no trace suspends the shader, and a
                                       # ray tests at most 64 alpha-tested candidates. Written for the lounge hang (the shadow

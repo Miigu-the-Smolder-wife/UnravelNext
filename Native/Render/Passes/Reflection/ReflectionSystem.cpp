@@ -174,6 +174,11 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.scShadowRaysOpaque = flag("surface_cache.shadow_rays_opaque", false);
     s.scDirectShadowInline = flag("surface_cache.direct_shadow_inline", false);
     s.scDirectPairs = flag("surface_cache.direct_pairs", true);
+    // (the pairs hold direct_analytic lighting alone; the other modes are r.sc.cells' - asked for together, neither a silent
+    // drop of the mode nor a silent return to the path that stops the device is right)
+    if (s.surfaceCache && s.scDirectPairs && (s.scDirectStochastic || s.scRemainderLight || !s.scDirectAnalytic))
+        fail("surface_cache.direct_pairs lights cells by direct_analytic alone: direct_stochastic, remainder_light and direct_analytic = false need "
+             "surface_cache.direct_pairs = false (r.sc.cells - the path that hung the device in the bath lounge, 2026-10-02)");
     s.scDebugCount = (uint32_t)num("surface_cache.debug_count", 0);
     s.scDirectStochasticFrames = num("surface_cache.direct_stochastic_max_frames", 12.0);
     s.scDirectMinWeight = num("surface_cache.direct_stochastic_min_sample_weight", 0.001);
