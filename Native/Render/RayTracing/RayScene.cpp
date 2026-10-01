@@ -396,7 +396,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         D3D12_RAYTRACING_INSTANCE_DESC d{};
         transformOf(in, d);
         d.InstanceID = (UINT)m_instances.size();
-        d.InstanceMask = (in.flags & gpu::kInstanceHidden) ? 0 : kRtMaskAll;
+        d.InstanceMask = rtInstanceMask(in.flags);
         d.InstanceContributionToHitGroupIndex = 0;
         d.Flags = instanceFlags(i);  // DXR's default winding = CCW front in our right-handed frame (verified by Tests/RayScene)
         d.AccelerationStructure = m_meshBlas[in.mesh].address;
@@ -466,7 +466,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         D3D12_RAYTRACING_INSTANCE_DESC desc{};
         desc.Transform[0][0] = desc.Transform[1][1] = desc.Transform[2][2] = 1;  // world-space vertices
         desc.InstanceID = (UINT)m_instances.size();
-        desc.InstanceMask = (instances[d.sceneInstance].flags & gpu::kInstanceHidden) ? 0 : kRtMaskAll;
+        desc.InstanceMask = rtInstanceMask(instances[d.sceneInstance].flags);
         desc.Flags = instanceFlags(d.sceneInstance);
         desc.AccelerationStructure = m_deformedBlasPool.address() + d.blasOffset;
         m_dynamicRecord.push_back((uint32_t)m_instances.size());
@@ -1497,7 +1497,7 @@ void RayScene::refreshDesc(D3D12_RAYTRACING_INSTANCE_DESC& d, const gpu::Instanc
             d.Transform[r][2] = in.objectToWorld[r].z;
             d.Transform[r][3] = in.objectToWorld[r].w;
         }
-    d.InstanceMask = (in.flags & gpu::kInstanceHidden) ? 0 : kRtMaskAll;
+    d.InstanceMask = rtInstanceMask(in.flags);
 }
 
 void RayScene::record(FramePassContext& fc)

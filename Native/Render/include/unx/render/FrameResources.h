@@ -108,6 +108,10 @@ struct ViewResources
     // the main view's rgb carries the screen probes' near occlusion too (E x occlusion x exposure: M gathers the probes
     // only for the K path and Foliage's back side).
     TextureRef giIrradiance;
+    // lumen.short_range_ao (A, for R's gi.lumen; Passes/GI/LumenShortRangeAO.hlsli): RGBA16F W x H of the main view,
+    // xyz = world bent normal x AO, a = accumulated frames + 1 (0: no surface). Invalid = off. Readers use
+    // lumenShortRangeAO / lumenAoMultibounce / lumenAoSpecular of that header.                                       [A]
+    TextureRef shortRangeAO;
     // gi.lumen (v1.93, LumenGather.cpp): RGBA16F W x H of the main view, the mean incident radiance x g_exposure of the
     // pixel's rough specular lobe from the screen probes (rgb; a = the pixel filter's fast-update amount). From roughness
     // 0.6 the lobe fades to irradiance / pi, which it is from 0.8 (gi.lumen_max_roughness_rough_specular). The reader
@@ -267,5 +271,10 @@ struct FrameResources
     BufferRef giAccumulator;       // hit direct-light accumulator pool (GiAccPool.hlsli;   [R]
                                    // invalid: gi.hit_accumulator_pool off). Readers after
                                    // globalIllumination: SrvCompute (giAccPoolRead)
+    // lumen.radiance_cache (A, for R's gi.lumen; Passes/GI/LumenRadianceCache.hlsli, unx/gi/LumenRadianceCache.h): this
+    // frame's far-field probe cache after its update. Readers: lrcParams(lumenRcParams), lrcCoverageChecked, lrcSample
+    // with the indirection (Texture3D R32_UINT) and the atlas (R11G11B10F) as SRVs. Invalid = off.                   [A]
+    TextureRef lumenRcIndirection, lumenRcAtlas, lumenRcDepth;
+    uint32_t lumenRcParams = 0xFFFFFFFFu;
 };
 } // namespace unx::render

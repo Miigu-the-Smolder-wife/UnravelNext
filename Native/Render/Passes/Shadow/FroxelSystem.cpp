@@ -6,6 +6,10 @@
 #include "unx/render/GpuScene.h"
 #include "unx/scene/SceneData.h"
 #include "unx/render/Tracks.h"
+#if UNX_S_HAS_RAYTRACING
+#include "unx/rt/RayPipeline.h"
+#include "unx/rt/RayScene.h"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -453,7 +457,7 @@ TextureRef recordReaders(FramePassContext& fc, const ViewResources& view, bool f
 
 // Air volume of one view from its lists (FroxelIntegrate.hlsl; a view with a clip plane integrates from the plane on).
 TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, BufferRef lights, bool keepVolume, TextureRef readers, const std::string& suffix,
-                              TextureRef media = {})
+                              TextureRef media = {}, TextureRef sampledLocal = {})
 {
     const QualityConfig& q = fc.quality;
     const FroxelGridCpu grid = froxelGridFor(q, view.view.width, view.view.height);
@@ -506,6 +510,7 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
         b.use(lights, Use::SrvCompute);
         if (bounded) b.use(readers, Use::SrvCompute);
         if (media.valid()) b.use(media, Use::SrvCompute);
+        if (sampledLocal.valid()) b.use(sampledLocal, Use::SrvCompute);  // shading.mega_lights_volume (P[5].y)
         if (functions.valid()) b.use(functions, Use::SrvCompute);
         b.use(tlut, Use::SrvCompute); b.use(mlut, Use::SrvCompute);
         if (shadows)
@@ -530,7 +535,8 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
         std::memcpy(&k[10], &stepAltitude, 4);
         k[11] = experiment | (walkStats ? 0x10000u : 0u);
         k[20] = shadows && vsm.clsBlocks.valid() ? ctx.srv(vsm.clsBlocks) : 0xFFFFFFFFu;  // P[5].x: L3 classification blocks (14.4 lit segments)
-        k[21] = k[22] = k[23] = 0;
+        k[21] = sampledLocal.valid() ? ctx.srv(sampledLocal) : 0xFFFFFFFFu;  // P[5].y: the local lights' sampled in-scattering
+        k[22] = k[23] = 0;
         ctx.bindFrameConstants(constants); ctx.computeConstants(k, 24);
     };
     if (queued)
@@ -641,6 +647,115 @@ void recordPlanarFroxels(FramePassContext& fc, ViewResources& view)
     view.airVolume = recordIntegration(fc, view, lists, false, readers, ".planar");
 }
 
+namespace
+{
+// shading.mega_lights with shading.mega_lights_volume (MegaLightsVolume.hlsl; owner A): the main view's local in-scattering
+// per froxel from light samples with shadow rays, with its own history (ping-pong, in this track's state). Invalid: off,
+// or no ray scene this frame - the integration then keeps its loop over the lists and the VSM walks.
+struct SampledLocalState
+{
+    Device* device = nullptr;
+    ComPtr<ID3D12Resource> volume[2];
+    uint32_t x = 0, y = 0, z = 0, parity = 0, revision = 0xFFFFFFFFu;
+    bool fresh = true;
+    float exposure = 0;
+    ~SampledLocalState()
+    {
+        if (!device) return;
+        for (auto& t : volume)
+            if (t) device->deferRelease(t);
+    }
+};
+
+TextureRef recordSampledLocal(FramePassContext& fc, const ViewResources& main, BufferRef lights, TextureRef readers)
+{
+#if UNX_S_HAS_RAYTRACING
+    const QualityConfig& q = fc.quality;
+    if (!q.has("shading.mega_lights") || !q.boolean("shading.mega_lights") || !q.boolean("shading.mega_lights_volume")) return {};
+    const FrameResources r = fc.resources;
+    if (!r.tlasStatic.valid() || !r.transmittanceLut.valid() || !fc.trackState) return {};
+    const FroxelGridCpu grid = froxelGridFor(q, main.view.width, main.view.height);
+    SampledLocalState& st = fc.state<SampledLocalState>("S.froxels.sampledLocal");
+    if (!st.volume[0] || st.x != grid.gridX || st.y != grid.gridY || st.z != grid.slices)
+    {
+        st.device = &fc.device;
+        D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+        D3D12_RESOURCE_DESC1 desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+        desc.Width = grid.gridX;
+        desc.Height = grid.gridY;
+        desc.DepthOrArraySize = (UINT16)grid.slices;
+        desc.MipLevels = 1;
+        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        desc.SampleDesc.Count = 1;
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        for (int k = 0; k < 2; ++k)
+        {
+            if (st.volume[k]) fc.device.deferRelease(st.volume[k]);
+            st.volume[k].Reset();
+            check(fc.device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
+                                                            IID_PPV_ARGS(&st.volume[k])),
+                  "S sampled local in-scattering");
+            st.volume[k]->SetName(k ? L"S ml volume 1" : L"S ml volume 0");
+        }
+        st.x = grid.gridX; st.y = grid.gridY; st.z = grid.slices;
+        st.fresh = true;
+    }
+    const float3 shift = fc.frame.originShift;
+    const bool valid = !st.fresh && st.revision == fc.scene.revision() && fc.frame.discontinuity == 0 && shift.x == 0 && shift.y == 0 && shift.z == 0;
+    st.fresh = false;
+    st.revision = fc.scene.revision();
+    const float exposure = 1.0f / (1.2f * std::exp2(main.view.ev100));
+    const float ratio = valid && st.exposure > 0 ? exposure / st.exposure : 1.0f;
+    st.exposure = exposure;
+    const uint32_t prev = st.parity, next = prev ^ 1u;
+    st.parity = next;
+    RenderGraph& g = fc.graph;
+    const TextureDesc desc{ "S ml volume", grid.gridX, grid.gridY, (uint16_t)grid.slices, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D };
+    const TextureRef previous = valid ? g.importTexture(st.volume[prev].Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS) : TextureRef{};
+    const TextureRef output = g.importTexture(st.volume[next].Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    const TextureRef tlut = r.transmittanceLut;
+    const BufferRef functions = r.lightFunctions, fxLights = r.fxLights;
+    const uint32_t samples = (uint32_t)q.integer("shading.mega_lights_volume_samples");
+    if (samples != 1 && samples != 2 && samples != 4) fail("shading.mega_lights_volume_samples must be 1, 2 or 4");
+    const float minWeight = (float)q.number("shading.mega_lights_volume_min_sample_weight"), cap = (float)q.number("shading.mega_lights_max_shading_weight");
+    const float bias = (float)q.number("shading.mega_lights_ray_bias_m"), endBias = (float)q.number("shading.mega_lights_ray_end_bias_m");
+    const float frames = (float)q.number("shading.mega_lights_volume_max_frames");
+    if (!(frames >= 1 && frames <= 64)) fail("shading.mega_lights_volume_max_frames must be in [1, 64]");
+    rt::RayScene* rays = &rt::RayScene::get(fc);
+    rt::RayPipeline& pipeline = rt::RayPipeline::get(fc.device, fc.shaders, rt::standardRayPipeline("Passes/Atmosphere/MegaLightsVolume", { "MegaLightsVolumeGen" }));
+    const D3D12_GPU_VIRTUAL_ADDRESS constants = main.frameConstants;
+    g.addPass("s.ml.volume", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  rays->declareTraversal(b);
+                  b.use(lights, Use::SrvCompute);
+                  if (fxLights.valid()) b.use(fxLights, Use::SrvCompute);
+                  b.use(tlut, Use::SrvCompute);
+                  if (functions.valid()) b.use(functions, Use::SrvCompute);
+                  if (readers.valid()) b.use(readers, Use::SrvCompute);
+                  if (previous.valid()) b.use(previous, Use::SrvCompute);
+                  b.use(output, Use::UavCompute);
+                  b.keep();  // persistent state: the next frame's history
+              },
+              [=, &pipeline](PassContext& ctx) {
+                  auto bits = [](float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; };
+                  uint32_t k[32] = { ctx.srv(lights), ctx.uav(output), ctx.srv(tlut), functions.valid() ? ctx.srv(functions) : 0xFFFFFFFFu,
+                                     previous.valid() ? ctx.srv(previous) : 0xFFFFFFFFu, samples, readers.valid() ? ctx.srv(readers) : 0xFFFFFFFFu, 0,
+                                     bits(minWeight), bits(bias), bits(endBias), bits(ratio),
+                                     bits(cap), bits(frames), 0, 0 };
+                  rays->rootConstants(k + 24);
+                  ctx.computeConstants(k, 32);
+                  ctx.bindFrameConstants(constants);
+                  pipeline.dispatch(ctx.cmd, 0, grid.gridX, grid.gridY, grid.slices);
+              });
+    return output;
+#else
+    (void)fc; (void)main; (void)lights; (void)readers;
+    return {};
+#endif
+}
+} // namespace
+
 void recordFroxels(FramePassContext& fc, const ViewResources& main)
 {
     State& s = fc.state<State>(kStateKey);
@@ -653,7 +768,8 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
     const TextureRef particleMedia = main.volumeSlices.valid() ? main.volumeSlices : tracks::volumeMedia(fc, mediaView, lights);
     // Turbid basins (defect queue 13 (75), shading.water_turbid): added to the media slices (or their own) - WaterMedia.hlsl.
     const TextureRef media = recordWaterMedia(fc, main, lights, particleMedia, froxelGridFor(fc.quality, main.view.width, main.view.height));
-    const TextureRef volume = recordIntegration(fc, main, lights, s.keep, recordReaders(fc, main, s.fullDepth, ""), "", media);
+    const TextureRef readers = recordReaders(fc, main, s.fullDepth, "");
+    const TextureRef volume = recordIntegration(fc, main, lights, s.keep, readers, "", media, recordSampledLocal(fc, main, lights, readers));
     fc.resources.froxels = volume;
     fc.resources.aerialPerspective = volume;  // atmosphereAerial / atmosphereAirView read it (Atmosphere.hlsli)
 
