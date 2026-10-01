@@ -177,10 +177,26 @@ bool reusedPid(uint32_t pid, const std::string& since)
     return ok && ticks(created) > ticks(sinceTime) + 5ull * 10000000ull;
 }
 
-// Whether a waiter (kind, since, pid) takes its turn before this one: first come ("since", then pid), whatever the kind
-// - GpuLock.ps1 v1.85 (v1.83 put timing first: a 31-minute timing batch held four sessions up).
-bool turnBefore(const std::string&, const std::string& since, uint32_t pid, const std::string&, const std::string& selfSince, uint32_t self)
+// Rank of a track's waiters (GpuLock.ps1 v1.86): 0 for the tracks listed in .gpulock/PRIORITY (one per line, "#" comments;
+// set by the coordinator from the user's priorities), 1 otherwise; no file = one queue.
+int priorityRank(const fs::path& lockDir, const std::string& track)
 {
+    std::istringstream lines(readAll(lockDir / "PRIORITY"));
+    std::string line;
+    while (std::getline(lines, line))
+    {
+        const size_t a = line.find_first_not_of(" \t\r"), b = line.find_last_not_of(" \t\r");
+        if (a == std::string::npos || line[a] == '#') continue;
+        if (line.substr(a, b - a + 1) == track) return 0;
+    }
+    return 1;
+}
+
+// Whether a waiter (rank, since, pid) takes its turn before this one: priority tracks first, then first come ("since",
+// then pid), whatever the kind - GpuLock.ps1 v1.86 (v1.85: one first-come queue; v1.83 put timing first).
+bool turnBefore(int rank, const std::string& since, uint32_t pid, int selfRank, const std::string& selfSince, uint32_t self)
+{
+    if (rank != selfRank) return rank < selfRank;
     const int order = since.compare(selfSince);
     return order < 0 || (order == 0 && pid < self);
 }
@@ -242,8 +258,9 @@ void GpuLockSlice::appendHistory(const std::string& line)
     logf("GpuLockSlice: could not append to %s\n", p.string().c_str());
 }
 
-// Why this process must not take the lock now (empty: it may): HOLD, or a live waiter whose turn comes first (v1.85:
-// first come - "since", then pid - whatever the kind). Waiting files of dead processes and of reused pids are removed.
+// Why this process must not take the lock now (empty: it may): HOLD, or a live waiter whose turn comes first (v1.86:
+// priority tracks, then first come - "since", then pid - whatever the kind). Waiting files of dead processes and of reused
+// pids are removed.
 std::string GpuLockSlice::blocker(const std::string& since)
 {
     std::error_code ec;
@@ -255,6 +272,7 @@ std::string GpuLockSlice::blocker(const std::string& since)
         return "HOLD: " + (reason.empty() ? std::string("(no reason given)") : reason);
     }
     const uint32_t self = GetCurrentProcessId();
+    const int selfRank = priorityRank(fs::path(m_dir), m_track);
     for (const fs::directory_entry& e : fs::directory_iterator(fs::path(m_dir) / "waiting", ec))
     {
         if (e.path().extension() != ".json") continue;
@@ -268,7 +286,7 @@ std::string GpuLockSlice::blocker(const std::string& since)
             fs::remove(e.path(), rc);
             continue;
         }
-        if (turnBefore(kind, waiting, pid, m_kind, since, self))
+        if (turnBefore(priorityRank(fs::path(m_dir), jsonField(json, "track")), waiting, pid, selfRank, since, self))
             return "in line behind " + jsonField(json, "track") + " (" + kind + ", pid " + std::to_string(pid) + ", since " + waiting + ")";
     }
     return {};
