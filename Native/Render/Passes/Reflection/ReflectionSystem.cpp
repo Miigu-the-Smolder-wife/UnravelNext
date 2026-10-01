@@ -1361,7 +1361,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
             fc.device, shaders, rt::standardRayPipeline(kSurfaceCacheLightLibrary[variant], { "SurfaceCacheSeedGen", "SurfaceCacheCellsGen", "SurfaceCacheProbesGen" }));
         const uint32_t lightFlags = (s.scDirect ? 1u : 0u) | (s.scRadiosity ? 2u : 0u) | (s.scRemainderLight ? 8u : 0u) | (s.scDirectStochastic ? 16u : 0u) | (s.scLightingFeedback ? 32u : 0u) |
                                     (s.scDirectAnalytic ? 64u : 0u) | ((s.scDebugSkip & 15u) << 7) | (s.scShadowRaysOpaque ? 2048u : 0u) | ((s.scDebugSkip & 16u) ? 4096u : 0u) |
-                                    (s.scDirectShadowInline ? 8192u : 0u) | (s.scDebugCount ? 16384u : 0u) | (s.scDebugCount == 2 ? 32768u : 0u);
+                                    (s.scDirectShadowInline ? 8192u : 0u) | (s.scDebugCount ? 16384u : 0u) | (s.scDebugCount == 2 ? 32768u : 0u) |
+                                    (s.scDebugCount == 3 ? 65536u : 0u);
         const uint32_t budgets[3] = { std::max(n / s.scCaptureFactor / (s.scCaptureBounces + 1), 1u), std::max(n / s.scDirectFactor, 1u),
                                       std::max(n / s.scRadiosityFactor / 16, 1u) };
         static const char* const kLightNames[3] = { "r.sc.seed", "r.sc.cells", "r.sc.probes" };

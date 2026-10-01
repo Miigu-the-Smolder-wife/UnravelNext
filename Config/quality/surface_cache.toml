@@ -41,7 +41,9 @@ direct_shadow_inline = false          # (with direct_analytic) the cell's lights
                                       # as inline ray queries in a loop of a fixed count - no trace suspends the shader, and a
                                       # ray tests at most 64 alpha-tested candidates. Written for the lounge hang (the shadow
                                       # rays toward the light centres); NOT run yet
-debug_count = 0                       # diagnostics (1; 2 = of the empty reads only the back faces): counts this frame's radiosity rays that met geometry and those that read no
+debug_count = 0                       # diagnostics (1; 2 = of the empty reads only the back faces; 3 = sums instead: view g =
+                                      # the lit hits' sun irradiance, lux / 16 / 65536 summed, r = their local-light + indirect
+                                      # irradiance over that): counts this frame's radiosity rays that met geometry and those that read no
                                       # light there (no lit cell, a back face); shown by reflection.lumen_surface_cache_view with
                                       # lumen_surface_cache_view_component = 7 (r = the share, g = rays / 65536). NOT run yet
 base_cells = true                     # a mark also keeps the cell 3 levels coarser (8 x the size) at the point, and a read that
