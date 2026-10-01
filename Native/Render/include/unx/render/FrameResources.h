@@ -250,5 +250,8 @@ struct FrameResources
     BufferRef froxelLights;        // per-froxel light lists (7.4)                          [S]
     BufferRef tlasStatic, tlasDynamic;  // acceleration structures                          [R]
     BufferRef giCache;             // world radiance cache                                  [R]
+    BufferRef giAccumulator;       // hit direct-light accumulator pool (GiAccPool.hlsli;   [R]
+                                   // invalid: gi.hit_accumulator_pool off). Readers after
+                                   // globalIllumination: SrvCompute (giAccPoolRead)
 };
 } // namespace unx::render

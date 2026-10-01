@@ -35,6 +35,7 @@
 #include "RayTracing/HitDecals.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
 #include "Passes/GI/GiInternal.hlsli"
+#include "Passes/GI/GiAccPool.hlsli"
 #include "Passes/GI/GiSky.hlsli"
 
 // Texel cone of an 8 x 8 hemispherical texel (2 pi / 64 sr ~ 10.1 deg half-angle): footprint diameter ~0.36 t.
@@ -410,14 +411,16 @@ void GiTraceGen()
             // light-side form, its point diffuse-direct radiance D_point, and the cell's means when they hold enough samples.
             float3 accDelta = 0;
             uint ea = e;  // the accumulator's cell (GI_ACC_CELL_SCALE: the bounce cell, or a finer one of its own)
-            if (b.Load(GI_ACC_OFFSET) != 0 && e != GI_ENTRY_PENDING && asfloat(b.Load(GI_ACC_CELL_SCALE)) != asfloat(P[0].z))
+            if (P[5].x == 0xFFFFFFFFu && b.Load(GI_ACC_OFFSET) != 0 && e != GI_ENTRY_PENDING && asfloat(b.Load(GI_ACC_CELL_SCALE)) != asfloat(P[0].z))
             {
                 bool createdA;
                 const uint levelA = giLevelForSize(h, hit.t * GI_FOOTPRINT_PER_METRE * asfloat(b.Load(GI_ACC_CELL_SCALE)));
                 ea = giFindOrCreate(b, h, giSurfaceKey(h, s.position, s.normal, levelA), giAnchorAtHit(h, s.position, r.Direction, hit.t), s.normal, createdA);
                 if (ea != GI_ENTRY_PENDING) giTouch(b, h, ea);
             }
-            if (b.Load(GI_ACC_OFFSET) != 0 && ea != GI_ENTRY_PENDING && (m.classFlags & 0xFFu) != MATERIAL_FOLIAGE && (P[3].w & 4096u) == 0)
+            // gi.hit_accumulator_pool (GiAccPool.hlsli, P[5].x): the accumulator's own cells, by the ray's footprint
+            const bool pooled = P[5].x != 0xFFFFFFFFu;
+            if ((pooled || (b.Load(GI_ACC_OFFSET) != 0 && ea != GI_ENTRY_PENDING)) && (m.classFlags & 0xFFu) != MATERIAL_FOLIAGE && (P[3].w & 4096u) == 0)
             {
                 const bool lambert = (P[3].w & 1024u) != 0;
                 ModelSurface ms;
@@ -450,8 +453,28 @@ void GiTraceGen()
                 const float coated = coat.cover > 0 ? coat.cover * (1 - modelCoatEms(coat, NoV)) / (coat.eta * coat.eta) : 0.0;
                 const float3 dPoint = plain * albedo * A + coated * (albedo * B + C);
                 float3 mA, mB, mC;
-                const bool frameMode = (b.Load(GI_ACC_MODE) & 1u) != 0;
-                if (frameMode)
+                const bool frameMode = !pooled && (b.Load(GI_ACC_MODE) & 1u) != 0;
+                if (pooled)
+                {
+                    RWByteAddressBuffer pool = ResourceDescriptorHeap[P[5].x];
+                    const float footprint = hit.t * GI_FOOTPRINT_PER_METRE;
+                    GiAccMeans means;
+                    if (giAccPoolRead(pool, s.position, s.normal, footprint, means))
+                    {
+                        const float3 dAcc = plain * albedo * means.A + coated * (albedo * means.B + means.C);
+                        accDelta = means.weight * (dAcc - dPoint);
+                        if ((P[3].w & 32768u) != 0)
+                        {
+                            const float3 Y = float3(0.2126, 0.7152, 0.0722);
+                            uint64_t prev;
+                            b.InterlockedAdd64(GI_ACC_AUDIT, (uint64_t)(max(dot(dPoint, Y), 0.0) * 1024), prev);
+                            b.InterlockedAdd64(GI_ACC_AUDIT + 8, (uint64_t)(max(dot(dPoint + accDelta, Y), 0.0) * 1024), prev);
+                        }
+                    }
+                    if (all(A == A) && all(B == B) && all(C == C) && all(A < 3.0e38) && all(C < 3.0e38))
+                        giAccPoolRecord(pool, s.position, s.normal, footprint, A, B, C, plain * albedo, coated * albedo, coated);
+                }
+                else if (frameMode)
                 {
                     accCell = ea;
                     accKA = plain * albedo;
@@ -471,7 +494,7 @@ void GiTraceGen()
                         b.InterlockedAdd64(GI_ACC_AUDIT + 8, (uint64_t)(max(dot(dAcc, Y), 0.0) * 1024), prev);
                     }
                 }
-                if (all(A == A) && all(B == B) && all(C == C) && all(A < 3.0e38) && all(C < 3.0e38)) giAccRecord(b, ea, A, B, C, plain * albedo, coated * albedo, coated);
+                if (!pooled && all(A == A) && all(B == B) && all(C == C) && all(A < 3.0e38) && all(C < 3.0e38)) giAccRecord(b, ea, A, B, C, plain * albedo, coated * albedo, coated);
             }
             // The texel cone's angular width filters the sun's highlight (GI_FOOTPRINT_PER_METRE: footprint / distance).
             float3 unbounced;
