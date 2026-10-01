@@ -40,11 +40,11 @@
 //        view's air volume } (this kernel reads no sky view)
 // P[4] = { B2 stable area lights' mask (raw, 1 bit per scene light; UNX_NONE = none), texture table, experiment mask (0;
 //        shading.toml), L2 tile lights' records (raw, TileLights.hlsli; UNX_NONE = off) }
+// P[10].w L3 S's tile lit records (raw, VsmCls.hlsli; UNX_NONE = off)
 // P[10].z 14.1b emissive area lights' diffuse irradiance (RGBA16F, exposed; Passes/Lights/EmissiveDirect.hlsl; UNX_NONE =
 //        off). (Until 2026-10-01 the kernel read it from P[4].x, B2's word: the term was never added.)
 // P[5] = { froxel lights (raw) (UNX_NONE = absent), LTC table (StructuredBuffer<float4>, AreaLight.hlsli) }
 // P[6] = { edge tile mask SRV (EdgeDetect.hlsl, R32G32_UINT per tile; UNX_NONE = no edge pixels), V's coverage tiles
-//        (.z: L3 S's tile lit records, VsmCls.hlsli; UNX_NONE = off)
 //        (raw; UNX_NONE = no coverage layer: a tile with coverage fragments keeps every pixel's exposed radiance for the
 //        coverage composite, CoverageComposite.hlsl), exposure histogram's centre sigma, E's light function table (raw;
 //        UNX_NONE = none: A8 cookies, IES, gobos, animated intensity and colour on point and spot lights) }
@@ -92,7 +92,7 @@
 #include "Passes/Atmosphere/Froxel.hlsli"
 #include "Passes/Common/LightNearFar.hlsli"  // 14.1 NEAR/FAR classification and FAR vector irradiance (shared header)
 #include "Passes/Lights/TileLights.hlsli"       // L2: the tile's NEAR mask and corner irradiance (shading.tile_lights)
-#include "Passes/Shadow/VsmCls.hlsli"            // L3: S's (tile, light) lit classification (P[6].z; a lit caster needs no visibility read)
+#include "Passes/Shadow/VsmCls.hlsli"            // L3: S's (tile, light) lit classification (P[10].w; a lit caster needs no visibility read)
 #include "Passes/Visibility/CoverageTiles.hlsli"
 #if !PLANAR
 #define GI_PROBE_TILE_CACHE  // R's screen probes at the group's tile corners, loaded once (design revision 1 4.4, 12.3)
@@ -500,13 +500,14 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         ShadowPixelReceiver overflowReceiver = (ShadowPixelReceiver)0;
         uint4 lightWords = 0;
         // L3 (14.3-2): S's tile classification: an entry lit over every pixel of the tile has visibility 1 here, without
-        // the slot or overflow read (shadow.vsm.classification_pages; UNX_NONE: off).
+        // the slot or overflow read (shadow.vsm.classification_pages; P[10].w, UNX_NONE: off. Until 2026-10-01 the kernel
+        // read P[6].z, the exposure histogram's centre weight in the record: never S's buffer).
         VsmClsTile clsTile = (VsmClsTile)0;
         uint clsSlice = 0;
 #if !FALLBACK  // (fallback tiles keep the full read path: the DXIL limit)
-        if (P[6].z != UNX_NONE)
+        if (P[10].w != UNX_NONE)
         {
-            clsTile = vsmClsTile(P[6].z, (pixel.y / M_TILE) * ((g_viewWidth + M_TILE - 1) / M_TILE) + pixel.x / M_TILE);
+            clsTile = vsmClsTile(P[10].w, (pixel.y / M_TILE) * ((g_viewWidth + M_TILE - 1) / M_TILE) + pixel.x / M_TILE);
             clsSlice = froxelSlice(froxelGrid(froxels.lights), linearZ);
         }
 #endif
@@ -571,8 +572,8 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #if FALLBACK
             if (casts)
 #else
-            if (casts && P[6].z != UNX_NONE && vsmClsTileUmbra(clsTile, clsSlice, i)) continue;  // umbra over the tile: 0
-            if (casts && !(P[6].z != UNX_NONE && vsmClsTileLit(clsTile, clsSlice, i)))
+            if (casts && P[10].w != UNX_NONE && vsmClsTileUmbra(clsTile, clsSlice, i)) continue;  // umbra over the tile: 0
+            if (casts && !(P[10].w != UNX_NONE && vsmClsTileLit(clsTile, clsSlice, i)))
 #endif
                 visibility = shadowOrdinal <= 3 ? shadowSlot(shadowPacked, shadowOrdinal)
                                                 : shOverflowVisibility(pixel, shadowOrdinal, overflowHead, overflowRecord, overflowPacked, overflowReceiver, lightIndex);

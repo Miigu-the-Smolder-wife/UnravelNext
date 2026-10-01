@@ -634,6 +634,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             useParticles(b);
             if (emissiveIrradiance.valid()) b.use(emissiveIrradiance, Use::SrvCompute);  // 14.1b
             if (tileLights) b.use(tileRecords, Use::SrvCompute);  // L2
+            if (r.vsmTileLit.valid()) b.use(r.vsmTileLit, Use::SrvCompute);  // L3 (P[10].w)
             if (meter) b.use(histogram.buffer, Use::UavCompute);
         };
         shadePass.execute = [=](PassContext& c) {
@@ -698,6 +699,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 k32[40] = c.uav(directRadiance);                                 // P[10].x: part 1 -> part 2 direct radiance
                 k32[41] = none;                                                  // P[10].y
                 k32[42] = emissiveIrradiance.valid() ? c.srv(emissiveIrradiance) : none;  // P[10].z: 14.1b (P[4].x is B2's mask)
+                k32[43] = r.vsmTileLit.valid() ? c.srv(r.vsmTileLit) : none;             // P[10].w: L3 (P[6].z is the histogram's centre weight)
                 ID3D12PipelineState* lobes = shadeClass == material::ShadeClass::Layered ? lobesLayered : (shadeClass == material::ShadeClass::Sheen ? lobesSheen : nullptr);
                 if (part == 1 && lobes && areaLobes.valid())
                 {
@@ -804,6 +806,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              k32[40] = c.uav(directRadiance);           // P[10].x: part 1 -> part 2 direct radiance
                              k32[41] = none;                            // P[10].y
                              k32[42] = emissiveIrradiance.valid() ? c.srv(emissiveIrradiance) : none;  // P[10].z: 14.1b
+                             k32[43] = none;                            // P[10].w (the fallback kernel reads no classification)
                              k32[37] = o.anisoWord.valid() ? c.srv(o.anisoWord) : gpu::kNone;  // P[9].y (A9 anisotropy word)
                              particleConstants(c, k32 + 22);  // P[5].zw
                              k32[16] = r.areaLightStable;     // P[4].x (B2)
