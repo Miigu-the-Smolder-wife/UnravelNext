@@ -482,7 +482,8 @@ void SurfaceCacheProbesGen()
         {
             float3 at, face;
             ScSample cell;
-            const bool lit = scMeet(b, l, scene, hit, ray, at, face, cell) && cell.valid;
+            const bool met = scMeet(b, l, scene, hit, ray, at, face, cell);
+            const bool lit = met && cell.valid;
             if (lit) radiance = scFinalLighting(cell);
             if (P[0].w & 16384u)
             {
@@ -490,7 +491,7 @@ void SurfaceCacheProbesGen()
                 // of them that read nothing - no lit cell there, a back face, an emitter (word 15)
                 uint before;
                 b.InterlockedAdd(56, 1u, before);
-                if (!lit) b.InterlockedAdd(60, 1u, before);
+                if ((P[0].w & 32768u) != 0 ? !met : !lit) b.InterlockedAdd(60, 1u, before);  // (bit 15: the back faces alone)
             }
         }
         const float brightest = max(radiance.r, max(radiance.g, radiance.b)) * g_exposure;
