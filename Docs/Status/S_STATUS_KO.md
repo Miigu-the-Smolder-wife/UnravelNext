@@ -415,3 +415,11 @@
 10. 방향광(태양)은 표본에 넣지 않음(VSM 유지).
 
 **품질을 내주는 값** (전부 키, 언리얼 기본값): `mega_lights_samples` 4 · `mega_lights_downsample` 2, `mega_lights_max_shading_weight` 20 / `_hidden` 5, `mega_lights_min_sample_weight` 0.001(공기 0.1), 광선 1개의 이진 가시성, `mega_lights_temporal_max_frames` 12(이력 실패 4), `mega_lights_spatial_radius_px` 8 · `_samples` 4, `mega_lights_volume_samples` 2 · `_max_frames` 10, `mega_lights_hidden_weight` 0.1 / 0.4.
+
+### 12.5 첫 실행 기록 (잠금 안, 1080p, 정확도 홀드 — 프레임 ms는 참고값)
+| 실행 | 결과 |
+|---|---|
+| 홀드 5 (ef2be8d: a~h, S 슬롯 켜진 채) | 로비 스모크 8프레임, 로비·욕탕 홀·라운지 300프레임, 로비 회전+컷: 전부 종료 0, 장치 제거 없음, NaN·검은 화소 없음 |
+| 홀드 6 ((i) S 국소 슬롯 끔) | 로비·기차 라운지·욕탕 홀 켬, 로비 끔: 전부 종료 0. 켬: "0 slots assigned, 0 local raster requests", `s.shadow.overflow` 1.45 → 0.003 ms, `s.shadow.visibility` 0.43 → 0.18 ms. 끔: 128 슬롯 그대로 |
+| GPU 프레임 중앙값 | 로비 끔 20.5~22.0 ms / 켬(슬롯 끔) **16.96 ms**; 욕탕 홀 켬 16.07 ms; 기차 라운지 켬 21.90 ms(끔은 재지 않음) |
+품질 판정·타이밍 홀드·1440p는 세 세션 병합 뒤(조정 21:05).
