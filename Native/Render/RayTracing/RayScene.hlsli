@@ -17,6 +17,8 @@
 #define RT_MASK_REFLECTION 0x2u  // reflection M/G rays
 #define RT_MASK_EMITTER 0x4u     // the analytic area lights (RayScene's emitter instance): GI and reflection rays only,
                                  // never visibility rays (the lights have no body; LTC ignores their occlusion)
+#define RT_MASK_SHADOW 0x10u     // instances that cast shadows (INSTANCE_CAST_SHADOW): the mask of lights' shadow rays
+                                 // (shading.mega_lights); every other ray's mask leaves it out
 #define RT_MASK_ALL 0xFFu
 // InstanceID of the emitter instance (RtHit.instance; RtHit.primitive = the light's index in the scene's light buffer).
 #define RT_INSTANCE_EMITTER 0xFFFFFEu

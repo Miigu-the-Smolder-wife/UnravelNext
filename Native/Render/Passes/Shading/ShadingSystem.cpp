@@ -1,4 +1,5 @@
 #include "unx/shading/ShadingSystem.h"
+#include "unx/shading/MegaLights.h"
 #include "unx/shading/DepthOfField.h"
 #include "unx/shading/Exposure.h"
 #include "unx/shading/MotionBlur.h"
@@ -252,6 +253,7 @@ struct ShadingResources
     TextureRef edgeRadiance, edgeTiles;
     TextureRef areaLobes;  // A9 (AreaLobes.hlsl): area-light lobe radiance of the layered classes (area-lit scenes only)
     TextureRef direct;     // ShadeOpaque part 1 -> ShadeIndirect (part 2): the direct radiance (RGBA32F, linear before exposure)
+    TextureRef megaLighting;  // shading.mega_lights: the local lights' direct light (m.ml.spatial; invalid = off)
     BufferRef edgePixels, edgeArgs, fallbackArgs;
 };
 struct ShadingTable
@@ -372,7 +374,15 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     const BufferRef emissiveLights = lights::emissiveLights(fc);
     TextureRef emissiveIrradiance;  // per-pixel diffuse irradiance from them (EmissiveDirect.hlsl, exposed RGBA16F)
     // 14.1/14.2 (L2): the tile lights' records (TileLights.hlsl; shading.tile_lights, main view with S's lists).
-    const bool tileLights = fc.quality.boolean("shading.tile_lights") && froxelLists && view.view.kind == gpu::ViewKind::Main;
+    // shading.mega_lights (MegaLights.cpp; main view with S's lists and R's ray scene): the local lights' direct light comes
+    // from light samples (m.ml.*) and the kernels skip their loop over the lists, so the tile records are not built.
+#if UNX_M_HAS_RAYTRACING
+    const bool megaWanted = fc.quality.boolean("shading.mega_lights") && view.view.kind == gpu::ViewKind::Main && froxelLists && r.tlasStatic.valid() &&
+                            fc.trackState != nullptr && (experiment & 32) == 0;
+#else
+    const bool megaWanted = false;
+#endif
+    const bool tileLights = fc.quality.boolean("shading.tile_lights") && froxelLists && view.view.kind == gpu::ViewKind::Main && !megaWanted;
     const BufferRef tileRecords = tileLights ? fc.graph.createBuffer({ "M tile lights", (uint64_t)tileCount * 96, 0 }) : BufferRef{};
     if (emissiveLights.valid())
     {
@@ -485,6 +495,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     }
     const BufferRef fallbackArgs = res.fallbackArgs, edgePixels = res.edgePixels, edgeArgs = res.edgeArgs;
     const TextureRef edgeRadiance = res.edgeRadiance, edgeTiles = res.edgeTiles, areaLobes = res.areaLobes, directRadiance = res.direct;
+    TextureRef megaLighting = res.megaLighting;  // (the banded part sets it below)
     // Planar views: tiles without mirror pixels are never shaded; edge detection and the composite treat their pixels as
     // outside the view (R always gives the tile mask with the pixel mask, v1.22).
     const TextureRef planarTiles = v.view.planarTileMask;
@@ -510,6 +521,92 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              c.computeConstants(k, 8);
                              c.cmd->Dispatch(1, 1, 1);
                          });
+
+        if (megaWanted)
+        {
+            // m.ml.sample, m.ml.trace; then m.ml.shade here (ShadeOpaque.hlsl with MEGA_LIGHTS = 1 on the class tile lists
+            // of every band, the LAYERED variant of each class); then m.ml.sets, m.ml.temporal, m.ml.spatial
+            MegaLightsFrame ml = megaLightsSample(fc, view, o.materialWord, areaLights, ltcSrv, signature);
+            if (!ml.on) fail("M.shading: shading.mega_lights could not start on the main view (its inputs were present)");
+            auto mlKernel = [&](uint32_t layered) {
+                const std::string name = std::string("Passes/Shading/MegaLightsShade.AREA") + (areaLights ? "1" : "0") + ".LAYERED" + std::to_string(layered);
+                return fc.shaders.compute(name.c_str());
+            };
+            ID3D12PipelineState* mlPlain = mlKernel(0);
+            ID3D12PipelineState* mlLayered = layeredMaterials ? mlKernel(1) : nullptr;
+            ID3D12PipelineState* mlSheen = sheenMaterials ? mlKernel(2) : nullptr;
+            const TextureRef samples = ml.samples, keys = ml.keys, outDiffuse = ml.resolvedDiffuse, outSpecular = ml.resolvedSpecular;
+            auto half = [](float f) {  // positive, in the half range (the weight caps)
+                uint32_t u;
+                std::memcpy(&u, &f, 4);
+                const int32_t e = (int32_t)((u >> 23) & 0xFF) - 127 + 15;
+                if (e <= 0) return 0u;
+                if (e >= 31) return 0x7BFFu;
+                return ((uint32_t)e << 10) | ((u >> 13) & 0x3FFu);
+            };
+            const uint32_t caps = half(ml.maxWeight) | (half(ml.maxWeightHidden) << 16), mlMode = ml.factor | (ml.count << 8);
+            const float minWeight = ml.minSampleWeight;
+            const uint32_t listBandCount = o.bands;
+            fc.graph.addPass("m.ml.shade", QueueType::Graphics,
+                             [&](PassBuilder& b) {
+                                 b.use(v.gbuffer, Use::SrvCompute);
+                                 b.use(v.depth, Use::SrvCompute);
+                                 b.use(o.materialWord, Use::SrvCompute);
+                                 if (o.anisoWord.valid()) b.use(o.anisoWord, Use::SrvCompute);
+                                 b.use(o.tiles, Use::SrvCompute);
+                                 b.use(o.tileArgs, Use::IndirectArgs);
+                                 if (r.lightFunctions.valid()) b.use(r.lightFunctions, Use::SrvCompute);
+                                 b.use(v.froxelLights, Use::SrvCompute);
+                                 if (r.fxLights.valid()) b.use(r.fxLights, Use::SrvCompute);
+                                 b.use(samples, Use::SrvCompute);
+                                 b.use(keys, Use::SrvCompute);
+                                 b.use(outDiffuse, Use::UavCompute);
+                                 b.use(outSpecular, Use::UavCompute);
+                             },
+                             [=](PassContext& c) {
+                                 const uint32_t none = gpu::kNone;
+                                 c.bindFrameConstants(cb);
+                                 ID3D12Resource* args = c.resource(o.tileArgs);
+                                 for (material::ShadeClass shadeClass : { material::ShadeClass::Opaque, material::ShadeClass::Subsurface, material::ShadeClass::Water,
+                                                                          material::ShadeClass::Layered, material::ShadeClass::Sheen })
+                                 {
+                                     ID3D12PipelineState* kernel = shadeClass == material::ShadeClass::Layered ? mlLayered : (shadeClass == material::ShadeClass::Sheen ? mlSheen : mlPlain);
+                                     if (!kernel) continue;
+                                     c.cmd->SetPipelineState(kernel);
+                                     const uint32_t cls = (uint32_t)shadeClass;
+                                     for (uint32_t band = 0; band < listBandCount; ++band)
+                                     {
+                                         uint32_t k32[48];
+                                         for (uint32_t& w : k32) w = none;
+                                         k32[0] = c.srv(v.gbuffer);
+                                         k32[1] = c.srv(v.depth);
+                                         k32[2] = c.srv(o.materialWord);
+                                         k32[4] = c.srv(o.tiles);
+                                         k32[5] = o.firstTile(cls, band);
+                                         k32[6] = cls;
+                                         k32[16] = r.areaLightStable;  // P[4].x (B2)
+                                         k32[17] = o.textureTableSrv;
+                                         k32[18] = experiment;
+                                         k32[20] = c.srv(v.froxelLights);
+                                         k32[21] = ltcSrv;
+                                         k32[27] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : none;  // P[6].w (A8)
+                                         k32[37] = o.anisoWord.valid() ? c.srv(o.anisoWord) : none;            // P[9].y
+                                         k32[41] = c.srv(samples);     // P[10].y
+                                         k32[42] = c.srv(keys);        // P[10].z
+                                         k32[43] = c.uav(outDiffuse);  // P[10].w
+                                         k32[44] = c.uav(outSpecular); // P[11].x
+                                         k32[45] = caps;               // P[11].y
+                                         std::memcpy(&k32[46], &minWeight, 4);  // P[11].z
+                                         k32[47] = mlMode;             // P[11].w
+                                         c.computeConstants(k32, 48);
+                                         c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
+                                     }
+                                 }
+                             });
+            megaLightsDenoise(fc, view, o.materialWord, ml);
+            megaLighting = ml.lighting;
+            table.views.back().second.megaLighting = megaLighting;
+        }
 
         // Edge detection and shading are banded passes (INTERFACES v1.29, design revision 1 4.8): in a band the detection
         // kernel reads the band's material words, depth and G-buffer and the shading kernels read them again while they are
@@ -634,6 +731,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             useParticles(b);
             if (emissiveIrradiance.valid()) b.use(emissiveIrradiance, Use::SrvCompute);  // 14.1b
             if (tileLights) b.use(tileRecords, Use::SrvCompute);  // L2
+            if (megaLighting.valid()) b.use(megaLighting, Use::SrvCompute);  // shading.mega_lights (P[10].y)
+            if (r.vsmTileLit.valid()) b.use(r.vsmTileLit, Use::SrvCompute);  // L3 (P[10].w)
             if (meter) b.use(histogram.buffer, Use::UavCompute);
         };
         shadePass.execute = [=](PassContext& c) {
@@ -680,9 +779,9 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                          v.shadowVisibility.valid() ? c.srv(v.shadowVisibility) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
                                          v.reflection.valid() ? c.srv(v.reflection) : none,
                                          r.giCache.valid() ? c.srv(r.giCache) : none,
-                                         atm[0], atm[1], overflow ? c.srv(v.shadowOverflowTiles) : none, atm[3], emissiveIrradiance.valid() ? c.srv(emissiveIrradiance) : none, o.textureTableSrv, experiment,
-                                         tileLights ? c.srv(tileRecords) : none, fx[0], fx[1] };
-                uint32_t k32[44] = {};
+                                         atm[0], atm[1], overflow ? c.srv(v.shadowOverflowTiles) : none, atm[3], none, o.textureTableSrv, experiment,
+                                         none, fx[0], fx[1] };
+                uint32_t k32[48] = {};
                 std::memcpy(k32, k, sizeof k);
                 std::memcpy(k32 + 24, edge, sizeof edge);
                 waterSunConstants(c, k32 + 32, 4);                    // P[8], P[9].x (v1.77)
@@ -696,16 +795,20 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 k32[38] = areaLobes.valid() ? c.uav(areaLobes) : none;  // P[9].z (A9 area-light lobes)
                 k32[39] = v.giIrradiance.valid() ? c.srv(v.giIrradiance) : none;  // P[9].w (R's per-pixel front irradiance)
                 k32[40] = c.uav(directRadiance);                                 // P[10].x: part 1 -> part 2 direct radiance
+                k32[41] = megaLighting.valid() ? c.srv(megaLighting) : none;      // P[10].y: shading.mega_lights' result
+                k32[42] = emissiveIrradiance.valid() ? c.srv(emissiveIrradiance) : none;  // P[10].z: 14.1b (P[4].x is B2's mask)
+                k32[43] = r.vsmTileLit.valid() ? c.srv(r.vsmTileLit) : none;             // P[10].w: L3 (P[6].z is the histogram's centre weight)
+                k32[44] = tileLights ? c.srv(tileRecords) : none;                        // P[11].x: L2 (P[4].w is the histogram)
                 ID3D12PipelineState* lobes = shadeClass == material::ShadeClass::Layered ? lobesLayered : (shadeClass == material::ShadeClass::Sheen ? lobesSheen : nullptr);
                 if (part == 1 && lobes && areaLobes.valid())
                 {
                     // the lobe texture is read by part 2 (after the barrier below)
                     c.cmd->SetPipelineState(lobes);
-                    c.computeConstants(k32, 44);
+                    c.computeConstants(k32, 48);
                     c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
                     c.cmd->SetPipelineState(shadeClass == material::ShadeClass::Layered ? opaqueLayered : opaqueSheen);
                 }
-                c.computeConstants(k32, 44);
+                c.computeConstants(k32, 48);
                 c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
             }
         };
@@ -773,6 +876,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              useParticles(b);
                              if (emissiveIrradiance.valid()) b.use(emissiveIrradiance, Use::SrvCompute);  // 14.1b
                              if (tileLights) b.use(tileRecords, Use::SrvCompute);  // L2
+                             if (megaLighting.valid()) b.use(megaLighting, Use::SrvCompute);  // shading.mega_lights (P[10].y)
                          },
                          [=](PassContext& c) {
                              const uint32_t none = gpu::kNone;
@@ -789,17 +893,21 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                                       v.shadowVisibility.valid() ? c.srv(v.shadowVisibility) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
                                                       v.reflection.valid() ? c.srv(v.reflection) : none, r.giCache.valid() ? c.srv(r.giCache) : none,
                                                       atmosphere ? c.srv(r.transmittanceLut) : none, atmosphere ? c.srv(r.multiScatterLut) : none, none,
-                                                      air ? c.srv(v.airVolume) : none, emissiveIrradiance.valid() ? c.srv(emissiveIrradiance) : none, o.textureTableSrv, experiment,
-                                                      tileLights ? c.srv(tileRecords) : none,
+                                                      air ? c.srv(v.airVolume) : none, none, o.textureTableSrv, experiment,
+                                                      none,
                                                       froxelLists ? c.srv(v.froxelLights) : none, ltcSrv };
                              const uint32_t edge[8] = { c.srv(edgeTiles), coverage ? c.srv(v.coverageTiles) : none, 0, 0, c.uav(edgeRadiance),
                                                         v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, shadowSrvs,
                                                         keepWater ? c.srv(v.waterVis) : none };  // P[7].w (v1.75)
-                             uint32_t k32[44] = {};
+                             uint32_t k32[48] = {};
                              std::memcpy(k32, k, sizeof k);
                              std::memcpy(k32 + 24, edge, sizeof edge);
                              waterSunConstants(c, k32 + 32, 4);  // P[8], P[9].x (v1.77)
                              k32[40] = c.uav(directRadiance);           // P[10].x: part 1 -> part 2 direct radiance
+                             k32[41] = megaLighting.valid() ? c.srv(megaLighting) : none;  // P[10].y
+                             k32[42] = emissiveIrradiance.valid() ? c.srv(emissiveIrradiance) : none;  // P[10].z: 14.1b
+                             k32[43] = none;                            // P[10].w (the fallback kernel reads no classification)
+                             k32[44] = none;                            // P[11].x (the fallback kernel keeps every light per pixel)
                              k32[37] = o.anisoWord.valid() ? c.srv(o.anisoWord) : gpu::kNone;  // P[9].y (A9 anisotropy word)
                              particleConstants(c, k32 + 22);  // P[5].zw
                              k32[16] = r.areaLightStable;     // P[4].x (B2)
@@ -820,11 +928,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                  if (fallbackLobes[run] && areaLobes.valid())
                                  {
                                      c.cmd->SetPipelineState(fallbackLobes[run]);
-                                     c.computeConstants(k32, 44);
+                                     c.computeConstants(k32, 48);
                                      c.cmd->ExecuteIndirect(signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
                                  }
                                  c.cmd->SetPipelineState(kernel);
-                                 c.computeConstants(k32, 44);
+                                 c.computeConstants(k32, 48);
                                  c.cmd->ExecuteIndirect(signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
                              }
                              lobeBarrier(c);
@@ -832,7 +940,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              {
                                  k32[6] = fallbackRuns[run].second;  // P[1].z
                                  c.cmd->SetPipelineState(fallbackIndirect[run]);
-                                 c.computeConstants(k32, 44);
+                                 c.computeConstants(k32, 48);
                                  c.cmd->ExecuteIndirect(signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
                              }
                          });

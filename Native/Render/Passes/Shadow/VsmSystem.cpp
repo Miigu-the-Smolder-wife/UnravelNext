@@ -517,8 +517,23 @@ namespace
 // Local lights of this frame: shadow slots (persistent while a light keeps casting; a slot's generation changes when its
 // light changes or moves, which releases its pages), the lights meeting the main view (raster views), and the uploads
 // (local lights, scene light -> slot, active slots) in this frame's ring slice.
+// shading.mega_lights (Passes/Shading/MegaLights.hlsli; owner A): the local lights' shadows are the light samples' rays, so
+// S assigns no local slot, draws no local page and its per-pixel passes skip the local lights (the sun's maps stay). The
+// same condition as M's (the switch, the R track in the build, a ray scene this frame). The slots' other readers (coverage
+// fragments, planar views, particles, the A9 lobe kernel) then light without local shadows until they take samples too.
+bool megaLightsOwnLocalShadows(FramePassContext& fc)
+{
+#if UNX_S_HAS_RAYTRACING
+    return fc.quality.has("shading.mega_lights") && fc.quality.boolean("shading.mega_lights") && fc.resources.tlasStatic.valid();
+#else
+    (void)fc;
+    return false;
+#endif
+}
+
 void updateLocalLights(FramePassContext& fc, State& s, const ViewResources& main)
 {
+    const bool noSlots = megaLightsOwnLocalShadows(fc);
     const scene::Scene* src = fc.scene.source();
     const std::vector<scene::Light> none;
     const std::vector<scene::Light>& lights = src ? src->lights : none;
@@ -536,7 +551,7 @@ void updateLocalLights(FramePassContext& fc, State& s, const ViewResources& main
     {
         const uint32_t li = s.localLight[i];
         if (li == 0) continue;
-        if (li - 1 < n && lights[li - 1].castShadow) s.slotOfLight[li - 1] = i;
+        if (!noSlots && li - 1 < n && lights[li - 1].castShadow) s.slotOfLight[li - 1] = i;
         else
         {
             s.localLight[i] = 0;
@@ -567,7 +582,7 @@ void updateLocalLights(FramePassContext& fc, State& s, const ViewResources& main
     };
     std::vector<std::pair<Priority, uint32_t>> waiting;  // lights without a slot, best first
     for (uint32_t li = 0; li < n; ++li)
-        if (lights[li].castShadow && s.slotOfLight[li] == 0xFFFFu) waiting.push_back({ priority(li), li });
+        if (!noSlots && lights[li].castShadow && s.slotOfLight[li] == 0xFFFFu) waiting.push_back({ priority(li), li });
     std::sort(waiting.begin(), waiting.end(), [](const auto& a, const auto& b) { return a.first.beats(b.first, 1.0f) || (!b.first.beats(a.first, 1.0f) && a.second < b.second); });
     uint32_t freeSlot = 0, replaced = 0;
     for (const auto& [pr, li] : waiting)
@@ -1742,7 +1757,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     const bool mainView = view.view.kind == gpu::ViewKind::Main;
     if (view.view.kind == gpu::ViewKind::PlanarReflection && !view.froxelLights.valid()) recordPlanarFroxels(fc, view);
     const BufferRef froxelLists = view.froxelLights.valid() ? view.froxelLights : (mainView ? fc.resources.froxelLights : BufferRef{});
-    const bool localSlots = froxelLists.valid() && s.localLightsNow != UINT32_MAX;
+    const bool localSlots = froxelLists.valid() && s.localLightsNow != UINT32_MAX && !megaLightsOwnLocalShadows(fc);
     const uint32_t localLightsSrv = s.localLightsNow, slotOfSrv = s.slotOfNow;
     const BufferRef table = s.tableRef, bound = s.boundRef, blocks = s.blocksRef, statsBuf = s.statsRef, layers = s.layersRef, useBuf = s.useRef;
     // Overflow list (INTERFACES 7.3, v1.20): the main view's shadow-casting lights past the third. Capacity = 1.5 x the

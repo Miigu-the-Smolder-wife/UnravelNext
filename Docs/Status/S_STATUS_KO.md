@@ -350,3 +350,76 @@
 | FroxelTests | 2 실패(FX 1b: 시험 훅이 shadowPages 뒤에 FX 꼬리를 복사 → 목록이 못 봄; c8a0531에서 훅을 앞으로). 통과: 용량 상한 ≥ 필요(5.83 M ≥ 2.50 M), 강제 fallback(FX 없음/있음) 정확, **L4 유계 생략 A/B 평균 5.76e-7·최대 8.5e-4(한도 1e-3/2e-3)**, **분류 페이지 lit 구간 A/B 평균 3.28e-7·최대 4.0e-4**, 독자 상한 비트 동일 |
 | ShadingTests | 14.1b 쿡 뒤 업로드 버퍼 final-release 오류로 중단(c8a0531: 상태 소멸 시 deferRelease). 그 앞 전부 ok: coverage 타일 광원 FAR 장 |ΔE|/E P99 **0**, 최악 0 |
 | 추가 커밋 | e99166d 둥근 욕조(74) + 보이는 면 비트(76); 단위 시험 `round_pool_modes` PASS [실측 CPU]; PoolTests 9(둥근 욕조) 추가 → chain 5(`run_chain5.sh`, chain 4 뒤 한 홀드)가 FroxelTests·ShadingTests·PoolTests·HostPools·HostAbi·단위 시험을 다시 돈다 |
+- (18:55, R 요청) `shading.experiment_disable` **16384**: VSM 슬롯 없는 그림자 광원(프록셀 항목 비트 15 없음)의 직접광을 주 셰이딩 커널에서 0 — 로비 "699 shadowed lights without a slot"의 기여량 측정용. **128 슬롯 한계 자체(슬롯 없는 광원은 그림자 없음, 프레임당 8 교체)는 품질 결함 → L3 5단계(활성 집합 가상 슬롯, 상한 없음)의 범위**로 확정 기록. R의 (76) GI 게이트 b3e3025 [R 실측 로비 f4 45/307 → 28/147 %].
+
+## 12. MegaLights 포트 (2026-10-01 밤, 사용자 결정 19:20: 조명을 언리얼 구조로 재구성; A = 국소광 직접광·그림자)
+
+스위치 `shading.mega_lights`(기본 끔, 끔일 때 기존 경로 그대로). 구조·통과 순서·기본값은 ue6-main `Renderer/Private/MegaLights`, `Shaders/Private/MegaLights`를 읽고 따랐고 코드는 새로 썼다(줄 복사 없음). 파일: `Passes/Shading/MegaLights.hlsli`(머리말에 통과 설명), `MegaLightsSample.hlsl`, `MegaLightsTrace.hlsl`(lib), `MegaLightsShade.hlsl`(= `ShadeOpaque.hlsl`을 `MEGA_LIGHTS=1`로 컴파일), `MegaLightsUpsample.hlsli`, `MegaLightsSets.hlsl`, `MegaLightsTemporal.hlsl`, `MegaLightsSpatial.hlsl`, `MegaLights.cpp`, `ShadingSystem.cpp`(기록), `shading.toml`(키 28개).
+
+| 통과 | 하는 일 | 언리얼 대응 |
+|---|---|---|
+| m.ml.sample | 2x2 다운샘플 화소(프레임마다 블록 안 1화소, 4-rooks)에서 프록셀 목록의 모든 광원을 log2(1 + 비차폐 휘도 x 노출)로 가중, 층화 저수지로 4개 선택. 지난 프레임 타일에서 숨었던 광원은 x0.1(이력 없으면 x0.4) | GenerateLightSamplesCS |
+| m.ml.trace | 표본마다 그림자 광선 1개(DispatchRays, R의 광선 장면, 알파 any-hit). 면광원은 표본 (u, v) 지점으로 | HardwareRayTracing (기본 경로) |
+| m.ml.shade | 화소마다 주변 다운샘플 화소 4개 중 하나를 양선형 x 평면 x 법선 가중으로 확률 선택, 그 표본의 광원만 화소 자신의 모델(LTC 면광원, A9 층, Foliage, 광원 함수 포함)로 평가, 확산·정반사 분리·복조 | ShadeLightSamplesCS |
+| m.ml.sets | 8x8 타일마다 보인/숨은 광원 비트 집합(24 B), 이웃 4타일 합침 | VisibleLightHashCS + Filter |
+| m.ml.temporal | 재투영(vis 버퍼 삼각형의 이전 정점), 12탭 유효면 Catmull-Rom, YCoCg 이웃 클램프, 최대 12프레임(이력 실패 4) | DenoiserTemporalCS |
+| m.ml.spatial | 분산 유도 필터(반경 8 px, 4탭; 디스오클루전 2프레임은 8탭·공간 분산), 변조 복원 | DenoiserSpatialCS |
+
+- 그림자 슬롯 128 한계가 없다(모든 목록 광원이 후보, 그림자는 광선). 주 커널 part 1은 국소광 루프를 건너뛰고 part 2가 결과(P[10].y)를 더한다. 가장자리(E) 합성·coverage 조각·평면 반사 뷰·A9 면광원 lobe 커널은 기존 경로(S의 슬롯) 그대로.
+- **아직 안 한 것(언리얼에 있고 여기 없는 것)**: 화면 공간 추적(접촉 그림자, RT 프록시와 래스터 면이 다를 때의 보정), 블루 노이즈 텍스처(지금은 interleaved gradient noise), 광원 세기 변화 이력(LightPowerDelta), 볼륨(프록셀 공기·반투명: 지금 공기는 S의 기존 적분), 머리카락·전면 반투명·1인칭 뷰모델 전용 경로, VSM 추적 경로, 추적 압축(표본 텍셀 전부에 raygen).
+- **품질을 내주는 값(사용자 결정 목록, 전부 `shading.toml` 키, 언리얼 기본값)**: 표본 수 4·다운샘플 2(1 spp), 세기 상한 20/숨은 광원 5(초과 에너지 손실), 최소 표본 가중 0.001(그 아래 광원은 서서히 0), 광선 1개의 이진 가시성, 이력 12프레임, 공간 필터 반경 8 px.
+- 크기 [실측, 빌드]: MegaLightsShade 최대 61.7 KB(AREA1.LAYERED1), Sample.AREA1 89.1 KB, Temporal 29.3 KB, Trace 12.8 KB, Spatial 8.1 KB(한도 204.8 KB).
+- 미검증 → 첫 잠금 홀드 `run_ml_hold1.ps1`(로비 1080p: 스모크 8프레임, 정지 f1/2/4/16/299 끔·켬, 회전+컷 f151/152/154/166 끔·켬). 그 뒤 타이밍 홀드(끔·켬 통과별 ms), 1440p.
+
+### 12.1 읽다가 찾은 내 이전 커밋의 루트 상수 충돌 3건 (수정·커밋, 미검증: 다음 홀드 ShadingTests)
+| 커밋 | 충돌 | 증상 |
+|---|---|---|
+| 8d0d065 | 14.1b 발광 조도 텍스처를 P[4].x에서 읽음 = B2 안정 면광원 마스크 자리(기록이 마스크로 덮어씀) | `emissive_area_lights` 켜도 항이 0 → R 통합 실행의 ShadingTests "emissive panel 1.000"의 원인. `raytracing.emitters` 켬이면 마스크 버퍼를 텍스처로 읽음 |
+| 43fce2e | L3 타일 lit 기록을 P[6].z에서 읽음 = 노출 히스토그램 중심 가중(float) | 모든 설정에서 part 1이 그 비트를 서술자 인덱스로 사용(정의되지 않은 읽기), `classification_pages`는 M에서 효과 없었음 |
+| 738c2fa | L2 타일 광원 기록을 P[4].w에서 읽음 = 노출 히스토그램 UAV | `tile_lights` 켜도 기록이 안 감. 기본 설정에서도 히스토그램 서술자에서 타일당 96 B 읽음(1 KB 뒤는 0 = 미적용, 맨 윗줄 첫 타일들은 히스토그램 값을 기록으로 읽을 수 있었음) |
+이제 P[10].z / P[10].w / P[11].x. 커널이 읽는 모든 워드를 기록과 대조했고 남은 충돌 없음. **V2.5 스위치(cls, tile, emis)의 M 쪽 켬 비교는 이 수정 전에는 의미가 없었다** (chain 4의 스위치 비교는 그래서 폐기; 사용자 결정으로 14.x는 내려놓음).
+
+### 12.2 로비 결함 귀속 (조정 19:35 요청, 내 브랜치 빌드 = R의 GI 필터·반사 층 없음, 1080p f299)
+`run_lobby_diag.ps1`, `postgame/compare_lobby.py`, 그림 `postgame/lobby_crop0_f299.png`(안내대 앞판), `lobby_crop1_f299.png`(왼쪽 벽 띠) — 왼쪽부터 기본 / 슬롯 없는 광원 끔(16384) / 공기 끔(8) / 국소광 끔(32) / 그림자 읽기 끔(2048).
+- 벽 띠의 네모 블록과 앞판의 흰 얼룩은 **국소광 끔·공기 끔·슬롯 없는 광원 끔 어느 것에서도 남는다** → 주 커널의 국소광 직접광(타일 광원 포함)·프록셀 공기·슬롯 없는 광원이 아니다. GI 끔(2)·반사 끔(4) 추가 실행(20:13) 결과 **두 결함 모두 반사 항**이다 [실측]: 반사 끔에서만 벽 띠의 네모가 사라지고(GI 끔에서는 남음), 안내대 앞판은 P99/P50 휘도 비가 18.3 → **4.5**, 평균이 0.214 → 0.113으로 떨어진다(GI 끔 39.9, 국소광 끔 20.1, 공기 끔 14.9, 슬롯 없는 광원 끔 25.3). 즉 광택 면에 비친 광천장의 반사 층(S2 영역)이고 직접광·공기·슬롯 없는 광원이 아니다.
+- 슬롯 없는 광원의 몫 [실측]: 화면 평균 휘도의 16.4 %(끔 → 0.836배). 국소광 전체 31 %, 공기 조회 8.8 %.
+
+### 12.3 실수 기록 (19:54)
+내 잠금 대기 프로세스를 정리하면서 필터 `GpuLock.ps1 -Track A`가 `-Track all`도 잡아 게임 세션(C)의 Unity 테스트 잠금 대기 2건(BathhouseTycoon WalkTheFloors, TrainExorcist TrainDepartsGhostLoads...)을 종료했다. 잠금을 얻기 전이었고 대기열 파일은 GpuLock이 정리했다. 조정 세션에 재실행을 알림. 이후 프로세스 종료는 pid로만 한다.
+
+### 12.4 완료 정의 (a)~(h) (조정 21:05) — 2026-10-01 밤 2차
+| | 항목 | 파일 | 상태 |
+|---|---|---|---|
+| (a) | 타일 분류: 표면이 있는 다운샘플 타일 목록 → 표본 커널을 그 목록으로 간접 dispatch, 빈 타일의 표본·키 비움 | `MegaLightsTiles.hlsl` | 구현·빌드 |
+| (b) | 광원 표본 생성 | `MegaLightsSample.hlsl` + `MegaLightsSampling.hlsli` | 구현·실행 |
+| (c) | 그림자 광선 | `MegaLightsTrace.hlsl` + `MegaLightsWorld.hlsli`(mlSampleVisible) | 구현·실행 |
+| (d) | resolve·음영(확산·정반사 분리) | `MegaLightsShade.hlsl`(= ShadeOpaque `MEGA_LIGHTS=1`), `MegaLightsUpsample.hlsli` | 구현·실행 |
+| (e)(f) | 공간·시간 디노이저 | `MegaLightsSpatial.hlsl`, `MegaLightsTemporal.hlsl` | 구현·실행 |
+| (g) | 공기: 프록셀마다 표본 2 + 그림자 광선 + 이력(최대 10프레임), S의 적분이 목록 루프·VSM 보행 대신 더함 | `Passes/Atmosphere/MegaLightsVolume.hlsl`, `FroxelIntegrate.hlsl`(P[5].y), `FroxelSystem.cpp` | 구현·빌드 |
+| (h) | 월드 점 include: `MlPoint`(mlPointOf / mlPointLambert), `mlLightUnshadowed`, `mlTargetWeight`, `MlReservoir`; R의 월드 광원 격자에서 뽑는 `mlWorldSamples`, 그림자 광선 `mlSampleVisible` | `MegaLightsSampling.hlsli`, `MegaLightsWorld.hlsli` | 구현·빌드(표본·추적 커널이 이 include를 씀) |
+
+| (i) | S의 국소 그림자 맵 끔(조정 20:55 추가): mega_lights가 켜지고 광선 장면이 있으면 S가 국소 슬롯을 배정하지 않고(국소 페이지 래스터 0), 화소별 슬롯·오버플로 통과가 국소광을 건너뜀. 태양 VSM은 그대로 | `VsmSystem.cpp` megaLightsOwnLocalShadows | 구현 |
+
+**스위치**: `shading.mega_lights`(전체), `shading.mega_lights_volume`(공기; mega_lights가 켜졌을 때). 나머지 키는 `shading.toml`의 `mega_lights_*`.
+
+**언리얼과 다르게 둔 점**
+1. 타일 분류는 빈 타일 건너뛰기만. 음영 모델·사각 광원별 타일 변종은 없음(우리는 M의 클래스 타일 목록과 장면에 면광원이 있는지로 커널을 고름).
+2. 화면 공간 추적(HZB 접촉 그림자) 없음. 광선만.
+3. 광선 끝 바이어스 5 cm(언리얼 1 cm): S의 국소 그림자 맵 근평면 규칙에 맞춤. 광선은 그림자 캐스터 마스크(0x10)만 봄.
+4. 난수: interleaved gradient noise(언리얼은 블루 노이즈 텍스처).
+5. 광원 세기 변화 이력(LightPowerDelta) 없음: "지난 프레임에 최소 가중 아래라 표본이 안 뽑혔는지"를 이번 프레임 휘도로 판정.
+6. 재투영: 속도 버퍼 대신 vis 버퍼 삼각형의 이전 정점(R의 GiScreenHistory). 이력 유효성은 깊이만(법선·재질 검사는 언리얼도 MegaLights에는 깊이 + 머리카락 플래그).
+7. 공기: 다운샘플 없음(프록셀마다), 표본 선택 → 추적 → 음영을 한 raygen에서. 보인 광원 이력 유도 없음. 이력은 자체 지수 평균(언리얼은 안개의 이력).
+8. 면광원 평가는 우리 LTC·정확 적분(언리얼은 대표점 근사), A9 층·Foliage 뒷면 포함. 면광원의 표본 가중도 같은 적분.
+9. 머리카락·전면 반투명·1인칭 뷰모델 전용 경로, 추적 압축, 참조 모드 없음. coverage 조각·평면 반사 뷰·입자 층·A9 면광원 lobe는 표본 경로로 옮기지 않았고, (i) 때문에 켬에서는 그곳의 국소광에 그림자가 없다(다음 이식 대상).
+10. 방향광(태양)은 표본에 넣지 않음(VSM 유지).
+
+**품질을 내주는 값** (전부 키, 언리얼 기본값): `mega_lights_samples` 4 · `mega_lights_downsample` 2, `mega_lights_max_shading_weight` 20 / `_hidden` 5, `mega_lights_min_sample_weight` 0.001(공기 0.1), 광선 1개의 이진 가시성, `mega_lights_temporal_max_frames` 12(이력 실패 4), `mega_lights_spatial_radius_px` 8 · `_samples` 4, `mega_lights_volume_samples` 2 · `_max_frames` 10, `mega_lights_hidden_weight` 0.1 / 0.4.
+
+### 12.5 첫 실행 기록 (잠금 안, 1080p, 정확도 홀드 — 프레임 ms는 참고값)
+| 실행 | 결과 |
+|---|---|
+| 홀드 5 (ef2be8d: a~h, S 슬롯 켜진 채) | 로비 스모크 8프레임, 로비·욕탕 홀·라운지 300프레임, 로비 회전+컷: 전부 종료 0, 장치 제거 없음, NaN·검은 화소 없음 |
+| 홀드 6 ((i) S 국소 슬롯 끔) | 로비·기차 라운지·욕탕 홀 켬, 로비 끔: 전부 종료 0. 켬: "0 slots assigned, 0 local raster requests", `s.shadow.overflow` 1.45 → 0.003 ms, `s.shadow.visibility` 0.43 → 0.18 ms. 끔: 128 슬롯 그대로 |
+| GPU 프레임 중앙값 | 로비 끔 20.5~22.0 ms / 켬(슬롯 끔) **16.96 ms**; 욕탕 홀 켬 16.07 ms; 기차 라운지 켬 21.90 ms(끔은 재지 않음) |
+품질 판정·타이밍 홀드·1440p는 세 세션 병합 뒤(조정 21:05).

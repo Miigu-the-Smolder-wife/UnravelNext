@@ -6,3 +6,7 @@ target_link_libraries(${UNX_MODULE_TARGET} PUBLIC unx_module_lights)
 # build is); a core + M build compiles the gate without them and it refuses to run.
 target_link_libraries(${UNX_MODULE_TARGET} INTERFACE $<TARGET_NAME_IF_EXISTS:unx_scenegen> $<TARGET_NAME_IF_EXISTS:unx_clusterbuilder>)
 target_compile_definitions(${UNX_MODULE_TARGET} INTERFACE $<$<TARGET_EXISTS:unx_scenegen>:UNX_M_HAS_SCENEGEN=1> $<$<TARGET_EXISTS:unx_clusterbuilder>:UNX_M_HAS_CLUSTERBUILDER=1>)
+# shading.mega_lights traces its light samples' shadow rays through the R track's ray scene when that track is in the build
+# (MegaLights.cpp); without it the switch has no effect.
+target_link_libraries(${UNX_MODULE_TARGET} PUBLIC $<TARGET_NAME_IF_EXISTS:unx_module_raytracing>)
+target_compile_definitions(${UNX_MODULE_TARGET} PRIVATE $<$<TARGET_EXISTS:unx_module_raytracing>:UNX_M_HAS_RAYTRACING=1>)

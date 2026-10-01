@@ -216,6 +216,19 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         const uint2 h = lists.Load2(g.headerBase + froxelIndex(g, tile, s) * 8);
         myFirst = h.x;
         myCount = (experiment & 2) ? 0u : h.y;
+        // shading.mega_lights_volume (MegaLightsVolume.hlsl, P[5].y): the slice's local in-scattering comes from light
+        // samples (shadow rays for every caster, no slots), in place of the loop over the list and the VSM walks
+        if (P[5].y != 0xFFFFFFFFu)
+        {
+            if (myCount != 0)
+            {
+                Texture3D<float4> sampled = ResourceDescriptorHeap[P[5].y];
+                const float3 local = sampled.Load(int4(tile, s, 0)).rgb / g_exposure;
+                source += local;
+                skyTerm += local;
+            }
+            myCount = 0;
+        }
         const float width = froxelTileWidth(g, 0.5 * (z0 + z1)) / asfloat(P[2].y);
         // L4 (RENDERER_REDESIGN_V2 14.4, bounded walk omission; experiment bit 1024 = on, A/B): a shadowed light whose
         // unshadowed in-scatter is under 1e-3 of the slice's total (every light at full visibility: the upper bound) is
