@@ -89,6 +89,7 @@ struct GiSettings  // from Config/quality/gi.toml
         uint32_t screenTraceIterations = 50;        // HierarchicalScreenTraces.MaxIterations
         float screenTraceThickness = 0.02f;         // HierarchicalScreenTraces.RelativeDepthThickness
         uint32_t screenTraceThicknessSteps = 4;     // NumThicknessStepsToDetermineCertainty
+        bool screenTraceSkipAfterCut = false;       // no screen traces in the frame after a cut either (A/B; not Unreal's)
     } lumen;
     uint32_t bounceSplitUpdates = 1;
     bool anchorResample = false;
@@ -242,6 +243,7 @@ private:
         ComPtr<ID3D12Resource> probeDepth[2], probePosition[2], probeRadiance[2], diffuse[2], specular[2], keys[2];
         uint32_t width = 0, height = 0, parity = 0, revision = 0, epoch = 0, prevTemporalIndex = 0;
         bool valid = false;
+        bool previousHadHistory = false;  // the frame before had a valid history (it was not a first frame, cut or restore)
         float prevExposure = 0;
         float4x4 prevInvViewProj{};
     } m_lumen;

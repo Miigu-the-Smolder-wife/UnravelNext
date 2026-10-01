@@ -89,6 +89,9 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     st.prevInvViewProj = view.view.invViewProj;
     st.prevTemporalIndex = temporalIndex;
     st.valid = true;
+    // The frame before this one was a first frame, a cut or a restore (it had no history itself).
+    const bool previousFrameWasCut = !st.previousHadHistory;
+    st.previousHadHistory = historyValid;
 
     const auto import = [&](ComPtr<ID3D12Resource>& t, const char* name, uint32_t w, uint32_t h, DXGI_FORMAT format) {
         return g.importTexture(t.Get(), TextureDesc{ name, w, h, 1, 1, format }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
@@ -368,7 +371,10 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     // Screen traces before the world rays (gi.lumen_screen_traces): the shared depth pyramid and last frame's colour
     // (tracks::screenTraceInputs published them before GI; without a colour history the walk is skipped).
     const TextureRef pyramid = fc.resources.screenTraceHzb, prevColor = view.prevSceneColor;
-    const bool screenTraced = L.screenTraces && pyramid.valid() && prevColor.valid();
+    // The cut frame itself has no colour history (the upscaler's reset; Unreal: the previous view info is reset on a
+    // cut, so its screen-trace input is invalid) and skips the walk. gi.lumen_screen_trace_skip_after_cut (default
+    // false, not an Unreal rule) also skips it in the frame after, which reads the cut frame's colour.
+    const bool screenTraced = L.screenTraces && pyramid.valid() && prevColor.valid() && !(L.screenTraceSkipAfterCut && previousFrameWasCut);
     if (screenTraced)
     {
         const FrameContext::Upscale up = fc.frame.upscale;
@@ -460,7 +466,8 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   c.bindFrameConstants(frameConstants);
                   // Bands of rows, each its own DispatchRays of at most raysPerDispatch rays (a structural bound on one
                   // dispatch's work: the atlas grows with the resolution, a dispatch does not).
-                  const uint32_t bandRows = std::max(1u, raysPerDispatch / std::max(traceX, 1u));
+                  // (a thread traces at most 3 rays: the probe ray, the sun's shadow ray and the light sample's at its hit)
+                  const uint32_t bandRows = std::max(1u, raysPerDispatch / 3u / std::max(traceX, 1u));
                   for (uint32_t row = 0; row < traceY; row += bandRows)
                   {
                       k[47] = row;
