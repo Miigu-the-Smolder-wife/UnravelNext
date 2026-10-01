@@ -167,10 +167,11 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.scLightingFeedback = flag("surface_cache.lighting_feedback", true);
     s.scDirectAnalytic = flag("surface_cache.direct_analytic", true);
     s.scBilinearRead = flag("surface_cache.bilinear_read", true);
+    s.scBaseCells = flag("surface_cache.base_cells", true);
     s.scDebugSkip = (uint32_t)num("surface_cache.debug_skip", 0);
     s.scShadowRaysOpaque = flag("surface_cache.shadow_rays_opaque", false);
     s.scDirectShadowInline = flag("surface_cache.direct_shadow_inline", false);
-    s.scDebugCount = flag("surface_cache.debug_count", false);
+    s.scDebugCount = (uint32_t)num("surface_cache.debug_count", 0);
     s.scDirectStochasticFrames = num("surface_cache.direct_stochastic_max_frames", 12.0);
     s.scDirectMinWeight = num("surface_cache.direct_stochastic_min_sample_weight", 0.001);
     s.lumenHitSurfaceCache = flag("reflection.lumen_hit_surface_cache", true);
@@ -1334,7 +1335,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         const uint32_t n = surfaceCacheEntries;
         g.addPass("r.sc.begin", QueueType::Compute, [&](PassBuilder& b) { b.use(surfaceCache, Use::UavCompute); },
                   [&shaders, surfaceCache, n, surfaceCacheClear, frame, frameConstants, s](PassContext& c) {
-                      const uint32_t k[8] = { c.uav(surfaceCache), n, frame, surfaceCacheClear ? 1u : 0u, s.scMaxUnused, 1u | (s.scBilinearRead ? 2u : 0u), asU(s.scRadiosityCap),
+                      const uint32_t k[8] = { c.uav(surfaceCache), n, frame, surfaceCacheClear ? 1u : 0u, s.scMaxUnused, 1u | (s.scBilinearRead ? 2u : 0u) | (s.scBaseCells ? 4u : 0u), asU(s.scRadiosityCap),
                                               asU(s.scRadiosityFrames) };
                       c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/SurfaceCacheBegin"));
                       c.computeConstants(k, 8);
@@ -1357,7 +1358,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
             fc.device, shaders, rt::standardRayPipeline(kSurfaceCacheLightLibrary[variant], { "SurfaceCacheSeedGen", "SurfaceCacheCellsGen", "SurfaceCacheProbesGen" }));
         const uint32_t lightFlags = (s.scDirect ? 1u : 0u) | (s.scRadiosity ? 2u : 0u) | (s.scRemainderLight ? 8u : 0u) | (s.scDirectStochastic ? 16u : 0u) | (s.scLightingFeedback ? 32u : 0u) |
                                     (s.scDirectAnalytic ? 64u : 0u) | ((s.scDebugSkip & 15u) << 7) | (s.scShadowRaysOpaque ? 2048u : 0u) | ((s.scDebugSkip & 16u) ? 4096u : 0u) |
-                                    (s.scDirectShadowInline ? 8192u : 0u) | (s.scDebugCount ? 16384u : 0u);
+                                    (s.scDirectShadowInline ? 8192u : 0u) | (s.scDebugCount ? 16384u : 0u) | (s.scDebugCount == 2 ? 32768u : 0u);
         const uint32_t budgets[3] = { std::max(n / s.scCaptureFactor / (s.scCaptureBounces + 1), 1u), std::max(n / s.scDirectFactor, 1u),
                                       std::max(n / s.scRadiosityFactor / 16, 1u) };
         static const char* const kLightNames[3] = { "r.sc.seed", "r.sc.cells", "r.sc.probes" };

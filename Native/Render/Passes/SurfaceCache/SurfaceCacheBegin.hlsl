@@ -2,7 +2,7 @@
 // The surface cache's frame start (SurfaceCache.hlsli): the header for this frame, one thread. With P[0].w != 0 (a new
 // buffer, a scene revision) every thread clears a slot instead - keys and heads of the cells and of the probes - and the
 // first writes the header.
-// P[0] = { cache UAV, cells N, frame, clear }, P[1] = { max unused frames, flags (bit 0: marking on, bit 1: bilinear reads), asuint(radiosity ray
+// P[0] = { cache UAV, cells N, frame, clear }, P[1] = { max unused frames, flags (bit 0: marking on, bit 1: bilinear reads, bit 2: base cells), asuint(radiosity ray
 // cap, exposed units), asuint(probe max frames) }; frame constants b1 = main view (the camera the levels are taken from).
 #include "Passes/SurfaceCache/SurfaceCache.hlsli"
 
