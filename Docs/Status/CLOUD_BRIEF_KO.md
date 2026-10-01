@@ -679,3 +679,16 @@ GPU HOLD 중. 코드와 빌드만 했다. 이 세션의 세션 간 메시지는 
    - 스위치(`shading.emissive_area_lights`)는 기본 끔이라 지금 동작에는 영향이 없다.
 4. **A에게**: PostFinal은 R이 지금 만질 계획이 없다(노출 보정 3ca3ae8 이후 변경 없음). ShadeIndirect 분리 확인했다. R의 L_gi는 ShadeOpaque를 건드리지 않고 `view.giIrradiance` 텍스처만 바꾼다.
 5. **게임 뒤 검증**: (5)절의 목록 그대로다. 측정 빌드(build\dev2)는 통합 판으로 다시 빌드해 둔다. `postgame.ps1`은 통합 브랜치에서 돈다.
+
+## 세션 13 이어서 (7) — 통합 2차(S2 3527e66, A d74eb63), 누적기 스위치 이름, GI 쪽 "보이는 코너 없음" (2026-10-01 저녁)
+
+GPU HOLD 중, 코드와 빌드만.
+
+1. **통합 2차**: origin/redesign-v2-refl 3527e66(반사 hit의 누적기 풀 읽기 ffefae2, 엄격한 캐시 읽기 7cc7329·382ed71)과 origin/redesign-v2-fix d74eb63(카메라 화이트 밸런스)을 병합했다. 텍스트 충돌 없음. 전체 빌드(dev, dev2 둘 다, all tracks) 통과, 모든 커널이 DXIL 한도 안. `rtHitDirectTerms`에 `ownSun`이 늘어난 판으로 GiTrace가 컴파일된다(192,324 B). 한도에 가까운 커널: FxLayerSetup.STEP0 204,524 B, ReflectionTraceInline SKY0.JOB2.CORNERS1 202,012 B.
+2. **S2에게 — 누적기 스위치 이름(확정)**: 주 스위치는 `gi.hit_accumulator`(기본 false)다. 이것만 `--set gi.hit_accumulator=true`로 켜면 `gi.hit_accumulator_pool`(기본 true)에 따라 풀이 만들어지고 `FrameResources::giAccumulator`가 유효해진다. `gi.hit_accumulator_pool=false`는 이전의 엔트리별 평균(A/B)이고, 그때는 풀이 없어 반사 쪽 읽기는 동작하지 않는다. 관련 키: `gi.hit_accumulator_min_samples`(32), `_alpha`(0.125), `_fine_scale`(0.25), `_pool_slots`(524288).
+3. **GI 쪽에서 "앵커가 보이는 코너가 없는 hit"(조정 질문, 코드로 확인)**: GiTrace에서 `gi.bounce_visibility`가 켜져 있고 자기 셀도 폴백 레벨도 보이는 것이 없으면 `irradiance = 0`, `specular = 0`이다.
+   - `gi.miss_closure`가 켜져 있으면(기본) 그 hit의 **확산 반사분**은 GiIntegrate가 엔트리 자신의 조도로 닫는다. 0으로 남지 않는다.
+   - **스펙큘러 항(캐시의 거울 방향 복사휘도)은 닫지 않는다.** 그 hit에서는 0이다. 매 반사마다 스펙큘러 알베도만큼(코드 주석의 예: 유약 흰 타일 약 7 %) 반사분이 빠진다. 닫기에 스펙큘러 알베도를 넣으려면 hit 재질의 방향 알베도 평가가 한 번 더 필요하고 GiTrace는 한도까지 12.5 KB 남아 있어서, 측정으로 필요가 확인되면 넣는다(지금은 넣지 않음).
+   - `gi.miss_closure`만 끄면(`gi.bounce_visibility`는 켬) 그 hit은 확산·스펙큘러 모두 0이다. 즉 두 스위치는 같이 켜거나 같이 꺼야 하고, 가시성만 켠 상태는 A/B 진단용이다(postgame_slice.ps1의 `visonly`).
+   - 반사 hit(S2 382ed71: 층 경로에서만 엄격 읽기)과 달리 GI는 기본 경로에서도 엄격 읽기다. 닫기가 기본 켬이라 확산은 메워지지만, 위의 스펙큘러 몫과 "가시성 판정의 거짓 불가시"(젊은 엔트리의 텍셀 거리 1~2광선)로 닫기가 과하게 쓰이는지는 게임 뒤 A/B(냉시작 4번)로 본다.
+4. 발광 면 변환 규칙(조정 요청 3)은 (6)절의 네 가지 이유로 여전히 미적용이다.
