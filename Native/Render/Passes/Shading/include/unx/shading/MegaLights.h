@@ -15,6 +15,7 @@ struct MegaLightsFrame
 {
     bool on = false;
     std::string stateKey;                          // the view's persistent state (megaLightsSample chose it)
+    bool transient = false;                        // no persistent state (a planar reflection view): no history, no sets
     TextureRef samples, keys;                      // the light samples after the trace and the downsampled key
     TextureRef resolvedDiffuse, resolvedSpecular;  // m.ml.shade's outputs (the shading record dispatches it per class)
     TextureRef lighting;                           // m.ml.spatial's result: what the shading kernels add (P[10].y)
