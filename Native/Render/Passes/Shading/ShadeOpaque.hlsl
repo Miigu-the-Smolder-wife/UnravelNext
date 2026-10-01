@@ -39,7 +39,9 @@
 // P[3] = { atmosphere transmittance, multi-scatter, S's shadow overflow tile heads (main kernel; UNX_NONE = absent), this
 //        view's air volume } (this kernel reads no sky view)
 // P[4] = { B2 stable area lights' mask (raw, 1 bit per scene light; UNX_NONE = none), texture table, experiment mask (0;
-//        shading.toml), L2 tile lights' records (raw, TileLights.hlsli; UNX_NONE = off) }
+//        shading.toml), exposure histogram UAV (part 2; UNX_NONE = not metered) }
+// P[11].x L2 tile lights' records (raw, TileLights.hlsli; UNX_NONE = off). (Until 2026-10-01 part 1 read P[4].w, the
+//        exposure histogram's UAV in the record: never the tile records.)
 // P[10].w L3 S's tile lit records (raw, VsmCls.hlsli; UNX_NONE = off)
 // P[10].z 14.1b emissive area lights' diffuse irradiance (RGBA16F, exposed; Passes/Lights/EmissiveDirect.hlsl; UNX_NONE =
 //        off). (Until 2026-10-01 the kernel read it from P[4].x, B2's word: the term was never added.)
@@ -514,9 +516,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         // L2 (14.1/14.2): this tile's record: FAR lights (a clear bit of the pixel's slice mask) skip their diffuse term
         // here and come back as the tile corners' vector irradiance below; Foliage keeps every light per pixel.
 #if !FALLBACK  // (fallback tiles - S's overflow - keep every light per pixel: the record is an optimisation, not a value)
-        if (P[4].w != UNX_NONE && !foliage)
+        if (P[11].x != UNX_NONE && !foliage)
         {
-            tileRec = tileLightsRecord(P[4].w, (pixel.y / M_TILE) * ((g_viewWidth + M_TILE - 1) / M_TILE) + pixel.x / M_TILE);
+            tileRec = tileLightsRecord(P[11].x, (pixel.y / M_TILE) * ((g_viewWidth + M_TILE - 1) / M_TILE) + pixel.x / M_TILE);
             if (tileLightsValid(tileRec))
             {
                 const uint slice = froxelSlice(froxelGrid(froxels.lights), linearZ), rel = slice - tileLightsFirstSlice(tileRec);

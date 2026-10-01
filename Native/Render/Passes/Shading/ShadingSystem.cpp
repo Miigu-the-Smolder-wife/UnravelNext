@@ -682,8 +682,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                          v.reflection.valid() ? c.srv(v.reflection) : none,
                                          r.giCache.valid() ? c.srv(r.giCache) : none,
                                          atm[0], atm[1], overflow ? c.srv(v.shadowOverflowTiles) : none, atm[3], none, o.textureTableSrv, experiment,
-                                         tileLights ? c.srv(tileRecords) : none, fx[0], fx[1] };
-                uint32_t k32[44] = {};
+                                         none, fx[0], fx[1] };
+                uint32_t k32[48] = {};
                 std::memcpy(k32, k, sizeof k);
                 std::memcpy(k32 + 24, edge, sizeof edge);
                 waterSunConstants(c, k32 + 32, 4);                    // P[8], P[9].x (v1.77)
@@ -700,16 +700,17 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 k32[41] = none;                                                  // P[10].y
                 k32[42] = emissiveIrradiance.valid() ? c.srv(emissiveIrradiance) : none;  // P[10].z: 14.1b (P[4].x is B2's mask)
                 k32[43] = r.vsmTileLit.valid() ? c.srv(r.vsmTileLit) : none;             // P[10].w: L3 (P[6].z is the histogram's centre weight)
+                k32[44] = tileLights ? c.srv(tileRecords) : none;                        // P[11].x: L2 (P[4].w is the histogram)
                 ID3D12PipelineState* lobes = shadeClass == material::ShadeClass::Layered ? lobesLayered : (shadeClass == material::ShadeClass::Sheen ? lobesSheen : nullptr);
                 if (part == 1 && lobes && areaLobes.valid())
                 {
                     // the lobe texture is read by part 2 (after the barrier below)
                     c.cmd->SetPipelineState(lobes);
-                    c.computeConstants(k32, 44);
+                    c.computeConstants(k32, 48);
                     c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
                     c.cmd->SetPipelineState(shadeClass == material::ShadeClass::Layered ? opaqueLayered : opaqueSheen);
                 }
-                c.computeConstants(k32, 44);
+                c.computeConstants(k32, 48);
                 c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
             }
         };
@@ -794,12 +795,12 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                                       v.reflection.valid() ? c.srv(v.reflection) : none, r.giCache.valid() ? c.srv(r.giCache) : none,
                                                       atmosphere ? c.srv(r.transmittanceLut) : none, atmosphere ? c.srv(r.multiScatterLut) : none, none,
                                                       air ? c.srv(v.airVolume) : none, none, o.textureTableSrv, experiment,
-                                                      tileLights ? c.srv(tileRecords) : none,
+                                                      none,
                                                       froxelLists ? c.srv(v.froxelLights) : none, ltcSrv };
                              const uint32_t edge[8] = { c.srv(edgeTiles), coverage ? c.srv(v.coverageTiles) : none, 0, 0, c.uav(edgeRadiance),
                                                         v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, shadowSrvs,
                                                         keepWater ? c.srv(v.waterVis) : none };  // P[7].w (v1.75)
-                             uint32_t k32[44] = {};
+                             uint32_t k32[48] = {};
                              std::memcpy(k32, k, sizeof k);
                              std::memcpy(k32 + 24, edge, sizeof edge);
                              waterSunConstants(c, k32 + 32, 4);  // P[8], P[9].x (v1.77)
@@ -807,6 +808,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              k32[41] = none;                            // P[10].y
                              k32[42] = emissiveIrradiance.valid() ? c.srv(emissiveIrradiance) : none;  // P[10].z: 14.1b
                              k32[43] = none;                            // P[10].w (the fallback kernel reads no classification)
+                             k32[44] = none;                            // P[11].x (the fallback kernel keeps every light per pixel)
                              k32[37] = o.anisoWord.valid() ? c.srv(o.anisoWord) : gpu::kNone;  // P[9].y (A9 anisotropy word)
                              particleConstants(c, k32 + 22);  // P[5].zw
                              k32[16] = r.areaLightStable;     // P[4].x (B2)
@@ -827,11 +829,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                  if (fallbackLobes[run] && areaLobes.valid())
                                  {
                                      c.cmd->SetPipelineState(fallbackLobes[run]);
-                                     c.computeConstants(k32, 44);
+                                     c.computeConstants(k32, 48);
                                      c.cmd->ExecuteIndirect(signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
                                  }
                                  c.cmd->SetPipelineState(kernel);
-                                 c.computeConstants(k32, 44);
+                                 c.computeConstants(k32, 48);
                                  c.cmd->ExecuteIndirect(signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
                              }
                              lobeBarrier(c);
@@ -839,7 +841,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              {
                                  k32[6] = fallbackRuns[run].second;  // P[1].z
                                  c.cmd->SetPipelineState(fallbackIndirect[run]);
-                                 c.computeConstants(k32, 44);
+                                 c.computeConstants(k32, 48);
                                  c.cmd->ExecuteIndirect(signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
                              }
                          });
