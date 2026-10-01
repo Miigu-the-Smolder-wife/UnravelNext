@@ -55,25 +55,34 @@ Unreal의 반사가 조용한 이유는 필터가 더 좋아서가 아니라, **
 
 이 다섯은 "반짝임이 없다"와 맞바꾼 것이다. 우리 규칙(품질·표본·부하를 낮춰 성능이나 조용함을 만들지 않는다)에서는 쓰지 않는다. 쓰려면 사용자 결정이 필요하다.
 
-## 6. 이식 상태 (2026-10-01 저녁)
+## 6. 이식 상태 (2026-10-01 밤)
 
-사용자 결정으로 비교에서 이식으로 바뀌었다: Lumen 반사의 구조를 우리 코드로 다시 써서 우리 경로를 대체한다. 스위치는 `reflection.lumen`(기본 false), 매개변수는 `reflection.lumen_*`(기본값은 언리얼 것), 코드는 `Passes/Reflection/ReflectionReuse*.hlsl`(742793c).
+사용자 결정으로 비교에서 이식으로 바뀌었다: Lumen의 구조를 우리 코드로 다시 써서 우리 경로를 대체하고, 조각별 품질 비교 없이 출하 기본 경로를 끝까지 조립한 뒤에 한꺼번에 판정한다.
 
-| 구성 요소 | 상태 |
-|---|---|
-| 거칠기 한계(0.4)와 혼합 구간(0.1), 시선각과 무관 | 구현 |
-| 화소당 광선 1개(GGX 가시 법선 표본) | 구현(우리 M 작업 재사용) |
-| 이웃 광선 BRDF 재사용 resolve(5표본, 반경 8 px) | 구현 |
-| 시간 누적(최대 12, 반사상·표면 두 이력, 이웃 범위 ±1σ, 신뢰도로 프레임 수 감소, 2차 모멘트) | 구현 |
-| 시간 분산으로 조절하는 양방향 필터, 이력 없는 2프레임 확대 | 구현 |
-| 거친 면의 스페큘러 = GI 최종 수집 재사용 | 지금의 K 경로(화면 프로브)로 연결. R의 최종 수집 재구성이 나오면 그 버퍼로 바꾼다 |
-| hit의 빛을 누적된 저장소에서 읽기(표면 캐시에 해당) | **미구현.** 지금은 hit을 예전처럼 셰이딩한다. 새 경로가 컷 직후·회전 중에 값 전체 층보다 나쁜 이유다(첫 실행: 로비 f0 반사 층 σ 257 % 대 16 %) |
-| 평면 거울·고요한 물 | 우리 래스터 유지(lumen 모드에서 강제) |
-| 화면 공간 추적, 2×1·2×2 다운샘플 추적, GGX 꼬리 절단, 전경 반투명·물 패스 | 미구현 |
+| 구성 요소 | 상태 | 코드 |
+|---|---|---|
+| 거칠기 한계(0.4)와 혼합 구간(0.1), 시선각과 무관 | 구현 | `ReflectionClassify`, `ShadeOpaque` |
+| 화소당 광선 1개(GGX 가시 법선 표본) | 구현(우리 M 작업 재사용) | `ReflectionTrace` |
+| 이웃 광선 BRDF 재사용 resolve(5표본, 반경 8 px) | 구현 | `ReflectionReuseResolve` |
+| 시간 누적(최대 12, 반사상·표면 두 이력, 이웃 범위 ±1σ, 신뢰도로 프레임 수 감소, 2차 모멘트) | 구현 | `ReflectionReuseTemporal` |
+| 시간 분산으로 조절하는 양방향 필터, 이력 없는 2프레임 확대 | 구현 | `ReflectionReuseFilter` |
+| 거친 면의 스페큘러 = GI 최종 수집 재사용 | 지금의 K 경로(화면 프로브)로 연결. R의 최종 수집 재구성이 나오면 그 버퍼로 바꾼다 | `ShadeOpaque` |
+| **표면 캐시**: 카메라 주변 표면의 조명을 월드 공간에 상주(캡처, 직접광 타일당 8광원·예산 1/32, radiosity 프로브 4×4·예산 1/64·누적 4) | 구현. 카드 대신 월드 셀 해시. 규칙·다른 점은 `SURFACE_CACHE_INTERFACE_KO.md` | `Passes/SurfaceCache/*` |
+| 반사 hit이 표면 캐시를 읽음 | 구현(`reflection.lumen_hit_surface_cache`) | `ReflectionShade` |
+| GI hit이 표면 캐시를 읽음 | 함수·버퍼 접근자 제공. 호출은 R | `SURFACE_CACHE_INTERFACE_KO.md` |
+| 평면 거울·고요한 물 | 우리 래스터 유지 | |
+| 화면 공간 추적, 2×1·2×2 다운샘플 추적, GGX 꼬리 절단, 전경 반투명·물 패스, 반사 전용 radiance cache, far field | 미구현 | |
 
-**사용자 결정 항목**(품질을 내주는 값. 언리얼 기본값으로 켜 두었고 0 / false로 끌 수 있다. `Config/quality/reflection.toml`에 QUALITY TRADE로 표시):
-- `lumen_max_roughness_to_trace = 0.4` — 그 위는 광선 없음.
-- `lumen_max_ray_intensity = 40` — 광선 세기 상한(노출 적용 단위).
-- `lumen_tonemap_range = 10` — 평균을 톤맵 공간에서 낸다(밝은 하이라이트가 어두워진다).
-- `lumen_disocclusion_tonemap = true` — 이력 없는 화소의 표본을 1 / (1 + 휘도)로 누른다.
+스위치: `reflection.lumen`(새 반사 경로), `surface_cache.enabled`(표면 캐시), `reflection.lumen_hit_surface_cache`(반사 hit이 캐시를 읽고 표시, 기본 true). 셋 다 켜야 조립된 상태다. 매개변수는 `reflection.lumen_*`(reflection.toml)와 `surface_cache.*`(surface_cache.toml), 기본값은 언리얼 것.
+
+실행 확인(품질 판정 아님): 로비 1080p, 300프레임, 장치 제거 없음, S 오류 비트 0, 화면 정상(평균 휘도 0.41~0.51, NaN 0), 3프레임째부터 반사 hit의 98~99 %가 조명 받은 셀을 읽음. reflectionanalytic은 `reflection.lumen=true`에서 PASS(7줄).
+
+**사용자 결정 항목**(품질을 내주는 값. 언리얼 기본값으로 켜 두었고 0 / false로 바꿀 수 있다. toml에 QUALITY TRADE로 표시):
+- `reflection.lumen_max_roughness_to_trace = 0.4` — 그 위는 광선 없음.
+- `reflection.lumen_max_ray_intensity = 40` — 반사 광선 세기 상한(노출 적용 단위).
+- `reflection.lumen_tonemap_range = 10` — 평균을 톤맵 공간에서 낸다(밝은 하이라이트가 어두워진다).
+- `reflection.lumen_disocclusion_tonemap = true` — 이력 없는 화소의 표본을 1 / (1 + 휘도)로 누른다.
+- `surface_cache.radiosity_max_ray_intensity = 40` — radiosity 광선 세기 상한.
+- `surface_cache.remainder_light = false` — 셀당 가장 센 8개 밖의 광원은 버린다(true: 나머지에서 1개를 더 뽑아 에너지를 지킨다).
+- `surface_cache.entries_log2 = 22` — 저장 칸 수(255 MB). 언리얼 아틀라스는 2^24 텍셀. 로비는 2^21에서 가득 찼다(91 %).
 - (미구현) GGX 표본 꼬리 10 % 절단.

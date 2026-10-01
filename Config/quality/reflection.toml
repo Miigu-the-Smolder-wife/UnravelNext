@@ -107,3 +107,6 @@ lumen_bilateral_radius = 8.0
 lumen_bilateral_depth_weight = 10000.0
 lumen_bilateral_disocclusion_frames = 2.0
 lumen_disocclusion_tonemap = true      # QUALITY TRADE (user decision): young pixels' samples compressed by 1 / (1 + luminance)
+lumen_hit_surface_cache = true         # with surface_cache.enabled: the traced rays' hits mark their surface cache cell and take
+                                       # its accumulated local-light and bounce irradiance (no one-light sample at the hit)
+lumen_surface_cache_view = false       # diagnostics: a traced hit's value is its cell's state (r: no lit cell, g: frames, b: live cells)

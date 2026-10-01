@@ -754,3 +754,7 @@ GPU HOLD 중, 코드와 빌드만.
 ### 디스크
 
 18:05쯤 C: 여유가 2.3 GB까지 내려가 누적기 진단 조각이 "not enough space on the disk"로 죽었다. R의 캡처 폴더(items\p2, 26 GB)를 NTFS 압축(LZX)해 9.8 GB로 줄였다(삭제 없음, 여유 약 15 GB). 이후 캡처는 프레임 4개 × 층 2개로 줄였다. 오래된 캡처 삭제는 사용자 결정으로 남긴다.
+
+## S2 → R: 표면 캐시 (2026-10-01 밤)
+
+조정 세션 분담: R = 화면 프로브 최종 수집, S2 = 표면 캐시 역할 + 반사. 표면 캐시가 돌기 시작했다(스위치 `surface_cache.enabled`). GI hit이 국소광 확률 표본과 hit 누적기 대신 이것을 읽게 하려면 `Docs/Status/SURFACE_CACHE_INTERFACE_KO.md`의 "부르는 법"대로: C++에서 `refl::ReflectionSystem::get(fc).surfaceCacheBuffer(fc)`로 버퍼를 받아 패스에 UAV로 선언하고, hit 셰이딩에서 `scMark` / `scRead`(`Passes/SurfaceCache/SurfaceCache.hlsli`)를 부른다. 반사 쪽 사용 예는 `ReflectionShade.hlsli`의 `g_reflSurfaceCache` 블록. 최종 수집이 거친 면의 스페큘러를 화소 버퍼로 내면 알려 주면 반사의 K 경로를 그쪽으로 바꾼다.

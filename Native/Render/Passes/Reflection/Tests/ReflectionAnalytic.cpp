@@ -851,7 +851,11 @@ int main(int argc, char** argv)
         g_checkFurnaceAnchors = true;
         const Outcome a = run(device, shaders, quality, furnace, { 0, 0, 0 },
                               furnaceExpectation(ViewDesc::fromCamera(furnace.cameras[0], 1920, 1080, float4x4{}), 1920, 1080, 1.0, 0.5), frames, 1920, 1080);
-        const bool okA = a.invalidAnchors == 0 && a.mirror > 0 && a.glossy > 0 && std::fabs(a.meanM - 1) < 0.01 && std::fabs(a.meanG - 1) < 0.01 && a.excessM <= 0 && a.excessG <= 0;
+        // reflection.lumen (the ray-reuse pipeline) has no G pixels: every traced pixel is an M sample and the glossy half
+        // above the roughness limit is K. The values are checked as before; the G terms have nothing to check.
+        const bool noGlossyPath = quality.has("reflection.lumen") && quality.boolean("reflection.lumen");
+        const bool okGlossy = noGlossyPath ? a.glossy == 0 : a.glossy > 0 && std::fabs(a.meanG - 1) < 0.01 && a.excessG <= 0;
+        const bool okA = a.invalidAnchors == 0 && a.mirror > 0 && okGlossy && std::fabs(a.meanM - 1) < 0.01 && a.excessM <= 0;
         logf("furnace (value / expected; cache L = 2): %u surface samples: K %u, M %u (mean %.4f, worst %.2f %%, %u beyond 3 %% + z sigma), G %u (mean %.4f, worst %.2f %%) -> %s\n", a.surface, a.k,
              a.mirror, a.meanM, 100 * a.worstM, a.outliersM, a.glossy, a.meanG, 100 * a.worstG, okA ? "PASS" : "FAIL");
         pass = pass && okA;

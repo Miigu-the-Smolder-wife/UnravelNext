@@ -64,6 +64,8 @@ const char* const kShadeKernel[2][2] = {
 const char* const kRefractLibrary[2] = { "Passes/Reflection/RefractionTrace.SKY0", "Passes/Reflection/RefractionTrace.SKY1" };
 constexpr const char* kShadowLibrary = "Passes/Reflection/ReflectionShadow";
 constexpr const char* kLocalShadowLibrary = "Passes/Reflection/ReflectionLocalShadow";
+const char* const kSurfaceCacheLightLibrary[2] = { "Passes/SurfaceCache/SurfaceCacheLight.SKY0", "Passes/SurfaceCache/SurfaceCacheLight.SKY1" };
+constexpr uint32_t kSurfaceCacheHeaderBytes = 64, kSurfaceCacheCellBytes = 52, kSurfaceCacheProbeBytes = 36;  // SurfaceCache.hlsli
 } // namespace
 
 ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
@@ -124,6 +126,23 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.lumenBilateralDepthWeight = num("reflection.lumen_bilateral_depth_weight", 10000.0);
     s.lumenDisocclusionFrames = num("reflection.lumen_bilateral_disocclusion_frames", 2.0);
     s.lumenDisocclusionTonemap = flag("reflection.lumen_disocclusion_tonemap", true);
+    // The surface cache (Passes/SurfaceCache/SurfaceCache.hlsli); defaults are the reference's (ue6-main LumenScene*.cpp,
+    // LumenRadiosity.cpp).
+    s.surfaceCache = flag("surface_cache.enabled", false);
+    s.scEntriesLog2 = (uint32_t)num("surface_cache.entries_log2", 22);
+    if (s.scEntriesLog2 < 12 || s.scEntriesLog2 > 24) fail("surface_cache.entries_log2 must be in [12, 24]");
+    s.scMaxUnused = std::min((uint32_t)num("surface_cache.max_unused_frames", 255), 255u);
+    s.scCaptureFactor = std::max((uint32_t)num("surface_cache.capture_factor", 64), 1u);
+    s.scCaptureBounces = std::min((uint32_t)num("surface_cache.capture_bounces", 3), 8u);
+    s.scDirectFactor = std::max((uint32_t)num("surface_cache.direct_update_factor", 32), 1u);
+    s.scRadiosityFactor = std::max((uint32_t)num("surface_cache.radiosity_update_factor", 64), 1u);
+    s.scRadiosityCap = num("surface_cache.radiosity_max_ray_intensity", 40.0);
+    s.scRadiosityFrames = num("surface_cache.radiosity_max_frames_accumulated", 4.0);
+    s.scDirect = flag("surface_cache.direct_lighting", true);
+    s.scRadiosity = flag("surface_cache.radiosity", true);
+    s.scRemainderLight = flag("surface_cache.remainder_light", false);
+    s.lumenHitSurfaceCache = flag("reflection.lumen_hit_surface_cache", true);
+    s.lumenSurfaceCacheView = flag("reflection.lumen_surface_cache_view", false);
     s.deterministic = q.has("debug.deterministic") && q.boolean("debug.deterministic");
     s.planarRayNs = (float)q.number("reflection.planar_ray_ns");
     return s;
@@ -434,6 +453,22 @@ ReflectionSystem::~ReflectionSystem()
     DescriptorHeaps* h = &m_device.descriptors();
     const uint32_t srv = m_planarSrv;
     if (srv != 0xFFFFFFFFu) m_device.deferCall([h, srv] { h->freeResource(srv); });
+}
+
+// The surface cache's buffer in this frame's graph (SurfaceCache.hlsli), imported once per frame: for the passes of this
+// system and for other tracks whose ray hits mark and read it (GI: before this system records, so its marks are of the
+// frame and its reads see the lighting of the frame before). Invalid until the first frame with surface_cache.enabled.
+BufferRef ReflectionSystem::surfaceCacheBuffer(FramePassContext& fc)
+{
+    if (!m_surfaceCache) return BufferRef{};
+    if (m_surfaceCacheFrame != fc.frame.frameIndex || !m_surfaceCacheRef.valid())
+    {
+        const uint64_t bytes = kSurfaceCacheHeaderBytes + (uint64_t)m_surfaceCacheEntries * kSurfaceCacheCellBytes +
+                               (uint64_t)(m_surfaceCacheEntries / 4) * kSurfaceCacheProbeBytes;
+        m_surfaceCacheRef = fc.graph.importBuffer(m_surfaceCache.Get(), { "R surface cache", bytes, 0 });
+        m_surfaceCacheFrame = fc.frame.frameIndex;
+    }
+    return m_surfaceCacheRef;
 }
 
 void ReflectionSystem::ensureHistory(uint32_t width, uint32_t height)
@@ -958,6 +993,43 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const BufferRef raysBuffer = g.createBuffer({ "R reflection rays", 48 + (uint64_t)rayCapacity * 60, 0 });  // REFL_RAYS_HEADER + REFL_RAYS_SLOT_BYTES
     // The GI hit accumulator pool (GiAccPool.hlsli; valid when gi.hit_accumulator's pool runs): reflection hits read it.
     const BufferRef accPool = s.hitAccumulator ? fc.resources.giAccumulator : BufferRef{};
+    // The surface cache (Passes/SurfaceCache/SurfaceCache.hlsli): one persistent raw buffer; cleared when new and on a scene
+    // revision (materials, geometry). It is world space: a camera cut does not reset it.
+    BufferRef surfaceCache;
+    bool surfaceCacheClear = false;
+    const uint32_t surfaceCacheEntries = 1u << s.scEntriesLog2;
+    if (s.surfaceCache)
+    {
+        const uint64_t bytes = kSurfaceCacheHeaderBytes + (uint64_t)surfaceCacheEntries * kSurfaceCacheCellBytes +
+                               (uint64_t)(surfaceCacheEntries / 4) * kSurfaceCacheProbeBytes;
+        if (!m_surfaceCache || m_surfaceCacheEntries != surfaceCacheEntries)
+        {
+            if (m_surfaceCache) m_device.deferRelease(m_surfaceCache);
+            D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+            D3D12_RESOURCE_DESC1 d{};
+            d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            d.Width = bytes;
+            d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+            d.SampleDesc.Count = 1;
+            d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            check(m_device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr,
+                                                           IID_PPV_ARGS(m_surfaceCache.ReleaseAndGetAddressOf())),
+                  "surface cache");
+            m_surfaceCache->SetName(L"R surface cache");
+            m_surfaceCacheEntries = surfaceCacheEntries;
+            m_surfaceCacheRef = BufferRef{};  // (an import of the buffer just released)
+            m_surfaceCacheRevision = fc.scene.revision();
+            surfaceCacheClear = true;
+        }
+        if (fc.scene.revision() != m_surfaceCacheRevision)
+        {
+            m_surfaceCacheRevision = fc.scene.revision();
+            surfaceCacheClear = true;
+        }
+        surfaceCache = surfaceCacheBuffer(fc);
+    }
+    const bool hitsUseSurfaceCache = surfaceCache.valid() && lumen && s.lumenHitSurfaceCache;
     const BufferRef rayLayers = layers ? g.createBuffer({ "R reflection ray layers", std::max<uint64_t>((uint64_t)rayCapacity * 16, 16), 0 }) : BufferRef{};  // REFL_LAYER_RAY_BYTES
     g.addPass("r.refl.args", QueueType::Compute,
               [&](PassBuilder& b) {
@@ -969,14 +1041,16 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       b.use(jobLayers, Use::UavCompute);
                   }
                   if (accPool.valid()) b.use(accPool, Use::SrvCompute);
+                  if (hitsUseSurfaceCache) b.use(surfaceCache, Use::UavCompute);
               },
-              [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, accPool,
-               hitFlags = (s.hitConeLobes ? 1u : 0u) | (s.hitOrientedLights ? 2u : 0u) | (layers && s.layerFilter && s.hitStrictRead ? 4u : 0u)](PassContext& c) {
+              [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, accPool, surfaceCache, hitsUseSurfaceCache,
+               hitFlags = (s.hitConeLobes ? 1u : 0u) | (s.hitOrientedLights ? 2u : 0u) | (layers && s.layerFilter && s.hitStrictRead ? 4u : 0u) |
+                          (s.lumenSurfaceCacheView ? 8u : 0u)](PassContext& c) {
                   // (the layer buffers' UAVs and the hit shading's flags into the rays header: the shade, combine and inline
                   // passes find them there)
                   const uint32_t k[12] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(raysBuffer), rayCapacity,
                                            layers ? c.uav(rayLayers) : 0xFFFFFFFFu, layers ? c.uav(jobLayers) : 0xFFFFFFFFu, hitFlags,
-                                           accPool.valid() ? c.srv(accPool) : 0xFFFFFFFFu, 0, 0 };
+                                           accPool.valid() ? c.srv(accPool) : 0xFFFFFFFFu, hitsUseSurfaceCache ? c.uav(surfaceCache) : 0xFFFFFFFFu, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionArgs"));
                   c.computeConstants(k, 12);
                   c.cmd->Dispatch(1, 1, 1);
@@ -1052,6 +1126,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         b.use(gbuffer, Use::SrvGraphics);
         if (gi) b.use(cache, Use::UavGraphics);
         if (gi && accPool.valid()) b.use(accPool, Use::SrvGraphics);  // (the passes that shade: the accumulator's cell means)
+        if (gi && hitsUseSurfaceCache) b.use(surfaceCache, Use::UavGraphics);  // (the passes that shade: hits mark and read their cells)
         if (gi && layers)  // (the passes that shade or combine: the layer records)
         {
             b.use(rayLayers, Use::UavGraphics);
@@ -1096,6 +1171,58 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   });
     };
     rayArgs("r.refl.rayargs", 0);
+    if (surfaceCache.valid())
+    {
+        // The surface cache's frame (SurfaceCache.hlsli): the upkeep of cells and probes marked up to last frame, the
+        // capture rays from the camera position, the cells' direct light and indirect gather, the probes' radiosity -
+        // before this frame's hits read and mark. Budgets as the reference's: capture capacity / 64 texels a frame,
+        // direct capacity / 32, radiosity capacity / 64 (one probe per 16 texels).
+        const uint32_t n = surfaceCacheEntries;
+        g.addPass("r.sc.begin", QueueType::Compute, [&](PassBuilder& b) { b.use(surfaceCache, Use::UavCompute); },
+                  [&shaders, surfaceCache, n, surfaceCacheClear, frame, frameConstants, s](PassContext& c) {
+                      const uint32_t k[8] = { c.uav(surfaceCache), n, frame, surfaceCacheClear ? 1u : 0u, s.scMaxUnused, 1u, asU(s.scRadiosityCap), asU(s.scRadiosityFrames) };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/SurfaceCacheBegin"));
+                      c.computeConstants(k, 8);
+                      c.bindFrameConstants(frameConstants);
+                      c.cmd->Dispatch(surfaceCacheClear ? (n + 63) / 64 : 1, 1, 1);
+                  });
+        for (uint32_t table = 0; table < 2; ++table)
+            g.addPass(table ? "r.sc.update.probes" : "r.sc.update.cells", QueueType::Compute, [&](PassBuilder& b) { b.use(surfaceCache, Use::UavCompute); },
+                      [&shaders, surfaceCache, n, table, frameConstants](PassContext& c) {
+                          const uint32_t k[4] = { c.uav(surfaceCache), n, table, 0 };
+                          c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/SurfaceCacheUpdate"));
+                          c.computeConstants(k, 4);
+                          c.bindFrameConstants(frameConstants);
+                          c.cmd->Dispatch(((table ? n / 4 : n) + 63) / 64, 1, 1);
+                      });
+        rt::RayPipeline& surfaceCacheLight = rt::RayPipeline::get(
+            fc.device, shaders, rt::standardRayPipeline(kSurfaceCacheLightLibrary[variant], { "SurfaceCacheSeedGen", "SurfaceCacheCellsGen", "SurfaceCacheProbesGen" }));
+        const uint32_t lightFlags = (s.scDirect ? 1u : 0u) | (s.scRadiosity ? 2u : 0u) | (s.scRemainderLight ? 8u : 0u);
+        const uint32_t budgets[3] = { std::max(n / s.scCaptureFactor / (s.scCaptureBounces + 1), 1u), std::max(n / s.scDirectFactor, 1u),
+                                      std::max(n / s.scRadiosityFactor / 16, 1u) };
+        static const char* const kLightNames[3] = { "r.sc.seed", "r.sc.cells", "r.sc.probes" };
+        for (uint32_t pass = 0; pass < 3; ++pass)
+        {
+            if (pass == 2 && !s.scRadiosity) continue;
+            g.addPass(kLightNames[pass], QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          b.use(surfaceCache, Use::UavGraphics);
+                          declareShared(b, false);
+                      },
+                      [&surfaceCacheLight, constantsFor, frameConstants, surfaceCache, frame, pass, lightFlags, budget = budgets[pass], bounces = s.scCaptureBounces](PassContext& c) {
+                          uint32_t k[32] = {};
+                          constantsFor(c, k, false);
+                          k[0] = c.uav(surfaceCache);
+                          k[1] = budget;
+                          k[2] = frame;
+                          k[3] = lightFlags;
+                          k[15] = bounces;
+                          c.computeConstants(k, 32);
+                          c.bindFrameConstants(frameConstants);
+                          surfaceCacheLight.dispatch(c.cmd, pass, budget, 1);
+                      });
+        }
+    }
     // Local-light samples of the hits: their shadow rays before the compute shading (bit 30 of the hit records). Declared
     // before the inline passes (which read GI's cache; they never touch the rays buffer), so it runs while GI's block is
     // still on the async queue.

@@ -1,0 +1,2 @@
+﻿reflectionanalytic_off: exit 0, 57 s
+reflectionanalytic_lumen: exit 0, 7 s

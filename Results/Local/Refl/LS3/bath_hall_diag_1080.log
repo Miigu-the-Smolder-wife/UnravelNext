@@ -1,0 +1,4 @@
+C:\Users\USER\UnravelNext-refl\build\all\bin\unx_gate_shadow_renderergate.exe --scene C:\Users\USER\UnravelNext-refl\Cache\ReflJudge\scenes\bt_bath_20261001_1801.unxscene --resolution 1920x1080 --auto-exposure --warmup-frames 0 --frames 16 --capture-frames 3,15 --capture-output C:\Users\USER\UnravelNext-refl\Cache\ReflJudge\LS3\bath_hall_diag_1080.pfm --capture-layers final,refl,reflmode --set reflection.lumen=true --set surface_cache.enabled=true
+cluster builder: mesh 2 - a group's simplification made more clusters than the group had: its cut bound is all 1600 clusters
+cluster builder: mesh 3 - a group's simplification made more clusters than the group had: its cut bound is all 2231 clusters
+scene C:\Users\USER\UnravelNext-refl\Cache\ReflJudge\scenes\bt_bath_20261001_1801.unxscene (27ec0ffe67818ff6), 8440 instances, 155357 clusters, camera 0 (static)

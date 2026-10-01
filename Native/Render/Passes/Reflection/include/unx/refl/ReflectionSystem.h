@@ -52,6 +52,12 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     uint32_t lumenReconstructionSamples = 5, lumenBilateralSamples = 4;
     float lumenReconstructionRadius = 8.0f, lumenTemporalMaxFrames = 12.0f, lumenClampScale = 1.0f, lumenDistanceThreshold = 0.03f;
     float lumenBilateralRadius = 8.0f, lumenBilateralDepthWeight = 10000.0f, lumenDisocclusionFrames = 2.0f;
+    // surface_cache.*: the world-space lighting store (Passes/SurfaceCache/SurfaceCache.hlsli), recorded by this system
+    bool surfaceCache = false, scDirect = true, scRadiosity = true, scRemainderLight = false;
+    uint32_t scEntriesLog2 = 22, scMaxUnused = 255, scCaptureFactor = 64, scCaptureBounces = 3, scDirectFactor = 32, scRadiosityFactor = 64;
+    float scRadiosityCap = 40.0f, scRadiosityFrames = 4.0f;
+    bool lumenSurfaceCacheView = false;  // reflection.lumen_surface_cache_view: diagnostics (ReflectionShade.hlsli REFL_HIT_SC_VIEW)
+    bool lumenHitSurfaceCache = true;  // reflection.lumen_hit_surface_cache: the ray-reuse pipeline's hits read and mark it
     bool layerWholeValue = true;      // reflection.layer_whole_value: lobe pixels' whole value is one layer (LAYER_MODE_L)
     bool layerCrossMode = true;       // reflection.layer_cross_mode: with layerMirrorLobe, residual taps across M and G pixels
     bool layerMirrorLobe = false;     // reflection.layer_mirror_lobe: M's base as a layer inside its lobe footprint (decision item)
@@ -108,6 +114,9 @@ public:
     // Planar reflectors of the scene (built on first use). Tests disable the planar path to compare it with rays.
     void setPlanarEnabled(bool enabled) { m_planarEnabled = enabled; }
     // Tests and capture modes: every counted candidate plane gets a camera (up to planar_views_max), without the cost choice.
+    // The surface cache's buffer in this frame's graph (Passes/SurfaceCache/SurfaceCache.hlsli: scMark, scRead), for
+    // passes of other tracks whose ray hits use it; declare it Use::UavCompute / UavGraphics. Invalid when off.
+    BufferRef surfaceCacheBuffer(FramePassContext& fc);
     void setPlanarForced(bool forced) { m_planarForced = forced; }
     size_t planarReflectorCount() const { return m_planes.size(); }
     // Counters of the last completed frame (blocking readback).
@@ -153,6 +162,10 @@ private:
     // The layers' history (LayerTemporal.hlsl), ping-pong by m_accumParity as the above (which the layers replace):
     // RGBA16F stochastic and residual (mean, frames), RG32_UINT keys.
     ComPtr<ID3D12Resource> m_layerStochastic[2], m_layerResidual[2], m_layerKeys[2];
+    ComPtr<ID3D12Resource> m_surfaceCache;  // SurfaceCache.hlsli: header + cells + probes (raw)
+    uint32_t m_surfaceCacheEntries = 0, m_surfaceCacheRevision = 0;
+    BufferRef m_surfaceCacheRef;            // its import into the frame's graph (surfaceCacheBuffer)
+    uint64_t m_surfaceCacheFrame = ~0ull;
     uint32_t m_accumParity = 0, m_accumSceneRevision = 0;
     bool m_accumReset = true;
     float3 m_prevCamera{};
