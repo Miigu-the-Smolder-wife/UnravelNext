@@ -188,6 +188,15 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         myFirst = h.x;
         myCount = (experiment & 2) ? 0u : h.y;
         const float width = froxelTileWidth(g, 0.5 * (z0 + z1)) / asfloat(P[2].y);
+        // L4 (RENDERER_REDESIGN_V2 14.4, bounded walk omission; experiment bit 1024 = on, A/B): a shadowed light whose
+        // unshadowed in-scatter is under 1e-3 of the slice's total (every light at full visibility: the upper bound) is
+        // added lit without its VSM walk; the omitted shares are summed in list order (the ordered head first) and the
+        // omission stops where the sum would pass 1e-3 x total, so the slice's error is at most 1e-3 of its in-scatter
+        // (an omitted light in umbra is counted lit: the bound; never dropped). Pass 1: every light's unshadowed value
+        // and the total; pass 2: the shadowed lights' decisions. The (slice interval, light) lit / umbra / mixed
+        // classification over the coarse pages follows 14.3 (L3).
+        const bool omission = (experiment & 1024) != 0;
+        float total = 0;
         for (uint i = 0; i < myCount; ++i)
         {
             uint li;
@@ -197,7 +206,8 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             // whose sphere meets the froxel, about a tenth of the depth beside the tile's centre ray.)
             const GpuLight light = loadLight(li);
             if (airLocalMap(light, o, dir, len).h >= light.range) continue;
-            if (slot != VSM_LOCAL_NONE)
+            const bool shadowed = slot != VSM_LOCAL_NONE;
+            if (shadowed && !omission)
             {
                 if (i < 32) myReach.x |= 1u << i;
                 else myReach.y |= 1u << (i - 32);
@@ -205,8 +215,34 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
                 continue;
             }
             const float3 local = airLocalLight(light, o, dir, len, cm, a.mieG, P[4].y, li, froxelTileWidth(g, 0.5 * (z0 + z1)));
+            total += dot(local, float3(0.2126, 0.7152, 0.0722));
+            if (shadowed) continue;  // (pass 2 decides)
             source += local;
             skyTerm += local;
+        }
+        if (omission)
+        {
+            float omitted = 0;
+            for (uint i2 = 0; i2 < myCount; ++i2)
+            {
+                uint li;
+                const uint slot = airLocalSlot(lists, g, myFirst + i2, localShadows, li);
+                if (slot == VSM_LOCAL_NONE) continue;
+                const GpuLight light = loadLight(li);
+                if (airLocalMap(light, o, dir, len).h >= light.range) continue;
+                const float3 local = airLocalLight(light, o, dir, len, cm, a.mieG, P[4].y, li, froxelTileWidth(g, 0.5 * (z0 + z1)));
+                const float lum = dot(local, float3(0.2126, 0.7152, 0.0722));
+                if (omitted + lum <= 1e-3 * total)
+                {
+                    omitted += lum;  // lit without the walk (bounded)
+                    source += local;
+                    skyTerm += local;
+                    continue;
+                }
+                if (i2 < 32) myReach.x |= 1u << i2;
+                else myReach.y |= 1u << (i2 - 32);
+                ++myShadowed;
+            }
         }
     }
     // Shadowed local lights: the group's (slice, light) items, each walked by K lanes in K pieces uniform in the light's

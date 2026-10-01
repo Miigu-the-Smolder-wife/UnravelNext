@@ -34,6 +34,8 @@ list_fallback_forced = 0             # tests only (0: off): 1 makes the fill pas
 near_m = 0.5                         # slice 0 spans the camera .. near_m (far / near)^(1/64)
 far_m = 65536                        # last node of the air volume (air perspective to 64 km; depths beyond clamp)
 experiment_disable = 0               # cost attribution only (never in a verdict): 1 air shadows, 2 local lights, 4 air integration,
+                                     # (A/B switch, not a disable: 1024 = L4 bounded VSM walk omission in the air, RENDERER_REDESIGN_V2 14.4:
+                                     #  a shadowed light under 1e-3 of the slice's in-scatter is added lit; off by default until measured)
                                      # 8 sun transmittance per substep, 16 multiple scattering per substep, 32 walk stops at pages,
                                      # 64 local lights' air shadows, 128 one lane per shadowed local-light item (test reference)
 walk_stats = 0                       # 1: count the air shadow walk (slices, mixed, block and texel loads) into the VSM

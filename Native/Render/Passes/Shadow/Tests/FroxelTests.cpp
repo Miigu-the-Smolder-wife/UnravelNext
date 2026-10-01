@@ -720,7 +720,39 @@ int main(int argc, char** argv)
                         }
                 logf("shadowed air, K pieces vs one walk per item: %u nodes, mean relative difference %.3g, largest %.3g\n", nodes, sumD / std::max(sumW, 1e-30), worstP);
                 report(nodes > 1000 && sumD / std::max(sumW, 1e-30) < 1e-3, "shadowed air: walk in K pieces = one walk (mean relative)", sumD / std::max(sumW, 1e-30), 1e-3);
-                report(worstP < 1e-2, "shadowed air: walk in K pieces = one walk (largest node)", worstP, 1e-2);            }
+                report(worstP < 1e-2, "shadowed air: walk in K pieces = one walk (largest node)", worstP, 1e-2);
+                {
+                    // L4 (RENDERER_REDESIGN_V2 14.4, bounded walk omission; experiment bit 1024): shadowed lights under 1e-3 of
+                    // their slice's local in-scatter (cumulative, list order) are added lit without their walk. The air with
+                    // the omission against the air without it, relative to the local lights' share (the volume minus the dark
+                    // scene's): the omitted shares bound the difference by 1e-3 per slice, so by 1e-3 of the share per node.
+                    tf.quality.applyOverride("atmosphere.froxels.experiment_disable=1024");
+                    run(sc, 6, -2.0f, false);
+                    const std::vector<uint8_t> omitted = lastVolume;
+                    tf.quality.applyOverride("atmosphere.froxels.experiment_disable=0");
+                    run(sc, 6, -2.0f, false);
+                    const std::vector<uint8_t> walked = lastVolume;
+                    double worstO = 0, sumDo = 0, sumWo = 0;
+                    uint32_t nodesO = 0, changed = 0;
+                    for (uint32_t ty = 0; ty < fg.gridY; ++ty)
+                        for (uint32_t tx = 0; tx < fg.gridX; ++tx)
+                            for (uint32_t n = 1; n <= fg.slices; ++n)
+                            {
+                                const ref::D3 o = nodeOf(omitted, tx, ty, n) - nodeOf(walked, tx, ty, n);
+                                const ref::D3 w = nodeOf(walked, tx, ty, n) - nodeOf(without, tx, ty, n);
+                                const double r = w.x + w.y + w.z, e = std::abs(o.x) + std::abs(o.y) + std::abs(o.z);
+                                if (e > 0) ++changed;
+                                if (r * exposure <= 1e-3) continue;
+                                worstO = std::max(worstO, e / r);
+                                sumDo += e;
+                                sumWo += r;
+                                ++nodesO;
+                            }
+                    logf("shadowed air, bounded walk omission (bit 1024) vs every walk: %u nodes, %u changed, mean relative difference %.3g, largest %.3g\n", nodesO, changed,
+                         sumDo / std::max(sumWo, 1e-30), worstO);
+                    report(nodesO > 1000 && sumDo / std::max(sumWo, 1e-30) <= 1e-3, "shadowed air: bounded walk omission vs every walk (mean relative to the local share)", sumDo / std::max(sumWo, 1e-30), 1e-3);
+                    report(worstO <= 2e-3, "shadowed air: bounded walk omission vs every walk (largest node, relative to the local share)", worstO, 2e-3);
+                }            }
 #if defined(FROXEL_TEST_LIGHT_FUNCTIONS)
             for (uint32_t i = 0; i < sc.lights.size(); ++i) lfSet.clear(i);
 #endif
