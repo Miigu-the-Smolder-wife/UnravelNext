@@ -118,3 +118,7 @@ lumen_screen_trace_max_iterations = 50
 lumen_screen_trace_relative_depth_thickness = 0.005
 lumen_ggx_sampling_bias = 0.1          # QUALITY TRADE (user decision): this share of the GGX sample domain - the lobe's tail - is not
                                        # drawn (reference: GGXSamplingBias 0.1); 0 = the whole lobe
+lumen_sample_scene_color_at_hit = true # a world ray's hit on a surface the view sees takes the previous frame's colour there and is
+                                       # not shaded (reference: SampleSceneColorAtHit 1 = with screen traces); needs lumen_screen_traces
+lumen_sample_scene_color_relative_depth_thickness = 0.01
+lumen_sample_scene_color_normal_threshold = 85.0   # degrees between the seen surface's normal and the direction to the camera

@@ -132,6 +132,9 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.lumenDisocclusionTonemap = flag("reflection.lumen_disocclusion_tonemap", true);
     s.lumenRoughFromGather = flag("reflection.lumen_rough_specular_from_gather", true);
     s.lumenScreenTraces = flag("reflection.lumen_screen_traces", true);
+    s.lumenSceneColorAtHit = flag("reflection.lumen_sample_scene_color_at_hit", true);
+    s.lumenSceneColorThickness = num("reflection.lumen_sample_scene_color_relative_depth_thickness", 0.01);
+    s.lumenSceneColorNormalDegrees = num("reflection.lumen_sample_scene_color_normal_threshold", 85.0);
     s.lumenSamplingBias = std::clamp(num("reflection.lumen_ggx_sampling_bias", 0.1), 0.0f, 0.99f);
     s.lumenScreenIterations = (uint32_t)num("reflection.lumen_screen_trace_max_iterations", 50);
     s.lumenScreenThickness = num("reflection.lumen_screen_trace_relative_depth_thickness", 0.005);
@@ -1243,6 +1246,39 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   c.cmd->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, firstTick);
                   pipeline.dispatchIndirect(c.cmd, argumentResource, 16 + variant * kDescStride);
               });
+    if (lumen && s.lumenScreenTraces && s.lumenSceneColorAtHit)
+    {
+        // The world rays' hits on surfaces the view sees take the previous frame's colour (ReflectionSceneColorAtHit.hlsl)
+        // and are not shaded.
+        const ScreenTraceInputs screen = screenTraceInputs(fc, main);
+        if (screen.prevColor.valid())
+        {
+            const FrameContext::Upscale& up = fc.frame.upscale;
+            g.addPass("r.refl.scenecolor", QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          b.use(modes, Use::SrvCompute);
+                          b.use(results, Use::UavCompute);
+                          b.use(depth, Use::SrvCompute);
+                          b.use(gbuffer, Use::SrvCompute);
+                          b.use(jobs, Use::SrvCompute);
+                          b.use(raysBuffer, Use::UavCompute);
+                          b.use(screen.prevColor, Use::SrvCompute);
+                      },
+                      [&shaders, modes, results, depth, gbuffer, jobs, raysBuffer, screen, frame, width, height, frameConstants, s, samplingBias16,
+                       outW = up.outputWidth, outH = up.outputHeight, ratio = up.exposureRatio, prevViewProj = up.prevViewProj](PassContext& c) {
+                          uint32_t k[32] = { c.srv(modes), c.uav(results), c.srv(depth), c.srv(gbuffer), c.srv(jobs), c.uav(raysBuffer), c.srv(screen.prevColor), frame,
+                                             width, height, outW, outH, asU(s.lumenSceneColorThickness),
+                                             asU(std::cos(std::clamp(s.lumenSceneColorNormalDegrees, 0.0f, 180.0f) * 0.01745329252f)),
+                                             asU(samplingBias16 / 65535.0f), asU(ratio) };
+                          for (int r = 0; r < 4; ++r)
+                              for (int col = 0; col < 4; ++col) k[16 + 4 * r + col] = asU(prevViewProj.m[r][col]);
+                          c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionSceneColorAtHit"));
+                          c.computeConstants(k, 32);
+                          c.bindFrameConstants(frameConstants);
+                          c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                      });
+        }
+    }
     // Split passes (ARCHITECTURE 2.6 revision 1): hit shading in compute, off-screen sun visibility, the jobs' values.
     auto rayArgs = [&](const char* name, uint32_t stage) {
         g.addPass(name, QueueType::Compute,
