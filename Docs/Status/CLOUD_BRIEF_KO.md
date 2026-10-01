@@ -606,3 +606,58 @@ GPU가 없어 **모두 미검증**이다. HLSL은 리눅스 dxc 1.8.2505(빌드�
    - HOLD가 풀리면 돌릴 순서: lounge 재측정(분산 전파 필터, 편차 지도) → train → hall 1080/1440 → 회귀 테스트(gianalytic, reflectionanalytic, hostmotion, shading, volume, froxel) → 비용(timing). 순서를 바꿀 것이 있으면 알려 달라.
    - `gi.screen_wide_filter` 기본값은 위 측정 뒤에 정하겠다. `gi.miss_closure`는 기록으로 둔다.
    - 이 세션에서 다른 세션으로 보내는 메시지가 사용자 입력 전까지 막혔다. 급한 것은 이 문서로 적는다.
+
+## 세션 13 이어서 (5) — GPU 중단 뒤 코드 작업: 끝낸 목록과 게임 뒤 검증 목록 (2026-10-01 오후)
+
+사용자 지시(14:45, 조정 전달)에 따라 GPU 실행은 모두 내렸고 코드와 빌드만 했다. 아래 커밋은 전부 **빌드 통과까지**이고, GPU 검증은 게임 뒤에 한 번에 한다. 세션 간 메시지는 이 세션에서 여전히 막혀 있어(사용자 입력 전까지) 이 절이 조정 세션과 S2로 가는 보고다.
+
+### 끝낸 것 (origin/redesign-v2)
+
+| 커밋 | 내용 | 기본값 | 지금까지의 근거 |
+|---|---|---|---|
+| ecdba03 | 큐 1: VSM 래스터 넘침 구조 수정(+ 큐 10 updateLocalLights break 포함) | 켬 | GPU 재확인 통과(절 (4)) |
+| 5a96060 | 큐 1b: 요청 묶기 상한을 뷰별 LOD 컷 상한으로(2단 컬 대신) | 켬(`shadow.vsm.raster_lod_bound`) | 빌드, 클러스터 빌더 CPU 테스트 15/15 |
+| 984a8d7 | P1″-b 앵커 무게중심: 기록(효과 없음 0.308 대 0.303) | 끔 | 1회 실측 |
+| bc05387 | P2 L_gi: σ, 적응 반경, 넓은 층(수준 보정·패스별 σ), 층 이력 | 켬 | 수준 보정 전·후 실측(절 (4)); 패스별 σ는 미측정 |
+| 1dc8a00 | 냉시작: 반사분 읽기의 앵커 가시성(`gi.bounce_visibility`) + 닫기(`gi.miss_closure`) | 둘 다 켬 | 엄격 폴백 + 닫기 실측(절 (4)); 자기 셀 검사는 미측정 |
+| f3523cf | 큐 3: `visibility.coverage_layer` 기본 켬 | 켬 | 원인 확인됨(조정 결정); 테스트 미실행 |
+| ca2ab40 | 12.8 누적기 풀(`gi.hit_accumulator_pool`), INTERFACES v1.88 | 주 스위치 `gi.hit_accumulator` 끔 | 빌드만 |
+| acd700e, b208cc6 | 인프로세스 잠금 조각 v1.85·v1.86 순서 | – | 빌드 |
+| acc3779 | 검증 스크립트(p2slice.ps1, judge.py, judge2.py, blotch.py) | – | – |
+
+큐 1b를 2단 컬이 아니라 상한으로 푼 이유: 2단 컬도 목록 크기는 폭주 프레임(0프레임, 전면 재그리기)의 실제 가시 수에 맞춰야 하는데, 넘친 것이 바로 그 경우였다. 뷰가 그리는 컷은 텍셀 크기에 따라 거칠어지므로(태양 레벨 2^k, 국소광 mip), 캐스터마다 "부모 오차 > 문턱 ∧ 자기 오차 ≤ 문턱"인 클러스터 수(빌더 표)를 세면 요청 수가 구조적으로 준다.
+
+### 정정 (조정 요청)
+
+- 오전 보고의 "광원이 수백 개면 꼬리가 두꺼워진다"는 **광원 선택 분산이 아니다**. 선택은 중요도 비례(`rtLightChoose`)이고, 전 광원 합으로도 반점이 그대로였다(V2.2 11.0 실측). 뿌리는 hit 점이 램프 옆 핫스팟에 떨어지는 **위치 분산**이고, 광원이 많으면 핫스팟 수가 는다. 그래서 원천 해법은 누적기(셀 평균)다.
+- 절 (4)의 "none 실행의 튐은 벽 너머 누설"은 색(청백)과 코드에서 나온 추정이다. `gi.bounce_visibility` 단독 A/B로 분리해 확인한 적은 없다.
+
+### S2에게 (누적기 API, ca2ab40)
+
+- `Passes/GI/GiAccPool.hlsli`: `struct GiAccMeans { float3 A, B, C; float weight; float cellSize; };`
+- `bool giAccPoolRead(pool, position, normal, footprint, out GiAccMeans m)` — pool = `FrameResources::giAccumulator`(invalid = 꺼짐; 읽는 커널은 SrvCompute, ByteAddressBuffer), footprint = hit 지점의 광선 발자국 폭(m). 쓰는 식: `radiance += m.weight * (kA*m.A + kB*m.B + kC*m.C - 점 값)`. `m.cellSize`로 "발자국의 4배 넘으면 점 값 유지"를 판단하면 된다. false = 데이터 없음.
+- `giAccPoolRecord(...)`는 GI 광선만 부른다. 반사 hit은 **읽기만** 해 달라: 비율 추정기의 에너지 보존은 R을 만든 집단 안에서만 성립하고, 반사 광선은 셀 안 위치 분포와 계수가 달라 GI 독자가 받는 값을 옮긴다. 설계 12.1-1("GI 광선과 반사 광선")과 다른 점이라 감사 결과로 A와 다시 정한다.
+- 엔트리 인덱스 기반 `giAccRead / giAccRecord`는 풀 모드에서 쓰이지 않는다(`gi.hit_accumulator_pool = false`일 때만 남음).
+- hit 직접광 공용 함수(`rtHitDirectTerms`, `rtHitDirectFromMeans`)는 제안한 서명 그대로 좋다. GiTrace 호출부는 S2 커밋이 올라오면 R이 바꾼다.
+- `gi.bounce_visibility`(GI_P1_FLAGS 780번 워드 bit 6)와 `GiCache.hlsli`의 `static bool g_giStrictVisibility`가 1dc8a00에 있다. reflShadeHit의 giCacheLevels 읽기 앞뒤에 두면 반사 hit도 앵커가 그 점을 보는 코너만 읽는다.
+
+### 게임 뒤 GPU로 한 번에 확인할 것 (R)
+
+스크립트: `Results/Local/Redesign/gia/p2slice.ps1`(환경 변수 P2_SCENE, P2_MODE, P2_RES; 빌드 폴더 build\dev2), 판정 `items/p2/judge2.py`, `blotch.py`. 순서는 위에서부터.
+
+1. **새 커널 첫 실행(correctness, TDR 확인)**: GiAccFold(64비트 exchange), GiProbeFilter, GiLayerTemporal, DepthRaster.as — 뒤 셋은 이미 돌았다. GiAccFold만 처음이다.
+2. **VSM 뷰별 상한(5a96060)**: 차례 `vsm2` — 그림자 층 f0 = f60 = f300(기차), f0 = f300(라운지, 욕탕), S 오류 비트 0x0(0x20 = 상한이 작았다), VisibilityTests·VSMTests·LocalShadowTests, 로그의 요청 수. 차례 `vsmtime` — lod / leaf / old 요청 수와 패스 합.
+3. **L_gi(bc05387)**: 차례 `lounge2` — 패스별 σ 필터의 f1/f4/f16/f299, 회전, 편차 지도(필터 없는 수렴 실행 대비), `gi.screen_wide_passes` 2 대 3. 이어서 train, hall 1080/1440(`blend`, `none`).
+4. **냉시작(1dc8a00)**: `gi.bounce_visibility`와 `gi.miss_closure` 각각 단독·둘 다·둘 다 끔, lounge·hall·train, f1/f4/f16/f299, 실행 3회 이상(수렴 수준의 실행 간 편차).
+5. **누적기(ca2ab40)**: `gi.hit_accumulator=true` — 감사(64프레임, 1.000 ± 0.5 %), 무코팅 욕탕 2000프레임 × 4~6회(평균 ±1 %, SD ≤ 0.5 pp), GiAnalytic 9, 게임 장면 f1/f4/f16/회전, 결정론, 비용(r.gi.acc.begin·fold0~3·r.gi.trace), 풀 통계(빠진 hit 수).
+6. **회귀(기본값 그대로)**: gianalytic, reflectionanalytic, hostmotion, shadingtests, volumetests, froxeltests, visibilitytests, vsmtests, localshadowtests — coverage_layer·넓은 층·냉시작 기본 켬 상태에서. 실패하면 어느 스위치 때문인지 하나씩 끈다.
+7. **비용(timing)**: lounge·train 1080/1440 — r.gi.probe.wide·filter0~2, r.gi.screen.filter, r.gi.screen.temporal, coverage 합성, VSM 요청 수.
+8. 가문비 밝은 화소(큐 1)를 최종 화면으로 확인.
+
+### 고치지 않고 적어만 두는 것 (확인 전)
+
+- 화소별 조회(giScreenSeen)와 프로브 읽기는 젊은 레벨을 여전히 가시성 검사 없이 읽는다(코드 사실). 화면에 누설로 보이는지는 4번 결과로 판단한다.
+- 넓은 층이 대부분의 화소를 맡는다면 화소별 조회(r.gi.screen, 1440p 약 1 ms)를 σ가 낮은 곳에서만 돌려 비용을 되찾을 수 있다. σ 분포를 재야 한다.
+- 누적기 접기 패스는 직접 디스패치(min(슬롯, 광선) 항목)다. 비용이 보이면 간접 디스패치로 바꾼다.
+- A 요청(발광 면 면광원 변환 시 GI 이중 계산 방지, `emissiveLightsConverted`)과 HitLocalLights 결정적 합의 GI 연결은 S2·A의 공용 함수가 올라온 뒤에 한다.
+- 기본 노출과 폴백 미터링의 0.03 stop 차, GiAnalytic 8 갓 +0.51 %(기존).
