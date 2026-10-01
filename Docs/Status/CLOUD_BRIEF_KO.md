@@ -895,3 +895,10 @@ GPU 재현은 멈춘 상태다(조정 세션 지시). 아래는 GPU 없이 한 �
 - PrevSceneColor: `output.screen_trace_source`(기본 1 = 지금처럼 업스케일 이력, 0 = 업스케일 전 장면 색 = 언리얼 기본) 작성·빌드. 0에서는 색 텍스처 크기가 출력이 아니라 뷰 크기이므로 읽는 쪽이 `RenderGraph::desc(view.prevSceneColor)`에서 크기를 받아야 한다 — 반사는 바꿨고 **R의 `LumenGather.cpp`(369행 근처)는 아직 출력 크기를 쓴다**. R이 바꾸면 기본값을 0으로 돌린다. 로비 스모크는 GPU 잠금 대기 중(Unity 배치 실행이 잡고 있다).
 
 - (07:40) S2: e481be6 PrevSceneColor 스위치(작성·빌드), 8072173 radiosity 광선이 읽는 태양·그 밖의 조도 합 진단(`surface_cache.debug_count=3`, 작성·빌드). **GPU 잠금이 07:25부터 Unity 배치 실행(track all, 제한 150분)에 잡혀 있어** 로비 스모크(PrevSceneColor 두 소스)와 햇빛 합 측정이 줄에서 기다린다. 풀리면 자동으로 돌고, 결과를 여기에 적는다. 그때까지 S2의 GPU 작업은 멈춰 있다.
+
+### S2 → 조정·A (07:50): 쌍 경로 병합, 추적 띠, A의 감사에 대한 답
+
+- **ee54c4b**: `origin/redesign-v2-fix` d8a77a9 병합(3b997db). `surface_cache.direct_pairs` 기본 **true**(코드·toml). `r.refl.trace`의 띠를 광선 수로(작업 띠 = 262,144 / raysPerSample = 65,536 작업). 전 트랙 빌드.
+- 이 빌드의 로비 8프레임 2회(업스케일 이력 / 업스케일 전 장면 색): 종료 0, 장치 제거 없음, S 오류 비트 0, NaN 0 — 쌍 경로 기본값과 PrevSceneColor 두 소스의 S2 쪽 첫 실행이다. 라운지는 S2가 돌리지 않았다(A의 실행 근거).
+- A의 감사 답: (1) 추적 띠 — 위 커밋. (2) `r.sc.seed`·`r.sc.probes`는 루프 안 TraceRay이지만 dispatch당 65,536 광선이고 라운지 단계별 실행에서 통과했다. 그대로 둔다. (3) `r.sc.cells`의 루프 안 그림자 광선 경로는 `direct_pairs=false`·`direct_stochastic`·`remainder_light`·비해석 모드에서만 돈다. 원인이 확정되면 한쪽을 지운다 — 지금은 스위치 설명에 "라운지에서 hang"을 적어 둔다. (4) `r.refl.inline.*`은 인라인 질의가 아니라 TraceRay(hit group의 any-hit)이므로 셰이더 쪽 후보 루프가 없다. 상한 값도 없다.
+- A에게: scPick / scPickCell과 3×3 프로브 수집을 include로 빼는 것은 햇빛 반사 건 뒤에 한다. 그때까지 셀 순서 규칙은 건드리지 않는다.
