@@ -3,10 +3,16 @@
 // a-trous wavelet filter (5 x 5 B3 spline, tap spacing 'step' units; the levels run with steps 1, 2, 4: +-14 units), one
 // thread per pixel of the view. The tap unit:
 //   M pixels                1 px (a 29 px support);
-//   G pixels                the pixel's sample spacing s (1, 2, 4, 8 px). The independent estimates of interpolated G
-//                           pixels lie s apart (the pixels between are bilinear mixes of the same four samples: taps
-//                           closer than s average copies, not samples - measured, the first hardware run: 13 samples in
-//                           the 29 px support at s = 8).
+//   G pixels                max(the pixel's sample spacing s, blur_px / 14) px, at most 8. The independent estimates of
+//                           interpolated G pixels lie s apart (the pixels between are bilinear mixes of the same four
+//                           samples: taps closer than s average copies, not samples - measured, the first hardware run:
+//                           13 samples in the 29 px support at s = 8). And the filter's radius is the lobe footprint
+//                           blur_px (design 1.2), whatever the spacing: before a hit distance is known (the first frame
+//                           after a cut or of a newly seen surface: ReflectionClassify's history is 0) every G pixel has
+//                           its own samples, s = 1, and the +-14 px support covered a wide lobe's footprint only in
+//                           part. With the unit blur_px / 14 the three levels reach +-blur_px; a pixel then averages
+//                           the samples of its own residue class of the unit lattice (up to 29 x 29 of them), its
+//                           neighbours those of theirs.
 // Weights are geometric only, the same for both layers of a pixel:
 //   M pixels (mirror): the guide is the hit geometry, never the mirror's own surface detail - taps of M pixels whose
 //     reflected image lies at the same depth (eye -> mirror -> hit path length within 1 % + 0.4 % per pixel of distance)
@@ -56,7 +62,7 @@ void main(uint2 pixel : SV_DispatchThreadID)
     const float NoV = saturate(dot(c.normal, normalize(g_cameraPosition - c.position)));
     const float blur = c.hitDistance / max(c.linearZ, 1e-4) * reflectionLobeHalfAngle(c.roughness, NoV) * asfloat(P[2].x);
     const float sigmaR = max(0.5 * blur, 0.5), sigmaS = max(0.5 * blur, 6.0);
-    const int unit = mirror ? 1 : (int)(1u << (g0.z & 3u));
+    const int unit = mirror ? 1 : (int)clamp(max((float)(1u << (g0.z & 3u)), floor(blur / 14.0)), 1.0, 8.0);
     const int step = (int)P[0].w * unit;
     float3 sumS = 0, sumR = 0;
     float wS = 0, wR = 0;
