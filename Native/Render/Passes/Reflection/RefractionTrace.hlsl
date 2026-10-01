@@ -18,7 +18,9 @@
 // Root constants: ReflectionRay.hlsli's P[1..7]; P[0] = { jobs SRV (raw: header 16 B { count, dispatch x, y, z }, then
 // 48 B jobs { float3 origin, uint outputSlot; float3 direction, uint flags (0..7 medium, 8..9 bounces, 31 coverage
 // record); float3 sigmaA (1/m), float iorInside }), results UAV (raw), max jobs, stream table SRV (raw: per triangle
-// stream slot its vertex buffer SRV) }.
+// stream slot its vertex buffer SRV) }; P[5].y (the other passes' rays buffer: none here) = the surface cache UAV
+// (reflection.lumen_refraction_hit_surface_cache; UNX_NONE: the hits are lit as before): a hit's light is its surface cache cell's, as the main view's reflection hits
+// (ReflectionShade.hlsli g_reflSurfaceCache).
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/Reflection/ReflectionRay.hlsli"
 #include "Passes/Reflection/ReflectionHit.hlsli"
@@ -55,6 +57,7 @@ void RefractionGen()
     const uint job = DispatchRaysIndex().x;
     ByteAddressBuffer jobs = ResourceDescriptorHeap[P[0].x];
     if (job >= min(jobs.Load(0), P[0].z)) return;
+    g_reflSurfaceCache = P[5].y;
     const uint at = 16 + job * 48;
     float3 o = asfloat(jobs.Load3(at)), d = normalize(asfloat(jobs.Load3(at + 16)));
     const uint flags = jobs.Load(at + 28);

@@ -125,3 +125,6 @@ lumen_sample_scene_color_normal_threshold = 85.0   # degrees between the seen su
 lumen_screen_trace_continue = true     # a ray whose screen trace gave no value starts its world ray where that trace ended in
                                        # front of the scene (the space crossed is empty), not at its surface
 lumen_screen_trace_pullback = 0.08     # ... less this distance, m (reference: HardwareRayTracing.PullbackBias 8)
+lumen_refraction_hit_surface_cache = true  # the hits of water's and glass's reflection / refraction rays (FrameServices::traceRefractions)
+                                       # take their light from the surface cache as the main view's reflection hits do
+                                       # (needs lumen_hit_surface_cache and surface_cache.enabled)

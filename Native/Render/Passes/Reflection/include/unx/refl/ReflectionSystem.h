@@ -55,6 +55,7 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     // reflection.lumen: the ray-reuse pipeline (ReflectionReuse.hlsli) in place of the G path, the accumulation and the layers
     bool lumen = false;
     float lumenMaxRoughness = 0.4f, lumenFadeLength = 0.1f, lumenMaxRayIntensity = 40.0f, lumenTonemapRange = 10.0f;
+    bool lumenRefractionSurfaceCache = true;  // reflection.lumen_refraction_hit_surface_cache: water's and glass's ray hits read it too
     bool lumenScreenContinue = true;   // reflection.lumen_screen_trace_continue: world rays start where their screen traces ended
     float lumenScreenPullback = 0.08f; // ... less this distance (m)
     bool lumenSceneColorAtHit = true;  // reflection.lumen_sample_scene_color_at_hit (with lumen_screen_traces)
@@ -165,6 +166,7 @@ private:
         float rayLength = 0;
         TextureRef luts[4];
         BufferRef cache;
+        BufferRef surfaceCache;  // valid: the refraction service's hits read the surface cache
         rt::RayScene::VsmRefs vsm;
         uint32_t frame = 0, experiment = 0, scene[8] = {};
         rt::RayScene* rays = nullptr;

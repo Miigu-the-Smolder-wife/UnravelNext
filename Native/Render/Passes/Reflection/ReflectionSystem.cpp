@@ -132,6 +132,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.lumenDisocclusionTonemap = flag("reflection.lumen_disocclusion_tonemap", true);
     s.lumenRoughFromGather = flag("reflection.lumen_rough_specular_from_gather", true);
     s.lumenScreenTraces = flag("reflection.lumen_screen_traces", true);
+    s.lumenRefractionSurfaceCache = flag("reflection.lumen_refraction_hit_surface_cache", true);
     s.lumenScreenContinue = flag("reflection.lumen_screen_trace_continue", true);
     s.lumenScreenPullback = num("reflection.lumen_screen_trace_pullback", 0.08);
     s.lumenSceneColorAtHit = flag("reflection.lumen_sample_scene_color_at_hit", true);
@@ -672,6 +673,7 @@ void ReflectionSystem::recordRefraction(FramePassContext& fc, BufferRef jobs, Bu
                   b.use(jobs, Use::SrvGraphics);
                   b.use(results, Use::UavGraphics);
                   b.use(in.cache, Use::UavGraphics);
+                  if (in.surfaceCache.valid()) b.use(in.surfaceCache, Use::UavGraphics);
                   rt::RayScene::declareVsm(b, in.vsm);
                   in.rays->declareTraversal(b);
                   in.rays->declareDecals(b);
@@ -693,7 +695,7 @@ void ReflectionSystem::recordRefraction(FramePassContext& fc, BufferRef jobs, Bu
                   k[18] = c.uav(in.cache);
                   k[19] = 0;
                   k[20] = (in.frame & 0xFFFFFFu) | (in.experiment << 24);
-                  k[21] = 0xFFFFFFFFu;
+                  k[21] = in.surfaceCache.valid() ? c.uav(in.surfaceCache) : 0xFFFFFFFFu;  // (RefractionTrace.hlsl: no rays buffer here)
                   k[22] = in.rays->vsmSrvs(c, in.vsm, in.frameIndex, 1);
                   k[23] = 0xFFFFFFFFu;
                   std::memcpy(&k[24], in.scene, sizeof in.scene);
@@ -1153,6 +1155,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     m_refract.cache = cache, m_refract.vsm = vsm, m_refract.frame = frame, m_refract.experiment = experiment;
     std::memcpy(m_refract.scene, scene, sizeof scene);
     m_refract.rays = &rays, m_refract.frameConstants = frameConstants, m_refract.variant = variant;
+    if (hitsUseSurfaceCache && s.lumenRefractionSurfaceCache) m_refract.surfaceCache = surfaceCache;  // water's and glass's ray hits
     // Root constants shared by the trace, shade, shadow and combine passes (ReflectionRay.hlsli).
     // gi = false (the traversal and the local-light shadow rays): GI's cache and screen probes are not bound (UNX_NONE)
     // nor declared, so those passes do not wait for GI's block (output.async_compute_passes).
