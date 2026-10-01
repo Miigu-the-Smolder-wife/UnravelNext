@@ -215,9 +215,9 @@ void printDred()
             const D3D12_DRED_BREADCRUMB_CONTEXT& c = node->pBreadcrumbContexts[i];
             if (c.BreadcrumbIndex <= done && c.pContextString && node->pCommandHistory[c.BreadcrumbIndex] == D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT) pass = c.pContextString;
         }
-        logf("UNX_DRED list '%ls' on queue '%ls': %u of %u operations completed; not completed: [%u] %s in pass '%ls'\n",
+        logf("UNX_DRED list '%ls' on queue '%ls': %u of %u operations completed; not completed: [%u] %s in pass '%ls' (%u pass names recorded)\n",
              node->pCommandListDebugNameW ? node->pCommandListDebugNameW : L"", node->pCommandQueueDebugNameW ? node->pCommandQueueDebugNameW : L"", done, count, done,
-             dredOpName(node->pCommandHistory[done]), pass);
+             dredOpName(node->pCommandHistory[done]), pass, node->BreadcrumbContextsCount);
         const uint32_t first = done > 12 ? done - 12 : 0, last = std::min(done + 4, count - 1);
         for (uint32_t i = first; i <= last; ++i)
         {
@@ -357,11 +357,20 @@ Device::Device(const DeviceOptions& options) : m_options(options)
         {
             dredSettings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
             dredSettings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-            // (the BeginEvent strings - the render graph's pass names - are kept only with the context setting)
+            // The BeginEvent strings - the render graph's pass names - are kept only with the context setting (DRED 1.1).
+            // The interface is asked for by itself: a QueryInterface from the 1.0 settings object did not give the
+            // strings (2026-10-02: the lounge hang's breadcrumbs came without them).
             ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> dredSettings1;
-            if (SUCCEEDED(dredSettings.As(&dredSettings1))) dredSettings1->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            const bool contexts = SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dredSettings1)));
+            if (contexts)
+            {
+                dredSettings1->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dredSettings1->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dredSettings1->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            }
             g_dred = true;
-            logf("UNX_DRED on: auto-breadcrumbs and page fault data (diagnostics: not for timings)\n");
+            logf("UNX_DRED on: auto-breadcrumbs and page fault data, pass names %s (diagnostics: not for timings)\n",
+                 contexts ? "on" : "NOT available (no DRED 1.1 settings interface)");
         }
         else logf("UNX_DRED requested, but the settings interface is not available\n");
     }
