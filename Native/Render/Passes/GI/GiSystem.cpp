@@ -1003,6 +1003,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     const bool probeHistory = main.visId.valid() && main.visibleClusters.valid() && s.screenOcclusionHistory > 1;
     TextureRef historyPrev, historyNext;
     uint32_t historyFlags = 0, historyPrevX = 0, historyPrevY = 0;
+    const uint32_t occlusionSpatial = fc.quality.boolean("gi.screen_occlusion_spatial") ? 2u : 0u;  // GiProbeGather P[4].x bit 1 (S2, L_occ)
     if (probeHistory)
     {
         const uint32_t oldX = m_probeHistoryX, oldY = m_probeHistoryY;
@@ -1039,13 +1040,13 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   }
               },
               [&shaders, cache, depth, gbuffer, probes, owners, mapArgs, probesX, probesY, frameConstants, s, main, probeHistory, visId, visibleClusters,
-               historyPrev, historyNext, historyFlags, historyPrevX, historyPrevY](PassContext& c) {
+               historyPrev, historyNext, historyFlags, historyPrevX, historyPrevY, occlusionSpatial](PassContext& c) {
                   const uint32_t none = 0xFFFFFFFFu;
                   const uint32_t k[20] = { c.uav(cache), c.srv(depth), c.srv(gbuffer), c.uav(probes), probesX, probesY, main.view.width, main.view.height,
                                            s.probeSpacing, asU(s.nearRadius), c.uav(owners), c.uav(mapArgs),
                                            probeHistory ? c.srv(visId) : none, probeHistory ? c.srv(visibleClusters) : none,
                                            probeHistory ? c.uav(historyPrev) : none, probeHistory ? c.uav(historyNext) : none,
-                                           historyFlags, s.screenOcclusionHistory, historyPrevX, historyPrevY };
+                                           historyFlags | occlusionSpatial, s.screenOcclusionHistory, historyPrevX, historyPrevY };
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiProbeGather"));
                   c.computeConstants(k, 20);
                   c.bindFrameConstants(frameConstants);
