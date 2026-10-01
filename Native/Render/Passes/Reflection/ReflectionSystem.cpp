@@ -174,9 +174,11 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.scShadowRaysOpaque = flag("surface_cache.shadow_rays_opaque", false);
     s.scDirectShadowInline = flag("surface_cache.direct_shadow_inline", false);
     s.scDirectPairs = flag("surface_cache.direct_pairs", true);
+    s.scMeshCards = s.surfaceCache && flag("surface_cache.mesh_cards", false);
+    s.scMeshCardsTestSet = flag("surface_cache.mesh_cards_test_set", false);
     // (the pairs hold direct_analytic lighting alone; the other modes are r.sc.cells' - asked for together, neither a silent
     // drop of the mode nor a silent return to the path that stops the device is right)
-    if (s.surfaceCache && s.scDirectPairs && (s.scDirectStochastic || s.scRemainderLight || !s.scDirectAnalytic))
+    if (s.surfaceCache && !s.scMeshCards && s.scDirectPairs && (s.scDirectStochastic || s.scRemainderLight || !s.scDirectAnalytic))
         fail("surface_cache.direct_pairs lights cells by direct_analytic alone: direct_stochastic, remainder_light and direct_analytic = false need "
              "surface_cache.direct_pairs = false (r.sc.cells - the path that hung the device in the bath lounge, 2026-10-02)");
     s.scDebugCount = (uint32_t)num("surface_cache.debug_count", 0);
@@ -502,7 +504,7 @@ ReflectionSystem::~ReflectionSystem()
 // frame and its reads see the lighting of the frame before). Invalid until the first frame with surface_cache.enabled.
 BufferRef ReflectionSystem::surfaceCacheBuffer(FramePassContext& fc)
 {
-    if (!m_surfaceCache) return BufferRef{};
+    if (!m_surfaceCache || m_settings.scMeshCards) return BufferRef{};
     if (m_surfaceCacheFrame != fc.frame.frameIndex || !m_surfaceCacheRef.valid())
     {
         const uint64_t bytes = kSurfaceCacheHeaderBytes + (uint64_t)m_surfaceCacheEntries * kSurfaceCacheCellBytes +
@@ -1090,7 +1092,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     BufferRef surfaceCache;
     bool surfaceCacheClear = false;
     const uint32_t surfaceCacheEntries = 1u << s.scEntriesLog2;
-    if (s.surfaceCache)
+    if (s.surfaceCache && !s.scMeshCards)
     {
         const uint64_t bytes = kSurfaceCacheHeaderBytes + (uint64_t)surfaceCacheEntries * kSurfaceCacheCellBytes +
                                (uint64_t)(surfaceCacheEntries / 4) * kSurfaceCacheProbeBytes;
@@ -1122,6 +1124,23 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         surfaceCache = surfaceCacheBuffer(fc);
     }
     const bool hitsUseSurfaceCache = surfaceCache.valid() && lumen && s.lumenHitSurfaceCache;
+    // surface_cache.mesh_cards (CardLighting.cpp): the card set of the frame and the card frame hits read through
+    CardSet cardSet;
+    BufferRef cardFrame;
+    if (s.scMeshCards)
+    {
+        if (s.scMeshCardsTestSet)
+        {
+            if (!m_cardTestSet) m_cardTestSet = std::make_unique<CardTestSet>(m_device);
+            cardSet = m_cardTestSet->record(fc);
+        }
+        if (cardSet.valid)
+        {
+            if (!m_cardLighting) m_cardLighting = std::make_unique<CardLighting>(m_device);
+            cardFrame = m_cardLighting->prepare(fc);
+        }
+    }
+    const bool hitsUseCards = cardFrame.valid() && lumen && s.lumenHitSurfaceCache;
     // Screen traces before the world rays (ReflectionScreenTrace.hlsl): a ray that meets a visible surface takes the
     // previous frame's colour there and its job traces no world ray. Without that colour (no upscale history) every
     // ray is a world ray.
@@ -1142,7 +1161,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   if (accPool.valid()) b.use(accPool, Use::SrvCompute);
                   if (hitsUseSurfaceCache) b.use(surfaceCache, Use::UavCompute);
               },
-              [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, accPool, surfaceCache, hitsUseSurfaceCache, jobBands, jobBand,
+              [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, accPool, surfaceCache, hitsUseSurfaceCache, jobBands, jobBand, cardFrame, hitsUseCards,
                hitFlags = (s.hitConeLobes ? 1u : 0u) | (s.hitOrientedLights ? 2u : 0u) | (layers && s.layerFilter && s.hitStrictRead ? 4u : 0u) |
                           (s.lumenSurfaceCacheView ? 8u | ((s.lumenSurfaceCacheViewComponent & 7u) << 8) : 0u) | (screenContinue ? 16u : 0u)](PassContext& c) {
                   // (the layer buffers' UAVs and the hit shading's flags into the rays header: the shade, combine and inline
@@ -1150,7 +1169,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   const uint32_t k[16] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(raysBuffer), rayCapacity,
                                            layers ? c.uav(rayLayers) : 0xFFFFFFFFu, layers ? c.uav(jobLayers) : 0xFFFFFFFFu, hitFlags,
                                            accPool.valid() ? c.srv(accPool) : 0xFFFFFFFFu, hitsUseSurfaceCache ? c.uav(surfaceCache) : 0xFFFFFFFFu, jobBands,
-                                           kArgumentsBytes, jobBand, 0, 0 };
+                                           kArgumentsBytes, jobBand, hitsUseCards ? c.srv(cardFrame) : 0xFFFFFFFFu, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionArgs"));
                   c.computeConstants(k, 16);
                   c.cmd->Dispatch(1, 1, 1);
@@ -1229,6 +1248,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         if (gi) b.use(cache, Use::UavGraphics);
         if (gi && accPool.valid()) b.use(accPool, Use::SrvGraphics);  // (the passes that shade: the accumulator's cell means)
         if (gi && hitsUseSurfaceCache) b.use(surfaceCache, Use::UavGraphics);  // (the passes that shade: hits mark and read their cells)
+        if (gi && hitsUseCards) m_cardLighting->declareRead(fc, b, Use::SrvGraphics);  // (the passes that shade: hits read their cards)
         if (gi && layers)  // (the passes that shade or combine: the layer records)
         {
             b.use(rayLayers, Use::UavGraphics);
@@ -1338,6 +1358,26 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   });
     };
     rayArgs("r.refl.rayargs", 0);
+    if (cardSet.valid)
+    {
+        // The surface cache on mesh cards: this frame's update selection, direct light, radiosity and final lighting -
+        // before this frame's hits read the cards.
+        CardLightingInputs cin;
+        cin.set = cardSet;
+        cin.frame = frame;
+        cin.skyVariant = variant;
+        cin.frameConstants = frameConstants;
+        cin.direct = s.scDirect;
+        cin.radiosity = s.scRadiosity;
+        cin.shadowRaysOpaque = s.scShadowRaysOpaque;
+        cin.radiosityCap = s.scRadiosityCap;
+        cin.radiosityFrames = s.scRadiosityFrames;
+        cin.directFactor = s.scDirectFactor;
+        cin.radiosityFactor = s.scRadiosityFactor;
+        cin.declareShared = [&](PassBuilder& b) { declareShared(b, false); };
+        cin.sharedConstants = [constantsFor](PassContext& c, uint32_t* k) { constantsFor(c, k, false); };
+        m_cardLighting->record(fc, cin);
+    }
     if (surfaceCache.valid())
     {
         // The surface cache's frame (SurfaceCache.hlsli): the upkeep of cells and probes marked up to last frame, the

@@ -24,6 +24,7 @@
 #include "RayTracing/HitLocalLights.hlsli"
 #include "Passes/GI/GiAccPool.hlsli"
 #include "Passes/SurfaceCache/SurfaceCache.hlsli"
+#include "Passes/SurfaceCache/CardLighting.hlsli"
 
 // Motion of a hit since the previous tick, in units of the ray's footprint there: |x - x_prev| / footprint, x_prev the
 // same barycentric point of the triangle's previous-tick vertices (deformed instances: the pool's per-vertex world -
@@ -135,6 +136,11 @@ static uint g_reflAccPool = UNX_NONE;
 // (textures at the ray's footprint), emission and sun term. Until the cell is lit (one frame after its first mark) the
 // hit is shaded as before. Compiled out with REFL_NO_ACCUMULATOR (the inline G library: no room).
 static uint g_reflSurfaceCache = UNX_NONE;
+// surface_cache.mesh_cards: the card frame's SRV (CardLayout.hlsli); the hit reads its irradiance from the mesh cards of
+// its instance (CardLighting.hlsli clReadCards) in place of the hashed cells.
+// REFL_NO_CARDS (the overflow libraries, at the DXIL limit): compiled without the card read - their hits shade as without
+// a surface cache.
+static uint g_reflCardFrame = UNX_NONE;
 
 // Local lights (HitLocalLights.hlsli): one next-event sample drawn with localSeed; its visibility is localVisible (the
 // compute path: ReflectionLocalShadow traced it before, same seed and hit point) or, with REFL_LOCAL_TRACE (the ray
@@ -271,7 +277,37 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
         }
     }
     bool fromSurfaceCache = false;
+    bool fromCards = false;  // (the cards' direct light holds the sun: the hit adds none)
 #if !REFL_NO_ACCUMULATOR
+#if !REFL_NO_CARDS
+    if (g_reflCardFrame != UNX_NONE && materialClass(m) != MATERIAL_FOLIAGE)
+    {
+        const float3 face = dot(s.geometricNormal, direction) > 0 ? -s.geometricNormal : s.geometricNormal;
+        const ClSample cards = clReadCards(mcFrame(g_reflCardFrame), s.sceneInstance, s.position, face, CL_READ_IRRADIANCE);
+        if (g_reflHitFlags & REFL_HIT_SC_VIEW)
+        {
+            // r: 16 = the hit read no card, g: 16 = it read one; components 1, 2: the cards' direct and indirect
+            // irradiance as E / pi
+            const uint component = (g_reflHitFlags >> 8) & 7u;
+            o.radiance = float3(cards.valid ? 0.0 : 16.0, cards.valid ? 16.0 : 0.0, 0);
+            if (component == 1) o.radiance = cards.direct / MODEL_PI;
+            if (component == 2) o.radiance = cards.indirect / MODEL_PI;
+            return o;
+        }
+        if (cards.valid)
+        {
+            L.irradiance = cards.direct + cards.indirect;
+            L.specularRadiance = L.irradiance / MODEL_PI;  // (the lobe at the hit sees the cards' light as uniform)
+            L.local = 0;
+            localE = 0;
+            localMu = 0;
+            o.noData = false;
+            fromSurfaceCache = true;
+            fromCards = true;
+        }
+    }
+    else
+#endif
     if (g_reflSurfaceCache != UNX_NONE && materialClass(m) != MATERIAL_FOLIAGE)
     {
         RWByteAddressBuffer surfaceCache = ResourceDescriptorHeap[g_reflSurfaceCache];
@@ -323,7 +359,7 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     bool split = false;
     float splitScale = 1;
     const float3 l = normalize(g_sunDirection);
-    if (dot(s.normal, l) > 0 || materialClass(m) == MATERIAL_FOLIAGE)
+    if (!fromCards && (dot(s.normal, l) > 0 || materialClass(m) == MATERIAL_FOLIAGE))
     {
         L.sunIlluminance = giSunIlluminance(s.position);
         if (any(L.sunIlluminance > 0))

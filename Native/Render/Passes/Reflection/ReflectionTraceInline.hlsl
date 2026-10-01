@@ -9,6 +9,7 @@
 // Root constants: ReflectionRay.hlsli.
 #define SHADOW_RESIDENCY_LOOP 1  // (the overflow path is at the DXIL limit: ShadowVisibility.hlsli's loop form)
 #define REFL_OVERFLOW 1  // use the same stored attributes/values as the split passes
+#define REFL_NO_CARDS 1  // (at the DXIL limit: the overflow jobs' hits read no mesh cards - ReflectionShade.hlsli g_reflCardFrame)
 #define REFL_NO_ACCUMULATOR (JOB == 2)  // (the G library is at the DXIL limit: ReflectionShade.hlsli g_reflAccPool)
 #define GI_BATCH_CORNERS CORNERS
 #include "RayTracing/RayShaders.hlsli"

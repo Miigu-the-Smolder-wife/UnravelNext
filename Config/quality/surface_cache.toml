@@ -60,3 +60,12 @@ debug_count = 0                       # diagnostics (1; 2 = of the empty reads o
 base_cells = true                     # a mark also keeps the cell 3 levels coarser (8 x the size) at the point, and a read that
                                       # finds no lit cell at the point's level takes that base cell (reference: every mesh in
                                       # range keeps its lowest-resolution cards). false: such a read gets nothing
+mesh_cards = false                    # the cache as lighting on mesh cards (the reference's shipping structure; S2:
+                                      # Passes/SurfaceCache/CardLighting.hlsli) in place of the hashed cells: update selection by
+                                      # page priority, direct light per card tile (8 lights + the sun), radiosity per card probe,
+                                      # the final lighting atlas; hits read the cards of their instance. Needs a card set
+mesh_cards_test_set = false           # a hand-made card set (CardTestSet.cpp: six axis cards per rigid instance, material
+                                      # constants, built on the CPU) - S2's fixture until A's capture is there. NOT a renderer path
+mesh_cards_update_distance_m = 25     # the distance at which a card page's update speed halves (reference: the first clipmap's extent)
+mesh_cards_frustum_margin_m = 5       # pages within this of the view frustum update twice as fast
+mesh_cards_depth_bias_m = 0.10        # a hit reads a card texel whose depth is within this of the hit (reference: 10 cm)

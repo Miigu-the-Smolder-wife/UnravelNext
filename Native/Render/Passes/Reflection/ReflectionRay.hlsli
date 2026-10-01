@@ -64,6 +64,7 @@ uint reflHitFlags(RWByteAddressBuffer rays) { return rays.Load(28); }
 // job's world ray starts - the end of its screen trace (ReflectionScreenTrace.hlsl), M jobs of the ray-reuse pipeline
 #define REFL_TRACE_SCREEN_START 16u
 uint reflAccPoolSrv(RWByteAddressBuffer rays) { return rays.Load(32); }
+uint reflCardFrameSrv(RWByteAddressBuffer rays) { return rays.Load(40); }  // the card frame (CardLayout.hlsli), UNX_NONE: hits read no cards
 uint reflSurfaceCacheUav(RWByteAddressBuffer rays) { return rays.Load(36); }  // the surface cache (SurfaceCache.hlsli), UNX_NONE: hits do not use it
 uint reflJobLayersUav(RWByteAddressBuffer rays) { return rays.Load(24); }
 // flags: REFL_LAYER_SURFACE (the job has surface hits), REFL_LAYER_NO_DATA (half or more of them found no cache data).
