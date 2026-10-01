@@ -30,6 +30,11 @@ layer_filter = true                    # the layers' spatial reconstruction ever
 layer_history_frames = 8               # the layers' running mean (LayerTemporal) in place of temporal_history_max's 32: the
                                        # spatial reconstruction is the frame's value, the history removes what it leaves
                                        # (design 10.5: 32 without the spatial filter against 8 with it). 1 = no history
+layer_history_bound = true             # the history is brought within the reconstructed layer's 3 x 3 neighbourhood (mean +- 3
+                                       # deviations + 5 %) before it is mixed. A/B, not settled by measurement: false = no
+                                       # bound (a lighting change then takes layer_history_frames frames to arrive in the
+                                       # layers); the bound may be too tight where the reconstruction leaves low-frequency
+                                       # noise (it then removes the history that would average it) [expected, to measure]
 layer_view = 0                         # diagnostics, written to view.reflection instead of the value (LayerCompose.hlsl):
                                        # 1 stochastic, 2 reconstructed, 3 |residual|, 4 reconstructed, 5 albedo, 6 base, 7 alphas
 stats_log_frames = 0                   # diagnostics: every N frames the log gets the reflection hits' cache lookups and

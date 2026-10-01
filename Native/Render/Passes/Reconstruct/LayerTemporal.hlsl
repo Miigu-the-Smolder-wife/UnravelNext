@@ -28,7 +28,8 @@
 // P[0] = { stochastic SRV, residual SRV (LayerDenoise's last level), guide SRV, vis id SRV }
 // P[1] = { visible clusters SRV, previous stochastic SRV, previous residual SRV, previous keys SRV }
 // P[2] = { stochastic out UAV, residual out UAV, keys out UAV, history frames }
-// P[3] = { width, height, asuint(lobe shift), flags (bit 0: no history this frame) }
+// P[3] = { width, height, asuint(lobe shift), flags (bit 0: no history this frame, bit 1: the history is not bounded -
+// reflection.layer_history_bound = false, A/B: the bound's rule is not settled by measurement yet) }
 // P[4] = { asuint(previous camera position xyz), asuint(pixel angle) }, P[5] = { hit distance / motion history SRV, 0, 0, 0 }
 // Frame constants b1 = main view.
 #include "Passes/Reconstruct/LayerCommon.hlsli"
@@ -162,8 +163,14 @@ void main(uint2 pixel : SV_DispatchThreadID)
                 }
                 m1S /= count, m1R /= count;
                 const float3 devS = sqrt(max(m2S / count - m1S * m1S, 0.0)), devR = sqrt(max(m2R / count - m1R * m1R, 0.0));
-                meanS = lerp(layerBoundHistory(sumS / weight, s.rgb, m1S, devS), s.rgb, 1.0 / (n + 1));
-                meanR = lerp(layerBoundHistory(sumR / weight, r.rgb, m1R, devR), r.rgb, 1.0 / (n + 1));
+                float3 historyS = sumS / weight, historyR = sumR / weight;
+                if ((P[3].w & 2u) == 0)
+                {
+                    historyS = layerBoundHistory(historyS, s.rgb, m1S, devS);
+                    historyR = layerBoundHistory(historyR, r.rgb, m1R, devR);
+                }
+                meanS = lerp(historyS, s.rgb, 1.0 / (n + 1));
+                meanR = lerp(historyR, r.rgb, 1.0 / (n + 1));
             }
         }
     }

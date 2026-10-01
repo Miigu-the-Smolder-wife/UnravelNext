@@ -94,6 +94,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.layerFilter = !q.has("reflection.layer_filter") || q.boolean("reflection.layer_filter");
     s.layerHistoryFrames = q.has("reflection.layer_history_frames") ? (uint32_t)std::max<int64_t>(q.integer("reflection.layer_history_frames"), 1) : 8u;
     s.layerView = q.has("reflection.layer_view") ? (uint32_t)q.integer("reflection.layer_view") : 0u;
+    s.layerHistoryBound = !q.has("reflection.layer_history_bound") || q.boolean("reflection.layer_history_bound");
     s.deterministic = q.has("debug.deterministic") && q.boolean("debug.deterministic");
     s.planarRayNs = (float)q.number("reflection.planar_ray_ns");
     return s;
@@ -1239,7 +1240,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
             const TextureRef nextKeys = import(m_layerKeys[next], "R reflection layer history keys", DXGI_FORMAT_R32G32_UINT);
             const TextureRef visId = main.visId;
             const BufferRef visibleClusters = main.visibleClusters;
-            const uint32_t flags = m_accumReset ? 1u : 0u;
+            const uint32_t flags = (m_accumReset ? 1u : 0u) | (s.layerHistoryBound ? 0u : 2u);
             m_accumReset = false;
             const float3 prevCamera = m_prevCamera;
             m_prevCamera = main.view.position;
