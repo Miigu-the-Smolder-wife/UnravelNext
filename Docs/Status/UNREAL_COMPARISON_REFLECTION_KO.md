@@ -71,7 +71,12 @@ Unreal의 반사가 조용한 이유는 필터가 더 좋아서가 아니라, **
 | 반사 hit이 표면 캐시를 읽음 | 구현(`reflection.lumen_hit_surface_cache`) | `ReflectionShade` |
 | GI hit이 표면 캐시를 읽음 | 함수·버퍼 접근자 제공. 호출은 R | `SURFACE_CACHE_INTERFACE_KO.md` |
 | 평면 거울·고요한 물 | 우리 래스터 유지 | |
-| 화면 공간 추적, 2×1·2×2 다운샘플 추적, GGX 꼬리 절단, 전경 반투명·물 패스, 반사 전용 radiance cache, far field | 미구현 | |
+| 화면 공간 추적(HZB 50회, 두께 0.005, 이전 프레임 색) | 구현(`reflection.lumen_screen_traces`). 차이: 이전 깊이 검사·움직이는 물체의 속도 없음 | `ScreenTrace.hlsli`, `ReflectionScreenTrace`, `SCREEN_TRACE_INTERFACE_KO.md` |
+| 화면 추적이 놓친 광선은 그 끝점에서 월드 광선을 잇는다(pull-back 8 cm) | 구현(`reflection.lumen_screen_trace_continue`) | `ReflectionScreenTrace`, `ReflectionTrace` |
+| 월드 hit이 화면에 보이는 면이면 이전 프레임 색을 읽는다(깊이 1 %, 법선 85°) | 구현(`reflection.lumen_sample_scene_color_at_hit`). 차이: 법선 검사는 hit 화소의 셰이딩 법선, 이전 깊이 검사 없음 | `ReflectionSceneColorAtHit` |
+| GGX 표본 꼬리 10 % 절단 | 구현(`reflection.lumen_ggx_sampling_bias`, QUALITY TRADE) | `ReflectionRay.hlsli`, `ReflectionReuse.hlsli` |
+| 2×1·2×2 다운샘플 추적 + 타일 지터 | **넣지 않음.** 언리얼 출하 기본값은 `DownsampleFactor 1`(전체 해상도)이고 2는 품질 단계를 낮출 때만 쓴다. 부하를 낮추는 옵션이라 사용자 결정 없이는 만들지 않는다 | |
+| 전경 반투명·물 패스, 반사 전용 radiance cache, far field | 미구현 | |
 
 스위치: `reflection.lumen`(새 반사 경로), `surface_cache.enabled`(표면 캐시), `reflection.lumen_hit_surface_cache`(반사 hit이 캐시를 읽고 표시, 기본 true). 셋 다 켜야 조립된 상태다. 매개변수는 `reflection.lumen_*`(reflection.toml)와 `surface_cache.*`(surface_cache.toml), 기본값은 언리얼 것.
 
@@ -85,4 +90,5 @@ Unreal의 반사가 조용한 이유는 필터가 더 좋아서가 아니라, **
 - `surface_cache.radiosity_max_ray_intensity = 40` — radiosity 광선 세기 상한.
 - `surface_cache.remainder_light = false` — 셀당 가장 센 8개 밖의 광원은 버린다(true: 나머지에서 1개를 더 뽑아 에너지를 지킨다).
 - `surface_cache.entries_log2 = 22` — 저장 칸 수(255 MB). 언리얼 아틀라스는 2^24 텍셀. 로비는 2^21에서 가득 찼다(91 %).
-- (미구현) GGX 표본 꼬리 10 % 절단.
+- `reflection.lumen_ggx_sampling_bias = 0.1` — GGX 표본 꼬리 10 % 절단(lobe가 조금 좁아진다). 0이면 lobe 전체.
+- (만들지 않음) 다운샘플 추적 2×1·2×2 — 언리얼에서도 기본이 아니다. 성능이 모자랄 때의 선택지로만 적어 둔다.
