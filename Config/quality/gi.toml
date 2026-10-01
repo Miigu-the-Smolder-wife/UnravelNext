@@ -50,11 +50,16 @@ bounce_visibility = true           # V2 1.3: a GI ray's bounce read counts only 
                                    # converged level, blue-white, for ~16 frames in 3 of 9 runs, and a converged level of -7..+17 %
                                    # between runs; attributed to these reads by the tint and the code, not yet isolated by an A/B of
                                    # this switch alone. false: the previous reads (A/B)
-miss_closure = true                # V2 1.3 (cold start: cuts, newly seen regions). A ray whose bounce read finds no data read irradiance 0
+miss_closure = false               # V2 1.3 (cold start: cuts, newly seen regions). A ray whose bounce read finds no data read irradiance 0
                                    # there: entries started at 50-80 % of their level and rose over ~16 frames [measured]. true: the
                                    # missing irradiance is the entry's own, E = E_measured / (1 - sum albedo / pi w cos) (GiIntegrate.hlsl;
                                    # frame-1 level 0.52-0.62 -> 0.90-1.04 of converged in the bath lounge, converged level unchanged
                                    # within the runs' spread [measured with the strict fallback alone]). false: A/B
+                                   # OFF since 2026-10-01: the closure takes the missing irradiance at a hit to be the entry's own,
+                                   # which holds in an evenly lit enclosure only. Under a luminous ceiling (bath hall, 18:01 export)
+                                   # the floor's cells assumed the walls and ceiling as bright as themselves: GI layer level 2.73 at
+                                   # frame 1 and 1.80 at frame 4 (without it 0.72, 0.77), final tile error 39/168 and 20/105 % against
+                                   # 8/26 and 4/19 % [measured, 1080p, one run each]. An undershoot that rises is the smaller defect.
 hit_oriented_lights = false        # a GI hit's one local-light sample chosen with the hit's orientation in the weights (the
                                    # reflection hits' rtLocalLightChooseOriented: importance x the largest cosine the emitter
                                    # can have at the hit; a light below the hit's horizon is never drawn). Unbiased - the same

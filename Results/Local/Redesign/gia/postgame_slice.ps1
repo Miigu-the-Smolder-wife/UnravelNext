@@ -50,6 +50,7 @@ $modes = @{
   t_nolocal = (S @('gi.experiment_disable=128'))
   t_onebounce = (S @('gi.experiment_disable=512'))
   t_notemporal = (S @('gi.screen_temporal_frames=0'))
+  nolayers = (S @('reflection.layers=false', 'reflection.layer_mirror_lobe=false'))
   alloff = ($filterOff + $coldOff + (S @('reflection.layers=false', 'reflection.hit_cone_lobes=false', 'reflection.hit_accumulator=false')))
 }
 $k = $env:PG_SCENE; $res = $env:PG_RES; $turn = $env:PG_TURN
@@ -104,7 +105,10 @@ switch ($turn) {
   'lobby' {
     # the coordinator's noisiest game scene (568 shadowed lights in view): PG_MODES with the game's exposure; final, GI and
     # reflection layers at frames 1/4/16/299, and the rotation (PG_ROT = 1)
-    foreach ($m in ($env:PG_MODES -split ',')) {
+    $lobbyModes = ($env:PG_MODES -split ',')
+    # (the follow-up queue's lobby job, started before the closure went off: the deploy configuration first)
+    if ($env:PG_MODES -eq 'oriented,acc1,oriented_acc1') { $lobbyModes = 'visonly', 'oriented', 'acc1' }
+    foreach ($m in $lobbyModes) {
       Step "still_${k}_${res}_$m" 'unx_gate_shadow_renderergate.exe' (@('--scene', $scenes[$k], '--resolution', $res, '--warmup-frames', '0', '--frames', '300', '--capture-frames', '1,4,16,299', '--capture-layers', 'final,gi,refl', '--auto-exposure', '--capture', "$p2\still_${k}_${res}_$m.pfm") + $modes[$m])
     }
     if ($env:PG_ROT -eq '1') {
@@ -118,12 +122,23 @@ switch ($turn) {
   'acct' {
     # GiAnalytic with the pool at one level (test 9), and the whole suite with the oriented light choice
     $out = 'C:/Users/USER/UnravelNext-redesign/Results/Local/Redesign/acc'.Replace('/', [string][char]92)
+    # (2026-10-01 20:40: the deploy configuration without the closure comes first - train, and GiAnalytic with the defaults)
+    $out = $p2; $k = 'train'; Still 'full' 'deploy2'; Rot 'full' 'deploy2'
+    $out = 'C:/Users/USER/UnravelNext-redesign/Results/Local/Redesign/items/p2tests'.Replace('/', [string][char]92)
+    Step 't2_unx_test_gi_gianalytic' 'unx_test_gi_gianalytic.exe' @()
+    return
     Step 't9_levels1' 'unx_test_gi_gianalytic.exe' (@('--only-light-near') + (S @('gi.hit_accumulator=true', 'gi.hit_accumulator_levels=1')))
     Step 'gianalytic_oriented' 'unx_test_gi_gianalytic.exe' (S @('gi.hit_oriented_lights=true'))
   }
   'modes' { foreach ($m in ($env:PG_MODES -split ',')) { Still $m } }
   # the off configuration again (a scene file exported anew: the hall, 2026-10-01 18:01)
   'offnew' { Still 'alloff' 'alloff_new'; Still 'visonly'; Rot 'alloff' 'alloff_new' }
+  'timing2' {
+    # frame cost of the deploy configuration and of it with one group off (timing lock; 300 warm-up + 300 measured frames)
+    $out = 'C:/Users/USER/UnravelNext-redesign/Results/Local/Redesign/items/p2time'.Replace('/', [string][char]92)
+    New-Item -ItemType Directory -Force $out | Out-Null
+    foreach ($m in ($env:PG_MODES -split ',')) { Step "time_${k}_${res}_$m" 'unx_gate_shadow_renderergate.exe' (@('--scene', $scenes[$k], '--resolution', $res, '--warmup-frames', '300', '--frames', '300', '--out', (Join-Path $out "${k}_${res}_$m")) + $modes[$m]) }
+  }
   'show' { Still 'allon'; Still 'alloff'; if ($res -eq '1920x1080') { Rot 'allon'; Rot 'alloff' } }
   'filter' { Still 'full'; Still 'none'; Still 'passes2'; Still 'wideonly'; if ($res -eq '1920x1080') { Rot 'full'; Rot 'none' } }
   'cold' { Still 'coldoff'; Still 'visonly'; Still 'closureonly'; Still 'full' 'full_b'; Still 'coldoff' 'coldoff_b' }
