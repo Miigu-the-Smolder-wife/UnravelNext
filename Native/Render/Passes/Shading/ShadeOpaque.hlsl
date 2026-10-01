@@ -34,6 +34,7 @@
 //        shading.toml), L2 tile lights' records (raw, TileLights.hlsli; UNX_NONE = off) }
 // P[5] = { froxel lights (raw) (UNX_NONE = absent), LTC table (StructuredBuffer<float4>, AreaLight.hlsli) }
 // P[6] = { edge tile mask SRV (EdgeDetect.hlsl, R32G32_UINT per tile; UNX_NONE = no edge pixels), V's coverage tiles
+//        (.z: L3 S's tile lit records, VsmCls.hlsli; UNX_NONE = off)
 //        (raw; UNX_NONE = no coverage layer: a tile with coverage fragments keeps every pixel's exposed radiance for the
 //        coverage composite, CoverageComposite.hlsl), exposure histogram's centre sigma, E's light function table (raw;
 //        UNX_NONE = none: A8 cookies, IES, gobos, animated intensity and colour on point and spot lights) }
@@ -75,6 +76,7 @@
 #include "Passes/Atmosphere/Froxel.hlsli"
 #include "Passes/Common/LightNearFar.hlsli"  // 14.1 NEAR/FAR classification and FAR vector irradiance (shared header)
 #include "Passes/Lights/TileLights.hlsli"       // L2: the tile's NEAR mask and corner irradiance (shading.tile_lights)
+#include "Passes/Shadow/VsmCls.hlsli"            // L3: S's (tile, light) lit classification (P[6].z; a lit caster needs no visibility read)
 #include "Passes/Visibility/CoverageTiles.hlsli"
 #if !PLANAR
 #define GI_PROBE_TILE_CACHE  // R's screen probes at the group's tile corners, loaded once (design revision 1 4.4, 12.3)
@@ -463,6 +465,17 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #endif
         ShadowPixelReceiver overflowReceiver = (ShadowPixelReceiver)0;
         uint4 lightWords = 0;
+        // L3 (14.3-2): S's tile classification: an entry lit over every pixel of the tile has visibility 1 here, without
+        // the slot or overflow read (shadow.vsm.classification_pages; UNX_NONE: off).
+        VsmClsTile clsTile = (VsmClsTile)0;
+        uint clsSlice = 0;
+#if !FALLBACK  // (fallback tiles keep the full read path: the DXIL limit)
+        if (P[6].z != UNX_NONE)
+        {
+            clsTile = vsmClsTile(P[6].z, (pixel.y / M_TILE) * ((g_viewWidth + M_TILE - 1) / M_TILE) + pixel.x / M_TILE);
+            clsSlice = froxelSlice(froxelGrid(froxels.lights), linearZ);
+        }
+#endif
         // L2 (14.1/14.2): this tile's record: FAR lights (a clear bit of the pixel's slice mask) skip their diffuse term
         // here and come back as the tile corners' vector irradiance below; Foliage keeps every light per pixel.
 #if !FALLBACK  // (fallback tiles - S's overflow - keep every light per pixel: the record is an optimisation, not a value)
@@ -518,7 +531,11 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 if (all(E == 0) || !((NoV > 0 && cosL > 0) || (foliage && NoV * cosL < 0))) continue;
             }
             float visibility = 1;
+#if FALLBACK
             if (casts)
+#else
+            if (casts && !(P[6].z != UNX_NONE && vsmClsTileLit(clsTile, clsSlice, i)))
+#endif
                 visibility = shadowOrdinal <= 3 ? shadowSlot(shadowPacked, shadowOrdinal)
                                                 : shOverflowVisibility(pixel, shadowOrdinal, overflowHead, overflowRecord, overflowPacked, overflowReceiver, lightIndex);
             if (visibility <= 0) continue;
