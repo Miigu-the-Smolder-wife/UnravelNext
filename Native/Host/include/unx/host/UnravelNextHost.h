@@ -482,7 +482,8 @@ UNX_API int32_t UNX_CALL UnxHairRemoveBody(UnxRenderer r, uint32_t body);
 
 // B8 GPU fluids (optional export within ABI 6, INTERFACES v1.70; engine 1's shared-mode physics fluids on the renderer's
 // device): the frames queued from now on draw these fluids until the next call (count 0: none). view = the
-// NP_FluidGpuView (96 B) np_fluid_gpu_view filled for the tick, alpha = the frame's time within that tick, domainCells = the
+// NP_FluidGpuView (96 B) or NP_FluidGpuView2 (136 B: an anchored domain's start origin and frame velocity) np_fluid_gpu_view
+// filled for the tick, alpha = the frame's time within that tick, domainCells = the
 // fluid's domain in cells; stamp = the tick's NRC_GpuWorldStamp (world, world_generation, epoch, tick, branch, phase).
 // The renderer admits the reads through the GPU bridge before each frame's lists and commits them with its fence.
 typedef struct UnxFluidInput

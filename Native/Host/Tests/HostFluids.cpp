@@ -4,7 +4,9 @@
 //      handed over as an NP_FluidGpuView: every frame queued while it is set is admitted by the bridge and committed with
 //      the frame's fence (one graphics submission per frame in the bridge's statistics), and frames without fluids admit
 //      nothing;
-//   2. invalid views are refused on the calling thread (size, stride under 48 or not a multiple of 4, no particles, alpha
+//   2. an NP_FluidGpuView2 (136 B, version 2: an anchored domain's start origin and frame velocity) is accepted and
+//      admitted; invalid views are refused on the calling thread (size, version 2 at 96 B, a non-finite start origin, stride
+//      under 48 or not a multiple of 4, no particles, alpha
 //      outside [0, 1], a material that is not Water-class, particle buffers of another device); the Water check follows
 //      material edits after the commit (an appended Water material is accepted, one edited away from Water refused);
 //   3. the lease and the buffer are released after the frames; no D3D12 debug-layer errors.
@@ -15,6 +17,7 @@
 #include "TestScenes.h"
 #include "unx/core/File.h"
 
+#include <cmath>
 #include <cstring>
 #include <dxgi1_6.h>
 #include <string>
@@ -39,6 +42,14 @@ struct FluidGpuView  // NP_FluidGpuView (96 B)
     uint64_t tick;
 };
 static_assert(sizeof(FluidGpuView) == 96);
+struct FluidGpuView2  // NP_FluidGpuView2 (136 B)
+{
+    FluidGpuView view;
+    double startOrigin[3];
+    float frameVelocity[3];
+    uint32_t reserved;
+};
+static_assert(sizeof(FluidGpuView2) == 136);
 } // namespace
 
 int main()
@@ -147,6 +158,29 @@ int main()
         HostRenderer::FluidInput badIn = in;
         badIn.view = &bad;
         expect("a view of another size is refused", throws([&] { h.setFluids({ &badIn, 1 }, stamp); }));
+        {
+            FluidGpuView2 anchored{};
+            anchored.view = view;
+            anchored.view.size = sizeof anchored;
+            anchored.view.version = 2;
+            anchored.startOrigin[0] = 0.6, anchored.startOrigin[1] = 2, anchored.startOrigin[2] = 3;
+            anchored.frameVelocity[0] = 24;
+            HostRenderer::FluidInput anchoredIn = in;
+            anchoredIn.view = &anchored;
+            const uint64_t v2Before = submissions();
+            expect("an NP_FluidGpuView2 (version 2, 136 B) is accepted", !throws([&] { h.setFluids({ &anchoredIn, 1 }, stamp); }));
+            frames(1);
+            expect("its frame is admitted and committed once", submissions() == v2Before + 1);
+            h.setFluids({}, stamp);
+            FluidGpuView2 short2 = anchored;
+            short2.view.size = sizeof(FluidGpuView);
+            anchoredIn.view = &short2;
+            expect("version 2 at the version 1 size is refused", throws([&] { h.setFluids({ &anchoredIn, 1 }, stamp); }));
+            FluidGpuView2 nan2 = anchored;
+            nan2.startOrigin[1] = std::nan("");
+            anchoredIn.view = &nan2;
+            expect("a non-finite start origin is refused", throws([&] { h.setFluids({ &anchoredIn, 1 }, stamp); }));
+        }
         bad = view;
         bad.stride = 32;
         expect("a stride under 48 is refused", throws([&] { h.setFluids({ &badIn, 1 }, stamp); }));

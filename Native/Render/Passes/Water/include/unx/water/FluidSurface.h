@@ -36,6 +36,7 @@ struct FluidSurfaceInput
     float alpha = 1.0f;                   // frame time between the previous (0) and current (1) tick
     uint32_t velocityOffset = UINT32_MAX; // bytes to the particle velocity float3 (physics fluid: 16); UINT32_MAX = none
     float velocityScale = 0;              // particle velocity units -> m/s (physics fluid: dx, cells/s -> m/s)
+    float frameVelocity[3] = {};          // m/s added to every particle's velocity (particle space: an anchored domain's frame)
     float axes[3] = { 1, 1, 1 };  // particle space -> output (renderer) axis signs (FrameContext::streamAxes: the host's
                                   // World is the renderer's mirrored in z); the grid, origin and bounds stay in particle space
     uint32_t previousSlotOffset = UINT32_MAX;  // bytes to the uint index of each particle in `previous` (physics fluid:

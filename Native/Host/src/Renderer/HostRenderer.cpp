@@ -968,6 +968,17 @@ struct FluidGpuView
     uint64_t tick;
 };
 static_assert(sizeof(FluidGpuView) == 96, "NP_FluidGpuView");
+// NP_FluidGpuView2 (version 2, 136 B; physics a342d694, an anchored domain): the start buffer's positions are cells from
+// start_origin (where the domain was when the tick started), the current buffer's from origin; velocities in both are
+// relative to frame_velocity (m/s). Unanchored: start_origin = origin, frame_velocity 0.
+struct FluidGpuView2
+{
+    FluidGpuView view;
+    double startOrigin[3];
+    float frameVelocity[3];
+    uint32_t reserved;
+};
+static_assert(sizeof(FluidGpuView2) == 136, "NP_FluidGpuView2");
 } // namespace
 
 void HostRenderer::setFluids(std::span<const FluidInput> fluids, const uint64_t (&stamp)[6])
@@ -977,10 +988,21 @@ void HostRenderer::setFluids(std::span<const FluidInput> fluids, const uint64_t 
     std::lock_guard lock(m_mutex);
     for (const FluidInput& in : fluids)
     {
-        FluidGpuView v;
         if (!in.view) fail("fluids: no view");
-        std::memcpy(&v, in.view, sizeof v);
-        if (v.size != sizeof v || v.version != 1) fail("fluids: NP_FluidGpuView size %u version %u", v.size, v.version);
+        uint32_t head[2];
+        std::memcpy(head, in.view, sizeof head);
+        FluidGpuView2 v2{};
+        if (head[0] == sizeof(FluidGpuView) && head[1] == 1)
+            std::memcpy(&v2.view, in.view, sizeof(FluidGpuView));
+        else if (head[0] == sizeof(FluidGpuView2) && head[1] == 2)
+            std::memcpy(&v2, in.view, sizeof v2);
+        else
+            fail("fluids: NP_FluidGpuView size %u version %u (96 B version 1 or 136 B version 2)", head[0], head[1]);
+        const FluidGpuView& v = v2.view;
+        if (head[1] == 1) std::copy(std::begin(v.origin), std::end(v.origin), v2.startOrigin);  // not anchored
+        if (!std::isfinite(v2.startOrigin[0]) || !std::isfinite(v2.startOrigin[1]) || !std::isfinite(v2.startOrigin[2]) || !std::isfinite(v2.frameVelocity[0]) ||
+            !std::isfinite(v2.frameVelocity[1]) || !std::isfinite(v2.frameVelocity[2]))
+            fail("fluids: NP_FluidGpuView2 start origin or frame velocity not finite");
         if (!v.current || !v.count || v.stride < 48 || v.stride % 4 || !(v.dx > 0)) fail("fluids: a view without particles (count %u, stride %u: >= 48 and a multiple of 4, dx %g)", v.count, v.stride, v.dx);
         if (!(in.alpha >= 0 && in.alpha <= 1)) fail("fluids: alpha %g outside [0, 1]", in.alpha);
         for (void* resource : { v.current, v.startValid ? v.start : nullptr })  // the particles must live on this device
@@ -1001,6 +1023,10 @@ void HostRenderer::setFluids(std::span<const FluidInput> fluids, const uint64_t 
         f.frame.origin[0] = v.origin[0] - m_mainOriginOffset.x;
         f.frame.origin[1] = v.origin[1] - m_mainOriginOffset.y;
         f.frame.origin[2] = v.origin[2] - m_mainOriginOffset.z;
+        f.frame.startOrigin[0] = v2.startOrigin[0] - m_mainOriginOffset.x;
+        f.frame.startOrigin[1] = v2.startOrigin[1] - m_mainOriginOffset.y;
+        f.frame.startOrigin[2] = v2.startOrigin[2] - m_mainOriginOffset.z;
+        std::copy(std::begin(v2.frameVelocity), std::end(v2.frameVelocity), f.frame.frameVelocity);
         f.frame.dx = v.dx;
         f.frame.alpha = in.alpha;
         f.frame.tick = v.tick;
