@@ -6,6 +6,7 @@
 namespace unx::render::tracks
 {
 void accelerationStructures(FramePassContext&) { pending("R.accelerationStructures (track disabled in this build)"); }
+void surfaceCache(FramePassContext&) {}
 void globalIllumination(FramePassContext&, ViewResources&) { pending("R.globalIllumination (track disabled in this build)"); }
 void reflections(FramePassContext&, ViewResources&) { pending("R.reflections (track disabled in this build)"); }
 void giScreenIrradiance(FramePassContext&, ViewResources&) {}

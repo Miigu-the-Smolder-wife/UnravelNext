@@ -50,11 +50,16 @@ bounce_visibility = true           # V2 1.3: a GI ray's bounce read counts only 
                                    # converged level, blue-white, for ~16 frames in 3 of 9 runs, and a converged level of -7..+17 %
                                    # between runs; attributed to these reads by the tint and the code, not yet isolated by an A/B of
                                    # this switch alone. false: the previous reads (A/B)
-miss_closure = true                # V2 1.3 (cold start: cuts, newly seen regions). A ray whose bounce read finds no data read irradiance 0
+miss_closure = false               # V2 1.3 (cold start: cuts, newly seen regions). A ray whose bounce read finds no data read irradiance 0
                                    # there: entries started at 50-80 % of their level and rose over ~16 frames [measured]. true: the
                                    # missing irradiance is the entry's own, E = E_measured / (1 - sum albedo / pi w cos) (GiIntegrate.hlsl;
                                    # frame-1 level 0.52-0.62 -> 0.90-1.04 of converged in the bath lounge, converged level unchanged
                                    # within the runs' spread [measured with the strict fallback alone]). false: A/B
+                                   # OFF since 2026-10-01: the closure takes the missing irradiance at a hit to be the entry's own,
+                                   # which holds in an evenly lit enclosure only. Under a luminous ceiling (bath hall, 18:01 export)
+                                   # the floor's cells assumed the walls and ceiling as bright as themselves: GI layer level 2.73 at
+                                   # frame 1 and 1.80 at frame 4 (without it 0.72, 0.77), final tile error 39/168 and 20/105 % against
+                                   # 8/26 and 4/19 % [measured, 1080p, one run each]. An undershoot that rises is the smaller defect.
 hit_oriented_lights = false        # a GI hit's one local-light sample chosen with the hit's orientation in the weights (the
                                    # reflection hits' rtLocalLightChooseOriented: importance x the largest cosine the emitter
                                    # can have at the hit; a light below the hit's horizon is never drawn). Unbiased - the same
@@ -103,6 +108,10 @@ hit_accumulator_pool_slots = 524288  # hash slots (a power of two; 268 B each: 1
 hit_accumulator_alpha = 0.125      # the window's frame weight decay (memory ~ 1 / alpha frames)
 hit_accumulator_fine_scale = 0.25  # the finest cell over the ray footprint (the levels are x 1, 2, 4, 8 of it)
 hit_accumulator_min_samples = 32   # samples a cell holds before hits read it (fewer: the point value)
+hit_accumulator_levels = 4         # pool form: the levels a hit may read (its own cell, then x 2, 4, 8 while a level holds fewer than
+                                   # min_samples) and the folds fill by passing sums up. 1 = its own cell only, no pass-up (fewer
+                                   # samples: the point value takes over by n / min_samples): a window then holds exactly the
+                                   # hits that read it. 4 measured +138 % / -23 % on GiAnalytic 9 (corner / lampshade) [2026-10-01]
 hit_accumulator_window = 1024      # the means' window in samples (~10 frames at ~100 hits per cell and frame)
 hit_accumulator_window_recent = 128  # while the sun changed within lighting_recent_frames
 hit_accumulator_cell_scale = 2.0   # the accumulator's cell over the ray footprint: 2.0 = the bounce cell itself; smaller = its own
@@ -174,3 +183,34 @@ experiment_disable = 0             # cost attribution only (recorded in the qual
                                    # 524288 = every emissive material as visible-only (v1.92: GI hits and emitter samples take
                                    # no emission; what the bridge's _UnxEmissiveVisibleOnly does, for scene files without the flag). Never nonzero outside
                                    # measurements and those tests.
+
+# gi.lumen (LumenGather.cpp, Passes/GI/Lumen): the screen-probe final gather in the structure of Unreal's Lumen (user
+# decision 2026-10-01: rebuild the proven structure, judge the picture afterwards). true: r.gi.lg.* make the main view's
+# indirect light (view.giIrradiance, view.giRoughSpecular) in place of r.gi.screen and its filters; the world cache
+# keeps updating and lights the probes' hits until the surface cache's read replaces it. The values below are Unreal's
+# defaults (ue6-main, r.Lumen.ScreenProbeGather.*); (Q) marks the ones that give up accuracy for stability - the user's
+# to decide. Differences from Unreal: Docs/Status/LUMEN_GATHER_KO.md.
+lumen = false
+lumen_tile = 16                            # DownsampleFactor: one probe per 16 x 16 px
+lumen_adaptive_fraction = 0.5              # AdaptiveProbeAllocationFraction
+lumen_min_pdf_to_trace = 0.1               # ImportanceSample.MinPDFToTrace
+lumen_importance_sample_lighting = true    # ImportanceSample.IncomingLighting (last frame's probe radiance)
+lumen_max_ray_intensity = 10.0             # (Q) MaxRayIntensity: a trace's exposed radiance is scaled down to it
+lumen_filter_passes = 3                    # SpatialFilterNumPasses
+lumen_filter_max_hit_angle_deg = 10.0      # SpatialFilterMaxRadianceHitAngle
+lumen_filter_position_weight = 1000.0      # SpatialFilterPositionWeightScale
+lumen_temporal_max_frames = 10.0           # (Q) Temporal.MaxFramesAccumulated
+lumen_temporal_filter_probes = false       # TemporalFilterProbes: blend the probes with last frame's before the spatial filter
+lumen_temporal_filter_probes_weight = 0.5  # TemporalFilterProbes.HistoryWeight
+lumen_temporal_distance_threshold = 0.01   # Temporal.DistanceThreshold (relative plane distance of a history pixel)
+lumen_temporal_fast_fraction = 0.1         # Temporal.FractionOfLightingMovingForFastUpdateMode
+lumen_temporal_max_fast = 0.9              # Temporal.MaxFastUpdateModeAmount
+lumen_jitter_width = 1.0                   # SpatialFilterProbes / FullResolutionJitterWidth (tiles)
+lumen_stochastic_interpolation = true      # StochasticInterpolation
+lumen_max_roughness_rough_specular = 0.8   # (Q) MaxRoughnessToEvaluateRoughSpecular
+lumen_disocclusion_max_frames = 4.0        # SpatialFilter.DisocclusionMaxFrames
+lumen_disocclusion_fraction = 0.4          # SpatialFilter.DisocclusionFraction
+lumen_ray_directions = 8                   # Temporal.MaxRayDirections
+lumen_moving_speed = 0.005                 # RelativeSpeedDifferenceToConsiderLightingMoving
+lumen_normal_bias = 0.001                  # m; Unreal's HardwareRayTracing.NormalBias is 0.1 cm
+lumen_hit_surface_cache = true             # the probes' ray hits read the surface cache (surface_cache.enabled) where a cell is lit; false or no cache: hit shading
