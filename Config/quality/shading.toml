@@ -5,6 +5,9 @@ emissive_area_lights = false      # 14.1b (L2b): constant-emission surfaces of n
                                   # for the diffuse direct light (first frame exact, no cache cold start); no shadows yet (14.3)
                                   # and R/S2's double-counting rule pending, so off by default
 emissive_leaf_m = 0.1             # 14.1b: the quadtree's largest leaf square (m); nodes are evaluated when diagonal <= 0.8 x distance
+tile_lights = false               # 14.1/14.2 (L2): per 8x8 tile NEAR/FAR classification of the froxel lists (Passes/Lights/TileLights.hlsl);
+                                  # FAR lights' diffuse comes from the tile corners' vector irradiance (1e-3 rule), their specular stays
+                                  # per pixel (D-23 pending); every shadow caster is NEAR until 14.3. Gate: tile vs per-pixel |dE|/E P99 <= 1e-3
 output_encoding = "srgb"          # RGB10A2 display output
 # Edge (E) pixels and surface groups (Passes/Shading/Edge.hlsli): two pixels are one surface when the material matches,
 # the shading normals differ by less than the angle, and each lies within max(footprint x ft, distance x dt) of the

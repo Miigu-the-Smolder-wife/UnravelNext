@@ -360,6 +360,9 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     // 14.1b (L2b): the converted emissive surfaces as quadtree area lights (shading.emissive_area_lights; invalid = off).
     const BufferRef emissiveLights = lights::emissiveLights(fc);
     TextureRef emissiveIrradiance;  // per-pixel diffuse irradiance from them (EmissiveDirect.hlsl, exposed RGBA16F)
+    // 14.1/14.2 (L2): the tile lights' records (TileLights.hlsl; shading.tile_lights, main view with S's lists).
+    const bool tileLights = fc.quality.boolean("shading.tile_lights") && froxelLists && view.view.kind == gpu::ViewKind::Main;
+    const BufferRef tileRecords = tileLights ? fc.graph.createBuffer({ "M tile lights", (uint64_t)tileCount * 96, 0 }) : BufferRef{};
     if (emissiveLights.valid())
     {
         RenderGraph& g = fc.graph;
@@ -550,6 +553,30 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         };
 
         // Planar reflection views are timed apart (their cost is R's reflection budget, ARCHITECTURE 2.6 C_planar).
+        // 14.1/14.2 (L2): the tile lights' classification and corner irradiance, after the edge tiles, before shading.
+        RenderGraph::BandedPass tilePass;
+        tilePass.name = "tile.lights";
+        if (tileLights)
+        {
+            ID3D12PipelineState* tileKernel = fc.shaders.compute("Passes/Lights/TileLights");
+            tilePass.setup = [=](PassBuilder& b) {
+                b.use(v.depth, Use::SrvCompute);
+                b.use(v.gbuffer, Use::SrvCompute);
+                b.use(v.froxelLights, Use::SrvCompute);
+                if (r.fxLights.valid()) b.use(r.fxLights, Use::SrvCompute);
+                b.use(edgeTiles, Use::SrvCompute);
+                b.use(tileRecords, Use::UavCompute);
+            };
+            tilePass.execute = [=](PassContext& c) {
+                const auto [row0, row1] = passTileRows(c);
+                if (row1 <= row0) return;
+                const uint32_t k[8] = { c.srv(v.depth), c.srv(v.gbuffer), c.srv(v.froxelLights), c.srv(edgeTiles), c.uav(tileRecords), o.tilesX, row0, 0 };
+                c.cmd->SetPipelineState(tileKernel);
+                c.bindFrameConstants(cb);
+                c.computeConstants(k, 8);
+                c.cmd->Dispatch(o.tilesX, row1 - row0, 1);
+            };
+        }
         RenderGraph::BandedPass shadePass;
         shadePass.name = "shade";
         shadePass.setup = [=](PassBuilder& b) {
@@ -591,6 +618,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             }
             useParticles(b);
             if (emissiveIrradiance.valid()) b.use(emissiveIrradiance, Use::SrvCompute);  // 14.1b
+            if (tileLights) b.use(tileRecords, Use::SrvCompute);  // L2
             if (meter) b.use(histogram.buffer, Use::UavCompute);
         };
         shadePass.execute = [=](PassContext& c) {
@@ -634,7 +662,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                          v.reflection.valid() ? c.srv(v.reflection) : none,
                                          r.giCache.valid() ? c.srv(r.giCache) : none,
                                          atm[0], atm[1], overflow ? c.srv(v.shadowOverflowTiles) : none, atm[3], emissiveIrradiance.valid() ? c.srv(emissiveIrradiance) : none, o.textureTableSrv, experiment,
-                                         0, fx[0], fx[1] };
+                                         tileLights ? c.srv(tileRecords) : none, fx[0], fx[1] };
                 uint32_t k32[40] = {};
                 std::memcpy(k32, k, sizeof k);
                 std::memcpy(k32 + 24, edge, sizeof edge);
@@ -661,6 +689,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
             }
         };
+        if (tileLights) return { detectPass, tilePass, shadePass };
         return { detectPass, shadePass };
     }
 
@@ -720,6 +749,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              }
                              useParticles(b);
                              if (emissiveIrradiance.valid()) b.use(emissiveIrradiance, Use::SrvCompute);  // 14.1b
+                             if (tileLights) b.use(tileRecords, Use::SrvCompute);  // L2
                          },
                          [=](PassContext& c) {
                              const uint32_t none = gpu::kNone;
@@ -736,7 +766,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                                       v.shadowVisibility.valid() ? c.srv(v.shadowVisibility) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
                                                       v.reflection.valid() ? c.srv(v.reflection) : none, r.giCache.valid() ? c.srv(r.giCache) : none,
                                                       atmosphere ? c.srv(r.transmittanceLut) : none, atmosphere ? c.srv(r.multiScatterLut) : none, none,
-                                                      air ? c.srv(v.airVolume) : none, emissiveIrradiance.valid() ? c.srv(emissiveIrradiance) : none, o.textureTableSrv, experiment, 0,
+                                                      air ? c.srv(v.airVolume) : none, emissiveIrradiance.valid() ? c.srv(emissiveIrradiance) : none, o.textureTableSrv, experiment,
+                                                      tileLights ? c.srv(tileRecords) : none,
                                                       froxelLists ? c.srv(v.froxelLights) : none, ltcSrv };
                              const uint32_t edge[8] = { c.srv(edgeTiles), coverage ? c.srv(v.coverageTiles) : none, 0, 0, c.uav(edgeRadiance),
                                                         v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, shadowSrvs,

@@ -31,7 +31,7 @@
 // P[3] = { atmosphere transmittance, multi-scatter, S's shadow overflow tile heads (main kernel; UNX_NONE = absent), this
 //        view's air volume } (this kernel reads no sky view)
 // P[4] = { 14.1b emissive area lights' diffuse irradiance (RGBA16F, exposed; Passes/Lights/EmissiveDirect.hlsl; UNX_NONE = off), texture table, experiment mask (0;
-//        shading.toml), 0 }
+//        shading.toml), L2 tile lights' records (raw, TileLights.hlsli; UNX_NONE = off) }
 // P[5] = { froxel lights (raw) (UNX_NONE = absent), LTC table (StructuredBuffer<float4>, AreaLight.hlsli) }
 // P[6] = { edge tile mask SRV (EdgeDetect.hlsl, R32G32_UINT per tile; UNX_NONE = no edge pixels), V's coverage tiles
 //        (raw; UNX_NONE = no coverage layer: a tile with coverage fragments keeps every pixel's exposed radiance for the
@@ -73,6 +73,8 @@
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 #include "Passes/Atmosphere/Froxel.hlsli"
+#include "Passes/Common/LightNearFar.hlsli"  // 14.1 NEAR/FAR classification and FAR vector irradiance (shared header)
+#include "Passes/Lights/TileLights.hlsli"       // L2: the tile's NEAR mask and corner irradiance (shading.tile_lights)
 #include "Passes/Visibility/CoverageTiles.hlsli"
 #if !PLANAR
 #define GI_PROBE_TILE_CACHE  // R's screen probes at the group's tile corners, loaded once (design revision 1 4.4, 12.3)
@@ -407,6 +409,10 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     froxels.lightIndices = P[5].x;
     froxels.scattering = UNX_NONE;
     froxels.pad = 0;
+    // L2 (14.1/14.2) tile record state: the FAR lights' diffuse comes once from the tile term after the loop.
+    bool tileFar = false;
+    uint2 nearMask = uint2(0xFFFFFFFFu, 0xFFFFFFFFu);
+    TileLightRecord tileRec = (TileLightRecord)0;
     if (froxels.lights != UNX_NONE && (experiment & 32) == 0)  // this view's lists (v1.22)
     {
         uint shadowPacked = 0xFFFFFFFFu;  // all slots lit when S publishes no visibility
@@ -457,9 +463,28 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #endif
         ShadowPixelReceiver overflowReceiver = (ShadowPixelReceiver)0;
         uint4 lightWords = 0;
+        // L2 (14.1/14.2): this tile's record: FAR lights (a clear bit of the pixel's slice mask) skip their diffuse term
+        // here and come back as the tile corners' vector irradiance below; Foliage keeps every light per pixel.
+#if !FALLBACK  // (fallback tiles - S's overflow - keep every light per pixel: the record is an optimisation, not a value)
+        if (P[4].w != UNX_NONE && !foliage)
+        {
+            tileRec = tileLightsRecord(P[4].w, (pixel.y / M_TILE) * ((g_viewWidth + M_TILE - 1) / M_TILE) + pixel.x / M_TILE);
+            if (tileLightsValid(tileRec))
+            {
+                const uint slice = froxelSlice(froxelGrid(froxels.lights), linearZ), rel = slice - tileLightsFirstSlice(tileRec);
+                if (rel < tileLightsSliceCount(tileRec))
+                {
+                    tileFar = true;
+                    nearMask = tileRec.mask[rel];
+                }
+            }
+        }
+#endif
         for (uint i = 0; i < range.y; ++i)
         {
             const uint lightIndex = froxelLightBuffered(froxels, indexBase, range, i, lightWords);
+            const bool isFar = tileFar && i < 64 && (((i < 32 ? nearMask.x : nearMask.y) >> (i & 31)) & 1u) == 0;
+            const float3 frontL = isFar ? 0 : front;  // (L2: the FAR light's diffuse is in the tile term)
             const GpuLight light = loadLight(lightIndex);
             // The light's shadow ordinal is counted here; its visibility (a slot, or the overflow records' dependent
             // loads) is read only for a light that adds something at this pixel (a window, a spot factor and a lobe on
@@ -561,7 +586,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                         continue;
                     }
 #endif
-                    radiance += scaleBase * Lw * (j == 0 ? front * (SH_PI * I) : (j == 1 ? specularAlbedo * I : back * (SH_PI * I)));
+                    radiance += scaleBase * Lw * (j == 0 ? frontL * (SH_PI * I) : (j == 1 ? specularAlbedo * I : back * (SH_PI * I)));
                 }
 #if LAYERED == 1
                 if (last == 5)
@@ -585,10 +610,10 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 E *= lightFunction(P[6].w, lightIndex, light.forward, light.right, -l, footprint, g_time);
             }
             float3 f = 0;
-            if (NoV > 0 && cosL > 0) f = front + shSpecular(f0, alpha, compensation, n, v, l, NoV, cosL);
+            if (NoV > 0 && cosL > 0) f = frontL + shSpecular(f0, alpha, compensation, n, v, l, NoV, cosL);
             else if (foliage && NoV * cosL < 0) f = back;
 #if LAYERED
-            if (aniso.on && NoV > 0 && cosL > 0) f = front + shAnisoSpecular(aniso, f0, n, v, l);
+            if (aniso.on && NoV > 0 && cosL > 0) f = frontL + shAnisoSpecular(aniso, f0, n, v, l);
 #endif
 #if LAYERED == 1
             if (cover > 0) f = keep * f + cover * (modelCoatLobe(coat, n, v, l) + modelCoatUnder(s, coat, n, v, l));
@@ -599,6 +624,12 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
             radiance += f * E * (abs(cosL) * visibility);
         }
     }
+
+    // L2 (14.2): the FAR lights' diffuse, once: the tile corners' vector irradiance (every FAR light above the tile's
+    // normal cone with margin, so n . E is their exact sum up to the 1e-3 interpolation rule), bilinear in the tile.
+#if !AREA_LOBES && !FALLBACK
+    if (tileFar && NoV > 0) radiance += front * max(0.0, dot(n, tileLightsIrradiance(tileRec, pixel & (M_TILE - 1))));
+#endif
 
     // 14.1b (L2b): the converted emissive surfaces as area lights - their diffuse irradiance on the viewer's side of n
     // (EmissiveDirect.hlsl: quadtree nodes as horizon-clipped Lambert polygons; the specular side is the reflection
