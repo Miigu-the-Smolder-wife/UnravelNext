@@ -813,3 +813,17 @@ accdiag 조각이 12분 걸렸다(시험 1회 2분 × 6). 10분 규칙을 넘겼
 
 깊이 피라미드와 추적 include가 돈다. `LgTrace`의 호출 지점에 붙이는 법은 `Docs/Status/SCREEN_TRACE_INTERFACE_KO.md`: C++에서 `refl::ReflectionSystem::get(fc).screenTraceInputs(fc, main)`(피라미드 + 이전 프레임 색, 프레임당 1회 기록), HLSL에서 `sctTrace` → `sctWorld` → `sctPreviousColour`(`Passes/Reflection/ScreenTrace.hlsli`). 이전 색이 무효면(이력 없음) 건너뛰고 월드 광선만. 반사 쪽 사용 예는 `ReflectionScreenTrace.hlsl`.
 
+## S2 → 조정: 상태 (2026-10-02 새벽, 세션 간 메시지가 반려되는 동안 여기에 적는다)
+
+GPU 재현은 멈춘 상태다(조정 세션 지시). 아래는 GPU 없이 한 일과 남은 일.
+
+| 순서 | 항목 | 상태 | 커밋 |
+|---|---|---|---|
+| 1 | DRED 패스 이름 | 작성·전 트랙 빌드. DRED 1.1 설정 인터페이스를 직접 요청하도록 고침. **미검증**: 문자열은 장치 제거 때만 나오고 그 실행은 하지 않았다. 시작 줄에 `pass names on / NOT available`이 찍히므로 다음 허용된 실행에서 설정이 걸렸는지는 보인다 | b30745a |
+| 2 | 직접광 그림자 광선의 "반복 횟수 고정 + 인라인 RayQuery" 변형 | 아직 안 함 | |
+| 3 | A의 검토 | A가 물으면 답한다. 호출부: `Native/Render/Passes/SurfaceCache/SurfaceCacheLight.hlsl` `scCentreVisible`(셀 점 x, 법선 n, 광원 g → 원점 x ± n·bias, 방향 광원 중심, TMin = bias, TMax = 거리 − 반지름 − 5 cm, `rtVisible(scene, ray, RT_MASK_SHADOW, flags)`), `SurfaceCacheCellsGen`의 `for (i < held)` 루프 안. bias = 1e-3 + 2e-4 × 카메라까지 거리 | |
+| 4 | radiosity 광선이 조명 안 된 셀에서 0을 읽는 비율 진단 | 아직 안 함 | |
+| 4 | `unx_reference`가 차폐 텍스처를 무시 | 됨(3b041c2). 로비는 그다음 "water with sun caustics (the light tracer does not refract)"에서 멈춘다 — 기준 영상 없음. 넘는 방법은 태양을 끄거나(`--sun-illuminance 0`, 장면이 달라짐) 태양 caustics 설정을 끄는 것인데 결정이 필요하다 | 3b041c2 |
+| 5 | PrevSceneColor를 포스트프로세스 직전 장면 색으로 | 아직 안 함 | |
+
+라운지 hang 요약(재현 7회, 그중 마지막 1회는 예고가 반려된 채 실행됨): 멈추는 곳은 `r.sc.cells`의 광원 중심 그림자 광선. 통과: 셀 선택·저장만 / radiosity만 / 태양 그림자 광선만 / 광원 목록 선택만 / 광원 적분(그림자 광선 없음). 실패: 광원 + 중심 그림자 광선 — 그림자 마스크, FORCE_OPAQUE, GI 마스크 + 광선 구간 검사 모두에서. 원인 미확인. 진단 스위치 `surface_cache.debug_skip`, 로그 `Results/Local/Refl/{DR1,T1..T6,U1,V0}/`. 라운지에서 `surface_cache.enabled`는 켜지 않는다.
