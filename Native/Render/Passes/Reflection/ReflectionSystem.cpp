@@ -99,6 +99,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.hitConeLobes = !q.has("reflection.hit_cone_lobes") || q.boolean("reflection.hit_cone_lobes");
     s.layerResidualWhole = !q.has("reflection.layer_residual_whole") || q.boolean("reflection.layer_residual_whole");
     s.hitOrientedLights = q.has("reflection.hit_oriented_lights") && q.boolean("reflection.hit_oriented_lights");
+    s.hitAccumulator = !q.has("reflection.hit_accumulator") || q.boolean("reflection.hit_accumulator");
     s.deterministic = q.has("debug.deterministic") && q.boolean("debug.deterministic");
     s.planarRayNs = (float)q.number("reflection.planar_ray_ns");
     return s;
@@ -927,8 +928,10 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     }
     // Rays buffer of the split passes (ReflectionRay.hlsli): header, hit records, ray -> job, values, shadow rays.
     const uint32_t rayCapacity = (s.experimentDisable & 64) ? 0 : m_rayCapacity;
-    static_assert(32 + (1ull << 24) * 60 < (1ull << 30), "the rays buffer stays under 1 GiB");  // 64: every job inline (A/B of the split)
-    const BufferRef raysBuffer = g.createBuffer({ "R reflection rays", 32 + (uint64_t)rayCapacity * 60, 0 });  // REFL_RAYS_HEADER + REFL_RAYS_SLOT_BYTES
+    static_assert(48 + (1ull << 24) * 60 < (1ull << 30), "the rays buffer stays under 1 GiB");  // 64: every job inline (A/B of the split)
+    const BufferRef raysBuffer = g.createBuffer({ "R reflection rays", 48 + (uint64_t)rayCapacity * 60, 0 });  // REFL_RAYS_HEADER + REFL_RAYS_SLOT_BYTES
+    // The GI hit accumulator pool (GiAccPool.hlsli; valid when gi.hit_accumulator's pool runs): reflection hits read it.
+    const BufferRef accPool = s.hitAccumulator ? fc.resources.giAccumulator : BufferRef{};
     const BufferRef rayLayers = layers ? g.createBuffer({ "R reflection ray layers", std::max<uint64_t>((uint64_t)rayCapacity * 16, 16), 0 }) : BufferRef{};  // REFL_LAYER_RAY_BYTES
     g.addPass("r.refl.args", QueueType::Compute,
               [&](PassBuilder& b) {
@@ -939,12 +942,15 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       b.use(rayLayers, Use::UavCompute);
                       b.use(jobLayers, Use::UavCompute);
                   }
+                  if (accPool.valid()) b.use(accPool, Use::SrvCompute);
               },
-              [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, hitFlags = (s.hitConeLobes ? 1u : 0u) | (s.hitOrientedLights ? 2u : 0u)](PassContext& c) {
+              [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, accPool,
+               hitFlags = (s.hitConeLobes ? 1u : 0u) | (s.hitOrientedLights ? 2u : 0u) | (s.layers && s.layerFilter ? 4u : 0u)](PassContext& c) {
                   // (the layer buffers' UAVs and the hit shading's flags into the rays header: the shade, combine and inline
                   // passes find them there)
                   const uint32_t k[12] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(raysBuffer), rayCapacity,
-                                           layers ? c.uav(rayLayers) : 0xFFFFFFFFu, layers ? c.uav(jobLayers) : 0xFFFFFFFFu, hitFlags, 0, 0, 0 };
+                                           layers ? c.uav(rayLayers) : 0xFFFFFFFFu, layers ? c.uav(jobLayers) : 0xFFFFFFFFu, hitFlags,
+                                           accPool.valid() ? c.srv(accPool) : 0xFFFFFFFFu, 0, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionArgs"));
                   c.computeConstants(k, 12);
                   c.cmd->Dispatch(1, 1, 1);
@@ -1019,6 +1025,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         b.use(depth, Use::SrvGraphics);
         b.use(gbuffer, Use::SrvGraphics);
         if (gi) b.use(cache, Use::UavGraphics);
+        if (gi && accPool.valid()) b.use(accPool, Use::SrvGraphics);  // (the passes that shade: the accumulator's cell means)
         if (gi && layers)  // (the passes that shade or combine: the layer records)
         {
             b.use(rayLayers, Use::UavGraphics);

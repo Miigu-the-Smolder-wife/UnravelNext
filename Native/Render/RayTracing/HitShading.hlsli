@@ -166,14 +166,15 @@ float3 rtHitRadiance(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float p
 //                layers on the cell's mean light.
 // eSun = the sun's illuminance x max(n.l, 0) x visibility, muS = max(n.l_sun, 0); localE = the local-light sample's
 // irradiance (weight x max(n.wi, 0), 0 when not visible), muL = max(n.wi, 0). Both terms are linear in eSun and localE:
-// a caller that learns the sun's visibility later takes the terms at visibility 0 and 1 and interpolates.
+// a caller that learns the sun's visibility later passes eSun at full visibility and takes own - ownSun (visibility 0)
+// and ownSun (the sun's share of 'own') apart.
 // lambert: GiAnalytic's closed forms (no layers). Foliage is not handled (its transmission has no accumulator term).
 struct RtHitDirect
 {
     float3 A, B, C;
     float3 kA, kB;
     float kC;
-    float3 own;
+    float3 own, ownSun;
 };
 RtHitDirect rtHitDirectTerms(GpuMaterial m, float3 n, float3 v, float3 eSun, float muS, float3 localE, float muL, bool lambert)
 {
@@ -195,12 +196,15 @@ RtHitDirect rtHitDirectTerms(GpuMaterial m, float3 n, float3 v, float3 eSun, flo
     d.A = eSun + localE;
     d.B = d.A;
     d.C = 0;
+    float3 sunB = eSun, sunC = 0;  // the sun's parts of B and C
     if (coat.cover > 0)
     {
         const float tS = 1 - modelCoatEms(coat, muS), tL = 1 - modelCoatEms(coat, muL);
         d.B = tS * eSun + tL * localE;
         d.C = (tS * eSun * modelCoatReturned(ms, coat, modelCoatRefractedCos(muS, coat.eta)) +
                tL * localE * modelCoatReturned(ms, coat, modelCoatRefractedCos(muL, coat.eta))) / MODEL_PI;
+        sunB = tS * eSun;
+        sunC = tS * eSun * modelCoatReturned(ms, coat, modelCoatRefractedCos(muS, coat.eta)) / MODEL_PI;
     }
     const float NoV = max(dot(n, v), 1e-4);
     const float3 albedo = m.baseColor * ((1 - m.metallic) / MODEL_PI);
@@ -210,6 +214,7 @@ RtHitDirect rtHitDirectTerms(GpuMaterial m, float3 n, float3 v, float3 eSun, flo
     d.kB = coated * albedo;
     d.kC = coated;
     d.own = plain * albedo * d.A + coated * (albedo * d.B + d.C);
+    d.ownSun = plain * albedo * eSun + coated * (albedo * sunB + sunC);
     return d;
 }
 float3 rtHitDirectFromMeans(RtHitDirect d, float3 mA, float3 mB, float3 mC) { return d.kA * mA + d.kB * mB + d.kC * mC; }

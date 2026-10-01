@@ -28,7 +28,8 @@
 |---|---|---|---|
 | `reflection.hit_cone_lobes` (9209fcd) | 켬 | 반사 hit의 광원 쪽 스펙큘러 lobe(국소광 표본의 기본 lobe, 국소광·태양의 코팅 lobe)를 광선 원뿔만큼 넓힌다: α' = sqrt(α² + (원뿔 퍼짐 / 2)²) | 코드 확인: GI hit은 둘 다 넓히고(GiTrace, g_rtHitCone) 반사 hit의 태양 기본 하이라이트도 원뿔로 필터되는데, 반사 hit의 국소광 lobe와 코팅 lobe만 한 방향으로 평가했다. lobe 원뿔이 몇 도인 G 광선이 유약 타일을 등의 거울 방향 근처에서 맞으면 드문 큰 표본이 된다 |
 | `reflection.hit_oriented_lights` (a7997f7) | 끔 | 국소광 표본 1개를 고를 때 hit 방향을 가중치에 넣는다(지평선 아래 광원은 뽑지 않음). 불편, 표본·그림자 광선 수 그대로 | 선택이 중요도(I·창/d²) 비례라 뒤쪽 광원을 제 무게로 뽑고 0을 받았다. 켜면 r.refl.localshadow가 모든 hit의 표면을 다시 만들어 작업량이 늘므로 timing 뒤에 켠다 |
-| hit 셀 누적기 읽기 (미구현) | — | 발자국이 큰 반사 광선의 국소광·태양 확산 직접 항을 셀 평균으로(V2.3 12.1). 공용 함수 `rtHitDirectTerms`만 넣었다(92f0a01) | R의 12.8 누적기 API를 기다린다 |
+| `reflection.hit_accumulator` (ffefae2) | 켬 (R의 `gi.hit_accumulator` + `gi.hit_accumulator_pool`이 켜질 때만 동작, 둘 다 지금 끔) | 반사 hit의 확산 직접 항(태양 + 국소광 표본)을 hit 점 값 대신 발자국이 덮는 표면 셀의 평균으로(V2.3 12.1·12.8, `GiAccPool.hlsli` 읽기 전용): `radiance += weight × (kA mA + kB mB + kC mC − 점 값)`. 셀이 발자국의 4배를 넘으면(거울) 점 값 유지 | 기존 경로 f0 실측: 화소별 표준편차/평균 2.9~5.4, 에너지 절반이 상위 1.5~5 % 표본(램프 옆 1/d² 핫스팟). **예외: 인라인 G 커널은 DXIL 자리가 없어 읽기를 뺐다** — 광선 용량을 넘은 G 작업(컷 직후 몇 프레임)은 점 값이다 |
+| `gi.bounce_visibility` 따름 (7cc7329) | R의 스위치(끔) | 반사 hit의 캐시 읽기가 앵커가 그 점을 보는 코너만 읽는다(컷 직후 벽 너머 빛 누설 방지, R 1dc8a00) | R 실측: 라운지에서 바깥 낮빛 1.5~1.8배 |
 | hit 국소광 결정적 합 D-1 (미구현) | — | 도달 광원 전부 평가 | 거친 분류 페이지(14.3-1) 전에는 그림자 광원이 전부 NEAR라 hit당 가시성 평가가 도달 광원 수만큼이다: 720p f0에서 [예상] 0.9 M hit × 30 × 0.4 ns ≈ 11 ms. 그리고 선택 분산은 O(1)이라 반짝이의 주원인이 아니다(R 실측 V2.2 11.0) |
 
 ### 설계와 다르게 한 것 (이유)
@@ -72,7 +73,7 @@
   - 벽·기둥은 f0 수준이 수렴값의 23~55 %다(캐시 데이터 없는 hit = 간접광 0). 데이터 없음 가중(0663e47)의 대상이다.
   - A f0(이력 없는 표본)의 화소별 표준편차/평균 [실측]: 기둥 2.9, 뒷벽 5.4, 왼쪽 벽 4.0, 바닥 0.67. 에너지 절반이 상위 5.0 % / 1.5 % / 2.3 % / 31 % 화소에 있다(두꺼운 꼬리).
   - 3단 B3 à-trous의 유효 표본 수는 274다 [계산: 커널의 1/Σw²]. 그래서 공간 필터 뒤 잡음은 [예상] 기둥 17.5 %, 뒷벽 33 %, 왼쪽 벽 24 %, 바닥 4.0 %이고, 이력 8을 더해도 6.2 / 11.5 / 8.5 / 1.4 %다. **벽·기둥은 공간·시간 평균만으로 3 %에 닿지 않는다**(3 %에 필요한 표본 수 9천~3만). 원천 분산을 줄여야 한다(4절).
-- DXIL [실측, HEAD 빌드]: ReflectionTraceInline.SKY0.JOB2.CORNERS1 199.9 KB(한도 200 KB = 204,800 B, 여유 약 4.9 KB), LayerDenoise 약 6 KB, LayerTemporal 29 KB, LayerCompose 3 KB.
+- DXIL [실측, ffefae2 빌드]: ReflectionTraceInline.SKY0.JOB2.CORNERS1 201,972 B(한도 204,800 B, 여유 2.8 KB; 누적기 읽기는 이 커널에서 뺌), JOB1 186,172 B, ReflectionShadeRays 122,100 B, LayerDenoise 약 6 KB, LayerTemporal 29 KB, LayerCompose 3 KB.
 
 ## 3. 게임 뒤 GPU로 가릴 것 (순서대로, 조각당 잠금 1회 ≤ 10분)
 
@@ -87,12 +88,14 @@
 
 9. `reflection.layer_mirror_lobe` 켬/끔(조정 승인: A/B 뒤 눈 판정으로 기본값 결정), `reflection.layer_history_bound` 켬/끔, `reflection.layer_residual_whole` 켬/끔: 욕탕 정지·회전에서 반사 층 σ, 기둥 옆 색 얼룩 크롭, 거울(샤워 거울·젖은 바닥·유약 타일) 윤곽 크롭.
 10. `reflection.hit_cone_lobes` 켬/끔(layers=false로, 기존 경로에서): 욕탕·라운지·기차 f0/f3/f15와 회전의 반사 층 σ·화소별 표준편차/평균, reflectionanalytic 전부. 끔이 이전 값과 비트 동일한지(결정론 모드 두 실행).
+12. `gi.hit_accumulator` + `gi.hit_accumulator_pool` 켬에서 `reflection.hit_accumulator` 켬/끔: 욕탕·라운지·기차 f0/f3/f15와 회전, 반사 층 σ, 영역별 화소 표준편차/평균, 평균 휘도 차(에너지 보존), reflectionanalytic·gianalytic. `--set reflection.experiment_disable=64`(모든 작업 인라인)로 인라인 M 경로도 본다.
+13. `gi.bounce_visibility` 켬: 컷 직후 반사 층 수준·색과 미스 비율(`reflection.stats_log_frames`).
 11. `reflection.hit_oriented_lights` 켬/끔: 같은 A/B + reflectionanalytic 5번(국소광 hit), r.refl.localshadow timing. 끔일 때 값이 이전과 비트 동일한지(선택 함수를 하나로 합쳤다).
 
 ## 4. 결정이 필요한 것 (조정 세션에 올림)
 
 1. **거친 M 화소의 lobe 발자국 재구성 (`reflection.layer_mirror_lobe`, 기본 끔, 8f98620).** M 경로는 roughness < 0.14 전부이고 화소당 광선 1개를 GGX lobe에서 뽑는다. roughness 0.1이면 lobe 반각 2°, 발자국 약 21 px(내부 720p, 눈·hit 거리 같을 때 [코드 식으로 계산])이다. 즉 유약 타일·광택 대리석·젖은 바닥의 "거울 identity"는 프레임마다 lobe 표본 하나라 그 자체가 잡음이다. 기존 경로는 시점이 멈춰 있을 때만 누적한다. 설계 1.2와 세션 규칙은 "M의 identity는 공간 필터를 받지 않는다"인데, 이는 blur_px < 1인 거울에만 맞는다. 스위치를 켜면 M의 base도 lobe 발자국(σ = blur_px / 2) 안에서 재구성하고, blur_px < 1인 거울은 그대로다. 광선 수는 같다. 규칙의 문구와 어긋나므로 결정 항목이다.
-2. **G lobe의 두꺼운 꼬리(벽·기둥).** 위 실측대로 공간·시간 평균으로는 3 %에 닿지 않는다. 설계 V2.3 12.1은 반사 hit도 hit 셀 누적기(셀 평균 직접 조도)를 읽게 돼 있다. R의 누적기(P1″-a, 12.8에서 추정기 개정 중)가 정해지면 반사 hit의 국소광 직접 항을 발자국이 셀보다 큰 광선에서 누적기 값으로 바꾸는 것이 원천 해법이다. R·설계와 정할 일이고, S2는 hit 쪽 배선을 맡는다.
+2. **G lobe의 두꺼운 꼬리(벽·기둥).** 위 실측대로 공간·시간 평균으로는 3 %에 닿지 않는다. 조정 결정(2b): 반사 hit이 hit 셀 누적기를 읽는다 — 배선함(ffefae2). 남은 것: 인라인 G 커널의 예외를 없애려면 그 커널에서 제어변량·조합(약 20 KB)을 combine 패스로 옮겨야 한다(하드웨어 검증이 필요한 구조 변경, 조정 세션에 제안).
 
 미확인 가설 (코드로 고치지 않음):
 - B 2판 f3·f15 반사 층의 8 px 블록의 출처(2번).

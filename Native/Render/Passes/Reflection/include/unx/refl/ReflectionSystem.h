@@ -48,6 +48,7 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     bool layerMirrorLobe = false;     // reflection.layer_mirror_lobe: M's base as a layer inside its lobe footprint (decision item)
     bool layerResidualWhole = true;   // reflection.layer_residual_whole: G residual = value - stochastic share (false: also - gbar)
     bool hitOrientedLights = false;   // reflection.hit_oriented_lights: the hits' light choice weighs the hit's orientation
+    bool hitAccumulator = true;       // reflection.hit_accumulator: hits read GI's hit accumulator pool when it runs
     bool hitConeLobes = true;         // reflection.hit_cone_lobes: the hits' specular lobes widened by the ray cone (ReflectionShade.hlsli)
     // debug.deterministic: the planar view / ray choice from the priors alone (planarRayNs, the view's prior a + b x),
     // never from measured GPU times (they differ between runs, and a plane drawn by a camera or by rays differs in value).

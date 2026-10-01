@@ -24,6 +24,11 @@ hit_cone_lobes = true                  # the hits' specular lobes toward their l
                                        # hits do: a reflection value is a mean over its cone. false = the lobes at the single ray
                                        # direction (the path before 2026-10-01: rare huge highlight samples on glazed and glossy
                                        # hits). A/B
+hit_accumulator = true                 # reflection hits read GI's hit accumulator pool (gi.hit_accumulator with gi.hit_accumulator_pool:
+                                       # the pool exists only then) - their diffuse direct light is the mean over the surface
+                                       # cell the ray's footprint covers, with the hit's own albedo and layers, not the light of
+                                       # one point (heavy-tailed beside lamps). Mirror rays (cell > 4 x footprint) keep the
+                                       # point value. false = the point value everywhere (A/B)
 hit_oriented_lights = false            # the hits' one local-light sample chosen with the hit's orientation in the weights (importance
                                        # x the emitter's largest possible cosine: lights below the hit's horizon are not drawn;
                                        # HitLocalLights.hlsli). Unbiased, one sample and one shadow ray as before; the local-light
