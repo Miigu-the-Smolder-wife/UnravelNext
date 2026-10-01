@@ -52,6 +52,7 @@ struct GiSettings  // from Config/quality/gi.toml
     // (GiIntegrate.hlsl). gi.bounce_visibility: GiTrace's bounce reads (the hit's own cell and the fallback levels) count
     // only cells whose anchor sees the hit.
     bool missClosure = false, bounceVisibility = false;
+    bool hitOrientedLights = false;  // gi.hit_oriented_lights (GI_P1_FLAGS bit 7)
     uint32_t bounceSplitUpdates = 1;
     bool anchorResample = false;
     bool anchorCentroid = false;  // gi.anchor_centroid (V2.3 12.2, P1''-b): the anchor is the lookups' centroid (GiInternal giCentroidOffer)

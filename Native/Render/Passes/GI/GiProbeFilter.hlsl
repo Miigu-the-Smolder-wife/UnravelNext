@@ -11,12 +11,15 @@
 //   plane:     its surface point's distance from the probe's tangent plane, 0 at 2 % of the probe's distance to the eye;
 //   normal:    (n . n_tap)^8 (a wall's SH is not a floor's);
 //   luminance: exp(-d / (4 sigma)), d = the relative difference of the SH's constant terms (luminance) and sigma = the
-//              probe's relative standard deviation: in the first filter pass the lookup's sigma at its surface point
-//              (GiCache.hlsli: measured spread / sqrt(samples)), then what each pass leaves of it, sigma x sqrt(sum
-//              w^2) / sum w (the variance of the weighted mean it stored, as SVGF propagates its variance). Where the
-//              estimate is noisy every tap on the surface counts; as the passes widen, only taps within the value's
-//              remaining error do, so a real gradient (larger than 4 sigma of what is left) is kept: the later passes
-//              average the cells' errors without flattening the light's own variation over several cells;
+//              larger of the two probes' relative standard deviations (the lookup's sigma at each probe's surface
+//              point, GiCache.hlsli: measured spread / sqrt(samples); the same in every pass). Where either estimate
+//              is noisy the pair averages; where both have converged only values within their error do, so a real
+//              gradient (larger than 4 sigma) is kept. The pair's sigma, not the centre's: with the centre's alone a
+//              converged bright probe kept its value while its noisy neighbours took it in, which raised the mean
+//              (train lounge frames 3-4: GI level 1.20-1.23 with three passes against 0.99 with one) [measured
+//              2026-10-01]. Shrinking sigma pass by pass (sigma x sqrt(sum w^2) / sum w, as SVGF propagates variance)
+//              was tried and removed: the later passes then kept the young cells' differences as 40-60 px blocks and
+//              left plateaus with visible borders in the converged image [same runs].
 //   surface:   probes without a surface, and probes whose point has no cache data yet (SH 0), are left out; a probe
 //              without data takes its neighbours' mean (no luminance stop: it has no value of its own).
 // The result is each probe's SH in GiProbeWide.hlsli's layout; r.gi.screen.filter evaluates it at the pixel's normal
@@ -66,11 +69,10 @@ void giWideFilter(Src src, Texture2D<uint4> probes, RWTexture2D<uint4> output, u
     const float planeTolerance = 0.02 * max(distance(p, g_cameraPosition), 1e-6);
     const float l0 = giWideLuminance(centre.sh[0]);
     const bool has = l0 > 0;
-    const float stop = has ? 1.0 / (4.0 * max(sigma, 1e-3)) : 0.0;
+    const float sigma0 = max(sigma, 1e-3);
     const int step = (int)P[1].z;
     float3 sum[9];
     float weight = has ? 0.375 * 0.375 : 0.0;
-    float weight2 = weight * weight;
     [unroll] for (uint k = 0; k < 9; ++k) sum[k] = centre.sh[k] * weight;
     [loop] for (int dy = -2; dy <= 2; ++dy)
     {
@@ -92,15 +94,15 @@ void giWideFilter(Src src, Texture2D<uint4> probes, RWTexture2D<uint4> output, u
             const float lq = giWideLuminance(r.sh[0]);
             if (!(lq > 0)) continue;
             const float d = abs(lq - l0) / max(max(lq, l0), 1e-9);
+            const float stop = has ? 1.0 / (4.0 * max(sigma0, asfloat(giProbePlane(src, uint2(q), 4, count).z))) : 0.0;
             const float kx = dx == 0 ? 0.375 : (abs(dx) == 1 ? 0.25 : 0.0625), ky = dy == 0 ? 0.375 : (abs(dy) == 1 ? 0.25 : 0.0625);
             w *= kx * ky * exp(-d * stop);
             [unroll] for (uint c = 0; c < 9; ++c) sum[c] += w * r.sh[c];
             weight += w;
-            weight2 += w * w;
         }
     }
     [unroll] for (uint m = 0; m < 9; ++m) sum[m] = weight > 0 ? sum[m] / weight : 0.0;
-    giWideStore(output, id, count, sum, occlusionWord, weight > 0 ? sigma * sqrt(weight2) / weight : sigma);
+    giWideStore(output, id, count, sum, occlusionWord, sigma);
 }
 
 [numthreads(8, 8, 1)]

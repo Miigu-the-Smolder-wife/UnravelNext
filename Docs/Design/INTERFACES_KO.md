@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.91, 2026-10-01)
+# UnravelNext 인터페이스 (v1.92, 2026-10-01)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -750,6 +750,11 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.92 (2026-10-01, A: 결함 큐 13 (75) 탁한 물; 미검증 — 빌드까지):
+  - `scene::Material::waterScattering`(σ_s 1/m rgb)·`waterAnisotropy`(HG g), `UnxMaterialDesc` **v6**(232 B; v5 216 B도 받음), GPU 재질의 Water 클래스는 `hairAbsorption` = σ_s, `hairBetaN` = g.
+  - (74) **둥근 욕조 W2-R**: `UnxPoolDesc::shape`(옛 reserved: 0 사각, 1 원형, sizeX = 지름), `PoolFrame::shape`, C# `UnravelNextPool.Round`. `Passes/Water/RoundPool.{h,cpp,hlsli}` + 커널 7개(Clear·Splat·Rows·Analysis·Evolve·Synthesis·Columns·Mesh): 극좌표 512 × 128 고리 + 중심, 차수 m = 0..255의 Dini 모드 J_m(k r)(J_m'(kR) = 0, kR ≤ π·128 절단), 호스트 double 표(모드 진동수·감쇠(바닥·원통벽·막 경계층 적분 닫힌식), 차수별 최소제곱 분석 F_m = (BᵀWB)⁻¹BᵀW·합성 B·기울기 D), 각 FFT + 차수별 행렬곱, 상태 = 복소 모드 진폭. 유체 접합·통계·setState는 미구현. 단위 시험 `round_pool_modes`.
+  - (76) `scene::Material::emissiveVisibleOnly`(**v7** 236 B, `uint32_t emissiveVisibleOnly`; v6 232 B·v5 216 B도 받음, C# `_UnxEmissiveVisibleOnly` 재질 프로퍼티) → GPU `classFlags` 비트 `MATERIAL_EMISSIVE_VISIBLE_ONLY`(1 << 14): 1차·반사 광선에는 발광 면, **GI 갱신 광선의 발광 표본·발광 캐시 채널에서는 0**(R 폴더: `rtEmissionAt`의 GI 호출처에서 비트 검사 — R에게 요청). 과도기 규칙: 14.1b가 모든 발광 면을 광원으로 삼으면 불필요. C# `MaterialDesc` v6(옛 DLL이면 v5로 재시도), `UnravelNextPool.Scattering/ScatteringAnisotropy`(커밋 전 `shading.water_turbid=true` 오버라이드).
+  - `shading.water_turbid`(기본 false): 켜면 S의 `s.froxel.watermedia`(`Passes/Water/WaterMedia.hlsl`)가 산란하는 수조마다 타일 광선의 상자 구간 σ_t·ℓ과 단일 산란 원천(태양: W 태양 지도의 굴절·프레넬·흡수·코스틱 × VSM 공기 보행 lit 비율 × p_HG; 국소광: `airLocalLight`(비차폐, v1); 주변: GI 캐시 조도 등방)을 E의 입자 매질 슬라이스 배치로 더한다(E 매질이 있으면 원천 합·자기감쇠 정확 결합). 수면 굴절 경로의 소멸은 σ_t = σ_a + σ_s(`WaterSurface.hlsli`), 태양 지도의 1 m 투과율도 e^−σ_s 곱(키 켜짐일 때).
 - v1.91 (2026-10-01, A: 결함 큐 6 / 게임 요청 83 — 카메라 화이트 밸런스; 미검증 — 빌드까지):
   - `FrameContext::whiteBalanceKelvin/Tint`, 호스트 `setWhiteBalance`, ABI 6 선택 export `UnxFrameSetWhiteBalance(float K, float Duv)`, C# `UnravelNextRenderer.TrySetWhiteBalance`·`UnravelNextScene.WhiteBalance/WhiteBalanceKelvin/WhiteBalanceTint`(커밋 전 `shading.post_white_balance=true` 오버라이드를 스스로 넣음), `PostFinal` P[3].y·P[4..6], 8.4 문단. 단위 시험 `white_balance_matrix`(D65 항등, 궤적 색도, 백색 → (1,1,1), 틴트 방향).
 - v1.90 (2026-10-01, A: 결함 큐 10번, B 요청 — 수조 η 통계 호스트 API; 미검증 — 빌드까지):

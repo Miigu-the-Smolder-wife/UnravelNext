@@ -215,6 +215,11 @@ void GiTraceGen()
             m = rtHitMaterial(m, s, hit.t * GI_FOOTPRINT_PER_METRE * asfloat(P[0].z), dot(s.normal, r.Direction));
             rtHitDecals(scene, s, hit.t * GI_FOOTPRINT_PER_METRE * asfloat(P[0].z), m);  // the direct view's decals (A7)
         }
+        // INTERFACES v1.92 (MATERIAL_EMISSIVE_VISIBLE_ONLY): the emission of such a surface is for primary and reflection
+        // rays; its analytic light lights the scene once, so the GI ray's hit takes 0 (and RayScene's emissive list
+        // leaves its triangles out: no emitter sample, no MIS share). Experiment 524288 (diagnostic): every emissive
+        // material so.
+        if ((m.classFlags & MATERIAL_EMISSIVE_VISIBLE_ONLY) != 0 || (P[3].w & 524288u) != 0) m.emissive = 0;
         const bool twoSided = (m.classFlags & MATERIAL_TWO_SIDED) != 0;
         if (!s.frontFace && !twoSided)
         {
@@ -341,7 +346,13 @@ void GiTraceGen()
             }
             else if ((P[3].w & 128) == 0)
             {
-                const RtLocalSample ls = rtLocalLightSample(scene, s.position, giUnit(seed + 11), giUnit(seed + 12), giUnit(seed + 13),
+                // gi.hit_oriented_lights (GI_P1_FLAGS bit 7): the light is chosen with the hit's orientation in the weights
+                // (rtLocalLightChooseOriented: importance x the largest cosine the emitter can have at the hit; a light below
+                // the hit's horizon is never drawn - its sample is exactly 0 there). Unbiased with the same probability
+                // in the weight. Off (and foliage, lit from behind too): rtLocalLightChoose's choice, bit for bit.
+                const bool orientedChoice = (b.Load(GI_P1_FLAGS) & 128u) != 0 && (m.classFlags & 0xFFu) != MATERIAL_FOLIAGE;
+                const RtLocalSample ls = rtLocalLightFinish(scene, rtLocalLightChooseOriented(scene, s.position, s.normal, !orientedChoice, giUnit(seed + 11)),
+                                                              s.position, giUnit(seed + 12), giUnit(seed + 13),
                                                               hit.t * GI_FOOTPRINT_PER_METRE * asfloat(P[0].z));  // the hit cell's footprint
                 if (ls.valid)
                 {
@@ -530,7 +541,7 @@ void GiTraceGen()
     float3 emitLocal = float3(0, 0, 1);
     {
         const RtEmissiveSample es = rtEmissiveSample(scene, r.Origin, giUnit(seed + 21), giUnit(seed + 22), giUnit(seed + 23));
-        if (es.valid && (P[3].w & 256) == 0)
+        if (es.valid && (P[3].w & (256u | 524288u)) == 0)
         {
             emitLocal = float3(dot(es.wi, t), dot(es.wi, bt), dot(es.wi, n));
             if (emitLocal.z > 0)

@@ -579,7 +579,8 @@ gpu::Material GpuScene::packMaterial(const scene::Material& m) const
     g.alphaCutoff = m.alphaCutoff;
     g.transmission = m.transmission;
     g.ior = m.ior;
-    g.classFlags = (uint32_t)m.cls | ((m.twoSided ? gpu::MaterialTwoSided : 0u) | (m.alphaCutoff > 0 ? gpu::MaterialAlphaTested : 0u)) << 8;
+    g.classFlags = (uint32_t)m.cls | ((m.twoSided ? gpu::MaterialTwoSided : 0u) | (m.alphaCutoff > 0 ? gpu::MaterialAlphaTested : 0u) |
+                                       (m.emissiveVisibleOnly ? gpu::MaterialEmissiveVisibleOnly : 0u)) << 8;
     g.baseColorTexture = g.normalTexture = g.roughMetalTexture = g.emissiveTexture = g.occlusionTexture = gpu::kNone;  // setMaterialTextures
     g.textureClamp = 0;
     g.revision = m_revision;
@@ -588,6 +589,11 @@ gpu::Material GpuScene::packMaterial(const scene::Material& m) const
         g.hairAbsorption = scene::model::hairAbsorption(m);
         g.hairBetaN = m.hairBetaN;
         g.hairTilt = m.hairTilt;
+    }
+    if (m.cls == scene::MaterialClass::Water)
+    {
+        g.hairAbsorption = m.waterScattering;  // Water (v1.92): the medium's sigma_s (1/m); hairBetaN = its HG g
+        g.hairBetaN = m.waterAnisotropy;
     }
     if (m.cls == scene::MaterialClass::Glass)
     {

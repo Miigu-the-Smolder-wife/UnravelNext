@@ -159,7 +159,7 @@ enum UnxMaterialClass  // scene::MaterialClass
 // INTERFACES_KO.md 8.1 material v1.
 typedef struct UnxMaterialDesc
 {
-    uint32_t size, version;     // sizeof, 5 (4: up to anisotropyRotation; 3 and 2: up to attenuationDistance, 2 without
+    uint32_t size, version;     // sizeof, 7 (6: up to waterAnisotropy, 232 B; 5: up to substrateExtinction; 4: up to anisotropyRotation; 3 and 2: up to attenuationDistance, 2 without
                                 // its sheen and attenuation fields; 1: up to name)
     uint32_t materialClass;     // UnxMaterialClass
     uint32_t twoSided;
@@ -191,6 +191,12 @@ typedef struct UnxMaterialDesc
     float thinFilmThickness, thinFilmIor, thinFilmCoverage;
     uint32_t thinFilmSubstrate;
     float substrateIor, substrateExtinction;
+    // version 6 (v1.92, defect queue 13 (75); Water class): the water's scattering coefficient (1/m, linear rgb; 0 = clear)
+    // and the Henyey-Greenstein asymmetry of its phase function (-1 < g < 1)
+    float waterScattering[3], waterAnisotropy;
+    // version 7 (defect queue 13 (76)): 1 = the emissive surface is seen by primary and reflection rays only - the GI
+    // update rays and the emissive cache take 0 from it (its lamp's analytic light lights the scene once); 0 = as before
+    uint32_t emissiveVisibleOnly;
 } UnxMaterialDesc;
 
 typedef struct UnxSubmesh
@@ -538,7 +544,8 @@ typedef struct UnxPoolDesc
     float sizeX, sizeZ, depth, surfaceFilm;
     double centre[3];                   // world, m
     float yaw;
-    uint32_t reserved;                  // 0
+    uint32_t shape;                     // 0 rectangle (sizeX x sizeZ); 1 round (v1.92, W2-R: sizeX = the diameter, sizeZ ignored;
+                                        // this word was 'reserved = 0' before, so older bridges describe rectangles)
 } UnxPoolDesc;
 #ifdef __cplusplus
 static_assert(sizeof(UnxPoolDesc) == 64, "UnxPoolDesc is part of the ABI");
@@ -792,7 +799,7 @@ UNX_API int32_t UNX_CALL UnxFramePassTimingsLatest(UnxRenderer r, UnxPassTiming*
 // The managed bridge (Assets/UnravelNextBridge/Runtime/Native/UnravelNextNative.cs) checks the same sizes at start.
 static_assert(sizeof(UnxRendererDesc) == 1040);
 static_assert(sizeof(UnxTextureDesc) == 104);
-static_assert(sizeof(UnxMaterialDesc) == 216);  // version 5 (A9 thin film); version 4 = 192 (A9 anisotropy); versions 3 and 2 = 184 (A9 layers); version 1 = 152
+static_assert(sizeof(UnxMaterialDesc) == 236);  // version 5 (A9 thin film); version 4 = 192 (A9 anisotropy); versions 3 and 2 = 184 (A9 layers); version 1 = 152
 static_assert(sizeof(UnxSubmesh) == 16);
 static_assert(sizeof(UnxMeshDesc) == 160);
 static_assert(sizeof(UnxInstanceDesc) == 96);

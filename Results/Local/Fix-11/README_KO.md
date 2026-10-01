@@ -20,7 +20,7 @@
 
 ## [실측] 시험 (새 빌드, 정확성 락)
 FroxelTests 0 failure(결정론: 두 프레임 목록 동일 검사 포함), LocalShadowTests 0, ShadingTests 0(시험이 옛 헤더로 만들던 가짜 목록 두 곳을 새 헤더로 고침), VsmTests 0.
-(용량 상한·강제 폴백 시험 결과: 대기열)
+[실측 2026-10-01 17:29, 게임 뒤 chain 4 tests2, 빌드 120bd7d] FroxelTests: 용량 상한 ≥ GPU 필요(5.83 M ≥ 2.50 M 항목, 버퍼 8.39 M) ok, 강제 fallback(FX 없음: 목록 항목별 동일, 잘림·손실 0; FX 있음: 장면 광원만 저장, FX 손실 집계) ok, L4 유계 생략 A/B 평균 5.76e-7·최대 8.5e-4 ok, 분류 페이지 lit 구간 A/B 평균 3.28e-7·최대 4.0e-4 ok; FX 1b 2건 실패는 시험 훅 순서(c8a0531 수정, chain 5 재실행). LocalShadowTests PASS(분류 lit 13,624쌍 위반 0, 쌍둥이 umbra 199쌍 위반 0, 오버플로 접두합 queued = inline, 용량 1 fallback ok). VsmTests PASS. ShadingTests: 14.1b 업로드 해제 오류로 중단(c8a0531 수정, chain 5 재실행; 그 앞 전부 ok, coverage 타일 광원 P99 0).
 
 ## 화면 비교
 (대기열: city_block 정확성 A/B, 욕탕 8프레임+레이어 A/B, 라운지)

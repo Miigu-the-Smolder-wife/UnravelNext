@@ -1,6 +1,7 @@
 # After-game chain (A): still captures of the bath hall / lounge with the V2.5 switches off and on, new build only
 # (the switches default off, so "off" is the baseline of every comparison). 300 frames, auto exposure, 1080p, the last
-# eight frames captured (temporal mean separates per-frame noise from bias). About 170 s per run: at most three runs per
+# three frames captured (temporal mean separates per-frame noise from bias; eight were planned, cut to three: the disk
+# was full on 2026-10-01 18:05). About 170 s per run: at most three runs per
 # lock hold (-Sets "off,cls,tile").
 #   off   : every switch off
 #   cls   : L3 classification pages + exact twin (shadow.vsm.classification_pages / classification_twin)
@@ -31,6 +32,6 @@ $exe = "C:\Users\USER\UnravelNext-fix\build\all\bin\unx_gate_shadow_renderergate
 foreach ($s in $Sets.Split(",")) {
   $name = "$($Scene)_$($Tag)_$s"
   $sw = [Diagnostics.Stopwatch]::StartNew()
-  & $exe --scene $scenes[$Scene] --resolution $Res --auto-exposure --warmup-frames 0 --frames 300 --capture (Join-Path $out "$name.pfm") --capture-frames 292,293,294,295,296,297,298,299 @($switches[$s]) *> (Join-Path $out "$name.log")
+  & $exe --scene $scenes[$Scene] --resolution $Res --auto-exposure --warmup-frames 0 --frames 300 --capture (Join-Path $out "$name.pfm") --capture-frames 297,298,299 @($switches[$s]) *> (Join-Path $out "$name.log")
   "$name exit $LASTEXITCODE in $([int]$sw.Elapsed.TotalSeconds) s"
 }
