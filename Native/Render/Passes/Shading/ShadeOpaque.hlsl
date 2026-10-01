@@ -735,7 +735,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         probes.pad1 = P[2].w != UNX_NONE && (gatherIrradiance || foliage) ? P[2].w + 1 : 0;
         const bool specular = NoV > 0 && (experiment & 4) == 0;
         const float4 refl = specular && P[2].z != UNX_NONE ? reflectionRadiance(P[2].z, pixel) : float4(0, 0, 0, 0);
-        const bool wantRadiance = specular && refl.a <= 0;
+        // (refl.a: the traced reflection's share of the lobe radiance - 1 or 0, in between over reflection.lumen's
+        // roughness fade, where the K path's radiance makes up the rest)
+        const bool wantRadiance = specular && refl.a < 1;
         if (fromScreen && (experiment & 2) == 0) irradiance = screenE.rgb / g_exposure;
         // gather 0: the pixel's irradiance and its lobe's K-path radiance; A9 gather 1: the coat lobe's cone (K path; R's
         // reflection result is the base lobe's) - one inlined gather for both
@@ -764,7 +766,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
             if (backSide) irradianceBack = g.irradianceBack * g.occlusion;
             if (wantRadiance) incident = g.radiance;
         }
-        if (specular && refl.a > 0) incident = refl.rgb;
+        if (specular && refl.a > 0) incident = refl.a >= 1 ? refl.rgb : lerp(incident, refl.rgb, refl.a);
     }
 #else
     if (P[2].w != UNX_NONE)

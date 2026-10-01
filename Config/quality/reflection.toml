@@ -84,3 +84,26 @@ experiment_disable = 0                 # cost attribution only (recorded in the 
                                        # touched or requested), 512 = no time integration (each frame's own estimate),
                                        # 1024 = the time integration's state instead of the value (diagnostics). Never nonzero
                                        # outside measurements.
+
+# The ray-reuse pipeline (Passes/Reflection/ReflectionReuse.hlsli): the structure of Unreal's Lumen reflections rebuilt on
+# this renderer's passes, in place of the G path, the 32-frame accumulation and the layers. Planar mirrors and calm water
+# keep their raster cameras. Values are the reference's defaults (ue6-main LumenReflections.cpp, Scene.cpp).
+lumen = false
+lumen_max_roughness_to_trace = 0.4     # QUALITY TRADE (user decision): rougher pixels trace no ray and take the K path
+lumen_roughness_fade_length = 0.1      # the traced reflection fades into the K path over this much roughness below the limit
+lumen_max_ray_intensity = 40.0         # QUALITY TRADE (user decision): a ray's exposed radiance is capped here; 0 = no cap
+lumen_tonemap_range = 10.0             # QUALITY TRADE (user decision): means are taken in exposed radiance / (1 + luminance /
+                                       # range), which darkens bright highlights; 0 = plain (energy-preserving) means
+lumen_reconstruction = true            # the resolve's neighbour rays (false: each pixel's own ray)
+lumen_reconstruction_samples = 5
+lumen_reconstruction_radius = 8.0      # px, x min(8 x roughness, 1)
+lumen_temporal = true
+lumen_temporal_max_frames = 12.0
+lumen_neighborhood_clamp_scale = 1.0   # the history's bound: the resolved 5 x 5 neighbourhood's mean +- this many deviations
+lumen_history_distance_threshold = 0.03
+lumen_bilateral = true
+lumen_bilateral_samples = 4
+lumen_bilateral_radius = 8.0
+lumen_bilateral_depth_weight = 10000.0
+lumen_bilateral_disocclusion_frames = 2.0
+lumen_disocclusion_tonemap = true      # QUALITY TRADE (user decision): young pixels' samples compressed by 1 / (1 + luminance)

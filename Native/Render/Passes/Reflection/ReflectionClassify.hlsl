@@ -21,6 +21,9 @@
 // P[2] = { K threshold (float radians), mirror roughness max (float), focal length px (float), rows H }
 // P[3] = { width, height, planar SRV (raw), planar byte offset }, P[4].x = planar counts UAV, P[4].y = log2 of the largest G spacing
 // (reflection.g_sample_spacing_px, at most 3 = 8 px); frame constants b1 = main view.
+// reflection.lumen (ReflectionReuse.hlsli): P[4].z != 0 - a pixel traces exactly when its roughness is below P[4].w
+// (float: reflection.lumen_max_roughness_to_trace), with one ray (an M job), whatever the view angle; there are no G
+// pixels, and the caller passes no lobe tiles (their early exit is the K threshold's).
 // Mirror-smooth pixels on a planar candidate (inside its rectangle, on its plane, facing along its normal) are counted per
 // candidate (the CPU's raster-or-rays choice framesInFlight frames later) and are REFL_PLANAR (no job) when it has a camera.
 // P[5] = mirror mask UAVs, P[6] = tile mask UAVs of views 0-3 (ViewDesc::planarMask / planarTileMask, INTERFACES v1.22;
@@ -113,7 +116,15 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : S
             }
             break;
         }
-        if (s.valid && mode == REFL_K)
+        if (s.valid && mode == REFL_K && P[4].z != 0)
+        {
+            if (s.roughness < asfloat(P[4].w))
+            {
+                mode = REFL_M;
+                job = true;
+            }
+        }
+        else if (s.valid && mode == REFL_K)
         {
             const float lobe = reflectionLobeHalfAngle(s.roughness, dot(s.normal, s.view));
             if (lobe < kThreshold)

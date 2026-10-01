@@ -103,6 +103,27 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.hitOrientedLights = q.has("reflection.hit_oriented_lights") && q.boolean("reflection.hit_oriented_lights");
     s.hitAccumulator = !q.has("reflection.hit_accumulator") || q.boolean("reflection.hit_accumulator");
     s.hitStrictRead = !q.has("reflection.hit_strict_read") || q.boolean("reflection.hit_strict_read");
+    // The ray-reuse pipeline (ReflectionReuse.hlsli); defaults are the reference's (ue6-main LumenReflections.cpp).
+    const auto num = [&q](const char* key, double fallback) { return (float)(q.has(key) ? q.number(key) : fallback); };
+    const auto flag = [&q](const char* key, bool fallback) { return q.has(key) ? q.boolean(key) : fallback; };
+    s.lumen = flag("reflection.lumen", false);
+    s.lumenMaxRoughness = num("reflection.lumen_max_roughness_to_trace", 0.4);
+    s.lumenFadeLength = num("reflection.lumen_roughness_fade_length", 0.1);
+    s.lumenMaxRayIntensity = num("reflection.lumen_max_ray_intensity", 40.0);
+    s.lumenTonemapRange = num("reflection.lumen_tonemap_range", 10.0);
+    s.lumenReconstruction = flag("reflection.lumen_reconstruction", true);
+    s.lumenReconstructionSamples = (uint32_t)num("reflection.lumen_reconstruction_samples", 5);
+    s.lumenReconstructionRadius = num("reflection.lumen_reconstruction_radius", 8.0);
+    s.lumenTemporal = flag("reflection.lumen_temporal", true);
+    s.lumenTemporalMaxFrames = num("reflection.lumen_temporal_max_frames", 12.0);
+    s.lumenClampScale = num("reflection.lumen_neighborhood_clamp_scale", 1.0);
+    s.lumenDistanceThreshold = num("reflection.lumen_history_distance_threshold", 0.03);
+    s.lumenBilateral = flag("reflection.lumen_bilateral", true);
+    s.lumenBilateralSamples = (uint32_t)num("reflection.lumen_bilateral_samples", 4);
+    s.lumenBilateralRadius = num("reflection.lumen_bilateral_radius", 8.0);
+    s.lumenBilateralDepthWeight = num("reflection.lumen_bilateral_depth_weight", 10000.0);
+    s.lumenDisocclusionFrames = num("reflection.lumen_bilateral_disocclusion_frames", 2.0);
+    s.lumenDisocclusionTonemap = flag("reflection.lumen_disocclusion_tonemap", true);
     s.deterministic = q.has("debug.deterministic") && q.boolean("debug.deterministic");
     s.planarRayNs = (float)q.number("reflection.planar_ray_ns");
     return s;
@@ -439,10 +460,11 @@ void ReflectionSystem::ensureHistory(uint32_t width, uint32_t height)
         if (m_layerResidual[k]) m_device.deferRelease(m_layerResidual[k]);
         if (m_layerKeys[k]) m_device.deferRelease(m_layerKeys[k]);
         m_accum[k] = nullptr, m_accumKeys[k] = nullptr, m_layerStochastic[k] = nullptr, m_layerResidual[k] = nullptr, m_layerKeys[k] = nullptr;
-        if (m_settings.layers)
+        if (m_settings.layers || m_settings.lumen)
         {
             // The layers' history in place of the value's (LayerTemporal.hlsl); none when the layers keep no history.
-            if (m_settings.layerHistoryFrames <= 1) continue;
+            // reflection.lumen keeps its history in the same textures (value + second moment, frames, keys).
+            if (!m_settings.lumen && m_settings.layerHistoryFrames <= 1) continue;
             ComPtr<ID3D12Resource>* targets[3] = { &m_layerStochastic[k], &m_layerResidual[k], &m_layerKeys[k] };
             const wchar_t* names[3][2] = { { L"R reflection layer history stochastic 0", L"R reflection layer history stochastic 1" },
                                            { L"R reflection layer history residual 0", L"R reflection layer history residual 1" },
@@ -605,7 +627,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const BufferRef jobs = g.createBuffer({ "R reflection jobs", (uint64_t)width * height * 4, 4 });
     const BufferRef results = g.createBuffer({ "R reflection results", (uint64_t)width * height * 12, 12 });
     // Reconstruction layers (ReflectionInternal.hlsli): per-job records beside the results, per-ray records beside the rays.
-    const bool layers = s.layers;
+    const bool lumen = s.lumen;  // the ray-reuse pipeline (ReflectionReuse.hlsli): its own resolve, history and filter
+    const bool layers = s.layers && !lumen;
     const BufferRef jobLayers = layers ? g.createBuffer({ "R reflection job layers", (uint64_t)width * height * 24, 0 }) : BufferRef{};  // REFL_LAYER_JOB_BYTES
     const BufferRef args = g.importBuffer(m_arguments.Get(), { "R reflection dispatch arguments", kArgumentsBytes, 0 });
     const BufferRef cache = fc.resources.giCache;
@@ -681,8 +704,12 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     // Exact threshold of the cost choice: a view costs at least a + b x pixels, rays c x pixels, so a plane can pay off
     // only when c > b and pixels > a / (c - b). Until the trace has been measured no plane is chosen.
     const float rayNs = m_rayNs, viewNs = m_viewNsPerPixel, viewFixedNs = m_viewFixedNs;
-    const bool planarCanWin = fc.services.renderView && (m_planarForced || rayNs > viewNs);
-    const double minPixels = m_planarForced ? 1.0 : planarCanWin ? viewFixedNs / (rayNs - viewNs) : 1e30;
+    // reflection.lumen: every planar mirror with pixels on screen gets its camera, as when forced - the measured cost per
+    // ray falls when every pixel under the roughness limit traces (the lobby: 5 % planar pixels went to rays [measured]),
+    // and a raster mirror is the direct view's exact image where a ray's is one lobe sample.
+    const bool planarForced = m_planarForced || s.lumen;
+    const bool planarCanWin = fc.services.renderView && (planarForced || rayNs > viewNs);
+    const double minPixels = planarForced ? 1.0 : planarCanWin ? viewFixedNs / (rayNs - viewNs) : 1e30;
     const auto selectStart = std::chrono::steady_clock::now();
     if (m_planarEnabled && !m_planes.empty() && planarCanWin)
     {
@@ -751,7 +778,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
             const double rayCost = (double)rayNs * m_planePixels[k];
             const bool hadCamera = m_planeCameraFrame[k] + 1 == frame;
             const bool cheaper = hadCamera ? viewCost < rayCost * 1.1 : viewCost * 1.1 < rayCost;  // hysteresis
-            candidates.push_back({ k, ix0, iy0, ix1 - ix0, iy1 - iy0, current && (m_planarForced ? m_planePixels[k] > 0 : cheaper), current });
+            candidates.push_back({ k, ix0, iy0, ix1 - ix0, iy1 - iy0, current && (planarForced ? m_planePixels[k] > 0 : cheaper), current });
         };
         uint32_t stack[64], top = 0;
         stack[top++] = 0;
@@ -859,7 +886,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
               [&](PassBuilder& b) {
                   b.use(depth, Use::SrvCompute);
                   b.use(gbuffer, Use::SrvCompute);
-                  if (lobes.valid()) b.use(lobes, Use::SrvCompute);
+                  if (lobes.valid() && !lumen) b.use(lobes, Use::SrvCompute);
                   b.use(history, Use::SrvCompute);
                   b.use(modes, Use::UavCompute);
                   b.use(jobs, Use::UavCompute);
@@ -873,11 +900,11 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   }
               },
               [&shaders, depth, gbuffer, lobes, history, modes, jobs, args, reflection, s, focal, width, height, tilesX, tilesY, frameConstants, planarSrv,
-               planarOffset, planarCounts, planarViews, viewCount = planar.views, spacingLog2](PassContext& c) {
-                  uint32_t k[28] = { c.srv(depth), c.srv(gbuffer), lobes.valid() ? c.srv(lobes) : 0xFFFFFFFFu, c.srv(history),
+               planarOffset, planarCounts, planarViews, viewCount = planar.views, spacingLog2, lumen](PassContext& c) {
+                  uint32_t k[28] = { c.srv(depth), c.srv(gbuffer), lobes.valid() && !lumen ? c.srv(lobes) : 0xFFFFFFFFu, c.srv(history),
                                      c.uav(modes), c.uav(jobs), c.uav(args), c.uav(reflection),
                                      asU(s.kHalfAngle), asU(s.mirrorRoughness), asU(focal), height,
-                                     width, height, planarSrv, planarOffset, c.uav(planarCounts), spacingLog2, 0, 0 };
+                                     width, height, planarSrv, planarOffset, c.uav(planarCounts), spacingLog2, lumen ? 1u : 0u, asU(s.lumenMaxRoughness) };
                   for (uint32_t v = 0; v < kPlanarMax; ++v)
                   {
                       k[20 + v] = v < viewCount ? c.uav(planarViews[v].mask) : 0xFFFFFFFFu;
@@ -948,7 +975,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   if (accPool.valid()) b.use(accPool, Use::SrvCompute);
               },
               [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, accPool,
-               hitFlags = (s.hitConeLobes ? 1u : 0u) | (s.hitOrientedLights ? 2u : 0u) | (s.layers && s.layerFilter && s.hitStrictRead ? 4u : 0u)](PassContext& c) {
+               hitFlags = (s.hitConeLobes ? 1u : 0u) | (s.hitOrientedLights ? 2u : 0u) | (layers && s.layerFilter && s.hitStrictRead ? 4u : 0u)](PassContext& c) {
                   // (the layer buffers' UAVs and the hit shading's flags into the rays header: the shade, combine and inline
                   // passes find them there)
                   const uint32_t k[12] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(raysBuffer), rayCapacity,
@@ -1316,6 +1343,99 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       c.cmd->SetPipelineState(shaders.compute("Passes/Reconstruct/LayerCompose"));
                       c.computeConstants(k, 12);
                       c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                  });
+    }
+    else if (lumen)
+    {
+        // The ray-reuse pipeline (ReflectionReuse.hlsli): resolve over neighbour rays, time accumulation, bilateral filter.
+        // ReflectionResolve above left each traced pixel's own ray value and the planar mirrors in view.reflection; the
+        // filter pass replaces the traced pixels with the pipeline's value and their share of the specular light.
+        if (fc.scene.revision() != m_accumSceneRevision || fc.frame.discontinuity != 0) m_accumReset = true;
+        m_accumSceneRevision = fc.scene.revision();
+        const uint32_t prev = m_accumParity, next = m_accumParity ^ 1u;
+        m_accumParity = next;
+        auto import = [&](ComPtr<ID3D12Resource>& r, const char* name, DXGI_FORMAT format) {
+            return g.importTexture(r.Get(), { name, width, height, 1, 1, format }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        };
+        const TextureRef prevValue = import(m_layerStochastic[prev], "R reflection reuse history (previous)", DXGI_FORMAT_R16G16B16A16_FLOAT);
+        const TextureRef prevFrames = import(m_layerResidual[prev], "R reflection reuse frames (previous)", DXGI_FORMAT_R16G16B16A16_FLOAT);
+        const TextureRef prevKeys = import(m_layerKeys[prev], "R reflection reuse keys (previous)", DXGI_FORMAT_R32G32_UINT);
+        const TextureRef nextValue = import(m_layerStochastic[next], "R reflection reuse history", DXGI_FORMAT_R16G16B16A16_FLOAT);
+        const TextureRef nextFrames = import(m_layerResidual[next], "R reflection reuse frames", DXGI_FORMAT_R16G16B16A16_FLOAT);
+        const TextureRef nextKeys = import(m_layerKeys[next], "R reflection reuse keys", DXGI_FORMAT_R32G32_UINT);
+        const TextureRef resolved = g.createTexture({ "R reflection reuse resolved", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+        const TextureRef visId = main.visId;
+        const BufferRef visibleClusters = main.visibleClusters;
+        const bool motion = visId.valid() && visibleClusters.valid();
+        const uint32_t noHistory = (m_accumReset || !s.lumenTemporal) ? 1u : 0u;
+        m_accumReset = false;
+        m_prevCamera = main.view.position;
+        const uint32_t reuseFrame = (uint32_t)fc.frame.frameIndex;
+        g.addPass("r.refl.reuse.resolve", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(modes, Use::SrvCompute);
+                      b.use(results, Use::SrvCompute);
+                      b.use(depth, Use::SrvCompute);
+                      b.use(gbuffer, Use::SrvCompute);
+                      b.use(reflection, Use::SrvCompute);
+                      b.use(resolved, Use::UavCompute);
+                  },
+                  [&shaders, modes, results, depth, gbuffer, reflection, resolved, width, height, tilesX, tilesY, frameConstants, reuseFrame, s](PassContext& c) {
+                      const uint32_t k[16] = { c.srv(modes), c.srv(results), c.srv(depth), c.srv(gbuffer), c.srv(reflection), c.uav(resolved), height, reuseFrame,
+                                               width, height, s.lumenReconstructionSamples, s.lumenReconstruction ? 0u : 1u,
+                                               asU(s.lumenReconstructionRadius), asU(s.lumenMaxRayIntensity), asU(s.lumenTonemapRange), 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionReuseResolve"));
+                      c.computeConstants(k, 16);
+                      c.bindFrameConstants(frameConstants);
+                      c.cmd->Dispatch(tilesX, tilesY, 1);
+                  });
+        g.addPass("r.refl.reuse.temporal", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(resolved, Use::SrvCompute);
+                      b.use(depth, Use::SrvCompute);
+                      b.use(gbuffer, Use::SrvCompute);
+                      if (motion)
+                      {
+                          b.use(visId, Use::SrvCompute);
+                          b.use(visibleClusters, Use::SrvCompute);
+                      }
+                      b.use(prevValue, Use::SrvCompute);
+                      b.use(prevFrames, Use::SrvCompute);
+                      b.use(prevKeys, Use::SrvCompute);
+                      b.use(nextValue, Use::UavCompute);
+                      b.use(nextFrames, Use::UavCompute);
+                      b.use(nextKeys, Use::UavCompute);
+                  },
+                  [&shaders, resolved, depth, gbuffer, visId, visibleClusters, motion, prevValue, prevFrames, prevKeys, nextValue, nextFrames, nextKeys, width, height,
+                   noHistory, frameConstants, reuseFrame, s](PassContext& c) {
+                      const uint32_t k[20] = { c.srv(resolved), c.srv(depth), c.srv(gbuffer), motion ? c.srv(visId) : 0xFFFFFFFFu,
+                                               motion ? c.srv(visibleClusters) : 0xFFFFFFFFu, c.srv(prevValue), c.srv(prevFrames), c.srv(prevKeys),
+                                               c.uav(nextValue), c.uav(nextFrames), c.uav(nextKeys), noHistory,
+                                               width, height, asU(s.lumenTemporalMaxFrames), asU(s.lumenClampScale),
+                                               asU(s.lumenTonemapRange), asU(s.lumenDistanceThreshold), reuseFrame, 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionReuseTemporal"));
+                      c.computeConstants(k, 20);
+                      c.bindFrameConstants(frameConstants);
+                      c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                  });
+        g.addPass("r.refl.reuse.filter", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(nextValue, Use::SrvCompute);
+                      b.use(nextFrames, Use::SrvCompute);
+                      b.use(depth, Use::SrvCompute);
+                      b.use(gbuffer, Use::SrvCompute);
+                      b.use(reflection, Use::UavCompute);
+                      b.use(modes, Use::SrvCompute);
+                  },
+                  [&shaders, nextValue, nextFrames, depth, gbuffer, reflection, modes, width, height, tilesX, tilesY, frameConstants, reuseFrame, s](PassContext& c) {
+                      const uint32_t k[20] = { c.srv(nextValue), c.srv(nextFrames), c.srv(depth), c.srv(gbuffer), c.uav(reflection), c.srv(modes), height, reuseFrame,
+                                               width, height, s.lumenBilateralSamples, (s.lumenBilateral ? 0u : 1u) | (s.lumenDisocclusionTonemap ? 0u : 2u),
+                                               asU(s.lumenBilateralRadius), asU(s.lumenBilateralDepthWeight), asU(s.lumenDisocclusionFrames), asU(s.lumenTemporalMaxFrames),
+                                               asU(s.lumenMaxRoughness), asU(s.lumenFadeLength), asU(s.lumenTonemapRange), 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionReuseFilter"));
+                      c.computeConstants(k, 20);
+                      c.bindFrameConstants(frameConstants);
+                      c.cmd->Dispatch(tilesX, tilesY, 1);
                   });
     }
     else if (main.visId.valid() && main.visibleClusters.valid())

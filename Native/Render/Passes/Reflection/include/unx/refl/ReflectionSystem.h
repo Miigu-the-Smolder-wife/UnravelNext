@@ -45,6 +45,13 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     uint32_t layerHistoryFrames = 0;  // reflection.layer_history_frames (1 = no history)
     uint32_t layerView = 0;           // reflection.layer_view: diagnostics (LayerCompose.hlsl), 0 in the shipped configuration
     bool layerHistoryBound = true;    // reflection.layer_history_bound: the history bounded by the frame's reconstruction (A/B)
+    // reflection.lumen: the ray-reuse pipeline (ReflectionReuse.hlsli) in place of the G path, the accumulation and the layers
+    bool lumen = false;
+    float lumenMaxRoughness = 0.4f, lumenFadeLength = 0.1f, lumenMaxRayIntensity = 40.0f, lumenTonemapRange = 10.0f;
+    bool lumenReconstruction = true, lumenTemporal = true, lumenBilateral = true, lumenDisocclusionTonemap = true;
+    uint32_t lumenReconstructionSamples = 5, lumenBilateralSamples = 4;
+    float lumenReconstructionRadius = 8.0f, lumenTemporalMaxFrames = 12.0f, lumenClampScale = 1.0f, lumenDistanceThreshold = 0.03f;
+    float lumenBilateralRadius = 8.0f, lumenBilateralDepthWeight = 10000.0f, lumenDisocclusionFrames = 2.0f;
     bool layerWholeValue = true;      // reflection.layer_whole_value: lobe pixels' whole value is one layer (LAYER_MODE_L)
     bool layerCrossMode = true;       // reflection.layer_cross_mode: with layerMirrorLobe, residual taps across M and G pixels
     bool layerMirrorLobe = false;     // reflection.layer_mirror_lobe: M's base as a layer inside its lobe footprint (decision item)
