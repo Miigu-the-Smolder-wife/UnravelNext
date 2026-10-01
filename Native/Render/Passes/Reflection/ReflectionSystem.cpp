@@ -163,6 +163,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.scDirectMinWeight = num("surface_cache.direct_stochastic_min_sample_weight", 0.001);
     s.lumenHitSurfaceCache = flag("reflection.lumen_hit_surface_cache", true);
     s.lumenSurfaceCacheView = flag("reflection.lumen_surface_cache_view", false);
+    s.lumenSurfaceCacheViewComponent = (uint32_t)num("reflection.lumen_surface_cache_view_component", 0);
     s.deterministic = q.has("debug.deterministic") && q.boolean("debug.deterministic");
     s.planarRayNs = (float)q.number("reflection.planar_ray_ns");
     return s;
@@ -1117,7 +1118,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
               },
               [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, accPool, surfaceCache, hitsUseSurfaceCache,
                hitFlags = (s.hitConeLobes ? 1u : 0u) | (s.hitOrientedLights ? 2u : 0u) | (layers && s.layerFilter && s.hitStrictRead ? 4u : 0u) |
-                          (s.lumenSurfaceCacheView ? 8u : 0u) | (screenContinue ? 16u : 0u)](PassContext& c) {
+                          (s.lumenSurfaceCacheView ? 8u | ((s.lumenSurfaceCacheViewComponent & 7u) << 8) : 0u) | (screenContinue ? 16u : 0u)](PassContext& c) {
                   // (the layer buffers' UAVs and the hit shading's flags into the rays header: the shade, combine and inline
                   // passes find them there)
                   const uint32_t k[12] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(raysBuffer), rayCapacity,

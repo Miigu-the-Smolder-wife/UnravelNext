@@ -32,6 +32,7 @@ MODES = {
     "diag": ["--frames", "16", "--capture-frames", "3,15"],  # layer diagnostics (reflection.layer_view)
     "diag0": ["--frames", "4", "--capture-frames", "0,3"],   # the first frame's layers
     "still": ["--frames", "300", "--capture-frames", "0,3,15,299"],
+    "long": ["--frames", "1800", "--capture-frames", "15,299,899,1799"],  # convergence of slow stores (surface cache radiosity)
     "rot": ["--frames", "180", "--path-rotate", "90", "--motion-start", "60", "--capture-frames", "59,63,75,120,179"],
     # a cut to the view turned by 90 degrees at frame 60, still before and after (frames 1, 4, 16 after the cut and its converged self)
     "cut": ["--frames", "360", "--path-rotate", "90", "--path-time", "0", "--cut-at", "60:1.0", "--capture-frames", "60,63,75,359"],
