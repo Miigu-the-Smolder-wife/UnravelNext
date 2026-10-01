@@ -38,8 +38,10 @@
 // P[2] = { shadow visibility, screen probes, reflection, GI cache (planar views) } (UNX_NONE = absent)
 // P[3] = { atmosphere transmittance, multi-scatter, S's shadow overflow tile heads (main kernel; UNX_NONE = absent), this
 //        view's air volume } (this kernel reads no sky view)
-// P[4] = { 14.1b emissive area lights' diffuse irradiance (RGBA16F, exposed; Passes/Lights/EmissiveDirect.hlsl; UNX_NONE = off), texture table, experiment mask (0;
+// P[4] = { B2 stable area lights' mask (raw, 1 bit per scene light; UNX_NONE = none), texture table, experiment mask (0;
 //        shading.toml), L2 tile lights' records (raw, TileLights.hlsli; UNX_NONE = off) }
+// P[10].z 14.1b emissive area lights' diffuse irradiance (RGBA16F, exposed; Passes/Lights/EmissiveDirect.hlsl; UNX_NONE =
+//        off). (Until 2026-10-01 the kernel read it from P[4].x, B2's word: the term was never added.)
 // P[5] = { froxel lights (raw) (UNX_NONE = absent), LTC table (StructuredBuffer<float4>, AreaLight.hlsli) }
 // P[6] = { edge tile mask SRV (EdgeDetect.hlsl, R32G32_UINT per tile; UNX_NONE = no edge pixels), V's coverage tiles
 //        (.z: L3 S's tile lit records, VsmCls.hlsli; UNX_NONE = off)
@@ -688,9 +690,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     // (EmissiveDirect.hlsl: quadtree nodes as horizon-clipped Lambert polygons; the specular side is the reflection
     // path's, which sees the emissive geometry: B2). Node shadows: 14.3 (L3). Foliage's back side: not yet.
 #if !AREA_LOBES
-    if (P[4].x != UNX_NONE && NoV > 0)
+    if (P[10].z != UNX_NONE && NoV > 0)
     {
-        Texture2D<float4> emissiveE = ResourceDescriptorHeap[P[4].x];
+        Texture2D<float4> emissiveE = ResourceDescriptorHeap[P[10].z];
         radiance += front * (emissiveE[pixel].rgb / g_exposure);
     }
 #endif

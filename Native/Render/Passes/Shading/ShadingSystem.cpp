@@ -680,7 +680,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                          v.shadowVisibility.valid() ? c.srv(v.shadowVisibility) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
                                          v.reflection.valid() ? c.srv(v.reflection) : none,
                                          r.giCache.valid() ? c.srv(r.giCache) : none,
-                                         atm[0], atm[1], overflow ? c.srv(v.shadowOverflowTiles) : none, atm[3], emissiveIrradiance.valid() ? c.srv(emissiveIrradiance) : none, o.textureTableSrv, experiment,
+                                         atm[0], atm[1], overflow ? c.srv(v.shadowOverflowTiles) : none, atm[3], none, o.textureTableSrv, experiment,
                                          tileLights ? c.srv(tileRecords) : none, fx[0], fx[1] };
                 uint32_t k32[44] = {};
                 std::memcpy(k32, k, sizeof k);
@@ -696,6 +696,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 k32[38] = areaLobes.valid() ? c.uav(areaLobes) : none;  // P[9].z (A9 area-light lobes)
                 k32[39] = v.giIrradiance.valid() ? c.srv(v.giIrradiance) : none;  // P[9].w (R's per-pixel front irradiance)
                 k32[40] = c.uav(directRadiance);                                 // P[10].x: part 1 -> part 2 direct radiance
+                k32[41] = none;                                                  // P[10].y
+                k32[42] = emissiveIrradiance.valid() ? c.srv(emissiveIrradiance) : none;  // P[10].z: 14.1b (P[4].x is B2's mask)
                 ID3D12PipelineState* lobes = shadeClass == material::ShadeClass::Layered ? lobesLayered : (shadeClass == material::ShadeClass::Sheen ? lobesSheen : nullptr);
                 if (part == 1 && lobes && areaLobes.valid())
                 {
@@ -789,7 +791,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                                       v.shadowVisibility.valid() ? c.srv(v.shadowVisibility) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
                                                       v.reflection.valid() ? c.srv(v.reflection) : none, r.giCache.valid() ? c.srv(r.giCache) : none,
                                                       atmosphere ? c.srv(r.transmittanceLut) : none, atmosphere ? c.srv(r.multiScatterLut) : none, none,
-                                                      air ? c.srv(v.airVolume) : none, emissiveIrradiance.valid() ? c.srv(emissiveIrradiance) : none, o.textureTableSrv, experiment,
+                                                      air ? c.srv(v.airVolume) : none, none, o.textureTableSrv, experiment,
                                                       tileLights ? c.srv(tileRecords) : none,
                                                       froxelLists ? c.srv(v.froxelLights) : none, ltcSrv };
                              const uint32_t edge[8] = { c.srv(edgeTiles), coverage ? c.srv(v.coverageTiles) : none, 0, 0, c.uav(edgeRadiance),
@@ -800,6 +802,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              std::memcpy(k32 + 24, edge, sizeof edge);
                              waterSunConstants(c, k32 + 32, 4);  // P[8], P[9].x (v1.77)
                              k32[40] = c.uav(directRadiance);           // P[10].x: part 1 -> part 2 direct radiance
+                             k32[41] = none;                            // P[10].y
+                             k32[42] = emissiveIrradiance.valid() ? c.srv(emissiveIrradiance) : none;  // P[10].z: 14.1b
                              k32[37] = o.anisoWord.valid() ? c.srv(o.anisoWord) : gpu::kNone;  // P[9].y (A9 anisotropy word)
                              particleConstants(c, k32 + 22);  // P[5].zw
                              k32[16] = r.areaLightStable;     // P[4].x (B2)
