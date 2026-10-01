@@ -365,13 +365,16 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   c.bindFrameConstants(frameConstants);
                   pipeline.dispatch(c.cmd, 0, traceX, traceY, 1);
               });
+    // Probe radiance stages after the composite: the optional probe-space temporal blend, then the spatial filter passes.
+    // They alternate between two transient textures; the last one writes the persistent texture (next frame's history).
+    const uint32_t stages = (L.temporalFilterProbes ? 1u : 0u) + L.filterPasses;
     g.addPass("r.gi.lg.composite", QueueType::Compute,
               [&](PassBuilder& b) {
                   probes(b);
                   b.use(traceRadiance, Use::SrvCompute);
                   b.use(traceWord, Use::SrvCompute);
                   b.use(rayInfo, Use::SrvCompute);
-                  b.use(L.filterPasses == 0 ? probeRadiance : radianceA, Use::UavCompute);
+                  b.use(stages == 0 ? probeRadiance : radianceA, Use::UavCompute);
                   b.use(hitDistance, Use::UavCompute);
                   b.use(probeMoving, Use::UavCompute);
               },
@@ -380,7 +383,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   k[0] = c.srv(traceRadiance);
                   k[1] = c.srv(traceWord);
                   k[2] = c.srv(rayInfo);
-                  k[4] = c.uav(L.filterPasses == 0 ? probeRadiance : radianceA);
+                  k[4] = c.uav(stages == 0 ? probeRadiance : radianceA);
                   k[5] = c.uav(hitDistance);
                   k[6] = c.uav(probeMoving);
                   k[7] = bits(L.maxRayIntensity);
@@ -393,9 +396,47 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     // Spatial filter: A -> B -> A ..., the last pass into the persistent texture (next frame's lighting density).
     static const char* const filterNames[4] = { "r.gi.lg.filter0", "r.gi.lg.filter1", "r.gi.lg.filter2", "r.gi.lg.filter3" };
     TextureRef filterIn = radianceA;
+    uint32_t stage = 0;
+    const auto stageTarget = [&]() {
+        const TextureRef t = stage + 1 == stages ? probeRadiance : ((stage & 1u) == 0 ? radianceB : radianceA);
+        ++stage;
+        return t;
+    };
+    if (L.temporalFilterProbes)
+    {
+        const TextureRef blended = stageTarget();
+        g.addPass("r.gi.lg.probetemporal", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      surface(b);
+                      probes(b);
+                      b.use(filterIn, Use::SrvCompute);
+                      b.use(prevProbeDepth, Use::SrvCompute);
+                      b.use(prevProbePosition, Use::SrvCompute);
+                      b.use(prevProbeRadiance, Use::SrvCompute);
+                      b.use(blended, Use::UavCompute);
+                  },
+                  [=, &shaders](PassContext& c) {
+                      uint32_t k[48] = {};
+                      surfaceWords(c, k);
+                      k[4] = c.srv(filterIn);
+                      k[5] = c.uav(blended);
+                      k[6] = c.srv(prevProbeDepth);
+                      k[7] = c.srv(prevProbePosition);
+                      k[8] = c.srv(prevProbeRadiance);
+                      k[9] = prevTemporalIndex;
+                      k[10] = bits(L.temporalFilterProbesWeight);
+                      k[11] = bits(exposureRatio);
+                      probeWords(c, k);
+                      c.cmd->SetPipelineState(shaders.compute("Passes/GI/Lumen/LgProbeTemporal"));
+                      c.computeConstants(k, 48);
+                      c.bindFrameConstants(frameConstants);
+                      c.cmd->Dispatch(probesX, atlasRows, 1);
+                  });
+        filterIn = blended;
+    }
     for (uint32_t pass = 0; pass < L.filterPasses; ++pass)
     {
-        const TextureRef filterOut = pass + 1 == L.filterPasses ? probeRadiance : ((pass & 1u) == 0 ? radianceB : radianceA);
+        const TextureRef filterOut = stageTarget();
         g.addPass(filterNames[pass], QueueType::Compute,
                   [&, filterIn, filterOut](PassBuilder& b) {
                       probes(b);

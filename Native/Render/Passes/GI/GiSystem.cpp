@@ -162,6 +162,8 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     if (q.has("gi.lumen_filter_max_hit_angle_deg")) s.lumen.filterMaxHitAngleDeg = (float)q.number("gi.lumen_filter_max_hit_angle_deg");
     if (q.has("gi.lumen_filter_position_weight")) s.lumen.filterPositionWeight = (float)q.number("gi.lumen_filter_position_weight");
     if (q.has("gi.lumen_temporal_max_frames")) s.lumen.temporalMaxFrames = (float)q.number("gi.lumen_temporal_max_frames");
+    if (q.has("gi.lumen_temporal_filter_probes")) s.lumen.temporalFilterProbes = q.boolean("gi.lumen_temporal_filter_probes");
+    if (q.has("gi.lumen_temporal_filter_probes_weight")) s.lumen.temporalFilterProbesWeight = (float)q.number("gi.lumen_temporal_filter_probes_weight");
     if (q.has("gi.lumen_temporal_distance_threshold")) s.lumen.temporalDistanceThreshold = (float)q.number("gi.lumen_temporal_distance_threshold");
     if (q.has("gi.lumen_temporal_fast_fraction")) s.lumen.temporalFastFraction = (float)q.number("gi.lumen_temporal_fast_fraction");
     if (q.has("gi.lumen_temporal_max_fast")) s.lumen.temporalMaxFast = (float)q.number("gi.lumen_temporal_max_fast");

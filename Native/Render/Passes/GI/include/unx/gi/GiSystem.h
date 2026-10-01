@@ -68,6 +68,8 @@ struct GiSettings  // from Config/quality/gi.toml
         float filterMaxHitAngleDeg = 10.0f;
         float filterPositionWeight = 1000.0f;
         float temporalMaxFrames = 10.0f;   // (Q) pixel history length
+        bool temporalFilterProbes = false; // probe-space blend with last frame's probes before the spatial filter
+        float temporalFilterProbesWeight = 0.5f;
         float temporalDistanceThreshold = 0.01f;
         float temporalFastFraction = 0.1f; // share of moving lighting at which the history is at its shortest
         float temporalMaxFast = 0.9f;
