@@ -203,16 +203,20 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
               });
 
     const D3D12_GPU_VIRTUAL_ADDRESS frameConstants = f.frameConstants;
-    auto dispatch = [&](const char* name, const char* kernel, uint32_t groupCount, std::function<void(PassBuilder&)> uses) {
+    // (words 4, 5 = P[1].xy: the setup kernel's sampled local light volumes - shading.mega_lights; UNX_NONE elsewhere)
+    auto dispatch = [&](const char* name, const char* kernel, uint32_t groupCount, std::function<void(PassBuilder&)> uses, TextureRef volume0 = {}, TextureRef volume1 = {}) {
         if (groupCount == 0) return;
         ID3D12PipelineState* pso = shaders.compute(kernel);
         g.addPass(name, QueueType::Graphics,
                   [=](PassBuilder& b) {
                       b.use(o.constants, Use::SrvCompute);
+                      if (volume0.valid()) b.use(volume0, Use::SrvCompute);
+                      if (volume1.valid()) b.use(volume1, Use::SrvCompute);
                       uses(b);
                   },
                   [=](PassContext& c) {
-                      const std::array<uint32_t, 8> p = { c.srv(o.constants), 0, 0, 0, 0, 0, 0, 0 };
+                      const bool volumes = volume0.valid() && volume1.valid();
+                      const std::array<uint32_t, 8> p = { c.srv(o.constants), 0, 0, 0, volumes ? c.srv(volume0) : 0xFFFFFFFFu, volumes ? c.srv(volume1) : 0xFFFFFFFFu, 0, 0 };
                       c.cmd->SetPipelineState(pso);
                       c.bindFrameConstants(frameConstants);
                       c.computeConstants(p.data(), 8);
@@ -228,7 +232,9 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
         b.use(o.edges, Use::UavCompute);
     });
     const ParticleLighting lighting = f.lighting;
-    dispatch("fx.layer.setup", "Passes/FX/FxLayerSetup.STEP0", groups(threads, 256), [=](PassBuilder& b) {
+    // (ML1: the local lights from shading.mega_lights' sampled volumes, P[1].xy; ML0: the loop over the froxel list)
+    const bool sampledLocal = lighting.localFluence.valid() && lighting.localMoment.valid();
+    dispatch("fx.layer.setup", sampledLocal ? "Passes/FX/FxLayerSetup.STEP0.ML1" : "Passes/FX/FxLayerSetup.STEP0.ML0", groups(threads, 256), [=](PassBuilder& b) {
         for (const BufferRef& x : inputBuffers)
             if (x.valid()) b.use(x, Use::SrvCompute);
         for (const BufferRef& x : { lighting.vsmPageTable, lighting.vsmPool, lighting.vsmBlocks, lighting.vsmSearchBound, lighting.vsmLayers, lighting.giCache, lighting.froxelLights, lighting.fxLights })
@@ -240,7 +246,7 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
         b.use(o.counters, Use::UavCompute);
         b.use(ribbonPoints, Use::UavCompute);
         b.use(o.ribbonAppearance, Use::UavCompute);
-    });
+    }, lighting.localFluence, lighting.localMoment);
     if (ribbons)
     {
         // the strips of this frame's points (FxRibbon, the simulation's kernel: same geometry rules), then their segments
@@ -278,7 +284,7 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
         b.use(o.tileStarts, Use::UavCompute);
         b.use(o.counters, Use::UavCompute);
     });
-    dispatch("fx.layer.scatter", "Passes/FX/FxLayerSetup.STEP1", groups(recordCount, 256), [=](PassBuilder& b) {
+    dispatch("fx.layer.scatter", "Passes/FX/FxLayerSetup.STEP1.ML0", groups(recordCount, 256), [=](PassBuilder& b) {
         b.use(o.records, Use::UavCompute);
         b.use(tileFill, Use::UavCompute);
         b.use(o.tileStarts, Use::UavCompute);

@@ -17,6 +17,9 @@ struct ParticleLighting
     render::BufferRef vsmPageTable, vsmPool, vsmBlocks, vsmSearchBound, vsmLayers, giCache, froxelLights;
     render::BufferRef fxLights;  // v1.81: the scene light buffer with the FX tail (declared so the FX writer comes first)
     render::TextureRef vsmAtlas, airVolume, transmittanceLut, multiScatterLut;
+    // shading.mega_lights: the froxel grid's sampled local light (FrameResources::localFluence / localMoment; invalid: the
+    // setup loops over the froxel list's lights with S's shadow maps)
+    render::TextureRef localFluence, localMoment;
     uint32_t vsmConstants = 0xFFFFFFFFu, vsmLocalLights = 0xFFFFFFFFu, vsmSlotOfLight = 0xFFFFFFFFu;
 };
 

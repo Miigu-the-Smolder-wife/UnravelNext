@@ -655,15 +655,16 @@ namespace
 struct SampledLocalState
 {
     Device* device = nullptr;
-    ComPtr<ID3D12Resource> volume[2];
+    ComPtr<ID3D12Resource> volume[2], fluence[2], moment[2];  // (fluence, moment: the same samples' light for lit particles)
     uint32_t x = 0, y = 0, z = 0, parity = 0, revision = 0xFFFFFFFFu;
     bool fresh = true;
     float exposure = 0;
     ~SampledLocalState()
     {
         if (!device) return;
-        for (auto& t : volume)
-            if (t) device->deferRelease(t);
+        for (auto* set : { volume, fluence, moment })
+            for (int k = 0; k < 2; ++k)
+                if (set[k]) device->deferRelease(set[k]);
     }
 };
 
@@ -689,15 +690,16 @@ TextureRef recordSampledLocal(FramePassContext& fc, const ViewResources& main, B
         desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
         desc.SampleDesc.Count = 1;
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        for (int k = 0; k < 2; ++k)
-        {
-            if (st.volume[k]) fc.device.deferRelease(st.volume[k]);
-            st.volume[k].Reset();
-            check(fc.device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
-                                                            IID_PPV_ARGS(&st.volume[k])),
-                  "S sampled local in-scattering");
-            st.volume[k]->SetName(k ? L"S ml volume 1" : L"S ml volume 0");
-        }
+        for (auto* set : { st.volume, st.fluence, st.moment })
+            for (int k = 0; k < 2; ++k)
+            {
+                if (set[k]) fc.device.deferRelease(set[k]);
+                set[k].Reset();
+                check(fc.device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
+                                                                IID_PPV_ARGS(&set[k])),
+                      "S sampled local in-scattering");
+                set[k]->SetName(set == st.volume ? L"S ml volume" : (set == st.fluence ? L"S ml volume fluence" : L"S ml volume moment"));
+            }
         st.x = grid.gridX; st.y = grid.gridY; st.z = grid.slices;
         st.fresh = true;
     }
@@ -714,6 +716,14 @@ TextureRef recordSampledLocal(FramePassContext& fc, const ViewResources& main, B
     const TextureDesc desc{ "S ml volume", grid.gridX, grid.gridY, (uint16_t)grid.slices, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D };
     const TextureRef previous = valid ? g.importTexture(st.volume[prev].Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS) : TextureRef{};
     const TextureRef output = g.importTexture(st.volume[next].Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    const TextureDesc fluenceDesc{ "S ml volume fluence", grid.gridX, grid.gridY, (uint16_t)grid.slices, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D };
+    const TextureDesc momentDesc{ "S ml volume moment", grid.gridX, grid.gridY, (uint16_t)grid.slices, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D };
+    const TextureRef prevFluence = valid ? g.importTexture(st.fluence[prev].Get(), fluenceDesc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS) : TextureRef{};
+    const TextureRef prevMoment = valid ? g.importTexture(st.moment[prev].Get(), momentDesc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS) : TextureRef{};
+    const TextureRef fluence = g.importTexture(st.fluence[next].Get(), fluenceDesc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    const TextureRef moment = g.importTexture(st.moment[next].Get(), momentDesc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    fc.resources.localFluence = fluence;  // lit particles (FxLayerSetup.hlsl)
+    fc.resources.localMoment = moment;
     const TextureRef tlut = r.transmittanceLut;
     const BufferRef functions = r.lightFunctions, fxLights = r.fxLights;
     const uint32_t samples = (uint32_t)q.integer("shading.mega_lights_volume_samples");
@@ -733,8 +743,9 @@ TextureRef recordSampledLocal(FramePassContext& fc, const ViewResources& main, B
                   b.use(tlut, Use::SrvCompute);
                   if (functions.valid()) b.use(functions, Use::SrvCompute);
                   if (readers.valid()) b.use(readers, Use::SrvCompute);
-                  if (previous.valid()) b.use(previous, Use::SrvCompute);
-                  b.use(output, Use::UavCompute);
+                  if (previous.valid())
+                      for (TextureRef t : { previous, prevFluence, prevMoment }) b.use(t, Use::SrvCompute);
+                  for (TextureRef t : { output, fluence, moment }) b.use(t, Use::UavCompute);
                   b.keep();  // persistent state: the next frame's history
               },
               [=, &pipeline](PassContext& ctx) {
@@ -742,7 +753,8 @@ TextureRef recordSampledLocal(FramePassContext& fc, const ViewResources& main, B
                   uint32_t k[32] = { ctx.srv(lights), ctx.uav(output), ctx.srv(tlut), functions.valid() ? ctx.srv(functions) : 0xFFFFFFFFu,
                                      previous.valid() ? ctx.srv(previous) : 0xFFFFFFFFu, samples, readers.valid() ? ctx.srv(readers) : 0xFFFFFFFFu, 0,
                                      bits(minWeight), bits(bias), bits(endBias), bits(ratio),
-                                     bits(cap), bits(frames), 0, 0 };
+                                     bits(cap), bits(frames), 0, 0,
+                                     ctx.uav(fluence), ctx.uav(moment), previous.valid() ? ctx.srv(prevFluence) : 0xFFFFFFFFu, previous.valid() ? ctx.srv(prevMoment) : 0xFFFFFFFFu };
                   rays->rootConstants(k + 24);
                   ctx.computeConstants(k, 32);
                   ctx.bindFrameConstants(constants);
