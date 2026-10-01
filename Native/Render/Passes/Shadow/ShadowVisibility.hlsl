@@ -25,6 +25,8 @@
 // pixels that are not mirror pixels are left as sky (M shades neither). P[4].z transmittance layer SRV (raw,
 // FrameResources::vsmLayers; 0xFFFFFFFF: none): slot 0 = opaque visibility x the thin casters' T (v1.26). P[4].w the
 // transmittance LUT (0xFFFFFFFF: none): slot 0 also x the cloud layer's sun transmittance (B5, CloudShadowCommon.hlsli).
+// P[5].x overflow need UAV (raw, 4 B per tile; with P[1].x): every tile's need starts at 0 (ShadowOverflow MODE0 writes
+// the listed tiles', ShadowOverflowScan allocates in tile order); P[5].y tiles per row.
 // Frame constants of the view. Mixed pixels get their local slots here and their sun slot in pass 2.
 #include "Frame.hlsli"
 #include "Scene.hlsli"
@@ -149,6 +151,8 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : SV_G
             {
                 RWTexture2D<uint> heads = ResourceDescriptorHeap[P[3].w];
                 heads[gid.xy] = 0;
+                RWByteAddressBuffer needs = ResourceDescriptorHeap[P[5].x];
+                needs.Store((gid.y * P[5].y + gid.x) * 4, 0);
             }
             return;
         }
@@ -163,6 +167,8 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : SV_G
         GroupMemoryBarrierWithGroupSync();
         if (gi == 0)
         {
+            RWByteAddressBuffer needs = ResourceDescriptorHeap[P[5].x];
+            needs.Store((gid.y * P[5].y + gid.x) * 4, 0);
             if (gs_overflow == 0)
             {
                 RWTexture2D<uint> heads = ResourceDescriptorHeap[P[3].w];

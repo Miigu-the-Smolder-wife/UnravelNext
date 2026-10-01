@@ -39,7 +39,8 @@ struct VsmLocalLight
     float radius;      // r_L (see above)
     uint lightIndex;   // scene light
     uint generation;   // page tag: changes when the slot's light changes or moves
-    float3 pad;
+    uint activeIndex;  // index among this frame's raster-active lights (classification page a x 6 + face, VsmCls.hlsli); 0xFFFFFFFF: not active
+    float2 pad;
     uint active;       // 1 when the slot holds a light this frame
 };
 

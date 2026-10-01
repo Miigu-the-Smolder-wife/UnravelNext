@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 namespace unx::render::shadow
 {
@@ -18,7 +19,8 @@ namespace
 {
 const char* const kStateKey = "s.froxel";
 constexpr uint32_t kStatsSlots = 4, kHeaderBytes = 64;
-constexpr uint32_t kListMax = 32;  // FROXEL_LIST_MAX (FroxelLists.hlsl)
+constexpr uint32_t kSortedMax = 96;  // FROXEL_SORTED_MAX (FroxelLists.hlsl): the ordered head of a list
+constexpr uint32_t kScanBlock = 2048;  // froxels per FroxelScan block (two levels: at most 2048 x 2048 froxels)
 
 struct State
 {
@@ -26,8 +28,17 @@ struct State
     ComPtr<ID3D12CommandSignature> dispatchSignature;
     uint64_t statsFrame[kStatsSlots] = {};
     uint64_t statsFence[kStatsSlots] = {};
+    uint32_t statsBound[kStatsSlots] = {};      // the scene bound that sized the frame's main-view buffer
+    uint64_t statsAllowance[kStatsSlots] = {};  // the FX allowance it held
     int lastStatsSlot = -1;
     FroxelStats latest;
+    // Lists buffer capacities (entries): the scene bound + the FX allowance, a power of two with hysteresis (no plan
+    // churn around a boundary).
+    uint64_t capacityMain = 0, capacityPlanar = 0;
+    uint64_t fxAllowance = 0;  // entries for the FX particle lights (their reach is computed on the GPU): grows from
+                               // the measured overage (needed - capacity) of a frame that listed the scene lights only
+    uint32_t boundNow = 0;     // the main view's scene bound and FX allowance of the frame being recorded
+    uint64_t allowanceNow = 0;
     bool keep = false;
     bool fullDepth = false;  // tests: integrate every slice (no reader bound)
     // This frame's lists (recordFroxelLists, called by shadowPages).
@@ -54,6 +65,143 @@ FroxelGridCpu froxelGridFor(const QualityConfig& q, uint32_t width, uint32_t hei
 
 const FroxelStats& froxelStats(TrackState& state) { return state.get<State>(kStateKey).latest; }
 
+namespace
+{
+uint32_t sortedHead(const QualityConfig& q)
+{
+    const uint32_t listMax = (uint32_t)q.integer("atmosphere.froxels.lights_max");
+    if (listMax == 0 || listMax > kSortedMax || (listMax & 1)) fail("atmosphere.froxels.lights_max must be even and in [2, %u] (FROXEL_SORTED_MAX)", kSortedMax);
+    return listMax;
+}
+constexpr uint64_t kFxAllowancePerLight = 2048;  // entries per FX light slot the allowance starts from [예상: a spark light
+                                                 // of 1 m range 2 m from the camera reaches about 400 tiles x 5 slices]
+constexpr uint64_t kCapacityMin = 1ull << 16;
+
+// The capacity of a view's lists buffer this frame (entries, even): the scene bound + the FX allowance rounded up to a
+// power of two, kept while the need stays above a quarter of it.
+uint32_t listCapacity(const QualityConfig& q, State& s, bool planar, uint64_t bound, uint64_t fxAllowance)
+{
+    const uint64_t need = bound + fxAllowance;
+    uint64_t target = kCapacityMin;
+    while (target < need) target <<= 1;
+    uint64_t& capacity = planar ? s.capacityPlanar : s.capacityMain;
+    if (target > capacity || target * 4 <= capacity) capacity = target;
+    uint64_t result = capacity;
+    const uint64_t forced = (uint64_t)q.integer("atmosphere.froxels.list_capacity_forced");  // tests: a frame over it falls back
+    if (forced > 0) result = (forced + 1) & ~1ull;
+    if (result >= (1ull << 31)) fail("froxel lists: capacity %llu entries exceeds the 31-bit entry index", (unsigned long long)result);
+    return (uint32_t)result;
+}
+
+struct D3 { double x, y, z; };
+D3 d3(float3 v) { return { v.x, v.y, v.z }; }
+double dot3(D3 a, D3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+// Tiles (of n, unit-depth lateral extent u0 + [0, n] x w, w of either sign) whose extent meets [lo, hi], plus one tile of
+// margin on each side for the float arithmetic of the GPU test; 0 when the interval misses the grid.
+uint64_t tilesMeeting(double lo, double hi, double u0, double w, uint32_t n)
+{
+    if (!(hi >= lo)) return 0;
+    double a = (lo - u0) / w, b = (hi - u0) / w;
+    if (a > b) std::swap(a, b);
+    const double i0 = std::floor(a) - 1, i1 = std::floor(b) + 1;
+    if (i1 < 0 || i0 > (double)n - 1) return 0;
+    return (uint64_t)(std::min(i1, (double)n - 1) - std::max(i0, 0.0)) + 1;
+}
+} // namespace
+
+uint64_t froxelListBound(const FroxelGridCpu& g, const ViewDesc& view, const std::vector<gpu::Light>& lights)
+{
+    // Camera basis as FroxelLists.hlsl uses it (froxelForward = -normalize(g_view[2].xyz); the view matrix's rows) and
+    // the rays through the image corners scaled to unit view depth (froxelRayAt): their lateral coordinates are affine
+    // in the pixel position, so tile tx spans unit-depth lateral [ux0 + tx wx, ux0 + (tx + 1) wx] (wx per tile).
+    auto row = [&](int r) { return normalize(float3{ view.view.m[r][0], view.view.m[r][1], view.view.m[r][2] }); };
+    const D3 right = d3(row(0)), up = d3(row(1)), forward = d3(-row(2)), cam = d3(view.position);
+    auto rayAt = [&](double px, double py) {
+        const double ndc[4] = { px / view.width * 2 - 1, 1 - py / view.height * 2, 1, 1 };
+        double p[4];
+        for (int r = 0; r < 4; ++r)
+        {
+            p[r] = 0;
+            for (int c = 0; c < 4; ++c) p[r] += (double)view.invViewProj.m[r][c] * ndc[c];
+        }
+        const D3 w{ p[0] / p[3] - cam.x, p[1] / p[3] - cam.y, p[2] / p[3] - cam.z };
+        const double z = dot3(w, forward);  // = nearPlane for a point of device depth 1 (froxelRayAt divides by it)
+        return D3{ w.x / z, w.y / z, w.z / z };
+    };
+    const D3 r00 = rayAt(0, 0), r10 = rayAt(view.width, 0), r01 = rayAt(0, view.height);
+    const double ux0 = dot3(r00, right), uy0 = dot3(r00, up);
+    const double wx = (dot3(r10, right) - ux0) / view.width * g.tilePx, wy = (dot3(r01, up) - uy0) / view.height * g.tilePx;
+    const double uxMax = std::max(std::abs(ux0), std::abs(ux0 + wx * g.gridX)), uyMax = std::max(std::abs(uy0), std::abs(uy0 + wy * g.gridY));
+    const double secant = std::sqrt(1 + uxMax * uxMax + uyMax * uyMax);  // >= sqrt(1 + a^2) of every tile-edge plane
+    const double logRatio = std::log2((double)g.farM / g.nearM);
+    auto node = [&](uint32_t n) { return n == 0 ? 0.0 : g.nearM * std::exp2(logRatio * n / g.slices); };
+    // Per slice: the depth span, and twice the largest bounding-sphere radius of its froxels (the half diagonal of a
+    // world-axis box of a set of diameter D is at most sqrt(3) / 2 D; D at most the diagonal of the view-aligned box of
+    // the outermost tile's froxel: lateral extent over both depths, depth extent).
+    struct Slice { double z0, z1, zb, rho2; };
+    std::vector<Slice> slices(g.slices);
+    for (uint32_t sIdx = 0; sIdx < g.slices; ++sIdx)
+    {
+        const bool last = sIdx + 1 == g.slices;
+        const double z0 = node(sIdx), z1 = last ? 3.0e38 : node(sIdx + 1), zb = last ? std::max((double)g.farM, 2 * z0) : z1;
+        const double ex = std::abs(wx) * zb + uxMax * (zb - z0), ey = std::abs(wy) * zb + uyMax * (zb - z0), ez = zb - z0;
+        const double diam = std::sqrt(ex * ex + ey * ey + ez * ez);
+        slices[sIdx] = { z0, z1, zb, std::sqrt(3.0) * diam };  // 2 rho_max
+    }
+    uint64_t total = 0;
+    for (const gpu::Light& l : lights)
+    {
+        const uint32_t type = l.typeFlags & 0xFFu;
+        const double extent = type == 5 ? 0.5 * l.size.x + l.size.y : (type == 2 ? 0.5 * std::sqrt((double)l.size.x * l.size.x + (double)l.size.y * l.size.y)
+                                                                      : (type == 3 || type == 4 ? l.size.x : 0.0));
+        const double r = (double)l.range + extent;  // froxelLightRadius
+        const D3 v{ l.position.x - cam.x, l.position.y - cam.y, l.position.z - cam.z };
+        const double lx = dot3(v, right), ly = dot3(v, up), lz = dot3(v, forward);
+        // Tile frustum test of the lists pass (plane distances >= -r): in unit-depth lateral coordinates, the light's
+        // projection widened by r secant / lz; a light within r of the camera passes every tile.
+        double fx0 = -1e300, fx1 = 1e300, fy0 = -1e300, fy1 = 1e300;
+        if (lz > r)
+        {
+            const double m = r * secant / lz;
+            fx0 = lx / lz - m, fx1 = lx / lz + m, fy0 = ly / lz - m, fy1 = ly / lz + m;
+        }
+        // Slices the light's depth span [lz - r, lz + r] meets (the explicit test below stays): slice s spans nodes s, s + 1.
+        if (lz + r < 0) continue;
+        auto coord = [&](double z) { return std::log2(std::max(z, 1e-300) / g.nearM) / logRatio * g.slices; };
+        const uint32_t sMax = lz + r < g.nearM ? 0u : (uint32_t)std::min<double>(g.slices - 1, std::floor(coord(lz + r)));
+        const uint32_t sMin = lz - r <= 0 ? 0u : (uint32_t)std::min<double>(g.slices - 1, std::max(0.0, std::ceil(coord(lz - r)) - 1));
+        for (uint32_t sIdx = sMin; sIdx <= sMax; ++sIdx)
+        {
+            const Slice& sl = slices[sIdx];
+            const bool last = sIdx + 1 == g.slices;
+            if (lz + r < sl.z0 || (!last && lz - r > sl.z1)) continue;
+            uint64_t nx = tilesMeeting(fx0, fx1, ux0, wx, g.gridX), ny = tilesMeeting(fy0, fy1, uy0, wy, g.gridY);
+            if (!last)
+            {
+                // Sphere test (light radius against the froxel's bounding sphere): every corner of a froxel that passes
+                // lies within r + 2 rho of the light, so the froxel's lateral span over its depths meets [l - R, l + R].
+                const double R = r + sl.rho2, z0 = std::max(sl.z0, 1e-9);
+                auto span = [&](double lo, double hi, double u0, double w, uint32_t n) {
+                    const double bl = std::min(lo / z0, lo / sl.zb), ah = std::max(hi / z0, hi / sl.zb);
+                    return tilesMeeting(bl, ah, u0, w, n);
+                };
+                nx = std::min(nx, span(lx - R, lx + R, ux0, wx, g.gridX));
+                ny = std::min(ny, span(ly - R, ly + R, uy0, wy, g.gridY));
+            }
+            total += nx * ny;
+        }
+    }
+    return total;
+}
+
+uint64_t froxelListBytes(const FroxelGridCpu& grid, uint64_t capacity)
+{
+    const uint64_t froxels = (uint64_t)grid.gridX * grid.gridY * grid.slices;
+    return kHeaderBytes + froxels * 8 + capacity * 2;
+}
+
+uint32_t froxelListCapacity(TrackState& state) { return (uint32_t)state.get<State>(kStateKey).latest.capacityNow; }
+
 void setKeepFroxels(TrackState& state, bool keep) { state.get<State>(kStateKey).keep = keep; }
 void setFroxelFullDepth(TrackState& state, bool full) { state.get<State>(kStateKey).fullDepth = full; }
 
@@ -64,41 +212,86 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
 {
     const QualityConfig& q = fc.quality;
     const FroxelGridCpu grid = froxelGridFor(q, view.view.width, view.view.height);
-    const uint32_t listMax = (uint32_t)q.integer("atmosphere.froxels.lights_max");
-    if (listMax == 0 || listMax > kListMax) fail("atmosphere.froxels.lights_max must be in [1, %u] (FROXEL_LIST_MAX)", kListMax);
+    const uint32_t listMax = sortedHead(q);
     const uint64_t froxels = (uint64_t)grid.gridX * grid.gridY * grid.slices;
-    const uint32_t stride = (listMax + 1) & ~1u;  // entries per froxel: every list fits (FroxelCommon.hlsli)
-    const uint64_t bytes = kHeaderBytes + froxels * 4 + froxels * stride * 2;
-    if (froxels * stride >= (1ull << 26)) fail("froxel lists: %llu entries exceed the header's 26-bit first entry", (unsigned long long)(froxels * stride));
+    State& s = fc.state<State>(kStateKey);
+    const bool planar = !suffix.empty();
+    const uint64_t bound = froxelListBound(grid, view.view, fc.scene.lights());
+    const uint32_t fxSlots = fc.scene.fxLightRange().capacity;
+    if (fxSlots > 0) s.fxAllowance = std::max(s.fxAllowance, (uint64_t)fxSlots * kFxAllowancePerLight);
+    const uint64_t fxAllowance = fxSlots > 0 ? s.fxAllowance : 0;
+    const uint32_t capacity = listCapacity(q, s, planar, bound, fxAllowance);
+    if (!planar)
+    {
+        s.latest.capacityNow = capacity;
+        s.boundNow = (uint32_t)std::min<uint64_t>(bound, 0xFFFFFFFFu);
+        s.allowanceNow = fxAllowance;
+    }
+    const uint32_t blocks = (uint32_t)((froxels + kScanBlock - 1) / kScanBlock);
+    if (blocks > kScanBlock) fail("froxel lists: %llu froxels exceed the two-level scan (%u x %u)", (unsigned long long)froxels, kScanBlock, kScanBlock);
+    const uint64_t bytes = froxelListBytes(grid, capacity);
+    const uint32_t fallbackForced = (uint32_t)q.integer("atmosphere.froxels.list_fallback_forced");  // tests: scene lights only this frame
     RenderGraph& g = fc.graph;
     const BufferRef lights = g.createBuffer(BufferDesc{ suffix.empty() ? "S froxel light lists" : "S froxel light lists (planar view)", bytes, 0 });
+    const BufferRef blockSums = g.createBuffer(BufferDesc{ suffix.empty() ? "S froxel list block sums" : "S froxel list block sums (planar view)", (uint64_t)kScanBlock * 4 * 2, 0 });
+    // The scene lights' own allocation (FroxelScan's second prefix sum): the runs of a frame whose need exceeds the capacity.
+    const BufferRef sceneAlloc = g.createBuffer(BufferDesc{ suffix.empty() ? "S froxel list scene allocation" : "S froxel list scene allocation (planar view)", froxels * 4, 0 });
     const D3D12_GPU_VIRTUAL_ADDRESS constants = view.frameConstants;
     ShaderLibrary& sh = fc.shaders;
     ID3D12PipelineState* pb = sh.compute("Passes/Atmosphere/FroxelBegin");
-    ID3D12PipelineState* pl = sh.compute("Passes/Atmosphere/FroxelLists");
+    ID3D12PipelineState* pc = sh.compute("Passes/Atmosphere/FroxelLists.MODE0");
+    ID3D12PipelineState* ps0 = sh.compute("Passes/Atmosphere/FroxelScan.MODE0");
+    ID3D12PipelineState* ps1 = sh.compute("Passes/Atmosphere/FroxelScan.MODE1");
+    ID3D12PipelineState* pl = sh.compute("Passes/Atmosphere/FroxelLists.MODE1");
     uint32_t nearBits, farBits;
     std::memcpy(&nearBits, &grid.nearM, 4);
     std::memcpy(&farBits, &grid.farM, 4);
     g.addPass("s.froxel.begin" + suffix, QueueType::Compute, [&](PassBuilder& b) { b.use(lights, Use::UavCompute); },
               [=](PassContext& ctx) {
-                  const uint32_t k[8] = { ctx.uav(lights), grid.gridX, grid.gridY, grid.slices, grid.tilePx, nearBits, farBits, stride };
+                  const uint32_t k[8] = { ctx.uav(lights), grid.gridX, grid.gridY, grid.slices, grid.tilePx, nearBits, farBits, capacity };
                   ctx.cmd->SetPipelineState(pb);
                   ctx.computeConstants(k, 8);
                   ctx.cmd->Dispatch(1, 1, 1);
               });
-    g.addPass("s.froxel.lists" + suffix, QueueType::Compute,
-              [&](PassBuilder& b) {
-                  b.use(lights, Use::UavCompute);
-                  if (readers.valid()) b.use(readers, Use::SrvCompute);
-                  // A3: the FX light tail (read through the scene's SRVs; declared so the FX writer runs first).
-                  if (fc.resources.fxLights.valid()) b.use(fc.resources.fxLights, Use::SrvCompute);
-                  if (fc.resources.fxLightCount.valid()) b.use(fc.resources.fxLightCount, Use::SrvCompute);
-              },
+    // Count, scan (two levels), fill: every list is allocated and stored within this frame (RENDERER_REDESIGN_V2 14.1).
+    auto cullInputs = [&](PassBuilder& b) {
+        b.use(lights, Use::UavCompute);
+        if (readers.valid()) b.use(readers, Use::SrvCompute);
+        // A3: the FX light tail (read through the scene's SRVs; declared so the FX writer runs first).
+        if (fc.resources.fxLights.valid()) b.use(fc.resources.fxLights, Use::SrvCompute);
+        if (fc.resources.fxLightCount.valid()) b.use(fc.resources.fxLightCount, Use::SrvCompute);
+    };
+    g.addPass("s.froxel.count" + suffix, QueueType::Compute, [&](PassBuilder& b) { cullInputs(b); },
               [=](PassContext& ctx) {
-                  const uint32_t k[4] = { ctx.uav(lights), listMax, slotOfLightSrv, readers.valid() ? ctx.srv(readers) : 0xFFFFFFFFu };
+                  const uint32_t k[8] = { ctx.uav(lights), listMax, slotOfLightSrv, readers.valid() ? ctx.srv(readers) : 0xFFFFFFFFu, 0xFFFFFFFFu, 0, 0, 0 };
+                  ctx.cmd->SetPipelineState(pc);
+                  ctx.bindFrameConstants(constants);
+                  ctx.computeConstants(k, 8);
+                  ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
+              });
+    g.addPass("s.froxel.scan.blocks" + suffix, QueueType::Compute,
+              [&](PassBuilder& b) { b.use(lights, Use::UavCompute); b.use(blockSums, Use::UavCompute); b.use(sceneAlloc, Use::UavCompute); },
+              [=](PassContext& ctx) {
+                  const uint32_t k[4] = { ctx.uav(lights), ctx.uav(blockSums), (uint32_t)froxels, ctx.uav(sceneAlloc) };
+                  ctx.cmd->SetPipelineState(ps0);
+                  ctx.computeConstants(k, 4);
+                  ctx.cmd->Dispatch(blocks, 1, 1);
+              });
+    g.addPass("s.froxel.scan.top" + suffix, QueueType::Compute,
+              [&](PassBuilder& b) { b.use(lights, Use::UavCompute); b.use(blockSums, Use::UavCompute); },
+              [=](PassContext& ctx) {
+                  const uint32_t k[4] = { ctx.uav(lights), ctx.uav(blockSums), blocks, 0 };
+                  ctx.cmd->SetPipelineState(ps1);
+                  ctx.computeConstants(k, 4);
+                  ctx.cmd->Dispatch(1, 1, 1);
+              });
+    g.addPass("s.froxel.lists" + suffix, QueueType::Compute,
+              [&](PassBuilder& b) { cullInputs(b); b.use(blockSums, Use::SrvCompute); b.use(sceneAlloc, Use::SrvCompute); },
+              [=](PassContext& ctx) {
+                  const uint32_t k[8] = { ctx.uav(lights), listMax, slotOfLightSrv, readers.valid() ? ctx.srv(readers) : 0xFFFFFFFFu, ctx.srv(blockSums), fallbackForced, ctx.srv(sceneAlloc), 0 };
                   ctx.cmd->SetPipelineState(pl);
                   ctx.bindFrameConstants(constants);
-                  ctx.computeConstants(k, 4);
+                  ctx.computeConstants(k, 8);
                   ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
               });
     return lights;
@@ -149,7 +342,9 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
     const scene::Atmosphere medium = fc.scene.source() ? fc.scene.source()->atmosphere : scene::Atmosphere{};
     const float stepAltitude = std::min((float)q.number("atmosphere.froxels.air_step_altitude_m"),
                                         std::min(medium.rayleighScaleHeight, medium.mieScaleHeight) / 12.0f);
-    const uint32_t experiment = (uint32_t)q.integer("atmosphere.froxels.experiment_disable");  // cost attribution only
+    // L4 (RENDERER_REDESIGN_V2 14.4) bounded walk omission: its own key, the same bit the experiment mask carries (1024; A/B)
+    const bool walkOmission = q.has("atmosphere.froxels.walk_omission") && q.boolean("atmosphere.froxels.walk_omission");
+    const uint32_t experiment = (uint32_t)q.integer("atmosphere.froxels.experiment_disable") | (walkOmission ? 1024u : 0u);  // cost attribution only (bit 1024: L4)
     if (!(stepAltitude > 0)) fail("atmosphere.froxels.air_step_altitude_m must be > 0");
     const bool walkStats = q.integer("atmosphere.froxels.walk_stats") != 0;  // measurement only
     const TextureRef tlut = fc.resources.transmittanceLut, mlut = fc.resources.multiScatterLut;
@@ -193,12 +388,13 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
         {
             b.use(vsm.table, Use::SrvCompute); b.use(vsm.atlas, Use::SrvCompute);
             b.use(vsm.blocks, Use::SrvCompute); b.use(vsm.bound, Use::SrvCompute);
+            if (vsm.clsBlocks.valid()) b.use(vsm.clsBlocks, Use::SrvCompute);  // L3 classification blocks
             b.use(vsm.stats, Use::UavCompute);
             if (vsm.use.valid()) b.use(vsm.use, Use::UavCompute);
         }
     };
     auto bind = [=](PassContext& ctx, uint32_t workDescriptor, uint32_t airDescriptor) {
-        uint32_t k[20] = { ctx.srv(lights), workDescriptor == 0xFFFFFFFFu ? ctx.uav(volume) : 0xFFFFFFFFu, ctx.srv(tlut), ctx.srv(mlut), 0, 0, 0, 0xFFFFFFFFu, 0, 0, 0, 0, localLights, slotOfLight,
+        uint32_t k[24] = { ctx.srv(lights), workDescriptor == 0xFFFFFFFFu ? ctx.uav(volume) : 0xFFFFFFFFu, ctx.srv(tlut), ctx.srv(mlut), 0, 0, 0, 0xFFFFFFFFu, 0, 0, 0, 0, localLights, slotOfLight,
                            bounded ? ctx.srv(readers) : 0xFFFFFFFFu, 0xFFFFFFFFu, media.valid() ? ctx.srv(media) : 0xFFFFFFFFu,
                            functions.valid() ? ctx.srv(functions) : 0xFFFFFFFFu, workDescriptor, airDescriptor };
         if (shadows)
@@ -209,7 +405,9 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
         }
         std::memcpy(&k[10], &stepAltitude, 4);
         k[11] = experiment | (walkStats ? 0x10000u : 0u);
-        ctx.bindFrameConstants(constants); ctx.computeConstants(k, 20);
+        k[20] = shadows && vsm.clsBlocks.valid() ? ctx.srv(vsm.clsBlocks) : 0xFFFFFFFFu;  // P[5].x: L3 classification blocks (14.4 lit segments)
+        k[21] = k[22] = k[23] = 0;
+        ctx.bindFrameConstants(constants); ctx.computeConstants(k, 24);
     };
     if (queued)
     {
@@ -261,8 +459,7 @@ void recordFroxelLists(FramePassContext& fc, const ViewResources& main, uint32_t
 {
     State& s = fc.state<State>(kStateKey);
     const QualityConfig& q = fc.quality;
-    const uint32_t listMax = (uint32_t)q.integer("atmosphere.froxels.lights_max");
-    if (listMax == 0 || listMax > kListMax) fail("atmosphere.froxels.lights_max must be in [1, %u] (FROXEL_LIST_MAX)", kListMax);
+    (void)sortedHead(q);
     const scene::Scene* src = fc.scene.source();
     if (src && src->lights.size() > 0x7FFF) fail("froxel lists hold 15-bit light indices (bit 15: shadow slot): %zu lights", src->lights.size());
 
@@ -281,7 +478,19 @@ void recordFroxelLists(FramePassContext& fc, const ViewResources& main, uint32_t
         D3D12_RANGE r{ i * kHeaderBytes, (i + 1) * kHeaderBytes };
         check(s.statsReadback->Map(0, &r, reinterpret_cast<void**>(&p)), "map froxel stats");
         const uint32_t* w = reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(p) + i * kHeaderBytes);
-        s.latest = { s.statsFrame[i], w[11], w[12], w[13], w[14], w[15] };
+        const uint32_t capacityNow = s.latest.capacityNow;
+        s.latest = { s.statsFrame[i], w[11], w[12], w[13], w[14], w[15], w[7], w[10], s.statsBound[i] };
+        s.latest.capacityNow = capacityNow;
+        if (s.latest.needed > s.latest.capacity)
+        {
+            // Scene lights only that frame (FroxelLists.hlsl): the FX particle lights exceeded their allowance (the scene's
+            // lights are inside the bound). Grow it for the frames from now on; the gate reports the cut lists.
+            const uint64_t overage = s.latest.needed - s.latest.capacity;
+            s.fxAllowance = std::max(s.fxAllowance, s.statsAllowance[i] + overage + overage / 2);
+            logf("S froxel lists: frame %llu needed %u entries over the capacity %u (scene bound %u, FX allowance %llu): scene lights only, %u lists cut, %u FX entries lost; the allowance grows to %llu\n",
+                 (unsigned long long)s.latest.frame, s.latest.needed, s.latest.capacity, s.latest.sceneBound, (unsigned long long)s.statsAllowance[i], s.latest.overflowLists,
+                 s.latest.droppedLights, (unsigned long long)s.fxAllowance);
+        }
         D3D12_RANGE none{ 0, 0 };
         s.statsReadback->Unmap(0, &none);
     }
@@ -333,6 +542,8 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
               [=](PassContext& ctx) { ctx.cmd->CopyBufferRegion(rb, (uint64_t)slot * kHeaderBytes, ctx.resource(lights), 0, kHeaderBytes); });
     s.statsFrame[slot] = fc.frame.frameIndex;
     s.statsFence[slot] = 0;
+    s.statsBound[slot] = s.boundNow;
+    s.statsAllowance[slot] = s.allowanceNow;
     s.lastStatsSlot = (int)slot;
 }
 } // namespace unx::render::shadow

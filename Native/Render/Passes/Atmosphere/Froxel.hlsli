@@ -22,8 +22,7 @@ uint2 froxelLightRange(FroxelSrvs f, uint2 pixel, float linearDepth)
     const FroxelGrid g = froxelGrid(f.lights);
     const uint2 tile = min(pixel / g.tilePx, uint2(g.gridX - 1, g.gridY - 1));
     ByteAddressBuffer b = ResourceDescriptorHeap[f.lights];
-    const uint h = b.Load(g.headerBase + froxelIndex(g, tile, froxelSlice(g, linearDepth)) * 4);
-    return uint2(h >> 6, h & 63u);
+    return b.Load2(g.headerBase + froxelIndex(g, tile, froxelSlice(g, linearDepth)) * 8);
 }
 
 // Scene light index of list entry i (bits 0-14; bit 15 of the stored entry: the light has a local shadow slot).
@@ -50,7 +49,7 @@ uint froxelEntryAt(FroxelSrvs f, uint indexBase, uint i)
 }
 uint froxelLightAt(FroxelSrvs f, uint indexBase, uint i) { return froxelEntryAt(f, indexBase, i) & 0x7FFFu; }
 // Ascending walk of one range. FroxelLists gives every range an even first
-// entry (fixed even stride), including odd-length lists. Fetch four packed
+// entry (counts rounded up to even in the allocation), including odd-length lists. Fetch four packed
 // words per eight lights; the tail reads only words owned by this range.
 uint froxelLightBuffered(FroxelSrvs f, uint indexBase, uint2 range, uint i, inout uint4 words)
 {

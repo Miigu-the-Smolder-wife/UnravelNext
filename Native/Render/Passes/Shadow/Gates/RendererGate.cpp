@@ -1254,6 +1254,11 @@ int main(int argc, char** argv)
 #endif
             const shadow::VsmStats& st = shadow::stats(renderer.trackState());
             logf("local shadows: %u slots assigned, %u raster-active, %u shadowed lights without a slot\n", st.localAssigned, st.localActive, st.localWithoutSlot);
+            if (st.clsTiles)
+                logf("local shadow classification (L3): %u tiles, %u (tile, slice, light) pairs, %u lit (%.1f %%), %u umbra (%.1f %%)\n", st.clsTiles, st.clsPairs,
+                     st.clsLitPairs, 100.0 * st.clsLitPairs / std::max(st.clsPairs, 1u), st.clsUmbraPairs, 100.0 * st.clsUmbraPairs / std::max(st.clsPairs, 1u));
+            if (st.airClsLit || st.airOmitted || st.airWalked)
+                logf("air shadowed items (walk_stats): %u lit over the classification pages, %u omitted (L4), %u walked\n", st.airClsLit, st.airOmitted, st.airWalked);
             double sPasses = 0, raster = 0;
             for (const auto& [name, d] : r.passMs)
                 if (name.rfind("s.", 0) == 0)
@@ -1266,11 +1271,13 @@ int main(int argc, char** argv)
             logf("%s: S passes %.4f ms (page raster %.4f ms) of GPU frame %.4f ms | pages requested mean %.0f max %u, dirty mean %.1f, T_sun mean %.2f M, pool exhausted %u\n",
                  rs.c_str(), sPasses, raster, r.gpuFrameMs.median, requestedSum / n, requestedMax, dirtySum / n, trianglesSum / n / 1e6, exhausted);
             const shadow::FroxelStats& fs = shadow::froxelStats(renderer.trackState());
-            logf("  froxels: %u light entries (%.2f per froxel), %u truncated lists, %u lights dropped, max %u per froxel\n", fs.indexCount,
+            logf("  froxels: %u light entries (%.2f per froxel), %u lists cut by the capacity, %u entries lost, max %u per froxel; needed %u of capacity %u (scene bound %u) %s\n",
+                 fs.indexCount,
                  (double)fs.indexCount / std::max(1.0, (double)shadow::froxelGridFor(quality, res.width, res.height).gridX *
                                                        shadow::froxelGridFor(quality, res.width, res.height).gridY *
                                                        shadow::froxelGridFor(quality, res.width, res.height).slices),
-                 fs.overflowLists, fs.droppedLights, fs.maxCount);
+                 fs.overflowLists, fs.droppedLights, fs.maxCount, fs.needed, fs.capacity, fs.sceneBound,
+                 fs.overflowLists == 0 && fs.droppedLights == 0 && fs.needed <= fs.capacity ? "ok" : "FAIL");
             if (quality.integer("atmosphere.froxels.walk_stats") != 0)
                 logf("  air walk: slices %u, mixed %u (%.1f %%), loads b32 %u b8 %u texel %u (%.1f/mixed)\n",
                      st.airSlices, st.airSlicesMixed, 100.0 * st.airSlicesMixed / std::max(st.airSlices, 1u), st.airBlocks32, st.airBlocks8, st.airTexels,

@@ -248,6 +248,8 @@ struct FrameResources
                                            // shadowVisibilityDirect
     TextureRef froxels;            // the same air volume as aerialPerspective (v1.15)      [S]
     BufferRef froxelLights;        // per-froxel light lists (7.4)                          [S]
+    BufferRef vsmTileLit;          // L3 (14.3-2): per 8x8 main-view tile, the froxel-list entries lit over   [S]
+                                   // every pixel (VsmCls.hlsli VsmClsTile; invalid = classification off)
     BufferRef tlasStatic, tlasDynamic;  // acceleration structures                          [R]
     BufferRef giCache;             // world radiance cache                                  [R]
     BufferRef giAccumulator;       // hit direct-light accumulator pool (GiAccPool.hlsli;   [R]

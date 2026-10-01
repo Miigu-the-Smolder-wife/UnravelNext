@@ -198,11 +198,13 @@ double peakIntensity(const scene::Light& l)
 struct Lists
 {
     std::vector<uint8_t> raw;
-    uint32_t header(uint32_t i) const { uint32_t h; std::memcpy(&h, raw.data() + 64 + i * 4, 4); return h; }
+    // Header of froxel i: (first entry, count), two words per froxel (FroxelCommon.hlsli).
+    uint32_t first(uint32_t i) const { uint32_t h; std::memcpy(&h, raw.data() + 64 + i * 8, 4); return h; }
+    uint32_t count(uint32_t i) const { uint32_t h; std::memcpy(&h, raw.data() + 64 + i * 8 + 4, 4); return h; }
     uint32_t word(uint32_t byte) const { uint32_t w; std::memcpy(&w, raw.data() + byte, 4); return w; }
     std::vector<uint32_t> list(uint32_t froxel) const
     {
-        const uint32_t h = header(froxel), first = h >> 6, count = h & 63, indexBase = word(36);
+        const uint32_t first = this->first(froxel), count = this->count(froxel), indexBase = word(36);
         std::vector<uint32_t> out;
         for (uint32_t i = 0; i < count; ++i)
         {
@@ -263,12 +265,12 @@ int main(int argc, char** argv)
 
         const shadow::FroxelGridCpu fg = shadow::froxelGridFor(tf.quality, W, H);
         const uint32_t F = fg.gridX * fg.gridY * fg.slices;
-        const uint32_t listMax = (uint32_t)tf.quality.integer("atmosphere.froxels.lights_max");
-        const uint32_t stride = (listMax + 1) & ~1u;
-        const uint64_t listBytes = 64 + (uint64_t)F * 4 + (uint64_t)F * stride * 2;
+        const uint32_t listMax = (uint32_t)tf.quality.integer("atmosphere.froxels.lights_max");  // the ordered head
+        // The lists buffer's size follows the frame's capacity (froxelListCapacity: the scene bound + the FX allowance).
         Grid grid{ fg, {}, std::log2((double)fg.farM / fg.nearM) };
 
         std::vector<uint8_t> lastLists, lastVolume, lastDepth;
+        std::vector<gpu::Light> gpuLights;  // the scene's light records of the last read frame (froxelListBound)
         bool wantDepth = false;
         std::function<TextureRef(FramePassContext&)> injectMedia;  // section 7: the view's volumeSlices before froxels()
         std::function<void(FramePassContext&)> beforeFroxels;      // section 1b: writes the FX light tail
@@ -299,7 +301,8 @@ int main(int argc, char** argv)
                     tracks::froxels(fc, main);
                     if (read)
                     {
-                        lists = tf.readbackBuffer(fc, fc.resources.froxelLights, listBytes);
+                        lists = tf.readbackBuffer(fc, fc.resources.froxelLights, shadow::froxelListBytes(fg, shadow::froxelListCapacity(tf.trackState)));
+                        gpuLights = fc.scene.lights();
                         volume = tf.readback(fc, fc.resources.froxels);
                         if (wantDepth) depthRb = tf.readback(fc, main.depth);
                         if (queueAb)
@@ -385,11 +388,50 @@ int main(int argc, char** argv)
                 for (uint32_t f = 0; f < F; ++f) differ += lists.list(f) != again.list(f) ? 1 : 0;
                 report(differ == 0, "lists identical over two frames (froxels differing)", differ, 0);
             }
-            const uint32_t indexCount = lists.word(44), overflow = lists.word(48), dropped = lists.word(52), maxCount = lists.word(56), candOverflow = lists.word(60);
-            logf("lists: %u entries (%.2f per froxel), %u froxels truncated (%u lights dropped), max %u lights per froxel, %u tiles over the candidate buffer\n",
-                 indexCount, (double)indexCount / F, overflow, dropped, maxCount, candOverflow);
+            const uint32_t indexCount = lists.word(44), cut = lists.word(48), dropped = lists.word(52), maxCount = lists.word(56), candOverflow = lists.word(60);
+            logf("lists: %u entries (%.2f per froxel), %u lists cut by the capacity (%u entries lost), max %u lights per froxel, %u tiles over the candidate buffer\n",
+                 indexCount, (double)indexCount / F, cut, dropped, maxCount, candOverflow);
             report(candOverflow == 0, "candidate buffer not exceeded (tiles)", candOverflow, 0);
-            report(overflow > 0 && maxCount > listMax, "the dense cluster truncates some lists (truncated froxels)", overflow, 1);
+            report(maxCount > listMax, "the dense cluster exceeds the ordered head (max lights per froxel)", maxCount, listMax + 1);
+            report(cut == 0 && dropped == 0, "no list cut by the capacity (froxels cut + entries lost)", cut + dropped, 0);
+            {
+                // The headers' runs: even starts, disjoint and in order, every count stored (the sum is the entry count).
+                uint32_t badRuns = 0, sum = 0;
+                for (uint32_t f = 0; f < F; ++f)
+                {
+                    const uint32_t first = lists.first(f), n = lists.count(f);
+                    if (first & 1) ++badRuns;
+                    if (f > 0 && n > 0 && first < lists.first(f - 1) + lists.count(f - 1)) ++badRuns;
+                    sum += n;
+                }
+                report(badRuns == 0, "runs start at even entries and do not overlap", badRuns, 0);
+                report(sum == indexCount, "sum of list counts equals the stored entry count", sum, indexCount);
+            }
+            {
+                // Capacity (FroxelSystem.cpp): the CPU bound of the scene lights' entries covers the GPU's exact need, and the
+                // buffer held it (no fallback).
+                const uint32_t needed = lists.word(28), capacity = lists.word(40);
+                const uint64_t bound = shadow::froxelListBound(fg, grid.view, gpuLights);
+                logf("capacity: GPU need %u entries, CPU scene bound %llu (%.2f x), buffer capacity %u (reserve %llu)\n", needed, (unsigned long long)bound,
+                     (double)bound / std::max(needed, 1u), capacity, (unsigned long long)F * listMax);
+                report(bound >= needed, "scene bound covers the GPU need (entries)", (uint32_t)std::min<uint64_t>(bound, 0xFFFFFFFFu), needed);
+                report(needed <= capacity, "the lists buffer held the frame's need (no fallback)", needed, capacity);
+            }
+            {
+                // The fallback of a frame over the capacity (FroxelLists.hlsl, forced here): the scene lights' own allocation
+                // and lists; without FX lights it is the normal frame, entry for entry, with nothing counted as lost.
+                tf.quality.applyOverride("atmosphere.froxels.list_fallback_forced=1");
+                run(sc, 1);
+                tf.quality.applyOverride("atmosphere.froxels.list_fallback_forced=0");
+                const Lists fb{ lastLists };
+                uint32_t differing = 0;
+                for (uint32_t f = 0; f < F; ++f)
+                    if (fb.first(f) != lists.first(f) || fb.count(f) != lists.count(f) || fb.list(f) != lists.list(f)) ++differing;
+                logf("forced fallback (no FX lights): %u entries stored, %u lists cut, %u entries lost, need %u\n", fb.word(44), fb.word(48), fb.word(52), fb.word(28));
+                report(differing == 0, "fallback without FX lights: the normal lists, entry for entry (froxels differing)", differing, 0);
+                report(fb.word(48) == 0 && fb.word(52) == 0, "fallback without FX lights: nothing cut or lost", fb.word(48) + fb.word(52), 0);
+                report(fb.word(28) == lists.word(28) && fb.word(44) == lists.word(44), "fallback: the need and the stored count unchanged", fb.word(28), lists.word(28));
+            }
 
             // Every froxel: well-formed, ordered. Sampled froxels: conservative against 8 points inside each.
             uint32_t malformed = 0, disorder = 0, missing = 0, checkedFroxels = 0, samples = 0;
@@ -401,7 +443,6 @@ int main(int argc, char** argv)
                     {
                         const uint32_t f = (s * fg.gridY + ty) * fg.gridX + tx;
                         const std::vector<uint32_t> li = lists.list(f);
-                        if (li.size() > listMax) ++malformed;
                         std::set<uint32_t> unique(li.begin(), li.end());
                         if (unique.size() != li.size() || (!li.empty() && *unique.rbegin() >= sc.lights.size())) ++malformed;
                         if ((tx * 7 + ty * 13 + s * 3) % 5 != 0) continue;  // conservativeness on a fifth of the froxels
@@ -417,15 +458,17 @@ int main(int argc, char** argv)
                             for (uint32_t l = 0; l < sc.lights.size(); ++l)
                             {
                                 if (!reaches(sc.lights[l], p) || unique.count(l)) continue;
-                                if (li.size() < listMax) ++missing;  // a full list may leave out lights of lower importance
+                                ++missing;  // no list is ever full: every light reaching the froxel is listed
                             }
                         }
                     }
-            // Order: importance at the froxel centre, recomputed as the kernel does, must not increase along a list.
+            // Order: importance at the froxel centre, recomputed as the kernel does, must not increase along the ordered
+            // head (the first lights_max entries; the tail past it is complete but unordered).
             for (uint32_t f = 0; f < F; f += 97)
             {
                 const uint32_t s = f / (fg.gridX * fg.gridY), ty = (f / fg.gridX) % fg.gridY, tx = f % fg.gridX;
-                const std::vector<uint32_t> li = lists.list(f);
+                std::vector<uint32_t> li = lists.list(f);
+                if (li.size() > listMax) li.resize(listMax);
                 if (li.size() < 2) continue;
                 const bool last = s + 1 == fg.slices;
                 const double z0 = grid.node(s), zb = last ? std::max((double)fg.farM, 2 * z0) : grid.node(s + 1);
@@ -454,10 +497,10 @@ int main(int argc, char** argv)
                     prev = imp;
                 }
             }
-            report(malformed == 0, "froxel lists well formed (count <= lights_max, unique, valid)", malformed, 0);
+            report(malformed == 0, "froxel lists well formed (unique, valid)", malformed, 0);
             logf("conservativeness: %u froxels, %u points\n", checkedFroxels, samples);
-            report(missing == 0, "lights reaching a froxel point missing from a non-full list", missing, 0);
-            report(disorder == 0, "lists out of importance order (entries)", disorder, 0);
+            report(missing == 0, "lights reaching a froxel point missing from its list", missing, 0);
+            report(disorder == 0, "ordered heads out of importance order (entries)", disorder, 0);
         }
 
         // ---- 2. Local lights in the air (sun below the horizon: no sun term); then the same lights casting shadows (their
@@ -677,7 +720,71 @@ int main(int argc, char** argv)
                         }
                 logf("shadowed air, K pieces vs one walk per item: %u nodes, mean relative difference %.3g, largest %.3g\n", nodes, sumD / std::max(sumW, 1e-30), worstP);
                 report(nodes > 1000 && sumD / std::max(sumW, 1e-30) < 1e-3, "shadowed air: walk in K pieces = one walk (mean relative)", sumD / std::max(sumW, 1e-30), 1e-3);
-                report(worstP < 1e-2, "shadowed air: walk in K pieces = one walk (largest node)", worstP, 1e-2);            }
+                report(worstP < 1e-2, "shadowed air: walk in K pieces = one walk (largest node)", worstP, 1e-2);
+                {
+                    // L4 (RENDERER_REDESIGN_V2 14.4, bounded walk omission; experiment bit 1024): shadowed lights under 1e-3 of
+                    // their slice's local in-scatter (cumulative, list order) are added lit without their walk. The air with
+                    // the omission against the air without it, relative to the local lights' share (the volume minus the dark
+                    // scene's): the omitted shares bound the difference by 1e-3 per slice, so by 1e-3 of the share per node.
+                    tf.quality.applyOverride("atmosphere.froxels.experiment_disable=1024");
+                    run(sc, 6, -2.0f, false);
+                    const std::vector<uint8_t> omitted = lastVolume;
+                    tf.quality.applyOverride("atmosphere.froxels.experiment_disable=0");
+                    run(sc, 6, -2.0f, false);
+                    const std::vector<uint8_t> walked = lastVolume;
+                    double worstO = 0, sumDo = 0, sumWo = 0;
+                    uint32_t nodesO = 0, changed = 0;
+                    for (uint32_t ty = 0; ty < fg.gridY; ++ty)
+                        for (uint32_t tx = 0; tx < fg.gridX; ++tx)
+                            for (uint32_t n = 1; n <= fg.slices; ++n)
+                            {
+                                const ref::D3 o = nodeOf(omitted, tx, ty, n) - nodeOf(walked, tx, ty, n);
+                                const ref::D3 w = nodeOf(walked, tx, ty, n) - nodeOf(without, tx, ty, n);
+                                const double r = w.x + w.y + w.z, e = std::abs(o.x) + std::abs(o.y) + std::abs(o.z);
+                                if (e > 0) ++changed;
+                                if (r * exposure <= 1e-3) continue;
+                                worstO = std::max(worstO, e / r);
+                                sumDo += e;
+                                sumWo += r;
+                                ++nodesO;
+                            }
+                    logf("shadowed air, bounded walk omission (bit 1024) vs every walk: %u nodes, %u changed, mean relative difference %.3g, largest %.3g\n", nodesO, changed,
+                         sumDo / std::max(sumWo, 1e-30), worstO);
+                    report(nodesO > 1000 && sumDo / std::max(sumWo, 1e-30) <= 1e-3, "shadowed air: bounded walk omission vs every walk (mean relative to the local share)", sumDo / std::max(sumWo, 1e-30), 1e-3);
+                    report(worstO <= 2e-3, "shadowed air: bounded walk omission vs every walk (largest node, relative to the local share)", worstO, 2e-3);
+                }
+                {
+                    // L3 (14.3-1 with 14.4): segments lit over the classification pages skip their walk (exact: no caster
+                    // nearer than the segment in the blocks its projection covers); the air with the classification on
+                    // against every walk, relative to the local share.
+                    tf.quality.applyOverride("shadow.vsm.classification_pages=true");
+                    run(sc, 6, -2.0f, false);
+                    const std::vector<uint8_t> classified = lastVolume;
+                    tf.quality.applyOverride("shadow.vsm.classification_pages=false");
+                    run(sc, 6, -2.0f, false);
+                    const std::vector<uint8_t> walkedAll = lastVolume;
+                    double worstC = 0, sumDc = 0, sumWc = 0;
+                    uint32_t nodesC = 0, changedC = 0;
+                    for (uint32_t ty = 0; ty < fg.gridY; ++ty)
+                        for (uint32_t tx = 0; tx < fg.gridX; ++tx)
+                            for (uint32_t n = 1; n <= fg.slices; ++n)
+                            {
+                                const ref::D3 o = nodeOf(classified, tx, ty, n) - nodeOf(walkedAll, tx, ty, n);
+                                const ref::D3 w = nodeOf(walkedAll, tx, ty, n) - nodeOf(without, tx, ty, n);
+                                const double r = w.x + w.y + w.z, e = std::abs(o.x) + std::abs(o.y) + std::abs(o.z);
+                                if (e > 0) ++changedC;
+                                if (r * exposure <= 1e-3) continue;
+                                worstC = std::max(worstC, e / r);
+                                sumDc += e;
+                                sumWc += r;
+                                ++nodesC;
+                            }
+                    logf("shadowed air, classification pages (lit segments without a walk) vs every walk: %u nodes, %u changed, mean relative difference %.3g, largest %.3g\n",
+                         nodesC, changedC, sumDc / std::max(sumWc, 1e-30), worstC);
+                    report(nodesC > 1000 && sumDc / std::max(sumWc, 1e-30) <= 1e-3, "shadowed air: classification pages vs every walk (mean relative to the local share)", sumDc / std::max(sumWc, 1e-30), 1e-3);
+                    report(worstC <= 5e-3, "shadowed air: classification pages vs every walk (largest node, relative to the local share)", worstC, 5e-3);
+                }
+            }
 #if defined(FROXEL_TEST_LIGHT_FUNCTIONS)
             for (uint32_t i = 0; i < sc.lights.size(); ++i) lfSet.clear(i);
 #endif
@@ -1252,13 +1359,18 @@ int main(int argc, char** argv)
                                  });
             };
             run(sc, 2);
+            tf.quality.applyOverride("atmosphere.froxels.list_fallback_forced=1");  // a frame over the capacity: FX lights left out
+            run(sc, 1);
+            tf.quality.applyOverride("atmosphere.froxels.list_fallback_forced=0");
+            const Lists fbLists{ lastLists };
+            run(sc, 1);
             beforeFroxels = nullptr;
             const Lists lists{ lastLists };
             const uint32_t N = (uint32_t)sc.lights.size(), indexBase = lists.word(36);
             uint32_t flagged = 0, outOfRange = 0, fxEntries = 0, missing = 0, points = 0, fxReaching = 0;
             for (uint32_t f = 0; f < F; ++f)
             {
-                const uint32_t h = lists.header(f), first = h >> 6, n = h & 63;
+                const uint32_t first = lists.first(f), n = lists.count(f);
                 for (uint32_t i = 0; i < n; ++i)
                 {
                     const uint32_t w = lists.word(indexBase + ((first + i) >> 1) * 4), e = (first + i) & 1 ? w >> 16 : w & 0xFFFF, li = e & 0x7FFF;
@@ -1269,6 +1381,22 @@ int main(int argc, char** argv)
                         if (e & 0x8000) ++flagged;
                     }
                 }
+            }
+            {
+                // The fallback frame: every froxel's list is the normal one without its FX entries; the FX entries are the
+                // lost entries, the froxels that had any are the cut lists.
+                uint32_t differing = 0, cutLists = 0;
+                for (uint32_t f = 0; f < F; ++f)
+                {
+                    std::vector<uint32_t> expect;
+                    for (uint32_t li : lists.list(f)) if (li < N) expect.push_back(li);
+                    if (expect.size() != lists.list(f).size()) ++cutLists;
+                    if (fbLists.list(f) != expect) ++differing;
+                }
+                logf("forced fallback with FX lights: %u entries stored, %u lists cut, %u entries lost (FX entries of the normal frame %u in %u lists)\n",
+                     fbLists.word(44), fbLists.word(48), fbLists.word(52), fxEntries, cutLists);
+                report(differing == 0, "fallback with FX lights: scene lights listed as usual, FX lights left out (froxels differing)", differing, 0);
+                report(fbLists.word(52) == fxEntries && fbLists.word(48) == cutLists, "fallback with FX lights: lost entries and cut lists counted", fbLists.word(52), fxEntries);
             }
             const ref::D3 camPos = d3(grid.view.position);
             for (uint32_t s = 0; s + 1 < fg.slices; ++s)

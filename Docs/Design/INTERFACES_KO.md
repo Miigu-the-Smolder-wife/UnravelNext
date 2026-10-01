@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.88, 2026-10-01)
+# UnravelNext 인터페이스 (v1.90, 2026-10-01)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -528,7 +528,7 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 - `shadowOverflow` raw uint: 오버플로 타일마다 블록 하나다.
   - 워드 0~63: 픽셀(행 우선 8×8)마다 `count << 24 | 런 시작`(블록 기준 워드 오프셋). count는 넷째 이후 그림자 광원 수(≤ 29)이고, 0 = 없음이다.
   - 런: 8비트 unorm 가시성(이 절과 같은 부호화). uint 하나에 4개, 하위 바이트부터, 프록셀 리스트 순서다.
-- 할당: 블록은 타일당 원자 가산 1회다. 같은 프레임 안에서 정확하고, 블록 위치만 비결정적이다. 용량은 S가 직전 필요량으로 관리한다.
+- 할당(v1.89, L3 3단계): 개수 패스(`ShadowOverflow.MODE0`, 타일별 필요 단어 수) → 타일 순서 접두 합(`ShadowOverflowScan`, 2048 × 2048 두 단계) → 채우기 패스(`MODE1`). 같은 프레임 안에서 정확하고, 블록 위치와 용량 초과(fallback) 타일 집합이 프레임 내용만으로 정해진다(이전의 타일당 원자 가산은 블록 위치가 비결정적이었다). 용량은 S가 직전 필요량으로 관리한다.
 - 넘친 타일은 `shadowOverflowFallbackTiles`(raw: 워드 0 = 개수, 워드 1..3 = DispatchIndirect 인자(개수, 1, 1), 워드 4.. = 타일 `y << 16 | x`)에 오른다. M 주 셰이딩 커널은 넘친 타일을 건너뛴다. M fallback 커널이 이 목록 위에서(바이트 오프셋 4의 인자) 슬롯 밖 광원을 `shadowVisibilityDirect`로 VSM에서 직접 탭한다. 결과는 정확하다.
 - S는 overage(넘친 타일 수·픽셀 수)를 통계로 낸다. 게이트는 0을 요구한다.
 - **coverage fragment 가시성(v1.41, S 요청 `20260926_S_fragment_visibility.md`)**: coverage 층 픽셀의 fragment용이다.
@@ -539,7 +539,7 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - `shadowFragmentSun`(raw, `coverageRecords` 원소당 1 B): pair 플래그가 선 픽셀의 fragment만 유효하다. 바이트 e = 원소 e 레코드의 태양 가시성(unorm8). 플래그 없는 픽셀의 바이트는 그 프레임에 쓰이지 않으니 플래그 없이 읽지 않는다.
 
 ### 7.4 프록셀 광원 리스트 (S)
-프록셀(24 px × 64 깊이 슬라이스) 당 광원 인덱스 목록, 최대 `atmosphere.froxels.lights_max`개. 초과 시 중요도 상위 `shading.analytic_lights_max`개를 해석 평가하고 나머지는 프록셀 조도로 합친다(합친 에너지를 통계로 기록). 소비자는 `froxelLightRange/froxelLight`로만 읽는다. 리스트는 뷰 단위다(v1.22, `ViewResources::froxelLights`). 메인 뷰는 `FrameResources::froxelLights`와 같고, 평면 반사 뷰는 S `shadowVisibility`가 그 뷰 크기의 격자로 만든다. 호출자는 그 뷰의 SRV를 넘기고 그 뷰의 프레임 상수를 바인딩한다. 항목의 bit 15는 "그 광원에 S의 그림자 슬롯이 있음"이다(v1.19, `froxelLightShadowed`). `froxelLight`는 그 비트를 뺀 광원 인덱스를 돌려주고, 장면 광원 한도는 32767이다.
+프록셀(24 px × 64 깊이 슬라이스) 당 광원 인덱스 목록, **가변 길이**(v1.80, RENDERER_REDESIGN_V2 14.1 L1): 개수 패스, 접두 합(FroxelScan), 채우기 패스로 같은 프레임 안에 정확히 할당되며, 프록셀에 닿는 광원은 모두 목록에 든다(잘림·합침 없음). 헤더는 프록셀당 두 워드(첫 항목, 개수), 런은 짝수 항목에서 시작한다. 목록의 앞 `atmosphere.froxels.lights_max`개(짝수, 96 이하)는 중요도 순(그림자 슬롯 1~3은 그중 첫 캐스터), 나머지는 결정적 순서. 버퍼 용량은 CPU가 같은 프레임에 계산한 장면 광원 항목 수의 상한(`FroxelSystem.cpp froxelListBound`: 광원마다 슬라이스별로 도달 검사를 통과할 수 있는 타일 수) + FX 입자 광원 몫(GPU가 범위를 계산하므로 실측 초과분에서 자라는 몫) 이다. 그래서 장면 광원은 잘릴 수 없고, FX 광원이 몫을 넘긴 프레임만(`needed` > `capacity`) 장면 광원만의 접두합(FroxelScan의 둘째 합, 상한 안)으로 런을 잡아 장면 광원은 그대로(머리+꼬리) 싣고 FX 광원만 그 프레임에 뺀다. 뺀 항목은 잘린 목록·잃은 항목 통계로 세고(게이트는 0을 요구) 다음 프레임부터 몫이 자란다. FX 입자 광원은 수(슬롯 용량)는 정해져 있지만 범위를 GPU가 밝기에서 계산하므로 구조 상한이 없다. `list_capacity_forced`는 시험용이다. 소비자는 `froxelLightRange/froxelLight`로만 읽는다. 리스트는 뷰 단위다(v1.22, `ViewResources::froxelLights`). 메인 뷰는 `FrameResources::froxelLights`와 같고, 평면 반사 뷰는 S `shadowVisibility`가 그 뷰 크기의 격자로 만든다. 호출자는 그 뷰의 SRV를 넘기고 그 뷰의 프레임 상수를 바인딩한다. 항목의 bit 15는 "그 광원에 S의 그림자 슬롯이 있음"이다(v1.19, `froxelLightShadowed`). `froxelLight`는 그 비트를 뺀 광원 인덱스를 돌려주고, 장면 광원 한도는 32767이다.
 
 ### 7.5 출력
 - 메인 뷰(표시): RGB10A2_UNORM, 값 = sRGB OETF(PBR Neutral 톤맵(광도 × 노출)).
@@ -611,7 +611,7 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 ## 9. 품질 설정 키 (`Config/quality/<이름>.toml`)
 - 파일 `<이름>.toml`은 `<이름>.`으로 시작하는 키만 가질 수 있다(`QualityConfig::loadDirectory`가 강제). 파일 소유는 1절 표.
 - 코드는 품질 키에 기본값을 두지 않는다(없으면 오류). 모든 보고는 병합된 키 집합의 SHA-256을 남긴다. 실험용 덮어쓰기(`applyOverride`)도 해시에 들어간다.
-- 다른 트랙이 읽는 키(이 목록 밖의 키를 다른 트랙이 읽으려면 0절 요청): `output.resolutions`(코어), `atmosphere.froxels.tile_px`, `atmosphere.froxels.depth_slices`, `atmosphere.froxels.lights_max`(S → M), `shading.analytic_lights_max`(M → S), `gi.screen_probe_spacing_px`(R → M), `shadow.vsm.page_texels`(S → V 래스터 LOD), `visibility.cluster_triangles`(V → R).
+- 다른 트랙이 읽는 키(이 목록 밖의 키를 다른 트랙이 읽으려면 0절 요청): `output.resolutions`(코어), `atmosphere.froxels.tile_px`, `atmosphere.froxels.depth_slices`, `atmosphere.froxels.lights_max`(S → M), `gi.screen_probe_spacing_px`(R → M), `shadow.vsm.page_texels`(S → V 래스터 LOD), `visibility.cluster_triangles`(V → R).
 
 ## 10. C 트랙 API
 
@@ -748,6 +748,12 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.90 (2026-10-01, A: 결함 큐 10번, B 요청 — 수조 η 통계 호스트 API; 미검증 — 빌드까지):
+  - W2 `PoolStats.hlsl`(행 부분합 → 고정 순서 축약: 평균, 평균 기준 RMS, max|η − η̄|), `Pool::latestStats()`(framesInFlight 기록 뒤 읽기), `water::poolStatsSnapshot`(렌더 스레드, 트랙 상태 → 호스트 사본).
+  - 호스트: `HostRenderer::poolStats(id)`, ABI 6 선택 export `UnxPoolStatsLatest(UnxPoolStats*)`(48 B: pool 입력, valid·frameIndex·time·mean·rms·maxDeviation 출력). C# `UnravelNextRenderer.TryPoolStats`, `UnravelNextPool.TryGetStats`.
+  - 시험: PoolTests 8(GPU 통계 = CPU 통계, 전달 지연 framesInFlight), HostPools 3b.
+- v1.89 (2026-10-01, A: 오버플로 목록 할당을 타일 순서 접두 합으로, RENDERER_REDESIGN_V2 14.3-3 L3 3단계; 미검증 — 빌드까지):
+  - 7.3 할당: `ShadowOverflow.MODE0`(개수) → `ShadowOverflowScan.MODE0/1`(타일 순서 접두 합) → `ShadowOverflow.MODE1`(채우기). 할당 카운터 버퍼 폐지. M의 소비(헤드·블록 배치·fallback 목록)는 그대로.
 - v1.88 (2026-10-01, R: hit 직접광 누적기 풀, 설계 V2.3 12.8; 미검증 — 빌드까지):
   - **`FrameResources::giAccumulator`**(BufferRef): `gi.hit_accumulator`와 `gi.hit_accumulator_pool`이 켜져 있을 때만 유효. R의 globalIllumination 뒤(r.gi.acc.fold3 뒤)의 읽는 쪽은 SrvCompute로 선언하고 `Passes/GI/GiAccPool.hlsli`의 `giAccPoolRead(pool, position, normal, footprint, out GiAccMeans)`로 읽는다(반사 hit: S2). 기록(`giAccPoolRecord`)은 GI 광선만 한다(비율 추정기의 에너지 보존이 기록한 집단 안에서만 성립. 설계 12.1-1의 "GI 광선과 반사 광선"과 다른 점: 감사 결과로 다시 정한다).
   - `GiAccMeans { A, B, C, weight, cellSize }`: 독자의 확산 직접광 = kA·A + kB·B + kC·C(자기 계수). `radiance += weight × (그 값 − 점 값)`. `cellSize`는 읽은 셀의 변(독자 발자국보다 훨씬 크면 점 값을 유지할지 독자가 판단).

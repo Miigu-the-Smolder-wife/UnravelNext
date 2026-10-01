@@ -17,6 +17,7 @@
 #include "unx/decal/SurfaceState.h"
 #include "unx/viewmodel/ViewModel.h"
 #include "unx/hair/Hair.h"
+#include "unx/water/Pool.h"
 #include "unx/render/Frame.h"
 #include "unx/render/GpuScene.h"
 #include "unx/scene/SceneData.h"
@@ -392,6 +393,9 @@ public:
     void addPoolSources(std::span<const FramePacket::PoolSource> sources);
     // The basins and sources the next queued frame takes, in that frame's coordinates (tests).
     std::pair<std::vector<render::PoolFrame>, std::vector<FramePacket::PoolSource>> queuedPools();
+    // The latest completed surface statistics of a basin (water::PoolStats; UnxPoolStatsLatest): false until a record of
+    // that basin completed on the GPU (framesInFlight records after its first), or when it is not in the set.
+    bool poolStats(uint32_t id, water::PoolStats& out) const;
     // B5 clouds (v1.77): held until changed; every queued frame takes the current layer.
     void setClouds(const render::CloudLayerDesc& clouds);
     render::CloudLayerDesc clouds()
@@ -606,6 +610,7 @@ private:
     render::CloudLayerDesc m_clouds;                                 // (m_mutex) B5 the cloud layer every queued frame takes
     std::optional<render::OceanFrame> oceanFrameLocked() const;      // (m_mutex held) m_ocean in the current coordinates
     std::vector<PoolInput> m_pools;                                  // (m_mutex) W2 basins every queued frame takes (world)
+    std::vector<std::pair<uint32_t, water::PoolStats>> m_poolStats;  // (m_mutex) their latest statistics, copied after each record
     std::vector<FramePacket::PoolSource> m_pendingPoolSources;       // (m_mutex) for the next queued frame (world)
     void poolsLocked(FramePacket& packet);                           // (m_mutex held) basins and sources into the packet's coordinates
     std::vector<render::PoolFrame> m_poolFrames;                     // submission thread: FrameContext::pools of the frame being recorded

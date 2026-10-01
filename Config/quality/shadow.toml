@@ -1,5 +1,13 @@
 # Owner: S. ARCHITECTURE 2.3, 2.4, 2.11.
 [shadow.vsm]
+# L3 stage 1 (14.3-1/2, A): classification pages - every active shadowed light's six faces at 128 texels, conservative
+# raster with the nearest depth over each texel (VsmClsPixel), blocks of 8 texels, and per 8x8 tile of the main view the
+# froxel-list entries lit over every pixel (LocalTileClassify; exact: no caster nearer than the pixel in its texel's block).
+# TileLights takes a lit caster FAR. Off until verified (LocalShadowTests: lit => fine visibility 1).
+classification_pages = false
+classification_tolerance = 0.002   # relative reversed-Z depth the pixel's own surface may exceed its texel's nearest caster by
+classification_twin = false        # stage 2: the exact-raster twin pages (standard raster, texel-centre depth): a (tile, light) whose
+                                   # pixels all have, in every texel of their blocks, a caster nearer than themselves is umbra (left out)
 virtual_resolution = 16384      # per clipmap level (compiled into the S kernels)
 page_texels = 128               # (compiled)
 clipmap_levels = 20             # level k covers 2^(k+4) m, texel 2^(k-10) m (compiled): 1 mm .. 512 m, window 16 m .. 8192 km

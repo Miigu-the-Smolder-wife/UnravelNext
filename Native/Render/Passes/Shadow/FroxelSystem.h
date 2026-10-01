@@ -21,12 +21,26 @@ FroxelGridCpu froxelGridFor(const QualityConfig& quality, uint32_t width, uint32
 struct FroxelStats
 {
     uint64_t frame = 0;  // frame the counters belong to
-    uint32_t indexCount = 0;                     // light entries listed over all froxels
-    uint32_t overflowLists = 0;                  // froxels reached by more than lights_max lights
-    uint32_t droppedLights = 0;                  // light entries lost to truncation
+    uint32_t indexCount = 0;                     // light entries stored over all froxels
+    uint32_t overflowLists = 0;                  // froxels whose list was cut by the buffer's capacity (gates: 0)
+    uint32_t droppedLights = 0;                  // light entries lost to that cut (gates: 0)
     uint32_t maxCount = 0;                       // most lights reaching one froxel
     uint32_t candidateOverflow = 0;              // tiles whose frustum held more than 1024 lights
+    uint32_t needed = 0;                         // entries the frame's lists took (the exact allocation)
+    uint32_t capacity = 0;                       // entries the buffer held that frame (needed > capacity: scene lights only)
+    uint32_t sceneBound = 0;                     // the scene lights' upper bound that sized it (froxelListBound)
+    uint32_t capacityNow = 0;                    // capacity of the main view's buffer as last recorded (froxelListCapacity)
 };
+// Upper bound of the entries the scene's lights can take in a view's lists this frame (RENDERER_REDESIGN_V2 14.1): per
+// light and slice, the tiles whose froxel can pass FroxelLists.hlsl's reach test (a sphere of the light's radius against
+// the froxel's bounding sphere), counted from the lateral extent of the slice's froxels. Every GPU-listed (scene light,
+// froxel) pair is inside it, so a lists buffer of this capacity never cuts a scene light's entry. FX particle lights
+// (ranges computed on the GPU) are not in it: they get an allowance grown from the measured need.
+uint64_t froxelListBound(const FroxelGridCpu& grid, const ViewDesc& view, const std::vector<gpu::Light>& lights);
+// Size of a view's froxel light list buffer (header, two words per froxel, capacity entries of 16 bits).
+uint64_t froxelListBytes(const FroxelGridCpu& grid, uint64_t capacity);
+// Entry capacity of the main view's lists buffer as last recorded (tests read the buffer back whole: froxelListBytes).
+uint32_t froxelListCapacity(TrackState& state);
 
 // shadowPages: the froxel light lists of the main view (FrameResources::froxelLights) with each entry's shadow-slot bit
 // (slotOfLightSrv: StructuredBuffer<uint> scene light -> shadow slot, or 0xFFFFFFFF: none). The local-light page marks

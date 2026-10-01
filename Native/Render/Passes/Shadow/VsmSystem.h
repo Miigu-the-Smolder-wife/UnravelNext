@@ -54,7 +54,8 @@ struct VsmLocalLightCpu
     float nearM;
     float farM, radius;
     uint32_t lightIndex, generation;
-    float pad[3];
+    uint32_t activeIndex;  // VsmLocal.hlsli: raster-active index (classification pages), 0xFFFFFFFF when not active
+    float pad[2];
     uint32_t active;
 };
 static_assert(sizeof(VsmLocalLightCpu) == 48);
@@ -102,6 +103,13 @@ struct VsmStats
     // settled value differs from the per-record SMRT by more than 1/255, and the largest difference (x 255).
     uint32_t fragmentPixels = 0, fragmentPairs = 0, fragmentChecked = 0, fragmentMismatch = 0, fragmentMaxDiff = 0;
     uint32_t fragmentFirstPixel = 0, fragmentFirstValues = 0;  // the check's first mismatch (pixel y << 16 | x, + 1; values)
+    // L3 classification of the main view (shadow.vsm.classification_pages; LocalTileClassify, words 64..67): tiles with a
+    // record (surface pixels, <= 4 slices, lists <= 64), their (tile, slice, light) pairs, of them lit over the whole tile
+    // (exact: TileLights may take the light FAR, ShadeOpaque reads no slot) and in umbra (the exact twin, left out).
+    uint32_t clsTiles = 0, clsPairs = 0, clsLitPairs = 0, clsUmbraPairs = 0;
+    // The air's shadowed (slice, light) items (atmosphere.froxels.walk_stats, words 68..70; main and planar views): added
+    // lit over the classification pages (L4 part 2, exact), added lit by the bounded omission (walk_omission, L4), walked.
+    uint32_t airClsLit = 0, airOmitted = 0, airWalked = 0;
 };
 
 // shadowPages: requests, page assignment and the raster of every requested page for this frame.
@@ -116,6 +124,8 @@ struct VsmFrameRefs
     TextureRef atlas;  // the page atlas (D32; SrvCompute / SrvGraphics for readers)
     BufferRef table, blocks, bound, stats;  // stats: raw VSM counters (walk statistics, words 20..24)
     BufferRef use;  // read bits (shadow.vsm.use_stats; invalid when off): readers declare it as UAV
+    BufferRef clsBlocks;  // L3 (14.3-1): the classification pages' 8-texel block maxima (VsmCls.hlsli; invalid = off)
+    uint32_t clsActive = 0;  // raster-active lights with classification pages this frame
     uint32_t constantsCbv = UINT32_MAX;  // ConstantBuffer<VsmConstants> of this frame
 };
 bool frameRefs(FramePassContext& fc, VsmFrameRefs& out);

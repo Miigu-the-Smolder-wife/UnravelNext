@@ -35,6 +35,7 @@ void main(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
     const uint listed = gid.x + gid.y * 65535;
     if (listed >= list.Load(4 * COV_LIST_COUNT)) return;  // uniform
     const uint4 info = coverageTileInfo(list, listed);  // tile, records, record base, block base
+    g_covListed = listed;  // L2c: the records' tile field (CoverageShade.hlsli)
     const uint tilesX = list.Load(4 * COV_LIST_TILES_X);
     const uint2 tileCoord = uint2(info.x % tilesX, info.x / tilesX);
     const uint first = info.z + coveragePixelStart(tilePixels, info, listed, gi);

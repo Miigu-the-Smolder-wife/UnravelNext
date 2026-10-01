@@ -22,7 +22,7 @@ namespace
 {
 const char* const kStateKey = "s.vsm";
 constexpr uint32_t kRingSlots = 16, kRingStride = 2048;  // per-frame constants; frames in flight must be < kRingSlots
-constexpr uint32_t kStatsSlots = 4, kStatsBytes = 256;  // VSM stats words (VsmBegin clears them)
+constexpr uint32_t kStatsSlots = 4, kStatsBytes = 512;  // VSM stats words (128; VsmBegin clears them; 64.. L3 / L4 counters)
 constexpr uint64_t kOverflowMinWords = 1u << 18;  // 1 MB overflow list at least (INTERFACES 7.3)
 constexpr uint32_t kErrRasterOverflow = 0x20;  // VsmCommon.hlsli VSM_ERR_RASTER_OVERFLOW
 constexpr uint32_t kMetaBytes = 48;  // VsmPageMeta
@@ -83,6 +83,13 @@ struct State
     uint32_t localSceneRevision = UINT32_MAX;
     uint32_t localWithoutSlot = 0;
     ComPtr<ID3D12Resource> localRing, localMask, localSlots;
+    ComPtr<ID3D12Resource> clsAtlas;  // L3: classification pages (VsmCls.hlsli), kLocalLights x 6 pages of 128^2 x 4 B
+    ComPtr<ID3D12Resource> clsTwin;   // stage 2: the exact-raster twin (umbra), the same layout
+    uint32_t clsTwinUav = UINT32_MAX;
+    BufferRef clsBlocksRef;  // this frame's block maxima (frameRefs); invalid when the classification is off
+    uint32_t clsActiveCount = 0;
+    uint64_t clsAtlasBytes = 0;
+    uint32_t clsAtlasUav = UINT32_MAX;  // raw UAV descriptor (V's pixel kernel root constant)
     uint8_t* localMapped = nullptr;
     uint32_t localStride = 0, localCap = 0;
     uint32_t localLightsSrv[kRingSlots] = {}, localSlotOfSrv[kRingSlots] = {}, localActiveSrv[kRingSlots] = {};
@@ -170,6 +177,22 @@ void createState(FramePassContext& fc, State& s, uint32_t pages)
         s.requests = createBuffer(d, L"S VSM requests", (uint64_t)kTotalSlots * 4);
         s.localMask = createBuffer(d, L"S VSM local cull mask", (uint64_t)kLocalLights * kLocalLightWords * 4);
         s.localSlots = createBuffer(d, L"S VSM local atlas slots", (uint64_t)kLocalLights * kLocalLightWords * 32 * 4);
+        // L3: the classification atlas, 48 pages per row (VSM_CLS_PAGES_PER_ROW), rows for kLocalLights x 6 pages
+        s.clsAtlasBytes = (uint64_t)48 * 128 * ((kLocalLights * 6 + 47) / 48) * 128 * 4;
+        s.clsAtlas = createBuffer(d, L"S VSM classification atlas", s.clsAtlasBytes);
+        {
+            DescriptorHeaps& h = d.descriptors();
+            s.clsAtlasUav = h.allocateResource();
+            D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+            ud.Format = DXGI_FORMAT_R32_TYPELESS;
+            ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+            ud.Buffer.NumElements = (UINT)(s.clsAtlasBytes / 4);
+            ud.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+            d.d3d()->CreateUnorderedAccessView(s.clsAtlas.Get(), nullptr, &ud, h.resourceCpu(s.clsAtlasUav));
+            s.clsTwin = createBuffer(d, L"S VSM classification twin", s.clsAtlasBytes);
+            s.clsTwinUav = h.allocateResource();
+            d.d3d()->CreateUnorderedAccessView(s.clsTwin.Get(), nullptr, &ud, h.resourceCpu(s.clsTwinUav));
+        }
         s.cullMask = createBuffer(d, L"S VSM cull mask", (uint64_t)kSlots / 8);
         s.atlasSlots = createBuffer(d, L"S VSM atlas slots", (uint64_t)kSlots * 4);
         s.groups = createBuffer(d, L"S VSM scan groups", (uint64_t)kScanGroupsMax * 4);
@@ -484,6 +507,8 @@ bool frameRefs(FramePassContext& fc, VsmFrameRefs& out)
     out.constantsCbv = s.ringCbv[s.constantsOffset / kRingStride];
     out.stats = s.statsRef;
     out.use = s.useRef;
+    out.clsBlocks = s.clsBlocksRef;
+    out.clsActive = s.clsActiveCount;
     return true;
 }
 
@@ -603,10 +628,15 @@ void updateLocalLights(FramePassContext& fc, State& s, const ViewResources& main
         d.lightIndex = s.localLight[i] - 1;
         d.generation = s.localGen[i];
         d.active = 1;
+        d.activeIndex = 0xFFFFFFFFu;
         s.localUsed = i + 1;
         const float3 eye = main.view.position;
         const float3 toLight = { d.position.x - eye.x, d.position.y - eye.y, d.position.z - eye.z };
-        if (dot(toLight, toLight) <= d.farM * d.farM || sphereInView(main.view.viewProj, d.position, d.farM)) s.localActive.push_back(i);
+        if (dot(toLight, toLight) <= d.farM * d.farM || sphereInView(main.view.viewProj, d.position, d.farM))
+        {
+            d.activeIndex = (uint32_t)s.localActive.size();
+            s.localActive.push_back(i);
+        }
     }
     s.latest.localAssigned = 0;
     for (uint32_t i = 0; i < kLocalLights; ++i) s.latest.localAssigned += s.localLight[i] != 0 ? 1u : 0u;
@@ -721,6 +751,13 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         s.latest.surfacePixels = w[61];
         s.latest.backfacePixels = w[62];
         s.latest.backfaceMixed = w[63];
+        s.latest.clsTiles = w[64];
+        s.latest.clsPairs = w[65];
+        s.latest.clsLitPairs = w[66];
+        s.latest.clsUmbraPairs = w[67];
+        s.latest.airClsLit = w[68];
+        s.latest.airOmitted = w[69];
+        s.latest.airWalked = w[70];
         s.latest.errorBits = w[15];
         if (w[15] & ~s.errorBitsSeen)
             logf("S VSM: error bits 0x%x (frame %llu): a shader loop reached its hard cap (INTERFACES 3.6; VsmCommon.hlsli VSM_ERR_*)\n", w[15],
@@ -1513,6 +1550,123 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         s.rasterRequests[0] = sunRequests;
         s.rasterRequests[1] = localRequests;
     }
+    // L3 stage 1 (14.3-1/2): the classification pages of the active lights (conservative raster, nearest depth over the
+    // texel: VsmClsPixel), their blocks (VsmClsBlocks) and the (tile, light) lit classification of the main view
+    // (LocalTileClassify) - shadow.vsm.classification_pages. Every active light's six faces are drawn each frame (the
+    // static / dynamic layers of 14.3-6 follow).
+    fc.resources.vsmTileLit = {};
+    s.clsBlocksRef = {};
+    s.clsActiveCount = 0;
+    if (fc.services.rasterizeDepth && activeLocal > 0 && main.depth.valid() && q.boolean("shadow.vsm.classification_pages"))
+    {
+        const uint32_t clsPages = activeLocal * 6, clsRows = (clsPages + 47) / 48, clsWidth = 48 * 128, clsHeight = clsRows * 128;
+        const uint64_t clsWords = (uint64_t)clsWidth * clsHeight;
+        if (clsWords * 4 > s.clsAtlasBytes)
+            fail("S VSM: %u active local lights need %llu B of classification atlas, %llu B allocated", activeLocal, (unsigned long long)(clsWords * 4), (unsigned long long)s.clsAtlasBytes);
+        const BufferRef clsAtlas = g.importBuffer(s.clsAtlas.Get(), BufferDesc{ "S VSM classification atlas", s.clsAtlasBytes, 0 });
+        const BufferRef clsBlocks = g.createBuffer(BufferDesc{ "S VSM classification blocks", (uint64_t)clsPages * 256 * 4, 0 });
+        const bool twin = q.boolean("shadow.vsm.classification_twin");
+        const BufferRef clsTwin = twin ? g.importBuffer(s.clsTwin.Get(), BufferDesc{ "S VSM classification twin", s.clsAtlasBytes, 0 }) : BufferRef{};
+        const BufferRef twinBlocks = twin ? g.createBuffer(BufferDesc{ "S VSM classification twin blocks", (uint64_t)clsPages * 256 * 4, 0 }) : BufferRef{};
+        const uint32_t tilesX = groups(main.view.width, 8), tilesY = groups(main.view.height, 8);
+        const BufferRef tileLit = g.createBuffer(BufferDesc{ "S VSM tile lit", (uint64_t)tilesX * tilesY * 80, 0 });
+        auto asUint = [](float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; };
+        ID3D12PipelineState* pClear = sh.compute("Passes/Shadow/VsmClsClear");
+        for (int which = 0; which < (twin ? 2 : 1); ++which)
+        {
+            const BufferRef target = which == 0 ? clsAtlas : clsTwin;
+            g.addPass(which == 0 ? "s.vsm.cls.clear" : "s.vsm.cls.cleartwin", QueueType::Compute, [&](PassBuilder& b) { b.use(target, Use::UavCompute); },
+                      [=](PassContext& ctx) {
+                          const uint32_t k[4] = { ctx.uav(target), (uint32_t)clsWords, 0, 0 };
+                          ctx.cmd->SetPipelineState(pClear);
+                          ctx.computeConstants(k, 4);
+                          ctx.cmd->Dispatch(groups((uint32_t)(clsWords / 4), 256), 1, 1);
+                      });
+        }
+        for (int which = 0; which < (twin ? 2 : 1); ++which)
+        {
+            // (V passes pixelConstants as given, so the atlas is a persistent buffer with a persistent raw UAV descriptor.)
+            // which 0: the conservative classification pages (corner max); 1: the exact twin (standard raster, centre).
+            DepthRasterRequest cr;
+            cr.instanceMask = scene::InstanceCastShadow;
+            cr.pixelKernel = which == 0 ? "Passes/Shadow/VsmClsPixel.MODE0" : "Passes/Shadow/VsmClsPixel.MODE1";
+            cr.bufferUses = { { which == 0 ? clsAtlas : clsTwin, Use::UavGraphics } };
+            cr.conservative = which == 0;
+            cr.cull = D3D12_CULL_MODE_NONE;
+            cr.pixelConstants[0] = which == 0 ? s.clsAtlasUav : s.clsTwinUav;
+            cr.pixelConstants[1] = clsWidth;
+            uint64_t sum = 0;
+            uint32_t clsRequests = 0;
+            auto flush = [&]() {
+                if (cr.views.empty()) return;
+                cr.name = (which == 0 ? "s.vsm.clsraster" : "s.vsm.clstwinraster") + std::to_string(clsRequests++);
+                fc.services.rasterizeDepth(fc, cr);
+                cr.views.clear();
+                sum = 0;
+            };
+            for (uint32_t a = 0; a < activeLocal; ++a)
+            {
+                const uint32_t slot = s.localActive[a];
+                const VsmLocalLightCpu& l = s.localData[slot];
+                uint64_t faceBounds[6][kLocalMips] = {};
+                if (split) localBounds(bounds, l, faceBounds);
+                for (uint32_t face = 0; face < 6; ++face)
+                {
+                    const uint64_t bound = faceBounds[face][0];
+                    if (!cr.views.empty() && (sum + bound > listCapacity || cr.views.size() >= 252u)) flush();
+                    RasterView v;
+                    v.viewProj = localViewProj(l, face);
+                    const uint32_t page = a * 6 + face;
+                    v.viewportX = (page % 48) * 128;
+                    v.viewportY = (page / 48) * 128;
+                    v.viewportWidth = v.viewportHeight = kPage;
+                    v.lodPixelsPerMetre = 0.5f * (float)kPage;
+                    v.userData = slot | face << 7;
+                    v.cullMaskOffset = UINT32_MAX;
+                    cr.views.push_back(v);
+                    sum += bound;
+                }
+            }
+            flush();
+        }
+        for (int which = 0; which < (twin ? 2 : 1); ++which)
+        {
+            ID3D12PipelineState* pBlocks = sh.compute(which == 0 ? "Passes/Shadow/VsmClsBlocks.MODE0" : "Passes/Shadow/VsmClsBlocks.MODE1");
+            const BufferRef pagesIn = which == 0 ? clsAtlas : clsTwin, blocksOut = which == 0 ? clsBlocks : twinBlocks;
+            g.addPass(which == 0 ? "s.vsm.cls.blocks" : "s.vsm.cls.twinblocks", QueueType::Compute,
+                      [&](PassBuilder& b) { b.use(pagesIn, Use::SrvCompute); b.use(blocksOut, Use::UavCompute); },
+                      [=](PassContext& ctx) {
+                          const uint32_t k[4] = { ctx.srv(pagesIn), ctx.uav(blocksOut), clsWidth, 48 };
+                          ctx.cmd->SetPipelineState(pBlocks);
+                          ctx.computeConstants(k, 4);
+                          ctx.cmd->Dispatch(clsPages, 1, 1);
+                      });
+        }
+        ID3D12PipelineState* pClassify = sh.compute("Passes/Shadow/LocalTileClassify");
+        const TextureRef depth = main.depth;
+        const BufferRef clsStats = s.statsRef;
+        const uint32_t toleranceBits = asUint((float)q.number("shadow.vsm.classification_tolerance"));
+        g.addPass("s.vsm.cls.tiles", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(depth, Use::SrvCompute);
+                      b.use(froxelLists, Use::SrvCompute);
+                      b.use(clsBlocks, Use::SrvCompute);
+                      if (twin) b.use(twinBlocks, Use::SrvCompute);
+                      b.use(tileLit, Use::UavCompute);
+                      b.use(clsStats, Use::UavCompute);  // words 64..67: tiles, pairs, lit, umbra (RendererGate)
+                  },
+                  [=](PassContext& ctx) {
+                      const uint32_t k[12] = { ctx.srv(depth), ctx.srv(froxelLists), localLightsSrv, slotOfSrv, ctx.srv(clsBlocks), ctx.uav(tileLit), tilesX, toleranceBits,
+                                               twin ? ctx.srv(twinBlocks) : 0xFFFFFFFFu, ctx.uav(clsStats), 0, 0 };
+                      ctx.cmd->SetPipelineState(pClassify);
+                      ctx.bindFrameConstants(mainConstants);
+                      ctx.computeConstants(k, 12);
+                      ctx.cmd->Dispatch(tilesX, tilesY, 1);
+                  });
+        fc.resources.vsmTileLit = tileLit;
+        s.clsBlocksRef = clsBlocks;
+        s.clsActiveCount = activeLocal;
+    }
 
     {
         ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmPageMax");
@@ -1592,12 +1746,16 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     const uint32_t localLightsSrv = s.localLightsNow, slotOfSrv = s.slotOfNow;
     const BufferRef table = s.tableRef, bound = s.boundRef, blocks = s.blocksRef, statsBuf = s.statsRef, layers = s.layersRef, useBuf = s.useRef;
     // Overflow list (INTERFACES 7.3, v1.20): the main view's shadow-casting lights past the third. Capacity = 1.5 x the
-    // need of the last completed frame (the counter keeps counting past the capacity, so an overage frame reports its
-    // full need), a power of two of words, at least 1 MB; shrinks only below a quarter (no plan churn around a boundary).
+    // need of the last completed frame (the needs are summed past the capacity, so an overage frame reports its full
+    // need), a power of two of words, at least 1 MB; shrinks only below a quarter (no plan churn around a boundary).
+    // Allocation (RENDERER_REDESIGN_V2 14.3-3, L3 stage 3): a count pass writes each listed tile's need, a two-level
+    // prefix sum in tile order (ShadowOverflowScan) gives the block starts, the fill pass evaluates: the block layout
+    // and the set of tiles over the capacity depend only on the frame's content.
     const bool overflowList = true;  // every view (its own lists; empty without local slots)
     const uint32_t tilesX = groups(w, 8), tilesY = groups(h, 8), tiles = tilesX * tilesY;
+    if (tiles > 2048u * 2048u) fail("shadow overflow: %u tiles exceed the two-level scan (2048 x 2048)", tiles);
     TextureRef heads;
-    BufferRef overflow, overflowTiles, fallback, counter;
+    BufferRef overflow, overflowTiles, fallback, needs, blockSums;
     uint32_t capacity = 0;
     if (overflowList)
     {
@@ -1621,7 +1779,8 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
         overflow = g.createBuffer(BufferDesc{ "S shadow overflow", (uint64_t)std::max(capacity, 64u) * 4, 0 });
         overflowTiles = g.createBuffer(BufferDesc{ "S shadow overflow tile list", 16 + (uint64_t)tiles * 4, 0 });
         fallback = g.createBuffer(BufferDesc{ "S shadow overflow fallback tiles", 16 + (uint64_t)tiles * 4, 0 });
-        counter = g.createBuffer(BufferDesc{ "S shadow overflow counter", 16, 0 });
+        needs = g.createBuffer(BufferDesc{ "S shadow overflow need", (uint64_t)tiles * 4, 0 });
+        blockSums = g.createBuffer(BufferDesc{ "S shadow overflow block sums", 2049 * 4, 0 });
         view.shadowOverflowTiles = heads;
         view.shadowOverflow = overflow;
         view.shadowOverflowFallbackTiles = fallback;
@@ -1636,7 +1795,10 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     ID3D12PipelineState* pa = fc.shaders.compute("Passes/Shadow/ShadowListArgs");
     ID3D12PipelineState* p2 = fc.shaders.compute(std::string("Passes/Shadow/ShadowPenumbra") + variant + ".STAGE0");
     ID3D12PipelineState* p3 = s.debugPaths ? nullptr : fc.shaders.compute("Passes/Shadow/ShadowPenumbra.PATHS0.STAGE1");
-    ID3D12PipelineState* po = overflowList ? fc.shaders.compute("Passes/Shadow/ShadowOverflow") : nullptr;
+    ID3D12PipelineState* poCount = overflowList ? fc.shaders.compute("Passes/Shadow/ShadowOverflow.MODE0") : nullptr;
+    ID3D12PipelineState* poFill = overflowList ? fc.shaders.compute("Passes/Shadow/ShadowOverflow.MODE1") : nullptr;
+    ID3D12PipelineState* poScan0 = overflowList ? fc.shaders.compute("Passes/Shadow/ShadowOverflowScan.MODE0") : nullptr;
+    ID3D12PipelineState* poScan1 = overflowList ? fc.shaders.compute("Passes/Shadow/ShadowOverflowScan.MODE1") : nullptr;
     ID3D12CommandSignature* signature = s.dispatchSignature.Get();
     // Pass 1 settles the pixels the page structures decide; the mixed ones go to a list for pass 2 (indirect).
     const BufferRef list = g.createBuffer(BufferDesc{ "S penumbra list", 4 + (uint64_t)w * h * 4, 0 });
@@ -1651,12 +1813,11 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   {
                       b.use(overflowTiles, Use::UavCompute);
                       b.use(fallback, Use::UavCompute);
-                      b.use(counter, Use::UavCompute);
                   }
               },
               [=](PassContext& ctx) {
                   const uint32_t k[4] = { ctx.uav(list), overflowList ? ctx.uav(overflowTiles) : 0xFFFFFFFFu, overflowList ? ctx.uav(fallback) : 0xFFFFFFFFu,
-                                          overflowList ? ctx.uav(counter) : 0xFFFFFFFFu };
+                                          0xFFFFFFFFu };
                   ctx.cmd->SetPipelineState(pc);
                   ctx.computeConstants(k, 4);
                   ctx.cmd->Dispatch(1, 1, 1);
@@ -1677,6 +1838,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   {
                       b.use(overflowTiles, Use::UavCompute);
                       b.use(heads, Use::UavCompute);
+                      b.use(needs, Use::UavCompute);
                   }
                   if (mirrorMask.valid()) b.use(mirrorMask, Use::SrvCompute);
                   if (mirrorTiles.valid()) b.use(mirrorTiles, Use::SrvCompute);
@@ -1685,15 +1847,16 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   if (useBuf.valid()) b.use(useBuf, Use::UavCompute);
               },
               [=](PassContext& ctx) {
-                  const uint32_t k[20] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, overflowList ? ctx.uav(overflowTiles) : 0xFFFFFFFFu,
+                  const uint32_t k[24] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, overflowList ? ctx.uav(overflowTiles) : 0xFFFFFFFFu,
                                            ctx.srv(table), ctx.srv(atlas), ctx.srv(bound), ctx.uav(list), ctx.srv(blocks), ctx.uav(statsBuf), 0,
                                            localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, localLightsSrv, slotOfSrv,
                                            overflowList ? ctx.uav(heads) : 0xFFFFFFFFu,
                                            mirrorMask.valid() ? ctx.srv(mirrorMask) : 0xFFFFFFFFu, mirrorTiles.valid() ? ctx.srv(mirrorTiles) : 0xFFFFFFFFu,
-                                           ctx.srv(layers), tlut.valid() ? ctx.srv(tlut) : 0xFFFFFFFFu };
+                                           ctx.srv(layers), tlut.valid() ? ctx.srv(tlut) : 0xFFFFFFFFu,
+                                           overflowList ? ctx.uav(needs) : 0xFFFFFFFFu, tilesX, 0, 0 };
                   ctx.cmd->SetPipelineState(p1);
                   ctx.bindFrameConstants(constants);
-                  ctx.computeConstants(k, 20);
+                  ctx.computeConstants(k, 24);
                   ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
               });
     g.addPass("s.shadow.listargs", QueueType::Compute,
@@ -1861,8 +2024,46 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                       ctx.cmd->SetPipelineState(begin); ctx.computeConstants(k, 4); ctx.cmd->Dispatch(1, 1, 1);
                   });
     }
-    // Overflow tiles: recount, one block per tile from the capacity, the lights past the third (indirect, one group per
-    // listed tile; without local slots the list is empty and the dispatch has no groups).
+    // Overflow tiles (indirect, one group per listed tile; without local slots the list is empty and the dispatches have
+    // no groups): count each tile's need, allocate in tile order (two-level prefix sum), then fill: the lights past the
+    // third, one block per tile from the capacity.
+    const uint32_t scanBlocks = (tiles + 2047) / 2048;
+    g.addPass("s.shadow.overflow.count", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(depth, Use::SrvCompute);
+                  b.use(overflowTiles, Use::SrvCompute);
+                  b.use(overflowTiles, Use::IndirectArgs);
+                  b.use(needs, Use::UavCompute);
+                  b.use(statsBuf, Use::UavCompute);
+                  if (localSlots) b.use(froxelLists, Use::SrvCompute);
+                  if (mirrorMask.valid()) b.use(mirrorMask, Use::SrvCompute);
+              },
+              [=](PassContext& ctx) {
+                  const uint32_t k[20] = { ctx.srv(depth), 0, 0, ring, ctx.srv(overflowTiles), 0, 0,
+                                           0, 0, capacity, 0, ctx.uav(statsBuf),
+                                           localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, localLightsSrv, slotOfSrv, ctx.uav(needs),
+                                           mirrorMask.valid() ? ctx.srv(mirrorMask) : 0xFFFFFFFFu, 0xFFFFFFFFu, tilesX, 0 };
+                  ctx.cmd->SetPipelineState(poCount);
+                  ctx.bindFrameConstants(constants);
+                  ctx.computeConstants(k, 20);
+                  ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(overflowTiles), 4, nullptr, 0);
+              });
+    g.addPass("s.shadow.overflow.scan.blocks", QueueType::Compute,
+              [&](PassBuilder& b) { b.use(needs, Use::UavCompute); b.use(blockSums, Use::UavCompute); },
+              [=](PassContext& ctx) {
+                  const uint32_t k[4] = { ctx.uav(needs), ctx.uav(blockSums), tiles, 0 };
+                  ctx.cmd->SetPipelineState(poScan0);
+                  ctx.computeConstants(k, 4);
+                  ctx.cmd->Dispatch(scanBlocks, 1, 1);
+              });
+    g.addPass("s.shadow.overflow.scan.top", QueueType::Compute,
+              [&](PassBuilder& b) { b.use(needs, Use::UavCompute); b.use(blockSums, Use::UavCompute); },
+              [=](PassContext& ctx) {
+                  const uint32_t k[4] = { ctx.uav(needs), ctx.uav(blockSums), scanBlocks, 0 };
+                  ctx.cmd->SetPipelineState(poScan1);
+                  ctx.computeConstants(k, 4);
+                  ctx.cmd->Dispatch(1, 1, 1);
+              });
     g.addPass("s.shadow.overflow", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(depth, Use::SrvCompute);
@@ -1872,10 +2073,11 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   b.use(blocks, Use::SrvCompute);
                   b.use(overflowTiles, Use::SrvCompute);
                   b.use(overflowTiles, Use::IndirectArgs);
+                  b.use(needs, Use::SrvCompute);
+                  b.use(blockSums, Use::SrvCompute);
                   b.use(heads, Use::UavCompute);
                   b.use(overflow, Use::UavCompute);
                   b.use(fallback, Use::UavCompute);
-                  b.use(counter, Use::UavCompute);
                   b.use(statsBuf, Use::UavCompute);
                   if (splitOverflow) b.use(overflowFilter, Use::UavCompute);
                   if (localSlots) b.use(froxelLists, Use::SrvCompute);
@@ -1885,10 +2087,10 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
               [=](PassContext& ctx) {
                   const uint32_t k[20] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(heads), ring, ctx.srv(overflowTiles), ctx.srv(table), ctx.srv(atlas),
                                            ctx.srv(blocks), ctx.uav(overflow), capacity, ctx.uav(fallback), ctx.uav(statsBuf),
-                                           localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, localLightsSrv, slotOfSrv, ctx.uav(counter),
+                                           localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, localLightsSrv, slotOfSrv, ctx.srv(needs),
                                            mirrorMask.valid() ? ctx.srv(mirrorMask) : 0xFFFFFFFFu,
-                                           splitOverflow ? ctx.uav(overflowFilter) : 0xFFFFFFFFu, 0, 0 };
-                  ctx.cmd->SetPipelineState(po);
+                                           splitOverflow ? ctx.uav(overflowFilter) : 0xFFFFFFFFu, tilesX, ctx.srv(blockSums) };
+                  ctx.cmd->SetPipelineState(poFill);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 20);
                   ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(overflowTiles), 4, nullptr, 0);

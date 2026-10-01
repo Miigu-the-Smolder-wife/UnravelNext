@@ -651,6 +651,22 @@ UNX_API int32_t UNX_CALL UnxFrameAddPoolSources(UnxRenderer r, const UnxPoolSour
     });
 }
 
+UNX_API int32_t UNX_CALL UnxPoolStatsLatest(UnxRenderer r, UnxPoolStats* stats)
+{
+    return call([&] {
+        if (!stats || stats->size != sizeof(UnxPoolStats) || stats->version != 1) fail("UnxPoolStatsLatest: UnxPoolStats size or version");
+        water::PoolStats s;
+        const bool valid = find(r)->poolStats(stats->pool, s);
+        stats->valid = valid ? 1u : 0u;
+        stats->frameIndex = valid ? s.frame : 0;
+        stats->time = valid ? s.time : 0.0;
+        stats->mean = valid ? s.mean : 0.0f;
+        stats->rms = valid ? s.rms : 0.0f;
+        stats->maxDeviation = valid ? s.maxDeviation : 0.0f;
+        stats->reserved = 0;
+    });
+}
+
 UNX_API int32_t UNX_CALL UnxHairAddBody(UnxRenderer r, const UnxHairBodyDesc* desc, uint32_t* body)
 {
     return call([&] {

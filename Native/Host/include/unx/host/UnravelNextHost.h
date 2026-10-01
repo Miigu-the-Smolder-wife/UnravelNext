@@ -42,7 +42,7 @@ enum UnxResult
                             //    UnxFrameRemoveRuntimeMesh, UnxFrameAddRuntimeInstance, UnxFrameRemoveRuntimeInstance,
                             //    UnxFrameSetRuntimeTransforms (C2b), UnxFrameSetTerrainDeformation (C5), UnxFrameSetOcean (B7),
                             //    UnxSceneSetTerrainLayers (C5 terrain material, v1.74), UnxFrameSetClouds (B5, v1.77),
-                            //    UnxFrameSetPools, UnxFrameAddPoolSources (W2, v1.78)
+                            //    UnxFrameSetPools, UnxFrameAddPoolSources (W2, v1.78), UnxPoolStatsLatest (W2, v1.90)
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -550,6 +550,23 @@ typedef struct UnxPoolSource
 static_assert(sizeof(UnxPoolSource) == 32, "UnxPoolSource is part of the ABI");
 #endif
 UNX_API int32_t UNX_CALL UnxFrameAddPoolSources(UnxRenderer r, const UnxPoolSource* sources, uint32_t count);
+// The surface statistics of a basin (optional export within ABI 6, INTERFACES v1.90; FEATURES_GAME 1.10): over the
+// basin's 257^2 samples of the record framesInFlight records before the latest, relative to the still level: the mean
+// height, the RMS of height - mean, and max |height - mean| (m). valid = 0 (UNX_OK) until a record of the basin has
+// completed on the GPU, or when the basin is not in the current set; the other fields are then 0.
+typedef struct UnxPoolStats
+{
+    uint32_t size, version;             // sizeof (48), 1
+    uint32_t pool, valid;               // UnxPoolDesc::id (in), 0 / 1 (out)
+    uint64_t frameIndex;                // the record's frame
+    double time;                        // the basin's time at that record (s)
+    float mean, rms, maxDeviation;      // m
+    uint32_t reserved;                  // 0
+} UnxPoolStats;
+#ifdef __cplusplus
+static_assert(sizeof(UnxPoolStats) == 48, "UnxPoolStats is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxPoolStatsLatest(UnxRenderer r, UnxPoolStats* stats);
 
 // B5 clouds (optional export within ABI 6, INTERFACES v1.77; after commit, any time): the frame's cloud layer, weather
 // content held until changed (render::CloudLayerDesc). Null or coverage 0 = no clouds.

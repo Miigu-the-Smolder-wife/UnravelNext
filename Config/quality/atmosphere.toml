@@ -23,14 +23,25 @@ sky_view_segments = 128              # quadratic segments x Gauss-Legendre 4 alo
 integration_queue = true             # same air-slice estimator in dense waves; false is the tile-scheduled A/B path
 tile_px = 24
 depth_slices = 64                    # exponential in view depth between near_m and far_m (<= 64: one thread per slice)
-lights_max = 32                      # per froxel list (<= 32, FROXEL_LIST_MAX); more reaching a froxel are counted
+lights_max = 32                      # ordered head of each froxel list (even, <= 96, FROXEL_SORTED_MAX): the strongest lights by
+                                     # importance come first; every other light reaching the froxel follows (nothing is dropped
+                                     # or merged, RENDERER_REDESIGN_V2 14.1)
+list_capacity_forced = 0             # tests only (0: off): entry capacity of the lists buffer. Normally the capacity is an upper
+                                     # bound of the scene lights' entries (FroxelSystem.cpp froxelListBound) + an allowance for FX
+                                     # particle lights grown from the measured need; a frame needing more lists the scene lights alone
+                                     # (their own allocation, inside the bound) and leaves the FX lights out, counted (gates require 0)
+list_fallback_forced = 0             # tests only (0: off): 1 makes the fill pass list the scene lights alone, as a frame over the capacity does
 near_m = 0.5                         # slice 0 spans the camera .. near_m (far / near)^(1/64)
 far_m = 65536                        # last node of the air volume (air perspective to 64 km; depths beyond clamp)
 experiment_disable = 0               # cost attribution only (never in a verdict): 1 air shadows, 2 local lights, 4 air integration,
+                                     # (A/B switch, not a disable: 1024 = L4 bounded VSM walk omission in the air, RENDERER_REDESIGN_V2 14.4:
+                                     #  a shadowed light under 1e-3 of the slice's in-scatter is added lit; off by default until measured)
                                      # 8 sun transmittance per substep, 16 multiple scattering per substep, 32 walk stops at pages,
                                      # 64 local lights' air shadows, 128 one lane per shadowed local-light item (test reference)
 walk_stats = 0                       # 1: count the air shadow walk (slices, mixed, block and texel loads) into the VSM
-                                     # stats (RendererGate); measurement only
+                                     # stats (RendererGate); measurement only; also the shadowed items lit over the L3 pages, omitted, walked
+walk_omission = false                # L4 (RENDERER_REDESIGN_V2 14.4): a shadowed local light under 1e-3 of the slice's in-scatter is added lit
+                                     # without its VSM walk (error <= 1e-3 of the slice; = experiment_disable bit 1024). Off until measured.
 air_step_altitude_m = 100            # air integration substeps: at most this altitude change per step and at most min(H_R, H_M) / 12
                                       # (midpoint error (dh/H)^2/24 <= 0.03 %; FroxelSystem.cpp)
 shadow_texels_per_tile = 4           # air shadows: VSM level with texel <= tile width / 4 (boundary placement, VsmAir.hlsli)

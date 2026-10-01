@@ -1,0 +1,31 @@
+one panel: one plane                                                           1            (limit 1) ok
+one panel: two triangles converted                                             2            (limit 2) ok
+one panel: plane normal faces down (-y)                                        -1           (limit -1) ok
+one panel: plane through the panel (origin y)                                  3            (limit 3) ok
+one panel: root square half size = 2 m (+margin)                               2            (limit 2) ok
+one panel: root mean radiance = emission x area fraction                       2000         (limit 2000) ok
+one panel: flux in = luminance x 8 m^2                                         3.057e+04    (limit 3.057e+04) ok
+one panel: 1 planes, 1377 nodes, 512 leaves; flux in 30566.9 out 30566.9
+one panel: leaves within the leaf size                                         0            (limit 0) ok
+one panel: children are their parent's quadrants                               0            (limit 0) ok
+one panel: leaf flux equals the triangles' flux (rel.)                         2.856e-15    (limit 1e-06) ok
+image size = header + planes + nodes + bitset                                  6.62e+04     (limit 6.62e+04) ok
+image header words                                                             96           (limit 96) ok
+image bitset: material 0 converted                                             1            (limit 1) ok
+two-sided panel: two planes (both sides)                                       2            (limit 2) ok
+two-sided panel: opposite plane normals                                        -1           (limit -1) ok
+textured emissive stays on the cache path (triangles)                          2            (limit 2) ok
+skinned emitter stays on the cache path (triangles)                            2            (limit 2) ok
+bitset marks the two-sided material alone                                      2            (limit 2) ok
+mixed emitters: 2 planes, 1362 nodes, 512 leaves; flux in 8000 out 8000
+mixed emitters: leaves within the leaf size                                    0            (limit 0) ok
+mixed emitters: children are their parent's quadrants                          0            (limit 0) ok
+mixed emitters: leaf flux equals the triangles' flux (rel.)                    1.819e-15    (limit 1e-06) ok
+tilted panel: one plane                                                        1            (limit 1) ok
+tilted panel: orthonormal plane basis                                          0            (limit 1e-05) ok
+tilted panel: plane normal is the rotated face normal                          0.6442       (limit 0.6442) ok
+tilted panel: 1 planes, 321 nodes, 96 leaves; flux in 300 out 300
+tilted panel: leaves within the leaf size                                      0            (limit 0) ok
+tilted panel: children are their parent's quadrants                            0            (limit 0) ok
+tilted panel: leaf flux equals the triangles' flux (rel.)                      3.974e-08    (limit 1e-06) ok
+PASS: 0 failure(s)

@@ -45,6 +45,8 @@
 // atmosphere.froxels.walk_stats, measurement only)
 // P[2].x VSM search bound SRV (raw), P[2].y shadow texels per tile (float bits), P[2].z air step altitude m (float bits),
 // P[2].w experiment mask (atmosphere.froxels.experiment_disable; 0; cost attribution only: 1 air shadows, 2 local lights,
+// bit 1024 = atmosphere.froxels.walk_omission (L4, A/B); bit 16 also words 68..70: shadowed items lit over the
+// classification pages, omitted, walked;
 // 4 air integration, 8 sun transmittance per substep, 16 multiple scattering per substep, 32 air shadow walk stops at
 // the page level, 64 local lights' air shadows; bit 16: walk statistics on, also the local lights' air walk: words 54..57
 // entries walked, cells, largest cells of one entry, lit runs; 58, 59 over waves: the sum of the lane maxima of cells
@@ -64,6 +66,7 @@
 // by them, the air in front is not.
 // Frame constants of the view (main, or a planar reflection view).
 #include "Passes/Atmosphere/FroxelSlice.hlsli"
+#include "Passes/Shadow/VsmCls.hlsli"
 groupshared float3 gs_tau[64];
 groupshared float3 gs_source[64];
 groupshared float4 gs_hat[64];  // L / (1 - T) of node s + 1, .w = 1 where the node has air
@@ -73,6 +76,31 @@ groupshared uint gs_scan[64];   // shadowed local-light items of the slices (inc
 groupshared uint gs_item[64];   // a batch's items: slice | list position << 6
 groupshared float gs_moments[64][8];  // each lane's piece of a shadowed item: its lit set's Legendre moments
 groupshared uint gs_runs[64];         // and its lit runs | 0x80000000 unless fully lit
+
+// L3 (14.3-1, 14.4): the segment o + dir [0, len] is lit by the local light of shadow slot 'slot' when both ends project
+// onto one cube face, beyond the near plane, and every 8-texel block the projected segment's bounding box covers (<= 16
+// blocks, else undecided) holds no caster nearer than the segment's farthest face depth (reversed Z: block max <= that
+// depth's device value x (1 + 2e-3)). Sufficient, never wrong: an occluder of a segment point lies on its ray, nearer.
+bool airClsSegmentLit(uint blocksSrv, uint localsSrv, uint slot, float3 o, float3 dir, float len)
+{
+    StructuredBuffer<VsmLocalLight> locals = ResourceDescriptorHeap[localsSrv];
+    const VsmLocalLight l = locals[slot];
+    if (l.activeIndex == 0xFFFFFFFFu) return false;
+    const VsmLocalPoint q0 = vsmLocalProject(l, o), q1 = vsmLocalProject(l, o + dir * len);
+    if (q0.face != q1.face || q0.z <= l.nearM || q1.z <= l.nearM) return false;
+    const float zFar = max(q0.z, q1.z);
+    const float limit = saturate(l.nearM * (l.farM - zFar) / ((l.farM - l.nearM) * zFar) * (1 + 2e-3));
+    const int2 t0 = clamp(int2(floor(vsmLocalTexel(q0.xy, 0))), 0, 127), t1 = clamp(int2(floor(vsmLocalTexel(q1.xy, 0))), 0, 127);
+    const int2 b0 = min(t0, t1) / 8, b1 = max(t0, t1) / 8;
+    if ((b1.x - b0.x + 1) * (b1.y - b0.y + 1) > 16) return false;
+    ByteAddressBuffer blocks = ResourceDescriptorHeap[blocksSrv];
+    const uint page = l.activeIndex * 6 + q0.face;
+    float nearest = 0;
+    for (int by = b0.y; by <= b1.y; ++by)
+        for (int bx = b0.x; bx <= b1.x; ++bx)
+            nearest = max(nearest, asfloat(blocks.Load((page * 256 + by * 16 + bx) * 4)));
+    return nearest <= limit;
+}
 
 [numthreads(64, 1, 1)]
 void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
@@ -93,6 +121,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     float3 tau = 0, source = 0, skyTerm = 0;
     VsmAirWalkCount walk = (VsmAirWalkCount)0;  // statistics (P[3].w)
     AirLocalCount localWalk = (AirLocalCount)0;
+    uint statClsLit = 0, statOmitted = 0, statWalked = 0;  // shadowed items: lit over the classification pages, omitted (L4), walked (words 68..70)
     const float tStart = airViewStart(g_clipPlane, g_cameraPosition, dir);
     const float zs0 = froxelNodeDepth(g, s), zs1 = froxelNodeDepth(g, s + 1);
     const bool hasAir = s < g.slices && zs1 * toRay > tStart;
@@ -142,7 +171,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     if (skyRead && hasAir)
     {
         ByteAddressBuffer lists = ResourceDescriptorHeap[P[0].x];
-        bool active = (lists.Load(g.headerBase + froxelIndex(g, tile, s) * 4) & 63u) != 0;
+        bool active = lists.Load(g.headerBase + froxelIndex(g, tile, s) * 8 + 4) != 0;
         if (P[1].w != 0xFFFFFFFFu)
         {
             ConstantBuffer<VsmConstants> vcs = ResourceDescriptorHeap[P[1].w];
@@ -184,10 +213,23 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         const float3 pm = airLiftToSurface(a, o + dir * (0.5 * len));
         const AirCoefficients cm = airCoefficients(a, max(0.0, airAltitude(a, pm)));
         ByteAddressBuffer lists = ResourceDescriptorHeap[P[0].x];
-        const uint h = lists.Load(g.headerBase + froxelIndex(g, tile, s) * 4);
-        myFirst = h >> 6;
-        myCount = (experiment & 2) ? 0u : h & 63u;
+        const uint2 h = lists.Load2(g.headerBase + froxelIndex(g, tile, s) * 8);
+        myFirst = h.x;
+        myCount = (experiment & 2) ? 0u : h.y;
         const float width = froxelTileWidth(g, 0.5 * (z0 + z1)) / asfloat(P[2].y);
+        // L4 (RENDERER_REDESIGN_V2 14.4, bounded walk omission; experiment bit 1024 = on, A/B): a shadowed light whose
+        // unshadowed in-scatter is under 1e-3 of the slice's total (every light at full visibility: the upper bound) is
+        // added lit without its VSM walk; the omitted shares are summed in list order (the ordered head first) and the
+        // omission stops where the sum would pass 1e-3 x total, so the slice's error is at most 1e-3 of its in-scatter
+        // (an omitted light in umbra is counted lit: the bound; never dropped). Pass 1: every light's unshadowed value
+        // and the total; pass 2: the shadowed lights' decisions. The (slice interval, light) lit / umbra / mixed
+        // classification over the coarse pages follows 14.3 (L3).
+        const bool omission = (experiment & 1024) != 0;
+        // L3 (14.4 with 14.3-1): a shadowed light whose segment is lit over the classification pages (no caster nearer
+        // than the segment's farthest face depth in the blocks the segment's projection covers; one face, <= 16 blocks)
+        // is added lit without its walk - exact, not an omission.
+        const bool cls = P[5].x != 0xFFFFFFFFu;
+        float total = 0;
         for (uint i = 0; i < myCount; ++i)
         {
             uint li;
@@ -197,16 +239,52 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             // whose sphere meets the froxel, about a tenth of the depth beside the tile's centre ray.)
             const GpuLight light = loadLight(li);
             if (airLocalMap(light, o, dir, len).h >= light.range) continue;
-            if (slot != VSM_LOCAL_NONE)
+            bool shadowed = slot != VSM_LOCAL_NONE;
+            if (shadowed && cls && airClsSegmentLit(P[5].x, P[3].x, slot, o, dir, len))
+            {
+                shadowed = false;
+                ++statClsLit;
+            }
+            if (shadowed && !omission)
             {
                 if (i < 32) myReach.x |= 1u << i;
                 else myReach.y |= 1u << (i - 32);
                 ++myShadowed;
+                ++statWalked;
                 continue;
             }
             const float3 local = airLocalLight(light, o, dir, len, cm, a.mieG, P[4].y, li, froxelTileWidth(g, 0.5 * (z0 + z1)));
+            total += dot(local, float3(0.2126, 0.7152, 0.0722));
+            if (shadowed) continue;  // (pass 2 decides)
             source += local;
             skyTerm += local;
+        }
+        if (omission)
+        {
+            float omitted = 0;
+            for (uint i2 = 0; i2 < myCount; ++i2)
+            {
+                uint li;
+                const uint slot = airLocalSlot(lists, g, myFirst + i2, localShadows, li);
+                if (slot == VSM_LOCAL_NONE) continue;
+                const GpuLight light = loadLight(li);
+                if (airLocalMap(light, o, dir, len).h >= light.range) continue;
+                if (cls && airClsSegmentLit(P[5].x, P[3].x, slot, o, dir, len)) continue;  // (added lit in pass 1)
+                const float3 local = airLocalLight(light, o, dir, len, cm, a.mieG, P[4].y, li, froxelTileWidth(g, 0.5 * (z0 + z1)));
+                const float lum = dot(local, float3(0.2126, 0.7152, 0.0722));
+                if (omitted + lum <= 1e-3 * total)
+                {
+                    omitted += lum;  // lit without the walk (bounded)
+                    ++statOmitted;
+                    source += local;
+                    skyTerm += local;
+                    continue;
+                }
+                if (i2 < 32) myReach.x |= 1u << i2;
+                else myReach.y |= 1u << (i2 - 32);
+                ++myShadowed;
+                ++statWalked;
+            }
         }
     }
     // Shadowed local lights: the group's (slice, light) items, each walked by K lanes in K pieces uniform in the light's
@@ -256,8 +334,8 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             const float t0 = max(z0 * toRay, tStart);
             len = z1 * toRay - t0;
             o = g_cameraPosition + dir * t0;
-            const uint h = lists.Load(g.headerBase + froxelIndex(g, tile, is) * 4);
-            const uint slot = airLocalSlot(lists, g, (h >> 6) + (it >> 6), localShadows, li);
+            const uint h = lists.Load(g.headerBase + froxelIndex(g, tile, is) * 8);  // the run's first entry
+            const uint slot = airLocalSlot(lists, g, h + (it >> 6), localShadows, li);
             l = loadLight(li);
             mp = airLocalMap(l, o, dir, len);
             StructuredBuffer<VsmLocalLight> locals = ResourceDescriptorHeap[P[3].x];
@@ -390,6 +468,14 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             st.InterlockedAdd(228, lr);
             st.InterlockedAdd(232, wc);
             st.InterlockedAdd(236, we);
+        }
+        const uint cl = WaveActiveSum(statClsLit), om = WaveActiveSum(statOmitted), wk = WaveActiveSum(statWalked);
+        if (WaveIsFirstLane())
+        {
+            RWByteAddressBuffer st = ResourceDescriptorHeap[P[3].w];
+            st.InterlockedAdd(272, cl);
+            st.InterlockedAdd(276, om);
+            st.InterlockedAdd(280, wk);
         }
     }
     if (s < g.slices)

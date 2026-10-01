@@ -8,6 +8,7 @@
 #include "unx/render/Frame.h"
 #include "unx/core/Log.h"
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <unordered_map>
@@ -28,12 +29,18 @@ struct PoolSlot
 struct PoolState
 {
     std::unordered_map<uint32_t, PoolSlot> slots;
+    std::vector<std::pair<uint32_t, PoolStats>> stats;  // the latest valid statistics of the basins in the set (render thread)
 };
 bool sameBasin(const PoolDesc& a, const PoolDesc& b)
 {
     return a.sizeX == b.sizeX && a.sizeZ == b.sizeZ && a.depth == b.depth && a.surfaceFilm == b.surfaceFilm;
 }
 } // namespace
+
+void poolStatsSnapshot(TrackState& state, std::vector<std::pair<uint32_t, PoolStats>>& out)
+{
+    out = state.get<PoolState>("W.pools").stats;
+}
 
 void poolGeometry(FramePassContext& fc)
 {
@@ -48,6 +55,7 @@ void poolGeometry(FramePassContext& fc)
     if (present.size() != frame.poolCount || present.count(0)) fail("W: the frame's %u basins need unique nonzero ids", frame.poolCount);
     for (auto it = state.slots.begin(); it != state.slots.end();)  // basins no longer in the list (the GPU release is deferred)
         it = present.count(it->first) ? std::next(it) : state.slots.erase(it);
+    std::erase_if(state.stats, [&](const auto& e) { return !present.count(e.first); });
 
     std::vector<PoolSource> sources;
     for (uint32_t i = 0; i < frame.poolCount; ++i)
@@ -81,6 +89,15 @@ void poolGeometry(FramePassContext& fc)
         }
         PoolOutput out = slot.pool->record(fc.graph, frame.frameIndex, placement, frame.time, frame.deltaTime, sources);
         out.stream.material = in.material;
+        {
+            const PoolStats& st = slot.pool->latestStats();
+            if (st.valid)
+            {
+                auto found = std::find_if(state.stats.begin(), state.stats.end(), [&](const auto& e) { return e.first == in.id; });
+                if (found == state.stats.end()) state.stats.push_back({ in.id, st });
+                else found->second = st;
+            }
+        }
         {
             FluidSurfaceInput::Basin b;
             for (int a = 0; a < 3; ++a) b.centre[a] = float(placement.centre[a]);

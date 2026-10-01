@@ -851,6 +851,10 @@ void replay(const Options& o, Stats& worst)
             }
             const double ep = std::sqrt(dp) / std::max(std::sqrt(pp), 1.0), ev = std::sqrt(dv) / std::max(std::sqrt(vv), 1.0);
             errs.push_back(ep);
+            if (g.emitter == g_watchEmitter && g.birth == g_watchBirth)  // --watch E B: the particle's state every compare tick (replay too)
+                FX_LOG("  watch tick %u particle (%u,%u): position error %.3g, velocity error %.3g; GPU p (%.7f %.7f %.7f) v (%.6f %.6f %.6f) age %.7f | ref p (%.7f %.7f %.7f) v (%.6f %.6f %.6f) age %.7f",
+                       t, g.emitter, g.birth, ep, ev, g.position[0], g.position[1], g.position[2], g.velocity[0], g.velocity[1], g.velocity[2], g.age, r.position[0], r.position[1],
+                       r.position[2], r.velocity[0], r.velocity[1], r.velocity[2], r.age);
             if (ep > 1e-5 && worst.dumped < 8)
             {
                 ++worst.dumped;

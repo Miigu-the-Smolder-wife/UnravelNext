@@ -1,5 +1,7 @@
 # Shading reads the material resolve's per-view outputs (same track: Passes/Material, Passes/Shading).
 target_link_libraries(${UNX_MODULE_TARGET} PUBLIC unx_module_material)
+# 14.1b: the emissive quadtree lights (Passes/Lights EmissiveLights.h) are cooked and uploaded from the shading record.
+target_link_libraries(${UNX_MODULE_TARGET} PUBLIC unx_module_lights)
 # The M gate renders C's procedural scenes through V's clusters when those tracks are in the build (the integrated gate
 # build is); a core + M build compiles the gate without them and it refuses to run.
 target_link_libraries(${UNX_MODULE_TARGET} INTERFACE $<TARGET_NAME_IF_EXISTS:unx_scenegen> $<TARGET_NAME_IF_EXISTS:unx_clusterbuilder>)

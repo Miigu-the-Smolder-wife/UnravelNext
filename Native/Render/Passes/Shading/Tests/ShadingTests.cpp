@@ -757,7 +757,7 @@ void testLocalLights(TestFrame& tf, Report& report)
     s.cameras.push_back(cam);
     tf.setScene(s);
 
-    // S's froxel list buffer: header, one froxel (first entry 0, count 7), indices 0..6 as 16-bit pairs.
+    // S's froxel list buffer: header, one froxel (first entry 0, count 7: two words), indices 0..6 as 16-bit pairs.
     std::vector<uint32_t> list(64, 0);
     const float nearM = 0.01f, farM = 1000.0f, logRatio = std::log2(farM / nearM);
     list[0] = 1;
@@ -769,9 +769,10 @@ void testLocalLights(TestFrame& tf, Report& report)
     std::memcpy(&list[6], &logRatio, 4);
     list[8] = 64;   // headerBase
     list[9] = 128;  // indexBase
-    list[10] = 64;  // indexStride
+    list[10] = 64;  // capacity (entries)
     list[11] = 7;   // indexCount
-    list[16] = (0u << 6) | 7u;
+    list[16] = 0;   // first entry
+    list[17] = 7;   // count
     list[32] = 0 | (1u << 16);
     list[33] = 2 | (3u << 16);
     list[34] = 4 | (5u << 16);
@@ -2326,6 +2327,81 @@ void testCoverageComposite(TestFrame& tf, Report& report)
     report(checked > 500 && layered > 50, "coverage composite: pixels with fragments and with overlapping fragments present", std::min(checked / 10, layered), 50);
     report(worst < 5e-3, "coverage composite: pixels with fragments vs CPU composite of CPU-shaded fragments (rel.)", worst, 5e-3);
     report(worstOther == 0, "coverage composite: pixels without fragments unchanged (abs.)", worstOther, 0);
+
+    // L2c (14.1c): the same layer under local lights, shading.coverage_tile_lights off (every light per record) vs on
+    // (the tile x depth-interval FAR field; NEAR, shadowed and horizon-straddling lights per record): every pixel within
+    // the 1e-3 rule (P99), the gate of 14.8 L2c. The sun is off so the local lights carry the whole direct term.
+    {
+        scene::Scene sl = s;
+        std::mt19937 rngL(31);
+        auto uniL = [&](float lo, float hi) { return std::uniform_real_distribution<float>(lo, hi)(rngL); };
+        for (int i = 0; i < 24; ++i)
+        {
+            scene::Light L;
+            const int kind = i % 3;
+            L.type = kind == 0 ? scene::LightType::Point : (kind == 1 ? scene::LightType::Spot : scene::LightType::Rect);
+            L.position = { uniL(-4, 4), uniL(0.8f, 4.5f), uniL(-5, 1.2f) };
+            L.forward = normalize(float3{ uniL(-0.5f, 0.5f), -1, uniL(-0.5f, 0.5f) });
+            L.right = normalize(cross(L.forward, float3{ 0, 0, 1 }));
+            L.intensity = kind == 2 ? uniL(200, 1200) : uniL(200, 2500);
+            L.range = uniL(6, 25);
+            L.size = kind == 2 ? float2{ uniL(0.2f, 0.5f), uniL(0.2f, 0.4f) } : float2{ 0, 0 };
+            L.spotInner = 0.4f;
+            L.spotOuter = 0.7f;
+            sl.lights.push_back(L);
+        }
+        sl.sun.illuminance = 0;
+        tf.setScene(sl, { 1 });
+        const uint32_t N = (uint32_t)sl.lights.size();
+        std::vector<uint32_t> llist(64 + N, 0);
+        const float nearM = 0.01f, farM = 1000.0f, logRatio = std::log2(farM / nearM);
+        llist[0] = 1, llist[1] = 1, llist[2] = 1, llist[3] = 4096;
+        std::memcpy(&llist[4], &nearM, 4);
+        std::memcpy(&llist[5], &farM, 4);
+        std::memcpy(&llist[6], &logRatio, 4);
+        llist[8] = 64, llist[9] = 128, llist[10] = (N + 1) & ~1u, llist[11] = N;
+        llist[16] = 0, llist[17] = N;
+        for (uint32_t i = 0; i < N; i += 2) llist[32 + i / 2] = i | ((i + 1 < N ? i + 1 : 0) << 16);
+        ComPtr<ID3D12Resource> llistBuffer = uploadStatic(tf.device, llist.data(), llist.size() * 4, L"test froxel list (coverage tile lights)");
+        std::shared_ptr<std::vector<uint8_t>> offL, onL;
+        tf.frame.outputLinearHdr = true;
+        for (int pass = 0; pass < 2; ++pass)
+        {
+            tf.quality.applyOverride(pass ? "shading.coverage_tile_lights=true" : "shading.coverage_tile_lights=false");
+            tf.run([&](FramePassContext& fc) {
+                ViewResources v = tf.mainView(fc, W, H, 0);
+                v.color = fc.graph.createTexture({ "m.test.coverage color", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+                tf.vis.record(fc, v);
+                tracks::materialResolve(fc, v);
+                fc.resources.froxelLights = fc.graph.importBuffer(llistBuffer.Get(), { "test froxel lists", llist.size() * 4, 0 });
+                v.froxelLights = fc.resources.froxelLights;
+                layer.install(fc.graph, v);
+                tracks::shading(fc, v);
+                (pass ? onL : offL) = tf.readback(fc, v.color);
+            });
+        }
+        tf.quality.applyOverride("shading.coverage_tile_lights=false");
+        tf.frame.outputLinearHdr = false;
+        std::vector<double> errsL;
+        double worstL = 0, largestL = 0;
+        for (uint32_t y = 0; y < H; ++y)
+            for (uint32_t x = 0; x < W; ++x)
+            {
+                const float4 pa = texelOf<float4>(*offL, W, x, y), pb = texelOf<float4>(*onL, W, x, y);
+                const double scale = std::max({ (double)pa.x, (double)pa.y, (double)pa.z, 1e-3 });
+                const double e = std::max({ std::abs(pa.x - pb.x), std::abs(pa.y - pb.y), std::abs(pa.z - pb.z) }) / scale;
+                if (e > worstL && e > 5e-3) logf("  coverage tile lights px (%u,%u): per-record (%.5f %.5f %.5f) field (%.5f %.5f %.5f)\n", x, y, pa.x, pa.y, pa.z, pb.x, pb.y, pb.z);
+                worstL = std::max(worstL, e);
+                largestL = std::max(largestL, (double)pa.x);
+                errsL.push_back(e);
+            }
+        std::sort(errsL.begin(), errsL.end());
+        const double p99L = errsL.empty() ? 1 : errsL[std::min(errsL.size() - 1, (size_t)(errsL.size() * 0.99))];
+        logf("coverage tile lights: %zu pixels, largest exposed radiance %.4f, |dE|/E P99 %.3g, worst %.3g\n", errsL.size(), largestL, p99L, worstL);
+        report(largestL > 0.02, "coverage tile lights: the local lights light the frame (exposed radiance)", largestL, 0.02);
+        report(p99L <= 1e-3, "coverage tile lights: FAR field vs per-record loop, |dE|/E P99 (14.8 L2c gate)", p99L, 1e-3);
+        report(worstL <= 1e-2, "coverage tile lights: FAR field vs per-record loop, worst pixel", worstL, 1e-2);
+    }
 }
 
 } // namespace
@@ -3672,7 +3748,7 @@ void testAreaLobesFrame(TestFrame& tf, Report& report)
     std::memcpy(&list[5], &farM, 4);
     std::memcpy(&list[6], &logRatio, 4);
     list[8] = 64, list[9] = 128, list[10] = 64, list[11] = 1;
-    list[16] = (0u << 6) | 1u;
+    list[16] = 0, list[17] = 1;  // header (first entry, count)
     list[32] = 0;
     ComPtr<ID3D12Resource> listBuffer = uploadStatic(tf.device, list.data(), list.size() * 4, L"test froxel list (area lobes)");
     const uint32_t W = 640, H = 360;
@@ -3867,6 +3943,229 @@ void testCoatSun(TestFrame& tf, Report& report)
     report(worstNarrow < 1e-2, "coat sun lobe [narrow, alpha < 2 theta_s] vs dense quadrature (rel. to peak)", worstNarrow, 1e-2);
 }
 
+// 14.1b (L2b): a constant-emission panel as quadtree area lights (shading.emissive_area_lights) against the same
+// panel authored as a RECT light (the LTC closed form the kernel uses for area lights): the ground's diffuse radiance
+// must agree pixel by pixel (the quadtree evaluates the panel as a few squares, the rect light as one polygon; the same
+// edge integral, the window w(d) of the rect light is 1 - (d / 1000)^4 ~ 1). The panel's own pixels (its material)
+// are skipped (its direct view is the material's emission in one run and black in the other).
+void testEmissivePanel(TestFrame& tf, Report& report)
+{
+    const float3 L{ 3000, 2800, 2500 };  // nits
+    const float3 panelPos{ 0.4f, 2.6f, 0.5f };
+    const float2 panelSize{ 1.2f, 0.8f };
+    auto renderGround = [&](bool quadtree, std::shared_ptr<std::vector<uint8_t>>& lin, std::shared_ptr<std::vector<uint8_t>>& words, uint32_t W, uint32_t H) {
+        scene::Scene s;
+        s.name = quadtree ? "emissive panel (quadtree)" : "emissive panel (rect light)";
+        scene::Material ground;
+        ground.baseColor = { 0.5f, 0.5f, 0.5f };
+        scene::Material panel;
+        panel.baseColor = { 0.02f, 0.02f, 0.02f };
+        if (quadtree) panel.emissive = L;
+        s.materials = { ground, panel };
+        scene::Instance a;
+        a.mesh = addPlane(s, 40, 0);
+        s.instances.push_back(a);
+        // the panel: addPlane's quad (normal +y, counter-clockwise from above) turned to face down and scaled
+        scene::Mesh pm;
+        pm.name = "panel";
+        const float hx = panelSize.x / 2, hz = panelSize.y / 2;
+        pm.positions = { { -hx, 0, -hz }, { hx, 0, -hz }, { -hx, 0, hz }, { hx, 0, hz } };
+        pm.normals.assign(4, { 0, -1, 0 });
+        pm.tangents.assign(4, { 1, 0, 0, 1 });
+        pm.uv0 = { { 0, 0 }, { 1, 0 }, { 0, 1 }, { 1, 1 } };
+        pm.indices = { 0, 1, 2, 1, 3, 2 };  // counter-clockwise seen from below
+        pm.submeshes.push_back({ 0, 6, 1 });
+        s.meshes.push_back(std::move(pm));
+        scene::Instance b;
+        b.mesh = (uint32_t)s.meshes.size() - 1;
+        b.transform = float3x4::translation(panelPos);
+        s.instances.push_back(b);
+        s.sun.illuminance = 0;
+        if (!quadtree)
+        {
+            scene::Light rl;
+            rl.type = scene::LightType::Rect;
+            rl.position = panelPos;
+            rl.forward = { 0, -1, 0 };
+            rl.right = { 1, 0, 0 };
+            rl.size = panelSize;
+            rl.intensity = 1;
+            rl.color = L;  // (colour x intensity = rgb nits, as the kernel's Lw)
+            rl.range = 1000;
+            s.lights.push_back(rl);
+        }
+        scene::Camera cam;
+        cam.position = { 0, 1.6f, 4.0f };
+        cam.forward = normalize(float3{ 0, -0.35f, -1 });
+        cam.ev100 = 9;
+        s.cameras.push_back(cam);
+        tf.setScene(s);
+        tf.quality.applyOverride(quadtree ? "shading.emissive_area_lights=true" : "shading.emissive_area_lights=false");
+        std::vector<uint32_t> list(64, 0);
+        const float nearM = 0.01f, farM = 1000.0f, logRatio = std::log2(farM / nearM);
+        list[0] = 1, list[1] = 1, list[2] = 1, list[3] = 4096;
+        std::memcpy(&list[4], &nearM, 4);
+        std::memcpy(&list[5], &farM, 4);
+        std::memcpy(&list[6], &logRatio, 4);
+        list[8] = 64, list[9] = 128, list[10] = 64, list[11] = 1;
+        list[16] = 0, list[17] = 1;  // header (first entry, count): the one rect light
+        list[32] = 0;
+        ComPtr<ID3D12Resource> listBuffer = uploadStatic(tf.device, list.data(), list.size() * 4, L"test froxel list (emissive panel)");
+        tf.frame.outputLinearHdr = true;
+        tf.run([&](FramePassContext& fc) {
+            ViewResources v = tf.mainView(fc, W, H, 0);
+            v.color = fc.graph.createTexture({ "m.test.color", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+            tf.vis.record(fc, v);
+            tracks::materialResolve(fc, v);
+            if (!quadtree)
+            {
+                fc.resources.froxelLights = fc.graph.importBuffer(listBuffer.Get(), { "test froxel lists", list.size() * 4, 0 });
+                v.froxelLights = fc.resources.froxelLights;
+            }
+            tracks::shading(fc, v);
+            const material::ResolveOutputs o = material::resolveOutputs(fc, v);
+            words = tf.readback(fc, o.materialWord);
+            lin = tf.readback(fc, v.color);
+        });
+        tf.frame.outputLinearHdr = false;
+        tf.quality.applyOverride("shading.emissive_area_lights=false");
+    };
+    const uint32_t W = 640, H = 360;
+    std::shared_ptr<std::vector<uint8_t>> linQ, wordsQ, linR, wordsR;
+    renderGround(true, linQ, wordsQ, W, H);
+    renderGround(false, linR, wordsR, W, H);
+    double worst = 0, sumE = 0, sumR = 0, largest = 0;
+    uint32_t checked = 0;
+    for (uint32_t y = 0; y < H; y += 2)
+        for (uint32_t x = 0; x < W; x += 2)
+        {
+            if ((texelOf<uint32_t>(*wordsQ, W, x, y) & 0xFFFF) != 0 || (texelOf<uint32_t>(*wordsR, W, x, y) & 0xFFFF) != 0) continue;  // ground pixels alone
+            const float4 q = texelOf<float4>(*linQ, W, x, y), r = texelOf<float4>(*linR, W, x, y);
+            const double scale = std::max({ (double)r.x, (double)r.y, (double)r.z, 1e-3 });
+            const double e = std::max({ std::abs(q.x - r.x), std::abs(q.y - r.y), std::abs(q.z - r.z) }) / scale;
+            if (e > worst && e > 2e-3) logf("  emissive panel px (%u,%u): quadtree (%.5f %.5f %.5f) rect light (%.5f %.5f %.5f)\n", x, y, q.x, q.y, q.z, r.x, r.y, r.z);
+            worst = std::max(worst, e);
+            largest = std::max(largest, (double)r.x);
+            sumE += std::abs(q.x - r.x), sumR += r.x;
+            ++checked;
+        }
+    logf("emissive panel: %u ground pixels, largest exposed radiance %.4f, energy-weighted error %.4g, worst %.4g\n", checked, largest, sumR > 0 ? sumE / sumR : 0, worst);
+    report(checked > 10000 && largest > 0.02, "emissive panel: the panel lights the ground (exposed radiance)", largest, 0.02);
+    report(sumR > 0 && sumE / sumR < 1e-3, "emissive panel: quadtree area lights vs the rect light (energy-weighted rel.)", sumR > 0 ? sumE / sumR : 1, 1e-3);
+    report(worst < 5e-3, "emissive panel: quadtree area lights vs the rect light (worst pixel rel.)", worst, 5e-3);
+}
+
+// L2 (14.1/14.2): the tile lights' FAR term against the per-pixel evaluation. The same frame shaded with
+// shading.tile_lights off (every light per pixel) and on (FAR lights' diffuse from the tile corners' vector
+// irradiance, NEAR lights and every specular per pixel): the gate of 14.8 L2, |dE| / E P99 <= 1e-3 over the surface
+// pixels (edge tiles keep the per-pixel path by design). The lights sit at 3..30 m from the ground and the boxes, so
+// most are FAR for most tiles; the one S-style froxel list of the tests holds them all.
+void testTileLights(TestFrame& tf, Report& report)
+{
+    scene::Scene s;
+    s.name = "tile lights";
+    scene::Material ground;
+    ground.baseColor = { 0.5f, 0.5f, 0.5f };
+    ground.roughness = 0.6f;
+    scene::Material boxMat;
+    boxMat.baseColor = { 0.7f, 0.4f, 0.3f };
+    boxMat.roughness = 0.3f;
+    s.materials = { ground, boxMat };
+    scene::Instance a;
+    a.mesh = addPlane(s, 60, 0);
+    s.instances.push_back(a);
+    for (int i = 0; i < 3; ++i)
+    {
+        scene::Instance b;
+        b.mesh = addSphere(s, 0.6f, 24, 48, 1);
+        b.transform = float3x4::translation({ -2.5f + 2.5f * i, 0.6f, -1.0f + 0.7f * i });
+        s.instances.push_back(b);
+    }
+    s.sun.illuminance = 0;
+    std::mt19937 rng(2026);
+    auto uni = [&](float lo, float hi) { return std::uniform_real_distribution<float>(lo, hi)(rng); };
+    for (int i = 0; i < 28; ++i)
+    {
+        scene::Light L;
+        const int kind = i % 4;
+        L.type = kind == 0 ? scene::LightType::Point : (kind == 1 ? scene::LightType::Spot : (kind == 2 ? scene::LightType::Rect : scene::LightType::Sphere));
+        L.position = { uni(-12, 12), uni(2, 9), uni(-14, 6) };
+        L.forward = normalize(float3{ uni(-0.5f, 0.5f), -1, uni(-0.5f, 0.5f) });
+        L.right = normalize(cross(L.forward, float3{ 0, 0, 1 }));
+        L.intensity = kind >= 2 ? uni(300, 1500) : uni(500, 4000);
+        L.range = uni(12, 40);
+        L.size = kind == 2 ? float2{ uni(0.2f, 0.6f), uni(0.2f, 0.5f) } : float2{ uni(0.05f, 0.2f), 0 };
+        L.spotInner = 0.4f;
+        L.spotOuter = 0.7f;
+        s.lights.push_back(L);
+    }
+    scene::Camera cam;
+    cam.position = { 0, 1.7f, 5.5f };
+    cam.forward = normalize(float3{ 0, -0.3f, -1 });
+    cam.ev100 = 9;
+    s.cameras.push_back(cam);
+    tf.setScene(s);
+    // one froxel holding every light (the tests' S-style list; FroxelCommon.hlsli layout: header, one (first, count), entries)
+    const uint32_t N = (uint32_t)s.lights.size();
+    std::vector<uint32_t> list(64 + N, 0);
+    const float nearM = 0.01f, farM = 1000.0f, logRatio = std::log2(farM / nearM);
+    list[0] = 1, list[1] = 1, list[2] = 1, list[3] = 4096;
+    std::memcpy(&list[4], &nearM, 4);
+    std::memcpy(&list[5], &farM, 4);
+    std::memcpy(&list[6], &logRatio, 4);
+    list[8] = 64, list[9] = 128, list[10] = (N + 1) & ~1u, list[11] = N;
+    list[16] = 0, list[17] = N;
+    for (uint32_t i = 0; i < N; i += 2) list[32 + i / 2] = i | ((i + 1 < N ? i + 1 : 0) << 16);
+    ComPtr<ID3D12Resource> listBuffer = uploadStatic(tf.device, list.data(), list.size() * 4, L"test froxel list (tile lights)");
+    const uint32_t W = 640, H = 360;
+    auto render = [&](bool tiles, std::shared_ptr<std::vector<uint8_t>>& lin, std::shared_ptr<std::vector<uint8_t>>& words, std::shared_ptr<std::vector<uint8_t>>& gb,
+                      std::shared_ptr<std::vector<uint8_t>>& depthRb, ViewDesc& desc) {
+        tf.quality.applyOverride(tiles ? "shading.tile_lights=true" : "shading.tile_lights=false");
+        tf.frame.outputLinearHdr = true;
+        tf.run([&](FramePassContext& fc) {
+            ViewResources v = tf.mainView(fc, W, H, 0);
+            desc = v.view;
+            v.color = fc.graph.createTexture({ "m.test.color", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+            tf.vis.record(fc, v);
+            tracks::materialResolve(fc, v);
+            fc.resources.froxelLights = fc.graph.importBuffer(listBuffer.Get(), { "test froxel lists", list.size() * 4, 0 });
+            v.froxelLights = fc.resources.froxelLights;
+            tracks::shading(fc, v);
+            const material::ResolveOutputs o = material::resolveOutputs(fc, v);
+            words = tf.readback(fc, o.materialWord);
+            gb = tf.readback(fc, v.gbuffer);
+            depthRb = tf.readback(fc, v.depth);
+            lin = tf.readback(fc, v.color);
+        });
+        tf.frame.outputLinearHdr = false;
+        tf.quality.applyOverride("shading.tile_lights=false");
+    };
+    std::shared_ptr<std::vector<uint8_t>> linOff, wordsOff, gbOff, depthOff, linOn, wordsOn, gbOn, depthOn;
+    ViewDesc descOff, descOn;
+    render(false, linOff, wordsOff, gbOff, depthOff, descOff);
+    render(true, linOn, wordsOn, gbOn, depthOn, descOn);
+    std::vector<double> errs;
+    double worst = 0, sumE = 0, sumR = 0;
+    for (uint32_t y = 0; y < H; ++y)
+        for (uint32_t x = 0; x < W; ++x)
+        {
+            if (texelOf<float>(*depthOff, W, x, y) <= 0) continue;  // sky
+            if (cpuIsEdge(descOff, *wordsOff, *gbOff, *depthOff, W, H, x, y, tf.quality)) continue;
+            const float4 pa = texelOf<float4>(*linOff, W, x, y), pb = texelOf<float4>(*linOn, W, x, y);
+            const double scale = std::max({ (double)pa.x, (double)pa.y, (double)pa.z, 1e-3 });
+            const double e = std::max({ std::abs(pa.x - pb.x), std::abs(pa.y - pb.y), std::abs(pa.z - pb.z) }) / scale;
+            if (e > worst && e > 5e-3) logf("  tile lights px (%u,%u): per-pixel (%.5f %.5f %.5f) tiles (%.5f %.5f %.5f)\n", x, y, pa.x, pa.y, pa.z, pb.x, pb.y, pb.z);
+            worst = std::max(worst, e);
+            errs.push_back(e);
+            sumE += std::abs(pa.x - pb.x), sumR += pa.x;
+        }
+    std::sort(errs.begin(), errs.end());
+    const double p99 = errs.empty() ? 1 : errs[std::min(errs.size() - 1, (size_t)(errs.size() * 0.99))];
+    logf("tile lights: %zu surface pixels, |dE|/E P99 %.3g, worst %.3g, energy-weighted %.3g\n", errs.size(), p99, worst, sumR > 0 ? sumE / sumR : 0);
+    report(errs.size() > 50000 && p99 <= 1e-3, "tile lights: tile FAR term vs per-pixel, |dE|/E P99 (14.8 L2 gate)", p99, 1e-3);
+    report(worst <= 1e-2, "tile lights: tile FAR term vs per-pixel, worst pixel", worst, 1e-2);
+}
+
 int main(int argc, char** argv)
 {
     try
@@ -3987,6 +4286,8 @@ int main(int argc, char** argv)
         testFilmFrame(tf, report);
         testAreaQuadrature(tf, report);
         testAreaLobesFrame(tf, report);
+        testEmissivePanel(tf, report);  // 14.1b (L2b)
+        testTileLights(tf, report);  // 14.1/14.2 (L2)
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;
     }

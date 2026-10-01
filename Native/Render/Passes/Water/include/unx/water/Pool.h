@@ -16,13 +16,30 @@
 namespace unx::render
 {
 struct FramePassContext;
+class TrackState;
 }
 
 namespace unx::water
 {
+// The surface's statistics of one record (PoolStats.hlsl; FEATURES_GAME 1.10 "max |eta - mean|"; the host's
+// UnxPoolStatsLatest): over the 257^2 samples, relative to the still level. Read back framesInFlight records after the
+// record they describe (the caller waited for that frame).
+struct PoolStats
+{
+    bool valid = false;        // false until a record's statistics completed on the GPU
+    uint64_t frame = 0;        // the record's frame index
+    double time = 0;           // the basin's time at that record (s)
+    float mean = 0;            // mean eta (m)
+    float rms = 0;             // RMS of eta - mean (m)
+    float maxDeviation = 0;    // max |eta - mean| (m)
+};
+
 // W's waterGeometry step for FrameContext::pools (PoolTrack.cpp): each basin in view or with sources this frame becomes a
 // layer-1 triangle stream.
 void poolGeometry(render::FramePassContext& fc);
+// The latest statistics of every basin in the frame's set (id, PoolStats; valid ones only), from the track state
+// (render thread: the host copies them after each record and serves UnxPoolStatsLatest from its copy).
+void poolStatsSnapshot(render::TrackState& state, std::vector<std::pair<uint32_t, PoolStats>>& out);
 
 struct PoolDesc
 {
@@ -85,6 +102,8 @@ public:
     // outside one clip plane (x, y against w, or behind the camera).
     static bool visible(const PoolDesc& desc, const PoolPlacement& placement, const float4x4& viewProj);
     double time() const { return m_time; }
+    // The statistics of the record framesInFlight records before the latest (valid once that many records completed).
+    const PoolStats& latestStats() const { return m_latestStats; }
 
 private:
     struct Refs
@@ -98,6 +117,12 @@ private:
     render::ShaderLibrary& m_shaders;
     PoolDesc m_desc;
     render::ComPtr<ID3D12Resource> m_modes, m_input, m_accum, m_previous, m_twiddles, m_table, m_tableUpload, m_output, m_stateUpload;
+    render::ComPtr<ID3D12Resource> m_stats;                            // PoolStats.hlsl: 257 row partials + the result
+    std::vector<render::ComPtr<ID3D12Resource>> m_statsReadback;       // framesInFlight + 1 slots of the result (16 B)
+    std::vector<uint64_t> m_statsFrame;
+    std::vector<double> m_statsTime;
+    uint64_t m_records = 0;
+    PoolStats m_latestStats;
     std::vector<render::ComPtr<ID3D12Resource>> m_sourceUpload;
     std::vector<uint8_t*> m_sourceMapped;
     std::vector<uint32_t> m_sourceSrv;

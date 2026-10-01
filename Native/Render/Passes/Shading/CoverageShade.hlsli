@@ -28,6 +28,10 @@
 // resolve - 1 Cut, 2 Terrain; COV_PRESHADE_LIGHT (MODE=3): covShadeFragment lights the material those kernels stored.
 #ifndef UNX_M_COVERAGE_SHADE_HLSLI
 #define UNX_M_COVERAGE_SHADE_HLSLI
+// L2c (14.1c): the listed coverage tile of the records being shaded (CoverageComposite sets it; the special and heavy
+// kernels leave it unset: their records keep the per-record loop). P[5].w = the field (raw SRV, UNX_NONE: off),
+// P[10].y = the field's capacity in tiles.
+static uint g_covListed = 0xFFFFFFFFu;
 #include "Bindless.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
@@ -35,6 +39,7 @@
 #include "Passes/Lights/LightFunction.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Shading/AreaLight.hlsli"
+#include "Passes/Lights/CoverageTileLights.hlsli"  // L2c (14.1c): the tile x depth-interval FAR field (P[5].w, P[10].y)
 #include "Passes/Water/WaterLight.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 #include "Passes/Shading/CoverageSpecial.hlsli"
@@ -497,9 +502,37 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
             farCasters = shadowFirstCasters(froxels, pixel, zFar);
         }
         uint4 lightWords = 0;
+        // L2c (14.1c): the tile's FAR field at this record's depth interval: FAR lights of bins above the horizon (with
+        // margin) are in the field, bins below add 0, straddling bins' lights and NEAR lights are evaluated here.
+        bool fieldOn = false;
+        uint fieldTile = 0, fieldK = 0;
+        uint2 fieldNear = uint2(0xFFFFFFFFu, 0xFFFFFFFFu);
+        if (P[5].w != UNX_NONE && g_covListed < P[10].y)
+        {
+            ByteAddressBuffer fieldBuf = ResourceDescriptorHeap[P[5].w];
+            fieldTile = g_covListed * COV_TL_TILE_BYTES;
+            const CovTlHeader h = covTlHeader(fieldBuf, fieldTile);
+            if ((h.flags & 1u) != 0 && h.K > 0 && linearZ >= h.zMin)
+            {
+                fieldK = min((uint)(log(linearZ / h.zMin) / h.lnRatio), h.K - 1);
+                // the record's own list must be the interval's (one froxel slice): else the per-record loop
+                if (covTlSliceOf(fieldBuf, fieldTile, fieldK) == froxelSlice(froxelGrid(froxels.lights), linearZ))
+                {
+                    fieldOn = true;
+                    fieldNear = covTlMask(fieldBuf, fieldTile, fieldK);
+                }
+            }
+        }
         for (uint i = 0; i < range.y; ++i)
         {
             const uint lightIndex = froxelLightBuffered(froxels, indexBase, range, i, lightWords);
+            if (fieldOn && i < 64 && (((i < 32 ? fieldNear.x : fieldNear.y) >> (i & 31)) & 1u) == 0)
+            {
+                // FAR: above or below its bin's horizon band -> in the field or 0; straddling -> evaluated here
+                ByteAddressBuffer fieldBuf = ResourceDescriptorHeap[P[5].w];
+                const float nb = dot(n, covTlBinDir(covTlBinId(fieldBuf, fieldTile, fieldK, i)));
+                if (nb > COV_TL_SIN_HALF + COV_TL_MARGIN || nb < -(COV_TL_SIN_HALF + COV_TL_MARGIN)) continue;
+            }
             const GpuLight light = loadLight(lightIndex);
             const float visibility = covLocalVisibility(shadow, nearCasters, farCasters, lightIndex);
             if (lightType(light) > LIGHT_SPOT)
@@ -571,6 +604,20 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
             if (sheenOn && cosL > 0) f = keepS * f + sheen.color * modelSheenLobe(sheen.roughness, n, v, l);
 #endif
             radiance += f * El * (abs(cosL) * visibility);
+        }
+        if (fieldOn)
+        {
+            // the field: bins above the horizon band for n (front), and for -n (the Foliage back side)
+            ByteAddressBuffer fieldBuf = ResourceDescriptorHeap[P[5].w];
+            float3 eFront = 0, eBack = 0;
+            [loop] for (uint b = 0; b < COV_TL_BINS; ++b)
+            {
+                const float nb = dot(n, covTlBinDir(b));
+                if (nb > COV_TL_SIN_HALF + COV_TL_MARGIN) eFront += covTlE(fieldBuf, fieldTile, fieldK, b);
+                else if (foliage && nb < -(COV_TL_SIN_HALF + COV_TL_MARGIN)) eBack += covTlE(fieldBuf, fieldTile, fieldK, b);
+            }
+            if (NoV > 0) radiance += front * max(0.0, dot(n, eFront));
+            if (foliage) radiance += back * max(0.0, dot(-n, eBack));
         }
     }
 
