@@ -99,7 +99,11 @@ ShadowSrvs reflShadowSrvs()
 //                        cone here too (rtHitRadianceSplit's pixelAngle); the reflection hits' local-light lobe and
 //                        coat lobe were evaluated at the single ray direction - a G ray (cone of several degrees)
 //                        meeting a glazed tile near a lamp's mirror direction returned the unfiltered highlight.
+//   REFL_HIT_ORIENTED    reflection.hit_oriented_lights: the hit's one local-light sample is chosen with the hit's
+//                        orientation in the weights (HitLocalLights.hlsli rtLocalLightChooseOriented): lights below
+//                        the hit's horizon are not drawn. Same estimator count (one sample, one shadow ray), unbiased.
 #define REFL_HIT_CONE_LOBES 1u
+#define REFL_HIT_ORIENTED 2u
 static uint g_reflHitFlags = 0;
 
 // Local lights (HitLocalLights.hlsli): one next-event sample drawn with localSeed; its visibility is localVisible (the
@@ -170,8 +174,9 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
 #if REFL_CHOICE_GIVEN
         choice = rtUnpackLocalChoice(localChoice);  // (r.refl.shade: ReflectionLocalShadow chose for every hit)
 #else
-        if (localChoice.x == REFL_NO_CHOICE) choice = rtLocalLightChoose(scene, s.position, giUnit(localSeed));
-        else choice = rtUnpackLocalChoice(localChoice);
+        // (one function for both settings: without REFL_HIT_ORIENTED its weights and arithmetic are rtLocalLightChoose's)
+        if (localChoice.x != REFL_NO_CHOICE) choice = rtUnpackLocalChoice(localChoice);
+        else choice = rtLocalLightChooseOriented(scene, s.position, s.normal, (g_reflHitFlags & REFL_HIT_ORIENTED) == 0 || materialClass(m) == MATERIAL_FOLIAGE, giUnit(localSeed));
 #endif
         const RtLocalSample ls = rtLocalLightFinish(scene, choice, s.position, giUnit(localSeed + 1), giUnit(localSeed + 2), footprint);
         if (ls.valid)

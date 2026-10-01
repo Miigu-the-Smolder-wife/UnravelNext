@@ -98,6 +98,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.layerMirrorLobe = q.has("reflection.layer_mirror_lobe") && q.boolean("reflection.layer_mirror_lobe");
     s.hitConeLobes = !q.has("reflection.hit_cone_lobes") || q.boolean("reflection.hit_cone_lobes");
     s.layerResidualWhole = !q.has("reflection.layer_residual_whole") || q.boolean("reflection.layer_residual_whole");
+    s.hitOrientedLights = q.has("reflection.hit_oriented_lights") && q.boolean("reflection.hit_oriented_lights");
     s.deterministic = q.has("debug.deterministic") && q.boolean("debug.deterministic");
     s.planarRayNs = (float)q.number("reflection.planar_ray_ns");
     return s;
@@ -939,7 +940,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       b.use(jobLayers, Use::UavCompute);
                   }
               },
-              [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, hitFlags = (s.hitConeLobes ? 1u : 0u)](PassContext& c) {
+              [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, hitFlags = (s.hitConeLobes ? 1u : 0u) | (s.hitOrientedLights ? 2u : 0u)](PassContext& c) {
                   // (the layer buffers' UAVs and the hit shading's flags into the rays header: the shade, combine and inline
                   // passes find them there)
                   const uint32_t k[12] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(raysBuffer), rayCapacity,
