@@ -375,7 +375,7 @@ void GpuScene::upload(const scene::Scene& s)
         g.spotOffset = -co * g.spotScale;
         g.size = l.size;
         g.typeFlags = (uint32_t)l.type | ((l.castShadow ? 1u : 0u) << 8) | (0xFFFFu << 16);
-        g.revision = m_revision;
+        g.revision = gpu::lightRevisionWord(m_revision, l.rayEndBias);
         lights.push_back(g);
     }
 
@@ -1149,7 +1149,7 @@ void GpuScene::rebase(float3 shift)
             g.spotOffset = -co * g.spotScale;
             g.size = l.size;
             g.typeFlags = (uint32_t)l.type | ((l.castShadow ? 1u : 0u) << 8) | (0xFFFFu << 16);
-            g.revision = m_revision;
+            g.revision = gpu::lightRevisionWord(m_revision, l.rayEndBias);
             lights.push_back(g);
         }
         release(m_lightBuffer);
@@ -1183,9 +1183,12 @@ void GpuScene::setLights(std::span<const uint32_t> indices)
         const bool shape = std::memcmp(&g.position, &old.position, sizeof g.position) != 0 || std::memcmp(&g.forward, &old.forward, sizeof g.forward) != 0 ||
                            std::memcmp(&g.right, &old.right, sizeof g.right) != 0 || g.range != old.range || g.spotScale != old.spotScale ||
                            g.spotOffset != old.spotOffset || std::memcmp(&g.size, &old.size, sizeof g.size) != 0 || g.typeFlags != old.typeFlags;
-        const bool radiometric = g.intensity != old.intensity || std::memcmp(&g.color, &old.color, sizeof g.color) != 0;
+        // (the ray end bias rides in the revision word's upper half: a change of it alone is a change of the record, not of
+        // the light's shape)
+        const bool radiometric = g.intensity != old.intensity || std::memcmp(&g.color, &old.color, sizeof g.color) != 0 ||
+                                 (gpu::lightRevisionWord(0, l.rayEndBias) >> 16) != (old.revision >> 16);
         if (!shape && !radiometric) continue;
-        g.revision = old.revision + 1;
+        g.revision = gpu::lightRevisionWord((old.revision & 0xFFFFu) + 1, l.rayEndBias);
         m_lights[i] = g;
         geometry = geometry || shape;
         any = true;

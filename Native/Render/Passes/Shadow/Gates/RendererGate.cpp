@@ -336,6 +336,7 @@ int main(int argc, char** argv)
         bool diffuseMaterials = false;
         bool whiteMaterials = false;
         int64_t onlyLight = -1;
+        float lightRayEndBias = -1;
         bool stripClearcoat = false;  // --strip-clearcoat (diagnostics): every clearcoat 0 (the reference tracer has no coat layer)  // --only-light i (diagnostics): every other light's intensity 0  // --white-materials (diagnostics): every material untextured grey 0.5 Lambert (with --diffuse-materials' rules)  // --diffuse-materials (diagnostics): specular 0, metallic 0, roughness 1, no texture maps but colour  // --strip-emissive (diagnostics): every material's emission 0 (emitters by lights only)  // --strip-normal-maps (diagnostics): every material without its normal map
         for (int i = 1; i < argc; ++i)
         {
@@ -444,6 +445,7 @@ int main(int argc, char** argv)
             else if (a == "--diffuse-materials") diffuseMaterials = true;
             else if (a == "--white-materials") diffuseMaterials = whiteMaterials = true;
             else if (a == "--only-light") onlyLight = std::stoll(next());
+            else if (a == "--light-ray-end-bias") lightRayEndBias = std::stof(next());  // every light's own shadow-ray end bias, m (scene::Light::rayEndBias)
             else if (a == "--strip-clearcoat") stripClearcoat = true;  // (with --save-scene: the same scene for unx_reference)  // print the scene's lights and cameras and stop (no GPU)
             else if (a == "--frame-log") frameLogPath = next();
             else if (a == "--gi-cache-stats") giCacheStatsPath = next();
@@ -570,6 +572,8 @@ int main(int argc, char** argv)
         if (onlyLight >= 0)
             for (size_t i = 0; i < s.lights.size(); ++i)
                 if ((int64_t)i != onlyLight) s.lights[i].intensity = 0;
+        if (lightRayEndBias >= 0)
+            for (scene::Light& l : s.lights) l.rayEndBias = lightRayEndBias;
         if (diffuseMaterials)
             for (scene::Material& m : s.materials)
             {

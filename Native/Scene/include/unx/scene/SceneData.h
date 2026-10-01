@@ -243,6 +243,10 @@ struct Light
     float spotInner = 0.3f, spotOuter = 0.5f;  // half-angles (rad)
     float2 size{ 0, 0 };           // rect: width,height; disk/sphere: radius in x; tube: length,radius
     bool castShadow = false;
+    // Where the light's shadow rays end, metres before their point on the light (shading.mega_lights; Unreal's per-light
+    // Ray End Bias): geometry nearer than this to the light - its own housing, the trough it sits in - casts no shadow of
+    // it. Negative: the engine's default (shading.mega_lights_ray_end_bias_m). File block "LEND" (lights with a value).
+    float rayEndBias = -1.0f;
 };
 
 // Sun and sky: the physical atmosphere of ARCHITECTURE 2.3, parameters from the previous engine (TitanNative

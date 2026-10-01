@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.92, 2026-10-01)
+# UnravelNext 인터페이스 (v1.93, 2026-10-02)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -750,6 +750,13 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.93 (2026-10-02, A: 조정 결정 — MegaLights 코브 띠, 언리얼의 광원별 Ray End Bias; 잠금 안 첫 실행까지):
+  - `scene::Light::rayEndBias`(m, 기본 -1 = 없음): 그 광원의 그림자 광선이 광원 위의 점 앞 몇 m에서 끝나는가. 그보다 광원에 가까운 형상(광원의 하우징, 광원이 놓인 홈통)은 그 광원의 그림자를 드리우지 않는다. 음수면 전역 기본 `shading.mega_lights_ray_end_bias_m`(이번에 0.05 → **0.01**, 언리얼 값). `shading.mega_lights`의 표본 광선(`mlSampleVisible`: 화면 표본, 공기 볼륨, coverage 인스턴스, S2의 표면 캐시 stochastic 경로)이 읽는다. S의 옛 국소 그림자 맵 경로는 읽지 않는다(그 경로는 `max(5 cm, 발광체 반경)` 근평면 그대로).
+  - 장면 파일: 선택 블록 `LEND`(값을 가진 광원만 { 인덱스, float }; FILM 뒤). 형식 버전은 1 그대로이고, 값을 가진 광원이 없으면 파일 바이트가 전과 같다(contentHash 불변). 옛 빌드는 `LEND`가 있는 파일을 "unknown extension block"으로 거절한다(재질 블록들과 같은 방식).
+  - GPU 광원 레코드(`gpu::Light`, 80 B 그대로): `revision` 워드의 bits 0..15 = 레코드 변경 횟수(되돌이), bits 16..31 = 끝 바이어스(half float, 부호 비트 = 값 없음). C++ `gpu::lightRevisionWord`, HLSL `lightRayEndBias(light, fallback)`(Scene.hlsli). FX 광원 꼬리는 0(= 0 m, 그림자 없는 광원이라 쓰이지 않음).
+  - 호스트 ABI: `UnxLightDesc` **version 2** — 옛 `reserved[0]` 자리가 `rayEndBias`(크기 같음). version 1도 받는다(그 자리를 읽지 않음 = 값 없음). 옛 DLL은 version 2를 "ABI mismatch"로 거절하므로 C# `UnravelNextRenderer.AddLight`가 재질처럼 2 → 1로 내려 다시 보낸다. C# 저작: 컴포넌트 `UnravelNextLightOptions.rayEndBias`(없으면 -1).
+  - 하우징 메시의 그림자 끄기는 기존 수단 그대로다: Unity `MeshRenderer.shadowCastingMode = Off` → 인스턴스 플래그 `CastShadow` 꺼짐 → `rtInstanceMask`가 `kRtMaskShadow`(0x10)를 빼므로 표본 그림자 광선에 잡히지 않는다(확인만, 변경 없음).
+  - 게이트: `unx_gate_shadow_renderergate --light-ray-end-bias M`(모든 광원에 그 값).
 - v1.92 (2026-10-01, A: 결함 큐 13 (75) 탁한 물; 미검증 — 빌드까지):
   - `scene::Material::waterScattering`(σ_s 1/m rgb)·`waterAnisotropy`(HG g), `UnxMaterialDesc` **v6**(232 B; v5 216 B도 받음), GPU 재질의 Water 클래스는 `hairAbsorption` = σ_s, `hairBetaN` = g.
   - (74) **둥근 욕조 W2-R**: `UnxPoolDesc::shape`(옛 reserved: 0 사각, 1 원형, sizeX = 지름), `PoolFrame::shape`, C# `UnravelNextPool.Round`. `Passes/Water/RoundPool.{h,cpp,hlsli}` + 커널 7개(Clear·Splat·Rows·Analysis·Evolve·Synthesis·Columns·Mesh): 극좌표 512 × 128 고리 + 중심, 차수 m = 0..255의 Dini 모드 J_m(k r)(J_m'(kR) = 0, kR ≤ π·128 절단), 호스트 double 표(모드 진동수·감쇠(바닥·원통벽·막 경계층 적분 닫힌식), 차수별 최소제곱 분석 F_m = (BᵀWB)⁻¹BᵀW·합성 B·기울기 D), 각 FFT + 차수별 행렬곱, 상태 = 복소 모드 진폭. 유체 접합·통계·setState는 미구현. 단위 시험 `round_pool_modes`.

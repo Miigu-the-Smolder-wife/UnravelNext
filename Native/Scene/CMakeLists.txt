@@ -26,3 +26,7 @@ add_executable(unx_test_scene_film Tests/ThinFilmTests.cpp)
 unx_target_defaults(unx_test_scene_film)
 target_link_libraries(unx_test_scene_film PRIVATE unx_scene)
 target_compile_definitions(unx_test_scene_film PRIVATE UNX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+# v1.93 (render A): a light's own shadow-ray end bias in the scene file (the optional LEND block).
+add_executable(unx_test_scene_lightendbias Tests/LightEndBiasTests.cpp)
+unx_target_defaults(unx_test_scene_lightendbias)
+target_link_libraries(unx_test_scene_lightendbias PRIVATE unx_scene)
