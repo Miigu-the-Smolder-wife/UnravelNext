@@ -157,7 +157,7 @@ Settings settings(const QualityConfig& q)
 } // namespace
 
 MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, bool areaLights, uint32_t ltcSrv,
-                                 ID3D12CommandSignature* dispatchSignature)
+                                 ID3D12CommandSignature* dispatchSignature, const char* instance)
 {
     MegaLightsFrame ml;
 #if UNX_M_HAS_RAYTRACING
@@ -186,6 +186,7 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
         if (ordinal.frame != fc.frame.frameIndex) ordinal = { fc.frame.frameIndex, 0 };
         ml.stateKey = "M.megaLights.planar" + std::to_string(ordinal.next++);
     }
+    if (instance) ml.stateKey += std::string(".") + instance;  // (a second instance of the view: the coverage layer's)
     MegaLightsState& st = fc.state<MegaLightsState>(ml.stateKey);
     st.ensure(fc.device, W, H);
     const float3 shift = fc.frame.originShift;
@@ -315,7 +316,7 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
     return ml;
 }
 
-void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, MegaLightsFrame& ml)
+void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, MegaLightsFrame& ml, bool demodulated)
 {
     if (!ml.on) return;
     const Settings s = settings(fc.quality);
@@ -409,22 +410,25 @@ void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureR
                   c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
               });
     ml.lighting = g.createTexture({ "m.ml lighting", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
-    const TextureRef lighting = ml.lighting;
+    if (demodulated) ml.lightingSpecular = g.createTexture({ "m.ml lighting specular", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+    const TextureRef lighting = ml.lighting, lightingSpecular = ml.lightingSpecular;
     ID3D12PipelineState* spatialPso = fc.shaders.compute("Passes/Shading/MegaLightsSpatial");
     g.addPass("m.ml.spatial", QueueType::Compute,
               [&](PassBuilder& b) {
                   for (TextureRef t : { outDiffuse, outSpecular, outMoments, outFrames, confidence, depth, gbuffer, materialWord }) b.use(t, Use::SrvCompute);
                   b.use(lighting, Use::UavCompute);
+                  if (demodulated) b.use(lightingSpecular, Use::UavCompute);
               },
               [=](PassContext& c) {
-                  const uint32_t k[20] = { c.srv(outDiffuse), c.srv(outSpecular), c.srv(outMoments), c.srv(outFrames),
+                  const uint32_t k[24] = { c.srv(outDiffuse), c.srv(outSpecular), c.srv(outMoments), c.srv(outFrames),
                                            c.srv(confidence), c.srv(depth), c.srv(gbuffer), c.srv(materialWord),
-                                           c.uav(lighting), W, H, (s.spatial ? 1u : 0u) | (s.historyVariance ? 2u : 0u),
+                                           c.uav(lighting), W, H, (s.spatial ? 1u : 0u) | (s.historyVariance ? 2u : 0u) | (demodulated ? 4u : 0u),
                                            asUint(s.radius), s.spatialSamples, asUint(s.depthWeight), asUint(s.maxDisocclusionFrames),
-                                           asUint(s.disocclusionDiffuse), asUint(s.disocclusionSpecular), asUint(s.historyStdDev), asUint(s.temporal ? s.maxFrames : 1.0f) };
+                                           asUint(s.disocclusionDiffuse), asUint(s.disocclusionSpecular), asUint(s.historyStdDev), asUint(s.temporal ? s.maxFrames : 1.0f),
+                                           demodulated ? c.uav(lightingSpecular) : gpu::kNone, 0, 0, 0 };
                   c.cmd->SetPipelineState(spatialPso);
                   c.bindFrameConstants(cb);
-                  c.computeConstants(k, 20);
+                  c.computeConstants(k, 24);
                   c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
               });
 }

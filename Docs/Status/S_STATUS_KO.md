@@ -462,3 +462,27 @@ R 쪽 접점(R의 파일은 건드리지 않음): `Lumen/LgTrace.hlsl`의 CALL S
 6. 캐시 비움: 장면 revision·원점 이동·크기 변경 때. 카메라 컷에는 비우지 않음(월드 고정).
 
 품질을 내주는 값(언리얼 기본값): `radiance_cache_grid` 48, `_probe_resolution` 32, `_probes_per_frame` 100, `_downsample_distance_m` 40. 구조적 상한 `_trace_capacity` 1024(언리얼에는 없는 값: 한 dispatch의 최악 시간을 묶기 위한 것. 넘으면 다음 프레임).
+
+### 13.3 실행 기록 (잠금 안, 정확도 홀드 — ms는 참고값) — 2026-10-01 밤
+| 홀드 | 내용 | 결과 |
+|---|---|---|
+| 1 (1818054) | 로비 1080p 8 + 300 + 120프레임, AO + radiance cache(+ mega_lights, gi.lumen, 표면 캐시) | 종료 0, 장치 제거 없음, S 오류 비트 0, NaN·검은 화소 없음 |
+| 2 (8e32652) | 로비·기차 라운지·욕탕 홀 120프레임, 전 스위치. 로비 패스 CSV | 종료 0. `r.gi.rc.*` 13개 패스가 매 프레임 실행(trace 중앙값 0.198 ms), `r.gi.sao` 0.043 / `.temporal` 0.186 ms |
+| 3 (4393a34) | 호스트 테스트 HostVfxMegaLights, watergate interior 1440p `--planar on`, 로비 | 테스트 ok(lit 입자 25,712 화소, 광원 0 대비 24,326 화소 차이, 디버그 레이어 오류 0). 평면 뷰: `m.ml.*` 120프레임에 242회 |
+| 4 (coverage 인스턴스) | 로비·기차 라운지·욕탕 홀 1080p 120프레임, 전 스위치, 장면마다 패스 CSV | 종료 0, 장치 제거 없음, S 오류 비트 0, NaN·검은 화소 없음. `m.ml.cov.nearest / surface / shade` 매 프레임 실행(로비 0.039 / 0.021 / 0.036 ms, 기차 0.099 / 0.027 / 0.030 ms), `m.ml.sample` 등은 프레임당 2회(주 표면 + coverage 인스턴스). f119 평균 휘도: 로비 0.5040 → 0.4799, 기차 1.7554 → 1.7609, 욕탕 0.3085 → 0.3090(홀드 2 대비; 원인 분해는 병합 뒤 판정 때) |
+
+## 14. MegaLights에서 표본 경로가 아니던 곳 — 2026-10-01 밤 4차 (조정 22:30의 4번)
+S의 국소 그림자 맵이 꺼지는 켬 상태에서 국소광에 그림자가 없던 곳을 표본 경로로 옮김. 스위치는 전부 `shading.mega_lights`.
+
+| 곳 | 방식 (언리얼의 해당 경로) | 파일 | 상태 |
+|---|---|---|---|
+| A9 면광원 lobe(이방성 base, sheen) | 표본 음영 커널 안에서 광원 표본의 가중으로 평가해 정반사에 더함. 별도 lobe 패스는 켬에서 돌지 않음 | `ShadeOpaque.hlsl`(MEGA_LIGHTS && LAYERED), `ShadingSystem.cpp` | 8e32652, 실행됨 |
+| 주 뷰 외 뷰 | 뷰마다 MegaLights 실행(언리얼은 뷰별). 전체 보조 뷰는 viewId별 이력, 평면 반사 뷰는 이력 없이 공간 필터만 | `MegaLights.cpp`(뷰별 상태 키) | 8e32652, watergate 평면 뷰에서 실행됨 |
+| 입자 층(lit sprite·ribbon) | 표본 볼륨(s.ml.volume)이 프록셀마다 국소광의 보이는 fluence와 방향 모멘트를 같이 저장, 입자는 위상함수 SH 2밴드로 읽음(언리얼: MegaLights가 translucency volume을 비춤) | `MegaLightsVolume.hlsl`, `FroxelSystem.cpp`, `FxLayerSetup.hlsl`(ML1 변종), `ParticleLayer.cpp` | 4393a34, 호스트 테스트로 실행됨 |
+| coverage 조각(클러스터 레코드) | coverage 화소의 가장 가까운 불투명 조각에 MegaLights 인스턴스 하나 더(언리얼: hair 가시성 표본의 두 번째 인스턴스). 결과는 변조 계수로 나눈 확산·정반사로 두고, 화소의 조각마다 자기 계수를 곱해 더함 | `MegaLightsCoverage.hlsl`(MODE 0..3), `MegaLightsShade`(FULL1), `MegaLightsSpatial.hlsl`(플래그 4), `CoverageShade.hlsli`(P[11].xy), `ShadingSystem.cpp`(m.ml.cov.*) | 홀드 4에서 실행됨 |
+
+**언리얼과 다르게 둔 점 / 남은 곳**
+1. 입자: 볼륨 표본의 최소 가중은 공기와 같은 0.1(`mega_lights_volume_min_sample_weight`). 위상함수는 SH 2밴드(g가 큰 전방 산란 lobe는 뭉개짐). 주 뷰 격자만(다른 뷰의 입자는 예전 루프, 그림자 없음).
+2. coverage: 대표 표면의 baseColor·roughness는 재질 상수(텍스처 없음, 표본 선택과 lobe 모양에만 영향). 음영은 plain 커널 하나(층 재질의 coat lobe 없음). 화소 안 조각들은 대표 조각의 조명을 공유(자기 법선으로 다시 평가하지 않음).
+3. **아직 그림자 없는 곳**: 머리카락 레코드(E의 hair 커널), 스트림 레코드(W의 물 표면 커널), 전방 반투명 층 — 각 소유 커널의 국소광 루프가 S 슬롯을 읽던 곳. 언리얼은 hair 전용 인스턴스와 translucency volume으로 처리.
+4. 주 뷰 외 뷰의 공기(프록셀) 표본 볼륨 없음.

@@ -13,7 +13,10 @@
 // Then the modulation factors come back and diffuse + specular is written (RGBA16F, exposed radiance; a = 1).
 // P[0] = { diffuse (a = shading confidence), specular (a = valid), moments, frame counts (R8_UINT, n x 8) }
 // P[1] = { history confidence (R8G8_UNORM), depth, G-buffer, material word }
-// P[2] = { output UAV, width, height, flags (1: filter on, 2: use the history confidence's spatial deviation) }
+// P[2] = { output UAV, width, height, flags (1: filter on, 2: use the history confidence's spatial deviation, 4: the
+//          modulation factors are not multiplied back - the output takes the diffuse and P[5].x the specular: the coverage
+//          layer's instance, whose fragments apply their own factors) }
+// P[5] = { specular output UAV (flag 4), 0, 0, 0 }
 // P[3] = { kernel radius (px, float), samples, depth weight scale (float), max disocclusion frames (float) }
 // P[4] = { disocclusion deviation scale diffuse, specular, history confidence deviation threshold, max frames } (floats)
 #include "Bindless.hlsli"
@@ -56,6 +59,11 @@ void main(uint3 id : SV_DispatchThreadID)
     if (!(count > 0))
     {
         output[pixel] = 0;
+        if ((P[2].w & 4u) != 0)
+        {
+            RWTexture2D<float4> outputSpecular = ResourceDescriptorHeap[P[5].x];
+            outputSpecular[pixel] = 0;
+        }
         return;
     }
     Texture2D<float> depthTex = ResourceDescriptorHeap[P[1].y];
@@ -175,6 +183,13 @@ void main(uint3 id : SV_DispatchThreadID)
         }
     }
     const float metallic = mWordMetallic(word);
+    if ((P[2].w & 4u) != 0)
+    {
+        RWTexture2D<float4> outputSpecular = ResourceDescriptorHeap[P[5].x];
+        output[pixel] = float4(diffuse, 1);
+        outputSpecular[pixel] = float4(specular, 1);
+        return;
+    }
     const float3 lighting = diffuse * mlDiffuseFactor(g.baseColor, metallic) + specular * mlSpecularFactor(g.baseColor, metallic, m.specular, g.roughness, NoV);
     output[pixel] = float4(lighting, 1);
 }

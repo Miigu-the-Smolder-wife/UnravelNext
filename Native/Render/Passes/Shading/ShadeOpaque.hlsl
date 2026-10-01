@@ -72,6 +72,9 @@
 #ifndef SHADE_PART
 #define SHADE_PART 1  // ShadeIndirect.hlsl compiles this file with 2 (see the header)
 #endif
+#ifndef ML_FULLSCREEN
+#define ML_FULLSCREEN 0
+#endif
 #ifndef MEGA_LIGHTS
 #define MEGA_LIGHTS 0  // MegaLightsShade.hlsl compiles this file with 1: the local lights of the pixel's light samples alone
 #endif
@@ -124,9 +127,13 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 [numthreads(8, 8, 1)]
 void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
 {
+#if ML_FULLSCREEN
+    const uint2 tileCoord = gid.xy;  // (MegaLightsShade.hlsl FULL = 1: every tile of the view)
+#else
     ByteAddressBuffer tiles = ResourceDescriptorHeap[P[1].x];
     const uint tile = tiles.Load(4 * (P[1].y + gid.x));
     const uint2 tileCoord = uint2(tile & 0xFFFFu, tile >> 16);
+#endif
     const uint2 pixel = tileCoord * M_TILE + tid;
     // The group's independent reads go out together before any of them is waited on: the records of the tile's 2 x 2 corner
     // screen probes (R's tile cache, split form: the probe counts come from the frame constants, so no header read comes
