@@ -35,6 +35,9 @@ uint32_t asUint(float f)
 
 constexpr uint32_t kSetTile = 8, kSetBytes = 24;  // MegaLights.hlsli ML_HASH_TILE, 4 x ML_HASH_WORDS
 
+// The structural bound of one ray dispatch (DISPATCH_BOUNDS_KO.md): at most this many rays.
+constexpr uint32_t kRaysPerDispatch = 262144;
+
 struct MegaLightsState
 {
     Device* device = nullptr;
@@ -295,9 +298,16 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
                   uint32_t k[32] = { c.uav(samples), c.srv(keys), 0, 0, dsW, dsH, s.factor | (s.count << 8), 0,
                                      asUint(s.rayBias), asUint(s.rayNormalBias), asUint(s.rayEndBias), 0 };
                   rays->rootConstants(k + 24);
-                  c.computeConstants(k, 32);
                   c.bindFrameConstants(cb);
-                  pipeline.dispatch(c.cmd, 0, dsW * gridX, dsH * gridY);
+                  // Bands of rows, each its own DispatchRays of at most kRaysPerDispatch rays (one per sample texel): the
+                  // sample texture grows with the resolution (1080p: 2.07 M texels, 4K: 8.3 M), a dispatch does not.
+                  const uint32_t width = dsW * gridX, height = dsH * gridY, bandRows = std::max(1u, kRaysPerDispatch / std::max(width, 1u));
+                  for (uint32_t row = 0; row < height; row += bandRows)
+                  {
+                      k[2] = row;  // P[0].z
+                      c.computeConstants(k, 32);
+                      pipeline.dispatch(c.cmd, 0, width, std::min(bandRows, height - row));
+                  }
               });
 #else
     (void)fc;

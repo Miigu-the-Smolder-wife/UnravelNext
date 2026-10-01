@@ -29,6 +29,8 @@ constexpr uint32_t kDescStride = (uint32_t)((sizeof(D3D12_DISPATCH_RAYS_DESC) + 
 // the store run in chunks of probes, each at most this many rays (probe texels); the chunks past the frame's trace count
 // launch nothing.
 constexpr uint32_t kMaxRaysPerDispatch = 262144;
+// A probe texel's thread traces up to this many rays: its own, and at a hit the sun's and one local light's shadow ray.
+constexpr uint32_t kRaysPerTexel = 3;
 
 // LumenRadianceCache.hlsli LrcParams
 struct Params
@@ -323,7 +325,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
     const BufferRef slots = st.slotsRef, counters = st.countersRef;  // (this frame's imports, by Begin)
     const BufferRef freeList = g.importBuffer(st.freeList.Get(), BufferDesc{ "r.gi.rc free list", (uint64_t)maxProbes * 4, 0 });
     const BufferRef traces = g.createBuffer({ "r.gi.rc traces", (uint64_t)s.traceCapacity * 16, 0 });
-    const uint32_t probesPerDispatch = std::max(1u, kMaxRaysPerDispatch / (s.probeResolution * s.probeResolution));
+    const uint32_t probesPerDispatch = std::max(1u, kMaxRaysPerDispatch / (s.probeResolution * s.probeResolution * kRaysPerTexel));
     const uint32_t chunks = (s.traceCapacity + probesPerDispatch - 1) / probesPerDispatch;
     const BufferRef rayArgs = g.createBuffer({ "r.gi.rc ray dispatch", (uint64_t)chunks * kDescStride, 0 });
     const BufferRef filterArgs = g.createBuffer({ "r.gi.rc filter dispatch", (uint64_t)chunks * 32, 0 });

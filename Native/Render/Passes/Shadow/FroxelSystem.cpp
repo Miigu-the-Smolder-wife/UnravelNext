@@ -631,6 +631,16 @@ void recordFroxelLists(FramePassContext& fc, const ViewResources& main, uint32_t
     s.listsFrame = fc.frame.frameIndex;
 }
 
+namespace
+{
+// shading.mega_lights_volume: a view's sampled local light (defined below; invalid members = off)
+struct SampledLocal
+{
+    TextureRef inScattering, fluence, moment;
+};
+SampledLocal recordSampledLocal(FramePassContext& fc, const ViewResources& view, BufferRef lights, TextureRef readers, bool persistent);
+} // namespace
+
 void recordPlanarFroxels(FramePassContext& fc, ViewResources& view)
 {
     if (!fc.resources.transmittanceLut.valid() || !fc.resources.multiScatterLut.valid())
@@ -644,14 +654,20 @@ void recordPlanarFroxels(FramePassContext& fc, ViewResources& view)
     const TextureRef readers = recordReaders(fc, view, fc.state<State>(kStateKey).fullDepth, ".planar");
     const BufferRef lists = recordLists(fc, view, fc.resources.vsmSlotOfLight, readers, ".planar");
     view.froxelLights = lists;
-    view.airVolume = recordIntegration(fc, view, lists, false, readers, ".planar");
+    // shading.mega_lights: the view's own sampled local light (no history: the view has no identity between frames) - its
+    // air takes it in place of the loop over the lists, its lit particles read the fluence and moment.
+    const SampledLocal sampled = recordSampledLocal(fc, view, lists, readers, false);
+    view.localFluence = sampled.fluence;
+    view.localMoment = sampled.moment;
+    view.airVolume = recordIntegration(fc, view, lists, false, readers, ".planar", TextureRef{}, sampled.inScattering);
 }
 
 namespace
 {
-// shading.mega_lights with shading.mega_lights_volume (MegaLightsVolume.hlsl; owner A): the main view's local in-scattering
-// per froxel from light samples with shadow rays, with its own history (ping-pong, in this track's state). Invalid: off,
-// or no ray scene this frame - the integration then keeps its loop over the lists and the VSM walks.
+// shading.mega_lights with shading.mega_lights_volume (MegaLightsVolume.hlsl; owner A): a view's local in-scattering per
+// froxel from light samples with shadow rays, and the same samples' fluence and direction moment. The main view keeps its
+// history (ping-pong, in this track's state); other views (planar reflections) use transients without history. Invalid:
+// off, or no ray scene this frame - the integration then keeps its loop over the lists and the VSM walks.
 struct SampledLocalState
 {
     Device* device = nullptr;
@@ -668,62 +684,84 @@ struct SampledLocalState
     }
 };
 
-TextureRef recordSampledLocal(FramePassContext& fc, const ViewResources& main, BufferRef lights, TextureRef readers)
+// One dispatch holds at most this many shadow rays (the structural bound of a dispatch's work, DISPATCH_BOUNDS_KO.md):
+// the froxel grid goes in bands of slices.
+constexpr uint32_t kSampledLocalRaysPerDispatch = 262144;
+
+SampledLocal recordSampledLocal(FramePassContext& fc, const ViewResources& view, BufferRef lights, TextureRef readers, bool persistent)
 {
+    SampledLocal out;
 #if UNX_S_HAS_RAYTRACING
     const QualityConfig& q = fc.quality;
-    if (!q.has("shading.mega_lights") || !q.boolean("shading.mega_lights") || !q.boolean("shading.mega_lights_volume")) return {};
+    if (!q.has("shading.mega_lights") || !q.boolean("shading.mega_lights") || !q.boolean("shading.mega_lights_volume")) return out;
     const FrameResources r = fc.resources;
-    if (!r.tlasStatic.valid() || !r.transmittanceLut.valid() || !fc.trackState) return {};
-    const FroxelGridCpu grid = froxelGridFor(q, main.view.width, main.view.height);
-    SampledLocalState& st = fc.state<SampledLocalState>("S.froxels.sampledLocal");
-    if (!st.volume[0] || st.x != grid.gridX || st.y != grid.gridY || st.z != grid.slices)
-    {
-        st.device = &fc.device;
-        D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
-        D3D12_RESOURCE_DESC1 desc{};
-        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
-        desc.Width = grid.gridX;
-        desc.Height = grid.gridY;
-        desc.DepthOrArraySize = (UINT16)grid.slices;
-        desc.MipLevels = 1;
-        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        desc.SampleDesc.Count = 1;
-        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        for (auto* set : { st.volume, st.fluence, st.moment })
-            for (int k = 0; k < 2; ++k)
-            {
-                if (set[k]) fc.device.deferRelease(set[k]);
-                set[k].Reset();
-                check(fc.device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
-                                                                IID_PPV_ARGS(&set[k])),
-                      "S sampled local in-scattering");
-                set[k]->SetName(set == st.volume ? L"S ml volume" : (set == st.fluence ? L"S ml volume fluence" : L"S ml volume moment"));
-            }
-        st.x = grid.gridX; st.y = grid.gridY; st.z = grid.slices;
-        st.fresh = true;
-    }
-    const float3 shift = fc.frame.originShift;
-    const bool valid = !st.fresh && st.revision == fc.scene.revision() && fc.frame.discontinuity == 0 && shift.x == 0 && shift.y == 0 && shift.z == 0;
-    st.fresh = false;
-    st.revision = fc.scene.revision();
-    const float exposure = 1.0f / (1.2f * std::exp2(main.view.ev100));
-    const float ratio = valid && st.exposure > 0 ? exposure / st.exposure : 1.0f;
-    st.exposure = exposure;
-    const uint32_t prev = st.parity, next = prev ^ 1u;
-    st.parity = next;
+    if (!r.tlasStatic.valid() || !r.transmittanceLut.valid() || !fc.trackState) return out;
+    const FroxelGridCpu grid = froxelGridFor(q, view.view.width, view.view.height);
     RenderGraph& g = fc.graph;
     const TextureDesc desc{ "S ml volume", grid.gridX, grid.gridY, (uint16_t)grid.slices, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D };
-    const TextureRef previous = valid ? g.importTexture(st.volume[prev].Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS) : TextureRef{};
-    const TextureRef output = g.importTexture(st.volume[next].Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     const TextureDesc fluenceDesc{ "S ml volume fluence", grid.gridX, grid.gridY, (uint16_t)grid.slices, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D };
     const TextureDesc momentDesc{ "S ml volume moment", grid.gridX, grid.gridY, (uint16_t)grid.slices, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D };
-    const TextureRef prevFluence = valid ? g.importTexture(st.fluence[prev].Get(), fluenceDesc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS) : TextureRef{};
-    const TextureRef prevMoment = valid ? g.importTexture(st.moment[prev].Get(), momentDesc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS) : TextureRef{};
-    const TextureRef fluence = g.importTexture(st.fluence[next].Get(), fluenceDesc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-    const TextureRef moment = g.importTexture(st.moment[next].Get(), momentDesc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-    fc.resources.localFluence = fluence;  // lit particles (FxLayerSetup.hlsl)
-    fc.resources.localMoment = moment;
+    TextureRef previous, prevFluence, prevMoment, output, fluence, moment;
+    float ratio = 1.0f;
+    if (persistent)
+    {
+        // the main view: its own history (ping-pong, in this track's state)
+        SampledLocalState& st = fc.state<SampledLocalState>("S.froxels.sampledLocal");
+        if (!st.volume[0] || st.x != grid.gridX || st.y != grid.gridY || st.z != grid.slices)
+        {
+            st.device = &fc.device;
+            D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+            D3D12_RESOURCE_DESC1 rd{};
+            rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+            rd.Width = grid.gridX;
+            rd.Height = grid.gridY;
+            rd.DepthOrArraySize = (UINT16)grid.slices;
+            rd.MipLevels = 1;
+            rd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            rd.SampleDesc.Count = 1;
+            rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            for (auto* set : { st.volume, st.fluence, st.moment })
+                for (int k = 0; k < 2; ++k)
+                {
+                    if (set[k]) fc.device.deferRelease(set[k]);
+                    set[k].Reset();
+                    check(fc.device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
+                                                                    IID_PPV_ARGS(&set[k])),
+                          "S sampled local in-scattering");
+                    set[k]->SetName(set == st.volume ? L"S ml volume" : (set == st.fluence ? L"S ml volume fluence" : L"S ml volume moment"));
+                }
+            st.x = grid.gridX; st.y = grid.gridY; st.z = grid.slices;
+            st.fresh = true;
+        }
+        const float3 shift = fc.frame.originShift;
+        const bool valid = !st.fresh && st.revision == fc.scene.revision() && fc.frame.discontinuity == 0 && shift.x == 0 && shift.y == 0 && shift.z == 0;
+        st.fresh = false;
+        st.revision = fc.scene.revision();
+        const float exposure = 1.0f / (1.2f * std::exp2(view.view.ev100));
+        ratio = valid && st.exposure > 0 ? exposure / st.exposure : 1.0f;
+        st.exposure = exposure;
+        const uint32_t prev = st.parity, next = prev ^ 1u;
+        st.parity = next;
+        if (valid)
+        {
+            previous = g.importTexture(st.volume[prev].Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+            prevFluence = g.importTexture(st.fluence[prev].Get(), fluenceDesc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+            prevMoment = g.importTexture(st.moment[prev].Get(), momentDesc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        }
+        output = g.importTexture(st.volume[next].Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        fluence = g.importTexture(st.fluence[next].Get(), fluenceDesc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        moment = g.importTexture(st.moment[next].Get(), momentDesc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    }
+    else
+    {
+        // a view without identity between frames (planar reflection views): the graph's transients, no history
+        output = g.createTexture(desc);
+        fluence = g.createTexture(fluenceDesc);
+        moment = g.createTexture(momentDesc);
+    }
+    out.inScattering = output;
+    out.fluence = fluence;
+    out.moment = moment;
     const TextureRef tlut = r.transmittanceLut;
     const BufferRef functions = r.lightFunctions, fxLights = r.fxLights;
     const uint32_t samples = (uint32_t)q.integer("shading.mega_lights_volume_samples");
@@ -734,7 +772,8 @@ TextureRef recordSampledLocal(FramePassContext& fc, const ViewResources& main, B
     if (!(frames >= 1 && frames <= 64)) fail("shading.mega_lights_volume_max_frames must be in [1, 64]");
     rt::RayScene* rays = &rt::RayScene::get(fc);
     rt::RayPipeline& pipeline = rt::RayPipeline::get(fc.device, fc.shaders, rt::standardRayPipeline("Passes/Atmosphere/MegaLightsVolume", { "MegaLightsVolumeGen" }));
-    const D3D12_GPU_VIRTUAL_ADDRESS constants = main.frameConstants;
+    const D3D12_GPU_VIRTUAL_ADDRESS constants = view.frameConstants;
+    const uint32_t slicesPerDispatch = std::max<uint32_t>(1, kSampledLocalRaysPerDispatch / std::max<uint32_t>(grid.gridX * grid.gridY * samples, 1));
     g.addPass("s.ml.volume", QueueType::Compute,
               [&](PassBuilder& b) {
                   rays->declareTraversal(b);
@@ -746,7 +785,7 @@ TextureRef recordSampledLocal(FramePassContext& fc, const ViewResources& main, B
                   if (previous.valid())
                       for (TextureRef t : { previous, prevFluence, prevMoment }) b.use(t, Use::SrvCompute);
                   for (TextureRef t : { output, fluence, moment }) b.use(t, Use::UavCompute);
-                  b.keep();  // persistent state: the next frame's history
+                  if (persistent) b.keep();  // persistent state: the next frame's history
               },
               [=, &pipeline](PassContext& ctx) {
                   auto bits = [](float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; };
@@ -756,15 +795,18 @@ TextureRef recordSampledLocal(FramePassContext& fc, const ViewResources& main, B
                                      bits(cap), bits(frames), 0, 0,
                                      ctx.uav(fluence), ctx.uav(moment), previous.valid() ? ctx.srv(prevFluence) : 0xFFFFFFFFu, previous.valid() ? ctx.srv(prevMoment) : 0xFFFFFFFFu };
                   rays->rootConstants(k + 24);
-                  ctx.computeConstants(k, 32);
                   ctx.bindFrameConstants(constants);
-                  pipeline.dispatch(ctx.cmd, 0, grid.gridX, grid.gridY, grid.slices);
+                  for (uint32_t first = 0; first < grid.slices; first += slicesPerDispatch)
+                  {
+                      k[14] = first;  // P[3].z: the dispatch's first slice
+                      ctx.computeConstants(k, 32);
+                      pipeline.dispatch(ctx.cmd, 0, grid.gridX, grid.gridY, std::min(slicesPerDispatch, grid.slices - first));
+                  }
               });
-    return output;
 #else
-    (void)fc; (void)main; (void)lights; (void)readers;
-    return {};
+    (void)fc; (void)view; (void)lights; (void)readers; (void)persistent;
 #endif
+    return out;
 }
 } // namespace
 
@@ -777,7 +819,10 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
     // shading.mega_lights_volume: the sampled local light first - it needs the lists and the readers only, and the lit
     // particle media below read its fluence and moment volumes (FrameResources::localFluence / localMoment).
     const TextureRef readers = recordReaders(fc, main, s.fullDepth, "");
-    const TextureRef sampledLocal = recordSampledLocal(fc, main, lights, readers);
+    const SampledLocal sampled = recordSampledLocal(fc, main, lights, readers, true);
+    const TextureRef sampledLocal = sampled.inScattering;
+    fc.resources.localFluence = sampled.fluence;  // lit particles and particle media (FxLayerSetup.hlsl, VolumeSetup.hlsl)
+    fc.resources.localMoment = sampled.moment;
     // E's particle media (smoke, fire) on this grid, between the lists and the integration (invalid: none this frame); a
     // view whose volumeSlices a producer already set keeps them (tests: FroxelTests 7).
     ViewResources mediaView = main;

@@ -17,7 +17,8 @@
 // P[0] = { froxel lights (raw), output UAV, transmittance LUT (the air's parameters), light functions (UNX_NONE: none) }
 // P[1] = { previous output SRV (UNX_NONE: no history), N, tile readers SRV (FroxelTileDepth; UNX_NONE: every slice), 0 }
 // P[2] = { minimum sample weight, ray bias (m), end bias (m), exposure now / previous } (floats)
-// P[3] = { weight cap, max frames } (floats)
+// P[3] = { weight cap, max frames (floats), the dispatch's first slice, 0 }: the grid goes in bands of slices, each at most
+//        262,144 shadow rays (FroxelSystem.cpp)
 // P[4] = { fluence UAV, moment UAV, previous fluence SRV, previous moment SRV } (UNX_NONE: not kept): the same samples'
 //        light for lit particles (FxLayerSetup.hlsl), as Unreal's MegaLights lights the translucency volume: RGBA16F,
 //        fluence.rgb = sum of weight x visible irradiance toward each sampled light at the slice's midpoint (x exposure),
@@ -33,7 +34,7 @@
 [shader("raygeneration")]
 void MegaLightsVolumeGen()
 {
-    const uint3 id = DispatchRaysIndex();
+    const uint3 id = uint3(DispatchRaysIndex().xy, DispatchRaysIndex().z + P[3].z);
     const uint2 tile = id.xy;
     const uint s = id.z;
     RWTexture3D<float4> output = ResourceDescriptorHeap[P[0].y];
