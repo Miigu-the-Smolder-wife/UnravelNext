@@ -15,6 +15,11 @@
 //   5. the triangle stream: 6 x 256^2 vertices, positions and normals from the field on the basin's rotated frame,
 //      counter-clockwise seen from above, velocity = (eta - previous eta) / dt
 //   6. two runs are bit-identical
+//   7. ten minutes frame by frame (coordinator 10-01: a game basin without sources collapsed after ~2 min): (a) one splash,
+//      then no source for 36,000 frames at 60 Hz - finite, the basin's volume unchanged, the height's RMS never above its
+//      first 10 s (+1 %), its peak within 1.5 x (reflections refocus), the last 5 min below the first; (b) a resting body re-sent every frame (its
+//      displaced volume removed at the old place and added at a place jittered by up to 1 mm, frame times jittered by
+//      +-20 %) - finite, volume unchanged, the RMS of the last minute at most that of the first
 //   unx_test_water_pooltests [--no-debug-layer] [--time | --warp]
 #include "unx/water/Pool.h"
 
@@ -599,6 +604,99 @@ int main(int argc, char** argv)
             }
             W_CHECK(std::memcmp(a.data(), b.data(), a.size() * 4) == 0, "two runs differ");
             std::printf("determinism: two 20-frame runs are bit-identical\n");
+        }
+        // 7. ten minutes frame by frame
+        {
+            const int frames = 36000;
+            const float dt60 = 1.0f / 60;  // 10 min at 60 Hz
+            auto stats = [&](const Frame& f, double& rms, double& peak, double& volume, bool& finite) {
+                double sum = 0;
+                peak = 0;
+                finite = true;
+                for (size_t i = 0; i < kSamples; ++i)
+                {
+                    const float e = f.field[4 * i];
+                    finite = finite && std::isfinite(e) && std::isfinite(f.field[4 * i + 3]);
+                    sum += double(e) * e;
+                    peak = std::max(peak, double(std::abs(e)));
+                }
+                rms = std::sqrt(sum / double(kSamples));
+                volume = trapezoid(f.field, 0) * double(bath.sizeX / C) * double(bath.sizeZ / C);
+            };
+            {
+                Pool pool(gpu.device, gpu.shaders, bath);
+                PoolSource s;
+                s.x = at.centre[0] + 0.7; s.z = at.centre[2] - 0.3; s.radius = 0.1f; s.impulse = 3.0f; s.volume = 1e-3f;
+                double rms0 = 0, peak0 = 0, rmsMax = 0, peakMax = 0, volumeWorst = 0, rmsFirst5 = 0, rmsLast5 = 0;
+                int samplesFirst = 0, samplesLast = 0;
+                for (int n = 0; n < frames; ++n)
+                {
+                    const bool read = n % 600 == 599;
+                    const Frame f = step(gpu, pool, uint64_t(n), at, n * double(dt60), dt60, n == 0 ? std::vector<PoolSource>{ s } : std::vector<PoolSource>{}, read);
+                    if (!read) continue;
+                    double rms, peak, volume;
+                    bool finite;
+                    stats(f, rms, peak, volume, finite);
+                    W_CHECK(finite, "splash: a non-finite height or potential after %d frames", n + 1);
+                    if (n < 600) rms0 = rms, peak0 = peak;
+                    rmsMax = std::max(rmsMax, rms);
+                    peakMax = std::max(peakMax, peak);
+                    volumeWorst = std::max(volumeWorst, std::abs(volume));
+                    if (n < frames / 2) rmsFirst5 += rms, ++samplesFirst;
+                    else rmsLast5 += rms, ++samplesLast;
+                }
+                rmsFirst5 /= samplesFirst;
+                rmsLast5 /= samplesLast;
+                // The RMS carries the energy's height part; a single sample's peak may rise as reflected waves refocus in the
+                // closed basin (dispersion), so it is only bounded loosely.
+                W_CHECK(rmsMax <= 1.01 * rms0 && peakMax <= 1.5 * peak0, "splash: the height grew without sources (RMS %.4g -> max %.4g, peak %.4g -> max %.4g m)", rms0, rmsMax, peak0,
+                        peakMax);
+                W_CHECK(rmsLast5 <= rmsFirst5, "splash: the last 5 min's RMS %.4g exceeds the first 5 min's %.4g", rmsLast5, rmsFirst5);
+                W_CHECK(volumeWorst <= 1e-6, "splash: the basin's volume changed by %.3g m^3", volumeWorst);
+                std::printf("ten minutes, one splash then no source: RMS %.4g m at 10 s, max %.4g; peak %.4g, max %.4g; mean RMS first / last 5 min %.4g / %.4g m; volume within %.2g m^3\n",
+                            rms0, rmsMax, peak0, peakMax, rmsFirst5, rmsLast5, volumeWorst);
+            }
+            {
+                Pool pool(gpu.device, gpu.shaders, bath);
+                uint32_t seed = 12345u;
+                auto unit = [&]() { seed = seed * 1664525u + 1013904223u; return double(seed >> 8) / 16777216.0 - 0.5; };  // [-0.5, 0.5)
+                PoolSource before;
+                before.x = at.centre[0] - 0.5; before.z = at.centre[2] + 0.2; before.radius = 0.2f; before.volume = 0.02f;  // a 20-litre body
+                double clock = 0, rmsFirst = 0, rmsLast = 0, volumeWorst = 0;
+                int first = 0, last = 0;
+                for (int n = 0; n < frames; ++n)
+                {
+                    const float frameDt = float(double(dt60) * (1.0 + 0.4 * unit()));
+                    clock += n == 0 ? 0.0 : double(frameDt);
+                    PoolSource now = before;
+                    now.x = at.centre[0] - 0.5 + 1e-3 * 2 * unit();
+                    now.z = at.centre[2] + 0.2 + 1e-3 * 2 * unit();
+                    now.volume = float(0.02 * (1.0 + 1e-3 * unit()));
+                    std::vector<PoolSource> sources;
+                    if (n > 0)
+                    {
+                        PoolSource out = before;
+                        out.volume = -before.volume;
+                        sources.push_back(out);
+                    }
+                    sources.push_back(now);
+                    before = now;
+                    const bool read = n % 600 == 599;
+                    const Frame f = step(gpu, pool, uint64_t(n), at, clock, n == 0 ? dt60 : frameDt, sources, read);
+                    if (!read) continue;
+                    double rms, peak, volume;
+                    bool finite;
+                    stats(f, rms, peak, volume, finite);
+                    W_CHECK(finite, "resting body: a non-finite height or potential after %d frames", n + 1);
+                    volumeWorst = std::max(volumeWorst, std::abs(volume));
+                    if (n < 3600) rmsFirst = std::max(rmsFirst, rms), ++first;
+                    if (n >= frames - 3600) rmsLast = std::max(rmsLast, rms), ++last;
+                }
+                W_CHECK(rmsLast <= 1.05 * rmsFirst, "resting body: the height's RMS grew from %.4g (first minute) to %.4g m (last minute)", rmsFirst, rmsLast);
+                W_CHECK(volumeWorst <= 1e-6, "resting body: the basin's volume changed by %.3g m^3", volumeWorst);
+                std::printf("ten minutes, a resting body re-sent every frame (1 mm jitter, +-20 %% frame times): RMS %.4g m (first minute) -> %.4g m (last minute); volume within %.2g m^3\n",
+                            rmsFirst, rmsLast, volumeWorst);
+            }
         }
         std::printf("pool tests passed\n");
         return 0;
