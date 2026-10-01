@@ -1,20 +1,27 @@
 // unx-kernel: cs_6_6 main
+// unx-variants: MODE=0,1
 // Overflow list of the shadow visibility (INTERFACES 7.3, v1.20): the shadow-casting lights past the third of each
 // pixel's froxel list, for the tiles ShadowVisibility.hlsl listed (indirect, one 64-thread group per 8x8 tile).
 // Each pixel recounts its lights past the third (list only); a groupshared scan gives the runs' offsets in the tile
-// block (64 pixel words, then ceil(count/4) words per pixel, in pixel order); one atomic per tile takes the block from
-// the capacity (the view's counter keeps counting past it: its final value is the view's need). A tile that fits writes
-// its head 1 + block start and evaluates
-// each light with shadowLocalVisibilityAtReceiver (ShadowVisibility.hlsli), the computation of slots 1-3; a tile past the
-// capacity writes 0xFFFFFFFF and goes to the fallback list (M evaluates it with the same function).
+// block (64 pixel words, then ceil(count/4) words per pixel, in pixel order).
+// MODE 0 (count; RENDERER_REDESIGN_V2 14.3-3, L3 stage 3): the tile's need in words to the need buffer (P[3].w, 4 B per
+// tile of the view; ShadowVisibility wrote 0 for every tile) and the frame's statistics. ShadowOverflowScan then turns
+// the needs into exclusive offsets in tile order, so a tile's block start depends only on the frame's content (the
+// atomic allocation before it placed blocks in the order the groups happened to run).
+// MODE 1 (fill): the same count; the block start = the tile's offset (P[3].w) + its block of 2048 tiles' prefix (P[4].w);
+// a tile that fits writes its head 1 + block start and evaluates each light with shadowLocalVisibilityAtReceiver
+// (ShadowVisibility.hlsli), the computation of slots 1-3; a tile past the capacity (start + need > capacity: in tile
+// order, the tail) writes 0xFFFFFFFF and goes to the fallback list (M evaluates it with the same function).
 // P[0].x depth SRV, P[0].y G-buffer SRV, P[0].z tile heads UAV (R32_UINT), P[0].w VSM constants CBV
 // P[1].x overflow tile list SRV (raw: count, args, tiles y << 16 | x), P[1].y page table SRV (raw), P[1].z pool SRV,
 // P[1].w blocks SRV (raw)
 // P[2].x overflow UAV (raw), P[2].y capacity (words), P[2].z fallback tile list UAV (raw), P[2].w statistics UAV (raw:
 // word 16 need in words summed over the frame's views (capacity), 17 tiles over capacity, 18 their overflow pixels, 19
 // lights past the third over all pixels)
-// P[3].x froxel lists SRV (raw), P[3].y local lights SRV, P[3].z slot of light SRV, P[3].w the view's allocation counter
-// UAV (raw). P[4].x planar mask SRV (R8_UINT; 0xFFFFFFFF: every pixel): other pixels have no lights past the third.
+// P[3].x froxel lists SRV (raw), P[3].y local lights SRV, P[3].z slot of light SRV, P[3].w MODE 0: the need UAV (raw,
+// 4 B per tile), MODE 1: the offsets SRV (raw: the scanned needs). P[4].x planar mask SRV (R8_UINT; 0xFFFFFFFF: every
+// pixel): other pixels have no lights past the third. P[4].z tiles per row of the view, P[4].w (MODE 1) block sums SRV
+// (raw: the prefix of each block of 2048 tiles, ShadowOverflowScan).
 // Frame constants of the view.
 #include "Frame.hlsli"
 #include "Scene.hlsli"
@@ -110,17 +117,28 @@ void main(uint3 gid : SV_GroupID, uint t : SV_GroupIndex)
         GroupMemoryBarrierWithGroupSync();
     }
     const uint runStart = 64 + gs_scan[t] - words;  // word offset in the tile block
+    const uint tileIndex = tile.y * P[4].z + tile.x;
 
+#if MODE == 0
+    if (t == 0)
+    {
+        RWByteAddressBuffer stats = ResourceDescriptorHeap[P[2].w];
+        RWByteAddressBuffer needBuf = ResourceDescriptorHeap[P[3].w];
+        const uint need = 64 + gs_scan[63];
+        needBuf.Store(tileIndex * 4, need);
+        stats.InterlockedAdd(64, need);
+        stats.InterlockedAdd(76, gs_lights);
+    }
+    return;
+#else
     if (t == 0)
     {
         RWByteAddressBuffer stats = ResourceDescriptorHeap[P[2].w];
         RWTexture2D<uint> heads = ResourceDescriptorHeap[P[0].z];
         const uint need = 64 + gs_scan[63];
-        RWByteAddressBuffer counter = ResourceDescriptorHeap[P[3].w];
-        uint start;
-        counter.InterlockedAdd(0, need, start);
-        stats.InterlockedAdd(64, need);
-        stats.InterlockedAdd(76, gs_lights);
+        ByteAddressBuffer offsets = ResourceDescriptorHeap[P[3].w];
+        ByteAddressBuffer blockSums = ResourceDescriptorHeap[P[4].w];
+        const uint start = offsets.Load(tileIndex * 4) + blockSums.Load((tileIndex / 2048u) * 4);
         uint head = 1 + start;
         if (start + need > P[2].y)
         {
@@ -137,6 +155,7 @@ void main(uint3 gid : SV_GroupID, uint t : SV_GroupIndex)
         gs_head = head;
     }
     GroupMemoryBarrierWithGroupSync();
+#endif
     const uint head = gs_head;
     if (head == 0xFFFFFFFFu) return;
     RWByteAddressBuffer overflow = ResourceDescriptorHeap[P[2].x];
