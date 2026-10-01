@@ -2327,6 +2327,81 @@ void testCoverageComposite(TestFrame& tf, Report& report)
     report(checked > 500 && layered > 50, "coverage composite: pixels with fragments and with overlapping fragments present", std::min(checked / 10, layered), 50);
     report(worst < 5e-3, "coverage composite: pixels with fragments vs CPU composite of CPU-shaded fragments (rel.)", worst, 5e-3);
     report(worstOther == 0, "coverage composite: pixels without fragments unchanged (abs.)", worstOther, 0);
+
+    // L2c (14.1c): the same layer under local lights, shading.coverage_tile_lights off (every light per record) vs on
+    // (the tile x depth-interval FAR field; NEAR, shadowed and horizon-straddling lights per record): every pixel within
+    // the 1e-3 rule (P99), the gate of 14.8 L2c. The sun is off so the local lights carry the whole direct term.
+    {
+        scene::Scene sl = s;
+        std::mt19937 rngL(31);
+        auto uniL = [&](float lo, float hi) { return std::uniform_real_distribution<float>(lo, hi)(rngL); };
+        for (int i = 0; i < 24; ++i)
+        {
+            scene::Light L;
+            const int kind = i % 3;
+            L.type = kind == 0 ? scene::LightType::Point : (kind == 1 ? scene::LightType::Spot : scene::LightType::Rect);
+            L.position = { uniL(-4, 4), uniL(0.8f, 4.5f), uniL(-5, 1.2f) };
+            L.forward = normalize(float3{ uniL(-0.5f, 0.5f), -1, uniL(-0.5f, 0.5f) });
+            L.right = normalize(cross(L.forward, float3{ 0, 0, 1 }));
+            L.intensity = kind == 2 ? uniL(200, 1200) : uniL(200, 2500);
+            L.range = uniL(6, 25);
+            L.size = kind == 2 ? float2{ uniL(0.2f, 0.5f), uniL(0.2f, 0.4f) } : float2{ 0, 0 };
+            L.spotInner = 0.4f;
+            L.spotOuter = 0.7f;
+            sl.lights.push_back(L);
+        }
+        sl.sun.illuminance = 0;
+        tf.setScene(sl, { 1 });
+        const uint32_t N = (uint32_t)sl.lights.size();
+        std::vector<uint32_t> llist(64 + N, 0);
+        const float nearM = 0.01f, farM = 1000.0f, logRatio = std::log2(farM / nearM);
+        llist[0] = 1, llist[1] = 1, llist[2] = 1, llist[3] = 4096;
+        std::memcpy(&llist[4], &nearM, 4);
+        std::memcpy(&llist[5], &farM, 4);
+        std::memcpy(&llist[6], &logRatio, 4);
+        llist[8] = 64, llist[9] = 128, llist[10] = (N + 1) & ~1u, llist[11] = N;
+        llist[16] = 0, llist[17] = N;
+        for (uint32_t i = 0; i < N; i += 2) llist[32 + i / 2] = i | ((i + 1 < N ? i + 1 : 0) << 16);
+        ComPtr<ID3D12Resource> llistBuffer = uploadStatic(tf.device, llist.data(), llist.size() * 4, L"test froxel list (coverage tile lights)");
+        std::shared_ptr<std::vector<uint8_t>> offL, onL;
+        tf.frame.outputLinearHdr = true;
+        for (int pass = 0; pass < 2; ++pass)
+        {
+            tf.quality.applyOverride(pass ? "shading.coverage_tile_lights=true" : "shading.coverage_tile_lights=false");
+            tf.run([&](FramePassContext& fc) {
+                ViewResources v = tf.mainView(fc, W, H, 0);
+                v.color = fc.graph.createTexture({ "m.test.coverage color", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+                tf.vis.record(fc, v);
+                tracks::materialResolve(fc, v);
+                fc.resources.froxelLights = fc.graph.importBuffer(llistBuffer.Get(), { "test froxel lists", llist.size() * 4, 0 });
+                v.froxelLights = fc.resources.froxelLights;
+                layer.install(fc.graph, v);
+                tracks::shading(fc, v);
+                (pass ? onL : offL) = tf.readback(fc, v.color);
+            });
+        }
+        tf.quality.applyOverride("shading.coverage_tile_lights=false");
+        tf.frame.outputLinearHdr = false;
+        std::vector<double> errsL;
+        double worstL = 0, largestL = 0;
+        for (uint32_t y = 0; y < H; ++y)
+            for (uint32_t x = 0; x < W; ++x)
+            {
+                const float4 pa = texelOf<float4>(*offL, W, x, y), pb = texelOf<float4>(*onL, W, x, y);
+                const double scale = std::max({ (double)pa.x, (double)pa.y, (double)pa.z, 1e-3 });
+                const double e = std::max({ std::abs(pa.x - pb.x), std::abs(pa.y - pb.y), std::abs(pa.z - pb.z) }) / scale;
+                if (e > worstL && e > 5e-3) logf("  coverage tile lights px (%u,%u): per-record (%.5f %.5f %.5f) field (%.5f %.5f %.5f)\n", x, y, pa.x, pa.y, pa.z, pb.x, pb.y, pb.z);
+                worstL = std::max(worstL, e);
+                largestL = std::max(largestL, (double)pa.x);
+                errsL.push_back(e);
+            }
+        std::sort(errsL.begin(), errsL.end());
+        const double p99L = errsL.empty() ? 1 : errsL[std::min(errsL.size() - 1, (size_t)(errsL.size() * 0.99))];
+        logf("coverage tile lights: %zu pixels, largest exposed radiance %.4f, |dE|/E P99 %.3g, worst %.3g\n", errsL.size(), largestL, p99L, worstL);
+        report(largestL > 0.02, "coverage tile lights: the local lights light the frame (exposed radiance)", largestL, 0.02);
+        report(p99L <= 1e-3, "coverage tile lights: FAR field vs per-record loop, |dE|/E P99 (14.8 L2c gate)", p99L, 1e-3);
+        report(worstL <= 1e-2, "coverage tile lights: FAR field vs per-record loop, worst pixel", worstL, 1e-2);
+    }
 }
 
 } // namespace
