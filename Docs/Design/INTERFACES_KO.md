@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.84, 2026-10-01)
+# UnravelNext 인터페이스 (v1.88, 2026-10-01)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -748,6 +748,10 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.88 (2026-10-01, R: hit 직접광 누적기 풀, 설계 V2.3 12.8; 미검증 — 빌드까지):
+  - **`FrameResources::giAccumulator`**(BufferRef): `gi.hit_accumulator`와 `gi.hit_accumulator_pool`이 켜져 있을 때만 유효. R의 globalIllumination 뒤(r.gi.acc.fold3 뒤)의 읽는 쪽은 SrvCompute로 선언하고 `Passes/GI/GiAccPool.hlsli`의 `giAccPoolRead(pool, position, normal, footprint, out GiAccMeans)`로 읽는다(반사 hit: S2). 기록(`giAccPoolRecord`)은 GI 광선만 한다(비율 추정기의 에너지 보존이 기록한 집단 안에서만 성립. 설계 12.1-1의 "GI 광선과 반사 광선"과 다른 점: 감사 결과로 다시 정한다).
+  - `GiAccMeans { A, B, C, weight, cellSize }`: 독자의 확산 직접광 = kA·A + kB·B + kC·C(자기 계수). `radiance += weight × (그 값 − 점 값)`. `cellSize`는 읽은 셀의 변(독자 발자국보다 훨씬 크면 점 값을 유지할지 독자가 판단).
+  - 품질 키: `gi.hit_accumulator_pool`(true = 풀, false = 이전의 엔트리별 평균), `gi.hit_accumulator_pool_slots`, `gi.hit_accumulator_alpha`, `gi.hit_accumulator_fine_scale`. `gi.hit_accumulator`(주 스위치)는 기본 false 그대로다.
 - v1.84 (2026-10-01, R: VSM 래스터 목록 넘침의 구조 수정, 결함 큐 1, 조정 결정 13:40):
   - **원인**: 기차 라운지의 0프레임 태양 래스터가 가시 클러스터 1.67 M / (클러스터, 타일) 쌍 2.07 M을 요구해 `visibility.max_visible_clusters`(1,048,576)를 넘었고, 캐스터가 빠진 페이지가 캐시에 남았다(f60에 104k 화소가 태양 그림자 없음).
   - **`DepthRaster.h`: `DepthRasterOverflow { frame, bits }`, `DepthRasterOverflows`(TrackState 키 `kDepthRasterOverflowKey`)**: V가 래스터 실행(요청 이름)마다 목록이 넘친 가장 최근 프레임과 넘침 비트를 적는다(통계가 돌아오는 framesInFlight 프레임 뒤). 실행 결과를 보관하는 요청자(S의 페이지 캐시)는 그것을 다시 그린다.

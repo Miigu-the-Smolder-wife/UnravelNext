@@ -42,6 +42,12 @@ struct GiSettings  // from Config/quality/gi.toml
     // Redesign V2.2 11.2 (P1'-b): gi.bounce_split (the bounce part as a current L1 pair beside the long mean) and the
     // current bounce part's window (gi.bounce_split_updates, 1 = replacement).
     bool bounceSplit = false;
+    // gi.hit_accumulator_pool (V2.3 12.8): the accumulator in its own cells and levels (GiAccPool.hlsli), window ratio
+    // with the frame weight (1 - alpha)^age; gi.hit_accumulator_pool_slots (a power of two), _alpha, _fine_scale (the
+    // finest cell over the ray footprint); the minimum samples are gi.hit_accumulator_min_samples.
+    bool hitAccumulatorPool = false;
+    uint32_t hitAccumulatorPoolSlots = 524288;
+    float hitAccumulatorAlpha = 0.125f, hitAccumulatorFineScale = 0.25f;
     // gi.miss_closure (V2 1.3, cold start): bounce reads without data are closed with the entry's own irradiance
     // (GiIntegrate.hlsl). gi.bounce_visibility: GiTrace's bounce reads (the hit's own cell and the fallback levels) count
     // only cells whose anchor sees the hit.
@@ -155,6 +161,10 @@ private:
     Device& m_device;
     GiSettings m_settings;
     ComPtr<ID3D12Resource> m_cache;
+    // gi.hit_accumulator_pool (GiAccPool.hlsli): the accumulator's buffer; cleared before its first use and after an origin shift
+    ComPtr<ID3D12Resource> m_accPool;
+    uint64_t m_accPoolBytes = 0;
+    bool m_accPoolClear = true;
     ComPtr<ID3D12Resource> m_lookupStats;  // 128 uint counters (setLookupStats)
     bool m_lookupStatsOn = false;
     ComPtr<ID3D12CommandSignature> m_dispatchSignature;  // one D3D12_DISPATCH_ARGUMENTS, 16 B stride (radiance maps)

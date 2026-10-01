@@ -86,6 +86,13 @@ anchor_centroid = false            # V2.3 12.2 (P1''-b): the anchor is the centr
 hit_accumulator = false            # V2.3 12.1 (P1''-a): every GI hit adds its direct light to its cell's sums; hits read the
                                    # cell's means for their diffuse direct term (the point value's lamp hotspots made the coarse
                                    # hit cells heavy-tailed and the room's multi-bounce level walk: SD 3.1 pp between runs)
+hit_accumulator_pool = true        # V2.3 12.8 (with hit_accumulator): the accumulator in its own cells (GiAccPool.hlsli) - the window
+                                   # ratio sum k T / sum k with the same frame weights (1 - alpha)^age for both sums, restart at 3
+                                   # sigma of a frame, hits written to the finest of 4 levels and passed up, the reader taking the
+                                   # finest level with min_samples hits. false: the per-entry means below (window / frame / ratio, A/B)
+hit_accumulator_pool_slots = 524288  # hash slots (a power of two; 268 B each: 134 MB)
+hit_accumulator_alpha = 0.125      # the window's frame weight decay (memory ~ 1 / alpha frames)
+hit_accumulator_fine_scale = 0.25  # the finest cell over the ray footprint (the levels are x 1, 2, 4, 8 of it)
 hit_accumulator_min_samples = 32   # samples a cell holds before hits read it (fewer: the point value)
 hit_accumulator_window = 1024      # the means' window in samples (~10 frames at ~100 hits per cell and frame)
 hit_accumulator_window_recent = 128  # while the sun changed within lighting_recent_frames

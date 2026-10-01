@@ -252,5 +252,8 @@ struct FrameResources
                                    // every pixel (VsmCls.hlsli VsmClsTile; invalid = classification off)
     BufferRef tlasStatic, tlasDynamic;  // acceleration structures                          [R]
     BufferRef giCache;             // world radiance cache                                  [R]
+    BufferRef giAccumulator;       // hit direct-light accumulator pool (GiAccPool.hlsli;   [R]
+                                   // invalid: gi.hit_accumulator_pool off). Readers after
+                                   // globalIllumination: SrvCompute (giAccPoolRead)
 };
 } // namespace unx::render
