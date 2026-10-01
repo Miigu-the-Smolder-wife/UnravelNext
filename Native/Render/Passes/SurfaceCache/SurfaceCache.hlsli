@@ -35,7 +35,8 @@
 // Feedback (the reference's r.LumenScene.Lighting.Feedback): a cell a consumer's hit marked is listed apart and half of
 // the relighting budget left after the new cells goes to those cells first (SurfaceCacheLight.hlsl scPickCell).
 // Header words: 13 = lit cells with feedback. 0 N, 1 frame, 2 lit cells, 3 new cells, 4-6 camera xyz (float), 7 max unused frames, 8 lit probes, 9 new
-// probes, 10 flags (bit 0: marking on, bit 1: bilinear reads), 11 asuint(radiosity ray cap, exposed), 12 asuint(probe max frames).
+// probes, 14 and 15 (diagnostics, surface_cache.debug_count) this frame's radiosity rays that met geometry and those of
+// them that read no light, 10 flags (bit 0: marking on, bit 1: bilinear reads), 11 asuint(radiosity ray cap, exposed), 12 asuint(probe max frames).
 #ifndef UNX_SURFACE_CACHE_HLSLI
 #define UNX_SURFACE_CACHE_HLSLI
 #include "Bindless.hlsli"

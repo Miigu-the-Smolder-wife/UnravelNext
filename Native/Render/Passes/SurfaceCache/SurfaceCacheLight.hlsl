@@ -34,7 +34,8 @@
 //          bit 8 no sun, bit 9 the lights are chosen but not evaluated, bit 10 the lights are evaluated without their
 //          shadow rays); bit 11 the cell's shadow rays (lights, sun) take alpha-tested casters as opaque; bit 12
 //          (diagnostics) the lights' shadow rays under the GI mask; bit 13 the lights' shadow rays as inline queries
-//          after all the lights are evaluated (surface_cache.direct_shadow_inline) }, P[4] = { asuint(stochastic max frames), asuint(min sample weight), 0, 0 }
+//          after all the lights are evaluated (surface_cache.direct_shadow_inline); bit 14 (diagnostics,
+//          surface_cache.debug_count) the radiosity rays' hits and empty reads are counted in header words 14, 15 }, P[4] = { asuint(stochastic max frames), asuint(min sample weight), 0, 0 }
 // P[1].xyz = constant sky radiance (SKY1), P[1].w = ray length, P[2] = atmosphere SRVs (SKY0), P[3].xyz = constant sun
 // illuminance (SKY1) (GiSky.hlsli), P[3].w = seed bounces; P[6], P[7] = RtSceneSrvs. Frame constants b1 = main view.
 #include "RayTracing/RayShaders.hlsli"
@@ -481,7 +482,16 @@ void SurfaceCacheProbesGen()
         {
             float3 at, face;
             ScSample cell;
-            if (scMeet(b, l, scene, hit, ray, at, face, cell) && cell.valid) radiance = scFinalLighting(cell);
+            const bool lit = scMeet(b, l, scene, hit, ray, at, face, cell) && cell.valid;
+            if (lit) radiance = scFinalLighting(cell);
+            if (P[0].w & 16384u)
+            {
+                // surface_cache.debug_count: the radiosity rays that met geometry this frame (header word 14) and those
+                // of them that read nothing - no lit cell there, a back face, an emitter (word 15)
+                uint before;
+                b.InterlockedAdd(56, 1u, before);
+                if (!lit) b.InterlockedAdd(60, 1u, before);
+            }
         }
         const float brightest = max(radiance.r, max(radiance.g, radiance.b)) * g_exposure;
         if (cap > 0 && brightest > cap) radiance *= cap / brightest;

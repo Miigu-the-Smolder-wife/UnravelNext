@@ -297,6 +297,9 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
                 // 5, 6: the emission the cell holds and the hit material's own (radiance)
                 if (component == 5) o.radiance = cell.valid ? cell.emission : 0;
                 if (component == 6) o.radiance = cell.valid ? m.emissive : 0;
+                // 7 (with surface_cache.debug_count): r = the share of this frame's radiosity rays that met geometry and
+                // read no light, g = those rays / 65536 (the same in every pixel)
+                if (component == 7) o.radiance = float3(surfaceCache.Load(60) / max((float)surfaceCache.Load(56), 1.0), surfaceCache.Load(56) / 65536.0, 0);
             }
             return o;
         }
