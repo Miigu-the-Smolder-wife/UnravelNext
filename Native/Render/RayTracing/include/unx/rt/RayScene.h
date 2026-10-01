@@ -45,6 +45,11 @@ struct DeformJob  // 16 B (Deform.hlsl)
 constexpr uint32_t kRtInstanceDeformed = 1u;
 constexpr uint32_t kRtGeometryProxyIndices = 1u;
 constexpr uint32_t kRtMaskGi = 1u, kRtMaskReflection = 2u, kRtMaskEmitter = 4u, kRtMaskAll = 0xFFu;
+// Instances that cast shadows (scene::InstanceCastShadow) carry this bit; shadow rays of lights (shading.mega_lights) use it
+// alone, so a mesh that casts no shadow in S's shadow maps blocks no light here either. No other ray's mask has it.
+constexpr uint32_t kRtMaskShadow = 16u;
+// The mask of a scene instance from its gpu::Instance flags (hidden: none).
+constexpr uint32_t rtInstanceMask(uint32_t flags) { return (flags & 0x80000000u) ? 0u : ((flags & 1u) ? kRtMaskAll : (kRtMaskAll & ~kRtMaskShadow)); }
 constexpr uint32_t kRtMaskFluid = 8u;  // W's triangle streams (refraction rays only: no scene records to shade them)
 constexpr uint32_t kRtInstanceEmitter = 0xFFFFFEu;  // RT_INSTANCE_EMITTER (RayScene.hlsli)
 constexpr uint32_t kRtInstanceStreamBase = 0xFFFF00u;  // + stream slot (< 64): RT_INSTANCE_STREAM (RayScene.hlsli)

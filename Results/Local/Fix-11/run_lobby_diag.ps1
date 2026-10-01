@@ -7,7 +7,7 @@ Set-Location "C:\Users\USER\UnravelNext-fix"
 $out = "C:\Users\USER\UnravelNext-fix\Results\Local\Fix-11\postgame"
 New-Item -ItemType Directory -Force $out | Out-Null
 $scene = "C:\Users\USER\UnravelGames\BathhouseTycoon\Artifacts\Look\lobby.unxscene"
-$bits = @{ off = 0; noslot = 16384; noair = 8; nolocal = 32; noshadow = 2048 }
+$bits = @{ off = 0; noslot = 16384; noair = 8; nolocal = 32; noshadow = 2048; nogi = 2; norefl = 4 }
 $exe = "C:\Users\USER\UnravelNext-fix\build\all\bin\unx_gate_shadow_renderergate.exe"
 foreach ($s in $Sets.Split(",")) {
   $name = "lobby_1080_$s"

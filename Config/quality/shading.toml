@@ -13,6 +13,41 @@ tile_lights = false               # 14.1/14.2 (L2): per 8x8 tile NEAR/FAR classi
                                   # FAR lights' diffuse comes from the tile corners' vector irradiance (1e-3 rule), their specular stays
                                   # per pixel (D-23 pending); every shadow caster is NEAR until 14.3. Gate: tile vs per-pixel |dE|/E P99 <= 1e-3
 output_encoding = "srgb"          # RGB10A2 display output
+# Stochastic direct light of the local lights (Passes/Shading/MegaLights.hlsli; user decision 2026-10-01: the lighting is
+# rebuilt on Unreal Engine's structure; owner A). true: every listed light is a candidate with its shadow (no slot limit),
+# the main view's kernels take N light samples per downsampled pixel with one shadow ray each (R's ray scene), then a
+# temporal and a spatial filter; false (default until the lobby verdict): the per-pixel loop with S's shadow slots,
+# bit-identical to before. The values below are Unreal's defaults (r.MegaLights.*, centimetres turned to metres); the
+# ones that trade accuracy for cost or noise are the user's to set (UNREAL_COMPARISON_LIGHTS_KO.md 5):
+# samples, downsample, the weight caps, min_sample_weight, the history length and the filter radius.
+mega_lights = false
+mega_lights_downsample = 2                        # DownsampleMode: 2 = 2 x 2 (one sample pixel per block and frame), 1 = full
+mega_lights_samples = 4                           # NumSamplesPerPixel: 1, 2 or 4 per downsampled pixel
+mega_lights_min_sample_weight = 0.001             # MinSampleWeight: exposed luminance under which a light fades out of the sampling
+mega_lights_guide_by_history = true               # GuideByHistory: lights hidden in the previous frame's tile weigh less
+mega_lights_hidden_weight = 0.1                   # GuideByHistory.LightHiddenWeight
+mega_lights_hidden_weight_history_miss = 0.4      # GuideByHistory.LightHiddenWeightForHistoryMiss
+mega_lights_merge_rays = true                     # MergeRays: samples of one light share a ray outside penumbrae
+mega_lights_max_shading_weight = 20.0             # MaxShadingWeight: cap of a sample's 1 / probability (energy lost above it)
+mega_lights_max_shading_weight_hidden = 5.0       # MaxShadingWeightForHiddenLight
+mega_lights_ray_bias_m = 0.01                     # HardwareRayTracing.Bias (TMin)
+mega_lights_ray_normal_bias_m = 0.001             # HardwareRayTracing.NormalBias
+mega_lights_ray_end_bias_m = 0.05                 # HardwareRayTracing.EndBias (Unreal 0.01): S's local shadow maps start 5 cm from
+                                                  # the light (its fixture casts no shadow), and rays follow that rule
+mega_lights_temporal = true                       # Temporal
+mega_lights_temporal_max_frames = 12              # Temporal.MaxFramesAccumulated
+mega_lights_temporal_min_frames_history_miss = 4  # Temporal.MinFramesAccumulatedForHistoryMiss
+mega_lights_temporal_distance_threshold = 0.03    # Temporal.HistoryDistanceThreshold (relative view depth)
+mega_lights_temporal_clamp_scale = 1.0            # Temporal.NeighborhoodClampScale (standard deviations)
+mega_lights_spatial = true                        # Spatial
+mega_lights_spatial_radius_px = 8.0               # Spatial.KernelRadius
+mega_lights_spatial_samples = 4                   # Spatial.NumSamples (twice after a disocclusion)
+mega_lights_spatial_depth_weight = 10000.0        # Spatial.DepthWeightScale
+mega_lights_spatial_max_disocclusion_frames = 2   # Spatial.MaxDisocclusionFrames
+mega_lights_spatial_disocclusion_scale_diffuse = 2.0   # Spatial.DisocclusionDiffuseSpatialVarianceScale
+mega_lights_spatial_disocclusion_scale_specular = 1.0  # Spatial.DisocclusionSpecularSpatialVarianceScale
+mega_lights_spatial_history_variance = true       # Spatial.UseHistorySpatialVariance
+mega_lights_spatial_history_stddev = 0.15         # Spatial.HistorySpatialStdDevThreshold
 # Edge (E) pixels and surface groups (Passes/Shading/Edge.hlsli): two pixels are one surface when the material matches,
 # the shading normals differ by less than the angle, and each lies within max(footprint x ft, distance x dt) of the
 # other's tangent plane. ARCHITECTURE 2.10: up to three surfaces per edge pixel.
