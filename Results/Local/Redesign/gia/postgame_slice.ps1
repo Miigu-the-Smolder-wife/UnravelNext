@@ -44,10 +44,16 @@ $modes = @{
   oriented = (S @('gi.hit_oriented_lights=true'))
   oriented_acc = (S @('gi.hit_oriented_lights=true', 'gi.hit_accumulator=true'))
   oriented_vis = (S @('gi.hit_oriented_lights=true', 'gi.experiment_disable=524288'))
+  acc1 = (S @('gi.hit_accumulator=true', 'gi.hit_accumulator_levels=1'))
+  oriented_acc1 = (S @('gi.hit_oriented_lights=true', 'gi.hit_accumulator=true', 'gi.hit_accumulator_levels=1'))
+  # the level transient after a cut (deploy: 1.0 at f1, ~1.5 at f16, 1.0 at f299 in the lounge): which term carries it
+  t_nolocal = (S @('gi.experiment_disable=128'))
+  t_onebounce = (S @('gi.experiment_disable=512'))
+  t_notemporal = (S @('gi.screen_temporal_frames=0'))
   alloff = ($filterOff + $coldOff + (S @('reflection.layers=false', 'reflection.hit_cone_lobes=false', 'reflection.hit_accumulator=false')))
 }
 $k = $env:PG_SCENE; $res = $env:PG_RES; $turn = $env:PG_TURN
-function Still($m, $label) { if (-not $label) { $label = $m }; Step "still_${k}_${res}_$label" 'unx_gate_shadow_renderergate.exe' (@('--scene', $scenes[$k], '--resolution', $res, '--warmup-frames', '0', '--frames', '300', '--capture-frames', '1,4,16,299', '--capture-layers', 'final,gi', '--capture', "$p2\still_${k}_${res}_$label.pfm") + $modes[$m]) }
+function Still($m, $label) { if (-not $label) { $label = $m }; Step "still_${k}_${res}_$label" 'unx_gate_shadow_renderergate.exe' (@('--scene', $scenes[$k], '--resolution', $res, '--warmup-frames', '0', '--frames', '300', '--capture-frames', $(if ($env:PG_FRAMES) { $env:PG_FRAMES } else { '1,4,16,299' }), '--capture-layers', 'final,gi', '--capture', "$p2\still_${k}_${res}_$label.pfm") + $modes[$m]) }
 function Rot($m, $label) { if (-not $label) { $label = $m }; Step "rot_${k}_$label" 'unx_gate_shadow_renderergate.exe' (@('--scene', $scenes[$k], '--resolution', '1920x1080', '--warmup-frames', '0', '--frames', '180', '--path-rotate', '90', '--motion-start', '60', '--capture-frames', '59,63,120,179', '--capture-layers', 'final', '--capture', "$p2\rot_${k}_$label.pfm") + $modes[$m]) }
 switch ($turn) {
   'acc1' {
@@ -109,6 +115,15 @@ switch ($turn) {
   }
   # the deploy configuration = the defaults (accumulator off, reflection layers on): frames 1/4/16/299 and the rotation
   'deploy' { Still 'full' 'deploy'; Rot 'full' 'deploy' }
+  'acct' {
+    # GiAnalytic with the pool at one level (test 9), and the whole suite with the oriented light choice
+    $out = 'C:/Users/USER/UnravelNext-redesign/Results/Local/Redesign/acc'.Replace('/', [string][char]92)
+    Step 't9_levels1' 'unx_test_gi_gianalytic.exe' (@('--only-light-near') + (S @('gi.hit_accumulator=true', 'gi.hit_accumulator_levels=1')))
+    Step 'gianalytic_oriented' 'unx_test_gi_gianalytic.exe' (S @('gi.hit_oriented_lights=true'))
+  }
+  'modes' { foreach ($m in ($env:PG_MODES -split ',')) { Still $m } }
+  # the off configuration again (a scene file exported anew: the hall, 2026-10-01 18:01)
+  'offnew' { Still 'alloff' 'alloff_new'; Still 'visonly'; Rot 'alloff' 'alloff_new' }
   'show' { Still 'allon'; Still 'alloff'; if ($res -eq '1920x1080') { Rot 'allon'; Rot 'alloff' } }
   'filter' { Still 'full'; Still 'none'; Still 'passes2'; Still 'wideonly'; if ($res -eq '1920x1080') { Rot 'full'; Rot 'none' } }
   'cold' { Still 'coldoff'; Still 'visonly'; Still 'closureonly'; Still 'full' 'full_b'; Still 'coldoff' 'coldoff_b' }
