@@ -422,36 +422,11 @@ void GiTraceGen()
             const bool pooled = P[5].x != 0xFFFFFFFFu;
             if ((pooled || (b.Load(GI_ACC_OFFSET) != 0 && ea != GI_ENTRY_PENDING)) && (m.classFlags & 0xFFu) != MATERIAL_FOLIAGE && (P[3].w & 4096u) == 0)
             {
-                const bool lambert = (P[3].w & 1024u) != 0;
-                ModelSurface ms;
-                ms.cls = m.classFlags & 0xFFu;
-                ms.baseColor = m.baseColor;
-                ms.roughness = m.roughness;
-                ms.metallic = m.metallic;
-                ms.specular = m.specular;
-                ms.transmission = m.transmission;
-                ModelCoat coat = (ModelCoat)0;
-                ModelSheen sheen = (ModelSheen)0;
-                if (!lambert)
-                {
-                    coat = rtHitCoat(m);
-                    sheen = modelSheenOf(m);
-                }
+                // (HitShading.hlsli rtHitDirectTerms: the terms and the reader's factors, shared with the reflection hits)
                 const float3 eSun = L.sunIlluminance * max(cosSun, 0.0) * L.sunVisibility;
-                const float muS = max(cosSun, 0.0), muL = max(dot(s.normal, localWi), 0.0);
-                float3 A = eSun + localE, B = A, C = 0;
-                if (coat.cover > 0)
-                {
-                    const float tS = 1 - modelCoatEms(coat, muS), tL = 1 - modelCoatEms(coat, muL);
-                    B = tS * eSun + tL * localE;
-                    C = (tS * eSun * modelCoatReturned(ms, coat, modelCoatRefractedCos(muS, coat.eta)) +
-                         tL * localE * modelCoatReturned(ms, coat, modelCoatRefractedCos(muL, coat.eta))) / GI_PI;
-                }
-                const float NoV = max(dot(s.normal, -r.Direction), 1e-4);
-                const float3 albedo = m.baseColor * ((1 - m.metallic) / GI_PI);
-                const float plain = (1 - coat.cover) * (any(sheen.color > 0) ? modelSheenKeep(sheen, NoV) : 1.0);
-                const float coated = coat.cover > 0 ? coat.cover * (1 - modelCoatEms(coat, NoV)) / (coat.eta * coat.eta) : 0.0;
-                const float3 dPoint = plain * albedo * A + coated * (albedo * B + C);
+                const RtHitDirect direct = rtHitDirectTerms(m, s.normal, -r.Direction, eSun, max(cosSun, 0.0), localE, max(dot(s.normal, localWi), 0.0), (P[3].w & 1024u) != 0);
+                const float3 A = direct.A, B = direct.B, C = direct.C;
+                const float3 dPoint = direct.own;
                 float3 mA, mB, mC;
                 const bool frameMode = !pooled && (b.Load(GI_ACC_MODE) & 1u) != 0;
                 if (pooled)
@@ -461,7 +436,7 @@ void GiTraceGen()
                     GiAccMeans means;
                     if (giAccPoolRead(pool, s.position, s.normal, footprint, means))
                     {
-                        const float3 dAcc = plain * albedo * means.A + coated * (albedo * means.B + means.C);
+                        const float3 dAcc = rtHitDirectFromMeans(direct, means.A, means.B, means.C);
                         accDelta = means.weight * (dAcc - dPoint);
                         if ((P[3].w & 32768u) != 0)
                         {
@@ -472,19 +447,19 @@ void GiTraceGen()
                         }
                     }
                     if (all(A == A) && all(B == B) && all(C == C) && all(A < 3.0e38) && all(C < 3.0e38))
-                        giAccPoolRecord(pool, s.position, s.normal, footprint, A, B, C, plain * albedo, coated * albedo, coated);
+                        giAccPoolRecord(pool, s.position, s.normal, footprint, A, B, C, direct.kA, direct.kB, direct.kC);
                 }
                 else if (frameMode)
                 {
                     accCell = ea;
-                    accKA = plain * albedo;
-                    accKB = coated * albedo;
-                    accKC = coated;
+                    accKA = direct.kA;
+                    accKB = direct.kB;
+                    accKC = direct.kC;
                     accPoint = dPoint;
                 }
                 else if (giAccRead(b, h, ea, mA, mB, mC))
                 {
-                    const float3 dAcc = plain * albedo * mA + coated * (albedo * mB + mC);
+                    const float3 dAcc = rtHitDirectFromMeans(direct, mA, mB, mC);
                     accDelta = dAcc - dPoint;
                     if ((P[3].w & 32768u) != 0)
                     {
@@ -494,7 +469,7 @@ void GiTraceGen()
                         b.InterlockedAdd64(GI_ACC_AUDIT + 8, (uint64_t)(max(dot(dAcc, Y), 0.0) * 1024), prev);
                     }
                 }
-                if (!pooled && all(A == A) && all(B == B) && all(C == C) && all(A < 3.0e38) && all(C < 3.0e38)) giAccRecord(b, ea, A, B, C, plain * albedo, coated * albedo, coated);
+                if (!pooled && all(A == A) && all(B == B) && all(C == C) && all(A < 3.0e38) && all(C < 3.0e38)) giAccRecord(b, ea, A, B, C, direct.kA, direct.kB, direct.kC);
             }
             // The texel cone's angular width filters the sun's highlight (GI_FOOTPRINT_PER_METRE: footprint / distance).
             float3 unbounced;
