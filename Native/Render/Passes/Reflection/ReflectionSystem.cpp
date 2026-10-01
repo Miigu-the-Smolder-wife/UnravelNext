@@ -1248,7 +1248,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           b.use(screen.prevColor, Use::SrvCompute);
                       },
                       [&shaders, modes, results, depth, gbuffer, jobs, screen, frame, width, height, rayLength, frameConstants, s, samplingBias16, screenContinue,
-                       outW = up.outputWidth, outH = up.outputHeight, ratio = up.exposureRatio, prevViewProj = up.prevViewProj](PassContext& c) {
+                       outW = g.desc(screen.prevColor).width, outH = g.desc(screen.prevColor).height, ratio = up.exposureRatio,
+                       prevViewProj = up.prevViewProj](PassContext& c) {
                           uint32_t k[32] = { c.srv(modes), c.uav(results), c.srv(depth), c.srv(gbuffer), c.uav(jobs), c.srv(screen.hzb), c.srv(screen.prevColor), frame,
                                              width, height, (outW & 0xFFFFu) | (outH << 16), asU(screenContinue ? std::max(s.lumenScreenPullback, 0.0f) : -1.0f), asU(rayLength), (s.lumenScreenIterations & 0xFFFFu) | (samplingBias16 << 16), asU(s.lumenScreenThickness),
                                              asU(ratio) };
@@ -1294,7 +1295,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           b.use(screen.prevColor, Use::SrvCompute);
                       },
                       [&shaders, modes, results, depth, gbuffer, jobs, raysBuffer, screen, frame, width, height, frameConstants, s, samplingBias16,
-                       outW = up.outputWidth, outH = up.outputHeight, ratio = up.exposureRatio, prevViewProj = up.prevViewProj](PassContext& c) {
+                       outW = g.desc(screen.prevColor).width, outH = g.desc(screen.prevColor).height, ratio = up.exposureRatio,
+                       prevViewProj = up.prevViewProj](PassContext& c) {
                           uint32_t k[32] = { c.srv(modes), c.uav(results), c.srv(depth), c.srv(gbuffer), c.srv(jobs), c.uav(raysBuffer), c.srv(screen.prevColor), frame,
                                              width, height, outW, outH, asU(s.lumenSceneColorThickness),
                                              asU(std::cos(std::clamp(s.lumenSceneColorNormalDegrees, 0.0f, 180.0f) * 0.01745329252f)),

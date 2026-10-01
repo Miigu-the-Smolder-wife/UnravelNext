@@ -123,6 +123,8 @@ struct ViewResources
     // exposureRatio = the same radiance at this frame's exposure), no jitter; a point's place in it is its projection by
     // FrameContext::upscale.prevViewProj. Invalid = no history: the first frame, a reset, or a frame that renders at its
     // output resolution (no upscale) - readers then skip their screen traces.  [M; added by S2 on the coordinator's decision]
+    // Its size is the texture's own (RenderGraph::desc): the output's with output.screen_trace_source = 1 (the upscale's
+    // history), the view's with 0 (the scene colour before the upscale).
     TextureRef prevSceneColor;
     TextureRef reflectionLobeTiles;  // R8_UNORM ceil(W/8) x ceil(H/8): min over the tile's      [M]
                                      // surface pixels of reflectionLobeHalfAngle(r, NoV) / pi
