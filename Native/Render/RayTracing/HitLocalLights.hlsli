@@ -180,6 +180,93 @@ RtLocalChoice rtLocalLightChoose(RtSceneSrvs scene, float3 x, float u0)
     c.probability = probability;
     return c;
 }
+// The choice with the hit's orientation in the weights (reflection.hit_oriented_lights): a scene light's weight is its
+// importance (rtLightImportance: intensity x luminance x window / d^2) x the largest cosine any point of the emitter can
+// have at the hit, saturate(n . dir to its centre + extent / d) (extent: the emitter's bounding radius, 0 for point and
+// spot lights). A light wholly below the hit's horizon gets weight 0: its sample contributes exactly 0 there
+// (rtLocalLightBrdfCos is 0 for n.l <= 0), and the importance-only choice drew it with its full weight - on a wall
+// with the lamps of the next room behind it, most draws. Every light that can contribute keeps a positive
+// probability, so the one-sample estimate stays unbiased; the estimate's weight uses the same probability.
+// transmits: the hit's material lets light through from behind (Foliage): no orientation, the importance alone.
+// n: the shading normal the hit's BRDF uses. The FX set's share and choice are unchanged (their group walk has no
+// per-light orientation), mixed in by the scene lights' oriented total.
+// With transmits = true the weights are the importances and the arithmetic is rtLocalLightChoose's (rtLightTotal's sum,
+// rtLightChoose's running sums and probability, in the same order): the same choice and probability, bit for bit - the
+// reflection passes call this one function for both settings (one copy of the walk in their kernels).
+float rtLightOrientedImportance(RtLight l, float3 x, float3 n, bool transmits)
+{
+    const float imp = rtLightImportance(l, x);
+    if (!(imp > 0) || transmits) return imp;
+    const float3 d = l.position - x;
+    const float dist = sqrt(max(dot(d, d), 1e-12));
+    const float extent = l.type == kRtLightRect ? 0.5 * length(l.size)
+                       : l.type == kRtLightDisk || l.type == kRtLightSphere ? l.size.x
+                       : l.type == kRtLightTube ? 0.5 * l.size.x + l.size.y  // (capsule: half its length + its radius)
+                       : 0.0;
+    return imp * saturate(dot(n, d) / dist + min(extent / dist, 1.0));
+}
+RtLocalChoice rtLocalLightChooseOriented(RtSceneSrvs scene, float3 x, float3 n, bool transmits, float u0)
+{
+    RtLocalChoice c;
+    c.valid = false;
+    c.li = 0;
+    c.probability = 0;
+    if (scene.pad == 0xFFFFFFFFu) return c;
+    g_rtLightData = scene.pad;
+    ByteAddressBuffer b = ResourceDescriptorHeap[scene.pad];
+    const RtLightGrid grid = b.Load<RtLightGrid>(0);
+    const uint cell = rtLightCell(grid, x);
+    float total = 0;
+    uint k0 = 0, k1 = 0;
+    if (cell != ~0u)
+    {
+        k0 = rtLightCellStart(cell);
+        k1 = rtLightCellStart(cell + 1);
+        [loop] for (uint k = k0; k < k1; ++k)
+        {
+            const float w = rtLightOrientedImportance(rtLightFetch(rtLightCellLight(k)), x, n, transmits);
+            if (w > 0) total += w;
+        }
+    }
+    uint cdf;
+    const float fxW = rtFxWeight(b, x, cdf);
+    if (!(total + fxW > 0)) return c;
+    const float pFx = fxW / (total + fxW);
+    float probability = 0;
+    uint li = ~0u;
+    if (u0 < pFx)
+    {
+        const uint j = rtFxChoose(cdf, x, fxW, u0 / pFx, probability);
+        if (j == ~0u) return c;
+        probability *= pFx;
+        li = g_lightCount + j;
+    }
+    else
+    {
+        // the first light whose running sum exceeds u x total (the last positive one if none does), as rtLightChoose
+        const float target = (pFx > 0 ? (u0 - pFx) / (1 - pFx) : u0) * total;
+        float cum = 0, chosenCum = 0, chosenPrev = 0;
+        [loop] for (uint k = k0; k < k1; ++k)
+        {
+            const uint i = rtLightCellLight(k);
+            const float w = rtLightOrientedImportance(rtLightFetch(i), x, n, transmits);
+            if (w <= 0) continue;
+            chosenPrev = cum;
+            cum += w;
+            li = i;
+            chosenCum = cum;
+            if (cum > target) break;
+        }
+        if (li == ~0u) return c;
+        probability = (chosenCum - chosenPrev) / total;
+        probability *= 1 - pFx;
+    }
+    if (!(probability > 0)) return c;
+    c.valid = true;
+    c.li = li;
+    c.probability = probability;
+    return c;
+}
 RtLocalSample rtLocalLightFinish(RtSceneSrvs scene, RtLocalChoice c, float3 x, float u1, float u2, float footprintWidth)
 {
     RtLocalSample o = (RtLocalSample)0;

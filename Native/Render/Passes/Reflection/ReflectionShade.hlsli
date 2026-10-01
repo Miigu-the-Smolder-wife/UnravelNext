@@ -69,6 +69,11 @@ struct ReflHitShade
     float3 penumbraNormal;
     uint penumbraLevel;
     float penumbraReach;
+    // Reconstruction layers (HitShading.hlsli rtHitRadianceSplit): the part of 'radiance' that is the hit's stochastic
+    // light, its demodulation albedo and the hit's shading normal; surface = false: an emitter, or no value (all in base).
+    float3 stochastic, albedo, hitNormal;
+    bool surface;
+    bool noData;  // the cache lookup at the hit found nothing (its indirect light is 0)
 };
 
 // This frame's ShadowSrvs (P[5].z raw buffer; P[5].z = UNX_NONE: none).
@@ -81,6 +86,25 @@ ShadowSrvs reflShadowSrvs()
     vsm.constants = c.x; vsm.lights = c.y; vsm.pad0 = c.z; vsm.layers = c.w;
     return vsm;
 }
+
+// Flags of the hit shading (the rays header's word 7, ReflectionSystem; the passes that have the rays buffer set
+// g_reflHitFlags from it before they shade - other users of reflShadeHit, refraction and test views, keep 0):
+//   REFL_HIT_CONE_LOBES  reflection.hit_cone_lobes: the hit's specular lobes toward its lights are widened by the ray
+//                        cone, alpha' = sqrt(alpha^2 + (cone spread / 2)^2) - the base lobe for the local-light sample
+//                        and the coat lobe for the local lights and the sun (HitLayers.hlsli g_rtHitCone). A reflection
+//                        value is the mean over its ray cone of what leaves the hit toward the reflector; for a
+//                        specular lobe at the hit that mean is the lobe widened by the cone. GI hits have done both
+//                        since 2026-09-27 (GiTrace: "a glossy hit's point-light highlight came in as rare huge
+//                        samples that stayed ... as bright dots"), and the sun's base highlight is filtered by the
+//                        cone here too (rtHitRadianceSplit's pixelAngle); the reflection hits' local-light lobe and
+//                        coat lobe were evaluated at the single ray direction - a G ray (cone of several degrees)
+//                        meeting a glazed tile near a lamp's mirror direction returned the unfiltered highlight.
+//   REFL_HIT_ORIENTED    reflection.hit_oriented_lights: the hit's one local-light sample is chosen with the hit's
+//                        orientation in the weights (HitLocalLights.hlsli rtLocalLightChooseOriented): lights below
+//                        the hit's horizon are not drawn. Same estimator count (one sample, one shadow ray), unbiased.
+#define REFL_HIT_CONE_LOBES 1u
+#define REFL_HIT_ORIENTED 2u
+static uint g_reflHitFlags = 0;
 
 // Local lights (HitLocalLights.hlsli): one next-event sample drawn with localSeed; its visibility is localVisible (the
 // compute path: ReflectionLocalShadow traced it before, same seed and hit point) or, with REFL_LOCAL_TRACE (the ray
@@ -98,6 +122,11 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     o.penumbraNormal = 0;
     o.penumbraLevel = 0;
     o.penumbraReach = 0;
+    o.stochastic = 0;
+    o.albedo = 1;
+    o.hitNormal = -direction;
+    o.surface = false;
+    o.noData = false;
     const uint experiment = P[5].x >> 24;
     if (hit.instance == RT_INSTANCE_EMITTER)
     {
@@ -137,6 +166,7 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     }
     if (!s.frontFace && (m.classFlags & MATERIAL_TWO_SIDED) == 0) return o;  // inside closed geometry
     const uint footprintLevel = giLevelForSize(h, footprint);
+    if (g_reflHitFlags & REFL_HIT_CONE_LOBES) g_rtHitCone = 0.5 * coneSpread;
     RtHitLighting L;
     L.irradiance = L.specularRadiance = L.local = 0;
     {
@@ -144,13 +174,20 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
 #if REFL_CHOICE_GIVEN
         choice = rtUnpackLocalChoice(localChoice);  // (r.refl.shade: ReflectionLocalShadow chose for every hit)
 #else
-        if (localChoice.x == REFL_NO_CHOICE) choice = rtLocalLightChoose(scene, s.position, giUnit(localSeed));
-        else choice = rtUnpackLocalChoice(localChoice);
+        // (one function for both settings: without REFL_HIT_ORIENTED its weights and arithmetic are rtLocalLightChoose's)
+        if (localChoice.x != REFL_NO_CHOICE) choice = rtUnpackLocalChoice(localChoice);
+        else choice = rtLocalLightChooseOriented(scene, s.position, s.normal, (g_reflHitFlags & REFL_HIT_ORIENTED) == 0 || materialClass(m) == MATERIAL_FOLIAGE, giUnit(localSeed));
 #endif
         const RtLocalSample ls = rtLocalLightFinish(scene, choice, s.position, giUnit(localSeed + 1), giUnit(localSeed + 2), footprint);
         if (ls.valid)
         {
-            const float3 f = rtLocalLightBrdfCos(m, s.normal, -direction, ls.wi, false);
+            GpuMaterial mc = m;  // the base lobe widened by the ray cone (REFL_HIT_CONE_LOBES; the coat lobe: g_rtHitCone)
+            if (g_reflHitFlags & REFL_HIT_CONE_LOBES)
+            {
+                const float alpha = modelAlpha(m.roughness), cone = 0.5 * coneSpread;
+                mc.roughness = sqrt(sqrt(alpha * alpha + cone * cone));
+            }
+            const float3 f = rtLocalLightBrdfCos(mc, s.normal, -direction, ls.wi, false);
             bool visible = !ls.castShadow || localVisible;
 #if REFL_LOCAL_TRACE
             if (any(f > 0))  // (f = 0: the visibility multiplies nothing, no ray)
@@ -181,6 +218,7 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
         giCacheLevels(cache, h, s.position, s.normal, reflect(direction, s.normal), true, footprintLevel, sumE, sumL, weight);
         L.irradiance = weight > 0 ? sumE / weight : 0;
         L.specularRadiance = weight > 0 ? sumL / weight : 0;
+        o.noData = weight <= 0;
         // Diagnostics: lookups and misses (no updated cell at any level searched), one atomic per wave.
         const uint lookups = WaveActiveCountBits(true), misses = WaveActiveCountBits(weight <= 0);
         if (WaveIsFirstLane())
@@ -247,8 +285,13 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     // the penumbra deferral, 1db06e4 [measured]).
     if (split) L.sunVisibility = 0;
     float3 sunFull;
-    o.radiance = rtHitRadianceParts(m, s.normal, v, L, coneSpread, split, sunFull);
+    RtHitSplit parts;
+    o.radiance = rtHitRadianceSplit(m, s.normal, v, L, coneSpread, split, sunFull, parts);
     if (split) o.sunTerm = sunFull * splitScale;
+    o.stochastic = parts.stochastic;
+    o.albedo = parts.albedo;
+    o.hitNormal = s.normal;
+    o.surface = true;
     return o;
 }
 

@@ -12,8 +12,53 @@
 // window by it).
 // Planar mirror pixels read their reflection camera's colour at (pixel - rectangle origin), divided by the exposure.
 // P[0] = { mode SRV, results SRV, depth SRV, gbuffer SRV }, P[1] = { reflection UAV, history UAV, rows H, planar SRV }
-// P[2] = { width, height, planar byte offset, 0 }, P[3] = planar colour SRVs; frame constants b1 = main view.
+// P[2] = { width, height, planar byte offset, flags (bit 0: reflection.layer_mirror_lobe, bit 1:
+// reflection.layer_residual_whole - a G pixel's residual is its value minus the stochastic share) }, P[3] = planar colour SRVs;
+// frame constants b1 = main view.
+// Reconstruction layers (reflection.layers; ReflectionInternal.hlsli): P[4] = { job layers SRV (raw; UNX_NONE: off),
+// stochastic layer UAV, residual layer UAV, guide UAV }. Every pixel of the view gets its guide (mode 0: no layer value -
+// K, planar, no data); an M or G pixel with a value also its demodulated stochastic part and residual, resolved from
+// the jobs with the value's own weights (the G grid: the modulated share and the albedo are interpolated, then divided).
 #include "Passes/Reflection/ReflectionInternal.hlsli"
+#include "Passes/Reconstruct/LayerCommon.hlsli"
+
+struct ResolveLayers
+{
+    float3 share;     // albedo x stochastic (modulated)
+    float3 albedo;
+    float3 residual;
+    uint hitGuide;    // M: hit normal oct 8 + 8; G: log2 of the pixel's sample spacing (the filter's tap unit)
+    float noData;     // the weight of the jobs without cache data at their hits (REFL_LAYER_NO_DATA)
+};
+ResolveLayers loadJobLayers(uint job)
+{
+    ByteAddressBuffer b = ResourceDescriptorHeap[P[4].x];
+    const uint4 a = b.Load4(job * REFL_LAYER_JOB_BYTES);
+    const uint2 c = b.Load2(job * REFL_LAYER_JOB_BYTES + 16);
+    ResolveLayers l;
+    l.albedo = reflUnpackAlbedo(a.z);
+    l.share = reflLayerRadiance(a.xy) * l.albedo;
+    l.residual = reflLayerRadiance(c);
+    l.hitGuide = a.y >> 16;
+    l.noData = (a.w & REFL_LAYER_NO_DATA) ? 1.0 : 0.0;
+    return l;
+}
+void storeLayers(uint2 pixel, ReflSurface s, float deviceDepth, uint mode, ResolveLayers l, float hitDistance)
+{
+    RWTexture2D<float4> layerS = ResourceDescriptorHeap[P[4].y];
+    RWTexture2D<float4> layerG = ResourceDescriptorHeap[P[4].z];
+    RWTexture2D<uint4> guide = ResourceDescriptorHeap[P[4].w];
+    const uint albedo = reflPackAlbedo(l.albedo);
+    layerS[pixel] = float4(min(l.share / reflUnpackAlbedo(albedo), 65504.0), 0);
+    layerG[pixel] = float4(clamp(l.residual, -65504.0, 65504.0), 0);
+    guide[pixel] = layerPackGuide(deviceDepth, s.normal, s.roughness, mode, l.noData >= 0.5, l.hitGuide, hitDistance, albedo);
+}
+void storeNoLayers(uint2 pixel)
+{
+    if (P[4].x == UNX_NONE) return;
+    RWTexture2D<uint4> guide = ResourceDescriptorHeap[P[4].w];
+    guide[pixel] = uint4(0, 0, 0, 0);
+}
 
 // The distance the next classification reads: an exponential mean (weight 1/4) of this pixel's hit distances, so its G
 // spacing (blur / 3) follows the scene and not one frame's 4-ray mean: noisy spacing wishes put neighbouring pixels on
@@ -26,10 +71,15 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
 {
     RWTexture2D<float4> reflection = ResourceDescriptorHeap[P[1].x];
     const uint rows = P[1].z;
-    if (reflection[uint2(tile.x, rows + tile.y)].a < 0.5) return;  // untouched tile: all K
     const uint2 size = P[2].xy;
     const uint2 pixel = tile * 8 + local;
     if (any(pixel >= size)) return;
+    if (reflection[uint2(tile.x, rows + tile.y)].a < 0.5)  // untouched tile: all K
+    {
+        storeNoLayers(pixel);
+        return;
+    }
+    const bool layers = P[4].x != UNX_NONE;
     Texture2D<uint> modes = ResourceDescriptorHeap[P[0].x];
     StructuredBuffer<uint3> results = ResourceDescriptorHeap[P[0].y];
     Texture2D<float> depth = ResourceDescriptorHeap[P[0].z];
@@ -40,6 +90,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
     if (mode == REFL_K)
     {
         reflection[pixel] = float4(0, 0, 0, 0);
+        storeNoLayers(pixel);
         return;
     }
     if (mode == REFL_PLANAR)
@@ -48,17 +99,26 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         const ReflPlanar pl = reflPlanar(P[1].w, P[2].z, k);
         Texture2D<float4> colour = ResourceDescriptorHeap[P[3][k]];
         reflection[pixel] = float4(reflStorable(colour.Load(int3(pixel - pl.rect.xy, 0)).rgb / g_exposure), 1);
+        storeNoLayers(pixel);
         return;
     }
+    const float deviceDepth = layers ? depth.Load(int3(pixel, 0)) : 0;
     if (mode == REFL_M)
     {
         const uint3 r = results[reflJob(m)];
         reflection[pixel] = float4(reflStorable(reflResultRadiance(r)), 1);
         history[pixel] = float2(reflSmoothedDistance(history[pixel].x, reflResultDistance(r)), reflResultMotion(r));
+        if (layers)
+        {
+            ResolveLayers own = loadJobLayers(reflJob(m));
+            // reflection.layer_mirror_lobe: the value without the stochastic share is a layer too (LayerDenoise)
+            if (P[2].w & 1u) own.residual = reflResultRadiance(r) - own.share;
+            storeLayers(pixel, reflSurface(depth, gbuffer, pixel), deviceDepth, LAYER_MODE_M, own, reflResultDistance(r));
+        }
         return;
     }
-    // G: bilinear over its spacing's grid (sample positions i s), in tiles R marked this frame.
     const ReflSurface s = reflSurface(depth, gbuffer, pixel);
+    // G: bilinear over its spacing's grid (sample positions i s), in tiles R marked this frame.
     const int sp = (int)reflSpacing(m);
     const float2 f = float2(pixel) / sp;
     const int2 i0 = int2(floor(f));
@@ -66,6 +126,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
     float3 sum = 0;
     float dist = 0, weight = 0;
     float motion = 0;
+    ResolveLayers sumLayers = (ResolveLayers)0;
     [unroll] for (uint k = 0; k < 4; ++k)
     {
         const int2 o = int2(k & 1, k >> 1);
@@ -86,6 +147,14 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         dist += w * reflResultDistance(r);
         weight += w;
         motion = max(motion, reflResultMotion(r));
+        if (layers)
+        {
+            const ResolveLayers l = loadJobLayers(reflJob(mq));
+            sumLayers.share += w * l.share;
+            sumLayers.albedo += w * l.albedo;
+            sumLayers.residual += w * l.residual;
+            sumLayers.noData += w * l.noData;
+        }
     }
     // Reflected edges inside a cell (a nearby wall against far content: -16.6 % near a furnace wall [measured]) are handled
     // by the spacing: a job's distance is its lobe's nearest hit (ReflectionCombine), so near content sets the blur and the
@@ -100,14 +169,32 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         const float d = max(reflSmoothedDistance(history[pixel].x, reflResultDistance(r)), 1e-3);
         reflection[pixel] = float4(reflStorable(reflResultRadiance(r)), 1);
         history[pixel] = float2(gridServes ? d : -d, reflResultMotion(r));
+        if (layers)
+        {
+            ResolveLayers own = loadJobLayers(reflJob(m));
+            own.hitGuide = 0;  // its own job: every pixel around it is a sample or interpolates finer ones
+            if (P[2].w & 2u) own.residual = reflResultRadiance(r) - own.share;
+            storeLayers(pixel, s, deviceDepth, LAYER_MODE_G, own, reflResultDistance(r));
+        }
         return;
     }
     if (!gridServes)
     {
         reflection[pixel] = float4(0, 0, 0, 0);
         history[pixel] = float2(-max(abs(history[pixel].x), 1e-3), 0);  // own job next frame
+        storeNoLayers(pixel);
         return;
     }
     reflection[pixel] = float4(reflStorable(sum / weight), 1);
     history[pixel] = float2(reflSmoothedDistance(history[pixel].x, dist / weight), motion);
+    if (layers)
+    {
+        sumLayers.share /= weight;
+        sumLayers.albedo /= weight;
+        sumLayers.residual /= weight;
+        sumLayers.noData /= weight;
+        if (P[2].w & 2u) sumLayers.residual = sum / weight - sumLayers.share;
+        sumLayers.hitGuide = (m >> 2) & 7u;
+        storeLayers(pixel, s, deviceDepth, LAYER_MODE_G, sumLayers, dist / weight);
+    }
 }

@@ -11,6 +11,10 @@ screen_occlusion_history_frames = 16  # the probes' near occlusion integrated ov
                                    # running mean over at most this many frames, clamped to 3 sigma of the frame's own
                                    # estimate). 1 = each frame's 16 points alone: 1/16 steps per probe, an 8 x 8 px pattern
                                    # where anything occludes. Geometry only, so no lighting lag.
+screen_occlusion_spatial = false   # redesign V2 1.2, layer L_occ (S2): each probe's near occlusion from this frame's estimates of
+                                   # the 3 x 3 probes around it (144 points; plane, normal and value weights), so a frame
+                                   # without history (a cut, a disocclusion) has no 1/16-step mosaic; the history then
+                                   # integrates the reconstructed value. false = each probe's own 16 points (A/B)
 screen_filter_cells = 0.75         # r.gi.screen.filter: edge-preserving spatial filter of M's per-pixel cache irradiance over
                                    # this share of the pixel's cache cell edge (plane, normal^32 and data weights, 12 taps);
                                    # it averages the cells' independent errors (blotches of the cell's size). 0 = no spatial

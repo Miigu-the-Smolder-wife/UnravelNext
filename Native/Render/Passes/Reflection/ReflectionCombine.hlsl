@@ -27,6 +27,10 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     float nearest = 65000;  // the lobe's nearest hit (ReflectionClassify's blur: the sharpest content the lobe sees)
     uint valid = 0;
     float motion = 0;
+    // Reconstruction layers (ReflectionInternal.hlsli): the rays' stochastic parts and albedos; an M job keeps its hit's guides.
+    const uint rayLayersUav = reflRayLayersUav(rays), jobLayersUav = reflJobLayersUav(rays);
+    float3 sumS = 0, sumA = 0;
+    uint hits = 0, guide = 0, guideInstance = 0, hitsNoData = 0;
     [loop] for (uint i = 0; i < j.rays; ++i)
     {
         float3 dir;
@@ -39,10 +43,28 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         nearest = min(nearest, f16tof32(v.y >> 16));
         motion = max(motion, f16tof32(v.w >> 17));  // ReflectionShadeRays: the hit's motion over its footprint
         ++valid;
+        if (rayLayersUav != UNX_NONE)
+        {
+            RWByteAddressBuffer rayLayers = ResourceDescriptorHeap[rayLayersUav];
+            const uint4 l = rayLayers.Load4((marker.x + i) * REFL_LAYER_RAY_BYTES);
+            if (l.w & REFL_LAYER_SURFACE)
+            {
+                sumS += reflLayerRadiance(l.xy);
+                sumA += reflUnpackAlbedo(l.z);
+                guide = l.y >> 16;
+                guideInstance = l.w & 0x00FFFFFFu;
+                ++hits;
+                hitsNoData += (l.w >> 30) & 1u;
+            }
+        }
     }
     const float3 gbar = j.mode == REFL_G ? reflLobeControl(j, probeTexture, footprint, probeCount)
                                          : valid == 0 ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, reflect(-j.s.view, j.s.normal), j.lobe, P[3].w) : 0;
-    results[job] = reflPackResult(reflLobeEstimate(sumL, sumG, valid, gbar), valid > 0 ? nearest : 0, motion);
+    const float3 total = reflLobeEstimate(sumL, sumG, valid, gbar);
+    results[job] = reflPackResult(total, valid > 0 ? nearest : 0, motion);
+    if (jobLayersUav != UNX_NONE)
+        reflStoreJobLayers(jobLayersUav, job, reflJobLayers(total, gbar, sumL, sumG, sumS, sumA, valid, hits, j.mode == REFL_G), reflUnpackOct16(guide), guideInstance,
+                           (hits > 0 ? REFL_LAYER_SURFACE : 0u) | (hits > 0 && 2 * hitsNoData >= hits ? REFL_LAYER_NO_DATA : 0u));
     // Diagnostics: G samples and those estimated by the ratio branch, one atomic per wave (GI header).
     const uint gSamples = WaveActiveCountBits(j.mode == REFL_G), gRatio = WaveActiveCountBits(j.mode == REFL_G && reflLobeRatio(sumL, sumG, valid, gbar));
     if (WaveIsFirstLane() && gSamples)

@@ -23,6 +23,8 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     if (slot >= min(rays.Load(0), capacity)) return;
     const uint4 record = rays.Load4(reflRaysHitOffset(slot));
     const uint valueOffset = reflRaysValueOffset(capacity, slot);
+    const uint layersUav = reflRayLayersUav(rays);  // reconstruction layers (UNX_NONE: off)
+    g_reflHitFlags = reflHitFlags(rays);
     if (record.x == REFL_RAY_NONE)
     {
         rays.Store4(valueOffset, uint4(0, 0, 0, 0));  // valid bit clear
@@ -35,6 +37,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     float3 radiance, sun = 0;
     float distanceToHit;
     float motion = 0;
+    uint4 layer = reflLayerRay(0, 1, -dir, 0, false);  // sky, emitters: all in the base
     if (record.x == REFL_RAY_MISS)
     {
         radiance = giSkyRadiance(dir);
@@ -57,6 +60,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         radiance = o.radiance;
         distanceToHit = hit.t;
         motion = o.motion;
+        layer = reflLayerRay(o.stochastic, o.albedo, o.hitNormal, hit.instance, o.surface, o.noData);
         if (o.needsPenumbra)
         {
             // queued from the sun queue's top (one atomic per wave); the hit record, read above, takes the normal and reach
@@ -80,4 +84,9 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         }
     }
     rays.Store4(valueOffset, reflStoreValue(radiance, sun, distanceToHit, motion));
+    if (layersUav != UNX_NONE)
+    {
+        RWByteAddressBuffer layers = ResourceDescriptorHeap[layersUav];
+        layers.Store4(slot * REFL_LAYER_RAY_BYTES, layer);
+    }
 }

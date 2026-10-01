@@ -76,7 +76,24 @@ struct RtHitLighting
 // sheen as ShadeOpaque LAYERED 2. The coat lobe is widened by the hit's cone (HitLayers.hlsli g_rtHitCone, GI texel rays: its half-width)
 // as the base lobe is for local lights; the coat lobe's incident radiance is the base lobe's mirror-direction radiance
 // (the hit has no second cone lookup).
-float3 rtHitRadianceParts(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float pixelAngle, bool wantSun, out float3 sunFull)
+// The split for the reconstruction layers (RENDERER_REDESIGN_V2 1.2, P2): the returned radiance = deterministic part +
+// 'stochastic', where
+//   deterministic  emission and the sun term (the direct view's estimators: no noise but the off-screen shadow ray's
+//                  penumbra) - the hit's identity, which no spatial filter may touch;
+//   stochastic     the cache's light at the hit (diffuse and specular indirect: young cells, cell-sized errors) and the
+//                  one-sample local-light estimate (relative variance ~ the lights reaching the hit - 1): the terms the
+//                  layer L_rs reconstructs over neighbouring hits of the same surface;
+//   albedo         the hit's directional reflectance (diffuse albedo + specular albedo toward v, base layer): stochastic /
+//                  albedo is free of the hit's texture detail (exactly for the diffuse part under any light; for the
+//                  specular part up to the lobe's shape), so the layer filter does not blur the reflected image's
+//                  textures. A demodulation key only: the composition multiplies it back, so its model error (the coat
+//                  and sheen are left out) changes what the filter averages, never the unfiltered value.
+struct RtHitSplit
+{
+    float3 stochastic;
+    float3 albedo;
+};
+float3 rtHitRadianceSplit(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float pixelAngle, bool wantSun, out float3 sunFull, out RtHitSplit split)
 {
     ModelSurface s;
     s.cls = m.classFlags & 0xFFu;
@@ -125,12 +142,76 @@ float3 rtHitRadianceParts(GpuMaterial m, float3 n, float3 v, RtHitLighting L, fl
         }
     }
     const float3 sun = sunFull * L.sunVisibility;  // fractional in penumbrae (the VSM estimate); was only tested > 0, giving full sun there
+    split.stochastic = cached + L.local;
+    split.albedo = diffuseAlbedo * MODEL_PI + shSpecularAlbedo(f0, NoV, s.roughness);
     return m.emissive + sun + cached + L.local;
+}
+float3 rtHitRadianceParts(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float pixelAngle, bool wantSun, out float3 sunFull)
+{
+    RtHitSplit split;
+    return rtHitRadianceSplit(m, n, v, L, pixelAngle, wantSun, sunFull, split);
 }
 float3 rtHitRadiance(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float pixelAngle)
 {
     float3 sunFull;
     return rtHitRadianceParts(m, n, v, L, pixelAngle, false, sunFull);
 }
+
+// A hit's diffuse direct light in the hit accumulator's light-side form (RENDERER_REDESIGN_V2 12.1; GiInternal.hlsli
+// GI_ACC_*), for GI and reflection hits alike: the arithmetic GiTrace.hlsl carries inline for its hits, as a function.
+//   A, B, C      the hit's direct irradiance terms: A = E_sun + E_local (plain surface), B the same through the coat's
+//                entry transmission, C the coat's returned light (/ pi); B = A and C = 0 without a coat;
+//   kA, kB, kC   the reader's factors: its diffuse-direct radiance toward v is kA A + kB B + kC C ('own' for the hit's
+//                own terms). A cell's means (mA, mB, mC) give the reader rtHitDirectFromMeans - its own albedo and
+//                layers on the cell's mean light.
+// eSun = the sun's illuminance x max(n.l, 0) x visibility, muS = max(n.l_sun, 0); localE = the local-light sample's
+// irradiance (weight x max(n.wi, 0), 0 when not visible), muL = max(n.wi, 0). Both terms are linear in eSun and localE:
+// a caller that learns the sun's visibility later takes the terms at visibility 0 and 1 and interpolates.
+// lambert: GiAnalytic's closed forms (no layers). Foliage is not handled (its transmission has no accumulator term).
+struct RtHitDirect
+{
+    float3 A, B, C;
+    float3 kA, kB;
+    float kC;
+    float3 own;
+};
+RtHitDirect rtHitDirectTerms(GpuMaterial m, float3 n, float3 v, float3 eSun, float muS, float3 localE, float muL, bool lambert)
+{
+    ModelSurface ms;
+    ms.cls = m.classFlags & 0xFFu;
+    ms.baseColor = m.baseColor;
+    ms.roughness = m.roughness;
+    ms.metallic = m.metallic;
+    ms.specular = m.specular;
+    ms.transmission = m.transmission;
+    ModelCoat coat = (ModelCoat)0;
+    ModelSheen sheen = (ModelSheen)0;
+    if (!lambert)
+    {
+        coat = rtHitCoat(m);
+        sheen = modelSheenOf(m);
+    }
+    RtHitDirect d;
+    d.A = eSun + localE;
+    d.B = d.A;
+    d.C = 0;
+    if (coat.cover > 0)
+    {
+        const float tS = 1 - modelCoatEms(coat, muS), tL = 1 - modelCoatEms(coat, muL);
+        d.B = tS * eSun + tL * localE;
+        d.C = (tS * eSun * modelCoatReturned(ms, coat, modelCoatRefractedCos(muS, coat.eta)) +
+               tL * localE * modelCoatReturned(ms, coat, modelCoatRefractedCos(muL, coat.eta))) / MODEL_PI;
+    }
+    const float NoV = max(dot(n, v), 1e-4);
+    const float3 albedo = m.baseColor * ((1 - m.metallic) / MODEL_PI);
+    const float plain = (1 - coat.cover) * (any(sheen.color > 0) ? modelSheenKeep(sheen, NoV) : 1.0);
+    const float coated = coat.cover > 0 ? coat.cover * (1 - modelCoatEms(coat, NoV)) / (coat.eta * coat.eta) : 0.0;
+    d.kA = plain * albedo;
+    d.kB = coated * albedo;
+    d.kC = coated;
+    d.own = plain * albedo * d.A + coated * (albedo * d.B + d.C);
+    return d;
+}
+float3 rtHitDirectFromMeans(RtHitDirect d, float3 mA, float3 mB, float3 mC) { return d.kA * mA + d.kB * mB + d.kC * mC; }
 
 #endif
