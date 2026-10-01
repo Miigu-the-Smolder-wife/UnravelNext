@@ -4,6 +4,8 @@
 // hit accumulator pool's SRV: ReflectionRay.hlsli).
 // P[0] = { arguments UAV (raw: uint job counter at 0, descriptions from byte 16), description count, stride bytes,
 //          Width offset in a description }
+// Bands (ReflectionRay.hlsli REFL_BAND): the arguments are held once per band (P[3].x bytes each); band b's
+// descriptions get the jobs of [b x P[3].y, (b + 1) x P[3].y) - the last of the P[2].w bands the rest.
 #include "Bindless.hlsli"
 
 [numthreads(1, 1, 1)]
@@ -11,7 +13,13 @@ void main()
 {
     RWByteAddressBuffer args = ResourceDescriptorHeap[P[0].x];
     const uint jobs = args.Load(0);
-    for (uint i = 0; i < P[0].y; ++i) args.Store3(16 + i * P[0].z + P[0].w, uint3(jobs, 1, 1));
+    const uint bands = max(P[2].w, 1u);
+    for (uint b = 0; b < bands; ++b)
+    {
+        const uint first = min(b * P[3].y, jobs);
+        const uint width = b + 1 == bands ? jobs - first : min(jobs - first, P[3].y);
+        for (uint i = 0; i < P[0].y; ++i) args.Store3(b * P[3].x + 16 + i * P[0].z + P[0].w, uint3(width, 1, 1));
+    }
     // The rays buffer's header for this frame (ReflectionRay.hlsli): no slots yet, its capacity, no shadow rays, the jobs;
     // no penumbra hits.
     RWByteAddressBuffer rays = ResourceDescriptorHeap[P[1].x];

@@ -93,7 +93,7 @@ void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer
 [shader("raygeneration")]
 void ReflectionTraceInlineGen()
 {
-    const uint job = DispatchRaysIndex().x;
+    const uint job = DispatchRaysIndex().x + reflBand() * REFL_INLINE_BAND;
     RWStructuredBuffer<uint3> results = ResourceDescriptorHeap[P[0].y];
     if (results[job].y != REFL_JOB_INLINE) return;
     ReflJob j = reflLoadJob(job);

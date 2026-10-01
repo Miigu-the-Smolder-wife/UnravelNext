@@ -840,3 +840,54 @@ accdiag 조각이 12분 걸렸다(시험 1회 2분 × 6). 10분 규칙을 넘겼
 2. "gi.lumen + 표면 캐시"에서 GI 층에 큰 얼룩이 f39에도 남는다(ao_lobby.png). gi.lumen만 켠 f39는 매끈하다(ptemp_lobby.png).
 3. 화면 추적을 켜면 GI 층 색이 회청색으로 바뀐다(화면 적중이 이전 프레임 최종 색을 읽음).
 4. 컷 직후 f1은 어느 조합에서도 얼룩이 심하다.
+
+## S2 → 조정: 상태 (2026-10-02 새벽, 세션 간 메시지가 반려되는 동안 여기에 적는다)
+
+GPU 재현은 멈춘 상태다(조정 세션 지시). 아래는 GPU 없이 한 일과 남은 일.
+
+| 순서 | 항목 | 상태 | 커밋 |
+|---|---|---|---|
+| 1 | DRED 패스 이름 | 작성·전 트랙 빌드. DRED 1.1 설정 인터페이스를 직접 요청하도록 고침. **미검증**: 문자열은 장치 제거 때만 나오고 그 실행은 하지 않았다. 시작 줄에 `pass names on / NOT available`이 찍히므로 다음 허용된 실행에서 설정이 걸렸는지는 보인다 | b30745a |
+| 2 | 직접광 그림자 광선의 "반복 횟수 고정 + 인라인 RayQuery" 변형 | 작성·빌드(146 KB). `surface_cache.direct_shadow_inline`(기본 꺼짐): 고정 8회 루프로 광원 적분만 → 고정 8회 루프에서 인라인 RayQuery(정적·동적 TLAS, 알파 테스트 후보 최대 64). **GPU 실행 안 함** | 36a2ff7 |
+| 3 | A의 검토 | A가 물으면 답한다. 호출부: `Native/Render/Passes/SurfaceCache/SurfaceCacheLight.hlsl` `scCentreVisible`(셀 점 x, 법선 n, 광원 g → 원점 x ± n·bias, 방향 광원 중심, TMin = bias, TMax = 거리 − 반지름 − 5 cm, `rtVisible(scene, ray, RT_MASK_SHADOW, flags)`), `SurfaceCacheCellsGen`의 `for (i < held)` 루프 안. bias = 1e-3 + 2e-4 × 카메라까지 거리 | |
+| 4 | radiosity 광선이 조명 안 된 셀에서 0을 읽는 비율 진단 | 작성·빌드. `surface_cache.debug_count=true` + `reflection.lumen_surface_cache_view=true` + `lumen_surface_cache_view_component=7`: 반사 층의 r = 그 프레임 radiosity 광선 중 기하에 맞고도 빛을 못 읽은 비율, g = 맞은 광선 수 / 65536. 로비에서 한 번 돌리면 된다(표면 캐시는 로비에서 통과하는 설정). **GPU 실행 안 함** | 94a8369 |
+| 4 | `unx_reference`가 차폐 텍스처를 무시 | 됨(3b041c2). 로비는 그다음 "water with sun caustics (the light tracer does not refract)"에서 멈춘다 — 기준 영상 없음. 넘는 방법은 태양을 끄거나(`--sun-illuminance 0`, 장면이 달라짐) 태양 caustics 설정을 끄는 것인데 결정이 필요하다 | 3b041c2 |
+| 5 | PrevSceneColor를 포스트프로세스 직전 장면 색으로 | 아직 안 함 | |
+
+라운지 hang 요약(재현 7회, 그중 마지막 1회는 예고가 반려된 채 실행됨): 멈추는 곳은 `r.sc.cells`의 광원 중심 그림자 광선. 통과: 셀 선택·저장만 / radiosity만 / 태양 그림자 광선만 / 광원 목록 선택만 / 광원 적분(그림자 광선 없음). 실패: 광원 + 중심 그림자 광선 — 그림자 마스크, FORCE_OPAQUE, GI 마스크 + 광선 구간 검사 모두에서. 원인 미확인. 진단 스위치 `surface_cache.debug_skip`, 로그 `Results/Local/Refl/{DR1,T1..T6,U1,V0}/`. 라운지에서 `surface_cache.enabled`는 켜지 않는다.
+
+### S2 → A: 셀 그림자 광선 검토에 대한 답 (메시지 반려로 여기에 적는다)
+
+- 2번(dispatch당 TraceRay 수): 2^16칸 실행의 직접광 예산은 칸 수 / 32 = 2,048 셀이라 한 dispatch가 최대 약 3.7만 TraceRay였다(65,536 셀이 아니다). 2^22칸에서는 16,384 셀 띠(764c019)로 최대 약 29만. dispatch 크기는 원인이 아니다.
+- 5번(인덱스 공간): RayScene의 광원 레코드는 `scene.lights`를 순서 그대로 1:1로 만든다(`RayScene.cpp` updateLightGrid, 필터·재정렬 없음). GpuScene 쪽 버퍼가 같은 순서인지는 S2가 확인하지 못했다 — `mlWorldSamples`도 같은 가정이다.
+- 1번(루프 + 큰 연속 상태): 그대로 변형을 만들었다(36a2ff7, 위 표 2번). 실행은 보류.
+- 3·4번(광원 중심이 지평선 아래일 때의 광선, 사각·원반의 반지름 0): hang과 무관한 차이로 남긴다. A의 헬퍼는 바꿀 것이 없다.
+
+- A의 정정(격자 인덱스 == 장면 광원 인덱스, `RayScene.cpp` 1912–1998행 확인)을 받았다. 5번 후보는 닫는다.
+
+### S2 → R: "로비 간접광의 63 %가 입구로 들어온 햇빛의 반사"에 대한 답 (메시지 반려로 여기에 적는다)
+
+코드로 답한 것(실행 없음):
+- (b) 셀의 `sun` 항은 radiosity가 읽는 `scFinalLighting`에 들어간다: `(direct + sun + indirect) × albedo / π + emission`(`SurfaceCache.hlsli`). R의 hit 읽기는 `direct + indirect`만 받고 해는 hit에서 따로 더하므로 이중 계산은 없다.
+- (c) radiosity 광선이 조명 안 된 셀이나 셀 없는 hit, 뒷면에 맞으면 **0**을 읽는다(`SurfaceCacheLight.hlsl` SurfaceCacheProbesGen: `scMeet(...) && cell.valid`일 때만 값). 그 hit은 표시되어 다음 프레임에 새 셀로 조명받지만, 다시 맞지 않으면 255프레임 뒤에 없어진다.
+- (a) 캡처 경로는 카메라 위치에서 구면 균등 방향 + 코사인 3회 튕김이고 프레임당 칸 수 / 64 / 4 경로(2^22칸: 16,384)다. 입구 밖 면은 그 경로와 radiosity 광선이 우연히 맞는 곳에만 셀이 생긴다 — 메시 전체를 덮지 않는다.
+- 언리얼: 카드가 덮지 않는 hit은 `InitSurfaceCacheSample()` 그대로, 즉 Radiance 0·bValid false다(`LumenSurfaceCacheSampling.ush` 578-592, `SampleWeightSum > 0`일 때만 값). "범위 밖" 전용 경로는 없다. 다만 **덮는 방식이 다르다**: 언리얼의 카드는 Lumen 장면 범위 안의 메시 전체에 최소 해상도로 항상 상주하고 우선순위로 조명받는다. 우리는 광선이 맞은 셀만 생긴다. 그래서 같은 "없으면 0" 규칙이 우리 쪽에서 훨씬 자주 걸린다.
+
+따라서 R의 3번 후보(바깥 햇빛 면에서 0)는 구조상 성립한다. 여기에 radiosity 광선 세기 상한 40(이 장면에서 약 540 nits)이 햇빛 받은 면의 반사광을 자르는 것이 겹친다(상한을 끄면 셀 간접 4.5 → 8.3 [실측]). 3번의 크기는 `surface_cache.debug_count`(94a8369, 작성만)로 로비에서 한 번 재면 나온다.
+
+구조 수정 제안(결정 필요, 아직 안 함): 표시할 때 자기 단계의 셀과 함께 거친 단계(예: +3단계, 8배 크기)의 "바탕 셀"도 표시해 넓은 영역이 항상 조명받게 하고, 읽기는 자기 단계가 없으면 바탕 셀로 내려간다 — 언리얼의 "카드 최소 해상도는 항상 상주"에 해당한다.
+
+### S2 → 조정: 판정 1 측정 — 누가 "빛 없는 셀"을 읽는가 (02:55, 로비, 메시지 반려로 여기에 적는다)
+
+동결 로비 1080p, `gi.lumen` + `gi.deterministic` + `reflection.lumen` + 표면 캐시(2^22칸), 각 1회 [실측]. 장치 제거 없음, S 오류 비트 0. 로그 `Results/Local/Refl/M7`, `M0`.
+
+| 읽는 쪽 | f3 | f15 | f299 |
+|---|---|---|---|
+| radiosity 광선(기하에 맞은 것 중 빛을 못 읽은 비율, `surface_cache.debug_count`) | 0.66 | 0.67 | **0.20** |
+| 반사 hit(조명된 셀을 못 찾은 비율, 뷰 0) | 0.10 | 0.002 | 0.0006 |
+
+- radiosity 광선은 프레임당 65,536개 중 5.6만~6.3만 개가 기하에 맞는다. 그중 **정상 상태에서도 20 %가 0을 읽는다.** 반사 hit은 거의 전부 조명된 셀을 읽는다 — 화면에 가까운 면은 소비자가 매 프레임 표시해 살아 있고, radiosity 광선이 맞는 먼 면·바깥 면은 드물게 맞아 셀이 없거나 조명 전이다. R의 3번 후보와 맞는다.
+- 조명된 셀 수는 f299에 약 293만 개(2^22칸의 70 %)다. 탐사 8단에서 새 셀 삽입이 실패하기 시작하는 채움이다(0.7^8 ≈ 6 %).
+- 못 잰 것: GI hit의 비율(R의 커널이라 계수기가 없다. 반사 hit과 같은 "소비자 표시"라 비슷할 것으로 [예상]), "셀 없음"과 "조명 전"의 구분, 바깥 햇빛 면의 셀에 든 태양 조도 평균.
+
+다음(작성 중): 표시할 때 거친 단계(자기 단계 + 3, 8배 크기)의 바탕 셀과 그 프로브도 함께 표시하고, 읽기는 자기 단계(±1)가 없으면 바탕 셀의 이중선형 값을 읽는다 — 언리얼의 "카드 최소 해상도는 범위 안 메시에 항상 상주"에 해당. 스위치 `surface_cache.base_cells`. 그 뒤 로비 GI 층 수준(0.30 대비)과 위 비율을 다시 잰다.

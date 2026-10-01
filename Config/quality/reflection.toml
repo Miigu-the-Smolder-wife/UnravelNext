@@ -110,9 +110,25 @@ lumen_disocclusion_tonemap = true      # QUALITY TRADE (user decision): young pi
 lumen_hit_surface_cache = true         # with surface_cache.enabled: the traced rays' hits mark their surface cache cell and take
                                        # its accumulated local-light and bounce irradiance (no one-light sample at the hit)
 lumen_surface_cache_view = false       # diagnostics: a traced hit's value is its cell's state (r: no lit cell, g: frames, b: live cells)
+lumen_surface_cache_view_component = 0  # with the view: 0 = found / not found colours; an irradiance at the hits as E / pi: 1 = the
+                                       # cell direct, 2 = the cell indirect, 3 = the world GI cache there, 4 = the local-light sample;
+                                       # radiance: 5 = the cell's emission, 6 = the hit material's emission;
+                                       # 7 = the radiosity rays' empty-read share (surface_cache.debug_count)
 lumen_rough_specular_from_gather = true  # with gi.lumen: pixels above the roughness limit (and the fade's other side) take the
                                        # final gather's rough specular (view.giRoughSpecular); false or no gather = the K path
 lumen_screen_traces = true             # a traced ray is first followed across the depth buffer (ScreenTrace.hlsli); a visible hit
                                        # takes the previous frame's colour and no world ray (needs the upscale's colour history)
 lumen_screen_trace_max_iterations = 50
 lumen_screen_trace_relative_depth_thickness = 0.005
+lumen_ggx_sampling_bias = 0.1          # QUALITY TRADE (user decision): this share of the GGX sample domain - the lobe's tail - is not
+                                       # drawn (reference: GGXSamplingBias 0.1); 0 = the whole lobe
+lumen_sample_scene_color_at_hit = true # a world ray's hit on a surface the view sees takes the previous frame's colour there and is
+                                       # not shaded (reference: SampleSceneColorAtHit 1 = with screen traces); needs lumen_screen_traces
+lumen_sample_scene_color_relative_depth_thickness = 0.01
+lumen_sample_scene_color_normal_threshold = 85.0   # degrees between the seen surface's normal and the direction to the camera
+lumen_screen_trace_continue = true     # a ray whose screen trace gave no value starts its world ray where that trace ended in
+                                       # front of the scene (the space crossed is empty), not at its surface
+lumen_screen_trace_pullback = 0.08     # ... less this distance, m (reference: HardwareRayTracing.PullbackBias 8)
+lumen_refraction_hit_surface_cache = true  # the hits of water's and glass's reflection / refraction rays (FrameServices::traceRefractions)
+                                       # take their light from the surface cache as the main view's reflection hits do
+                                       # (needs lumen_hit_surface_cache and surface_cache.enabled)

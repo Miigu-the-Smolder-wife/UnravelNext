@@ -55,6 +55,13 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     // reflection.lumen: the ray-reuse pipeline (ReflectionReuse.hlsli) in place of the G path, the accumulation and the layers
     bool lumen = false;
     float lumenMaxRoughness = 0.4f, lumenFadeLength = 0.1f, lumenMaxRayIntensity = 40.0f, lumenTonemapRange = 10.0f;
+    bool lumenRefractionSurfaceCache = true;  // reflection.lumen_refraction_hit_surface_cache: water's and glass's ray hits read it too
+    bool lumenScreenContinue = true;   // reflection.lumen_screen_trace_continue: world rays start where their screen traces ended
+    float lumenScreenPullback = 0.08f; // ... less this distance (m)
+    bool lumenSceneColorAtHit = true;  // reflection.lumen_sample_scene_color_at_hit (with lumen_screen_traces)
+    float lumenSceneColorThickness = 0.01f;
+    float lumenSceneColorNormalDegrees = 85.0f;
+    float lumenSamplingBias = 0.1f;    // reflection.lumen_ggx_sampling_bias: the lobe tail's share that is not sampled
     bool lumenScreenTraces = true;     // reflection.lumen_screen_traces: screen traces before the world rays (ScreenTrace.hlsli)
     uint32_t lumenScreenIterations = 50;
     float lumenScreenThickness = 0.005f;
@@ -67,8 +74,16 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     bool surfaceCache = false, scDirect = true, scRadiosity = true, scRemainderLight = false;
     uint32_t scEntriesLog2 = 22, scMaxUnused = 255, scCaptureFactor = 64, scCaptureBounces = 3, scDirectFactor = 32, scRadiosityFactor = 64;
     float scRadiosityCap = 40.0f, scRadiosityFrames = 4.0f;
+    bool scDebugCount = false;          // surface_cache.debug_count: radiosity ray hits / empty reads in the header (view component 7)
+    bool scDirectShadowInline = false;  // surface_cache.direct_shadow_inline: the lights' shadow rays as inline queries, after the evaluation
+    bool scShadowRaysOpaque = false;  // surface_cache.shadow_rays_opaque: the cells' shadow rays run no alpha test
+    uint32_t scDebugSkip = 0;         // surface_cache.debug_skip (diagnostics): 1 no local lights, 2 no sun, 4 lights chosen only, 8 no light shadow rays, 16 light shadow rays under the GI mask
+    bool scBilinearRead = true;       // surface_cache.bilinear_read: a read blends the four cells around the point
+    bool scDirectAnalytic = true;     // surface_cache.direct_analytic: the 8 lights by their integrals, shadow ray to the centre
+    bool scLightingFeedback = true;   // surface_cache.lighting_feedback: cells consumers read are relit first
     bool scDirectStochastic = false;  // surface_cache.direct_stochastic: A's world-point light sampler in place of the 8 strongest lights
     float scDirectStochasticFrames = 12.0f, scDirectMinWeight = 0.001f;
+    uint32_t lumenSurfaceCacheViewComponent = 0;  // 0 validity colours, 1 cell direct, 2 cell indirect, 3 GI cache irradiance, 4 local-light sample
     bool lumenSurfaceCacheView = false;  // reflection.lumen_surface_cache_view: diagnostics (ReflectionShade.hlsli REFL_HIT_SC_VIEW)
     bool lumenHitSurfaceCache = true;  // reflection.lumen_hit_surface_cache: the ray-reuse pipeline's hits read and mark it
     bool layerWholeValue = true;      // reflection.layer_whole_value: lobe pixels' whole value is one layer (LAYER_MODE_L)
@@ -158,6 +173,7 @@ private:
         float rayLength = 0;
         TextureRef luts[4];
         BufferRef cache;
+        BufferRef surfaceCache;  // valid: the refraction service's hits read the surface cache
         rt::RayScene::VsmRefs vsm;
         uint32_t frame = 0, experiment = 0, scene[8] = {};
         rt::RayScene* rays = nullptr;

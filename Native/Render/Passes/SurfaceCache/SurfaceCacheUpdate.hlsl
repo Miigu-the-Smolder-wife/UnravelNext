@@ -15,7 +15,7 @@ void main(uint3 id : SV_DispatchThreadID)
     const uint n = P[0].y;
     const bool probes = P[0].z != 0;
     const uint count = probes ? scProbeCount(n) : n;
-    const uint slot = id.x;
+    const uint slot = id.y * SC_ROW_THREADS + id.x;
     if (slot >= count) return;
     const uint keyOffset = probes ? scProbeKeysOffset(n, slot) : scKeysOffset(slot);
     const uint key = b.Load(keyOffset);
@@ -34,6 +34,13 @@ void main(uint3 id : SV_DispatchThreadID)
         return;
     }
     b.Store(headOffset, SC_HEAD_VALID | (lit << 8) | (unused << 16) | (head & 0xFF000000u));  // (bits 24-31: the stochastic direct light's frames)
+    if (!probes && lit != 0 && (head & SC_HEAD_FEEDBACK) != 0)
+    {
+        // a lit cell a consumer read since the last upkeep: relit ahead of the others (scPickCell)
+        uint wanted;
+        b.InterlockedAdd(52, 1u, wanted);
+        b.Store(scFeedbackListOffset(n, wanted), slot);
+    }
     uint index;
     b.InterlockedAdd((probes ? 32u : 8u) + (lit != 0 ? 0u : 4u), 1u, index);
     const uint at = lit != 0 ? index : count - 1 - index;

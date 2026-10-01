@@ -1599,6 +1599,7 @@ void RenderGraph::execute(GpuProfiler* profiler)
     std::vector<CommandList> lists(plan.segments.size());
     PassContext ctx;
     ctx.m_graph = this;
+    const bool passMarkers = dredEnabled();  // (UNX_DRED: each pass in a BeginEvent / EndEvent pair, the breadcrumbs' pass names)
     for (size_t s = 0; s < plan.segments.size(); ++s)
     {
         Impl::Segment& seg = plan.segments[s];
@@ -1615,7 +1616,13 @@ void RenderGraph::execute(GpuProfiler* profiler)
                 ctx.cmd = cmd;
                 ctx.queue = seg.queue;
                 ctx.band = pass.band;
+                if (passMarkers)
+                {
+                    const std::wstring wide(pass.name.begin(), pass.name.end());
+                    cmd->BeginEvent(0, wide.c_str(), (UINT)((wide.size() + 1) * sizeof(wchar_t)));  // (0: a UTF-16 string)
+                }
                 pass.execute(ctx);
+                if (passMarkers) cmd->EndEvent();
                 if (profiler) profiler->passEnd(cmd, seg.queue);
             }
             impl.emit(cmd, pp.after);

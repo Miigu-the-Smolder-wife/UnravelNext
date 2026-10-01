@@ -12,7 +12,7 @@ void ReflectionShadowGen()
 {
     RWByteAddressBuffer rays = ResourceDescriptorHeap[P[5].y];
     const uint capacity = rays.Load(4);
-    const uint4 entry = rays.Load4(reflRaysShadowOffset(capacity, DispatchRaysIndex().x));
+    const uint4 entry = rays.Load4(reflRaysShadowOffset(capacity, DispatchRaysIndex().x + reflBand() * REFL_BAND));
     const uint slot = entry.w;
     const uint owner = rays.Load(reflRaysJobOffset(capacity, slot));
     const float visibility = reflSunVisibility(rtScene(), asfloat(entry.xyz), reflSunSeed(reflJobSeed(owner & 0x0FFFFFFFu), owner >> 28));
