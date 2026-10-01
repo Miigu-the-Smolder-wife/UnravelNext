@@ -34,6 +34,9 @@ strands_per_pixel_max = 2         # hair/grass LOD: blades or strands per pixel 
 # Capacities of one cull run (a view or a raster-service request). Exceeding one drops geometry and is reported in
 # unx::visibility::Stats::overflow (tests and gates fail on it); they are sizes, not quality settings.
 max_visible_clusters = 1048576    # visible-list entries (each draw list has the same capacity)
+raster_amplification = true       # tile-local raster runs (DepthRasterRequest::tileLocal): an amplification stage launches each
+                                  # (cluster, tile run) pair from the visible entry's tile rectangle (no pair is stored: no pair
+                                  # capacity); false = the stored pair list of capacity max_visible_clusters (A/B)
 max_node_items = 4194304          # hierarchy traversal work items (instance, node) of both phases
 max_group_items = 1048576         # hierarchy leaves reached (instance, group)
 max_deferred_items = 1048576      # phase-1 occluded instances / nodes / clusters retested in phase 2

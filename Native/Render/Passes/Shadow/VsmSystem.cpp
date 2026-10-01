@@ -24,6 +24,7 @@ const char* const kStateKey = "s.vsm";
 constexpr uint32_t kRingSlots = 16, kRingStride = 2048;  // per-frame constants; frames in flight must be < kRingSlots
 constexpr uint32_t kStatsSlots = 4, kStatsBytes = 256;  // VSM stats words (VsmBegin clears them)
 constexpr uint64_t kOverflowMinWords = 1u << 18;  // 1 MB overflow list at least (INTERFACES 7.3)
+constexpr uint32_t kErrRasterOverflow = 0x20;  // VsmCommon.hlsli VSM_ERR_RASTER_OVERFLOW
 constexpr uint32_t kMetaBytes = 48;  // VsmPageMeta
 constexpr uint32_t kBlockBytes = 341 * 32;  // VSM_BLOCK_ENTRIES x VsmBlock
 
@@ -47,6 +48,12 @@ struct State
     uint64_t statsFence[kStatsSlots] = {};
     int lastStatsSlot = -1;
     uint32_t errorBitsSeen = 0;  // OR of the error words of every harvested frame (INTERFACES 3.6)
+    // V's raster runs of the pages (s.vsm.raster, s.vsm.localraster<k>): the newest frame whose overflow was handled, and
+    // whether this frame draws every page anew because of one (no sun page kept; every local slot's generation moved).
+    uint64_t rasterOverflowFrame = UINT64_MAX;
+    uint32_t rasterOverflows = 0;  // overflowed frames handled (logged up to 8)
+    uint32_t rasterRequests[2] = { UINT32_MAX, UINT32_MAX };  // the last frame's sun and local raster requests (logged on change)
+    bool rasterRedraw = false;
     VsmStats latest;
     uint32_t prevSlotsUsed = 0;  // slots the previous frame scanned (a shrinking local-light set clears its old slots)
     uint64_t frames = 0;
@@ -232,6 +239,95 @@ float4x4 levelViewProj(const VsmConstantsCpu& c, uint32_t k)
 
 uint32_t groups(uint64_t n, uint32_t size) { return (uint32_t)((n + size - 1) / size); }
 
+// The visible-list bound of V's raster runs (coordinator 10-01: the lists must not overflow by construction, train
+// lounge frame 0 needed 1.67 M entries in one run of 1 M). A run's visible list holds one entry per (cluster, view) it
+// draws, and a view draws one LOD cut of an instance's hierarchy, so an instance adds at most its mesh's cut bound (the
+// builder's ClusterData::MeshRange::cutBound: its leaf clusters) to a view it can reach. Summed over the shadow-casting instances a view can reach - by
+// their bounding spheres, from the scene's structure, not from what the frame draws - this bounds the view's entries,
+// and the requests are packed so that their views' bounds sum to at most the list capacity.
+struct CasterBounds
+{
+    std::vector<float4> spheres;  // world bounding sphere per placed caster
+    std::vector<uint32_t> clusters;
+    uint64_t everywhere = 0;  // casters whose geometry moves past its bind-pose sphere (skinned, morphs, wind) and the
+                              // GPU-written instances' capacity (any mesh): counted in every view
+};
+
+CasterBounds casterBounds(const GpuScene& scene)
+{
+    CasterBounds b;
+    const auto& meshes = scene.meshes();
+    const auto& ranges = scene.clusters().meshes;  // the builder's cut bounds (runtime meshes: their whole hierarchies)
+    auto cut = [&](uint32_t mesh) { return mesh < ranges.size() && ranges[mesh].cutBound != 0 ? ranges[mesh].cutBound : meshes[mesh].clusterCount; };
+    uint32_t largest = 0;
+    for (const gpu::Mesh& m : meshes) largest = std::max(largest, m.clusterCount);
+    for (const gpu::Instance& inst : scene.instances())
+    {
+        if ((inst.flags & gpu::kInstanceHidden) != 0 || (inst.flags & scene::InstanceCastShadow) == 0 || inst.mesh >= meshes.size()) continue;
+        const gpu::Mesh& m = meshes[inst.mesh];
+        if ((inst.flags & (scene::InstanceSkinned | scene::InstanceWind)) != 0 || inst.morph != gpu::kNone)
+        {
+            b.everywhere += cut(inst.mesh);
+            continue;
+        }
+        const float4* r = inst.objectToWorld;
+        const float3 c = { m.boundsSphere.x, m.boundsSphere.y, m.boundsSphere.z };
+        const float3 w = { r[0].x * c.x + r[0].y * c.y + r[0].z * c.z + r[0].w, r[1].x * c.x + r[1].y * c.y + r[1].z * c.z + r[1].w,
+                           r[2].x * c.x + r[2].y * c.y + r[2].z * c.z + r[2].w };
+        const float scale = std::max({ std::sqrt(r[0].x * r[0].x + r[0].y * r[0].y + r[0].z * r[0].z), std::sqrt(r[1].x * r[1].x + r[1].y * r[1].y + r[1].z * r[1].z),
+                                       std::sqrt(r[2].x * r[2].x + r[2].y * r[2].y + r[2].z * r[2].z) });
+        b.spheres.push_back({ w.x, w.y, w.z, m.boundsSphere.w * scale * 1.001f + 1e-3f });
+        b.clusters.push_back(cut(inst.mesh));
+    }
+    b.everywhere += (uint64_t)scene.gpuInstanceRange().capacity * largest;
+    return b;
+}
+
+// The bound of an orthographic sun level view (levelViewProj: a sphere reaches it when its NDC x, y interval meets
+// [-1, 1]; every depth: the level's caster range follows the casters).
+uint64_t levelBound(const CasterBounds& b, const float4x4& vp)
+{
+    uint64_t n = b.everywhere;
+    const float sx = std::sqrt(vp.m[0][0] * vp.m[0][0] + vp.m[0][1] * vp.m[0][1] + vp.m[0][2] * vp.m[0][2]);
+    const float sy = std::sqrt(vp.m[1][0] * vp.m[1][0] + vp.m[1][1] * vp.m[1][1] + vp.m[1][2] * vp.m[1][2]);
+    for (size_t i = 0; i < b.spheres.size(); ++i)
+    {
+        const float4& q = b.spheres[i];
+        const float x = vp.m[0][0] * q.x + vp.m[0][1] * q.y + vp.m[0][2] * q.z + vp.m[0][3];
+        const float y = vp.m[1][0] * q.x + vp.m[1][1] * q.y + vp.m[1][2] * q.z + vp.m[1][3];
+        if (std::abs(x) <= 1 + q.w * sx && std::abs(y) <= 1 + q.w * sy) n += b.clusters[i];
+    }
+    return n;
+}
+
+// The bounds of a local light's six cube faces (each shared by the face's mip views): the casters its reach sphere (range +
+// emitter radius) meets that also meet the face's 90-degree frustum (the four side planes (axis +- right) / sqrt 2,
+// (axis +- up) / sqrt 2, and in front of the light) - a caster in one face's quarter of space is not counted in the others.
+void cubeBasis(uint32_t face, float3& right, float3& up, float3& axis);
+void localBounds(const CasterBounds& b, const VsmLocalLightCpu& l, uint64_t (&faces)[6])
+{
+    const float reach = l.farM + l.radius, h = 0.70710678f;
+    float3 right[6], up[6], axis[6];
+    for (uint32_t f = 0; f < 6; ++f)
+    {
+        cubeBasis(f, right[f], up[f], axis[f]);
+        faces[f] = b.everywhere;
+    }
+    for (size_t i = 0; i < b.spheres.size(); ++i)
+    {
+        const float4& q = b.spheres[i];
+        const float3 d = { q.x - l.position.x, q.y - l.position.y, q.z - l.position.z };
+        const float rr = reach + q.w;
+        if (dot(d, d) > rr * rr) continue;
+        for (uint32_t f = 0; f < 6; ++f)
+        {
+            const float a = dot(d, axis[f]), x = dot(d, right[f]), y = dot(d, up[f]);
+            if (a < -q.w || (a - x) * h < -q.w || (a + x) * h < -q.w || (a - y) * h < -q.w || (a + y) * h < -q.w) continue;
+            faces[f] += b.clusters[i];
+        }
+    }
+}
+
 // Cube face bases (VsmLocal.hlsli vsmCubeBasis): right = up x axis.
 void cubeBasis(uint32_t face, float3& right, float3& up, float3& axis)
 {
@@ -402,7 +498,9 @@ void updateLocalLights(FramePassContext& fc, State& s, const ViewResources& main
                 ++replaced;
             }
         }
-        if (slot == kLocalLights) continue;
+        // No free slot and no replacement (this light does not beat the weakest holder by 1.25 x, or the frame's 8 are
+        // used): the waiting lights after it rank no higher and the weakest holder is unchanged, so none can take a slot.
+        if (slot == kLocalLights) break;
         s.localLight[slot] = li + 1;
         ++s.localGen[slot];
         s.slotOfLight[li] = slot;
@@ -569,6 +667,30 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         s.grownAtFrame = s.frames + 1;  // stats of frames recorded with the old atlas do not count
         logf("S VSM: %u page requests exceeded the %u-page atlas (frame %llu): the atlas grows to %u pages\n", s.latest.exhausted, s.atlasPages,
              (unsigned long long)s.latest.frame, (s.poolTarget + kAtlasPagesPerRow - 1) / kAtlasPagesPerRow * kAtlasPagesPerRow);
+    }
+    // V's raster runs of the pages: a run whose visible or tile-pair list overflowed dropped casters from the pages it drew,
+    // and the page cache would keep them (train lounge, frame 0 -> 60: 104,460 pixels without their sun shadow [measured]).
+    // Their statistics come back framesInFlight frames later; then every page is drawn anew - no sun page is kept and every
+    // local slot's generation moves - and VSM_ERR_RASTER_OVERFLOW fails the gates (INTERFACES 3.6: a structural bound was
+    // exceeded, a defect). The runs' bound keeps them inside their lists; this is the guard behind it.
+    s.rasterRedraw = false;
+    {
+        for (const auto& [name, o] : fc.state<DepthRasterOverflows>(kDepthRasterOverflowKey))
+        {
+            if (name.rfind("s.vsm.", 0) != 0 || o.frame == UINT64_MAX) continue;
+            if (s.rasterOverflowFrame != UINT64_MAX && o.frame <= s.rasterOverflowFrame) continue;
+            s.rasterOverflowFrame = std::max(o.frame, s.rasterOverflowFrame == UINT64_MAX ? 0 : s.rasterOverflowFrame);
+            s.rasterRedraw = true;
+            if (++s.rasterOverflows <= 8)  // (each frame it recurs: a full redraw that overflows again shows here)
+                logf("S VSM: V's raster run '%s' overflowed its lists in frame %llu (bits 0x%x): every page is drawn anew (error bit 0x%x)\n", name.c_str(),
+                     (unsigned long long)o.frame, o.bits, kErrRasterOverflow);
+            s.errorBitsSeen |= kErrRasterOverflow;
+            s.latest.errorBits |= kErrRasterOverflow;
+            s.latest.errorBitsSeen = s.errorBitsSeen;
+        }
+        if (s.rasterRedraw)
+            for (uint32_t i = 0; i < kLocalLights; ++i)
+                if (s.localLight[i] != 0) ++s.localGen[i];  // its pages are released and drawn anew
     }
     // Local lights first: their count sizes the atlas's initial budget with the view's pixels.
     updateLocalLights(fc, s, main);
@@ -746,7 +868,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     const bool originShift = fc.frame.originShift.x != 0 || fc.frame.originShift.y != 0 || fc.frame.originShift.z != 0;
     // (the wind casters' spheres are bounded with this frame's wind: a changed scene wind redraws every page)
     const bool sameWind = s.cacheWind[0] == c.windSpeed && s.cacheWind[1] == c.windDirection.x && s.cacheWind[2] == c.windDirection.y && s.cacheWind[3] == c.windDirection.z;
-    const bool cacheable = cacheOn && rangeKept && sameWind && !stateFresh && !s.needsInit && s.cacheFrame != UINT64_MAX && s.cacheFrame + 1 == fc.frame.frameIndex &&
+    const bool cacheable = cacheOn && rangeKept && sameWind && !stateFresh && !s.needsInit && !s.rasterRedraw && s.cacheFrame != UINT64_MAX && s.cacheFrame + 1 == fc.frame.frameIndex &&
                            s.cacheRevision == fc.scene.revision() && !originShift && (fc.frame.discontinuity & kDiscontinuityRestore) == 0;
     s.cacheFrame = fc.frame.frameIndex;
     s.cacheRevision = fc.scene.revision();
@@ -1201,18 +1323,31 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     // Every requested page through V's cluster pipeline into its atlas slot (tile atlas, hardware depth, no pixel
     // kernel): one orthographic view per level over its whole window; the tile mask limits the raster to the pages
     // with a slot this frame.
+    // The runs' visible-list bound (casterBounds): the views are packed into requests whose bounds sum to at most the
+    // list capacity; a single view over it stops the frame (a structural limit of this scene, never a silent drop).
+    // shadow.vsm.raster_split false (A/B): the old packing - one sun request, 6 lights per local request - whose lists can
+    // overflow; the bound is then infinite.
+    const bool split = !q.has("shadow.vsm.raster_split") || q.boolean("shadow.vsm.raster_split");
+    const uint64_t listCapacity = split ? (uint64_t)q.integer("visibility.max_visible_clusters") : UINT64_MAX;
+    const CasterBounds bounds = fc.services.rasterizeDepth && split ? casterBounds(fc.scene) : CasterBounds{};
+    uint32_t sunRequests = 0, localRequests = 0;
     if (fc.services.rasterizeDepth)
     {
-        DepthRasterRequest r;
-        r.name = "s.vsm.raster";
-        r.instanceMask = scene::InstanceCastShadow;
-        r.depthTarget = atlas;
-        r.atlasSlots = atlasSlots;
-        r.atlasTilesPerRow = kAtlasPagesPerRow;
-        r.cullMask = mask;
-        r.cullTilePx = kPage;
-        r.tileLocal = true;
-        r.cull = D3D12_CULL_MODE_NONE;
+        auto request = [&](const std::string& name) {
+            DepthRasterRequest r;
+            r.name = name;
+            r.instanceMask = scene::InstanceCastShadow;
+            r.depthTarget = atlas;
+            r.atlasSlots = atlasSlots;
+            r.atlasTilesPerRow = kAtlasPagesPerRow;
+            r.cullMask = mask;
+            r.cullTilePx = kPage;
+            r.tileLocal = true;
+            r.cull = D3D12_CULL_MODE_NONE;
+            return r;
+        };
+        DepthRasterRequest r = request("s.vsm.raster");
+        uint64_t sum = 0;
         for (uint32_t k = 0; k < kLevels; ++k)
         {
             RasterView v;
@@ -1222,18 +1357,31 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             v.lodPixelsPerMetre = 1.0f / std::ldexp(1.0f, (int)k - 10);
             v.userData = k;
             v.cullMaskOffset = k * (kTable * kTable / 32);
+            const uint64_t bound = split ? levelBound(bounds, v.viewProj) : 0;
+            if (bound > listCapacity)
+                fail("S VSM: sun level %u can reach %llu cluster entries, over the raster list capacity %llu (visibility.max_visible_clusters): this scene "
+                     "needs instance batches of the level's casters",
+                     k, (unsigned long long)bound, (unsigned long long)listCapacity);
+            if (!r.views.empty() && sum + bound > listCapacity)
+            {
+                fc.services.rasterizeDepth(fc, r);
+                r = request("s.vsm.raster" + std::to_string(++sunRequests));
+                sum = 0;
+            }
             r.views.push_back(v);
+            sum += bound;
         }
         fc.services.rasterizeDepth(fc, r);
+        ++sunRequests;
     }
     if (fc.services.rasterizeDepth && activeLocal > 0)
     {
-        // Local lights: the (light, face, mip) views of 6 lights per request (42 views each, V's 255-view limit); each
-        // view's viewport is its mip's resolution, the tile masks and slots are packed per light (VsmLocalCullMask).
-        for (uint32_t first = 0; first < activeLocal; first += 6)
-        {
+        // Local lights: the (light, face, mip) views (42 per light) packed into requests of at most 252 views (V's
+        // 255-view limit) whose bounds (localBound per view) sum to at most the list capacity; each view's viewport is its
+        // mip's resolution, the tile masks and slots are packed per light (VsmLocalCullMask).
+        auto request = [&]() {
             DepthRasterRequest r;
-            r.name = "s.vsm.localraster" + std::to_string(first / 6);
+            r.name = "s.vsm.localraster" + std::to_string(localRequests++);
             r.instanceMask = scene::InstanceCastShadow;
             r.depthTarget = atlas;
             r.atlasSlots = localSlots;
@@ -1242,13 +1390,31 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             r.cullTilePx = kPage;
             r.tileLocal = true;
             r.cull = D3D12_CULL_MODE_NONE;
-            for (uint32_t a = first; a < std::min<uint32_t>(first + 6, activeLocal); ++a)
+            return r;
+        };
+        DepthRasterRequest r = request();
+        uint64_t sum = 0;
+        {
+            for (uint32_t a = 0; a < activeLocal; ++a)
             {
                 const uint32_t slot = s.localActive[a];
                 const VsmLocalLightCpu& l = s.localData[slot];
+                uint64_t faceBounds[6] = {};
+                if (split) localBounds(bounds, l, faceBounds);
+                for (uint32_t face = 0; face < 6; ++face)
+                    if (faceBounds[face] > listCapacity)
+                        fail("S VSM: local light %u face %u can reach %llu cluster entries per view, over the raster list capacity %llu (visibility.max_visible_clusters)",
+                             l.lightIndex, face, (unsigned long long)faceBounds[face], (unsigned long long)listCapacity);
                 for (uint32_t face = 0; face < 6; ++face)
                     for (uint32_t mip = 0; mip < kLocalMips; ++mip)
                     {
+                        const uint64_t bound = faceBounds[face];
+                        if (!r.views.empty() && (sum + bound > listCapacity || r.views.size() >= (split ? 252u : 42u * 6u) || (!split && face == 0 && mip == 0 && a % 6 == 0)))
+                        {
+                            fc.services.rasterizeDepth(fc, r);
+                            r = request();
+                            sum = 0;
+                        }
                         RasterView v;
                         v.viewProj = localViewProj(l, face);
                         v.viewportX = v.viewportY = 0;
@@ -1257,10 +1423,18 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                         v.userData = slot | face << 7 | mip << 10;
                         v.cullMaskOffset = a * kLocalLightWords + face * kLocalFaceWords + kLocalViewWordOffset[mip];
                         r.views.push_back(v);
+                        sum += bound;
                     }
             }
             fc.services.rasterizeDepth(fc, r);
         }
+    }
+    if (fc.services.rasterizeDepth && (s.rasterRequests[0] != sunRequests || s.rasterRequests[1] != localRequests))
+    {
+        logf("S VSM: %u sun and %u local raster requests (%u active local lights; views packed under the list capacity %llu)\n", sunRequests, localRequests,
+             activeLocal, (unsigned long long)listCapacity);
+        s.rasterRequests[0] = sunRequests;
+        s.rasterRequests[1] = localRequests;
     }
 
     {

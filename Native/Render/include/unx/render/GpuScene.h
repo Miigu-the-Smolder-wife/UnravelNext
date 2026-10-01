@@ -34,6 +34,10 @@ struct ClusterData  // V's builder output for the whole scene (per-mesh ranges g
     struct MeshRange
     {
         uint32_t clusterOffset = 0, clusterCount = 0, lodLevelOffset = 0, lodLevelCount = 0;
+        // The most clusters any LOD cut of the mesh can hold (the builder: its leaf count, the source clusters, when every
+        // group's simplification made no more clusters than the group had - then no cut exceeds the leaves; else every
+        // cluster). 0 = not known (clusterCount). Bounds V's raster lists (S's request packing).
+        uint32_t cutBound = 0;
     };
     std::vector<MeshRange> meshes;  // one per scene mesh
     // V-internal buffers (hierarchy nodes, ...): uploaded as StructuredBuffers, found with GpuScene::srv(name).

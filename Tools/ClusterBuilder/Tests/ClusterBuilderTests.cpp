@@ -249,6 +249,13 @@ void checkStructure(const Built& b)
     const auto roots = named<gpu::MeshClusterRoots>(d, kMeshClusterRoots);
     const auto spheres = named<float4>(d, kClusterLodSpheres);
     CHECK(spheres.size() == d.clusters.size());
+    // the cut bound (VSM raster packing): no group's simplification made more clusters than it had, so it is the leaf count
+    for (const auto& m : d.meshes)
+    {
+        uint32_t leaves = 0;
+        for (uint32_t c = m.clusterOffset; c < m.clusterOffset + m.clusterCount; ++c) leaves += d.clusters[c].lodError == 0 ? 1u : 0u;
+        CHECK(m.cutBound == leaves && leaves > 0);
+    }
     CHECK(roots.size() == d.meshes.size());
     const Settings st = settings();
     for (size_t mi = 0; mi < d.meshes.size(); ++mi)

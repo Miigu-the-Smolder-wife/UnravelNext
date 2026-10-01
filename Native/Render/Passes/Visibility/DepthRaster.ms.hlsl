@@ -1,12 +1,13 @@
 // unx-kernel: ms_6_6 main
-// unx-variants: TILE=0,1,2 DEPTH=0,1 OUT=64,128
+// unx-variants: TILE=0,1,2 DEPTH=0,1 OUT=64,128 AS=0,1
 // Depth raster service (FrameServices::rasterizeDepth, INTERFACES 5.3): one mesh-shader group per draw-list entry,
 // any number of views (the visible entry carries the view). Outputs match struct DepthRasterPixel (DepthRaster.hlsli)
 // for the requester's pixel kernel: position, uv (alpha test), userData, material, instance.
 // Views with different viewports select theirs with SV_ViewportArrayIndex (at most 16 per request).
-// TILE=1 (DepthRasterRequest::tileLocal): the entry is a (cluster, tile rectangle) pair (CullClusters,
-// writeTilePairs). Triangles outside the rectangle are culled and the rest are clipped to it by four clip distances,
-// so the rasteriser makes fragments only inside the requested tiles; positions are unchanged (same pixels, same depth).
+// TILE=1 (DepthRasterRequest::tileLocal): the group is one (cluster, tile rectangle) pair launched by DepthRaster.as.hlsl
+// (DepthRasterPayload.hlsli: the pair from the payload's per-row prefix). Triangles outside the rectangle are culled
+// and the rest are clipped to it by four clip distances, so the rasteriser makes fragments only inside the requested
+// tiles; positions are unchanged (same pixels, same depth).
 // TILE=2 (atlas mode, DepthRasterRequest::atlasSlots): pairs are single tiles (CULL_VIEW_TILE_SINGLE); the tile moves to
 // its atlas slot by a whole-pixel shift in clip space, the viewport being the whole atlas.
 // DEPTH=1 (no pixel kernel: hardware depth only): only the position, the clip distances, the viewport and the cull flag
@@ -14,8 +15,16 @@
 // shader group's output size limits how many groups an SM holds at once.
 //   P[0] visible SRV (uint2), lists SRV (raw), state SRV (raw), list
 //   P[1] phase (always 1: the service culls in one phase), list capacity, views SRV, viewport per view (0 = one viewport)
-//   P[2] tile pairs SRV (uint3, TILE=1,2), atlas slots SRV (raw, TILE=2), atlas tiles per row, atlas size (w | h << 16)
+//   P[2] tile rectangles SRV (TILE=1,2: read by the amplification stage), atlas slots SRV (raw, TILE=2), atlas tiles per
+//        row, atlas size (w | h << 16)
+//   P[3] tile mask SRV (raw, TILE=1,2)
+// AS=0 with TILE (visibility.raster_amplification false, A/B): the group is a draw-list entry of the stored pair list
+// (P[2].x: uint3 (visible index, tile rectangle) per pair), dispatched directly.
 #include "Passes/Visibility/VisibilityCommon.hlsli"
+#define FROM_PAYLOAD (TILE && AS)
+#if FROM_PAYLOAD
+#include "Passes/Visibility/DepthRasterPayload.hlsli"
+#endif
 
 // OUT: the declared output arrays (vertices, primitives). The service picks 64 when every installed cluster has at most
 // 64 vertices and 64 triangles (GpuScene::maxClusterVertices/Triangles; visibility.cluster_vertices/triangles = 64): the
@@ -53,8 +62,17 @@ groupshared float3 g_pixel[MS_OUT];  // viewport-relative pixel position per ver
 [outputtopology("triangle")]
 [numthreads(64, 1, 1)]
 void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices VertexOut verts[MS_OUT], out primitives PrimitiveOut prims[MS_OUT],
-          out indices uint3 tris[MS_OUT])
+          out indices uint3 tris[MS_OUT]
+#if FROM_PAYLOAD
+          , in payload DepthRasterPayload payload
+#endif
+)
 {
+#if FROM_PAYLOAD
+    const uint pairIndex = group.x + group.y * DR_GRID;
+    const bool valid = pairIndex < payload.total;  // uniform over the group (the grid rounds up to whole rows)
+    const uint visibleIndex = payload.visibleIndex;
+#else
     ByteAddressBuffer state = ResourceDescriptorHeap[P[0].z];
     ByteAddressBuffer lists = ResourceDescriptorHeap[P[0].y];
     const uint list = P[0].w, capacity = P[1].y;
@@ -63,17 +81,42 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     const bool valid = index < count;  // uniform over the group
     const uint entryIndex = valid ? lists.Load(4 * (list * capacity + index)) : 0;
 #if TILE
-    StructuredBuffer<uint3> pairs = ResourceDescriptorHeap[P[2].x];
-    const uint3 pair = valid ? pairs[entryIndex] : uint3(0, 0, 0);
-    const uint visibleIndex = pair.x;
+    StructuredBuffer<uint3> storedPairs = ResourceDescriptorHeap[P[2].x];
+    const uint3 storedPair = valid ? storedPairs[entryIndex] : uint3(0, 0, 0);
+    const uint visibleIndex = storedPair.x;
 #else
     const uint visibleIndex = entryIndex;
+#endif
 #endif
     StructuredBuffer<uint2> visible = ResourceDescriptorHeap[P[0].x];
     const uint2 entry = valid ? visible[visibleIndex] : uint2(0, 0);
     const uint view = entry.y >> 24;
     StructuredBuffer<CullView> views = ResourceDescriptorHeap[P[1].z];
     const CullView v = views[view];
+#if TILE && !FROM_PAYLOAD
+    const uint3 pair = storedPair;
+#elif FROM_PAYLOAD
+    // This group's pair: the whole rectangle, or the row whose prefix range holds pairIndex (binary search over the
+    // non-decreasing prefix) and that row's (pairIndex - prefix)-th run or tile.
+    uint3 pair = uint3(visibleIndex, payload.rectLo, payload.rectHi);
+    if (valid && payload.whole == 0)
+    {
+        const uint2 a = uint2(payload.rectLo & 0xFFFFu, payload.rectLo >> 16), b = uint2(payload.rectHi & 0xFFFFu, payload.rectHi >> 16);
+        const uint rows = min(b.y - a.y + 1, DR_MAX_ROWS);
+        uint lo = 0, hi = rows - 1;  // the last row r with prefix[r] <= pairIndex
+        while (lo < hi)
+        {
+            const uint mid = (lo + hi + 1) >> 1;
+            if (payload.prefix[mid] <= pairIndex) lo = mid;
+            else hi = mid - 1;
+        }
+        ByteAddressBuffer mask = ResourceDescriptorHeap[P[3].x];
+        const uint y = a.y + lo;
+        const uint2 run = drRowPair(mask, v.cullMaskOffset, v.tilesX, y, a.x, b.x, (v.flags & CULL_VIEW_TILE_SINGLE) != 0, pairIndex - payload.prefix[lo]);
+        pair.y = run.x | (y << 16);
+        pair.z = run.y | (y << 16);
+    }
+#endif
     const GpuInstance inst = loadInstance(entry.x);
     const GpuMesh mesh = loadMesh(inst.mesh);
     const GpuCluster cl = loadCluster(entry.y & 0xFFFFFFu);

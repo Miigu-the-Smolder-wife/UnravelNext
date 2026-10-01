@@ -95,6 +95,8 @@ ID3D12PipelineState* ShaderLibrary::mesh(const std::string& name, const MeshPipe
         auto it = m_pipelines.find(name);
         if (it != m_pipelines.end()) return it->second.Get();
     }
+    std::vector<uint8_t> as;
+    if (!desc.amplificationShader.empty()) as = load(desc.amplificationShader);
     std::vector<uint8_t> ms = load(desc.meshShader);
     std::vector<uint8_t> ps;
     if (!desc.pixelShader.empty()) ps = load(desc.pixelShader);
@@ -102,6 +104,7 @@ ID3D12PipelineState* ShaderLibrary::mesh(const std::string& name, const MeshPipe
     struct Stream
     {
         Subobject<ID3D12RootSignature*, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE> root;
+        Subobject<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS> as;
         Subobject<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS> ms;
         Subobject<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS> ps;
         Subobject<D3D12_RASTERIZER_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER> raster;
@@ -113,6 +116,7 @@ ID3D12PipelineState* ShaderLibrary::mesh(const std::string& name, const MeshPipe
         Subobject<UINT, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK> mask;
     } s;
     s.root.value = m_device.rootSignature();
+    s.as.value = { as.empty() ? nullptr : as.data(), as.size() };
     s.ms.value = { ms.data(), ms.size() };
     s.ps.value = { ps.empty() ? nullptr : ps.data(), ps.size() };
     s.raster.value.FillMode = D3D12_FILL_MODE_SOLID;
