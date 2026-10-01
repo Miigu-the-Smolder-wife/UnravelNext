@@ -3868,6 +3868,118 @@ void testCoatSun(TestFrame& tf, Report& report)
     report(worstNarrow < 1e-2, "coat sun lobe [narrow, alpha < 2 theta_s] vs dense quadrature (rel. to peak)", worstNarrow, 1e-2);
 }
 
+// 14.1b (L2b): a constant-emission panel as quadtree area lights (shading.emissive_area_lights) against the same
+// panel authored as a RECT light (the LTC closed form the kernel uses for area lights): the ground's diffuse radiance
+// must agree pixel by pixel (the quadtree evaluates the panel as a few squares, the rect light as one polygon; the same
+// edge integral, the window w(d) of the rect light is 1 - (d / 1000)^4 ~ 1). The panel's own pixels (its material)
+// are skipped (its direct view is the material's emission in one run and black in the other).
+void testEmissivePanel(TestFrame& tf, Report& report)
+{
+    const float3 L{ 3000, 2800, 2500 };  // nits
+    const float3 panelPos{ 0.4f, 2.6f, 0.5f };
+    const float2 panelSize{ 1.2f, 0.8f };
+    auto renderGround = [&](bool quadtree, std::shared_ptr<std::vector<uint8_t>>& lin, std::shared_ptr<std::vector<uint8_t>>& words, uint32_t W, uint32_t H) {
+        scene::Scene s;
+        s.name = quadtree ? "emissive panel (quadtree)" : "emissive panel (rect light)";
+        scene::Material ground;
+        ground.baseColor = { 0.5f, 0.5f, 0.5f };
+        scene::Material panel;
+        panel.baseColor = { 0.02f, 0.02f, 0.02f };
+        if (quadtree) panel.emissive = L;
+        s.materials = { ground, panel };
+        scene::Instance a;
+        a.mesh = addPlane(s, 40, 0);
+        s.instances.push_back(a);
+        // the panel: addPlane's quad (normal +y, counter-clockwise from above) turned to face down and scaled
+        scene::Mesh pm;
+        pm.name = "panel";
+        const float hx = panelSize.x / 2, hz = panelSize.y / 2;
+        pm.positions = { { -hx, 0, -hz }, { hx, 0, -hz }, { -hx, 0, hz }, { hx, 0, hz } };
+        pm.normals.assign(4, { 0, -1, 0 });
+        pm.tangents.assign(4, { 1, 0, 0, 1 });
+        pm.uv0 = { { 0, 0 }, { 1, 0 }, { 0, 1 }, { 1, 1 } };
+        pm.indices = { 0, 1, 2, 1, 3, 2 };  // counter-clockwise seen from below
+        pm.submeshes.push_back({ 0, 6, 1 });
+        s.meshes.push_back(std::move(pm));
+        scene::Instance b;
+        b.mesh = (uint32_t)s.meshes.size() - 1;
+        b.transform = float3x4::translation(panelPos);
+        s.instances.push_back(b);
+        s.sun.illuminance = 0;
+        if (!quadtree)
+        {
+            scene::Light rl;
+            rl.type = scene::LightType::Rect;
+            rl.position = panelPos;
+            rl.forward = { 0, -1, 0 };
+            rl.right = { 1, 0, 0 };
+            rl.size = panelSize;
+            rl.intensity = 1;
+            rl.color = L;  // (colour x intensity = rgb nits, as the kernel's Lw)
+            rl.range = 1000;
+            s.lights.push_back(rl);
+        }
+        scene::Camera cam;
+        cam.position = { 0, 1.6f, 4.0f };
+        cam.forward = normalize(float3{ 0, -0.35f, -1 });
+        cam.ev100 = 9;
+        s.cameras.push_back(cam);
+        tf.setScene(s);
+        tf.quality.applyOverride(quadtree ? "shading.emissive_area_lights=true" : "shading.emissive_area_lights=false");
+        std::vector<uint32_t> list(64, 0);
+        const float nearM = 0.01f, farM = 1000.0f, logRatio = std::log2(farM / nearM);
+        list[0] = 1, list[1] = 1, list[2] = 1, list[3] = 4096;
+        std::memcpy(&list[4], &nearM, 4);
+        std::memcpy(&list[5], &farM, 4);
+        std::memcpy(&list[6], &logRatio, 4);
+        list[8] = 64, list[9] = 128, list[10] = 64, list[11] = 1;
+        list[16] = 0, list[17] = 1;  // header (first entry, count): the one rect light
+        list[32] = 0;
+        ComPtr<ID3D12Resource> listBuffer = uploadStatic(tf.device, list.data(), list.size() * 4, L"test froxel list (emissive panel)");
+        tf.frame.outputLinearHdr = true;
+        tf.run([&](FramePassContext& fc) {
+            ViewResources v = tf.mainView(fc, W, H, 0);
+            v.color = fc.graph.createTexture({ "m.test.color", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+            tf.vis.record(fc, v);
+            tracks::materialResolve(fc, v);
+            if (!quadtree)
+            {
+                fc.resources.froxelLights = fc.graph.importBuffer(listBuffer.Get(), { "test froxel lists", list.size() * 4, 0 });
+                v.froxelLights = fc.resources.froxelLights;
+            }
+            tracks::shading(fc, v);
+            const material::ResolveOutputs o = material::resolveOutputs(fc, v);
+            words = tf.readback(fc, o.materialWord);
+            lin = tf.readback(fc, v.color);
+        });
+        tf.frame.outputLinearHdr = false;
+        tf.quality.applyOverride("shading.emissive_area_lights=false");
+    };
+    const uint32_t W = 640, H = 360;
+    std::shared_ptr<std::vector<uint8_t>> linQ, wordsQ, linR, wordsR;
+    renderGround(true, linQ, wordsQ, W, H);
+    renderGround(false, linR, wordsR, W, H);
+    double worst = 0, sumE = 0, sumR = 0, largest = 0;
+    uint32_t checked = 0;
+    for (uint32_t y = 0; y < H; y += 2)
+        for (uint32_t x = 0; x < W; x += 2)
+        {
+            if ((texelOf<uint32_t>(*wordsQ, W, x, y) & 0xFFFF) != 0 || (texelOf<uint32_t>(*wordsR, W, x, y) & 0xFFFF) != 0) continue;  // ground pixels alone
+            const float4 q = texelOf<float4>(*linQ, W, x, y), r = texelOf<float4>(*linR, W, x, y);
+            const double scale = std::max({ (double)r.x, (double)r.y, (double)r.z, 1e-3 });
+            const double e = std::max({ std::abs(q.x - r.x), std::abs(q.y - r.y), std::abs(q.z - r.z) }) / scale;
+            if (e > worst && e > 2e-3) logf("  emissive panel px (%u,%u): quadtree (%.5f %.5f %.5f) rect light (%.5f %.5f %.5f)\n", x, y, q.x, q.y, q.z, r.x, r.y, r.z);
+            worst = std::max(worst, e);
+            largest = std::max(largest, (double)r.x);
+            sumE += std::abs(q.x - r.x), sumR += r.x;
+            ++checked;
+        }
+    logf("emissive panel: %u ground pixels, largest exposed radiance %.4f, energy-weighted error %.4g, worst %.4g\n", checked, largest, sumR > 0 ? sumE / sumR : 0, worst);
+    report(checked > 10000 && largest > 0.02, "emissive panel: the panel lights the ground (exposed radiance)", largest, 0.02);
+    report(sumR > 0 && sumE / sumR < 1e-3, "emissive panel: quadtree area lights vs the rect light (energy-weighted rel.)", sumR > 0 ? sumE / sumR : 1, 1e-3);
+    report(worst < 5e-3, "emissive panel: quadtree area lights vs the rect light (worst pixel rel.)", worst, 5e-3);
+}
+
 int main(int argc, char** argv)
 {
     try
@@ -3988,6 +4100,7 @@ int main(int argc, char** argv)
         testFilmFrame(tf, report);
         testAreaQuadrature(tf, report);
         testAreaLobesFrame(tf, report);
+        testEmissivePanel(tf, report);  // 14.1b (L2b)
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;
     }

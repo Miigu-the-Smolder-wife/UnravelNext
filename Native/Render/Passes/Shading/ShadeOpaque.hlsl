@@ -30,7 +30,7 @@
 // P[2] = { shadow visibility, screen probes, reflection, GI cache (planar views) } (UNX_NONE = absent)
 // P[3] = { atmosphere transmittance, multi-scatter, S's shadow overflow tile heads (main kernel; UNX_NONE = absent), this
 //        view's air volume } (this kernel reads no sky view)
-// P[4] = { 0 (the specular albedo LUT is the frame constant g_specularAlbedoLut, v1.25), texture table, experiment mask (0;
+// P[4] = { 14.1b emissive area lights' diffuse irradiance (RGBA16F, exposed; Passes/Lights/EmissiveDirect.hlsl; UNX_NONE = off), texture table, experiment mask (0;
 //        shading.toml), 0 }
 // P[5] = { froxel lights (raw) (UNX_NONE = absent), LTC table (StructuredBuffer<float4>, AreaLight.hlsli) }
 // P[6] = { edge tile mask SRV (EdgeDetect.hlsl, R32G32_UINT per tile; UNX_NONE = no edge pixels), V's coverage tiles
@@ -599,6 +599,17 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
             radiance += f * E * (abs(cosL) * visibility);
         }
     }
+
+    // 14.1b (L2b): the converted emissive surfaces as area lights - their diffuse irradiance on the viewer's side of n
+    // (EmissiveDirect.hlsl: quadtree nodes as horizon-clipped Lambert polygons; the specular side is the reflection
+    // path's, which sees the emissive geometry: B2). Node shadows: 14.3 (L3). Foliage's back side: not yet.
+#if !AREA_LOBES
+    if (P[4].x != UNX_NONE && NoV > 0)
+    {
+        Texture2D<float4> emissiveE = ResourceDescriptorHeap[P[4].x];
+        radiance += front * (emissiveE[pixel].rgb / g_exposure);
+    }
+#endif
 
 #if AREA_LOBES
     {

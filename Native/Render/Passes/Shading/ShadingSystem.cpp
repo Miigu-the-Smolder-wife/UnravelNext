@@ -9,6 +9,7 @@
 #include "unx/material/MaterialSystem.h"
 #include "unx/render/GpuScene.h"
 #include "unx/render/Tracks.h"
+#include "unx/lights/EmissiveLights.h"
 #include "unx/scene/MaterialModel.h"
 
 #include <algorithm>
@@ -356,6 +357,33 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         dst[1] = particles ? c.srv(v.particleEdges) : gpu::kNone;
     };
     const uint32_t tileCount = o.tilesX * o.tilesY, ltcSrv = ltc.srv, experiment = experimentMask(fc.quality);
+    // 14.1b (L2b): the converted emissive surfaces as quadtree area lights (shading.emissive_area_lights; invalid = off).
+    const BufferRef emissiveLights = lights::emissiveLights(fc);
+    TextureRef emissiveIrradiance;  // per-pixel diffuse irradiance from them (EmissiveDirect.hlsl, exposed RGBA16F)
+    if (emissiveLights.valid())
+    {
+        RenderGraph& g = fc.graph;
+        const uint32_t W = view.view.width, H = view.view.height;
+        emissiveIrradiance = g.createTexture({ "M emissive irradiance", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+        ID3D12PipelineState* kernel = fc.shaders.compute("Passes/Lights/EmissiveDirect");
+        const TextureRef depth = view.depth, gbuffer = view.gbuffer, outTex = emissiveIrradiance;
+        const BufferRef lightsBuf = emissiveLights;
+        const D3D12_GPU_VIRTUAL_ADDRESS cbAddr = view.frameConstants;
+        g.addPass("m.emissive.direct", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(depth, Use::SrvCompute);
+                      b.use(gbuffer, Use::SrvCompute);
+                      b.use(lightsBuf, Use::SrvCompute);
+                      b.use(outTex, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      const uint32_t k[4] = { c.srv(depth), c.srv(gbuffer), c.srv(lightsBuf), c.uav(outTex) };
+                      c.cmd->SetPipelineState(kernel);
+                      c.bindFrameConstants(cbAddr);
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                  });
+    }
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
     const EdgeConfig ec = edgeConfig(fc.quality);
     const bool planar = view.view.kind != gpu::ViewKind::Main;
@@ -562,6 +590,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 if (caustics) b.use(r.waterSunCaustics, Use::SrvCompute);
             }
             useParticles(b);
+            if (emissiveIrradiance.valid()) b.use(emissiveIrradiance, Use::SrvCompute);  // 14.1b
             if (meter) b.use(histogram.buffer, Use::UavCompute);
         };
         shadePass.execute = [=](PassContext& c) {
@@ -604,7 +633,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                          v.shadowVisibility.valid() ? c.srv(v.shadowVisibility) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
                                          v.reflection.valid() ? c.srv(v.reflection) : none,
                                          r.giCache.valid() ? c.srv(r.giCache) : none,
-                                         atm[0], atm[1], overflow ? c.srv(v.shadowOverflowTiles) : none, atm[3], 0, o.textureTableSrv, experiment,
+                                         atm[0], atm[1], overflow ? c.srv(v.shadowOverflowTiles) : none, atm[3], emissiveIrradiance.valid() ? c.srv(emissiveIrradiance) : none, o.textureTableSrv, experiment,
                                          0, fx[0], fx[1] };
                 uint32_t k32[40] = {};
                 std::memcpy(k32, k, sizeof k);
@@ -690,6 +719,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                  if (caustics) b.use(r.waterSunCaustics, Use::SrvCompute);
                              }
                              useParticles(b);
+                             if (emissiveIrradiance.valid()) b.use(emissiveIrradiance, Use::SrvCompute);  // 14.1b
                          },
                          [=](PassContext& c) {
                              const uint32_t none = gpu::kNone;
@@ -706,7 +736,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                                       v.shadowVisibility.valid() ? c.srv(v.shadowVisibility) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
                                                       v.reflection.valid() ? c.srv(v.reflection) : none, r.giCache.valid() ? c.srv(r.giCache) : none,
                                                       atmosphere ? c.srv(r.transmittanceLut) : none, atmosphere ? c.srv(r.multiScatterLut) : none, none,
-                                                      air ? c.srv(v.airVolume) : none, 0, o.textureTableSrv, experiment, 0,
+                                                      air ? c.srv(v.airVolume) : none, emissiveIrradiance.valid() ? c.srv(emissiveIrradiance) : none, o.textureTableSrv, experiment, 0,
                                                       froxelLists ? c.srv(v.froxelLights) : none, ltcSrv };
                              const uint32_t edge[8] = { c.srv(edgeTiles), coverage ? c.srv(v.coverageTiles) : none, 0, 0, c.uav(edgeRadiance),
                                                         v.screenProbeMaps.valid() ? c.srv(v.screenProbeMaps) : none, shadowSrvs,

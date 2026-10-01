@@ -1,6 +1,10 @@
 # Owner: M (M session, INTERFACES v1.2). ARCHITECTURE 2.4, 2.10, 2.11.
 [shading]
 tonemap = "pbr_neutral"           # Khronos PBR Neutral (INTERFACES 8.4)
+emissive_area_lights = false      # 14.1b (L2b): constant-emission surfaces of non-skinned instances become quadtree area lights
+                                  # for the diffuse direct light (first frame exact, no cache cold start); no shadows yet (14.3)
+                                  # and R/S2's double-counting rule pending, so off by default
+emissive_leaf_m = 0.1             # 14.1b: the quadtree's largest leaf square (m); nodes are evaluated when diagonal <= 0.8 x distance
 output_encoding = "srgb"          # RGB10A2 display output
 # Edge (E) pixels and surface groups (Passes/Shading/Edge.hlsli): two pixels are one surface when the material matches,
 # the shading normals differ by less than the angle, and each lies within max(footprint x ft, distance x dt) of the
