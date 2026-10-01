@@ -676,6 +676,9 @@ void validate(const Scene& s)
         if (m.roughness < 0 || m.roughness > 1 || m.metallic < 0 || m.metallic > 1) fail("material %zu '%s': roughness/metallic outside [0,1]", i, m.name.c_str());
         if (m.cls == MaterialClass::Hair && !(m.hairEumelanin >= 0 && m.hairPheomelanin >= 0 && m.hairBetaN > 0 && m.hairBetaN <= 1 && std::isfinite(m.hairTilt) && m.ior > 1))
             fail("material %zu '%s': hair needs melanin >= 0, beta_N in (0, 1], a finite tilt and ior > 1", i, m.name.c_str());
+        if (!(m.waterScattering.x >= 0 && m.waterScattering.y >= 0 && m.waterScattering.z >= 0 && std::isfinite(m.waterScattering.x) && std::isfinite(m.waterScattering.y) &&
+              std::isfinite(m.waterScattering.z) && m.waterAnisotropy > -1 && m.waterAnisotropy < 1))
+            fail("material %zu '%s': water scattering >= 0 (finite) and anisotropy in (-1, 1)", i, m.name.c_str());
         if (m.cls == MaterialClass::Cut && !(m.cutScale > 0 && m.cutDamageWidth >= 0 && std::isfinite(m.cutScale) && std::isfinite(m.cutDamageWidth)))
             fail("material %zu '%s': a cut material needs cutScale > 0 and cutDamageWidth >= 0", i, m.name.c_str());
         if (m.clearcoat != 0)

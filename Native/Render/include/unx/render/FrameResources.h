@@ -237,6 +237,10 @@ struct FrameResources
     TextureRef waterSunDepth, waterSunNormal, waterSunMedium;  // [W]
     TextureRef waterSunCaustics;  // R32_UINT array, 5 slices (WaterLight.hlsli waterCausticFactor; waterSunLight's causticsSrv)  [W]
     BufferRef waterSunConstants;                              // [W]
+    // 14.1b (L2b, v1.92): the emissive quadtree lights image (lights::emissiveLights, Passes/Lights/EmissiveLights.hlsli;
+    // invalid: shading.emissive_area_lights off or no converted emitter). Published by the first caller of the frame (M's
+    // shading or R's GI hit); R's emissiveLightsConverted rule reads it from here.
+    BufferRef emissiveLights;                                  // [A/Lights]
     // Light functions (E's Passes/Lights LightFunction.hlsli, A8; invalid = no light has one): cookies, IES, gobos,  [E]
     // flicker and animation per light index. Every reader of a light's emission (M shading, S froxel in-scattering, R
     // hit shading and GI) multiplies it by lightFunction(srv, light, forward, right, dir, footprint, g_time) (raw).

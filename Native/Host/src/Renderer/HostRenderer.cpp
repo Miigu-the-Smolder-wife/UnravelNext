@@ -1084,6 +1084,11 @@ namespace
 // Whether world (x, z) lies in the basin (its samples 0..256 per axis, half a sample of slack for rounding).
 bool poolContains(const HostRenderer::PoolInput& p, double x, double z)
 {
+    if (p.shape == 1)
+    {
+        const double dx = x - p.centre[0], dz = z - p.centre[2];
+        return std::sqrt(dx * dx + dz * dz) <= 0.5 * p.sizeX * (1 + 0.5 / 128);  // RoundPool::contains
+    }
     const double c = std::cos(double(p.yaw)), s = std::sin(double(p.yaw)), dx = x - p.centre[0], dz = z - p.centre[2];
     const double u = (dx * c - dz * s) / p.sizeX + 0.5, v = (dx * s + dz * c) / p.sizeZ + 0.5, slackU = 0.5 / 256, slackV = 0.5 / 256;
     return u >= -slackU && u <= 1 + slackU && v >= -slackV && v <= 1 + slackV;
@@ -1098,8 +1103,9 @@ void HostRenderer::setPools(std::span<const PoolInput> pools)
         const PoolInput& p = pools[i];
         const bool finite = std::isfinite(p.sizeX) && std::isfinite(p.sizeZ) && std::isfinite(p.depth) && std::isfinite(p.yaw) && std::isfinite(p.centre[0]) &&
                             std::isfinite(p.centre[1]) && std::isfinite(p.centre[2]);
-        if (!p.id || !finite || !(p.sizeX > 0) || !(p.sizeZ > 0) || !(p.depth >= 0) || !(p.surfaceFilm == 0 || p.surfaceFilm == 1))
-            fail("pools: basin %zu (id %u): id nonzero, sizes %g x %g (> 0), depth %g (>= 0), film %g (0 or 1), finite", i, p.id, p.sizeX, p.sizeZ, p.depth, p.surfaceFilm);
+        if (!p.id || !finite || !(p.sizeX > 0) || !(p.sizeZ > 0) || !(p.depth >= 0) || !(p.surfaceFilm == 0 || p.surfaceFilm == 1) || p.shape > 1)
+            fail("pools: basin %zu (id %u): id nonzero, sizes %g x %g (> 0), depth %g (>= 0), film %g (0 or 1), shape %u (0 or 1), finite", i, p.id, p.sizeX, p.sizeZ, p.depth,
+                 p.surfaceFilm, p.shape);
         for (size_t j = 0; j < i; ++j)
             if (pools[j].id == p.id) fail("pools: id %u appears twice", p.id);
     }
@@ -1132,7 +1138,7 @@ void HostRenderer::poolsLocked(FramePacket& packet)
     for (const PoolInput& p : m_pools)
     {
         render::PoolFrame f;
-        f.id = p.id, f.material = p.material;
+        f.id = p.id, f.material = p.material, f.shape = p.shape;
         f.sizeX = p.sizeX, f.sizeZ = p.sizeZ, f.depth = p.depth, f.surfaceFilm = p.surfaceFilm;
         f.centre[0] = p.centre[0] - m_mainOriginOffset.x, f.centre[1] = p.centre[1] - m_mainOriginOffset.y, f.centre[2] = p.centre[2] - m_mainOriginOffset.z;
         f.yaw = p.yaw;

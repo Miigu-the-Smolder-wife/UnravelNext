@@ -492,7 +492,7 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
     // Transmission along the refracted ray.
     // Absorption from the material: baseColor = the medium's transmittance over 1 m (sigma_a = -ln T; authoring rule
     // agreed with engine 2 for W2). Pure water (Pope & Fry 1997, 650 / 550 / 450 nm) is T = (0.712, 0.945, 0.991).
-    const float3 sigmaA = -log(clamp(m.baseColor, 1e-6, 1.0));
+    const float3 sigmaA = -log(clamp(m.baseColor, 1e-6, 1.0)) + m.hairAbsorption;  // + sigma_s of a turbid Water material (v1.92): the beam's extinction sigma_t
     rays.sigmaA = sigmaA;
     float3 transmitted = 0;
     float3 t;

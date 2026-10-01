@@ -51,6 +51,8 @@ static void waterSunMap(FramePassContext& fc)
         {
             const scene::Material& m = source->materials[t.material];
             w.transmittance[0] = m.baseColor.x, w.transmittance[1] = m.baseColor.y, w.transmittance[2] = m.baseColor.z;
+            if (fc.quality.has("shading.water_turbid") && fc.quality.boolean("shading.water_turbid"))  // v1.92: the beam's extinction includes sigma_s
+                for (int a = 0; a < 3; ++a) w.transmittance[a] *= std::exp(-(a == 0 ? m.waterScattering.x : a == 1 ? m.waterScattering.y : m.waterScattering.z));
             if (m.ior > 1.0001f) w.ior = m.ior;
         }
         streams.push_back(w);

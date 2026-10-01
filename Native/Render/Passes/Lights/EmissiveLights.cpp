@@ -310,9 +310,19 @@ struct EmissiveLightsState
     uint64_t revision = 0;   // scene revision of the cook
     bool cooked = false;
     ComPtr<ID3D12Resource> buffer;
-    std::vector<ComPtr<ID3D12Resource>> uploads;
+    std::vector<ComPtr<ID3D12Resource>> uploads;  // this frame's upload (released once its copy completed: the next call, or here)
     uint64_t bytes = 0;
     bool logged = false;
+    uint64_t importedFrame = UINT64_MAX;  // the frame whose graph holds 'imported' (one import per frame: M and R share it)
+    BufferRef imported;
+    Device* device = nullptr;  // for the deferred releases at destruction (a track state cleared while the GPU still copies:
+                               // ShadingTests 2026-10-01 saw the debug layer's final-release corruption error)
+    ~EmissiveLightsState()
+    {
+        if (!device) return;
+        for (ComPtr<ID3D12Resource>& u : uploads) device->deferRelease(u);
+        if (buffer) device->deferRelease(buffer);
+    }
 };
 } // namespace
 
@@ -322,6 +332,8 @@ BufferRef emissiveLights(FramePassContext& fc)
     if (!fc.quality.boolean("shading.emissive_area_lights")) return {};
     EmissiveLightsState& s = fc.state<EmissiveLightsState>("lights.emissive");
     Device& device = fc.device;
+    s.device = &device;
+    if (s.importedFrame == fc.frame.frameIndex) return s.imported;  // already in this frame's graph (FrameResources::emissiveLights)
     for (ComPtr<ID3D12Resource>& u : s.uploads) device.deferRelease(u);
     s.uploads.clear();
     RenderGraph& g = fc.graph;
@@ -349,6 +361,9 @@ BufferRef emissiveLights(FramePassContext& fc)
         std::memcpy(p, image.data(), s.bytes);
         upload->Unmap(0, nullptr);
         const BufferRef table = g.importBuffer(s.buffer.Get(), BufferDesc{ "lights.emissive", s.bytes, 0 });
+        s.importedFrame = fc.frame.frameIndex;
+        s.imported = table;
+        fc.resources.emissiveLights = table;
         ID3D12Resource* srcBuffer = upload.Get();
         const uint64_t bytes = s.bytes;
         g.addPass("lights.emissive.upload", QueueType::Graphics, [=](PassBuilder& b) { b.use(table, Use::CopyDst); },
@@ -359,6 +374,9 @@ BufferRef emissiveLights(FramePassContext& fc)
         return table;
     }
     if (!s.buffer) return {};
-    return g.importBuffer(s.buffer.Get(), BufferDesc{ "lights.emissive", s.bytes, 0 });
+    s.importedFrame = fc.frame.frameIndex;
+    s.imported = g.importBuffer(s.buffer.Get(), BufferDesc{ "lights.emissive", s.bytes, 0 });
+    fc.resources.emissiveLights = s.imported;
+    return s.imported;
 }
 } // namespace unx::lights

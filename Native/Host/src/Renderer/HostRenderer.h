@@ -388,6 +388,7 @@ public:
     struct PoolInput
     {
         uint32_t id = 0, material = 0;
+        uint32_t shape = 0;  // v1.92: 0 rectangle, 1 round (sizeX = diameter)
         float sizeX = 0, sizeZ = 0, depth = 0, surfaceFilm = 0;
         double centre[3] = {};
         float yaw = 0;

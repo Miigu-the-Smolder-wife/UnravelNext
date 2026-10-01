@@ -22,6 +22,7 @@
 //      +-20 %) - finite, volume unchanged, the RMS of the last minute at most that of the first
 //   unx_test_water_pooltests [--no-debug-layer] [--time | --warp]
 #include "unx/water/Pool.h"
+#include "unx/water/RoundPool.h"
 
 #include "unx/render/GpuProfiler.h"
 #include "unx/core/File.h"
@@ -732,6 +733,115 @@ int main(int argc, char** argv)
             W_CHECK(delivered == 8 - bath.framesInFlight, "statistics: %u delivered of 8 records", delivered);
             std::printf("statistics: GPU mean / RMS / max deviation equal the CPU's over %u records (last: %.4g / %.4g / %.4g m)\n", delivered, pool.latestStats().mean,
                         pool.latestStats().rms, pool.latestStats().maxDeviation);
+        }
+        // 9. round tub (W2-R, RoundPool; defect queue 13 (74)): a 1 m radius, 0.5 m deep tub placed at a yaw. (a) a central
+        //    splash: the field stays axisymmetric (per ring, max - min over the angles <= 1e-4 of the peak: the footprint is
+        //    exactly axisymmetric on the polar grid), finite, the sampled volume sum eta r h_r h_theta changes by at most
+        //    1e-3 of the pushed-out volume from the first frame on (the mean mode is exact; the oscillating Dini modes have
+        //    zero continuous mean), and the RMS after the first second stays below 1.5 x its first second's; (b) an
+        //    off-centre volume source at local (0.5, 0) m: at the first frame the lowest sample lies within 5 cm of it.
+        {
+            using unx::water::RoundPool;
+            using unx::water::RoundPoolDesc;
+            using unx::water::RoundPoolPlacement;
+            using unx::water::RoundPoolSource;
+            constexpr uint32_t RT = RoundPool::kTheta, RR = RoundPool::kRings;
+            RoundPoolDesc rd;
+            rd.radius = 1.0f;
+            rd.depth = 0.5f;
+            RoundPoolPlacement rp;
+            rp.centre[0] = 1.5; rp.centre[1] = 0.3; rp.centre[2] = -2.0;
+            rp.yaw = 0.7f;
+            auto stepRound = [&](RoundPool& pool, uint64_t frame, double time, const std::vector<RoundPoolSource>& src, std::vector<float>& field, float centreOut[4]) {
+                RenderGraph g(gpu.device);
+                const auto out = pool.record(g, frame, rp, time, 1.0f / 60, src);
+                const uint64_t pitch = (RT * 16 + 255) / 256 * 256;
+                ComPtr<ID3D12Resource> rb = buffer(gpu.device, pitch * RR + 256, D3D12_HEAP_TYPE_READBACK);
+                ID3D12Resource* r = rb.Get();
+                const auto f = out.field;
+                const auto c = out.centre;
+                g.addPass("round read", QueueType::Graphics,
+                          [&](PassBuilder& pb) { pb.use(f, Use::CopySrc); pb.use(c, Use::CopySrc); pb.keep(); },
+                          [=](PassContext& ctx) {
+                              D3D12_TEXTURE_COPY_LOCATION dst{ r, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
+                              dst.PlacedFootprint.Footprint = { DXGI_FORMAT_R32G32B32A32_FLOAT, RT, RR, 1, UINT(pitch) };
+                              D3D12_TEXTURE_COPY_LOCATION srcLoc{ ctx.resource(f), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+                              ctx.cmd->CopyTextureRegion(&dst, 0, 0, 0, &srcLoc, nullptr);
+                              ctx.cmd->CopyBufferRegion(r, pitch * RR, ctx.resource(c), 0, 16);
+                          });
+                g.execute(nullptr);
+                for (uint32_t q = 0; q < kQueueTypeCount; ++q) gpu.device.queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
+                const uint8_t* p = nullptr;
+                check(rb->Map(0, nullptr, (void**)&p), "map round field");
+                field.resize(size_t(RT) * RR * 4);
+                for (uint32_t j = 0; j < RR; ++j) std::memcpy(&field[size_t(j) * RT * 4], p + j * pitch, RT * 16);
+                std::memcpy(centreOut, p + pitch * RR, 16);
+                rb->Unmap(0, nullptr);
+            };
+            const double hr = rd.radius / RR, hTheta = 2 * kPi / RT;
+            auto volumeOf = [&](const std::vector<float>& f) {
+                double v = 0;
+                for (uint32_t j = 0; j < RR; ++j)
+                    for (uint32_t i = 0; i < RT; ++i) v += double(f[(size_t(j) * RT + i) * 4]) * ((j + 1) * hr) * hr * hTheta;
+                return v;
+            };
+            {
+                RoundPool pool(gpu.device, gpu.shaders, rd);
+                RoundPoolSource s;
+                s.x = rp.centre[0]; s.z = rp.centre[2]; s.radius = 0.08f; s.impulse = 2.0f; s.volume = 1e-3f;
+                std::vector<float> f;
+                float centre[4];
+                double v1 = 0, rmsFirst = 0, rmsLater = 0, asymWorst = 0;
+                bool finite = true;
+                for (int n = 0; n < 300; ++n)
+                {
+                    stepRound(pool, uint64_t(n), n / 60.0, n == 0 ? std::vector<RoundPoolSource>{ s } : std::vector<RoundPoolSource>{}, f, centre);
+                    double peak = 0, sum = 0;
+                    for (size_t q = 0; q < size_t(RT) * RR; ++q)
+                    {
+                        const float e = f[4 * q];
+                        finite = finite && std::isfinite(e) && std::isfinite(f[4 * q + 1]) && std::isfinite(f[4 * q + 2]);
+                        peak = std::max(peak, double(std::abs(e)));
+                        sum += double(e) * e;
+                    }
+                    finite = finite && std::isfinite(centre[0]);
+                    const double rms = std::sqrt(sum / double(size_t(RT) * RR));
+                    for (uint32_t j = 0; j < RR; ++j)
+                    {
+                        float lo = 3e38f, hi = -3e38f;
+                        for (uint32_t i = 0; i < RT; ++i) { const float e = f[(size_t(j) * RT + i) * 4]; lo = std::min(lo, e); hi = std::max(hi, e); }
+                        asymWorst = std::max(asymWorst, double(hi - lo) / std::max(peak, 1e-9));
+                    }
+                    const double v = volumeOf(f);
+                    if (n == 0) v1 = v;
+                    else W_CHECK(std::abs(v - v1) <= 1e-3 * s.volume, "round tub: the volume sum changed by %.3g m^3 at frame %d (first %.6g)", v - v1, n, v1);
+                    if (n < 60) rmsFirst = std::max(rmsFirst, rms);
+                    else rmsLater = std::max(rmsLater, rms);
+                }
+                W_CHECK(finite, "round tub: a non-finite height or slope");
+                W_CHECK(asymWorst <= 1e-4, "round tub: a central splash lost its axial symmetry (%.3g of the peak)", asymWorst);
+                W_CHECK(rmsFirst > 0 && rmsLater <= 1.5 * rmsFirst, "round tub: the RMS grew (%.4g -> %.4g m)", rmsFirst, rmsLater);
+                std::printf("round tub: central splash over 300 frames: axisymmetric within %.2g of the peak, volume sum %.6g m^3, RMS first second %.4g m, later %.4g m\n", asymWorst, v1, rmsFirst,
+                            rmsLater);
+            }
+            {
+                RoundPool pool(gpu.device, gpu.shaders, rd);
+                const double c = std::cos(double(rp.yaw)), sn = std::sin(double(rp.yaw)), lx = 0.5, lz = 0;
+                RoundPoolSource s;
+                s.x = rp.centre[0] + lx * c + lz * sn;  // Pool.cpp axes: local x -> (cos, -sin), local z -> (sin, cos)
+                s.z = rp.centre[2] - lx * sn + lz * c;
+                s.radius = 0.06f; s.impulse = 0; s.volume = 5e-4f;
+                std::vector<float> f;
+                float centre[4];
+                stepRound(pool, 0, 0.0, { s }, f, centre);
+                size_t lowest = 0;
+                for (size_t q = 1; q < size_t(RT) * RR; ++q) if (f[4 * q] < f[4 * lowest]) lowest = q;
+                const uint32_t i = uint32_t(lowest % RT), j = uint32_t(lowest / RT);
+                const double r = (j + 1) * hr, theta = i * hTheta, px = r * std::cos(theta), pz = r * std::sin(theta);
+                const double dist = std::sqrt((px - lx) * (px - lx) + (pz - lz) * (pz - lz));
+                W_CHECK(dist <= 0.05, "round tub: the lowest sample after an off-centre source lies %.3f m from it (ring %u, angle %u: local %.3f, %.3f)", dist, j, i, px, pz);
+                std::printf("round tub: off-centre source at local (0.5, 0): lowest sample at local (%.3f, %.3f)\n", px, pz);
+            }
         }
         std::printf("pool tests passed\n");
         return 0;

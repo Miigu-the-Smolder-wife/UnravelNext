@@ -14,6 +14,6 @@ $exe = "C:\Users\USER\UnravelNext-fix\build\all\bin\unx_gate_shadow_renderergate
 foreach ($s in $Sets.Split(",")) {
   $name = "bath_motion_$($Tag)_$s"
   $sw = [Diagnostics.Stopwatch]::StartNew()
-  & $exe --scene $scene --resolution $Res --auto-exposure --warmup-frames 0 --frames 300 --path-rotate 45 --cut-at 150 --capture (Join-Path $out "$name.pfm") --capture-frames 151,152,154,166,299 --frame-log (Join-Path $out "$name.csv") @($switches[$s]) *> (Join-Path $out "$name.log")
+  & $exe --scene $scene --resolution $Res --auto-exposure --warmup-frames 0 --frames 300 --path-rotate 45 --cut-at 150 --capture (Join-Path $out "$name.pfm") --capture-frames 151,152,154,166 --frame-log (Join-Path $out "$name.csv") @($switches[$s]) *> (Join-Path $out "$name.log")
   "$name exit $LASTEXITCODE in $([int]$sw.Elapsed.TotalSeconds) s"
 }

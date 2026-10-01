@@ -72,7 +72,15 @@ struct Material
     float alphaCutoff = 0.0f;                // 0 = opaque; otherwise alpha-tested against baseColor texture alpha
     float transmission = 0.0f;               // Foliage: fraction of diffuse transmitted to the back side
     float ior = 1.5f;                        // Glass / Water
+    // Water (v1.92, defect queue 13 (75)): the medium's scattering coefficient (1/m, rgb; 0 = clear: the absorption
+    // -ln baseColor alone) and the Henyey-Greenstein asymmetry of its phase function (-1 < g < 1; bath water ~ 0.7-0.9)
+    float3 waterScattering{ 0.0f, 0.0f, 0.0f };
+    float waterAnisotropy = 0.0f;
     bool twoSided = false;
+    // v1.92 (defect queue 13 (76), transitional until V2.5 14.1b lights every emissive face): an emissive surface that is
+    // seen as emissive by primary and reflection rays (it shows in mirrors) but adds nothing to the GI update rays'
+    // emissive samples and the emissive cache channel, so the analytic light it belongs to lights the scene once.
+    bool emissiveVisibleOnly = false;
     uint32_t baseColorTexture = kNone;       // Rgba8Srgb; multiplies baseColor, alpha = coverage
     uint32_t normalTexture = kNone;          // Rg8Normal
     uint32_t roughMetalTexture = kNone;      // Rg8RoughMetal; multiplies roughness/metallic
