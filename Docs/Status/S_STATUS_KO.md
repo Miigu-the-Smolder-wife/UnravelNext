@@ -519,6 +519,8 @@ S의 국소 그림자 맵이 꺼지는 켬 상태에서 국소광에 그림자�
 - **③ 광원 격자 칸 목록 상한 제안**: bfc3cdd `Docs/Status/LIGHT_GRID_BOUND_PROPOSAL_KO.md`(R에게 전달). R은 `r.gi.lg.trace` 띠를 광선 기준으로 고침(redesign-v2 c4d2060).
 - 관찰: `unx_test_host_hostabi`가 "S VSM: sun level 0 can reach 4089109318 cluster entries"로 실패(장면 커밋 뒤, 첫 프레임). 값은 GPU 인스턴스 용량 × 가장 큰 메시의 클러스터 수 꼴이라 광원과 무관해 보이나, 이 변경 전에도 실패했는지는 확인하지 않았다.
 
+- **`direct_pairs` 기본 true** (조정 07:30): 기본 변종은 라운지를 통과한 `rtVisible` 쪽(인라인 변종은 로비에서만 돌았고 선택 사항으로 남김). `direct_stochastic` · `remainder_light` · `direct_analytic = false`를 쌍 경로와 같이 켜면 설정 단계에서 오류로 멈춘다(모드를 조용히 버리지도, 멈추는 옛 경로로 조용히 돌아가지도 않음). [실측, 잠금 안] 로비 8프레임, `reflection.lumen` + `surface_cache.enabled`(direct_pairs 지정 없음): 종료 0, `r.sc.pairs.trace` 8회 / `r.sc.cells` 0회; `direct_stochastic=true`를 더한 실행은 GPU 작업 전에 그 오류로 종료 1.
+
 ### 17.1 라운지 hang — 확정된 것과 추정인 것 (2026-10-02)
 - **확정 [실측]**: (a) S2의 DRED·단계별 실행으로 멈추는 곳은 `r.sc.cells`가 광원 중심으로 쏘는 그림자 광선이었다(같은 셀의 태양 광선·광원 선택·해석 적분만으로는 통과; S2의 기록). (b) 같은 조명을 쌍 구조로 바꾼 `surface_cache.direct_pairs`(1f494fe: 선택은 광선 없는 compute, 쌍 레코드당 스레드 하나가 그림자 광선 1개, dispatch당 ≤ 262,144)는 라운지에서 8프레임·60프레임·전부 켬 8프레임 모두 장치 제거 없이 돌았다. (c) 같은 `rtVisible` 헬퍼·같은 마스크(0x10)·같은 구간 꼴을 쓰는 MegaLights 광선은 그 전에도 라운지를 통과했다.
 - **구조의 차이 [코드]**: 옛 구조는 ray generation 스레드 하나가 [loop] 안에서 TraceRay를 최대 18번(광원 8 + 나머지 1 + 태양 1, 각각 정적·동적 TLAS) 부르고, 고른 광원 배열·가중·MlPoint 등이 매 추적을 가로질러 살아 있었다. 새 구조는 추적을 가로질러 살아 있는 것이 쌍 주소뿐이다.

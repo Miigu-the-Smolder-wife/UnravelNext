@@ -75,7 +75,7 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     uint32_t scEntriesLog2 = 22, scMaxUnused = 255, scCaptureFactor = 64, scCaptureBounces = 3, scDirectFactor = 32, scRadiosityFactor = 64;
     float scRadiosityCap = 40.0f, scRadiosityFrames = 4.0f;
     uint32_t scDebugCount = 0;              // surface_cache.debug_count: radiosity ray hits / empty reads in the header (view component 7)
-    bool scDirectPairs = false;  // surface_cache.direct_pairs (A): the direct light as (cell, light) pairs, SurfaceCacheLightPairs.cpp
+    bool scDirectPairs = true;  // surface_cache.direct_pairs (A): the direct light as (cell, light) pairs, SurfaceCacheLightPairs.cpp
     bool scDirectShadowInline = false;  // surface_cache.direct_shadow_inline: the lights' shadow rays as inline queries, after the evaluation
     bool scShadowRaysOpaque = false;  // surface_cache.shadow_rays_opaque: the cells' shadow rays run no alpha test
     uint32_t scDebugSkip = 0;         // surface_cache.debug_skip (diagnostics): 1 no local lights, 2 no sun, 4 lights chosen only, 8 no light shadow rays, 16 light shadow rays under the GI mask
