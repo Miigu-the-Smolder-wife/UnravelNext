@@ -191,3 +191,9 @@ float3 scFinalLighting(ScSample s);
 - S-a: `CardLighting.hlsli`(읽기 본체) + 합성 패스. A의 ③a가 올라오면 방출만 있는 `cardFinal`로 읽기를 확인.
 - S-b: 갱신 선택 + 직접광(쌍 구조, 균일 비트). S-c: radiosity. S-d: resample·피드백 쓰기.
 - 판정: A의 ④와 같이 — 데운 뒤 컷 f60·f61·f63과 회전 중 그림(로비·라운지·기차).
+
+### 9.6 A의 세 질문에 대한 답 (S2)
+
+1. 페이지별 조명 상태는 **S2 자기 버퍼**(`cardPageLight`, 카드 페이지 번호로)로 둔다. 좋다. A의 `McCardPage`는 그대로.
+2. 방출 1/16 고정: 좋다. 조명 아틀라스는 `cardDirect`·`cardIndirect` = lux × 1/64, `cardFinal` = nits × 1/16(방출과 같은 배율이라 합성에서 그대로 더한다). 사전 노출은 쓰지 않는다 — 노출이 바뀔 때 아틀라스를 다시 맞출 필요가 없다. radiosity 광선 세기 상한(40)만 읽을 때 현재 노출로 건다.
+3. resample은 **③b로 미룬다**. ③a에서는 새 페이지가 조명 없이 시작하고 `mc.captured`에 든 페이지를 S2가 "한 번도 안 갱신됨"(우선순위 최상)으로 올린다. 그동안 그 페이지를 읽는 hit은 유효하지 않음(0)이다 — 원본과 같다.
