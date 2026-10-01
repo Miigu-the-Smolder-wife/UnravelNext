@@ -1,0 +1,25 @@
+﻿unx_test_shading_ltcfit.exe : sheen LTC fit (L1 distance of the normalised lobe, 0 = exact): mean 0.2985, worst 1.9340 
+at roughness 0.100, NoV 0.998
+At line:1 char:462
++ ... ","fan")) { & .\build\M\bin\unx_test_shading_ltcfit.exe --sheen --pol ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (sheen LTC fit (....100, NoV 0.998:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  roughness 0.101, x = sqrt(1 - NoV) 0 .. 1: 0.1409 1.6520 0.3999 0.3230 0.2750 0.4409
+  roughness 0.146, x = sqrt(1 - NoV) 0 .. 1: 0.1586 0.3564 0.3448 0.3315 0.2774 0.4399
+  roughness 0.311, x = sqrt(1 - NoV) 0 .. 1: 0.1799 0.2364 0.2389 0.2340 0.2537 0.4011
+  roughness 0.595, x = sqrt(1 - NoV) 0 .. 1: 0.1502 0.1566 0.1731 0.1732 0.1884 0.3336
+  roughness 1.000, x = sqrt(1 - NoV) 0 .. 1: 0.1062 0.1087 0.1175 0.1193 0.1338 0.2906
+  x lobe / LTC ratio at the light centre: mean 0.3752, worst 1.1459, cells over 3 %: 704 of 704
+  x lobe / LTC ratio at the form-factor direction: mean 0.1852, worst 1.0000, cells over 3 %: 704 of 704
+  LTC + horizon-clipped quadrature of (lobe - LTC), Gauss-Legendre 2 x 2: mean 0.0800, worst 0.4628, cells over 3 %: 39
+9 of 704
+  LTC + horizon-clipped quadrature of (lobe - LTC), Gauss-Legendre 3 x 3: mean 0.0399, worst 0.1879, cells over 3 %: 26
+8 of 704
+  LTC + horizon-clipped quadrature of (lobe - LTC), Gauss-Legendre 4 x 4: mean 0.0242, worst 0.1816, cells over 3 %: 12
+1 of 704
+  LTC + horizon-clipped quadrature of (lobe - LTC), Gauss-Legendre 6 x 6: mean 0.0078, worst 0.0636, cells over 3 %: 27
+ of 704
+polygon check (rect lights, sum |I_ltc - I_true| / sum I_true per cell): mean 0.1467, worst 2.7104 at roughness 0.100 N
+oV 0.998, cells over 3 %: 683 of 704
