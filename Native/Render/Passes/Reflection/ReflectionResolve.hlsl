@@ -12,7 +12,8 @@
 // window by it).
 // Planar mirror pixels read their reflection camera's colour at (pixel - rectangle origin), divided by the exposure.
 // P[0] = { mode SRV, results SRV, depth SRV, gbuffer SRV }, P[1] = { reflection UAV, history UAV, rows H, planar SRV }
-// P[2] = { width, height, planar byte offset, 0 }, P[3] = planar colour SRVs; frame constants b1 = main view.
+// P[2] = { width, height, planar byte offset, flags (bit 0: reflection.layer_mirror_lobe) }, P[3] = planar colour SRVs;
+// frame constants b1 = main view.
 // Reconstruction layers (reflection.layers; ReflectionInternal.hlsli): P[4] = { job layers SRV (raw; UNX_NONE: off),
 // stochastic layer UAV, residual layer UAV, guide UAV }. Every pixel of the view gets its guide (mode 0: no layer value -
 // K, planar, no data); an M or G pixel with a value also its demodulated stochastic part and residual, resolved from
@@ -106,7 +107,13 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         const uint3 r = results[reflJob(m)];
         reflection[pixel] = float4(reflStorable(reflResultRadiance(r)), 1);
         history[pixel] = float2(reflSmoothedDistance(history[pixel].x, reflResultDistance(r)), reflResultMotion(r));
-        if (layers) storeLayers(pixel, reflSurface(depth, gbuffer, pixel), deviceDepth, LAYER_MODE_M, loadJobLayers(reflJob(m)), reflResultDistance(r));
+        if (layers)
+        {
+            ResolveLayers own = loadJobLayers(reflJob(m));
+            // reflection.layer_mirror_lobe: the value without the stochastic share is a layer too (LayerDenoise)
+            if (P[2].w & 1u) own.residual = reflResultRadiance(r) - own.share;
+            storeLayers(pixel, reflSurface(depth, gbuffer, pixel), deviceDepth, LAYER_MODE_M, own, reflResultDistance(r));
+        }
         return;
     }
     const ReflSurface s = reflSurface(depth, gbuffer, pixel);

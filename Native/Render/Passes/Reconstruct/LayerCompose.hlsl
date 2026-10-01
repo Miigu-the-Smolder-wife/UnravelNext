@@ -8,7 +8,8 @@
 // value is the resolve's bit for bit. Pixels without layers (K, planar mirrors, no data) are left as they are.
 // P[0] = { reflection UAV, guide SRV, stochastic SRV, residual SRV }, P[1] = { stochastic' SRV, residual' SRV, width, height }
 // P[2] = { view (reflection.layer_view, diagnostics: 0 = the value; 1 stochastic, 2 stochastic', 3 residual, 4 residual',
-// 5 albedo, 6 base, 7 = the reconstructed layers' alphas (frames in their history) - written instead of the value), 0, 0, 0 }
+// 5 albedo, 6 base, 7 = the reconstructed layers' alphas (frames in their history) - written instead of the value),
+// reflection.layer_mirror_lobe (M pixels have a residual layer), 0, 0 }
 #include "Passes/Reconstruct/LayerCommon.hlsli"
 
 [numthreads(8, 8, 1)]
@@ -38,7 +39,7 @@ void main(uint2 pixel : SV_DispatchThreadID)
     const float4 s1 = newS.Load(int3(pixel, 0));
     float3 r0 = 0;
     float4 r1 = 0;
-    if (mode == LAYER_MODE_G)
+    if (mode == LAYER_MODE_G || P[2].y != 0)
     {
         r0 = rawR.Load(int3(pixel, 0)).rgb;
         r1 = newR.Load(int3(pixel, 0));

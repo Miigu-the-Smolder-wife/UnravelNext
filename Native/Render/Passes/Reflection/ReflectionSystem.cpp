@@ -95,6 +95,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.layerHistoryFrames = q.has("reflection.layer_history_frames") ? (uint32_t)std::max<int64_t>(q.integer("reflection.layer_history_frames"), 1) : 8u;
     s.layerView = q.has("reflection.layer_view") ? (uint32_t)q.integer("reflection.layer_view") : 0u;
     s.layerHistoryBound = !q.has("reflection.layer_history_bound") || q.boolean("reflection.layer_history_bound");
+    s.layerMirrorLobe = q.has("reflection.layer_mirror_lobe") && q.boolean("reflection.layer_mirror_lobe");
     s.deterministic = q.has("debug.deterministic") && q.boolean("debug.deterministic");
     s.planarRayNs = (float)q.number("reflection.planar_ray_ns");
     return s;
@@ -1176,9 +1177,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   }
               },
               [&shaders, modes, results, depth, gbuffer, reflection, history, width, height, tilesX, tilesY, frameConstants, planarSrv, planarOffset, planarCount,
-               planarColor, layers, jobLayers, layerStochastic, layerResidual, layerGuide](PassContext& c) {
+               planarColor, layers, jobLayers, layerStochastic, layerResidual, layerGuide, mirrorLobe = s.layerMirrorLobe](PassContext& c) {
                   uint32_t k[20] = { c.srv(modes), c.srv(results), c.srv(depth), c.srv(gbuffer), c.uav(reflection), c.uav(history), height, planarSrv,
-                                     width, height, planarOffset, 0, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
+                                     width, height, planarOffset, mirrorLobe ? 1u : 0u, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
                   for (uint32_t v = 0; v < planarCount; ++v) k[12 + v] = c.srv(planarColor[v]);
                   if (layers) k[16] = c.srv(jobLayers), k[17] = c.uav(layerStochastic), k[18] = c.uav(layerResidual), k[19] = c.uav(layerGuide);
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionResolve"));
@@ -1211,8 +1212,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                               b.use(outS, Use::UavCompute);
                               b.use(outR, Use::UavCompute);
                           },
-                          [&shaders, inS, inR, layerGuide, outS, outR, width, height, focal, level, frameConstants](PassContext& c) {
-                              const uint32_t k[12] = { c.srv(inS), c.srv(inR), c.srv(layerGuide), 1u << level, c.uav(outS), c.uav(outR), width, height, asU(focal), 0, 0, 0 };
+                          [&shaders, inS, inR, layerGuide, outS, outR, width, height, focal, level, frameConstants, mirrorLobe = s.layerMirrorLobe](PassContext& c) {
+                              const uint32_t k[12] = { c.srv(inS), c.srv(inR), c.srv(layerGuide), 1u << level, c.uav(outS), c.uav(outR), width, height, asU(focal),
+                                                       mirrorLobe ? 1u : 0u, 0, 0 };
                               c.cmd->SetPipelineState(shaders.compute("Passes/Reconstruct/LayerDenoise"));
                               c.computeConstants(k, 12);
                               c.bindFrameConstants(frameConstants);
@@ -1240,7 +1242,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
             const TextureRef nextKeys = import(m_layerKeys[next], "R reflection layer history keys", DXGI_FORMAT_R32G32_UINT);
             const TextureRef visId = main.visId;
             const BufferRef visibleClusters = main.visibleClusters;
-            const uint32_t flags = (m_accumReset ? 1u : 0u) | (s.layerHistoryBound ? 0u : 2u);
+            const uint32_t flags = (m_accumReset ? 1u : 0u) | (s.layerHistoryBound ? 0u : 2u) | (s.layerMirrorLobe ? 4u : 0u);
             m_accumReset = false;
             const float3 prevCamera = m_prevCamera;
             m_prevCamera = main.view.position;
@@ -1288,8 +1290,10 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           b.use(composeR, Use::SrvCompute);
                       }
                   },
-                  [&shaders, reflection, layerGuide, layerStochastic, layerResidual, composeS, composeR, width, height, view = s.layerView](PassContext& c) {
-                      const uint32_t k[12] = { c.uav(reflection), c.srv(layerGuide), c.srv(layerStochastic), c.srv(layerResidual), c.srv(composeS), c.srv(composeR), width, height, view, 0, 0, 0 };
+                  [&shaders, reflection, layerGuide, layerStochastic, layerResidual, composeS, composeR, width, height, view = s.layerView,
+                   mirrorLobe = s.layerMirrorLobe](PassContext& c) {
+                      const uint32_t k[12] = { c.uav(reflection), c.srv(layerGuide), c.srv(layerStochastic), c.srv(layerResidual), c.srv(composeS), c.srv(composeR), width, height, view,
+                                               mirrorLobe ? 1u : 0u, 0, 0 };
                       c.cmd->SetPipelineState(shaders.compute("Passes/Reconstruct/LayerCompose"));
                       c.computeConstants(k, 12);
                       c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);

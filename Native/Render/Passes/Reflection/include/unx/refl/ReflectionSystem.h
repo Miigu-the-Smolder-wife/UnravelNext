@@ -45,6 +45,7 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     uint32_t layerHistoryFrames = 0;  // reflection.layer_history_frames (1 = no history)
     uint32_t layerView = 0;           // reflection.layer_view: diagnostics (LayerCompose.hlsl), 0 in the shipped configuration
     bool layerHistoryBound = true;    // reflection.layer_history_bound: the history bounded by the frame's reconstruction (A/B)
+    bool layerMirrorLobe = false;     // reflection.layer_mirror_lobe: M's base as a layer inside its lobe footprint (decision item)
     // debug.deterministic: the planar view / ray choice from the priors alone (planarRayNs, the view's prior a + b x),
     // never from measured GPU times (they differ between runs, and a plane drawn by a camera or by rays differs in value).
     bool deterministic = false;

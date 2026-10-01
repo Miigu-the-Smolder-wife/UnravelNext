@@ -24,6 +24,10 @@
 //     distance of sigma blur_px / 2 for the residual (it is band-limited by the lobe, and a wider average would blur the
 //     reflection the lobe resolves) and of max(blur_px / 2, 6 px) for the stochastic layer (the hits' lighting over their
 //     albedo varies no faster than under a mirror, whose layer the full support averages).
+//   reflection.layer_mirror_lobe (P[2].y, a decision item, off): an M pixel's value without its stochastic share is in
+//     the residual layer too and is filtered as a G residual - receiver-guided taps of M pixels under the Gaussian of
+//     sigma blur_px / 2 (a mirror, blur_px < 1, keeps its own value: the Gaussian is 0 one pixel away), the tap unit
+//     blur_px / 14 as for G. Without it an M pixel has no residual (its base passes unfiltered).
 // No value (luminance) weights: the G layers are band-limited by the lobe footprint the Gaussian already bounds, so a
 // value difference between accepted taps is noise, and the noise here is heavy-tailed (a lobe that meets a lamp's
 // hotspot with one ray in hundreds): variance-guided value weights kept every such sample as a hard-edged square of the
@@ -36,7 +40,7 @@
 // Unbiased where the layer is constant over the accepted taps; elsewhere the bias is that of averaging the hit lighting
 // over the filter's footprint on the reflected surface.
 // P[0] = { stochastic in SRV, residual in SRV, guide SRV, step }, P[1] = { stochastic out UAV, residual out UAV, width, height }
-// P[2] = { asuint(focal length px), 0, 0, 0 }; frame constants b1 = main view.
+// P[2] = { asuint(focal length px), reflection.layer_mirror_lobe, 0, 0 }; frame constants b1 = main view.
 #include "Passes/Reconstruct/LayerCommon.hlsli"
 
 static const float kB3[5] = { 1.0 / 16.0, 1.0 / 4.0, 3.0 / 8.0, 1.0 / 4.0, 1.0 / 16.0 };
@@ -55,14 +59,16 @@ void main(uint2 pixel : SV_DispatchThreadID)
     RWTexture2D<float4> outR = ResourceDescriptorHeap[P[1].y];
     const LayerGuide c = layerGuide(g0, pixel);
     const bool mirror = c.mode == LAYER_MODE_M;
+    const bool residual = !mirror || P[2].y != 0;  // the pixel has a residual layer
     const float4 s0 = inS.Load(int3(pixel, 0));
     float4 r0 = 0;
-    if (!mirror) r0 = inR.Load(int3(pixel, 0));
+    if (residual) r0 = inR.Load(int3(pixel, 0));
     const float image0 = layerImageDepth(c);
     const float NoV = saturate(dot(c.normal, normalize(g_cameraPosition - c.position)));
     const float blur = c.hitDistance / max(c.linearZ, 1e-4) * reflectionLobeHalfAngle(c.roughness, NoV) * asfloat(P[2].x);
-    const float sigmaR = max(0.5 * blur, 0.5), sigmaS = max(0.5 * blur, 6.0);
-    const int unit = mirror ? 1 : (int)clamp(max((float)(1u << (g0.z & 3u)), floor(blur / 14.0)), 1.0, 8.0);
+    // (no floor on the residual's sigma: a footprint under a pixel is the pixel's own value - a mirror stays a mirror)
+    const float sigmaR = max(0.5 * blur, 1e-3), sigmaS = max(0.5 * blur, 6.0);
+    const int unit = (int)clamp(max(mirror ? 1.0 : (float)(1u << (g0.z & 3u)), residual ? floor(blur / 14.0) : 1.0), 1.0, 8.0);
     const int step = (int)P[0].w * unit;
     float3 sumS = 0, sumR = 0;
     float wS = 0, wR = 0;
@@ -77,27 +83,28 @@ void main(uint2 pixel : SV_DispatchThreadID)
             if (!centre) gq = guides.Load(int3(q, 0));
             if (layerMode(gq) != c.mode) continue;
             float w = kB3[dx + 2] * kB3[dy + 2];
-            float wResidual = mirror ? 0 : w;
+            float wResidual = residual ? w : 0;
             if (!centre)
             {
                 const float offset = length(float2(dx, dy)) * step;
+                if (residual)
+                {
+                    // the receiver's guides and the lobe footprint (G's layers; with layer_mirror_lobe an M pixel's residual)
+                    const LayerGuide t = layerGuide(gq, uint2(q));
+                    const float plane = saturate(1 - abs(dot(c.normal, t.position - c.position)) / max(c.linearZ, 1e-4) / 0.02);
+                    const float agree = saturate(dot(c.normal, t.normal));
+                    const float agree2 = agree * agree, agree4 = agree2 * agree2;
+                    const float nearer = min(c.hitDistance, t.hitDistance), farther = max(c.hitDistance, t.hitDistance);
+                    const float receiver = plane * plane * agree4 * agree4 * saturate(1 - abs(c.roughness - t.roughness) * 4) * saturate(4 * nearer / max(farther, 1e-6));
+                    wResidual = w * receiver * exp(-0.5 * offset * offset / (sigmaR * sigmaR));
+                    if (!mirror) w *= receiver * exp(-0.5 * offset * offset / (sigmaS * sigmaS));
+                }
                 if (mirror)
                 {
                     const float imageQ = linearDepth(max(asfloat(gq.x), 1e-30)) + f16tof32(gq.z >> 16);
                     const float agree = saturate(dot(c.hitNormal, reflUnpackOct16(gq.z & 0xFFFFu)));
                     const float agree2 = agree * agree, agree4 = agree2 * agree2;
                     w *= exp(-abs(imageQ - image0) / (image0 * (0.01 + 0.004 * offset))) * agree4 * agree4;
-                }
-                else
-                {
-                    const LayerGuide t = layerGuide(gq, uint2(q));
-                    const float plane = saturate(1 - abs(dot(c.normal, t.position - c.position)) / max(c.linearZ, 1e-4) / 0.02);
-                    const float agree = saturate(dot(c.normal, t.normal));
-                    const float agree2 = agree * agree, agree4 = agree2 * agree2;
-                    const float nearer = min(c.hitDistance, t.hitDistance), farther = max(c.hitDistance, t.hitDistance);
-                    w *= plane * plane * agree4 * agree4 * saturate(1 - abs(c.roughness - t.roughness) * 4) * saturate(4 * nearer / max(farther, 1e-6));
-                    wResidual = w * exp(-0.5 * offset * offset / (sigmaR * sigmaR));
-                    w *= exp(-0.5 * offset * offset / (sigmaS * sigmaS));
                 }
             }
             if (w > 0 && !layerNoData(gq))
@@ -116,8 +123,8 @@ void main(uint2 pixel : SV_DispatchThreadID)
             }
         }
     }
-    // (the centre tap always counts for the residual: wR > 0 for G; the stochastic layer has wS = 0 when the pixel and
-    // every accepted tap lack data: its own value stays)
+    // (the centre tap always counts for the residual: wR > 0; the stochastic layer has wS = 0 when the pixel and every
+    // accepted tap lack data: its own value stays)
     outS[pixel] = float4(wS > 0 ? sumS / wS : s0.rgb, 0);
-    if (!mirror) outR[pixel] = float4(sumR / wR, 0);
+    if (residual) outR[pixel] = float4(sumR / wR, 0);
 }

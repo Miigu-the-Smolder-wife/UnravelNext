@@ -30,6 +30,13 @@ layer_filter = true                    # the layers' spatial reconstruction ever
 layer_history_frames = 8               # the layers' running mean (LayerTemporal) in place of temporal_history_max's 32: the
                                        # spatial reconstruction is the frame's value, the history removes what it leaves
                                        # (design 10.5: 32 without the spatial filter against 8 with it). 1 = no history
+layer_mirror_lobe = false              # DECISION ITEM, off: an M pixel's value without its stochastic share (its "identity") is also
+                                       # a layer, reconstructed inside its lobe's footprint (Gaussian sigma blur_px / 2 over
+                                       # receiver-guided taps, as G's residual). Design 1.2 keeps M's identity out of every
+                                       # spatial filter - right for a mirror (blur_px < 1: the Gaussian leaves it untouched),
+                                       # but M is every roughness below mirror_roughness_max, whose one ray per pixel is one
+                                       # draw of a GGX lobe up to ~4 deg wide: a footprint of tens of pixels, one sample each
+                                       # frame, integrated by the previous path only while the view stands still
 layer_history_bound = true             # the history is brought within the reconstructed layer's 3 x 3 neighbourhood (mean +- 3
                                        # deviations + 5 %) before it is mixed. A/B, not settled by measurement: false = no
                                        # bound (a lighting change then takes layer_history_frames frames to arrive in the

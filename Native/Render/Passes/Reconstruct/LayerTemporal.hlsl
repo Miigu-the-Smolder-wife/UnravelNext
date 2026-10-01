@@ -28,7 +28,8 @@
 // P[0] = { stochastic SRV, residual SRV (LayerDenoise's last level), guide SRV, vis id SRV }
 // P[1] = { visible clusters SRV, previous stochastic SRV, previous residual SRV, previous keys SRV }
 // P[2] = { stochastic out UAV, residual out UAV, keys out UAV, history frames }
-// P[3] = { width, height, asuint(lobe shift), flags (bit 0: no history this frame, bit 1: the history is not bounded -
+// P[3] = { width, height, asuint(lobe shift), flags (bit 0: no history this frame, bit 2: M pixels carry a residual layer -
+// reflection.layer_mirror_lobe - followed with the image point as their stochastic layer; bit 1: the history is not bounded -
 // reflection.layer_history_bound = false, A/B: the bound's rule is not settled by measurement yet) }
 // P[4] = { asuint(previous camera position xyz), asuint(pixel angle) }, P[5] = { hit distance / motion history SRV, 0, 0, 0 }
 // Frame constants b1 = main view.
@@ -61,9 +62,10 @@ void main(uint2 pixel : SV_DispatchThreadID)
     RWTexture2D<float4> outR = ResourceDescriptorHeap[P[2].y];
     const LayerGuide c = layerGuide(g0, pixel);
     const bool mirror = c.mode == LAYER_MODE_M;
+    const bool residual = !mirror || (P[3].w & 4u) != 0;
     const float4 s = inS.Load(int3(pixel, 0));
     float4 r = 0;
-    if (!mirror) r = inR.Load(int3(pixel, 0));
+    if (residual) r = inR.Load(int3(pixel, 0));
     const float3 toEye = g_cameraPosition - c.position;
     const float eyeDistance = length(toEye);
     const float3 view = toEye / max(eyeDistance, 1e-20);
@@ -133,7 +135,7 @@ void main(uint2 pixel : SV_DispatchThreadID)
             const float w = (o.x ? f.x : 1 - f.x) * (o.y ? f.y : 1 - f.y);
             if (w <= 0) continue;
             sumS += w * a.rgb;
-            if (!mirror) sumR += w * prevR.Load(int3(t, 0)).rgb;
+            if (residual) sumR += w * prevR.Load(int3(t, 0)).rgb;
             weight += w;
             nPrev = min(nPrev, (uint)a.a);
         }
@@ -153,7 +155,7 @@ void main(uint2 pixel : SV_DispatchThreadID)
                     const float3 a = k9 == 4 ? s.rgb : inS.Load(int3(q, 0)).rgb;
                     m1S += a;
                     m2S += a * a;
-                    if (!mirror)
+                    if (residual)
                     {
                         const float3 b = k9 == 4 ? r.rgb : inR.Load(int3(q, 0)).rgb;
                         m1R += b;
@@ -181,5 +183,5 @@ void main(uint2 pixel : SV_DispatchThreadID)
         keysOut[pixel] = uint2(0, 0);  // (never expected: no history from this pixel)
     }
     outS[pixel] = float4(meanS, (float)(n + 1));
-    if (!mirror) outR[pixel] = float4(meanR, (float)(n + 1));
+    if (residual) outR[pixel] = float4(meanR, (float)(n + 1));
 }
