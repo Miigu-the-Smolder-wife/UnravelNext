@@ -98,7 +98,12 @@ static void waterFluids(FramePassContext& fc)
             slot.h = h;
             slot.particles = d.maxParticles;
         }
-        const float origin[3] = { float(in.origin[0]), float(in.origin[1]), float(in.origin[2]) };
+        // An anchored domain moves during the tick (NP_FluidGpuView2): the start buffer's cells are from startOrigin, the
+        // current one's from origin, so the blended point is lerp(startOrigin, origin, alpha) + dx lerp(x_start, x, alpha) -
+        // the grid at the blended origin (physics a342d694: 0.5 m off at 30 m/s without it).
+        const bool blend = in.start && in.startValid;
+        float origin[3];
+        for (int a = 0; a < 3; ++a) origin[a] = float(blend ? in.startOrigin[a] + (in.origin[a] - in.startOrigin[a]) * in.alpha : in.origin[a]);
         slot.surface->setOrigin(origin);
         water::FluidSurfaceInput input;
         input.particles = g.importBuffer(in.current, { "W fluid particles", in.current->GetDesc().Width, 0 });
@@ -112,6 +117,7 @@ static void waterFluids(FramePassContext& fc)
         input.alpha = in.alpha;
         input.velocityOffset = 16;       // NP_FluidParticle velocity, cells per second
         input.velocityScale = in.dx;
+        std::copy(std::begin(in.frameVelocity), std::end(in.frameVelocity), input.frameVelocity);  // relative -> world velocity
         // The fluid's particles and origin are in the physics World's axes, which are the particle streams' (the Unity host's
         // World is the renderer's mirrored in z: FrameContext::streamAxes); the surface is written in renderer axes.
         for (int a = 0; a < 3; ++a) input.axes[a] = frame.streamAxes[a] < 0 ? -1.0f : 1.0f;

@@ -354,11 +354,12 @@ public:
     void hairSetFrameFraction(float fraction);
     void hairRemoveBody(uint32_t body);
     // B8 GPU fluids (engine 1's shared-mode physics fluids) for the frames queued from now on until the next call: each
-    // one's NP_FluidGpuView (96 B, as np_fluid_gpu_view filled it), the frame's time within their tick and its domain in
+    // one's NP_FluidGpuView (96 B) or NP_FluidGpuView2 (136 B, an anchored domain), as np_fluid_gpu_view filled it, the
+    // frame's time within their tick and its domain in
     // cells; stamp = the tick's NRC_GpuWorldStamp (6 x 64 bit). An empty list: no fluids.
     struct FluidInput
     {
-        const void* view = nullptr;  // NP_FluidGpuView
+        const void* view = nullptr;  // NP_FluidGpuView or NP_FluidGpuView2
         float alpha = 1;
         uint32_t domainCells[3] = {};
         uint32_t material = 0;       // the scene material of its surface (Water class)

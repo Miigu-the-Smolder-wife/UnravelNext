@@ -57,6 +57,9 @@ struct FluidFrame
     ID3D12Resource* start = nullptr;    // particles at the start of that tick (null or !startValid: no blend)
     uint32_t count = 0, startCount = 0, stride = 80, startValid = 0;  // stride: NP_FluidGpuView::stride (>= 48; 80 today)
     double origin[3] = {};              // world position of cell 0 in this frame's coordinates (origin shifts applied)
+    double startOrigin[3] = {};         // cell 0 of the start buffer's positions (NP_FluidGpuView2: an anchored domain where
+                                        // the tick started; = origin when not anchored)
+    float frameVelocity[3] = {};        // m/s the particles' velocities are relative to (the anchored domain's; 0 otherwise)
     float dx = 0;                       // cell size (m); particle positions are in cells
     float alpha = 1;                    // this frame's time between the tick's start (0) and end (1)
     uint64_t tick = 0;

@@ -5,6 +5,9 @@
 //   2. origin rebase: the same particles with the fluid's origin moved by -1024 m in x give the same triangles moved by
 //      -1024 m (within float spacing at 1 km)
 //   3. a fluid without particles adds no stream
+//   4. an anchored domain (NP_FluidGpuView2, physics a342d694): the start buffer's cells from startOrigin, the current one's
+//      from origin; at alpha 0.5 the surface lies at the blended origin (the same particles in both buffers: the triangles
+//      of test 1 moved by half the domain's motion) and every vertex velocity carries the frame velocity
 //   unx_test_water_watertracktests [--no-debug-layer] [--warp]
 #include "unx/render/Frame.h"
 #include "unx/render/GpuScene.h"
@@ -99,6 +102,21 @@ Read readStream(Gpu& gpu, RenderGraph& g, BufferRef vertices, BufferRef draw, ui
     check(rb->Map(0, nullptr, (void**)&m), "map stream");
     std::memcpy(&out.drawn, m, 4);
     out.vertices.assign((const float*)(m + 256), (const float*)(m + 256) + size_t(std::min(out.drawn, maxVertices)) * 8);
+    rb->Unmap(0, nullptr);
+    return out;
+}
+// The stream's first `vertices` velocities (16 B each: m/s, w = 0).
+std::vector<float> readVelocities(Gpu& gpu, RenderGraph& g, BufferRef velocities, uint32_t vertices)
+{
+    ComPtr<ID3D12Resource> rb = buffer(gpu.device, uint64_t(vertices) * 16, D3D12_HEAP_TYPE_READBACK);
+    ID3D12Resource* r = rb.Get();
+    g.addPass("W test read velocities", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(velocities, Use::CopySrc); pb.keep(); },
+              [=](PassContext& c) { c.cmd->CopyBufferRegion(r, 0, c.resource(velocities), 0, uint64_t(vertices) * 16); });
+    run(gpu, g);
+    std::vector<float> out(size_t(vertices) * 4);
+    const uint8_t* m = nullptr;
+    check(rb->Map(0, nullptr, (void**)&m), "map velocities");
+    std::memcpy(out.data(), m, out.size() * 4);
     rb->Unmap(0, nullptr);
     return out;
 }
@@ -241,6 +259,39 @@ int main(int argc, char** argv)
             frameWith(&empty, 1, resources, g);
             W_CHECK(resources.triangleStreams.empty(), "an empty fluid added %zu streams", resources.triangleStreams.size());
             std::printf("a fluid without particles adds no stream\n");
+        }
+        // 4. an anchored domain: moved +0.4 m in x over the tick (24 m/s at 60 Hz), the particles still in the domain's frame
+        {
+            FluidFrame anchored = fluid;
+            anchored.start = particles.Get();
+            anchored.startValid = 1;
+            anchored.startCount = count;
+            anchored.startOrigin[0] = fluid.origin[0] - 0.4;
+            anchored.startOrigin[1] = fluid.origin[1];
+            anchored.startOrigin[2] = fluid.origin[2];
+            anchored.alpha = 0.5f;
+            anchored.frameVelocity[0] = 24.0f;
+            RenderGraph g(gpu.device);
+            FrameResources resources;
+            frameWith(&anchored, 1, resources, g);
+            const TriangleStream& st = resources.triangleStreams.at(0);
+            const Read moved = readStream(gpu, g, st.vertices, st.drawArgs, 3 * maxTriangles);
+            W_CHECK(moved.drawn == viaTrack.drawn, "anchored: %u vertices, unanchored %u", moved.drawn, viaTrack.drawn);
+            double worst = 0;
+            for (size_t v = 0; v < moved.vertices.size(); v += 8)
+                worst = std::max({ worst, std::abs(double(moved.vertices[v]) - (double(viaTrack.vertices[v]) - 0.2)), std::abs(double(moved.vertices[v + 1]) - viaTrack.vertices[v + 1]),
+                                   std::abs(double(moved.vertices[v + 2]) - viaTrack.vertices[v + 2]) });
+            W_CHECK(worst <= 1e-5, "anchored vertices differ from the surface at the blended origin by %.3g m", worst);
+            RenderGraph gv(gpu.device);
+            FrameResources rv;
+            frameWith(&anchored, 1, rv, gv);
+            const std::vector<float> velocity = readVelocities(gpu, gv, rv.triangleStreams.at(0).velocities, moved.drawn);
+            // the particles' own velocity (1, 0, -0.5) cells/s x 0.05 m = (0.05, 0, -0.025) m/s plus the frame's (24, 0, 0)
+            double worstV = 0;
+            for (size_t v = 0; v < velocity.size(); v += 4)
+                worstV = std::max({ worstV, std::abs(double(velocity[v]) - 24.05), std::abs(double(velocity[v + 1])), std::abs(double(velocity[v + 2]) + 0.025) });
+            W_CHECK(worstV <= 1e-3, "anchored vertex velocities differ from the particles' plus the frame's by %.3g m/s", worstV);
+            std::printf("anchored domain: at alpha 0.5 every vertex lies at the blended origin within %.2e m, velocities carry the frame's within %.2e m/s\n", worst, worstV);
         }
         if (!warp)
         {

@@ -17,6 +17,7 @@
 //   P[7] particle velocity offset (bytes; 0xFFFFFFFF = none), velocity scale (particle units -> m/s), previous slot
 //        offset (bytes to the uint index of the particle in the previous buffer; 0xFFFFFFFF = the same index), first
 //        record (1: every triangle past the drawn ones is retired, FluidTail.hlsl)
+//   P[9] xyz: the frame velocity (m/s) the particle velocities are relative to (an anchored physics domain; 0 otherwise)
 // Nodes hold 4 uints: density (fixed point 2^20) and the density-weighted velocity (signed, m/s x 2^16) for the surface
 // velocities (motion vectors: V's triangle stream, request 20260926_W_gpu_triangle_stream.md).
 #ifndef UNX_WATER_FLUID_SURFACE_HLSLI
@@ -158,7 +159,7 @@ float3 fsVelocity(uint i)
         ByteAddressBuffer prev = ResourceDescriptorHeap[P[0].y];
         v = lerp(asfloat(prev.Load3(fsPrevious(i) * fsStride() + P[7].x)), v, fsAlpha());
     }
-    return v * asfloat(P[7].y);
+    return v * asfloat(P[7].y) + asfloat(P[9].xyz);
 }
 // Particle i in node units at the frame's time (current, or blended with the previous tick's position).
 float3 fsParticle(uint i)

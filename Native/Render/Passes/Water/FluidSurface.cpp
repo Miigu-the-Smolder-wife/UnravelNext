@@ -277,6 +277,7 @@ FluidSurfaceOutput FluidSurface::record(RenderGraph& g, const FluidSurfaceInput&
         k.p[6][3] = (in.axes[0] < 0 ? 1u : 0u) | (in.axes[1] < 0 ? 2u : 0u) | (in.axes[2] < 0 ? 4u : 0u);
         k.p[7][0] = in.velocityOffset; std::memcpy(&k.p[7][1], &in.velocityScale, 4); k.p[7][2] = in.previousSlotOffset; k.p[7][3] = first ? 1 : 0;
         k.p[8][0] = c.srv(basinTable); k.p[8][1] = basinCount;  // W3 seam: the basin table (FluidBasin.hlsl)
+        std::memcpy(&k.p[9][0], in.frameVelocity, 12);           // the particles' frame velocity (m/s)
         if (pass >= 1 && pass <= 3)
         {
             k.p[8][2] = c.uav(pass == 2 ? smooth : density);
