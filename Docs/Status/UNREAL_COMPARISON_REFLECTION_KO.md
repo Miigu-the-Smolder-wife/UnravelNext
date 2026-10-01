@@ -92,3 +92,57 @@ Unreal의 반사가 조용한 이유는 필터가 더 좋아서가 아니라, **
 - `surface_cache.entries_log2 = 22` — 저장 칸 수(255 MB). 언리얼 아틀라스는 2^24 텍셀. 로비는 2^21에서 가득 찼다(91 %).
 - `reflection.lumen_ggx_sampling_bias = 0.1` — GGX 표본 꼬리 10 % 절단(lobe가 조금 좁아진다). 0이면 lobe 전체.
 - (만들지 않음) 다운샘플 추적 2×1·2×2 — 언리얼에서도 기본이 아니다. 성능이 모자랄 때의 선택지로만 적어 둔다.
+
+## 7. 판정 항목 1 — gi.lumen이 표면 캐시를 읽을 때의 간접광 수준 (2026-10-02 새벽)
+
+증상(조정 세션): 로비에서 gi.lumen + 표면 캐시를 같이 켜면 간접광이 낮고 네모 조각과 푸른 기가 보인다.
+
+### 7.1 소스로 확인한 것
+
+| 질문 | 언리얼(ue6-main) | 우리 |
+|---|---|---|
+| MegaLights가 켜지면 표면 캐시 직접광이 확률판으로 바뀌는가 | 아니다. `r.LumenScene.DirectLighting.Stochastic` 기본 0, MegaLights 분기 없음(`LumenSceneDirectLightingStochastic.inl` 3-5, 57-60). 기본은 타일당 가장 센 8개, 나머지는 버림(`LumenSceneDirectLighting.cpp` 89-91, `LumenSceneDirectLightingCulling.usf` BuildLightTilesCS) | 같다(`remainder_light=false`) |
+| 기본 경로의 직접광 계산 | 결정적. 조도 = 광원의 해석적 적분(`DeferredLightingCommon.ush` 518 GetIrradianceForLight), 그림자 = 광원 위치로 쏜 광선 1개(`LumenSceneDirectLightingHardwareRayTracing.usf` 154-180). 광원 위 무작위 점은 확률판에서만 | 무작위 점 1개 + GI 마스크 그림자 광선이었다 → **`surface_cache.direct_analytic`(기본 true)로 고침** |
+| hit이 읽는 값 | FinalLighting = (직접 + 간접) × 알베도 / π + 방출(`LumenSurfaceCache.ush` 50-55) | 같다(`scFinalLighting`; R의 hit은 직접 + 간접을 조도로 받아 실제 재질로 셰이딩) |
+| hit에서의 보간 | 카드 최대 3장(법선 축 가중) × 텍셀 4개 이중선형 × 깊이 가시성(`LumenSurfaceCacheSampling.ush` 235-311) | 셀 하나(최근접). **차이로 남아 있다** |
+| 방출면 | 카드 캡처의 EmissiveAtlas → FinalLighting → radiosity 광선이 읽어 퍼짐. 광선 세기 상한 40 × 1/PreExposure(`LumenRadiosity.usf` 188-190) | 같다(셀의 방출, 상한 40) |
+
+### 7.2 실측
+
+내 동결 로비 장면(`bt_lobby_20261001_1802`), 1080p, gi.lumen + reflection.lumen, 각 1회 [실측]. GI 층 평균에 2^ev100을 곱해 노출을 뺀 값, f299, 표면 캐시 없음 = 1.00.
+
+| 설정 | GI 층 수준 |
+|---|---|
+| 표면 캐시 없음 | 1.00 |
+| 표면 캐시, 이전 직접광(무작위 점) | 0.21 |
+| + `remainder_light=true` | 0.22 |
+| + `direct_stochastic=true` | 0.30 |
+| 표면 캐시, 해석적 직접광(새 기본) | 0.30 |
+| 해석적 + `remainder_light=true` | 0.30 |
+| 해석적, `radiosity=false` | 0.19 |
+| `direct_lighting=false` | 0.12 |
+| 해석적 + `radiosity_max_ray_intensity=0` | 0.46 |
+| 전부 켬(MegaLights + radiance cache + AO, 이전 직접광) | 0.40 |
+
+- 8개 밖 광원은 원인이 아니다(remainder가 수준을 바꾸지 않는다).
+- 해석적 = 확률판(편향 없는 추정)의 수준이므로, 이전의 무작위 점 방식이 직접광을 낮게 냈다.
+- 1800프레임(`judge_run.py --modes long`): 해석적 0.33 → 0.35 → 0.37(f299 / f899 / f1799, 같은 실행의 캐시 없음 = 1.00). 수렴 지연이 아니다.
+
+반사 hit에서의 성분(`reflection.lumen_surface_cache_view_component`, E / π, nits, f299, `sc_components.py`):
+
+| 성분 | 값 |
+|---|---|
+| 셀 직접광 | 5.5 |
+| 셀 간접광(상한 40) | 4.5 |
+| 셀 간접광(상한 끔) | 8.3 |
+| 같은 hit의 월드 GI 캐시 조도 | 19.3 |
+| 같은 hit의 국소광 표본(기존 hit 셰이딩) | 2.2 |
+
+화이트 퍼니스(`furnace_sc.ps1`, 닫힌 방 Le = 1, ρ = 0.5, 기대 L = 2): 표면 캐시를 켠 반사 hit 값 / 기대값 = 0.9995, radiosity를 끄면 0.4785(방출만: 0.5 근처), 표면 캐시 없음 0.9984. **radiosity의 다중 반사는 에너지를 보존한다.**
+
+### 7.3 결론과 남은 것
+
+1. 고친 것: 직접광을 언리얼 기본 구조로(d4d97e3). 수준 0.21 → 0.30, 계단·카운터의 얼룩이 줄었다.
+2. radiosity 광선 세기 상한 40(언리얼 기본값, QUALITY TRADE)이 이 장면에서 간접광의 절반 가까이를 자른다. 로비는 ev100 3.5라 상한이 약 540 nits이고 발광면이 그보다 밝다. 사용자 결정 항목.
+3. 상한을 꺼도 hit의 간접광은 8.3 대 19.3이다. 퍼니스에서는 두 경로가 같은 값을 내므로 차이는 광원·방출면이 있는 이 장면에서 기존 GI 캐시가 무엇을 더 담는가의 문제다. **어느 쪽이 맞는지 미확인**: 기준 경로 추적기(`unx_reference`)는 이 장면을 읽지 못한다(재질의 차폐 텍스처 정의가 없다는 오류).
+4. 셀 보간(7.1 넷째 줄)은 아직 최근접이다.
