@@ -110,3 +110,5 @@ lumen_disocclusion_tonemap = true      # QUALITY TRADE (user decision): young pi
 lumen_hit_surface_cache = true         # with surface_cache.enabled: the traced rays' hits mark their surface cache cell and take
                                        # its accumulated local-light and bounce irradiance (no one-light sample at the hit)
 lumen_surface_cache_view = false       # diagnostics: a traced hit's value is its cell's state (r: no lit cell, g: frames, b: live cells)
+lumen_rough_specular_from_gather = true  # with gi.lumen: pixels above the roughness limit (and the fade's other side) take the
+                                       # final gather's rough specular (view.giRoughSpecular); false or no gather = the K path

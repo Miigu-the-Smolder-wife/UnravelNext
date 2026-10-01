@@ -48,6 +48,7 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     // reflection.lumen: the ray-reuse pipeline (ReflectionReuse.hlsli) in place of the G path, the accumulation and the layers
     bool lumen = false;
     float lumenMaxRoughness = 0.4f, lumenFadeLength = 0.1f, lumenMaxRayIntensity = 40.0f, lumenTonemapRange = 10.0f;
+    bool lumenRoughFromGather = true;  // reflection.lumen_rough_specular_from_gather: untraced pixels take view.giRoughSpecular
     bool lumenReconstruction = true, lumenTemporal = true, lumenBilateral = true, lumenDisocclusionTonemap = true;
     uint32_t lumenReconstructionSamples = 5, lumenBilateralSamples = 4;
     float lumenReconstructionRadius = 8.0f, lumenTemporalMaxFrames = 12.0f, lumenClampScale = 1.0f, lumenDistanceThreshold = 0.03f;

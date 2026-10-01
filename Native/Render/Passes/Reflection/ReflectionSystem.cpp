@@ -126,6 +126,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.lumenBilateralDepthWeight = num("reflection.lumen_bilateral_depth_weight", 10000.0);
     s.lumenDisocclusionFrames = num("reflection.lumen_bilateral_disocclusion_frames", 2.0);
     s.lumenDisocclusionTonemap = flag("reflection.lumen_disocclusion_tonemap", true);
+    s.lumenRoughFromGather = flag("reflection.lumen_rough_specular_from_gather", true);
     // The surface cache (Passes/SurfaceCache/SurfaceCache.hlsli); defaults are the reference's (ue6-main LumenScene*.cpp,
     // LumenRadiosity.cpp).
     s.surfaceCache = flag("surface_cache.enabled", false);
@@ -934,11 +935,12 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   }
               },
               [&shaders, depth, gbuffer, lobes, history, modes, jobs, args, reflection, s, focal, width, height, tilesX, tilesY, frameConstants, planarSrv,
-               planarOffset, planarCounts, planarViews, viewCount = planar.views, spacingLog2, lumen](PassContext& c) {
+               planarOffset, planarCounts, planarViews, viewCount = planar.views, spacingLog2, lumen, roughSpecularValid = main.giRoughSpecular.valid()](PassContext& c) {
                   uint32_t k[28] = { c.srv(depth), c.srv(gbuffer), lobes.valid() && !lumen ? c.srv(lobes) : 0xFFFFFFFFu, c.srv(history),
                                      c.uav(modes), c.uav(jobs), c.uav(args), c.uav(reflection),
                                      asU(s.kHalfAngle), asU(s.mirrorRoughness), asU(focal), height,
-                                     width, height, planarSrv, planarOffset, c.uav(planarCounts), spacingLog2, lumen ? 1u : 0u, asU(s.lumenMaxRoughness) };
+                                     width, height, planarSrv, planarOffset, c.uav(planarCounts), spacingLog2,
+                                     (lumen ? 1u : 0u) | (lumen && s.lumenRoughFromGather && roughSpecularValid ? 2u : 0u), asU(s.lumenMaxRoughness) };
                   for (uint32_t v = 0; v < kPlanarMax; ++v)
                   {
                       k[20 + v] = v < viewCount ? c.uav(planarViews[v].mask) : 0xFFFFFFFFu;
@@ -1500,6 +1502,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         m_accumReset = false;
         m_prevCamera = main.view.position;
         const uint32_t reuseFrame = (uint32_t)fc.frame.frameIndex;
+        // GI's rough specular (gi.lumen's final gather, view.giRoughSpecular): the value of the pixels above the roughness
+        // limit and the other side of the fade (ReflectionReuseFilter). Absent: those pixels stay on the K path.
+        const TextureRef roughSpecular = s.lumenRoughFromGather ? main.giRoughSpecular : TextureRef{};
         g.addPass("r.refl.reuse.resolve", QueueType::Compute,
                   [&](PassBuilder& b) {
                       b.use(modes, Use::SrvCompute);
@@ -1555,12 +1560,14 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       b.use(gbuffer, Use::SrvCompute);
                       b.use(reflection, Use::UavCompute);
                       b.use(modes, Use::SrvCompute);
+                      if (roughSpecular.valid()) b.use(roughSpecular, Use::SrvCompute);
                   },
-                  [&shaders, nextValue, nextFrames, depth, gbuffer, reflection, modes, width, height, tilesX, tilesY, frameConstants, reuseFrame, s](PassContext& c) {
+                  [&shaders, nextValue, nextFrames, depth, gbuffer, reflection, modes, width, height, tilesX, tilesY, frameConstants, reuseFrame, s, roughSpecular](PassContext& c) {
                       const uint32_t k[20] = { c.srv(nextValue), c.srv(nextFrames), c.srv(depth), c.srv(gbuffer), c.uav(reflection), c.srv(modes), height, reuseFrame,
                                                width, height, s.lumenBilateralSamples, (s.lumenBilateral ? 0u : 1u) | (s.lumenDisocclusionTonemap ? 0u : 2u),
                                                asU(s.lumenBilateralRadius), asU(s.lumenBilateralDepthWeight), asU(s.lumenDisocclusionFrames), asU(s.lumenTemporalMaxFrames),
-                                               asU(s.lumenMaxRoughness), asU(s.lumenFadeLength), asU(s.lumenTonemapRange), 0 };
+                                               asU(s.lumenMaxRoughness), asU(s.lumenFadeLength), asU(s.lumenTonemapRange),
+                                               roughSpecular.valid() ? c.srv(roughSpecular) : 0xFFFFFFFFu };
                       c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionReuseFilter"));
                       c.computeConstants(k, 20);
                       c.bindFrameConstants(frameConstants);
