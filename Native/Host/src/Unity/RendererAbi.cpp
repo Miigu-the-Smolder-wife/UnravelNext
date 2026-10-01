@@ -427,6 +427,11 @@ UNX_API int32_t UNX_CALL UnxFrameSetLens(UnxRenderer r, float apertureMetres, fl
     return call([&] { find(r)->setLens(apertureMetres, focusMetres); });
 }
 
+UNX_API int32_t UNX_CALL UnxFrameSetWhiteBalance(UnxRenderer r, float kelvin, float tint)
+{
+    return call([&] { find(r)->setWhiteBalance(kelvin, tint); });
+}
+
 // A3 mesh particles (render C, v1.82): the scene mesh a stream program's mesh_asset draws - a committed mesh index, a
 // runtime mesh id (UnxSceneAddRuntimeMesh, bit 31 set) or 0xFFFFFFFF to remove the mapping. Takes effect from the next
 // queued frame; particles of an unmapped asset (or of a removed runtime mesh) are not drawn and counted unmapped.

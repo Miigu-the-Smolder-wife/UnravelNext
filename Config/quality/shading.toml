@@ -52,6 +52,11 @@ post_lut = ""
 # Display rendering (U2): "film" (default; ShadingCommon.hlsli shFilm: filmic toe and shoulder, highlights roll off to
 # white, scene grey 0.18 stays 0.18) or "neutral" (Khronos PBR Neutral: base colours kept, flatter).
 post_tone_curve = "film"
+# Camera white balance (v1.91, defect queue 6 / game request 83): true adapts the frame from the camera's white point
+# (the host's UnxFrameSetWhiteBalance: correlated colour temperature K and tint Duv; 0 K = D65) to the display's D65 by
+# the Bradford transform, before the tone curve. false (default), or a D65 white point: bit-identical to before.
+# Automatic white balance (estimating the illuminant from the frame) is a design memo only (FEATURES_GAME 6.2).
+post_white_balance = false
 
 # Motion blur (A5; COVERAGE 14.12 (2); MotionBlur.cpp): the shutter's open time as a fraction of the frame interval,
 # the exposure [t - s dt, t]; 0.5 = 180 degrees (the user's gate camera, 2026-09-26), 0 = instantaneous. Frames without

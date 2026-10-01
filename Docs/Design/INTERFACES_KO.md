@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.90, 2026-10-01)
+# UnravelNext 인터페이스 (v1.91, 2026-10-01)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -579,6 +579,8 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
 ### 8.4 카메라·노출·톤맵
 핀홀(피사계 심도·모션 블러 없음, v1). 픽셀 필터 = 픽셀 사각형 박스. 노출 = 1 / (1.2 · 2^EV100). 톤맵 = Khronos PBR Neutral(`shading.tonemap`), 이어서 sRGB OETF.
 
+**카메라 화이트 밸런스(v1.91, 결함 큐 6 / 게임 요청 83).** 호스트가 `UnxFrameSetWhiteBalance(색온도 K, 틴트 Duv)`로 카메라가 맞춘 광원의 백색점을 준다(0 K = D65, 적응 없음; 4000 K 이상 CIE 주광 궤적, 아래 플랑크 궤적(Kim 2002), 틴트는 CIE 1960 uv에서 궤적 법선 방향 Duv, + 초록 − 자홍). `shading.post_white_balance = true`(커밋 전 오버라이드)일 때 M의 포스트 체인(`PostFinal`, 노출 보정 뒤·비네팅 앞)이 그 백색을 표시 D65로 Bradford 적응하는 선형 Rec.709 3×3(`Post.cpp whiteBalanceMatrix`, double로 계산)을 곱한다. 끄거나 D65(±1 K, 틴트 0)이면 곱을 건너뛰어 이전과 비트 동일. 자동 화이트 밸런스는 FEATURES_GAME 6.2의 설계 메모만.
+
 ### 8.5 Unity 콘텐츠 → 렌더러 장면 매핑 (v1.44, D0; core 결정 — M 정지 중, 조율 지시)
 호스트(I)의 레벨 적재기가 Unity 에셋을 `scene::Scene`(UnxScene*)으로 바꿀 때의 규칙이다. 목표는 두 가지다. 같은 입력이면 늘 같은 장면이 나와야 하고, 8.1~8.4 모델로 정확히 옮길 수 없는 입력은 조용히 바꾸지 않고 **콘텐츠 보고**(적재 로그 + 적재기 결과 목록)에 남긴다.
 - **좌표**: Unity(왼손, y 위)에서 렌더러 공간으로 z를 반전한다(S = diag(1, 1, −1)).
@@ -748,6 +750,8 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.91 (2026-10-01, A: 결함 큐 6 / 게임 요청 83 — 카메라 화이트 밸런스; 미검증 — 빌드까지):
+  - `FrameContext::whiteBalanceKelvin/Tint`, 호스트 `setWhiteBalance`, ABI 6 선택 export `UnxFrameSetWhiteBalance(float K, float Duv)`, C# `UnravelNextRenderer.TrySetWhiteBalance`·`UnravelNextScene.WhiteBalance/WhiteBalanceKelvin/WhiteBalanceTint`(커밋 전 `shading.post_white_balance=true` 오버라이드를 스스로 넣음), `PostFinal` P[3].y·P[4..6], 8.4 문단. 단위 시험 `white_balance_matrix`(D65 항등, 궤적 색도, 백색 → (1,1,1), 틴트 방향).
 - v1.90 (2026-10-01, A: 결함 큐 10번, B 요청 — 수조 η 통계 호스트 API; 미검증 — 빌드까지):
   - W2 `PoolStats.hlsl`(행 부분합 → 고정 순서 축약: 평균, 평균 기준 RMS, max|η − η̄|), `Pool::latestStats()`(framesInFlight 기록 뒤 읽기), `water::poolStatsSnapshot`(렌더 스레드, 트랙 상태 → 호스트 사본).
   - 호스트: `HostRenderer::poolStats(id)`, ABI 6 선택 export `UnxPoolStatsLatest(UnxPoolStats*)`(48 B: pool 입력, valid·frameIndex·time·mean·rms·maxDeviation 출력). C# `UnravelNextRenderer.TryPoolStats`, `UnravelNextPool.TryGetStats`.

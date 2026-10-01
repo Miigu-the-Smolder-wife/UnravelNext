@@ -42,7 +42,8 @@ enum UnxResult
                             //    UnxFrameRemoveRuntimeMesh, UnxFrameAddRuntimeInstance, UnxFrameRemoveRuntimeInstance,
                             //    UnxFrameSetRuntimeTransforms (C2b), UnxFrameSetTerrainDeformation (C5), UnxFrameSetOcean (B7),
                             //    UnxSceneSetTerrainLayers (C5 terrain material, v1.74), UnxFrameSetClouds (B5, v1.77),
-                            //    UnxFrameSetPools, UnxFrameAddPoolSources (W2, v1.78), UnxPoolStatsLatest (W2, v1.90)
+                            //    UnxFrameSetPools, UnxFrameAddPoolSources (W2, v1.78), UnxPoolStatsLatest (W2, v1.90),
+                            //    UnxFrameSetWhiteBalance (v1.91)
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -303,6 +304,13 @@ UNX_API int32_t UNX_CALL UnxRendererQualityOverride(UnxRenderer r, const char* u
 // in metres (0 = pinhole: no depth of field) and focus distance in metres along the view axis. Unity: focal length /
 // f-number of a physical camera, and its focus distance.
 UNX_API int32_t UNX_CALL UnxFrameSetLens(UnxRenderer r, float apertureMetres, float focusMetres);
+// The camera's white balance for the frames queued from now on (optional export within ABI 6; INTERFACES v1.91, defect
+// queue 6 / game request 83): the illuminant the camera is set to as a correlated colour temperature in kelvin (0 = D65:
+// no adaptation; else 1000..40000; the CIE daylight locus from 4000 K, the Planckian locus below) and a tint as Duv in
+// the CIE 1960 uv diagram (+ towards green, - towards magenta; |tint| <= 0.1). The post chain adapts the exposed image
+// from that white to the display's D65 (Bradford) when the quality key shading.post_white_balance is on (the game sets
+// it as an override before commit); off, or at D65, the output is bit-identical to before.
+UNX_API int32_t UNX_CALL UnxFrameSetWhiteBalance(UnxRenderer r, float kelvin, float tint);
 // Surface state field (A7, E's SurfaceField; optional exports within ABI 6, INTERFACES v1.52): after each VFX commit the
 // host passes NativeVfx nv_surface_delta(previous publication, publication): `changed` NV_SurfaceBrickV2 records (1560 B:
 // int32 key[3], uint32, double t0, float value[384]) and `removedKeys` (3 int32 per key). Half-lives: 6 doubles (s, 0 = no

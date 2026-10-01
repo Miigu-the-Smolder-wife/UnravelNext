@@ -95,6 +95,7 @@ struct FramePacket
                                                    // null standalone
     float displayPeak = 0;                         // FrameContext::displayPeak: 0 SDR, else HDR peak / paper white
     float lensAperture = 0, lensFocus = 0;         // FrameContext::lensAperture / lensFocus (the host's current lens)
+    float whiteBalanceKelvin = 0, whiteBalanceTint = 0;  // FrameContext::whiteBalance* (v1.91; 0 = D65)
     // A3 mesh particles (render C): the host's asset -> mesh table when it changed (mesh = committed mesh index, a runtime
     // mesh id with bit 31, or 0xFFFFFFFF = unmapped); resolved on the render thread (fx::meshAssets)
     std::optional<std::vector<std::pair<uint64_t, uint32_t>>> meshAssets;
@@ -322,6 +323,9 @@ public:
     void setDiscontinuity(uint32_t flags);
     // The camera's lens for the following frames (depth of field): aperture diameter (m, 0 = pinhole) and focus distance (m).
     void setLens(float aperture, float focus);
+    // The camera's white balance for the following frames (v1.91): the illuminant the camera is set to as a correlated
+    // colour temperature (K; 0 = D65, no adaptation; else 1000..40000) and a tint (Duv, |tint| <= 0.1).
+    void setWhiteBalance(float kelvin, float tint);
     // A3 mesh particles (render C): the scene mesh a program's mesh_asset draws (committed mesh index or runtime mesh id;
     // 0xFFFFFFFF removes the mapping: its particles are not drawn and counted unmapped)
     void mapMeshAsset(uint64_t asset, uint32_t mesh);
@@ -594,6 +598,7 @@ private:
     std::mutex m_fxMutex;
     uint64_t m_fxRecorded = 0;  // (m_fxMutex held) packets written under UNX_FX_RECORD
     float m_lensAperture = 0, m_lensFocus = 0;  // (m_mutex) the lens every queued frame takes
+    float m_whiteBalanceKelvin = 0, m_whiteBalanceTint = 0;  // (m_mutex) the white balance every queued frame takes (v1.91)
     std::map<uint64_t, uint32_t> m_meshAssetMap;  // (m_mutex) A3 mesh particles: asset -> mesh
     bool m_meshAssetsChanged = false;             // (m_mutex)
     std::vector<std::pair<uint64_t, uint32_t>> m_meshAssetsRender;  // render thread: the latest table received
@@ -631,6 +636,7 @@ private:
         scene::Scene scene;
         scene::Camera camera;
         float lensAperture = 0, lensFocus = 0;
+        float whiteBalanceKelvin = 0, whiteBalanceTint = 0;
         double time = 0;
         PhotoSettings settings;
     };
