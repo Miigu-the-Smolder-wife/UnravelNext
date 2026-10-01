@@ -40,8 +40,9 @@
 //   header 64 B: { S, frame, lighting epoch, exposure scale (float) }, { keep = 1 - alpha (float), minSamples (float),
 //     fineScale (float), GI cellSize0 (float) }, { 0, hits left out (statistics), 0, 0 }, { touched count of list 0..3 }
 //     (bytes 48-63)
-//   keys      at 64:        S x 8 B (0 = empty; open addressing, GI_ACCP_PROBES linear probes, a lookup reads them all:
-//                           eviction empties slots, so an empty slot does not end a search)
+//   keys      at 64:        S x 8 B (0 = never used, 1 = evicted; open addressing, at most GI_ACCP_PROBES linear probes: a
+//                           search ends at a never-used slot and passes evicted ones, a new key takes the first
+//                           evicted or never-used slot of its probes)
 //   stamps    at 64 + 8 S:  S x 4 B, frame x 4 + list + 1 of the slot's last touch (0 = never): the first toucher of a
 //                           list in a frame appends the slot to it (a cell hit by rays and fed by finer cells is in
 //                           list 0 and in a later one: each fold takes what has arrived since its last)
@@ -70,6 +71,7 @@
 #define GI_ACCP_MOMENT_SCALE 16777216.0
 #define GI_ACCP_TOP_LEVEL 27u  // the finest cells' level is at most this (4 levels above it fit the key's 5 bits)
 #define GI_ACCP_NONE 0xFFFFFFFFu
+#define GI_ACCP_EVICTED 1ull  // a key word of an emptied slot (keys have bit 63 set)
 
 struct GiAccPoolHeader
 {
@@ -133,39 +135,49 @@ uint64_t giAccpLoadKey(B pool, uint address)
     const uint2 w = pool.Load2(address);
     return ((uint64_t)w.y << 32) | w.x;
 }
-// The key's slot, or GI_ACCP_NONE. Every probe is read (an evicted slot is empty and does not end the search).
+// The key's slot, or GI_ACCP_NONE. The search ends at a never-used slot (a key is never placed past one).
 template <typename B>
 uint giAccpFind(B pool, GiAccPoolHeader h, uint64_t key)
 {
     const uint first = giHash(key);
     uint found = GI_ACCP_NONE;
-    [loop] for (uint i = 0; i < GI_ACCP_PROBES && found == GI_ACCP_NONE; ++i)
-    {
-        const uint slot = (first + i) & (h.slots - 1);
-        if (giAccpLoadKey(pool, giAccpKeyAddress(h, slot)) == key) found = slot;
-    }
-    return found;
-}
-// The key's slot, taking the first empty probe when it has none; GI_ACCP_NONE when all its probes hold other keys (the
-// caller then leaves the hit out: its point value stands). Two creators of one key meet at the same first empty slot:
-// the loser of the exchange finds the key there.
-uint giAccpFindOrCreate(RWByteAddressBuffer pool, GiAccPoolHeader h, uint64_t key)
-{
-    const uint first = giHash(key);
-    uint found = GI_ACCP_NONE, empty = GI_ACCP_PROBES;
-    [loop] for (uint i = 0; i < GI_ACCP_PROBES && found == GI_ACCP_NONE; ++i)
+    bool end = false;
+    [loop] for (uint i = 0; i < GI_ACCP_PROBES && found == GI_ACCP_NONE && !end; ++i)
     {
         const uint slot = (first + i) & (h.slots - 1);
         const uint64_t k = giAccpLoadKey(pool, giAccpKeyAddress(h, slot));
         if (k == key) found = slot;
-        else if (k == 0 && empty == GI_ACCP_PROBES) empty = i;
+        end = k == 0;
     }
-    [loop] for (uint j = empty; j < GI_ACCP_PROBES && found == GI_ACCP_NONE; ++j)
+    return found;
+}
+// The key's slot, taking the first evicted or never-used probe when it has none; GI_ACCP_NONE when all its probes hold
+// other keys (the caller then leaves the hit out: its point value stands). The creators of one key try the same free
+// slots in the same order, and the loser of an exchange finds the key there (slots are freed only by r.gi.acc.begin,
+// never while hits or folds run).
+uint giAccpFindOrCreate(RWByteAddressBuffer pool, GiAccPoolHeader h, uint64_t key)
+{
+    const uint first = giHash(key);
+    uint found = GI_ACCP_NONE, free = GI_ACCP_PROBES;
+    bool end = false;
+    [loop] for (uint i = 0; i < GI_ACCP_PROBES && found == GI_ACCP_NONE && !end; ++i)
+    {
+        const uint slot = (first + i) & (h.slots - 1);
+        const uint64_t k = giAccpLoadKey(pool, giAccpKeyAddress(h, slot));
+        if (k == key) found = slot;
+        else if ((k == 0 || k == GI_ACCP_EVICTED) && free == GI_ACCP_PROBES) free = i;
+        end = k == 0;
+    }
+    [loop] for (uint j = free; j < GI_ACCP_PROBES && found == GI_ACCP_NONE; ++j)
     {
         const uint slot = (first + j) & (h.slots - 1);
+        const uint address = giAccpKeyAddress(h, slot);
+        const uint64_t seen = giAccpLoadKey(pool, address);
+        if (seen == key) found = slot;
+        if (seen != 0 && seen != GI_ACCP_EVICTED) continue;
         uint64_t previous;
-        pool.InterlockedCompareExchange64(giAccpKeyAddress(h, slot), 0ull, key, previous);
-        if (previous == 0 || previous == key) found = slot;
+        pool.InterlockedCompareExchange64(address, seen, key, previous);
+        if (previous == seen || previous == key) found = slot;
     }
     return found;
 }

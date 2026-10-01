@@ -55,12 +55,14 @@ void main(uint id : SV_DispatchThreadID)
         if (id >= n.slots) return;
         const uint stamp = pool.Load(giAccpStampAddress(n, id));
         const bool stale = stamp == 0 || n.frame - (stamp - 1) / GI_ACCP_LEVELS >= GI_ACCP_KEEP_FRAMES;
-        if (P[0].y == 0 && (giAccpLoadKey(pool, giAccpKeyAddress(n, id)) == 0 || !stale)) return;
+        const uint64_t key = giAccpLoadKey(pool, giAccpKeyAddress(n, id));
+        if (P[0].y == 0 && (key == 0 || key == GI_ACCP_EVICTED || !stale)) return;
         const GiAccPoolHeader h = n;
         const uint base = giAccpPayload(h, id);
         [unroll] for (uint z = 0; z < GI_ACCP_PAYLOAD / 16; ++z) pool.Store4(base + z * 16, uint4(0, 0, 0, 0));
         pool.Store(giAccpStampAddress(h, id), 0u);
-        pool.Store2(giAccpKeyAddress(h, id), uint2(0, 0));
+        // (evicted, not never-used: keys placed past this slot stay reachable; the clear of the whole pool leaves 0)
+        pool.Store2(giAccpKeyAddress(h, id), uint2(P[0].y == 0 ? 1u : 0u, 0));
         return;
     }
     const GiAccPoolHeader h = giAccPoolHeader(pool);
