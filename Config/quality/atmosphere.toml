@@ -39,7 +39,9 @@ experiment_disable = 0               # cost attribution only (never in a verdict
                                      # 8 sun transmittance per substep, 16 multiple scattering per substep, 32 walk stops at pages,
                                      # 64 local lights' air shadows, 128 one lane per shadowed local-light item (test reference)
 walk_stats = 0                       # 1: count the air shadow walk (slices, mixed, block and texel loads) into the VSM
-                                     # stats (RendererGate); measurement only
+                                     # stats (RendererGate); measurement only; also the shadowed items lit over the L3 pages, omitted, walked
+walk_omission = false                # L4 (RENDERER_REDESIGN_V2 14.4): a shadowed local light under 1e-3 of the slice's in-scatter is added lit
+                                     # without its VSM walk (error <= 1e-3 of the slice; = experiment_disable bit 1024). Off until measured.
 air_step_altitude_m = 100            # air integration substeps: at most this altitude change per step and at most min(H_R, H_M) / 12
                                       # (midpoint error (dh/H)^2/24 <= 0.03 %; FroxelSystem.cpp)
 shadow_texels_per_tile = 4           # air shadows: VSM level with texel <= tile width / 4 (boundary placement, VsmAir.hlsli)

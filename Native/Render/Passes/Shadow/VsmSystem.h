@@ -103,6 +103,13 @@ struct VsmStats
     // settled value differs from the per-record SMRT by more than 1/255, and the largest difference (x 255).
     uint32_t fragmentPixels = 0, fragmentPairs = 0, fragmentChecked = 0, fragmentMismatch = 0, fragmentMaxDiff = 0;
     uint32_t fragmentFirstPixel = 0, fragmentFirstValues = 0;  // the check's first mismatch (pixel y << 16 | x, + 1; values)
+    // L3 classification of the main view (shadow.vsm.classification_pages; LocalTileClassify, words 64..67): tiles with a
+    // record (surface pixels, <= 4 slices, lists <= 64), their (tile, slice, light) pairs, of them lit over the whole tile
+    // (exact: TileLights may take the light FAR, ShadeOpaque reads no slot) and in umbra (the exact twin, left out).
+    uint32_t clsTiles = 0, clsPairs = 0, clsLitPairs = 0, clsUmbraPairs = 0;
+    // The air's shadowed (slice, light) items (atmosphere.froxels.walk_stats, words 68..70; main and planar views): added
+    // lit over the classification pages (L4 part 2, exact), added lit by the bounded omission (walk_omission, L4), walked.
+    uint32_t airClsLit = 0, airOmitted = 0, airWalked = 0;
 };
 
 // shadowPages: requests, page assignment and the raster of every requested page for this frame.

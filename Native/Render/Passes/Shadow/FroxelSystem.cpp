@@ -342,7 +342,9 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
     const scene::Atmosphere medium = fc.scene.source() ? fc.scene.source()->atmosphere : scene::Atmosphere{};
     const float stepAltitude = std::min((float)q.number("atmosphere.froxels.air_step_altitude_m"),
                                         std::min(medium.rayleighScaleHeight, medium.mieScaleHeight) / 12.0f);
-    const uint32_t experiment = (uint32_t)q.integer("atmosphere.froxels.experiment_disable");  // cost attribution only
+    // L4 (RENDERER_REDESIGN_V2 14.4) bounded walk omission: its own key, the same bit the experiment mask carries (1024; A/B)
+    const bool walkOmission = q.has("atmosphere.froxels.walk_omission") && q.boolean("atmosphere.froxels.walk_omission");
+    const uint32_t experiment = (uint32_t)q.integer("atmosphere.froxels.experiment_disable") | (walkOmission ? 1024u : 0u);  // cost attribution only (bit 1024: L4)
     if (!(stepAltitude > 0)) fail("atmosphere.froxels.air_step_altitude_m must be > 0");
     const bool walkStats = q.integer("atmosphere.froxels.walk_stats") != 0;  // measurement only
     const TextureRef tlut = fc.resources.transmittanceLut, mlut = fc.resources.multiScatterLut;

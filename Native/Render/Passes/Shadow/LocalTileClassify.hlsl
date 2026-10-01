@@ -12,7 +12,8 @@
 // everything else stays mixed (umbra needs the exact-raster twin, 14.3-1, stage 2).
 // P[0] = { depth SRV, froxel lights SRV, local lights SRV (StructuredBuffer<VsmLocalLight>), slot of light SRV }
 // P[1] = { classification blocks SRV (raw), tile lit records UAV (raw), tilesX, tolerance bits (float: relative depth) }
-// P[2] = { exact twin blocks SRV (raw, block minima; UNX_NONE: no umbra verdicts), 0, 0, 0 }: a pixel is in umbra when
+// P[2] = { exact twin blocks SRV (raw, block minima; UNX_NONE: no umbra verdicts), VSM stats UAV (raw; UNX_NONE: no
+//          counters; words 64 tiles with a record, 65 listed (tile, slice, light) pairs, 66 lit, 67 umbra), 0, 0 }: a pixel is in umbra when
 //        every texel of its block (3 x 3 for an area light) holds a caster nearer than the pixel by the tolerance;
 //        the tile's umbra bit is the AND over its surface pixels. Umbra lights are left out (visibility 0).
 #include "Bindless.hlsli"
@@ -158,12 +159,28 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint lane : SV_G
         const uint o = tileIndex * VSM_CLS_TILE_BYTES;
         const bool valid = gs_valid != 0;
         records.Store4(o, uint4(valid ? 1u : 0u, gs_first, gs_count, 0));
-        // slices the tile does not span: nothing lit
+        // slices the tile does not span: nothing lit; bits past the slice's list length (never voted on) are cleared
+        uint pairs = 0, litPairs = 0, umbraPairs = 0;
         [unroll] for (uint s = 0; s < VSM_CLS_TILE_SLICES; ++s)
         {
             const bool spanned = valid && s < gs_count;
-            records.Store2(o + 16 + s * 8, spanned ? uint2(gs_lit[s * 2], gs_lit[s * 2 + 1]) : uint2(0, 0));
-            records.Store2(o + 48 + s * 8, spanned ? uint2(gs_umbra[s * 2], gs_umbra[s * 2 + 1]) : uint2(0, 0));
+            const uint n = spanned ? gs_list[s].y : 0;  // <= 64 (valid)
+            const uint2 mask = uint2(n >= 32 ? 0xFFFFFFFFu : (1u << n) - 1u, n >= 64 ? 0xFFFFFFFFu : (n > 32 ? (1u << (n - 32)) - 1u : 0u));
+            const uint2 lit = uint2(gs_lit[s * 2], gs_lit[s * 2 + 1]) & mask;
+            const uint2 umbra = uint2(gs_umbra[s * 2], gs_umbra[s * 2 + 1]) & mask;
+            records.Store2(o + 16 + s * 8, lit);
+            records.Store2(o + 48 + s * 8, umbra);
+            pairs += n;
+            litPairs += countbits(lit.x) + countbits(lit.y);
+            umbraPairs += countbits(umbra.x) + countbits(umbra.y);
+        }
+        if (P[2].y != UNX_NONE)
+        {
+            RWByteAddressBuffer stats = ResourceDescriptorHeap[P[2].y];
+            stats.InterlockedAdd(256, valid ? 1u : 0u);
+            stats.InterlockedAdd(260, pairs);
+            stats.InterlockedAdd(264, litPairs);
+            stats.InterlockedAdd(268, umbraPairs);
         }
     }
 }

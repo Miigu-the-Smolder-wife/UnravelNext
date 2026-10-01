@@ -22,7 +22,7 @@ namespace
 {
 const char* const kStateKey = "s.vsm";
 constexpr uint32_t kRingSlots = 16, kRingStride = 2048;  // per-frame constants; frames in flight must be < kRingSlots
-constexpr uint32_t kStatsSlots = 4, kStatsBytes = 256;  // VSM stats words (VsmBegin clears them)
+constexpr uint32_t kStatsSlots = 4, kStatsBytes = 512;  // VSM stats words (128; VsmBegin clears them; 64.. L3 / L4 counters)
 constexpr uint64_t kOverflowMinWords = 1u << 18;  // 1 MB overflow list at least (INTERFACES 7.3)
 constexpr uint32_t kErrRasterOverflow = 0x20;  // VsmCommon.hlsli VSM_ERR_RASTER_OVERFLOW
 constexpr uint32_t kMetaBytes = 48;  // VsmPageMeta
@@ -751,6 +751,13 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         s.latest.surfacePixels = w[61];
         s.latest.backfacePixels = w[62];
         s.latest.backfaceMixed = w[63];
+        s.latest.clsTiles = w[64];
+        s.latest.clsPairs = w[65];
+        s.latest.clsLitPairs = w[66];
+        s.latest.clsUmbraPairs = w[67];
+        s.latest.airClsLit = w[68];
+        s.latest.airOmitted = w[69];
+        s.latest.airWalked = w[70];
         s.latest.errorBits = w[15];
         if (w[15] & ~s.errorBitsSeen)
             logf("S VSM: error bits 0x%x (frame %llu): a shader loop reached its hard cap (INTERFACES 3.6; VsmCommon.hlsli VSM_ERR_*)\n", w[15],
@@ -1637,6 +1644,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         }
         ID3D12PipelineState* pClassify = sh.compute("Passes/Shadow/LocalTileClassify");
         const TextureRef depth = main.depth;
+        const BufferRef clsStats = s.statsRef;
         const uint32_t toleranceBits = asUint((float)q.number("shadow.vsm.classification_tolerance"));
         g.addPass("s.vsm.cls.tiles", QueueType::Compute,
                   [&](PassBuilder& b) {
@@ -1645,10 +1653,11 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.use(clsBlocks, Use::SrvCompute);
                       if (twin) b.use(twinBlocks, Use::SrvCompute);
                       b.use(tileLit, Use::UavCompute);
+                      b.use(clsStats, Use::UavCompute);  // words 64..67: tiles, pairs, lit, umbra (RendererGate)
                   },
                   [=](PassContext& ctx) {
                       const uint32_t k[12] = { ctx.srv(depth), ctx.srv(froxelLists), localLightsSrv, slotOfSrv, ctx.srv(clsBlocks), ctx.uav(tileLit), tilesX, toleranceBits,
-                                               twin ? ctx.srv(twinBlocks) : 0xFFFFFFFFu, 0, 0, 0 };
+                                               twin ? ctx.srv(twinBlocks) : 0xFFFFFFFFu, ctx.uav(clsStats), 0, 0 };
                       ctx.cmd->SetPipelineState(pClassify);
                       ctx.bindFrameConstants(mainConstants);
                       ctx.computeConstants(k, 12);

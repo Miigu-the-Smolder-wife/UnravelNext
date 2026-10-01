@@ -45,6 +45,8 @@
 // atmosphere.froxels.walk_stats, measurement only)
 // P[2].x VSM search bound SRV (raw), P[2].y shadow texels per tile (float bits), P[2].z air step altitude m (float bits),
 // P[2].w experiment mask (atmosphere.froxels.experiment_disable; 0; cost attribution only: 1 air shadows, 2 local lights,
+// bit 1024 = atmosphere.froxels.walk_omission (L4, A/B); bit 16 also words 68..70: shadowed items lit over the
+// classification pages, omitted, walked;
 // 4 air integration, 8 sun transmittance per substep, 16 multiple scattering per substep, 32 air shadow walk stops at
 // the page level, 64 local lights' air shadows; bit 16: walk statistics on, also the local lights' air walk: words 54..57
 // entries walked, cells, largest cells of one entry, lit runs; 58, 59 over waves: the sum of the lane maxima of cells
@@ -119,6 +121,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     float3 tau = 0, source = 0, skyTerm = 0;
     VsmAirWalkCount walk = (VsmAirWalkCount)0;  // statistics (P[3].w)
     AirLocalCount localWalk = (AirLocalCount)0;
+    uint statClsLit = 0, statOmitted = 0, statWalked = 0;  // shadowed items: lit over the classification pages, omitted (L4), walked (words 68..70)
     const float tStart = airViewStart(g_clipPlane, g_cameraPosition, dir);
     const float zs0 = froxelNodeDepth(g, s), zs1 = froxelNodeDepth(g, s + 1);
     const bool hasAir = s < g.slices && zs1 * toRay > tStart;
@@ -237,12 +240,17 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             const GpuLight light = loadLight(li);
             if (airLocalMap(light, o, dir, len).h >= light.range) continue;
             bool shadowed = slot != VSM_LOCAL_NONE;
-            if (shadowed && cls && airClsSegmentLit(P[5].x, P[3].x, slot, o, dir, len)) shadowed = false;
+            if (shadowed && cls && airClsSegmentLit(P[5].x, P[3].x, slot, o, dir, len))
+            {
+                shadowed = false;
+                ++statClsLit;
+            }
             if (shadowed && !omission)
             {
                 if (i < 32) myReach.x |= 1u << i;
                 else myReach.y |= 1u << (i - 32);
                 ++myShadowed;
+                ++statWalked;
                 continue;
             }
             const float3 local = airLocalLight(light, o, dir, len, cm, a.mieG, P[4].y, li, froxelTileWidth(g, 0.5 * (z0 + z1)));
@@ -267,6 +275,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
                 if (omitted + lum <= 1e-3 * total)
                 {
                     omitted += lum;  // lit without the walk (bounded)
+                    ++statOmitted;
                     source += local;
                     skyTerm += local;
                     continue;
@@ -274,6 +283,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
                 if (i2 < 32) myReach.x |= 1u << i2;
                 else myReach.y |= 1u << (i2 - 32);
                 ++myShadowed;
+                ++statWalked;
             }
         }
     }
@@ -458,6 +468,14 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             st.InterlockedAdd(228, lr);
             st.InterlockedAdd(232, wc);
             st.InterlockedAdd(236, we);
+        }
+        const uint cl = WaveActiveSum(statClsLit), om = WaveActiveSum(statOmitted), wk = WaveActiveSum(statWalked);
+        if (WaveIsFirstLane())
+        {
+            RWByteAddressBuffer st = ResourceDescriptorHeap[P[3].w];
+            st.InterlockedAdd(272, cl);
+            st.InterlockedAdd(276, om);
+            st.InterlockedAdd(280, wk);
         }
     }
     if (s < g.slices)

@@ -1254,6 +1254,11 @@ int main(int argc, char** argv)
 #endif
             const shadow::VsmStats& st = shadow::stats(renderer.trackState());
             logf("local shadows: %u slots assigned, %u raster-active, %u shadowed lights without a slot\n", st.localAssigned, st.localActive, st.localWithoutSlot);
+            if (st.clsTiles)
+                logf("local shadow classification (L3): %u tiles, %u (tile, slice, light) pairs, %u lit (%.1f %%), %u umbra (%.1f %%)\n", st.clsTiles, st.clsPairs,
+                     st.clsLitPairs, 100.0 * st.clsLitPairs / std::max(st.clsPairs, 1u), st.clsUmbraPairs, 100.0 * st.clsUmbraPairs / std::max(st.clsPairs, 1u));
+            if (st.airClsLit || st.airOmitted || st.airWalked)
+                logf("air shadowed items (walk_stats): %u lit over the classification pages, %u omitted (L4), %u walked\n", st.airClsLit, st.airOmitted, st.airWalked);
             double sPasses = 0, raster = 0;
             for (const auto& [name, d] : r.passMs)
                 if (name.rfind("s.", 0) == 0)
