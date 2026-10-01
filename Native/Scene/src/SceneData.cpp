@@ -441,6 +441,31 @@ void writeMorph(Writer& w, const Scene& s)
     }
 }
 
+// Lights with their own shadow-ray end bias (Light::rayEndBias >= 0; INTERFACES v1.93): an optional block after the
+// material blocks, as those are - a scene without such lights writes the same bytes as before.
+constexpr uint32_t kLightEndTag = 0x444E454Cu;  // "LEND"
+
+bool anyLightEnd(const Scene& s)
+{
+    for (const Light& l : s.lights)
+        if (l.rayEndBias >= 0) return true;
+    return false;
+}
+
+void writeLightEnd(Writer& w, const Scene& s)
+{
+    w.pod(kLightEndTag);
+    uint64_t count = 0;
+    for (const Light& l : s.lights) count += l.rayEndBias >= 0;
+    w.pod(count);
+    for (uint32_t i = 0; i < s.lights.size(); ++i)
+        if (s.lights[i].rayEndBias >= 0)
+        {
+            w.pod(i);
+            w.pod(s.lights[i].rayEndBias);
+        }
+}
+
 std::vector<uint8_t> serialize(const Scene& s)
 {
     Writer w;
@@ -469,6 +494,7 @@ std::vector<uint8_t> serialize(const Scene& s)
     if (anyAttenuation(s)) writeAttenuation(w, s);
     if (anyAnisotropy(s)) writeAnisotropy(w, s);
     if (anyFilm(s)) writeFilm(w, s);
+    if (anyLightEnd(s)) writeLightEnd(w, s);
     return std::move(w.out);
 }
 
@@ -633,6 +659,17 @@ Scene deserialize(const std::vector<uint8_t>& bytes)
             m.thinFilmSubstrate = r.pod<uint32_t>();
             m.substrateIor = r.pod<float>();
             m.substrateExtinction = r.pod<float>();
+        }
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
+    if (tag == kLightEndTag)
+    {
+        const uint64_t count = r.pod<uint64_t>();
+        for (uint64_t k = 0; k < count; ++k)
+        {
+            const uint32_t i = r.pod<uint32_t>();
+            if (i >= s.lights.size()) fail("unxscene: ray end bias of light %u of %zu", i, s.lights.size());
+            s.lights[i].rayEndBias = r.pod<float>();
         }
         tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
     }

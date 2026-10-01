@@ -112,6 +112,10 @@ struct ViewResources
     // xyz = world bent normal x AO, a = accumulated frames + 1 (0: no surface). Invalid = off. Readers use
     // lumenShortRangeAO / lumenAoMultibounce / lumenAoSpecular of that header.                                       [A]
     TextureRef shortRangeAO;
+    // shading.mega_lights_volume on a view other than the main one (planar reflection views; S records them with the view's
+    // froxels): the view's froxel grid, the local lights' sampled visible fluence and direction moment, as
+    // FrameResources::localFluence / localMoment are the main view's. Invalid = off.                                  [A]
+    TextureRef localFluence, localMoment;
     // gi.lumen (v1.93, LumenGather.cpp): RGBA16F W x H of the main view, the mean incident radiance x g_exposure of the
     // pixel's rough specular lobe from the screen probes (rgb; a = the pixel filter's fast-update amount). From roughness
     // 0.6 the lobe fades to irradiance / pi, which it is from 0.8 (gi.lumen_max_roughness_rough_specular). The reader
@@ -282,6 +286,10 @@ struct FrameResources
     BufferRef giAccumulator;       // hit direct-light accumulator pool (GiAccPool.hlsli;   [R]
                                    // invalid: gi.hit_accumulator_pool off). Readers after
                                    // globalIllumination: SrvCompute (giAccPoolRead)
+    // shading.mega_lights_volume (A; Passes/Atmosphere/MegaLightsVolume.hlsl): the main view's froxel grid, RGBA16F, the
+    // local lights' sampled visible fluence (rgb x exposure) and its luminance-weighted direction moment (xyz): lit
+    // particles read them (FxLayerSetup.hlsl). Invalid = off.                                                         [A]
+    TextureRef localFluence, localMoment;
     // lumen.radiance_cache (A, for R's gi.lumen; Passes/GI/LumenRadianceCache.hlsli, unx/gi/LumenRadianceCache.h): this
     // frame's far-field probe cache after its update. Readers: lrcParams(lumenRcParams), lrcCoverageChecked, lrcSample
     // with the indirection (Texture3D R32_UINT) and the atlas (R11G11B10F) as SRVs. Invalid = off.                   [A]

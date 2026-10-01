@@ -32,8 +32,9 @@ mega_lights_max_shading_weight = 20.0             # MaxShadingWeight: cap of a s
 mega_lights_max_shading_weight_hidden = 5.0       # MaxShadingWeightForHiddenLight
 mega_lights_ray_bias_m = 0.01                     # HardwareRayTracing.Bias (TMin)
 mega_lights_ray_normal_bias_m = 0.001             # HardwareRayTracing.NormalBias
-mega_lights_ray_end_bias_m = 0.05                 # HardwareRayTracing.EndBias (Unreal 0.01): S's local shadow maps start 5 cm from
-                                                  # the light (its fixture casts no shadow), and rays follow that rule
+mega_lights_ray_end_bias_m = 0.01                 # HardwareRayTracing.EndBias (1 cm): where a shadow ray ends before its point on the
+                                                  # light, for lights without their own value (scene::Light::rayEndBias, v1.93: a light in
+                                                  # a housing or a trough takes a larger one, as Unreal's per-light Ray End Bias)
 mega_lights_temporal = true                       # Temporal
 mega_lights_temporal_max_frames = 12              # Temporal.MaxFramesAccumulated
 mega_lights_temporal_min_frames_history_miss = 4  # Temporal.MinFramesAccumulatedForHistoryMiss

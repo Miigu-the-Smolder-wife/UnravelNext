@@ -52,6 +52,9 @@ TextureRef volumeMedia(FramePassContext& fc, ViewResources& main, BufferRef frox
     volume::VolumeFrame f = frameOf(fc, main);
     f.froxelLights = froxelLights;
     f.lighting.froxelLights = froxelLights;
+    // shading.mega_lights: the grid's sampled local light (S records it before the media; main view's grid)
+    f.lighting.localFluence = fc.resources.localFluence;
+    f.lighting.localMoment = fc.resources.localMoment;
     f.media = true;
     const volume::VolumeOutput out = volumePass(fc).record(*system, fc.graph, fc.shaders, fc.quality, fc.frame.frameIndex, f);
     main.volumeSlices = out.volumeSlices;

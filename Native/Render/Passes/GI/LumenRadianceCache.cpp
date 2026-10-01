@@ -25,6 +25,12 @@ namespace
 {
 constexpr uint32_t kMaxClipmaps = 6, kRing = 4, kParamBytes = 256;
 constexpr uint32_t kDescStride = (uint32_t)((sizeof(D3D12_DISPATCH_RAYS_DESC) + 7) / 8 * 8);
+// The structural bound of one dispatch (2026-10-01, the bath lounge's device-hung report): the probe rays, the filter and
+// the store run in chunks of probes, each at most this many rays (probe texels); the chunks past the frame's trace count
+// launch nothing.
+constexpr uint32_t kMaxRaysPerDispatch = 262144;
+// A probe texel's thread traces up to this many rays: its own, and at a hit the sun's and one local light's shadow ray.
+constexpr uint32_t kRaysPerTexel = 3;
 
 // LumenRadianceCache.hlsli LrcParams
 struct Params
@@ -319,8 +325,10 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
     const BufferRef slots = st.slotsRef, counters = st.countersRef;  // (this frame's imports, by Begin)
     const BufferRef freeList = g.importBuffer(st.freeList.Get(), BufferDesc{ "r.gi.rc free list", (uint64_t)maxProbes * 4, 0 });
     const BufferRef traces = g.createBuffer({ "r.gi.rc traces", (uint64_t)s.traceCapacity * 16, 0 });
-    const BufferRef rayArgs = g.createBuffer({ "r.gi.rc ray dispatch", kDescStride, 0 });
-    const BufferRef filterArgs = g.createBuffer({ "r.gi.rc filter dispatch", 32, 0 });
+    const uint32_t probesPerDispatch = std::max(1u, kMaxRaysPerDispatch / (s.probeResolution * s.probeResolution * kRaysPerTexel));
+    const uint32_t chunks = (s.traceCapacity + probesPerDispatch - 1) / probesPerDispatch;
+    const BufferRef rayArgs = g.createBuffer({ "r.gi.rc ray dispatch", (uint64_t)chunks * kDescStride, 0 });
+    const BufferRef filterArgs = g.createBuffer({ "r.gi.rc filter dispatch", (uint64_t)chunks * 32, 0 });
     const uint32_t tempSize = p.tempProbes * s.probeResolution;
     const TextureRef traced = g.createTexture({ "r.gi.rc traced", tempSize, tempSize, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
     const TextureRef filtered = g.createTexture({ "r.gi.rc filtered", tempSize, tempSize, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
@@ -368,7 +376,10 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
     }
     ID3D12Resource* descTemplate = st.descTemplate.Get();
     g.addPass("r.gi.rc.args", QueueType::Compute, [&](PassBuilder& b) { b.use(rayArgs, Use::CopyDst); },
-              [=](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(rayArgs), 0, descTemplate, variant * kDescStride, kDescStride); });
+              [=](PassContext& c) {
+                  for (uint32_t chunk = 0; chunk < chunks; ++chunk)
+                      c.cmd->CopyBufferRegion(c.resource(rayArgs), (uint64_t)chunk * kDescStride, descTemplate, variant * kDescStride, kDescStride);
+              });
     g.addPass("r.gi.rc.finish", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(counters, Use::UavCompute);
@@ -377,11 +388,12 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   b.keep();
               },
               [=, &shaders](PassContext& c) {
-                  const uint32_t k[12] = { paramsSrv, 0xFFFFFFFFu, 0xFFFFFFFFu, c.uav(counters), 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0,
-                                           c.uav(rayArgs), (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(filterArgs), 0 };
+                  const uint32_t k[16] = { paramsSrv, 0xFFFFFFFFu, 0xFFFFFFFFu, c.uav(counters), 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0,
+                                           c.uav(rayArgs), (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(filterArgs), probesPerDispatch,
+                                           chunks, kDescStride, 0, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenRadianceCacheUpdate.MODE6"));
                   c.bindFrameConstants(cb);
-                  c.computeConstants(k, 12);
+                  c.computeConstants(k, 16);
                   c.cmd->Dispatch(1, 1, 1);
               });
     const BufferRef worldCache = in.worldCache, surfaceCache = in.surfaceCache;
@@ -425,9 +437,13 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   k[17] = c.srv(counters);
                   k[20] = surfaceCache.valid() ? c.uav(surfaceCache) : 0xFFFFFFFFu;
                   std::memcpy(&k[24], sceneSrvs.data(), 32);
-                  c.computeConstants(k, 32);
                   c.bindFrameConstants(cb);
-                  pipeline.dispatchIndirect(c.cmd, c.resource(rayArgs), 0);
+                  for (uint32_t chunk = 0; chunk < chunks; ++chunk)
+                  {
+                      k[18] = chunk * probesPerDispatch;  // P[4].z: the dispatch's first trace record
+                      c.computeConstants(k, 32);
+                      pipeline.dispatchIndirect(c.cmd, c.resource(rayArgs), (uint64_t)chunk * kDescStride);
+                  }
               });
 
     // ---- filter, then store with the border
@@ -441,13 +457,17 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   b.use(filterArgs, Use::IndirectArgs);
               },
               [=, &shaders](PassContext& c) {
-                  const uint32_t k[12] = { paramsSrv, c.srv(counters), c.srv(traces), c.srv(indirection),
-                                           c.srv(traced), c.srv(depthAtlas), c.srv(slots), c.uav(filtered),
-                                           c.srv(atlas), bits(maxHitAngle), 0, 0 };
+                  uint32_t k[12] = { paramsSrv, c.srv(counters), c.srv(traces), c.srv(indirection),
+                                     c.srv(traced), c.srv(depthAtlas), c.srv(slots), c.uav(filtered),
+                                     c.srv(atlas), bits(maxHitAngle), 0, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenRadianceCacheFilter.MODE0"));
                   c.bindFrameConstants(cb);
-                  c.computeConstants(k, 12);
-                  c.cmd->ExecuteIndirect(signature, 1, c.resource(filterArgs), 0, nullptr, 0);
+                  for (uint32_t chunk = 0; chunk < chunks; ++chunk)
+                  {
+                      k[10] = chunk * probesPerDispatch;  // P[2].z: the dispatch's first trace record
+                      c.computeConstants(k, 12);
+                      c.cmd->ExecuteIndirect(signature, 1, c.resource(filterArgs), (uint64_t)chunk * 32, nullptr, 0);
+                  }
               });
     g.addPass("r.gi.rc.store", QueueType::Compute,
               [&](PassBuilder& b) {
@@ -458,11 +478,15 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   b.keep();
               },
               [=, &shaders](PassContext& c) {
-                  const uint32_t k[12] = { paramsSrv, c.srv(counters), c.srv(traces), 0xFFFFFFFFu, c.srv(filtered), 0xFFFFFFFFu, 0xFFFFFFFFu, c.uav(atlas), 0xFFFFFFFFu, 0, 0, 0 };
+                  uint32_t k[12] = { paramsSrv, c.srv(counters), c.srv(traces), 0xFFFFFFFFu, c.srv(filtered), 0xFFFFFFFFu, 0xFFFFFFFFu, c.uav(atlas), 0xFFFFFFFFu, 0, 0, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenRadianceCacheFilter.MODE1"));
                   c.bindFrameConstants(cb);
-                  c.computeConstants(k, 12);
-                  c.cmd->ExecuteIndirect(signature, 1, c.resource(filterArgs), 16, nullptr, 0);
+                  for (uint32_t chunk = 0; chunk < chunks; ++chunk)
+                  {
+                      k[10] = chunk * probesPerDispatch;
+                      c.computeConstants(k, 12);
+                      c.cmd->ExecuteIndirect(signature, 1, c.resource(filterArgs), (uint64_t)chunk * 32 + 16, nullptr, 0);
+                  }
               });
     bookkeeping("r.gi.rc.validate", "Passes/GI/LumenRadianceCacheUpdate.MODE8", cellsX, cellsYZ, cellsYZ, true, false, false);
 

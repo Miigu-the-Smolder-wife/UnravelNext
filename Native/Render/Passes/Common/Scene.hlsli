@@ -181,6 +181,8 @@ uint clusterSubmesh(GpuCluster c) { return c.counts >> 16; }  // index within th
 uint lightType(GpuLight l) { return l.typeFlags & 0xFFu; }
 bool lightCastsShadow(GpuLight l) { return (l.typeFlags & 0x100u) != 0; }
 uint lightShadowIndex(GpuLight l) { return l.typeFlags >> 16; }
+// The light's own shadow-ray end bias (m; revision bits 16..31 as a half float), 'fallback' when it has none (sign bit).
+float lightRayEndBias(GpuLight l, float fallback) { return (l.revision & 0x80000000u) != 0 ? fallback : f16tof32(l.revision >> 16); }
 
 // Instance material for a submesh (instance overrides first).
 uint instanceMaterial(GpuInstance inst, GpuSubmesh sub, uint submeshIndexInMesh)

@@ -79,11 +79,14 @@ RtLight mlRtLight(GpuLight g)
 
 // One shadow ray from the point (x world, n its normal) toward the sample's point on the light ((u, v): the centre of point
 // and spot lights whatever they are): false when blocked or when that point sends nothing to x. Shadow casters only
-// (RT_MASK_SHADOW); the ray ends endBias before the light (S's rule: what lies within 5 cm of a light casts no shadow).
+// (RT_MASK_SHADOW); the ray ends before the light by the light's own end bias (scene::Light::rayEndBias, as Unreal's
+// per-light Ray End Bias: a light inside a housing or a trough) or, when it has none, by endBias (the engine's default).
 bool mlSampleVisible(RtSceneSrvs scene, float3 x, float3 n, uint light, float2 uv, float bias, float normalBias, float endBias)
 {
+    const GpuLight g = loadLight(light);
+    endBias = lightRayEndBias(g, endBias);
     RtLightSample ls;
-    if (!rtLightSample(mlRtLight(loadLight(light)), x, uv.x, uv.y, ls)) return false;
+    if (!rtLightSample(mlRtLight(g), x, uv.x, uv.y, ls)) return false;
     RayDesc ray;
     ray.Origin = x + n * (dot(n, ls.wi) < 0 ? -normalBias : normalBias);
     ray.Direction = ls.wi;

@@ -1,4 +1,5 @@
 #include "unx/refl/ReflectionSystem.h"
+#include "unx/refl/SurfaceCacheLightPairs.h"
 
 #include "unx/rt/RayPipeline.h"
 #if UNX_R_HAS_SHADING
@@ -172,6 +173,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.scDebugSkip = (uint32_t)num("surface_cache.debug_skip", 0);
     s.scShadowRaysOpaque = flag("surface_cache.shadow_rays_opaque", false);
     s.scDirectShadowInline = flag("surface_cache.direct_shadow_inline", false);
+    s.scDirectPairs = flag("surface_cache.direct_pairs", false);
     s.scDebugCount = (uint32_t)num("surface_cache.debug_count", 0);
     s.scDirectStochasticFrames = num("surface_cache.direct_stochastic_max_frames", 12.0);
     s.scDirectMinWeight = num("surface_cache.direct_stochastic_min_sample_weight", 0.001);
@@ -1369,6 +1371,22 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         for (uint32_t pass = 0; pass < 3; ++pass)
         {
             if (pass == 2 && !s.scRadiosity) continue;
+            if (pass == 1 && s.scDirectPairs)
+            {
+                // surface_cache.direct_pairs (A, SurfaceCacheLightPairs.cpp): the cells direct light as (cell, light) pairs -
+                // select without rays, one shadow ray per pair in bands, store - in place of r.sc.cells
+                SurfaceCachePairsInputs pin;
+                pin.surfaceCache = surfaceCache;
+                pin.budget = budgets[1];
+                pin.frame = frame;
+                pin.lightFlags = lightFlags;
+                pin.skyVariant = variant;
+                pin.frameConstants = frameConstants;
+                pin.declareShared = [&](PassBuilder& b) { declareShared(b, false); };
+                pin.sharedConstants = [constantsFor](PassContext& c, uint32_t* k) { constantsFor(c, k, false); };
+                recordSurfaceCacheLightPairs(fc, pin);
+                continue;
+            }
             g.addPass(kLightNames[pass], QueueType::Compute,
                       [&](PassBuilder& b) {
                           b.use(surfaceCache, Use::UavGraphics);

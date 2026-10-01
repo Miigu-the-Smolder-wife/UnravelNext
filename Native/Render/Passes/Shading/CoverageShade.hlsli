@@ -43,6 +43,7 @@ static uint g_covListed = 0xFFFFFFFFu;
 #include "Passes/Water/WaterLight.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 #include "Passes/Shading/CoverageSpecial.hlsli"
+#include "Passes/Shading/MegaLights.hlsli"  // (mlDiffuseFactor, mlSpecularFactor: the coverage instance, P[11].xy)
 #if COV_PRESHADE_CLASSES == 1
 #include "Passes/Material/MaterialCut.hlsli"
 #elif COV_PRESHADE_CLASSES == 2
@@ -462,7 +463,19 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
     froxels.lightIndices = P[3].x;
     froxels.scattering = UNX_NONE;
     froxels.pad = 0;
-    if (froxels.lights != UNX_NONE && (experiment & 32) == 0)
+    // shading.mega_lights (render A; P[11].xy = the coverage layer's MegaLights instance, MegaLightsCoverage.hlsl: the
+    // local lights' diffuse and specular at the pixel's nearest fragment from light samples with shadow rays, filtered,
+    // exposed and divided by the modulation factors): every fragment of the pixel takes them times its own factors, in
+    // place of the loop over the list with S's fragment visibility (S assigns no local shadow maps under mega_lights).
+    if (P[11].x != UNX_NONE && (experiment & 32) == 0)
+    {
+        Texture2D<float4> covDiffuse = ResourceDescriptorHeap[P[11].x];
+        Texture2D<float4> covSpecular = ResourceDescriptorHeap[P[11].y];
+        if (NoV > 0 || foliage)
+            radiance += (covDiffuse[pixel].rgb * mlDiffuseFactor(s.baseColor, s.metallic) +
+                         covSpecular[pixel].rgb * mlSpecularFactor(s.baseColor, s.metallic, s.specular, s.roughness, abs(NoV))) / g_exposure;
+    }
+    else if (froxels.lights != UNX_NONE && (experiment & 32) == 0)
     {
         const float e = modelDirectionalAlbedo(max(NoV, 1e-4), s.roughness);
         const float3 compensation = 1 + f0 * (1 / e - 1);
