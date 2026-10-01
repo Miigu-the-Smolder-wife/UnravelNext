@@ -692,3 +692,27 @@ GPU HOLD 중, 코드와 빌드만.
    - `gi.miss_closure`만 끄면(`gi.bounce_visibility`는 켬) 그 hit은 확산·스펙큘러 모두 0이다. 즉 두 스위치는 같이 켜거나 같이 꺼야 하고, 가시성만 켠 상태는 A/B 진단용이다(postgame_slice.ps1의 `visonly`).
    - 반사 hit(S2 382ed71: 층 경로에서만 엄격 읽기)과 달리 GI는 기본 경로에서도 엄격 읽기다. 닫기가 기본 켬이라 확산은 메워지지만, 위의 스펙큘러 몫과 "가시성 판정의 거짓 불가시"(젊은 엔트리의 텍셀 거리 1~2광선)로 닫기가 과하게 쓰이는지는 게임 뒤 A/B(냉시작 4번)로 본다.
 4. 발광 면 변환 규칙(조정 요청 3)은 (6)절의 네 가지 이유로 여전히 미적용이다.
+
+## 세션 13 이어서 (8) — 게임 뒤 검증: 통합 브랜치 "전부 켬" 대 "전부 끔" (2026-10-01 17:30~)
+
+통합 브랜치 8fcd53d, build\dev2, 조각마다 락 1회. [실측]. 게임은 끝났고 League 클라이언트만 떠 있다. correctness 조각이라 프레임 시간은 참고값이다. 세션 간 메시지가 막혀 있어 조각이 끝날 때마다 이 절에 적고 푸시한다. 그림은 `C:\Users\USER\UnravelNext-redesign\Results\Local\Redesign\items\p2\`.
+
+- 전부 켬(allon) = 기본값(넓은 층, 냉시작 가시성·닫기, hit cone lobes) + `gi.hit_accumulator=true`(풀) + `reflection.layers=true` + `reflection.layer_mirror_lobe=true`.
+- 전부 끔(alloff) = `gi.screen_filter_adaptive=false`, `gi.screen_temporal_frames=0`, `gi.screen_wide_filter=false`, `gi.bounce_visibility=false`, `gi.miss_closure=false`, `reflection.layers=false`, `reflection.hit_cone_lobes=false`, `reflection.hit_accumulator=false`(누적기 끔은 기본).
+
+### 조각 1 — bath lounge 1080p (17:29~17:34)
+
+새 커널 첫 실행(GiAccFold, 풀을 읽고 쓰는 GiTrace, 반사 hit의 풀 읽기 포함): 종료 코드 0, 장치 제거 없음, S 오류 비트 0x0, "GI accumulator pool: 524288 slots, 134.0 MB".
+
+| | f1 | f3 | f4 | f15 | f16 |
+|---|---|---|---|---|---|
+| 최종 화면 타일 오차 P50 / P95, 전부 끔 | 41 / 196 % | 46 / 431 % | 41 / 342 % | 22 / 92 % | 22 / 89 % |
+| 최종 화면 타일 오차 P50 / P95, 전부 켬 | 21 / 98 % | 15 / 70 % | 14 / 66 % | 10 / 50 % | 9 / 46 % |
+| GI 층 수준(자기 f299 대비), 전부 끔 | 0.59 | 1.46 | 1.46 | 1.20 | 1.19 |
+| GI 층 수준, 전부 켬 | 0.97 | 1.00 | 1.00 | 1.00 | 1.01 |
+| GI 층 타일 오차 P50, 전부 끔 → 켬 | 62 → 31 % | 58 → 21 % | 56 → 19 % | 37 → 9 % | 36 → 8 % |
+
+- 눈: 전부 켬은 f1부터 밝기가 f299와 같고(끔은 f3~f16에 1.2~1.5배로 튀는 실행이었다), 벽·천장 얼룩이 없고, 바닥·탁자 반짝이가 크게 줄었다. f1·f4의 바닥과 천장에 밝은 네모 점이 일부 남는다. 회전(f63/f75/f120/f179)에서도 석벽 얼룩이 없다.
+- 목표 8 / 5 / 3 %에는 아직 못 미친다(f1 21 %, f4 14 %, f16 9 %).
+- GPU 프레임 중앙값(참고): 전부 끔 18.39 ms, 전부 켬 21.79 ms(+3.4 ms). 비용 분해는 timing 조각에서 한다.
+- 그림: `show_lounge_1920x1080_final.png`(행 = 끔 / 켬, 열 = f1 / f4 / f16 / f299), `show_lounge_1920x1080_gi.png`, `show_lounge_1920x1080_rot.png`(열 = f59 / f63 / f75 / f120 / f179).
