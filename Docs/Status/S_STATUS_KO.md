@@ -290,3 +290,20 @@
   비용: FX 광원이 없는 city 4K에서 GI 0.919 → 0.917 ms, 반사 1.974 → 1.962 ms. 쓰는 쪽(FX 모듈)이 들어오면 발광 장면에서 다시 잰다.
 - **결함(S), 고쳤다: 9e(국소광 링 조각 간격)**: FroxelTests 2의 "shadowed air of local lights" 최대 노드가 앞서 돈 프레임 수에 따라 달라진다. 빈 프레임 2개만 더해도 656노드 중 1개가 5.1배 틀리고(평균은 1.4 %), 기본 순서에서는 0.056이다.
   VSM 국소 페이지 상태가 프레임에 따라 달라지는 것으로 보인다. 원인을 조사할 차례이고, 시험 1b는 이것을 가리지 않게 맨 끝에서 돈다.
+
+## 11. V2.5 많은 국소광 — A의 S 영역 구현 (2026-10-01, 코드만; 미검증: 게임 뒤)
+
+사용자 지시(14:45)로 GPU 검증은 중단된 채 코드만 넣었다. 모두 스위치 뒤(기본 끔), 빌드·DXIL 한도 통과만 확인했다. 게임 뒤 실행 목록은 각 커밋 메시지의 "미검증" 줄과 아래 표다.
+
+| 항목 | 커밋 | 스위치 | 게임 뒤 실행 |
+|---|---|---|---|
+| L1 목록 용량: CPU 상한 + FX 허용량 + 장면 광원만의 fallback 프레임 | (11번 큐) | `atmosphere.froxels.list_capacity_forced`, `list_fallback_forced`(시험 전용) | FroxelTests, city_block 정확성 A/B, 욕탕 층 비교(chain 3) |
+| L3 1단계 분류 페이지(보수 래스터, V 픽셀 커널 `VsmClsPixel.MODE0`) → (타일, 광원) lit | 01a9641·f003cea 이전 | `shadow.vsm.classification_pages`, `classification_tolerance` | LocalShadowTests "classification lit"(기준 추적 가시도 1) |
+| L3 2단계 정확 래스터 쌍둥이(`MODE1`, 블록 min) → umbra | f003cea | `shadow.vsm.classification_twin` | LocalShadowTests "classification twin"(umbra 화소 전부 가시도 0, lit·umbra 동시 0) |
+| ShadeOpaque lit 광원: 슬롯·overflow 읽기 없이 가시도 1 | 8f0b908 | (위 키) | ShadingTests, 욕탕 1080p 켬/끔 비교 |
+| L4 1부 유계 보행 생략(슬라이스 1e-3) | 0e1ad22 이전 | `atmosphere.froxels.walk_omission`(= experiment 1024) | FroxelTests A/B |
+| L4 2부 분류 페이지 위 lit 구간은 보행 없음(정확) | 0e1ad22 | `classification_pages` | FroxelTests A/B(비트 동일 조건) |
+| L0 카운터: 분류 타일·쌍·lit·umbra(단어 64..67), 공기 lit·생략·보행(68..70, walk_stats) | b80a439 | — | RendererGate 욕탕 로비 1080p 로그 줄 |
+
+- VSM 통계 버퍼는 512 B(128 단어)다. 단어 64 이상은 L3/L4 카운터다.
+- 3단계(혼합 목록 같은 프레임 할당)·4단계(분류 페이지 정적/동적 층)·5단계(활성 집합 가상 슬롯, 조정 결정 (c))는 조정 세션에 크기·의존성 질문을 보낸 상태다(2026-10-01 저녁).
