@@ -362,6 +362,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     const float3 sky = m_skyRadiance, sun = m_sunIlluminance;
     const float skyBand = m_skyBand, rayLength = m_settings.rayLength;
     const uint32_t experiment = m_settings.experimentDisable;
+    const uint32_t raysPerDispatch = L.raysPerDispatch;
     // gi.lumen_hit_surface_cache: the hits read the surface cache (tracks::surfaceCache published it before GI).
     const BufferRef surfaceCache = L.hitSurfaceCache ? fc.resources.surfaceCache : BufferRef{};
     // Screen traces before the world rays (gi.lumen_screen_traces): the shared depth pyramid and last frame's colour
@@ -456,9 +457,16 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   k[43] = c.srv(probeDepth);
                   k[44] = c.srv(probeNormal);
                   k[45] = c.srv(probePosition);
-                  c.computeConstants(k, 48);
                   c.bindFrameConstants(frameConstants);
-                  pipeline.dispatch(c.cmd, 0, traceX, traceY, 1);
+                  // Bands of rows, each its own DispatchRays of at most raysPerDispatch rays (a structural bound on one
+                  // dispatch's work: the atlas grows with the resolution, a dispatch does not).
+                  const uint32_t bandRows = std::max(1u, raysPerDispatch / std::max(traceX, 1u));
+                  for (uint32_t row = 0; row < traceY; row += bandRows)
+                  {
+                      k[47] = row;
+                      c.computeConstants(k, 48);
+                      pipeline.dispatch(c.cmd, 0, traceX, std::min(bandRows, traceY - row), 1);
+                  }
               });
     // Probe radiance stages after the composite: the optional probe-space temporal blend, then the spatial filter passes.
     // They alternate between two transient textures; the last one writes the persistent texture (next frame's history).

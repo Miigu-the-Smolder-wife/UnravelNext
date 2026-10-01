@@ -22,7 +22,9 @@
 // coverage distance, and a ray that reached it without a hit takes the cache's radiance in its direction (x exposure;
 // the sky is in the cache's own misses) - the trace word's bit 31,
 // P[6], P[7] = RtSceneSrvs,
-// P[8..11] = the common block (P[10].z adaptive SRV, P[10].w / P[11].x / P[11].y probe depth / normal / position SRVs).
+// P[8..11] = the common block (P[10].z adaptive SRV, P[10].w / P[11].x / P[11].y probe depth / normal / position SRVs),
+// P[11].w = first trace row of this dispatch (the pass splits the atlas into bands of at most gi.lumen_rays_per_dispatch
+// rays: each dispatch's work is bounded by its ray count, whatever the resolution).
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitDecals.hlsli"
@@ -41,7 +43,8 @@ float lgBias(float3 p) { return 1e-3 + 2e-4 * distance(p, g_cameraPosition); }
 [shader("raygeneration")]
 void LgTraceGen()
 {
-    const uint2 coord = DispatchRaysIndex().xy;
+    // (the atlas is traced in bands of rows, each its own DispatchRays: P[11].w = the band's first row)
+    const uint2 coord = DispatchRaysIndex().xy + uint2(0, P[11].w);
     const uint2 atlas = coord / LG_TRACE_RES, texel = coord % LG_TRACE_RES;
     const uint probe = lgProbeIndex(atlas);
     ByteAddressBuffer adaptive = ResourceDescriptorHeap[P[10].z];

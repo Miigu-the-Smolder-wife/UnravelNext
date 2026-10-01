@@ -218,3 +218,4 @@ lumen_screen_traces = true                 # ScreenTraces: the probes' rays walk
 lumen_screen_trace_iterations = 50         # HierarchicalScreenTraces.MaxIterations
 lumen_screen_trace_thickness = 0.02        # HierarchicalScreenTraces.RelativeDepthThickness
 lumen_screen_trace_thickness_steps = 4     # NumThicknessStepsToDetermineCertainty
+lumen_rays_per_dispatch = 262144           # the probe rays' DispatchRays is split into row bands of at most this many rays (bound on one dispatch's work; not an Unreal value)
