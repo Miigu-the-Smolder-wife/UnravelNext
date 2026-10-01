@@ -16,6 +16,10 @@
 // P[1], P[2], P[3] = sky and sun (GiSky.hlsli), ray length; P[3].w = gi.experiment_disable bits (8, 16, 128 as GiTrace),
 // P[4] = { sky band (tests), flags, normal bias (float, m), moving threshold (float) }, P[5].x = surface cache UAV
 // (0xFFFFFFFF: none - gi.lumen_hit_surface_cache off, surface_cache.enabled off or before its first frame),
+// P[5].y / .z / .w = radiance cache params (raw SRV) / indirection SRV / atlas SRV (P[5].y = 0xFFFFFFFF: none -
+// lumen.radiance_cache off): where all 8 cache probes around the screen probe exist the ray stops at the cache's
+// coverage distance, and a ray that reached it without a hit takes the cache's radiance in its direction (x exposure;
+// the sky is in the cache's own misses) - the trace word's bit 31,
 // P[6], P[7] = RtSceneSrvs,
 // P[8..11] = the common block (P[10].z adaptive SRV, P[10].w / P[11].x / P[11].y probe depth / normal / position SRVs).
 #include "RayTracing/RayShaders.hlsli"
@@ -26,6 +30,7 @@
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/GI/Lumen/LgCommon.hlsli"
 #include "Passes/SurfaceCache/SurfaceCache.hlsli"
+#include "Passes/GI/Lumen/LgRadianceCache.hlsli"
 
 float lgBias(float3 p) { return 1e-3 + 2e-4 * distance(p, g_cameraPosition); }
 
@@ -72,15 +77,27 @@ void LgTraceGen()
     // CALL SITE (S2's shared screen trace, as Lumen's LumenScreenTracing: the probes' rays and the reflection rays use one):
     // the ray first walks the depth pyramid; a certain hit takes last frame's lit colour there and skips the ray below (the
     // trace word then carries its distance and hit); otherwise r.TMin = the distance the screen trace cleared.
-    // CALL SITE (A's radiance cache, LumenRadianceCache): r.TMax = min(r.TMax, the cache's coverage distance at the probe),
-    // a miss then reads the cache in r.Direction and the trace word's bit 31 (reached the cache) is set.
+    // The far field: A's radiance cache (the position is the probe's, as marked by LgRcMark).
+    LrcCoverage coverage = (LrcCoverage)0;
+    if (P[5].y != 0xFFFFFFFFu)
+    {
+        coverage = lrcCoverageChecked(lrcParams(P[5].y), P[5].z, positionSpeed.xyz, lgRcDither(atlas));
+        if (coverage.valid) r.TMax = min(r.TMax, coverage.minTraceDistance);
+    }
     const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_GI | RT_MASK_EMITTER);
     const uint seed = giRandom(coord.x * 9781u + coord.y * 6271u + lgFrame() * 26699u);
 
     float3 radiance = 0;
     bool isHit = false, moving = false;
     float distanceToHit = giRayLength();
-    if (hit.t < 0)
+    bool reachedCache = false;
+    if (hit.t < 0 && coverage.valid)
+    {
+        radiance = lrcSample(lrcParams(P[5].y), P[5].z, P[5].w, coverage, positionSpeed.xyz, r.Direction, giUnit(seed + 31));
+        reachedCache = true;
+        distanceToHit = r.TMax;
+    }
+    else if (hit.t < 0)
     {
         radiance = giSkyRadiance(r.Direction);
 #if SKY != SKY_ATMOSPHERE
@@ -189,5 +206,5 @@ void LgTraceGen()
     }
     if (!all(radiance == radiance) || any(radiance < 0)) radiance = 0;
     traceRadiance[coord] = float4(min(radiance * g_exposure, 64000.0), 1);
-    traceWord[coord] = lgEncodeTrace(min(distanceToHit, giRayLength()), isHit, moving, false);
+    traceWord[coord] = lgEncodeTrace(min(distanceToHit, giRayLength()), isHit, moving, reachedCache);
 }
