@@ -159,7 +159,7 @@ enum UnxMaterialClass  // scene::MaterialClass
 // INTERFACES_KO.md 8.1 material v1.
 typedef struct UnxMaterialDesc
 {
-    uint32_t size, version;     // sizeof, 6 (5: up to substrateExtinction; 4: up to anisotropyRotation; 3 and 2: up to attenuationDistance, 2 without
+    uint32_t size, version;     // sizeof, 7 (6: up to waterAnisotropy, 232 B; 5: up to substrateExtinction; 4: up to anisotropyRotation; 3 and 2: up to attenuationDistance, 2 without
                                 // its sheen and attenuation fields; 1: up to name)
     uint32_t materialClass;     // UnxMaterialClass
     uint32_t twoSided;
@@ -194,7 +194,7 @@ typedef struct UnxMaterialDesc
     // version 6 (v1.92, defect queue 13 (75); Water class): the water's scattering coefficient (1/m, linear rgb; 0 = clear)
     // and the Henyey-Greenstein asymmetry of its phase function (-1 < g < 1)
     float waterScattering[3], waterAnisotropy;
-    // version 6 (defect queue 13 (76)): 1 = the emissive surface is seen by primary and reflection rays only - the GI
+    // version 7 (defect queue 13 (76)): 1 = the emissive surface is seen by primary and reflection rays only - the GI
     // update rays and the emissive cache take 0 from it (its lamp's analytic light lights the scene once); 0 = as before
     uint32_t emissiveVisibleOnly;
 } UnxMaterialDesc;

@@ -245,7 +245,7 @@ void pushScene(const Api& api, UnxRenderer r, const scene::Scene& s)
     {
         UnxMaterialDesc d{};
         d.size = sizeof d;
-        d.version = 6;  // v1.92: + the water scattering fields (a version 5 description of 216 B is still accepted)
+        d.version = 7;  // v1.92: + the water scattering fields (v6, 232 B) and the visible-only emissive word (v7); 5 and 6 are still accepted
         d.waterScattering[0] = m.waterScattering.x, d.waterScattering[1] = m.waterScattering.y, d.waterScattering[2] = m.waterScattering.z;
         d.waterAnisotropy = m.waterAnisotropy;
         d.emissiveVisibleOnly = m.emissiveVisibleOnly ? 1u : 0u;
