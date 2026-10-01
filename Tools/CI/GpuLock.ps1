@@ -52,7 +52,26 @@
 # of five waiting sessions. Turns are now first come, first served for both kinds (the kind no longer changes the
 # order; it still says whether CPU-heavy background jobs pause and how contention is judged). Rule for callers
 # (INTERFACES 3.3): one hold is at most about 10 minutes - longer batches are split and queue again between pieces.
+# v1.87 (2026-10-01 14:30: v1.85 copies in two worktrees and v1.86 in the main checkout yielded to each other and the GPU
+# stood idle for 13 minutes): (1) a worktree's copy of this script hands over to the main checkout's copy, so every
+# session runs one version and a rule change reaches all of them at once; (2) a waiter that has seen no holder for 30 s
+# stops yielding to waiters ahead and takes the lock (waiters that follow different rules cannot starve each other).
 # Arguments are parsed by hand (no param block) so everything after "--" reaches the command unchanged.
+$unxSelf = $MyInvocation.MyCommand.Path
+$unxSelfRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $unxSelf))
+$unxMain = $null
+if (Test-Path (Join-Path $unxSelfRoot ".git") -PathType Leaf) {
+  try {
+    $unxGitDir = [IO.File]::ReadAllText((Join-Path $unxSelfRoot ".git")).Trim() -replace '^gitdir:\s*', ''
+    if (-not [IO.Path]::IsPathRooted($unxGitDir)) { $unxGitDir = Join-Path $unxSelfRoot $unxGitDir }
+    $unxCommon = $unxGitDir
+    if (Test-Path (Join-Path $unxGitDir "commondir")) { $unxCommon = [IO.File]::ReadAllText((Join-Path $unxGitDir "commondir")).Trim() }
+    if (-not [IO.Path]::IsPathRooted($unxCommon)) { $unxCommon = Join-Path $unxGitDir $unxCommon }
+    $unxCandidate = Join-Path (Split-Path -Parent ([IO.Path]::GetFullPath($unxCommon))) "Tools\CI\GpuLock.ps1"
+    if ((Test-Path $unxCandidate) -and ($unxCandidate -ine $unxSelf)) { $unxMain = $unxCandidate }
+  } catch { $unxMain = $null }
+}
+if ($unxMain) { & $unxMain @args; exit $LASTEXITCODE }
 $ErrorActionPreference = "Stop"
 $Track = $null
 $WaitMinutes = 120
@@ -881,9 +900,17 @@ function Get-Blocker {
   $hold = Get-Hold
   if ($hold) { return "HOLD: $hold" }
   $w = Get-WaiterAhead
-  if ($w) { return "in line behind {0} ({1}, pid {2}, since {3}) :: {4}" -f $w.track, $w.kind, $w.pid, $w.since, $w.command }
+  if ($w) {
+    # Deadlock breaker (v1.87): nobody has held the lock for 30 s although waiters exist - stop yielding.
+    if (Test-Path $current) { $script:noHolderSince = $null }
+    elseif (-not $script:noHolderSince) { $script:noHolderSince = Get-Date }
+    elseif (((Get-Date) - $script:noHolderSince).TotalSeconds -ge 30) { return $null }
+    return "in line behind {0} ({1}, pid {2}, since {3}) :: {4}" -f $w.track, $w.kind, $w.pid, $w.since, $w.command
+  }
+  $script:noHolderSince = $null
   return $null
 }
+$script:noHolderSince = $null
 
 $mutex = New-Object System.Threading.Mutex($false, "Local\UnravelNext.GpuMeasurement")
 $acquired = $false
