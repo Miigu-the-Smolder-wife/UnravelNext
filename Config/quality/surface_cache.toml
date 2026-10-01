@@ -30,3 +30,10 @@ direct_analytic = true                # each of the cell's 8 lights: its unshado
 bilinear_read = true                  # a hit's value is the bilinear blend of the four cells around it in its face's plane, cells
                                       # that are not there left out (reference: a card's four texels with depth weights). false:
                                       # the hit's own cell - cells show as squares
+debug_skip = 0                        # diagnostics (which part of the cell lighting a fault is in), a sum of: 1 no local lights,
+                                      # 2 no sun, 4 the lights are chosen but not evaluated, 8 evaluated without shadow rays,
+                                      # 16 the lights' shadow rays under the GI mask
+shadow_rays_opaque = false            # QUALITY TRADE (user decision; the reference's default is on: no alpha masking in Lumen's
+                                      # hardware rays): true = the cells' shadow rays (lights, sun) take alpha-tested casters as
+                                      # solid - no any-hit work per ray. Off here: it changes the cached shadows and did not
+                                      # cure the lounge hang it was tried for (2026-10-02)

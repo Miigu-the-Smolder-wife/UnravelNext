@@ -29,7 +29,10 @@
 //                          reference). Without it: one random point on each light, one shadow ray to it.
 // P[4].z = the first thread index of the dispatch (SurfaceCacheCellsGen: the frame's budget goes in several dispatches).
 // P[0] = { cache UAV, budget, frame, flags (bit 0: local lights and sun, bit 1: radiosity, bit 3: the remainder light,
-//          bit 4: stochastic local lights, bit 5: feedback order, bit 6: analytic local lights) }, P[4] = { asuint(stochastic max frames), asuint(min sample weight), 0, 0 }
+//          bit 4: stochastic local lights, bit 5: feedback order, bit 6: analytic local lights; diagnostics
+//          (surface_cache.debug_skip, to find which part of the cell lighting a fault is in): bit 7 no local lights,
+//          bit 8 no sun, bit 9 the lights are chosen but not evaluated, bit 10 the lights are evaluated without their
+//          shadow rays); bit 11 the cell's shadow rays (lights, sun) take alpha-tested casters as opaque) }, P[4] = { asuint(stochastic max frames), asuint(min sample weight), 0, 0 }
 // P[1].xyz = constant sky radiance (SKY1), P[1].w = ray length, P[2] = atmosphere SRVs (SKY0), P[3].xyz = constant sun
 // illuminance (SKY1) (GiSky.hlsli), P[3].w = seed bounces; P[6], P[7] = RtSceneSrvs. Frame constants b1 = main view.
 #include "RayTracing/RayShaders.hlsli"
@@ -57,6 +60,8 @@ bool scRayOk(float3 origin, float3 direction)
     const float d = dot(direction, direction);
     return all(abs(origin) < 1e9) && d > 0.98 && d < 1.02;  // (comparisons are false for NaN)
 }
+// ... and its interval: 0 <= TMin <= TMax, both finite (max(a, NaN) is not defined to be a).
+bool scRayOk(RayDesc ray) { return scRayOk(ray.Origin, ray.Direction) && ray.TMin >= 0 && ray.TMax >= ray.TMin && ray.TMax < 1e30; }
 
 // A sampled light point's shadow ray under the GI mask (the sampled-point direct light: surface_cache.direct_analytic=false).
 bool scShadowVisible(RtSceneSrvs scene, RayDesc ray) { return scRayOk(ray.Origin, ray.Direction) && rtVisible(scene, ray, RT_MASK_GI); }
@@ -98,7 +103,9 @@ bool scMeet(RWByteAddressBuffer b, ScLayout l, RtSceneSrvs scene, RtHit hit, Ray
 
 // Whether the centre of a light is seen from x (n: the surface's normal): the reference's shadow ray of a card texel.
 // The ray ends 5 cm before the light's surface (S's rule: what lies within 5 cm of a light casts no shadow).
-bool scCentreVisible(RtSceneSrvs scene, float3 x, float3 n, GpuLight g, float bias)
+// (flags: RAY_FLAG_FORCE_OPAQUE with surface_cache.shadow_rays_opaque - the reference's hardware rays run no alpha
+// masking by default (r.Lumen.HardwareRayTracing.SurfaceCacheAlphaMasking 0): a ray's cost is the traversal's alone.)
+bool scCentreVisible(RtSceneSrvs scene, float3 x, float3 n, GpuLight g, float bias, uint flags)
 {
     const float3 d = g.position - x;
     const float dist = length(d);
@@ -106,13 +113,14 @@ bool scCentreVisible(RtSceneSrvs scene, float3 x, float3 n, GpuLight g, float bi
     const uint type = lightType(g);
     const float radius = type == LIGHT_SPHERE ? g.size.x : type == LIGHT_TUBE ? g.size.y : 0.0;
     const float3 wi = d / dist;
+    const float reach = dist - radius - 0.05;
     RayDesc ray;
     ray.Origin = x + n * (dot(n, wi) < 0 ? -bias : bias);
     ray.Direction = wi;
     ray.TMin = bias;
-    ray.TMax = max(bias, dist - radius - 0.05);
-    if (!scRayOk(ray.Origin, ray.Direction)) return false;
-    return rtVisible(scene, ray, RT_MASK_SHADOW);
+    ray.TMax = reach > bias ? reach : bias;  // (a NaN reach - a light record without a valid size - gives the bias)
+    if (!scRayOk(ray)) return false;
+    return rtVisible(scene, ray, (flags & 0x80000000u) != 0 ? RT_MASK_GI : RT_MASK_SHADOW, flags & 0x7FFFFFFFu);
 }
 
 // The item a thread of a lighting pass works on: the entries not lit yet first, then a window over the lit ones.
@@ -194,6 +202,9 @@ void SurfaceCacheCellsGen()
     const uint seed = giRandom(slot * 9781u + P[0].z * 6271u + 17u);
     const uint3 before = b.Load3(scLightOffset(n, slot));
     float3 direct = scUnpackRgb(before.x), sun = scUnpackRgb(before.y), indirect = scUnpackRgb(before.z);
+    // (bit 12, diagnostics - surface_cache.debug_skip 16: the lights' shadow rays under the GI mask; carried in bit 31)
+    const uint shadowFlags = (P[0].w & 2048u) != 0 ? RAY_FLAG_FORCE_OPAQUE : RAY_FLAG_NONE;
+    const uint lightRayFlags = shadowFlags | ((P[0].w & 4096u) != 0 ? 0x80000000u : 0u);
     if (P[0].w & 1u)
     {
         const float3 directBefore = direct;
@@ -216,7 +227,7 @@ void SurfaceCacheCellsGen()
             if (framesS > 1) direct = lerp(directBefore, direct, 1 / framesS);
             if ((float)hadS < framesS) b.InterlockedAdd(headOffsetS, 1u << 24);
         }
-        else if (scene.pad != 0xFFFFFFFFu)
+        else if (scene.pad != 0xFFFFFFFFu && (P[0].w & 128u) == 0)
         {
             // the lights of the cell's place in the light grid, the strongest SC_LIGHTS_PER_CELL kept
             g_rtLightData = scene.pad;
@@ -260,11 +271,12 @@ void SurfaceCacheCellsGen()
             [loop] for (uint i = 0; i < held; ++i)
             {
                 kept += weight[i];
+                if (P[0].w & 512u) continue;  // (diagnostics: chosen, not evaluated)
                 if (analytic)
                 {
                     const GpuLight g = loadLight(chosen[i]);
                     const float3 e = 3.14159265 * mlLightUnshadowed(lambert, g, chosen[i], UNX_NONE);
-                    if (any(e > 0) && (!lightCastsShadow(g) || scCentreVisible(scene, position, normal, g, bias))) direct += e;
+                    if (any(e > 0) && ((P[0].w & 1024u) != 0 || !lightCastsShadow(g) || scCentreVisible(scene, position, normal, g, bias, lightRayFlags))) direct += e;
                     continue;
                 }
                 RtLocalChoice c;
@@ -310,7 +322,7 @@ void SurfaceCacheCellsGen()
         }
         const float3 toSun = giSunDirection(seed + 3);
         const float muS = dot(normal, toSun);
-        if (muS > 0)
+        if (muS > 0 && (P[0].w & 256u) == 0)
         {
             const float3 e = giSunIlluminance(position);
             if (any(e > 0))
@@ -320,7 +332,7 @@ void SurfaceCacheCellsGen()
                 r.Direction = toSun;
                 r.TMin = 0;
                 r.TMax = giRayLength();
-                if (scRayOk(r.Origin, r.Direction) && rtVisible(scene, r, RT_MASK_GI)) sun = e * muS;
+                if (scRayOk(r) && rtVisible(scene, r, RT_MASK_GI, shadowFlags)) sun = e * muS;
             }
         }
     }
