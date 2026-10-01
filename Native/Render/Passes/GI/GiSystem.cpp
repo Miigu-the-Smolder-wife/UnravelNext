@@ -151,6 +151,7 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.bounceSplit = q.has("gi.bounce_split") && q.boolean("gi.bounce_split");
     s.missClosure = q.has("gi.miss_closure") && q.boolean("gi.miss_closure");
     s.bounceVisibility = q.has("gi.bounce_visibility") && q.boolean("gi.bounce_visibility");
+    s.hitOrientedLights = q.has("gi.hit_oriented_lights") && q.boolean("gi.hit_oriented_lights");
     if (s.missClosure && s.splitBounceHistory) fail("gi.miss_closure is not combined with gi.split_bounce_history");
     s.anchorResample = q.has("gi.anchor_resample") && q.boolean("gi.anchor_resample");
     s.anchorCentroid = q.has("gi.anchor_centroid") && q.boolean("gi.anchor_centroid");
@@ -277,7 +278,8 @@ GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(devi
     h[193] = m_settings.splitBounceHistory ? l.split : 0;
     h[194] = m_settings.bounceHistoryUpdates;
     h[195] = (m_settings.updateTiers ? 1u : 0u) | (m_settings.parentPrior ? 2u : 0u) | (m_settings.relightRestart ? 4u : 0u) | (m_settings.hitLightFootprint ? 8u : 0u) |
-             (m_settings.bounceSplit ? 16u : 0u) | (m_settings.missClosure ? 32u : 0u) | (m_settings.bounceVisibility ? 64u : 0u);  // GI_P1_FLAGS
+             (m_settings.bounceSplit ? 16u : 0u) | (m_settings.missClosure ? 32u : 0u) | (m_settings.bounceVisibility ? 64u : 0u) |
+             (m_settings.hitOrientedLights ? 128u : 0u);  // GI_P1_FLAGS
     h[196] = asU(m_settings.youngUpdateShare);                                     // GI_P1_T0_SHARE
     h[197] = asU(m_settings.parentDeltaInitial * m_settings.parentDeltaInitial);  // GI_P1_DELTA2
     h[212] = asU(m_settings.hitLightFootprintScale);                              // GI_P1_FOOTPRINT_SCALE

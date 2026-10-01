@@ -346,7 +346,13 @@ void GiTraceGen()
             }
             else if ((P[3].w & 128) == 0)
             {
-                const RtLocalSample ls = rtLocalLightSample(scene, s.position, giUnit(seed + 11), giUnit(seed + 12), giUnit(seed + 13),
+                // gi.hit_oriented_lights (GI_P1_FLAGS bit 7): the light is chosen with the hit's orientation in the weights
+                // (rtLocalLightChooseOriented: importance x the largest cosine the emitter can have at the hit; a light below
+                // the hit's horizon is never drawn - its sample is exactly 0 there). Unbiased with the same probability
+                // in the weight. Off (and foliage, lit from behind too): rtLocalLightChoose's choice, bit for bit.
+                const bool orientedChoice = (b.Load(GI_P1_FLAGS) & 128u) != 0 && (m.classFlags & 0xFFu) != MATERIAL_FOLIAGE;
+                const RtLocalSample ls = rtLocalLightFinish(scene, rtLocalLightChooseOriented(scene, s.position, s.normal, !orientedChoice, giUnit(seed + 11)),
+                                                              s.position, giUnit(seed + 12), giUnit(seed + 13),
                                                               hit.t * GI_FOOTPRINT_PER_METRE * asfloat(P[0].z));  // the hit cell's footprint
                 if (ls.valid)
                 {

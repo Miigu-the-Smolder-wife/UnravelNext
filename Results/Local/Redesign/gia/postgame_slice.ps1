@@ -84,7 +84,8 @@ switch ($turn) {
   'tests' {
     $out = 'C:\Users\USER\UnravelNext-redesign\Results\Local\Redesign\items\p2tests'
     New-Item -ItemType Directory -Force $out | Out-Null
-    foreach ($t in 'unx_test_gi_gianalytic', 'unx_test_reflection_reflectionanalytic', 'unx_test_host_hostmotion', 'unx_test_shading_shadingtests', 'unx_test_volume_volumetests', 'unx_test_shadow_froxeltests') { Step "t_$t" "$t.exe" @() }
+    $list = if ($env:PG_TESTS) { $env:PG_TESTS -split ',' } else { 'unx_test_gi_gianalytic', 'unx_test_reflection_reflectionanalytic', 'unx_test_host_hostmotion', 'unx_test_shading_shadingtests', 'unx_test_volume_volumetests', 'unx_test_shadow_froxeltests' }
+    foreach ($t in $list) { Step "t_$t" "$t.exe" @() }
   }
   'isolate' {
     # which change the frame 3-4 block pattern of the train's GI layer follows: all on with one group off
@@ -103,6 +104,8 @@ switch ($turn) {
       }
     }
   }
+  # the deploy configuration = the defaults (accumulator off, reflection layers on): frames 1/4/16/299 and the rotation
+  'deploy' { Still 'full' 'deploy'; Rot 'full' 'deploy' }
   'show' { Still 'allon'; Still 'alloff'; if ($res -eq '1920x1080') { Rot 'allon'; Rot 'alloff' } }
   'filter' { Still 'full'; Still 'none'; Still 'passes2'; Still 'wideonly'; if ($res -eq '1920x1080') { Rot 'full'; Rot 'none' } }
   'cold' { Still 'coldoff'; Still 'visonly'; Still 'closureonly'; Still 'full' 'full_b'; Still 'coldoff' 'coldoff_b' }

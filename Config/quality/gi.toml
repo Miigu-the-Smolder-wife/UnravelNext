@@ -55,6 +55,11 @@ miss_closure = true                # V2 1.3 (cold start: cuts, newly seen region
                                    # missing irradiance is the entry's own, E = E_measured / (1 - sum albedo / pi w cos) (GiIntegrate.hlsl;
                                    # frame-1 level 0.52-0.62 -> 0.90-1.04 of converged in the bath lounge, converged level unchanged
                                    # within the runs' spread [measured with the strict fallback alone]). false: A/B
+hit_oriented_lights = false        # a GI hit's one local-light sample chosen with the hit's orientation in the weights (the
+                                   # reflection hits' rtLocalLightChooseOriented: importance x the largest cosine the emitter
+                                   # can have at the hit; a light below the hit's horizon is never drawn). Unbiased - the same
+                                   # probability in the weight; fewer zero samples where many lights reach a hit from behind
+                                   # (rooms with hundreds of lamps: the lobby, 827 lights). Off: the importance alone, bit for bit.
 anchor_resample = false            # V2.2 P1'-b: each update moves the entry's anchor to a random point among the surface
                                    # points that looked it up since its last update (the value = the mean over where the cell is
                                    # read, not the irradiance at its creator's point: the level depended on the history)
