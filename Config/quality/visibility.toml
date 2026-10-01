@@ -22,9 +22,11 @@ band_c_max_fragments_per_pixel = 8
 coverage_hair = false             # E's strand hair segments drawn in the coverage layer (HairRaster.ms, B10) - with
                                   # coverage_layer; true once M reads hair records (coverageFragmentIsHair)
 coverage_subsamples = 32          # in-pixel fragment overlap ordering mask
-coverage_layer = false            # main view: bands B and C drawn in the coverage layer (INTERFACES 7.1); false draws
-                                  # them in the vis buffer, which loses sub-pixel geometry. true once M composites the
-                                  # coverage fragments (without it thin geometry would leave M's image)
+coverage_layer = true             # main view: bands B and C drawn in the coverage layer (INTERFACES 7.1), and the translucent
+                                  # layer (A6: glass) runs - with false the games' glass was white (defect queue 3: the layer
+                                  # does not run) and sub-pixel geometry is lost in the vis buffer. Cost at 1440p [measured
+                                  # 2026-10-01]: bath lounge +2.06 ms, bath +1.70 ms, mostly m.coverage composite at 21-24 ns
+                                  # per record (design V2.5 item 7 takes it). false: the vis buffer path (A/B)
 brick_resolution = 16             # band C voxel brick edge
 brick_max_feature_width = 0.0     # m: meshes whose thin width (area-weighted P10 of component widths) is at most this get
                                   # band C bricks (Bricks.h); 0 = none until the bake and the march are gated

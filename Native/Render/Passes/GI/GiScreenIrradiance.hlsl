@@ -4,8 +4,8 @@
 // shading kernel to read once (R_STATUS_KO.md 0, GI tile path verdict: the lookup costs 2.44 ms at 4K in a kernel of its
 // own occupancy [measured], against ~3.4 ms inside M's shading kernel [expected]). The same function on the same inputs
 // as M (GiScreenInputs.hlsli), so the only difference is the storage: RGBA16F, rgb = irradiance x the view's exposure
-// (relative rounding <= 2^-11; pre-exposed so no value leaves the half range), a = 1 where the cache had data (weight
-// > 0), 0 where M keeps the screen probes' irradiance. Pixels without a surface get 0.
+// (relative rounding <= 2^-11; pre-exposed so no value leaves the half range), a = the value's relative standard deviation
+// (GiCache.hlsli, >= 1e-3) where the cache had data (weight > 0), 0 where it had none. Pixels without a surface get 0.
 // The cache's anchor visibility (gi.anchor_visibility, giScreenSeen) re-weights each level's corners where they are all
 // converged. (A quad-shared form with batched corner loads, plus the visibility loads, measured 1.44 ms against this
 // form's 0.77 without visibility at 1440p [measured, 20379fb, RTX 4080]: the shared form is removed.)
@@ -101,13 +101,14 @@ bool giScreenReuse(uint2 pixel, float3 worldPos, float3 nv, float footprint, uin
         const float3 n = giScreenUnpackNormal(key.y);
         if (giNormalClass(n) != nc || dot(n, prevN) < 0.99) return false;
         const float4 v = values.Load(int3(q, 0));
-        if (flag >= 0 && v.a != flag) return false;
-        flag = v.a;
+        const float data = v.a > 0 ? 1.0 : 0.0;  // (a = the value's relative standard deviation where there is data)
+        if (flag >= 0 && data != flag) return false;
+        flag = data;
         const float w = (k & 1 ? f.x : 1 - f.x) * (k & 2 ? f.y : 1 - f.y);
         sum += w * v;
         oldest = max(oldest, a);
     }
-    value = float4(sum.rgb * asfloat(P[1].w), flag);
+    value = float4(sum.rgb * asfloat(P[1].w), sum.a);
     age = oldest + 1;
     return true;
 }
@@ -143,9 +144,10 @@ void main(uint2 pixel : SV_DispatchThreadID, uint2 tile : SV_GroupID)
     if (lookup)
     {
         ByteAddressBuffer cache = ResourceDescriptorHeap[P[0].x];
-        float weight;
-        const float3 e = giCacheIrradianceScreen(cache, giHeader(cache), worldPos, nv, weight);
-        result = weight > 0 ? float4(e * g_exposure, 1) : float4(0, 0, 0, 0);
+        float weight, sigma;
+        const float3 e = giCacheIrradianceScreen(cache, giHeader(cache), worldPos, nv, weight, sigma);
+        // a = the value's relative standard deviation (GiCache.hlsli; >= 1e-3: a > 0 still marks data) for the filter
+        result = weight > 0 ? float4(e * g_exposure, max(sigma, 1e-3)) : float4(0, 0, 0, 0);
     }
     output[pixel] = result;
 #if SPLIT

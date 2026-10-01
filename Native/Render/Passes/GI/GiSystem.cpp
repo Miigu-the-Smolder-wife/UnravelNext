@@ -31,7 +31,8 @@ uint32_t asU(float f)
 // Cache buffer layout (GiCache.hlsli header fields 4..11, 24..27).
 struct Layout
 {
-    uint32_t table, freeList, meta, anchor, sh, texels, update, selected, hitStamp, hitList, shTable, mapOwner, anchorMin, irr, slotAnchor, emit, split, bsplit, resample, acc, accSums, end;
+    uint32_t table, freeList, meta, anchor, sh, texels, update, selected, hitStamp, hitList, shTable, mapOwner, anchorMin, irr, slotAnchor, emit, split, bsplit, resample, acc, accSums,
+        centroid, end;
 };
 
 Layout layoutOf(const GiSettings& s)
@@ -61,9 +62,12 @@ Layout layoutOf(const GiSettings& s)
     l.resample = (uint32_t)resample;
     const uint64_t acc = resample + (s.anchorResample ? (uint64_t)s.capacity * 8 : 0);  // gi.anchor_resample (GI_RESAMPLE_OFFSET)
     l.acc = (uint32_t)acc;
-    const uint64_t accSums = acc + (s.hitAccumulator ? (uint64_t)s.capacity * 48 : 0);  // gi.hit_accumulator means (GI_ACC_OFFSET)
+    const bool accEntries = s.hitAccumulator && !s.hitAccumulatorPool;  // (the pool has its own buffer: GiAccPool.hlsli)
+    const uint64_t accSums = acc + (accEntries ? (uint64_t)s.capacity * 48 : 0);  // gi.hit_accumulator means (GI_ACC_OFFSET)
     l.accSums = (uint32_t)accSums;
-    const uint64_t end = accSums + (s.hitAccumulator ? (uint64_t)s.capacity * 144 : 0);  // and frame sums (GI_ACC_SUMS, GI_ACC_SUMS_BYTES)
+    const uint64_t centroid = accSums + (accEntries ? (uint64_t)s.capacity * 144 : 0);  // and frame sums (GI_ACC_SUMS, GI_ACC_SUMS_BYTES)
+    l.centroid = (uint32_t)centroid;
+    const uint64_t end = centroid + (s.anchorCentroid ? (uint64_t)s.capacity * 48 : 0);  // gi.anchor_centroid (GI_CENTROID_OFFSET)
     if (end >= (1ull << 32)) fail("GI cache exceeds raw-buffer address space");
     l.end = (uint32_t)end;
     return l;
@@ -122,6 +126,15 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.hitCellFootprintScale = (float)q.number("gi.hit_cell_footprint_scale");
     s.screenOcclusionHistory = (uint32_t)q.integer("gi.screen_occlusion_history_frames");
     s.screenFilterCells = (float)q.number("gi.screen_filter_cells");
+    s.screenFilterAdaptive = q.has("gi.screen_filter_adaptive") && q.boolean("gi.screen_filter_adaptive");
+    s.screenTemporalFrames = q.has("gi.screen_temporal_frames") ? (uint32_t)q.integer("gi.screen_temporal_frames") : 0;
+    s.screenWideFilter = q.has("gi.screen_wide_filter") && q.boolean("gi.screen_wide_filter");
+    if (q.has("gi.screen_wide_passes")) s.screenWidePasses = (uint32_t)q.integer("gi.screen_wide_passes");
+    if (s.screenWidePasses < 1 || s.screenWidePasses > 3) fail("gi.screen_wide_passes must be 1..3");
+    if (q.has("gi.screen_wide_sigma_lo")) s.screenWideSigmaLo = (float)q.number("gi.screen_wide_sigma_lo");
+    if (q.has("gi.screen_wide_sigma_hi")) s.screenWideSigmaHi = (float)q.number("gi.screen_wide_sigma_hi");
+    if (!(s.screenWideSigmaLo >= 0) || !(s.screenWideSigmaHi >= s.screenWideSigmaLo)) fail("gi.screen_wide_sigma_lo / _hi must satisfy 0 <= lo <= hi");
+    if (s.screenTemporalFrames > 64) fail("gi.screen_temporal_frames must be at most 64");
     s.screenUpdateFrames = q.has("gi.screen_update_frames") ? (uint32_t)q.integer("gi.screen_update_frames") : 1;
     s.experimentDisable = (uint32_t)q.integer("gi.experiment_disable");
     s.deterministic = q.boolean("gi.deterministic") || (q.has("debug.deterministic") && q.boolean("debug.deterministic"));  // (debug.deterministic implies it)
@@ -136,7 +149,12 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.lightInvalidation = q.has("gi.light_invalidation") && q.boolean("gi.light_invalidation");
     s.hitLightFootprintScale = q.has("gi.hit_light_footprint_scale") ? (float)q.number("gi.hit_light_footprint_scale") : 1.0f;
     s.bounceSplit = q.has("gi.bounce_split") && q.boolean("gi.bounce_split");
+    s.missClosure = q.has("gi.miss_closure") && q.boolean("gi.miss_closure");
+    s.bounceVisibility = q.has("gi.bounce_visibility") && q.boolean("gi.bounce_visibility");
+    if (s.missClosure && s.splitBounceHistory) fail("gi.miss_closure is not combined with gi.split_bounce_history");
     s.anchorResample = q.has("gi.anchor_resample") && q.boolean("gi.anchor_resample");
+    s.anchorCentroid = q.has("gi.anchor_centroid") && q.boolean("gi.anchor_centroid");
+    if (s.anchorResample && s.anchorCentroid) fail("gi.anchor_resample and gi.anchor_centroid both move the anchor: choose one");
     if (q.has("gi.history_window_rule"))
     {
         const std::string rule = q.string("gi.history_window_rule");
@@ -153,6 +171,18 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.hitAccumulatorCellScale = q.has("gi.hit_accumulator_cell_scale") ? (float)q.number("gi.hit_accumulator_cell_scale") : s.hitCellFootprintScale;
     s.hitAccumulatorFrame = q.has("gi.hit_accumulator_frame") && q.boolean("gi.hit_accumulator_frame");
     s.hitAccumulatorRatio = q.has("gi.hit_accumulator_ratio") && q.boolean("gi.hit_accumulator_ratio");
+    s.hitAccumulatorPool = s.hitAccumulator && q.has("gi.hit_accumulator_pool") && q.boolean("gi.hit_accumulator_pool");
+    if (q.has("gi.hit_accumulator_pool_slots")) s.hitAccumulatorPoolSlots = (uint32_t)q.integer("gi.hit_accumulator_pool_slots");
+    if (q.has("gi.hit_accumulator_alpha")) s.hitAccumulatorAlpha = (float)q.number("gi.hit_accumulator_alpha");
+    if (q.has("gi.hit_accumulator_fine_scale")) s.hitAccumulatorFineScale = (float)q.number("gi.hit_accumulator_fine_scale");
+    if (s.hitAccumulatorPool)
+    {
+        if (s.hitAccumulatorPoolSlots < 1024 || (s.hitAccumulatorPoolSlots & (s.hitAccumulatorPoolSlots - 1)) != 0 || s.hitAccumulatorPoolSlots > (1u << 22))
+            fail("gi.hit_accumulator_pool_slots must be a power of two in [1024, 2^22]");
+        if (!(s.hitAccumulatorAlpha > 0 && s.hitAccumulatorAlpha <= 1)) fail("gi.hit_accumulator_alpha must be in (0, 1]");
+        if (!(s.hitAccumulatorFineScale > 0 && s.hitAccumulatorFineScale <= 2)) fail("gi.hit_accumulator_fine_scale must be in (0, 2]");
+        if (s.hitAccumulatorFrame) fail("gi.hit_accumulator_pool does not use the frame correction (gi.hit_accumulator_frame)");
+    }
     if (!(s.hitAccumulatorWindow >= 1 && s.hitAccumulatorWindowRecent >= 1)) fail("gi.hit_accumulator windows must be >= 1 sample");
     if (q.has("gi.path_guiding_uniform_share")) s.pathGuidingUniformShare = (float)q.number("gi.path_guiding_uniform_share");
     if (!(s.pathGuidingUniformShare > 0 && s.pathGuidingUniformShare <= 1)) fail("gi.path_guiding_uniform_share must be in (0, 1] (unbiased only with a uniform share)");
@@ -247,17 +277,18 @@ GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(devi
     h[193] = m_settings.splitBounceHistory ? l.split : 0;
     h[194] = m_settings.bounceHistoryUpdates;
     h[195] = (m_settings.updateTiers ? 1u : 0u) | (m_settings.parentPrior ? 2u : 0u) | (m_settings.relightRestart ? 4u : 0u) | (m_settings.hitLightFootprint ? 8u : 0u) |
-             (m_settings.bounceSplit ? 16u : 0u);  // GI_P1_FLAGS
+             (m_settings.bounceSplit ? 16u : 0u) | (m_settings.missClosure ? 32u : 0u) | (m_settings.bounceVisibility ? 64u : 0u);  // GI_P1_FLAGS
     h[196] = asU(m_settings.youngUpdateShare);                                     // GI_P1_T0_SHARE
     h[197] = asU(m_settings.parentDeltaInitial * m_settings.parentDeltaInitial);  // GI_P1_DELTA2
     h[212] = asU(m_settings.hitLightFootprintScale);                              // GI_P1_FOOTPRINT_SCALE
     h[230] = m_settings.bounceSplit ? l.bsplit : 0;                                // GI_BSPLIT_OFFSET
     h[231] = m_settings.bounceSplitUpdates;                                        // GI_BSPLIT_WINDOW
     h[232] = m_settings.anchorResample ? l.resample : 0;                           // GI_RESAMPLE_OFFSET
-    h[234] = m_settings.hitAccumulator ? l.acc : 0;                                // GI_ACC_OFFSET
-    h[235] = m_settings.hitAccumulator ? l.accSums : 0;                            // GI_ACC_SUMS
+    h[234] = m_settings.hitAccumulator && !m_settings.hitAccumulatorPool ? l.acc : 0;      // GI_ACC_OFFSET
+    h[235] = m_settings.hitAccumulator && !m_settings.hitAccumulatorPool ? l.accSums : 0;  // GI_ACC_SUMS
     h[236] = m_settings.hitAccumulatorMinSamples;                                  // GI_ACC_MIN
     h[237] = asU(m_settings.hitAccumulatorCellScale);                              // GI_ACC_CELL_SCALE
+    h[242] = m_settings.anchorCentroid ? l.centroid : 0;                           // GI_CENTROID_OFFSET
     h[233] = (m_settings.hitAccumulatorFrame ? 1u : 0u) | ((m_settings.experimentDisable & 32768u) ? 2u : 0u) |
              (m_settings.hitAccumulatorRatio ? 4u : 0u);  // GI_ACC_MODE
     for (uint32_t e = 0; e < m_settings.capacity; ++e) head[l.freeList / 4 + e] = m_settings.capacity - 1 - e;  // pops 0, 1, 2 ...
@@ -282,6 +313,19 @@ GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(devi
     };
     uploadRange(0, head);
     uploadRange(l.hitStamp, tail);
+    if (m_settings.hitAccumulatorPool)
+    {
+        // The accumulator pool (GiAccPool.hlsli): header, keys, stamps, 4 lists, payload. Committed resources are created
+        // zeroed; r.gi.acc.clear empties it again before its first use.
+        m_accPoolBytes = 64 + (uint64_t)m_settings.hitAccumulatorPoolSlots * (28 + 240);
+        D3D12_RESOURCE_DESC1 pd = d;
+        pd.Width = m_accPoolBytes;
+        check(device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &pd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_accPool)),
+              "GI accumulator pool");
+        m_accPool->SetName(L"GI hit accumulator pool");
+        logf("GI accumulator pool: %u slots, %.1f MB, alpha %.3f, finest cell %.2f x the ray footprint, %u samples\n", m_settings.hitAccumulatorPoolSlots,
+             m_accPoolBytes / 1048576.0, m_settings.hitAccumulatorAlpha, m_settings.hitAccumulatorFineScale, m_settings.hitAccumulatorMinSamples);
+    }
     logf("GI cache: %u entries, %u table slots, %.1f MB (texels %.1f MB), finest cell %.3f m, cell %.2f deg, %u rays = %u hemisphere updates per frame\n",
          m_settings.capacity, m_settings.tableSlots, m_bytes / 1048576.0, m_settings.capacity * 512.0 / 1048576.0, m_settings.cellMin, m_settings.cellAngleDeg,
          m_settings.raysPerFrame, m_settings.updatesPerFrame);
@@ -350,6 +394,8 @@ GiSystem::~GiSystem()
     {
         if (m_screenValue[k]) m_device.deferRelease(m_screenValue[k]);
         if (m_screenKeys[k]) m_device.deferRelease(m_screenKeys[k]);
+        if (m_layerValue[k]) m_device.deferRelease(m_layerValue[k]);
+        if (m_layerKeys[k]) m_device.deferRelease(m_layerKeys[k]);
     }
     if (m_changeRing)
     {
@@ -444,8 +490,8 @@ TextureRef GiSystem::recordScreen(FramePassContext& fc, ViewResources& view, Buf
                       b.use(visibleClusters, Use::SrvCompute);
                   }
               },
-              [&shaders, cache, depth, gbuffer, screen, frameConstants, width, height, split, keys, prevScreen, prevKeys, visId, visibleClusters, splitFlags,
-               exposureRatio, invPrev](PassContext& c) {
+              [&shaders, cache, depth, gbuffer, screen, frameConstants, width, height, split, keys, prevScreen, prevKeys, visId, visibleClusters,
+               splitFlags, exposureRatio, invPrev](PassContext& c) {
                   const uint32_t none = 0xFFFFFFFFu;
                   uint32_t k[32] = { c.srv(cache), c.srv(depth), c.srv(gbuffer), c.uav(screen), width, height, splitFlags, asU(exposureRatio),
                                      split ? c.srv(prevKeys) : none, split ? c.uav(keys) : none, split ? c.srv(prevScreen) : none, split ? c.srv(visId) : none,
@@ -462,6 +508,41 @@ TextureRef GiSystem::recordScreen(FramePassContext& fc, ViewResources& view, Buf
     const TextureRef filtered = g.createTexture({ "GI screen irradiance", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
     const float pixelAngle = 2.0f * std::tan(view.view.verticalFov * 0.5f) / (float)height;
     const TextureRef probes = planar ? TextureRef{} : view.screenProbes;
+    // The wide layer (gi.screen_wide_filter, GiProbeFilter.hlsl): the records' pass, then three a-trous passes over the probes' SH. The tap
+    // spacing in probes follows the cells' size on screen (cache_cell_angle over the pixel angle; the cells are 1-2 x
+    // that): the passes reach +-14 spacings, ~6 cells at spacing = nominal cell px / 12.
+    TextureRef wide;
+    if (probes.valid() && s.screenWideFilter)
+    {
+        const uint32_t probesX = (width + s.probeSpacing - 1) / s.probeSpacing + 1, probesY = (height + s.probeSpacing - 1) / s.probeSpacing + 1;
+        const float cellPx = std::tan(s.cellAngleDeg * 3.14159265358979f / 180.0f) / pixelAngle;
+        const uint32_t spacing = std::max(1u, (uint32_t)std::lround(cellPx / 12.0f));
+        TextureRef source;
+        for (uint32_t pass = 0; pass < 1 + s.screenWidePasses; ++pass)
+        {
+            static const char* const names[4] = { "r.gi.probe.wide", "r.gi.probe.filter0", "r.gi.probe.filter1", "r.gi.probe.filter2" };
+            static const char* const textures[4] = { "GI probe SH (wide)", "GI probe SH (wide 0)", "GI probe SH (wide 1)", "GI probe SH (wide 2)" };
+            const TextureRef target = g.createTexture({ textures[pass], probesX * 4, probesY, 1, 1, DXGI_FORMAT_R32G32B32A32_UINT });
+            const uint32_t step = pass == 0 ? 0u : spacing << (pass - 1), mode = pass == 0 ? 0u : 1u;
+            g.addPass(names[pass], QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          b.use(probes, Use::SrvCompute);
+                          if (source.valid()) b.use(source, Use::SrvCompute);
+                          else readCache(b);
+                          b.use(target, Use::UavCompute);
+                      },
+                      [&shaders, probes, source, target, cache, frameConstants, probesX, probesY, step, mode](PassContext& c) {
+                          const uint32_t k[8] = { c.srv(probes), source.valid() ? c.srv(source) : 0xFFFFFFFFu, c.uav(target),
+                                                  source.valid() ? 0xFFFFFFFFu : c.srv(cache), probesX, probesY, step, mode };
+                          c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiProbeFilter"));
+                          c.computeConstants(k, 8);
+                          c.bindFrameConstants(frameConstants);
+                          c.cmd->Dispatch((probesX + 7) / 8, (probesY + 7) / 8, 1);
+                      });
+            source = target;
+        }
+        wide = source;
+    }
     g.addPass(planar ? "r.gi.screen.filter.planar" : "r.gi.screen.filter", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(screen, Use::SrvCompute);
@@ -469,17 +550,98 @@ TextureRef GiSystem::recordScreen(FramePassContext& fc, ViewResources& view, Buf
                   b.use(gbuffer, Use::SrvCompute);
                   readCache(b);
                   if (probes.valid()) b.use(probes, Use::SrvCompute);
+                  if (wide.valid()) b.use(wide, Use::SrvCompute);
                   b.use(filtered, Use::UavCompute);
               },
-              [&shaders, screen, depth, gbuffer, cache, probes, filtered, frameConstants, width, height, pixelAngle, s](PassContext& c) {
-                  const uint32_t k[12] = { c.srv(screen), c.srv(depth), c.srv(gbuffer), c.uav(filtered), width, height, c.srv(cache),
-                                           asU(pixelAngle), asU(s.screenFilterCells), probes.valid() ? c.srv(probes) : 0xFFFFFFFFu, 0, 0 };
+              [&shaders, screen, depth, gbuffer, cache, probes, wide, filtered, frameConstants, width, height, pixelAngle, s](PassContext& c) {
+                  const uint32_t k[16] = { c.srv(screen), c.srv(depth), c.srv(gbuffer), c.uav(filtered), width, height, c.srv(cache),
+                                           asU(pixelAngle), asU(s.screenFilterCells), probes.valid() ? c.srv(probes) : 0xFFFFFFFFu,
+                                           (s.screenFilterAdaptive ? 1u : 0u) | (wide.valid() ? 4u : 0u), 0,
+                                           wide.valid() ? c.srv(wide) : 0xFFFFFFFFu, asU(s.screenWideSigmaLo), asU(s.screenWideSigmaHi), 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiScreenFilter"));
-                  c.computeConstants(k, 12);
+                  c.computeConstants(k, 16);
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
               });
     view.giIrradiance = filtered;
+    // L_gi's temporal step (GiLayerTemporal.hlsl, redesign V2 1.2): the main view with V's vis buffer (the surface's exact
+    // motion). The history restarts on new textures, a scene revision, a lighting epoch, a history discontinuity (restore,
+    // camera cut) or an origin shift - as the frame split's.
+    if (!planar && s.screenTemporalFrames > 0 && visId.valid() && visibleClusters.valid())
+    {
+        if (!m_layerValue[0] || m_layerX != width || m_layerY != height)
+        {
+            D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+            D3D12_RESOURCE_DESC1 d{};
+            d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            d.Width = width;
+            d.Height = height;
+            d.DepthOrArraySize = d.MipLevels = 1;
+            d.SampleDesc.Count = 1;
+            d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            for (int k = 0; k < 2; ++k)
+                for (auto [t, format] : { std::pair{ std::addressof(m_layerValue[k]), DXGI_FORMAT_R16G16B16A16_FLOAT }, std::pair{ std::addressof(m_layerKeys[k]), DXGI_FORMAT_R32G32_UINT } })
+                {
+                    if (*t) m_device.deferRelease(*t);
+                    d.Format = format;
+                    check(m_device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
+                                                                   IID_PPV_ARGS(t->ReleaseAndGetAddressOf())),
+                          "GI layer history");
+                    (*t)->SetName(format == DXGI_FORMAT_R32G32_UINT ? L"R GI layer keys" : L"R GI layer value");
+                }
+            m_layerX = width;
+            m_layerY = height;
+            m_layerValid = false;
+        }
+        const float3 shift = fc.frame.originShift;
+        if (fc.scene.revision() != m_layerRevision || m_epoch != m_layerEpoch || fc.frame.discontinuity != 0 || shift.x != 0 || shift.y != 0 || shift.z != 0)
+            m_layerValid = false;
+        m_layerRevision = fc.scene.revision();
+        m_layerEpoch = m_epoch;
+        const float exposure = 1.0f / (1.2f * std::exp2(view.view.ev100));
+        const float ratio = m_layerValid && m_layerPrevExposure > 0 ? exposure / m_layerPrevExposure : 1.0f;
+        const float4x4 lprev = m_layerPrevInvViewProj;
+        const uint32_t flags = m_layerValid ? 1u : 0u;
+        m_layerPrevExposure = exposure;
+        m_layerPrevInvViewProj = view.view.invViewProj;
+        m_layerValid = true;
+        const uint32_t prev = m_layerParity, next = prev ^ 1u;
+        m_layerParity = next;
+        const TextureDesc vd{ "GI layer value", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT };
+        const TextureDesc kd{ "GI layer keys", width, height, 1, 1, DXGI_FORMAT_R32G32_UINT };
+        TextureDesc pvd = vd, pkd = kd;
+        pvd.name = "GI layer value (previous)";
+        pkd.name = "GI layer keys (previous)";
+        const TextureRef lv = g.importTexture(m_layerValue[next].Get(), vd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        const TextureRef lk = g.importTexture(m_layerKeys[next].Get(), kd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        const TextureRef plv = g.importTexture(m_layerValue[prev].Get(), pvd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        const TextureRef plk = g.importTexture(m_layerKeys[prev].Get(), pkd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        const uint32_t frames = s.screenTemporalFrames;
+        g.addPass("r.gi.screen.temporal", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(filtered, Use::SrvCompute);
+                      b.use(depth, Use::SrvCompute);
+                      b.use(gbuffer, Use::SrvCompute);
+                      b.use(lv, Use::UavCompute);
+                      b.use(lk, Use::UavCompute);
+                      b.use(plv, Use::SrvCompute);
+                      b.use(plk, Use::SrvCompute);
+                      b.use(visId, Use::SrvCompute);
+                      b.use(visibleClusters, Use::SrvCompute);
+                  },
+                  [&shaders, filtered, depth, gbuffer, lv, lk, plv, plk, visId, visibleClusters, frameConstants, width, height, flags, ratio, lprev, frames](PassContext& c) {
+                      uint32_t k[32] = { c.srv(filtered), c.srv(depth), c.srv(gbuffer), c.uav(lv), width, height, flags, asU(ratio),
+                                         c.srv(plk), c.uav(lk), c.srv(plv), c.srv(visId), c.srv(visibleClusters), frames, 0, 0 };
+                      std::memcpy(&k[16], &lprev, 64);  // rows (row_major in HLSL)
+                      c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiLayerTemporal"));
+                      c.computeConstants(k, 32);
+                      c.bindFrameConstants(frameConstants);
+                      c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                  });
+        view.giIrradiance = lv;
+    }
+    else if (!planar)
+        m_layerValid = false;
     return screen;
 }
 
@@ -613,6 +775,30 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     if (s.deterministic) ensureAdmission(fc, main);
     const BufferRef cache = g.importBuffer(m_cache.Get(), { "GI cache", m_bytes, 0 });
     fc.resources.giCache = cache;
+    // gi.hit_accumulator_pool: the frame's header, eviction (or the whole pool emptied: first use, origin shift - its keys
+    // are world cells) before the rays.
+    BufferRef accPool{};
+    if (m_accPool)
+    {
+        accPool = g.importBuffer(m_accPool.Get(), { "GI accumulator pool", m_accPoolBytes, 0 });
+        fc.resources.giAccumulator = accPool;
+        const float3 shift = fc.frame.originShift;
+        if (shift.x != 0 || shift.y != 0 || shift.z != 0) m_accPoolClear = true;
+        const float exposureRaw = 1.0f / (1.2f * std::exp2(main.view.ev100));
+        const float exposure = std::isfinite(exposureRaw) && exposureRaw > 0 ? exposureRaw : 1.0f;
+        const uint32_t header[8] = { s.hitAccumulatorPoolSlots, (uint32_t)fc.frame.frameIndex, m_epoch, asU(exposure),
+                                     asU(1.0f - s.hitAccumulatorAlpha), asU((float)s.hitAccumulatorMinSamples), asU(s.hitAccumulatorFineScale), asU(s.cellMin) };
+        const uint32_t mode = m_accPoolClear ? 2u : 0u;
+        m_accPoolClear = false;
+        g.addPass(mode == 2 ? "r.gi.acc.clear" : "r.gi.acc.begin", QueueType::Compute, [&](PassBuilder& b) { b.use(accPool, Use::UavCompute); },
+                  [&library = fc.shaders, accPool, mode, slots = s.hitAccumulatorPoolSlots, header](PassContext& c) {
+                      uint32_t k[12] = { c.uav(accPool), mode, 0, 0 };
+                      std::memcpy(&k[4], header, sizeof header);
+                      c.cmd->SetPipelineState(library.compute("Passes/GI/GiAccFold"));
+                      c.computeConstants(k, 12);
+                      c.cmd->Dispatch((slots + 63) / 64, 1, 1);
+                  });
+    }
     // Probes at the tile corners (design revision 12.3): one more column and row than tiles.
     const uint32_t probesX = (main.view.width + s.probeSpacing - 1) / s.probeSpacing + 1;
     const uint32_t probesY = (main.view.height + s.probeSpacing - 1) / s.probeSpacing + 1;
@@ -923,12 +1109,13 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   b.use(samples, Use::UavGraphics);
                   if (guide.valid()) b.use(guide, Use::SrvGraphics);
                   if (accRecords.valid()) b.use(accRecords, Use::UavGraphics);
+                  if (accPool.valid()) b.use(accPool, Use::UavGraphics);
                   rays.declareTraversal(b);
                   rays.declareDecals(b);
                   if (atmosphere)
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
               },
-              [&pipeline, cache, samples, guide, accRecords, rayCount, s, sky, sun, skyBand, scene, frameConstants, atmosphere, luts](PassContext& c) {
+              [&pipeline, cache, samples, guide, accRecords, accPool, rayCount, s, sky, sun, skyBand, scene, frameConstants, atmosphere, luts](PassContext& c) {
                   uint32_t k[32] = {};
                   k[0] = c.uav(cache);
                   k[1] = rayCount;
@@ -947,12 +1134,31 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   k[17] = c.uav(samples);
                   k[18] = guide.valid() ? c.srv(guide) : 0xFFFFFFFFu;  // gi.path_guiding (P[4].z)
                   k[19] = accRecords.valid() ? c.uav(accRecords) : 0xFFFFFFFFu;  // gi.hit_accumulator_frame (P[4].w)
+                  k[20] = accPool.valid() ? c.uav(accPool) : 0xFFFFFFFFu;        // gi.hit_accumulator_pool (P[5].x)
                   std::memcpy(&k[24], scene, sizeof scene);
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
                   pipeline.dispatch(c.cmd, 0, rayCount, 1, 1);
               });
-    if (s.hitAccumulator)
+    if (accPool.valid())
+    {
+        // gi.hit_accumulator_pool (GiAccFold.hlsl): the touched cells fold their frame sums into their windows and pass
+        // them up one level, four lists in order. A list holds at most one entry per ray (list 0) or per entry of the
+        // list before it, so the dispatch covers min(slots, rays) entries; threads past the list's count return.
+        const uint32_t entries = std::min(s.hitAccumulatorPoolSlots, rayCount);
+        for (uint32_t list = 0; list < 4; ++list)
+        {
+            static const char* const names[4] = { "r.gi.acc.fold0", "r.gi.acc.fold1", "r.gi.acc.fold2", "r.gi.acc.fold3" };
+            g.addPass(names[list], QueueType::Compute, [&](PassBuilder& b) { b.use(accPool, Use::UavCompute); },
+                      [&shaders, accPool, list, entries](PassContext& c) {
+                          const uint32_t k[12] = { c.uav(accPool), 1, list, 0 };
+                          c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiAccFold"));
+                          c.computeConstants(k, 12);
+                          c.cmd->Dispatch((entries + 63) / 64, 1, 1);
+                      });
+        }
+    }
+    else if (s.hitAccumulator)
     {
         // gi.hit_accumulator (GiAccumulate.hlsl): this frame's hit cells fold their direct-light sums into their means; the
         // window in samples, shorter while the sun changes (the same scene rule as the running means' window)

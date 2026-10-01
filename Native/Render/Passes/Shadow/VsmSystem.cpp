@@ -245,17 +245,40 @@ uint32_t groups(uint64_t n, uint32_t size) { return (uint32_t)((n + size - 1) / 
 // builder's ClusterData::MeshRange::cutBound: its leaf clusters) to a view it can reach. Summed over the shadow-casting instances a view can reach - by
 // their bounding spheres, from the scene's structure, not from what the frame draws - this bounds the view's entries,
 // and the requests are packed so that their views' bounds sum to at most the list capacity.
+// Per view (defect queue 1b, shadow.vsm.raster_lod_bound): the cut a view draws depends on its texel size - a sun level
+// of 2^k times the texel, or a local face's coarser mip, draws a coarser cut - so an instance adds
+// MeshRange::cutBoundAt(lo, hi) with the view's object-space LOD thresholds over the instance (V's test: error x
+// instance scale x pixels per metre / distance against visibility.lod_error_px; orthographic views without the
+// distance). Counting the leaves in every view packed the train lounge's 20 sun levels into 14 requests and the bath
+// lounge's 75 lights into 22 (one cull chain each, +0.5-0.8 ms per frame [measured 2026-10-01]).
 struct CasterBounds
 {
     std::vector<float4> spheres;  // world bounding sphere per placed caster
     std::vector<uint32_t> clusters;
+    std::vector<uint32_t> mesh;       // per placed caster: its mesh (kNone: no per-view bound, 'clusters' in every view it reaches),
+    std::vector<float> errorScale;    // V's instanceScale (the error's object-to-world factor),
+    std::vector<float4> lodSpheres;   // and the world sphere holding its LOD spheres (the distances V projects errors at)
     uint64_t everywhere = 0;  // casters whose geometry moves past its bind-pose sphere (skinned, morphs, wind) and the
                               // GPU-written instances' capacity (any mesh): counted in every view
+    struct Moving
+    {
+        uint32_t mesh;   // kNone: no table (a runtime mesh)
+        float errorScale;
+        uint32_t whole;  // its cut bound
+    };
+    std::vector<Moving> everywhereMeshes;  // those casters: orthographic views bound them by LOD
+    uint64_t everywhereFixed = 0;                              // the part of 'everywhere' without a mesh entry (GPU-written instances)
+    const std::vector<render::ClusterData::MeshRange>* ranges = nullptr;
+    float thresholdPx = 1;
+    bool lod = false;
 };
 
-CasterBounds casterBounds(const GpuScene& scene)
+CasterBounds casterBounds(const GpuScene& scene, bool lod, float thresholdPx)
 {
     CasterBounds b;
+    b.ranges = &scene.clusters().meshes;
+    b.lod = lod;
+    b.thresholdPx = thresholdPx;
     const auto& meshes = scene.meshes();
     const auto& ranges = scene.clusters().meshes;  // the builder's cut bounds (runtime meshes: their whole hierarchies)
     auto cut = [&](uint32_t mesh) { return mesh < ranges.size() && ranges[mesh].cutBound != 0 ? ranges[mesh].cutBound : meshes[mesh].clusterCount; };
@@ -265,12 +288,14 @@ CasterBounds casterBounds(const GpuScene& scene)
     {
         if ((inst.flags & gpu::kInstanceHidden) != 0 || (inst.flags & scene::InstanceCastShadow) == 0 || inst.mesh >= meshes.size()) continue;
         const gpu::Mesh& m = meshes[inst.mesh];
+        const float4* r = inst.objectToWorld;
+        const float errorScale = std::sqrt(r[0].x * r[0].x + r[0].y * r[0].y + r[0].z * r[0].z);  // VisibilityCommon.hlsli instanceScale
         if ((inst.flags & (scene::InstanceSkinned | scene::InstanceWind)) != 0 || inst.morph != gpu::kNone)
         {
             b.everywhere += cut(inst.mesh);
+            b.everywhereMeshes.push_back({ inst.mesh < ranges.size() && ranges[inst.mesh].cutErrorBase > 0 ? inst.mesh : gpu::kNone, errorScale, cut(inst.mesh) });
             continue;
         }
-        const float4* r = inst.objectToWorld;
         const float3 c = { m.boundsSphere.x, m.boundsSphere.y, m.boundsSphere.z };
         const float3 w = { r[0].x * c.x + r[0].y * c.y + r[0].z * c.z + r[0].w, r[1].x * c.x + r[1].y * c.y + r[1].z * c.z + r[1].w,
                            r[2].x * c.x + r[2].y * c.y + r[2].z * c.z + r[2].w };
@@ -278,16 +303,48 @@ CasterBounds casterBounds(const GpuScene& scene)
                                        std::sqrt(r[2].x * r[2].x + r[2].y * r[2].y + r[2].z * r[2].z) });
         b.spheres.push_back({ w.x, w.y, w.z, m.boundsSphere.w * scale * 1.001f + 1e-3f });
         b.clusters.push_back(cut(inst.mesh));
+        // per-view bound: not for terrain patches (C5: their replaced rectangles force the source clusters)
+        const bool table = lod && inst.patch == gpu::kNone && inst.mesh < ranges.size() && ranges[inst.mesh].cutErrorBase > 0;
+        b.mesh.push_back(table ? inst.mesh : gpu::kNone);
+        b.errorScale.push_back(errorScale);
+        float4 ls{ w.x, w.y, w.z, 0 };
+        if (table)
+        {
+            const float4 o = ranges[inst.mesh].lodBounds;
+            ls = { r[0].x * o.x + r[0].y * o.y + r[0].z * o.z + r[0].w, r[1].x * o.x + r[1].y * o.y + r[1].z * o.z + r[1].w,
+                   r[2].x * o.x + r[2].y * o.y + r[2].z * o.z + r[2].w, o.w * scale * 1.001f + 1e-3f };
+        }
+        b.lodSpheres.push_back(ls);
     }
-    b.everywhere += (uint64_t)scene.gpuInstanceRange().capacity * largest;
+    b.everywhereFixed = (uint64_t)scene.gpuInstanceRange().capacity * largest;
+    b.everywhere += b.everywhereFixed;
     return b;
+}
+
+// A caster's clusters in a view whose object-space LOD thresholds over it are [lo, hi] (1e-4 of slack for V's float
+// evaluation of the same products).
+uint32_t casterCut(const CasterBounds& b, size_t i, float lo, float hi)
+{
+    if (b.mesh[i] == gpu::kNone) return b.clusters[i];
+    return std::min((*b.ranges)[b.mesh[i]].cutBoundAt(lo * (1 - 1e-4f), hi * (1 + 1e-4f)), b.clusters[i]);
 }
 
 // The bound of an orthographic sun level view (levelViewProj: a sphere reaches it when its NDC x, y interval meets
 // [-1, 1]; every depth: the level's caster range follows the casters).
-uint64_t levelBound(const CasterBounds& b, const float4x4& vp)
+uint64_t levelBound(const CasterBounds& b, const float4x4& vp, float pixelsPerMetre)
 {
     uint64_t n = b.everywhere;
+    const float threshold = b.thresholdPx / pixelsPerMetre;  // world-space error at the LOD threshold (every distance: orthographic)
+    if (b.lod)
+    {
+        // the moving casters too: their cut depends on the level's texel, not on where they are
+        n = b.everywhereFixed;
+        for (const CasterBounds::Moving& m : b.everywhereMeshes)
+        {
+            const float t = threshold / std::max(m.errorScale, 1e-12f);
+            n += m.mesh == gpu::kNone ? m.whole : std::min((*b.ranges)[m.mesh].cutBoundAt(t * (1 - 1e-4f), t * (1 + 1e-4f)), m.whole);
+        }
+    }
     const float sx = std::sqrt(vp.m[0][0] * vp.m[0][0] + vp.m[0][1] * vp.m[0][1] + vp.m[0][2] * vp.m[0][2]);
     const float sy = std::sqrt(vp.m[1][0] * vp.m[1][0] + vp.m[1][1] * vp.m[1][1] + vp.m[1][2] * vp.m[1][2]);
     for (size_t i = 0; i < b.spheres.size(); ++i)
@@ -295,7 +352,9 @@ uint64_t levelBound(const CasterBounds& b, const float4x4& vp)
         const float4& q = b.spheres[i];
         const float x = vp.m[0][0] * q.x + vp.m[0][1] * q.y + vp.m[0][2] * q.z + vp.m[0][3];
         const float y = vp.m[1][0] * q.x + vp.m[1][1] * q.y + vp.m[1][2] * q.z + vp.m[1][3];
-        if (std::abs(x) <= 1 + q.w * sx && std::abs(y) <= 1 + q.w * sy) n += b.clusters[i];
+        if (!(std::abs(x) <= 1 + q.w * sx && std::abs(y) <= 1 + q.w * sy)) continue;
+        const float t = threshold / std::max(b.errorScale[i], 1e-12f);
+        n += b.lod ? casterCut(b, i, t, t) : b.clusters[i];
     }
     return n;
 }
@@ -304,14 +363,16 @@ uint64_t levelBound(const CasterBounds& b, const float4x4& vp)
 // emitter radius) meets that also meet the face's 90-degree frustum (the four side planes (axis +- right) / sqrt 2,
 // (axis +- up) / sqrt 2, and in front of the light) - a caster in one face's quarter of space is not counted in the others.
 void cubeBasis(uint32_t face, float3& right, float3& up, float3& axis);
-void localBounds(const CasterBounds& b, const VsmLocalLightCpu& l, uint64_t (&faces)[6])
+// Per mip (kLocalMips views of a face, pixels per metre at distance 1 = 64 x 2^mip): the caster's cut at that mip's
+// thresholds over the distances from the light to its LOD spheres (V: max(distance - radius, near 1e-4)).
+void localBounds(const CasterBounds& b, const VsmLocalLightCpu& l, uint64_t (&faces)[6][kLocalMips])
 {
     const float reach = l.farM + l.radius, h = 0.70710678f;
     float3 right[6], up[6], axis[6];
     for (uint32_t f = 0; f < 6; ++f)
     {
         cubeBasis(f, right[f], up[f], axis[f]);
-        faces[f] = b.everywhere;
+        for (uint32_t mip = 0; mip < kLocalMips; ++mip) faces[f][mip] = b.everywhere;
     }
     for (size_t i = 0; i < b.spheres.size(); ++i)
     {
@@ -323,7 +384,19 @@ void localBounds(const CasterBounds& b, const VsmLocalLightCpu& l, uint64_t (&fa
         {
             const float a = dot(d, axis[f]), x = dot(d, right[f]), y = dot(d, up[f]);
             if (a < -q.w || (a - x) * h < -q.w || (a + x) * h < -q.w || (a - y) * h < -q.w || (a + y) * h < -q.w) continue;
-            faces[f] += b.clusters[i];
+            if (!b.lod || b.mesh[i] == gpu::kNone)
+            {
+                for (uint32_t mip = 0; mip < kLocalMips; ++mip) faces[f][mip] += b.clusters[i];
+                continue;
+            }
+            const float4& ls = b.lodSpheres[i];
+            const float3 e = { ls.x - l.position.x, ls.y - l.position.y, ls.z - l.position.z };
+            const float centre = std::sqrt(dot(e, e)), nearest = std::max(centre - ls.w, 1e-4f), farthest = centre + ls.w;
+            for (uint32_t mip = 0; mip < kLocalMips; ++mip)
+            {
+                const float perMetre = b.thresholdPx / (0.5f * (float)(kPage << mip) * std::max(b.errorScale[i], 1e-12f));
+                faces[f][mip] += casterCut(b, i, perMetre * nearest, perMetre * farthest);
+            }
         }
     }
 }
@@ -1329,7 +1402,10 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     // overflow; the bound is then infinite.
     const bool split = !q.has("shadow.vsm.raster_split") || q.boolean("shadow.vsm.raster_split");
     const uint64_t listCapacity = split ? (uint64_t)q.integer("visibility.max_visible_clusters") : UINT64_MAX;
-    const CasterBounds bounds = fc.services.rasterizeDepth && split ? casterBounds(fc.scene) : CasterBounds{};
+    // shadow.vsm.raster_lod_bound false (A/B): the leaf count of every caster in every view it reaches
+    const bool lodBound = !q.has("shadow.vsm.raster_lod_bound") || q.boolean("shadow.vsm.raster_lod_bound");
+    const CasterBounds bounds =
+        fc.services.rasterizeDepth && split ? casterBounds(fc.scene, lodBound, (float)q.number("visibility.lod_error_px")) : CasterBounds{};
     uint32_t sunRequests = 0, localRequests = 0;
     if (fc.services.rasterizeDepth)
     {
@@ -1357,7 +1433,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             v.lodPixelsPerMetre = 1.0f / std::ldexp(1.0f, (int)k - 10);
             v.userData = k;
             v.cullMaskOffset = k * (kTable * kTable / 32);
-            const uint64_t bound = split ? levelBound(bounds, v.viewProj) : 0;
+            const uint64_t bound = split ? levelBound(bounds, v.viewProj, v.lodPixelsPerMetre) : 0;
             if (bound > listCapacity)
                 fail("S VSM: sun level %u can reach %llu cluster entries, over the raster list capacity %llu (visibility.max_visible_clusters): this scene "
                      "needs instance batches of the level's casters",
@@ -1399,16 +1475,17 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             {
                 const uint32_t slot = s.localActive[a];
                 const VsmLocalLightCpu& l = s.localData[slot];
-                uint64_t faceBounds[6] = {};
+                uint64_t faceBounds[6][kLocalMips] = {};
                 if (split) localBounds(bounds, l, faceBounds);
                 for (uint32_t face = 0; face < 6; ++face)
-                    if (faceBounds[face] > listCapacity)
-                        fail("S VSM: local light %u face %u can reach %llu cluster entries per view, over the raster list capacity %llu (visibility.max_visible_clusters)",
-                             l.lightIndex, face, (unsigned long long)faceBounds[face], (unsigned long long)listCapacity);
+                    for (uint32_t mip = 0; mip < kLocalMips; ++mip)
+                        if (faceBounds[face][mip] > listCapacity)
+                            fail("S VSM: local light %u face %u mip %u can reach %llu cluster entries, over the raster list capacity %llu (visibility.max_visible_clusters)",
+                                 l.lightIndex, face, mip, (unsigned long long)faceBounds[face][mip], (unsigned long long)listCapacity);
                 for (uint32_t face = 0; face < 6; ++face)
                     for (uint32_t mip = 0; mip < kLocalMips; ++mip)
                     {
-                        const uint64_t bound = faceBounds[face];
+                        const uint64_t bound = faceBounds[face][mip];
                         if (!r.views.empty() && (sum + bound > listCapacity || r.views.size() >= (split ? 252u : 42u * 6u) || (!split && face == 0 && mip == 0 && a % 6 == 0)))
                         {
                             fc.services.rasterizeDepth(fc, r);

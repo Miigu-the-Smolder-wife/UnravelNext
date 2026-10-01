@@ -35,6 +35,7 @@
 #include "RayTracing/HitDecals.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
 #include "Passes/GI/GiInternal.hlsli"
+#include "Passes/GI/GiAccPool.hlsli"
 #include "Passes/GI/GiSky.hlsli"
 
 // Texel cone of an 8 x 8 hemispherical texel (2 pi / 64 sr ~ 10.1 deg half-angle): footprint diameter ~0.36 t.
@@ -174,6 +175,10 @@ void GiTraceGen()
 #if SPLIT
     float3 nonBounceRadiance = 0;
 #endif
+    // gi.miss_closure (GI_P1_FLAGS bit 5): the hit's diffuse albedo when its bounce read found no data (no cell with an
+    // update, or with gi.bounce_visibility none whose anchor sees the hit, at any level of the search) - GiIntegrate closes
+    // the missing bounce with it.
+    float3 missAlbedo = 0;
     bool readsBounce = false;  // the hit's radiance has a bounce term (the cache's irradiance and mirror radiance read there)
     bool youngBounce = false;  // read from a young cell, or from other levels in place of a cell without data
     float bounceShare = 0;     // luminance share of the radiance that came from the cache reads (GiIntegrate: Jacobi length)
@@ -227,6 +232,9 @@ void GiTraceGen()
             const uint bounceLevel = giLevelForSize(h, hit.t * GI_FOOTPRINT_PER_METRE * asfloat(P[0].z));
             const uint e = giFindOrCreate(b, h, giSurfaceKey(h, s.position, s.normal, bounceLevel), giAnchorAtHit(h, s.position, r.Direction, hit.t), s.normal, created);
             bool known = false;
+            const uint p1Flags = b.Load(GI_P1_FLAGS);
+            const bool strict = (p1Flags & 64u) != 0;   // gi.bounce_visibility
+            const bool closure = (p1Flags & 32u) != 0;  // gi.miss_closure
             if (e != GI_ENTRY_PENDING)
             {
                 if (b.Load(h.offHitStamp + e * 4) != h.frame)  // (stamped this frame: touched and requested already, giKeepRead)
@@ -235,7 +243,14 @@ void GiTraceGen()
                     giRequestHit(b, h, e);
                 }
                 // Experiment 262144 (diagnostic, V2.2 P1'-b): every bounce read through the interpolated level search below
-                if (!created && b.Load(h.offSh + e * GI_SH_STRIDE + GI_SH_UPDATES) != 0 && (P[3].w & 262144u) == 0)
+                // gi.bounce_visibility: the hit's own cell counts only when its anchor sees the hit. A footprint-level cell is
+                // coarse for a long ray (metres): a room's floor and the ground outside share it, and the cell is
+                // anchored wherever its first ray landed - inside or outside, so an interior hit read daylight or not
+                // by the order of the first frames (the converged level differed by -7..+17 % between runs of one
+                // build, the first 16 frames by x 1.5-1.8 [measured 2026-10-01]). Not seen: read as without data (the
+                // strict level search below, then gi.miss_closure).
+                const bool seen = !strict || giAnchorSeesPoint(b, h, e, giAnchorNormal(b, h, e), s.position, giCellSize(h, bounceLevel));
+                if (seen && !created && b.Load(h.offSh + e * GI_SH_STRIDE + GI_SH_UPDATES) != 0 && (P[3].w & 262144u) == 0)
                 {
                     float unused;
                     irradiance = giShIrradiance(b, h, e, s.normal, unused);
@@ -257,12 +272,15 @@ void GiTraceGen()
             {
                 g_giReadYoung = 0;
                 g_giTrackYoung = true;
+                g_giStrictVisibility = strict;
                 float3 sumE, sumL;
                 giCacheLevels(b, h, s.position, s.normal, mirror, true, bounceLevel, sumE, sumL, fallbackWeight);  // coarser, then finer levels
                 irradiance = fallbackWeight > 0 ? sumE / fallbackWeight : 0;
                 specular = fallbackWeight > 0 ? sumL / fallbackWeight : 0;
                 fallbackYoung = g_giReadYoung;
                 g_giTrackYoung = false;
+                g_giStrictVisibility = false;
+                if (closure && !(fallbackWeight > 0)) missAlbedo = saturate(m.baseColor * (1 - m.metallic));
             }
             const float3 l = normalize(g_sunDirection);
             const float cosSun = dot(s.normal, l);
@@ -393,14 +411,16 @@ void GiTraceGen()
             // light-side form, its point diffuse-direct radiance D_point, and the cell's means when they hold enough samples.
             float3 accDelta = 0;
             uint ea = e;  // the accumulator's cell (GI_ACC_CELL_SCALE: the bounce cell, or a finer one of its own)
-            if (b.Load(GI_ACC_OFFSET) != 0 && e != GI_ENTRY_PENDING && asfloat(b.Load(GI_ACC_CELL_SCALE)) != asfloat(P[0].z))
+            if (P[5].x == 0xFFFFFFFFu && b.Load(GI_ACC_OFFSET) != 0 && e != GI_ENTRY_PENDING && asfloat(b.Load(GI_ACC_CELL_SCALE)) != asfloat(P[0].z))
             {
                 bool createdA;
                 const uint levelA = giLevelForSize(h, hit.t * GI_FOOTPRINT_PER_METRE * asfloat(b.Load(GI_ACC_CELL_SCALE)));
                 ea = giFindOrCreate(b, h, giSurfaceKey(h, s.position, s.normal, levelA), giAnchorAtHit(h, s.position, r.Direction, hit.t), s.normal, createdA);
                 if (ea != GI_ENTRY_PENDING) giTouch(b, h, ea);
             }
-            if (b.Load(GI_ACC_OFFSET) != 0 && ea != GI_ENTRY_PENDING && (m.classFlags & 0xFFu) != MATERIAL_FOLIAGE && (P[3].w & 4096u) == 0)
+            // gi.hit_accumulator_pool (GiAccPool.hlsli, P[5].x): the accumulator's own cells, by the ray's footprint
+            const bool pooled = P[5].x != 0xFFFFFFFFu;
+            if ((pooled || (b.Load(GI_ACC_OFFSET) != 0 && ea != GI_ENTRY_PENDING)) && (m.classFlags & 0xFFu) != MATERIAL_FOLIAGE && (P[3].w & 4096u) == 0)
             {
                 const bool lambert = (P[3].w & 1024u) != 0;
                 ModelSurface ms;
@@ -433,8 +453,28 @@ void GiTraceGen()
                 const float coated = coat.cover > 0 ? coat.cover * (1 - modelCoatEms(coat, NoV)) / (coat.eta * coat.eta) : 0.0;
                 const float3 dPoint = plain * albedo * A + coated * (albedo * B + C);
                 float3 mA, mB, mC;
-                const bool frameMode = (b.Load(GI_ACC_MODE) & 1u) != 0;
-                if (frameMode)
+                const bool frameMode = !pooled && (b.Load(GI_ACC_MODE) & 1u) != 0;
+                if (pooled)
+                {
+                    RWByteAddressBuffer pool = ResourceDescriptorHeap[P[5].x];
+                    const float footprint = hit.t * GI_FOOTPRINT_PER_METRE;
+                    GiAccMeans means;
+                    if (giAccPoolRead(pool, s.position, s.normal, footprint, means))
+                    {
+                        const float3 dAcc = plain * albedo * means.A + coated * (albedo * means.B + means.C);
+                        accDelta = means.weight * (dAcc - dPoint);
+                        if ((P[3].w & 32768u) != 0)
+                        {
+                            const float3 Y = float3(0.2126, 0.7152, 0.0722);
+                            uint64_t prev;
+                            b.InterlockedAdd64(GI_ACC_AUDIT, (uint64_t)(max(dot(dPoint, Y), 0.0) * 1024), prev);
+                            b.InterlockedAdd64(GI_ACC_AUDIT + 8, (uint64_t)(max(dot(dPoint + accDelta, Y), 0.0) * 1024), prev);
+                        }
+                    }
+                    if (all(A == A) && all(B == B) && all(C == C) && all(A < 3.0e38) && all(C < 3.0e38))
+                        giAccPoolRecord(pool, s.position, s.normal, footprint, A, B, C, plain * albedo, coated * albedo, coated);
+                }
+                else if (frameMode)
                 {
                     accCell = ea;
                     accKA = plain * albedo;
@@ -454,7 +494,7 @@ void GiTraceGen()
                         b.InterlockedAdd64(GI_ACC_AUDIT + 8, (uint64_t)(max(dot(dAcc, Y), 0.0) * 1024), prev);
                     }
                 }
-                if (all(A == A) && all(B == B) && all(C == C) && all(A < 3.0e38) && all(C < 3.0e38)) giAccRecord(b, ea, A, B, C, plain * albedo, coated * albedo, coated);
+                if (!pooled && all(A == A) && all(B == B) && all(C == C) && all(A < 3.0e38) && all(C < 3.0e38)) giAccRecord(b, ea, A, B, C, plain * albedo, coated * albedo, coated);
             }
             // The texel cone's angular width filters the sun's highlight (GI_FOOTPRINT_PER_METRE: footprint / distance).
             float3 unbounced;
@@ -543,7 +583,10 @@ void GiTraceGen()
         records.Store4(thread * 48 + 16, uint4(asuint(accKB), asuint(accKC)));
         records.Store4(thread * 48 + 32, uint4(asuint(accPoint), 0));
     }
-    samples[3 * P[0].y + thread] = uint4(asuint(emitterRadiance), 0);  // the emitter texel's value (GiIntegrate)
+    // the emitter texel's value (GiIntegrate); .w: bit 31 = the bounce read found no data, bits 0-29 = the hit's diffuse
+    // albedo (unorm10 x 3), gi.miss_closure
+    const uint3 missPacked = uint3(round(missAlbedo * 1023.0));
+    samples[3 * P[0].y + thread] = uint4(asuint(emitterRadiance), any(missAlbedo > 0) ? 0x80000000u | missPacked.x | (missPacked.y << 10) | (missPacked.z << 20) : 0u);
 #if SPLIT
     if (!readsBounce) nonBounceRadiance = radiance; // sky, emitters, closed back faces
     samples[4 * P[0].y + thread] = uint4(asuint(emitter ? float3(0, 0, 0) : nonBounceRadiance - emissionOut), 0);

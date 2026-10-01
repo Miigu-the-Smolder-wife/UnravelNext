@@ -58,6 +58,17 @@ groupshared float gs_bounceIrradiance[GI_TEXEL_COUNT];  // per texel ray: its bo
 groupshared uint gs_emitted[GI_TEXEL_COUNT];  // per emitter sample: 1 when its value is not 0
 groupshared uint gs_rayTexel[GI_TEXEL_COUNT];   // gi.path_guiding: each texel ray's texel
 groupshared float4 gs_rayTexelValue[GI_TEXEL_COUNT];  // its texel sample (radiance, hit distance)
+// gi.miss_closure (GI_P1_FLAGS bit 5): a ray whose hit found no bounce data (GiTrace: no cell with an update - after a
+// cut, where the view opens - or, with gi.bounce_visibility, none whose anchor sees the hit) read irradiance 0 there: the entry
+// started at its first bounce alone, 50-80 % of its level in the bath and train scenes, and rose over ~16 frames as the
+// hit cells got their updates [measured 2026-10-01]. The closure takes the entry's own irradiance E for the missing
+// irradiance at those hits (the surfaces an entry sees are lit by the same room as the entry; the ambient term of
+// progressive radiosity, per entry): E = E_measured + sum over the missing rays of (albedo / pi) w cos x E, so
+// E = E_measured / (1 - R), R = sum (albedo / pi) w cos <= 0.9 per channel, and each missing ray's radiance gets
+// (albedo / pi) x E before the sums below (map, SH, texels, statistics: all as if the ray had read E). No missing ray:
+// nothing changes. Hit cells with data are read as before, so the closure fades as the cache fills.
+groupshared float3 gs_miss[GI_TEXEL_COUNT];  // per texel ray: albedo / pi of a hit without bounce data, else 0
+groupshared float3 gs_closure;               // E
 groupshared float3 gs_rayEmitted[GI_TEXEL_COUNT];     // its emitter texel sample
 #if !SPLIT
 groupshared float3 gs_bounceRay[GI_TEXEL_COUNT];  // gi.bounce_split: each texel ray's cache-fed radiance
@@ -82,6 +93,7 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
     const uint p1 = b.Load(GI_P1_FLAGS);
 #endif
     const bool bsplit = (p1 & 16u) != 0;
+    const bool closure = (p1 & 32u) != 0;
     const uint restartWord = b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_RESTART);
     const uint restartCount = giRestartUpdates(b, h, entry);
     const bool prior = (p1 & 2u) != 0 && (restartWord & 0x10000u) != 0 && history == 0 && b.Load(h.offSh + entry * GI_SH_STRIDE + GI_SH_UPDATES) == 0;
@@ -149,7 +161,10 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         const float lum = dot(asfloat(texelSample.xyz), float3(0.2126, 0.7152, 0.0722));
         gs_bounceIrradiance[lane] = finite && lum < 3.0e38 ? ((w >> 18) & 4095u) / 4095.0 * lum * gs_sample[lane].w * gs_local[lane].z : 0.0;
         texelOld = b.Load2(texelAddress);
-        emitted = asfloat(samples[3 * P[0].y * GI_TEXEL_COUNT + slot * GI_TEXEL_COUNT + lane].xyz);
+        const uint4 emitterSample = samples[3 * P[0].y * GI_TEXEL_COUNT + slot * GI_TEXEL_COUNT + lane];
+        emitted = asfloat(emitterSample.xyz);
+        gs_miss[lane] = closure && finite && (emitterSample.w >> 31) != 0
+                            ? float3(emitterSample.w & 1023u, (emitterSample.w >> 10) & 1023u, (emitterSample.w >> 20) & 1023u) / (1023.0 * GI_PI) : float3(0, 0, 0);
         emitOld = b.Load(emitAddress);
         gs_rayTexelValue[lane] = float4(asfloat(texelSample.xyz), f16tof32(texelSample.w & 0xFFFFu));
         gs_rayEmitted[lane] = emitted;
@@ -179,6 +194,29 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
         [unroll] for (uint j = 0; j < 9; ++j) gs_shWeight[lane * 9 + j] = y[j] * w;
     }
     GroupMemoryBarrierWithGroupSync();
+    if (closure)  // (uniform over the group)
+    {
+        if (lane < WaveGetLaneCount())
+        {
+            float3 measured = 0, transfer = 0;
+            [loop] for (uint k = 0; k < 2 * GI_TEXEL_COUNT; ++k) measured += gs_sample[k].xyz * (gs_sample[k].w * max(gs_local[k].z, 0.0));
+            [loop] for (uint k = 0; k < GI_TEXEL_COUNT; ++k) transfer += gs_miss[k] * (gs_sample[k].w * max(gs_local[k].z, 0.0));
+            if (WaveIsFirstLane()) gs_closure = measured / (1 - min(transfer, 0.9));
+        }
+        GroupMemoryBarrierWithGroupSync();
+        if (lane < GI_TEXEL_COUNT)
+        {
+            const float3 add = gs_miss[lane] * gs_closure;
+            gs_sample[lane].xyz += add;
+            gs_rayTexelValue[lane].xyz += add;
+            texelSample.xyz = asuint(asfloat(texelSample.xyz) + add);
+            gs_bounceIrradiance[lane] += dot(add, float3(0.2126, 0.7152, 0.0722)) * gs_sample[lane].w * gs_local[lane].z;
+#if !SPLIT
+            if (bsplit) gs_bounceRay[lane] += add;
+#endif
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
     // The loops run over the texel samples, then the emitter samples unless all of these are 0 (no emissive triangles,
     // or none visible from the anchor): every term they would add is then +0, which leaves each sum as it is (a sum that
     // starts at +0 never becomes -0), so the sums are the full loops' bit for bit.
@@ -487,9 +525,55 @@ void main(uint lane : SV_GroupIndex, uint slot : SV_GroupID)
             }
         }
     }
+    // gi.anchor_centroid (GiInternal giCentroidOffer): the period's lookups into the centroid; a move beyond s / 8 places
+    // the anchor there (or at the nearest lookup when the centroid left the surface) and halves the running-mean count.
+    bool centroidMoved = false;
+    {
+        const uint cb = b.Load(GI_CENTROID_OFFSET);
+        if (cb != 0)
+        {
+            const uint a = cb + entry * 48;
+            const uint4 sums = b.Load4(a);
+            if (sums.w > 0)
+            {
+                const uint2 keyWords = b.Load2(h.offMeta + entry * 16);
+                const uint64_t key = ((uint64_t)keyWords.y << 32) | keyWords.x;
+                const float s = giCellSize(h, (uint)(key & 31u));
+                const int3 cell = (int3(uint3((uint)(key >> 8), (uint)(key >> 26), (uint)(key >> 44)) & 0x3FFFFu) << 14) >> 14;
+                const float3 origin = float3(cell) * s - 0.5 * s;
+                const float3 mean = origin + float3(sums.xyz) / (float)sums.w / 16383.0 * (2 * s);
+                const float4 old = asfloat(b.Load4(a + 32));
+                const float alpha = 1.0 - pow(63.0 / 64.0, (float)sums.w);
+                const float3 meanPoint = old.w > 0 ? old.xyz + (mean - old.xyz) * alpha : mean;
+                const float3 anchorNow = asfloat(b.Load3(h.offAnchor + entry * 16));
+                if (distance(meanPoint, anchorNow) > s / 8)
+                {
+                    float3 target = meanPoint;
+                    const uint2 nearestWords = b.Load2(a + 16);
+                    if (nearestWords.y != 0xFFFFFFFFu)
+                    {
+                        const uint64_t nearest = ((uint64_t)nearestWords.y << 32) | nearestWords.x;
+                        const float3 p = giAnchorOfferPosition(h, key, nearest & ((1ull << 42) - 1));
+                        if (distance(meanPoint, p) > s / 8) target = p;  // the centroid lies off the looked-up surface
+                    }
+                    b.Store3(h.offAnchor + entry * 16, asuint(target));
+                    centroidMoved = true;
+                }
+                b.Store4(a + 32, asuint(float4(meanPoint, 1)));
+                b.Store4(a, uint4(0, 0, 0, 0));
+                b.Store2(a + 16, uint2(0xFFFFFFFFu, 0xFFFFFFFFu));
+            }
+        }
+    }
     const uint jacobiByte = min((jacobiLength + 15) / 16, 255u) << 24;
-    const uint historyWord = prior ? (min(jacobiLength, 0xFFFu) | (min((uint)round(kappa) + 1, max(cap, 2u) - 1u) << 12) | jacobiByte)
+    uint historyWord = prior ? (min(jacobiLength, 0xFFFu) | (min((uint)round(kappa) + 1, max(cap, 2u) - 1u) << 12) | jacobiByte)
                              : restart ? ((history & 0xFFFu) | (1u << 12) | jacobiByte) : giHistoryNext(h, history, bsplit ? 0.0 : young, jacobiLength, cap);
+    if (centroidMoved)
+    {
+        // the running mean's count (bits 12..23, GiInternal giHistory) halved: the moved anchor's irradiance weighs in
+        const uint count = (historyWord >> 12) & 0xFFFu;
+        historyWord = (historyWord & ~(0xFFFu << 12)) | (max(count / 2, 1u) << 12);
+    }
     b.Store3(address + GI_SH_HISTORY, uint3(historyWord, h.epoch,
                                             f32tof16(nearestHalf(fast * GI_STORE_SCALE)) | (f32tof16(nearestHalf(spreadMean * GI_STORE_SCALE)) << 16)));
 }

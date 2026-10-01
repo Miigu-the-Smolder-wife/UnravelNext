@@ -22,35 +22,98 @@
 // irradiance, so M's shading kernel needs no probe gather for it (only the K path's radiance and Foliage's back side
 // gather). Views without probes (planar views): occlusion 1. gi.screen_filter_cells = 0: no spatial filter, the
 // occlusion still applied (M relies on it).
-// P[0] = { r.gi.screen SRV (RGBA16F: rgb = E x exposure, a = 1 data), depth SRV, gbuffer SRV, output UAV }
+// P[0] = { r.gi.screen SRV (RGBA16F: rgb = E x exposure, a = the value's relative sigma, 0 = no data), depth SRV, gbuffer SRV,
+// output UAV (a = 1 data) }
 // P[1] = { width, height, GI cache SRV (raw), asuint(pixel angle, radians) }, P[2] = { asuint(radius in cell edges), view.screenProbes
-// SRV (UNX_NONE: none), 0, 0 }
+// SRV (UNX_NONE: none), flags (bit 0 adaptive radius, bit 2 wide layer), 0 }, P[3] = { r.gi.probe.filter's output SRV
+// (GiProbeWide.hlsli; with flag bit 2), asuint(wide sigma lo), asuint(wide sigma hi), 0 }
 // Frame constants b1 = the view's.
 #include "Passes/GI/GiCache.hlsli"
+#include "Passes/GI/GiProbeWide.hlsli"
 #include "Passes/GI/GiScreenInputs.hlsli"
 #include "Passes/GI/ScreenProbes.hlsli"
 
-// The near occlusion of M's probe footprint at the pixel (giProbeGatherFrom -> giFootprintIrradiance's a, without the SH).
-float giScreenOcclusion(uint2 pixel, float3 p, float3 n, float linearZ)
+// What the pixel takes from the screen probes through M's footprint (giProbeFootprintAt: the four probes around it, by
+// plane and normal), computed once: the near occlusion (giProbeGatherFrom -> giFootprintIrradiance's a, without the SH)
+// and, with the wide layer, its irradiance at the pixel's normal (r.gi.probe.filter's SH; over the probes with data: a
+// probe whose surroundings had none holds SH 0). The wide records carry the probes' own occlusion word, so with the wide
+// layer one set of loads gives both.
+struct GiScreenProbe
 {
-    if (P[2].y == UNX_NONE) return 1;
+    float occlusion;  // 1 without probes or a footprint
+    float3 wide;      // irradiance (radiance units)
+    bool hasWide;
+};
+GiScreenProbe giScreenProbeAt(uint2 pixel, float3 p, float3 n, float linearZ)
+{
+    GiScreenProbe result;
+    result.occlusion = 1;
+    result.wide = 0;
+    result.hasWide = false;
+    if (P[2].y == UNX_NONE) return result;
     Texture2D<uint4> t = ResourceDescriptorHeap[P[2].y];
     float spacing;
     int2 count;
     const GiProbeFootprint fp = giProbeFootprintAt(t, pixel, p, n, linearZ, spacing, count);
-    float occlusion = 0;
-    bool any = false;
+    const bool wide = (P[2].z & 4u) != 0;
+    GiProbeWide src;
+    src.srv = P[3].x;
+    float occlusion = 0, total = 0;
+    float3 sum = 0;
+    bool covered = false;
     [unroll] for (uint k = 0; k < 4; ++k)
     {
         if (fp.weight[k] <= 0) continue;
-        occlusion += fp.weight[k] * ((giProbePlane(t, uint2(fp.probe[k]), 4, count).y >> 16) / 65535.0);  // giLoadProbeRecord's word 13
-        any = true;
+        covered = true;
+        if (wide)
+        {
+            const GiProbeRecord r = giLoadProbeRecord(src, uint2(fp.probe[k]), count);
+            occlusion += fp.weight[k] * r.occlusion;
+            if (!any(r.sh[0] > 0)) continue;
+            sum += fp.weight[k] * giEvalShIrradiance(r.sh, n);
+            total += fp.weight[k];
+        }
+        else
+            occlusion += fp.weight[k] * ((giProbePlane(t, uint2(fp.probe[k]), 4, count).y >> 16) / 65535.0);  // giLoadProbeRecord's word 13
     }
-    return any ? occlusion : 1;
+    if (covered) result.occlusion = occlusion;
+    if (total > 0)
+    {
+        result.wide = sum / total;
+        result.hasWide = true;
+    }
+    return result;
 }
 
 #define GI_FILTER_TAPS 12u
-#define GI_FILTER_MAX_PX 48.0
+#define GI_FILTER_MAX_PX 96.0
+// gi.screen_filter_adaptive (P[2].z bit 0; redesign V2 1.2 L_gi): the radius scales with the lookup's relative standard
+// deviation (r.gi.screen's a, GiCache.hlsli) over GI_FILTER_SIGMA0 - that of an entry of 16 updates - within [0.5, 3]:
+// young cells (just created, Jacobi phase: a few updates) are averaged over up to three times the configured radius, so
+// their error does not show as a cell-sized blotch; converged cells keep a narrower one.
+#define GI_FILTER_SIGMA0 0.0475
+// gi.screen_wide_filter (P[2].z bit 2; redesign V2 1.2 L_gi): the pixel's value is the filtered cache value (the narrow
+// estimate: this pass' taps, at most ~2 cells) where its relative standard deviation is below what shows, and the wide
+// layer (r.gi.probe.filter: the probes' SH averaged over many cells with plane, normal and luminance stops, evaluated at
+// the pixel's normal through M's footprint) where it is above: wide share = (sigma_narrow - lo) / (hi - lo) in [0, 1]
+// (gi.screen_wide_sigma_lo / _hi, P[3].yz). sigma_narrow = the taps' mean sigma (r.gi.screen's a: the entries'
+// measured spread / sqrt(samples)) / sqrt(N), N = the independent estimates under the taps: the smaller of the taps'
+// effective count (sum w)^2 / sum w^2 and the cells under the filter 1 + pi (radius / cell)^2. A pixel without cache data
+// takes the wide layer. Quality definition (the configured 0.02 / 0.06): a low-frequency error of 2 % of the local level
+// is not seen (below the contrast threshold of a smooth gradient), 6 % is; between them the two estimates mix, so nothing
+// switches.
+
+// The pixel's value from the filtered cache value (data: 'has', relative standard deviation 'sigma') and the wide layer.
+float4 giScreenBlend(GiScreenProbe probe, float3 cacheValue, bool has, float sigma)
+{
+    if ((P[2].z & 4u) != 0 && probe.hasWide)
+    {
+        const float lo = asfloat(P[3].y), hi = asfloat(P[3].z);
+        const float share = has ? saturate((sigma - lo) / max(hi - lo, 1e-6)) : 1.0;
+        return float4(lerp(cacheValue, probe.wide * g_exposure, share) * probe.occlusion, 1);
+    }
+    return float4(cacheValue * probe.occlusion, has ? 1.0 : 0.0);
+}
 
 [numthreads(8, 8, 1)]
 void main(uint2 pixel : SV_DispatchThreadID)
@@ -70,18 +133,20 @@ void main(uint2 pixel : SV_DispatchThreadID)
     }
     const float4 centre = raw.Load(int3(pixel, 0));
     const float linearZ = linearDepth(depthValue);
-    const float occlusion = giScreenOcclusion(pixel, p, n, linearZ);
+    const GiScreenProbe probe = giScreenProbeAt(pixel, p, n, linearZ);
     ByteAddressBuffer cache = ResourceDescriptorHeap[P[1].z];
     const GiHeader h = giHeader(cache);
     const float cellPx = giCellSize(h, giLevel(h, p)) / max(linearZ * asfloat(P[1].w), 1e-9);
-    const float radius = min(asfloat(P[2].x) * cellPx, GI_FILTER_MAX_PX);
+    const float adapt = (P[2].z & 1u) != 0 ? clamp((centre.a > 0 ? centre.a : 1.0) / GI_FILTER_SIGMA0, 0.5, 3.0) : 1.0;
+    const float radius = min(asfloat(P[2].x) * adapt * cellPx, GI_FILTER_MAX_PX);
     if (radius < 1.5)
     {
-        output[pixel] = float4(centre.rgb * occlusion, centre.a);
+        output[pixel] = giScreenBlend(probe, centre.rgb, centre.a > 0, centre.a);
         return;
     }
     float3 sum = centre.a > 0 ? centre.rgb : 0;
     float weight = centre.a > 0 ? 1 : 0;
+    float weight2 = weight, sigmaSum = centre.a > 0 ? centre.a : 0;  // (the taps' effective count and mean sigma)
     const float planeTolerance = 0.02 * linearZ;
     [loop] for (uint i = 0; i < GI_FILTER_TAPS; ++i)
     {
@@ -114,6 +179,10 @@ void main(uint2 pixel : SV_DispatchThreadID)
         const float w = exp(-2 * u) * (plane * plane) * agree;  // exp(-2 (r / R)^2), u = (r / R)^2
         sum += w * e.rgb;
         weight += w;
+        weight2 += w * w;
+        sigmaSum += w * e.a;
     }
-    output[pixel] = weight > 0 ? float4(sum / weight * occlusion, 1) : float4(centre.rgb * occlusion, centre.a);
+    const float cells = radius / max(cellPx, 1e-6);
+    const float estimates = weight > 0 ? min(weight * weight / weight2, 1 + 3.14159265 * cells * cells) : 1.0;
+    output[pixel] = giScreenBlend(probe, weight > 0 ? sum / weight : 0, weight > 0, weight > 0 ? sigmaSum / weight / sqrt(estimates) : 1.0);
 }
