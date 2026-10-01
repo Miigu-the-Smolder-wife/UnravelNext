@@ -11,6 +11,8 @@
 //       While Cache/Reference/LIGHT exists (the user is gaming but work may continue lightly): 8 processors, below normal.
 //       --also-hold <file>: an extra pause file (the render queue passes Cache/Reference/PAUSE_QUEUE so ad-hoc renders can
 //       pause it instead of running beside it).
+//       --ev100 X: the exposure of the image (radiance x 1 / (1.2 x 2^X)) for a camera that has none of its own
+//       (automatic exposure: the image would be NaN); the value goes into the cache file's camera label.
 //       --no-sun-caustics (diagnostics): the sun is not light traced - for scenes the light tracer refuses (water with
 //       the sun on: "the light tracer does not refract"), when what is asked is a level away from the water. Sunlight
 //       that reaches a surface only through a specular path is then missing or noisy; the image has its own hash.
@@ -36,6 +38,7 @@
 // holder) or while the manual marker .gpulock/HOLD exists (e.g. the user plays a game); --no-hold disables.
 // Scenes by name come from Tools/SceneGen (seed 1, scale 1 unless given). --no-wind sets the wind speed to 0 before
 // hashing (a different scene identity); --write-scene saves the exact scene that was rendered for the engine to use.
+#include <limits>
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
 #include "unx/core/Log.h"
@@ -79,6 +82,7 @@ struct Args
     uint32_t orderMin = 0, orderMax = 0xFFFFFFFFu;  // --volume-order MIN:MAX (diagnostics)
     uint32_t surfMin = 0, surfMax = 0xFFFFFFFFu;    // --surface-order MIN:MAX (diagnostics)
     bool noSunCaustics = false;                     // --no-sun-caustics (diagnostics)
+    float ev100 = std::numeric_limits<float>::quiet_NaN();  // --ev100 (a camera without a fixed exposure)
     uint32_t threads = 0;                            // --threads N (0 = 3/4 of the logical processors)
     float wcap = 0.0f;                               // scenemeta --wcap: face-on sheets below this width are band B (design default 0)
     std::vector<std::string> alsoHold;               // --also-hold <file> (repeatable)
@@ -128,6 +132,7 @@ Args parse(int argc, char** argv)
         else if (k == "--sun-illuminance") a.sunIlluminance = std::stof(next());
         else if (k == "--force") a.force = true;
         else if (k == "--no-sun-caustics") a.noSunCaustics = true;
+        else if (k == "--ev100") a.ev100 = std::stof(next());
         else if (k == "--out") a.out = next();
         else if (k == "--engine") a.engine = next();
         else if (k == "--test") a.test = next();
@@ -730,7 +735,15 @@ int main(int argc, char** argv)
             return 0;
         }
         std::string label;
-        const reference::ResolvedCamera cam = pickCamera(s, a, label);
+        reference::ResolvedCamera cam = pickCamera(s, a, label);
+        if (std::isfinite(a.ev100))
+        {
+            // (the image is radiance x 1 / (1.2 x 2^ev100): a camera with automatic exposure has no ev100 of its own)
+            cam.ev100 = a.ev100;
+            label += format("_ev%g", a.ev100);
+        }
+        else if (!std::isfinite(cam.ev100) && a.command == "render")
+            fail("reference: camera '%s' has no fixed exposure (automatic exposure); give --ev100", label.c_str());
         if (a.command == "render")
         {
             renderCached(a, s, label, cam, q);
