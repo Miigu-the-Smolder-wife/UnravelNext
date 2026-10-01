@@ -221,16 +221,21 @@ VolumeOutput VolumePass::recordImpl(const fx::ParticleRenderInputs* particlesIn,
               });
 
     const D3D12_GPU_VIRTUAL_ADDRESS frameConstants = f.frameConstants;
-    auto dispatch = [&](const char* name, const char* kernel, uint32_t gx, uint32_t gy, uint32_t list, std::function<void(PassBuilder&)> uses) {
+    // (words 4, 5 = P[1].xy: shading.mega_lights' sampled local light volumes for the setup kernel; UNX_NONE elsewhere)
+    auto dispatch = [&](const char* name, const char* kernel, uint32_t gx, uint32_t gy, uint32_t list, std::function<void(PassBuilder&)> uses,
+                        TextureRef volume0 = {}, TextureRef volume1 = {}) {
         if (gx == 0 || gy == 0) return;
         ID3D12PipelineState* pso = shaders.compute(kernel);
         g.addPass(name, QueueType::Graphics,
                   [=](PassBuilder& b) {
                       b.use(o.constants, Use::SrvCompute);
+                      if (volume0.valid()) b.use(volume0, Use::SrvCompute);
+                      if (volume1.valid()) b.use(volume1, Use::SrvCompute);
                       uses(b);
                   },
                   [=](PassContext& c) {
-                      const std::array<uint32_t, 8> p = { c.srv(o.constants), list, 0, 0, 0, 0, 0, 0 };
+                      const bool volumes = volume0.valid() && volume1.valid();
+                      const std::array<uint32_t, 8> p = { c.srv(o.constants), list, 0, 0, volumes ? c.srv(volume0) : 0xFFFFFFFFu, volumes ? c.srv(volume1) : 0xFFFFFFFFu, 0, 0 };
                       c.cmd->SetPipelineState(pso);
                       c.bindFrameConstants(frameConstants);
                       c.computeConstants(p.data(), 8);
@@ -251,7 +256,7 @@ VolumeOutput VolumePass::recordImpl(const fx::ParticleRenderInputs* particlesIn,
             if (x.valid()) b.use(x, Use::SrvCompute);
         b.use(o.records, Use::UavCompute);
         useLists(b);
-    });
+    }, L.localFluence, L.localMoment);
     // binning: one thread per (record, cell row) - at most K cell rows per record (VolumeCommon.hlsli)
     const uint32_t binRows = kLooseSpan;
     dispatch("volume.count", "Passes/Volume/VolumeSetup.STEP4", groups(threads, 256), binRows, 0, [=](PassBuilder& b) {

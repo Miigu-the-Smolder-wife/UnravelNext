@@ -774,14 +774,17 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
     if (s.listsFrame != fc.frame.frameIndex) recordFroxelLists(fc, main, 0xFFFFFFFFu);  // no shadowPages this frame
     RenderGraph& g = fc.graph;
     const BufferRef lights = s.lists;
+    // shading.mega_lights_volume: the sampled local light first - it needs the lists and the readers only, and the lit
+    // particle media below read its fluence and moment volumes (FrameResources::localFluence / localMoment).
+    const TextureRef readers = recordReaders(fc, main, s.fullDepth, "");
+    const TextureRef sampledLocal = recordSampledLocal(fc, main, lights, readers);
     // E's particle media (smoke, fire) on this grid, between the lists and the integration (invalid: none this frame); a
     // view whose volumeSlices a producer already set keeps them (tests: FroxelTests 7).
     ViewResources mediaView = main;
     const TextureRef particleMedia = main.volumeSlices.valid() ? main.volumeSlices : tracks::volumeMedia(fc, mediaView, lights);
     // Turbid basins (defect queue 13 (75), shading.water_turbid): added to the media slices (or their own) - WaterMedia.hlsl.
     const TextureRef media = recordWaterMedia(fc, main, lights, particleMedia, froxelGridFor(fc.quality, main.view.width, main.view.height));
-    const TextureRef readers = recordReaders(fc, main, s.fullDepth, "");
-    const TextureRef volume = recordIntegration(fc, main, lights, s.keep, readers, "", media, recordSampledLocal(fc, main, lights, readers));
+    const TextureRef volume = recordIntegration(fc, main, lights, s.keep, readers, "", media, sampledLocal);
     fc.resources.froxels = volume;
     fc.resources.aerialPerspective = volume;  // atmosphereAerial / atmosphereAirView read it (Atmosphere.hlsli)
 
