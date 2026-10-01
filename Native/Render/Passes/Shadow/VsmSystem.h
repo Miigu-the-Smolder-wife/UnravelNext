@@ -54,7 +54,8 @@ struct VsmLocalLightCpu
     float nearM;
     float farM, radius;
     uint32_t lightIndex, generation;
-    float pad[3];
+    uint32_t activeIndex;  // VsmLocal.hlsli: raster-active index (classification pages), 0xFFFFFFFF when not active
+    float pad[2];
     uint32_t active;
 };
 static_assert(sizeof(VsmLocalLightCpu) == 48);

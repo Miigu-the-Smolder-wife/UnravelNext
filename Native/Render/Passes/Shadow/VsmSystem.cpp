@@ -83,6 +83,9 @@ struct State
     uint32_t localSceneRevision = UINT32_MAX;
     uint32_t localWithoutSlot = 0;
     ComPtr<ID3D12Resource> localRing, localMask, localSlots;
+    ComPtr<ID3D12Resource> clsAtlas;  // L3: classification pages (VsmCls.hlsli), kLocalLights x 6 pages of 128^2 x 4 B
+    uint64_t clsAtlasBytes = 0;
+    uint32_t clsAtlasUav = UINT32_MAX;  // raw UAV descriptor (V's pixel kernel root constant)
     uint8_t* localMapped = nullptr;
     uint32_t localStride = 0, localCap = 0;
     uint32_t localLightsSrv[kRingSlots] = {}, localSlotOfSrv[kRingSlots] = {}, localActiveSrv[kRingSlots] = {};
@@ -170,6 +173,19 @@ void createState(FramePassContext& fc, State& s, uint32_t pages)
         s.requests = createBuffer(d, L"S VSM requests", (uint64_t)kTotalSlots * 4);
         s.localMask = createBuffer(d, L"S VSM local cull mask", (uint64_t)kLocalLights * kLocalLightWords * 4);
         s.localSlots = createBuffer(d, L"S VSM local atlas slots", (uint64_t)kLocalLights * kLocalLightWords * 32 * 4);
+        // L3: the classification atlas, 48 pages per row (VSM_CLS_PAGES_PER_ROW), rows for kLocalLights x 6 pages
+        s.clsAtlasBytes = (uint64_t)48 * 128 * ((kLocalLights * 6 + 47) / 48) * 128 * 4;
+        s.clsAtlas = createBuffer(d, L"S VSM classification atlas", s.clsAtlasBytes);
+        {
+            DescriptorHeaps& h = d.descriptors();
+            s.clsAtlasUav = h.allocateResource();
+            D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+            ud.Format = DXGI_FORMAT_R32_TYPELESS;
+            ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+            ud.Buffer.NumElements = (UINT)(s.clsAtlasBytes / 4);
+            ud.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+            d.d3d()->CreateUnorderedAccessView(s.clsAtlas.Get(), nullptr, &ud, h.resourceCpu(s.clsAtlasUav));
+        }
         s.cullMask = createBuffer(d, L"S VSM cull mask", (uint64_t)kSlots / 8);
         s.atlasSlots = createBuffer(d, L"S VSM atlas slots", (uint64_t)kSlots * 4);
         s.groups = createBuffer(d, L"S VSM scan groups", (uint64_t)kScanGroupsMax * 4);
@@ -603,10 +619,15 @@ void updateLocalLights(FramePassContext& fc, State& s, const ViewResources& main
         d.lightIndex = s.localLight[i] - 1;
         d.generation = s.localGen[i];
         d.active = 1;
+        d.activeIndex = 0xFFFFFFFFu;
         s.localUsed = i + 1;
         const float3 eye = main.view.position;
         const float3 toLight = { d.position.x - eye.x, d.position.y - eye.y, d.position.z - eye.z };
-        if (dot(toLight, toLight) <= d.farM * d.farM || sphereInView(main.view.viewProj, d.position, d.farM)) s.localActive.push_back(i);
+        if (dot(toLight, toLight) <= d.farM * d.farM || sphereInView(main.view.viewProj, d.position, d.farM))
+        {
+            d.activeIndex = (uint32_t)s.localActive.size();
+            s.localActive.push_back(i);
+        }
     }
     s.latest.localAssigned = 0;
     for (uint32_t i = 0; i < kLocalLights; ++i) s.latest.localAssigned += s.localLight[i] != 0 ? 1u : 0u;
@@ -1512,6 +1533,102 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
              activeLocal, (unsigned long long)listCapacity);
         s.rasterRequests[0] = sunRequests;
         s.rasterRequests[1] = localRequests;
+    }
+    // L3 stage 1 (14.3-1/2): the classification pages of the active lights (conservative raster, nearest depth over the
+    // texel: VsmClsPixel), their blocks (VsmClsBlocks) and the (tile, light) lit classification of the main view
+    // (LocalTileClassify) - shadow.vsm.classification_pages. Every active light's six faces are drawn each frame (the
+    // static / dynamic layers of 14.3-6 follow).
+    fc.resources.vsmTileLit = {};
+    if (fc.services.rasterizeDepth && activeLocal > 0 && main.depth.valid() && q.boolean("shadow.vsm.classification_pages"))
+    {
+        const uint32_t clsPages = activeLocal * 6, clsRows = (clsPages + 47) / 48, clsWidth = 48 * 128, clsHeight = clsRows * 128;
+        const uint64_t clsWords = (uint64_t)clsWidth * clsHeight;
+        if (clsWords * 4 > s.clsAtlasBytes)
+            fail("S VSM: %u active local lights need %llu B of classification atlas, %llu B allocated", activeLocal, (unsigned long long)(clsWords * 4), (unsigned long long)s.clsAtlasBytes);
+        const BufferRef clsAtlas = g.importBuffer(s.clsAtlas.Get(), BufferDesc{ "S VSM classification atlas", s.clsAtlasBytes, 0 });
+        const BufferRef clsBlocks = g.createBuffer(BufferDesc{ "S VSM classification blocks", (uint64_t)clsPages * 256 * 4, 0 });
+        const uint32_t tilesX = groups(main.view.width, 8), tilesY = groups(main.view.height, 8);
+        const BufferRef tileLit = g.createBuffer(BufferDesc{ "S VSM tile lit", (uint64_t)tilesX * tilesY * 48, 0 });
+        auto asUint = [](float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; };
+        ID3D12PipelineState* pClear = sh.compute("Passes/Shadow/VsmClsClear");
+        g.addPass("s.vsm.cls.clear", QueueType::Compute, [&](PassBuilder& b) { b.use(clsAtlas, Use::UavCompute); },
+                  [=](PassContext& ctx) {
+                      const uint32_t k[4] = { ctx.uav(clsAtlas), (uint32_t)clsWords, 0, 0 };
+                      ctx.cmd->SetPipelineState(pClear);
+                      ctx.computeConstants(k, 4);
+                      ctx.cmd->Dispatch(groups((uint32_t)(clsWords / 4), 256), 1, 1);
+                  });
+        {
+            // (V passes pixelConstants as given, so the atlas is a persistent buffer with a persistent raw UAV descriptor.)
+            DepthRasterRequest cr;
+            cr.instanceMask = scene::InstanceCastShadow;
+            cr.pixelKernel = "Passes/Shadow/VsmClsPixel";
+            cr.bufferUses = { { clsAtlas, Use::UavGraphics } };
+            cr.conservative = true;
+            cr.cull = D3D12_CULL_MODE_NONE;
+            cr.pixelConstants[0] = s.clsAtlasUav;
+            cr.pixelConstants[1] = clsWidth;
+            uint64_t sum = 0;
+            uint32_t clsRequests = 0;
+            auto flush = [&]() {
+                if (cr.views.empty()) return;
+                cr.name = "s.vsm.clsraster" + std::to_string(clsRequests++);
+                fc.services.rasterizeDepth(fc, cr);
+                cr.views.clear();
+                sum = 0;
+            };
+            for (uint32_t a = 0; a < activeLocal; ++a)
+            {
+                const uint32_t slot = s.localActive[a];
+                const VsmLocalLightCpu& l = s.localData[slot];
+                uint64_t faceBounds[6][kLocalMips] = {};
+                if (split) localBounds(bounds, l, faceBounds);
+                for (uint32_t face = 0; face < 6; ++face)
+                {
+                    const uint64_t bound = faceBounds[face][0];
+                    if (!cr.views.empty() && (sum + bound > listCapacity || cr.views.size() >= 252u)) flush();
+                    RasterView v;
+                    v.viewProj = localViewProj(l, face);
+                    const uint32_t page = a * 6 + face;
+                    v.viewportX = (page % 48) * 128;
+                    v.viewportY = (page / 48) * 128;
+                    v.viewportWidth = v.viewportHeight = kPage;
+                    v.lodPixelsPerMetre = 0.5f * (float)kPage;
+                    v.userData = slot | face << 7;
+                    v.cullMaskOffset = UINT32_MAX;
+                    cr.views.push_back(v);
+                    sum += bound;
+                }
+            }
+            flush();
+        }
+        ID3D12PipelineState* pBlocks = sh.compute("Passes/Shadow/VsmClsBlocks");
+        g.addPass("s.vsm.cls.blocks", QueueType::Compute,
+                  [&](PassBuilder& b) { b.use(clsAtlas, Use::SrvCompute); b.use(clsBlocks, Use::UavCompute); },
+                  [=](PassContext& ctx) {
+                      const uint32_t k[4] = { ctx.srv(clsAtlas), ctx.uav(clsBlocks), clsWidth, 48 };
+                      ctx.cmd->SetPipelineState(pBlocks);
+                      ctx.computeConstants(k, 4);
+                      ctx.cmd->Dispatch(clsPages, 1, 1);
+                  });
+        ID3D12PipelineState* pClassify = sh.compute("Passes/Shadow/LocalTileClassify");
+        const TextureRef depth = main.depth;
+        const uint32_t toleranceBits = asUint((float)q.number("shadow.vsm.classification_tolerance"));
+        g.addPass("s.vsm.cls.tiles", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(depth, Use::SrvCompute);
+                      b.use(froxelLists, Use::SrvCompute);
+                      b.use(clsBlocks, Use::SrvCompute);
+                      b.use(tileLit, Use::UavCompute);
+                  },
+                  [=](PassContext& ctx) {
+                      const uint32_t k[8] = { ctx.srv(depth), ctx.srv(froxelLists), localLightsSrv, slotOfSrv, ctx.srv(clsBlocks), ctx.uav(tileLit), tilesX, toleranceBits };
+                      ctx.cmd->SetPipelineState(pClassify);
+                      ctx.bindFrameConstants(mainConstants);
+                      ctx.computeConstants(k, 8);
+                      ctx.cmd->Dispatch(tilesX, tilesY, 1);
+                  });
+        fc.resources.vsmTileLit = tileLit;
     }
 
     {

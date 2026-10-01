@@ -8,7 +8,8 @@
 // The record is marked invalid (every light NEAR, the exact per-pixel path) for an edge tile (EdgeDetect's mask), a
 // tile with a sky corner, a depth span over more than 4 slices, or a slice list over 64 entries.
 // P[0] = { depth SRV, G-buffer SRV, froxel lights SRV (this view's lists), edge tile mask SRV (R32G32_UINT) }
-// P[1] = { records UAV (raw), tilesX, first tile row of this dispatch, 0 }
+// P[1] = { records UAV (raw), tilesX, first tile row of this dispatch, S's tile lit records SRV (VsmCls.hlsli; UNX_NONE: every
+//          caster NEAR) }
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
@@ -17,6 +18,7 @@
 #include "Passes/Atmosphere/Froxel.hlsli"
 #include "Passes/Common/LightNearFar.hlsli"
 #include "Passes/Lights/TileLights.hlsli"
+#include "Passes/Shadow/VsmCls.hlsli"
 
 groupshared float3 gs_pos[64];
 groupshared float3 gs_normal[64];
@@ -143,6 +145,8 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint lane : SV_G
         region.normalSin = gs_sinCone;
         const float3 c0 = g_cameraPosition + gs_pos[0], c1 = g_cameraPosition + gs_pos[7], c2 = g_cameraPosition + gs_pos[56], c3 = g_cameraPosition + gs_pos[63];
         const uint sliceCount = gs_sliceCount, total = gs_total;
+        VsmClsTile clsTile = (VsmClsTile)0;
+        if (P[1].w != UNX_NONE) clsTile = vsmClsTile(P[1].w, tileIndex);
         for (uint e = lane; e < total; e += 64)
         {
             // slice and position of entry e
@@ -151,7 +155,9 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint lane : SV_G
             const uint li = froxelLightAt(f, indexBase, gs_list[s].x + i);
             const GpuLight light = loadLight(li);
             float d;
-            const bool near = nfIsNear(light, region, false, !lightCastsShadow(light), d);
+            // a caster lit over every pixel of the tile (L3 classification) may be FAR like an unshadowed light
+            const bool litOver = P[1].w != UNX_NONE && vsmClsTileLit(clsTile, gs_sliceFirst + s, i);
+            const bool near = nfIsNear(light, region, false, !lightCastsShadow(light) || litOver, d);
             if (near)
             {
                 InterlockedOr(gs_mask[s * 2 + (i >> 5)], 1u << (i & 31));

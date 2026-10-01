@@ -566,11 +566,13 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 if (r.fxLights.valid()) b.use(r.fxLights, Use::SrvCompute);
                 b.use(edgeTiles, Use::SrvCompute);
                 b.use(tileRecords, Use::UavCompute);
+                if (r.vsmTileLit.valid()) b.use(r.vsmTileLit, Use::SrvCompute);  // L3: lit casters may be FAR
             };
             tilePass.execute = [=](PassContext& c) {
                 const auto [row0, row1] = passTileRows(c);
                 if (row1 <= row0) return;
-                const uint32_t k[8] = { c.srv(v.depth), c.srv(v.gbuffer), c.srv(v.froxelLights), c.srv(edgeTiles), c.uav(tileRecords), o.tilesX, row0, 0 };
+                const uint32_t k[8] = { c.srv(v.depth), c.srv(v.gbuffer), c.srv(v.froxelLights), c.srv(edgeTiles), c.uav(tileRecords), o.tilesX, row0,
+                                        r.vsmTileLit.valid() ? c.srv(r.vsmTileLit) : gpu::kNone };
                 c.cmd->SetPipelineState(tileKernel);
                 c.bindFrameConstants(cb);
                 c.computeConstants(k, 8);
