@@ -40,6 +40,8 @@ struct UpscaleState
     ComPtr<ID3D12Resource> history[2];
     uint32_t width = 0, height = 0, parity = 0;
     bool fresh = true;  // the textures hold nothing yet
+    TextureRef previous;           // history[parity] in the graph of frame 'previousFrame' (upscalePreviousColor)
+    uint64_t previousFrame = ~0ull;
     ~UpscaleState()
     {
         if (!device) return;
@@ -92,6 +94,22 @@ ViewResources upscaleOutputView(FramePassContext& fc, const ViewResources& view)
     return out;
 }
 
+TextureRef upscalePreviousColor(FramePassContext& fc, const ViewResources& view)
+{
+    if (!upscaleActive(fc, view)) return TextureRef{};
+    const FrameContext::Upscale& u = fc.frame.upscale;
+    UpscaleState& s = fc.state<UpscaleState>("M.upscale");
+    if (!s.history[0] || s.width != u.outputWidth || s.height != u.outputHeight || s.fresh || u.reset) return TextureRef{};
+    if (s.previousFrame != fc.frame.frameIndex || !s.previous.valid())
+    {
+        s.previous = fc.graph.importTexture(s.history[s.parity].Get(),
+                                            { "m.upscale.history (previous)", u.outputWidth, u.outputHeight, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
+                                            D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        s.previousFrame = fc.frame.frameIndex;
+    }
+    return s.previous;
+}
+
 TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, TextureRef src)
 {
     if (!view.depth.valid()) fail("M.upscale: the main view has no depth");
@@ -106,11 +124,14 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
     UpscaleState& s = fc.state<UpscaleState>("M.upscale");
     s.ensure(fc.device, W, H);
     const bool reset = u.reset || s.fresh;
+    // (an earlier pass of this frame may hold the previous history already: upscalePreviousColor - one import per frame)
+    const bool imported = !reset && s.previousFrame == fc.frame.frameIndex && s.previous.valid();
     s.fresh = false;
     const uint32_t prev = s.parity, next = prev ^ 1u;
     s.parity = next;
-    const TextureRef history = g.importTexture(s.history[prev].Get(), { "m.upscale.history (previous)", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
-                                               D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    const TextureRef history = imported ? s.previous
+                                        : g.importTexture(s.history[prev].Get(), { "m.upscale.history (previous)", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
+                                                          D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     const TextureRef output = g.importTexture(s.history[next].Get(), { "m.upscale.history", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
                                               D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     const TextureRef motion = g.createTexture(TextureDesc{ "m.upscale.motion", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT });

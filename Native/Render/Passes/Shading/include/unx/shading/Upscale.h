@@ -11,5 +11,10 @@ bool upscaleActive(FramePassContext& fc, const ViewResources& view);
 ViewResources upscaleOutputView(FramePassContext& fc, const ViewResources& view);
 // The output-resolution image (RGBA16F, exposed linear; it is also the next frame's history) from 'src' (the view's
 // exposed-linear image at the internal resolution) and the previous output.
+// The previous frame's upscaled colour (the history temporalUpscale reads this frame) in this frame's graph, for passes
+// recorded before the upscale - screen-space traces of reflection and GI rays (ViewResources::prevSceneColor documents
+// the texture). Imported once per frame; temporalUpscale then uses the same reference. Invalid when the view is not
+// upscaled or the history holds nothing yet.
+TextureRef upscalePreviousColor(FramePassContext& fc, const ViewResources& view);
 TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, TextureRef src);
 } // namespace unx::render::shading

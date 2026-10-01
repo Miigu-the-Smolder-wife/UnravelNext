@@ -17,3 +17,7 @@ direct_lighting = true
 radiosity = true
 remainder_light = false               # QUALITY TRADE (user decision) when false, as the reference: a cell's direct light is its 8
                                       # strongest lights and the rest are dropped; true = one more light drawn from the rest
+direct_stochastic = false             # the reference's stochastic direct lighting (off by default there): one light sample per
+                                      # cell per update from all its lights (A's MegaLightsWorld.hlsli), a running mean
+direct_stochastic_max_frames = 12.0   # (reference: Stochastic.Temporal.MaxFramesAccumulated 12)
+direct_stochastic_min_sample_weight = 0.001

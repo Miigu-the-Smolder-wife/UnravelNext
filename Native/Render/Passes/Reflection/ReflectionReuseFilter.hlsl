@@ -15,7 +15,11 @@
 // P[1] = { reflection UAV, modes SRV, rows H, frame }
 // P[2] = { width, height, samples, flags (bit 0: no filter, bit 1: no tone map on young pixels) }
 // P[3] = { asuint(radius px), asuint(depth weight), asuint(young frames), asuint(max frames) }
-// P[4] = { asuint(max roughness to trace), asuint(roughness fade length), asuint(tone-map range), 0 }
+// P[4] = { asuint(max roughness to trace), asuint(roughness fade length), asuint(tone-map range), GI's rough specular SRV
+//          (view.giRoughSpecular: the rough lobe's mean incident radiance x exposure, per pixel; UNX_NONE: none) }
+// With GI's rough specular (gi.lumen's final gather) the pixels above the roughness limit take it as their value (a = 1:
+// ShadeOpaque then reads no probe lobe for them), and the pixels in the fade take the mix of it and the traced value -
+// the reference's rough reflections above MaxRoughnessToTrace. Without it those pixels keep the K path (a = the share).
 // Frame constants b1 = main view.
 #include "Passes/Reflection/ReflectionReuse.hlsli"
 
@@ -31,7 +35,18 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
     RWTexture2D<float4> reflection = ResourceDescriptorHeap[P[1].x];
     if (reflection[uint2(tile.x, P[1].z + tile.y)].a < 0.5) return;  // a tile without traced or planar pixels
     Texture2D<uint> modes = ResourceDescriptorHeap[P[1].y];
-    if (reflMode(modes.Load(int3(pixel, 0))) != REFL_M) return;  // K and planar pixels: as ReflectionResolve left them
+    const uint mode = reflMode(modes.Load(int3(pixel, 0)));
+    if (mode == REFL_K && P[4].w != UNX_NONE)
+    {
+        Texture2D<float> depthK = ResourceDescriptorHeap[P[0].z];
+        if (depthK.Load(int3(pixel, 0)) > 0)
+        {
+            Texture2D<float4> roughK = ResourceDescriptorHeap[P[4].w];
+            reflection[pixel] = float4(reflStorable(max(roughK.Load(int3(pixel, 0)).rgb, 0.0) / max(g_exposure, 1e-20)), 1);
+        }
+        return;
+    }
+    if (mode != REFL_M) return;  // planar pixels (and K pixels without GI's rough specular): as ReflectionResolve left them
     Texture2D<float4> accumulated = ResourceDescriptorHeap[P[0].x];
     Texture2D<float4> frameCounts = ResourceDescriptorHeap[P[0].y];
     Texture2D<float> depth = ResourceDescriptorHeap[P[0].z];
@@ -74,6 +89,16 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
             weight += w;
         }
     }
-    const float3 value = reuseFromFilter(youngExpand(sum / weight, compress), range);
-    reflection[pixel] = float4(reflStorable(max(value, 0.0)), reuseTraceShare(s.roughness, asfloat(P[4].x), asfloat(P[4].y)));
+    float3 value = max(reuseFromFilter(youngExpand(sum / weight, compress), range), 0.0);
+    float share = reuseTraceShare(s.roughness, asfloat(P[4].x), asfloat(P[4].y));
+    if (P[4].w != UNX_NONE)
+    {
+        if (share < 1)
+        {
+            Texture2D<float4> rough = ResourceDescriptorHeap[P[4].w];
+            value = lerp(max(rough.Load(int3(pixel, 0)).rgb, 0.0) / max(g_exposure, 1e-20), value, share);
+        }
+        share = 1;
+    }
+    reflection[pixel] = float4(reflStorable(value), share);
 }

@@ -11,8 +11,10 @@
 //   capture   SurfaceCacheSeed: every frame rays leave the camera position uniformly over the sphere (no view direction)
 //             and bounce on; each hit marks its cell (created when new; the frame's first mark sets its point, normal,
 //             albedo and emission). Reflection and GI hits and the radiosity rays mark too (the reference's feedback).
-//             A cell stays while its point still maps to its key (the camera has not moved it to another level) and it
-//             was marked within the last 255 frames (the reference keeps unused pages 256 frames).
+//             A cell stays while it was marked within the last 255 frames (the reference keeps unused pages 256 frames).
+//             When the camera moves, a point's level changes: marks then go to the cell of the new level, and until that
+//             one is lit a read takes the cell the point had one level finer or coarser (the reference resamples a
+//             card's lighting when it is reallocated at another resolution); the old cell ages out unmarked.
 //   direct    SurfaceCacheCells, capacity / 32 cells a frame (new cells first, then a window that walks the lit ones):
 //             the 8 lights with the largest unshadowed irradiance on the cell, each evaluated with one shadow ray, and
 //             the sun with one. The value replaces the cell's (no time accumulation, as the reference's default).
@@ -27,7 +29,8 @@
 // indirect as R11G11B10 x SC_STORE_SCALE, 0), list 4 B; then probes, per slot of N / 4: keys 4 B, heads 4 B, data 16 B,
 // light 8 B (irradiance R11G11B10 x SC_STORE_SCALE, 0), list 4 B.
 // heads: bit 0 marked since the last upkeep, bit 1 has data, bits 8-15 lighting updates (cells: 0 = not lit yet, else 1;
-//        probes: frames in the running mean), bits 16-23 frames since the last mark.
+//        probes: frames in the running mean), bits 16-23 frames since the last mark, bits 24-31 (cells) frames in the
+//        stochastic direct light's running mean (surface_cache.direct_stochastic).
 // lists (written by SurfaceCacheUpdate): the lit entries from index 0 up, the entries not lit yet from the last index down.
 // Header words: 0 N, 1 frame, 2 lit cells, 3 new cells, 4-6 camera xyz (float), 7 max unused frames, 8 lit probes, 9 new
 // probes, 10 flags (bit 0: marking on), 11 asuint(radiosity ray cap, exposed), 12 asuint(probe max frames).
@@ -195,10 +198,20 @@ ScSample scRead(RWByteAddressBuffer b, ScLayout l, float3 position, float3 norma
     s.direct = s.sun = s.indirect = s.albedo = s.emission = 0;
     const uint n = l.entries;
     if (n == 0) return s;
-    const uint slot = scFind(b, scKeysOffset(0), n, scKey(l, position, normal, 1.0));
+    // the point's own level, else the level it had before the camera moved (one finer, one coarser)
+    const uint level = scLevel(l, position);
+    const uint face = scFace(normal);
+    uint slot = SC_NONE;
+    for (uint attempt = 0; attempt < 3 && slot == SC_NONE; ++attempt)
+    {
+        if (attempt == 1 && level == 0) continue;
+        const uint at = attempt == 0 ? level : attempt == 1 ? level - 1 : level + 1;
+        const uint found = scFind(b, scKeysOffset(0), n, scKeyAt(at, scCoord(at, position, 1.0), face));
+        if (found == SC_NONE) continue;
+        const uint head = b.Load(scHeadsOffset(n, found));
+        if ((head & SC_HEAD_VALID) != 0 && ((head >> 8) & 0xFFu) != 0) slot = found;
+    }
     if (slot == SC_NONE) return s;
-    const uint head = b.Load(scHeadsOffset(n, slot));
-    if ((head & SC_HEAD_VALID) == 0 || ((head >> 8) & 0xFFu) == 0) return s;
     s.valid = true;
     const uint3 light = b.Load3(scLightOffset(n, slot));
     s.direct = scUnpackRgb(light.x);

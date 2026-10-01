@@ -16,13 +16,20 @@
 //                          cell it meets (its largest channel held to the header's cap in exposed units; the cell is
 //                          marked: it is in use) or the sky; the probe's irradiance is a running mean over at most the
 //                          header's probe frames.
-// P[0] = { cache UAV, budget, frame, flags (bit 0: local lights and sun, bit 1: radiosity, bit 3: the remainder light) }
+//                          With flag bit 4 (surface_cache.direct_stochastic; the reference's stochastic direct lighting,
+//                          off by default there too) the local lights are not the 8 strongest but one sample of all
+//                          the cell's lights by A's world-point sampler (MegaLightsWorld.hlsli: the light drawn by its
+//                          unshadowed contribution, area lights by their integral), one shadow ray, and the cell keeps
+//                          a running mean of it over at most P[4].x frames.
+// P[0] = { cache UAV, budget, frame, flags (bit 0: local lights and sun, bit 1: radiosity, bit 3: the remainder light,
+//          bit 4: stochastic local lights) }, P[4] = { asuint(stochastic max frames), asuint(min sample weight), 0, 0 }
 // P[1].xyz = constant sky radiance (SKY1), P[1].w = ray length, P[2] = atmosphere SRVs (SKY0), P[3].xyz = constant sun
 // illuminance (SKY1) (GiSky.hlsli), P[3].w = seed bounces; P[6], P[7] = RtSceneSrvs. Frame constants b1 = main view.
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/GI/GiSky.hlsli"
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
+#include "Passes/Shading/MegaLightsWorld.hlsli"
 #include "Passes/SurfaceCache/SurfaceCache.hlsli"
 
 #define SC_LIGHTS_PER_CELL 8u
@@ -129,9 +136,27 @@ void SurfaceCacheCellsGen()
     float3 direct = scUnpackRgb(before.x), sun = scUnpackRgb(before.y), indirect = scUnpackRgb(before.z);
     if (P[0].w & 1u)
     {
+        const float3 directBefore = direct;
         direct = 0;
         sun = 0;
-        if (scene.pad != 0xFFFFFFFFu)
+        if (P[0].w & 16u)
+        {
+            const MlPoint p = mlPointLambert(position, normal, float3(1, 1, 1));  // (its radiance is irradiance / pi)
+            const MlWorldSamples samples = mlWorldSamples(scene, p, 1, giUnit(seed), asfloat(P[4].y), g_exposure, UNX_NONE);
+            [loop] for (uint i = 0; i < samples.count; ++i)
+            {
+                const bool visible = !samples.castShadow[i] ||
+                                     mlSampleVisible(scene, position, normal, samples.light[i], float2(giUnit(seed + 1), giUnit(seed + 2)), bias, bias, 0.05);
+                if (visible) direct += 3.14159265 * mlLightUnshadowed(p, loadLight(samples.light[i]), samples.light[i], UNX_NONE) * samples.weight[i];
+            }
+            // the running mean (frames in the head's bits 24-31)
+            const uint headOffsetS = scHeadsOffset(n, slot);
+            const uint hadS = b.Load(headOffsetS) >> 24;
+            const float framesS = min((float)hadS + 1, max(asfloat(P[4].x), 1.0));
+            if (framesS > 1) direct = lerp(directBefore, direct, 1 / framesS);
+            if ((float)hadS < framesS) b.InterlockedAdd(headOffsetS, 1u << 24);
+        }
+        else if (scene.pad != 0xFFFFFFFFu)
         {
             // the lights of the cell's place in the light grid, the strongest SC_LIGHTS_PER_CELL kept
             g_rtLightData = scene.pad;

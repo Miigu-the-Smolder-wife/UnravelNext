@@ -22,6 +22,8 @@
 void ReflectionTraceGen()
 {
     const uint job = DispatchRaysIndex().x;
+    StructuredBuffer<uint> jobList = ResourceDescriptorHeap[P[0].x];
+    if (jobList[job] & REFL_JOB_DONE) return;  // its value came from the screen trace
     RWStructuredBuffer<uint3> results = ResourceDescriptorHeap[P[0].y];
     RWByteAddressBuffer rays = ResourceDescriptorHeap[P[5].y];
     const RtSceneSrvs scene = rtScene();
