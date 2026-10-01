@@ -2,7 +2,9 @@
 // Stochastic direct light of the local lights (shading.mega_lights; MegaLights.hlsli states the passes; owner A). The
 // structure and default numbers follow Unreal Engine's MegaLights; this replaces the per-pixel loop over every listed
 // light with S's shadow slots (128 lights with shadows) by N light samples per downsampled pixel, one shadow ray each,
-// and a temporal and spatial filter. Main view only; needs S's froxel lists and the R track's ray scene.
+// and a temporal and spatial filter. Every view with S's froxel lists (planar reflection views: without history); needs
+// the R track's ray scene.
+#include <string>
 #include "unx/render/Frame.h"
 
 struct ID3D12CommandSignature;
@@ -12,6 +14,7 @@ namespace unx::render::shading
 struct MegaLightsFrame
 {
     bool on = false;
+    std::string stateKey;                          // the view's persistent state (megaLightsSample chose it)
     TextureRef samples, keys;                      // the light samples after the trace and the downsampled key
     TextureRef resolvedDiffuse, resolvedSpecular;  // m.ml.shade's outputs (the shading record dispatches it per class)
     TextureRef lighting;                           // m.ml.spatial's result: what the shading kernels add (P[10].y)

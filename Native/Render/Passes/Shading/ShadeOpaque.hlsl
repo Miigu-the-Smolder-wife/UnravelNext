@@ -90,7 +90,7 @@
 #include "Passes/Shading/AreaLight.hlsli"
 #if LAYERED
 #include "Passes/Shading/AnisoShading.hlsli"
-#if AREA_LOBES
+#if AREA_LOBES || (MEGA_LIGHTS && AREA)
 #include "Passes/Shading/AreaQuadrature.hlsli"
 #endif
 #endif
@@ -625,20 +625,30 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #if AREA
                 // L w (f_d pi I + E_s I_ltc) on the viewer's side of n; Foliage transmits what arrives on the other.
                 const float3 Lw = light.color * (light.intensity * window * visibility);
-#if AREA_LOBES
+#if AREA_LOBES || (MEGA_LIGHTS && LAYERED)
                 // A9 the lobes no LTC represents, over the light (AreaQuadrature.hlsli): the anisotropic base (MATERIAL_LAYERS
-                // 1.5; under a coat scaled like the base) and the sheen (1.4) - on the viewer's side
+                // 1.5; under a coat scaled like the base) and the sheen (1.4) - on the viewer's side. The lobe kernel
+                // (AREA_LOBES) holds these alone, with S's visibility; shading.mega_lights' kernel adds them to its specular
+                // with the light samples' weight (Lw), and the lobe kernel then does not run (ShadingSystem.cpp).
                 if (NoV > 0)
                 {
+                    float3 lobe = 0;
 #if LAYERED == 1
                     if (aniso.on && !shLightSpecularInResult(lightIndex))
-                        radiance += ((cover > 0) ? keep : 1.0) * Lw * shAreaAniso(light, p, aniso.t, aniso.b, n, v, aniso.alpha, f0, 1 + f0 * (1 / (aniso.ab.x + aniso.ab.y) - 1));
+                        lobe = ((cover > 0) ? keep : 1.0) * Lw * shAreaAniso(light, p, aniso.t, aniso.b, n, v, aniso.alpha, f0, 1 + f0 * (1 / (aniso.ab.x + aniso.ab.y) - 1));
 #endif
 #if LAYERED == 2
-                    radiance += Lw * sheen.color * shAreaSheen(light, p, frame, v, sheen.roughness);
+                    lobe = Lw * sheen.color * shAreaSheen(light, p, frame, v, sheen.roughness);
+#endif
+#if MEGA_LIGHTS
+                    mlSpecular += lobe;
+#else
+                    radiance += lobe;
 #endif
                 }
+#if AREA_LOBES
                 continue;
+#endif
 #endif
                 // Integrals in order: front diffuse, specular, back (Foliage) -- one inlined evaluator (the diffuse frames
                 // are rotations: closed forms on circular cones).

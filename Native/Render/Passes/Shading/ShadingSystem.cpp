@@ -377,8 +377,9 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     // shading.mega_lights (MegaLights.cpp; main view with S's lists and R's ray scene): the local lights' direct light comes
     // from light samples (m.ml.*) and the kernels skip their loop over the lists, so the tile records are not built.
 #if UNX_M_HAS_RAYTRACING
-    const bool megaWanted = fc.quality.boolean("shading.mega_lights") && view.view.kind == gpu::ViewKind::Main && froxelLists && r.tlasStatic.valid() &&
-                            fc.trackState != nullptr && (experiment & 32) == 0;
+    // Every view runs it (as Unreal's MegaLights does per view): the main view, the full auxiliary views (their own history
+    // under viewId) and planar reflection views (no history: the spatial filter alone).
+    const bool megaWanted = fc.quality.boolean("shading.mega_lights") && froxelLists && r.tlasStatic.valid() && fc.trackState != nullptr && (experiment & 32) == 0;
 #else
     const bool megaWanted = false;
 #endif
@@ -451,7 +452,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     {
         res.fallbackArgs = fallback ? fc.graph.createBuffer({ "m.shade fallback args", 12, 0 }) : BufferRef{};
         res.edgeRadiance = fc.graph.createTexture({ "m.edge radiance", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
-        if (lobesOn) res.areaLobes = fc.graph.createTexture({ "m.area lobes", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+        // (shading.mega_lights: the lobes are in its kernel, on the light samples - no lobe texture, no lobe pass)
+        if (lobesOn && !megaWanted) res.areaLobes = fc.graph.createTexture({ "m.area lobes", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
         res.direct = fc.graph.createTexture({ "m.direct radiance", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
         res.edgePixels = fc.graph.createBuffer({ "m.edge pixels", ((uint64_t)v.view.width * v.view.height + 1) * 4, 0 });
         res.edgeArgs = fc.graph.createBuffer({ "m.edge args", 24, 0 });  // dispatch args + pixel count (Edge.hlsli)
@@ -527,7 +529,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             // m.ml.sample, m.ml.trace; then m.ml.shade here (ShadeOpaque.hlsl with MEGA_LIGHTS = 1 on the class tile lists
             // of every band, the LAYERED variant of each class); then m.ml.sets, m.ml.temporal, m.ml.spatial
             MegaLightsFrame ml = megaLightsSample(fc, view, o.materialWord, areaLights, ltcSrv, signature);
-            if (!ml.on) fail("M.shading: shading.mega_lights could not start on the main view (its inputs were present)");
+            if (!ml.on) fail("M.shading: shading.mega_lights could not start on a view (its inputs were present)");
+            const bool mlMainView = view.view.kind == gpu::ViewKind::Main;
             auto mlKernel = [&](uint32_t layered) {
                 const std::string name = std::string("Passes/Shading/MegaLightsShade.AREA") + (areaLights ? "1" : "0") + ".LAYERED" + std::to_string(layered);
                 return fc.shaders.compute(name.c_str());
@@ -584,7 +587,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                          k32[4] = c.srv(o.tiles);
                                          k32[5] = o.firstTile(cls, band);
                                          k32[6] = cls;
-                                         k32[16] = r.areaLightStable;  // P[4].x (B2)
+                                         k32[16] = mlMainView ? r.areaLightStable : gpu::kNone;  // P[4].x (B2; planar views: none, as PLANAR = 1)
                                          k32[17] = o.textureTableSrv;
                                          k32[18] = experiment;
                                          k32[20] = c.srv(v.froxelLights);

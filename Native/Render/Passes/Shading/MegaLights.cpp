@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <string>
 
 namespace unx::render::shading
 {
@@ -33,6 +34,12 @@ uint32_t asUint(float f)
 }
 
 constexpr uint32_t kSetTile = 8, kSetBytes = 24;  // MegaLights.hlsli ML_HASH_TILE, 4 x ML_HASH_WORDS
+
+struct PlanarOrdinal  // the planar reflection views of a frame, in the order they are shaded
+{
+    uint64_t frame = UINT64_MAX;
+    uint32_t next = 0;
+};
 
 struct MegaLightsState
 {
@@ -154,7 +161,7 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
 {
     MegaLightsFrame ml;
 #if UNX_M_HAS_RAYTRACING
-    if (!fc.quality.boolean("shading.mega_lights") || view.view.kind != gpu::ViewKind::Main || !fc.trackState) return ml;
+    if (!fc.quality.boolean("shading.mega_lights") || !fc.trackState) return ml;
     const FrameResources r = fc.resources;
     // needs S's froxel lists (the candidates) and R's ray scene (the visibility); without either the shading kernels keep
     // their loop over the lists with S's slots
@@ -166,10 +173,23 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
     const uint32_t gridX = s.count >= 2 ? 2u : 1u, gridY = s.count >= 4 ? 2u : 1u;
     const uint32_t tilesX = (W + kSetTile - 1) / kSetTile, tilesY = (H + kSetTile - 1) / kSetTile;
 
-    MegaLightsState& st = fc.state<MegaLightsState>("M.megaLights");
+    // The view's persistent state (as Unreal runs MegaLights per view): the main view and every full auxiliary view (A14:
+    // render texture, mirror, portal, split - ViewResources::viewId) keep their own history. A planar reflection view has
+    // no identity between frames (R renders them through FrameServices::renderView): the frame's n-th such view takes
+    // the n-th planar state and never reads history (no temporal accumulation, no guiding by last frame's sets).
+    const bool mainView = view.view.kind == gpu::ViewKind::Main, fullView = mainView || view.viewId != 0;
+    if (mainView) ml.stateKey = "M.megaLights";
+    else if (fullView) ml.stateKey = "M.megaLights.view" + std::to_string(view.viewId);
+    else
+    {
+        PlanarOrdinal& ordinal = fc.state<PlanarOrdinal>("M.megaLights.planarOrdinal");
+        if (ordinal.frame != fc.frame.frameIndex) ordinal = { fc.frame.frameIndex, 0 };
+        ml.stateKey = "M.megaLights.planar" + std::to_string(ordinal.next++);
+    }
+    MegaLightsState& st = fc.state<MegaLightsState>(ml.stateKey);
     st.ensure(fc.device, W, H);
     const float3 shift = fc.frame.originShift;
-    const bool valid = !st.fresh && st.revision == fc.scene.revision() && fc.frame.discontinuity == 0 && shift.x == 0 && shift.y == 0 && shift.z == 0;
+    const bool valid = fullView && !st.fresh && st.revision == fc.scene.revision() && fc.frame.discontinuity == 0 && shift.x == 0 && shift.y == 0 && shift.z == 0;
     st.fresh = false;
     st.revision = fc.scene.revision();
     const float exposure = 1.0f / (1.2f * std::exp2(view.view.ev100));
@@ -203,7 +223,8 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
     const BufferRef sets = ml.sets;
     const TextureRef prevDepth = ml.prevDepth;
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
-    const uint32_t stable = r.areaLightStable;
+    // (B2's mask of lights whose specular the reflections carry: the main view's; other views shade every light's specular)
+    const uint32_t stable = mainView ? r.areaLightStable : gpu::kNone;
     // m.ml.tiles: the downsampled tiles with a surface (the sample kernel's dispatch list); the others' samples are emptied
     const uint32_t dsTilesX = (dsW + 7) / 8, dsTilesY = (dsH + 7) / 8;
     const BufferRef tileList = g.createBuffer({ "m.ml tiles", 16 + 4ull * dsTilesX * dsTilesY, 0 });
@@ -299,7 +320,7 @@ void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureR
     if (!ml.on) return;
     const Settings s = settings(fc.quality);
     RenderGraph& g = fc.graph;
-    MegaLightsState& st = fc.state<MegaLightsState>("M.megaLights");
+    MegaLightsState& st = fc.state<MegaLightsState>(ml.stateKey);
     const uint32_t W = view.view.width, H = view.view.height;
     const uint32_t dsW = (W + s.factor - 1) / s.factor, dsH = (H + s.factor - 1) / s.factor;
     const uint32_t gridX = s.count >= 2 ? 2u : 1u, gridY = s.count >= 4 ? 2u : 1u;
