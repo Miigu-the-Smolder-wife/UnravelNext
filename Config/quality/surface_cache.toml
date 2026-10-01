@@ -21,3 +21,5 @@ direct_stochastic = false             # the reference's stochastic direct lighti
                                       # cell per update from all its lights (A's MegaLightsWorld.hlsli), a running mean
 direct_stochastic_max_frames = 12.0   # (reference: Stochastic.Temporal.MaxFramesAccumulated 12)
 direct_stochastic_min_sample_weight = 0.001
+lighting_feedback = true              # cells a reflection or GI hit read since the last frame are relit ahead of the others
+                                      # (reference: r.LumenScene.Lighting.Feedback 1); half of the budget left after new cells

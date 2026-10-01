@@ -69,7 +69,7 @@ constexpr const char* kShadowLibrary = "Passes/Reflection/ReflectionShadow";
 constexpr const char* kLocalShadowLibrary = "Passes/Reflection/ReflectionLocalShadow";
 const char* const kSurfaceCacheLightLibrary[2] = { "Passes/SurfaceCache/SurfaceCacheLight.SKY0", "Passes/SurfaceCache/SurfaceCacheLight.SKY1" };
 constexpr uint32_t kScreenTraceLevels = 6;  // ScreenTrace.hlsli SCT_LEVELS
-constexpr uint32_t kSurfaceCacheHeaderBytes = 64, kSurfaceCacheCellBytes = 52, kSurfaceCacheProbeBytes = 36;  // SurfaceCache.hlsli
+constexpr uint32_t kSurfaceCacheHeaderBytes = 64, kSurfaceCacheCellBytes = 56, kSurfaceCacheProbeBytes = 36;  // SurfaceCache.hlsli
 } // namespace
 
 ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
@@ -150,6 +150,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.scRadiosity = flag("surface_cache.radiosity", true);
     s.scRemainderLight = flag("surface_cache.remainder_light", false);
     s.scDirectStochastic = flag("surface_cache.direct_stochastic", false);
+    s.scLightingFeedback = flag("surface_cache.lighting_feedback", true);
     s.scDirectStochasticFrames = num("surface_cache.direct_stochastic_max_frames", 12.0);
     s.scDirectMinWeight = num("surface_cache.direct_stochastic_min_sample_weight", 0.001);
     s.lumenHitSurfaceCache = flag("reflection.lumen_hit_surface_cache", true);
@@ -1282,7 +1283,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       });
         rt::RayPipeline& surfaceCacheLight = rt::RayPipeline::get(
             fc.device, shaders, rt::standardRayPipeline(kSurfaceCacheLightLibrary[variant], { "SurfaceCacheSeedGen", "SurfaceCacheCellsGen", "SurfaceCacheProbesGen" }));
-        const uint32_t lightFlags = (s.scDirect ? 1u : 0u) | (s.scRadiosity ? 2u : 0u) | (s.scRemainderLight ? 8u : 0u) | (s.scDirectStochastic ? 16u : 0u);
+        const uint32_t lightFlags = (s.scDirect ? 1u : 0u) | (s.scRadiosity ? 2u : 0u) | (s.scRemainderLight ? 8u : 0u) | (s.scDirectStochastic ? 16u : 0u) | (s.scLightingFeedback ? 32u : 0u);
         const uint32_t budgets[3] = { std::max(n / s.scCaptureFactor / (s.scCaptureBounces + 1), 1u), std::max(n / s.scDirectFactor, 1u),
                                       std::max(n / s.scRadiosityFactor / 16, 1u) };
         static const char* const kLightNames[3] = { "r.sc.seed", "r.sc.cells", "r.sc.probes" };

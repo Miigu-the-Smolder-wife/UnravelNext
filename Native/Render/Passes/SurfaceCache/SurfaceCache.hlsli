@@ -32,7 +32,9 @@
 //        probes: frames in the running mean), bits 16-23 frames since the last mark, bits 24-31 (cells) frames in the
 //        stochastic direct light's running mean (surface_cache.direct_stochastic).
 // lists (written by SurfaceCacheUpdate): the lit entries from index 0 up, the entries not lit yet from the last index down.
-// Header words: 0 N, 1 frame, 2 lit cells, 3 new cells, 4-6 camera xyz (float), 7 max unused frames, 8 lit probes, 9 new
+// Feedback (the reference's r.LumenScene.Lighting.Feedback): a cell a consumer's hit marked is listed apart and half of
+// the relighting budget left after the new cells goes to those cells first (SurfaceCacheLight.hlsl scPickCell).
+// Header words: 13 = lit cells with feedback. 0 N, 1 frame, 2 lit cells, 3 new cells, 4-6 camera xyz (float), 7 max unused frames, 8 lit probes, 9 new
 // probes, 10 flags (bit 0: marking on), 11 asuint(radiosity ray cap, exposed), 12 asuint(probe max frames).
 #ifndef UNX_SURFACE_CACHE_HLSLI
 #define UNX_SURFACE_CACHE_HLSLI
@@ -45,7 +47,8 @@
 #define SC_STORE_SCALE (1.0 / 64.0)
 #define SC_HEAD_MARKED 1u
 #define SC_HEAD_VALID 2u
-#define SC_CELL_BYTES 52u
+#define SC_HEAD_FEEDBACK 4u  // marked by a consumer's hit (a reflection or GI ray read it) since the last upkeep
+#define SC_CELL_BYTES 56u
 #define SC_PROBE_BYTES 36u
 #define SC_TEXEL_CM 5.0          // the finest cell (the reference's 0.2 texels per cm)
 #define SC_TEXEL_DISTANCE 100.0  // cell size = distance / this (the reference's card texel density scale)
@@ -62,6 +65,7 @@ uint scDataOffset(uint n, uint i) { return SC_HEADER + n * 8 + i * 16; }
 uint scMaterialOffset(uint n, uint i) { return SC_HEADER + n * 24 + i * 8; }
 uint scLightOffset(uint n, uint i) { return SC_HEADER + n * 32 + i * 16; }
 uint scListOffset(uint n, uint i) { return SC_HEADER + n * 48 + i * 4; }
+uint scFeedbackListOffset(uint n, uint i) { return SC_HEADER + n * 52 + i * 4; }  // the lit cells consumers read (header word 13: count)
 uint scProbeBase(uint n) { return SC_HEADER + n * SC_CELL_BYTES; }
 uint scProbeCount(uint n) { return n / 4; }
 uint scProbeKeysOffset(uint n, uint i) { return scProbeBase(n) + i * 4; }
@@ -227,7 +231,18 @@ float3 scFinalLighting(ScSample s) { return (s.direct + s.sun + s.indirect) * s.
 
 // Marks the cell of a surface point and its probe (created when new); the frame's first mark sets the point and the
 // material. Returns the cell's slot, SC_NONE when its steps are all taken by other cells or marking is off.
+uint scMarkAs(RWByteAddressBuffer b, ScLayout l, float3 position, float3 normal, float3 albedo, float3 emission, uint bits);
+// A consumer's mark (a reflection or GI hit that reads the cell): the cell is in use and its lighting is wanted soon.
 uint scMark(RWByteAddressBuffer b, ScLayout l, float3 position, float3 normal, float3 albedo, float3 emission)
+{
+    return scMarkAs(b, l, position, normal, albedo, emission, SC_HEAD_MARKED | SC_HEAD_FEEDBACK);
+}
+// The cache's own rays (capture, radiosity): the cell exists and stays, with no claim on the relighting order.
+uint scMarkQuiet(RWByteAddressBuffer b, ScLayout l, float3 position, float3 normal, float3 albedo, float3 emission)
+{
+    return scMarkAs(b, l, position, normal, albedo, emission, SC_HEAD_MARKED);
+}
+uint scMarkAs(RWByteAddressBuffer b, ScLayout l, float3 position, float3 normal, float3 albedo, float3 emission, uint bits)
 {
     const uint n = l.entries;
     if (n == 0 || (b.Load(40) & 1u) == 0) return SC_NONE;
@@ -236,7 +251,7 @@ uint scMark(RWByteAddressBuffer b, ScLayout l, float3 position, float3 normal, f
     const uint slot = scFindOrInsert(b, scKeysOffset(0), n, scKeyAt(level, scCoord(level, position, 1.0), face));
     if (slot == SC_NONE) return SC_NONE;
     uint before;
-    b.InterlockedOr(scHeadsOffset(n, slot), SC_HEAD_MARKED, before);
+    b.InterlockedOr(scHeadsOffset(n, slot), bits, before);
     if ((before & SC_HEAD_MARKED) == 0)
     {
         b.Store4(scDataOffset(n, slot), uint4(asuint(position), scPackOct(normal)));

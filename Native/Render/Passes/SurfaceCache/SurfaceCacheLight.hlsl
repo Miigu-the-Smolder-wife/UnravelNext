@@ -72,7 +72,7 @@ bool scMeet(RWByteAddressBuffer b, ScLayout l, RtSceneSrvs scene, RtHit hit, Ray
     position = s.position;
     face = dot(s.geometricNormal, ray.Direction) > 0 ? -s.geometricNormal : s.geometricNormal;
     m = rtHitMaterial(m, s, scCellSize(l, s.position), dot(s.normal, ray.Direction));
-    scMark(b, l, position, face, scAlbedoOf(m), m.emissive);
+    scMarkQuiet(b, l, position, face, scAlbedoOf(m), m.emissive);
     cell = scRead(b, l, position, face);
     return true;
 }
@@ -86,6 +86,25 @@ uint scPick(RWByteAddressBuffer b, uint index, uint budget, uint frame, uint lit
     const uint room = budget - min(fresh, budget);
     const uint at = lit > room ? (j + (frame % lit) * (room % lit)) % lit : j;
     return b.Load(listBase + at * 4);
+}
+
+// The cell a thread of the direct-light pass works on: the cells not lit yet, then - with flag bit 5,
+// surface_cache.lighting_feedback - half of the room left for the cells consumers read since the last upkeep (a window
+// over that list when it is longer), then the window over all lit cells.
+uint scPickCell(RWByteAddressBuffer b, uint index, uint budget, uint frame, uint n, bool feedback)
+{
+    const uint lit = b.Load(8), fresh = b.Load(12);
+    if (!feedback || index < fresh) return scPick(b, index, budget, frame, lit, fresh, n, scListOffset(n, 0));
+    const uint wanted = b.Load(52);
+    const uint room = budget - min(fresh, budget);
+    const uint share = min(room / 2, wanted);
+    const uint j = index - fresh;
+    if (j < share)
+    {
+        const uint at = wanted > share ? (j + (frame % wanted) * (share % wanted)) % wanted : j;
+        return b.Load(scFeedbackListOffset(n, at));
+    }
+    return scPick(b, index - share, budget - share, frame, lit, fresh, n, scListOffset(n, 0));
 }
 
 [shader("raygeneration")]
@@ -124,7 +143,7 @@ void SurfaceCacheCellsGen()
     const ScLayout l = scLayout(b);
     const uint n = l.entries;
     if (n == 0) return;
-    const uint slot = scPick(b, DispatchRaysIndex().x, P[0].y, P[0].z, b.Load(8), b.Load(12), n, scListOffset(n, 0));
+    const uint slot = scPickCell(b, DispatchRaysIndex().x, P[0].y, P[0].z, n, (P[0].w & 32u) != 0);
     if (slot == SC_NONE) return;
     const uint4 data = b.Load4(scDataOffset(n, slot));
     const float3 position = asfloat(data.xyz), normal = scUnpackOct(data.w);
