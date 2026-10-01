@@ -43,6 +43,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         b.Store2(h.offAnchorMin + entry * 8, r.keyAnchor.zw);
         if (b.Load(GI_RESAMPLE_OFFSET) != 0) b.Store2(b.Load(GI_RESAMPLE_OFFSET) + entry * 8, uint2(0, 0));  // gi.anchor_resample: no stale offer
         giAccClear(b, entry);  // gi.hit_accumulator
+        giCentroidClear(b, entry);  // gi.anchor_centroid
         // Carried after screen requests so visible entries retain tier 0.
         b.Store(h.offHitStamp + entry * 4, h.frame - 1);
         uint slot;

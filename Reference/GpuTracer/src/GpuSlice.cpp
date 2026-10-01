@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
+#include <sstream>
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -194,23 +195,39 @@ bool reusedPid(uint32_t pid, const std::string& since)
     return ok && ticks(created) > ticks(sinceTime) + 5ull * 10000000ull;
 }
 
-// Whether a waiter (kind, since, pid) takes its turn before this one: timing before correctness, then first come
-// ("since", then pid) - GpuLock.ps1 v1.83.
-bool turnBefore(const std::string& kind, const std::string& since, uint32_t pid, const std::string& selfKind, const std::string& selfSince, uint32_t self)
+// Rank of a track's waiters (GpuLock.ps1 v1.86): 0 for the tracks listed in .gpulock/PRIORITY (one per line, "#" comments;
+// set by the coordinator from the user's priorities), 1 otherwise; no file = one queue.
+int priorityRank(const std::filesystem::path& lockDir, const std::string& track)
 {
-    const int rank = kind == "timing" ? 0 : 1, selfRank = selfKind == "timing" ? 0 : 1;
+    std::istringstream lines(readShared(lockDir / "PRIORITY"));
+    std::string line;
+    while (std::getline(lines, line))
+    {
+        const size_t a = line.find_first_not_of(" \t\r"), b = line.find_last_not_of(" \t\r");
+        if (a == std::string::npos || line[a] == '#') continue;
+        if (line.substr(a, b - a + 1) == track) return 0;
+    }
+    return 1;
+}
+
+// Whether a waiter (rank, since, pid) takes its turn before this one: priority tracks first, then first come ("since",
+// then pid), whatever the kind - GpuLock.ps1 v1.86 (v1.85: one first-come queue; v1.83 put timing first).
+bool turnBefore(int rank, const std::string& since, uint32_t pid, int selfRank, const std::string& selfSince, uint32_t self)
+{
     if (rank != selfRank) return rank < selfRank;
     const int order = since.compare(selfSince);
     return order < 0 || (order == 0 && pid < self);
 }
 
-// A live waiter in .gpulock/waiting whose turn comes before this correctness slice's (INTERFACES 3.3 v1.83: timing first,
-// then "since", then pid); removes the records of waiters whose process is gone or whose pid was reused.
-bool waiterAhead(const std::filesystem::path& dir, uint32_t self, const std::string& selfSince)
+// A live waiter in .gpulock/waiting whose turn comes before this slice's (INTERFACES 3.3 v1.86: priority tracks, then first
+// come - "since", then pid - whatever the kind); removes the records of waiters whose process is gone or whose pid was
+// reused. dir = .gpulock/waiting.
+bool waiterAhead(const std::filesystem::path& dir, uint32_t self, const std::string& selfSince, const std::string& selfTrack)
 {
     std::error_code ec;
     if (!std::filesystem::exists(dir, ec)) return false;
     bool found = false;
+    const int selfRank = priorityRank(dir.parent_path(), selfTrack);
     for (const auto& e : std::filesystem::directory_iterator(dir, ec))
     {
         if (e.path().extension() != ".json") continue;
@@ -224,7 +241,7 @@ bool waiterAhead(const std::filesystem::path& dir, uint32_t self, const std::str
             std::filesystem::remove(e.path(), ec);
             continue;
         }
-        if (turnBefore(field(text, "kind"), since, p, "correctness", selfSince, self)) found = true;
+        if (turnBefore(priorityRank(dir.parent_path(), field(text, "track")), since, p, selfRank, selfSince, self)) found = true;
     }
     return found;
 }
@@ -302,7 +319,7 @@ double GpuSlice::acquire()
             Sleep(1000);
             continue;
         }
-        if (waiterAhead(waitingDir, self, since))
+        if (waiterAhead(waitingDir, self, since, m_track))
         {
             if (!yieldAnnounced) logf("gpu slice: in line behind an earlier waiter (or a timing measurement)\n");
             yieldAnnounced = true;
@@ -324,7 +341,7 @@ double GpuSlice::acquire()
             }
             else if (r == WAIT_ABANDONED) appendHistory(history, nowText() + " stale release (unknown holder)");
             // HOLD or a waiter ahead may have appeared while this process waited for the mutex.
-            if (std::filesystem::exists(hold) || waiterAhead(waitingDir, self, since))
+            if (std::filesystem::exists(hold) || waiterAhead(waitingDir, self, since, m_track))
             {
                 ReleaseMutex((HANDLE)m_mutex);
                 Sleep(250);

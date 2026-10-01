@@ -38,6 +38,19 @@ bounce_split = false               # V2.2 11.2 (P1'-b): the map, SH and texels a
                                    # 48 B per entry): weights by update count only, no Jacobi phase; the bounce part follows
                                    # its neighbours' current values (the running mean converged as n^-(1 - rho))
 bounce_split_updates = 1           # the current bounce part's window (1 = replacement: contraction rho per update)
+bounce_visibility = true           # V2 1.3: a GI ray's bounce read counts only cells whose anchor sees the hit (GiCache anchor visibility:
+                                   # the texel hit distance) - the hit's own footprint cell, and the coarser / finer levels read in its
+                                   # place. Before, the own cell was read without the test (a room's floor and the ground outside share a
+                                   # coarse cell, anchored wherever its first ray landed), and young levels were read without it (after a
+                                   # cut every level is young). Observed in the bath lounge [measured 2026-10-01]: x 1.5-1.8 of the
+                                   # converged level, blue-white, for ~16 frames in 3 of 9 runs, and a converged level of -7..+17 %
+                                   # between runs; attributed to these reads by the tint and the code, not yet isolated by an A/B of
+                                   # this switch alone. false: the previous reads (A/B)
+miss_closure = true                # V2 1.3 (cold start: cuts, newly seen regions). A ray whose bounce read finds no data read irradiance 0
+                                   # there: entries started at 50-80 % of their level and rose over ~16 frames [measured]. true: the
+                                   # missing irradiance is the entry's own, E = E_measured / (1 - sum albedo / pi w cos) (GiIntegrate.hlsl;
+                                   # frame-1 level 0.52-0.62 -> 0.90-1.04 of converged in the bath lounge, converged level unchanged
+                                   # within the runs' spread [measured with the strict fallback alone]). false: A/B
 anchor_resample = false            # V2.2 P1'-b: each update moves the entry's anchor to a random point among the surface
                                    # points that looked it up since its last update (the value = the mean over where the cell is
                                    # read, not the irradiance at its creator's point: the level depended on the history)
@@ -51,6 +64,25 @@ path_guiding = false               # V2.2 D-12 (decision item): each GI ray's te
                                    # proportional to the texels' irradiance share in the history (GiGuide.hlsl), weighted by
                                    # 1 / pdf (balance heuristic); texels average the rays that landed in them. Same ray count
 path_guiding_uniform_share = 0.5
+screen_filter_adaptive = true      # V2 1.2 (P2 L_gi): the screen filter's radius x clamp(sigma / 0.0475, 0.5, 3) - sigma = the lookup's
+                                   # relative standard deviation, from its entries' measured spread and sample counts (GiCache.hlsli);
+                                   # false: the configured radius everywhere (A/B)
+screen_wide_filter = true         # V2 1.2 (P2 L_gi): the wide layer - the screen probes' SH, scaled to the per-pixel lookup's level at each
+                                   # probe, filtered over many cells (a-trous passes with plane, normal and sigma-scaled luminance stops,
+                                   # the sigma shrinking with each pass; GiProbeFilter.hlsl); a pixel takes it where the filtered cache
+                                   # value's relative sigma is above screen_wide_sigma_lo (all of it from _hi) and where it has no cache
+                                   # data. Bath lounge 1080p [measured 2026-10-01, before the per-pass sigma]: the GI layer's cell-scale
+                                   # structure 0.68 -> 0.32 at frame 1, 0.31 -> 0.14 at frame 299 (log units); final image tile P50 at
+                                   # frames 1 / 4 / 16: 42 / 47 / 25 % -> 32 / 26 / 22 %. false: the filtered cache value alone (A/B)
+screen_wide_passes = 3             # the wide layer's a-trous passes (1..3): tap spacing x 1, 2, 4, reach +-2, 6, 14 spacings (~1, 3, 6 cells)
+screen_wide_sigma_lo = 0.02        # the filtered cache value's relative sigma up to which the wide layer has no share,
+screen_wide_sigma_hi = 0.06        # and from which it is the whole value (quality definition: 2 % of the local level is not seen, 6 % is)
+screen_temporal_frames = 8         # V2 1.2 (P2 L_gi): the screen GI's history after its spatial reconstruction - the surface point's
+                                   # exact previous value (vis buffer motion), clipped to this frame's 3 x 3 mean +- 3 sigma, a
+                                   # running mean of at most this many frames (GiLayerTemporal.hlsl); 0 = none (A/B)
+anchor_centroid = false            # V2.3 12.2 (P1''-b): the anchor is the centroid of the surface points the entry is looked up at
+                                   # (an exponential mean over lookups, weight 1/64; moved only beyond 1/8 cell, onto the nearest
+                                   # lookup when the centroid leaves the surface; the running mean's count halves on a move)
 hit_accumulator = false            # V2.3 12.1 (P1''-a): every GI hit adds its direct light to its cell's sums; hits read the
                                    # cell's means for their diffuse direct term (the point value's lamp hotspots made the coarse
                                    # hit cells heavy-tailed and the room's multi-bounce level walk: SD 3.1 pp between runs)

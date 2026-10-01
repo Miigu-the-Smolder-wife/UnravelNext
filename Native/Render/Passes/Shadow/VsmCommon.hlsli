@@ -157,6 +157,7 @@ float2 vsmDiskPoint(uint i, uint n)
 #define VSM_ERR_MARK_FRAGMENT_WALK 0x4u  // VsmMarkFragments: the page walk stopped at its cap
 #define VSM_ERR_LOCAL_AIR_WALK 0x8u  // FroxelIntegrate: a local light's air walk stopped at VSM_LOCAL_AIR_STEPS
 #define VSM_ERR_MARK_LOCAL_AIR_WALK 0x10u  // VsmLocalMarkAir: the page walk stopped at VSM_LOCAL_AIR_PAGE_STEPS
+#define VSM_ERR_RASTER_OVERFLOW 0x20u  // (set on the CPU, VsmSystem.cpp) V's raster run of the VSM pages overflowed its lists
 
 // Level geometry by arithmetic (a per-pixel level index into the constant buffer would serialise divergent waves):
 // texel 2^(k-10) m and page 2^(k-3) m as exact powers of two; window origin = floor(camera / page) - VSM_TABLE / 2,

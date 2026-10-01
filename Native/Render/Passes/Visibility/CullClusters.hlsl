@@ -8,7 +8,9 @@
 // Tests: own error <= threshold, frustum + clip plane, normal cone (one-sided, undeformed), HiZ occlusion (phase 1:
 // previous frame, occluded clusters deferred; phase 2: this frame), tile mask (raster service). Visible clusters get a
 // visible-list entry (the vis id's cluster index) and an entry in their band / pipeline list; in a tile-local raster
-// run (TILE_PAIRS_UAV) one entry per (cluster, tile rectangle) pair instead (tileVisit).
+// run (TILE_PAIRS_UAV) the entry's tile rectangle too (uint2 per visible entry: packTileRect, bit 31 of .y = the whole
+// rectangle is set), from which DepthRaster.as.hlsl launches one mesh group per (cluster, tile run or tile) pair: no
+// pair is stored, so the pairs have no capacity (the visible list's bound is the requester's, DepthRasterRequest).
 // Bands (ARCHITECTURE 2.1): w_face = projected minimum feature width seen face-on, w_min = w_face x (flat sheets) the
 // smallest |cos| between the view direction and the cluster's normals. A: w_min >= band A minimum; C: w_face < band C
 // maximum; B otherwise. The run's band mode picks the list of each band (BAND_MODE_*, CullShared.hlsli).
@@ -149,12 +151,16 @@ void emit(RWByteAddressBuffer state, bool active, uint instance, uint clusterInd
 {
     const bool visible = active && r.visible, defer = active && r.defer;
     const bool tileLocal = TILE_PAIRS_UAV != UNX_NONE;
-    const uint entries = visible ? (tileLocal ? r.pairs : 1) : 0;
+    const bool stored = tileLocal && TILE_STORED_PAIRS != 0;  // the stored pair list (A/B: visibility.raster_amplification false)
+    const uint entries = visible ? (stored ? r.pairs : 1) : 0;
     const uint idx = waveAppend(state, VS_VISIBLE, visible ? 1 : 0, CAP_VISIBLE, OVERFLOW_VISIBLE);
     uint slot[VS_LISTS];
     [unroll] for (uint k = 0; k < VS_LISTS; ++k)
         slot[k] = waveAppend(state, VS_LIST_COUNT + k, (r.list == k || r.list2 == k) ? entries : 0, CAP_VISIBLE, OVERFLOW_VISIBLE);
-    const uint pairBase = waveAppend(state, VS_TILE_PAIRS, tileLocal ? entries : 0, CAP_VISIBLE, OVERFLOW_TILE_PAIRS);
+    // the pairs the amplification stage will launch (a statistic: nothing is stored per pair), or the stored list's
+    const uint pairCount = WaveActiveSum((visible && tileLocal && !stored) ? r.pairs : 0);
+    if (WaveIsFirstLane() && pairCount > 0) state.InterlockedAdd(4 * VS_TILE_PAIRS, pairCount);
+    const uint pairBase = waveAppend(state, VS_TILE_PAIRS, stored ? entries : 0, CAP_VISIBLE, OVERFLOW_TILE_PAIRS);
     if (visible && idx < CAP_VISIBLE)
     {
         RWStructuredBuffer<uint2> visibleList = ResourceDescriptorHeap[VISIBLE_UAV];
@@ -166,10 +172,17 @@ void emit(RWByteAddressBuffer state, bool active, uint instance, uint clusterInd
             if (r.list == k) s = slot[k];
             if (r.list2 == k) s2 = slot[k];
         }
-        if (tileLocal)
+        if (stored)
             tileVisit(TILE_VISIT_WRITE, loadView(view), view, tileMasks(), r.tileA, r.tileB, r.wholeRange, idx, pairBase, s, r.list, CAP_VISIBLE, TILE_PAIRS_UAV,
                       LISTS_UAV);
-        else
+        else if (tileLocal)
+        {
+            RWStructuredBuffer<uint2> rects = ResourceDescriptorHeap[TILE_PAIRS_UAV];
+            uint2 rect = packTileRect(r.tileA, r.tileB);
+            if (r.wholeRange) rect.y |= 0x80000000u;
+            rects[idx] = rect;
+        }
+        if (!stored)
         {
             const uint e = idx | (r.mixed ? LIST_ENTRY_MIXED : 0u);
             if (s < CAP_VISIBLE) lists.Store(4 * (r.list * CAP_VISIBLE + s), e);

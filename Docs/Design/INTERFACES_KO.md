@@ -1,4 +1,4 @@
-# UnravelNext 인터페이스 (v1.83, 2026-10-01)
+# UnravelNext 인터페이스 (v1.84, 2026-10-01)
 
 렌더러를 네 세션이 병렬로 짜기 위한 계약이다(REBUILD_PLAN 14.1). 설계는 `ARCHITECTURE_KO.md`가 정하고, 이 문서는 트랙 사이의 경계만 정한다. **코드의 헤더가 이 문서와 같은 내용을 담고, 둘이 다르면 헤더가 틀린 것이다.** 이 문서에 적힌 파일 경로·함수 이름·레이아웃은 트랙이 바꾸지 않는다.
 
@@ -748,6 +748,16 @@ v1.1 세부(헤더 `GpuSceneLayout.h`가 권위):
   - **이력 불연속(5.5.2, I 요청 d07bca2 계열, S·R·M 목록)**: `FrameContext::discontinuity`(`kDiscontinuityRestore`, `kDiscontinuityCut`), 메인 뷰 이전 뷰 재설정, `GpuScene::resetMotion`, `kTransformTeleport`(6.3). 전체 렌더러의 결정성은 결정 대기다(R 비용과 함께).
   - **GI 광선 배분 입력(10.3, R·I 합의)**: `FrameContext::gpuSimulation`(`kGpuSimulationSoft/Vfx/Rigid`). 품질 키 `gi.rays_per_frame`은 이름과 뜻(프레임당 평균)을 그대로 둔다. 배분, 무게, 누산기는 R의 GiSystem 안이다. `giRaysThisFrame`(5.5)은 R이 GPU 진단용으로 채운다.
   - **`GpuScene::palette(instance)`(R 요청)**: 스킨 프록시 자세 편차 한계용 CPU 팔레트 접근자.
+- v1.84 (2026-10-01, R: VSM 래스터 목록 넘침의 구조 수정, 결함 큐 1, 조정 결정 13:40):
+  - **원인**: 기차 라운지의 0프레임 태양 래스터가 가시 클러스터 1.67 M / (클러스터, 타일) 쌍 2.07 M을 요구해 `visibility.max_visible_clusters`(1,048,576)를 넘었고, 캐스터가 빠진 페이지가 캐시에 남았다(f60에 104k 화소가 태양 그림자 없음).
+  - **`DepthRaster.h`: `DepthRasterOverflow { frame, bits }`, `DepthRasterOverflows`(TrackState 키 `kDepthRasterOverflowKey`)**: V가 래스터 실행(요청 이름)마다 목록이 넘친 가장 최근 프레임과 넘침 비트를 적는다(통계가 돌아오는 framesInFlight 프레임 뒤). 실행 결과를 보관하는 요청자(S의 페이지 캐시)는 그것을 다시 그린다.
+  - **S 오류 비트 `VSM_ERR_RASTER_OVERFLOW = 0x20`**(3.6, CPU에서 세움): 넘친 실행이 있으면 S가 모든 페이지를 다시 그리고 국소광 세대를 올린다(안전장치. 아래 묶기가 켜져 있으면 일어나지 않는다).
+  - **요청 묶기 `shadow.vsm.raster_split`(기본 true, false = 이전: 태양 요청 하나, 국소광 6개씩)**: S가 V 래스터 요청을 뷰별 구조적 상한(그 뷰가 닿는 캐스터의 컷 상한 합, 국소광은 큐브 면별 절두체)이 가시 목록 용량에 들도록 나눈다.
+  - **`ClusterData::MeshRange::cutBound`**(GpuScene.h): 메시의 어떤 LOD 컷도 넘지 않는 클러스터 수. 빌더가 "모든 그룹의 단순화 결과 ≤ 그룹의 클러스터 수"를 확인하면 잎 클러스터 수, 아니면 전체 클러스터 수. 0 = 모름(clusterCount를 쓴다).
+  - **`visibility.raster_amplification`(기본 true, false = 이전: 저장된 쌍 목록)**: 타일 국소 래스터(`DepthRasterRequest::tileLocal`)가 쌍을 저장하지 않는다. 컬이 가시 클러스터마다 항목 하나와 타일 사각형을 쓰고, 증폭 셰이더(`DepthRaster.as.hlsl`)가 행별 접두합으로 (클러스터, 타일 런) 메시 그룹을 띄운다. 쌍 용량이 없으므로 쌍 넘침이 없다. 타일 격자는 256 × 256 이하(V가 확인).
+  - **`MeshPipelineDesc::amplificationShader`**(Shaders.h): 커널 이름(as_6_6), 빈 문자열 = 없음.
+  - 정확성 [실측, 2026-10-01]: 그림자 층 f0 = f60 = f300 비트 동일(기차 라운지 1080), f0 = f300(욕탕 라운지 1080), 넘침 0, 오류 비트 0x0, VisibilityTests 9/9, VSMTests, LocalShadowTests, 클러스터 빌더 테스트 15/15.
+  - 비용 [실측, 게임 실행 중 측정, 패스 최소값 합]: 래스터 요청 수 4 → 14(기차), 14 → 23(욕탕 라운지). 요청 하나 = 컬 체인 19패스, 바닥 약 0.047 ms. 프레임 바닥 +0.8 ms(기차 1080), +0.5 ms(기차 1440), +0.6 ms(라운지 1080), +0.7 ms(라운지 1440). AS 래스터 패스 자체는 요청당 +0.001–0.003 ms. 이 비용은 큐 1b(2단 컬: 뷰별 가시 수 → 접두합 → 쓰기)로 되찾는다.
 - v1.82 (2026-09-27, 렌더 A: A3 발광 입자 광원 쓰는 쪽 + 렌더 C의 메시 입자 합류):
   - **`tracks::particleLightCapacity(TrackState&, GpuScene&)`**(프레임 import·frame constants 전)와 **`tracks::particleLights(fc, main)`**(simulation 바로 뒤, V·S 전): 최신 tick의 빛 플래그 행(NV_STREAM_PROGRAM_LIGHT, 발광 스프라이트)마다 점광원 1개. I = Σ α L π(s/2)², 위치 = Y 가중 중심, 색 = I/Y, size.x = Y 가중 RMS 반경 + 평균 반경, range = √(Y·노출/(π 2⁻¹⁰))(창이 버리는 조도 < 현재 노출의 1 표시 코드), 그림자 없음. 청크(≤ 2048 입자) 그룹 트리 합 → 행별 순서 합: 원자 연산 없이 결정적. 용량은 max(F, 2 × 용량, 16)으로만 는다.
   - **`tracks::particleMeshes(fc)`**(렌더 C, simulation 뒤): FrameRenderer가 부른다.

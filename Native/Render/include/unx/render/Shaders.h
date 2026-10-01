@@ -11,6 +11,7 @@ namespace unx::render
 {
 struct MeshPipelineDesc
 {
+    std::string amplificationShader;  // kernel name (as_6_6); empty = none (the mesh shader's groups are dispatched)
     std::string meshShader;   // kernel name, e.g. "Test/Triangle.ms"
     std::string pixelShader;  // empty = depth-only
     std::vector<DXGI_FORMAT> renderTargets;

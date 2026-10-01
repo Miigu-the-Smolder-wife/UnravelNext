@@ -1020,6 +1020,24 @@ render::ClusterData build(const scene::Scene& scene, const Settings& settings, B
         render::ClusterData::MeshRange& range = data.meshes[mi];
         range.clusterOffset = clusterBase;
         range.clusterCount = (uint32_t)mo.clusters.size();
+        {
+            // Cut bound: a cut takes, per group of the DAG, either the group's clusters or (recursively) what its
+            // simplification made; when no simplification made more clusters than its group had, no cut holds more than
+            // the leaves (the source clusters). Checked here per group; a mesh where it fails is bounded by all its clusters.
+            std::vector<uint32_t> made(mo.groups.size(), 0);
+            uint32_t leaves = 0;
+            for (const ClusterOut& c : mo.clusters)
+            {
+                if (c.refined < 0) ++leaves;
+                else if ((size_t)c.refined < made.size()) ++made[c.refined];
+            }
+            bool shrinks = true;
+            for (size_t gi = 0; gi < mo.groups.size(); ++gi) shrinks = shrinks && made[gi] <= mo.groups[gi].clusterCount;
+            range.cutBound = shrinks ? leaves : range.clusterCount;
+            if (!shrinks)
+                logf("cluster builder: mesh %zu - a group's simplification made more clusters than the group had: its cut bound is all %u clusters\n", mi,
+                     range.clusterCount);
+        }
 
         // Clusters (group order), their LOD spheres and index pools.
         for (size_t gi = 0; gi < mo.groups.size(); ++gi)
@@ -1086,6 +1104,47 @@ render::ClusterData build(const scene::Scene& scene, const Settings& settings, B
             }
         }
         appendNamed(data, kClusterNodes, nodes.data(), nodes.size() * sizeof(gpu::ClusterNode), sizeof(gpu::ClusterNode));
+        {
+            // The view cut bound's tables (MeshRange::cutBoundAt): own and parent errors above log-spaced edges from the
+            // smallest positive error, valid when no cluster's parent error is below its own; and the sphere holding
+            // every LOD sphere (clusters' and nodes').
+            float base = FLT_MAX;
+            bool monotone = true;
+            for (uint32_t c = 0; c < range.clusterCount; ++c)
+            {
+                const render::gpu::Cluster& rc = data.clusters[clusterBase + c];
+                if (rc.lodError > 0) base = std::min(base, rc.lodError);
+                if (rc.parentLodError > 0) base = std::min(base, rc.parentLodError);
+                monotone = monotone && rc.parentLodError >= rc.lodError;
+            }
+            if (monotone && base < FLT_MAX)
+            {
+                range.cutErrorBase = base;
+                for (uint32_t k = 0; k < render::ClusterData::MeshRange::kCutBins; ++k)
+                {
+                    const float e = base * std::exp2(0.5f * (float)k);
+                    for (uint32_t c = 0; c < range.clusterCount; ++c)
+                    {
+                        const render::gpu::Cluster& rc = data.clusters[clusterBase + c];
+                        range.parentAbove[k] += rc.parentLodError > e ? 1u : 0u;
+                        range.ownAbove[k] += rc.lodError > e ? 1u : 0u;
+                    }
+                }
+            }
+            float3 lo{ FLT_MAX, FLT_MAX, FLT_MAX }, hi{ -FLT_MAX, -FLT_MAX, -FLT_MAX };
+            auto grow = [&](const float* centre) {
+                lo = { std::min(lo.x, centre[0]), std::min(lo.y, centre[1]), std::min(lo.z, centre[2]) };
+                hi = { std::max(hi.x, centre[0]), std::max(hi.y, centre[1]), std::max(hi.z, centre[2]) };
+            };
+            for (const ClusterOut& c : mo.clusters) grow(c.lod.center);
+            for (const clodNode& n : mo.nodes) grow(n.bounds.center);
+            const float3 centre = (lo + hi) * 0.5f;
+            float radius = 0;
+            auto reach = [&](const float* c, float r) { radius = std::max(radius, length(float3{ c[0], c[1], c[2] } - centre) + r); };
+            for (const ClusterOut& c : mo.clusters) reach(c.lod.center, c.lod.radius);
+            for (const clodNode& n : mo.nodes) reach(n.bounds.center, n.bounds.radius);
+            range.lodBounds = { centre.x, centre.y, centre.z, radius };
+        }
         const gpu::MeshClusterRoots roots{ nodeBase, mo.levelCount };
         appendNamed(data, kMeshClusterRoots, &roots, sizeof roots, sizeof roots);
         nodeBase += (uint32_t)nodes.size();

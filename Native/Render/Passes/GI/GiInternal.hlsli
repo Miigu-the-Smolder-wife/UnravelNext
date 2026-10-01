@@ -107,7 +107,8 @@ uint giAgeBucket(RWByteAddressBuffer b, GiHeader h, uint entry)
 
 // ---- Redesign V2 P1 (RENDERER_REDESIGN_V2 1.1): update tiers, the parent prior, relight restarts.
 // Header words (the spare bytes after the admission word, GiSystem.cpp h[195..]):
-#define GI_P1_FLAGS 780         // bit 0 gi.update_tiers, bit 1 gi.parent_prior, bit 2 gi.relight_restart, bit 3 gi.hit_light_footprint
+#define GI_P1_FLAGS 780         // bit 0 gi.update_tiers, bit 1 gi.parent_prior, bit 2 gi.relight_restart, bit 3 gi.hit_light_footprint,
+                                // bit 4 gi.bounce_split, bit 5 gi.miss_closure, bit 6 gi.bounce_visibility
 #define GI_P1_T0_SHARE 784      // gi.young_update_share (float): the most of a tier's updates the young (T0) entries take
 #define GI_P1_DELTA2 788        // running estimate of the parent-child relative squared difference (float), kept by GiBegin
 #define GI_P1_DELTA_SUM 792     // this frame's samples of it: sum of min(d^2, 1) x 2^16, count (GiIntegrate)
@@ -353,6 +354,47 @@ float3 giAnchorOfferPosition(GiHeader h, uint64_t key, uint64_t offer)
     return float3(cell) * s - 0.5 * s + float3(q) / 16383.0 * (2 * s);
 }
 
+// Anchor centroid (gi.anchor_centroid; RENDERER_REDESIGN_V2 12.2, P1''-b): an entry's value is the irradiance at its anchor,
+// and the anchor is the centroid of the surface points it is looked up at, not one point. Every lookup that finds the
+// entry adds its point (giPackAnchorCandidate's 14-bit grid over the cell, integer sums: the same in any order) and keeps
+// the lookup nearest the entry's current centroid (a 64-bit minimum of distance | point). Each update (GiIntegrate) folds
+// the period's mean into an exponential mean over lookups (weight 1/64 each: 1 - (63/64)^n per update) and moves the
+// anchor only when that mean left it by more than an eighth of the cell; a mean farther than that from every lookup
+// (between two faces of a crease) moves it to the nearest lookup instead. A move halves the entry's running-mean count, so
+// the new place's irradiance takes over within a few updates without a restart (no jump: the random resample's spots).
+// 48 B per entry: sums x, y, z, count; nearest (64 bit); 8 B spare; centroid xyz, valid.
+#define GI_CENTROID_OFFSET 968  // header word: the region (0 = off)
+#define GI_CENTROID_MAX_COUNT 131072u  // lookups summed per update period (16383 x 2^17 < 2^32)
+void giCentroidClear(RWByteAddressBuffer b, uint entry)
+{
+    const uint base = b.Load(GI_CENTROID_OFFSET);
+    if (base == 0) return;
+    b.Store4(base + entry * 48, uint4(0, 0, 0, 0));
+    b.Store4(base + entry * 48 + 16, uint4(0xFFFFFFFFu, 0xFFFFFFFFu, 0, 0));
+    b.Store4(base + entry * 48 + 32, uint4(0, 0, 0, 0));
+}
+void giCentroidOffer(RWByteAddressBuffer b, GiHeader h, uint entry, uint64_t key, float3 p)
+{
+    const uint base = b.Load(GI_CENTROID_OFFSET);
+    if (base == 0 || entry == GI_ENTRY_PENDING) return;
+    const uint a = base + entry * 48;
+    if (b.Load(a + 12) >= GI_CENTROID_MAX_COUNT) return;
+    const uint64_t q = giPackAnchorCandidate(h, key, p, float3(0, 0, 1)) >> 22;  // 42 bits: 14 per axis
+    uint previous;
+    b.InterlockedAdd(a, (uint)(q >> 28) & 16383u, previous);
+    b.InterlockedAdd(a + 4, (uint)(q >> 14) & 16383u, previous);
+    b.InterlockedAdd(a + 8, (uint)q & 16383u, previous);
+    b.InterlockedAdd(a + 12, 1u, previous);
+    const float4 meanPoint = asfloat(b.Load4(a + 32));
+    if (meanPoint.w > 0)
+    {
+        const float s = giCellSize(h, (uint)(key & 31u));
+        const uint64_t d = (uint64_t)min(distance(p, meanPoint.xyz) / (4 * s) * 4194303.0, 4194303.0);  // 22 bits over 4 cells
+        uint64_t previous64;
+        b.InterlockedMin64(a + 16, (d << 42) | q, previous64);
+    }
+}
+
 uint giFindOrCreate(RWByteAddressBuffer b, GiHeader h, uint64_t key, float3 anchor, float3 normal, out bool created)
 {
     created = false;
@@ -362,6 +404,7 @@ uint giFindOrCreate(RWByteAddressBuffer b, GiHeader h, uint64_t key, float3 anch
     {
         giDetAnchorCandidate(b, h, existing, key, anchor, normal);
         giAnchorOffer(b, h, existing, key, anchor);
+        giCentroidOffer(b, h, existing, key, anchor);
         return existing;
     }
     if ((h.flags & 1u) != 0)
@@ -423,6 +466,7 @@ uint giFindOrCreate(RWByteAddressBuffer b, GiHeader h, uint64_t key, float3 anch
             b.Store(h.offHitStamp + entry * 4, 0u);
             if (b.Load(GI_RESAMPLE_OFFSET) != 0) b.Store2(b.Load(GI_RESAMPLE_OFFSET) + entry * 8, uint2(0, 0));  // no offer of a previous occupant
             giAccClear(b, entry);  // (gi.hit_accumulator: not a previous occupant's light)
+            giCentroidClear(b, entry);  // (gi.anchor_centroid: nor its lookups)
             if (h.flags & 1u)
             {
                 b.Store2(h.offAnchorMin + entry * 8, uint2(0xFFFFFFFFu, 0xFFFFFFFFu));
