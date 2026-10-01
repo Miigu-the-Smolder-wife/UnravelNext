@@ -45,10 +45,13 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     uint32_t layerHistoryFrames = 0;  // reflection.layer_history_frames (1 = no history)
     uint32_t layerView = 0;           // reflection.layer_view: diagnostics (LayerCompose.hlsl), 0 in the shipped configuration
     bool layerHistoryBound = true;    // reflection.layer_history_bound: the history bounded by the frame's reconstruction (A/B)
+    bool layerWholeValue = true;      // reflection.layer_whole_value: lobe pixels' whole value is one layer (LAYER_MODE_L)
+    bool layerCrossMode = true;       // reflection.layer_cross_mode: with layerMirrorLobe, residual taps across M and G pixels
     bool layerMirrorLobe = false;     // reflection.layer_mirror_lobe: M's base as a layer inside its lobe footprint (decision item)
     bool layerResidualWhole = true;   // reflection.layer_residual_whole: G residual = value - stochastic share (false: also - gbar)
     bool hitOrientedLights = false;   // reflection.hit_oriented_lights: the hits' light choice weighs the hit's orientation
     bool hitAccumulator = true;       // reflection.hit_accumulator: hits read GI's hit accumulator pool when it runs
+    bool hitStrictRead = true;        // reflection.hit_strict_read: with the layers' filter, hits read the cache as GI's bounces do (gi.bounce_visibility)
     bool hitConeLobes = true;         // reflection.hit_cone_lobes: the hits' specular lobes widened by the ray cone (ReflectionShade.hlsli)
     // debug.deterministic: the planar view / ray choice from the priors alone (planarRayNs, the view's prior a + b x),
     // never from measured GPU times (they differ between runs, and a plane drawn by a camera or by rays differs in value).

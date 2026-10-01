@@ -10,6 +10,10 @@ sigma and no error against a reference):
   refl sigma the reflection layer's high-pass noise (view.reflection: lobe-normalised incident radiance, 8 x 8 tiles, P95)
              over the pixels with a value, for the frame and for the reference
   refl err   the reflection layer's tile error P95 against the reference
+  final sigma  the displayed image's high-pass noise (mapped luminance, 8 x 8 tiles' sd / mean, P50 / P95), every frame.
+             Texture and edges are in it too, the same for every tag at the same frame and camera: the tags' difference
+             is the noise's. It is the number that compares moving frames ('rot'), which have no converged reference;
+             there the pattern index is taken against the first tag's same frame (peaks that tag lacks).
 Images: <out>/<case>_<mode>_<res>_strip.png (one row per tag: the frames at the reference's exposure, whole view) and
 _crop.png (1:1 crops at the brightest-reflection region), _refl.png (the reflection layer).
 """
@@ -117,6 +121,13 @@ def main():
                     srow.append(label(np.asarray(Image.fromarray(shown).resize((640, round(hh * 640 / ww)), Image.LANCZOS)), f"{tag} f{f} x{norm:.2f}"))
                     crow.append(label(shown[y0:y0 + ch, x0:x0 + cw], f"{tag} f{f}"))
                     entry = {"norm": norm}
+                    ml = mm.mapped(img * norm, key).astype(np.float64)
+                    hp = mm.tiles(ml - mm.box3(ml), 8).std(axis=(1, 3)) / np.maximum(mm.tiles(ml, 8).mean(axis=(1, 3)), 0.02)
+                    entry.update(final_sigma_p50=float(np.percentile(hp, 50)), final_sigma_p95=float(np.percentile(hp, 95)))
+                    if mode == "rot" and tag != tags[0]:
+                        other = load(a.raw, tags[0], name, f)
+                        if other is not None and other.shape == img.shape:
+                            entry["pattern_vs_first"] = mm.pattern(img * norm, other * (ref_mean / max(float(mm.luma(other).mean()), 1e-12)), key=key)[0]
                     still_ref = mode != "rot" and f != frames[-1]
                     if still_ref:
                         p95, mean = mm.tile_p95(img * norm, ref, key)
@@ -139,6 +150,9 @@ def main():
                     t = f"f{f}:"
                     if "tile_p95" in entry:
                         t += f" 타일 P95 {entry['tile_p95'] * 100:.1f} %, 무늬 {entry['pattern']:.2f},"
+                    t += f" 화면 σ {entry['final_sigma_p50'] * 100:.1f} / {entry['final_sigma_p95'] * 100:.1f} %,"
+                    if "pattern_vs_first" in entry:
+                        t += f" 무늬({tags[0]} 대비) {entry['pattern_vs_first']:.2f},"
                     if "refl_sigma" in entry:
                         t += f" 반사 층 σ {entry['refl_sigma'] * 100:.1f} %"
                     if "refl_err" in entry:

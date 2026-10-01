@@ -13,6 +13,7 @@
 //   G pixels: the pixel's own surface point one tick ago (GiScreenHistory.hlsli: exact motion), where the tap holds the
 //     same instance on the point's plane. The window is limited as ReflectionAccumulate's: the lobe integral depends on
 //     the view, so the reflected direction may travel reflection.temporal_lobe_shift of the lobe half-angle over it.
+//   L pixels (reflection.layer_whole_value): as G pixels, keyed as L (their stochastic layer is 0 and stays 0).
 //   Both: the hits' motion (ReflectionResolve's history, displacement per tick over the ray footprint) limits the window
 //     to n x motion <= reflection.temporal_lobe_shift.
 // A history value outside this frame's reconstruction is brought to its bound: per channel the mean +- 3 standard
@@ -95,7 +96,7 @@ void main(uint2 pixel : SV_DispatchThreadID)
         float3 prevP, prevN;
         uint instance;
         giPreviousSurface(P[0].w, P[1].x, pixel, c.position, c.normal, prevP, prevN, instance);
-        keyX = LAYER_MODE_G | (instance << 2);
+        keyX = c.mode | (instance << 2);
         keyDepth = c.linearZ;
         found = instance != 0 && giPreviousPixel(prevP, float2(size), prevPixel, expected);
         tolerance = expected * (1e-3 + 2 * pixelAngle / max(abs(dot(c.normal, view)), 0.1));

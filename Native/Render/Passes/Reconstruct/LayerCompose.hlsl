@@ -39,7 +39,7 @@ void main(uint2 pixel : SV_DispatchThreadID)
     const float4 s1 = newS.Load(int3(pixel, 0));
     float3 r0 = 0;
     float4 r1 = 0;
-    if (mode == LAYER_MODE_G || P[2].y != 0)
+    if (mode != LAYER_MODE_M || P[2].y != 0)
     {
         r0 = rawR.Load(int3(pixel, 0)).rgb;
         r1 = newR.Load(int3(pixel, 0));

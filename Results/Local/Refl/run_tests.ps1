@@ -3,6 +3,7 @@
 # Each test's full log goes to Results/Local/Refl/tests/<Tag>/; the run stops at a device removal (exit 87).
 param([string]$Tag = "t", [string[]]$Only = @())
 $ErrorActionPreference = "Continue"
+$Only = @($Only | ForEach-Object { $_ -split "," } | Where-Object { $_ })  # (-File hands "a,b" over as one string)
 $root = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)))
 Set-Location $root
 $bin = Join-Path $root "build\all\bin"
@@ -15,6 +16,8 @@ $tests = @(
   @{ name = "reflectionanalytic_oriented"; exe = "unx_test_reflection_reflectionanalytic.exe"; args = @("--set", "reflection.layers=false", "--set", "reflection.hit_oriented_lights=true") },
   @{ name = "reflectionanalytic_on"; exe = "unx_test_reflection_reflectionanalytic.exe"; args = $on },
   @{ name = "reflectionanalytic_on_nohistory"; exe = "unx_test_reflection_reflectionanalytic.exe"; args = $on + @("--set", "reflection.layer_history_frames=1") },
+  @{ name = "reflectionanalytic_lumen"; exe = "unx_test_reflection_reflectionanalytic.exe"; args = @("--set", "reflection.lumen=true") },
+  @{ name = "planarmirror_lumen"; exe = "unx_test_reflection_planarmirror.exe"; args = @("--set", "reflection.lumen=true") },
   @{ name = "planarmirror"; exe = "unx_test_reflection_planarmirror.exe"; args = @() },
   @{ name = "gianalytic"; exe = "unx_test_gi_gianalytic.exe"; args = @() },
   @{ name = "hostmotion"; exe = "unx_test_host_hostmotion.exe"; args = @() }

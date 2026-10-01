@@ -24,6 +24,9 @@ hit_cone_lobes = true                  # the hits' specular lobes toward their l
                                        # hits do: a reflection value is a mean over its cone. false = the lobes at the single ray
                                        # direction (the path before 2026-10-01: rare huge highlight samples on glazed and glossy
                                        # hits). A/B
+hit_strict_read = true                 # with reflection.layers and layer_filter: the hits' cache lookup under gi.bounce_visibility's
+                                       # rule (entries the hit point does not see are skipped; a hit without one is 'no data' and the
+                                       # layers' filter fills it from its neighbours). false = the lookup of the path without layers. A/B
 hit_accumulator = true                 # reflection hits read GI's hit accumulator pool (gi.hit_accumulator with gi.hit_accumulator_pool:
                                        # the pool exists only then) - their diffuse direct light is the mean over the surface
                                        # cell the ray's footprint covers, with the hit's own albedo and layers, not the light of
@@ -54,6 +57,15 @@ layer_mirror_lobe = false              # DECISION ITEM, off: an M pixel's value 
                                        # but M is every roughness below mirror_roughness_max, whose one ray per pixel is one
                                        # draw of a GGX lobe up to ~4 deg wide: a footprint of tens of pixels, one sample each
                                        # frame, integrated by the previous path only while the view stands still
+layer_whole_value = true               # lobe pixels (every G pixel; an M pixel whose lobe footprint is a pixel or more) are
+                                       # reconstructed as a whole: their value is the residual layer, no division by the hits'
+                                       # albedo (LayerCommon.hlsli LAYER_MODE_L; as Lumen's reflection denoiser, which filters
+                                       # the rays' whole radiance). Mirrors keep the split (their stochastic light over the hit's
+                                       # albedo, guided by the hits). false = the split for every pixel (A/B: the filter raised
+                                       # 'albedo x stochastic' 2.6 - 3.5 times on the bath hall's ceiling and walls [measured])
+layer_cross_mode = true                # with layer_mirror_lobe: the residual layer takes taps of M and G pixels alike (both are lobe
+                                       # estimates; the roughness weight separates unlike lobes). M and G alternate pixel by pixel
+                                       # on glazed tiles and their grout. false = taps of the pixel's own mode only (A/B)
 layer_history_bound = true             # the history is brought within the reconstructed layer's 3 x 3 neighbourhood (mean +- 3
                                        # deviations + 5 %) before it is mixed. A/B, not settled by measurement: false = no
                                        # bound (a lighting change then takes layer_history_frames frames to arrive in the

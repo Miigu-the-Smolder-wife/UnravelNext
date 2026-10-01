@@ -96,10 +96,13 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.layerView = q.has("reflection.layer_view") ? (uint32_t)q.integer("reflection.layer_view") : 0u;
     s.layerHistoryBound = !q.has("reflection.layer_history_bound") || q.boolean("reflection.layer_history_bound");
     s.layerMirrorLobe = q.has("reflection.layer_mirror_lobe") && q.boolean("reflection.layer_mirror_lobe");
+    s.layerCrossMode = !q.has("reflection.layer_cross_mode") || q.boolean("reflection.layer_cross_mode");
+    s.layerWholeValue = !q.has("reflection.layer_whole_value") || q.boolean("reflection.layer_whole_value");
     s.hitConeLobes = !q.has("reflection.hit_cone_lobes") || q.boolean("reflection.hit_cone_lobes");
     s.layerResidualWhole = !q.has("reflection.layer_residual_whole") || q.boolean("reflection.layer_residual_whole");
     s.hitOrientedLights = q.has("reflection.hit_oriented_lights") && q.boolean("reflection.hit_oriented_lights");
     s.hitAccumulator = !q.has("reflection.hit_accumulator") || q.boolean("reflection.hit_accumulator");
+    s.hitStrictRead = !q.has("reflection.hit_strict_read") || q.boolean("reflection.hit_strict_read");
     s.deterministic = q.has("debug.deterministic") && q.boolean("debug.deterministic");
     s.planarRayNs = (float)q.number("reflection.planar_ray_ns");
     return s;
@@ -945,7 +948,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   if (accPool.valid()) b.use(accPool, Use::SrvCompute);
               },
               [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, accPool,
-               hitFlags = (s.hitConeLobes ? 1u : 0u) | (s.hitOrientedLights ? 2u : 0u) | (s.layers && s.layerFilter ? 4u : 0u)](PassContext& c) {
+               hitFlags = (s.hitConeLobes ? 1u : 0u) | (s.hitOrientedLights ? 2u : 0u) | (s.layers && s.layerFilter && s.hitStrictRead ? 4u : 0u)](PassContext& c) {
                   // (the layer buffers' UAVs and the hit shading's flags into the rays header: the shade, combine and inline
                   // passes find them there)
                   const uint32_t k[12] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(raysBuffer), rayCapacity,
@@ -1189,13 +1192,14 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
               },
               [&shaders, modes, results, depth, gbuffer, reflection, history, width, height, tilesX, tilesY, frameConstants, planarSrv, planarOffset, planarCount,
                planarColor, layers, jobLayers, layerStochastic, layerResidual, layerGuide,
-               layerFlags = (s.layerMirrorLobe ? 1u : 0u) | (s.layerResidualWhole ? 2u : 0u)](PassContext& c) {
-                  uint32_t k[20] = { c.srv(modes), c.srv(results), c.srv(depth), c.srv(gbuffer), c.uav(reflection), c.uav(history), height, planarSrv,
-                                     width, height, planarOffset, layerFlags, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
+               layerFlags = (s.layerMirrorLobe ? 1u : 0u) | (s.layerResidualWhole ? 2u : 0u) | (s.layerWholeValue ? 4u : 0u), focal](PassContext& c) {
+                  uint32_t k[24] = { c.srv(modes), c.srv(results), c.srv(depth), c.srv(gbuffer), c.uav(reflection), c.uav(history), height, planarSrv,
+                                     width, height, planarOffset, layerFlags, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
+                                     asU(focal), 0, 0, 0 };
                   for (uint32_t v = 0; v < planarCount; ++v) k[12 + v] = c.srv(planarColor[v]);
                   if (layers) k[16] = c.srv(jobLayers), k[17] = c.uav(layerStochastic), k[18] = c.uav(layerResidual), k[19] = c.uav(layerGuide);
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionResolve"));
-                  c.computeConstants(k, 20);
+                  c.computeConstants(k, 24);
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch(tilesX, tilesY, 1);
               });
@@ -1212,8 +1216,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                 ping[p][0] = g.createTexture({ p ? "R reflection layer stochastic filter 1" : "R reflection layer stochastic filter 0", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
                 ping[p][1] = g.createTexture({ p ? "R reflection layer residual filter 1" : "R reflection layer residual filter 0", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
             }
-            static const char* const kLevelNames[3] = { "r.refl.layer.filter0", "r.refl.layer.filter1", "r.refl.layer.filter2" };
-            for (uint32_t level = 0; level < 3; ++level)
+            // three a-trous levels in the pixels' units, then the dense pass (LayerDenoise.hlsl)
+            static const char* const kLevelNames[4] = { "r.refl.layer.filter0", "r.refl.layer.filter1", "r.refl.layer.filter2", "r.refl.layer.filter.dense" };
+            for (uint32_t level = 0; level < 4; ++level)
             {
                 const TextureRef inS = newStochastic, inR = newResidual, outS = ping[level & 1][0], outR = ping[level & 1][1];
                 g.addPass(kLevelNames[level], QueueType::Compute,
@@ -1224,9 +1229,11 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                               b.use(outS, Use::UavCompute);
                               b.use(outR, Use::UavCompute);
                           },
-                          [&shaders, inS, inR, layerGuide, outS, outR, width, height, focal, level, frameConstants, mirrorLobe = s.layerMirrorLobe](PassContext& c) {
-                              const uint32_t k[12] = { c.srv(inS), c.srv(inR), c.srv(layerGuide), 1u << level, c.uav(outS), c.uav(outR), width, height, asU(focal),
-                                                       mirrorLobe ? 1u : 0u, 0, 0 };
+                          [&shaders, inS, inR, layerGuide, outS, outR, width, height, focal, level, frameConstants,
+                           flags = (s.layerMirrorLobe ? 1u : 0u) | (s.layerCrossMode ? 2u : 0u)](PassContext& c) {
+                              const bool dense = level == 3;
+                              const uint32_t k[12] = { c.srv(inS), c.srv(inR), c.srv(layerGuide), dense ? 1u : 1u << level, c.uav(outS), c.uav(outR), width, height, asU(focal),
+                                                       flags, dense ? 1u : 0u, 0 };
                               c.cmd->SetPipelineState(shaders.compute("Passes/Reconstruct/LayerDenoise"));
                               c.computeConstants(k, 12);
                               c.bindFrameConstants(frameConstants);
