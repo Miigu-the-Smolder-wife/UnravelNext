@@ -13,7 +13,9 @@
 // Planar mirror pixels read their reflection camera's colour at (pixel - rectangle origin), divided by the exposure.
 // P[0] = { mode SRV, results SRV, depth SRV, gbuffer SRV }, P[1] = { reflection UAV, history UAV, rows H, planar SRV }
 // P[2] = { width, height, planar byte offset, flags (bit 0: reflection.layer_mirror_lobe, bit 1:
-// reflection.layer_residual_whole - a G pixel's residual is its value minus the stochastic share) }, P[3] = planar colour SRVs;
+// reflection.layer_residual_whole - a G pixel's residual is its value minus the stochastic share, bit 2:
+// reflection.layer_whole_value - lobe pixels are LAYER_MODE_L, LayerCommon.hlsli) }, P[3] = planar colour SRVs,
+// P[5] = { asuint(focal length px), 0, 0, 0 };
 // frame constants b1 = main view.
 // Reconstruction layers (reflection.layers; ReflectionInternal.hlsli): P[4] = { job layers SRV (raw; UNX_NONE: off),
 // stochastic layer UAV, residual layer UAV, guide UAV }. Every pixel of the view gets its guide (mode 0: no layer value -
@@ -52,6 +54,16 @@ void storeLayers(uint2 pixel, ReflSurface s, float deviceDepth, uint mode, Resol
     layerS[pixel] = float4(min(l.share / reflUnpackAlbedo(albedo), 65504.0), 0);
     layerG[pixel] = float4(clamp(l.residual, -65504.0, 65504.0), 0);
     guide[pixel] = layerPackGuide(deviceDepth, s.normal, s.roughness, mode, l.noData >= 0.5, l.hitGuide, hitDistance, albedo);
+}
+// reflection.layer_whole_value: a lobe pixel's whole value as its residual layer (LAYER_MODE_L).
+void storeWhole(uint2 pixel, ReflSurface s, float deviceDepth, float3 value, uint spacingLog2, float hitDistance)
+{
+    RWTexture2D<float4> layerS = ResourceDescriptorHeap[P[4].y];
+    RWTexture2D<float4> layerG = ResourceDescriptorHeap[P[4].z];
+    RWTexture2D<uint4> guide = ResourceDescriptorHeap[P[4].w];
+    layerS[pixel] = float4(0, 0, 0, 0);
+    layerG[pixel] = float4(min(value, 65504.0), 0);
+    guide[pixel] = layerPackGuide(deviceDepth, s.normal, s.roughness, LAYER_MODE_L, false, spacingLog2, hitDistance, reflPackAlbedo(1.0));
 }
 void storeNoLayers(uint2 pixel)
 {
@@ -111,9 +123,17 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         if (layers)
         {
             ResolveLayers own = loadJobLayers(reflJob(m));
+            const ReflSurface sm = reflSurface(depth, gbuffer, pixel);
+            // the lobe's footprint on the screen (LayerDenoise's blur_px): a pixel or more is a lobe pixel
+            const float blur = reflResultDistance(r) / max(sm.linearDepth, 1e-4) * reflectionLobeHalfAngle(sm.roughness, saturate(dot(sm.normal, sm.view))) * asfloat(P[5].x);
+            if ((P[2].w & 4u) != 0 && blur >= 1.0)
+            {
+                storeWhole(pixel, sm, deviceDepth, reflResultRadiance(r), 0, reflResultDistance(r));
+                return;
+            }
             // reflection.layer_mirror_lobe: the value without the stochastic share is a layer too (LayerDenoise)
             if (P[2].w & 1u) own.residual = reflResultRadiance(r) - own.share;
-            storeLayers(pixel, reflSurface(depth, gbuffer, pixel), deviceDepth, LAYER_MODE_M, own, reflResultDistance(r));
+            storeLayers(pixel, sm, deviceDepth, LAYER_MODE_M, own, reflResultDistance(r));
         }
         return;
     }
@@ -171,6 +191,11 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         history[pixel] = float2(gridServes ? d : -d, reflResultMotion(r));
         if (layers)
         {
+            if (P[2].w & 4u)
+            {
+                storeWhole(pixel, s, deviceDepth, reflResultRadiance(r), 0, reflResultDistance(r));
+                return;
+            }
             ResolveLayers own = loadJobLayers(reflJob(m));
             own.hitGuide = 0;  // its own job: every pixel around it is a sample or interpolates finer ones
             if (P[2].w & 2u) own.residual = reflResultRadiance(r) - own.share;
@@ -187,7 +212,9 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
     }
     reflection[pixel] = float4(reflStorable(sum / weight), 1);
     history[pixel] = float2(reflSmoothedDistance(history[pixel].x, dist / weight), motion);
-    if (layers)
+    if (layers && (P[2].w & 4u) != 0)
+        storeWhole(pixel, s, deviceDepth, sum / weight, (m >> 2) & 7u, dist / weight);
+    else if (layers)
     {
         sumLayers.share /= weight;
         sumLayers.albedo /= weight;

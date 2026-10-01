@@ -24,6 +24,9 @@ hit_cone_lobes = true                  # the hits' specular lobes toward their l
                                        # hits do: a reflection value is a mean over its cone. false = the lobes at the single ray
                                        # direction (the path before 2026-10-01: rare huge highlight samples on glazed and glossy
                                        # hits). A/B
+hit_strict_read = true                 # with reflection.layers and layer_filter: the hits' cache lookup under gi.bounce_visibility's
+                                       # rule (entries the hit point does not see are skipped; a hit without one is 'no data' and the
+                                       # layers' filter fills it from its neighbours). false = the lookup of the path without layers. A/B
 hit_accumulator = true                 # reflection hits read GI's hit accumulator pool (gi.hit_accumulator with gi.hit_accumulator_pool:
                                        # the pool exists only then) - their diffuse direct light is the mean over the surface
                                        # cell the ray's footprint covers, with the hit's own albedo and layers, not the light of
@@ -54,6 +57,15 @@ layer_mirror_lobe = true               # DECISION ITEM, off: an M pixel's value 
                                        # but M is every roughness below mirror_roughness_max, whose one ray per pixel is one
                                        # draw of a GGX lobe up to ~4 deg wide: a footprint of tens of pixels, one sample each
                                        # frame, integrated by the previous path only while the view stands still
+layer_whole_value = true               # lobe pixels (every G pixel; an M pixel whose lobe footprint is a pixel or more) are
+                                       # reconstructed as a whole: their value is the residual layer, no division by the hits'
+                                       # albedo (LayerCommon.hlsli LAYER_MODE_L; as Lumen's reflection denoiser, which filters
+                                       # the rays' whole radiance). Mirrors keep the split (their stochastic light over the hit's
+                                       # albedo, guided by the hits). false = the split for every pixel (A/B: the filter raised
+                                       # 'albedo x stochastic' 2.6 - 3.5 times on the bath hall's ceiling and walls [measured])
+layer_cross_mode = true                # with layer_mirror_lobe: the residual layer takes taps of M and G pixels alike (both are lobe
+                                       # estimates; the roughness weight separates unlike lobes). M and G alternate pixel by pixel
+                                       # on glazed tiles and their grout. false = taps of the pixel's own mode only (A/B)
 layer_history_bound = true             # the history is brought within the reconstructed layer's 3 x 3 neighbourhood (mean +- 3
                                        # deviations + 5 %) before it is mixed. A/B, not settled by measurement: false = no
                                        # bound (a lighting change then takes layer_history_frames frames to arrive in the
@@ -72,3 +84,29 @@ experiment_disable = 0                 # cost attribution only (recorded in the 
                                        # touched or requested), 512 = no time integration (each frame's own estimate),
                                        # 1024 = the time integration's state instead of the value (diagnostics). Never nonzero
                                        # outside measurements.
+
+# The ray-reuse pipeline (Passes/Reflection/ReflectionReuse.hlsli): the structure of Unreal's Lumen reflections rebuilt on
+# this renderer's passes, in place of the G path, the 32-frame accumulation and the layers. Planar mirrors and calm water
+# keep their raster cameras. Values are the reference's defaults (ue6-main LumenReflections.cpp, Scene.cpp).
+lumen = false
+lumen_max_roughness_to_trace = 0.4     # QUALITY TRADE (user decision): rougher pixels trace no ray and take the K path
+lumen_roughness_fade_length = 0.1      # the traced reflection fades into the K path over this much roughness below the limit
+lumen_max_ray_intensity = 40.0         # QUALITY TRADE (user decision): a ray's exposed radiance is capped here; 0 = no cap
+lumen_tonemap_range = 10.0             # QUALITY TRADE (user decision): means are taken in exposed radiance / (1 + luminance /
+                                       # range), which darkens bright highlights; 0 = plain (energy-preserving) means
+lumen_reconstruction = true            # the resolve's neighbour rays (false: each pixel's own ray)
+lumen_reconstruction_samples = 5
+lumen_reconstruction_radius = 8.0      # px, x min(8 x roughness, 1)
+lumen_temporal = true
+lumen_temporal_max_frames = 12.0
+lumen_neighborhood_clamp_scale = 1.0   # the history's bound: the resolved 5 x 5 neighbourhood's mean +- this many deviations
+lumen_history_distance_threshold = 0.03
+lumen_bilateral = true
+lumen_bilateral_samples = 4
+lumen_bilateral_radius = 8.0
+lumen_bilateral_depth_weight = 10000.0
+lumen_bilateral_disocclusion_frames = 2.0
+lumen_disocclusion_tonemap = true      # QUALITY TRADE (user decision): young pixels' samples compressed by 1 / (1 + luminance)
+lumen_hit_surface_cache = true         # with surface_cache.enabled: the traced rays' hits mark their surface cache cell and take
+                                       # its accumulated local-light and bounce irradiance (no one-light sample at the hit)
+lumen_surface_cache_view = false       # diagnostics: a traced hit's value is its cell's state (r: no lit cell, g: frames, b: live cells)

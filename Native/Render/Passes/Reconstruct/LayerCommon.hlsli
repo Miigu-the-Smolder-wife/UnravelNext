@@ -12,7 +12,15 @@
 //                        z = M: hit normal oct 8 + 8, G: log2 of the sample spacing | hit distance fp16 << 16 (M: its ray's;
 //                            G: the samples' nearest)
 //                        w = albedo (reflPackAlbedo: the demodulation key the composition multiplies back)
-// mode: 0 = no layer value at the pixel (K, planar mirror, sky, no data), 1 = M (mirror: one ray), 2 = G (glossy lobe).
+// mode: 0 = no layer value at the pixel (K, planar mirror, sky, no data), 1 = M (mirror: one ray), 2 = G (glossy lobe),
+// 3 = L (reflection.layer_whole_value: a lobe pixel - every G pixel and an M pixel whose lobe footprint is a pixel or
+// more - whose whole value is the residual layer: stochastic = 0, albedo = 1, z as G's with spacing 1 for an M pixel).
+// The split by the hits' albedo holds for a mirror, where a pixel's hit is one surface point. Over a lobe the stored
+// albedo is the mean of that frame's 1 - 4 hits and the 'stochastic light over albedo' is not the same quantity from
+// pixel to pixel (a dark glossy hit with a lamp's highlight gives a huge quotient that the filter then hands to
+// neighbours with ordinary albedo): measured, bath hall frame 0, G pixels - albedo x stochastic 2.16 (ceiling) / 1.75
+// (pillar) times the converged level before the filter, 5.70 / 4.69 after it; frame 3 ceiling 0.13 -> 0.46. A lobe
+// pixel's value is band-limited by its footprint as a whole, so it is reconstructed as a whole.
 #ifndef UNX_LAYER_COMMON_HLSLI
 #define UNX_LAYER_COMMON_HLSLI
 #include "Passes/Reflection/ReflectionInternal.hlsli"
@@ -20,6 +28,7 @@
 #define LAYER_MODE_NONE 0u
 #define LAYER_MODE_M 1u
 #define LAYER_MODE_G 2u
+#define LAYER_MODE_L 3u
 
 // Unit vector <-> octahedral 11 + 11 bits (0.1 deg steps: the receiver normal aims the hit point, layerHitPoint).
 uint layerPackOct22(float3 n)

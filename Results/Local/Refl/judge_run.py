@@ -9,20 +9,28 @@ whose log shows a device removal (TDR) and exits 87.
 import argparse, os, subprocess, sys, time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-BT = r"C:\Users\USER\UnravelGames\BathhouseTycoon\Artifacts\Look"
-TE = r"C:\Users\USER\UnravelGames\TrainExorcist\Artifacts\Look"
+# Frozen copies of the game projects' look scenes (Cache/ReflJudge/scenes, not committed): the projects' own files are
+# rewritten whenever a game session runs its look tests (bath_reference.unxscene changed between two runs of one
+# comparison on 2026-10-01 18:01: 6668 -> 8440 instances), so a comparison reads copies taken once.
+SCENES = os.path.join(ROOT, "Cache", "ReflJudge", "scenes")
+BATH = os.path.join(SCENES, "bt_bath_20261001_1801.unxscene")      # BathhouseTycoon Artifacts/Look/bath_reference.unxscene
+LOUNGE = os.path.join(SCENES, "bt_lounge_20261001_0500.unxscene")  # BathhouseTycoon Artifacts/Look/lounge_reference.unxscene
+LOBBY = os.path.join(SCENES, "bt_lobby_20261001_1802.unxscene")    # BathhouseTycoon Artifacts/Look/lobby.unxscene
+TRAIN = os.path.join(SCENES, "te_lounge_20261001_0735.unxscene")   # TrainExorcist Artifacts/Look/lounge_reference.unxscene
 CASES = {
     # name: (scene, extra camera arguments)
-    "bath_lounge": (BT + r"\lounge_reference.unxscene", []),
-    "bath_hall": (BT + r"\bath_reference.unxscene", []),
-    "train_lounge": (TE + r"\lounge_reference.unxscene", []),
+    "bath_lounge": (LOUNGE, []),
+    "bath_hall": (BATH, []),
+    "bath_lobby": (LOBBY, []),  # the glossy lobby floor (the user's "game impossible" view, 2026-10-01)
+    "train_lounge": (TRAIN, []),
     # reflection-heavy views (the level look tests' shots): the showers' mirrors and wet floor, the train's windows
-    "bath_mirror": (BT + r"\bath_reference.unxscene", ["--camera-at", "-43.2,-2.93,-8.4,-45,-3.05,-8.2"]),
-    "bath_showers": (BT + r"\bath_reference.unxscene", ["--camera-at", "-40,-2.85,-10,-44.5,-3.2,-2"]),
-    "train_window": (TE + r"\lounge_reference.unxscene", ["--camera-at", "1.8,1.55,-1.5,8,1.45,3.5"]),
+    "bath_mirror": (BATH, ["--camera-at", "-43.2,-2.93,-8.4,-45,-3.05,-8.2"]),
+    "bath_showers": (BATH, ["--camera-at", "-40,-2.85,-10,-44.5,-3.2,-2"]),
+    "train_window": (TRAIN, ["--camera-at", "1.8,1.55,-1.5,8,1.45,3.5"]),
 }
 MODES = {
     "diag": ["--frames", "16", "--capture-frames", "3,15"],  # layer diagnostics (reflection.layer_view)
+    "diag0": ["--frames", "4", "--capture-frames", "0,3"],   # the first frame's layers
     "still": ["--frames", "300", "--capture-frames", "0,3,15,299"],
     "rot": ["--frames", "180", "--path-rotate", "90", "--motion-start", "60", "--capture-frames", "59,63,75,120,179"],
     # a cut to the view turned by 90 degrees at frame 60, still before and after (frames 1, 4, 16 after the cut and its converged self)

@@ -64,6 +64,8 @@ const char* const kShadeKernel[2][2] = {
 const char* const kRefractLibrary[2] = { "Passes/Reflection/RefractionTrace.SKY0", "Passes/Reflection/RefractionTrace.SKY1" };
 constexpr const char* kShadowLibrary = "Passes/Reflection/ReflectionShadow";
 constexpr const char* kLocalShadowLibrary = "Passes/Reflection/ReflectionLocalShadow";
+const char* const kSurfaceCacheLightLibrary[2] = { "Passes/SurfaceCache/SurfaceCacheLight.SKY0", "Passes/SurfaceCache/SurfaceCacheLight.SKY1" };
+constexpr uint32_t kSurfaceCacheHeaderBytes = 64, kSurfaceCacheCellBytes = 52, kSurfaceCacheProbeBytes = 36;  // SurfaceCache.hlsli
 } // namespace
 
 ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
@@ -96,10 +98,51 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.layerView = q.has("reflection.layer_view") ? (uint32_t)q.integer("reflection.layer_view") : 0u;
     s.layerHistoryBound = !q.has("reflection.layer_history_bound") || q.boolean("reflection.layer_history_bound");
     s.layerMirrorLobe = q.has("reflection.layer_mirror_lobe") && q.boolean("reflection.layer_mirror_lobe");
+    s.layerCrossMode = !q.has("reflection.layer_cross_mode") || q.boolean("reflection.layer_cross_mode");
+    s.layerWholeValue = !q.has("reflection.layer_whole_value") || q.boolean("reflection.layer_whole_value");
     s.hitConeLobes = !q.has("reflection.hit_cone_lobes") || q.boolean("reflection.hit_cone_lobes");
     s.layerResidualWhole = !q.has("reflection.layer_residual_whole") || q.boolean("reflection.layer_residual_whole");
     s.hitOrientedLights = q.has("reflection.hit_oriented_lights") && q.boolean("reflection.hit_oriented_lights");
     s.hitAccumulator = !q.has("reflection.hit_accumulator") || q.boolean("reflection.hit_accumulator");
+    s.hitStrictRead = !q.has("reflection.hit_strict_read") || q.boolean("reflection.hit_strict_read");
+    // The ray-reuse pipeline (ReflectionReuse.hlsli); defaults are the reference's (ue6-main LumenReflections.cpp).
+    const auto num = [&q](const char* key, double fallback) { return (float)(q.has(key) ? q.number(key) : fallback); };
+    const auto flag = [&q](const char* key, bool fallback) { return q.has(key) ? q.boolean(key) : fallback; };
+    s.lumen = flag("reflection.lumen", false);
+    s.lumenMaxRoughness = num("reflection.lumen_max_roughness_to_trace", 0.4);
+    s.lumenFadeLength = num("reflection.lumen_roughness_fade_length", 0.1);
+    s.lumenMaxRayIntensity = num("reflection.lumen_max_ray_intensity", 40.0);
+    s.lumenTonemapRange = num("reflection.lumen_tonemap_range", 10.0);
+    s.lumenReconstruction = flag("reflection.lumen_reconstruction", true);
+    s.lumenReconstructionSamples = (uint32_t)num("reflection.lumen_reconstruction_samples", 5);
+    s.lumenReconstructionRadius = num("reflection.lumen_reconstruction_radius", 8.0);
+    s.lumenTemporal = flag("reflection.lumen_temporal", true);
+    s.lumenTemporalMaxFrames = num("reflection.lumen_temporal_max_frames", 12.0);
+    s.lumenClampScale = num("reflection.lumen_neighborhood_clamp_scale", 1.0);
+    s.lumenDistanceThreshold = num("reflection.lumen_history_distance_threshold", 0.03);
+    s.lumenBilateral = flag("reflection.lumen_bilateral", true);
+    s.lumenBilateralSamples = (uint32_t)num("reflection.lumen_bilateral_samples", 4);
+    s.lumenBilateralRadius = num("reflection.lumen_bilateral_radius", 8.0);
+    s.lumenBilateralDepthWeight = num("reflection.lumen_bilateral_depth_weight", 10000.0);
+    s.lumenDisocclusionFrames = num("reflection.lumen_bilateral_disocclusion_frames", 2.0);
+    s.lumenDisocclusionTonemap = flag("reflection.lumen_disocclusion_tonemap", true);
+    // The surface cache (Passes/SurfaceCache/SurfaceCache.hlsli); defaults are the reference's (ue6-main LumenScene*.cpp,
+    // LumenRadiosity.cpp).
+    s.surfaceCache = flag("surface_cache.enabled", false);
+    s.scEntriesLog2 = (uint32_t)num("surface_cache.entries_log2", 22);
+    if (s.scEntriesLog2 < 12 || s.scEntriesLog2 > 24) fail("surface_cache.entries_log2 must be in [12, 24]");
+    s.scMaxUnused = std::min((uint32_t)num("surface_cache.max_unused_frames", 255), 255u);
+    s.scCaptureFactor = std::max((uint32_t)num("surface_cache.capture_factor", 64), 1u);
+    s.scCaptureBounces = std::min((uint32_t)num("surface_cache.capture_bounces", 3), 8u);
+    s.scDirectFactor = std::max((uint32_t)num("surface_cache.direct_update_factor", 32), 1u);
+    s.scRadiosityFactor = std::max((uint32_t)num("surface_cache.radiosity_update_factor", 64), 1u);
+    s.scRadiosityCap = num("surface_cache.radiosity_max_ray_intensity", 40.0);
+    s.scRadiosityFrames = num("surface_cache.radiosity_max_frames_accumulated", 4.0);
+    s.scDirect = flag("surface_cache.direct_lighting", true);
+    s.scRadiosity = flag("surface_cache.radiosity", true);
+    s.scRemainderLight = flag("surface_cache.remainder_light", false);
+    s.lumenHitSurfaceCache = flag("reflection.lumen_hit_surface_cache", true);
+    s.lumenSurfaceCacheView = flag("reflection.lumen_surface_cache_view", false);
     s.deterministic = q.has("debug.deterministic") && q.boolean("debug.deterministic");
     s.planarRayNs = (float)q.number("reflection.planar_ray_ns");
     return s;
@@ -412,6 +455,22 @@ ReflectionSystem::~ReflectionSystem()
     if (srv != 0xFFFFFFFFu) m_device.deferCall([h, srv] { h->freeResource(srv); });
 }
 
+// The surface cache's buffer in this frame's graph (SurfaceCache.hlsli), imported once per frame: for the passes of this
+// system and for other tracks whose ray hits mark and read it (GI: before this system records, so its marks are of the
+// frame and its reads see the lighting of the frame before). Invalid until the first frame with surface_cache.enabled.
+BufferRef ReflectionSystem::surfaceCacheBuffer(FramePassContext& fc)
+{
+    if (!m_surfaceCache) return BufferRef{};
+    if (m_surfaceCacheFrame != fc.frame.frameIndex || !m_surfaceCacheRef.valid())
+    {
+        const uint64_t bytes = kSurfaceCacheHeaderBytes + (uint64_t)m_surfaceCacheEntries * kSurfaceCacheCellBytes +
+                               (uint64_t)(m_surfaceCacheEntries / 4) * kSurfaceCacheProbeBytes;
+        m_surfaceCacheRef = fc.graph.importBuffer(m_surfaceCache.Get(), { "R surface cache", bytes, 0 });
+        m_surfaceCacheFrame = fc.frame.frameIndex;
+    }
+    return m_surfaceCacheRef;
+}
+
 void ReflectionSystem::ensureHistory(uint32_t width, uint32_t height)
 {
     if (m_history && m_historyWidth == width && m_historyHeight == height) return;
@@ -436,10 +495,11 @@ void ReflectionSystem::ensureHistory(uint32_t width, uint32_t height)
         if (m_layerResidual[k]) m_device.deferRelease(m_layerResidual[k]);
         if (m_layerKeys[k]) m_device.deferRelease(m_layerKeys[k]);
         m_accum[k] = nullptr, m_accumKeys[k] = nullptr, m_layerStochastic[k] = nullptr, m_layerResidual[k] = nullptr, m_layerKeys[k] = nullptr;
-        if (m_settings.layers)
+        if (m_settings.layers || m_settings.lumen)
         {
             // The layers' history in place of the value's (LayerTemporal.hlsl); none when the layers keep no history.
-            if (m_settings.layerHistoryFrames <= 1) continue;
+            // reflection.lumen keeps its history in the same textures (value + second moment, frames, keys).
+            if (!m_settings.lumen && m_settings.layerHistoryFrames <= 1) continue;
             ComPtr<ID3D12Resource>* targets[3] = { &m_layerStochastic[k], &m_layerResidual[k], &m_layerKeys[k] };
             const wchar_t* names[3][2] = { { L"R reflection layer history stochastic 0", L"R reflection layer history stochastic 1" },
                                            { L"R reflection layer history residual 0", L"R reflection layer history residual 1" },
@@ -602,7 +662,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const BufferRef jobs = g.createBuffer({ "R reflection jobs", (uint64_t)width * height * 4, 4 });
     const BufferRef results = g.createBuffer({ "R reflection results", (uint64_t)width * height * 12, 12 });
     // Reconstruction layers (ReflectionInternal.hlsli): per-job records beside the results, per-ray records beside the rays.
-    const bool layers = s.layers;
+    const bool lumen = s.lumen;  // the ray-reuse pipeline (ReflectionReuse.hlsli): its own resolve, history and filter
+    const bool layers = s.layers && !lumen;
     const BufferRef jobLayers = layers ? g.createBuffer({ "R reflection job layers", (uint64_t)width * height * 24, 0 }) : BufferRef{};  // REFL_LAYER_JOB_BYTES
     const BufferRef args = g.importBuffer(m_arguments.Get(), { "R reflection dispatch arguments", kArgumentsBytes, 0 });
     const BufferRef cache = fc.resources.giCache;
@@ -856,7 +917,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
               [&](PassBuilder& b) {
                   b.use(depth, Use::SrvCompute);
                   b.use(gbuffer, Use::SrvCompute);
-                  if (lobes.valid()) b.use(lobes, Use::SrvCompute);
+                  if (lobes.valid() && !lumen) b.use(lobes, Use::SrvCompute);
                   b.use(history, Use::SrvCompute);
                   b.use(modes, Use::UavCompute);
                   b.use(jobs, Use::UavCompute);
@@ -870,11 +931,11 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   }
               },
               [&shaders, depth, gbuffer, lobes, history, modes, jobs, args, reflection, s, focal, width, height, tilesX, tilesY, frameConstants, planarSrv,
-               planarOffset, planarCounts, planarViews, viewCount = planar.views, spacingLog2](PassContext& c) {
-                  uint32_t k[28] = { c.srv(depth), c.srv(gbuffer), lobes.valid() ? c.srv(lobes) : 0xFFFFFFFFu, c.srv(history),
+               planarOffset, planarCounts, planarViews, viewCount = planar.views, spacingLog2, lumen](PassContext& c) {
+                  uint32_t k[28] = { c.srv(depth), c.srv(gbuffer), lobes.valid() && !lumen ? c.srv(lobes) : 0xFFFFFFFFu, c.srv(history),
                                      c.uav(modes), c.uav(jobs), c.uav(args), c.uav(reflection),
                                      asU(s.kHalfAngle), asU(s.mirrorRoughness), asU(focal), height,
-                                     width, height, planarSrv, planarOffset, c.uav(planarCounts), spacingLog2, 0, 0 };
+                                     width, height, planarSrv, planarOffset, c.uav(planarCounts), spacingLog2, lumen ? 1u : 0u, asU(s.lumenMaxRoughness) };
                   for (uint32_t v = 0; v < kPlanarMax; ++v)
                   {
                       k[20 + v] = v < viewCount ? c.uav(planarViews[v].mask) : 0xFFFFFFFFu;
@@ -932,6 +993,43 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const BufferRef raysBuffer = g.createBuffer({ "R reflection rays", 48 + (uint64_t)rayCapacity * 60, 0 });  // REFL_RAYS_HEADER + REFL_RAYS_SLOT_BYTES
     // The GI hit accumulator pool (GiAccPool.hlsli; valid when gi.hit_accumulator's pool runs): reflection hits read it.
     const BufferRef accPool = s.hitAccumulator ? fc.resources.giAccumulator : BufferRef{};
+    // The surface cache (Passes/SurfaceCache/SurfaceCache.hlsli): one persistent raw buffer; cleared when new and on a scene
+    // revision (materials, geometry). It is world space: a camera cut does not reset it.
+    BufferRef surfaceCache;
+    bool surfaceCacheClear = false;
+    const uint32_t surfaceCacheEntries = 1u << s.scEntriesLog2;
+    if (s.surfaceCache)
+    {
+        const uint64_t bytes = kSurfaceCacheHeaderBytes + (uint64_t)surfaceCacheEntries * kSurfaceCacheCellBytes +
+                               (uint64_t)(surfaceCacheEntries / 4) * kSurfaceCacheProbeBytes;
+        if (!m_surfaceCache || m_surfaceCacheEntries != surfaceCacheEntries)
+        {
+            if (m_surfaceCache) m_device.deferRelease(m_surfaceCache);
+            D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+            D3D12_RESOURCE_DESC1 d{};
+            d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            d.Width = bytes;
+            d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+            d.SampleDesc.Count = 1;
+            d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            check(m_device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr,
+                                                           IID_PPV_ARGS(m_surfaceCache.ReleaseAndGetAddressOf())),
+                  "surface cache");
+            m_surfaceCache->SetName(L"R surface cache");
+            m_surfaceCacheEntries = surfaceCacheEntries;
+            m_surfaceCacheRef = BufferRef{};  // (an import of the buffer just released)
+            m_surfaceCacheRevision = fc.scene.revision();
+            surfaceCacheClear = true;
+        }
+        if (fc.scene.revision() != m_surfaceCacheRevision)
+        {
+            m_surfaceCacheRevision = fc.scene.revision();
+            surfaceCacheClear = true;
+        }
+        surfaceCache = surfaceCacheBuffer(fc);
+    }
+    const bool hitsUseSurfaceCache = surfaceCache.valid() && lumen && s.lumenHitSurfaceCache;
     const BufferRef rayLayers = layers ? g.createBuffer({ "R reflection ray layers", std::max<uint64_t>((uint64_t)rayCapacity * 16, 16), 0 }) : BufferRef{};  // REFL_LAYER_RAY_BYTES
     g.addPass("r.refl.args", QueueType::Compute,
               [&](PassBuilder& b) {
@@ -943,14 +1041,16 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       b.use(jobLayers, Use::UavCompute);
                   }
                   if (accPool.valid()) b.use(accPool, Use::SrvCompute);
+                  if (hitsUseSurfaceCache) b.use(surfaceCache, Use::UavCompute);
               },
-              [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, accPool,
-               hitFlags = (s.hitConeLobes ? 1u : 0u) | (s.hitOrientedLights ? 2u : 0u) | (s.layers && s.layerFilter ? 4u : 0u)](PassContext& c) {
+              [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, accPool, surfaceCache, hitsUseSurfaceCache,
+               hitFlags = (s.hitConeLobes ? 1u : 0u) | (s.hitOrientedLights ? 2u : 0u) | (layers && s.layerFilter && s.hitStrictRead ? 4u : 0u) |
+                          (s.lumenSurfaceCacheView ? 8u : 0u)](PassContext& c) {
                   // (the layer buffers' UAVs and the hit shading's flags into the rays header: the shade, combine and inline
                   // passes find them there)
                   const uint32_t k[12] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(raysBuffer), rayCapacity,
                                            layers ? c.uav(rayLayers) : 0xFFFFFFFFu, layers ? c.uav(jobLayers) : 0xFFFFFFFFu, hitFlags,
-                                           accPool.valid() ? c.srv(accPool) : 0xFFFFFFFFu, 0, 0 };
+                                           accPool.valid() ? c.srv(accPool) : 0xFFFFFFFFu, hitsUseSurfaceCache ? c.uav(surfaceCache) : 0xFFFFFFFFu, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionArgs"));
                   c.computeConstants(k, 12);
                   c.cmd->Dispatch(1, 1, 1);
@@ -1026,6 +1126,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         b.use(gbuffer, Use::SrvGraphics);
         if (gi) b.use(cache, Use::UavGraphics);
         if (gi && accPool.valid()) b.use(accPool, Use::SrvGraphics);  // (the passes that shade: the accumulator's cell means)
+        if (gi && hitsUseSurfaceCache) b.use(surfaceCache, Use::UavGraphics);  // (the passes that shade: hits mark and read their cells)
         if (gi && layers)  // (the passes that shade or combine: the layer records)
         {
             b.use(rayLayers, Use::UavGraphics);
@@ -1070,6 +1171,58 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   });
     };
     rayArgs("r.refl.rayargs", 0);
+    if (surfaceCache.valid())
+    {
+        // The surface cache's frame (SurfaceCache.hlsli): the upkeep of cells and probes marked up to last frame, the
+        // capture rays from the camera position, the cells' direct light and indirect gather, the probes' radiosity -
+        // before this frame's hits read and mark. Budgets as the reference's: capture capacity / 64 texels a frame,
+        // direct capacity / 32, radiosity capacity / 64 (one probe per 16 texels).
+        const uint32_t n = surfaceCacheEntries;
+        g.addPass("r.sc.begin", QueueType::Compute, [&](PassBuilder& b) { b.use(surfaceCache, Use::UavCompute); },
+                  [&shaders, surfaceCache, n, surfaceCacheClear, frame, frameConstants, s](PassContext& c) {
+                      const uint32_t k[8] = { c.uav(surfaceCache), n, frame, surfaceCacheClear ? 1u : 0u, s.scMaxUnused, 1u, asU(s.scRadiosityCap), asU(s.scRadiosityFrames) };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/SurfaceCacheBegin"));
+                      c.computeConstants(k, 8);
+                      c.bindFrameConstants(frameConstants);
+                      c.cmd->Dispatch(surfaceCacheClear ? (n + 63) / 64 : 1, 1, 1);
+                  });
+        for (uint32_t table = 0; table < 2; ++table)
+            g.addPass(table ? "r.sc.update.probes" : "r.sc.update.cells", QueueType::Compute, [&](PassBuilder& b) { b.use(surfaceCache, Use::UavCompute); },
+                      [&shaders, surfaceCache, n, table, frameConstants](PassContext& c) {
+                          const uint32_t k[4] = { c.uav(surfaceCache), n, table, 0 };
+                          c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/SurfaceCacheUpdate"));
+                          c.computeConstants(k, 4);
+                          c.bindFrameConstants(frameConstants);
+                          c.cmd->Dispatch(((table ? n / 4 : n) + 63) / 64, 1, 1);
+                      });
+        rt::RayPipeline& surfaceCacheLight = rt::RayPipeline::get(
+            fc.device, shaders, rt::standardRayPipeline(kSurfaceCacheLightLibrary[variant], { "SurfaceCacheSeedGen", "SurfaceCacheCellsGen", "SurfaceCacheProbesGen" }));
+        const uint32_t lightFlags = (s.scDirect ? 1u : 0u) | (s.scRadiosity ? 2u : 0u) | (s.scRemainderLight ? 8u : 0u);
+        const uint32_t budgets[3] = { std::max(n / s.scCaptureFactor / (s.scCaptureBounces + 1), 1u), std::max(n / s.scDirectFactor, 1u),
+                                      std::max(n / s.scRadiosityFactor / 16, 1u) };
+        static const char* const kLightNames[3] = { "r.sc.seed", "r.sc.cells", "r.sc.probes" };
+        for (uint32_t pass = 0; pass < 3; ++pass)
+        {
+            if (pass == 2 && !s.scRadiosity) continue;
+            g.addPass(kLightNames[pass], QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          b.use(surfaceCache, Use::UavGraphics);
+                          declareShared(b, false);
+                      },
+                      [&surfaceCacheLight, constantsFor, frameConstants, surfaceCache, frame, pass, lightFlags, budget = budgets[pass], bounces = s.scCaptureBounces](PassContext& c) {
+                          uint32_t k[32] = {};
+                          constantsFor(c, k, false);
+                          k[0] = c.uav(surfaceCache);
+                          k[1] = budget;
+                          k[2] = frame;
+                          k[3] = lightFlags;
+                          k[15] = bounces;
+                          c.computeConstants(k, 32);
+                          c.bindFrameConstants(frameConstants);
+                          surfaceCacheLight.dispatch(c.cmd, pass, budget, 1);
+                      });
+        }
+    }
     // Local-light samples of the hits: their shadow rays before the compute shading (bit 30 of the hit records). Declared
     // before the inline passes (which read GI's cache; they never touch the rays buffer), so it runs while GI's block is
     // still on the async queue.
@@ -1189,13 +1342,14 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
               },
               [&shaders, modes, results, depth, gbuffer, reflection, history, width, height, tilesX, tilesY, frameConstants, planarSrv, planarOffset, planarCount,
                planarColor, layers, jobLayers, layerStochastic, layerResidual, layerGuide,
-               layerFlags = (s.layerMirrorLobe ? 1u : 0u) | (s.layerResidualWhole ? 2u : 0u)](PassContext& c) {
-                  uint32_t k[20] = { c.srv(modes), c.srv(results), c.srv(depth), c.srv(gbuffer), c.uav(reflection), c.uav(history), height, planarSrv,
-                                     width, height, planarOffset, layerFlags, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
+               layerFlags = (s.layerMirrorLobe ? 1u : 0u) | (s.layerResidualWhole ? 2u : 0u) | (s.layerWholeValue ? 4u : 0u), focal](PassContext& c) {
+                  uint32_t k[24] = { c.srv(modes), c.srv(results), c.srv(depth), c.srv(gbuffer), c.uav(reflection), c.uav(history), height, planarSrv,
+                                     width, height, planarOffset, layerFlags, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
+                                     asU(focal), 0, 0, 0 };
                   for (uint32_t v = 0; v < planarCount; ++v) k[12 + v] = c.srv(planarColor[v]);
                   if (layers) k[16] = c.srv(jobLayers), k[17] = c.uav(layerStochastic), k[18] = c.uav(layerResidual), k[19] = c.uav(layerGuide);
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionResolve"));
-                  c.computeConstants(k, 20);
+                  c.computeConstants(k, 24);
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch(tilesX, tilesY, 1);
               });
@@ -1212,8 +1366,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                 ping[p][0] = g.createTexture({ p ? "R reflection layer stochastic filter 1" : "R reflection layer stochastic filter 0", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
                 ping[p][1] = g.createTexture({ p ? "R reflection layer residual filter 1" : "R reflection layer residual filter 0", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
             }
-            static const char* const kLevelNames[3] = { "r.refl.layer.filter0", "r.refl.layer.filter1", "r.refl.layer.filter2" };
-            for (uint32_t level = 0; level < 3; ++level)
+            // three a-trous levels in the pixels' units, then the dense pass (LayerDenoise.hlsl)
+            static const char* const kLevelNames[4] = { "r.refl.layer.filter0", "r.refl.layer.filter1", "r.refl.layer.filter2", "r.refl.layer.filter.dense" };
+            for (uint32_t level = 0; level < 4; ++level)
             {
                 const TextureRef inS = newStochastic, inR = newResidual, outS = ping[level & 1][0], outR = ping[level & 1][1];
                 g.addPass(kLevelNames[level], QueueType::Compute,
@@ -1224,9 +1379,11 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                               b.use(outS, Use::UavCompute);
                               b.use(outR, Use::UavCompute);
                           },
-                          [&shaders, inS, inR, layerGuide, outS, outR, width, height, focal, level, frameConstants, mirrorLobe = s.layerMirrorLobe](PassContext& c) {
-                              const uint32_t k[12] = { c.srv(inS), c.srv(inR), c.srv(layerGuide), 1u << level, c.uav(outS), c.uav(outR), width, height, asU(focal),
-                                                       mirrorLobe ? 1u : 0u, 0, 0 };
+                          [&shaders, inS, inR, layerGuide, outS, outR, width, height, focal, level, frameConstants,
+                           flags = (s.layerMirrorLobe ? 1u : 0u) | (s.layerCrossMode ? 2u : 0u)](PassContext& c) {
+                              const bool dense = level == 3;
+                              const uint32_t k[12] = { c.srv(inS), c.srv(inR), c.srv(layerGuide), dense ? 1u : 1u << level, c.uav(outS), c.uav(outR), width, height, asU(focal),
+                                                       flags, dense ? 1u : 0u, 0 };
                               c.cmd->SetPipelineState(shaders.compute("Passes/Reconstruct/LayerDenoise"));
                               c.computeConstants(k, 12);
                               c.bindFrameConstants(frameConstants);
@@ -1309,6 +1466,99 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       c.cmd->SetPipelineState(shaders.compute("Passes/Reconstruct/LayerCompose"));
                       c.computeConstants(k, 12);
                       c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                  });
+    }
+    else if (lumen)
+    {
+        // The ray-reuse pipeline (ReflectionReuse.hlsli): resolve over neighbour rays, time accumulation, bilateral filter.
+        // ReflectionResolve above left each traced pixel's own ray value and the planar mirrors in view.reflection; the
+        // filter pass replaces the traced pixels with the pipeline's value and their share of the specular light.
+        if (fc.scene.revision() != m_accumSceneRevision || fc.frame.discontinuity != 0) m_accumReset = true;
+        m_accumSceneRevision = fc.scene.revision();
+        const uint32_t prev = m_accumParity, next = m_accumParity ^ 1u;
+        m_accumParity = next;
+        auto import = [&](ComPtr<ID3D12Resource>& r, const char* name, DXGI_FORMAT format) {
+            return g.importTexture(r.Get(), { name, width, height, 1, 1, format }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        };
+        const TextureRef prevValue = import(m_layerStochastic[prev], "R reflection reuse history (previous)", DXGI_FORMAT_R16G16B16A16_FLOAT);
+        const TextureRef prevFrames = import(m_layerResidual[prev], "R reflection reuse frames (previous)", DXGI_FORMAT_R16G16B16A16_FLOAT);
+        const TextureRef prevKeys = import(m_layerKeys[prev], "R reflection reuse keys (previous)", DXGI_FORMAT_R32G32_UINT);
+        const TextureRef nextValue = import(m_layerStochastic[next], "R reflection reuse history", DXGI_FORMAT_R16G16B16A16_FLOAT);
+        const TextureRef nextFrames = import(m_layerResidual[next], "R reflection reuse frames", DXGI_FORMAT_R16G16B16A16_FLOAT);
+        const TextureRef nextKeys = import(m_layerKeys[next], "R reflection reuse keys", DXGI_FORMAT_R32G32_UINT);
+        const TextureRef resolved = g.createTexture({ "R reflection reuse resolved", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+        const TextureRef visId = main.visId;
+        const BufferRef visibleClusters = main.visibleClusters;
+        const bool motion = visId.valid() && visibleClusters.valid();
+        const uint32_t noHistory = (m_accumReset || !s.lumenTemporal) ? 1u : 0u;
+        m_accumReset = false;
+        m_prevCamera = main.view.position;
+        const uint32_t reuseFrame = (uint32_t)fc.frame.frameIndex;
+        g.addPass("r.refl.reuse.resolve", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(modes, Use::SrvCompute);
+                      b.use(results, Use::SrvCompute);
+                      b.use(depth, Use::SrvCompute);
+                      b.use(gbuffer, Use::SrvCompute);
+                      b.use(reflection, Use::SrvCompute);
+                      b.use(resolved, Use::UavCompute);
+                  },
+                  [&shaders, modes, results, depth, gbuffer, reflection, resolved, width, height, tilesX, tilesY, frameConstants, reuseFrame, s](PassContext& c) {
+                      const uint32_t k[16] = { c.srv(modes), c.srv(results), c.srv(depth), c.srv(gbuffer), c.srv(reflection), c.uav(resolved), height, reuseFrame,
+                                               width, height, s.lumenReconstructionSamples, s.lumenReconstruction ? 0u : 1u,
+                                               asU(s.lumenReconstructionRadius), asU(s.lumenMaxRayIntensity), asU(s.lumenTonemapRange), 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionReuseResolve"));
+                      c.computeConstants(k, 16);
+                      c.bindFrameConstants(frameConstants);
+                      c.cmd->Dispatch(tilesX, tilesY, 1);
+                  });
+        g.addPass("r.refl.reuse.temporal", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(resolved, Use::SrvCompute);
+                      b.use(depth, Use::SrvCompute);
+                      b.use(gbuffer, Use::SrvCompute);
+                      if (motion)
+                      {
+                          b.use(visId, Use::SrvCompute);
+                          b.use(visibleClusters, Use::SrvCompute);
+                      }
+                      b.use(prevValue, Use::SrvCompute);
+                      b.use(prevFrames, Use::SrvCompute);
+                      b.use(prevKeys, Use::SrvCompute);
+                      b.use(nextValue, Use::UavCompute);
+                      b.use(nextFrames, Use::UavCompute);
+                      b.use(nextKeys, Use::UavCompute);
+                  },
+                  [&shaders, resolved, depth, gbuffer, visId, visibleClusters, motion, prevValue, prevFrames, prevKeys, nextValue, nextFrames, nextKeys, width, height,
+                   noHistory, frameConstants, reuseFrame, s](PassContext& c) {
+                      const uint32_t k[20] = { c.srv(resolved), c.srv(depth), c.srv(gbuffer), motion ? c.srv(visId) : 0xFFFFFFFFu,
+                                               motion ? c.srv(visibleClusters) : 0xFFFFFFFFu, c.srv(prevValue), c.srv(prevFrames), c.srv(prevKeys),
+                                               c.uav(nextValue), c.uav(nextFrames), c.uav(nextKeys), noHistory,
+                                               width, height, asU(s.lumenTemporalMaxFrames), asU(s.lumenClampScale),
+                                               asU(s.lumenTonemapRange), asU(s.lumenDistanceThreshold), reuseFrame, 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionReuseTemporal"));
+                      c.computeConstants(k, 20);
+                      c.bindFrameConstants(frameConstants);
+                      c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                  });
+        g.addPass("r.refl.reuse.filter", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(nextValue, Use::SrvCompute);
+                      b.use(nextFrames, Use::SrvCompute);
+                      b.use(depth, Use::SrvCompute);
+                      b.use(gbuffer, Use::SrvCompute);
+                      b.use(reflection, Use::UavCompute);
+                      b.use(modes, Use::SrvCompute);
+                  },
+                  [&shaders, nextValue, nextFrames, depth, gbuffer, reflection, modes, width, height, tilesX, tilesY, frameConstants, reuseFrame, s](PassContext& c) {
+                      const uint32_t k[20] = { c.srv(nextValue), c.srv(nextFrames), c.srv(depth), c.srv(gbuffer), c.uav(reflection), c.srv(modes), height, reuseFrame,
+                                               width, height, s.lumenBilateralSamples, (s.lumenBilateral ? 0u : 1u) | (s.lumenDisocclusionTonemap ? 0u : 2u),
+                                               asU(s.lumenBilateralRadius), asU(s.lumenBilateralDepthWeight), asU(s.lumenDisocclusionFrames), asU(s.lumenTemporalMaxFrames),
+                                               asU(s.lumenMaxRoughness), asU(s.lumenFadeLength), asU(s.lumenTonemapRange), 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionReuseFilter"));
+                      c.computeConstants(k, 20);
+                      c.bindFrameConstants(frameConstants);
+                      c.cmd->Dispatch(tilesX, tilesY, 1);
                   });
     }
     else if (main.visId.valid() && main.visibleClusters.valid())

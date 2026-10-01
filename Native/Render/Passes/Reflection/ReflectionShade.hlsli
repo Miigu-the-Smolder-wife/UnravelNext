@@ -23,6 +23,7 @@
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
 #include "Passes/GI/GiAccPool.hlsli"
+#include "Passes/SurfaceCache/SurfaceCache.hlsli"
 
 // Motion of a hit since the previous tick, in units of the ray's footprint there: |x - x_prev| / footprint, x_prev the
 // same barycentric point of the triangle's previous-tick vertices (deformed instances: the pool's per-vertex world -
@@ -110,6 +111,7 @@ ShadowSrvs reflShadowSrvs()
 #define REFL_HIT_CONE_LOBES 1u
 #define REFL_HIT_ORIENTED 2u
 #define REFL_HIT_STRICT_READ 4u
+#define REFL_HIT_SC_VIEW 8u  // diagnostics (reflection.lumen_surface_cache_view): the hit's value is its surface cache state
 static uint g_reflHitFlags = 0;
 // The GI hit accumulator pool (GiAccPool.hlsli; RENDERER_REDESIGN_V2 12.1 / 12.8), UNX_NONE: none - set with the flags
 // from the rays header (word 8). A hit's diffuse direct light (sun and the local-light sample on the hit's diffuse and
@@ -126,6 +128,13 @@ static uint g_reflHitFlags = 0;
 // capacity has grown) therefore keep the point value: the same expectation, the point value's variance. To remove: the
 // control variate and the job's combination out of that library (the combine pass can finish its jobs), about 20 KB.
 static uint g_reflAccPool = UNX_NONE;
+// The surface cache (Passes/SurfaceCache/SurfaceCache.hlsli; the rays header's word 9), UNX_NONE: not used. With it a hit
+// marks its cell (the cell stays alive and lit every frame from then on) and, where the cell has lighting, takes its
+// local-light and bounce irradiance from the cell: no one-light sample, no cache lookup noise - the hit's light is what
+// the cell accumulated, as a Lumen reflection ray reads the surface cache at its hit. The hit keeps its own material
+// (textures at the ray's footprint), emission and sun term. Until the cell is lit (one frame after its first mark) the
+// hit is shaded as before. Compiled out with REFL_NO_ACCUMULATOR (the inline G library: no room).
+static uint g_reflSurfaceCache = UNX_NONE;
 
 // Local lights (HitLocalLights.hlsli): one next-event sample drawn with localSeed; its visibility is localVisible (the
 // compute path: ReflectionLocalShadow traced it before, same seed and hit point) or, with REFL_LOCAL_TRACE (the ray
@@ -261,6 +270,34 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
             if (misses) cache.InterlockedAdd(GI_H_STAT_HIT_MISSES, misses);
         }
     }
+    bool fromSurfaceCache = false;
+#if !REFL_NO_ACCUMULATOR
+    if (g_reflSurfaceCache != UNX_NONE && materialClass(m) != MATERIAL_FOLIAGE)
+    {
+        RWByteAddressBuffer surfaceCache = ResourceDescriptorHeap[g_reflSurfaceCache];
+        const ScLayout layout = scLayout(surfaceCache);
+        const float3 face = dot(s.geometricNormal, direction) > 0 ? -s.geometricNormal : s.geometricNormal;
+        const float3 bounceAlbedo = saturate(m.baseColor * (1 - m.metallic) + 0.45 * lerp(float3(0.04, 0.04, 0.04), m.baseColor, m.metallic));
+        scMark(surfaceCache, layout, s.position, face, bounceAlbedo, m.emissive);
+        const ScSample cell = scRead(surfaceCache, layout, s.position, face);
+        if (g_reflHitFlags & REFL_HIT_SC_VIEW)
+        {
+            // r: 16 = the hit found no lit cell, g: 16 = it found one, b: lit cells / 65536 (the same everywhere)
+            o.radiance = float3(cell.valid ? 0.0 : 16.0, cell.valid ? 16.0 : 0.0, surfaceCache.Load(8) / 65536.0);
+            return o;
+        }
+        if (cell.valid)
+        {
+            L.irradiance = cell.direct + cell.indirect;
+            L.specularRadiance = L.irradiance / MODEL_PI;  // (the lobe at the hit sees the cell's light as uniform)
+            L.local = 0;
+            localE = 0;
+            localMu = 0;
+            o.noData = false;
+            fromSurfaceCache = true;
+        }
+    }
+#endif
     const float3 v = -direction;
     L.sunIlluminance = 0;
     L.sunVisibility = 0;
@@ -323,7 +360,7 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     o.radiance = rtHitRadianceSplit(m, s.normal, v, L, coneSpread, split, sunFull, parts);
     if (split) o.sunTerm = sunFull * splitScale;
 #if !REFL_NO_ACCUMULATOR
-    if (g_reflAccPool != UNX_NONE && materialClass(m) != MATERIAL_FOLIAGE)
+    if (g_reflAccPool != UNX_NONE && materialClass(m) != MATERIAL_FOLIAGE && !fromSurfaceCache)
     {
         ByteAddressBuffer pool = ResourceDescriptorHeap[g_reflAccPool];
         GiAccMeans means;

@@ -18,7 +18,11 @@ def main():
     log = os.path.join(ROOT, "Results", "Local", "Refl", name + ".queue.log")
     with open(log, "w", encoding="utf-8") as f:
         f.write(f"queue {name}: {len(args)} pieces\n")
+    queue_kind = kind
     for piece in args:
+        kind = queue_kind
+        if piece.startswith("timing:"):  # a single piece of the other kind inside a queue
+            kind, piece = "timing", piece[len("timing:"):]
         cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", os.path.join(ROOT, "Tools", "CI", "GpuLock.ps1"), "-Track", "S2", "-Kind", kind,
                "--"] + shlex.split(piece, posix=False)
         t0 = time.time()
