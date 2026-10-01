@@ -37,6 +37,13 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     uint32_t statsLogFrames = 0;     // reflection.stats_log_frames: log the GI/reflection counters every N frames (0 = off)
     uint32_t temporalHistoryMax = 0; // reflection.temporal_history_max: running mean over at most this many frames
     float temporalLobeShift = 0;     // reflection.temporal_lobe_shift: reflected-direction travel over the window / lobe
+    // Reconstruction layers (RENDERER_REDESIGN_V2 1.2, P2; Passes/Reconstruct): the values split into base + residual +
+    // albedo x stochastic, the layers rebuilt every frame (layerFilter: LayerDenoise) with a short history
+    // (layerHistoryFrames > 1: LayerTemporal, in place of ReflectionAccumulate) and composed back (LayerCompose).
+    bool layers = false;              // reflection.layers
+    bool layerFilter = false;         // reflection.layer_filter: the spatial reconstruction (off: the split and composition alone)
+    uint32_t layerHistoryFrames = 0;  // reflection.layer_history_frames (1 = no history)
+    uint32_t layerView = 0;           // reflection.layer_view: diagnostics (LayerCompose.hlsl), 0 in the shipped configuration
     // debug.deterministic: the planar view / ray choice from the priors alone (planarRayNs, the view's prior a + b x),
     // never from measured GPU times (they differ between runs, and a plane drawn by a camera or by rays differs in value).
     bool deterministic = false;
@@ -127,6 +134,9 @@ private:
     // (scene instance + 1, linear depth). m_accumReset: the next frame ignores the history (new textures, a scene
     // revision, a discontinuity).
     ComPtr<ID3D12Resource> m_accum[2], m_accumKeys[2];
+    // The layers' history (LayerTemporal.hlsl), ping-pong by m_accumParity as the above (which the layers replace):
+    // RGBA16F stochastic and residual (mean, frames), RG32_UINT keys.
+    ComPtr<ID3D12Resource> m_layerStochastic[2], m_layerResidual[2], m_layerKeys[2];
     uint32_t m_accumParity = 0, m_accumSceneRevision = 0;
     bool m_accumReset = true;
     float3 m_prevCamera{};

@@ -22,11 +22,13 @@ float reflSunVisibility(RtSceneSrvs scene, float3 origin, uint seed)
 
 // localSeed: the local-light sample's seed, sunSeed: the sun shadow ray's (reflLocalSeed, reflSunSeed of the job and ray:
 // the same draws as the split passes, so a job gets the same value on either path).
+// layer: the ray's reconstruction layer record (ReflectionInternal.hlsli reflLayerRay, as ReflectionShadeRays stores it).
 float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h, RayDesc r, float coneWidth, float coneSpread, uint localSeed, uint sunSeed,
-                       out float hitDistance, out float motion)
+                       out float hitDistance, out float motion, out uint4 layer)
 {
     RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_REFLECTION | RT_MASK_EMITTER);
     motion = 0;
+    layer = reflLayerRay(0, 1, -r.Direction, 0, false);
     if (hit.t < 0)
     {
         hitDistance = 65000;
@@ -42,6 +44,7 @@ float3 reflHitRadiance(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader h,
 #endif
     const ReflHitShade o = reflShadeHit(scene, cache, h, hit, r.Origin, r.Direction, coneWidth, coneSpread, localSeed, false);
     motion = o.motion;
+    layer = reflLayerRay(o.stochastic, o.albedo, o.hitNormal, hit.instance, o.surface, o.noData);
     float visibility = 0;
     if (o.needsPenumbra)
         visibility = shadowSunPenumbraDeferred(reflShadowSrvs(), o.shadowOrigin, o.penumbraNormal, o.penumbraLevel, o.penumbraReach);

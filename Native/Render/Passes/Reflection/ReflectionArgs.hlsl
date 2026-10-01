@@ -1,6 +1,6 @@
 // unx-kernel: cs_6_6 main
 // Writes this frame's job count into the indirect DispatchRays descriptions (Width; Height = Depth = 1) and resets the
-// rays buffer's header (P[1] = { rays UAV, capacity }).
+// rays buffer's header (P[1] = { rays UAV, capacity, ray layers UAV, job layers UAV }: ReflectionRay.hlsli).
 // P[0] = { arguments UAV (raw: uint job counter at 0, descriptions from byte 16), description count, stride bytes,
 //          Width offset in a description }
 #include "Bindless.hlsli"
@@ -15,5 +15,5 @@ void main()
     // no penumbra hits.
     RWByteAddressBuffer rays = ResourceDescriptorHeap[P[1].x];
     rays.Store4(0, uint4(0, P[1].y, 0, jobs));
-    rays.Store4(16, uint4(0, 0, 0, 0));
+    rays.Store4(16, uint4(0, P[1].z, P[1].w, 0));  // the layer buffers' UAVs (reflection.layers; UNX_NONE: off)
 }

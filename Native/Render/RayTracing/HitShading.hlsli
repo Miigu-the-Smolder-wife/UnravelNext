@@ -76,7 +76,24 @@ struct RtHitLighting
 // sheen as ShadeOpaque LAYERED 2. The coat lobe is widened by the hit's cone (HitLayers.hlsli g_rtHitCone, GI texel rays: its half-width)
 // as the base lobe is for local lights; the coat lobe's incident radiance is the base lobe's mirror-direction radiance
 // (the hit has no second cone lookup).
-float3 rtHitRadianceParts(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float pixelAngle, bool wantSun, out float3 sunFull)
+// The split for the reconstruction layers (RENDERER_REDESIGN_V2 1.2, P2): the returned radiance = deterministic part +
+// 'stochastic', where
+//   deterministic  emission and the sun term (the direct view's estimators: no noise but the off-screen shadow ray's
+//                  penumbra) - the hit's identity, which no spatial filter may touch;
+//   stochastic     the cache's light at the hit (diffuse and specular indirect: young cells, cell-sized errors) and the
+//                  one-sample local-light estimate (relative variance ~ the lights reaching the hit - 1): the terms the
+//                  layer L_rs reconstructs over neighbouring hits of the same surface;
+//   albedo         the hit's directional reflectance (diffuse albedo + specular albedo toward v, base layer): stochastic /
+//                  albedo is free of the hit's texture detail (exactly for the diffuse part under any light; for the
+//                  specular part up to the lobe's shape), so the layer filter does not blur the reflected image's
+//                  textures. A demodulation key only: the composition multiplies it back, so its model error (the coat
+//                  and sheen are left out) changes what the filter averages, never the unfiltered value.
+struct RtHitSplit
+{
+    float3 stochastic;
+    float3 albedo;
+};
+float3 rtHitRadianceSplit(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float pixelAngle, bool wantSun, out float3 sunFull, out RtHitSplit split)
 {
     ModelSurface s;
     s.cls = m.classFlags & 0xFFu;
@@ -125,7 +142,14 @@ float3 rtHitRadianceParts(GpuMaterial m, float3 n, float3 v, RtHitLighting L, fl
         }
     }
     const float3 sun = sunFull * L.sunVisibility;  // fractional in penumbrae (the VSM estimate); was only tested > 0, giving full sun there
+    split.stochastic = cached + L.local;
+    split.albedo = diffuseAlbedo * MODEL_PI + shSpecularAlbedo(f0, NoV, s.roughness);
     return m.emissive + sun + cached + L.local;
+}
+float3 rtHitRadianceParts(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float pixelAngle, bool wantSun, out float3 sunFull)
+{
+    RtHitSplit split;
+    return rtHitRadianceSplit(m, n, v, L, pixelAngle, wantSun, sunFull, split);
 }
 float3 rtHitRadiance(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float pixelAngle)
 {

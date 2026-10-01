@@ -69,6 +69,11 @@ struct ReflHitShade
     float3 penumbraNormal;
     uint penumbraLevel;
     float penumbraReach;
+    // Reconstruction layers (HitShading.hlsli rtHitRadianceSplit): the part of 'radiance' that is the hit's stochastic
+    // light, its demodulation albedo and the hit's shading normal; surface = false: an emitter, or no value (all in base).
+    float3 stochastic, albedo, hitNormal;
+    bool surface;
+    bool noData;  // the cache lookup at the hit found nothing (its indirect light is 0)
 };
 
 // This frame's ShadowSrvs (P[5].z raw buffer; P[5].z = UNX_NONE: none).
@@ -98,6 +103,11 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     o.penumbraNormal = 0;
     o.penumbraLevel = 0;
     o.penumbraReach = 0;
+    o.stochastic = 0;
+    o.albedo = 1;
+    o.hitNormal = -direction;
+    o.surface = false;
+    o.noData = false;
     const uint experiment = P[5].x >> 24;
     if (hit.instance == RT_INSTANCE_EMITTER)
     {
@@ -181,6 +191,7 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
         giCacheLevels(cache, h, s.position, s.normal, reflect(direction, s.normal), true, footprintLevel, sumE, sumL, weight);
         L.irradiance = weight > 0 ? sumE / weight : 0;
         L.specularRadiance = weight > 0 ? sumL / weight : 0;
+        o.noData = weight <= 0;
         // Diagnostics: lookups and misses (no updated cell at any level searched), one atomic per wave.
         const uint lookups = WaveActiveCountBits(true), misses = WaveActiveCountBits(weight <= 0);
         if (WaveIsFirstLane())
@@ -247,8 +258,13 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     // the penumbra deferral, 1db06e4 [measured]).
     if (split) L.sunVisibility = 0;
     float3 sunFull;
-    o.radiance = rtHitRadianceParts(m, s.normal, v, L, coneSpread, split, sunFull);
+    RtHitSplit parts;
+    o.radiance = rtHitRadianceSplit(m, s.normal, v, L, coneSpread, split, sunFull, parts);
     if (split) o.sunTerm = sunFull * splitScale;
+    o.stochastic = parts.stochastic;
+    o.albedo = parts.albedo;
+    o.hitNormal = s.normal;
+    o.surface = true;
     return o;
 }
 

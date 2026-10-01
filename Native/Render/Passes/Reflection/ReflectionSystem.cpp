@@ -89,6 +89,10 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.planarViewNsPerPixel = (float)q.number("reflection.planar_view_ns_per_px");
     s.temporalHistoryMax = (uint32_t)q.integer("reflection.temporal_history_max");
     s.temporalLobeShift = (float)q.number("reflection.temporal_lobe_shift");
+    s.layers = q.boolean("reflection.layers");
+    s.layerFilter = q.boolean("reflection.layer_filter");
+    s.layerHistoryFrames = (uint32_t)std::max<int64_t>(q.integer("reflection.layer_history_frames"), 1);
+    s.layerView = (uint32_t)q.integer("reflection.layer_view");
     s.deterministic = q.has("debug.deterministic") && q.boolean("debug.deterministic");
     s.planarRayNs = (float)q.number("reflection.planar_ray_ns");
     return s;
@@ -386,6 +390,9 @@ ReflectionSystem::~ReflectionSystem()
     {
         m_device.deferRelease(m_accum[k]);
         m_device.deferRelease(m_accumKeys[k]);
+        m_device.deferRelease(m_layerStochastic[k]);
+        m_device.deferRelease(m_layerResidual[k]);
+        m_device.deferRelease(m_layerKeys[k]);
     }
     if (m_planarRing) m_planarRing->Unmap(0, nullptr);
     m_device.deferRelease(m_planarRing);
@@ -418,6 +425,28 @@ void ReflectionSystem::ensureHistory(uint32_t width, uint32_t height)
     {
         if (m_accum[k]) m_device.deferRelease(m_accum[k]);
         if (m_accumKeys[k]) m_device.deferRelease(m_accumKeys[k]);
+        if (m_layerStochastic[k]) m_device.deferRelease(m_layerStochastic[k]);
+        if (m_layerResidual[k]) m_device.deferRelease(m_layerResidual[k]);
+        if (m_layerKeys[k]) m_device.deferRelease(m_layerKeys[k]);
+        m_accum[k] = nullptr, m_accumKeys[k] = nullptr, m_layerStochastic[k] = nullptr, m_layerResidual[k] = nullptr, m_layerKeys[k] = nullptr;
+        if (m_settings.layers)
+        {
+            // The layers' history in place of the value's (LayerTemporal.hlsl); none when the layers keep no history.
+            if (m_settings.layerHistoryFrames <= 1) continue;
+            ComPtr<ID3D12Resource>* targets[3] = { &m_layerStochastic[k], &m_layerResidual[k], &m_layerKeys[k] };
+            const wchar_t* names[3][2] = { { L"R reflection layer history stochastic 0", L"R reflection layer history stochastic 1" },
+                                           { L"R reflection layer history residual 0", L"R reflection layer history residual 1" },
+                                           { L"R reflection layer history keys 0", L"R reflection layer history keys 1" } };
+            for (int t = 0; t < 3; ++t)
+            {
+                d.Format = t == 2 ? DXGI_FORMAT_R32G32_UINT : DXGI_FORMAT_R16G16B16A16_FLOAT;
+                check(m_device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
+                                                               IID_PPV_ARGS(targets[t]->ReleaseAndGetAddressOf())),
+                      "reflection layer history");
+                (*targets[t])->SetName(names[t][k]);
+            }
+            continue;
+        }
         d.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
         check(m_device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
                                                        IID_PPV_ARGS(&m_accum[k])),
@@ -565,6 +594,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                                                D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     const BufferRef jobs = g.createBuffer({ "R reflection jobs", (uint64_t)width * height * 4, 4 });
     const BufferRef results = g.createBuffer({ "R reflection results", (uint64_t)width * height * 12, 12 });
+    // Reconstruction layers (ReflectionInternal.hlsli): per-job records beside the results, per-ray records beside the rays.
+    const bool layers = s.layers;
+    const BufferRef jobLayers = layers ? g.createBuffer({ "R reflection job layers", (uint64_t)width * height * 24, 0 }) : BufferRef{};  // REFL_LAYER_JOB_BYTES
     const BufferRef args = g.importBuffer(m_arguments.Get(), { "R reflection dispatch arguments", kArgumentsBytes, 0 });
     const BufferRef cache = fc.resources.giCache;
     const D3D12_GPU_VIRTUAL_ADDRESS frameConstants = main.frameConstants;
@@ -878,13 +910,21 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const uint32_t rayCapacity = (s.experimentDisable & 64) ? 0 : m_rayCapacity;
     static_assert(32 + (1ull << 24) * 60 < (1ull << 30), "the rays buffer stays under 1 GiB");  // 64: every job inline (A/B of the split)
     const BufferRef raysBuffer = g.createBuffer({ "R reflection rays", 32 + (uint64_t)rayCapacity * 60, 0 });  // REFL_RAYS_HEADER + REFL_RAYS_SLOT_BYTES
+    const BufferRef rayLayers = layers ? g.createBuffer({ "R reflection ray layers", std::max<uint64_t>((uint64_t)rayCapacity * 16, 16), 0 }) : BufferRef{};  // REFL_LAYER_RAY_BYTES
     g.addPass("r.refl.args", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(args, Use::UavCompute);
                   b.use(raysBuffer, Use::UavCompute);
+                  if (layers)
+                  {
+                      b.use(rayLayers, Use::UavCompute);
+                      b.use(jobLayers, Use::UavCompute);
+                  }
               },
-              [&shaders, args, raysBuffer, rayCapacity](PassContext& c) {
-                  const uint32_t k[8] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(raysBuffer), rayCapacity, 0, 0 };
+              [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers](PassContext& c) {
+                  // (the layer buffers' UAVs into the rays header: the shade, combine and inline passes find them there)
+                  const uint32_t k[8] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(raysBuffer), rayCapacity,
+                                          layers ? c.uav(rayLayers) : 0xFFFFFFFFu, layers ? c.uav(jobLayers) : 0xFFFFFFFFu };
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionArgs"));
                   c.computeConstants(k, 8);
                   c.cmd->Dispatch(1, 1, 1);
@@ -959,6 +999,11 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         b.use(depth, Use::SrvGraphics);
         b.use(gbuffer, Use::SrvGraphics);
         if (gi) b.use(cache, Use::UavGraphics);
+        if (gi && layers)  // (the passes that shade or combine: the layer records)
+        {
+            b.use(rayLayers, Use::UavGraphics);
+            b.use(jobLayers, Use::UavGraphics);
+        }
         b.use(results, Use::UavGraphics);
         if (exactCounts.valid()) b.use(exactCounts, Use::UavGraphics);
         rt::RayScene::declareVsm(b, vsm);
@@ -1090,6 +1135,14 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
               });
     rays.recordExactReadback(fc);  // after the trace: the counts pick next frames' exact set
     const uint32_t planarCount = planar.views;
+    // The pixels' layers (Passes/Reconstruct/LayerCommon.hlsli): the resolve writes them beside the value.
+    TextureRef layerStochastic, layerResidual, layerGuide;
+    if (layers)
+    {
+        layerStochastic = g.createTexture({ "R reflection layer stochastic", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+        layerResidual = g.createTexture({ "R reflection layer residual", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+        layerGuide = g.createTexture({ "R reflection layer guide", width, height, 1, 1, DXGI_FORMAT_R32G32B32A32_UINT });
+    }
     g.addPass("r.refl.resolve", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(modes, Use::SrvCompute);
@@ -1099,18 +1152,135 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   for (uint32_t k = 0; k < planarCount; ++k) b.use(planarColor[k], Use::SrvCompute);
                   b.use(reflection, Use::UavCompute);
                   b.use(history, Use::UavCompute);
+                  if (layers)
+                  {
+                      b.use(jobLayers, Use::SrvCompute);
+                      b.use(layerStochastic, Use::UavCompute);
+                      b.use(layerResidual, Use::UavCompute);
+                      b.use(layerGuide, Use::UavCompute);
+                  }
               },
               [&shaders, modes, results, depth, gbuffer, reflection, history, width, height, tilesX, tilesY, frameConstants, planarSrv, planarOffset, planarCount,
-               planarColor](PassContext& c) {
-                  uint32_t k[16] = { c.srv(modes), c.srv(results), c.srv(depth), c.srv(gbuffer), c.uav(reflection), c.uav(history), height, planarSrv,
-                                     width, height, planarOffset, 0, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
+               planarColor, layers, jobLayers, layerStochastic, layerResidual, layerGuide](PassContext& c) {
+                  uint32_t k[20] = { c.srv(modes), c.srv(results), c.srv(depth), c.srv(gbuffer), c.uav(reflection), c.uav(history), height, planarSrv,
+                                     width, height, planarOffset, 0, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
                   for (uint32_t v = 0; v < planarCount; ++v) k[12 + v] = c.srv(planarColor[v]);
+                  if (layers) k[16] = c.srv(jobLayers), k[17] = c.uav(layerStochastic), k[18] = c.uav(layerResidual), k[19] = c.uav(layerGuide);
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionResolve"));
-                  c.computeConstants(k, 16);
+                  c.computeConstants(k, 20);
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch(tilesX, tilesY, 1);
               });
-    if (main.visId.valid() && main.visibleClusters.valid())
+    if (layers)
+    {
+        // Reconstruction (RENDERER_REDESIGN_V2 1.2): the layers' spatial filter every frame (three a-trous levels), the
+        // short history where V's vis id gives the surfaces' motion, and the composition back into view.reflection.
+        TextureRef newStochastic = layerStochastic, newResidual = layerResidual;
+        if (s.layerFilter)
+        {
+            TextureRef ping[2][2];
+            for (int p = 0; p < 2; ++p)
+            {
+                ping[p][0] = g.createTexture({ p ? "R reflection layer stochastic filter 1" : "R reflection layer stochastic filter 0", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+                ping[p][1] = g.createTexture({ p ? "R reflection layer residual filter 1" : "R reflection layer residual filter 0", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+            }
+            static const char* const kLevelNames[3] = { "r.refl.layer.filter0", "r.refl.layer.filter1", "r.refl.layer.filter2" };
+            for (uint32_t level = 0; level < 3; ++level)
+            {
+                const TextureRef inS = newStochastic, inR = newResidual, outS = ping[level & 1][0], outR = ping[level & 1][1];
+                g.addPass(kLevelNames[level], QueueType::Compute,
+                          [&](PassBuilder& b) {
+                              b.use(inS, Use::SrvCompute);
+                              b.use(inR, Use::SrvCompute);
+                              b.use(layerGuide, Use::SrvCompute);
+                              b.use(outS, Use::UavCompute);
+                              b.use(outR, Use::UavCompute);
+                          },
+                          [&shaders, inS, inR, layerGuide, outS, outR, width, height, focal, level, frameConstants](PassContext& c) {
+                              const uint32_t k[12] = { c.srv(inS), c.srv(inR), c.srv(layerGuide), 1u << level, c.uav(outS), c.uav(outR), width, height, asU(focal), level, 0, 0 };
+                              c.cmd->SetPipelineState(shaders.compute("Passes/Reconstruct/LayerDenoise"));
+                              c.computeConstants(k, 12);
+                              c.bindFrameConstants(frameConstants);
+                              c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                          });
+                newStochastic = outS;
+                newResidual = outR;
+            }
+        }
+        if (s.layerHistoryFrames > 1 && main.visId.valid() && main.visibleClusters.valid())
+        {
+            // Reset as ReflectionAccumulate's history: new textures, a scene revision, a history discontinuity.
+            if (fc.scene.revision() != m_accumSceneRevision || fc.frame.discontinuity != 0) m_accumReset = true;
+            m_accumSceneRevision = fc.scene.revision();
+            const uint32_t prev = m_accumParity, next = m_accumParity ^ 1u;
+            m_accumParity = next;
+            auto import = [&](ComPtr<ID3D12Resource>& r, const char* name, DXGI_FORMAT format) {
+                return g.importTexture(r.Get(), { name, width, height, 1, 1, format }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+            };
+            const TextureRef prevS = import(m_layerStochastic[prev], "R reflection layer history stochastic (previous)", DXGI_FORMAT_R16G16B16A16_FLOAT);
+            const TextureRef prevR = import(m_layerResidual[prev], "R reflection layer history residual (previous)", DXGI_FORMAT_R16G16B16A16_FLOAT);
+            const TextureRef prevKeys = import(m_layerKeys[prev], "R reflection layer history keys (previous)", DXGI_FORMAT_R32G32_UINT);
+            const TextureRef nextS = import(m_layerStochastic[next], "R reflection layer history stochastic", DXGI_FORMAT_R16G16B16A16_FLOAT);
+            const TextureRef nextR = import(m_layerResidual[next], "R reflection layer history residual", DXGI_FORMAT_R16G16B16A16_FLOAT);
+            const TextureRef nextKeys = import(m_layerKeys[next], "R reflection layer history keys", DXGI_FORMAT_R32G32_UINT);
+            const TextureRef visId = main.visId;
+            const BufferRef visibleClusters = main.visibleClusters;
+            const uint32_t flags = m_accumReset ? 1u : 0u;
+            m_accumReset = false;
+            const float3 prevCamera = m_prevCamera;
+            m_prevCamera = main.view.position;
+            const float pixelAngle = 2.0f * std::tan(main.view.verticalFov * 0.5f) / height;
+            const TextureRef inS = newStochastic, inR = newResidual;
+            g.addPass("r.refl.layer.temporal", QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          b.use(inS, Use::SrvCompute);
+                          b.use(inR, Use::SrvCompute);
+                          b.use(layerGuide, Use::SrvCompute);
+                          b.use(visId, Use::SrvCompute);
+                          b.use(visibleClusters, Use::SrvCompute);
+                          b.use(prevS, Use::SrvCompute);
+                          b.use(prevR, Use::SrvCompute);
+                          b.use(prevKeys, Use::SrvCompute);
+                          b.use(nextS, Use::UavCompute);
+                          b.use(nextR, Use::UavCompute);
+                          b.use(nextKeys, Use::UavCompute);
+                          b.use(history, Use::SrvCompute);
+                      },
+                      [&shaders, inS, inR, layerGuide, visId, visibleClusters, prevS, prevR, prevKeys, nextS, nextR, nextKeys, history, width, height, flags, prevCamera,
+                       pixelAngle, frameConstants, s](PassContext& c) {
+                          const uint32_t k[24] = { c.srv(inS), c.srv(inR), c.srv(layerGuide), c.srv(visId), c.srv(visibleClusters), c.srv(prevS), c.srv(prevR), c.srv(prevKeys),
+                                                   c.uav(nextS), c.uav(nextR), c.uav(nextKeys), s.layerHistoryFrames, width, height, asU(s.temporalLobeShift), flags,
+                                                   asU(prevCamera.x), asU(prevCamera.y), asU(prevCamera.z), asU(pixelAngle), c.srv(history), 0, 0, 0 };
+                          c.cmd->SetPipelineState(shaders.compute("Passes/Reconstruct/LayerTemporal"));
+                          c.computeConstants(k, 24);
+                          c.bindFrameConstants(frameConstants);
+                          c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                      });
+            newStochastic = nextS;
+            newResidual = nextR;
+        }
+        const TextureRef composeS = newStochastic, composeR = newResidual;
+        const bool composeOwn = composeS.id != layerStochastic.id;
+        g.addPass("r.refl.layer.compose", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(reflection, Use::UavCompute);
+                      b.use(layerGuide, Use::SrvCompute);
+                      b.use(layerStochastic, Use::SrvCompute);
+                      b.use(layerResidual, Use::SrvCompute);
+                      if (composeOwn)
+                      {
+                          b.use(composeS, Use::SrvCompute);
+                          b.use(composeR, Use::SrvCompute);
+                      }
+                  },
+                  [&shaders, reflection, layerGuide, layerStochastic, layerResidual, composeS, composeR, width, height, view = s.layerView](PassContext& c) {
+                      const uint32_t k[12] = { c.uav(reflection), c.srv(layerGuide), c.srv(layerStochastic), c.srv(layerResidual), c.srv(composeS), c.srv(composeR), width, height, view, 0, 0, 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/Reconstruct/LayerCompose"));
+                      c.computeConstants(k, 12);
+                      c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                  });
+    }
+    else if (main.visId.valid() && main.visibleClusters.valid())
     {
         // Time integration (ReflectionAccumulate.hlsl): reset on new textures, a scene revision (upload, materials) or a
         // history discontinuity (restore, camera cut); ping-pong by parity. Needs V's vis id (surface identity and exact
