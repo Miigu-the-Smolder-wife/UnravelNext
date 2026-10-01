@@ -48,6 +48,10 @@
 # slices), and waiters take turns first come, first served: timing before correctness, then by "since", then by pid. A
 # waiter acquires only when no live waiter is ahead of it. A waiter file whose pid now belongs to a process started
 # after the file's "since" (a reused pid) is stale and removed.
+# v1.85 (user question 2026-10-01 13:25: "sessions keep waiting behind R's timing"): one 31-minute timing run went ahead
+# of five waiting sessions. Turns are now first come, first served for both kinds (the kind no longer changes the
+# order; it still says whether CPU-heavy background jobs pause and how contention is judged). Rule for callers
+# (INTERFACES 3.3): one hold is at most about 10 minutes - longer batches are split and queue again between pieces.
 # Arguments are parsed by hand (no param block) so everything after "--" reaches the command unchanged.
 $ErrorActionPreference = "Stop"
 $Track = $null
@@ -824,8 +828,8 @@ function Add-History([string]$line) {
   Write-Warning "GpuLock.ps1: could not append to $history"
 }
 
-# Waiters (v1.40): .gpulock/waiting/<pid>.json while waiting; HOLD stops all. Turns (v1.83): timing before correctness,
-# then first come ("since", then pid).
+# Waiters (v1.40): .gpulock/waiting/<pid>.json while waiting; HOLD stops all. Turns (v1.85): first come ("since", then
+# pid) for both kinds; v1.83 put timing first, which let one long timing batch hold up every other session.
 $waitDir = Join-Path $lockDir "waiting"
 New-Item -ItemType Directory -Force $waitDir | Out-Null
 $waitFile = Join-Path $waitDir ("{0}.json" -f $PID)
@@ -836,7 +840,7 @@ function Write-Waiting {
   [IO.File]::WriteAllText($tmp, ($w | ConvertTo-Json -Compress), $utf8)
   if (-not [UnxGpuLockJob]::ReplaceFile($tmp, $waitFile)) { Remove-Item $tmp -ErrorAction SilentlyContinue }
 }
-function Get-Rank([string]$kind) { if ($kind -eq "timing") { return 0 } return 1 }
+function Get-Rank([string]$kind) { return 0 }  # (v1.85: one queue; v1.83 ranked timing 0, correctness 1)
 # The first live waiter whose turn comes before this one's (null: none).
 function Get-WaiterAhead {
   $rank = Get-Rank $Kind
