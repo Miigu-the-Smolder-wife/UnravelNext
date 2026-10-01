@@ -157,4 +157,61 @@ float3 rtHitRadiance(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float p
     return rtHitRadianceParts(m, n, v, L, pixelAngle, false, sunFull);
 }
 
+// A hit's diffuse direct light in the hit accumulator's light-side form (RENDERER_REDESIGN_V2 12.1; GiInternal.hlsli
+// GI_ACC_*), for GI and reflection hits alike: the arithmetic GiTrace.hlsl carries inline for its hits, as a function.
+//   A, B, C      the hit's direct irradiance terms: A = E_sun + E_local (plain surface), B the same through the coat's
+//                entry transmission, C the coat's returned light (/ pi); B = A and C = 0 without a coat;
+//   kA, kB, kC   the reader's factors: its diffuse-direct radiance toward v is kA A + kB B + kC C ('own' for the hit's
+//                own terms). A cell's means (mA, mB, mC) give the reader rtHitDirectFromMeans - its own albedo and
+//                layers on the cell's mean light.
+// eSun = the sun's illuminance x max(n.l, 0) x visibility, muS = max(n.l_sun, 0); localE = the local-light sample's
+// irradiance (weight x max(n.wi, 0), 0 when not visible), muL = max(n.wi, 0). Both terms are linear in eSun and localE:
+// a caller that learns the sun's visibility later takes the terms at visibility 0 and 1 and interpolates.
+// lambert: GiAnalytic's closed forms (no layers). Foliage is not handled (its transmission has no accumulator term).
+struct RtHitDirect
+{
+    float3 A, B, C;
+    float3 kA, kB;
+    float kC;
+    float3 own;
+};
+RtHitDirect rtHitDirectTerms(GpuMaterial m, float3 n, float3 v, float3 eSun, float muS, float3 localE, float muL, bool lambert)
+{
+    ModelSurface ms;
+    ms.cls = m.classFlags & 0xFFu;
+    ms.baseColor = m.baseColor;
+    ms.roughness = m.roughness;
+    ms.metallic = m.metallic;
+    ms.specular = m.specular;
+    ms.transmission = m.transmission;
+    ModelCoat coat = (ModelCoat)0;
+    ModelSheen sheen = (ModelSheen)0;
+    if (!lambert)
+    {
+        coat = rtHitCoat(m);
+        sheen = modelSheenOf(m);
+    }
+    RtHitDirect d;
+    d.A = eSun + localE;
+    d.B = d.A;
+    d.C = 0;
+    if (coat.cover > 0)
+    {
+        const float tS = 1 - modelCoatEms(coat, muS), tL = 1 - modelCoatEms(coat, muL);
+        d.B = tS * eSun + tL * localE;
+        d.C = (tS * eSun * modelCoatReturned(ms, coat, modelCoatRefractedCos(muS, coat.eta)) +
+               tL * localE * modelCoatReturned(ms, coat, modelCoatRefractedCos(muL, coat.eta))) / MODEL_PI;
+    }
+    const float NoV = max(dot(n, v), 1e-4);
+    const float3 albedo = m.baseColor * ((1 - m.metallic) / MODEL_PI);
+    const float plain = (1 - coat.cover) * (any(sheen.color > 0) ? modelSheenKeep(sheen, NoV) : 1.0);
+    const float coated = coat.cover > 0 ? coat.cover * (1 - modelCoatEms(coat, NoV)) / (coat.eta * coat.eta) : 0.0;
+    d.kA = plain * albedo;
+    d.kB = coated * albedo;
+    d.kC = coated;
+    d.own = plain * albedo * d.A + coated * (albedo * d.B + d.C);
+    return d;
+}
+float3 rtHitDirectFromMeans(RtHitDirect d, float3 mA, float3 mB, float3 mC) { return d.kA * mA + d.kB * mB + d.kC * mC; }
+
 #endif
