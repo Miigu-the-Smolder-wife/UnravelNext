@@ -74,6 +74,17 @@ bool nfIsNearGeometric(GpuLight l, NfRegion r, out float d)
     return least < NF_HORIZON_MARGIN;
 }
 
+// Conditions 1-2 alone (the coverage FAR field, 14.1c: the horizon is handled per record by direction bins).
+bool nfIsNearGeometricNoHorizon(GpuLight l, NfRegion r, out float d)
+{
+    const float3 v = l.position - r.centre;
+    d = max(length(v) - r.halfExtent, 1e-4);
+    const float t = 2 * r.halfExtent;
+    if (6 * t * t > NF_TOLERANCE * d * d) return true;
+    const float re = nfLightExtent(l);
+    return lightType(l) != LIGHT_RECT && re * re > NF_TOLERANCE * d * d;
+}
+
 // All five conditions. shadowLitOverRegion: the caller's verdict that the light's visibility is 1 over the whole region
 // (false for every caster until 14.3's classification exists).
 bool nfIsNear(GpuLight l, NfRegion r, bool discontinuous, bool shadowLitOverRegion, out float d)

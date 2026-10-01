@@ -1050,11 +1050,36 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             addLight("5");  // every kind 5 entry (MODE 3, one lighting kernel, retired at the DXIL limit)
             addLight("6");
         }
+        // L2c (14.1c): the coverage tiles' FAR field (CoverageTileLights.hlsl), before the composite reads it.
+        const bool covTileLights = froxelLists && fc.quality.boolean("shading.coverage_tile_lights");
+        const uint32_t covTlCapacity = (uint32_t)fc.quality.integer("shading.coverage_tile_lights_capacity");
+        const BufferRef covTlField = covTileLights ? g.createBuffer({ "m.coverage tile lights", (uint64_t)std::max(covTlCapacity, 1u) * 6176, 0 }) : BufferRef{};
+        if (covTileLights)
+        {
+            if (covTlCapacity == 0 || covTlCapacity > 65535) fail("shading.coverage_tile_lights_capacity must be in [1, 65535]");
+            ID3D12PipelineState* tlKernel = fc.shaders.compute("Passes/Lights/CoverageTileLights");
+            g.addPass("m.coverage.tilelights", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(v.coverageRecords, Use::SrvCompute);
+                          b.use(v.coverageTileList, Use::SrvCompute);
+                          b.use(v.froxelLights, Use::SrvCompute);
+                          if (r.fxLights.valid()) b.use(r.fxLights, Use::SrvCompute);
+                          b.use(covTlField, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          const uint32_t k[8] = { c.srv(v.coverageRecords), c.srv(v.coverageTileList), c.srv(v.froxelLights), c.uav(covTlField), covTlCapacity, 0, 0, 0 };
+                          c.cmd->SetPipelineState(tlKernel);
+                          c.bindFrameConstants(cb);
+                          c.computeConstants(k, 8);
+                          c.cmd->Dispatch(covTlCapacity, 1, 1);  // groups past the list's count return at once
+                      });
+        }
         // E: per listed tile and part, the light pixels' fragments walked and weighted (part 1 records the heavy pixels).
         auto addComposite = [&](uint32_t stage) {
             g.addPass(stage == 1 ? "m.coverage direct" : "m.coverage", QueueType::Graphics,
                       [&](PassBuilder& b) {
                           useShading(b);
+                          if (covTileLights) b.use(covTlField, Use::SrvCompute);  // L2c
                           if (shaded.valid()) b.use(shaded, Use::SrvCompute);
                           b.use(v.coverageTilePixels, Use::SrvCompute);
                           b.use(v.coverageTileList, Use::SrvCompute);
@@ -1082,8 +1107,10 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           k[11] = stage == 1 ? c.uav(heavy) : gpu::kNone;
                           k[21] = hcap;
                           k[22] = ccap;
+                          k[23] = covTileLights ? c.srv(covTlField) : gpu::kNone;  // P[5].w (L2c)
                           uint32_t k32[48] = {};
                           std::memcpy(k32, k, sizeof k);
+                          k32[41] = covTileLights ? covTlCapacity : 0;  // P[10].y (L2c)
                           if (stage == 2) particleConstants(c, k32 + 24);  // P[6].xy
                           else k32[24] = k32[25] = gpu::kNone;
                           fragmentConstants(c, k32);      // P[6].zw, P[7], P[8].xy
