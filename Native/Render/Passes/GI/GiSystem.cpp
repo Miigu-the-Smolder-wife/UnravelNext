@@ -152,6 +152,34 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.missClosure = q.has("gi.miss_closure") && q.boolean("gi.miss_closure");
     s.bounceVisibility = q.has("gi.bounce_visibility") && q.boolean("gi.bounce_visibility");
     s.hitOrientedLights = q.has("gi.hit_oriented_lights") && q.boolean("gi.hit_oriented_lights");
+    s.lumen.enabled = q.has("gi.lumen") && q.boolean("gi.lumen");
+    if (q.has("gi.lumen_tile")) s.lumen.tile = (uint32_t)q.integer("gi.lumen_tile");
+    if (q.has("gi.lumen_adaptive_fraction")) s.lumen.adaptiveFraction = (float)q.number("gi.lumen_adaptive_fraction");
+    if (q.has("gi.lumen_min_pdf_to_trace")) s.lumen.minPdfToTrace = (float)q.number("gi.lumen_min_pdf_to_trace");
+    if (q.has("gi.lumen_importance_sample_lighting")) s.lumen.importanceSampleLighting = q.boolean("gi.lumen_importance_sample_lighting");
+    if (q.has("gi.lumen_max_ray_intensity")) s.lumen.maxRayIntensity = (float)q.number("gi.lumen_max_ray_intensity");
+    if (q.has("gi.lumen_filter_passes")) s.lumen.filterPasses = (uint32_t)q.integer("gi.lumen_filter_passes");
+    if (q.has("gi.lumen_filter_max_hit_angle_deg")) s.lumen.filterMaxHitAngleDeg = (float)q.number("gi.lumen_filter_max_hit_angle_deg");
+    if (q.has("gi.lumen_filter_position_weight")) s.lumen.filterPositionWeight = (float)q.number("gi.lumen_filter_position_weight");
+    if (q.has("gi.lumen_temporal_max_frames")) s.lumen.temporalMaxFrames = (float)q.number("gi.lumen_temporal_max_frames");
+    if (q.has("gi.lumen_temporal_distance_threshold")) s.lumen.temporalDistanceThreshold = (float)q.number("gi.lumen_temporal_distance_threshold");
+    if (q.has("gi.lumen_temporal_fast_fraction")) s.lumen.temporalFastFraction = (float)q.number("gi.lumen_temporal_fast_fraction");
+    if (q.has("gi.lumen_temporal_max_fast")) s.lumen.temporalMaxFast = (float)q.number("gi.lumen_temporal_max_fast");
+    if (q.has("gi.lumen_jitter_width")) s.lumen.jitterWidth = (float)q.number("gi.lumen_jitter_width");
+    if (q.has("gi.lumen_stochastic_interpolation")) s.lumen.stochasticInterpolation = q.boolean("gi.lumen_stochastic_interpolation");
+    if (q.has("gi.lumen_max_roughness_rough_specular")) s.lumen.maxRoughnessRoughSpecular = (float)q.number("gi.lumen_max_roughness_rough_specular");
+    if (q.has("gi.lumen_disocclusion_max_frames")) s.lumen.disocclusionMaxFrames = (float)q.number("gi.lumen_disocclusion_max_frames");
+    if (q.has("gi.lumen_disocclusion_fraction")) s.lumen.disocclusionFraction = (float)q.number("gi.lumen_disocclusion_fraction");
+    if (q.has("gi.lumen_ray_directions")) s.lumen.rayDirections = (uint32_t)q.integer("gi.lumen_ray_directions");
+    if (q.has("gi.lumen_moving_speed")) s.lumen.movingSpeed = (float)q.number("gi.lumen_moving_speed");
+    if (q.has("gi.lumen_normal_bias")) s.lumen.normalBias = (float)q.number("gi.lumen_normal_bias");
+    if (s.lumen.enabled)
+    {
+        if (s.lumen.tile < 8 || s.lumen.tile > 32) fail("gi.lumen_tile must be in 8..32");
+        if (s.lumen.filterPasses > 4) fail("gi.lumen_filter_passes must be at most 4");
+        if (!(s.lumen.adaptiveFraction >= 0 && s.lumen.adaptiveFraction <= 1)) fail("gi.lumen_adaptive_fraction must be in [0, 1]");
+        if (s.lumen.rayDirections < 1 || s.lumen.rayDirections > 255) fail("gi.lumen_ray_directions must be in 1..255");
+    }
     if (s.missClosure && s.splitBounceHistory) fail("gi.miss_closure is not combined with gi.split_bounce_history");
     s.anchorResample = q.has("gi.anchor_resample") && q.boolean("gi.anchor_resample");
     s.anchorCentroid = q.has("gi.anchor_centroid") && q.boolean("gi.anchor_centroid");
@@ -1293,6 +1321,12 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     // M's per-pixel cache irradiance (front side) as a pass of its own (GiScreenIrradiance.hlsl; R_STATUS 0, GI tile path
     // verdict): M reads view.giIrradiance once instead of the lookup inside its shading kernel. Culled while nothing reads it.
     // Then the edge-preserving spatial filter over the cells' blotches (GiScreenFilter.hlsl) makes view.giIrradiance.
+    // gi.lumen: the screen-probe final gather (LumenGather.cpp) makes view.giIrradiance instead.
+    if (s.lumen.enabled && !m_lookupStatsOn)
+    {
+        recordLumen(fc, main, cache, rays);
+        return;
+    }
     const TextureRef screenRaw = recordScreen(fc, main, cache);
     if (m_lookupStatsOn)
     {

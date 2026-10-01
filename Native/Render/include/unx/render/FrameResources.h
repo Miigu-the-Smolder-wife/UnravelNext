@@ -108,6 +108,11 @@ struct ViewResources
     // the main view's rgb carries the screen probes' near occlusion too (E x occlusion x exposure: M gathers the probes
     // only for the K path and Foliage's back side).
     TextureRef giIrradiance;
+    // gi.lumen (v1.93, LumenGather.cpp): RGBA16F W x H of the main view, the mean incident radiance x g_exposure of the
+    // pixel's rough specular lobe from the screen probes (rgb; a = the pixel filter's fast-update amount). From roughness
+    // 0.6 the lobe fades to irradiance / pi, which it is from 0.8 (gi.lumen_max_roughness_rough_specular). The reader
+    // multiplies its specular albedo. Invalid without gi.lumen.  [R]
+    TextureRef giRoughSpecular;
     TextureRef reflectionLobeTiles;  // R8_UNORM ceil(W/8) x ceil(H/8): min over the tile's      [M]
                                      // surface pixels of reflectionLobeHalfAngle(r, NoV) / pi
                                      // (Reflection.hlsli; sky-only tile = 1); R skips ray

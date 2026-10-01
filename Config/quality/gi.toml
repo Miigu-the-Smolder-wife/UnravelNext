@@ -183,3 +183,31 @@ experiment_disable = 0             # cost attribution only (recorded in the qual
                                    # 524288 = every emissive material as visible-only (v1.92: GI hits and emitter samples take
                                    # no emission; what the bridge's _UnxEmissiveVisibleOnly does, for scene files without the flag). Never nonzero outside
                                    # measurements and those tests.
+
+# gi.lumen (LumenGather.cpp, Passes/GI/Lumen): the screen-probe final gather in the structure of Unreal's Lumen (user
+# decision 2026-10-01: rebuild the proven structure, judge the picture afterwards). true: r.gi.lg.* make the main view's
+# indirect light (view.giIrradiance, view.giRoughSpecular) in place of r.gi.screen and its filters; the world cache
+# keeps updating and lights the probes' hits until the surface cache's read replaces it. The values below are Unreal's
+# defaults (ue6-main, r.Lumen.ScreenProbeGather.*); (Q) marks the ones that give up accuracy for stability - the user's
+# to decide. Differences from Unreal: Docs/Status/LUMEN_GATHER_KO.md.
+lumen = false
+lumen_tile = 16                            # DownsampleFactor: one probe per 16 x 16 px
+lumen_adaptive_fraction = 0.5              # AdaptiveProbeAllocationFraction
+lumen_min_pdf_to_trace = 0.1               # ImportanceSample.MinPDFToTrace
+lumen_importance_sample_lighting = true    # ImportanceSample.IncomingLighting (last frame's probe radiance)
+lumen_max_ray_intensity = 10.0             # (Q) MaxRayIntensity: a trace's exposed radiance is scaled down to it
+lumen_filter_passes = 3                    # SpatialFilterNumPasses
+lumen_filter_max_hit_angle_deg = 10.0      # SpatialFilterMaxRadianceHitAngle
+lumen_filter_position_weight = 1000.0      # SpatialFilterPositionWeightScale
+lumen_temporal_max_frames = 10.0           # (Q) Temporal.MaxFramesAccumulated
+lumen_temporal_distance_threshold = 0.01   # Temporal.DistanceThreshold (relative plane distance of a history pixel)
+lumen_temporal_fast_fraction = 0.1         # Temporal.FractionOfLightingMovingForFastUpdateMode
+lumen_temporal_max_fast = 0.9              # Temporal.MaxFastUpdateModeAmount
+lumen_jitter_width = 1.0                   # SpatialFilterProbes / FullResolutionJitterWidth (tiles)
+lumen_stochastic_interpolation = true      # StochasticInterpolation
+lumen_max_roughness_rough_specular = 0.8   # (Q) MaxRoughnessToEvaluateRoughSpecular
+lumen_disocclusion_max_frames = 4.0        # SpatialFilter.DisocclusionMaxFrames
+lumen_disocclusion_fraction = 0.4          # SpatialFilter.DisocclusionFraction
+lumen_ray_directions = 8                   # Temporal.MaxRayDirections
+lumen_moving_speed = 0.005                 # RelativeSpeedDifferenceToConsiderLightingMoving
+lumen_normal_bias = 0.001                  # m; Unreal's HardwareRayTracing.NormalBias is 0.1 cm
