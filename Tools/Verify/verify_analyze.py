@@ -242,7 +242,7 @@ def main():
     md += ["## 실행 기록 (종료 코드, D3D12 메시지 수)", "", "| 실행 | 종료 코드 | d3d12 메시지 | 초 |", "|---|---|---|---|"]
     fails = []
     if os.path.exists(os.path.join(out, "steps.csv")):
-        for row in csv.reader(open(os.path.join(out, "steps.csv"), encoding="utf-8")):
+        for row in csv.reader(open(os.path.join(out, "steps.csv"), encoding="utf-8-sig")):  # PowerShell writes a BOM
             if len(row) >= 4:
                 md.append(f"| {row[0]} | {row[1]} | {row[2]} | {row[3]} |")
                 if row[1] != "0" or row[2] != "0":
@@ -286,6 +286,7 @@ def main():
     md += ["## 성능 [실측] (비동기 기본 꺼짐, 정지 카메라 600프레임, GpuLock timing)", ""] + lines + ["",
            "이전 값(84e789f, 직렬): 기차 1440p 5.33, 기차 1080p 3.79, 욕탕 1440p 6.10, 욕탕 1080p 4.40 ms.", "", "상위 패스 (ms, 회차 중앙값):", ""] + detail + [""]
     open(os.path.join(out, "SUMMARY_KO.md"), "w", encoding="utf-8").write("\n".join(md))
+    sys.stdout.reconfigure(errors="replace")  # the console's code page (cp949) must not fail the report after it is written
     print("\n".join(md))
 
 
