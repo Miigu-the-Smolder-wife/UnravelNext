@@ -526,7 +526,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         {
             // m.ml.sample, m.ml.trace; then m.ml.shade here (ShadeOpaque.hlsl with MEGA_LIGHTS = 1 on the class tile lists
             // of every band, the LAYERED variant of each class); then m.ml.sets, m.ml.temporal, m.ml.spatial
-            MegaLightsFrame ml = megaLightsSample(fc, view, o.materialWord, areaLights, ltcSrv);
+            MegaLightsFrame ml = megaLightsSample(fc, view, o.materialWord, areaLights, ltcSrv, signature);
             if (!ml.on) fail("M.shading: shading.mega_lights could not start on the main view (its inputs were present)");
             auto mlKernel = [&](uint32_t layered) {
                 const std::string name = std::string("Passes/Shading/MegaLightsShade.AREA") + (areaLights ? "1" : "0") + ".LAYERED" + std::to_string(layered);

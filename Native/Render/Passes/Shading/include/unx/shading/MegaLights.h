@@ -5,6 +5,8 @@
 // and a temporal and spatial filter. Main view only; needs S's froxel lists and the R track's ray scene.
 #include "unx/render/Frame.h"
 
+struct ID3D12CommandSignature;
+
 namespace unx::render::shading
 {
 struct MegaLightsFrame
@@ -24,7 +26,9 @@ struct MegaLightsFrame
 };
 // m.ml.sample and m.ml.trace of the main view; 'on' is false when the switch is off or the view cannot run it (then the
 // shading kernels keep their loop). Creates the textures m.ml.shade writes.
-MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, bool areaLights, uint32_t ltcSrv);
+// dispatchSignature: M's one-dispatch command signature (material::dispatchSignature) for the tile list's dispatch.
+MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, bool areaLights, uint32_t ltcSrv,
+                                 ID3D12CommandSignature* dispatchSignature);
 // m.ml.sets, m.ml.temporal and m.ml.spatial, after the caller's m.ml.shade; sets ml.lighting.
 void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, MegaLightsFrame& ml);
 } // namespace unx::render::shading

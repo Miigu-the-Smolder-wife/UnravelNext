@@ -1,6 +1,7 @@
 // Stochastic direct light of the local lights (shading.mega_lights; owner A). The structure, the pass order and the
 // default numbers follow Unreal Engine's MegaLights (ue6-main, Renderer/Private/MegaLights and Shaders/Private/MegaLights,
 // read on 2026-10-01); the code is ours (no Epic code is copied). Passes of the main view, before the shading group:
+//   m.ml.tiles     the downsampled tiles that hold a surface (the sample kernel's dispatch list);
 //   m.ml.sample    per downsampled pixel (2 x 2 by default, one jittered pixel of the block per frame): the froxel list's
 //                  lights weighed by log2(1 + unshadowed luminance x exposure) (lights hidden in the previous frame's tile
 //                  weigh less), a stratified weighted reservoir picks N lights (4 by default);
@@ -11,7 +12,10 @@
 //   m.ml.hash      the lights that were visible / hidden in each 8 x 8 tile, as small bit sets, for the next frame's sample;
 //   m.ml.temporal  reprojected history, clamped to the neighbourhood, at most 12 frames (less where few lights decide);
 //   m.ml.spatial   variance-guided filter (disk of 8 px), wider for 2 frames after a disocclusion; modulation back;
-// the shading kernels then skip their local-light loop and add the result.
+// the shading kernels then skip their local-light loop and add the result. The air: s.ml.volume
+// (Passes/Atmosphere/MegaLightsVolume.hlsl) samples the froxels' lights the same way and S's integration adds it. Points
+// off the screen: MegaLightsSampling.hlsli (the point, the target weight, the reservoir) and MegaLightsWorld.hlsli (R's
+// world light grid, the shadow ray).
 // Where it gives up accuracy for cost (listed for the user in Docs/Status/UNREAL_COMPARISON_LIGHTS_KO.md 5): N samples
 // per downsampled pixel, the per-sample weight cap, the smooth cut of contributions under the minimum sample weight, the
 // binary visibility of one ray, the history length and the filter radius. All are keys of shading.toml with Unreal's

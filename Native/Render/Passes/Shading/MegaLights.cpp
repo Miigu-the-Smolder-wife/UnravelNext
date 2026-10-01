@@ -149,7 +149,8 @@ Settings settings(const QualityConfig& q)
 }
 } // namespace
 
-MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, bool areaLights, uint32_t ltcSrv)
+MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, bool areaLights, uint32_t ltcSrv,
+                                 ID3D12CommandSignature* dispatchSignature)
 {
     MegaLightsFrame ml;
 #if UNX_M_HAS_RAYTRACING
@@ -203,9 +204,37 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
     const TextureRef prevDepth = ml.prevDepth;
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
     const uint32_t stable = r.areaLightStable;
-    ID3D12PipelineState* samplePso = fc.shaders.compute(areaLights ? "Passes/Shading/MegaLightsSample.AREA1" : "Passes/Shading/MegaLightsSample.AREA0");
-    g.addPass("m.ml.sample", QueueType::Compute,
+    // m.ml.tiles: the downsampled tiles with a surface (the sample kernel's dispatch list); the others' samples are emptied
+    const uint32_t dsTilesX = (dsW + 7) / 8, dsTilesY = (dsH + 7) / 8;
+    const BufferRef tileList = g.createBuffer({ "m.ml tiles", 16 + 4ull * dsTilesX * dsTilesY, 0 });
+    ID3D12PipelineState* tilesBegin = fc.shaders.compute("Passes/Shading/MegaLightsTiles.MODE0");
+    ID3D12PipelineState* tilesPso = fc.shaders.compute("Passes/Shading/MegaLightsTiles.MODE1");
+    g.addPass("m.ml.tiles", QueueType::Graphics,
               [&](PassBuilder& b) {
+                  b.use(materialWord, Use::SrvCompute);
+                  b.use(tileList, Use::UavCompute);
+                  b.use(samples, Use::UavCompute);
+                  b.use(keys, Use::UavCompute);
+              },
+              [=](PassContext& c) {
+                  const uint32_t k[8] = { c.srv(materialWord), c.uav(tileList), c.uav(samples), c.uav(keys), dsW, dsH, s.factor | (s.count << 8), 0 };
+                  c.bindFrameConstants(cb);
+                  c.computeConstants(k, 8);
+                  c.cmd->SetPipelineState(tilesBegin);
+                  c.cmd->Dispatch(1, 1, 1);
+                  D3D12_GLOBAL_BARRIER gb{ D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                           D3D12_BARRIER_ACCESS_UNORDERED_ACCESS };
+                  D3D12_BARRIER_GROUP group{ D3D12_BARRIER_TYPE_GLOBAL, 1 };
+                  group.pGlobalBarriers = &gb;
+                  c.cmd->Barrier(1, &group);
+                  c.cmd->SetPipelineState(tilesPso);
+                  c.cmd->Dispatch(dsTilesX, dsTilesY, 1);
+              });
+    ID3D12PipelineState* samplePso = fc.shaders.compute(areaLights ? "Passes/Shading/MegaLightsSample.AREA1" : "Passes/Shading/MegaLightsSample.AREA0");
+    g.addPass("m.ml.sample", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(tileList, Use::SrvCompute);
+                  b.use(tileList, Use::IndirectArgs);
                   b.use(gbuffer, Use::SrvCompute);
                   b.use(depth, Use::SrvCompute);
                   b.use(materialWord, Use::SrvCompute);
@@ -231,11 +260,11 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
                                            dsW, dsH, s.factor | (s.count << 8) | ((guide ? 1u : 0u) | (s.merge ? 2u : 0u)) << 16, ltcSrv,
                                            asUint(s.minSampleWeight), asUint(s.hiddenWeight), asUint(s.hiddenWeightMiss), asUint(s.distanceThreshold),
                                            hasVis ? c.srv(visId) : none, hasVis ? c.srv(clusters) : none, tilesX, tilesY,
-                                           stable, 0, 0, 0 };
+                                           stable, c.srv(tileList), 0, 0 };
                   c.cmd->SetPipelineState(samplePso);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 24);
-                  c.cmd->Dispatch((dsW + 7) / 8, (dsH + 7) / 8, 1);
+                  c.cmd->ExecuteIndirect(dispatchSignature, 1, c.resource(tileList), 0, nullptr, 0);
               });
 
     rt::RayScene* rays = &rt::RayScene::get(fc);
@@ -260,6 +289,7 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
     (void)materialWord;
     (void)areaLights;
     (void)ltcSrv;
+    (void)dispatchSignature;
 #endif
     return ml;
 }

@@ -48,6 +48,12 @@ mega_lights_spatial_disocclusion_scale_diffuse = 2.0   # Spatial.DisocclusionDif
 mega_lights_spatial_disocclusion_scale_specular = 1.0  # Spatial.DisocclusionSpecularSpatialVarianceScale
 mega_lights_spatial_history_variance = true       # Spatial.UseHistorySpatialVariance
 mega_lights_spatial_history_stddev = 0.15         # Spatial.HistorySpatialStdDevThreshold
+# The air (Passes/Atmosphere/MegaLightsVolume.hlsl; with mega_lights): the local lights' in-scattering per froxel from light
+# samples with shadow rays, in place of the integration's loop over the list and the shadow-map walks of slotted lights.
+mega_lights_volume = true                         # Volume
+mega_lights_volume_samples = 2                    # Volume.NumSamplesPerVoxel
+mega_lights_volume_min_sample_weight = 0.1        # Volume.MinSampleWeight
+mega_lights_volume_max_frames = 10                # the air's history length (Unreal: the fog's r.VolumetricFog.HistoryWeight 0.9)
 # Edge (E) pixels and surface groups (Passes/Shading/Edge.hlsli): two pixels are one surface when the material matches,
 # the shading normals differ by less than the angle, and each lies within max(footprint x ft, distance x dt) of the
 # other's tangent plane. ARCHITECTURE 2.10: up to three surfaces per edge pixel.

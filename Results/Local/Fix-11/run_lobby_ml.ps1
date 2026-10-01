@@ -14,6 +14,7 @@ $scenes = @{
   lobby  = "C:\Users\USER\UnravelGames\BathhouseTycoon\Artifacts\Look\lobby.unxscene"
   bath   = "C:\Users\USER\UnravelGames\BathhouseTycoon\Artifacts\Look\bath_reference.unxscene"
   lounge = "C:\Users\USER\UnravelGames\BathhouseTycoon\Artifacts\Look\lounge_reference.unxscene"
+  train  = "C:\Users\USER\UnravelGames\TrainExorcist\Artifacts\Look\lounge_reference.unxscene"
 }
 $switches = @{
   off    = @()

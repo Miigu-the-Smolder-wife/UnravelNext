@@ -13,26 +13,7 @@
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
-#include "Passes/Shading/MegaLights.hlsli"
-
-RtLight mlRtLight(GpuLight g)
-{
-    RtLight l;
-    l.position = g.position;
-    l.type = lightType(g);
-    l.forward = g.forward;
-    l.intensity = g.intensity;
-    l.right = g.right;
-    l.range = max(g.range, 1e-3);
-    l.up = cross(g.forward, g.right);
-    l.spotScale = g.spotScale;
-    l.color = g.color;
-    l.spotOffset = g.spotOffset;
-    l.size = g.size;
-    l.castShadow = lightCastsShadow(g) ? 1u : 0u;
-    l.pad = 0;
-    return l;
-}
+#include "Passes/Shading/MegaLightsWorld.hlsli"  // mlSampleVisible
 
 [shader("raygeneration")]
 void MegaLightsTraceGen()
@@ -53,17 +34,6 @@ void MegaLightsTraceGen()
     mPixelRay(float2(pixel) + 0.5, D, Dx, Dy);
     const float3 x = g_cameraPosition + D * linearZ;
     const float3 n = octDecode(key.y);
-    RtLightSample ls;
-    bool visible = false;
-    if (rtLightSample(mlRtLight(loadLight(s.light)), x, s.uv.x, s.uv.y, ls))
-    {
-        const float bias = asfloat(P[2].x);
-        RayDesc ray;
-        ray.Origin = x + n * (dot(n, ls.wi) < 0 ? -asfloat(P[2].y) : asfloat(P[2].y));
-        ray.Direction = ls.wi;
-        ray.TMin = bias;
-        ray.TMax = max(bias, ls.distance - asfloat(P[2].z));
-        visible = rtVisible(rtScene(), ray, RT_MASK_SHADOW);  // shadow casters only, as S's shadow maps draw
-    }
+    const bool visible = mlSampleVisible(rtScene(), x, n, s.light, s.uv, asfloat(P[2].x), asfloat(P[2].y), asfloat(P[2].z));
     if (!visible) samples[texel] = uint2(stored.x & 0x7FFFFFFFu, stored.y);
 }

@@ -1,6 +1,6 @@
 // unx-kernel: cs_6_6 main
 // unx-variants: AREA=0,1
-// m.ml.sample (MegaLights.hlsli): one thread per downsampled pixel. The pixel of the block this frame stands on gives the
+// m.ml.sample (MegaLights.hlsli): one group per listed downsampled tile (m.ml.tiles), one thread per downsampled pixel. The pixel of the block this frame stands on gives the
 // surface (G-buffer, depth, material word); every light of its froxel list is weighed by
 //   w = log2(1 + L m(L)),  L = luminance of the light's unshadowed radiance at the pixel x exposure
 // (the base model's diffuse and specular; area lights by their exact diffuse and LTC integrals; m: the smooth cut under the
@@ -15,50 +15,22 @@
 // P[2] = { downsampled width, height, factor | N << 8 | flags << 16 (1: guide by history, 2: merge rays), LTC table }
 // P[3] = { minimum sample weight, hidden weight, hidden weight without history, history distance threshold } (floats)
 // P[4] = { vis id, visible clusters (UNX_NONE: static reprojection), sets' tiles X, tiles Y }
-// P[5] = { B2 stable area lights' mask (UNX_NONE: none), 0, 0, 0 }
+// P[5] = { B2 stable area lights' mask (UNX_NONE: none), the tile list (raw; MegaLightsTiles.hlsl), 0, 0 }
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
-#include "Passes/Shading/ShadingCommon.hlsli"
-#include "Passes/Shading/AreaLight.hlsli"
+#define ML_AREA AREA
+#include "Passes/Shading/MegaLightsSampling.hlsli"  // the point, the target weight and the reservoir (shared with world points)
 #include "Passes/Atmosphere/Froxel.hlsli"
 #include "Passes/GI/GiScreenHistory.hlsli"
-#include "Passes/Shading/MegaLights.hlsli"
-
-struct MlReservoir
-{
-    uint light[ML_MAX_SAMPLES];
-    float weight[ML_MAX_SAMPLES];
-    bool wasVisible[ML_MAX_SAMPLES];
-    float u[ML_MAX_SAMPLES];
-    float sum;
-};
-
-// One candidate into the N strata: each stratum keeps its light with probability sum / (sum + w) and its random number
-// stays uniform either way.
-void mlOffer(inout MlReservoir r, uint n, float w, uint light, bool wasVisible)
-{
-    const float keep = r.sum / (r.sum + w);
-    r.sum += w;
-    for (uint i = 0; i < n; ++i)
-    {
-        if (r.u[i] < keep) r.u[i] /= keep;
-        else
-        {
-            r.u[i] = (r.u[i] - keep) / (1 - keep);
-            r.light[i] = light;
-            r.weight[i] = w;
-            r.wasVisible[i] = wasVisible;
-        }
-        r.u[i] = clamp(r.u[i], 0.0, 0.99999994);
-    }
-}
 
 [numthreads(8, 8, 1)]
-void main(uint3 id : SV_DispatchThreadID)
+void main(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID)
 {
-    const uint2 ds = id.xy;
+    ByteAddressBuffer tileList = ResourceDescriptorHeap[P[5].y];
+    const uint tile = tileList.Load(16 + 4 * gid.x);
+    const uint2 ds = uint2(tile & 0xFFFFu, tile >> 16) * 8 + tid.xy;
     if (any(ds >= P[2].xy)) return;
     const uint factor = P[2].z & 0xFFu, count = (P[2].z >> 8) & 0xFFu, flags = P[2].z >> 16;
     const bool guide = (flags & 1u) != 0, merge = (flags & 2u) != 0;
@@ -98,20 +70,7 @@ void main(uint3 id : SV_DispatchThreadID)
     s.metallic = mWordMetallic(word);
     s.specular = m.specular;
     s.transmission = m.transmission;
-    const float3 diffuse = s.baseColor * ((1 - s.metallic) / SH_PI);
-    const float3 f0 = modelF0(s);
-    const float alpha = modelAlpha(s.roughness);
-    const bool foliage = s.cls == MATERIAL_FOLIAGE;
-    const float3 front = foliage ? diffuse * (1 - s.transmission) : diffuse;
-    const float3 back = foliage ? diffuse * s.transmission : 0;
-    const float e = modelDirectionalAlbedo(max(NoV, 1e-4), s.roughness);
-    const float3 compensation = 1 + f0 * (1 / e - 1);
-#if AREA
-    const float3x3 frame = shShadingFrame(n, v, NoV);
-    const float3x3 frameBack = float3x3(frame[0], -frame[1], -frame[2]);
-    const float3x3 specular = mul(shLtcInverse(P[2].w, max(NoV, 1e-4), s.roughness), frame);
-    const float3 specularAlbedo = shSpecularAlbedo(f0, max(NoV, 1e-4), s.roughness);
-#endif
+    const MlPoint surfacePoint = mlPointOf(s, offset, n, v, P[2].w);
 
     // ---- the previous frame's tile sets at this surface point (a random offset of half a tile stands in for a bilinear
     // lookup of the sets); without history every light counts as visible
@@ -146,16 +105,7 @@ void main(uint3 id : SV_DispatchThreadID)
     }
 
     // ---- candidates: the froxel list
-    MlReservoir r;
-    r.sum = 0;
-    const float u0 = mlNoise(ds, g_frameIndex, 0);
-    for (i = 0; i < ML_MAX_SAMPLES; ++i)
-    {
-        r.light[i] = ML_LIGHT_NONE;
-        r.weight[i] = 0;
-        r.wasVisible[i] = true;
-        r.u[i] = (u0 + i) / max(count, 1u);
-    }
+    MlReservoir r = mlReservoirBegin(mlNoise(ds, g_frameIndex, 0), count);
     FroxelSrvs froxels;
     froxels.lights = P[0].w;
     froxels.lightIndices = P[0].w;
@@ -168,39 +118,8 @@ void main(uint3 id : SV_DispatchThreadID)
     {
         const uint lightIndex = froxelLightBuffered(froxels, indexBase, range, i, lightWords);
         const GpuLight light = loadLight(lightIndex);
-        float lum = 0;
-        if (lightType(light) > LIGHT_SPOT)
-        {
-#if AREA
-            const float3 p = (light.position - g_cameraPosition) - offset;
-            const float window = shAreaWindow(light, p);
-            if (window <= 0) continue;
-            float3 c = 0;
-            if (NoV > 0)
-            {
-                c = front * (SH_PI * shAreaIntegral(light, p, frame, true));
-                if (!shSpecularInReflections(P[5].x, lightIndex)) c += specularAlbedo * shAreaIntegral(light, p, specular, false);
-            }
-            if (foliage) c += back * (SH_PI * shAreaIntegral(light, p, NoV > 0 ? frameBack : frame, true));
-            lum = mlLuminance(light.color * c) * (light.intensity * window);
-#else
-            continue;  // AREA=0: the scene has no area lights
-#endif
-        }
-        else
-        {
-            const float3 toLight = (light.position - g_cameraPosition) - offset;
-            float3 l;
-            const float3 E = shPunctualIlluminance(light, toLight, l);
-            const float cosL = dot(n, l);
-            if (all(E == 0)) continue;
-            float3 f = 0;
-            if (NoV > 0 && cosL > 0) f = front + shSpecular(f0, alpha, compensation, n, v, l, NoV, cosL);
-            else if (foliage && NoV * cosL < 0) f = back;
-            lum = mlLuminance(f * E) * abs(cosL);
-        }
-        lum *= g_exposure;
-        float w = log2(1 + lum * mlFalloffMask(lum, minWeight));
+        const float lum = mlLuminance(mlLightUnshadowed(surfacePoint, light, lightIndex, P[5].x)) * g_exposure;
+        float w = mlTargetWeight(lum, minWeight);
         if (!(w > 0)) continue;
         bool wasVisible = true;
         if (guide)

@@ -386,3 +386,32 @@
 
 ### 12.3 실수 기록 (19:54)
 내 잠금 대기 프로세스를 정리하면서 필터 `GpuLock.ps1 -Track A`가 `-Track all`도 잡아 게임 세션(C)의 Unity 테스트 잠금 대기 2건(BathhouseTycoon WalkTheFloors, TrainExorcist TrainDepartsGhostLoads...)을 종료했다. 잠금을 얻기 전이었고 대기열 파일은 GpuLock이 정리했다. 조정 세션에 재실행을 알림. 이후 프로세스 종료는 pid로만 한다.
+
+### 12.4 완료 정의 (a)~(h) (조정 21:05) — 2026-10-01 밤 2차
+| | 항목 | 파일 | 상태 |
+|---|---|---|---|
+| (a) | 타일 분류: 표면이 있는 다운샘플 타일 목록 → 표본 커널을 그 목록으로 간접 dispatch, 빈 타일의 표본·키 비움 | `MegaLightsTiles.hlsl` | 구현·빌드 |
+| (b) | 광원 표본 생성 | `MegaLightsSample.hlsl` + `MegaLightsSampling.hlsli` | 구현·실행 |
+| (c) | 그림자 광선 | `MegaLightsTrace.hlsl` + `MegaLightsWorld.hlsli`(mlSampleVisible) | 구현·실행 |
+| (d) | resolve·음영(확산·정반사 분리) | `MegaLightsShade.hlsl`(= ShadeOpaque `MEGA_LIGHTS=1`), `MegaLightsUpsample.hlsli` | 구현·실행 |
+| (e)(f) | 공간·시간 디노이저 | `MegaLightsSpatial.hlsl`, `MegaLightsTemporal.hlsl` | 구현·실행 |
+| (g) | 공기: 프록셀마다 표본 2 + 그림자 광선 + 이력(최대 10프레임), S의 적분이 목록 루프·VSM 보행 대신 더함 | `Passes/Atmosphere/MegaLightsVolume.hlsl`, `FroxelIntegrate.hlsl`(P[5].y), `FroxelSystem.cpp` | 구현·빌드 |
+| (h) | 월드 점 include: `MlPoint`(mlPointOf / mlPointLambert), `mlLightUnshadowed`, `mlTargetWeight`, `MlReservoir`; R의 월드 광원 격자에서 뽑는 `mlWorldSamples`, 그림자 광선 `mlSampleVisible` | `MegaLightsSampling.hlsli`, `MegaLightsWorld.hlsli` | 구현·빌드(표본·추적 커널이 이 include를 씀) |
+
+| (i) | S의 국소 그림자 맵 끔(조정 20:55 추가): mega_lights가 켜지고 광선 장면이 있으면 S가 국소 슬롯을 배정하지 않고(국소 페이지 래스터 0), 화소별 슬롯·오버플로 통과가 국소광을 건너뜀. 태양 VSM은 그대로 | `VsmSystem.cpp` megaLightsOwnLocalShadows | 구현 |
+
+**스위치**: `shading.mega_lights`(전체), `shading.mega_lights_volume`(공기; mega_lights가 켜졌을 때). 나머지 키는 `shading.toml`의 `mega_lights_*`.
+
+**언리얼과 다르게 둔 점**
+1. 타일 분류는 빈 타일 건너뛰기만. 음영 모델·사각 광원별 타일 변종은 없음(우리는 M의 클래스 타일 목록과 장면에 면광원이 있는지로 커널을 고름).
+2. 화면 공간 추적(HZB 접촉 그림자) 없음. 광선만.
+3. 광선 끝 바이어스 5 cm(언리얼 1 cm): S의 국소 그림자 맵 근평면 규칙에 맞춤. 광선은 그림자 캐스터 마스크(0x10)만 봄.
+4. 난수: interleaved gradient noise(언리얼은 블루 노이즈 텍스처).
+5. 광원 세기 변화 이력(LightPowerDelta) 없음: "지난 프레임에 최소 가중 아래라 표본이 안 뽑혔는지"를 이번 프레임 휘도로 판정.
+6. 재투영: 속도 버퍼 대신 vis 버퍼 삼각형의 이전 정점(R의 GiScreenHistory). 이력 유효성은 깊이만(법선·재질 검사는 언리얼도 MegaLights에는 깊이 + 머리카락 플래그).
+7. 공기: 다운샘플 없음(프록셀마다), 표본 선택 → 추적 → 음영을 한 raygen에서. 보인 광원 이력 유도 없음. 이력은 자체 지수 평균(언리얼은 안개의 이력).
+8. 면광원 평가는 우리 LTC·정확 적분(언리얼은 대표점 근사), A9 층·Foliage 뒷면 포함. 면광원의 표본 가중도 같은 적분.
+9. 머리카락·전면 반투명·1인칭 뷰모델 전용 경로, 추적 압축, 참조 모드 없음. coverage 조각·평면 반사 뷰·입자 층·A9 면광원 lobe는 표본 경로로 옮기지 않았고, (i) 때문에 켬에서는 그곳의 국소광에 그림자가 없다(다음 이식 대상).
+10. 방향광(태양)은 표본에 넣지 않음(VSM 유지).
+
+**품질을 내주는 값** (전부 키, 언리얼 기본값): `mega_lights_samples` 4 · `mega_lights_downsample` 2, `mega_lights_max_shading_weight` 20 / `_hidden` 5, `mega_lights_min_sample_weight` 0.001(공기 0.1), 광선 1개의 이진 가시성, `mega_lights_temporal_max_frames` 12(이력 실패 4), `mega_lights_spatial_radius_px` 8 · `_samples` 4, `mega_lights_volume_samples` 2 · `_max_frames` 10, `mega_lights_hidden_weight` 0.1 / 0.4.
