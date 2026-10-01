@@ -3,12 +3,12 @@
 // value = base + residual + albedo x stochastic), one thread per pixel of the view. ReflectionResolve left the pixel's
 // unfiltered value in view.reflection and its unfiltered layers beside it, so
 //     value' = value + albedo x (stochastic' - stochastic) + (residual' - residual),
-// with the primed layers the reconstructed ones (LayerDenoise, LayerTemporal): the base - the reflected image's
-// identity, a G pixel's control variate integral - never passes through a filter, and with the reconstruction off the
+// with the primed layers the reconstructed ones (LayerDenoise, LayerTemporal): the base - an M pixel's reflected image
+// without its stochastic light: its identity - never passes through a filter, and with the reconstruction off the
 // value is the resolve's bit for bit. Pixels without layers (K, planar mirrors, no data) are left as they are.
 // P[0] = { reflection UAV, guide SRV, stochastic SRV, residual SRV }, P[1] = { stochastic' SRV, residual' SRV, width, height }
 // P[2] = { view (reflection.layer_view, diagnostics: 0 = the value; 1 stochastic, 2 stochastic', 3 residual, 4 residual',
-// 5 albedo, 6 base, 7 = (stochastic' sigma, residual' sigma, frames in the history) - written instead of the value), 0, 0, 0 }
+// 5 albedo, 6 base, 7 = the reconstructed layers' alphas (frames in their history) - written instead of the value), 0, 0, 0 }
 #include "Passes/Reconstruct/LayerCommon.hlsli"
 
 [numthreads(8, 8, 1)]

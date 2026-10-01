@@ -1197,7 +1197,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                               b.use(outR, Use::UavCompute);
                           },
                           [&shaders, inS, inR, layerGuide, outS, outR, width, height, focal, level, frameConstants](PassContext& c) {
-                              const uint32_t k[12] = { c.srv(inS), c.srv(inR), c.srv(layerGuide), 1u << level, c.uav(outS), c.uav(outR), width, height, asU(focal), level, 0, 0 };
+                              const uint32_t k[12] = { c.srv(inS), c.srv(inR), c.srv(layerGuide), 1u << level, c.uav(outS), c.uav(outR), width, height, asU(focal), 0, 0, 0 };
                               c.cmd->SetPipelineState(shaders.compute("Passes/Reconstruct/LayerDenoise"));
                               c.computeConstants(k, 12);
                               c.bindFrameConstants(frameConstants);
