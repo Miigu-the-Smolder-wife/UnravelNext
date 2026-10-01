@@ -6,6 +6,7 @@
 // bordered radiance -> integrate (per pixel) -> temporal (per pixel).
 #include "unx/gi/GiSystem.h"
 
+#include "unx/gi/LumenRadianceCache.h"
 #include "unx/rt/RayPipeline.h"
 
 #include <algorithm>
@@ -245,6 +246,38 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
         k[44] = c.srv(probeNormal);
         k[45] = c.srv(probePosition);
     };
+    // A's far-field radiance cache (lumen.radiance_cache): cleared and marked from the screen by Begin, marked by the
+    // probes here, updated (allocation, probe rays, filter) before the probes' own rays read it.
+    LumenRcFrame rc = lumenRadianceCacheBegin(fc, view);
+    if (rc.on)
+    {
+        const TextureRef indirection = rc.indirection;
+        const uint32_t rcParams = rc.params;
+        g.addPass("r.gi.lg.rcmark", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      probes(b);
+                      b.use(indirection, Use::UavCompute);
+                  },
+                  [=, &shaders](PassContext& c) {
+                      uint32_t k[48] = {};
+                      k[4] = c.uav(indirection);
+                      k[5] = rcParams;
+                      probeWords(c, k);
+                      c.cmd->SetPipelineState(shaders.compute("Passes/GI/Lumen/LgRcMark"));
+                      c.computeConstants(k, 48);
+                      c.cmd->Dispatch((probesX + 7) / 8, (atlasRows + 7) / 8, 1);
+                  });
+        LumenRcInputs in;
+        in.worldCache = cache;
+        in.surfaceCache = L.hitSurfaceCache ? fc.resources.surfaceCache : BufferRef{};
+        in.skyRadiance = m_skyRadiance;
+        in.sunIlluminance = m_sunIlluminance;
+        in.experiment = m_settings.experimentDisable;
+        lumenRadianceCacheUpdate(fc, view, rays, in, rc);
+    }
+    const bool farField = rc.on;
+    const TextureRef rcIndirection = rc.indirection, rcAtlas = rc.atlas;
+    const uint32_t rcParamsSrv = rc.params;
     g.addPass("r.gi.lg.screendata", QueueType::Compute,
               [&](PassBuilder& b) {
                   surface(b);
@@ -274,10 +307,18 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                       b.use(prevProbePosition, Use::SrvCompute);
                       b.use(prevProbeRadiance, Use::SrvCompute);
                       b.use(lightingPdf, Use::UavCompute);
+                      if (farField)
+                      {
+                          b.use(rcIndirection, Use::SrvCompute);
+                          b.use(rcAtlas, Use::SrvCompute);
+                      }
                   },
                   [=, &shaders](PassContext& c) {
                       uint32_t k[48] = {};
                       surfaceWords(c, k);
+                      k[12] = farField ? rcParamsSrv : 0xFFFFFFFFu;
+                      k[13] = farField ? c.srv(rcIndirection) : 0xFFFFFFFFu;
+                      k[14] = farField ? c.srv(rcAtlas) : 0xFFFFFFFFu;
                       k[4] = c.uav(lightingPdf);
                       k[5] = c.srv(prevProbeDepth);
                       k[6] = c.srv(prevProbePosition);
@@ -323,6 +364,48 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     const uint32_t experiment = m_settings.experimentDisable;
     // gi.lumen_hit_surface_cache: the hits read the surface cache (tracks::surfaceCache published it before GI).
     const BufferRef surfaceCache = L.hitSurfaceCache ? fc.resources.surfaceCache : BufferRef{};
+    // Screen traces before the world rays (gi.lumen_screen_traces): the shared depth pyramid and last frame's colour
+    // (tracks::screenTraceInputs published them before GI; without a colour history the walk is skipped).
+    const TextureRef pyramid = fc.resources.screenTraceHzb, prevColor = view.prevSceneColor;
+    const bool screenTraced = L.screenTraces && pyramid.valid() && prevColor.valid();
+    if (screenTraced)
+    {
+        const FrameContext::Upscale up = fc.frame.upscale;
+        g.addPass("r.gi.lg.screentrace", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      surface(b);
+                      probes(b);
+                      b.use(rayInfo, Use::SrvCompute);
+                      b.use(pyramid, Use::SrvCompute);
+                      b.use(prevColor, Use::SrvCompute);
+                      b.use(traceRadiance, Use::UavCompute);
+                      b.use(traceWord, Use::UavCompute);
+                  },
+                  [=, &shaders](PassContext& c) {
+                      uint32_t k[48] = {};
+                      surfaceWords(c, k);
+                      k[4] = c.srv(rayInfo);
+                      k[5] = c.uav(traceRadiance);
+                      k[6] = c.uav(traceWord);
+                      k[7] = c.srv(pyramid);
+                      k[8] = c.srv(prevColor);
+                      k[9] = up.outputWidth;
+                      k[10] = up.outputHeight;
+                      k[11] = bits(up.exposureRatio);
+                      k[12] = L.screenTraceIterations;
+                      k[13] = bits(L.screenTraceThickness);
+                      k[14] = L.screenTraceThicknessSteps;
+                      k[15] = bits(rayLength);
+                      for (int row = 0; row < 4; ++row)
+                          for (int col = 0; col < 4; ++col) k[16 + 4 * row + col] = bits(up.prevViewProj.m[row][col]);
+                      probeWords(c, k);
+                      k[47] = bits(L.movingSpeed);
+                      c.cmd->SetPipelineState(shaders.compute("Passes/GI/Lumen/LgScreenTrace"));
+                      c.computeConstants(k, 48);
+                      c.bindFrameConstants(frameConstants);
+                      c.cmd->Dispatch(probesX, atlasRows, 1);
+                  });
+    }
     g.addPass("r.gi.lg.trace", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(cache, Use::SrvGraphics);
@@ -334,6 +417,11 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   b.use(traceRadiance, Use::UavGraphics);
                   b.use(traceWord, Use::UavGraphics);
                   if (surfaceCache.valid()) b.use(surfaceCache, Use::UavGraphics);
+                  if (farField)
+                  {
+                      b.use(rcIndirection, Use::SrvGraphics);
+                      b.use(rcAtlas, Use::SrvGraphics);
+                  }
                   rays.declareTraversal(b);
                   rays.declareDecals(b);
                   if (atmosphere)
@@ -355,10 +443,13 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   k[14] = bits(sun.z);
                   k[15] = experiment;
                   k[16] = bits(skyBand);
-                  k[17] = 0;
+                  k[17] = screenTraced ? 1u : 0u;
                   k[18] = bits(L.normalBias);
                   k[19] = bits(L.movingSpeed);
                   k[20] = surfaceCache.valid() ? c.uav(surfaceCache) : 0xFFFFFFFFu;
+                  k[21] = farField ? rcParamsSrv : 0xFFFFFFFFu;
+                  k[22] = farField ? c.srv(rcIndirection) : 0xFFFFFFFFu;
+                  k[23] = farField ? c.srv(rcAtlas) : 0xFFFFFFFFu;
                   std::memcpy(&k[24], scene, sizeof scene);
                   std::memcpy(&k[32], common.k, sizeof common.k);
                   k[42] = c.srv(adaptive);
@@ -485,6 +576,9 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   c.computeConstants(k, 48);
                   c.cmd->Dispatch(probesX, atlasRows, 1);
               });
+    // A's short-range AO and bent normal (lumen.short_range_ao; recorded before GI's record by the track: invalid = off).
+    const TextureRef shortRangeAo = view.shortRangeAO;
+    const float aoMaxAlbedo = fc.quality.has("lumen.short_range_ao_max_multibounce_albedo") ? (float)fc.quality.number("lumen.short_range_ao_max_multibounce_albedo") : 0.5f;
     g.addPass("r.gi.lg.integrate", QueueType::Compute,
               [&](PassBuilder& b) {
                   surface(b);
@@ -492,6 +586,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   b.use(irradiance, Use::SrvCompute);
                   b.use(radianceBorder, Use::SrvCompute);
                   b.use(probeMoving, Use::SrvCompute);
+                  if (shortRangeAo.valid()) b.use(shortRangeAo, Use::SrvCompute);
                   b.use(newDiffuse, Use::UavCompute);
                   b.use(newSpecular, Use::UavCompute);
               },
@@ -506,7 +601,8 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   k[9] = L.stochasticInterpolation ? 1u : 0u;
                   k[10] = bits(L.maxRoughnessRoughSpecular);
                   k[11] = c.srv(probeMoving);
-                  k[12] = 0xFFFFFFFFu;  // short-range AO (LgShortRangeAo: not yet)
+                  k[12] = shortRangeAo.valid() ? c.srv(shortRangeAo) : 0xFFFFFFFFu;
+                  k[13] = bits(aoMaxAlbedo);
                   probeWords(c, k);
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/Lumen/LgIntegrate"));
                   c.computeConstants(k, 48);

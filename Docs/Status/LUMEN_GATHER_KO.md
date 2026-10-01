@@ -15,12 +15,12 @@
 |---|---|---|---|
 | (a) 프로브 배치 | r.gi.lg.place, adaptive.mark, adaptive.spawn | LgPlace, LgAdaptiveMark, LgAdaptiveSpawn | 빌드됨 |
 | (b) 8×8 광선·중요도 표본 | screendata, lightingpdf, rays | LgScreenData, LgLightingPdf, LgGenerateRays | 빌드됨 |
-| (c) 추적·hit 조명 | trace | LgTrace (SKY0/1) | 빌드됨. hit 조명은 지금 hit 셰이딩, `scRead` 대기 |
-| (d) 먼 거리 radiance cache | — | — | A 담당. 호출 지점: LgTrace(TMax·miss), LgLightingPdf |
+| (c) 추적·hit 조명 | screentrace, trace | LgScreenTrace, LgTrace (SKY0/1) | 화면 추적(S2 공용) → 하드웨어 광선, hit 조명은 표면 캐시(없으면 hit 셰이딩) |
+| (d) 먼 거리 radiance cache | rcmark (+ A의 r.gi.rc.*) | LgRcMark, LgRadianceCache.hlsli (A: LumenRadianceCache*) | A의 모듈을 연결: 프로브가 칸 표시, LgTrace가 범위에서 멈추고 miss면 캐시, LgLightingPdf가 이력 없는 방향을 캐시로. 스위치 `lumen.radiance_cache` |
 | (e) 프로브 공간 필터·세기 상한 | composite, filter0..2 | LgComposite, LgFilter | 빌드됨 |
 | (f) 프로브 시간 누적 | probetemporal | LgProbeTemporal | 빌드됨(기본 꺼짐: 언리얼 기본값) |
 | (g) 화소 보간·적분 | irradiance, integrate | LgIrradiance, LgIntegrate | 빌드됨 |
-| (h) 짧은 거리 AO / bent normal | — | — | A 담당. 호출 지점: LgIntegrate P[3].x |
+| (h) 짧은 거리 AO / bent normal | (A의 r.gi.sao*) | (A: LumenShortRangeAO*) | LgIntegrate가 굽은 법선 방향 조도 × 다중 반사 AO, 거친 스페큘러 × 스페큘러 AO. 스위치 `lumen.short_range_ao` |
 | (i) 화소 시간 필터 | temporal | LgTemporal | 빌드됨 |
 
 GPU 실행 기록은 CLOUD_BRIEF에 적는다.
@@ -39,8 +39,8 @@ GPU 실행 기록은 CLOUD_BRIEF에 적는다.
 
 ## 언리얼과 다르게 둔 점
 
-1. **화면(HZB) 추적 없음.** 언리얼은 하드웨어 광선 전에 깊이 버퍼를 따라 화면 추적을 하고 적중점에서 이전 프레임 화면 색을 읽는다. 이 렌더러에는 R이 읽을 이전 프레임 HDR 화면 색(확산 조명) 이력이 없다. M 쪽에서 이력 텍스처가 나오면 추가한다. 지금은 모든 광선이 하드웨어 광선이다.
-2. **hit 조명.** 언리얼은 표면 캐시(모든 광원의 직접광 + 다중 반사)를 읽는다. 지금은 적중점에서 해(그림자 광선 1개), 국소 광원 표본 1개(방향 가중 선택, 그림자 광선), 월드 캐시의 간접광을 읽는다. S2의 `scRead`가 나오면 스위치로 바꾼다.
+1. **화면 추적.** `gi.lumen_screen_traces`(기본 켬): S2의 공용 화면 추적(`Passes/Reflection/ScreenTrace.hlsli`)을 `r.gi.lg.screentrace`에서 쓴다(반복 50, 상대 두께 0.02, 두께 확인 4걸음 = 언리얼의 화면 프로브 기본값). 다른 점: 적중점의 이전 프레임 깊이 검사 없음(깊이 이력이 없다), 적중점 색은 정지한 것으로 재투영, 화면 추적 거리를 radiance cache 범위로 자르지 않음(루트 상수 자리가 없다), 색 이력이 없는 프레임(첫 프레임, 리셋)은 화면 추적을 건너뜀, 화면 추적 뒤 월드 광선은 8 cm 물러난 곳에서 시작(언리얼 PullbackBias).
+2. **hit 조명.** `gi.lumen_hit_surface_cache`(기본 켬, `surface_cache.enabled` 필요): 적중점이 S2의 표면 캐시 칸을 표시하고, 칸이 조명을 받은 상태면 칸의 조도(국소광 + 다중 반사)를 쓴다. 칸이 아직 조명받지 않았거나 캐시가 없으면 적중점에서 해(그림자 광선 1개), 국소 광원 표본 1개(방향 가중 선택, 그림자 광선), 월드 캐시의 간접광을 읽는다(언리얼은 표면 캐시만).
 3. **난수.** 블루 노이즈 LUT 대신 좌표 해시 + R2 수열(`lgNoise2`). 타일 지터는 같은 8프레임 Hammersley.
 4. **적응 프로브 목록.** 타일당 R16 텍스처 대신 버퍼(타일마다 머리 + 8칸). 생성 판단은 마스크만 읽어 스레드 순서와 무관(언리얼과 같은 규칙).
 5. **아틀라스 행 수.** 적응 프로브 행 = ceil(최대 적응 수 / 가로)(언리얼은 세로의 절반을 버림).

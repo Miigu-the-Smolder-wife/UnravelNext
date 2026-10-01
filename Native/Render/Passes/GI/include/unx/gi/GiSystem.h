@@ -82,6 +82,10 @@ struct GiSettings  // from Config/quality/gi.toml
         float movingSpeed = 0.005f;        // relative speed difference that makes a trace "moving"
         float normalBias = 0.001f;         // m: the rays' origin off the surface (Unreal: 0.1 cm)
         bool hitSurfaceCache = true;       // the hits read the surface cache when it exists (surface_cache.enabled)
+        bool screenTraces = true;          // the rays walk the depth pyramid first (ScreenTraces; needs the colour history)
+        uint32_t screenTraceIterations = 50;        // HierarchicalScreenTraces.MaxIterations
+        float screenTraceThickness = 0.02f;         // HierarchicalScreenTraces.RelativeDepthThickness
+        uint32_t screenTraceThicknessSteps = 4;     // NumThicknessStepsToDetermineCertainty
     } lumen;
     uint32_t bounceSplitUpdates = 1;
     bool anchorResample = false;

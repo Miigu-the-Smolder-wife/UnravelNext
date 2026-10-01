@@ -423,3 +423,42 @@
 | 홀드 6 ((i) S 국소 슬롯 끔) | 로비·기차 라운지·욕탕 홀 켬, 로비 끔: 전부 종료 0. 켬: "0 slots assigned, 0 local raster requests", `s.shadow.overflow` 1.45 → 0.003 ms, `s.shadow.visibility` 0.43 → 0.18 ms. 끔: 128 슬롯 그대로 |
 | GPU 프레임 중앙값 | 로비 끔 20.5~22.0 ms / 켬(슬롯 끔) **16.96 ms**; 욕탕 홀 켬 16.07 ms; 기차 라운지 켬 21.90 ms(끔은 재지 않음) |
 품질 판정·타이밍 홀드·1440p는 세 세션 병합 뒤(조정 21:05).
+
+## 13. Lumen 최종 수집의 A 담당분: 짧은 거리 AO (h), 먼 거리 radiance cache (d) — 2026-10-01 밤 3차
+조정 21:20: R의 화면 프로브 최종 수집 가운데 (d)와 (h)를 A가 맡는다. 규칙은 12와 같다(출하 기본 경로·기본값, 새 파일, 스위치 뒤 기본 끔, 빌드 + 잠금 안 첫 실행까지. 조각별 품질 비교 없음).
+
+### 13.1 (h) 짧은 거리 AO / bent normal — `lumen.short_range_ao` (기본 끔)
+| 단계 | 파일 | 내용 |
+|---|---|---|
+| 수평선 탐색 | `Passes/GI/LumenShortRangeAO.hlsl` (r.gi.sao) | 반해상도, 슬라이스 2 × 스텝 3, 반경 32 px, HZB 반해상도 단계, 전경 표본 거부(0.3, 지수 1). 결과: bent normal × AO (11-11-10) |
+| 시간 필터 | `LumenShortRangeAOTemporal.hlsl` (r.gi.sao.temporal) | 확률적 bilinear 업샘플, 재투영(R의 GiScreenHistory), 3×3 clamp(배율 1), 최대 10프레임 |
+| 읽기 | `LumenShortRangeAO.hlsli` | `lumenShortRangeAO(srv, pixel, normal)`, `lumenAoMultibounce(diffuseColor, ao, 0.5)`, `lumenAoSpecular(n, roughness, ao, v, bentNormal×ao)` |
+| 기록 | `LumenShortRangeAO.cpp`, `unx/gi/LumenShortRangeAO.h` | `gi::lumenShortRangeAO(fc, view)` → `ViewResources::shortRangeAO` (RGBA16F W×H; xyz = 월드 bent normal × AO, a = 누적 프레임 + 1). GiTrack.cpp가 R의 record 뒤에 호출 |
+
+R 쪽 접점(R의 파일은 건드리지 않음): 화소 적분(LgIntegrate)이 `main.shortRangeAO`를 SRV로 읽어 확산에 `lumenAoMultibounce`, 거친 정반사에 `lumenAoSpecular`를 곱한다. 지금은 읽는 곳이 없어 화면은 그대로다.
+
+언리얼과 다르게 둔 점: 난수는 interleaved gradient noise(언리얼은 블루 노이즈). 재투영은 vis 버퍼의 이전 정점. 머리카락·Substrate 경로 없음. Foliage 세기(0.7)는 키만 두고 적분 쪽에서 적용.
+품질을 내주는 값(언리얼 기본값): `short_range_ao_slices` 2, `_steps` 3, `_downsample` 2, `_max_frames` 10.
+
+### 13.2 (d) 먼 거리 radiance cache — `lumen.radiance_cache` (기본 끔)
+| 단계 | 패스 | 파일 | 내용 |
+|---|---|---|---|
+| 비움·표시 | r.gi.rc.reset / clear / mark | `LumenRadianceCacheUpdate.hlsl` MODE 7, 0, 1; `LumenRadianceCacheMark.hlsli` (`lrcMark`) | clipmap 4단 × 48³ 칸(0단 ±25 m, 단마다 2배). 화면 16 px 타일마다 표면 한 점이 둘레 8칸을 표시. 소비자(R)가 자기 프로브 위치를 더 표시할 수 있음 |
+| 재사용·배정 | r.gi.rc.reuse / allocate | MODE 2, 3 | 지난 프레임 프로브는 clipmap이 밀려도 월드 위치로 칸을 다시 찾아 슬롯 유지(표시됐거나 8프레임 안에 쓰였으면). 새 칸은 빈 슬롯 목록 → 새 슬롯. 아틀라스 128² = 16384개 |
+| 예산 | r.gi.rc.select / traces / finish | MODE 4, 5, 6 | 우선순위 = (마지막 사용 − 마지막 추적) / (단 + 1)의 log 16칸 히스토그램. 프레임 예산 프로브 100개분(추적 비용 4, 40 m 밖은 1). 새 프로브는 항상 추적(예산을 넘으면 광선 1/4). 구조적 상한 1024개/프레임 |
+| 추적 | r.gi.rc.trace | `LumenRadianceCacheTrace.hlsl` (SKY 0/1) | 프로브마다 32×32 방향(등면적 팔면체), 칸 대각선 길이부터 200 m. 히트 조명은 R의 화면 프로브 광선과 같다: 표면 캐시 칸이 켜져 있으면 그 값, 아니면 월드 캐시 + 태양 + 국소광 표본 1. 간접 DispatchRays(추적 수는 GPU에서) |
+| 필터·저장 | r.gi.rc.filter / store / validate | `LumenRadianceCacheFilter.hlsl` MODE 0, 1; Update MODE 8 | 이웃 6 프로브와 히트 각(0.2 rad)·상호 가림 검사로 평균, 1텍셀 테두리와 함께 아틀라스(R11G11B10F, nit × 1/64)에 저장. 한 번도 추적되지 않은 프로브는 읽는 쪽에 내놓지 않음 |
+| 읽기 | — | `LumenRadianceCache.hlsli` | `lrcCoverage` / `lrcCoverageChecked`(8 프로브가 다 있는지 확인) → `minTraceDistance`; `lrcSample(p, indirection, atlas, coverage, 위치, 방향, 난수)`: 구 시차 재투영(반경 1.5 × TMin) |
+| 기록 | — | `LumenRadianceCache.cpp`, `unx/gi/LumenRadianceCache.h` | `gi::lumenRadianceCacheBegin(fc, main)` → (소비자 표시) → `gi::lumenRadianceCacheUpdate(fc, main, rays, inputs, frame)`. 둘 다 프레임당 한 번만 일함. `FrameResources::lumenRcIndirection / lumenRcAtlas / lumenRcDepth / lumenRcParams` |
+
+R 쪽 접점(R의 파일은 건드리지 않음): `Lumen/LgTrace.hlsl`의 CALL SITE — `r.TMax = min(r.TMax, coverage.minTraceDistance)`, miss면 `lrcSample`을 그 방향으로 읽고 추적 워드 bit 31. R이 Begin/Update를 자기 record 안(프로브 배치 뒤, 광선 앞)에서 부르면 프로브 위치 표시도 넣을 수 있다. 부르지 않으면 GiTrack.cpp가 R의 record 뒤에 화면 표시만으로 갱신한다(그 프레임의 캐시는 다음 프레임부터 읽힘).
+
+언리얼과 다르게 둔 점
+1. 표시: 언리얼은 화면 프로브(적응 프로브 포함)가 표시한다. 모듈 자체 표시는 16 px 타일의 표면 한 점(지터)이고, R이 프로브 위치로 표시하면 같아진다.
+2. 추적 타일: 언리얼은 프로브를 8×8 추적 타일로 쪼개 BRDF/거리로 타일별 해상도를 고른다(슈퍼샘플 포함). 여기는 프로브 단위 두 단계(32², 40 m 밖·예산 초과는 16²)만.
+3. 히트 조명: 언리얼은 표면 캐시(카드)만. 여기는 표면 캐시 칸이 켜지지 않은 히트에 우리 히트 음영(월드 캐시 + 태양 + 국소광 표본).
+4. 하늘 가시성(skylight occlusion)·방향성 irradiance 아틀라스(반투명·안개용)·먼 장면(far field)·프로브 가림 아틀라스의 별도 해상도 없음. 깊이는 프로브와 같은 32².
+5. 저장 단위: nit × 1/64(R11G11B10F). 노출과 무관하게 둠.
+6. 캐시 비움: 장면 revision·원점 이동·크기 변경 때. 카메라 컷에는 비우지 않음(월드 고정).
+
+품질을 내주는 값(언리얼 기본값): `radiance_cache_grid` 48, `_probe_resolution` 32, `_probes_per_frame` 100, `_downsample_distance_m` 40. 구조적 상한 `_trace_capacity` 1024(언리얼에는 없는 값: 한 dispatch의 최악 시간을 묶기 위한 것. 넘으면 다음 프레임).
