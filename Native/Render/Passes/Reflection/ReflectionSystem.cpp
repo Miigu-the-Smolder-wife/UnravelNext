@@ -56,9 +56,10 @@ constexpr uint32_t kArgumentsBytes = kPenumbraArgsOffset + 16;
 // Bands (ReflectionRay.hlsli REFL_BAND, REFL_INLINE_BAND): one DispatchRays launches at most kBand threads (the inline
 // pass kInlineBand jobs), so its time is bounded whatever a frame's counts are; the arguments buffer holds kMaxBands
 // copies of the descriptions, one per band (band b's at b x kArgumentsBytes). The surface cache's direct light:
-// kCellBand cells a dispatch (each up to 8 shadow rays, the sun's and the remainder light's).
+// kCellBand cells a dispatch, bounded in TraceRay calls: a cell traces up to 8 light rays, the remainder light and the
+// sun, each over the static and the dynamic TLAS = 20 calls, so 163,840 calls a dispatch (under kBand).
 constexpr uint32_t kSlotRowGroups = 16384;  // SurfaceCache.hlsli SC_ROW_THREADS / 64: the per-slot passes' dispatch rows
-constexpr uint32_t kBand = 262144, kInlineBand = 65536, kMaxBands = 128, kCellBand = 16384;
+constexpr uint32_t kBand = 262144, kInlineBand = 65536, kMaxBands = 128, kCellBand = 8192;
 constexpr uint32_t bandsFor(uint64_t count, uint32_t band) { return (uint32_t)std::clamp<uint64_t>((count + band - 1) / band, 1, kMaxBands); }
 const char* const kTraceLibrary[2] = { "Passes/Reflection/ReflectionTrace.SKY0", "Passes/Reflection/ReflectionTrace.SKY1" };
 const char* const kInlineLibrary[2][2][2] = {
@@ -1383,7 +1384,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           k[17] = asU(minWeight);
                           c.bindFrameConstants(frameConstants);
                           // One dispatch of the capture paths (budget x (1 + bounces) rays: N / 64) and of the radiosity
-                          // (budget x 16 rays: N / 64); the direct light in bands of kCellBand cells (each up to 10 rays).
+                          // (budget x 16 rays: N / 64); the direct light in bands of kCellBand cells (each up to 20 TraceRay calls).
                           const uint32_t band = pass == 1 ? kCellBand : budget;
                           for (uint32_t first = 0; first < budget; first += band)
                           {
