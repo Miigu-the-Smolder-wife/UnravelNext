@@ -103,8 +103,13 @@ ShadowSrvs reflShadowSrvs()
 //   REFL_HIT_ORIENTED    reflection.hit_oriented_lights: the hit's one local-light sample is chosen with the hit's
 //                        orientation in the weights (HitLocalLights.hlsli rtLocalLightChooseOriented): lights below
 //                        the hit's horizon are not drawn. Same estimator count (one sample, one shadow ray), unbiased.
+//   REFL_HIT_STRICT_READ the hit's cache read follows gi.bounce_visibility (only corners whose anchor sees the hit). Set
+//                        with the reconstruction layers and their filter only: a hit that then finds no corner has no
+//                        data, and it is the layers' filter that gives such a pixel its neighbours' value - without
+//                        it the hit's indirect light would be 0 (black reflection samples after a cut).
 #define REFL_HIT_CONE_LOBES 1u
 #define REFL_HIT_ORIENTED 2u
+#define REFL_HIT_STRICT_READ 4u
 static uint g_reflHitFlags = 0;
 // The GI hit accumulator pool (GiAccPool.hlsli; RENDERER_REDESIGN_V2 12.1 / 12.8), UNX_NONE: none - set with the flags
 // from the rays header (word 8). A hit's diffuse direct light (sun and the local-light sample on the hit's diffuse and
@@ -241,8 +246,8 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
         // gi.bounce_visibility (GI_P1_FLAGS bit 6; GiCache.hlsli g_giStrictVisibility, as GiTrace's fallback read): only
         // the corners whose anchor sees the hit - after a cut every level is young, and the coarse cells then carried light
         // from behind walls into the hits (R: lounge, daylight from outside at 1.5-1.8 x [measured]). A hit that finds
-        // no such corner has no data (the layers' filter gives it its neighbours' value).
-        g_giStrictVisibility = (cache.Load(GI_P1_FLAGS) & 64u) != 0;
+        // no such corner has no data (the layers' filter gives it its neighbours' value: REFL_HIT_STRICT_READ).
+        g_giStrictVisibility = (g_reflHitFlags & REFL_HIT_STRICT_READ) != 0 && (cache.Load(GI_P1_FLAGS) & 64u) != 0;
         giCacheLevels(cache, h, s.position, s.normal, reflect(direction, s.normal), true, footprintLevel, sumE, sumL, weight);
         g_giStrictVisibility = false;
         L.irradiance = weight > 0 ? sumE / weight : 0;
