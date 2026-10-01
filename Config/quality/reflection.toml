@@ -111,7 +111,8 @@ lumen_hit_surface_cache = true         # with surface_cache.enabled: the traced 
                                        # its accumulated local-light and bounce irradiance (no one-light sample at the hit)
 lumen_surface_cache_view = false       # diagnostics: a traced hit's value is its cell's state (r: no lit cell, g: frames, b: live cells)
 lumen_surface_cache_view_component = 0  # with the view: 0 = found / not found colours; an irradiance at the hits as E / pi: 1 = the
-                                       # cell direct, 2 = the cell indirect, 3 = the world GI cache there, 4 = the local-light sample
+                                       # cell direct, 2 = the cell indirect, 3 = the world GI cache there, 4 = the local-light sample;
+                                       # radiance: 5 = the cell's emission, 6 = the hit material's emission
 lumen_rough_specular_from_gather = true  # with gi.lumen: pixels above the roughness limit (and the fade's other side) take the
                                        # final gather's rough specular (view.giRoughSpecular); false or no gather = the K path
 lumen_screen_traces = true             # a traced ray is first followed across the depth buffer (ScreenTrace.hlsli); a visible hit

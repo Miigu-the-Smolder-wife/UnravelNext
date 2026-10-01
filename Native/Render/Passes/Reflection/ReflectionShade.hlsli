@@ -287,12 +287,16 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
             // reflection.lumen_surface_cache_view_component (bits 8-10 of the flags) 1..4: an irradiance at the hit as
             // E / pi, 0 where the hit has no lit cell (the same hits in every component, so their means compare): the
             // cell's direct light, the cell's indirect light, the world GI cache's irradiance there (what the hit
-            // shading without the surface cache reads) and that shading's one-sample local-light irradiance.
+            // shading without the surface cache reads) and that shading's one-sample local-light irradiance; 5, 6: the
+            // cell's stored emission and the hit material's emission (radiance).
             const uint component = (g_reflHitFlags >> 8) & 7u;
             if (component != 0)
             {
                 const float3 e = component == 1 ? cell.direct : component == 2 ? cell.indirect : component == 3 ? L.irradiance : localE;
                 o.radiance = cell.valid ? e / MODEL_PI : 0;
+                // 5, 6: the emission the cell holds and the hit material's own (radiance)
+                if (component == 5) o.radiance = cell.valid ? cell.emission : 0;
+                if (component == 6) o.radiance = cell.valid ? m.emissive : 0;
             }
             return o;
         }
