@@ -37,3 +37,7 @@ shadow_rays_opaque = false            # QUALITY TRADE (user decision; the refere
                                       # hardware rays): true = the cells' shadow rays (lights, sun) take alpha-tested casters as
                                       # solid - no any-hit work per ray. Off here: it changes the cached shadows and did not
                                       # cure the lounge hang it was tried for (2026-10-02)
+direct_shadow_inline = false          # (with direct_analytic) the cell's lights are evaluated first and their shadow rays follow
+                                      # as inline ray queries in a loop of a fixed count - no trace suspends the shader, and a
+                                      # ray tests at most 64 alpha-tested candidates. Written for the lounge hang (the shadow
+                                      # rays toward the light centres); NOT run yet

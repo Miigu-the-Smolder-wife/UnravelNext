@@ -32,7 +32,9 @@
 //          bit 4: stochastic local lights, bit 5: feedback order, bit 6: analytic local lights; diagnostics
 //          (surface_cache.debug_skip, to find which part of the cell lighting a fault is in): bit 7 no local lights,
 //          bit 8 no sun, bit 9 the lights are chosen but not evaluated, bit 10 the lights are evaluated without their
-//          shadow rays); bit 11 the cell's shadow rays (lights, sun) take alpha-tested casters as opaque) }, P[4] = { asuint(stochastic max frames), asuint(min sample weight), 0, 0 }
+//          shadow rays); bit 11 the cell's shadow rays (lights, sun) take alpha-tested casters as opaque; bit 12
+//          (diagnostics) the lights' shadow rays under the GI mask; bit 13 the lights' shadow rays as inline queries
+//          after all the lights are evaluated (surface_cache.direct_shadow_inline) }, P[4] = { asuint(stochastic max frames), asuint(min sample weight), 0, 0 }
 // P[1].xyz = constant sky radiance (SKY1), P[1].w = ray length, P[2] = atmosphere SRVs (SKY0), P[3].xyz = constant sun
 // illuminance (SKY1) (GiSky.hlsli), P[3].w = seed bounces; P[6], P[7] = RtSceneSrvs. Frame constants b1 = main view.
 #include "RayTracing/RayShaders.hlsli"
@@ -121,6 +123,51 @@ bool scCentreVisible(RtSceneSrvs scene, float3 x, float3 n, GpuLight g, float bi
     ray.TMax = reach > bias ? reach : bias;  // (a NaN reach - a light record without a valid size - gives the bias)
     if (!scRayOk(ray)) return false;
     return rtVisible(scene, ray, (flags & 0x80000000u) != 0 ? RT_MASK_GI : RT_MASK_SHADOW, flags & 0x7FFFFFFFu);
+}
+
+// Visibility by an inline ray query (surface_cache.direct_shadow_inline): no hit groups and no continuation of the ray
+// generation shader across the trace - the query runs to its end inside this function. Non-opaque candidates take the
+// alpha test here, at most SC_INLINE_CANDIDATES of them a TLAS (more: the ray counts as blocked - the cap only stops
+// a ray that would not end). The emitters' boxes are never committed (a light has no body).
+#define SC_INLINE_CANDIDATES 64u
+bool scVisibleInline(RtSceneSrvs scene, RayDesc ray, uint mask, uint flags)
+{
+    if (!scRayOk(ray)) return false;
+    [loop] for (uint tlas = 0; tlas < 2; ++tlas)
+    {
+        RaytracingAccelerationStructure structure = ResourceDescriptorHeap[tlas == 0 ? scene.tlasStatic : scene.tlasDynamic];
+        RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;
+        q.TraceRayInline(structure, flags, mask, ray);
+        uint candidates = 0;
+        [loop] while (q.Proceed())
+        {
+            if (q.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE) continue;
+            if (++candidates > SC_INLINE_CANDIDATES) return false;
+            if (rtAlphaOpaque(scene, q.CandidateInstanceID(), q.CandidateGeometryIndex(), q.CandidatePrimitiveIndex(), q.CandidateTriangleBarycentrics()))
+                q.CommitNonOpaqueTriangleHit();
+        }
+        if (q.CommittedStatus() != COMMITTED_NOTHING) return false;
+    }
+    return true;
+}
+
+// The shadow ray of a light's centre (scCentreVisible's ray); false when the light's place gives no ray.
+bool scCentreRay(float3 x, float3 n, GpuLight g, float bias, out RayDesc ray)
+{
+    ray.Origin = x;
+    ray.Direction = n;
+    ray.TMin = ray.TMax = bias;
+    const float3 d = g.position - x;
+    const float dist = length(d);
+    if (!(dist > 0)) return false;
+    const uint type = lightType(g);
+    const float radius = type == LIGHT_SPHERE ? g.size.x : type == LIGHT_TUBE ? g.size.y : 0.0;
+    const float3 wi = d / dist;
+    const float reach = dist - radius - 0.05;
+    ray.Origin = x + n * (dot(n, wi) < 0 ? -bias : bias);
+    ray.Direction = wi;
+    ray.TMax = reach > bias ? reach : bias;
+    return scRayOk(ray);
 }
 
 // The item a thread of a lighting pass works on: the entries not lit yet first, then a window over the lit ones.
@@ -268,7 +315,39 @@ void SurfaceCacheCellsGen()
             float kept = 0;
             const bool analytic = (P[0].w & 64u) != 0;
             const MlPoint lambert = mlPointLambert(position, normal, float3(1, 1, 1));  // (its radiance is irradiance / pi)
-            [loop] for (uint i = 0; i < held; ++i)
+            uint evaluated = 0;
+            if (analytic && (P[0].w & 8192u) != 0)
+            {
+                // surface_cache.direct_shadow_inline: the lights are evaluated first, in a loop of a fixed count with no
+                // ray in it; then the rays, in a second loop of the same fixed count, each an inline query. Nothing but
+                // the eight irradiances and the running sum lives across a trace, and no trace suspends this shader.
+                float3 lightE[SC_LIGHTS_PER_CELL];
+                uint lightOf[SC_LIGHTS_PER_CELL];
+                [loop] for (uint a = 0; a < SC_LIGHTS_PER_CELL; ++a)
+                {
+                    lightE[a] = 0;
+                    lightOf[a] = a < held ? chosen[a] : 0u;
+                    if (a >= held) continue;
+                    kept += weight[a];
+                    lightE[a] = 3.14159265 * mlLightUnshadowed(lambert, loadLight(chosen[a]), chosen[a], UNX_NONE);
+                    if (!all(lightE[a] >= 0) || !all(lightE[a] < 1e30)) lightE[a] = 0;  // (NaN, infinite: no light)
+                }
+                [loop] for (uint r = 0; r < SC_LIGHTS_PER_CELL; ++r)
+                {
+                    if (!any(lightE[r] > 0)) continue;
+                    const GpuLight g = loadLight(lightOf[r]);
+                    bool visible = true;
+                    if (lightCastsShadow(g) && (P[0].w & 1024u) == 0)
+                    {
+                        RayDesc ray;
+                        visible = scCentreRay(position, normal, g, bias, ray) &&
+                                  scVisibleInline(scene, ray, (lightRayFlags & 0x80000000u) != 0 ? RT_MASK_GI : RT_MASK_SHADOW, lightRayFlags & 0x7FFFFFFFu);
+                    }
+                    if (visible) direct += lightE[r];
+                }
+                evaluated = held;  // (done: the loop below has nothing left; the kept lights stay known to the remainder draw)
+            }
+            [loop] for (uint i = evaluated; i < held; ++i)
             {
                 kept += weight[i];
                 if (P[0].w & 512u) continue;  // (diagnostics: chosen, not evaluated)
