@@ -191,13 +191,15 @@ static scene::Material toMaterial(const UnxMaterialDesc* d)
     if (!d) fail("UnxMaterialDesc is null");
     const uint32_t v3Size = (uint32_t)offsetof(UnxMaterialDesc, anisotropy);
     const uint32_t v4Size = (uint32_t)offsetof(UnxMaterialDesc, thinFilmThickness);
-    const bool v5 = d->size == sizeof(UnxMaterialDesc) && d->version == 5;
+    const uint32_t v5Size = (uint32_t)offsetof(UnxMaterialDesc, waterScattering);
+    const bool v6 = d->size == sizeof(UnxMaterialDesc) && d->version == 6;
+    const bool v5 = v6 || (d->size == v5Size && d->version == 5);
     const bool v4 = v5 || (d->size == v4Size && d->version == 4);
     const bool v3 = v4 || (d->size == v3Size && d->version == 3);
     const bool v2 = v3 || (d->size == v3Size && d->version == 2);
     if (!v2 && !(d->size == v3Size - 32 && d->version == 1))
-        fail("UnxMaterialDesc ABI mismatch: size %u version %u, native %zu version 5 (or %u version 4, %u version 3 or 2, %u version 1)", d->size,
-             d->version, sizeof(UnxMaterialDesc), v4Size, v3Size, v3Size - 32);
+        fail("UnxMaterialDesc ABI mismatch: size %u version %u, native %zu version 6 (or %u version 5, %u version 4, %u version 3 or 2, %u version 1)", d->size,
+             d->version, sizeof(UnxMaterialDesc), v5Size, v4Size, v3Size, v3Size - 32);
     if (d->materialClass > UNX_MATERIAL_TERRAIN) fail("unknown material class %u", d->materialClass);
     scene::Material m;
     m.name = fixedString(d->name, sizeof d->name);
@@ -241,6 +243,11 @@ static scene::Material toMaterial(const UnxMaterialDesc* d)
         m.thinFilmSubstrate = d->thinFilmSubstrate;
         m.substrateIor = d->substrateIor;
         m.substrateExtinction = d->substrateExtinction;
+    }
+    if (v6)
+    {
+        m.waterScattering = f3(d->waterScattering);
+        m.waterAnisotropy = d->waterAnisotropy;
     }
     return m;
 }

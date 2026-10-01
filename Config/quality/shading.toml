@@ -58,6 +58,13 @@ post_tone_curve = "film"
 # Automatic white balance (estimating the illuminant from the frame) is a design memo only (FEATURES_GAME 6.2).
 post_white_balance = false
 
+# Turbid basin water (v1.92, defect queue 13 (75); Passes/Water/WaterMedia.hlsl): true puts every W2 basin whose Water
+# material scatters (UnxMaterialDesc v6 waterScattering sigma_s 1/m, waterAnisotropy g) into the froxel grid as a
+# medium (optical depth sigma_t x path, single scattering of the sun through the surface, the local lights and the GI
+# cache's ambient) and lets the sun map's beam extinction include sigma_s. false (default): clear water as before
+# (bit-identical); a material with sigma_s = 0 is clear either way.
+water_turbid = false
+
 # Motion blur (A5; COVERAGE 14.12 (2); MotionBlur.cpp): the shutter's open time as a fraction of the frame interval,
 # the exposure [t - s dt, t]; 0.5 = 180 degrees (the user's gate camera, 2026-09-26), 0 = instantaneous. Frames without
 # motion (static camera and scene) are unchanged.

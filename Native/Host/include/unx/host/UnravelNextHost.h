@@ -159,7 +159,7 @@ enum UnxMaterialClass  // scene::MaterialClass
 // INTERFACES_KO.md 8.1 material v1.
 typedef struct UnxMaterialDesc
 {
-    uint32_t size, version;     // sizeof, 5 (4: up to anisotropyRotation; 3 and 2: up to attenuationDistance, 2 without
+    uint32_t size, version;     // sizeof, 6 (5: up to substrateExtinction; 4: up to anisotropyRotation; 3 and 2: up to attenuationDistance, 2 without
                                 // its sheen and attenuation fields; 1: up to name)
     uint32_t materialClass;     // UnxMaterialClass
     uint32_t twoSided;
@@ -191,6 +191,9 @@ typedef struct UnxMaterialDesc
     float thinFilmThickness, thinFilmIor, thinFilmCoverage;
     uint32_t thinFilmSubstrate;
     float substrateIor, substrateExtinction;
+    // version 6 (v1.92, defect queue 13 (75); Water class): the water's scattering coefficient (1/m, linear rgb; 0 = clear)
+    // and the Henyey-Greenstein asymmetry of its phase function (-1 < g < 1)
+    float waterScattering[3], waterAnisotropy;
 } UnxMaterialDesc;
 
 typedef struct UnxSubmesh
@@ -792,7 +795,7 @@ UNX_API int32_t UNX_CALL UnxFramePassTimingsLatest(UnxRenderer r, UnxPassTiming*
 // The managed bridge (Assets/UnravelNextBridge/Runtime/Native/UnravelNextNative.cs) checks the same sizes at start.
 static_assert(sizeof(UnxRendererDesc) == 1040);
 static_assert(sizeof(UnxTextureDesc) == 104);
-static_assert(sizeof(UnxMaterialDesc) == 216);  // version 5 (A9 thin film); version 4 = 192 (A9 anisotropy); versions 3 and 2 = 184 (A9 layers); version 1 = 152
+static_assert(sizeof(UnxMaterialDesc) == 232);  // version 5 (A9 thin film); version 4 = 192 (A9 anisotropy); versions 3 and 2 = 184 (A9 layers); version 1 = 152
 static_assert(sizeof(UnxSubmesh) == 16);
 static_assert(sizeof(UnxMeshDesc) == 160);
 static_assert(sizeof(UnxInstanceDesc) == 96);

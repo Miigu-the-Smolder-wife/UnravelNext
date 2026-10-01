@@ -589,6 +589,11 @@ gpu::Material GpuScene::packMaterial(const scene::Material& m) const
         g.hairBetaN = m.hairBetaN;
         g.hairTilt = m.hairTilt;
     }
+    if (m.cls == scene::MaterialClass::Water)
+    {
+        g.hairAbsorption = m.waterScattering;  // Water (v1.92): the medium's sigma_s (1/m); hairBetaN = its HG g
+        g.hairBetaN = m.waterAnisotropy;
+    }
     if (m.cls == scene::MaterialClass::Glass)
     {
         const float d = m.attenuationDistance;

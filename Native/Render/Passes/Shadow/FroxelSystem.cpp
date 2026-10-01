@@ -4,6 +4,7 @@
 #include "VsmSystem.h"
 
 #include "unx/render/GpuScene.h"
+#include "unx/scene/SceneData.h"
 #include "unx/render/Tracks.h"
 
 #include <algorithm>
@@ -44,7 +45,130 @@ struct State
     // This frame's lists (recordFroxelLists, called by shadowPages).
     uint64_t listsFrame = UINT64_MAX;
     BufferRef lists;
+    // Turbid basins (shading.water_turbid; WaterMedia.hlsl): the frame's basin records in an upload ring (raw SRVs).
+    std::vector<ComPtr<ID3D12Resource>> waterUploads;
+    std::vector<uint32_t> waterSrvs;
+    uint64_t waterBytes = 0;
 };
+
+// Turbid basin water as a froxel medium (defect queue 13 (75); Passes/Water/WaterMedia.hlsl): the W2 basins of the frame
+// whose Water material scatters add their optical depth and single-scattered source to the view's media slices (E's
+// particle media layout), combined with E's when present. Returns the slices to integrate (media unchanged when the
+// switch is off, the frame has no scattering basin, or there are no lists).
+TextureRef recordWaterMedia(FramePassContext& fc, const ViewResources& main, BufferRef lights, TextureRef media, const FroxelGridCpu& grid)
+{
+    const QualityConfig& q = fc.quality;
+    if (!(q.has("shading.water_turbid") && q.boolean("shading.water_turbid")) || !lights.valid()) return media;
+    const scene::Scene* src = fc.scene.source();
+    if (!src || fc.frame.poolCount == 0) return media;
+    struct Rec
+    {
+        float centre[3], cosYaw, sinYaw, halfX, halfZ, depth, sigmaS[3], g, sigmaA[3], pad;
+    };
+    static_assert(sizeof(Rec) == 64, "WaterMedia.hlsl basin record");
+    std::vector<Rec> recs;
+    for (uint32_t i = 0; i < fc.frame.poolCount; ++i)
+    {
+        const PoolFrame& p = fc.frame.pools[i];
+        if (p.material >= src->materials.size()) continue;
+        const scene::Material& m = src->materials[p.material];
+        if (!(m.waterScattering.x > 0 || m.waterScattering.y > 0 || m.waterScattering.z > 0)) continue;
+        Rec r{};
+        for (int a = 0; a < 3; ++a) r.centre[a] = (float)p.centre[a];
+        r.cosYaw = std::cos(p.yaw);
+        r.sinYaw = std::sin(p.yaw);
+        r.halfX = 0.5f * p.sizeX;
+        r.halfZ = 0.5f * p.sizeZ;
+        r.depth = p.depth;
+        r.sigmaS[0] = m.waterScattering.x, r.sigmaS[1] = m.waterScattering.y, r.sigmaS[2] = m.waterScattering.z;
+        r.g = m.waterAnisotropy;
+        r.sigmaA[0] = -std::log(std::max(m.baseColor.x, 1e-6f)), r.sigmaA[1] = -std::log(std::max(m.baseColor.y, 1e-6f)), r.sigmaA[2] = -std::log(std::max(m.baseColor.z, 1e-6f));
+        recs.push_back(r);
+    }
+    if (recs.empty()) return media;
+    State& s = fc.state<State>(kStateKey);
+    Device& d = fc.device;
+    const uint32_t ring = fc.framesInFlight + 1, slot = (uint32_t)(fc.frame.frameIndex % ring);
+    const uint64_t bytes = recs.size() * sizeof(Rec);
+    if (s.waterUploads.size() != ring || s.waterBytes < bytes)
+    {
+        for (ComPtr<ID3D12Resource>& u : s.waterUploads) d.deferRelease(u);
+        for (uint32_t srv : s.waterSrvs) d.descriptors().freeResource(srv);
+        s.waterUploads.clear();
+        s.waterSrvs.clear();
+        uint64_t cap = 1024;
+        while (cap < bytes) cap *= 2;
+        s.waterBytes = cap;
+        for (uint32_t i = 0; i < ring; ++i)
+        {
+            s.waterUploads.push_back(createBuffer(d, L"S water media basins", cap, D3D12_HEAP_TYPE_UPLOAD));
+            D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+            sd.Format = DXGI_FORMAT_R32_TYPELESS;
+            sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sd.Buffer.NumElements = (UINT)(cap / 4);
+            sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+            const uint32_t srv = d.descriptors().allocateResource();
+            d.d3d()->CreateShaderResourceView(s.waterUploads.back().Get(), &sd, d.descriptors().resourceCpu(srv));
+            s.waterSrvs.push_back(srv);
+        }
+    }
+    {
+        void* mapped = nullptr;
+        D3D12_RANGE none{ 0, 0 };
+        check(s.waterUploads[slot]->Map(0, &none, &mapped), "map water media basins");
+        std::memcpy(mapped, recs.data(), bytes);
+        s.waterUploads[slot]->Unmap(0, nullptr);
+    }
+    RenderGraph& g = fc.graph;
+    const TextureRef slices = media.valid() ? media
+                                            : g.createTexture(TextureDesc{ "S water media", grid.gridX, grid.gridY, (uint16_t)(2 * grid.slices), 1,
+                                                                           DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D });
+    VsmFrameRefs vsm;
+    const bool shadows = frameRefs(fc, vsm);
+    const FrameResources& r = fc.resources;
+    const bool sunMap = r.waterSunDepth.valid() && r.waterSunNormal.valid() && r.waterSunMedium.valid() && r.waterSunConstants.valid();
+    const bool caustics = sunMap && r.waterSunCaustics.valid(), gi = r.giCache.valid(), functions = r.lightFunctions.valid();
+    const bool luts = r.transmittanceLut.valid() && r.multiScatterLut.valid();
+    const uint32_t count = (uint32_t)recs.size(), basinSrv = s.waterSrvs[slot], existing = media.valid() ? 1u : 0u;
+    uint32_t texelBits = 0;
+    std::memcpy(&texelBits, &grid.shadowTexelsPerTile, 4);
+    const D3D12_GPU_VIRTUAL_ADDRESS constants = main.frameConstants;
+    ID3D12PipelineState* pso = fc.shaders.compute("Passes/Water/WaterMedia");
+    g.addPass("s.froxel.watermedia", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(lights, Use::SrvCompute);
+                  b.use(slices, Use::UavCompute);
+                  if (sunMap)
+                  {
+                      for (TextureRef t : { r.waterSunDepth, r.waterSunNormal, r.waterSunMedium }) b.use(t, Use::SrvCompute);
+                      b.use(r.waterSunConstants, Use::SrvCompute);
+                      if (caustics) b.use(r.waterSunCaustics, Use::SrvCompute);
+                  }
+                  if (gi) b.use(r.giCache, Use::SrvCompute);
+                  if (functions) b.use(r.lightFunctions, Use::SrvCompute);
+                  if (shadows)
+                  {
+                      b.use(vsm.table, Use::SrvCompute); b.use(vsm.atlas, Use::SrvCompute);
+                      b.use(vsm.blocks, Use::SrvCompute); b.use(vsm.bound, Use::SrvCompute);
+                  }
+                  if (luts) { b.use(r.transmittanceLut, Use::SrvCompute); b.use(r.multiScatterLut, Use::SrvCompute); }
+              },
+              [=](PassContext& ctx) {
+                  const uint32_t none = 0xFFFFFFFFu;
+                  const uint32_t k[20] = { ctx.srv(lights), ctx.uav(slices), count, basinSrv,
+                                           sunMap ? ctx.srv(r.waterSunDepth) : none, sunMap ? ctx.srv(r.waterSunNormal) : none, sunMap ? ctx.srv(r.waterSunMedium) : none,
+                                           sunMap ? ctx.srv(r.waterSunConstants) : none,
+                                           caustics ? ctx.srv(r.waterSunCaustics) : none, gi ? ctx.srv(r.giCache) : none, functions ? ctx.srv(r.lightFunctions) : none, existing,
+                                           shadows ? ctx.srv(vsm.table) : none, shadows ? ctx.srv(vsm.atlas) : none, shadows ? ctx.srv(vsm.blocks) : none, shadows ? vsm.constantsCbv : none,
+                                           shadows ? ctx.srv(vsm.bound) : none, texelBits, luts ? ctx.srv(r.transmittanceLut) : none, luts ? ctx.srv(r.multiScatterLut) : none };
+                  ctx.cmd->SetPipelineState(pso);
+                  ctx.bindFrameConstants(constants);
+                  ctx.computeConstants(k, 20);
+                  ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
+              });
+    return slices;
+}
 } // namespace
 
 FroxelGridCpu froxelGridFor(const QualityConfig& q, uint32_t width, uint32_t height)
@@ -526,7 +650,9 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
     // E's particle media (smoke, fire) on this grid, between the lists and the integration (invalid: none this frame); a
     // view whose volumeSlices a producer already set keeps them (tests: FroxelTests 7).
     ViewResources mediaView = main;
-    const TextureRef media = main.volumeSlices.valid() ? main.volumeSlices : tracks::volumeMedia(fc, mediaView, lights);
+    const TextureRef particleMedia = main.volumeSlices.valid() ? main.volumeSlices : tracks::volumeMedia(fc, mediaView, lights);
+    // Turbid basins (defect queue 13 (75), shading.water_turbid): added to the media slices (or their own) - WaterMedia.hlsl.
+    const TextureRef media = recordWaterMedia(fc, main, lights, particleMedia, froxelGridFor(fc.quality, main.view.width, main.view.height));
     const TextureRef volume = recordIntegration(fc, main, lights, s.keep, recordReaders(fc, main, s.fullDepth, ""), "", media);
     fc.resources.froxels = volume;
     fc.resources.aerialPerspective = volume;  // atmosphereAerial / atmosphereAirView read it (Atmosphere.hlsli)
