@@ -661,3 +661,21 @@ GPU가 없어 **모두 미검증**이다. HLSL은 리눅스 dxc 1.8.2505(빌드�
 - 누적기 접기 패스는 직접 디스패치(min(슬롯, 광선) 항목)다. 비용이 보이면 간접 디스패치로 바꾼다.
 - A 요청(발광 면 면광원 변환 시 GI 이중 계산 방지, `emissiveLightsConverted`)과 HitLocalLights 결정적 합의 GI 연결은 S2·A의 공용 함수가 올라온 뒤에 한다.
 - 기본 노출과 폴백 미터링의 0.03 stop 차, GiAnalytic 8 갓 +0.51 %(기존).
+
+## 세션 13 이어서 (6) — 통합 브랜치, GiTrace 공용 함수, 발광 변환 적용이 막힌 이유 (2026-10-01 17시)
+
+GPU HOLD 중. 코드와 빌드만 했다. 이 세션의 세션 간 메시지는 아직 막혀 있다.
+
+1. **통합(조정 요청 1)**: origin/redesign-v2-fix(A, 739d44c까지: ShadeOpaque 두 커널 분리 포함)와 origin/redesign-v2-refl(S2, b423bf2까지)을 redesign-v2에 병합했다(fde0f12, fd8ced3, 69397e3). 텍스트 충돌은 없었다.
+   - 전체 빌드(dev, all tracks) 통과, 모든 커널이 DXIL 한도 안이다. 분리 전 병합 판에서는 ShadeOpaque FALLBACK1 변종이 204,260 B(여유 540 B)로 통과했고, 분리 뒤에는 ShadeOpaque 최대 123.3 KB, ShadeIndirect 최대 91.6 KB다.
+   - 지금 한도(204,800 B)에 가까운 커널: FxLayerSetup.STEP0 204,524 B(여유 276 B, FX), ReflectionTraceInline SKY0.JOB2.CORNERS1 201,932 B(S2), CoverageComposite PART1 192,972 B, GiTrace SKY0.SPLIT1 192,324 B.
+   - S2의 누적기 읽기 배선 커밋이 올라오면 한 번 더 병합한다.
+2. **GiTrace 호출부(조정 요청 2)**: 052d75c. 누적기의 A·B·C, 독자 계수, 점 값을 S2의 `rtHitDirectTerms` / `rtHitDirectFromMeans`로 받는다(식은 같다. GPU 값 비교는 게임 뒤).
+3. **발광 면 변환의 이중 계산 방지(조정 요청 3, A 요청)는 적용하지 않았다.** 지금 제시된 방법으로는 R 쪽에서 맞게 할 수 없어서, 추측으로 넣지 않고 막힌 점을 적는다(A에게 전달 부탁):
+   - `unx::lights::emissiveLights(fc)`는 부를 때마다 `g.importBuffer`를 한다(EmissiveLights.cpp 끝). 렌더 그래프는 같은 자원의 import를 합치지 않으므로(INTERFACES v1.81의 fxLights와 같은 문제), M과 R이 한 프레임에 각각 부르면 같은 버퍼가 두 번 import된다. 프레임당 한 번만 import해 돌려주는 캐시나, core가 먼저 넣어 두는 `FrameResources` 필드가 필요하다.
+   - Lights는 E 트랙 라이브러리이고 GI는 R 트랙이다. R이 그 함수를 직접 부르면 R → E 링크 의존이 생긴다(E가 꺼진 빌드에서 깨짐). `FrameResources` 필드면 이 문제도 없다.
+   - 발광 삼각형 MIS 표본에서 변환된 재질을 빼려면 표본의 재질 번호가 필요한데, `RtEmissiveSample`(HitLocalLights.hlsli, S2 소유)에는 재질 구조체만 있고 번호가 없다. `uint material` 한 필드가 필요하다.
+   - 방출을 0으로만 하면 화소의 이중 계산은 없어지지만, 그 발광체의 1회 반사광(발광체 → 면 X → 화소)도 같이 없어진다. X의 조도는 캐시(광선이 발광체를 맞혀서 얻던 값, 이제 0)와 hit 직접광(태양 + 국소광 표본, 노드 광원 없음)으로만 오기 때문이다. GI hit이 노드 광원을 평가하는 항(14.4의 셀 FAR 항 / hit 평가)이 같이 들어가야 스위치를 켰을 때 에너지가 맞는다.
+   - 스위치(`shading.emissive_area_lights`)는 기본 끔이라 지금 동작에는 영향이 없다.
+4. **A에게**: PostFinal은 R이 지금 만질 계획이 없다(노출 보정 3ca3ae8 이후 변경 없음). ShadeIndirect 분리 확인했다. R의 L_gi는 ShadeOpaque를 건드리지 않고 `view.giIrradiance` 텍스처만 바꾼다.
+5. **게임 뒤 검증**: (5)절의 목록 그대로다. 측정 빌드(build\dev2)는 통합 판으로 다시 빌드해 둔다. `postgame.ps1`은 통합 브랜치에서 돈다.
