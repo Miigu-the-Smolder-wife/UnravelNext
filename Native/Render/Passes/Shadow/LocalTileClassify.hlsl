@@ -12,6 +12,9 @@
 // everything else stays mixed (umbra needs the exact-raster twin, 14.3-1, stage 2).
 // P[0] = { depth SRV, froxel lights SRV, local lights SRV (StructuredBuffer<VsmLocalLight>), slot of light SRV }
 // P[1] = { classification blocks SRV (raw), tile lit records UAV (raw), tilesX, tolerance bits (float: relative depth) }
+// P[2] = { exact twin blocks SRV (raw, block minima; UNX_NONE: no umbra verdicts), 0, 0, 0 }: a pixel is in umbra when
+//        every texel of its block (3 x 3 for an area light) holds a caster nearer than the pixel by the tolerance;
+//        the tile's umbra bit is the AND over its surface pixels. Umbra lights are left out (visibility 0).
 #include "Bindless.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
@@ -20,6 +23,7 @@
 #include "Passes/Shadow/VsmCls.hlsli"
 
 groupshared uint gs_lit[2 * VSM_CLS_TILE_SLICES];
+groupshared uint gs_umbra[2 * VSM_CLS_TILE_SLICES];
 groupshared uint2 gs_list[VSM_CLS_TILE_SLICES];
 groupshared uint gs_first, gs_count, gs_valid;
 groupshared uint gs_zMinBits, gs_zMaxBits;
@@ -49,7 +53,7 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint lane : SV_G
         gs_zMinBits = 0x7F800000u;
         gs_zMaxBits = 0;
         gs_valid = 0;
-        [unroll] for (uint k = 0; k < 2 * VSM_CLS_TILE_SLICES; ++k) gs_lit[k] = 0xFFFFFFFFu;
+        [unroll] for (uint k = 0; k < 2 * VSM_CLS_TILE_SLICES; ++k) { gs_lit[k] = 0xFFFFFFFFu; gs_umbra[k] = 0xFFFFFFFFu; }
     }
     GroupMemoryBarrierWithGroupSync();
     if (surface)
@@ -98,6 +102,7 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint lane : SV_G
         StructuredBuffer<uint> slotOf = ResourceDescriptorHeap[P[0].w];
         ByteAddressBuffer blocks = ResourceDescriptorHeap[P[1].x];
         const float tolerance = asfloat(P[1].w);
+        const bool twin = P[2].x != UNX_NONE;
         for (uint s = 0; s < gs_count; ++s)
         {
             const uint2 range = gs_list[s];
@@ -105,7 +110,7 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint lane : SV_G
             {
                 const uint li = froxelLightAt(f, indexBase, range.x + i);
                 const uint slot = li < g_lightCount ? slotOf[li] : VSM_LOCAL_NONE;
-                bool lit = false;
+                bool lit = false, umbra = false;
                 if (slot != VSM_LOCAL_NONE)
                 {
                     const VsmLocalLight l = locals[slot];
@@ -127,9 +132,23 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint lane : SV_G
                                 nearest = max(nearest, asfloat(blocks.Load((page * 256 + c.y * 16 + c.x) * 4)));
                             }
                         lit = nearest <= limit;
+                        if (twin && !lit)
+                        {
+                            // umbra: every texel of the blocks holds a caster nearer than the pixel (the twin's block minima)
+                            ByteAddressBuffer twinBlocks = ResourceDescriptorHeap[P[2].x];
+                            float farthest = 1;
+                            for (int uy = -reach; uy <= reach; ++uy)
+                                for (int ux = -reach; ux <= reach; ++ux)
+                                {
+                                    const int2 c = clamp(blk + int2(ux, uy), 0, 15);
+                                    farthest = min(farthest, asfloat(twinBlocks.Load((page * 256 + c.y * 16 + c.x) * 4)));
+                                }
+                            umbra = farthest > saturate(dr * (1 + tolerance));
+                        }
                     }
                 }
                 if (!lit) InterlockedAnd(gs_lit[s * 2 + (i >> 5)], ~(1u << (i & 31)));
+                if (!umbra) InterlockedAnd(gs_umbra[s * 2 + (i >> 5)], ~(1u << (i & 31)));
             }
         }
     }
@@ -144,6 +163,7 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint lane : SV_G
         {
             const bool spanned = valid && s < gs_count;
             records.Store2(o + 16 + s * 8, spanned ? uint2(gs_lit[s * 2], gs_lit[s * 2 + 1]) : uint2(0, 0));
+            records.Store2(o + 48 + s * 8, spanned ? uint2(gs_umbra[s * 2], gs_umbra[s * 2 + 1]) : uint2(0, 0));
         }
     }
 }

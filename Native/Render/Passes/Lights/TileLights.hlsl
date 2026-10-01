@@ -157,6 +157,7 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint lane : SV_G
             float d;
             // a caster lit over every pixel of the tile (L3 classification) may be FAR like an unshadowed light
             const bool litOver = P[1].w != UNX_NONE && vsmClsTileLit(clsTile, gs_sliceFirst + s, i);
+            if (P[1].w != UNX_NONE && vsmClsTileUmbra(clsTile, gs_sliceFirst + s, i)) { InterlockedOr(gs_mask[s * 2 + (i >> 5)], 1u << (i & 31)); continue; }  // umbra: NEAR, 0 per pixel
             const bool near = nfIsNear(light, region, false, !lightCastsShadow(light) || litOver, d);
             if (near)
             {

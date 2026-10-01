@@ -6,15 +6,17 @@
 //          the texel square (0 = none), from the face's projection (VsmSystem.cpp localViewProj: near = the light's
 //          nearM, far = farM);
 //   blocks: per page 16 x 16 floats, the maximum of its 8 x 8 texels (VsmClsBlocks);
-//   tile lit records (LocalTileClassify): per 8 x 8 tile of the main view 48 B: flags (bit 0 valid), first slice, slice
+//   tile lit records (LocalTileClassify): per 8 x 8 tile of the main view 80 B: flags (bit 0 valid), first slice, slice
 //          count, then a uint2 per slice (<= 4): bit i = entry i of that slice's froxel list is lit over every pixel of
-//          the tile (visibility 1: TileLights may take it FAR, ShadeOpaque needs no slot read).
+//          the tile (visibility 1: TileLights may take it FAR, ShadeOpaque needs no slot read), then (stage 2, the
+//          exact twin) a uint2 per slice: bit i = the entry is in umbra over every pixel (visibility 0: the light is
+//          left out).
 #ifndef UNX_VSM_CLS_HLSLI
 #define UNX_VSM_CLS_HLSLI
 
 #define VSM_CLS_PAGE 128u
 #define VSM_CLS_PAGES_PER_ROW 48u
-#define VSM_CLS_TILE_BYTES 48u
+#define VSM_CLS_TILE_BYTES 80u
 #define VSM_CLS_TILE_SLICES 4u
 
 uint2 vsmClsPageOrigin(uint page, uint pagesPerRow) { return uint2(page % pagesPerRow, page / pagesPerRow) * VSM_CLS_PAGE; }
@@ -23,6 +25,7 @@ struct VsmClsTile
 {
     uint flags, firstSlice, sliceCount, pad;
     uint2 lit[4];
+    uint2 umbra[4];
 };
 VsmClsTile vsmClsTile(uint srv, uint tileIndex)
 {
@@ -38,6 +41,10 @@ VsmClsTile vsmClsTile(uint srv, uint tileIndex)
     t.lit[1] = b.Load2(o + 24);
     t.lit[2] = b.Load2(o + 32);
     t.lit[3] = b.Load2(o + 40);
+    t.umbra[0] = b.Load2(o + 48);
+    t.umbra[1] = b.Load2(o + 56);
+    t.umbra[2] = b.Load2(o + 64);
+    t.umbra[3] = b.Load2(o + 72);
     return t;
 }
 // Whether entry i of the list of froxel slice 'slice' is lit over the tile (false when the record does not apply).
@@ -47,6 +54,14 @@ bool vsmClsTileLit(VsmClsTile t, uint slice, uint i)
     const uint rel = slice - t.firstSlice;
     if (rel >= t.sliceCount) return false;
     return (((i < 32 ? t.lit[rel].x : t.lit[rel].y) >> (i & 31)) & 1u) != 0;
+}
+// Whether entry i of that slice's list is in umbra over the tile (stage 2; false when the record does not apply).
+bool vsmClsTileUmbra(VsmClsTile t, uint slice, uint i)
+{
+    if ((t.flags & 1u) == 0 || i >= 64) return false;
+    const uint rel = slice - t.firstSlice;
+    if (rel >= t.sliceCount) return false;
+    return (((i < 32 ? t.umbra[rel].x : t.umbra[rel].y) >> (i & 31)) & 1u) != 0;
 }
 
 #endif

@@ -84,6 +84,8 @@ struct State
     uint32_t localWithoutSlot = 0;
     ComPtr<ID3D12Resource> localRing, localMask, localSlots;
     ComPtr<ID3D12Resource> clsAtlas;  // L3: classification pages (VsmCls.hlsli), kLocalLights x 6 pages of 128^2 x 4 B
+    ComPtr<ID3D12Resource> clsTwin;   // stage 2: the exact-raster twin (umbra), the same layout
+    uint32_t clsTwinUav = UINT32_MAX;
     BufferRef clsBlocksRef;  // this frame's block maxima (frameRefs); invalid when the classification is off
     uint32_t clsActiveCount = 0;
     uint64_t clsAtlasBytes = 0;
@@ -187,6 +189,9 @@ void createState(FramePassContext& fc, State& s, uint32_t pages)
             ud.Buffer.NumElements = (UINT)(s.clsAtlasBytes / 4);
             ud.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
             d.d3d()->CreateUnorderedAccessView(s.clsAtlas.Get(), nullptr, &ud, h.resourceCpu(s.clsAtlasUav));
+            s.clsTwin = createBuffer(d, L"S VSM classification twin", s.clsAtlasBytes);
+            s.clsTwinUav = h.allocateResource();
+            d.d3d()->CreateUnorderedAccessView(s.clsTwin.Get(), nullptr, &ud, h.resourceCpu(s.clsTwinUav));
         }
         s.cullMask = createBuffer(d, L"S VSM cull mask", (uint64_t)kSlots / 8);
         s.atlasSlots = createBuffer(d, L"S VSM atlas slots", (uint64_t)kSlots * 4);
@@ -1553,32 +1558,41 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             fail("S VSM: %u active local lights need %llu B of classification atlas, %llu B allocated", activeLocal, (unsigned long long)(clsWords * 4), (unsigned long long)s.clsAtlasBytes);
         const BufferRef clsAtlas = g.importBuffer(s.clsAtlas.Get(), BufferDesc{ "S VSM classification atlas", s.clsAtlasBytes, 0 });
         const BufferRef clsBlocks = g.createBuffer(BufferDesc{ "S VSM classification blocks", (uint64_t)clsPages * 256 * 4, 0 });
+        const bool twin = q.boolean("shadow.vsm.classification_twin");
+        const BufferRef clsTwin = twin ? g.importBuffer(s.clsTwin.Get(), BufferDesc{ "S VSM classification twin", s.clsAtlasBytes, 0 }) : BufferRef{};
+        const BufferRef twinBlocks = twin ? g.createBuffer(BufferDesc{ "S VSM classification twin blocks", (uint64_t)clsPages * 256 * 4, 0 }) : BufferRef{};
         const uint32_t tilesX = groups(main.view.width, 8), tilesY = groups(main.view.height, 8);
-        const BufferRef tileLit = g.createBuffer(BufferDesc{ "S VSM tile lit", (uint64_t)tilesX * tilesY * 48, 0 });
+        const BufferRef tileLit = g.createBuffer(BufferDesc{ "S VSM tile lit", (uint64_t)tilesX * tilesY * 80, 0 });
         auto asUint = [](float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; };
         ID3D12PipelineState* pClear = sh.compute("Passes/Shadow/VsmClsClear");
-        g.addPass("s.vsm.cls.clear", QueueType::Compute, [&](PassBuilder& b) { b.use(clsAtlas, Use::UavCompute); },
-                  [=](PassContext& ctx) {
-                      const uint32_t k[4] = { ctx.uav(clsAtlas), (uint32_t)clsWords, 0, 0 };
-                      ctx.cmd->SetPipelineState(pClear);
-                      ctx.computeConstants(k, 4);
-                      ctx.cmd->Dispatch(groups((uint32_t)(clsWords / 4), 256), 1, 1);
-                  });
+        for (int which = 0; which < (twin ? 2 : 1); ++which)
+        {
+            const BufferRef target = which == 0 ? clsAtlas : clsTwin;
+            g.addPass(which == 0 ? "s.vsm.cls.clear" : "s.vsm.cls.cleartwin", QueueType::Compute, [&](PassBuilder& b) { b.use(target, Use::UavCompute); },
+                      [=](PassContext& ctx) {
+                          const uint32_t k[4] = { ctx.uav(target), (uint32_t)clsWords, 0, 0 };
+                          ctx.cmd->SetPipelineState(pClear);
+                          ctx.computeConstants(k, 4);
+                          ctx.cmd->Dispatch(groups((uint32_t)(clsWords / 4), 256), 1, 1);
+                      });
+        }
+        for (int which = 0; which < (twin ? 2 : 1); ++which)
         {
             // (V passes pixelConstants as given, so the atlas is a persistent buffer with a persistent raw UAV descriptor.)
+            // which 0: the conservative classification pages (corner max); 1: the exact twin (standard raster, centre).
             DepthRasterRequest cr;
             cr.instanceMask = scene::InstanceCastShadow;
-            cr.pixelKernel = "Passes/Shadow/VsmClsPixel";
-            cr.bufferUses = { { clsAtlas, Use::UavGraphics } };
-            cr.conservative = true;
+            cr.pixelKernel = which == 0 ? "Passes/Shadow/VsmClsPixel.MODE0" : "Passes/Shadow/VsmClsPixel.MODE1";
+            cr.bufferUses = { { which == 0 ? clsAtlas : clsTwin, Use::UavGraphics } };
+            cr.conservative = which == 0;
             cr.cull = D3D12_CULL_MODE_NONE;
-            cr.pixelConstants[0] = s.clsAtlasUav;
+            cr.pixelConstants[0] = which == 0 ? s.clsAtlasUav : s.clsTwinUav;
             cr.pixelConstants[1] = clsWidth;
             uint64_t sum = 0;
             uint32_t clsRequests = 0;
             auto flush = [&]() {
                 if (cr.views.empty()) return;
-                cr.name = "s.vsm.clsraster" + std::to_string(clsRequests++);
+                cr.name = (which == 0 ? "s.vsm.clsraster" : "s.vsm.clstwinraster") + std::to_string(clsRequests++);
                 fc.services.rasterizeDepth(fc, cr);
                 cr.views.clear();
                 sum = 0;
@@ -1608,15 +1622,19 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             }
             flush();
         }
-        ID3D12PipelineState* pBlocks = sh.compute("Passes/Shadow/VsmClsBlocks");
-        g.addPass("s.vsm.cls.blocks", QueueType::Compute,
-                  [&](PassBuilder& b) { b.use(clsAtlas, Use::SrvCompute); b.use(clsBlocks, Use::UavCompute); },
-                  [=](PassContext& ctx) {
-                      const uint32_t k[4] = { ctx.srv(clsAtlas), ctx.uav(clsBlocks), clsWidth, 48 };
-                      ctx.cmd->SetPipelineState(pBlocks);
-                      ctx.computeConstants(k, 4);
-                      ctx.cmd->Dispatch(clsPages, 1, 1);
-                  });
+        for (int which = 0; which < (twin ? 2 : 1); ++which)
+        {
+            ID3D12PipelineState* pBlocks = sh.compute(which == 0 ? "Passes/Shadow/VsmClsBlocks.MODE0" : "Passes/Shadow/VsmClsBlocks.MODE1");
+            const BufferRef pagesIn = which == 0 ? clsAtlas : clsTwin, blocksOut = which == 0 ? clsBlocks : twinBlocks;
+            g.addPass(which == 0 ? "s.vsm.cls.blocks" : "s.vsm.cls.twinblocks", QueueType::Compute,
+                      [&](PassBuilder& b) { b.use(pagesIn, Use::SrvCompute); b.use(blocksOut, Use::UavCompute); },
+                      [=](PassContext& ctx) {
+                          const uint32_t k[4] = { ctx.srv(pagesIn), ctx.uav(blocksOut), clsWidth, 48 };
+                          ctx.cmd->SetPipelineState(pBlocks);
+                          ctx.computeConstants(k, 4);
+                          ctx.cmd->Dispatch(clsPages, 1, 1);
+                      });
+        }
         ID3D12PipelineState* pClassify = sh.compute("Passes/Shadow/LocalTileClassify");
         const TextureRef depth = main.depth;
         const uint32_t toleranceBits = asUint((float)q.number("shadow.vsm.classification_tolerance"));
@@ -1625,13 +1643,15 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.use(depth, Use::SrvCompute);
                       b.use(froxelLists, Use::SrvCompute);
                       b.use(clsBlocks, Use::SrvCompute);
+                      if (twin) b.use(twinBlocks, Use::SrvCompute);
                       b.use(tileLit, Use::UavCompute);
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[8] = { ctx.srv(depth), ctx.srv(froxelLists), localLightsSrv, slotOfSrv, ctx.srv(clsBlocks), ctx.uav(tileLit), tilesX, toleranceBits };
+                      const uint32_t k[12] = { ctx.srv(depth), ctx.srv(froxelLists), localLightsSrv, slotOfSrv, ctx.srv(clsBlocks), ctx.uav(tileLit), tilesX, toleranceBits,
+                                               twin ? ctx.srv(twinBlocks) : 0xFFFFFFFFu, 0, 0, 0 };
                       ctx.cmd->SetPipelineState(pClassify);
                       ctx.bindFrameConstants(mainConstants);
-                      ctx.computeConstants(k, 8);
+                      ctx.computeConstants(k, 12);
                       ctx.cmd->Dispatch(tilesX, tilesY, 1);
                   });
         fc.resources.vsmTileLit = tileLit;

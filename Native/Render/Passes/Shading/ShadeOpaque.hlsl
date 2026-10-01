@@ -534,6 +534,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #if FALLBACK
             if (casts)
 #else
+            if (casts && P[6].z != UNX_NONE && vsmClsTileUmbra(clsTile, clsSlice, i)) continue;  // umbra over the tile: 0
             if (casts && !(P[6].z != UNX_NONE && vsmClsTileLit(clsTile, clsSlice, i)))
 #endif
                 visibility = shadowOrdinal <= 3 ? shadowSlot(shadowPacked, shadowOrdinal)
