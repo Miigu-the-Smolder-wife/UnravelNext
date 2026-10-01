@@ -444,7 +444,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   k[14] = bits(sun.z);
                   k[15] = experiment;
                   k[16] = bits(skyBand);
-                  k[17] = screenTraced ? 1u : 0u;
+                  k[17] = (screenTraced ? 1u : 0u) | (!L.hitFallback && surfaceCache.valid() ? 2u : 0u);
                   k[18] = bits(L.normalBias);
                   k[19] = bits(L.movingSpeed);
                   k[20] = surfaceCache.valid() ? c.uav(surfaceCache) : 0xFFFFFFFFu;

@@ -181,6 +181,7 @@ experiment_disable = 0             # cost attribution only (recorded in the qual
                                    # their cell's tangent square, 131072 = bounce reads from the cell's irradiance map (not its SH),
                                    # 262144 = every bounce read through the interpolated level search (diagnostics),
                                    # 1048576 = gi.lumen: a probe ray that leaves the scene takes 0 instead of the sky (diagnostic),
+                                   # 2097152 = gi.lumen: the probe hits' surface-cache read class as colour (red no cell, green not lit, blue lit; statistics),
                                    # 524288 = every emissive material as visible-only (v1.92: GI hits and emitter samples take
                                    # no emission; what the bridge's _UnxEmissiveVisibleOnly does, for scene files without the flag). Never nonzero outside
                                    # measurements and those tests.
@@ -220,3 +221,4 @@ lumen_screen_trace_iterations = 50         # HierarchicalScreenTraces.MaxIterati
 lumen_screen_trace_thickness = 0.02        # HierarchicalScreenTraces.RelativeDepthThickness
 lumen_screen_trace_thickness_steps = 4     # NumThicknessStepsToDetermineCertainty
 lumen_rays_per_dispatch = 262144           # the probe rays' DispatchRays is split into row bands of at most this many rays (bound on one dispatch's work; not an Unreal value)
+lumen_hit_fallback = true                  # with the surface cache: a probe hit without a lit cell is shaded from the world cache (a footprint-level cell: the source of the lobby's run-to-run warm / grey-blue split) and a light sample. false = Unreal's rule: such a hit takes no cached light (its emission and sun term stay)

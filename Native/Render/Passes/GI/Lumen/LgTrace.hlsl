@@ -14,7 +14,8 @@
 // moves relative to the probe, |probe speed - hit speed| / max(probe depth, 1 m) > P[4].w).
 // P[0] = { world cache SRV, ray info SRV (R16_UINT), trace radiance UAV, trace word UAV (R32_UINT) },
 // P[1], P[2], P[3] = sky and sun (GiSky.hlsli), ray length; P[3].w = gi.experiment_disable bits (8, 16, 128 as GiTrace),
-// P[4] = { sky band (tests), flags (bit 0: LgScreenTrace ran before - gi.lumen_screen_traces), normal bias (float, m),
+// P[4] = { sky band (tests), flags (bit 0: LgScreenTrace ran before - gi.lumen_screen_traces; bit 1: no fallback at hits
+// without a lit surface-cache cell - gi.lumen_hit_fallback = false), normal bias (float, m),
 // moving threshold (float) }, P[5].x = surface cache UAV
 // (0xFFFFFFFF: none - gi.lumen_hit_surface_cache off, surface_cache.enabled off or before its first frame),
 // P[5].y / .z / .w = radiance cache params (raw SRV) / indirection SRV / atlas SRV (P[5].y = 0xFFFFFFFF: none -
@@ -102,6 +103,7 @@ void LgTraceGen()
 
     float3 radiance = 0;
     bool isHit = false, moving = false;
+    uint statClass = 0;  // experiment 2097152: 1 = the hit's surface-cache cell did not exist, 2 = not lit yet, 3 = valid
     float distanceToHit = giRayLength();
     bool reachedCache = false;
     if (hit.t < 0 && coverage.valid)
@@ -166,6 +168,13 @@ void LgTraceGen()
                 RWByteAddressBuffer surfaceCache = ResourceDescriptorHeap[P[5].x];
                 const ScLayout layout = scLayout(surfaceCache);
                 const float3 face = dot(s.geometricNormal, r.Direction) > 0 ? -s.geometricNormal : s.geometricNormal;
+                // (experiment 2097152, statistics: did the hit's cell exist before this ray marked it - its own level)
+                bool existed = true;
+                if ((P[3].w & 2097152u) != 0 && layout.entries != 0)
+                {
+                    const uint level = scLevel(layout, s.position);
+                    existed = scFind(surfaceCache, scKeysOffset(0), layout.entries, scKeyAt(level, scCoord(level, s.position, 1.0), scFace(face))) != SC_NONE;
+                }
                 const float3 bounceAlbedo = saturate(m.baseColor * (1 - m.metallic) + 0.45 * lerp(float3(0.04, 0.04, 0.04), m.baseColor, m.metallic));
                 scMark(surfaceCache, layout, s.position, face, bounceAlbedo, m.emissive);
                 const ScSample cell = scRead(surfaceCache, layout, s.position, face);
@@ -175,6 +184,11 @@ void LgTraceGen()
                     L.specularRadiance = L.irradiance / LG_PI;
                     fromSurfaceCache = true;
                 }
+                // gi.lumen_hit_fallback = false (P[4].y bit 1), the shipping rule of the structure: a hit without a lit
+                // cell takes no light from the caches (Unreal: an invalid surface-cache sample is radiance 0) - no
+                // world-cache read at a footprint-level cell, no light sample. The hit's emission and sun term stay.
+                else if ((P[4].y & 2u) != 0) fromSurfaceCache = true;
+                statClass = !existed ? 1u : (cell.valid ? 3u : 2u);
             }
             // indirect light at the hit: the world cache (read only; experiment 512, attribution: none - one bounce)
             if (!fromSurfaceCache && (P[3].w & 512u) == 0)
@@ -227,6 +241,11 @@ void LgTraceGen()
         }
     }
     if (!all(radiance == radiance) || any(radiance < 0)) radiance = 0;
+    // Experiment 2097152 (statistics): the hit's surface-cache read class as a colour of exposed value 1 - red: no cell,
+    // green: a cell not lit yet, blue: a lit cell; rays without a surface hit (sky, emitters, back faces, foliage): 0.
+    // The GI layer's channel means then give the cosine-weighted shares.
+    if ((P[3].w & 2097152u) != 0)
+        radiance = float3(statClass == 1u ? 1.0 : 0.0, statClass == 2u ? 1.0 : 0.0, statClass == 3u ? 1.0 : 0.0) / max(g_exposure, 1e-20);
     traceRadiance[coord] = float4(min(radiance * g_exposure, 64000.0), 1);
     traceWord[coord] = lgEncodeTrace(min(distanceToHit, giRayLength()), isHit, moving, reachedCache);
 }
