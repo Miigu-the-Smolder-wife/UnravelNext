@@ -893,3 +893,5 @@ GPU 재현은 멈춘 상태다(조정 세션 지시). 아래는 GPU 없이 한 �
 그 밖:
 - d5f33ab 직접광 dispatch를 TraceRay 수로 묶음(8,192 셀, 최대 163,840회). 빌드만.
 - PrevSceneColor: `output.screen_trace_source`(기본 1 = 지금처럼 업스케일 이력, 0 = 업스케일 전 장면 색 = 언리얼 기본) 작성·빌드. 0에서는 색 텍스처 크기가 출력이 아니라 뷰 크기이므로 읽는 쪽이 `RenderGraph::desc(view.prevSceneColor)`에서 크기를 받아야 한다 — 반사는 바꿨고 **R의 `LumenGather.cpp`(369행 근처)는 아직 출력 크기를 쓴다**. R이 바꾸면 기본값을 0으로 돌린다. 로비 스모크는 GPU 잠금 대기 중(Unity 배치 실행이 잡고 있다).
+
+- (07:40) S2: e481be6 PrevSceneColor 스위치(작성·빌드), 8072173 radiosity 광선이 읽는 태양·그 밖의 조도 합 진단(`surface_cache.debug_count=3`, 작성·빌드). **GPU 잠금이 07:25부터 Unity 배치 실행(track all, 제한 150분)에 잡혀 있어** 로비 스모크(PrevSceneColor 두 소스)와 햇빛 합 측정이 줄에서 기다린다. 풀리면 자동으로 돌고, 결과를 여기에 적는다. 그때까지 S2의 GPU 작업은 멈춰 있다.
