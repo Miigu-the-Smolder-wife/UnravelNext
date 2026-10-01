@@ -1020,6 +1020,24 @@ render::ClusterData build(const scene::Scene& scene, const Settings& settings, B
         render::ClusterData::MeshRange& range = data.meshes[mi];
         range.clusterOffset = clusterBase;
         range.clusterCount = (uint32_t)mo.clusters.size();
+        {
+            // Cut bound: a cut takes, per group of the DAG, either the group's clusters or (recursively) what its
+            // simplification made; when no simplification made more clusters than its group had, no cut holds more than
+            // the leaves (the source clusters). Checked here per group; a mesh where it fails is bounded by all its clusters.
+            std::vector<uint32_t> made(mo.groups.size(), 0);
+            uint32_t leaves = 0;
+            for (const ClusterOut& c : mo.clusters)
+            {
+                if (c.refined < 0) ++leaves;
+                else if ((size_t)c.refined < made.size()) ++made[c.refined];
+            }
+            bool shrinks = true;
+            for (size_t gi = 0; gi < mo.groups.size(); ++gi) shrinks = shrinks && made[gi] <= mo.groups[gi].clusterCount;
+            range.cutBound = shrinks ? leaves : range.clusterCount;
+            if (!shrinks)
+                logf("cluster builder: mesh %zu - a group's simplification made more clusters than the group had: its cut bound is all %u clusters\n", mi,
+                     range.clusterCount);
+        }
 
         // Clusters (group order), their LOD spheres and index pools.
         for (size_t gi = 0; gi < mo.groups.size(); ++gi)

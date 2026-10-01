@@ -5,12 +5,26 @@
 #include "unx/render/GraphTypes.h"
 #include "unx/scene/SceneData.h"
 
+#include <cstdint>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace unx::render
 {
+// V -> requester (INTERFACES 3.6): the newest frame in which a depth raster run (DepthRasterRequest::name) overflowed its
+// lists, and its overflow bits - geometry was dropped from what that frame drew. V writes it when the run's statistics
+// come back (framesInFlight frames later); requesters that keep what a run drew (S's page cache) redraw it. TrackState
+// key kDepthRasterOverflowKey.
+struct DepthRasterOverflow
+{
+    uint64_t frame = UINT64_MAX;
+    uint32_t bits = 0;
+};
+using DepthRasterOverflows = std::map<std::string, DepthRasterOverflow>;
+inline const char* kDepthRasterOverflowKey = "depthRaster.overflows";
+
 // S -> V: rasterise shadow-casting clusters into depth-like targets through V's cluster pipeline (cull, LOD, deform,
 // mesh shader). V owns geometry; the requester owns the output: either hardware depth into 'depthTarget', or its own
 // pixel kernel (e.g. atomic depth into paged storage) with the extra resources it declares.

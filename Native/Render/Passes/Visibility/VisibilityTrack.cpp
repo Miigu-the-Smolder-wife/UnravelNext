@@ -48,6 +48,7 @@ struct Settings
     uint32_t capVisible = 0, capNodes = 0, capGroups = 0, capDeferred = 0;
     uint32_t coverageDebugStage = 0;
     bool coverageHair = false;  // visibility.coverage_hair (B10 strands in the coverage layer)
+    bool rasterAmplification = true;  // visibility.raster_amplification (tile-local raster runs: no stored pairs)
     double coveragePoolMinPerPixel = 0;
     uint32_t oceanEdgesMin = 0;  // ocean edge pixel list capacity floor (entries)
     uint32_t coverageSpecialMin = 0;  // special record list capacity floor (entries)
@@ -73,6 +74,7 @@ struct Settings
         s.coverageLayer = q.boolean("visibility.coverage_layer");
         s.coverageBandC = q.boolean("visibility.coverage_band_c");
         s.coverageHair = q.boolean("visibility.coverage_hair");
+        s.rasterAmplification = q.has("visibility.raster_amplification") ? q.boolean("visibility.raster_amplification") : true;
         const int64_t stage = q.integer("visibility.coverage_debug_stage");
         if (stage < 0 || stage > 4) fail("visibility.coverage_debug_stage = %lld: 0 (the layer), 1 .. 4 (measurement variants)", (long long)stage);
         s.coverageDebugStage = (uint32_t)stage;
@@ -762,7 +764,7 @@ void ensureHiz(Device& device, Hiz& h, uint32_t width, uint32_t height)
 struct Run
 {
     BufferRef state, args, nodeItems, groupItems, visible, lists, deferInstances, deferNodes, deferClusters, tileMask;
-    BufferRef tilePairs;  // tile-local raster runs: uint3 (visible index, tile rectangle) per list entry
+    BufferRef tilePairs;  // tile-local raster runs: uint2 tile rectangle per visible entry (DepthRaster.as expands the pairs)
     BufferRef tileCoarse;  // runs with a tile mask: bit per 8 x 8 tiles (TileMaskCoarse.hlsl)
     BufferRef chunkWork;   // C3: visible chunk items [0, capDeferred), deferred chunks [capDeferred, 2 capDeferred)
     BufferRef chunks, skinBounds;  // C3 persistent buffers imported for this frame (read by the cull kernels)
@@ -774,6 +776,7 @@ struct Run
     uint32_t nodesSrv = kNone, rootsSrv = kNone, spheresSrv = kNone, sheetsSrv = kNone;
     D3D12_GPU_VIRTUAL_ADDRESS frameConstants = 0;  // scene indices, time and wind for the kernels (b1)
     uint32_t bandMode = kBandModeA;
+    bool storedPairs = false;  // tile-local run with the stored pair list (visibility.raster_amplification false, A/B)
     Settings cfg;
     std::string prefix;
 };
@@ -849,7 +852,7 @@ void cullConstants(const PassContext& c, const Run& r, uint32_t phase, uint32_t 
     k[23] = r.cfg.capDeferred;
     k[24] = r.viewCount;
     k[25] = instanceCount;
-    k[26] = r.bandMode;
+    k[26] = r.bandMode | (r.storedPairs ? 256u : 0u);  // CullShared.hlsli BAND_MODE, TILE_STORED_PAIRS
     k[27] = r.tilePairs.valid() ? c.uav(r.tilePairs) : kNone;
     k[28] = halfBits(r.cfg.bandAMinPx) | halfBits(r.cfg.bandCMaxPx) << 16;
     k[29] = r.sheetsSrv;
@@ -1585,9 +1588,18 @@ void readStats(FramePassContext& fc, State& s, const std::string& name)
                  "out, it grows from the next completed frame; 0x400: a shader loop reached its iteration bound or a coverage consistency check failed, "
                  "a defect)\n",
                  name.c_str(), (unsigned long long)st.frameIndex, st.overflow);
+            // the need (the counters count past the capacity): visible entries, tile pairs, deferred items
+            logf("V: '%s' frame %llu needed %u visible entries, %u tile pairs, %u deferred instances, %u deferred nodes, %u deferred clusters\n",
+                 name.c_str(), (unsigned long long)st.frameIndex, st.visibleClusters, st.tilePairs, st.deferredInstances, st.deferredNodes, st.deferredClusters);
             run.overflowReported = true;
         }
         run.latest = st;
+        if (st.overflow && name != "main")
+        {
+            // a depth raster run dropped geometry: its requester redraws what it kept (DepthRaster.h DepthRasterOverflows)
+            DepthRasterOverflow& o = fc.state<DepthRasterOverflows>(kDepthRasterOverflowKey)[name];
+            if (o.frame == UINT64_MAX || st.frameIndex > o.frame) o = { st.frameIndex, st.overflow };
+        }
     }
 }
 
@@ -1994,6 +2006,15 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
         fail("rasterizeDepth '%s': coverage mode and band selection (v1.26) are not implemented yet (V)", request.name.c_str());
     if (request.tileLocal && (!request.cullMask.valid() || request.cullTilePx == 0))
         fail("rasterizeDepth '%s': tileLocal needs a tile mask (cullMask, cullTilePx)", request.name.c_str());
+    // Tile-local runs: DepthRaster.as.hlsl launches one mesh group per (cluster, tile run) pair from a per-row prefix of
+    // at most 256 rows (DepthRasterPayload.hlsli DR_MAX_ROWS), so every view's tile grid is at most 256 x 256 tiles: one
+    // cluster launches at most 65536 mesh groups (D3D12: 2^22) - a structural bound, not a capacity.
+    const bool amplify = request.tileLocal && cfg.rasterAmplification;
+    if (amplify)
+        for (const RasterView& v : request.views)
+            if ((v.viewportWidth + request.cullTilePx - 1) / request.cullTilePx > 256 || (v.viewportHeight + request.cullTilePx - 1) / request.cullTilePx > 256)
+                fail("rasterizeDepth '%s': a %ux%u viewport in %u px tiles exceeds the 256 x 256 tile grid of the tile-local raster", request.name.c_str(),
+                     v.viewportWidth, v.viewportHeight, request.cullTilePx);
     const DXGI_FORMAT depthFormat = request.depthTarget.valid() ? fc.graph.desc(request.depthTarget).format : DXGI_FORMAT_UNKNOWN;
     if (request.depthTarget.valid() && depthFormat != DXGI_FORMAT_D32_FLOAT && depthFormat != DXGI_FORMAT_D16_UNORM)
         fail("rasterizeDepth '%s': depth target format %u (D32_FLOAT or D16_UNORM)", request.name.c_str(), (unsigned)depthFormat);
@@ -2022,7 +2043,10 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     prepareCullScene(fc, s, s.mainFrameConstants);
     Run r = createRun(fc, cfg, request.name + ".", s.mainFrameConstants);
     r.tileMask = request.cullMask;
-    if (request.tileLocal) r.tilePairs = fc.graph.createBuffer({ "v.cull.tilePairs", (uint64_t)cfg.capVisible * 12, 12 });
+    // tile-local: each visible entry's tile rectangle (CullClusters); the amplification stage expands its pairs
+    if (amplify) r.tilePairs = fc.graph.createBuffer({ "v.cull.tileRects", (uint64_t)cfg.capVisible * 8, 8 });
+    else if (request.tileLocal) r.tilePairs = fc.graph.createBuffer({ "v.cull.tilePairs", (uint64_t)cfg.capVisible * 12, 12 });  // (A/B)
+    r.storedPairs = request.tileLocal && !amplify;
     r.instanceMask = request.instanceMask;
     std::vector<CullView> views;
     for (const RasterView& v : request.views) views.push_back(viewOf(v, request, cfg));
@@ -2041,8 +2065,9 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
         const bool back = request.cull == D3D12_CULL_MODE_BACK && (l == kListABack || l == kListAAlphaBack);
         MeshPipelineDesc d;
         // DEPTH1: no pixel kernel reads the attributes (hardware depth only), so the kernel exports none of them
+        if (amplify) d.amplificationShader = std::string("Passes/Visibility/DepthRaster.as.TILE") + (atlas ? "2" : "1");
         d.meshShader = std::string("Passes/Visibility/DepthRaster.ms.TILE") + (atlas ? "2" : request.tileLocal ? "1" : "0") +
-                       (request.pixelKernel.empty() ? ".DEPTH1" : ".DEPTH0") + (out64 ? ".OUT64" : ".OUT128");
+                       (request.pixelKernel.empty() ? ".DEPTH1" : ".DEPTH0") + (out64 ? ".OUT64" : ".OUT128") + (amplify ? ".AS1" : ".AS0");
         d.pixelShader = request.pixelKernel;
         d.depthFormat = depthOut ? depthFormat : DXGI_FORMAT_UNKNOWN;
         d.depthWrite = depthOut;
@@ -2050,7 +2075,7 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
         d.conservative = request.conservative;
         pso[l] = fc.shaders.mesh("v.depth|" + request.pixelKernel + (back ? "|back" : "|none") +
                                      (depthOut ? (depthFormat == DXGI_FORMAT_D16_UNORM ? "|d16" : "|d32") : "|uav") + (request.conservative ? "|cons" : "") +
-                                     (atlas ? "|atlas" : request.tileLocal ? "|tile" : "") + (out64 ? "|out64" : ""), d);
+                                     (atlas ? "|atlas" : request.tileLocal ? "|tile" : "") + (amplify ? "|as" : "") + (out64 ? "|out64" : ""), d);
     }
     std::vector<D3D12_VIEWPORT> viewports;
     std::vector<D3D12_RECT> scissors;
@@ -2075,6 +2100,7 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                          b.use(r.lists, Use::SrvGraphics);
                          b.use(r.state, Use::SrvGraphics);
                          if (r.tilePairs.valid()) b.use(r.tilePairs, Use::SrvGraphics);
+                         if (amplify) b.use(req.cullMask, Use::SrvGraphics);  // (the amplification stage's pairs)
                          if (req.atlasSlots.valid()) b.use(req.atlasSlots, Use::SrvGraphics);
                          if (req.depthTarget.valid()) b.use(req.depthTarget, Use::DepthWrite);
                          for (const auto& [t, u] : req.textureUses) b.use(t, u);
@@ -2095,7 +2121,7 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                          {
                              uint32_t k[32] = { c.srv(r.visible), c.srv(r.lists), c.srv(r.state), l, 1, r.cfg.capVisible, r.viewsSrv, sameViewport ? 0u : 1u,
                                                 r.tilePairs.valid() ? c.srv(r.tilePairs) : kNone, req.atlasSlots.valid() ? c.srv(req.atlasSlots) : kNone,
-                                                req.atlasTilesPerRow, atlasWidth | atlasHeight << 16 };
+                                                req.atlasTilesPerRow, atlasWidth | atlasHeight << 16, amplify ? c.srv(req.cullMask) : kNone };
                              std::memcpy(&k[16], req.pixelConstants, sizeof req.pixelConstants);
                              c.cmd->SetPipelineState(pso[l]);
                              c.graphicsConstants(k, 32);

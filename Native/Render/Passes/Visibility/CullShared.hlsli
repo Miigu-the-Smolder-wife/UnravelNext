@@ -40,7 +40,8 @@
 #define CAP_DEFERRED P[5].w
 #define VIEW_COUNT P[6].x
 #define INSTANCE_COUNT P[6].y
-#define BAND_MODE P[6].z
+#define BAND_MODE (P[6].z & 0xFFu)
+#define TILE_STORED_PAIRS ((P[6].z >> 8) & 1u)  // visibility.raster_amplification false: the stored pair list (A/B)
 #define TILE_PAIRS_UAV P[6].w
 #define BAND_A_MIN_PX f16tof32(P[7].x)
 #define BAND_C_MAX_PX f16tof32(P[7].x >> 16)
