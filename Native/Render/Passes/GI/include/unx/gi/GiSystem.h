@@ -72,6 +72,7 @@ struct GiSettings  // from Config/quality/gi.toml
     // hitAccumulatorMinSamples; the means' window in samples (hitAccumulatorWindowRecent while the sun changes).
     bool hitAccumulator = false;
     uint32_t hitAccumulatorMinSamples = 32;
+    uint32_t hitAccumulatorLevels = 4;  // gi.hit_accumulator_levels (pool form): 1 = a reader's own cell only, no pass-up
     float hitAccumulatorWindow = 1024, hitAccumulatorWindowRecent = 128;
     float hitAccumulatorCellScale = 2;  // gi.hit_accumulator_cell_scale (default: the bounce cell's, gi.hit_cell_footprint_scale)
     bool hitAccumulatorFrame = false;   // gi.hit_accumulator_frame: this frame's cell means (GiAccFix), not a window's

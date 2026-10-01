@@ -176,6 +176,8 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     if (q.has("gi.hit_accumulator_pool_slots")) s.hitAccumulatorPoolSlots = (uint32_t)q.integer("gi.hit_accumulator_pool_slots");
     if (q.has("gi.hit_accumulator_alpha")) s.hitAccumulatorAlpha = (float)q.number("gi.hit_accumulator_alpha");
     if (q.has("gi.hit_accumulator_fine_scale")) s.hitAccumulatorFineScale = (float)q.number("gi.hit_accumulator_fine_scale");
+    if (q.has("gi.hit_accumulator_levels")) s.hitAccumulatorLevels = (uint32_t)q.integer("gi.hit_accumulator_levels");
+    if (s.hitAccumulatorLevels < 1 || s.hitAccumulatorLevels > 4) fail("gi.hit_accumulator_levels must be 1..4");
     if (s.hitAccumulatorPool)
     {
         if (s.hitAccumulatorPoolSlots < 1024 || (s.hitAccumulatorPoolSlots & (s.hitAccumulatorPoolSlots - 1)) != 0 || s.hitAccumulatorPoolSlots > (1u << 22))
@@ -793,8 +795,8 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
         const uint32_t mode = m_accPoolClear ? 2u : 0u;
         m_accPoolClear = false;
         g.addPass(mode == 2 ? "r.gi.acc.clear" : "r.gi.acc.begin", QueueType::Compute, [&](PassBuilder& b) { b.use(accPool, Use::UavCompute); },
-                  [&library = fc.shaders, accPool, mode, slots = s.hitAccumulatorPoolSlots, header](PassContext& c) {
-                      uint32_t k[12] = { c.uav(accPool), mode, 0, 0 };
+                  [&library = fc.shaders, accPool, mode, slots = s.hitAccumulatorPoolSlots, header, levels = s.hitAccumulatorLevels](PassContext& c) {
+                      uint32_t k[12] = { c.uav(accPool), mode, 0, levels };
                       std::memcpy(&k[4], header, sizeof header);
                       c.cmd->SetPipelineState(library.compute("Passes/GI/GiAccFold"));
                       c.computeConstants(k, 12);
@@ -1148,12 +1150,12 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
         // them up one level, four lists in order. A list holds at most one entry per ray (list 0) or per entry of the
         // list before it, so the dispatch covers min(slots, rays) entries; threads past the list's count return.
         const uint32_t entries = std::min(s.hitAccumulatorPoolSlots, rayCount);
-        for (uint32_t list = 0; list < 4; ++list)
+        for (uint32_t list = 0; list < s.hitAccumulatorLevels; ++list)
         {
             static const char* const names[4] = { "r.gi.acc.fold0", "r.gi.acc.fold1", "r.gi.acc.fold2", "r.gi.acc.fold3" };
             g.addPass(names[list], QueueType::Compute, [&](PassBuilder& b) { b.use(accPool, Use::UavCompute); },
-                      [&shaders, accPool, list, entries](PassContext& c) {
-                          const uint32_t k[12] = { c.uav(accPool), 1, list, 0 };
+                      [&shaders, accPool, list, entries, levels = s.hitAccumulatorLevels](PassContext& c) {
+                          const uint32_t k[12] = { c.uav(accPool), 1, list, levels };
                           c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiAccFold"));
                           c.computeConstants(k, 12);
                           c.cmd->Dispatch((entries + 63) / 64, 1, 1);

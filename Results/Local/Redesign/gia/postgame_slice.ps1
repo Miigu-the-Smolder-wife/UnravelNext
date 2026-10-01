@@ -41,6 +41,9 @@ $modes = @{
   allon_vis = (S @('gi.hit_accumulator=true', 'reflection.layers=true', 'reflection.layer_mirror_lobe=true', 'gi.experiment_disable=524288'))
   noacc_vis = (S @('reflection.layers=true', 'reflection.layer_mirror_lobe=true', 'gi.experiment_disable=524288'))
   alloff_vis = ($filterOff + $coldOff + (S @('reflection.layers=false', 'reflection.hit_cone_lobes=false', 'reflection.hit_accumulator=false', 'gi.experiment_disable=524288')))
+  oriented = (S @('gi.hit_oriented_lights=true'))
+  oriented_acc = (S @('gi.hit_oriented_lights=true', 'gi.hit_accumulator=true'))
+  oriented_vis = (S @('gi.hit_oriented_lights=true', 'gi.experiment_disable=524288'))
   alloff = ($filterOff + $coldOff + (S @('reflection.layers=false', 'reflection.hit_cone_lobes=false', 'reflection.hit_accumulator=false')))
 }
 $k = $env:PG_SCENE; $res = $env:PG_RES; $turn = $env:PG_TURN

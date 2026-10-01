@@ -103,6 +103,10 @@ hit_accumulator_pool_slots = 524288  # hash slots (a power of two; 268 B each: 1
 hit_accumulator_alpha = 0.125      # the window's frame weight decay (memory ~ 1 / alpha frames)
 hit_accumulator_fine_scale = 0.25  # the finest cell over the ray footprint (the levels are x 1, 2, 4, 8 of it)
 hit_accumulator_min_samples = 32   # samples a cell holds before hits read it (fewer: the point value)
+hit_accumulator_levels = 4         # pool form: the levels a hit may read (its own cell, then x 2, 4, 8 while a level holds fewer than
+                                   # min_samples) and the folds fill by passing sums up. 1 = its own cell only, no pass-up (fewer
+                                   # samples: the point value takes over by n / min_samples): a window then holds exactly the
+                                   # hits that read it. 4 measured +138 % / -23 % on GiAnalytic 9 (corner / lampshade) [2026-10-01]
 hit_accumulator_window = 1024      # the means' window in samples (~10 frames at ~100 hits per cell and frame)
 hit_accumulator_window_recent = 128  # while the sun changed within lighting_recent_frames
 hit_accumulator_cell_scale = 2.0   # the accumulator's cell over the ray footprint: 2.0 = the bounce cell itself; smaller = its own
