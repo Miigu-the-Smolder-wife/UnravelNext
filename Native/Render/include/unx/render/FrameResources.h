@@ -271,5 +271,10 @@ struct FrameResources
     BufferRef giAccumulator;       // hit direct-light accumulator pool (GiAccPool.hlsli;   [R]
                                    // invalid: gi.hit_accumulator_pool off). Readers after
                                    // globalIllumination: SrvCompute (giAccPoolRead)
+    // lumen.radiance_cache (A, for R's gi.lumen; Passes/GI/LumenRadianceCache.hlsli, unx/gi/LumenRadianceCache.h): this
+    // frame's far-field probe cache after its update. Readers: lrcParams(lumenRcParams), lrcCoverageChecked, lrcSample
+    // with the indirection (Texture3D R32_UINT) and the atlas (R11G11B10F) as SRVs. Invalid = off.                   [A]
+    TextureRef lumenRcIndirection, lumenRcAtlas, lumenRcDepth;
+    uint32_t lumenRcParams = 0xFFFFFFFFu;
 };
 } // namespace unx::render

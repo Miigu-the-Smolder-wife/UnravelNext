@@ -17,3 +17,25 @@ short_range_ao_max_frames = 10.0             # (Q) the gather's Temporal.MaxFram
 short_range_ao_history_distance = 0.01       # the gather's Temporal.DistanceThreshold (relative view depth)
 short_range_ao_max_multibounce_albedo = 0.5  # ShortRangeAO.MaxMultibounceAlbedo (the integration's lumenAoMultibounce)
 short_range_ao_foliage_strength = 0.7        # ShortRangeAO.FoliageOcclusionStrength (the integration's, Foliage pixels)
+
+# Far-field radiance cache (Passes/GI/LumenRadianceCache.hlsli): world-space probes on clipmaps around the camera that the
+# screen probes' rays end in (a ray is traced only up to the cache's coverage distance at its probe; a miss reads the
+# cache in the ray's direction). false (default): not built; the screen probes' rays run to their full length.
+radiance_cache = false
+radiance_cache_clipmaps = 4                       # RadianceCache.NumClipmaps (the gather's); at most 6
+radiance_cache_extent_m = 25.0                    # ClipmapWorldExtent (2500 cm): level 0 spans +- this around the camera
+radiance_cache_distribution_base = 2.0            # ClipmapDistributionBase: each level's extent is this x the last
+radiance_cache_grid = 48                          # (Q) ProbeGridResolution: probes per axis and level
+radiance_cache_probe_resolution = 32              # (Q) ProbeResolution: directions per probe = this^2 (stored + 1 border)
+radiance_cache_atlas_probes = 128                 # ProbeAtlasResolutionInProbes: at most this^2 probes alive
+radiance_cache_probes_per_frame = 100             # (Q) NumProbesToTraceBudget: full-resolution probe updates per frame
+radiance_cache_keep_frames = 8                    # NumFramesToKeepCachedProbes: an unused probe keeps its slot this long
+radiance_cache_reprojection_radius_scale = 1.5    # ReprojectionRadiusScale: the parallax sphere, in probe TMin radii
+radiance_cache_downsample_distance_m = 40.0       # (Q) DownsampleDistanceFromCamera: farther probes trace 1/4 of the rays
+radiance_cache_trace_distance_m = 200.0           # Lumen's MaxTraceDistance (20000 cm)
+radiance_cache_filter = true                      # RadianceCache.SpatialFilterProbes
+radiance_cache_filter_max_hit_angle = 0.2         # SpatialFilterMaxRadianceHitAngle (rad)
+radiance_cache_mark_tile_px = 16                  # the module's own screen marker: one surface point per tile (the screen
+                                                  # probes' spacing); the gather marks its probes itself
+radiance_cache_trace_capacity = 1024              # structural bound of probes traced in one frame (new probes are always
+                                                  # traced, past the budget at 1/4 of the rays; past this bound they wait a frame)
