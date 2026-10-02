@@ -35,6 +35,12 @@ render_height_max = 1440
 # CPU model (Tools/ImageQuality, band 0.25-0.5 cycles/px against native, 2/3 scale): still energy 0.92 / SSIM 0.996,
 # 1.4 px/frame pan 0.56 / 0.92 (the 974c6bb kernel: 0.10 / 0.78 and 0.03 / 0.77).
 upscale_kernel = 60.0
+upscale_tsr = true                      # the temporal upscale in the structure of Unreal's TSR (Passes/Shading/Tsr.hlsli): dilated
+                                        # vectors with parallax disocclusion, a low-resolution guide history and the shading rejection
+                                        # measured against it, spatial anti-aliasing where the history is rejected or missing (the
+                                        # frame after a cut), a history of 16 samples held to 4 where the pixel moves an output pixel
+                                        # a frame and to 2 where rejected. false: the one-pass accumulation below (upscale_kernel,
+                                        # upscale_history_frames*, which the TSR path does not read)
 screen_trace_source = 0                # the previous frame colour screen-space traces read (GI, reflections): 0 = the scene colour
                                         # before the upscale, as the reference (r.Lumen.ScreenTracingSource 0), kept with its
                                         # frame's depth in alpha - the traces' history depth test (UpscaleSceneKeep.hlsl);

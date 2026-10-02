@@ -8,6 +8,8 @@
 // RG32F (UV offsets need more than half precision at 4K: 1/3840 per pixel).
 // P[0] = { vis id SRV (UNX_NONE: none), visible clusters SRV, depth SRV, motion UAV }, P[1] = { width, height,
 // asuint(jitter x), asuint(jitter y) } (internal pixels), P[2..5] = rows of the previous unjittered view-projection.
+// P[6].x = previous depth UAV (R32F; UNX_NONE: none): the point's view depth in the previous frame (0: the sky, or
+// behind the previous camera) - the temporal super resolution's parallax test (Tsr.hlsli).
 // Frame constants of the (jittered) main view.
 #include "Bindless.hlsli"
 #include "Passes/Common/Frame.hlsli"
@@ -50,4 +52,9 @@ void main(uint2 id : SV_DispatchThreadID)
         m = uvNow - float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     }
     motion[id] = all(isfinite(m)) ? m : float2(2, 2);
+    if (P[6].x != UNX_NONE)
+    {
+        RWTexture2D<float> previousDepth = ResourceDescriptorHeap[P[6].x];
+        previousDepth[id] = d > 0 && prevClip.w > 1e-6 && isfinite(prevClip.w) ? prevClip.w : 0.0;
+    }
 }

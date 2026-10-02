@@ -77,9 +77,41 @@ struct UpscaleState
         sceneFormat = format;
         sceneFresh = true;
     }
+    // output.upscale_tsr (Tsr.hlsli): the guide history at the internal resolution (R10G10B10A2: the scene colour in
+    // the guide space at low frequency, a = the reprojection edge); guide[parity] is the last one written.
+    ComPtr<ID3D12Resource> guide[2];
+    uint32_t guideWidth = 0, guideHeight = 0;
+    bool guideFresh = true;
+    void ensureGuide(Device& d, uint32_t w, uint32_t h)
+    {
+        if (guide[0] && guideWidth == w && guideHeight == h) return;
+        device = &d;
+        D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+        D3D12_RESOURCE_DESC1 desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = w;
+        desc.Height = h;
+        desc.DepthOrArraySize = desc.MipLevels = 1;
+        desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        for (int k = 0; k < 2; ++k)
+        {
+            if (guide[k]) d.deferRelease(guide[k]);
+            check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
+                                                    IID_PPV_ARGS(guide[k].ReleaseAndGetAddressOf())),
+                  "M upscale guide");
+            guide[k]->SetName(k ? L"M upscale guide 1" : L"M upscale guide 0");
+        }
+        guideWidth = w;
+        guideHeight = h;
+        guideFresh = true;
+    }
     ~UpscaleState()
     {
         if (!device) return;
+        for (auto& t : guide)
+            if (t) device->deferRelease(t);
         for (auto& t : history)
             if (t) device->deferRelease(t);
         for (auto& t : scene)
@@ -213,6 +245,9 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
         s.sceneFresh = false;
     }
     const TextureRef motion = g.createTexture(TextureDesc{ "m.upscale.motion", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT });
+    // output.upscale_tsr: the temporal super resolution's structure (Tsr.hlsli) in place of the one-pass accumulation
+    const bool tsr = !fc.quality.has("output.upscale_tsr") || fc.quality.boolean("output.upscale_tsr");
+    const TextureRef previousDepth = tsr ? g.createTexture(TextureDesc{ "m.upscale.previous depth", w, h, 1, 1, DXGI_FORMAT_R32_FLOAT }) : TextureRef{};
     const TextureRef depth = view.depth, vis = view.visId;
     const BufferRef clusters = view.visibleClusters;
     const bool hasVis = vis.valid() && clusters.valid();
@@ -229,16 +264,131 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       b.use(clusters, Use::SrvCompute);
                   }
                   b.use(motion, Use::UavCompute);
+                  if (tsr) b.use(previousDepth, Use::UavCompute);
               },
               [=](PassContext& c) {
-                  uint32_t k[24] = { hasVis ? c.srv(vis) : 0xFFFFFFFFu, hasVis ? c.srv(clusters) : 0xFFFFFFFFu, c.srv(depth), c.uav(motion), w, h, asUint(jx), asUint(jy) };
+                  uint32_t k[28] = { hasVis ? c.srv(vis) : 0xFFFFFFFFu, hasVis ? c.srv(clusters) : 0xFFFFFFFFu, c.srv(depth), c.uav(motion), w, h, asUint(jx), asUint(jy) };
                   for (int r = 0; r < 4; ++r)
                       for (int col = 0; col < 4; ++col) k[8 + 4 * r + col] = asUint(prevViewProj.m[r][col]);
+                  k[24] = tsr ? c.uav(previousDepth) : 0xFFFFFFFFu;
                   c.cmd->SetPipelineState(motionPso);
                   c.bindFrameConstants(cb);
-                  c.computeConstants(k, 24);
+                  c.computeConstants(k, 28);
                   c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
               });
+    if (tsr)
+    {
+        // Tsr.hlsli: dilate (+ the closest occluder scatter) -> decimate -> reject -> spatial anti-aliasing -> update.
+        s.ensureGuide(fc.device, w, h);
+        const bool guideReset = reset || s.guideFresh;
+        s.guideFresh = false;
+        const TextureRef previousGuide = g.importTexture(s.guide[prev].Get(), { "m.tsr.guide (previous)", w, h, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM },
+                                                         D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        const TextureRef nextGuide = g.importTexture(s.guide[next].Get(), { "m.tsr.guide", w, h, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        const TextureRef scatter = g.createTexture(TextureDesc{ "m.tsr.closest occluder", w, h, 1, 1, DXGI_FORMAT_R32_UINT });
+        const TextureRef dilated = g.createTexture(TextureDesc{ "m.tsr.dilated motion", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT });
+        const TextureRef info = g.createTexture(TextureDesc{ "m.tsr.dilate info", w, h, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+        const TextureRef reprojected = g.createTexture(TextureDesc{ "m.tsr.reprojected guide", w, h, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
+        const TextureRef decimateMask = g.createTexture(TextureDesc{ "m.tsr.decimate mask", w, h, 1, 1, DXGI_FORMAT_R8G8_UNORM });
+        const TextureRef rejection = g.createTexture(TextureDesc{ "m.tsr.rejection", w, h, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM });
+        const TextureRef aaInput = g.createTexture(TextureDesc{ "m.tsr.aa input", w, h, 1, 1, DXGI_FORMAT_R8G8_UNORM });
+        const TextureRef aa = g.createTexture(TextureDesc{ "m.tsr.aa", w, h, 1, 1, DXGI_FORMAT_R8G8_UINT });
+        ShaderLibrary& shaders = fc.shaders;
+        ID3D12PipelineState* clearPso = shaders.compute("Passes/Shading/TsrClear");
+        ID3D12PipelineState* dilatePso = shaders.compute("Passes/Shading/TsrDilate");
+        ID3D12PipelineState* decimatePso = shaders.compute("Passes/Shading/TsrDecimate");
+        ID3D12PipelineState* rejectPso = shaders.compute("Passes/Shading/TsrReject");
+        ID3D12PipelineState* aaPso = shaders.compute("Passes/Shading/TsrAntiAlias");
+        ID3D12PipelineState* updatePso = shaders.compute("Passes/Shading/TsrUpdate");
+        const float exposureRatio = u.exposureRatio;
+        // the guide's blend of a held history: 1 / (1 + 16 / (input / output size)^2) (the reference's TheoricBlendFactor)
+        const float fraction = (float)w / (float)W;
+        const float theoreticBlend = 1.0f / (1.0f + 16.0f / (fraction * fraction));
+        g.addPass("m.tsr.clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(scatter, Use::UavCompute); },
+                  [=](PassContext& c) {
+                      const uint32_t k[4] = { c.uav(scatter), w, h, 0 };
+                      c.cmd->SetPipelineState(clearPso);
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                  });
+        g.addPass("m.tsr.dilate", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(depth, Use::SrvCompute);
+                      b.use(motion, Use::SrvCompute);
+                      b.use(previousDepth, Use::SrvCompute);
+                      b.use(dilated, Use::UavCompute);
+                      b.use(info, Use::UavCompute);
+                      b.use(scatter, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      const uint32_t k[8] = { c.srv(depth), c.srv(motion), c.srv(previousDepth), c.uav(dilated), c.uav(info), c.uav(scatter), w, h };
+                      c.cmd->SetPipelineState(dilatePso);
+                      c.bindFrameConstants(cb);
+                      c.computeConstants(k, 8);
+                      c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                  });
+        g.addPass("m.tsr.decimate", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(dilated, Use::SrvCompute);
+                      b.use(info, Use::SrvCompute);
+                      b.use(scatter, Use::SrvCompute);
+                      b.use(previousGuide, Use::SrvCompute);
+                      b.use(reprojected, Use::UavCompute);
+                      b.use(decimateMask, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      const uint32_t k[12] = { c.srv(dilated), c.srv(info), c.srv(scatter), c.srv(previousGuide), c.uav(reprojected), c.uav(decimateMask), w, h,
+                                               asUint(jx), asUint(jy), asUint(exposureRatio), guideReset ? 1u : 0u };
+                      c.cmd->SetPipelineState(decimatePso);
+                      c.bindFrameConstants(cb);
+                      c.computeConstants(k, 12);
+                      c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                  });
+        g.addPass("m.tsr.reject", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(src, Use::SrvCompute);
+                      b.use(reprojected, Use::SrvCompute);
+                      b.use(decimateMask, Use::SrvCompute);
+                      b.use(rejection, Use::UavCompute);
+                      b.use(nextGuide, Use::UavCompute);
+                      b.use(aaInput, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      const uint32_t k[12] = { c.srv(src), c.srv(reprojected), c.srv(decimateMask), c.uav(rejection), c.uav(nextGuide), c.uav(aaInput), w, h,
+                                               asUint(theoreticBlend), 0, 0, 0 };
+                      c.cmd->SetPipelineState(rejectPso);
+                      c.computeConstants(k, 12);
+                      c.cmd->Dispatch((w + 15) / 16, (h + 15) / 16, 1);
+                  });
+        g.addPass("m.tsr.aa", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(aaInput, Use::SrvCompute);
+                      b.use(aa, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      const uint32_t k[4] = { c.srv(aaInput), c.uav(aa), w, h };
+                      c.cmd->SetPipelineState(aaPso);
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                  });
+        g.addPass("m.upscale", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(src, Use::SrvCompute);
+                      b.use(rejection, Use::SrvCompute);
+                      b.use(dilated, Use::SrvCompute);
+                      b.use(aa, Use::SrvCompute);
+                      b.use(history, Use::SrvCompute);
+                      b.use(output, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      const uint32_t k[16] = { c.srv(src), c.srv(rejection), c.srv(dilated), c.srv(history), c.uav(output), w, h, reset ? 1u : 0u,
+                                               W, H, asUint(jx), asUint(jy), asUint(exposureRatio), c.srv(aa), 0, 0 };
+                      c.cmd->SetPipelineState(updatePso);
+                      c.computeConstants(k, 16);
+                      c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                  });
+        return output;
+    }
     const float ratio = u.exposureRatio, capStill = (float)frames, capMoving = (float)framesMoving, kernelK = (float)kernel;
     ID3D12PipelineState* pso = fc.shaders.compute("Passes/Shading/Upscale");
     g.addPass("m.upscale", QueueType::Graphics,
