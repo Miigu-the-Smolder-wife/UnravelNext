@@ -73,6 +73,37 @@ float fogExtinctionAt(FogMedium f, float y)
     return f.density * min(exp2(-f.falloff * (y - f.height)), 64.0);
 }
 
+// The density's variation about its mean (atmosphere.fog.noise_amount): value noise of two octaves on a lattice that
+// repeats every 256 points (zero mean, in [-1, 1]), twice as fine in height as across (fog lies in sheets).
+// lattice: the position's lattice coordinates (FroxelSystem.cpp recordFogVolume: position x (1, 2, 1) / scale + the
+// frame's offset - the world's origin and the wind's drift).
+float fogLatticeValue(int3 c)
+{
+    uint h = (uint(c.x) & 255u) | (uint(c.y) & 255u) << 8 | (uint(c.z) & 255u) << 16;
+    h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12; h *= 0x297A2D39u; h ^= h >> 15;
+    return float(h & 0xFFFFu) * (2.0 / 65535.0) - 1.0;
+}
+float fogValueNoise(float3 x)
+{
+    const float3 base = floor(x);
+    const float3 f = x - base;
+    const float3 u = f * f * (3.0 - 2.0 * f);
+    const int3 c = int3(base);
+    const float x00 = lerp(fogLatticeValue(c), fogLatticeValue(c + int3(1, 0, 0)), u.x);
+    const float x10 = lerp(fogLatticeValue(c + int3(0, 1, 0)), fogLatticeValue(c + int3(1, 1, 0)), u.x);
+    const float x01 = lerp(fogLatticeValue(c + int3(0, 0, 1)), fogLatticeValue(c + int3(1, 0, 1)), u.x);
+    const float x11 = lerp(fogLatticeValue(c + int3(0, 1, 1)), fogLatticeValue(c + int3(1, 1, 1)), u.x);
+    return lerp(lerp(x00, x10, u.y), lerp(x01, x11, u.y), u.z);
+}
+// The factor on the mean density at a lattice coordinate: 1 + amount x 2 x noise, not below 0 (amount <= 0.5 never
+// reaches 0: the mean stays the closed form's).
+float fogDensityScale(float3 lattice, float amount)
+{
+    if (!(amount > 0)) return 1.0;
+    const float n = (fogValueNoise(lattice) + 0.5 * fogValueNoise(lattice * 2.0 + float3(37.0, 17.0, 59.0))) * (1.0 / 1.5);
+    return max(1.0 + amount * 2.0 * n, 0.0);
+}
+
 // The view's fog record (FroxelSystem.cpp FogParamsGpu; 80 B). The first 32 bytes are all a reader needs.
 struct FogParams
 {

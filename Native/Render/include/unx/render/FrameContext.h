@@ -131,6 +131,8 @@ struct FogDesc
     float phaseG = 0.2f;           // Henyey-Greenstein asymmetry, (-1, 1)
     float startDistance = 0;       // m: no fog nearer than this
     float skyAmount = 1;           // [0, 1]: how much of the fog sky pixels take
+    float noiseAmount = 0.3f;      // [0, 1]: the density's variation about its mean (0: a uniform medium)
+    float noiseScale = 20;         // m: the variation's largest features
 };
 
 // A14 (FEATURES_GAME 8; Requests/20260926_C_per_view_history.md): a full auxiliary view drawn in this frame before the

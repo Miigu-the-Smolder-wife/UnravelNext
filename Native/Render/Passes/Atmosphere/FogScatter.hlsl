@@ -23,7 +23,8 @@
 //          light), depth pyramid SRV }
 // P[6] = { local fluence SRV, direction moment SRV, previous translucency volume params SRV (UNX_NONE: none),
 //          transmittance LUT SRV }
-// P[7] = asuint{ jitter x, y, z in [0, 1), history weight }, P[8] = { VSM stats UAV (the walk's error word), depth SRV }
+// P[7] = asuint{ jitter x, y, z in [0, 1), history weight }, P[8] = { VSM stats UAV (the walk's error word), depth SRV,
+//          asuint(the density's noise amount), asuint(1 / its scale in m) }, P[9].xyz = asuint(the noise's lattice offset)
 // Frame constants of the main view.
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
@@ -64,7 +65,7 @@ void main(uint3 id : SV_DispatchThreadID)
     const float3 p = g_cameraPosition + ray * zs;
 
     const FogMedium fog = fogMedium(uint4(1, 0, 0, 0), P[2], P[3]);
-    float sigma = fogExtinctionAt(fog, p.y);
+    float sigma = fogExtinctionAt(fog, p.y) * fogDensityScale(p * float3(1, 2, 1) * asfloat(P[8].w) + asfloat(P[9].xyz), asfloat(P[8].z));
     if (zs * toRay < fog.start) sigma = 0;
     float3 inScattered = 0;
     if (sigma > 0)

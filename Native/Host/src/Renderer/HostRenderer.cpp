@@ -1084,10 +1084,11 @@ void HostRenderer::setFog(const render::FogDesc& f)
     requireCommitted();
     const bool finite = std::isfinite(f.density) && std::isfinite(f.heightFalloff) && std::isfinite(f.height) && std::isfinite(f.albedo[0]) &&
                         std::isfinite(f.albedo[1]) && std::isfinite(f.albedo[2]) && std::isfinite(f.phaseG) && std::isfinite(f.startDistance) &&
-                        std::isfinite(f.skyAmount);
-    if (!finite || f.density < 0 || f.heightFalloff < 0 || !(f.phaseG > -1 && f.phaseG < 1) || f.startDistance < 0 || f.skyAmount < 0 || f.skyAmount > 1)
-        fail("fog: density %g >= 0, falloff %g >= 0, phase g %g in (-1, 1), start %g >= 0, sky amount %g in [0, 1]", f.density, f.heightFalloff, f.phaseG,
-             f.startDistance, f.skyAmount);
+                        std::isfinite(f.skyAmount) && std::isfinite(f.noiseAmount) && std::isfinite(f.noiseScale);
+    if (!finite || f.density < 0 || f.heightFalloff < 0 || !(f.phaseG > -1 && f.phaseG < 1) || f.startDistance < 0 || f.skyAmount < 0 || f.skyAmount > 1 ||
+        f.noiseAmount < 0 || f.noiseAmount > 1 || (f.enabled && f.noiseScale < 1))
+        fail("fog: density %g >= 0, falloff %g >= 0, phase g %g in (-1, 1), start %g >= 0, sky amount %g in [0, 1], noise amount %g in [0, 1], noise scale %g >= 1",
+             f.density, f.heightFalloff, f.phaseG, f.startDistance, f.skyAmount, f.noiseAmount, f.noiseScale);
     std::lock_guard lock(m_mutex);
     m_fog = f;
 }

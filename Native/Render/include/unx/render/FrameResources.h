@@ -213,6 +213,9 @@ struct FogView
     float albedo[3] = { 1, 1, 1 };
     float skyAmount = 0, historyWeight = 0.9f, shadowTexelsPerCell = 1;
     bool indirect = true;
+    // the density's variation (FogVolume.hlsli fogDensityScale): its share of the density, its largest features (m), the
+    // drift's speed with no wind (m/s) and the wind's share of the drift
+    float noiseAmount = 0, noiseScale = 20, noiseDrift = 0.3f, noiseWind = 1;
 };
 
 struct FrameResources

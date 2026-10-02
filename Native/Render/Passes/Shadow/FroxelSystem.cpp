@@ -204,6 +204,8 @@ FogView fogViewFor(const QualityConfig& q, const FogDesc& frame, uint32_t width,
         f.g = frame.phaseG;
         f.start = frame.startDistance;
         f.skyAmount = frame.skyAmount;
+        f.noiseAmount = frame.noiseAmount;
+        f.noiseScale = frame.noiseScale;
         for (int k = 0; k < 3; ++k) f.albedo[k] = frame.albedo[k];
         if (!(f.density >= 0) || !(f.falloff >= 0) || !(f.g > -1 && f.g < 1) || !(f.start >= 0))
             fail("FrameContext::fog: density and falloff >= 0, phase g in (-1, 1), start distance >= 0");
@@ -218,12 +220,18 @@ FogView fogViewFor(const QualityConfig& q, const FogDesc& frame, uint32_t width,
         f.g = (float)q.number("atmosphere.fog.phase_g");
         f.start = (float)q.number("atmosphere.fog.start_distance_m");
         f.skyAmount = (float)q.number("atmosphere.fog.sky_amount");
+        f.noiseAmount = (float)q.number("atmosphere.fog.noise_amount");
+        f.noiseScale = (float)q.number("atmosphere.fog.noise_scale_m");
         const std::vector<double> albedo = q.numbers("atmosphere.fog.albedo");
         if (albedo.size() != 3 || !(scale > 0) || !(f.density >= 0) || !(f.falloff >= 0) || !(f.g > -1 && f.g < 1) || !(f.start >= 0))
             fail("atmosphere.fog: albedo of 3 numbers, extinction_scale > 0, density and falloff >= 0, phase_g in (-1, 1), start distance >= 0");
         for (int k = 0; k < 3; ++k) f.albedo[k] = (float)albedo[k] / scale;
     }
     f.indirect = q.boolean("atmosphere.fog.indirect_light");
+    f.noiseDrift = (float)q.number("atmosphere.fog.noise_drift_mps");
+    f.noiseWind = (float)q.number("atmosphere.fog.noise_wind_scale");
+    if (!(f.noiseAmount >= 0 && f.noiseAmount <= 1) || !(f.noiseScale >= 1) || !(f.noiseDrift >= 0) || !(f.noiseWind >= 0))
+        fail("atmosphere.fog: noise amount in [0, 1], noise scale >= 1 m, noise_drift_mps and noise_wind_scale >= 0");
     f.historyWeight = (float)q.number("atmosphere.fog.history_weight");
     f.shadowTexelsPerCell = (float)q.number("atmosphere.fog.shadow_texels_per_cell");
     f.cellPx = (uint32_t)q.integer("atmosphere.fog.cell_px");
@@ -884,8 +892,9 @@ void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef 
 
 uint32_t fogPrepare(FramePassContext& fc, const ViewDesc& view)
 {
-    const FogView f = fogViewFor(fc.quality, fc.frame.fog, view.width, view.height);
+    FogView f = fogViewFor(fc.quality, fc.frame.fog, view.width, view.height);
     if (!f.on || !fc.trackState) return 0;
+    f.height -= fc.scene.originOffset().y;  // (the kernels' positions are the frame's render space: world - the origin offset)
     FogState& st = fc.state<FogState>("S.fog.volume");
     st.ensure(fc.device, f);
     st.view = f;
@@ -1105,6 +1114,27 @@ void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef 
     const float jitter[3] = { fogHalton(index, 2), fogHalton(index, 3), fogHalton(index, 5) };
     auto bits = [](float v) { uint32_t u; std::memcpy(&u, &v, 4); return u; };
     const uint32_t grid0 = f.gridX | f.gridY << 16, grid1 = f.gridZ | f.cellPx << 16 | f.farSlices << 24;
+    // The density's variation: the noise's lattice coordinate of a render-space position p is p x (1, 2, 1) / scale + this
+    // offset (the lattice repeats every 256: the offset is kept inside one period in double). It follows the world (the
+    // origin offset) and drifts with the scene's wind, or along x at noise_drift_mps in still air.
+    float noise[3] = { 0, 0, 0 };
+    if (f.noiseAmount > 0)
+    {
+        double v[3] = { f.noiseDrift, 0, 0 };
+        if (const scene::Scene* src = fc.scene.source())
+        {
+            const float3 d = src->windDirection;
+            const double speed = (double)src->windSpeed * f.noiseWind, len = std::sqrt((double)d.x * d.x + (double)d.y * d.y + (double)d.z * d.z);
+            if (speed > f.noiseDrift && len > 1e-6) v[0] = d.x / len * speed, v[1] = d.y / len * speed, v[2] = d.z / len * speed;
+        }
+        const float3 origin = fc.scene.originOffset();
+        const double o[3] = { origin.x, origin.y, origin.z }, axis[3] = { 1, 2, 1 };
+        for (int i = 0; i < 3; ++i)
+        {
+            const double lattice = std::fmod((o[i] - v[i] * fc.frame.time) * axis[i] / f.noiseScale, 256.0);
+            noise[i] = (float)(lattice < 0 ? lattice + 256.0 : lattice);
+        }
+    }
     const D3D12_GPU_VIRTUAL_ADDRESS constants = main.frameConstants;
     ID3D12PipelineState* ps = fc.shaders.compute("Passes/Atmosphere/FogScatter");
     ID3D12PipelineState* pi = fc.shaders.compute("Passes/Atmosphere/FogIntegrate");
@@ -1136,7 +1166,7 @@ void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef 
               },
               [=](PassContext& ctx) {
                   const uint32_t none = 0xFFFFFFFFu;
-                  uint32_t k[36] = { grid0, grid1, bits(f.farM), bits(f.k),
+                  uint32_t k[40] = { grid0, grid1, bits(f.farM), bits(f.k),
                                      bits(f.b), ctx.uav(scatter), history.valid() ? ctx.srv(history) : none, clip ? 1u : 0u,
                                      bits(f.density), bits(f.falloff), bits(f.height), bits(f.g),
                                      bits(f.albedo[0]), bits(f.albedo[1]), bits(f.albedo[2]), bits(f.start),
@@ -1145,10 +1175,11 @@ void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef 
                                      shadows ? ctx.srv(vsm.bound) : none, bits(f.shadowTexelsPerCell), local ? ctx.srv(lights) : none, ctx.srv(hiz),
                                      local ? ctx.srv(fluence) : none, local ? ctx.srv(moment) : none, ambient ? ambientParams : none, ctx.srv(tlut),
                                      bits(jitter[0]), bits(jitter[1]), bits(jitter[2]), bits(f.historyWeight),
-                                     shadows ? ctx.uav(vsm.stats) : none, ctx.srv(fogDepth), 0, 0 };
+                                     shadows ? ctx.uav(vsm.stats) : none, ctx.srv(fogDepth), bits(f.noiseAmount), bits(1.0f / f.noiseScale),
+                                     bits(noise[0]), bits(noise[1]), bits(noise[2]), 0 };
                   ctx.cmd->SetPipelineState(ps);
                   ctx.bindFrameConstants(constants);
-                  ctx.computeConstants(k, 36);
+                  ctx.computeConstants(k, 40);
                   ctx.cmd->Dispatch((f.gridX + 3) / 4, (f.gridY + 3) / 4, (f.gridZ + 3) / 4);
               });
     g.addPass("s.fog.integrate", QueueType::Compute,

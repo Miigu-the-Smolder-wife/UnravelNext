@@ -607,7 +607,7 @@ UNX_API int32_t UNX_CALL UnxFrameSetClouds(UnxRenderer r, const UnxCloudDesc* cl
 // (render::FogDesc). Null: the quality file's atmosphere.fog decides (off unless the file turns it on).
 typedef struct UnxFogDesc
 {
-    uint32_t size, version;             // sizeof (48), 1
+    uint32_t size, version;             // sizeof (56), 1
     float density;                      // extinction (1/m) at 'height', >= 0 (0: no fog)
     float heightFalloff;                // the density halves every 1 / this metres of height, >= 0
     float height;                       // world metres
@@ -615,10 +615,12 @@ typedef struct UnxFogDesc
     float phaseG;                       // Henyey-Greenstein asymmetry, (-1, 1)
     float startDistance;                // m, >= 0
     float skyAmount;                    // [0, 1]: how much of the fog sky pixels take (1: as every pixel; 0: opaque pixels only)
+    float noiseAmount;                  // [0, 1]: the density's variation about its mean (0: a uniform medium)
+    float noiseScale;                   // m, >= 1: the variation's largest features
     uint32_t reserved;                  // 0
 } UnxFogDesc;
 #ifdef __cplusplus
-static_assert(sizeof(UnxFogDesc) == 48, "UnxFogDesc is part of the ABI");
+static_assert(sizeof(UnxFogDesc) == 56, "UnxFogDesc is part of the ABI");
 #endif
 UNX_API int32_t UNX_CALL UnxFrameSetFog(UnxRenderer r, const UnxFogDesc* fog);
 
