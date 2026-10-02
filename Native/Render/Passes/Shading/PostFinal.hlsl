@@ -57,11 +57,13 @@ void main(uint2 id : SV_DispatchThreadID)
     const float vignette = asfloat(P[1].y);
     if (vignette > 0)
     {
-        // natural vignetting: cos^4 of the pixel's field angle (this view's pinhole projection)
+        // cos^4 vignetting on a circle through the corners, whatever the aspect and the field of view (the reference's
+        // VignetteSpace and cosine fourth law): the corners sit at radius sqrt(2), tan(angle) = radius x intensity
         const float2 ndc = (float2(id) + 0.5) / float2(P[2].xy) * 2 - 1;
-        const float2 t = float2(ndc.x / g_proj[0][0], ndc.y / g_proj[1][1]);
+        const float aspect = (float)P[2].y / (float)P[2].x;
+        const float2 t = ndc * float2(1.0, aspect) * (1.4142136 / sqrt(1.0 + aspect * aspect)) * vignette;
         const float c2 = 1.0 / (1.0 + dot(t, t));
-        e *= lerp(1.0, c2 * c2, vignette);
+        e *= c2 * c2;
     }
     const float peak = asfloat(P[2].z);
     const bool hdrDisplay = peak > 0;

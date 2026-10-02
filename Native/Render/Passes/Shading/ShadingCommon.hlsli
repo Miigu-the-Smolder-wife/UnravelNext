@@ -317,13 +317,48 @@ float3 shPbrNeutralPeak(float3 color, float peak)
 // linear Rec.709 display light (1 = paper white). An HDR display (peak x paper white): below the knee 0.8 per channel
 // the SDR image exactly; above it the SDR shoulder's range [0.8, 1.04) is expanded monotonically onto [0.8, 1.04 peak)
 // by E(u) = u / (1 - u (1 - 1 / r)) (slope 1 at the knee, r = the ranges' ratio; the identity at peak 1).
+// Around the curve, the steps that family's display rendering runs by default (ue6-main PostProcessCombineLUTs.usf,
+// TonemapCommon.ush FilmToneMap and the ACES reference rendering's sweeteners read as a reference; the code is ours):
+//   gamut expansion (1)     bright saturated colours move toward a gamut between P3 and AP1 before the curve, by
+//                           (1 - 2^(-4 chroma distance^2)) (1 - 2^(-4 luma^2)): saturated lights stay saturated;
+//   blue correction (0.6)   a matrix that pulls bright blue toward cyan-less blue before the curve and its inverse
+//                           after (pure blues do not turn purple on their way to white);
+//   glow                    dark saturated colours gain up to 5 % (below luminance 0.16, by saturation);
+//   red modifier            saturated reds are pulled toward 0.03 by 18 % (reds roll off without going orange).
 float3 shFilm(float3 color, float peak)
 {
     const float3x3 toAp1 = float3x3(0.6130973, 0.3395229, 0.0473793, 0.0701942, 0.9163556, 0.0134526, 0.0206156, 0.1095698, 0.8698151);
     const float3x3 toSrgb = float3x3(1.7050510, -0.6217921, -0.0832589, -0.1302564, 1.1408047, -0.0105483, -0.0240033, -0.1289690, 1.1529723);
+    const float3x3 ap1ToAp0 = float3x3(0.6954522, 0.1406787, 0.1638691, 0.0447946, 0.8596711, 0.0955343, -0.0055259, 0.0040252, 1.0015007);
+    const float3x3 ap0ToAp1 = float3x3(1.4514393, -0.2365107, -0.2149286, -0.0765538, 1.1762297, -0.0996759, 0.0083161, -0.0060324, 0.9977163);
+    const float3x3 expand = float3x3(1.3704124, -0.3292922, -0.0636831, -0.0834335, 1.0970927, -0.0108614, -0.0257933, -0.0986258, 1.2036949);
     const float3 ap1Y = float3(0.2722287, 0.6740818, 0.0536895);
     const float slope = 0.88, toe = 0.55, shoulder = 0.26, blackClip = 0.0, whiteClip = 0.04;
+    const float blueCorrection = 0.6, expandGamut = 1.0;
     float3 a = mul(toAp1, color);
+    {
+        const float luma = dot(a, ap1Y);
+        const float3 chroma = a / max(luma, 1e-10) - 1.0;
+        const float amount = (1 - exp2(-4 * dot(chroma, chroma))) * (1 - exp2(-4 * expandGamut * luma * luma));
+        a = lerp(a, mul(expand, a), amount);
+    }
+    // (the blue correction in AP1: rows (0.9386394, 0, 0.0613606), (0, 0.8307941, 0.1692059), (0, 0, 1))
+    a = lerp(a, float3(0.9386394 * a.r + 0.0613606 * a.b, 0.8307941 * a.g + 0.1692059 * a.b, a.b), blueCorrection);
+    {
+        float3 c0 = mul(ap1ToAp0, a);
+        const float lowest = min(c0.r, min(c0.g, c0.b)), highest = max(c0.r, max(c0.g, c0.b));
+        const float saturation = (max(highest, 1e-10) - max(lowest, 1e-10)) / max(highest, 1e-2);
+        const float yc = (c0.r + c0.g + c0.b + 1.75 * sqrt(max(c0.b * (c0.b - c0.g) + c0.g * (c0.g - c0.r) + c0.r * (c0.r - c0.b), 0.0))) / 3.0;
+        const float x = (saturation - 0.4) / 0.2, t = max(1 - abs(0.5 * x), 0.0);
+        const float gain = 0.05 * 0.5 * (1 + sign(x) * (1 - t * t));
+        const float glowMid = 0.08;
+        c0 *= 1 + (yc <= 2.0 / 3.0 * glowMid ? gain : (yc >= 2 * glowMid ? 0.0 : gain * (glowMid / yc - 0.5)));
+        float hue = all(c0.rgb == c0.r) ? 0.0 : degrees(atan2(1.7320508 * (c0.g - c0.b), 2 * c0.r - c0.g - c0.b));
+        hue = hue > 180 ? hue - 360 : hue;  // (centred on red: hue 0)
+        const float hueWeight = smoothstep(0.0, 1.0, 1 - abs(2 * hue / 135.0));
+        c0.r += hueWeight * hueWeight * saturation * (0.03 - c0.r) * (1 - 0.82);
+        a = max(mul(ap0ToAp1, c0), 0.0);
+    }
     a = max(lerp(dot(a, ap1Y).xxx, a, 0.96), 0.0);
     const float toeScale = 1 + blackClip - toe, shoulderScale = 1 + whiteClip - shoulder;
     const float bt = (0.18 + blackClip) / toeScale - 1;
@@ -341,6 +376,8 @@ float3 shFilm(float3 color, float peak)
     t = (3 - 2 * t) * t * t;
     a = lerp(toeColor, shoulderColor, t);
     a = max(lerp(dot(a, ap1Y).xxx, a, 0.93), 0.0);
+    // (the blue correction's inverse: rows (1.0653749, 0, -0.0653710), (0, 1.2036635, -0.2036677), (0, 0, 1))
+    a = lerp(a, float3(1.0653749 * a.r - 0.0653710 * a.b, 1.2036635 * a.g - 0.2036677 * a.b, a.b), blueCorrection);
     float3 d = max(mul(toSrgb, a), 0.0);
     if (peak > 1)
     {
