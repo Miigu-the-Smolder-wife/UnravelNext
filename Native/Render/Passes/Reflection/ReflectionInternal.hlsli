@@ -213,6 +213,17 @@ float reflTopLayerRoughness(uint2 pixel, float roughness)
     return loadMaterialLayers(m.classFlags >> 16).clearcoat > 0 ? (word >> 24) / 255.0 : roughness;
 }
 
+// Whether the pixel is a foliage pixel in the reference's sense (LumenReflectionsCombine.ush bHasBackfaceDiffuse: a
+// two-sided-foliage or subsurface shading model; here a Foliage or Subsurface material): its dedicated reflection rays
+// stop at reflection.lumen_max_roughness_to_trace_foliage. From M's material word (g_reflWords; none: false).
+bool reflFoliagePixel(uint2 pixel)
+{
+    if (g_reflWords == UNX_NONE) return false;
+    Texture2D<uint> words = ResourceDescriptorHeap[g_reflWords];
+    const uint cls = materialClass(loadMaterial(words.Load(int3(pixel, 0)) & 0xFFFFu));
+    return cls == MATERIAL_FOLIAGE || cls == MATERIAL_SUBSURFACE;
+}
+
 ReflSurface reflSurface(Texture2D<float> depth, Texture2D<uint2> gbuffer, uint2 pixel)
 {
     ReflSurface s;

@@ -59,6 +59,7 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     // screen probes; the refraction service's rays likewise (RefractionLumenTrace.hlsl)
     bool lumenOnly = false;
     float lumenMaxRoughness = 0.4f, lumenFadeLength = 0.1f, lumenMaxRayIntensity = 40.0f, lumenTonemapRange = 10.0f;
+    float lumenMaxRoughnessFoliage = 0.2f;  // reflection.lumen_max_roughness_to_trace_foliage (Foliage and Subsurface pixels)
     bool lumenRefractionSurfaceCache = true;  // reflection.lumen_refraction_hit_surface_cache: water's and glass's ray hits read it too
     bool lumenScreenContinue = true;   // reflection.lumen_screen_trace_continue: world rays start where their screen traces ended
     float lumenScreenPullback = 0.08f; // ... less this distance (m)

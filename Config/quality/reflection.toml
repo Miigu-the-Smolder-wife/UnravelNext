@@ -100,6 +100,11 @@ lumen_only = true                      # with lumen: the world rays are Reflecti
 lumen_downsample = 1                   # 1 = a ray per traced pixel (the reference's default, Reflections.DownsampleFactor 1); 2 = one ray per 2 x 2
                                        # pixels, at a per-frame offset, the other pixels resolved from the neighbouring blocks' rays
 lumen_max_roughness_to_trace = 0.4     # QUALITY TRADE (user decision): rougher pixels trace no ray and take the K path
+lumen_max_roughness_to_trace_foliage = 0.2  # QUALITY TRADE (user decision; the reference's default): the limit of a foliage pixel
+                                       # - a Foliage or Subsurface material, the reference's pixel with backface diffuse
+                                       # (Reflections.MaxRoughnessToTraceForFoliage 0.2): leaves and skin trace a
+                                       # dedicated ray only when smoother than this; set it to lumen_max_roughness_to_trace
+                                       # for one limit
 lumen_roughness_fade_length = 0.1      # the traced reflection fades into the K path over this much roughness below the limit
 lumen_max_ray_intensity = 40.0         # QUALITY TRADE (user decision): a ray's exposed radiance is capped here; 0 = no cap
 lumen_tonemap_range = 10.0             # QUALITY TRADE (user decision): means are taken in exposed radiance / (1 + luminance /

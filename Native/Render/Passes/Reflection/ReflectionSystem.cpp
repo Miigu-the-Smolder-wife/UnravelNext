@@ -127,6 +127,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.lumen = flag("reflection.lumen", false);
     s.lumenOnly = s.lumen && flag("reflection.lumen_only", false);
     s.lumenMaxRoughness = num("reflection.lumen_max_roughness_to_trace", 0.4);
+    s.lumenMaxRoughnessFoliage = std::min(num("reflection.lumen_max_roughness_to_trace_foliage", 0.2), s.lumenMaxRoughness);
     s.lumenFadeLength = num("reflection.lumen_roughness_fade_length", 0.1);
     s.lumenMaxRayIntensity = num("reflection.lumen_max_ray_intensity", 40.0);
     s.lumenTonemapRange = num("reflection.lumen_tonemap_range", 10.0);
@@ -1078,6 +1079,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   }
                   k[28] = words.valid() ? c.srv(words) : 0xFFFFFFFFu;
                   k[29] = downsampleWord;
+                  k[30] = asU(s.lumenMaxRoughnessFoliage);
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionClassify"));
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
@@ -1921,7 +1923,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                                                asU(s.lumenBilateralRadius), asU(s.lumenBilateralDepthWeight), asU(s.lumenDisocclusionFrames), asU(s.lumenTemporalMaxFrames),
                                                asU(s.lumenMaxRoughness), asU(s.lumenFadeLength), asU(s.lumenTonemapRange),
                                                roughSpecular.valid() ? c.srv(roughSpecular) : 0xFFFFFFFFu, words.valid() ? c.srv(words) : 0xFFFFFFFFu,
-                                               snap.valid() ? c.srv(snap) : 0xFFFFFFFFu, 0, 0 };
+                                               snap.valid() ? c.srv(snap) : 0xFFFFFFFFu, asU(s.lumenMaxRoughnessFoliage), 0 };
                       c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionReuseFilter"));
                       c.computeConstants(k, 24);
                       c.bindFrameConstants(frameConstants);

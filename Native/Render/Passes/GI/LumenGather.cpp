@@ -810,9 +810,17 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
               });
+    // Foliage pixels' history distance and the history's rejection by its normal (LgTemporal.hlsl; lumen.toml)
+    const float foliageDistanceThreshold =
+        fq.has("lumen.gather_temporal_distance_threshold_foliage") ? (float)fq.number("lumen.gather_temporal_distance_threshold_foliage") : 0.03f;
+    const bool rejectByNormal = fq.has("lumen.gather_temporal_reject_normal") && fq.boolean("lumen.gather_temporal_reject_normal");
+    const float rejectNormalDegrees = fq.has("lumen.gather_temporal_normal_threshold_deg") ? (float)fq.number("lumen.gather_temporal_normal_threshold_deg") : 45.0f;
+    const uint32_t rejectNormalBits =
+        rejectByNormal ? std::clamp((uint32_t)std::lround(std::cos(std::clamp(rejectNormalDegrees, 0.0f, 89.0f) * 0.01745329252f) * 255.0f), 1u, 255u) : 0u;
     g.addPass("r.gi.lg.temporal", QueueType::Compute,
               [&](PassBuilder& b) {
                   surface(b);
+                  if (materialWord.valid()) b.use(materialWord, Use::SrvCompute);
                   b.use(newDiffuse, Use::SrvCompute);
                   b.use(newSpecular, Use::SrvCompute);
                   b.use(prevDiffuse, Use::SrvCompute);
@@ -850,6 +858,11 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   k[42] = foliage ? c.srv(newBackface) : 0xFFFFFFFFu;
                   k[43] = foliage && backfaceHistory ? c.srv(prevBackface) : 0xFFFFFFFFu;
                   k[44] = foliage ? c.uav(backface) : 0xFFFFFFFFu;
+                  // (P[11].y, P[11].w: the material word and the foliage pixels' distance threshold; P[9].z bits 24-31:
+                  // the normal rejection's cosine)
+                  k[45] = materialWord.valid() ? c.srv(materialWord) : 0xFFFFFFFFu;
+                  k[47] = bits(foliageDistanceThreshold);
+                  k[38] |= rejectNormalBits << 24;
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/Lumen/LgTemporal"));
                   c.computeConstants(k, 48);
                   c.bindFrameConstants(frameConstants);
