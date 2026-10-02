@@ -1,7 +1,7 @@
 // unx-kernel: cs_6_6 main
 // m.tsr.reject (Tsr.hlsli; the reference's TSRRejectShading, MeasureRejection): the shading rejection of the history,
-// this frame's guide, and the spatial anti-aliaser's inputs. One group per 16 x 16 internal pixels; the chain of 3 x 3
-// operators needs 6 more pixels on every side, so the group works on a 28 x 28 region held in group memory (colours as
+// this frame's guide, and the spatial anti-aliaser's inputs. One group per 20 x 20 internal pixels; the chain of 3 x 3
+// operators needs 6 more pixels on every side, so the group works on a 32 x 32 region held in group memory (colours as
 // three 11 / 11 / 10-bit square roots: the guide's own precision), one stage after the other:
 //   0  I = the input and H = the reprojected guide in the measurement space
 //   1  H' = H clamped to I's 3 x 3 range, I' = I clamped to H's 3 x 3 range
@@ -23,7 +23,7 @@
 //          channel) the filtered guide is not clamped, and the denominator is at least the error's share of the channel
 #include "Passes/Shading/Tsr.hlsli"
 
-#define TILE 16
+#define TILE 20  // (20 + 2 x 6 = 32: 7 x 1024 words + the alias bits = 30.3 KB of the 32 KB of group memory; 16 kept 3.06 cells a pixel, 20 keeps 2.56)
 #define BORDER 6
 #define SIDE (TILE + 2 * BORDER)
 #define CELLS (SIDE * SIDE)

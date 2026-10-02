@@ -30,6 +30,10 @@ mega_lights_hidden_weight_history_miss = 0.4      # GuideByHistory.LightHiddenWe
 mega_lights_merge_rays = true                     # MergeRays: samples of one light share a ray outside penumbrae
 mega_lights_max_shading_weight = 20.0             # MaxShadingWeight: cap of a sample's 1 / probability (energy lost above it)
 mega_lights_max_shading_weight_hidden = 5.0       # MaxShadingWeightForHiddenLight
+mega_lights_max_shading_weight_light_scale = 2.0  # NOT in the reference: the caps grow with the place's effective number of lights M
+                                                  # (max(cap, scale x M x cap / 20), MegaLightsSampling.hlsli mlWeightCap). The constant cap
+                                                  # holds back every light where more than 20 comparable lights shine: the lobby's walls and
+                                                  # floor stood at a third of the path-traced reference. 0 = the reference's constant caps
 mega_lights_screen_traces = true                  # ScreenTraces: a sample's ray is walked across the depth buffer first (contact shadows, and
                                                   # shadows of what the ray scene does not hold as drawn); a hit hides the sample
 mega_lights_screen_trace_max_iterations = 50      # ScreenTraces.MaxIterations

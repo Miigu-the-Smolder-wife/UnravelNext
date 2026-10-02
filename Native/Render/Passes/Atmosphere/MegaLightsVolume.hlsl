@@ -17,7 +17,8 @@
 // P[0] = { froxel lights (raw), output UAV, transmittance LUT (the air's parameters), light functions (UNX_NONE: none) }
 // P[1] = { previous output SRV (UNX_NONE: no history), N, tile readers SRV (FroxelTileDepth; UNX_NONE: every slice), 0 }
 // P[2] = { minimum sample weight, ray bias (m), end bias (m), exposure now / previous } (floats)
-// P[3] = { weight cap, max frames (floats), the dispatch's first slice, 0 }: the grid goes in bands of slices, each at most
+// P[3] = { weight cap, max frames (floats), the dispatch's first slice, the cap's scale with the effective number of
+//        lights (float; mlWeightCap) }: the grid goes in bands of slices, each at most
 //        262,144 shadow rays (FroxelSystem.cpp)
 // P[4] = { fluence UAV, moment UAV, previous fluence SRV, previous moment SRV } (UNX_NONE: not kept): the same samples'
 //        light for lit particles (FxLayerSetup.hlsl), as Unreal's MegaLights lights the translucency volume: RGBA16F,
@@ -118,7 +119,7 @@ void MegaLightsVolumeGen()
             const float2 uv = float2(mlNoise(tile + uint2(s * 11u, s * 2u), g_frameIndex, 18 + i), mlNoise(tile + uint2(s * 2u, s * 11u), g_frameIndex, 22 + i));
             if (!mlSampleVisible(scene, x, float3(0, 0, 0), li, uv, asfloat(P[2].y), 0, asfloat(P[2].z))) continue;
         }
-        const float weight = min(r.sum / r.weight[i], asfloat(P[3].x)) / count;
+        const float weight = min(r.sum / r.weight[i], mlWeightCap(r, asfloat(P[3].x), asfloat(P[3].w))) / count;
         now += airLocalLight(light, o, dir, len, cm, a.mieG, P[0].w, li, lateral) * weight;
         {
             const float3 vm = mid - light.position;

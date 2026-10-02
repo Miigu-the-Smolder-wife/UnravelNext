@@ -122,11 +122,13 @@ struct MlReservoir
     bool wasVisible[ML_MAX_SAMPLES];
     float u[ML_MAX_SAMPLES];
     float sum;
+    float sumSquares;  // of the offered weights: sum^2 / sumSquares = the effective number of lights (mlWeightCap)
 };
 MlReservoir mlReservoirBegin(float u0, uint count)
 {
     MlReservoir r;
     r.sum = 0;
+    r.sumSquares = 0;
     for (uint i = 0; i < ML_MAX_SAMPLES; ++i)
     {
         r.light[i] = ML_LIGHT_NONE;
@@ -140,6 +142,7 @@ void mlOffer(inout MlReservoir r, uint count, float w, uint light, bool wasVisib
 {
     const float keep = r.sum / (r.sum + w);
     r.sum += w;
+    r.sumSquares += w * w;
     for (uint i = 0; i < count; ++i)
     {
         if (r.u[i] < keep) r.u[i] /= keep;
@@ -152,5 +155,19 @@ void mlOffer(inout MlReservoir r, uint count, float w, uint light, bool wasVisib
         }
         r.u[i] = clamp(r.u[i], 0.0, 0.99999994);
     }
+}
+
+// The cap of a sample's weight (sum / its light's weight = 1 / its probability). The reference's cap is a constant (20:
+// MaxShadingWeight; 5 for a light guided as hidden): a light is held back when it is chosen less than once in 20 - which
+// a place lit by more than 20 comparable lights is for EVERY light, and the cap then removes light in proportion (the
+// lobby's walls and floor, lit by tens of lights each, stood at a third of the path-traced reference, 2026-10-02; the
+// ceiling beside few strong lights at 0.7). The cap is against a sample far less probable than its neighbours, so it is
+// taken relative to the place's effective number of lights M = sum^2 / sum of squares (M equal lights: every weight is
+// M): max(cap, scale x M x cap / 20). scale 2 leaves alone every light within half of the typical probability; 0 = the
+// reference's constant.
+float mlWeightCap(MlReservoir r, float cap, float scale)
+{
+    const float lights = r.sumSquares > 0 ? r.sum * r.sum / r.sumSquares : 1.0;
+    return max(cap, scale * lights * cap * (1.0 / 20.0));
 }
 #endif
