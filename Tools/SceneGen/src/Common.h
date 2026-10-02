@@ -142,6 +142,9 @@ struct FoliageAssets
 };
 FoliageAssets buildFoliage(Scene& s, const Palette& p, uint64_t seed, FoliageStyle style);
 
+// HairBall (HairBall.cpp): the diagnostic scene of strand hair; its strands are SceneGen.h's grooms.
+Scene hairBall(const Request& rq);
+
 // RPP-1 dynamic bodies (Bodies.cpp): adds the content's bodies to the scene as InstanceDynamic instances and records
 // each body's scene instance index.
 void addDynamicBodies(Scene& s, DynamicContent& content);

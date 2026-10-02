@@ -1,5 +1,5 @@
 # Core-owned: the scene description shared by every track (INTERFACES_KO.md 6).
-add_library(unx_scene STATIC src/SceneData.cpp src/MaterialModel.cpp src/TerrainPatch.cpp src/MeshCards.cpp)
+add_library(unx_scene STATIC src/SceneData.cpp src/MaterialModel.cpp src/HairModel.cpp src/TerrainPatch.cpp src/MeshCards.cpp)
 unx_target_defaults(unx_scene)
 target_include_directories(unx_scene PUBLIC include)
 target_link_libraries(unx_scene PUBLIC unx_core)
@@ -34,3 +34,7 @@ target_link_libraries(unx_test_scene_lightendbias PRIVATE unx_scene)
 add_executable(unx_test_scene_meshcards Tests/MeshCardsTests.cpp)
 unx_target_defaults(unx_test_scene_meshcards)
 target_link_libraries(unx_test_scene_meshcards PRIVATE unx_scene)
+# Hair class (M's hair records): the strand model's twin against its definitions (CPU; Passes/Hair/HairScattering.hlsli).
+add_executable(unx_test_scene_hairmodel Tests/HairModelTests.cpp)
+unx_target_defaults(unx_test_scene_hairmodel)
+target_link_libraries(unx_test_scene_hairmodel PRIVATE unx_scene)

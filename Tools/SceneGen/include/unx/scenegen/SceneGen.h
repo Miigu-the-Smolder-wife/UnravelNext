@@ -26,6 +26,8 @@ enum class SceneId : uint32_t
                          // through the walls reads as light over them (a leak is thousands of times the room's light)
     ShadingBall = 10,    // diagnostic: the shading models side by side - five spheres (Standard, Subsurface, Subsurface
                          // with one lobe, sheen, clearcoat) and a thin Subsurface slab with a light behind it
+    HairBall = 11,       // diagnostic: strand hair in two colours - two head-sized spheres under a dark and a blond groom
+                         // (grooms), a key light, a rim light behind them, a dim sun
     // New scenes are appended (never renumbered) through the interface-change procedure.
 };
 
@@ -71,6 +73,27 @@ DynamicContent dynamicContent(const Request& request);  // instance indices are 
 std::string dynamicContentJson(const Request& request, const DynamicContent& content);
 // generate() and the scene's dynamic content with instance indices filled in.
 scene::Scene generateWithContent(const Request& request, DynamicContent& content);
+
+// Strand grooms of a scene (hair_ball; empty for the others). The scene file holds no strands: whoever renders the
+// scene makes a hair body of each groom (unx/hair/Hair.h BodyDesc: one joint at 'head', the rest positions relative
+// to it, the head's sphere as the collision capsule), as the gates do for their characters' hair.
+struct Groom
+{
+    float3 head;                        // the joint: the head sphere's centre (scene coordinates)
+    float headRadius = 0;               // the sphere under the hair (m)
+    uint32_t material = 0;              // scene material (Hair class)
+    uint32_t nodesPerStrand = 0;
+    std::vector<float3> restPositions;  // guides x nodesPerStrand, relative to 'head'
+    struct Follow
+    {
+        uint32_t guide;
+        float3 offset;                  // at the root, in the guide's rest frame (x along the root segment)
+        float tipSpread;                // offset scale at the tip
+    };
+    std::vector<Follow> follows;
+    float rootRadius = 40e-6f, tipRadius = 20e-6f;  // metres
+};
+std::vector<Groom> grooms(const Request& request);
 
 // Ground height of a scene's terrain at scene-local (x, z) (RPP-1 world assembly): the analytic function its terrain
 // mesh samples (the mesh vertices lie on it exactly; between them the mesh is linear over its grid: city 2 m, forest

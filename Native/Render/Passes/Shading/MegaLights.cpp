@@ -341,7 +341,7 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
     return ml;
 }
 
-void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, MegaLightsFrame& ml, bool demodulated)
+void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, MegaLightsFrame& ml, bool demodulated, bool spatial)
 {
     if (!ml.on) return;
     const Settings s = settings(fc.quality);
@@ -459,7 +459,7 @@ void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureR
               [=](PassContext& c) {
                   const uint32_t k[24] = { c.srv(outDiffuse), c.srv(outSpecular), c.srv(outMoments), c.srv(outFrames),
                                            c.srv(confidence), c.srv(depth), c.srv(gbuffer), c.srv(materialWord),
-                                           c.uav(lighting), W, H, (s.spatial ? 1u : 0u) | (s.historyVariance ? 2u : 0u) | (demodulated ? 4u : 0u),
+                                           c.uav(lighting), W, H, (s.spatial && spatial ? 1u : 0u) | (s.historyVariance ? 2u : 0u) | (demodulated ? 4u : 0u),
                                            asUint(s.radius), s.spatialSamples, asUint(s.depthWeight), asUint(s.maxDisocclusionFrames),
                                            asUint(s.disocclusionDiffuse), asUint(s.disocclusionSpecular), asUint(s.historyStdDev), asUint(s.temporal ? s.maxFrames : 1.0f),
                                            demodulated ? c.uav(lightingSpecular) : gpu::kNone, 0, 0, 0 };

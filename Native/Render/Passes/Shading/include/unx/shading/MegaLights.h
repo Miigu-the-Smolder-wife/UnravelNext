@@ -42,7 +42,8 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
 // m.ml.sets, m.ml.temporal and m.ml.spatial, after the caller's m.ml.shade; sets ml.lighting.
 // demodulated: the result stays divided by the modulation factors, diffuse in ml.lighting and specular in
 // ml.lightingSpecular (the reader multiplies its own factors).
-void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, MegaLightsFrame& ml, bool demodulated = false);
+// spatial = false: the temporal step alone (the hair records' instance: as Unreal, whose hair input has no spatial filter).
+void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, MegaLightsFrame& ml, bool demodulated = false, bool spatial = true);
 // m.ml.spatial.sss (shading.subsurface_scatter; MegaLightsSpatialSubsurface.hlsl), after megaLightsDenoise: the spatial
 // step on the tiles of one shade class (the Subsurface class's lists of the material resolve: 'tiles' with one dispatch
 // per list band - first entry and argument offset in 'bands' - through 'dispatchSignature'), for that class's pixels,

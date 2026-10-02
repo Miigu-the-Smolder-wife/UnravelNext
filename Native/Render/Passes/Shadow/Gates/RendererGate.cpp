@@ -58,6 +58,12 @@
 #if __has_include("unx/refl/ReflectionSystem.h")
 #include "unx/refl/ReflectionSystem.h"
 #endif
+#if __has_include("unx/hair/Hair.h")
+#include "unx/hair/Hair.h"
+#define S_GATE_HAIR 1
+#else
+#define S_GATE_HAIR 0
+#endif
 #if __has_include("unx/gi/GiSystem.h")
 #include "unx/gi/GiSystem.h"
 #endif
@@ -790,6 +796,25 @@ int main(int argc, char** argv)
                 res = resolutionFromString(rs, quality);
             FrameRenderer renderer(device, shaders, quality, gpuScene, 2);
             shadow::setKeepFroxels(renderer.trackState(), true);  // no consumer of the volume yet (M): measure it anyway
+#if S_GATE_HAIR
+            // The scene's grooms (SceneGen.h grooms: hair_ball) as E's hair bodies: one joint at the head, ticked every
+            // frame with the head's sphere as the collision capsule and the scene's wind.
+            const std::vector<scenegen::Groom> grooms = sceneFile ? std::vector<scenegen::Groom>{} : scenegen::grooms(request);
+            std::vector<uint32_t> groomBodies;
+            for (const scenegen::Groom& groom : grooms)
+            {
+                hair::BodyDesc d;
+                d.nodesPerStrand = groom.nodesPerStrand;
+                d.joints = 1;
+                d.restPositions = groom.restPositions;
+                d.guideJoint.assign(groom.restPositions.size() / groom.nodesPerStrand, 0u);
+                for (const scenegen::Groom::Follow& f : groom.follows) d.follows.push_back({ f.guide, f.offset, f.tipSpread });
+                d.rootRadius = groom.rootRadius;
+                d.tipRadius = groom.tipRadius;
+                d.material = groom.material;
+                groomBodies.push_back(hair::hairSystem(renderer.trackState()).addBody(d));
+            }
+#endif
             HarnessOptions options;
             options.frames = frames;
             options.passTimestamps = passTimestamps;
@@ -975,6 +1000,20 @@ int main(int argc, char** argv)
                 fc.autoExposure = autoExposure || !std::isfinite(fc.mainView.ev100);
                 const TextureRef output = g.createTexture({ "gate output", rr.width, rr.height, 1, 1,
                                                             fc.outputLinearHdr ? DXGI_FORMAT_R32G32B32A32_FLOAT : DXGI_FORMAT_R10G10B10A2_UNORM });
+#if S_GATE_HAIR
+                if (!groomBodies.empty())
+                {
+                    hair::HairSystem& hairs = hair::hairSystem(renderer.trackState());
+                    for (size_t k = 0; k < groomBodies.size(); ++k)
+                    {
+                        const float3 head = grooms[k].head - offset;
+                        const float3x4 joint = float3x4::translation(head);
+                        const hair::Capsule skull{ head - float3{ 0, 0.01f, 0 }, grooms[k].headRadius, head + float3{ 0, 0.01f, 0 } };
+                        hairs.tick(groomBodies[k], &joint, 1, &skull, 1, s.windDirection * s.windSpeed, 1.0f / 60);
+                    }
+                    hairs.setFrameFraction(1.0f);
+                }
+#endif
                 const ViewResources rendered = renderer.record(g, fc, output);
                 internalW = rendered.view.width;
                 internalH = rendered.view.height;

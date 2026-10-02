@@ -5,8 +5,11 @@
 //   hair_records_are_exact   every hair record names a segment of the frame, its u lies in that segment's range, and the
 //                            records' areas add up to the ribbons' exact projected areas (the CPU ribbon of each segment,
 //                            as HairRaster.ms builds it) within the records' 10-bit area rounding.
-// M reads hair records only when told to (it does not yet): the frame runs with shading.experiment_disable 8192 (M's
-// allowance for the coverage layer next to S's shadows; not an image), since only V's records are checked here.
+//   hair_records_are_lit     M shades them (Passes/Shading/CoverageHair.hlsl; the body's material is of the Hair class):
+//                            every hair record's radiance in ViewResources::coverageRecordRadiance is finite and above 0
+//                            under the scene's sun (the fibre scatters into every direction).
+// The frame runs with shading.experiment_disable 8192 (M's allowance for the coverage layer next to S's shadows; not an
+// image): the records and their radiance are checked here, not the picture.
 //   unx_test_visibility_haircoveragetests
 #include "unx/clusterbuilder/ClusterBuilder.h"
 #include "unx/core/Config.h"
@@ -23,6 +26,7 @@
 #include <map>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -98,7 +102,12 @@ int main()
         // A small box far behind (the scene needs content and a material; nothing in front of the strands).
         scene::Scene s;
         s.name = "hair coverage";
-        s.materials.resize(1);
+        s.materials.resize(2);
+        s.materials[1].name = "hair";
+        s.materials[1].cls = scene::MaterialClass::Hair;
+        s.materials[1].ior = 1.55f;
+        s.materials[1].roughness = 0.3f;
+        s.materials[1].hairEumelanin = 0.3f;
         scene::Mesh box;
         box.name = "far box";
         for (int k = 0; k < 8; ++k) box.positions.push_back({ (k & 1) ? 0.1f : -0.1f, (k & 2) ? 0.1f : -0.1f, (k & 4) ? 0.1f : -0.1f });
@@ -134,15 +143,16 @@ int main()
             d.follows.push_back({ g, float3{ 0, 0, 0 }, 1.0f });
         }
         d.rootRadius = d.tipRadius = radius;
+        d.material = 1;
         d.params.gravity = { 0, 0, 0 };
         const uint32_t body = hs.addBody(d);
         float3x4 joint;
         joint.m[1][3] = 1;
 
         const uint64_t tileCount = (uint64_t)((width + 7) / 8) * ((height + 7) / 8);
-        ComPtr<ID3D12Resource> tilesRb = readbackBuffer(tileCount * 32), recordsRb;
+        ComPtr<ID3D12Resource> tilesRb = readbackBuffer(tileCount * 32), recordsRb, radianceRb;
         uint64_t recordBytes = 0;
-        std::vector<uint32_t> tiles, records;
+        std::vector<uint32_t> tiles, records, radiance;
         float4x4 vp{};
         const float4x4 first = ViewDesc::fromCamera(cam, width, height, {}).viewProj;
         // Worst GPU time of every pass over the frames, reported (the 2026-09-26 TDR ran this test beside a game; INTERFACES
@@ -170,29 +180,35 @@ int main()
             vp = fr.mainView.viewProj;
             TextureRef output = graph.createTexture({ "test output", width, height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
             const ViewResources main = renderer.record(graph, fr, output);
-            CHECK(main.coverageTiles.valid() && main.coverageRecords.valid());
+            CHECK(main.coverageTiles.valid() && main.coverageRecords.valid() && main.coverageRecordRadiance.valid());
             const uint64_t poolBytes = graph.desc(main.coverageRecords).size;
             if (poolBytes != recordBytes)
             {
                 if (recordsRb) device().deferRelease(recordsRb);
+                if (radianceRb) device().deferRelease(radianceRb);
                 recordsRb = readbackBuffer(poolBytes);
+                radianceRb = readbackBuffer(poolBytes / 2);
                 recordBytes = poolBytes;
             }
-            ID3D12Resource *tl = tilesRb.Get(), *rc = recordsRb.Get();
+            CHECK(graph.desc(main.coverageRecordRadiance).size >= poolBytes / 2);  // 8 B per 16 B record
+            ID3D12Resource *tl = tilesRb.Get(), *rc = recordsRb.Get(), *rd = radianceRb.Get();
             graph.addPass("test.readback", QueueType::Graphics,
                           [&](PassBuilder& b) {
                               b.use(main.coverageTiles, Use::CopySrc);
                               b.use(main.coverageRecords, Use::CopySrc);
+                              b.use(main.coverageRecordRadiance, Use::CopySrc);
                               b.keep();
                           },
                           [=](PassContext& c) {
                               c.cmd->CopyBufferRegion(tl, 0, c.resource(main.coverageTiles), 0, tileCount * 32);
                               c.cmd->CopyBufferRegion(rc, 0, c.resource(main.coverageRecords), 0, poolBytes);
+                              c.cmd->CopyBufferRegion(rd, 0, c.resource(main.coverageRecordRadiance), 0, poolBytes / 2);
                           });
             graph.execute(&profiler);
             device().waitIdle();
             tiles = readWords(tl, tileCount * 8);
             records = readWords(rc, poolBytes / 4);
+            radiance = readWords(rd, poolBytes / 8);
         }
         for (uint32_t f = 4; f < 6; ++f)
         {
@@ -226,9 +242,14 @@ int main()
                 expectedArea += std::fabs(area2) * 0.5;
             }
         // Records of the last frame: the listed tiles' ranges (tile header: records, base, listed index + 1).
-        double area = 0;
-        uint64_t hairRecords = 0, otherRecords = 0;
+        double area = 0, radianceSum = 0;
+        uint64_t hairRecords = 0, otherRecords = 0, litRecords = 0;
         uint32_t badSegment = 0, badU = 0;
+        auto half = [](uint32_t h) {  // f16 -> float (the record radiance: CoverageSpecial.hlsli covPackRadiance)
+            const uint32_t e = (h >> 10) & 31u, m = h & 0x3FFu;
+            if (e == 31) return std::numeric_limits<float>::infinity();
+            return e == 0 ? std::ldexp((float)m, -24) : std::ldexp((float)(m | 0x400u), (int)e - 25);
+        };
         const uint32_t segments = G * S;  // follow strands only (one per guide), in body order
         for (uint64_t t = 0; t < tileCount; ++t)
         {
@@ -243,6 +264,16 @@ int main()
                     continue;
                 }
                 ++hairRecords;
+                {
+                    const uint32_t* rad = &radiance[2 * (size_t)(base + r)];
+                    const float rgb[3] = { half(rad[0] & 0xFFFFu), half(rad[0] >> 16), half(rad[1] & 0xFFFFu) };
+                    const float y = 0.2126f * rgb[0] + 0.7152f * rgb[1] + 0.0722f * rgb[2];
+                    if (std::isfinite(y) && y > 0)
+                    {
+                        ++litRecords;
+                        radianceSum += y;
+                    }
+                }
                 const uint32_t seg = rec[0] & 0x7FFFFFFFu;
                 area += ((rec[3] >> 16) & 0x3FFu) / 1023.0;
                 if (seg >= segments)
@@ -260,12 +291,16 @@ int main()
              (unsigned long long)hairRecords, (unsigned long long)otherRecords, area, expectedArea, rounding, badSegment, badU);
         CHECK(hairRecords > 100 && badSegment == 0 && badU == 0);
         CHECK(std::fabs(area - expectedArea) <= rounding + 1e-3 * expectedArea);
-        logf("PASS hair_records_are_exact\n1/1 passed\n");
+        logf("PASS hair_records_are_exact\n");
+        logf("    %llu of %llu hair records lit, mean exposed luminance %.4f\n", (unsigned long long)litRecords, (unsigned long long)hairRecords,
+             litRecords ? radianceSum / litRecords : 0.0);
+        CHECK(litRecords == hairRecords);
+        logf("PASS hair_records_are_lit\n2/2 passed\n");
         return 0;
     }
     catch (const std::exception& e)
     {
-        logf("FAIL hair_records_are_exact: %s\n0/1 passed\n", e.what());
+        logf("FAIL hair coverage: %s\n", e.what());
         return 1;
     }
 }

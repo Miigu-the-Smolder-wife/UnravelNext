@@ -1552,6 +1552,210 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             };
             addLight("5");  // every kind 5 entry (MODE 3, one lighting kernel, retired at the DXIL limit)
             addLight("6");
+
+            // Strand hair records (kind 1; CoverageHair.hlsl): the strand model of Passes/Hair/HairScattering.hlsli with E's
+            // density volume. The sun and the indirect light per record; the local lights from a MegaLights instance of
+            // its own on each pixel's nearest hair record under shading.mega_lights (as the coverage layer's instance
+            // above; its samples shaded at the pixel's nearest and farthest hair record, a record between them by its
+            // depth), else from the froxel list per record with S's fragment slots.
+            const bool hairRecords = r.hairSegments.valid() && r.hairBodies.valid() && fc.quality.boolean("visibility.coverage_hair");
+            if (hairRecords)
+            {
+                const uint32_t W = v.view.width, H = v.view.height;
+                const BufferRef hairSegments = r.hairSegments, hairBodies = r.hairBodies, densityParams = r.hairDensityParams;
+                const TextureRef densityFine = r.hairDensity, densityCoarse = r.hairDensityCoarse;
+                const bool density = densityParams.valid() && densityFine.valid() && densityCoarse.valid();
+                const uint32_t steps = (uint32_t)fc.quality.integer("shading.hair_density_steps");
+                const float fibresBehind = (float)fc.quality.number("shading.hair_fibres_behind");
+                if (steps < 2 || steps > 64 || !(fibresBehind >= 0)) fail("shading.hair_density_steps must be in [2, 64], shading.hair_fibres_behind >= 0");
+                const GiSource hairGi = giSource(r);  // (the translucency volume whenever the frame has one)
+                std::array<ID3D12PipelineState*, 6> hairKernel{};
+                for (int mode = 0; mode < 6; ++mode) hairKernel[mode] = fc.shaders.compute(("Passes/Shading/CoverageHair.MODE" + std::to_string(mode)).c_str());
+                auto useHair = [=](PassBuilder& b) {
+                    b.use(v.coverageRecords, Use::SrvCompute);
+                    b.use(hairSegments, Use::SrvCompute);
+                    b.use(hairBodies, Use::SrvCompute);
+                    if (density)
+                    {
+                        b.use(densityParams, Use::SrvCompute);
+                        b.use(densityFine, Use::SrvCompute);
+                        b.use(densityCoarse, Use::SrvCompute);
+                    }
+                    if (r.fxLights.valid()) b.use(r.fxLights, Use::SrvCompute);
+                    if (r.lightFunctions.valid()) b.use(r.lightFunctions, Use::SrvCompute);
+                };
+                // P[0].x, P[1].xyz, P[5] of every mode
+                auto hairConstants = [=](PassContext& c, uint32_t* k) {
+                    k[0] = c.srv(v.coverageRecords);
+                    k[4] = c.srv(hairSegments);
+                    k[5] = c.srv(hairBodies);
+                    k[6] = density ? c.srv(densityParams) : gpu::kNone;
+                    k[20] = steps;
+                    std::memcpy(&k[21], &fibresBehind, 4);
+                    k[22] = experiment;
+                    k[23] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : gpu::kNone;
+                };
+                TextureRef hairLighting, hairLightingFar, hairNearest, hairFarthest;
+#if UNX_M_HAS_RAYTRACING
+                if (megaLighting.valid())
+                {
+                    const TextureRef nearest = g.createTexture({ "m.hair nearest depth", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
+                    const TextureRef element = g.createTexture({ "m.hair element", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
+                    const TextureRef farthest = g.createTexture({ "m.hair farthest depth", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
+                    const TextureRef farElement = g.createTexture({ "m.hair farthest element", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
+                    const TextureRef hairGbuffer = g.createTexture({ "m.hair gbuffer", W, H, 1, 1, DXGI_FORMAT_R32G32_UINT });
+                    const TextureRef hairWord = g.createTexture({ "m.hair material word", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
+                    const TextureRef hairDepth = g.createTexture({ "m.hair depth", W, H, 1, 1, DXGI_FORMAT_R32_FLOAT });
+                    g.addPass("m.hair.nearest", QueueType::Graphics,
+                              [&](PassBuilder& b) {
+                                  b.use(v.coverageRecords, Use::SrvCompute);
+                                  b.use(special, Use::SrvCompute);
+                                  b.use(special, Use::IndirectArgs);
+                                  b.use(v.coverageTileList, Use::SrvCompute);
+                                  b.use(v.depth, Use::SrvCompute);
+                                  for (TextureRef t : { nearest, element, farthest, farElement }) b.use(t, Use::UavCompute);
+                              },
+                              [=](PassContext& c) {
+                                  uint32_t k[36] = { c.srv(v.coverageRecords), c.srv(special), c.srv(v.coverageTileList), 0, 0, 0, 0, c.srv(v.depth), c.uav(nearest), c.uav(element), 0, 0 };
+                                  k[32] = c.uav(farthest);    // P[8].xy
+                                  k[33] = c.uav(farElement);
+                                  c.bindFrameConstants(cb);
+                                  c.computeConstants(k, 36);
+                                  c.cmd->SetPipelineState(hairKernel[0]);
+                                  c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                                  // the depths are complete before the elements are chosen (one global UAV barrier between the steps)
+                                  D3D12_GLOBAL_BARRIER gb{ D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                                           D3D12_BARRIER_ACCESS_UNORDERED_ACCESS };
+                                  D3D12_BARRIER_GROUP group{ D3D12_BARRIER_TYPE_GLOBAL, 1 };
+                                  group.pGlobalBarriers = &gb;
+                                  for (int mode = 1; mode <= 2; ++mode)
+                                  {
+                                      c.cmd->Barrier(1, &group);
+                                      c.cmd->SetPipelineState(hairKernel[mode]);
+                                      c.cmd->ExecuteIndirect(signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
+                                  }
+                              });
+                    g.addPass("m.hair.surface", QueueType::Graphics,
+                              [&](PassBuilder& b) {
+                                  useHair(b);
+                                  b.use(element, Use::SrvCompute);
+                                  for (TextureRef t : { hairGbuffer, hairWord, hairDepth }) b.use(t, Use::UavCompute);
+                              },
+                              [=](PassContext& c) {
+                                  uint32_t k[24] = {};
+                                  hairConstants(c, k);
+                                  k[9] = c.srv(element);
+                                  k[10] = c.uav(hairGbuffer);
+                                  k[11] = c.uav(hairWord);
+                                  k[12] = c.uav(hairDepth);
+                                  c.bindFrameConstants(cb);
+                                  c.computeConstants(k, 24);
+                                  c.cmd->SetPipelineState(hairKernel[3]);
+                                  c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                              });
+                    // the instance: the view with the hair surface as its depth and G-buffer (no vis buffer: its history
+                    // is reprojected as static); a view that cannot run it keeps the per-record loop
+                    ViewResources hview = view;
+                    hview.depth = hairDepth;
+                    hview.gbuffer = hairGbuffer;
+                    hview.visId = {};
+                    MegaLightsFrame hml = megaLightsSample(fc, hview, hairWord, areaLights, ltcSrv, signature, "hair");
+                    if (hml.on)
+                    {
+                        auto half = [](float f) {  // positive, in the half range (the weight caps)
+                            uint32_t u;
+                            std::memcpy(&u, &f, 4);
+                            const int32_t e = (int32_t)((u >> 23) & 0xFF) - 127 + 15;
+                            if (e <= 0) return 0u;
+                            if (e >= 31) return 0x7BFFu;
+                            return ((uint32_t)e << 10) | ((u >> 13) & 0x3FFu);
+                        };
+                        const uint32_t caps = half(hml.maxWeight) | (half(hml.maxWeightHidden) << 16), mlMode = hml.factor | (hml.count << 8);
+                        const TextureRef samples = hml.samples, keys = hml.keys, outDiffuse = hml.resolvedDiffuse, outSpecular = hml.resolvedSpecular;
+                        g.addPass("m.hair.lights", QueueType::Graphics,
+                                  [&](PassBuilder& b) {
+                                      useHair(b);
+                                      for (TextureRef t : { element, farElement, samples, keys }) b.use(t, Use::SrvCompute);
+                                      b.use(outDiffuse, Use::UavCompute);
+                                      b.use(outSpecular, Use::UavCompute);
+                                  },
+                                  [=](PassContext& c) {
+                                      uint32_t k[36] = {};
+                                      hairConstants(c, k);
+                                      k[33] = c.srv(farElement);  // P[8].y
+                                      k[9] = c.srv(element);
+                                      k[10] = c.srv(samples);
+                                      k[11] = c.srv(keys);
+                                      k[12] = c.uav(outDiffuse);
+                                      k[13] = c.uav(outSpecular);
+                                      k[14] = caps;
+                                      k[15] = mlMode;
+                                      c.bindFrameConstants(cb);
+                                      c.computeConstants(k, 36);
+                                      c.cmd->SetPipelineState(hairKernel[4]);
+                                      c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                                  });
+                        // (shading.hair_lights_spatial: the instance's spatial filter; off as the reference's hair input)
+                        megaLightsDenoise(fc, hview, hairWord, hml, true, fc.quality.boolean("shading.hair_lights_spatial"));
+                        hairLighting = hml.lighting;                // at the pixel's nearest hair record
+                        hairLightingFar = hml.lightingSpecular;     // at its farthest
+                        hairNearest = nearest;
+                        hairFarthest = farthest;
+                    }
+                }
+#endif
+                g.addPass("m.hair", QueueType::Graphics,
+                          [&](PassBuilder& b) {
+                              useHair(b);
+                              b.use(special, Use::SrvCompute);
+                              b.use(special, Use::IndirectArgs);
+                              b.use(v.coverageTileList, Use::SrvCompute);
+                              b.use(shaded, Use::UavCompute);
+                              b.use(v.depth, Use::SrvCompute);
+                              if (fragmentShadows)
+                              {
+                                  b.use(v.shadowFragmentVisibility, Use::SrvCompute);
+                                  b.use(v.coverageDepthRange, Use::SrvCompute);
+                                  if (v.shadowFragmentSun.valid()) b.use(v.shadowFragmentSun, Use::SrvCompute);
+                              }
+                              if (hairLighting.valid())
+                                  for (TextureRef t : { hairLighting, hairLightingFar, hairNearest, hairFarthest }) b.use(t, Use::SrvCompute);
+                              else if (froxelLists) b.use(v.froxelLights, Use::SrvCompute);
+                              if (atmosphere)
+                                  for (TextureRef t : { r.transmittanceLut, r.multiScatterLut }) b.use(t, Use::SrvCompute);
+                              if (air) b.use(v.airVolume, Use::SrvCompute);
+                              declareFog(b, r, Use::SrvCompute);
+                              declareGiSource(b, hairGi, Use::SrvCompute);
+                          },
+                          [=](PassContext& c) {
+                              const uint32_t none = gpu::kNone;
+                              uint32_t k[36] = {};
+                              hairConstants(c, k);
+                              k[1] = c.srv(special);
+                              k[2] = c.srv(v.coverageTileList);
+                              k[3] = c.uav(shaded);
+                              k[16] = fragmentShadows ? c.srv(v.shadowFragmentVisibility) : none;
+                              k[17] = fragmentShadows ? c.srv(v.coverageDepthRange) : none;
+                              k[18] = fragmentShadows && v.shadowFragmentSun.valid() ? c.srv(v.shadowFragmentSun) : none;
+                              k[19] = !hairLighting.valid() && froxelLists ? c.srv(v.froxelLights) : none;
+                              k[24] = atmosphere ? c.srv(r.transmittanceLut) : none;
+                              k[25] = atmosphere ? c.srv(r.multiScatterLut) : none;
+                              k[26] = air ? c.srv(v.airVolume) : none;
+                              k[27] = giSourceWord(c, hairGi);
+                              k[28] = hairLighting.valid() ? c.srv(hairLighting) : none;
+                              k[29] = c.srv(v.depth);
+                              if (hairLighting.valid())
+                              {
+                                  k[32] = c.srv(hairFarthest);      // P[8]
+                                  k[34] = c.srv(hairNearest);
+                                  k[35] = c.srv(hairLightingFar);
+                              }
+                              c.bindFrameConstants(cb);
+                              c.computeConstants(k, 36);
+                              c.cmd->SetPipelineState(hairKernel[5]);
+                              c.cmd->ExecuteIndirect(signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
+                          });
+            }
         }
         // L2c (14.1c): the coverage tiles' FAR field (CoverageTileLights.hlsl), before the composite reads it.
         const bool covTileLights = froxelLists && fc.quality.boolean("shading.coverage_tile_lights");
@@ -1916,6 +2120,7 @@ void shade(FramePassContext& fc, ViewResources& view)
     shadingComposite(fc, target);
     view.exposureCorrection = target.exposureCorrection;  // a snap frame's own metering (Exposure.cpp): the chain and the caller
     view.localDirect = target.localDirect;                 // (shading.mega_lights' result, for the gate's captures)
+    view.coverageRecordRadiance = target.coverageRecordRadiance;  // (the special records' radiance, for the tests' readback)
     if (translucentActive(fc, view)) translucentComposite(fc, view, target.color);  // A10 glass over the composited image
     TextureRef image = target.color;
     if (haze)
