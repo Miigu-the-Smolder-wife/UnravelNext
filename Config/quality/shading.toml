@@ -61,6 +61,18 @@ mega_lights_volume = true                         # Volume
 mega_lights_volume_samples = 2                    # Volume.NumSamplesPerVoxel
 mega_lights_volume_min_sample_weight = 0.1        # Volume.MinSampleWeight
 mega_lights_volume_max_frames = 10                # the air's history length (Unreal: the fog's r.VolumetricFog.HistoryWeight 0.9)
+# Strand hair records (Passes/Shading/CoverageHair.hlsl, with visibility.coverage_hair): the hair between a strand and a
+# light comes from E's density volume (Passes/Hair/HairDensity.hlsli).
+hair_density_resolution = 64      # cells along the longest side of a body's box (a multiple of 4, at most 128; 0: no volume -
+                                  # every strand is then shaded with no fibre in front and hair_fibres_behind behind)
+hair_density_bodies = 16          # the nearest bodies that get a block of the volume (resolution^3 x 6 B each); the others
+                                  # are shaded as with resolution 0
+hair_density_steps = 16           # samples of a march through the volume towards a light (the indirect light's four
+                                  # marches take half as many)
+hair_lights_spatial = false       # with mega_lights: the spatial filter on the hair records' local lights (Unreal runs its hair
+                                  # input without one: "no proper reconstruction filter"); the temporal filter always runs
+hair_fibres_behind = 2.0          # fibres taken to lie behind a strand whose body has no block (the neighbourhood's backward
+                                  # lobe counts with 1 - exp(-this))
 # Edge (E) pixels and surface groups (Passes/Shading/Edge.hlsli): two pixels are one surface when the material matches,
 # the shading normals differ by less than the angle, and each lies within max(footprint x ft, distance x dt) of the
 # other's tangent plane. ARCHITECTURE 2.10: up to three surfaces per edge pixel.

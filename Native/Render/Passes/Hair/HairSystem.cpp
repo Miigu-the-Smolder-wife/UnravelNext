@@ -1,6 +1,7 @@
 // Strand hair (track E, B10). See include/unx/hair/Hair.h and HairSimulate.hlsl.
 #include "unx/hair/Hair.h"
 
+#include "unx/core/Config.h"
 #include "unx/core/Log.h"
 #include "unx/render/RenderGraph.h"
 #include "unx/render/Shaders.h"
@@ -72,6 +73,11 @@ struct HairSystem::Body
     std::vector<float4> rest, follow, initial;
     std::vector<uint32_t> guideJoint;
     float extent = 0;  // max distance of a rest node from its root (LOD bound)
+    // The density volume's bounds (HairDensity.hlsli): per joint the box of its guides' rest nodes (joint space; lo > hi:
+    // no guide), and what is added around the body's box under the frame's joints - a quarter of the strand length for
+    // the motion, the follow strands' largest offset.
+    std::vector<float3> restLo, restHi;
+    float boundMargin = 0;
     struct Tick
     {
         std::vector<float4> jointsPrev, jointsCur, capsules;
@@ -118,6 +124,20 @@ uint32_t HairSystem::addBody(const BodyDesc& d)
             b->extent = std::max(b->extent, length(p - d.restPositions[g * N]));
         }
     b->guideJoint = d.guideJoint;
+    b->restLo.assign(d.joints, float3{ 1e30f, 1e30f, 1e30f });
+    b->restHi.assign(d.joints, float3{ -1e30f, -1e30f, -1e30f });
+    for (uint32_t g = 0; g < guides; ++g)
+        for (uint32_t i = 0; i < N; ++i)
+        {
+            const float3 p = d.restPositions[g * N + i];
+            float3& lo = b->restLo[d.guideJoint[g]];
+            float3& hi = b->restHi[d.guideJoint[g]];
+            lo = { std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z) };
+            hi = { std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z) };
+        }
+    float followReach = 0;
+    for (const BodyDesc::Follow& x : d.follows) followReach = std::max(followReach, length(x.offset) * std::max(1.0f, x.tipSpread));
+    b->boundMargin = 0.25f * b->extent + followReach + d.rootRadius;
     for (uint32_t f = 0; f < b->follows; ++f)
     {
         const BodyDesc::Follow& x = d.follows[f];
@@ -261,6 +281,12 @@ public:
             while (initBytes.size() % 16) initBytes.push_back(0);
         };
         uint32_t segmentsTotal = 0;
+        struct Box
+        {
+            float3 lo, hi;
+            float distance;
+        };
+        std::vector<Box> boxes;  // per body, camera-relative
         std::vector<uint32_t> header(1 + kBodyHeaderWords * bodies.size(), 0);
         header[0] = (uint32_t)bodies.size();
         for (size_t bi = 0; bi < bodies.size(); ++bi)
@@ -361,6 +387,24 @@ public:
                 dispatches.push_back({ &b, 2, (uint32_t)constants.size(), (b.follows + 63) / 64 });
                 constants.push_back(cf);
             }
+            // the body's box under the tick's two joint sets (the frame's joints lie between them), camera-relative
+            {
+                float3 lo{ 1e30f, 1e30f, 1e30f }, hi{ -1e30f, -1e30f, -1e30f };
+                for (const std::vector<float4>* rows : { &b.jointsPrev, &b.jointsCur })
+                    for (uint32_t j = 0; j < b.desc.joints; ++j)
+                    {
+                        if (b.restLo[j].x > b.restHi[j].x) continue;
+                        for (uint32_t corner = 0; corner < 8; ++corner)
+                        {
+                            const float3 q = rowsTransform(&(*rows)[3 * j], { (corner & 1) ? b.restHi[j].x : b.restLo[j].x, (corner & 2) ? b.restHi[j].y : b.restLo[j].y,
+                                                                              (corner & 4) ? b.restHi[j].z : b.restLo[j].z });
+                            lo = { std::min(lo.x, q.x), std::min(lo.y, q.y), std::min(lo.z, q.z) };
+                            hi = { std::max(hi.x, q.x), std::max(hi.y, q.y), std::max(hi.z, q.z) };
+                        }
+                    }
+                const float3 m{ b.boundMargin, b.boundMargin, b.boundMargin };
+                boxes.push_back({ lo - m - v.position, hi + m - v.position, distance });
+            }
             uint32_t* h = &header[1 + kBodyHeaderWords * bi];
             h[0] = segmentsTotal;
             h[1] = b.follows * (b.nodes - 1);
@@ -372,9 +416,51 @@ public:
             segmentsTotal += b.follows * (b.nodes - 1);
         }
 
+        // The density volume (HairDensity.hlsli; shading.hair_density_resolution cells per side, 0: none): made when the
+        // strands are drawn (visibility.coverage_hair: M's hair records read it), for the nearest
+        // shading.hair_density_bodies bodies - one block of R^3 cells each, side by side in the two textures.
+        const QualityConfig& q = fc.quality;
+        const uint32_t densityRes = q.has("visibility.coverage_hair") && q.boolean("visibility.coverage_hair") && q.has("shading.hair_density_resolution")
+                                        ? (uint32_t)q.integer("shading.hair_density_resolution")
+                                        : 0u;
+        if (densityRes % 4 != 0 || densityRes > 128) fail("shading.hair_density_resolution must be a multiple of 4, at most 128 (0: no volume)");
+        const uint32_t densityBodies =
+            densityRes && q.has("shading.hair_density_bodies") ? std::min<uint32_t>((uint32_t)bodies.size(), (uint32_t)std::max<int64_t>(q.integer("shading.hair_density_bodies"), 0)) : 0u;
+        const uint32_t densityColumns = densityBodies ? std::min(densityBodies, 2048u / densityRes) : 0u;
+        const uint32_t densityRows = densityBodies ? (densityBodies + densityColumns - 1) / densityColumns : 0u;
+        if (densityRows * densityRes > 2048u) fail("shading.hair_density_bodies: %u blocks of %u cells exceed a 3D texture", densityBodies, densityRes);
+        std::vector<uint32_t> densityParams(4 + 8 * bodies.size(), 0);
+        struct DensityBody
+        {
+            uint32_t body, block;
+        };
+        std::vector<DensityBody> densityList;
+        if (densityBodies)
+        {
+            std::vector<uint32_t> order(bodies.size());
+            for (uint32_t i = 0; i < (uint32_t)order.size(); ++i) order[i] = i;
+            std::stable_sort(order.begin(), order.end(), [&](uint32_t x, uint32_t y) { return boxes[x].distance < boxes[y].distance; });
+            densityParams[0] = (uint32_t)bodies.size();
+            densityParams[1] = densityRes;
+            for (uint32_t k = 0; k < densityBodies; ++k)
+            {
+                const Box& box = boxes[order[k]];
+                const float3 size = box.hi - box.lo;
+                const float longest = std::max({ size.x, size.y, size.z });
+                if (!(longest > 0)) continue;
+                const float cell = longest / (float)densityRes;
+                const float f[4] = { box.lo.x, box.lo.y, box.lo.z, cell };
+                uint32_t* w = &densityParams[4 + 8 * order[k]];
+                std::memcpy(w, f, 16);
+                const float extent[3] = { size.x, size.y, size.z };
+                for (int axis = 0; axis < 3; ++axis) w[4 + axis] = std::clamp((uint32_t)std::ceil(extent[axis] / cell), 1u, densityRes);
+                w[7] = (k % densityColumns) | ((k / densityColumns) << 16);
+                densityList.push_back({ order[k], k });
+            }
+        }
         const uint64_t constantsBytes = constants.size() * kConstantSlot, inputsBytes = std::max<size_t>(inputs.size(), 1) * 16,
-                       headerBytes = (header.size() * 4 + 15) / 16 * 16;
-        const uint64_t bytes = constantsBytes + inputsBytes + headerBytes + initBytes.size();
+                       headerBytes = (header.size() * 4 + 15) / 16 * 16, densityBytes = densityBodies ? (densityParams.size() * 4 + 15) / 16 * 16 : 0;
+        const uint64_t bytes = constantsBytes + inputsBytes + headerBytes + densityBytes + initBytes.size();
         Slot& slot = m_slots[fc.frame.frameIndex % m_slots.size()];
         if (!slot.upload || slot.bytes < bytes)
         {
@@ -388,7 +474,7 @@ public:
             D3D12_RANGE none{ 0, 0 };
             check(slot.upload->Map(0, &none, reinterpret_cast<void**>(&slot.mapped)), "map hair upload");
         }
-        std::memset(slot.mapped, 0, (size_t)(constantsBytes + inputsBytes + headerBytes));
+        std::memset(slot.mapped, 0, (size_t)(constantsBytes + inputsBytes + headerBytes + densityBytes));
 
         // graph resources
         const BufferRef constantBuffer = g.createBuffer(BufferDesc{ "hair.constants", constantsBytes, 0 });
@@ -423,8 +509,8 @@ public:
         ID3D12Resource* upload = slot.upload.Get();
         std::memcpy(mapped + constantsBytes, inputs.data(), inputs.size() * 16);
         std::memcpy(mapped + constantsBytes + inputsBytes, header.data(), header.size() * 4);
-        std::memcpy(mapped + constantsBytes + inputsBytes + headerBytes, initBytes.data(), initBytes.size());
-        const uint64_t initBase = constantsBytes + inputsBytes + headerBytes;
+        std::memcpy(mapped + constantsBytes + inputsBytes + headerBytes + densityBytes, initBytes.data(), initBytes.size());
+        const uint64_t initBase = constantsBytes + inputsBytes + headerBytes + densityBytes, densityBase = constantsBytes + inputsBytes + headerBytes;
         std::vector<Dispatch> ds = dispatches;
         std::vector<Constants> cs = constants;
         std::vector<Imported> ims = imported;
@@ -520,6 +606,80 @@ public:
         }
         fc.resources.hairSegments = segments;
         fc.resources.hairBodies = headerBuffer;
+        if (!densityList.empty())
+        {
+            const uint32_t R = densityRes, coarse = R / 4, columns = densityColumns, rows = densityRows;
+            const uint64_t words = (uint64_t)densityBodies * R * R * R;
+            const BufferRef params = g.createBuffer(BufferDesc{ "hair.density params", densityBytes, 0 });
+            const BufferRef sums = g.createBuffer(BufferDesc{ "hair.density sums", words * 4, 0 });
+            const TextureRef fine = g.createTexture({ "hair.density", R * columns, R * rows, (uint16_t)R, 1, DXGI_FORMAT_R16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D });
+            const TextureRef low =
+                g.createTexture({ "hair.density coarse", coarse * columns, coarse * rows, (uint16_t)coarse, 1, DXGI_FORMAT_R16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D });
+            std::vector<uint32_t> dp = densityParams;
+            g.addPass("hair.density.params", QueueType::Graphics, [=](PassBuilder& b) { b.use(params, Use::CopyDst); },
+                      [=](PassContext& c) mutable {
+                          dp[2] = c.srv(fine);  // (the readers find the two textures through the parameters)
+                          dp[3] = c.srv(low);
+                          std::memcpy(mapped + densityBase, dp.data(), dp.size() * 4);
+                          c.cmd->CopyBufferRegion(c.resource(params), 0, upload, densityBase, densityBytes);
+                      });
+            ID3D12PipelineState* kernel[4] = { fc.shaders.compute("Passes/Hair/HairDensity.MODE0"), fc.shaders.compute("Passes/Hair/HairDensity.MODE1"),
+                                               fc.shaders.compute("Passes/Hair/HairDensity.MODE2"), fc.shaders.compute("Passes/Hair/HairDensity.MODE3") };
+            // (a body's parameters are found by its place in the header, its cells by its block)
+            struct Splat
+            {
+                uint32_t body, block, first, count;
+            };
+            std::vector<Splat> splats;
+            for (const DensityBody& d : densityList)
+            {
+                const uint32_t* h = &header[1 + kBodyHeaderWords * d.body];
+                splats.push_back({ d.body, d.block, h[0], h[1] });
+            }
+            g.addPass("hair.density", QueueType::Graphics,
+                      [=](PassBuilder& b) {
+                          b.use(segments, Use::SrvCompute);
+                          b.use(params, Use::SrvCompute);
+                          b.use(sums, Use::UavCompute);
+                          b.use(fine, Use::UavCompute);
+                          b.use(low, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          D3D12_GLOBAL_BARRIER gb{ D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                                   D3D12_BARRIER_ACCESS_UNORDERED_ACCESS };
+                          D3D12_BARRIER_GROUP group{ D3D12_BARRIER_TYPE_GLOBAL, 1 };
+                          group.pGlobalBarriers = &gb;
+                          uint32_t k[8] = { c.srv(segments), c.uav(sums), c.srv(params), c.uav(fine), (uint32_t)words, 0, 0, 0 };
+                          c.cmd->SetPipelineState(kernel[0]);
+                          c.computeConstants(k, 8);
+                          c.cmd->Dispatch((uint32_t)((words + 255) / 256), 1, 1);
+                          c.cmd->Barrier(1, &group);
+                          c.cmd->SetPipelineState(kernel[1]);
+                          for (const Splat& sp : splats)
+                          {
+                              k[4] = sp.body;
+                              k[5] = sp.first;
+                              k[6] = sp.count;
+                              k[7] = sp.block;
+                              c.computeConstants(k, 8);
+                              c.cmd->Dispatch((sp.count + 63) / 64, 1, 1);
+                          }
+                          c.cmd->Barrier(1, &group);
+                          k[4] = columns;
+                          k[5] = (uint32_t)splats.size() ? densityBodies : 0;
+                          k[6] = k[7] = 0;
+                          c.cmd->SetPipelineState(kernel[2]);
+                          c.computeConstants(k, 8);
+                          c.cmd->Dispatch(R * columns / 4, R * rows / 4, R / 4);
+                          k[3] = c.uav(low);
+                          c.cmd->SetPipelineState(kernel[3]);
+                          c.computeConstants(k, 8);
+                          c.cmd->Dispatch((coarse * columns + 3) / 4, (coarse * rows + 3) / 4, (coarse + 3) / 4);
+                      });
+            fc.resources.hairDensity = fine;
+            fc.resources.hairDensityCoarse = low;
+            fc.resources.hairDensityParams = params;
+        }
     }
 
 private:

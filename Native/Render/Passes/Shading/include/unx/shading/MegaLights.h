@@ -39,5 +39,6 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
 // m.ml.sets, m.ml.temporal and m.ml.spatial, after the caller's m.ml.shade; sets ml.lighting.
 // demodulated: the result stays divided by the modulation factors, diffuse in ml.lighting and specular in
 // ml.lightingSpecular (the reader multiplies its own factors).
-void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, MegaLightsFrame& ml, bool demodulated = false);
+// spatial = false: the temporal step alone (the hair records' instance: as Unreal, whose hair input has no spatial filter).
+void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, MegaLightsFrame& ml, bool demodulated = false, bool spatial = true);
 } // namespace unx::render::shading

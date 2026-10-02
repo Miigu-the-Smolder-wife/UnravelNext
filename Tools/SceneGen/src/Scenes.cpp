@@ -738,6 +738,7 @@ scene::Scene generate(const Request& rq)
     case SceneId::FurnaceRoom: s = furnaceRoom(rq, false); break;
     case SceneId::FurnaceRoomDay: s = furnaceRoom(rq, true); break;
     case SceneId::ShadingBall: s = shadingBall(rq); break;
+    case SceneId::HairBall: s = hairBall(rq); break;
     default: fail("scenegen: unknown scene id %u", (uint32_t)rq.id);
     }
     DynamicContent content = dynamicContent(rq);
@@ -772,7 +773,8 @@ float terrainHeight(SceneId id, float x, float z)
     case SceneId::RidgeSunset: return inside(10000.0f) ? ridgeTerrain(x, z) : NAN;
     case SceneId::FurnaceRoom:
     case SceneId::FurnaceRoomDay:
-    case SceneId::ShadingBall: return NAN;
+    case SceneId::ShadingBall:
+    case SceneId::HairBall: return NAN;
     }
     fail("scenegen: unknown scene id %u", (uint32_t)id);
 }
@@ -782,7 +784,7 @@ std::vector<SceneId> allScenes()
     return { SceneId::CityBlock, SceneId::ForestThin, SceneId::ForestCard, SceneId::Waterside, SceneId::Interior, SceneId::CityNight, SceneId::RidgeSunset, SceneId::ForestCombat };
 }
 
-std::vector<SceneId> diagnosticScenes() { return { SceneId::FurnaceRoom, SceneId::FurnaceRoomDay, SceneId::ShadingBall }; }
+std::vector<SceneId> diagnosticScenes() { return { SceneId::FurnaceRoom, SceneId::FurnaceRoomDay, SceneId::ShadingBall, SceneId::HairBall }; }
 
 const char* sceneName(SceneId id)
 {
@@ -799,6 +801,7 @@ const char* sceneName(SceneId id)
     case SceneId::FurnaceRoom: return "furnace_room";
     case SceneId::FurnaceRoomDay: return "furnace_room_day";
     case SceneId::ShadingBall: return "shading_ball";
+    case SceneId::HairBall: return "hair_ball";
     }
     fail("scenegen: unknown scene id %u", (uint32_t)id);
 }

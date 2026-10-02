@@ -74,6 +74,17 @@ void main(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID)
     s.transmission = m.transmission;
     MlPoint surfacePoint = mlPointOf(s, offset, n, v, P[2].w);
     if (s.cls == MATERIAL_SUBSURFACE) mlPointSubsurface(surfacePoint, s, modelSubsurfaceOf(m, s.roughness), P[2].w);
+    if (s.cls == MATERIAL_HAIR)
+    {
+        // a strand (the hair records' instance, CoverageHair.hlsl): light from either side of the fibre reaches the viewer,
+        // so the weight is a two-sided Lambert point's (the fibre's lobes are the shading's)
+        surfacePoint.foliage = true;
+        surfacePoint.front = surfacePoint.back = 1 / SH_PI;
+        surfacePoint.specular = false;
+#if ML_AREA
+        surfacePoint.specularAlbedo = 0;
+#endif
+    }
 
     // ---- the previous frame's tile sets at this surface point (a random offset of half a tile stands in for a bilinear
     // lookup of the sets); without history every light counts as visible

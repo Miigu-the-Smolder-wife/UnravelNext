@@ -1,5 +1,5 @@
 // Pre-shaded coverage records (INTERFACES 7.1 v1.75). Owner: M. Readers and writers: M's coverage composite and
-// CoverageSpecial.hlsl, W's water record pass (tracks::water), later the hair owner.
+// CoverageSpecial.hlsl, W's water record pass (tracks::water), M's hair records (CoverageHair.hlsl).
 // ViewResources::coverageSpecial lists the special records of the view's coverage layer (V, v1.73: { element, kind });
 // their owners shade them into ViewResources::coverageRecordRadiance before the composite, which only reads the value
 // (CoverageShade.hlsli covFragmentRadiance) and weights it like any record: area x the share its mask leaves uncovered,

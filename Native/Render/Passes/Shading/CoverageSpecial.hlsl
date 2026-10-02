@@ -3,7 +3,7 @@
 // Special coverage records (CoverageSpecial.hlsli, INTERFACES 7.1 v1.75), one thread per entry of
 // ViewResources::coverageSpecial, dispatched indirectly from its header (64 per group):
 //   MODE=0 (before tracks::water): kinds 1 (hair) and 2 (streams) get radiance 0, the defined value their owners
-//          overwrite (W: kind 2 in tracks::water).
+//          overwrite (W: kind 2 in tracks::water; hair: CoverageHair.hlsl before the composite).
 //   MODE=1, 2, 4 (before the composite): kind 5 records (COV_PRESHADE_ID) of M's pre-shaded materials, 1 Cut, 2 Terrain,
 //          4 A9 layered Standard materials (clearcoat, sheen): the material at the footprint (CoverageShade.hlsli
 //          covFragmentMaterial, as the resolve; MODE 4 also the coat's filtered roughness) stored per entry (48 B, M's

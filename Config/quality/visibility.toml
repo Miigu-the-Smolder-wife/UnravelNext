@@ -19,8 +19,12 @@ band_a_hysteresis_px = 2.0        # a cluster or sheet triangle that was band B 
                                   # (COVERAGE_REDESIGN 14.9: 1.5 -> 2.0; sheets are classified per triangle)
 band_c_max_width_px = 0.25        # w_px < this (or too many fragments): aggregate bricks
 band_c_max_fragments_per_pixel = 8
-coverage_hair = false             # E's strand hair segments drawn in the coverage layer (HairRaster.ms, B10) - with
-                                  # coverage_layer; true once M reads hair records (coverageFragmentIsHair)
+coverage_hair = true              # E's strand hair segments drawn in the coverage layer (HairRaster.ms, B10) - with
+                                  # coverage_layer - and shaded by M (Passes/Shading/CoverageHair.hlsl; E makes its density
+                                  # volume with it). Costs nothing without hair bodies. hair_ball at 1080p, two grooms filling
+                                  # the view, 3.7 M hair records [measured 2026-10-02, RTX 4080]: GPU frame 3.6 -> 21.3 ms -
+                                  # the records' shading 6.6 ms, their local lights 1.5 ms, the composite over them (its
+                                  # heavy pixels' sort and rounds) 7.5 ms, V's raster and S's fragment shadows 1.9 ms
 coverage_subsamples = 32          # in-pixel fragment overlap ordering mask
 coverage_layer = true             # main view: bands B and C drawn in the coverage layer (INTERFACES 7.1), and the translucent
                                   # layer (A6: glass) runs - with false the games' glass was white (defect queue 3: the layer

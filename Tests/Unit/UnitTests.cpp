@@ -12,6 +12,7 @@
 #include "unx/render/FrameRenderer.h"
 #include "unx/render/GpuLock.h"
 #include "unx/render/Harness.h"
+#include "unx/scene/HairModel.h"
 #include "unx/scene/MaterialModel.h"
 #include "unx/shading/Post.h"
 #include "unx/water/RoundPool.h"
@@ -2225,6 +2226,141 @@ UNX_TEST(subsurface_model_on_the_gpu)
     CHECK(across > 0);
     CHECK(worstLobes < 1e-6);
     CHECK(worst < 1e-4);
+    testDevice().deferRelease(constants);
+    testDevice().deferRelease(rb);
+}
+
+UNX_TEST(hair_scattering_on_the_gpu)
+{
+    // Hair class: Passes/Hair/HairScattering.hlsli equals scene::model's twin (unx/scene/HairModel.h) at 4096 points -
+    // the width-averaged kernel plain and spread, the forward and backward averages, what a fibre count lets through, the
+    // backward lobe, a light's kernel and the moments - with the fibres read from the scene's material records (GpuScene's
+    // Hair slots), which equal the materials' (Passes/Test/HairScatteringModel.hlsl).
+    scene::Scene s = tinyScene();
+    const uint32_t firstMaterial = (uint32_t)s.materials.size();
+    {
+        scene::Material hair;
+        hair.name = "hair";
+        hair.cls = scene::MaterialClass::Hair;
+        hair.ior = 1.55f;
+        hair.roughness = 0.3f;
+        hair.hairEumelanin = 0.3f;
+        s.materials.push_back(hair);  // blond
+        hair.hairEumelanin = 2.5f;
+        hair.roughness = 0.2f;
+        hair.hairBetaN = 0.45f;
+        s.materials.push_back(hair);  // dark, smoother along, rougher around
+        hair.hairEumelanin = 0;
+        hair.hairPheomelanin = 0;
+        hair.baseColor = { 0.95f, 0.9f, 0.85f };  // by its colour (Chiang): nearly white
+        hair.roughness = 0.5f;
+        hair.hairBetaN = 0.25f;
+        hair.hairTilt = 0.05f;
+        s.materials.push_back(hair);
+    }
+    const uint32_t materialCount = (uint32_t)s.materials.size() - firstMaterial;
+    scene::validate(s);
+    GpuScene gs(testDevice());
+    gs.upload(s);
+    gpu::FrameConstants fc{};
+    gs.fill(fc);
+    ComPtr<ID3D12Resource> constants, rb;
+    const uint32_t n = 4096, bytes = n * 192;
+    {
+        D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD }, rp{ D3D12_HEAP_TYPE_READBACK };
+        D3D12_RESOURCE_DESC1 rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = (sizeof(gpu::FrameConstants) + 255) / 256 * 256;
+        rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        check(testDevice().d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&constants)),
+              "constants");
+        void* mapped = nullptr;
+        check(constants->Map(0, nullptr, &mapped), "map constants");
+        std::memcpy(mapped, &fc, sizeof fc);
+        constants->Unmap(0, nullptr);
+        rd.Width = bytes;
+        check(testDevice().d3d()->CreateCommittedResource3(&rp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&rb)), "readback");
+    }
+    ID3D12PipelineState* pso = shaders().compute("Passes/Test/HairScatteringModel");
+    RenderGraph g(testDevice());
+    const BufferRef out = g.createBuffer({ "hair scattering out", bytes, 0 });
+    const D3D12_GPU_VIRTUAL_ADDRESS address = constants->GetGPUVirtualAddress();
+    g.addPass("hair scattering", QueueType::Graphics, [&](PassBuilder& b) { b.use(out, Use::UavCompute); },
+              [=](PassContext& ctx) {
+                  const uint32_t k[4] = { ctx.uav(out), n, firstMaterial, materialCount };
+                  ctx.cmd->SetPipelineState(pso);
+                  ctx.bindFrameConstants(address);
+                  ctx.computeConstants(k, 4);
+                  ctx.cmd->Dispatch((n + 63) / 64, 1, 1);
+              });
+    ID3D12Resource* dst = rb.Get();
+    g.addPass("hair scattering readback", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(out, Use::CopySrc);
+                  b.keep();
+              },
+              [=](PassContext& ctx) { ctx.cmd->CopyBufferRegion(dst, 0, ctx.resource(out), 0, bytes); });
+    g.execute(nullptr);
+    for (uint32_t q = 0; q < kQueueTypeCount; ++q) testDevice().queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
+    const float* v = nullptr;
+    check(rb->Map(0, nullptr, (void**)&v), "map readback");
+    // worst difference per group, relative to the larger of the value and a floor (the kernels are sums of lobes whose
+    // exponentials differ in the last bits between the two compilers)
+    double worstKernel = 0, worstSpread = 0, worstAverage = 0, worstThrough = 0, worstBack = 0, worstLight = 0, worstMoments = 0;
+    uint32_t lit = 0;
+    auto differ = [](double& worst, float got, float want, double floor) { worst = std::max(worst, std::fabs((double)got - want) / std::max(std::fabs((double)want), floor)); };
+    auto differ3 = [&](double& worst, const float* got, float3 want, double floor) {
+        differ(worst, got[0], want.x, floor);
+        differ(worst, got[1], want.y, floor);
+        differ(worst, got[2], want.z, floor);
+    };
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        const float* p = v + 48 * i;
+        const scene::model::HairFibre f = scene::model::hairFibreOf(s.materials[firstMaterial + i % materialCount]);
+        const float3 wo{ p[0], p[1], p[2] }, wi{ p[3], p[4], p[5] };
+        const float front = p[6], behind = p[7], spread = p[8];
+        const scene::model::HairStrand strand = scene::model::hairStrand(f, wo);
+        const scene::model::HairAverage a = scene::model::hairAverage(f, wi.x);
+        const scene::model::HairThrough t = scene::model::hairThrough(a, front);
+        const scene::model::HairBack b = scene::model::hairBackscatter(a);
+        const scene::model::HairMoments mo = scene::model::hairStrandMoments(strand, a, 1 - std::exp(-behind));
+        differ3(worstKernel, p + 10, scene::model::hairStrandKernel(strand, wi, 0, false), 1e-3);
+        differ3(worstSpread, p + 13, scene::model::hairStrandKernel(strand, wi, spread, true), 1e-3);
+        differ3(worstAverage, p + 16, a.forward, 1e-3);
+        differ3(worstAverage, p + 19, a.backward, 1e-3);
+        differ(worstAverage, p[22], a.varianceForward, 1e-3);
+        differ(worstAverage, p[23], a.varianceBackward, 1e-3);
+        differ(worstAverage, p[24], a.shiftForward, 1e-3);
+        differ(worstAverage, p[25], a.shiftBackward, 1e-3);
+        differ(worstThrough, p[26], t.direct, 1e-3);
+        differ3(worstThrough, p + 27, t.scattered, 1e-3);
+        differ(worstThrough, p[30], t.spread, 1e-3);
+        differ3(worstBack, p + 31, b.albedo, 1e-3);
+        differ(worstBack, p[34], b.shift, 1e-3);
+        differ(worstBack, p[35], b.variance, 1e-3);
+        const float3 light = scene::model::hairStrandLight(strand, a, wi, front, behind);
+        differ3(worstLight, p + 36, light, 1e-3);
+        lit += light.y > 1e-3f;
+        // (the first moments are sums of lobes of either sign: against a floor of 0.05 of the albedo's scale)
+        differ3(worstMoments, p + 39, mo.albedo, 1e-3);
+        differ3(worstMoments, p + 42, mo.along, 5e-2);
+        differ3(worstMoments, p + 45, mo.across, 5e-2);
+    }
+    rb->Unmap(0, nullptr);
+    logf("    hair scattering on the GPU vs scene::model over %u points (%u above 1e-3): worst relative - kernel %.2e, spread kernel %.2e, averages %.2e, through %.2e, "
+         "backward lobe %.2e, light %.2e, moments %.2e\n",
+         n, lit, worstKernel, worstSpread, worstAverage, worstThrough, worstBack, worstLight, worstMoments);
+    CHECK(lit > n / 2);
+    CHECK(worstKernel < 1e-3);
+    CHECK(worstSpread < 1e-3);
+    CHECK(worstAverage < 1e-3);
+    CHECK(worstThrough < 1e-3);
+    CHECK(worstBack < 1e-3);
+    CHECK(worstLight < 1e-3);
+    CHECK(worstMoments < 1e-3);
     testDevice().deferRelease(constants);
     testDevice().deferRelease(rb);
 }

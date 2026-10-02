@@ -125,6 +125,31 @@ int main(int argc, char** argv)
             CHECK(scene::contentHash(scene::deserialize(scene::serialize(a))) == ha);
             CHECK(a.name == scenegen::sceneName(id));
             CHECK(!a.cameras.empty() && a.paths.size() == a.cameras.size());
+            if (id == scenegen::SceneId::HairBall)
+            {
+                // hair_ball's content (SceneGen.h, HairBall.cpp): two heads, a dark and a blond Hair material, the key and the
+                // rim light, two cameras; its two grooms name those materials and stand on the heads
+                CHECK(a.cameras.size() == 2 && a.cameras[0].name == "front" && a.cameras[1].name == "back");
+                CHECK(a.lights.size() == 2 && a.lights[0].castShadow && a.lights[1].castShadow);
+                CHECK(a.instances.size() == 3);
+                const std::vector<scenegen::Groom> grooms = scenegen::grooms(rq);
+                CHECK(grooms.size() == 2);
+                for (const scenegen::Groom& g : grooms)
+                {
+                    CHECK(g.material < a.materials.size() && a.materials[g.material].cls == scene::MaterialClass::Hair);
+                    CHECK(g.nodesPerStrand == 12 && g.restPositions.size() == 2500u * 12 && g.follows.size() == 2500u * 16);
+                    for (uint32_t k = 0; k < 2500; ++k) CHECK(std::fabs(length(g.restPositions[k * 12]) - 0.1f) < 1e-5f && length(g.restPositions[k * 12]) > g.headRadius);
+                }
+                if (grooms.size() == 2)
+                {
+                    CHECK(a.materials[grooms[0].material].hairEumelanin > a.materials[grooms[1].material].hairEumelanin);
+                    CHECK(grooms[0].head.x < grooms[1].head.x);
+                    // (the same request, the same strands)
+                    const std::vector<scenegen::Groom> again = scenegen::grooms(rq);
+                    CHECK(again.size() == 2 && std::memcmp(again[1].restPositions.data(), grooms[1].restPositions.data(), grooms[1].restPositions.size() * sizeof(float3)) == 0);
+                }
+            }
+            else CHECK(scenegen::grooms(rq).empty());
             if (id == scenegen::SceneId::ShadingBall)
             {
                 CHECK(a.cameras.size() == 2 && a.cameras[0].name == "front" && a.cameras[1].name == "back");
