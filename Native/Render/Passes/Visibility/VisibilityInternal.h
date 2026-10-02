@@ -70,6 +70,7 @@ constexpr uint32_t kViewTileSingle = 4;  // tile-local pairs are single tiles (a
 constexpr uint32_t kViewTileOccluders = 8;  // tested against the request's tile occluders (RasterView::tileOccluders)
 constexpr uint32_t kViewTileTwoPhase = 16;  // ... in two phases (RasterView::tileTwoPhase)
 constexpr uint32_t kViewProxies = 32;       // chunk members under minInstancePx are drawn as proxies (DepthRasterRequest::proxies)
+constexpr uint32_t kViewNoGlass = 64, kViewGlassOnly = 128;  // RasterView::materialFilter 1, 2
 // Views of one cull run: the work items' view field is 16 bits (VisibilityCommon.hlsli packItem), a run's views one
 // upload chunk of this many.
 constexpr uint32_t kViewsPerRun = 4096;

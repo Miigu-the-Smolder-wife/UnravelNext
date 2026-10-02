@@ -16,7 +16,8 @@
 // P[3].w the transmittance LUT (0xFFFFFFFF: none): the sun slot also x the cloud layer's sun transmittance (B5).
 // P[3].x blocker search taps, P[3].y penumbra filter taps, P[3].z transmittance layer SRV (raw; 0xFFFFFFFF: none):
 // the result is multiplied by the thin casters' T over the penumbra's reach (v1.26). P[4].x the self-shadow slack SRV
-// (ShadowSelfSlack.hlsl; 0xFFFFFFFF: none), as pass 1 takes it. Frame constants of the view.
+// (ShadowSelfSlack.hlsl; 0xFFFFFFFF: none), as pass 1 takes it. P[4].y 1: the output has the glass casters' half (pass 1
+// wrote each pixel's transmittance there; the slot takes its luminance: VsmTint.hlsli). Frame constants of the view.
 #include "Frame.hlsli"
 #include "Passes/Shadow/ShadowReceiver.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
@@ -44,6 +45,7 @@ void storeSun(uint2 px, float3 world, float3 normal, float footprint, float reac
     }
     if (P[3].w != 0xFFFFFFFFu && sun > 0) sun *= cloudSunTransmittanceFromLut(P[3].w, world);  // B5 cloud shadow
     RWTexture2D<uint> output = ResourceDescriptorHeap[P[0].z];
+    if (P[4].y != 0 && sun > 0) sun *= vsmTintLuminance(vsmTintUnpack(output[px + uint2(0, g_viewHeight)]));  // the glass casters
     output[px] = (output[px] & 0xFFFFFF00u) | (uint)round(saturate(sun) * 255.0);  // local slots from pass 1
 }
 

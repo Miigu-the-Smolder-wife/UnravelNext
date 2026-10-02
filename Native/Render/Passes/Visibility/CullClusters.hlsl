@@ -49,6 +49,9 @@ ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
     if (!unbounded && !frustumVisible(v, s)) return r;
     const GpuMaterial m = loadMaterial(clusterMaterial(inst, cl));
     const bool twoSided = (m.classFlags & MATERIAL_TWO_SIDED) != 0, alpha = (m.classFlags & MATERIAL_ALPHA_TESTED) != 0;
+    // (RasterView::materialFilter: a view without the glass casters, or of them alone)
+    const bool glass = (m.classFlags & 0xFFu) == MATERIAL_GLASS;
+    if ((v.flags & (glass ? CULL_VIEW_NO_GLASS : CULL_VIEW_GLASS_ONLY)) != 0) return r;
     const bool cullBack = (v.flags & CULL_VIEW_CULL_BACK) != 0 && !twoSided;
     const float3 axis = normalize(transformVector(inst.objectToWorld, cl.normalCone.xyz));
     const float3 toCluster = s.xyz - v.position;

@@ -125,7 +125,16 @@ struct State
     // every local page anew); the raw SRV of the local atlas slots (V's tile occluders of the movable casters' views)
     bool localSeparate = false;
     uint32_t localSlotsSrv = UINT32_MAX;
+    // shadow.vsm.translucent_tint (VsmTint.hlsli): the sun pages' tint atlas (kTintPage texels a page, laid out as the
+    // page atlas; made when a scene first has a Glass material), its SRV, the pages it was made for, whether the last
+    // frame drew the glass casters into it (a change draws every page anew), and this frame's handle.
+    ComPtr<ID3D12Resource> tintAtlas;
+    uint32_t tintSrv = UINT32_MAX, tintPages = 0;
+    bool tintActive = false;
+    TextureRef tintRef;
 };
+
+constexpr uint32_t kTintPage = 32;  // VsmTint.hlsli VSM_TINT_PAGE
 
 constexpr uint32_t kAtlasPagesPerRow = 128;                                        // VsmCommon.hlsli VSM_ATLAS_PAGES_PER_ROW
 constexpr uint32_t kLocalFaceWords = 173, kLocalLightWords = 6 * kLocalFaceWords;  // VsmLocal.hlsli
@@ -157,7 +166,7 @@ void createState(FramePassContext& fc, State& s, uint32_t pages, bool separate)
         fail("VSM atlas: %u pages is not a positive multiple of %u within one 16384^2 atlas", pages, kAtlasPagesPerRow);
     Device& d = fc.device;
     for (ComPtr<ID3D12Resource>* r : { std::addressof(s.atlas), std::addressof(s.meta), std::addressof(s.blocks), std::addressof(s.pageList), std::addressof(s.layers),
-                                       std::addressof(s.atlasStatic), std::addressof(s.dynamicList), std::addressof(s.staticHzb) })
+                                       std::addressof(s.atlasStatic), std::addressof(s.dynamicList), std::addressof(s.staticHzb), std::addressof(s.tintAtlas) })
         if (*r)
         {
             d.deferRelease(*r);
@@ -1018,6 +1027,51 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     c.useStats = useStats ? s.useUav + 1 : 0;
     c.atlasSrv = s.atlasSrv;
     c.fragmentCheck = (uint32_t)q.integer("shadow.vsm.fragment_check");
+    // shadow.vsm.translucent_tint: in a scene with a Glass material the sun's glass casters stay out of the pages' depth
+    // and their transmittance goes to the tint atlas (VsmTint.hlsli). The frame the state changes draws every page anew.
+    bool tintWanted = q.has("shadow.vsm.translucent_tint") && q.boolean("shadow.vsm.translucent_tint") && fc.services.rasterizeDepth != nullptr;
+    if (tintWanted)
+    {
+        tintWanted = false;
+        for (const gpu::Material& m : fc.scene.materials()) tintWanted = tintWanted || (m.classFlags & 0xFFu) == 4u;  // scene::MaterialClass Glass
+    }
+    if (tintWanted && (!s.tintAtlas || s.tintPages != s.atlasPages))
+    {
+        if (q.has("shadow.vsm.tint_page_texels") && q.integer("shadow.vsm.tint_page_texels") != kTintPage)
+            fail("shadow.vsm.tint_page_texels is compiled into the S kernels (%u)", kTintPage);
+        Device& d = fc.device;
+        DescriptorHeaps& h = d.descriptors();
+        if (s.tintAtlas) d.deferRelease(s.tintAtlas);
+        if (s.tintSrv == UINT32_MAX) s.tintSrv = h.allocateResource();
+        D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+        D3D12_RESOURCE_DESC1 rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        rd.Width = kAtlasPagesPerRow * kTintPage;
+        rd.Height = s.atlasPages / kAtlasPagesPerRow * kTintPage;
+        rd.DepthOrArraySize = rd.MipLevels = 1;
+        rd.Format = DXGI_FORMAT_R16G16B16A16_UNORM;
+        rd.SampleDesc.Count = 1;
+        rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        D3D12_CLEAR_VALUE clear{};
+        clear.Format = rd.Format;
+        clear.Color[0] = clear.Color[1] = clear.Color[2] = 1.0f;  // no glass caster: everything through, depth 0
+        s.tintAtlas.Reset();
+        check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, &clear, nullptr, 0, nullptr,
+                                                IID_PPV_ARGS(&s.tintAtlas)),
+              "S VSM tint atlas");
+        s.tintAtlas->SetName(L"S VSM tint atlas");
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = rd.Format;
+        sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Texture2D.MipLevels = 1;
+        d.d3d()->CreateShaderResourceView(s.tintAtlas.Get(), &sd, h.resourceCpu(s.tintSrv));
+        s.tintPages = s.atlasPages;
+        s.tintActive = false;  // (its texels hold nothing yet)
+    }
+    const bool tintOn = tintWanted, tintChanged = tintOn != s.tintActive;
+    s.tintActive = tintOn;
+    c.tint = tintOn ? s.tintSrv + 1 : 0;
     const float3 windDir = src ? src->windDirection : float3{};
     c.windSpeed = std::max(src ? src->windSpeed : 0.0f, 0.0f);
     c.windDirection = c.windSpeed > 0 ? normalize(windDir) : float3{};
@@ -1189,7 +1243,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     const bool originShift = fc.frame.originShift.x != 0 || fc.frame.originShift.y != 0 || fc.frame.originShift.z != 0;
     // (the wind casters' spheres are bounded with this frame's wind: a changed scene wind redraws every page)
     const bool sameWind = s.cacheWind[0] == c.windSpeed && s.cacheWind[1] == c.windDirection.x && s.cacheWind[2] == c.windDirection.y && s.cacheWind[3] == c.windDirection.z;
-    const bool cacheable = cacheOn && rangeKept && sameWind && !stateFresh && !s.needsInit && !s.rasterRedraw && !hzbFresh && s.cacheFrame != UINT64_MAX &&
+    const bool cacheable = cacheOn && rangeKept && sameWind && !stateFresh && !s.needsInit && !s.rasterRedraw && !hzbFresh && !tintChanged && s.cacheFrame != UINT64_MAX &&
                            s.cacheFrame + 1 == fc.frame.frameIndex && s.cacheRevision == fc.scene.revision() && !originShift &&
                            (fc.frame.discontinuity & kDiscontinuityRestore) == 0;
     s.cacheFrame = fc.frame.frameIndex;
@@ -1733,8 +1787,8 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       auto clearList = [&](TextureRef target, BufferRef list) {
                           const D3D12_CPU_DESCRIPTOR_HANDLE dsv = ctx.dsv(target);
                           ctx.cmd->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
-                          const uint32_t k[4] = { ctx.srv(list), atlasW, atlasH, 0 };
-                          ctx.graphicsConstants(k, 4);
+                          const uint32_t k[8] = { ctx.srv(list), atlasW, atlasH, 0, 0, 0, 0, 0 };
+                          ctx.graphicsConstants(k, 8);
                           ctx.cmd->DispatchMesh(groupCount, 1, 1);
                       };
                       clearList(atlas, pageList);
@@ -1842,6 +1896,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             v.instanceSet = instanceSet;
             v.tileOccluders = occluders;
             v.tileTwoPhase = occlusion == 2;
+            v.materialFilter = tintOn ? 1u : 0u;  // (the glass casters: s.vsm.tint below)
             v.cullMaskOffset = maskWords + k * (kTable * kTable / 32);
             const uint64_t bound = split ? levelBound(bounds, v.viewProj, v.lodPixelsPerMetre, instanceSet) : 0;
             if (bound > listCapacity)
@@ -1992,6 +2047,94 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             sunRequests = sunFamily("s.vsm.raster", atlas, 0, 0, 0);
             if (locals) localRequests = localFamily("s.vsm.localraster", atlas, 0, 0, false);
         }
+    }
+    s.tintRef = {};
+    if (tintOn)
+    {
+        // The glass casters of the pages drawn this frame (anew, or their movable casters anew: the same pages the
+        // sampled atlas is drawn for) into the tint atlas: the pages' tint texels back to "nothing in the way", then one
+        // request of V's service over the levels - each a view of kTintPage texels a page, the Glass clusters alone, the
+        // pixel kernel's transmittance multiplied into the texel and the nearest depth kept beside it (VsmTintPixel.ps).
+        // One request: its visible list holds the glass casters' clusters only, which the packing bounds do not single out.
+        const uint32_t tintW = kAtlasPagesPerRow * kTintPage, tintH = pagesNow / kAtlasPagesPerRow * kTintPage;
+        const TextureRef tint = g.importTexture(s.tintAtlas.Get(), TextureDesc{ "S VSM tint atlas", tintW, tintH, 1, 1, DXGI_FORMAT_R16G16B16A16_UNORM },
+                                                D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+        s.tintRef = tint;
+        MeshPipelineDesc d;
+        d.meshShader = "Passes/Shadow/VsmClearPages.ms";
+        d.pixelShader = "Passes/Shadow/VsmTintClear.ps";
+        d.renderTargets = { DXGI_FORMAT_R16G16B16A16_UNORM };
+        d.cull = D3D12_CULL_MODE_NONE;
+        ID3D12PipelineState* clearTint = sh.mesh("s.vsm.tintclear", d);
+        const bool whole = !cacheable;
+        g.addPass("s.vsm.tint.clear", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(tint, Use::RenderTarget);
+                      b.use(pageList, Use::SrvGraphics);
+                      if (separate) b.use(dynamicList, Use::SrvGraphics);
+                      b.keep();
+                  },
+                  [=](PassContext& ctx) {
+                      const D3D12_CPU_DESCRIPTOR_HANDLE rtv = ctx.rtv(tint);
+                      if (whole)
+                      {
+                          const float nothing[4] = { 1, 1, 1, 0 };
+                          ctx.cmd->ClearRenderTargetView(rtv, nothing, 0, nullptr);
+                          return;
+                      }
+                      ctx.cmd->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+                      D3D12_VIEWPORT vp{ 0, 0, (float)tintW, (float)tintH, 0, 1 };
+                      D3D12_RECT sc{ 0, 0, (LONG)tintW, (LONG)tintH };
+                      ctx.cmd->RSSetViewports(1, &vp);
+                      ctx.cmd->RSSetScissorRects(1, &sc);
+                      ctx.cmd->SetPipelineState(clearTint);
+                      const uint32_t groupCount = (pagesNow + 31) / 32;  // VsmClearPages.ms: 32 pages per group, the list's count
+                      for (uint32_t which = 0; which < (separate ? 2u : 1u); ++which)
+                      {
+                          const uint32_t k[8] = { ctx.srv(which == 0 ? pageList : dynamicList), tintW, tintH, 0, kTintPage, 0, 0, 0 };
+                          ctx.graphicsConstants(k, 8);
+                          ctx.cmd->DispatchMesh(groupCount, 1, 1);
+                      }
+                  });
+        DepthRasterRequest r;
+        r.name = "s.vsm.tint";
+        r.instanceMask = scene::InstanceCastShadow;
+        r.colorTargets = { tint };
+        r.colorMultiply = true;
+        r.pixelKernel = "Passes/Shadow/VsmTintPixel.ps";
+        r.pixelNormals = true;
+        const float towardSun[3] = { sunDir.x, sunDir.y, sunDir.z };
+        std::memcpy(r.pixelConstants, towardSun, sizeof towardSun);
+        r.atlasSlots = atlasSlots;
+        r.atlasTilesPerRow = kAtlasPagesPerRow;
+        r.cullMask = mask;
+        r.cullTilePx = kTintPage;
+        r.tileLocal = true;
+        r.cull = D3D12_CULL_MODE_NONE;
+        // (static_separate: the second set of mask words and slots - the pages drawn anew and those whose movable casters are)
+        const uint32_t drawnWords = separate ? kLevels * (kTable * kTable / 32) : 0u;
+        for (uint32_t k = 0; k < kLevels; ++k)
+        {
+            RasterView v;
+            v.viewProj = levelViewProj(c, k);
+            v.viewportX = v.viewportY = 0;
+            v.viewportWidth = v.viewportHeight = kTable * kTintPage;
+            v.lodPixelsPerMetre = (float)kTintPage / (float)kPage / std::ldexp(1.0f, (int)k - 10);
+            v.minInstanceTexels = minCasterTexels;
+            v.userData = k;
+            v.materialFilter = 2;
+            v.cullMaskOffset = drawnWords + k * (kTable * kTable / 32);
+            r.views.push_back(v);
+        }
+        fc.services.rasterizeDepth(fc, r);
+        // (the lookups of other tracks read the atlas through the VSM constants without declaring it: it is a shader
+        // resource from here on)
+        g.addPass("s.vsm.tint.ready", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(tint, Use::SrvCompute);
+                      b.keep();
+                  },
+                  [](PassContext&) {});
     }
     if (fc.services.rasterizeDepth && (s.rasterRequests[0] != sunRequests || s.rasterRequests[1] != localRequests))
     {
@@ -2153,8 +2296,8 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       const uint32_t groupCount = (pagesNow + 31) / 32;  // VsmClearPages.ms: 32 pages per group, the list's count
                       for (BufferRef list : { pageList, dynamicList })
                       {
-                          const uint32_t k[4] = { ctx.srv(list), atlasW, atlasH, ctx.srv(atlasStatic) };
-                          ctx.graphicsConstants(k, 4);
+                          const uint32_t k[8] = { ctx.srv(list), atlasW, atlasH, ctx.srv(atlasStatic), 0, 0, 0, 0 };
+                          ctx.graphicsConstants(k, 8);
                           ctx.cmd->DispatchMesh(groupCount, 1, 1);
                       }
                   });
@@ -2234,7 +2377,11 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     const bool foldSmall = !fc.quality.has("shadow.vsm.fold_small_passes") || fc.quality.boolean("shadow.vsm.fold_small_passes");
     PassChain chain(g, QueueType::Compute, foldSmall);
     const uint32_t w = view.view.width, h = view.view.height;
-    const TextureRef out = g.createTexture(TextureDesc{ "S shadow visibility", w, h, 1, 1, DXGI_FORMAT_R32_UINT });
+    // (shadow.vsm.translucent_tint, in a frame with glass casters: a second half below the view's rows takes what they
+    // let through at each pixel - FrameResources.h shadowVisibility; not with the path diagnostics, whose readers take
+    // the view's size)
+    const TextureRef tint = s.debugPaths ? TextureRef{} : s.tintRef;
+    const TextureRef out = g.createTexture(TextureDesc{ "S shadow visibility", w, tint.valid() ? 2 * h : h, 1, 1, DXGI_FORMAT_R32_UINT });
     view.shadowVisibility = out;
     const TextureRef depth = view.depth, gbuffer = view.gbuffer;
     const TextureRef mirrorMask = view.view.planarMask, mirrorTiles = view.view.planarTileMask;  // planar views: mirror pixels only
@@ -2385,18 +2532,20 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   if (tlut.valid()) b.use(tlut, Use::SrvCompute);
                   if (useBuf.valid()) b.use(useBuf, Use::UavCompute);
                   if (selfSlack.valid()) b.use(selfSlack, Use::SrvCompute);
+                  if (tint.valid()) b.use(tint, Use::SrvCompute);
               },
               [=](PassContext& ctx) {
-                  const uint32_t k[24] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, overflowList ? ctx.uav(overflowTiles) : 0xFFFFFFFFu,
+                  const uint32_t k[28] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, overflowList ? ctx.uav(overflowTiles) : 0xFFFFFFFFu,
                                            ctx.srv(table), ctx.srv(atlas), ctx.srv(bound), ctx.uav(list), ctx.srv(blocks), ctx.uav(statsBuf), 0,
                                            localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, localLightsSrv, slotOfSrv,
                                            overflowList ? ctx.uav(heads) : 0xFFFFFFFFu,
                                            mirrorMask.valid() ? ctx.srv(mirrorMask) : 0xFFFFFFFFu, mirrorTiles.valid() ? ctx.srv(mirrorTiles) : 0xFFFFFFFFu,
                                            ctx.srv(layers), tlut.valid() ? ctx.srv(tlut) : 0xFFFFFFFFu,
-                                           overflowList ? ctx.uav(needs) : 0xFFFFFFFFu, tilesX, contact, selfSlack.valid() ? ctx.srv(selfSlack) : 0xFFFFFFFFu };
+                                           overflowList ? ctx.uav(needs) : 0xFFFFFFFFu, tilesX, contact, selfSlack.valid() ? ctx.srv(selfSlack) : 0xFFFFFFFFu,
+                                           tint.valid() ? 1u : 0u, 0, 0, 0 };
                   ctx.cmd->SetPipelineState(p1);
                   ctx.bindFrameConstants(constants);
-                  ctx.computeConstants(k, 24);
+                  ctx.computeConstants(k, 28);
                   ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
               });
     chain.flush("s.shadow.visibility");
@@ -2433,7 +2582,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
               [=](PassContext& ctx) {
                   const uint32_t k[20] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, contact, ctx.srv(table), ctx.srv(atlas), ctx.srv(bound),
                                            ctx.srv(list), ctx.srv(blocks), ctx.uav(statsBuf), ctx.uav(filterList), rays, steps, ctx.srv(layers),
-                                           tlut.valid() ? ctx.srv(tlut) : 0xFFFFFFFFu, selfSlack.valid() ? ctx.srv(selfSlack) : 0xFFFFFFFFu, 0, 0, 0 };
+                                           tlut.valid() ? ctx.srv(tlut) : 0xFFFFFFFFu, selfSlack.valid() ? ctx.srv(selfSlack) : 0xFFFFFFFFu, tint.valid() ? 1u : 0u, 0, 0 };
                   ctx.cmd->SetPipelineState(p2);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 20);
@@ -2472,7 +2621,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   [=](PassContext& ctx) {
                       const uint32_t k[20] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, contact, ctx.srv(table), ctx.srv(atlas), ctx.srv(bound),
                                                ctx.srv(filterList), ctx.srv(blocks), 0xFFFFFFFFu, 0xFFFFFFFFu, rays, steps, ctx.srv(layers),
-                                               tlut.valid() ? ctx.srv(tlut) : 0xFFFFFFFFu, selfSlack.valid() ? ctx.srv(selfSlack) : 0xFFFFFFFFu, 0, 0, 0 };
+                                               tlut.valid() ? ctx.srv(tlut) : 0xFFFFFFFFu, selfSlack.valid() ? ctx.srv(selfSlack) : 0xFFFFFFFFu, tint.valid() ? 1u : 0u, 0, 0 };
                       ctx.cmd->SetPipelineState(p3);
                       ctx.bindFrameConstants(constants);
                       ctx.computeConstants(k, 20);

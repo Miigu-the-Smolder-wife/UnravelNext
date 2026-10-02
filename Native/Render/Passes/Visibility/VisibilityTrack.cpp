@@ -699,6 +699,8 @@ CullView viewOf(const RasterView& r, const DepthRasterRequest& req, const Settin
     v.minInstancePx = r.minInstanceTexels;
     v.instanceSet = r.instanceSet;
     if (req.proxies && r.minInstanceTexels > 0) v.flags |= kViewProxies;
+    if (r.materialFilter > 2) fail("rasterizeDepth '%s': materialFilter %u (0 .. 2)", req.name.c_str(), r.materialFilter);
+    if (r.materialFilter != 0) v.flags |= r.materialFilter == 1 ? kViewNoGlass : kViewGlassOnly;
     if (r.tileOccluders && req.tileOccluders.valid() && req.atlasSlots.valid())
     {
         if (req.cullTilePx != 128 || req.tileOccludersSrv == UINT32_MAX || req.atlasSlotsSrv == UINT32_MAX)
@@ -2395,10 +2397,11 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     uint32_t atlasWidth = 0, atlasHeight = 0;
     if (atlas)
     {
-        if (!request.tileLocal || !request.depthTarget.valid() || request.atlasTilesPerRow == 0)
-            fail("rasterizeDepth '%s': the tile atlas needs tileLocal, a tile mask, a depth target and atlasTilesPerRow", request.name.c_str());
-        atlasWidth = fc.graph.desc(request.depthTarget).width;
-        atlasHeight = fc.graph.desc(request.depthTarget).height;
+        if (!request.tileLocal || (!request.depthTarget.valid() && request.colorTargets.empty()) || request.atlasTilesPerRow == 0)
+            fail("rasterizeDepth '%s': the tile atlas needs tileLocal, a tile mask, a depth target (or render targets) and atlasTilesPerRow", request.name.c_str());
+        const TextureRef atlasTarget = request.depthTarget.valid() ? request.depthTarget : request.colorTargets[0];
+        atlasWidth = fc.graph.desc(atlasTarget).width;
+        atlasHeight = fc.graph.desc(atlasTarget).height;
         if (request.atlasTilesPerRow * request.cullTilePx > atlasWidth || atlasWidth > 0xFFFF || atlasHeight > 0xFFFF)
             fail("rasterizeDepth '%s': atlas %ux%u for %u tiles of %u px per row", request.name.c_str(), atlasWidth, atlasHeight, request.atlasTilesPerRow, request.cullTilePx);
     }

@@ -55,6 +55,9 @@ struct RasterView
     // GPU-written instance). A view of set 1 and a view of set 2 with one projection draw every instance exactly once
     // between them (S's static / dynamic shadow pages).
     uint32_t instanceSet = 0;
+    // Which clusters the view draws by their material: 0 every material; 1 all but the Glass class; 2 the Glass class
+    // alone (S: glass casters let light through - they stay out of the pages' depth and go to a tint beside it).
+    uint32_t materialFilter = 0;
     // First word of the view's tile slots in DepthRasterRequest::atlasSlots (tile i: word atlasSlotOffset + i);
     // UINT32_MAX = cullMaskOffset * 32, the layout of the mask. Two views with different masks over the same tiles (S's
     // static and movable casters' views of one face) can then share one set of slots.
@@ -118,7 +121,8 @@ struct DepthRasterRequest
     // set tiles (fragments = sum of triangle area inside set tiles). Pixel positions, depth and DepthRasterPixel are
     // the same as without it. For sparse masks over large viewports (VSM dirty pages in a 16384^2 level).
     bool tileLocal = false;
-    // Tile atlas (v1.32, S request 20260925_S_vsm_depth_atlas.md; needs tileLocal, cullMask and depthTarget): every set
+    // Tile atlas (v1.32, S request 20260925_S_vsm_depth_atlas.md; needs tileLocal, cullMask and depthTarget - or, v2,
+    // colorTargets without one: the atlas is then the first of them): every set
     // tile is drawn on its own into its slot of the atlas 'depthTarget' (hardware depth, D32_FLOAT or D16_UNORM: the
     // requester picks per request, e.g. VSM D16 while the sun's zenith angle is below 76 degrees). The slot of tile i of
     // a view (bit i of its mask) is word cullMaskOffset * 32 + i of 'atlasSlots' (raw buffer, one uint per mask bit);

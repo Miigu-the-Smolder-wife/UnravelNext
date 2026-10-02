@@ -116,6 +116,8 @@ uint skinSlot(CullScene cs, uint instance)
                                      // deferred), phase 2 against the occluders rebuilt from what phase 1 drew
 #define CULL_VIEW_PROXIES 32u        // chunk members under the view's smallest instance are drawn as proxies
                                      // (DepthRasterRequest::proxies, DepthProxy.ms.hlsl)
+#define CULL_VIEW_NO_GLASS 64u       // RasterView::materialFilter 1: clusters of a Glass class material are not drawn
+#define CULL_VIEW_GLASS_ONLY 128u    // RasterView::materialFilter 2: only those are
 
 // A chunk item (CullChunks PHASE=1: uint2 chunk, view) whose members are all under its view's smallest instance: none of
 // them is tested (CullInstances SOURCE=1 skips the item); the proxy kernel draws them from the item.

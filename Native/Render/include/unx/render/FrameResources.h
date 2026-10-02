@@ -72,6 +72,9 @@ struct ViewResources
     TextureRef materialWord;       // R32_UINT: material 16 | metallic 8 | layer roughness 8 [M]
                                    // (MaterialInternal.hlsli mPackMaterialWord)
     TextureRef shadowVisibility;   // R32_UINT, 4 light slots x 8 bit (7.3)                 [S]
+                                   // (in a frame with glass shadow casters - shadow.vsm.translucent_tint - twice the
+                                   //  view's height: the rows below the view's are what they let through at each
+                                   //  pixel, slot 0 x its luminance; ShadowVisibility.hlsli shadowSunTintChroma)
     TextureRef shadowOverflowTiles;  // R32_UINT ceil(W/8) x ceil(H/8) (main view, 7.3, v1.20): [S]
                                      // 0 = no shadow-casting light past the third in the tile,
                                      // 0xFFFFFFFF = over capacity (fallback list), else 1 + the

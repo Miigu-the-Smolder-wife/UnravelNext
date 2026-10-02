@@ -47,6 +47,20 @@ static_separate = true          # sun pages keep a static copy (the reference's 
                                 # all its casters gives - a depth buffer keeps the nearest fragment in any order. Costs a second
                                 # atlas (64 KB per page: 256 MB at 4096 pages) and a second family of sun raster requests
                                 # (s.vsm.static*). Needs cache. false: one atlas, a changed caster redraws its pages whole (A/B)
+translucent_tint = true         # the sun's glass casters let light through: in a scene with a Glass class material they are
+                                # left out of the pages' depth and drawn into a tint atlas beside it (tint_page_texels^2 texels
+                                # a page; V's raster service with a render target: VsmTintPixel.ps.hlsl) - per texel the
+                                # product of what the glass surfaces over it let through (a pane's (1 - F)^2 t / (1 - F^2 t^2)
+                                # with t its base colour, a solid's (1 - F) sqrt(t) a face) and the depth of the nearest one.
+                                # A receiver behind that one takes the product: the views' sun slot and the coverage
+                                # fragments' sun are multiplied by its luminance, and the opaque shading takes its colour (the
+                                # views' visibility texture is then twice as high: FrameResources.h). One layer: a point
+                                # between two glass surfaces takes both. Costs 8 KB a page (32 MB at 4096 pages) and one more
+                                # raster request a frame while the scene has glass. Ray hits, water and the translucent layer
+                                # look the sun up without it: past glass they are lit whole. false: glass casts an opaque
+                                # shadow (A/B).
+                                # The local lights' pages keep glass opaque either way
+tint_page_texels = 32           # compiled into the kernels (VsmTint.hlsli VSM_TINT_PAGE)
 aggregate_small_casters = true  # with min_caster_texels: a sun level draws each static caster under that radius as a proxy - one
                                 # square facing the sun at its bounds' centre, aggregate_coverage of its bounding disc in area
                                 # (V's raster service: DepthProxy.ms.hlsl) - where min_caster_texels alone leaves it out. A
