@@ -306,7 +306,7 @@ RtLocalChoice rtUnpackLocalChoice(uint2 v)
 
 // The model's BRDF x cosine toward wi for the hit (INTERFACES 8.1: diffuse albedo / pi, the GGX lobe with compensation,
 // foliage transmission from behind). diffuseOnly: Lambert hits (GiAnalytic's closed forms, gi.experiment_disable 1024).
-// A Subsurface-class hit is Standard here (one lobe, no light through thin parts), as in HitShading.hlsli.
+// A Subsurface-class hit has one lobe here and its light through thin parts from behind, as in HitShading.hlsli.
 float3 rtLocalLightBrdfCos(GpuMaterial m, float3 n, float3 v, float3 wi, bool diffuseOnly)
 {
     ModelSurface s;
@@ -319,21 +319,28 @@ float3 rtLocalLightBrdfCos(GpuMaterial m, float3 n, float3 v, float3 wi, bool di
     const float NoL = dot(n, wi);
     const float3 albedo = s.baseColor * ((1 - s.metallic) / MODEL_PI);
     const bool foliage = s.cls == MATERIAL_FOLIAGE;
-    if (NoL <= 0) return foliage ? albedo * s.transmission * -NoL : 0;
+    if (NoL <= 0)
+    {
+        // across the surface: through the leaf, or through a Subsurface hit's thin part (W)
+        if (foliage) return albedo * s.transmission * -NoL;
+        return s.cls == MATERIAL_SUBSURFACE ? albedo * (s.transmission * modelSubsurfaceThin(-NoL, v, wi)) : 0;
+    }
     const float3 diffuse = (foliage ? albedo * (1 - s.transmission) : albedo) * NoL;
     if (diffuseOnly) return diffuse;
     const float NoV = max(dot(n, v), 1e-4);
     const float alpha = modelAlpha(s.roughness);
     const float3 f0 = modelF0(s);
     const float3 compensation = 1 + f0 * (1 / modelDirectionalAlbedo(NoV, s.roughness) - 1);
-    const float3 base = diffuse + shSpecular(f0, alpha, compensation, n, v, wi, NoV, NoL) * NoL;
+    const float3 specular = shSpecular(f0, alpha, compensation, n, v, wi, NoV, NoL) * NoL;
+    const float3 base = diffuse + specular;
     if ((m.classFlags & MATERIAL_LAYERED) != 0 && !foliage)
     {
         // A9 layers (HitShading.hlsli rtHitCoat: the coat lobe widened by the hit's cone)
         const ModelCoat coat = rtHitCoat(m);
         if (coat.cover > 0) return (1 - coat.cover) * base + coat.cover * (modelCoatLobe(coat, n, v, wi) + modelCoatUnder(s, coat, n, v, wi)) * NoL;
         const ModelSheen sheen = modelSheenOf(m);
-        if (any(sheen.color > 0)) return modelSheenKeep(sheen, NoV) * base + sheen.color * modelSheenLobe(sheen.roughness, n, v, wi) * NoL;
+        // (the cloth blend: the base's specular lobe x (1 - cloth))
+        if (any(sheen.color > 0)) return modelSheenKeep(sheen, NoV) * (base - specular * sheen.cloth) + sheen.color * modelSheenLobe(sheen.roughness, n, v, wi) * NoL;
     }
     return base;
 }

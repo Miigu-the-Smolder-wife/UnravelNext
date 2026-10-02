@@ -671,6 +671,7 @@ Surface RtScene::surface(const Hit& hit, float3 rayDir) const
     {
         s.sheen.color = mat.sheenColor;
         s.sheen.roughness = std::clamp(mat.sheenRoughness, 0.1f, 1.0f);
+        s.sheen.cloth = mat.cloth;
     }
     s.bsdf.cls = mat.cls;
     s.bsdf.baseColor = base;

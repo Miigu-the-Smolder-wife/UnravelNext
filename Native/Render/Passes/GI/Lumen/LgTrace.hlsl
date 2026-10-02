@@ -225,7 +225,7 @@ void LgTraceGen()
             if (!fromCards) L.irradiance += giFarSkyIrradiance(s.position, s.normal, float(P[4].y >> 16));
             const float3 l = normalize(g_sunDirection);
             const float cosSun = dot(s.normal, l);
-            if (!fromCards && (cosSun > 0 || (m.classFlags & 0xFFu) == MATERIAL_FOLIAGE) && (P[3].w & 16) == 0)
+            if (!fromCards && (cosSun > 0 || rtHitTransmits(m)) && (P[3].w & 16) == 0)
             {
                 const float3 e0 = giSunIlluminance(s.position);
                 if (any(e0 > 0))

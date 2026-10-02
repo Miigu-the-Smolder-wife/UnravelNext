@@ -42,8 +42,17 @@
 //          area     each lobe's LTC integral and albedo, weighed by the mix (two Standard lobes);
 //          thin     transmission > 0: the light through thin parts (modelSubsurfaceThin) from the sun and from point and
 //                   spot lights on the far side of the shading normal - the light's one visibility decides, so a part
-//                   thicker than the shadow bias shadows itself -; not from area lights, the emissive irradiance or the
-//                   indirect light.
+//                   thicker than the shadow bias shadows itself -, and from area lights: the far side's cosine integral
+//                   times W over the cosine at the light's centre; not from the emissive irradiance or the indirect light.
+//          eye      a Subsurface material with an iris (MATERIAL_EYE; MaterialModel.hlsli "Eye"): one lobe - the cornea's,
+//                   at the surface normal -, and on the iris mask's share every direct diffuse term on the iris plane
+//                   with the caustic (modelEyeCosine; the plane's normal, the mask and the caustic weight from the class
+//                   word P[9].y - without that texture an eye is plain) in place of the surface's cosine: the sun at the disk's centre,
+//                   point and spot lights, area lights by a cosine integral in the plane's frame. The indirect light,
+//                   the tile term and the emissive irradiance stay the surface's. The scatter pass leaves the iris its
+//                   own light (the mean free path x (1 - mask)).
+//        2 (the sheen class) carries the cloth blend (MaterialModel.hlsli modelEvaluateSheen): every specular term of the
+//                   base - the sun's lobe, point and spot lights, the area lights' LTC lobe, the indirect lobe - x (1 - cloth).
 // SSS_SPLIT = 1 (shading.subsurface_scatter, SubsurfaceScatter.hlsli states the passes): the Subsurface class's kernels
 //        with the diffuse light apart. Parts 1 and 2 (SubsurfaceDirect.hlsl, SubsurfaceIndirect.hlsl) sum the specular
 //        light and the emission as before and add every diffuse term per unit f_d - the sun's cosine, the local lights',
@@ -86,8 +95,11 @@
 //        r.gi.screen.planar); Foliage keeps the cache for its back side
 // P[9].z A9 area-light lobe texture (RGBA16F UAV, exposed radiance; AreaLobes.hlsl writes it, the LAYERED variants with
 //        AREA read it; UNX_NONE = none)
-// P[9].y A9 anisotropy word (Resolve.hlsl; UNX_NONE = no anisotropic material): read by the LAYERED variants, whose
-//        anisotropic pixels shade the base specular with the anisotropic lobe (AnisoShading.hlsli)
+// P[9].y A9 anisotropy word (Resolve.hlsl; UNX_NONE = no anisotropic and no eye material): read by the LAYERED variants,
+//        whose anisotropic pixels shade the base specular with the anisotropic lobe (AnisoShading.hlsli), and by the
+//        Subsurface variant for an eye's pixels (the eye word; SHADE_PART 3 reads its mask)
+// P[8].xy (SHADE_PART 3) the vis buffer and V's visible clusters in frames whose view models are drawn through
+//        viewmodel.fov_override_degrees (UNX_NONE: none): a view-model pixel scatters at its true size
 // P[10].y the stochastic local lights' result (shading.mega_lights, MegaLights.hlsli; RGBA16F exposed radiance, m.ml.spatial;
 //        UNX_NONE = off): part 1 then skips its local-light loop and part 2 adds the texture. (MEGA_LIGHTS = 1: P[10].y..P[11]
 //        as MegaLightsShade.hlsl states.)
@@ -387,6 +399,18 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #else
     const float3 thin = diffuse * s.transmission;
 #endif
+    // An eye's pixel (see the header): its mask, and outside the scatter kernel the iris plane's normal and the caustic
+    // normal, from the eye word. mask 0: not an eye, or its sclera - the plain Subsurface model.
+    ModelEye eye = (ModelEye)0;
+    if ((m.classFlags & MATERIAL_EYE) != 0 && P[9].y != UNX_NONE)
+    {
+        Texture2D<uint> eyeWords = ResourceDescriptorHeap[P[9].y];
+#if SHADE_PART == 3
+        eye.mask = modelEyeMask(eyeWords[pixel]);
+#else
+        eye = modelEyeOf(eyeWords[pixel], n);
+#endif
+    }
 #endif
 #if LAYERED == 1
     // A9 clearcoat (MATERIAL_LAYERS 1.1, MaterialModel.hlsli): f = (1 - c) f_base + c (f_c + f_under); the coat's roughness
@@ -402,6 +426,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     ModelSheen sheen = modelSheenOf(m);
     sheen.roughness = max(mWordCoatRoughness(word), 0.1);
     const float keepS = NoV > 0 ? modelSheenKeep(sheen, NoV) : 1;
+    const float keepCloth = 1 - sheen.cloth;  // the cloth blend: what stays of the base's specular lobe
 #endif
 #if LAYERED
     // A9 anisotropy (MATERIAL_LAYERS 1.5; anisotropic materials are layered): the base's specular lobe (AnisoShading.hlsli)
@@ -533,6 +558,8 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #endif
 #if SUBSURFACE
                     sun += spec * (lobe == 1 ? 1 - skin.mix : skin.mix);
+#elif LAYERED == 2
+                    sun += spec * keepCloth;
 #else
                     sun += spec;
 #endif
@@ -560,10 +587,16 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
             sun = keepS * sun + sheen.color * (modelSheenSun(sheen.roughness, n, v, l0, g_sunAngularRadius) * cap);
         }
 #endif
+#if SUBSURFACE
+        // an eye's iris: the sun on the iris plane (at the disk's centre) in place of the cornea's surface
+        const float irisSun = eye.mask > 0 && NoV > 0 ? modelEyeCosine(eye, above, l0) - above : 0;
+        sun += front * (irisSun * cap);
+#endif
 #if SSS_SPLIT
         // the sun's diffuse light per unit f_d: the disk's cosine on the viewer's side and its light through a thin part
         // (W is 0 where the disk does not reach the far side)
         scatterE += cap * ((NoV > 0 ? above + s.transmission * modelSubsurfaceThin(below, v, l0) : s.transmission * modelSubsurfaceThin(above, v, l0)) * sunVisibility);
+        scatterE += cap * (irisSun * sunVisibility);
 #endif
         radiance += sun * sunVisibility;
     }
@@ -634,11 +667,13 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         float3 specularAlbedo = skin.mix * shSpecularAlbedo(f0, max(NoV, 1e-4), skin.roughness0);
         const float3x3 specular1 = mul(shLtcInverse(P[5].y, max(NoV, 1e-4), skin.roughness1), frame);
         const float3 specularAlbedo1 = (1 - skin.mix) * shSpecularAlbedo(f0, max(NoV, 1e-4), skin.roughness1);
+        const float3x3 frameIris = shShadingFrame(eye.iris, v, dot(eye.iris, v));  // (an eye's iris plane; unused without one)
 #else
         float3x3 specular = mul(shLtcInverse(P[5].y, max(NoV, 1e-4), s.roughness), frame);
         float3 specularAlbedo = shSpecularAlbedo(f0, max(NoV, 1e-4), s.roughness);
 #endif
-#if LAYERED
+#if LAYERED == 2
+        specularAlbedo *= keepCloth;  // (the cloth blend)
 #endif
 #if LAYERED == 1
         float3x3 coatSpecular = frame, coatBase = frame;
@@ -733,7 +768,8 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 // MaterialModel.hlsli returns 0 for NoL <= 0), and E = 0 outside the window or the spot cone.
 #if SUBSURFACE
                 // (the Subsurface class: the far side adds the light through thin parts)
-                if (all(E == 0) || !((NoV > 0 && cosL > 0) || (s.transmission > 0 && NoV * cosL < 0))) continue;
+                // (an eye's iris takes the light on its plane, whatever the cornea's cosine)
+                if (all(E == 0) || !((NoV > 0 && cosL > 0) || (s.transmission > 0 && NoV * cosL < 0) || (eye.mask > 0 && NoV > 0))) continue;
 #else
                 if (all(E == 0) || !((NoV > 0 && cosL > 0) || (foliage && NoV * cosL < 0))) continue;
 #endif
@@ -790,7 +826,12 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 scaleBase = keepS;  // (the sheen lobe over area lights: the lobe texture, AreaLobes.hlsl)
 #endif
 #if SUBSURFACE
-                if (NoV > 0 && skin.mix < 1) last = 4;  // integral 3: the Subsurface class's lobe 1 (integral 1 is its lobe 0)
+                // integral 2: the light through a thin part (the far side's cosine); 3: the Subsurface class's lobe 1
+                // (integral 1 is its lobe 0); 4: an eye's iris plane
+                if (s.transmission > 0) last = 3;
+                if (NoV > 0 && skin.mix < 1) last = 4;
+                if (NoV > 0 && eye.mask > 0) last = 5;
+                float irisI0 = 0;
 #endif
 #if LAYERED == 1
                 // A9 (MATERIAL_LAYERS 3.1): integrals 3 (the coat lobe, its own LTC, albedo E_ms(n.v)) and 4 (the base
@@ -809,26 +850,57 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #endif
                 [loop] for (uint j = first; j < last; ++j)
                 {
+#if SUBSURFACE
+                    if ((j == 1 || j == 3) && specularInReflections) continue;
+                    if ((j == 2 && !(s.transmission > 0)) || (j == 3 && !(skin.mix < 1))) continue;
+#else
                     if ((j == 1 || j >= 3) && specularInReflections) continue;
+#endif
 #if LAYERED
                     if (j == 1 && aniso.on) continue;  // (the anisotropic lobe over the light: the lobe texture, AreaLobes.hlsl)
 #endif
+#if !SUBSURFACE
                     if (j == 2 && !foliage) continue;
+#endif
 #if LAYERED == 1
                     const float3x3 T = j == 0 ? frame : (j == 1 ? specular : (j == 3 ? coatSpecular : (j == 4 ? coatBase : (NoV > 0 ? frameBack : frame))));
 #elif SUBSURFACE
-                    const float3x3 T = j == 0 ? frame : (j == 1 ? specular : (j == 3 ? specular1 : (NoV > 0 ? frameBack : frame)));
+                    const float3x3 T = j == 0 ? frame : (j == 1 ? specular : (j == 3 ? specular1 : (j == 4 ? frameIris : (NoV > 0 ? frameBack : frame))));
 #else
                     const float3x3 T = j == 0 ? frame : (j == 1 ? specular : (NoV > 0 ? frameBack : frame));
 #endif
-                    const float I = shAreaIntegral(light, p, T, j == 0 || j == 2);
 #if SUBSURFACE
+                    const float I = shAreaIntegral(light, p, T, j == 0 || j == 2 || j == 4);
+#else
+                    const float I = shAreaIntegral(light, p, T, j == 0 || j == 2);
+#endif
+#if SUBSURFACE
+                    if (j == 0) irisI0 = I;
                     if (j == 3)
                     {
 #if MEGA_LIGHTS
                         mlSpecular += Lw * (specularAlbedo1 * I);
 #else
                         radiance += Lw * (specularAlbedo1 * I);
+#endif
+                        continue;
+                    }
+                    if (j == 2 || j == 4)
+                    {
+                        // 2: the light through a thin part - the far side's cosine integral, W over the cosine at the
+                        //    light's centre (the cosine held above 1/16: W / c grows without bound at the horizon);
+                        // 4: an eye's iris - the plane's cosine integral with the caustic at the light's centre, in place
+                        //    of the surface's (integral 0) on the mask's share.
+                        const float3 lc = normalize(p);
+                        const float c0 = max(abs(dot(n, lc)), 0.0625);
+                        const float Ed = j == 2 ? s.transmission * (SH_PI * I * modelSubsurfaceThin(c0, v, lc) / c0)
+                                                : eye.mask * (SH_PI * (I * modelEyeCaustic(eye, lc) - irisI0));
+#if SSS_SPLIT
+                        scatterE += Lw * Ed;
+#elif MEGA_LIGHTS
+                        mlDiffuse += Lw * (diffuse * Ed);
+#else
+                        radiance += Lw * (diffuse * Ed);
 #endif
                         continue;
                     }
@@ -887,6 +959,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #if LAYERED
             if (aniso.on && NoV > 0 && cosL > 0) f = frontL + shAnisoSpecular(aniso, f0, n, v, l);
 #endif
+#if LAYERED == 2
+            if (NoV > 0 && cosL > 0) f -= (f - frontL) * sheen.cloth;  // (the cloth blend: the base's specular lobe x (1 - cloth))
+#endif
 #if LAYERED == 1
             if (cover > 0) f = keep * f + cover * (modelCoatLobe(coat, n, v, l) + modelCoatUnder(s, coat, n, v, l));
 #endif
@@ -910,12 +985,29 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 if (NoV > 0 && cosL > 0) fd *= keepS;
 #endif
                 const float3 unshadowed = E * abs(cosL);
-                const float3 c = unshadowed * (visibility * mlFalloffMask(mlLuminance(f * unshadowed) * g_exposure, asfloat(P[11].z)));
+                const float cw = visibility * mlFalloffMask(mlLuminance(f * unshadowed) * g_exposure, asfloat(P[11].z));
+                const float3 c = unshadowed * cw;
                 mlDiffuse += fd * c;
                 mlSpecular += max(f - fd, 0.0) * c;
+#if SUBSURFACE
+                // an eye's iris: the light on the iris plane in place of the cornea's surface (modelEyeCosine)
+                if (eye.mask > 0 && NoV > 0) mlDiffuse += frontL * (E * ((modelEyeCosine(eye, cosL, l) - max(cosL, 0.0)) * cw));
+#endif
             }
 #else
             radiance += f * E * (abs(cosL) * visibility);
+#if SUBSURFACE
+            // an eye's iris: the light on the iris plane in place of the cornea's surface (modelEyeCosine); per unit f_d
+            // with SSS_SPLIT (front is 0 there)
+            if (eye.mask > 0 && NoV > 0)
+            {
+                const float irisE = (modelEyeCosine(eye, cosL, l) - max(cosL, 0.0)) * visibility;
+                radiance += frontL * (E * irisE);
+#if SSS_SPLIT
+                scatterE += E * irisE;
+#endif
+            }
+#endif
 #endif
 #if SSS_SPLIT
             // the light's diffuse per unit f_d (a FAR light's: the tile term), or its light through a thin part
@@ -1138,7 +1230,8 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #if LAYERED == 2
     // the base's indirect light scaled; the sheen's from the irradiance: C E_sh(n.v) E / pi (exact for uniform incident
     // radiance; MATERIAL_LAYERS 1.4 states the shape error)
-    if (NoV > 0) radiance += keepS * (front * irradiance + incident * baseAlbedo) + sheen.color * (modelSheenAlbedo(NoV, sheen.roughness) / SH_PI) * irradiance;
+    // (the cloth blend: the base's specular lobe x keepCloth)
+    if (NoV > 0) radiance += keepS * (front * irradiance + incident * (baseAlbedo * keepCloth)) + sheen.color * (modelSheenAlbedo(NoV, sheen.roughness) / SH_PI) * irradiance;
     else
 #endif
     if (NoV > 0) radiance += front * irradiance + incident * baseAlbedo;
@@ -1162,8 +1255,25 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     {
         Texture2D<float4> scatterDiffuse = ResourceDescriptorHeap[P[9].z];
         Texture2D<float> sceneDepth = ResourceDescriptorHeap[P[0].y];
-        radiance += diffuse * (sssScatter(scatterDiffuse, sceneDepth, pixel, D, Dx, Dy, linearZ, n, s.baseColor * (1 - s.metallic), m.hairAbsorption, P[11].y,
-                                          asfloat(P[11].z)) / g_exposure);
+        // A first-person view model under viewmodel.fov_override_degrees is drawn with clip.xy x g_viewModelScale
+        // (ViewModel.hlsli): its surface lies on the pixel's ray with the image-plane part divided by that scale, so the
+        // scatter pass takes that ray - the radius in pixels is the true geometry's, the scale times the remapped ray's.
+        float3 Ds = D, Dxs = Dx, Dys = Dy;
+        if (P[8].x != UNX_NONE)
+        {
+            Texture2D<uint> visIds = ResourceDescriptorHeap[P[8].x];
+            const uint visId = visIds[pixel];
+            if (visId != VIS_NONE && (loadInstance(loadVisibleCluster(P[8].y, visVisibleCluster(visId)).instance).flags & INSTANCE_VIEW_MODEL) != 0)
+            {
+                const float k = 1 / g_viewModelScale;
+                Ds = (D + g_view[2].xyz) * k - g_view[2].xyz;
+                Dxs = Dx * k;
+                Dys = Dy * k;
+            }
+        }
+        // (an eye's iris keeps its own light: the mean free path x (1 - mask))
+        radiance += diffuse * (sssScatter(scatterDiffuse, sceneDepth, pixel, Ds, Dxs, Dys, linearZ, n, s.baseColor * (1 - s.metallic), m.hairAbsorption * (1 - eye.mask),
+                                          P[11].y, asfloat(P[11].z)) / g_exposure);
     }
 #endif
 #if SSS_SPLIT && SHADE_PART == 2

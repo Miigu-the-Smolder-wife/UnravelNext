@@ -594,6 +594,32 @@ UNX_API int32_t UNX_CALL UnxSceneSetTerrainLayers(UnxRenderer r, uint32_t materi
     });
 }
 
+UNX_API int32_t UNX_CALL UnxSceneSetCharacterShading(UnxRenderer r, uint32_t material, const UnxCharacterShadingDesc* d)
+{
+    return call([&] {
+        if (!d) fail("UnxSceneSetCharacterShading: no description");
+        if (d->size != sizeof(UnxCharacterShadingDesc) || d->version != 1)
+            fail("UnxSceneSetCharacterShading: UnxCharacterShadingDesc size %u version %u", d->size, d->version);
+        host::CharacterShading c;  // (the engine's defaults; a 0 marked "default" in the header keeps them)
+        if (d->subsurfaceMeanFreePath[0] != 0 || d->subsurfaceMeanFreePath[1] != 0 || d->subsurfaceMeanFreePath[2] != 0) c.subsurfaceMeanFreePath = f3(d->subsurfaceMeanFreePath);
+        if (d->subsurfaceLobeRoughness[0] != 0 || d->subsurfaceLobeRoughness[1] != 0)
+        {
+            c.subsurfaceLobeMix = d->subsurfaceLobeMix;
+            c.subsurfaceLobeRoughness = { d->subsurfaceLobeRoughness[0], d->subsurfaceLobeRoughness[1] };
+        }
+        c.cloth = d->cloth;
+        c.eyeIrisRadius = d->eyeIrisRadius;
+        if (d->eyeIrisDepth != 0) c.eyeIrisDepth = d->eyeIrisDepth;
+        if (d->eyeLimbusWidth != 0) c.eyeLimbusWidth = d->eyeLimbusWidth;
+        c.eyeLimbusDarkening = d->eyeLimbusDarkening;
+        if (d->eyePupilScale != 0) c.eyePupilScale = d->eyePupilScale;
+        c.eyeIrisConcavity = d->eyeIrisConcavity;
+        if (d->eyeIor != 0) c.eyeIor = d->eyeIor;
+        if (d->eyeAxis[0] != 0 || d->eyeAxis[1] != 0 || d->eyeAxis[2] != 0) c.eyeAxis = f3(d->eyeAxis);
+        find(r)->setCharacterShading(material, c);
+    });
+}
+
 UNX_API int32_t UNX_CALL UnxFrameSetClouds(UnxRenderer r, const UnxCloudDesc* clouds)
 {
     return call([&] {

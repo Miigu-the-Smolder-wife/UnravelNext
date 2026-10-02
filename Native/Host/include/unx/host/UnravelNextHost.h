@@ -43,7 +43,8 @@ enum UnxResult
                             //    UnxFrameSetRuntimeTransforms (C2b), UnxFrameSetTerrainDeformation (C5), UnxFrameSetOcean (B7),
                             //    UnxSceneSetTerrainLayers (C5 terrain material, v1.74), UnxFrameSetClouds (B5, v1.77),
                             //    UnxFrameSetPools, UnxFrameAddPoolSources (W2, v1.78), UnxPoolStatsLatest (W2, v1.90),
-                            //    UnxFrameSetWhiteBalance (v1.91), UnxFrameSetFog, UnxFrameSetFogVolumes (the height fog, local fog volumes)
+                            //    UnxFrameSetWhiteBalance (v1.91), UnxFrameSetFog, UnxFrameSetFogVolumes (the height fog, local fog volumes),
+                            //    UnxSceneSetCharacterShading (skin, eye and cloth parameters of a material)
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -167,7 +168,7 @@ typedef struct UnxMaterialDesc
     float roughness;            // perceptual
     float metallic, specular;   // dielectric f0 = 0.08 * specular
     float alphaCutoff;          // 0 = opaque
-    float transmission;         // foliage diffuse transmission
+    float transmission;         // foliage diffuse transmission; Subsurface: the strength of the light through thin parts
     float emissive[3];          // nits
     float ior;
     uint32_t baseColorTexture, normalTexture, roughMetalTexture, emissiveTexture, occlusionTexture;  // UNX_NONE = none
@@ -658,6 +659,48 @@ typedef struct UnxTerrainLayer
 static_assert(sizeof(UnxTerrainLayer) == 32, "UnxTerrainLayer is part of the ABI");
 #endif
 UNX_API int32_t UNX_CALL UnxSceneSetTerrainLayers(UnxRenderer r, uint32_t material, uint32_t splat0, uint32_t splat1, const UnxTerrainLayer* layers, uint32_t count);
+
+// Character shading (optional export within ABI 6; before or after UnxSceneCommit): what skin, eyes and cloth need beyond
+// UnxMaterialDesc, for a material already in the scene. One description holds the three groups; each applies to the
+// materials it is defined on and is ignored on the others:
+//   skin   UNX_MATERIAL_SUBSURFACE: the medium's mean free path per colour channel - the screen-space scattering spreads
+//          the diffuse light by it -, and the two specular lobes (roughness x scale each, lobe 0 weighing the mix). The
+//          light through thin parts (ears, fingers) is the material's own 'transmission'.
+//   eye    UNX_MATERIAL_SUBSURFACE with eyeIrisRadius > 0: one sphere-like mesh is sclera, iris and cornea. Its uv
+//          (0.5, 0.5) is where the optical axis leaves the eye and eyeAxis that axis in the mesh's object space (renderer
+//          space, as the mesh's positions); the base colour texture is the whole eye's with the iris painted around the uv
+//          centre, eyeIrisRadius its radius in uv units. The iris is seen through the cornea (refraction onto the iris
+//          plane, eyeIrisDepth under the cornea's apex), darkened at the limbus, lit on its own plane with the light of a
+//          grazing lamp gathered on its far side; the sclera scatters with the mean free path; the specular lobe is the
+//          cornea's, at the material's roughness and specular (the two skin lobes and 'transmission' are not used).
+//          eyePupilScale may change every frame (a pupil that follows the light): call again with the new value.
+//   cloth  UNX_MATERIAL_STANDARD with a sheen (sheenColor: the fuzz): the share of the base's specular lobe the fuzz
+//          replaces. The reference's Cloth shading model (FuzzColor, Cloth) is sheenColor = Cloth x FuzzColor, cloth = Cloth.
+// Values of 0 marked "default" take the engine's default, so a zeroed description with one group filled in is valid.
+// Before commit the material is changed in place; after commit the change reaches the GPU scene with the next queued
+// frame. UnxSceneEditMaterials describes a material anew without these fields: the material keeps them while its class
+// stays the same (cloth: while it has a sheen).
+typedef struct UnxCharacterShadingDesc
+{
+    uint32_t size, version;             // sizeof (80), 1
+    float subsurfaceMeanFreePath[3];    // m (1 / sigma_t), >= 0; all 0: default (skin: 0.00130, 0.00095, 0.00067)
+    float subsurfaceLobeMix;            // [0, 1]: the weight of lobe 0 (read with the scales)
+    float subsurfaceLobeRoughness[2];   // >= 0: the lobes' roughness scales; both 0: default (mix 0.85, scales 0.75 and 1.30)
+    float cloth;                        // [0, 1]; 0 = the sheen over the whole base
+    float eyeIrisRadius;                // (0, 0.5] uv units; 0 = not an eye
+    float eyeIrisDepth;                 // (0, 2] iris radii: the cornea's apex above the iris plane; 0: default 0.45
+    float eyeLimbusWidth;               // [0.01, 1] iris radii: the band where the iris gives way to the sclera; 0: default 0.12
+    float eyeLimbusDarkening;           // [0, 1]: the limbal ring (0 = none)
+    float eyePupilScale;                // (0, 8]: the iris texture's radius 1 - (1 - r) x this (> 1: a wider pupil); 0: default 1
+    float eyeIrisConcavity;             // [0, 1]: how far a grazing light gathers on the iris's far side (0 = evenly lit)
+    float eyeIor;                       // [1, 2]: the aqueous humour's index; 0: default 1.336
+    float eyeAxis[3];                   // unit, the mesh's object space, out of the eye; all 0: default (0, 0, 1)
+    uint32_t reserved;                  // 0
+} UnxCharacterShadingDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxCharacterShadingDesc) == 80, "UnxCharacterShadingDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxSceneSetCharacterShading(UnxRenderer r, uint32_t material, const UnxCharacterShadingDesc* desc);
 
 // Loads a .unxscene file (INTERFACES 6.2) as the renderer's content: textures, materials, meshes, skeletons, instances
 // (their flags included), lights, sun, atmosphere and wind, with the file's indices. Only before any content was added and

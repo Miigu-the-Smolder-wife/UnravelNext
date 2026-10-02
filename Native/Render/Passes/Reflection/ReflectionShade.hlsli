@@ -214,7 +214,7 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
 #else
         // (one function for both settings: without REFL_HIT_ORIENTED its weights and arithmetic are rtLocalLightChoose's)
         if (localChoice.x != REFL_NO_CHOICE) choice = rtUnpackLocalChoice(localChoice);
-        else choice = rtLocalLightChooseOriented(scene, s.position, s.normal, (g_reflHitFlags & REFL_HIT_ORIENTED) == 0 || materialClass(m) == MATERIAL_FOLIAGE, giUnit(localSeed));
+        else choice = rtLocalLightChooseOriented(scene, s.position, s.normal, (g_reflHitFlags & REFL_HIT_ORIENTED) == 0 || rtHitTransmits(m), giUnit(localSeed));
 #endif
         const RtLocalSample ls = rtLocalLightFinish(scene, choice, s.position, giUnit(localSeed + 1), giUnit(localSeed + 2), footprint);
         if (ls.valid)
@@ -359,7 +359,7 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     bool split = false;
     float splitScale = 1;
     const float3 l = normalize(g_sunDirection);
-    if (!fromCards && (dot(s.normal, l) > 0 || materialClass(m) == MATERIAL_FOLIAGE))
+    if (!fromCards && (dot(s.normal, l) > 0 || rtHitTransmits(m)))
     {
         L.sunIlluminance = giSunIlluminance(s.position);
         if (any(L.sunIlluminance > 0))

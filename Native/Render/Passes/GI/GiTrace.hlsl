@@ -292,7 +292,7 @@ void GiTraceGen()
             RtHitLighting L;
             L.sunIlluminance = 0;
             L.sunVisibility = 0;
-            if ((cosSun > 0 || (m.classFlags & 0xFFu) == MATERIAL_FOLIAGE) && (P[3].w & 16) == 0)  // 16 (attribution): no sun at GI hits
+            if ((cosSun > 0 || rtHitTransmits(m)) && (P[3].w & 16) == 0)  // 16 (attribution): no sun at GI hits
             {
                 const float3 e0 = giSunIlluminance(s.position);
                 if (any(e0 > 0))
@@ -349,8 +349,9 @@ void GiTraceGen()
                 // gi.hit_oriented_lights (GI_P1_FLAGS bit 7): the light is chosen with the hit's orientation in the weights
                 // (rtLocalLightChooseOriented: importance x the largest cosine the emitter can have at the hit; a light below
                 // the hit's horizon is never drawn - its sample is exactly 0 there). Unbiased with the same probability
-                // in the weight. Off (and foliage, lit from behind too): rtLocalLightChoose's choice, bit for bit.
-                const bool orientedChoice = (b.Load(GI_P1_FLAGS) & 128u) != 0 && (m.classFlags & 0xFFu) != MATERIAL_FOLIAGE;
+                // in the weight. Off (and foliage or a Subsurface hit's thin part, lit from behind too): rtLocalLightChoose's
+                // choice, bit for bit.
+                const bool orientedChoice = (b.Load(GI_P1_FLAGS) & 128u) != 0 && !rtHitTransmits(m);
                 const RtLocalSample ls = rtLocalLightFinish(scene, rtLocalLightChooseOriented(scene, s.position, s.normal, !orientedChoice, giUnit(seed + 11)),
                                                               s.position, giUnit(seed + 12), giUnit(seed + 13),
                                                               hit.t * GI_FOOTPRINT_PER_METRE * asfloat(P[0].z));  // the hit cell's footprint

@@ -15,4 +15,13 @@ ModelCoat rtHitCoat(GpuMaterial m)
     }
     return c;
 }
+
+// The hit's material takes light from behind its shading normal: Foliage's transmission, a Subsurface material's light
+// through thin parts (transmission > 0). Callers give such a hit its sun term and its light sample on either side, and
+// choose its light without the hit's orientation.
+bool rtHitTransmits(GpuMaterial m)
+{
+    const uint cls = m.classFlags & 0xFFu;
+    return cls == MATERIAL_FOLIAGE || (cls == MATERIAL_SUBSURFACE && m.transmission > 0);
+}
 #endif

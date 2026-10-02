@@ -399,6 +399,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
     if (subsurface) skin = modelSubsurfaceOf(m, s.roughness);
     const float3 thin = subsurface ? diffuse * s.transmission : 0;
     const float lobeRoughness = subsurface ? skin.roughness : s.roughness;  // the roughness of the specular's compensation
+    float keepCloth = 1;  // the cloth blend (COV_COAT: a sheen's cloth factor): what stays of the base's specular lobe
 #if COV_COAT
     ModelCoat coat = modelCoatOf(m);
     coat.roughness = cmat.coatRoughness;
@@ -409,6 +410,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
     sheen.roughness = max(cmat.coatRoughness, 0.1);
     const bool sheenOn = max(sheen.color.r, max(sheen.color.g, sheen.color.b)) > 0 && NoV > 0;
     const float keepS = sheenOn ? modelSheenKeep(sheen, NoV) : 1;
+    if (sheenOn) keepCloth = 1 - sheen.cloth;
 #endif
 
     // ---- sun (with S's air at the fragment's depth: in-scatter and transmittance in front of it, the sun's illuminance)
@@ -460,7 +462,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
                 {
                     const float lr = subsurface ? (lobe == 1 ? skin.roughness1 : skin.roughness0) : s.roughness;
                     const float3 spec = shSunSpecular(f0, lr, modelAlpha(lr), compensation, n, v, NoV, l0, E, shPixelAngle(D, Dx));
-                    sun += subsurface ? spec * (lobe == 1 ? 1 - skin.mix : skin.mix) : spec;
+                    sun += (subsurface ? spec * (lobe == 1 ? 1 - skin.mix : skin.mix) : spec) * keepCloth;
                 }
             }
             if (foliage) sun += back * below * cap;
@@ -524,6 +526,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
             specular1 = mul(shLtcInverse(P[3].y, max(NoV, 1e-4), skin.roughness1), frame);
             specularAlbedo1 = (1 - skin.mix) * shSpecularAlbedo(f0, max(NoV, 1e-4), skin.roughness1);
         }
+        specularAlbedo *= keepCloth;
 #if COV_COAT
         float3x3 coatSpecular = frame, coatBase = frame;
         float coatAlbedo = 0;
@@ -657,7 +660,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
             else if (foliage && NoV * cosL < 0) f = back;
 #if COV_COAT
             if (cover > 0) f = keep * f + cover * (modelCoatLobe(coat, n, v, l) + modelCoatUnder(s, coat, n, v, l));
-            if (sheenOn && cosL > 0) f = keepS * f + sheen.color * modelSheenLobe(sheen.roughness, n, v, l);
+            if (sheenOn && cosL > 0) f = keepS * (f - (f - front) * sheen.cloth) + sheen.color * modelSheenLobe(sheen.roughness, n, v, l);
 #endif
             radiance += f * El * (abs(cosL) * visibility);
         }
@@ -718,7 +721,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
         {
             // as ShadeOpaque LAYERED=2: the base's indirect light scaled, the sheen's C E_sh(n.v) E / pi
             const float3 irr = (experiment & 2) == 0 ? g.irradiance * g.occlusion : 0;
-            radiance += keepS * (front * irr + (wantRadiance ? g.radiance * shSpecularAlbedo(f0, NoV, s.roughness) : 0)) +
+            radiance += keepS * (front * irr + (wantRadiance ? g.radiance * (shSpecularAlbedo(f0, NoV, s.roughness) * keepCloth) : 0)) +
                         sheen.color * (modelSheenAlbedo(NoV, sheen.roughness) / SH_PI) * irr;
         }
         else
@@ -749,7 +752,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
             radiance += keep * (front * irr + inc * shSpecularAlbedo(f0, NoV, s.roughness)) + cover * (under + inc * modelCoatEms(coat, NoV));
         }
         else if (sheenOn)
-            radiance += keepS * (front * irr + inc * shSpecularAlbedo(f0, NoV, s.roughness)) + sheen.color * (modelSheenAlbedo(NoV, sheen.roughness) / SH_PI) * irr;
+            radiance += keepS * (front * irr + inc * (shSpecularAlbedo(f0, NoV, s.roughness) * keepCloth)) + sheen.color * (modelSheenAlbedo(NoV, sheen.roughness) / SH_PI) * irr;
         else
 #endif
         {

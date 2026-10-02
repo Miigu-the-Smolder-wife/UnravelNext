@@ -5,8 +5,9 @@
 // ML_AREA (default 1): area lights by their exact diffuse and LTC integrals; 0 compiles them out (scenes without them).
 // ML_SUBSURFACE (default 0; m.ml.sample sets 1): a point can carry the Subsurface class's model (mlPointSubsurface: its two
 // specular lobes and the light through thin parts under point and spot lights, as ShadeOpaque's Subsurface variant shades
-// them; under area lights one lobe at the two's average roughness - a sampling weight, the shading takes both); world
-// points have none.
+// them; under area lights one lobe at the two's average roughness - a sampling weight, the shading takes both - and the
+// light through thin parts as the far side's cosine integral); world points have none. An eye's iris (MATERIAL_EYE) is
+// weighed as its cornea's surface: a light below that surface's horizon is not drawn for the pixel.
 #ifndef UNX_MEGA_LIGHTS_SAMPLING_HLSLI
 #define UNX_MEGA_LIGHTS_SAMPLING_HLSLI
 #include "Passes/Shading/ShadingCommon.hlsli"
@@ -126,7 +127,12 @@ float3 mlLightUnshadowed(MlPoint p, GpuLight light, uint lightIndex, uint stable
             c = p.front * (SH_PI * shAreaIntegral(light, toCentre, p.frame, true));
             if (p.specular && !shSpecularInReflections(stableMask, lightIndex)) c += p.specularAlbedo * shAreaIntegral(light, toCentre, p.specularLtc, false);
         }
-        if (p.foliage) c += p.back * (SH_PI * shAreaIntegral(light, toCentre, p.NoV > 0 ? p.frameBack : p.frame, true));
+        // what crosses the surface: Foliage's transmission, a Subsurface point's light through thin parts
+        float3 across = p.foliage ? p.back : 0;
+#if ML_SUBSURFACE
+        if (p.subsurface) across = p.thin;
+#endif
+        if (any(across > 0)) c += across * (SH_PI * shAreaIntegral(light, toCentre, p.NoV > 0 ? p.frameBack : p.frame, true));
         return light.color * c * (light.intensity * window);
 #else
         return 0;

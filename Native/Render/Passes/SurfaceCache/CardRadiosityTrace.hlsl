@@ -76,7 +76,7 @@ void CardRadiosityTraceGen()
                 const float bias = 1e-3 + 2e-4 * distance(s.position, g_cameraPosition);
                 RtHitLighting L = (RtHitLighting)0;
                 const float3 l = normalize(g_sunDirection);
-                if (dot(s.normal, l) > 0 || (m.classFlags & 0xFFu) == MATERIAL_FOLIAGE)
+                if (dot(s.normal, l) > 0 || rtHitTransmits(m))
                 {
                     const float3 e0 = giSunIlluminance(s.position);
                     if (any(e0 > 0))

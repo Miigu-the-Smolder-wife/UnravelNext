@@ -516,10 +516,13 @@ void GpuScene::packTerrainLayers(std::vector<gpu::Material>& materials)
 }
 
 // A9 layer records (v1.76) of every layered material, in material order; its classFlags gain MaterialLayered and the index.
+// An eye material (a Subsurface material with an iris) takes a record of the same buffer for its eye parameters
+// (gpu::MaterialEyeRecord), with MaterialEye and the index.
 void GpuScene::packMaterialLayers(std::vector<gpu::Material>& materials)
 {
     const scene::Scene& s = *m_source;
     std::vector<gpu::MaterialLayers> layers;
+    m_eyes = false;
     // The film tables follow the coat, sheen and (when present, and it only grows) anisotropy tables in coatTable.
     bool anisotropic = m_anisotropic;
     for (const scene::Material& m : s.materials) anisotropic |= m.anisotropy > 0;
@@ -528,7 +531,27 @@ void GpuScene::packMaterialLayers(std::vector<gpu::Material>& materials)
     for (size_t i = 0; i < materials.size() && i < s.materials.size(); ++i)
     {
         const scene::Material& m = s.materials[i];
-        materials[i].classFlags &= 0xFFFFu & ~((gpu::MaterialLayered | gpu::MaterialSheen | gpu::MaterialAnisotropic | gpu::MaterialThinFilm) << 8);
+        materials[i].classFlags &= 0xFFFFu & ~((gpu::MaterialLayered | gpu::MaterialSheen | gpu::MaterialAnisotropic | gpu::MaterialThinFilm | gpu::MaterialEye) << 8);
+        if (m.cls == scene::MaterialClass::Subsurface && m.eyeIrisRadius > 0)
+        {
+            if (layers.size() >= 0xFFFFu) fail("GpuScene: more than 65535 layered materials");
+            gpu::MaterialEyeRecord r{};
+            r.irisRadius = m.eyeIrisRadius;
+            r.irisDepth = m.eyeIrisDepth;
+            r.limbusWidth = m.eyeLimbusWidth;
+            r.limbusDarkening = m.eyeLimbusDarkening;
+            r.pupilScale = m.eyePupilScale;
+            r.concavity = m.eyeIrisConcavity;
+            r.eta = m.eyeIor;
+            const float3 axis = normalize(m.eyeAxis);
+            r.axis[0] = axis.x, r.axis[1] = axis.y, r.axis[2] = axis.z;
+            gpu::MaterialLayers l{};
+            std::memcpy(&l, &r, sizeof l);
+            materials[i].classFlags |= (uint32_t)gpu::MaterialEye << 8 | (uint32_t)layers.size() << 16;
+            layers.push_back(l);
+            m_eyes = true;
+            continue;
+        }
         const bool sheen = m.sheenColor.x > 0 || m.sheenColor.y > 0 || m.sheenColor.z > 0;
         const bool aniso = m.anisotropy > 0;
         const bool film = m.thinFilmThickness > 0;
@@ -541,6 +564,7 @@ void GpuScene::packMaterialLayers(std::vector<gpu::Material>& materials)
         l.coatEta = m.clearcoatIor;
         l.sheenColor[0] = m.sheenColor.x, l.sheenColor[1] = m.sheenColor.y, l.sheenColor[2] = m.sheenColor.z;
         l.sheenRoughness = m.sheenRoughness;
+        l.cloth = sheen ? m.cloth : 0.0f;
         l.anisotropy = m.anisotropy;
         l.anisotropyCos = std::cos(m.anisotropyRotation);
         l.anisotropySin = std::sin(m.anisotropyRotation);
@@ -620,6 +644,14 @@ void packMaterialClass(const scene::Material& m, gpu::Material& g)
         g.hairBetaN = m.subsurfaceLobeMix;
         g.cutScale = m.subsurfaceLobeRoughness.x;
         g.cutDamageWidth = m.subsurfaceLobeRoughness.y;
+        if (m.eyeIrisRadius > 0)
+        {
+            // an eye (scene::model::Eye): one lobe - the cornea's - and no light through thin parts; its own parameters
+            // are a record of the layer buffer (packMaterialLayers)
+            g.hairBetaN = 1;
+            g.cutScale = g.cutDamageWidth = 1;
+            g.transmission = 0;
+        }
     }
 }
 

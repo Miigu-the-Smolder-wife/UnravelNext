@@ -87,6 +87,65 @@ float3 subsurfaceRoughness(const Subsurface& k, float roughness);  // (r_0, r_1,
 float subsurfaceThin(float c, float3 v, float3 l);                 // W
 float3 evaluateSubsurface(const Surface& s, const Subsurface& k, float3 n, float3 v, float3 l);
 
+// Eye (a Subsurface material with an iris: Material::eyeIrisRadius > 0; ue6-main ShadingModels.ush EyeBxDF and
+// ShadingModelsMaterial.ush read as a reference, with what the engine's eye material functions do in a material graph -
+// the refraction onto the iris plane, the limbus, the pupil - written here as part of the model; the code is ours).
+// One sphere-like mesh is sclera, iris and cornea. uv (0.5, 0.5) is where the optical axis a leaves the eye, the iris
+// ends at |uv - 0.5| = R_i (irisRadius). In iris radii, q = (uv - 0.5) / R_i, rho = |q|, with (e_u, e_v) the uv
+// directions in the iris plane:
+//   mask     m = 1 - smoothstep(1 - w, 1, rho)                    w = limbusWidth: 1 on the iris, 0 on the sclera
+//   cornea   a spherical cap over the iris, apex h_0 (irisDepth) above the iris plane, meeting it at rho = 1:
+//            h(rho) = sqrt(R_c^2 - rho^2) - (R_c - h_0),  R_c = (1 + h_0^2) / (2 h_0)
+//   iris     the view ray refracted at the surface's shading normal into the aqueous humour (eta), t = refract(-v, n,
+//            1 / eta), meets the iris plane at q' = q + (t.e_u, t.e_v) h(min(rho, 1)) / max(-t.a, 0.2); rho' = |q'|,
+//            rho_c = min(rho', 1) (a ray that leaves the iris sees its edge)
+//   pupil    the iris texture is read at the radius rho_t = 1 - saturate((1 - rho_c) s_p) (s_p = pupilScale): the limbus
+//            stays, the pupil's edge moves
+//   uv       the base colour's uv = lerp(uv, 0.5 + R_i q' rho_t / rho', m)
+//   limbus   the base colour x (1 - k_l (1 - smoothstep(0, 1.5 w, |lerp(rho, rho_c, m) - (1 - w)|)))   (k_l =
+//            limbusDarkening): a ring darkest where the iris starts to give way, with the iris's parallax inside it
+//   caustic  w_c = saturate(k_c m rho_c) (k_c = irisConcavity); the caustic normal c = normalize(a - w_c r), r = the
+//            direction of n - a (a.n) (the cornea's normal leans away from the axis: r points outwards in the iris
+//            plane; |n - a (a.n)|^2 held above 1e-8): the iris plane's normal tilted towards the axis by atan(w_c),
+//            more towards the limbus. (The reference blends a towards -n by its weight, which ties the tilt to the
+//            cornea's curvature and turns over where the two nearly cancel; here n gives the direction only.)
+// Shading (n.v > 0): the specular is the Subsurface model's with one lobe (m = 1, s = (1, 1)) at the surface normal -
+// the cornea and the tear film. The diffuse light of a light direction l is f_d E times
+//   (1 - m) max(n.l, 0) + m c_i (0.8 + 0.2 (p + 1) saturate(c.l)^p),   c_i = saturate(a.l),  p = lerp(12, 1, c_i)
+// - the sclera lit as the surface, the iris on its own plane; the caustic factor gathers the light of a grazing light on
+// the iris's far side (the cornea's focus there, as the reference draws it) and is flat for a light along the axis
+// ((p + 1) cos^p integrates to 2 pi over the hemisphere for every p). The sclera's diffuse light scatters with the
+// material's mean free path, the iris keeps its own (the scatter pass's mean free path x (1 - m)).
+// No light through thin parts. Indirect light is the surface's (its normal's irradiance) on both.
+struct Eye
+{
+    float irisRadius = 0;  // 0 = not an eye
+    float irisDepth = 0.45f, limbusWidth = 0.12f, limbusDarkening = 0.6f, pupilScale = 1, irisConcavity = 1, eta = 1.336f;
+};
+Eye eyeOf(const Material& m);
+struct EyePoint
+{
+    float2 uv;        // where the base colour is read
+    float mask;       // m
+    float darkening;  // the base colour's factor
+    float caustic;    // w_c
+};
+float eyeCorneaHeight(float irisDepth, float rho);       // h
+float3 eyeRefract(float3 v, float3 n, float eta);       // t (unit; v towards the viewer, n.v > 0)
+// tLocal = (t.e_u, t.e_v, t.a): the refracted view ray in the eye's frame.
+EyePoint eyePoint(const Eye& e, float2 uv, float3 tLocal);
+// The eye word of a pixel (the renderer's: MaterialModel.hlsli modelEyePack): a as octahedral snorm10 x 2 (bits 0..19;
+// within a quarter of a degree), m unorm6 (20..25), w_c unorm6 (26..31).
+uint32_t eyePack(float3 axis, float mask, float caustic);
+void eyeUnpack(uint32_t word, float3& axis, float& mask, float& caustic);
+float3 eyeCausticNormal(float3 axis, float3 n, float caustic);  // c
+float eyeCaustic(float3 axis, float3 causticNormal, float3 l);  // 0.8 + 0.2 (p + 1) saturate(c.l)^p
+// The diffuse light's factor for l (in place of max(n.l, 0)).
+float eyeCosine(float mask, float3 axis, float3 causticNormal, float NoL, float3 l);
+// The radiance towards v per unit illuminance on a surface facing the light (the BRDF x cosine; the iris's term is not
+// one of the surface's cosine): s = the surface with the base colour read at EyePoint::uv x darkening.
+float3 evaluateEyeCos(const Surface& s, float mask, float3 axis, float3 causticNormal, float3 n, float3 v, float3 l);
+
 // Subsurface class, stage B: the diffusion profile of the screen-space scattering pass (Passes/Common/
 // SubsurfaceProfile.hlsli is the mirror, Passes/Shading/SubsurfaceScatter.hlsli the pass; ue6-main
 // SubsurfaceBurleyNormalized.ush and BurleyNormalizedSSSCommon.ush read as a reference; the code is ours). The diffuse
@@ -165,7 +224,8 @@ float3 evaluateCoated(const Surface& s, const Coat& c, float3 n, float3 v, float
 float evaluateCoatLobe(const Coat& c, float3 n, float3 v, float3 l);  // f_c alone (without the cover)
 
 // Sheen layer (A9, MATERIAL_LAYERS 1.4; cloth): a Charlie microfacet surface over a Standard surface s, for n.v, n.l > 0,
-//   f = f_sh + f_s (1 - max(C) E_sh(n.v, r_sh)),   f_sh = C D(h) G2(v, l) / (4 n.v n.l),
+//   f = f_sh + (f_d + (1 - c) f_spec) (1 - max(C) E_sh(n.v, r_sh)),   f_sh = C D(h) G2(v, l) / (4 n.v n.l),
+//   f_d + f_spec = the Standard surface's diffuse and specular terms, c = the cloth factor (Sheen::cloth; 0: f_s whole),
 //   D = (2 + 1 / a) (1 - (n.h)^2)^(1 / (2 a)) / (2 pi)    Charlie (Estevez & Kulla 2017), a = alpha(r_sh)
 //   G2 = 1 / (1 + Lambda(v) + Lambda(l)),  Lambda(w) = A(n.w) / n.w - 1,  A(mu) = integral of D(m) max(0, w.m) dm
 // Smith masking derived from D itself (the projected area A, tabulated; no fitted shadowing), so the lobe's albedo is at
@@ -174,11 +234,18 @@ float evaluateCoatLobe(const Coat& c, float3 n, float3 v, float3 l);  // f_c alo
 // steep at grazing views and for sharp lobes), bilinear (sheenLookup); deterministic midpoint integration.
 // The base's scale takes the view side only (Imageworks' albedo scaling: energy bounded, exact under any lighting
 // integral).
-// r_sh in [0.1, 1] (scene validation).
+// The cloth blend (ue6-main ShadingModels.ush ClothBxDF read as a reference; the code is ours): the reference's cloth
+// lerps its specular from the GGX lobe to the fuzz lobe by Cloth and the diffuse's energy scale with it. Here the fuzz
+// (C = Cloth x FuzzColor) keeps the sheen layer's form and scale, and the cloth factor c takes the same share off the
+// base's specular lobe: at c = 1 the surface is diffuse under fuzz, at c = 0 the sheen layer over the whole base, and
+// in between every term is linear in c. Energy: the fuzz reflects at most max(C) E_sh towards v and the base is scaled
+// by what is left, so the cloth factor only lowers the sum.
+// r_sh in [0.1, 1], c in [0, 1] (scene validation).
 struct Sheen
 {
     float3 color{ 0, 0, 0 };
     float roughness = 0.5f;
+    float cloth = 0;
 };
 constexpr uint32_t kSheenTableMu = 64, kSheenTableR = 32, kSheenTableSize = 2 * kSheenTableMu * kSheenTableR;
 float sheenLookup(const float* table, float mu, float roughness);

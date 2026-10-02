@@ -82,6 +82,18 @@ struct SkeletonPose
     std::shared_ptr<const std::vector<float3x4>> jointToModel;
 };
 
+// Character shading of a material (UnxSceneSetCharacterShading): scene::Material's skin, eye and cloth fields, which the
+// material description of the ABI does not carry. Defaults are scene::Material's.
+struct CharacterShading
+{
+    float3 subsurfaceMeanFreePath{ 0.00130f, 0.00095f, 0.00067f };
+    float subsurfaceLobeMix = 0.85f;
+    float2 subsurfaceLobeRoughness{ 0.75f, 1.30f };
+    float cloth = 0;
+    float eyeIrisRadius = 0, eyeIrisDepth = 0.45f, eyeLimbusWidth = 0.12f, eyeLimbusDarkening = 0.6f, eyePupilScale = 1, eyeIrisConcavity = 1, eyeIor = 1.336f;
+    float3 eyeAxis{ 0, 0, 1 };
+};
+
 // Everything one frame needs, copied on the main thread.
 struct FramePacket
 {
@@ -139,6 +151,8 @@ struct FramePacket
     // them: index == the count at that point appends. Applied before this packet's transforms.
     std::vector<std::pair<uint32_t, scene::Instance>> instanceEdits;
     std::vector<std::pair<uint32_t, scene::Material>> materialEdits;
+    // Character shading set after commit (setCharacterShading), applied after this packet's material edits.
+    std::vector<std::pair<uint32_t, CharacterShading>> characterEdits;
     // A7 surface state field (E's surface::SurfaceField, fed from NativeVfx nv_surface_delta): delta batches in the host's
     // order (each: removed keys, then changed bricks), changed half-lives, and the frame's VFX context time.
     struct SurfaceDelta
@@ -281,6 +295,10 @@ public:
         m.terrainSplat[1] = splat1;
         m.terrainLayers = layers;
     }
+    // Character shading of a material of the scene (main thread; the values are checked here). Before commit the scene
+    // material takes it; after commit it is an edit of the next queued frame. The groups that are not defined on the
+    // material's class are ignored (applyCharacter); a later editMaterials of the material keeps it (keepCharacter).
+    void setCharacterShading(uint32_t material, const CharacterShading& c);
     SceneCommitInfo commit();
     // Quality override before commit ("section.key=value", QualityConfig::applyOverride): a game's post terms, for example.
     void overrideQuality(const std::string& assignment);
@@ -508,6 +526,8 @@ private:
     };
     static void overlay(const FramePacket& p, HostState& state);
     static void applyEdits(const FramePacket& p, scene::Scene& s);
+    static void applyCharacter(const CharacterShading& c, scene::Material& m);
+    static void keepCharacter(const scene::Material& old, scene::Material& next);
     void ensureStandaloneOutput(uint32_t width, uint32_t height, DXGI_FORMAT format);
     // Paces the frame slot, applies the packet's scene updates, declares the frame; returns the frame slot.
     uint32_t beginFrame(const FramePacket& packet);
