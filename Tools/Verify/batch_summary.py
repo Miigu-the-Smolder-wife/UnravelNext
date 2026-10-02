@@ -1,5 +1,6 @@
 # The batch's summary sheet (Run-Ue6Batch.ps1): the furnace sheets, every timing run's GPU frame with its largest pass
-# groups, the frames' error bits, the gates that failed.
+# groups, the A/B sheet (each variant's picture difference and GPU frame against its base's), the frames' error bits,
+# the gates that failed.
 #   python Tools/Verify/batch_summary.py <batch directory> <diag directory (Run-Ue6Still's output: batch_furnace*)>
 import glob
 import json
@@ -20,6 +21,48 @@ def groups_of(passes, depth):
         g[0] += ms
         g[1] += 1
     return out
+
+
+def timing_of(directory):
+    """(GPU frame median, pass groups by two name parts) of a run's timing_turning, or None."""
+    files = sorted(glob.glob(os.path.join(directory, 'timing_turning', '*.json')))
+    if not files:
+        return None
+    j = json.load(open(files[0], encoding='utf-8'))
+    return (j.get('gpu_frame_ms') or {}).get('median', 0.0), {k: v[0] for k, v in groups_of(j.get('passes') or {}, 2).items()}, j.get('graph') or {}
+
+
+def ab_sheet(batch):
+    """The A/B group: the picture differences as the batch wrote them, then each variant's GPU frame against its base's."""
+    manifest = os.path.join(batch, 'ab', 'manifest.json')
+    if not os.path.exists(manifest):
+        return
+    print('== A/B of the switches: pictures (in units of the base picture\'s mean)')
+    sheet = os.path.join(batch, 'ab', 'pictures.txt')
+    if os.path.exists(sheet):
+        print(open(sheet, encoding='utf-8-sig', errors='replace').read().rstrip())
+    rows = json.load(open(manifest, encoding='utf-8-sig'))
+    if isinstance(rows, dict):
+        rows = [rows]
+    print('== A/B of the switches: GPU frame median turning (ms), variant - base, then the pass groups that moved most (ms)')
+    bases = {}
+    for r in rows:
+        if r.get('row') == 'base':
+            bases[(r.get('group'), r.get('scene'))] = timing_of(os.path.join(batch, r.get('dir', '')))
+    for r in rows:
+        if r.get('row') == 'base':
+            continue
+        base, t = bases.get((r.get('group'), r.get('scene'))), timing_of(os.path.join(batch, r.get('dir', '')))
+        label = '%s / %s / %s' % (r.get('group'), r.get('scene'), r.get('row'))
+        if not base or not t:
+            if base is None and t is None:
+                continue  # (a group without timing runs)
+            print('%-56s no timing (%s)' % (label, 'variant' if base else 'base'))
+            continue
+        moved = sorted(((k, t[1].get(k, 0.0) - base[1].get(k, 0.0)) for k in set(t[1]) | set(base[1])), key=lambda kv: -abs(kv[1]))[:4]
+        print('%-56s %7.2f -> %7.2f (%+.2f)   scopes %s -> %s   %s' % (label, base[0], t[0], t[0] - base[0], base[2].get('pass_scopes', '?'), t[2].get('pass_scopes', '?'),
+                                                                  '  '.join('%s %+.2f' % kv for kv in moved)))
+        print('      set: %s' % r.get('set'))
 
 
 def main(argv):
@@ -53,6 +96,7 @@ def main(argv):
         print('%-52s %7.2f / %7.2f   sum %7.2f   %4d passes   render %s' % (rel, frame.get('median', 0.0), frame.get('p95', 0.0), total, len(passes), j.get('resolution')))
         print('      tracks: ' + '  '.join('%s %.2f' % (k, v[0]) for k, v in coarse))
         print('      groups: ' + '  '.join('%s %.2f' % (k, v[0]) for k, v in top))
+    ab_sheet(batch)
     print('== logs: error bits, failures')
     for f in sorted(glob.glob(os.path.join(batch, '**', '*.log'), recursive=True)):
         if os.path.basename(f) == 'batch.log':
