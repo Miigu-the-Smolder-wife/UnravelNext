@@ -20,8 +20,10 @@
 //          is-moving), dilated motion UAV (RG32F) }
 // P[1] = { info UAV (RGBA16F: previous closest device depth, device depth error, reprojection edge, a = (1: the vector
 //          came from a neighbour) + is-moving / 2), scatter UAV (R32_UINT, cleared), width, height }
-// P[2] = { field UAV (RGBA32_UINT: jacobian, offset and boundary, the closest device depth's bits, 0), flags (1: the
-//          reprojection field), asuint(boundary threshold), 0 }. Frame constants b1 = the main view.
+// P[2] = { field UAV (RGBA32_UINT: jacobian, offset and boundary, the closest device depth's bits, 0; UNX_NONE: none),
+//          flags (1: the reprojection field's jacobian and boundary; without it the field holds a zero jacobian, the
+//          whole pixel and the closest depth - what the history resurrection reprojects by), asuint(boundary
+//          threshold), 0 }. Frame constants b1 = the main view.
 #include "Passes/Shading/Tsr.hlsli"
 #include "Passes/Common/Frame.hlsli"
 
@@ -123,7 +125,7 @@ void main(uint2 id : SV_DispatchThreadID)
     RWTexture2D<float2> dilated = ResourceDescriptorHeap[P[0].w];
     RWTexture2D<float4> info = ResourceDescriptorHeap[P[1].x];
     RWTexture2D<uint> scatter = ResourceDescriptorHeap[P[1].y];
-    const bool field = (P[2].y & 1u) != 0;
+    const bool field = (P[2].y & 1u) != 0 && P[2].x != UNX_NONE;
 
     float z[9];
     float closest = -1;
@@ -234,6 +236,11 @@ void main(uint2 id : SV_DispatchThreadID)
         }
         RWTexture2D<uint4> fieldOut = ResourceDescriptorHeap[P[2].x];
         fieldOut[id] = uint4(tsrEncodeJacobian(dx, dy), tsrEncodeBoundary(offset, boundary), asuint(closest), 0);
+    }
+    else if (P[2].x != UNX_NONE)
+    {
+        RWTexture2D<uint4> fieldOut = ResourceDescriptorHeap[P[2].x];
+        fieldOut[id] = uint4(tsrEncodeJacobian(float2(0, 0), float2(0, 0)), tsrEncodeBoundary(offset, float2(0, 1)), asuint(closest), 0);
     }
     dilated[id] = vector;
     info[id] = float4(previousZ, depthError, edge, (any(offset != 0) ? 1.0 : 0.0) + 0.5 * saturate(previousSample.y));

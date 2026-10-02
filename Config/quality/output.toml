@@ -62,6 +62,20 @@ upscale_tsr_reprojection_field = true   # with upscale_tsr: the reprojection fie
 upscale_tsr_reprojection_field_aa_speed = 0.125  # output pixels a frame the two sides of an edge must move apart by before the
                                         # boundary is found from the depth edge (r.TSR.ReprojectionField.AntiAliasPixelSpeed);
                                         # slower edges give the whole pixel to the foreground
+upscale_tsr_resurrection = true         # with upscale_tsr: history resurrection (TsrResurrect.hlsl; the reference's
+                                        # r.TSR.Resurrection, off in its defaults): the history keeps every 31st frame (two of them,
+                                        # its Resurrection.PersistentFrameInterval / PersistentFrameCount) beside the previous one;
+                                        # a pixel whose history is rejected or was hidden in the previous frame takes the kept
+                                        # frame's converged colour where that matches what it shows now (a door that closes again,
+                                        # the wall behind a passer-by, a view turned back) instead of starting from this frame's
+                                        # samples. Costs two more histories and guides (4K output at 100 %: 2 x 63 MiB) and one
+                                        # more reprojection and measure of the guide. false: the two-frame history
+upscale_tsr_history_percent = 200.0     # with upscale_tsr: the history's size, percent of the output's per axis (100 .. 200; the
+                                        # reference's r.TSR.History.ScreenPercentage, 200 on its epic tier): above 100 the history
+                                        # holds detail beyond the output's pixels, each reprojection resamples it with less blur,
+                                        # and m.tsr.resolve filters it down to the output (TsrResolve.hlsl). 200 at a 4K output: an
+                                        # 8K history (253 MiB a slot, 2 slots, 4 with resurrection) and the update over 4 x the
+                                        # pixels - the tiers below epic keep 100
 upscale_tsr_thin_geometry = true        # with upscale_tsr: thin geometry detection (TsrThin.hlsl; the reference's
                                         # r.TSR.ThinGeometryDetection, there on with its foliage): geometry under a pixel wide
                                         # changes its share of the pixel with every jitter offset and would be rejected as a

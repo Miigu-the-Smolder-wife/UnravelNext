@@ -2,6 +2,8 @@
 // (ue6-main Engine/Shaders/Private/TemporalSuperResolution/*, PostProcess/TemporalSuperResolution.cpp, read 2026-10-02 as
 // a reference; the code is ours). Per frame, at the internal resolution unless stated:
 //   m.upscale.motion    each sample's reprojection vector and its point's previous view depth (UpscaleMotion.hlsl);
+//                       with output.upscale_layer_motion the vector and depth of the front-most layer the picture is
+//                       of (glass, water, the coverage layer's thin fragments) and the layers' marks;
 //   m.tsr.dilate        the closest depth of the 3 x 3 neighbourhood and its vector (edges take the foreground's), the
 //                       depth error of the neighbourhood's slope, the reprojection edge (how much the dilated vector
 //                       differs from the pixel's own), and every pixel scattered to where it was in the previous frame
@@ -12,10 +14,15 @@
 //                       found by following the depth edge both ways as the spatial anti-aliaser follows a luma edge;
 //   m.tsr.decimate      parallax disocclusion (something closer landed where this pixel was: it was hidden then), the
 //                       previous guide - a low-resolution copy of the history in a perceptual space - reprojected, the
-//                       reprojection edge over the dilated vectors;
+//                       reprojection edge over the dilated vectors; the kept frame's guide reprojected by the cameras;
+//   m.tsr.thin          thin geometry detection (output.upscale_tsr_thin_geometry): the coverage history of the
+//                       coverage layer's thin fragments and pixel-wide lines of depth give the relaxation weight by
+//                       which the rejection's clamp box opens to the history's own neighbourhood;
 //   m.tsr.flicker       the flickering heuristic: each pixel's luma followed over time; a gradient that flips its sign
 //                       every frame on a still surface is the jitter beating against a pattern finer than the pixels,
 //                       and its amplitude is the band inside which the rejection lets the history be;
+//   m.tsr.resurrect     history resurrection (output.upscale_tsr_resurrection): the kept frame's guide measured as the
+//                       previous frame's is; a pixel it matches better takes the kept frame's history;
 //   m.tsr.reject        the shading rejection: input and reprojected guide compared at low frequency after each was
 //                       clamped into the other's 3 x 3 range (their aliasing differs every frame and is no change of
 //                       shading); what the comparison's clamp box removes from the filtered guide, over the larger of
@@ -23,23 +30,26 @@
 //                       LDR luma and mask of the spatial anti-aliaser;
 //   m.tsr.aa            spatial anti-aliasing of the pixels whose history is rejected or missing: the edge through the
 //                       pixel is followed both ways (8 steps) and the pixel's sample position moves across it;
-//   m.upscale           (output resolution) the history update: 5 input samples around the output pixel under a kernel
-//                       as wide as an input pixel while the history is missing or rejected and as an output pixel
-//                       while it refines; the history reprojected (Catmull-Rom), clamped to the samples' range only as
-//                       far as the rejection says, its weight a validity in [0, 1] of 16 samples, held down where the
-//                       pixel moves (4 samples at one output pixel a frame) and where it was rejected (2 samples).
+//   m.upscale           (history resolution: the output's, or output.upscale_tsr_history_percent of it) the history
+//                       update: 5 input samples around the history pixel under a kernel as wide as an input pixel
+//                       while the history is missing or rejected and as a history pixel while it refines; the history
+//                       reprojected (Catmull-Rom), clamped to the samples' range only as far as the rejection says,
+//                       its weight a validity in [0, 1] of 16 samples an output pixel, held down where the pixel moves
+//                       (4 samples at one output pixel a frame) and where it was rejected (2 samples);
+//   m.tsr.resolve       a history above the output resolution filtered down to it (Mitchell-Netravali over 4 x 4).
 // The history update reads the field per output pixel: on a boundary the vector of the side the output pixel lies on,
 // and that vector carried to the output pixel's own position by the jacobian (a turn or a zoom reprojects every output
 // pixel to its own place instead of all of an input pixel's to one offset).
-// Not here yet: history resurrection, thin geometry detection, a history above the output resolution, lens distortion.
-// The flickering heuristic follows the final scene colour (the reference: the colour before translucency, and less by
-// what translucency changed).
+// Not here: lens distortion, the reference's hole filling of a disoccluded pixel's vector by its occluder's, its
+// high-contrast line detection (the coverage layer has the thin fragments' share itself), thin geometry inside the
+// flickering heuristic. The flickering heuristic follows the final scene colour (the reference: the colour before
+// translucency, and less by what translucency changed).
 #ifndef UNX_TSR_HLSLI
 #define UNX_TSR_HLSLI
 #include "Bindless.hlsli"
 
 // The reference's settings (r.TSR.History.SampleCount 16, ShadingRejection.SampleCount 2, Velocity.WeightClampingSampleCount
-// 4, Velocity.WeightClampingPixelSpeed 1; history at the output resolution).
+// 4, Velocity.WeightClampingPixelSpeed 1), per output pixel: TsrUpdate.hlsl scales them to its history pixels.
 #define TSR_HISTORY_SAMPLES 16.0
 #define TSR_HYSTERESIS (1.0 / TSR_HISTORY_SAMPLES)
 #define TSR_WEIGHT_CLAMPING_REJECTION (1.0 - 2.0 * TSR_HYSTERESIS)

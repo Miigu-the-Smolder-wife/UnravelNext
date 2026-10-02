@@ -2,7 +2,7 @@
 // 1440p and 1080p; output.render_scale, output.render_height_max, FrameContext::Upscale set by
 // FrameRenderer::setupUpscale). The main view renders at the output height x render_scale (at most render_height_max)
 // with a Halton (2, 3) sub-pixel jitter of its projection; every system of the frame sees that internal view, and M's
-// texture footprints are the output pixel's (FrameConstants::upscaleRatio). After the shading chain (haze, motion blur, depth of field at the internal resolution) two passes
+// texture footprints are the output pixel's (FrameConstants::upscaleRatio). After the shading chain (haze, depth of field at the internal resolution) two passes
 // reconstruct the output resolution:
 //   m.upscale.motion  per internal sample, the output-UV motion to the previous frame's unjittered view
 //                     (UpscaleMotion.hlsl: the vis buffer's triangle in its previous-tick vertices);
@@ -21,6 +21,7 @@
 #include "unx/render/Shaders.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace unx::render::shading
@@ -34,13 +35,35 @@ uint32_t asUint(float f)
     return u;
 }
 
+// The history's ring (output.upscale_tsr_resurrection; the reference's TSR history slices, its
+// r.TSR.Resurrection.PersistentFrameInterval 31 and PersistentFrameCount 2): a frame's place in the cycle is its rolling
+// index; every kResurrectionPeriod-th frame is kept, in slots 1 and 2 alternately, the others take slots 0 and 3 in
+// turn (the period is odd: two frames in a row never share a slot). Without resurrection only slots 0 and 3 exist.
+constexpr uint32_t kResurrectionPeriod = 31, kResurrectionCycle = 2 * kResurrectionPeriod, kRingSlots = 4;
+uint32_t ringSlot(uint32_t rolling, bool ring)
+{
+    if (ring && rolling % kResurrectionPeriod == 0) return (rolling / kResurrectionPeriod) % 2 ? 2u : 1u;
+    return rolling % 2 ? 3u : 0u;
+}
+bool ringSlotUsed(uint32_t slot, bool ring) { return ring || slot == 0 || slot == 3; }
+
 struct UpscaleState
 {
     Device* device = nullptr;
-    ComPtr<ID3D12Resource> history[2];
-    uint32_t width = 0, height = 0, parity = 0;
+    ComPtr<ID3D12Resource> history[kRingSlots];
+    uint32_t width = 0, height = 0, parity = 0;  // (the history's size: the output's, or above it)
+    bool ring = false;
     bool fresh = true;  // the textures hold nothing yet
-    TextureRef previous;           // history[parity] in the graph of frame 'previousFrame' (upscalePreviousColor)
+    // the ring: the slot the last frame wrote, that frame's rolling index, the frames since the last cut (up to the
+    // cycle), and each slot's frame - its unjittered view-projection and exposure (what a later frame reprojects by)
+    uint32_t last = 0, rolling = 0, accumulated = 0;
+    struct Kept
+    {
+        float4x4 viewProj{};
+        float exposure = 1;
+        bool valid = false;
+    } kept[kRingSlots];
+    TextureRef previous;           // history[last] in the graph of frame 'previousFrame' (upscalePreviousColor)
     uint64_t previousFrame = ~0ull;
     // output.screen_trace_source = 0: the lit opaque scene colour (the view's resolution; before translucency, the air,
     // the upscale and the display transform), kept for the next frame's screen-space traces - the reference's default
@@ -78,15 +101,15 @@ struct UpscaleState
         sceneFresh = true;
     }
     // output.upscale_tsr (Tsr.hlsli): the guide history at the internal resolution (R10G10B10A2: the scene colour in
-    // the guide space at low frequency, a = the reprojection edge); guide[parity] is the last one written.
-    ComPtr<ID3D12Resource> guide[2];
+    // the guide space at low frequency, a = the reprojection edge), in the history's ring: guide[last] is the last one.
+    ComPtr<ID3D12Resource> guide[kRingSlots];
     ComPtr<ID3D12Resource> flicker[2];  // the flickering heuristic's history (RGBA8, TsrFlicker.hlsl), as the guide
     ComPtr<ID3D12Resource> thin[2];     // the thin geometry's coverage history (R8, TsrThin.hlsl), as the guide
     uint32_t guideWidth = 0, guideHeight = 0;
-    bool guideFresh = true;
-    void ensureGuide(Device& d, uint32_t w, uint32_t h)
+    bool guideRing = false;
+    void ensureGuide(Device& d, uint32_t w, uint32_t h, bool withRing)
     {
-        if (guide[0] && guideWidth == w && guideHeight == h) return;
+        if (guide[0] && guideWidth == w && guideHeight == h && guideRing == withRing) return;
         device = &d;
         D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
         D3D12_RESOURCE_DESC1 desc{};
@@ -97,13 +120,19 @@ struct UpscaleState
         desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
         desc.SampleDesc.Count = 1;
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        for (int k = 0; k < 2; ++k)
+        static const wchar_t* const guideNames[kRingSlots] = { L"M upscale guide 0", L"M upscale guide 1 (kept)", L"M upscale guide 2 (kept)", L"M upscale guide 3" };
+        for (uint32_t k = 0; k < kRingSlots; ++k)
         {
             if (guide[k]) d.deferRelease(guide[k]);
+            guide[k].Reset();
+            if (!ringSlotUsed(k, withRing)) continue;
             check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
                                                     IID_PPV_ARGS(guide[k].ReleaseAndGetAddressOf())),
                   "M upscale guide");
-            guide[k]->SetName(k ? L"M upscale guide 1" : L"M upscale guide 0");
+            guide[k]->SetName(guideNames[k]);
+        }
+        for (int k = 0; k < 2; ++k)
+        {
             if (flicker[k]) d.deferRelease(flicker[k]);
             D3D12_RESOURCE_DESC1 fd = desc;
             fd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -120,7 +149,8 @@ struct UpscaleState
         }
         guideWidth = w;
         guideHeight = h;
-        guideFresh = true;
+        guideRing = withRing;
+        fresh = true;  // (the guides hold nothing: the frame is a reset)
     }
     ~UpscaleState()
     {
@@ -136,9 +166,9 @@ struct UpscaleState
         for (auto& t : scene)
             if (t) device->deferRelease(t);
     }
-    void ensure(Device& d, uint32_t w, uint32_t h)
+    void ensure(Device& d, uint32_t w, uint32_t h, bool withRing)
     {
-        if (history[0] && width == w && height == h) return;
+        if (history[0] && width == w && height == h && ring == withRing) return;
         device = &d;
         D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
         D3D12_RESOURCE_DESC1 desc{};
@@ -149,19 +179,41 @@ struct UpscaleState
         desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
         desc.SampleDesc.Count = 1;
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        for (int k = 0; k < 2; ++k)
+        static const wchar_t* const names[kRingSlots] = { L"M upscale history 0", L"M upscale history 1 (kept)", L"M upscale history 2 (kept)", L"M upscale history 3" };
+        for (uint32_t k = 0; k < kRingSlots; ++k)
         {
             if (history[k]) d.deferRelease(history[k]);
+            history[k].Reset();
+            if (!ringSlotUsed(k, withRing)) continue;
             check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
-                                                    IID_PPV_ARGS(&history[k])),
+                                                    IID_PPV_ARGS(history[k].ReleaseAndGetAddressOf())),
                   "M upscale history");
-            history[k]->SetName(k ? L"M upscale history 1" : L"M upscale history 0");
+            history[k]->SetName(names[k]);
         }
         width = w;
         height = h;
+        ring = withRing;
         fresh = true;
     }
 };
+
+// output.upscale_tsr: the temporal super resolution's structure (Tsr.hlsli) in place of the one-pass accumulation.
+bool tsrOn(FramePassContext& fc) { return !fc.quality.has("output.upscale_tsr") || fc.quality.boolean("output.upscale_tsr"); }
+
+// The history's size: the output's, or with upscale_tsr output.upscale_tsr_history_percent of it per axis (the
+// reference's r.TSR.History.ScreenPercentage, 100 .. 200; back to the output's size where a texture cannot be that large).
+void historySize(FramePassContext& fc, uint32_t W, uint32_t H, uint32_t& hw, uint32_t& hh)
+{
+    const double percent = tsrOn(fc) && fc.quality.has("output.upscale_tsr_history_percent") ? fc.quality.number("output.upscale_tsr_history_percent") : 100.0;
+    if (!(percent >= 100 && percent <= 200)) fail("output.upscale_tsr_history_percent must be in [100, 200]");
+    hw = (uint32_t)std::ceil((double)W * percent / 100.0);
+    hh = (uint32_t)std::ceil((double)H * percent / 100.0);
+    if (hw > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION || hh > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION)
+    {
+        hw = W;
+        hh = H;
+    }
+}
 } // namespace
 
 bool upscaleActive(FramePassContext& fc, const ViewResources& view)
@@ -206,11 +258,14 @@ TextureRef upscalePreviousColor(FramePassContext& fc, const ViewResources& view)
         }
         return s.previousScene;
     }
-    if (!s.history[0] || s.width != u.outputWidth || s.height != u.outputHeight || s.fresh || u.reset) return TextureRef{};
+    // (the history's own size: above the output's with output.upscale_tsr_history_percent - readers take the size from
+    // RenderGraph::desc and sample by UV)
+    uint32_t hw, hh;
+    historySize(fc, u.outputWidth, u.outputHeight, hw, hh);
+    if (!s.history[s.last] || s.width != hw || s.height != hh || s.fresh || u.reset) return TextureRef{};
     if (s.previousFrame != fc.frame.frameIndex || !s.previous.valid())
     {
-        s.previous = fc.graph.importTexture(s.history[s.parity].Get(),
-                                            { "m.upscale.history (previous)", u.outputWidth, u.outputHeight, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
+        s.previous = fc.graph.importTexture(s.history[s.last].Get(), { "m.upscale.history (previous)", hw, hh, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
                                             D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
         s.previousFrame = fc.frame.frameIndex;
     }
@@ -265,22 +320,73 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
     const double kernel = fc.quality.has("output.upscale_kernel") ? fc.quality.number("output.upscale_kernel") : 60.0;
     if (frames < 1 || frames > 256 || framesMoving < 1 || framesMoving > frames) fail("output.upscale_history_frames(_moving) must be in [1, 256], moving <= still");
     if (!(kernel >= 1 && kernel <= 1000)) fail("output.upscale_kernel must be in [1, 1000]");
+    const bool tsr = tsrOn(fc);
+    // output.upscale_tsr_resurrection (the reference's r.TSR.Resurrection): frames kept in the history's ring; a pixel
+    // whose history is rejected or hidden takes the kept frame's where that matches this frame (TsrResurrect.hlsl)
+    const bool resurrection = tsr && fc.quality.has("output.upscale_tsr_resurrection") && fc.quality.boolean("output.upscale_tsr_resurrection");
+    uint32_t HW, HH;
+    historySize(fc, W, H, HW, HH);
     UpscaleState& s = fc.state<UpscaleState>("M.upscale");
-    s.ensure(fc.device, W, H);
+    s.ensure(fc.device, HW, HH, resurrection);
+    if (tsr) s.ensureGuide(fc.device, w, h, resurrection);
     const bool reset = u.reset || s.fresh;
     // (an earlier pass of this frame may hold the previous history already: upscalePreviousColor - one import per frame)
     const bool imported = !reset && s.previousFrame == fc.frame.frameIndex && s.previous.valid();
     s.fresh = false;
-    const uint32_t prev = s.parity, next = prev ^ 1u;
+    const uint32_t prev = s.parity, next = prev ^ 1u;  // (the two-frame histories: flickering, thin coverage, keepSceneColor's)
     s.parity = next;
+    // The ring: this frame's slot, the previous frame's, and the kept frame a pixel may be resurrected from.
+    const uint32_t cycle = resurrection ? kResurrectionCycle : 2u;
+    if (reset)
+    {
+        s.accumulated = 0;
+        for (UpscaleState::Kept& kept : s.kept) kept.valid = false;
+    }
+    else if (fc.frame.originShift.x != 0 || fc.frame.originShift.y != 0 || fc.frame.originShift.z != 0)
+    {
+        // C9 origin rebase: the kept views in the new coordinates (a point p now was p + shift then; FrameRenderer does
+        // the same to the previous frame's view)
+        for (UpscaleState::Kept& kept : s.kept)
+            for (int r = 0; r < 4; ++r)
+                kept.viewProj.m[r][3] += kept.viewProj.m[r][0] * fc.frame.originShift.x + kept.viewProj.m[r][1] * fc.frame.originShift.y +
+                                         kept.viewProj.m[r][2] * fc.frame.originShift.z;
+    }
+    const uint32_t rolling = reset ? 0u : (s.rolling + 1u) % cycle;
+    const uint32_t slot = ringSlot(rolling, resurrection);
+    // (after a reset the last slot may be this frame's: the history bound then is not read - any other slot)
+    const uint32_t prevSlot = reset && s.last == slot ? (slot == 0 ? 3u : 0u) : s.last;
+    const float exposure = 1.0f / (1.2f * std::exp2(view.view.ev100));
+    uint32_t keptSlot = prevSlot;
+    bool canResurrect = false;
+    float4x4 toKept{};
+    float keptExposureRatio = 1;
+    if (resurrection && !reset)
+    {
+        // the newest kept frame that is not the previous frame (the reference's GetResurrectionFrameRollingIndex; before
+        // the cycle's second kept frame exists, the first)
+        uint32_t keptRolling = ((s.rolling + 2 * kResurrectionPeriod - 1) / kResurrectionPeriod * kResurrectionPeriod) % cycle;
+        if (!s.kept[ringSlot(keptRolling, true)].valid) keptRolling = 0;
+        keptSlot = ringSlot(keptRolling, true);
+        const UpscaleState::Kept& kept = s.kept[keptSlot];
+        canResurrect = keptSlot != prevSlot && keptSlot != slot && kept.valid && kept.exposure > 0;
+        if (canResurrect)
+        {
+            toKept = mul(kept.viewProj, inverse(u.viewProj));  // this frame's unjittered clip space to the kept frame's
+            keptExposureRatio = exposure / kept.exposure;
+        }
+    }
+    s.rolling = rolling;
+    s.accumulated = std::min(s.accumulated + 1u, cycle);
+    s.last = slot;
+    s.kept[slot].viewProj = u.viewProj;
+    s.kept[slot].exposure = exposure;
+    s.kept[slot].valid = true;
     const TextureRef history = imported ? s.previous
-                                        : g.importTexture(s.history[prev].Get(), { "m.upscale.history (previous)", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
+                                        : g.importTexture(s.history[prevSlot].Get(), { "m.upscale.history (previous)", HW, HH, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
                                                           D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-    const TextureRef output = g.importTexture(s.history[next].Get(), { "m.upscale.history", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
+    const TextureRef output = g.importTexture(s.history[slot].Get(), { "m.upscale.history", HW, HH, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
                                               D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     const TextureRef motion = g.createTexture(TextureDesc{ "m.upscale.motion", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT });
-    // output.upscale_tsr: the temporal super resolution's structure (Tsr.hlsli) in place of the one-pass accumulation
-    const bool tsr = !fc.quality.has("output.upscale_tsr") || fc.quality.boolean("output.upscale_tsr");
     const TextureRef previousDepth = tsr ? g.createTexture(TextureDesc{ "m.upscale.previous depth", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT }) : TextureRef{};
     const TextureRef depth = view.depth, vis = view.visId;
     const BufferRef clusters = view.visibleClusters;
@@ -364,13 +470,24 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
     const TextureRef motionDepth = layerMotion ? trackedDepth : depth;
     if (tsr)
     {
-        // Tsr.hlsli: dilate (+ the closest occluder scatter) -> decimate -> reject -> spatial anti-aliasing -> update.
-        s.ensureGuide(fc.device, w, h);
-        const bool guideReset = reset || s.guideFresh;
-        s.guideFresh = false;
-        const TextureRef previousGuide = g.importTexture(s.guide[prev].Get(), { "m.tsr.guide (previous)", w, h, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM },
+        // Tsr.hlsli: dilate (+ the closest occluder scatter) -> decimate -> [resurrect] -> reject -> spatial
+        // anti-aliasing -> update -> [resolve].
+        const bool guideReset = reset;
+        const TextureRef previousGuide = g.importTexture(s.guide[prevSlot].Get(), { "m.tsr.guide (previous)", w, h, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM },
                                                          D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-        const TextureRef nextGuide = g.importTexture(s.guide[next].Get(), { "m.tsr.guide", w, h, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        const TextureRef nextGuide = g.importTexture(s.guide[slot].Get(), { "m.tsr.guide", w, h, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        // the kept frame: its history and guide, the guide reprojected and its measure against this frame
+        TextureRef keptHistory, keptGuide, resurrectedGuide, resurrectionMeasure;
+        if (canResurrect)
+        {
+            keptHistory = g.importTexture(s.history[keptSlot].Get(), { "m.upscale.history (kept)", HW, HH, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
+                                          D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+            keptGuide = g.importTexture(s.guide[keptSlot].Get(), { "m.tsr.guide (kept)", w, h, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+            resurrectedGuide = g.createTexture(TextureDesc{ "m.tsr.resurrected guide", w, h, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
+            resurrectionMeasure = g.createTexture(TextureDesc{ "m.tsr.resurrection measure", w, h, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM });
+        }
+        ID3D12PipelineState* resurrectPso = canResurrect ? fc.shaders.compute("Passes/Shading/TsrResurrect") : nullptr;
+        ID3D12PipelineState* resolvePso = HW != W || HH != H ? fc.shaders.compute("Passes/Shading/TsrResolve") : nullptr;
         const TextureRef scatter = g.createTexture(TextureDesc{ "m.tsr.closest occluder", w, h, 1, 1, DXGI_FORMAT_R32_UINT });
         const TextureRef dilated = g.createTexture(TextureDesc{ "m.tsr.dilated motion", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT });
         const TextureRef info = g.createTexture(TextureDesc{ "m.tsr.dilate info", w, h, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
@@ -385,7 +502,9 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
         const bool reprojectionField = fc.quality.has("output.upscale_tsr_reprojection_field") && fc.quality.boolean("output.upscale_tsr_reprojection_field");
         const double aaSpeed = fc.quality.has("output.upscale_tsr_reprojection_field_aa_speed") ? fc.quality.number("output.upscale_tsr_reprojection_field_aa_speed") : 0.125;
         if (!(aaSpeed >= 0 && aaSpeed <= 16)) fail("output.upscale_tsr_reprojection_field_aa_speed must be in [0, 16] output pixels a frame");
-        const TextureRef field = reprojectionField ? g.createTexture(TextureDesc{ "m.tsr.reprojection field", w, h, 1, 1, DXGI_FORMAT_R32G32B32A32_UINT }) : TextureRef{};
+        // (the field's texture also carries the closest depth the resurrection reprojects by)
+        const bool hasField = reprojectionField || canResurrect;
+        const TextureRef field = hasField ? g.createTexture(TextureDesc{ "m.tsr.reprojection field", w, h, 1, 1, DXGI_FORMAT_R32G32B32A32_UINT }) : TextureRef{};
         // output.upscale_tsr_flickering (the reference's r.TSR.ShadingRejection.Flickering, default on)
         const bool flickering = !fc.quality.has("output.upscale_tsr_flickering") || fc.quality.boolean("output.upscale_tsr_flickering");
         TextureRef previousFlicker, nextFlicker, reprojectedFlicker, moireError;
@@ -423,7 +542,9 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
         ID3D12PipelineState* rejectPso = shaders.compute("Passes/Shading/TsrReject");
         ID3D12PipelineState* aaPso = shaders.compute("Passes/Shading/TsrAntiAlias");
         ID3D12PipelineState* updatePso = shaders.compute("Passes/Shading/TsrUpdate");
-        const uint32_t updateFlags = fc.quality.has("output.upscale_tsr_kernel_by_samples") && fc.quality.boolean("output.upscale_tsr_kernel_by_samples") ? 2u : 0u;
+        const uint32_t updateFlags = (fc.quality.has("output.upscale_tsr_kernel_by_samples") && fc.quality.boolean("output.upscale_tsr_kernel_by_samples") ? 2u : 0u) |
+                                     (reprojectionField ? 4u : 0u);
+        const float historyScale = (float)HW / (float)W;
         const float exposureRatio = u.exposureRatio;
         // the guide's blend of a held history: 1 / (1 + 16 / (input / output size)^2) (the reference's TheoricBlendFactor)
         const float fraction = (float)w / (float)W;
@@ -445,11 +566,11 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       b.use(dilated, Use::UavCompute);
                       b.use(info, Use::UavCompute);
                       b.use(scatter, Use::UavCompute);
-                      if (reprojectionField) b.use(field, Use::UavCompute);
+                      if (hasField) b.use(field, Use::UavCompute);
                   },
                   [=](PassContext& c) {
                       const uint32_t k[12] = { c.srv(motionDepth), c.srv(motion), c.srv(previousDepth), c.uav(dilated), c.uav(info), c.uav(scatter), w, h,
-                                               reprojectionField ? c.uav(field) : 0xFFFFFFFFu, reprojectionField ? 1u : 0u, asUint(boundaryThreshold), 0 };
+                                               hasField ? c.uav(field) : 0xFFFFFFFFu, reprojectionField ? 1u : 0u, asUint(boundaryThreshold), 0 };
                       c.cmd->SetPipelineState(dilatePso);
                       c.bindFrameConstants(cb);
                       c.computeConstants(k, 12);
@@ -473,18 +594,43 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                           b.use(previousThin, Use::SrvCompute);
                           b.use(reprojectedThin, Use::UavCompute);
                       }
+                      if (canResurrect)
+                      {
+                          b.use(keptGuide, Use::SrvCompute);
+                          b.use(field, Use::SrvCompute);
+                          b.use(resurrectedGuide, Use::UavCompute);
+                      }
                   },
                   [=](PassContext& c) {
                       const uint32_t none = 0xFFFFFFFFu;
-                      const uint32_t k[20] = { c.srv(dilated), c.srv(info), c.srv(scatter), c.srv(previousGuide), c.uav(reprojected), c.uav(decimateMask), w, h,
-                                               asUint(jx), asUint(jy), asUint(exposureRatio), guideReset ? 1u : 0u,
-                                               flickering ? c.srv(previousFlicker) : none, flickering ? c.uav(reprojectedFlicker) : none, frameIndex, 0,
-                                               thinGeometry ? c.srv(previousThin) : none, thinGeometry ? c.uav(reprojectedThin) : none, 0, 0 };
+                      uint32_t k[40] = { c.srv(dilated), c.srv(info), c.srv(scatter), c.srv(previousGuide), c.uav(reprojected), c.uav(decimateMask), w, h,
+                                         asUint(jx), asUint(jy), asUint(exposureRatio), guideReset ? 1u : 0u,
+                                         flickering ? c.srv(previousFlicker) : none, flickering ? c.uav(reprojectedFlicker) : none, frameIndex, 0,
+                                         thinGeometry ? c.srv(previousThin) : none, thinGeometry ? c.uav(reprojectedThin) : none, 0, 0,
+                                         canResurrect ? c.srv(keptGuide) : none, canResurrect ? c.uav(resurrectedGuide) : none, asUint(keptExposureRatio),
+                                         canResurrect ? c.srv(field) : none };
+                      for (int r = 0; r < 4; ++r)
+                          for (int col = 0; col < 4; ++col) k[24 + 4 * r + col] = asUint(toKept.m[r][col]);
                       c.cmd->SetPipelineState(decimatePso);
                       c.bindFrameConstants(cb);
-                      c.computeConstants(k, 20);
+                      c.computeConstants(k, 40);
                       c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
                   });
+        if (canResurrect)
+            g.addPass("m.tsr.resurrect", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(src, Use::SrvCompute);
+                          b.use(reprojected, Use::SrvCompute);
+                          b.use(resurrectedGuide, Use::SrvCompute);
+                          b.use(decimateMask, Use::SrvCompute);
+                          b.use(resurrectionMeasure, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          const uint32_t k[8] = { c.srv(src), c.srv(reprojected), c.srv(resurrectedGuide), c.srv(decimateMask), c.uav(resurrectionMeasure), w, h, 0 };
+                          c.cmd->SetPipelineState(resurrectPso);
+                          c.computeConstants(k, 8);
+                          c.cmd->Dispatch((w + 15) / 16, (h + 15) / 16, 1);
+                      });
         if (thinGeometry)
             g.addPass("m.tsr.thin", QueueType::Graphics,
                       [&](PassBuilder& b) {
@@ -533,13 +679,20 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       if (flickering) b.use(moireError, Use::SrvCompute);
                       if (layerMotion) b.use(layers, Use::SrvCompute);
                       if (thinGeometry) b.use(relaxation, Use::SrvCompute);
+                      if (canResurrect)
+                      {
+                          b.use(resurrectionMeasure, Use::SrvCompute);
+                          b.use(resurrectedGuide, Use::SrvCompute);
+                      }
                   },
                   [=](PassContext& c) {
-                      const uint32_t k[12] = { c.srv(src), c.srv(reprojected), c.srv(decimateMask), c.uav(rejection), c.uav(nextGuide), c.uav(aaInput), w, h,
-                                               asUint(theoreticBlend), flickering ? c.srv(moireError) : 0xFFFFFFFFu,
-                                               thinGeometry ? c.srv(relaxation) : 0xFFFFFFFFu, layerMotion ? c.srv(layers) : 0xFFFFFFFFu };
+                      const uint32_t none = 0xFFFFFFFFu;
+                      const uint32_t k[16] = { c.srv(src), c.srv(reprojected), c.srv(decimateMask), c.uav(rejection), c.uav(nextGuide), c.uav(aaInput), w, h,
+                                               asUint(theoreticBlend), flickering ? c.srv(moireError) : none,
+                                               thinGeometry ? c.srv(relaxation) : none, layerMotion ? c.srv(layers) : none,
+                                               canResurrect ? c.srv(resurrectionMeasure) : none, canResurrect ? c.srv(resurrectedGuide) : none, 0, 0 };
                       c.cmd->SetPipelineState(rejectPso);
-                      c.computeConstants(k, 12);
+                      c.computeConstants(k, 16);
                       c.cmd->Dispatch((w + 15) / 16, (h + 15) / 16, 1);
                   });
         g.addPass("m.tsr.aa", QueueType::Graphics,
@@ -561,16 +714,35 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       b.use(aa, Use::SrvCompute);
                       b.use(history, Use::SrvCompute);
                       b.use(output, Use::UavCompute);
-                      if (reprojectionField) b.use(field, Use::SrvCompute);
+                      if (hasField) b.use(field, Use::SrvCompute);
+                      if (canResurrect) b.use(keptHistory, Use::SrvCompute);
                   },
                   [=](PassContext& c) {
-                      const uint32_t k[16] = { c.srv(src), c.srv(rejection), c.srv(dilated), c.srv(history), c.uav(output), w, h, (reset ? 1u : 0u) | updateFlags,
-                                               W, H, asUint(jx), asUint(jy), asUint(exposureRatio), c.srv(aa), reprojectionField ? c.srv(field) : 0xFFFFFFFFu, 0 };
+                      const uint32_t none = 0xFFFFFFFFu;
+                      uint32_t k[36] = { c.srv(src), c.srv(rejection), c.srv(dilated), c.srv(history), c.uav(output), w, h, (reset ? 1u : 0u) | updateFlags,
+                                         HW, HH, asUint(jx), asUint(jy), asUint(exposureRatio), c.srv(aa), hasField ? c.srv(field) : none, 0,
+                                         canResurrect ? c.srv(keptHistory) : none, asUint(keptExposureRatio), asUint(historyScale), 0 };
+                      for (int r = 0; r < 4; ++r)
+                          for (int col = 0; col < 4; ++col) k[20 + 4 * r + col] = asUint(toKept.m[r][col]);
                       c.cmd->SetPipelineState(updatePso);
-                      c.computeConstants(k, 16);
+                      c.computeConstants(k, 36);
+                      c.cmd->Dispatch((HW + 7) / 8, (HH + 7) / 8, 1);
+                  });
+        if (!resolvePso) return output;
+        // the history above the output resolution, filtered down (TsrResolve.hlsl)
+        const TextureRef resolved = g.createTexture(TextureDesc{ "m.upscale.resolved", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+        g.addPass("m.tsr.resolve", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(output, Use::SrvCompute);
+                      b.use(resolved, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      const uint32_t k[8] = { c.srv(output), c.uav(resolved), W, H, HW, HH, 0, 0 };
+                      c.cmd->SetPipelineState(resolvePso);
+                      c.computeConstants(k, 8);
                       c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
                   });
-        return output;
+        return resolved;
     }
     const float ratio = u.exposureRatio, capStill = (float)frames, capMoving = (float)framesMoving, kernelK = (float)kernel;
     ID3D12PipelineState* pso = fc.shaders.compute("Passes/Shading/Upscale");
