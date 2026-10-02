@@ -41,7 +41,8 @@ cbuffer FrameConstants : register(b1)
     uint g_fog;  // the view's fog parameters' SRV + 1 (FogVolume.hlsli), 0: none
     uint g_materialInputs;  // StructuredBuffer<GpuMaterialInputs> (Scene.hlsli), UNX_NONE: none
     uint g_meshAttributes, g_vertexAttributes;  // per mesh 1 + its first GpuVertexAttributes (0: none); UNX_NONE: no mesh has any
-    uint g_framePad3, g_framePad4;
+    // (the C++ record ends with two spare words; they are not declared here: a library kernel at the DXIL limit pays for
+    // every field's annotation)
 };
 
 // Reversed-Z infinite projection: device depth d = near / viewDistance (1 at the near plane, 0 = sky).

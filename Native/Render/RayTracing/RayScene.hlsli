@@ -155,6 +155,9 @@ float2 rtUv(GpuMesh mesh, uint3 meshVertex, float2 barycentrics)
 }
 
 // Surface at a hit, world space.
+#ifndef RT_SURFACE_EXTRAS
+#define RT_SURFACE_EXTRAS 1
+#endif
 struct RtSurface
 {
     float3 position;
@@ -165,22 +168,17 @@ struct RtSurface
     uint material;
     uint sceneInstance;
     bool frontFace;
+#if RT_SURFACE_EXTRAS
     // The hit triangle (HitShading.hlsli rtHitEye): its rest-pose edges (object space), its edges as hit (world) and its
     // uv edges; and the vertex colour at the hit (white for a mesh without colours). RT_SURFACE_EXTRAS 0 (a kernel at the
-    // DXIL limit that reads none of them): zero edges, white, nothing loaded for them.
+    // DXIL limit, which reads none of them): the surface has no such fields.
     float3 restE1, restE2, worldE1, worldE2;
     float2 uvE1, uvE2;
     float4 color;
+#endif
 };
-#ifndef RT_SURFACE_EXTRAS
-#define RT_SURFACE_EXTRAS 1
-#endif
-// RT_HIT_INPUTS (HitShading.hlsli, HitLocalLights.hlsli): 1 = a hit's material takes its emissive mask and its vertex
-// tint; 0 (a kernel at the DXIL limit) = neither. The uv transform is applied either way (texture tiling, the alpha
-// test's cut shape).
-#ifndef RT_HIT_INPUTS
-#define RT_HIT_INPUTS 1
-#endif
+// (The material inputs at a hit - the uv transform in its textures and its alpha test, the emissive mask, the vertex
+// tint - compile out with UNX_MATERIAL_INPUTS 0, Scene.hlsli.)
 
 // With the records it read (a caller needing more of the hit, e.g. its motion, does not load them again).
 RtSurface rtSurfaceParts(RtSceneSrvs s, RtHit h, float3 origin, float3 direction, out GpuInstance inst, out GpuMesh mesh, out RtInstance ri,
@@ -220,8 +218,8 @@ RtSurface rtSurfaceParts(RtSceneSrvs s, RtHit h, float3 origin, float3 direction
         o.restE2 = c.position - a.position;
 #endif
     }
-    o.color = 1;
 #if RT_SURFACE_EXTRAS
+    o.color = 1;
     o.worldE1 = p1 - p0;
     o.worldE2 = p2 - p0;
     const uint attributeBase = meshAttributeBase(inst.mesh);
@@ -234,8 +232,6 @@ RtSurface rtSurfaceParts(RtSceneSrvs s, RtHit h, float3 origin, float3 direction
         loadVertexAttributes(attributeBase, tri.meshVertex.z, unusedUv, c2);
         o.color = c0 * w.x + c1 * w.y + c2 * w.z;
     }
-#else
-    o.restE1 = o.restE2 = o.worldE1 = o.worldE2 = 0;
 #endif
     o.position = origin + direction * h.t;
     o.geometricNormal = normalize(cross(p1 - p0, p2 - p0));
@@ -245,8 +241,6 @@ RtSurface rtSurfaceParts(RtSceneSrvs s, RtHit h, float3 origin, float3 direction
 #if RT_SURFACE_EXTRAS
     o.uvE1 = du;
     o.uvE2 = dv;
-#else
-    o.uvE1 = o.uvE2 = 0;
 #endif
     o.uvPerWorldArea = abs(du.x * dv.y - du.y * dv.x) / max(length(cross(p1 - p0, p2 - p0)), 1e-20);
     o.frontFace = h.frontFace != 0;

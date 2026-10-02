@@ -13,7 +13,8 @@
 #define REFL_NO_ACCUMULATOR (JOB == 2)  // (the G library is at the DXIL limit: ReflectionShade.hlsli g_reflAccPool)
 #define RT_HIT_EYE 0  // (at the DXIL limit: an overflow job's hit on an eye reads its colour at the surface's uv - HitShading.hlsli)
 #define RT_SURFACE_EXTRAS 0  // (... and its surface carries no triangle edges and no vertex colour: RayScene.hlsli)
-#define RT_HIT_INPUTS 0  // (... and its hits take no emissive mask and no vertex tint; the uv transform they take)
+#define UNX_MATERIAL_INPUTS 0  // (... and no material inputs: an overflow job's hit and its alpha test read the mesh's uv, without
+                               // the material's transform, emissive mask or vertex tint - Scene.hlsli)
 #define GI_BATCH_CORNERS CORNERS
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/Reflection/ReflectionRay.hlsli"

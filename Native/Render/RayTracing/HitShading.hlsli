@@ -13,8 +13,9 @@
 //                                                 wider ones the bilinear texel instead of the lobe average.
 // Material textures at hits: rtHitMaterial (M's published textures, INTERFACES v1.11, at the ray cone's level of detail).
 // Material inputs at hits (scene::Material; Scene.hlsli GpuMaterialInputs): the uv transform (with the level of detail
-// by its determinant), the emissive mask and the vertex tint (RT_HIT_INPUTS; the emission's scale is in the material's
-// emissive). No parallax, no detail maps, no second uv set: a hit is a cone's footprint.
+// by its determinant), the emissive mask and the vertex tint (the emission's scale is in the material's emissive); none
+// of them with UNX_MATERIAL_INPUTS 0 (Scene.hlsli: a kernel at the DXIL limit). No parallax, no detail maps, no second
+// uv set: a hit is a cone's footprint.
 //   local lights                                  one next-event sample per hit (HitLocalLights.hlsli, the reference's
 //                                                 estimator), visibility by one shadow ray: unbiased, averaged by the
 //                                                 hit's history.
@@ -39,6 +40,7 @@ GpuMaterial rtHitMaterialAt(GpuMaterial m, RtSurface s, float2 uvColor, float co
     const float footprint = log2(max(coneWidth, 1e-8) / max(abs(cosTheta), 1e-3));
     float2 uv = s.uv;
     float uvPerWorldArea = s.uvPerWorldArea;
+#if UNX_MATERIAL_INPUTS
     if (m.inputs != UNX_NONE)
     {
         // the material's uv transform: its uv, and its texture area per world area by the determinant
@@ -46,16 +48,17 @@ GpuMaterial rtHitMaterialAt(GpuMaterial m, RtSurface s, float2 uvColor, float co
         uv = materialInputsUv(r, uv);
         uvColor = materialInputsUv(r, uvColor);
         uvPerWorldArea *= abs(r.uvU.x * r.uvV.y - r.uvU.y * r.uvV.x);
-#if RT_HIT_INPUTS
+#if RT_SURFACE_EXTRAS
         if ((r.flags & MATERIAL_INPUT_VERTEX_TINT) != 0) m.baseColor *= s.color.rgb;
+#endif
         if (r.emissiveMaskTexture != UNX_NONE)
         {
             Texture2D t = ResourceDescriptorHeap[r.emissiveMaskTexture];
             const float lod = rtTextureLod(t, uvPerWorldArea, footprint);
             m.emissive *= (r.textureClamp & 8u) ? t.SampleLevel(g_anisoClamp, uv, lod).x : t.SampleLevel(g_anisoWrap, uv, lod).x;
         }
-#endif
     }
+#endif
     if (m.baseColorTexture != UNX_NONE)
     {
         Texture2D t = ResourceDescriptorHeap[m.baseColorTexture];
@@ -77,11 +80,16 @@ GpuMaterial rtHitMaterialAt(GpuMaterial m, RtSurface s, float2 uvColor, float co
     }
     return m;
 }
-GpuMaterial rtHitMaterial(GpuMaterial m, RtSurface s, float coneWidth, float cosTheta) { return rtHitMaterialAt(m, s, s.uv, coneWidth, cosTheta); }
+// (a macro, not a function: a wrapper's copies of the material and the surface cost a kernel at the DXIL limit 176 B)
+#define rtHitMaterial(m, s, coneWidth, cosTheta) rtHitMaterialAt(m, s, (s).uv, coneWidth, cosTheta)
 
 // An eye (MATERIAL_EYE) at a ray hit: the base colour's uv - the iris point seen through the cornea along the ray
 // (modelEyeFrame through the hit triangle, modelEyePoint, as the resolve's MaterialEye.hlsli) - and the limbal ring's
 // factor (returned).
+#ifndef RT_HIT_EYE
+#define RT_HIT_EYE 0
+#endif
+#if RT_HIT_EYE && RT_SURFACE_EXTRAS
 float rtHitEye(GpuMaterial m, RtSurface s, float3 direction, inout float2 uv)
 {
     const GpuMaterialEye e = loadMaterialEye(m.classFlags >> 16);
@@ -94,17 +102,15 @@ float rtHitEye(GpuMaterial m, RtSurface s, float3 direction, inout float2 uv)
 }
 // The material of a hit as a viewer along 'direction' (the ray's, unit) sees it: rtHitMaterial, and with RT_HIT_EYE = 1
 // (the reflection kernels set it; default 0: GI hits take the surface's uv) an eye's base colour at its iris point.
-#ifndef RT_HIT_EYE
-#define RT_HIT_EYE 0
-#endif
 GpuMaterial rtHitMaterialSeen(GpuMaterial m, RtSurface s, float3 direction, float coneWidth, float cosTheta)
 {
     float2 uvColor = s.uv;
-#if RT_HIT_EYE
     if ((m.classFlags & MATERIAL_EYE) != 0) m.baseColor *= rtHitEye(m, s, direction, uvColor);
-#endif
     return rtHitMaterialAt(m, s, uvColor, coneWidth, cosTheta);
 }
+#else
+#define rtHitMaterialSeen(m, s, direction, coneWidth, cosTheta) rtHitMaterialAt(m, s, (s).uv, coneWidth, cosTheta)
+#endif
 
 struct RtHitLighting
 {

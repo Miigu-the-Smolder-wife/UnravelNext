@@ -400,11 +400,12 @@ RtEmissiveTriangle rtEmissiveTriangleOf(uint sceneInstance, uint meshTriangle, u
     o.m = loadMaterial(instanceMaterial(inst, loadSubmesh(mesh.submeshOffset + submesh), submesh));
     return o;
 }
-// Emitted radiance at the mesh's uv (emissive x its texture at level 0, at the material's uv; with RT_HIT_INPUTS x its
-// mask).
+// Emitted radiance at the mesh's uv (emissive x its texture at level 0, at the material's uv, x its mask; the mesh's uv
+// and no mask with UNX_MATERIAL_INPUTS 0).
 float3 rtEmissionAt(GpuMaterial m, float2 uv)
 {
     float3 e = m.emissive;
+#if UNX_MATERIAL_INPUTS
     GpuMaterialInputs r = (GpuMaterialInputs)0;
     r.emissiveMaskTexture = UNX_NONE;
     if (m.inputs != UNX_NONE)
@@ -412,12 +413,13 @@ float3 rtEmissionAt(GpuMaterial m, float2 uv)
         r = loadMaterialInputs(m.inputs);
         uv = materialInputsUv(r, uv);
     }
+#endif
     if (m.emissiveTexture != UNX_NONE)
     {
         Texture2D<float4> t = ResourceDescriptorHeap[m.emissiveTexture];
         e *= (m.textureClamp & MATERIAL_TEXTURE_EMISSIVE) ? t.SampleLevel(g_anisoClamp, uv, 0).rgb : t.SampleLevel(g_anisoWrap, uv, 0).rgb;
     }
-#if RT_HIT_INPUTS
+#if UNX_MATERIAL_INPUTS
     if (r.emissiveMaskTexture != UNX_NONE)
     {
         Texture2D<float4> t = ResourceDescriptorHeap[r.emissiveMaskTexture];

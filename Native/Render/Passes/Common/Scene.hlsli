@@ -265,18 +265,28 @@ GpuLight loadLight(uint i) { StructuredBuffer<GpuLight> b = ResourceDescriptorHe
 uint materialClass(GpuMaterial m) { return m.classFlags & 0xFFu; }
 // The uv at which a material's own textures are read, from the mesh's uv0 (the material's uv transform; the identity
 // without a record), and the same with a footprint.
+// UNX_MATERIAL_INPUTS 0 before this file compiles the material inputs out of these two (the mesh's uv) and out of the ray
+// hits' material and emission (HitShading.hlsli, HitLocalLights.hlsli): for a kernel at the DXIL size limit; such a
+// kernel says so in its header.
+#ifndef UNX_MATERIAL_INPUTS
+#define UNX_MATERIAL_INPUTS 1
+#endif
 float2 materialUv(GpuMaterial m, float2 uv)
 {
-    if (m.inputs == UNX_NONE) return uv;
-    return materialInputsUv(loadMaterialInputs(m.inputs), uv);
+#if UNX_MATERIAL_INPUTS
+    if (m.inputs != UNX_NONE) uv = materialInputsUv(loadMaterialInputs(m.inputs), uv);
+#endif
+    return uv;
 }
 void materialUvFootprint(GpuMaterial m, inout float2 uv, inout float2 duvdx, inout float2 duvdy)
 {
+#if UNX_MATERIAL_INPUTS
     if (m.inputs == UNX_NONE) return;
     const GpuMaterialInputs r = loadMaterialInputs(m.inputs);
     uv = materialInputsUv(r, uv);
     duvdx = materialInputsUvStep(r, duvdx);
     duvdy = materialInputsUvStep(r, duvdy);
+#endif
 }
 uint clusterVertexCount(GpuCluster c) { return c.counts & 0xFFu; }
 uint clusterTriangleCount(GpuCluster c) { return (c.counts >> 8) & 0xFFu; }
