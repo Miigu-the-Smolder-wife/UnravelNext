@@ -663,7 +663,6 @@ Unreal의 재질 그래프와 Unity 재질이 흔히 쓰는 입력 가운데 렌
 
 실행해서 확인할 것(순서대로): `unx_test_decal_decaltests`(레코드 크기가 바뀌었다), `unx_test_host_hostdecal`, 입자 레이어 테스트(`fx.particles.soft`가 꺼진 기본 `ParticleLayerFrame`은 전과 같은 값이어야 한다), 그 뒤 still: 바닥에 걸친 연기 스프라이트(소프트 켬/끔), 카메라가 스프라이트 안에 있을 때, 멀어지는 데칼(화면 크기 페이드), 수명 페이드 구간, 법선만·roughness만 데칼, `InstanceNoDecals` 인스턴스.
 
-<<<<<<< HEAD
 ### 11.3 목록을 작업으로 (4차, 2026-10-03)
 
 **코드 작성·빌드 통과, 실행 안 함.** 테스트 실행 파일·still·게이트를 돌리지 않았다.
@@ -829,7 +828,6 @@ Unreal의 재질 그래프와 Unity 재질이 흔히 쓰는 입력 가운데 렌
 - **선언과 순서**: `PassChain`의 단계는 각자 선언한다; 2단계 가림의 순서(래스터 1 → `statichzb.p1` → 컬 2 → 래스터 2); 틴트 아틀라스는 `s.vsm.tint.ready`가 읽을 수 있는 상태로 둔다; 2배 높이 가시성 텍스처의 읽는 쪽은 모두 화소로 인덱싱한다; 머리카락 밀도 텍스처는 `declareHair`와 각 패스가 선언한다; 안개 볼륨의 뜻이 바뀐 것(노출 전 저장, 구름 장막)은 모든 읽는 쪽이 `FogVolume.hlsli`를 거친다.
 - **씬 파일과 호스트**: 선택 블록의 순서가 쓰기와 읽기에서 같다(MRPH, HAIR, CUTS, TERR, COAT, SHEN, GATT, ANIS, FILM, LEND, LCMP, SUBS, CLTH, EYES, MINP, VATT, CLDS, CIRR, FOGS, FGL2, FVST — 세 브랜치가 각자 끝에 붙였다); 호스트 ABI의 새 진입점(기술 → 씬·프레임 필드, 커밋 뒤 편집의 패킷 전달과 밀린 프레임의 이월, 재질을 다시 기술할 때 캐릭터·입력 값 유지); 저장하는 씬의 날씨는 호스트가 줄 수 있는 필드만 담는다(권운·둘째 층·김은 호스트 ABI에 아직 없다).
 - **루프**: 오늘 더해진 루프는 모두 상수나 CPU가 정한 수로 묶여 있다(순회 작업 큐, coverage bins·compute 래스터, 추측 레벨, 머리카락 행진, `clFeedback`, parallax ≤ 64걸음). 조용히 자르던 셋은 위에 적었다(틴트 레벨: 고침; 머리카락 body: 실패로; 층 fragment 16개: 남음).
-=======
 ## 15. 쇼케이스 씬 (2026-10-03, 브랜치 `w/cache`) — 코드 작성·빌드 통과, 실행 안 함
 
 2026-10-03에 쓴 기능 가운데 그것을 쓰는 씬이 없는 것이 많다(A/B 배치는 씬이 쓰는 것만 잰다). 생성 씬 세 개를 추가했다: `Tools/SceneGen/src/Showcase.cpp`, 씬 id 12~14, 이름은 `diagnosticScenes()`에 들어 있어 게이트가 `--scene showcase_bathhouse`처럼 바로 안다(`allScenes()`의 스윕과 그 시험 집합에는 넣지 않았다).
@@ -946,4 +944,3 @@ Unreal의 재질 그래프와 Unity 재질이 흔히 쓰는 입력 가운데 렌
 4. 욕실 `lamp`: 유리 갓 위쪽 천장이 뷰(MegaLights 그림자 광선: 유리 통과, 흰 빛)와 GI(hit의 그림자 광선: 호박색)에서 다르게 물든다 — 알려진 차이(상태 문서 1.3.3).
 5. 욕조 물: Water 클래스 정적 메시가 반투명 층에서 어떻게 그려지는지 이 씬에서 처음 본다(다른 생성 씬의 물은 Standard 재질이다).
 6. 기슭: scale 1에서 인스턴스 약 19만 개. `raytracing.far_field=true`의 로드 로그(`RayScene far field:`, `near set`).
->>>>>>> w/cache

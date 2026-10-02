@@ -7,6 +7,9 @@
 //       --scene city_block|forest_thin|... [--resolution 4K|1440p|both] [--frames 600] [--moving] [--sun-deg-per-s R]
 //       [--wind-gust-period-s T] [--camera NAME] [--capture FILE.pfm | --capture-output FILE.pfm] [--out DIR] [--set k=v]
 //       (--resolution also 1080p, and all = 4K, 1440p, 1080p)
+// A generated scene's extras (SceneGen.h SceneExtras: the showcase scenes' light functions - cookie, IES, gobo -, decals
+// and the rain of one camera, which the scene format does not hold) are applied: the light functions and decals to E's
+// sets, the weather to the frames of the camera it names (--camera, else the scene's first).
 // --capture: the main view's linear scene radiance (FrameContext::outputLinearHdr, x exposure) of the last frame as
 // a PFM for unx_reference compare (one resolution; the frames still render as measured, plus one copy each). The frame
 // renders at the output resolution (no temporal upscale).
@@ -67,6 +70,19 @@
 #endif
 #if __has_include("unx/gi/GiSystem.h")
 #include "unx/gi/GiSystem.h"
+#endif
+// The scenes' extras (SceneGen.h SceneExtras: what the scene format does not hold) go to E's interfaces.
+#if __has_include("unx/lights/LightFunctions.h")
+#include "unx/lights/LightFunctions.h"
+#define S_GATE_LIGHT_FUNCTIONS 1
+#else
+#define S_GATE_LIGHT_FUNCTIONS 0
+#endif
+#if __has_include("unx/decal/Decals.h")
+#include "unx/decal/Decals.h"
+#define S_GATE_DECALS 1
+#else
+#define S_GATE_DECALS 0
 #endif
 #if __has_include("unx/shading/ShadingSystem.h")
 #include "unx/shading/ShadingSystem.h"  // (the coverage composite's counts in the summary)
@@ -385,7 +401,8 @@ int main(int argc, char** argv)
         // --lens A,F: the camera's lens - aperture diameter and focus distance, m (FrameContext::lensAperture / lensFocus).
         // Without it the gate's camera is a pinhole and no depth of field runs.
         float lensAperture = 0, lensFocus = 0;
-        float rainRate = 0;              // --rain R: the frame's weather record rains R mm/h (WeatherFrame::rainRate: the fog's rain veil)
+        float rainRate = -1;             // --rain R: the frame's weather record rains R mm/h (WeatherFrame::rainRate: the fog's rain
+                                         // veil); 0: dry, whatever the scene's extras say
         float displayPeak = 0;           // --display-peak P: an HDR frame (FrameContext::displayPeak; the gate's 10-bit output then
                                          // needs output.hdr_encoding 2)
         // --lightning x,y,z,cd[,first frame,frames]: a lightning flash at a world position with a luminous intensity, in
@@ -872,6 +889,67 @@ int main(int argc, char** argv)
                 groomBodies.push_back(hair::hairSystem(renderer.trackState()).addBody(d));
             }
 #endif
+            // The scene's extras (SceneGen.h extras: the showcase scenes' light functions, decals and one camera's rain -
+            // the scene format holds none of them; a scene file has none). --no-scene-weather leaves the rain out.
+            const scenegen::SceneExtras extras = sceneFile ? scenegen::SceneExtras{} : scenegen::extras(request);
+#if S_GATE_LIGHT_FUNCTIONS
+            for (const scenegen::ExtraLightFunction& e : extras.lightFunctions)
+            {
+                if (e.light >= s.lights.size()) fail("scene extras: a light function of light %u of %zu", e.light, s.lights.size());
+                lights::LightFunction f;
+                f.profile = (lights::Profile)e.profile;
+                if (f.profile == lights::Profile::Ies)
+                {
+                    // (one horizontal angle: the same profile at every angle about the light's axis; the values are
+                    // already over their peak, which is the light's own intensity)
+                    f.ies.vertical = e.iesVertical;
+                    f.ies.horizontal = { 0.0f };
+                    f.ies.values = e.iesValues;
+                    f.ies.peak = s.lights[e.light].intensity;
+                }
+                else if (f.profile == lights::Profile::Cookie || f.profile == lights::Profile::Gobo)
+                {
+                    f.image.width = e.imageWidth;
+                    f.image.height = e.imageHeight;
+                    f.image.rgb = e.imageRgb;
+                }
+                else
+                    fail("scene extras: light %u has profile %u (1 IES, 2 cookie, 3 gobo)", e.light, e.profile);
+                f.tanX = e.tanX;
+                f.tanY = e.tanY;
+                f.rotationSpeed = e.rotationSpeed;
+                f.flickerDepth = e.flickerDepth;
+                f.flickerFrequency = e.flickerFrequency;
+                lights::lightFunctions(renderer.trackState()).set(e.light, f);
+            }
+#endif
+#if S_GATE_DECALS
+            // (kept in the scene's coordinates: an origin shift moves them with the scene - below)
+            std::vector<std::pair<uint32_t, decal::Decal>> extraDecals;
+            for (const scenegen::ExtraDecal& e : extras.decals)
+            {
+                if (e.material >= s.materials.size()) fail("scene extras: a decal of material %u of %zu", e.material, s.materials.size());
+                decal::Decal d;
+                d.box = e.box;
+                d.material = e.material;
+                d.priority = e.priority;
+                d.opacity = e.opacity;
+                d.fadeStartDegrees = e.fadeStartDegrees;
+                d.fadeEndDegrees = e.fadeEndDegrees;
+                d.edge = e.edge;
+                d.color = e.color;
+                d.channels = e.channels;
+                d.fadeScreenSize = e.fadeScreenSize;
+                d.fadeInStart = e.fadeInStart;
+                d.fadeInDuration = e.fadeInDuration;
+                extraDecals.push_back({ decal::decals(renderer.trackState()).add(d), d });
+            }
+#endif
+            if (!extras.lightFunctions.empty() || !extras.decals.empty() || !extras.weather.empty())
+                logf("scene extras: %zu light functions%s, %zu decals%s, weather for %zu cameras\n", extras.lightFunctions.size(), S_GATE_LIGHT_FUNCTIONS ? "" : " (not in this build)",
+                     extras.decals.size(), S_GATE_DECALS ? "" : " (not in this build)", extras.weather.size());
+            // (the frame's camera by name: --camera, else the scene's first - a path follows its own camera)
+            const std::string frameCamera = !cameraName.empty() ? cameraName : (s.cameras.empty() ? std::string() : s.cameras[0].name);
             HarnessOptions options;
             options.frames = frames;
             options.passTimestamps = passTimestamps;
@@ -995,6 +1073,18 @@ int main(int argc, char** argv)
                     // coordinates from here on; the previous view moves with it (FrameRenderer).
                     gpuScene.rebase(shiftBy);
                     fc.originShift = shiftBy;
+#if S_GATE_DECALS
+                    // (the extras' decals are world space: they move with the scene)
+                    const float3 moved = gpuScene.originOffset();
+                    for (const auto& [id, d] : extraDecals)
+                    {
+                        decal::Decal shifted = d;
+                        shifted.box.m[0][3] -= moved.x;
+                        shifted.box.m[1][3] -= moved.y;
+                        shifted.box.m[2][3] -= moved.z;
+                        decal::decals(renderer.trackState()).update(id, shifted);
+                    }
+#endif
                 }
                 const float3 offset = gpuScene.originOffset();
                 cam.position = cam.position - offset;
@@ -1027,7 +1117,18 @@ int main(int argc, char** argv)
                 if (!fogVolumes.empty()) fc.sceneWeather &= ~kSceneFogVolumes;
                 fc.lensAperture = lensAperture;
                 fc.lensFocus = lensFocus;
-                if (rainRate > 0) fc.weather.rainRate = rainRate;
+                // (the extras' weather belongs to one camera of its scene: a frame from that camera takes it)
+                for (const scenegen::ExtraWeather& w : extras.weather)
+                    if (sceneWeather && w.camera == frameCamera)
+                    {
+                        fc.weather.rainRate = w.rainRate;
+                        fc.weather.wetness = w.wetness;
+                    }
+                if (rainRate >= 0)
+                {
+                    fc.weather.rainRate = rainRate;
+                    if (rainRate == 0) fc.weather.wetness = 0;
+                }
                 fc.displayPeak = displayPeak;
                 if (!sceneWeather) fc.sceneWeather = 0;
                 if (gustPeriodS > 0)
