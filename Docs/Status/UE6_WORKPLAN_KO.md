@@ -139,6 +139,20 @@ high 티어: 같은 커밋에서의 비교가 아직 없다(Batch2 기본 vs Bat
 
 **이 절의 변경은 모두 컴파일만 했다. GPU에서는 테스트·게이트·캡처를 하나도 돌리지 않았다.** "그림이 같다"는 코드에서 따진 것이고(같은 클러스터·페이지·광원 집합이 같은 소비자에게 간다), 변경마다 옛 경로로 돌아가는 스위치가 있다. 시간과 그림은 다음 배치에서 스위치 A/B로 잰다.
 
+스위치(모두 새 경로가 기본값이다. 다음 배치에서 문제가 나면 위에서부터 끄면서 가른다 — 실행 검증 없이 넣은 것 가운데 동시성에 기대는 순서):
+
+| 스위치 | 기본 | 끄면 | 항목 |
+|---|---|---|---|
+| `visibility.traversal_work_queue` | true | 레벨당 prepare + nodes 패스 | (1) |
+| `shadow.vsm.static_separate` | true | 아틀라스 하나, 변한 캐스터 밑 페이지 전체 다시 그림 | (7) |
+| `shadow.vsm.static_hzb_cull` | true | 움직이는 캐스터를 가림 검사 없이 래스터 | (9) |
+| `visibility.cull_pass_merge` | true | 디스패치마다 패스, 인자 패스 있음 | (2) |
+| `shadow.vsm.fold_small_passes`, `atmosphere.froxels.fold_small_passes`, `visibility.fold_small_passes` | true | 작은 디스패치마다 패스 | (6) |
+| `shadow.vsm.cache_hzb_filter` | true | 변한 캐스터 밑의 모든 페이지가 stale | (10) |
+| `shadow.vsm.min_caster_texels` | 1.0 | 0: 모든 캐스터를 모든 레벨에 | (3) |
+| `shadow.vsm.coarse_pages`, `shadow.vsm.page_dilation` | 2, 0.05 | 0: 굵은 페이지·팽창 없음 | (8) |
+| `atmosphere.froxels.candidates_once`, `atmosphere.froxels.sort_head_for_slots_only` | true | 두 패스가 각자 컬, 머리 항상 정렬 | (4) |
+
 **(1) 계층 컬을 한 커널의 작업 큐로** — `visibility.traversal_work_queue`(기본 true), `visibility.traversal_worker_groups`(1024).
 V의 컬 한 번(메인 뷰, 그리고 `rasterizeDepth` 요청마다: VSM 태양 레벨·국소광·분류 페이지가 모두 이 경로다 — VSM에 따로 된 계층 컬은 없다)이 노드 순회를 레벨마다 `prepare.nodes` + `nodes` 두 패스로 돌던 것을(깊이 5에서 단계당 10패스), 노드 항목을 작업 큐로 쓰는 디스패치 하나(`nodes.p1` / `nodes.p2`, `CullNodes.hlsl` QUEUE=1)로 바꿨다. 원본의 persistent cull(`NaniteHierarchyTraversal.ush`)과 같은 구조다: 고정된 수의 그룹을 띄우고, 웨이브 하나가 작업자 하나로 큐가 빌 때까지 돈다.
 - 큐의 단어: `VS_NODE_WRITE`(예약), `VS_NODE_COMMIT`(여기까지 저장됨), `VS_NODE_READ`(여기까지 가져감), `VS_NODE_PENDING`(처리가 안 끝난 항목 수). 작업자는 COMMIT 아래에서만 CAS로 한 웨이브만큼 가져가고, 자식은 예약 → 저장 → **예약 순서대로** COMMIT을 올린다(자기 앞 구간이 올라올 때까지 CAS 반복). 그래서 읽는 쪽이 본 항목은 항상 저장이 끝난 것이다 — 원본은 버퍼를 미리 지우고 "아직 안 쓰인 칸"을 표식으로 가리는데, 여기 노드 버퍼는 프레임마다 내용이 정해지지 않은 그래프 버퍼라 지우는 비용(32 MB) 대신 순서 있는 공개를 썼다.
