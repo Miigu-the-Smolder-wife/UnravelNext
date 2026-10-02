@@ -17,7 +17,8 @@
 // (CardFrameSources.hlsl) - the screen probes' rays and the reflections read those.
 #ifndef UNX_LUMEN_HIT_INDIRECT_HLSLI
 #define UNX_LUMEN_HIT_INDIRECT_HLSLI
-#include "Passes/SurfaceCache/CardLayout.hlsli"
+#include "Scene.hlsli"
+#include "Passes/SurfaceCache/CardLighting.hlsli"
 #include "Passes/GI/LumenTranslucencyVolume.hlsli"
 #include "Passes/GI/LumenRadianceCache.hlsli"
 
@@ -50,6 +51,7 @@ struct LhiRules
     float skyLeakingInvDistance; // 1 / the distance at which a hit takes the whole of it
     float skyLeakingReflection;  // its share at the reflections' hits
     float distantScreenTrace, distantSlopeTolerance, distantStepOffsetBias;  // ScreenTrace.hlsli sctDistantTrace
+    bool foliageTransmission;    // surface_cache.foliage_transmission (lhiFoliageThrough)
 };
 // cardFrameSrv 0xFFFFFFFF (no cards): no rule.
 LhiRules lhiRules(uint cardFrameSrv)
@@ -64,8 +66,38 @@ LhiRules lhiRules(uint cardFrameSrv)
     r.distantSlopeTolerance = asfloat(a.w);
     r.skyLeaking = asfloat(b.xyz);
     r.skyLeakingReflection = asfloat(b.w);
-    r.distantStepOffsetBias = asfloat(frame.Load(MC_FRAME_RULES + 32));
+    const uint2 c = frame.Load2(MC_FRAME_RULES + 32);
+    r.distantStepOffsetBias = asfloat(c.x);
+    r.foliageTransmission = (c.y & 1u) != 0;
     return r;
+}
+
+// The light through a leaf at a card-lit hit (surface_cache.foliage_transmission; a Foliage material's transmission).
+// The cards hold each side of a two-sided surface on its own card - the capture draws it from both sides, a side seen
+// from behind showing its back - so what reaches the hit's side through the leaf is the light on the other side's card:
+// the read with the face turned (the resident level, no feedback). A hit's own lighting keeps (1 - t) of its side
+// (HitShading.hlsli: the Foliage class's diffuse albedo); before this the t share was lost at every card-lit hit, and a
+// sunlit canopy seen from below - by a probe, a mirror - was dark where the direct view shows the sun through the leaves.
+// The reference's cards have no transmission either (its card direct light: bUseSubsurfaceTransmission = false; it
+// adds the subsurface colour to the card's albedo instead): this is the renderer's own term.
+// The other side's light is card light: shadowed and occluded as every card's - nothing a closed room lets in.
+//   lhiFoliageThrough  for a hit shaded from the cards' irradiance: the radiance to add (nits) - base colour x
+//                      (1 - metallic) / pi x t x the other side's irradiance;
+//   lhiFoliageFinal    for a hit that takes the cards' final lighting (which holds the side's whole albedo, not
+//                      (1 - t) of it): (1 - t) of this side's and t of the other side's.
+// face: the hit's geometric normal on the ray's side.
+float3 lhiFoliageThrough(LhiRules r, McFrame f, GpuMaterial m, uint sceneInstance, float3 position, float3 face)
+{
+    if (!r.foliageTransmission || materialClass(m) != MATERIAL_FOLIAGE || !(m.transmission > 0)) return 0;
+    const ClSample behind = clReadCardsAt(f, sceneInstance, position, -face, CL_READ_IRRADIANCE, false, 0, uint2(0, 0));
+    if (!behind.valid) return 0;
+    return saturate(m.baseColor) * ((1 - m.metallic) * saturate(m.transmission) / 3.14159265) * (behind.direct + behind.indirect);
+}
+float3 lhiFoliageFinal(LhiRules r, McFrame f, GpuMaterial m, uint sceneInstance, float3 position, float3 face, float3 final)
+{
+    if (!r.foliageTransmission || materialClass(m) != MATERIAL_FOLIAGE || !(m.transmission > 0)) return final;
+    const ClSample behind = clReadCardsAt(f, sceneInstance, position, -face, CL_READ_FINAL, false, 0, uint2(0, 0));
+    return behind.valid ? lerp(final, behind.final, saturate(m.transmission)) : final;
 }
 
 #ifdef UNX_GI_SKY_HLSLI

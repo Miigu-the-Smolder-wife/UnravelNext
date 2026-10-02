@@ -119,7 +119,8 @@ void CardRadiosityTraceGen()
         {
             // (the cone of a ray of the 4 x 4 hemisphere map: about 20 degrees half angle)
             const ClSample cards = clReadCardsHiRes(f, s.sceneInstance, s.position, s.geometricNormal, CL_READ_FINAL, 0.37 * hit.t, traceCoord);
-            if (cards.valid) radiance = cards.final;
+            // (a leaf: (1 - t) of its side's light and t of the other side's - LumenHitIndirect.hlsli lhiFoliageFinal)
+            if (cards.valid) radiance = lhiFoliageFinal(lhiRules(P[0].x), f, m, s.sceneInstance, s.position, s.geometricNormal, cards.final);
             else
             {
                 // no card: the hit's direct light through the material's constants

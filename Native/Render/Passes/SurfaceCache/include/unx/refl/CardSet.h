@@ -18,6 +18,7 @@ struct CardHitRules
     float skyLeaking[3] = { 0, 0, 0 };  // lumen.skylight_leaking x lumen.skylight_leaking_tint (0: none)
     float skyLeakingReflection = 0.25f; // lumen.skylight_leaking_reflection_average_albedo
     float distantStepOffsetBias = 0;    // reflection.lumen_distant_screen_trace_step_offset_bias
+    bool foliageTransmission = true;    // surface_cache.foliage_transmission
 };
 
 struct CardSet

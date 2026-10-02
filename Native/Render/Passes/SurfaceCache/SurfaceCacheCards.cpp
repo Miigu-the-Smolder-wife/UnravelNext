@@ -208,6 +208,7 @@ SurfaceCacheCardSettings SurfaceCacheCardSettings::fromQuality(const QualityConf
         h.distantScreenTrace = flag("reflection.lumen_distant_screen_traces", true) && distant > rayLength ? distant - rayLength : 0.0f;
         h.distantSlopeTolerance = (float)std::max(num("reflection.lumen_distant_screen_trace_depth_threshold", 2.0), 0.0);
         h.distantStepOffsetBias = (float)num("reflection.lumen_distant_screen_trace_step_offset_bias", 0.0);
+        h.foliageTransmission = flag("surface_cache.foliage_transmission", true);
     }
     s.direct = flag("surface_cache.direct_lighting", true);
     s.radiosity = flag("surface_cache.radiosity", true);

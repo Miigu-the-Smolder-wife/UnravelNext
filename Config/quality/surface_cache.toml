@@ -37,6 +37,11 @@ lighting_feedback = true              # cells a reflection or GI hit read since 
                                       # (reference: r.LumenScene.Lighting.Feedback 1); half of the budget left after new cells.
                                       # Mesh cards: a card page a reader of the high levels (a reflection, the radiosity)
                                       # read within the last two updates is relit at 4 x the speed
+foliage_transmission = true           # (mesh cards) a ray hit on a leaf (a Foliage material with transmission) lit from its cards
+                                      # also takes the light on the leaf's other side through it: the card facing the other way
+                                      # (LumenHitIndirect.hlsli lhiFoliageThrough). NOT in the reference - its cards have no
+                                      # transmission (it adds the subsurface colour to the card albedo); false: the t share of a
+                                      # leaf's light is lost at card-lit hits, as before
 direct_analytic = true                # each of the cell's 8 lights: its unshadowed irradiance by the light's integral, one shadow
                                       # ray to the light's centre (the reference's default path: a cell's value is the same at
                                       # every update; area lights cast hard shadows in the cache). false: one random point on

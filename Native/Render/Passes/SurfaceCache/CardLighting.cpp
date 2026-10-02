@@ -22,7 +22,7 @@ namespace
 constexpr uint32_t kTile = 8, kProbeSpacing = 4, kBuckets = 16;
 constexpr uint32_t kPageLightBytes = 16, kUniformBytes = 32, kTileLightBytes = 64, kTileShadowBytes = 72, kTraceThreads = 576;
 constexpr uint32_t kSelectHead = 64, kPageTiles = 256;  // (a page of 128 x 128 texels: the most tiles one listed page adds)
-constexpr uint32_t kFrameBytes = 160;  // (CardLayout.hlsli: 40 words, 37 in use)
+constexpr uint32_t kFrameBytes = 160;  // (CardLayout.hlsli: 40 words, 38 in use)
 // The structural bound of one dispatch (Docs/Status/DISPATCH_BOUNDS_KO.md): a thread traces at most one ray.
 constexpr uint32_t kThreadsPerDispatch = 262144;
 const char* const kStore[2] = { "Passes/SurfaceCache/CardDirectStore.SKY0", "Passes/SurfaceCache/CardDirectStore.SKY1" };
@@ -102,7 +102,7 @@ struct CardLighting::Impl
                                      none, none, none, none,
                                      bits(h.farStart), bits(h.skyLeakingInvDistance), bits(h.distantScreenTrace), bits(h.distantSlopeTolerance),
                                      bits(h.skyLeaking[0]), bits(h.skyLeaking[1]), bits(h.skyLeaking[2]), bits(h.skyLeakingReflection),
-                                     bits(h.distantStepOffsetBias), 0, 0, 0 };
+                                     bits(h.distantStepOffsetBias), h.foliageTransmission ? 1u : 0u, 0, 0 };
         std::memcpy(k, words, sizeof words);
     }
 };

@@ -4,7 +4,8 @@
 //   surface         its material at the ray cone's footprint (textures, decals), its emission, and the light of the mesh
 //                   cards of its instance (CardLighting.hlsli clReadCards: direct light with the sun, radiosity) through
 //                   the material - diffuse albedo x E / pi and the specular albedo x E / pi (the lobe at the hit sees the
-//                   cards' light as uniform); no light sample, no shadow ray;
+//                   cards' light as uniform); no light sample, no shadow ray; a leaf also takes the other side's
+//                   card light through it (LumenHitIndirect.hlsli lhiFoliageThrough);
 //   without cards   (a deforming instance: skin, wind; a texel the cards do not cover) the sun through one shadow ray
 //                   to the disk's centre and, with localSample, one local-light sample with its shadow ray
 //                   (HitLocalSample.hlsli: a mirror showed such surfaces unlit); the indirect light the card frame
@@ -130,6 +131,9 @@ RlHit rlShadeHit(RtSceneSrvs scene, RtHit hit, float3 origin, float3 direction, 
         if (localSample) L.local = rtHitLocalSample(scene, s, m, -direction, footprint, 1e-3 + 2e-4 * distance(s.position, g_cameraPosition), hitSeed);
     }
     o.radiance = rtHitRadiance(m, s.normal, -direction, L, coneSpread) + lhiSkyLeakingReflection(rules, s.normal);
+    // a leaf lit from its cards: the other side's light through it (LumenHitIndirect.hlsli)
+    if (fromCards)
+        o.radiance += lhiFoliageThrough(rules, mcFrame(cardFrame), m, s.sceneInstance, s.position, dot(s.geometricNormal, direction) > 0 ? -s.geometricNormal : s.geometricNormal);
     if (any(isnan(o.radiance)) || any(isinf(o.radiance))) o.radiance = 0;
     return o;
 }

@@ -258,6 +258,10 @@ void LgTraceGen()
             // a hit without cards: one local-light sample (HitLocalSample.hlsli; experiment 128: none, as the reference)
             if (!fromCards && (P[3].w & 128) == 0) L.local = rtHitLocalSample(scene, s, m, -r.Direction, footprint, lgBias(s.position), seed);
             radiance = rtHitRadiance(m, s.normal, -r.Direction, L, footprintPerMetre);
+            // a leaf lit from its cards: the other side's light through it (LumenHitIndirect.hlsli)
+            if (fromCards)
+                radiance += lhiFoliageThrough(lhiRules(P[5].x), mcFrame(P[5].x), m, s.sceneInstance, s.position,
+                                              dot(s.geometricNormal, r.Direction) > 0 ? -s.geometricNormal : s.geometricNormal);
         }
         // lumen.skylight_leaking (LumenHitIndirect.hlsli; 0 by default: nothing)
         radiance += lhiSkyLeaking(lhiRules(P[5].x), r.Direction, hit.t);

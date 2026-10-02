@@ -109,7 +109,8 @@ void LumenTranslucencyVolumeTraceGen()
         if (s.frontFace || (m.classFlags & MATERIAL_TWO_SIDED) != 0)
         {
             const ClSample cards = clReadCards(mcFrame(P[5].x), s.sceneInstance, s.position, s.geometricNormal, CL_READ_FINAL);
-            if (cards.valid) radiance = cards.final;
+            // (a leaf: (1 - t) of its side's light and t of the other side's - LumenHitIndirect.hlsli lhiFoliageFinal)
+            if (cards.valid) radiance = lhiFoliageFinal(lhiRules(P[5].x), mcFrame(P[5].x), m, s.sceneInstance, s.position, s.geometricNormal, cards.final);
             else
             {
                 if ((m.classFlags & MATERIAL_EMISSIVE_VISIBLE_ONLY) != 0) m.emissive = 0;

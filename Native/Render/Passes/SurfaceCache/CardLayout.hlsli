@@ -17,7 +17,8 @@
 //   the mesh cards' end; 0: none), 29 asuint(1 / the skylight leaking's full distance, 1/m), 30 asuint(the distant
 //   screen traces' length past the rays' end, m; 0: none), 31 asuint(their slope compare tolerance), 32..34
 //   asuint(the skylight leaking's colour; 0: none), 35 asuint(its share at the reflections' hits), 36 asuint(the
-//   distant screen traces' step offset bias), 37..39 unused.
+//   distant screen traces' step offset bias), 37 flags (bit 0: a leaf's hit takes the other side's card light through
+//   the leaf - surface_cache.foliage_transmission), 38, 39 unused.
 // The record buffers are raw here (the loaders hide it).
 #ifndef UNX_CARD_LAYOUT_HLSLI
 #define UNX_CARD_LAYOUT_HLSLI
