@@ -601,6 +601,8 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
                 }
             }
         }
+        // (lighting channels, Scene.hlsli: the fragment's instance; the FAR field holds only lights that light every instance)
+        g_lightChannels = instanceLightingChannels(loadInstance(id.instance).flags);
         for (uint i = 0; i < range.y; ++i)
         {
             const uint lightIndex = froxelLightBuffered(froxels, indexBase, range, i, lightWords);
@@ -697,6 +699,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
 #endif
             radiance += f * El * (abs(cosL) * visibility);
         }
+        g_lightChannels = 7u;
         if (fieldOn)
         {
             // the field: bins above the horizon band for n (front), and for -n (the Foliage back side)

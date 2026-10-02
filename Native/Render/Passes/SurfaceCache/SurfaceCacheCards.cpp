@@ -394,7 +394,7 @@ struct SurfaceCacheCards::Impl
                     ++waiting;
                     continue;
                 }
-                scene->addInstance(i, *cards, matrixOf(g));
+                scene->addInstance(i, *cards, matrixOf(g), scene::instanceLightingChannels(g.flags));
                 t.state = 2;
                 t.transformRevision = g.transformRevision;
                 continue;

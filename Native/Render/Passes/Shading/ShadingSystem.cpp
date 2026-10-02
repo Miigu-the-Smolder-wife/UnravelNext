@@ -859,6 +859,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         if (tileLights)
         {
             ID3D12PipelineState* tileKernel = fc.shaders.compute("Passes/Lights/TileLights");
+            const uint32_t channelsShared = fc.scene.lightingChannelsShared();  // (a FAR light lights every instance)
             tilePass.setup = [=](PassBuilder& b) {
                 b.use(v.depth, Use::SrvCompute);
                 b.use(v.gbuffer, Use::SrvCompute);
@@ -871,11 +872,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             tilePass.execute = [=](PassContext& c) {
                 const auto [row0, row1] = passTileRows(c);
                 if (row1 <= row0) return;
-                const uint32_t k[8] = { c.srv(v.depth), c.srv(v.gbuffer), c.srv(v.froxelLights), c.srv(edgeTiles), c.uav(tileRecords), o.tilesX, row0,
-                                        r.vsmTileLit.valid() ? c.srv(r.vsmTileLit) : gpu::kNone };
+                const uint32_t k[12] = { c.srv(v.depth), c.srv(v.gbuffer), c.srv(v.froxelLights), c.srv(edgeTiles), c.uav(tileRecords), o.tilesX, row0,
+                                         r.vsmTileLit.valid() ? c.srv(r.vsmTileLit) : gpu::kNone, channelsShared, 0, 0, 0 };
                 c.cmd->SetPipelineState(tileKernel);
                 c.bindFrameConstants(cb);
-                c.computeConstants(k, 8);
+                c.computeConstants(k, 12);
                 c.cmd->Dispatch(o.tilesX, row1 - row0, 1);
             };
         }
@@ -1296,6 +1297,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             const TextureRef covGbuffer = g.createTexture({ "m.ml.cov gbuffer", W, H, 1, 1, DXGI_FORMAT_R32G32_UINT });
             const TextureRef covWord = g.createTexture({ "m.ml.cov material word", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
             const TextureRef covDepth = g.createTexture({ "m.ml.cov depth", W, H, 1, 1, DXGI_FORMAT_R32_FLOAT });
+            // (the nearest fragment's lighting channels: the instance's samples take no light its instance is not lit by)
+            const TextureRef covChannels = g.createTexture({ "m.ml.cov lighting channels", W, H, 1, 1, DXGI_FORMAT_R8_UINT });
             std::array<ID3D12PipelineState*, 4> covKernel{};
             for (int mode = 0; mode < 4; ++mode) covKernel[mode] = fc.shaders.compute(("Passes/Shading/MegaLightsCoverage.MODE" + std::to_string(mode)).c_str());
             g.addPass("m.ml.cov.nearest", QueueType::Graphics,
@@ -1332,11 +1335,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           b.use(v.visibleClusters, Use::SrvCompute);
                           b.use(nearest, Use::SrvCompute);
                           b.use(element, Use::SrvCompute);
-                          for (TextureRef t : { covGbuffer, covWord, covDepth }) b.use(t, Use::UavCompute);
+                          for (TextureRef t : { covGbuffer, covWord, covDepth, covChannels }) b.use(t, Use::UavCompute);
                       },
                       [=](PassContext& c) {
                           const uint32_t k[12] = { c.srv(v.coverageRecords), gpu::kNone, c.srv(nearest), c.srv(element), gpu::kNone, c.srv(v.visibleClusters), 0, 0,
-                                                   c.uav(covGbuffer), c.uav(covWord), c.uav(covDepth), 0 };
+                                                   c.uav(covGbuffer), c.uav(covWord), c.uav(covDepth), c.uav(covChannels) };
                           c.bindFrameConstants(cb);
                           c.computeConstants(k, 12);
                           c.cmd->SetPipelineState(covKernel[3]);
@@ -1348,7 +1351,9 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             cview.depth = covDepth;
             cview.gbuffer = covGbuffer;
             cview.visId = {};
-            MegaLightsFrame cml = megaLightsSample(fc, cview, covWord, areaLights, ltcSrv, signature, "coverage");
+            MegaLightsOptions covOptions;
+            covOptions.channels = covChannels;
+            MegaLightsFrame cml = megaLightsSample(fc, cview, covWord, areaLights, ltcSrv, signature, "coverage", covOptions);
             if (!cml.on) fail("M.shading: the coverage layer's shading.mega_lights instance could not start");
             ID3D12PipelineState* covShade = fc.shaders.compute((std::string("Passes/Shading/MegaLightsShade.AREA") + (areaLights ? "1" : "0") + ".LAYERED0.FULL1").c_str());
             // Subsurface fragments take that class's variant in a dispatch of its own - its two specular lobes and the light
@@ -1975,6 +1980,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         {
             if (covTlCapacity == 0 || covTlCapacity > 65535) fail("shading.coverage_tile_lights_capacity must be in [1, 65535]");
             ID3D12PipelineState* tlKernel = fc.shaders.compute("Passes/Lights/CoverageTileLights");
+            const uint32_t channelsShared = fc.scene.lightingChannelsShared();  // (a FAR light lights every instance)
             g.addPass("m.coverage.tilelights", QueueType::Graphics,
                       [&](PassBuilder& b) {
                           b.use(v.coverageRecords, Use::SrvCompute);
@@ -1984,7 +1990,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           b.use(covTlField, Use::UavCompute);
                       },
                       [=](PassContext& c) {
-                          const uint32_t k[8] = { c.srv(v.coverageRecords), c.srv(v.coverageTileList), c.srv(v.froxelLights), c.uav(covTlField), covTlCapacity, 0, 0, 0 };
+                          const uint32_t k[8] = { c.srv(v.coverageRecords), c.srv(v.coverageTileList), c.srv(v.froxelLights), c.uav(covTlField), covTlCapacity,
+                                                  channelsShared, 0, 0 };
                           c.cmd->SetPipelineState(tlKernel);
                           c.bindFrameConstants(cb);
                           c.computeConstants(k, 8);

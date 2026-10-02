@@ -17,6 +17,29 @@
 #include "../../../Reference/GpuTracer/shared/Lights.hlsli"
 #include "Passes/Lights/LightFunction.hlsli"
 
+// A rect with barn doors as the point x samples it (Scene.hlsli lightBarnDoorRect): the sampler's rect becomes the part
+// of the emitter x sees past the doors, so a shadow ray goes to a point that lights x and the estimate's area is the
+// visible one - the part the shading's integral is over (AreaLight.hlsli). false: x sees none of it.
+bool rtLightBarnDoors(GpuLight g, float3 x, inout RtLight l)
+{
+    if (g.barnDoor == 0 || lightType(g) != LIGHT_RECT) return true;
+    float3 centre = g.position - x;
+    float2 halfSize = 0.5 * g.size;
+    if (!lightBarnDoorRect(g, g.position - x, cross(g.forward, g.right), centre, halfSize)) return false;
+    l.position = x + centre;
+    l.size = 2 * halfSize;
+    return true;
+}
+// The specular scale of the light rtLocalLightFinish sampled last, over its diffuse one (the record's intensity carries
+// the diffuse scale): what rtLocalLightBrdfCos multiplies the hit's specular lobes by. 1 until a light is sampled.
+static float g_rtLightSpecular = 1;
+// UNX_RT_LIGHT_COMPONENTS 0 before this file: a sample reads none of the record's pad word - the plain range window (no
+// falloff exponent, no draw-distance fade), a rect with barn doors unclipped, the light's specular scale as its
+// diffuse one (a library at the DXIL size limit; it says so in its header).
+#ifndef UNX_RT_LIGHT_COMPONENTS
+#define UNX_RT_LIGHT_COMPONENTS 1
+#endif
+
 static uint g_rtLightData = 0xFFFFFFFFu;
 RtLight rtLightFetch(uint i)
 {
@@ -277,6 +300,21 @@ RtLocalSample rtLocalLightFinish(RtSceneSrvs scene, RtLocalChoice c, float3 x, f
     RtLight l;
     if (li >= g_lightCount) l = rtFxLight(li - g_lightCount);
     else l = rtLightFetch(li);
+    // The record's pad word (RayScene.cpp; 0 for an FX light): bit 0 - a falloff exponent or a draw distance; bit 1 - a
+    // rect with barn doors; bits 16..31 - half(specular scale / diffuse scale - 1). The indirect and diffuse scales are
+    // in the record's intensity (what GI carries on).
+#if UNX_RT_LIGHT_COMPONENTS
+    const uint components = li < g_lightCount ? l.pad : 0u;
+    g_rtLightSpecular = 1 + f16tof32(components >> 16);
+#else
+    const uint components = 0u;
+#endif
+    const float3 centre = l.position;
+    GpuLight own = (GpuLight)0;
+    if ((components & 3u) != 0) own = loadLight(li);
+#if UNX_RT_LIGHT_COMPONENTS
+    if ((components & 2u) != 0 && !rtLightBarnDoors(own, x, l)) return o;  // (the sample's point: on the part x sees)
+#endif
     RtLightSample s;
     if (!rtLightSample(l, x, u1, u2, s) || !(s.pdf > 0)) return o;
     o.valid = true;
@@ -285,13 +323,12 @@ RtLocalSample rtLocalLightFinish(RtSceneSrvs scene, RtLocalChoice c, float3 x, f
     o.wi = s.wi;
     o.distance = s.distance;
     o.weight = s.L / (s.pdf * c.probability);
-    // A light with a falloff exponent or a draw distance (the record's pad bit 0, RayScene.cpp): the sampler's window is
-    // the plain range window - the weight takes the light's own (Scene.hlsli lightWindow: the exponent's form, the
-    // view's fade) over it. The scales are in the record's intensity (indirect x diffuse: what GI carries on).
-    if (l.pad != 0 && li < g_lightCount)
+    // The sampler's window is the plain range window at the sampled rect's centre: the weight takes the light's own
+    // (Scene.hlsli lightWindow at the emitter's centre: the exponent's form, the view's fade) over it.
+    if ((components & 3u) != 0)
     {
         const float plain = rtLightWindow(l, x);
-        o.weight *= plain > 0 ? lightWindow(loadLight(li), length(l.position - x)) / plain : 0.0;
+        o.weight *= plain > 0 ? lightWindow(own, length(centre - x)) / plain : 0.0;
     }
     if (l.type == kRtLightPoint || l.type == kRtLightSpot)
         o.weight *= lightFunction(b.Load(80), li, l.forward, l.right, -s.wi, footprintWidth / max(s.distance, 1e-4), g_time);
@@ -339,17 +376,18 @@ float3 rtLocalLightBrdfCos(GpuMaterial m, float3 n, float3 v, float3 wi, bool di
     const float alpha = modelAlpha(s.roughness);
     const float3 f0 = modelF0(s);
     const float3 compensation = 1 + f0 * (1 / modelDirectionalAlbedo(NoV, s.roughness) - 1);
-    // (the unscaled lobe: R's light records carry one scale - indirect x diffuse, RayScene.cpp - for both lobes)
-    const float3 specular = shSpecularLobe(f0, alpha, compensation, n, v, wi, NoV, NoL) * NoL;
+    // (the lobe without the direct shading's scale state: the specular lobes here take the sampled light's specular
+    // scale over its diffuse one, g_rtLightSpecular - the record's intensity carries indirect x diffuse)
+    const float3 specular = shSpecularLobe(f0, alpha, compensation, n, v, wi, NoV, NoL) * (NoL * g_rtLightSpecular);
     const float3 base = diffuse + specular;
     if ((m.classFlags & MATERIAL_LAYERED) != 0 && !foliage)
     {
         // A9 layers (HitShading.hlsli rtHitCoat: the coat lobe widened by the hit's cone)
         const ModelCoat coat = rtHitCoat(m);
-        if (coat.cover > 0) return (1 - coat.cover) * base + coat.cover * (modelCoatLobe(coat, n, v, wi) + modelCoatUnder(s, coat, n, v, wi)) * NoL;
+        if (coat.cover > 0) return (1 - coat.cover) * base + coat.cover * (modelCoatLobe(coat, n, v, wi) * g_rtLightSpecular + modelCoatUnder(s, coat, n, v, wi)) * NoL;
         const ModelSheen sheen = modelSheenOf(m);
         // (the cloth blend: the base's specular lobe x (1 - cloth))
-        if (any(sheen.color > 0)) return modelSheenKeep(sheen, NoV) * (base - specular * sheen.cloth) + sheen.color * modelSheenLobe(sheen.roughness, n, v, wi) * NoL;
+        if (any(sheen.color > 0)) return modelSheenKeep(sheen, NoV) * (base - specular * sheen.cloth) + sheen.color * modelSheenLobe(sheen.roughness, n, v, wi) * (NoL * g_rtLightSpecular);
     }
     return base;
 }

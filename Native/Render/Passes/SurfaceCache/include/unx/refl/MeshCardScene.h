@@ -142,7 +142,8 @@ public:
 
     // The cards of one instance (mesh space cards of its mesh, the instance's object -> world: rotation, uniform scale,
     // translation). Returns its mesh cards index, mc::kNone when none of its cards passes the size rule.
-    uint32_t addInstance(uint32_t sceneInstance, const scene::MeshCards& cards, const float3x4& objectToWorld);
+    // lightingChannels: the instance's (scene::instanceLightingChannels): its cards take the lights that light it.
+    uint32_t addInstance(uint32_t sceneInstance, const scene::MeshCards& cards, const float3x4& objectToWorld, uint32_t lightingChannels = 1);
     // A rigid move (same scale): the cards follow, nothing is captured again.
     void setTransform(uint32_t sceneInstance, const float3x4& objectToWorld);
     // The instance's cards leave the atlas and the scene (hidden or removed instance, changed mesh, scale or materials:
@@ -219,6 +220,7 @@ private:
         float scale = 1;
         float rotation[3][3] = {};  // columns = the mesh axes in world space (unit)
         bool mostlyTwoSided = false;
+        uint32_t lightingChannels = 1;
     };
     struct PageEntry  // FLumenPageTableEntry
     {

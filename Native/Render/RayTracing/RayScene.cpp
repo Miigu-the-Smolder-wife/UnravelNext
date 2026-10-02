@@ -1925,7 +1925,12 @@ void RayScene::updateLightGrid(FramePassContext& fc)
         mix(&l.range, 4); mix(&l.spotInner, 4); mix(&l.spotOuter, 4); mix(&l.size, 8); mix(&shadow, 4);
         // (the light components the records hold: the scales, the temperature's tint, what sets the window)
         mix(&l.diffuseScale, 4); mix(&l.indirectIntensity, 4); mix(&l.temperature, 4); mix(&l.falloffExponent, 4); mix(&l.maxDrawDistance, 4);
+        mix(&l.specularScale, 4); mix(&l.barnDoorLength, 4);
     }
+    // (a rect's image: its mean colour, as M published it into the GPU records)
+    const std::vector<gpu::Light>& published = fc.scene.lights();
+    for (size_t i = 0; i < lights.size() && i < published.size(); ++i)
+        if (published[i].sourceTexture != 0) mix(&published[i].sourceMean, 4);
     const size_t n = lights.size();
     mix(&n, sizeof n);
     const float3 origin = m_scene.originOffset();  // C9: positions relative to the frame's origin
@@ -1952,15 +1957,25 @@ void RayScene::updateLightGrid(FramePassContext& fc)
             r.spotScale = 1.0f / std::max(ci - co, 1e-4f);
             r.spotOffset = -co * r.spotScale;
             // (what a hit's light sample carries on is indirect light: the light's indirect and diffuse scales)
-            r.intensity = l.intensity * l.indirectIntensity * l.diffuseScale;
+            // (a diffuse scale of 0 counts as 1e-4, as ShadingCommon.hlsli: the specular scale over it stays exact)
+            const float diffuseScale = std::max(l.diffuseScale, 1e-4f);
+            r.intensity = l.intensity * l.indirectIntensity * diffuseScale;
             r.range = std::max(l.range, 1e-3f);
             r.color = scene::lightColor(l);  // (with its colour temperature)
+            if (i < published.size() && published[i].sourceTexture != 0)
+            {
+                const float3 mean = gpu::rgb9e5ToFloat(published[i].sourceMean);  // (a rect's image: its mean colour)
+                r.color = { r.color.x * mean.x, r.color.y * mean.y, r.color.z * mean.z };
+            }
             r.size[0] = l.size.x;
             r.size[1] = l.size.y;
             r.castShadow = l.castShadow ? 1u : 0u;
-            // pad bit 0: the hit's weight takes the light's own window (HitLocalLights.hlsli rtLocalLightFinish)
+            // pad (HitLocalLights.hlsli rtLocalLightFinish): bit 0 - the hit's weight takes the light's own window; bit 1 -
+            // a rect with barn doors (the sample's point lies on the part the hit sees); bits 16..31 - the specular scale
+            // over the diffuse one, half(ratio - 1)
             const bool punctual = l.type == scene::LightType::Point || l.type == scene::LightType::Spot;
-            r.pad = (punctual && l.falloffExponent > 0) || l.maxDrawDistance > 0 ? 1u : 0u;
+            r.pad = ((punctual && l.falloffExponent > 0) || l.maxDrawDistance > 0 ? 1u : 0u) |
+                    (l.type == scene::LightType::Rect && l.barnDoorLength > 0 ? 2u : 0u) | (gpu::halfFloatBits(l.specularScale / diffuseScale - 1.0f) << 16);
             lo = { std::min(lo.x, r.position.x - r.range), std::min(lo.y, r.position.y - r.range), std::min(lo.z, r.position.z - r.range) };
             hi = { std::max(hi.x, r.position.x + r.range), std::max(hi.y, r.position.y + r.range), std::max(hi.z, r.position.z + r.range) };
             ranges.push_back(r.range);

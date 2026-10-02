@@ -16,10 +16,12 @@
 // P[2] = { downsampled width, height, factor | N << 8 | flags << 16 (1: guide by history, 2: merge rays), LTC table }
 // P[3] = { minimum sample weight, hidden weight, hidden weight without history, history distance threshold } (floats)
 // P[4] = { vis id, visible clusters (UNX_NONE: static reprojection), sets' tiles X, tiles Y }
-// Lighting channels (Scene.hlsli): the pixel's instance - its vis id's - gives the point's channels; a light in none of
-// them weighs 0 and is never sampled, so m.ml.shade needs no test. An instance without a vis id (the coverage layer's,
-// the hair records'): every channel.
-// P[5] = { B2 stable area lights' mask (UNX_NONE: none), the tile list (raw; MegaLightsTiles.hlsl), 0, 0 }
+// Lighting channels (Scene.hlsli): the pixel's instance - its vis id's, or for an instance on another surface (the
+// coverage layer's) the channels its surface pass wrote, P[5].z - gives the point's channels; a light in none of them
+// weighs 0 and is never sampled, so m.ml.shade needs no test. Neither (the hair records' instance): every channel -
+// the hair's shading tests its body's instance.
+// P[5] = { B2 stable area lights' mask (UNX_NONE: none), the tile list (raw; MegaLightsTiles.hlsl), the pixels'
+//          lighting channels (R8_UINT; UNX_NONE: the vis id's instance), 0 }
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
@@ -89,7 +91,12 @@ void main(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID)
 #endif
     }
 
-    if (P[4].x != UNX_NONE && P[4].y != UNX_NONE)
+    if (P[5].z != UNX_NONE)
+    {
+        Texture2D<uint> channels = ResourceDescriptorHeap[P[5].z];
+        surfacePoint.channels = channels[pixel];
+    }
+    else if (P[4].x != UNX_NONE && P[4].y != UNX_NONE)
     {
         Texture2D<uint> visIds = ResourceDescriptorHeap[P[4].x];
         const uint visId = visIds[pixel];

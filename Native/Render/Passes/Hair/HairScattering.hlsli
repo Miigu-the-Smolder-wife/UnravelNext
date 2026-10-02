@@ -132,6 +132,15 @@ HairStrand hairStrand(float3 outgoing, float eta, float3 absorption, float betaM
     }
     return s;
 }
+// The strand as a local light with a specular scale lights it: the fibre's surface reflection (R, the primary
+// highlight) is the light's specular part and takes 'scale' (the light's specular scale over its diffuse one); what
+// went through the fibre (TT, TRT, the tail) and the volume's multiple scattering stay with the diffuse scale the
+// illuminance carries. (Unreal's hair BSDF returns its whole response as transmission, on the diffuse scale alone.)
+HairStrand hairStrandSpecular(HairStrand s, float scale)
+{
+    [loop] for (uint k = 0; k < HAIR_NODES; ++k) s.r[k] *= scale;
+    return s;
+}
 float hairLobeShift(float tilt, uint order) { return order == 0 ? -2 * tilt : order == 1 ? tilt : order == 2 ? 4 * tilt : 0; }
 float hairLobeVariance(float variance, uint order) { return variance * (order == 0 ? 1 : order == 1 ? 0.25f : 4); }
 // The width-averaged kernel. spread: variance added to every lobe's inclination; forward: the light arrives over the

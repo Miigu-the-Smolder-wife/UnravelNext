@@ -137,7 +137,7 @@ float3 volumeLit(VolumeConstants c, float3 offset, float3 D, float g, float foot
                                  : type == LIGHT_DISK ? SH_PI * light.size.x * light.size.x * facing
                                  : type == LIGHT_SPHERE ? SH_PI * light.size.x * light.size.x
                                                         : 2.0f * light.size.y * light.size.x + SH_PI * light.size.y * light.size.y;
-                El = light.color * (light.intensity * volumetric * area * shAreaWindow(light, p) / d2);
+                El = lightMeanColor(light) * (light.intensity * volumetric * area * lightBarnDoorFar(light, -toLight) * shAreaWindow(light, p) / d2);
             }
             float v = 1;
             if (lightCastsShadow(light) && c.shadow[0] != UNX_NONE && c.shadow[5] != UNX_NONE) v = shadowVisibilityDirect(sh, index, worldPos, -D);

@@ -12,6 +12,12 @@
 #define REFL_NO_CARDS 1  // (at the DXIL limit: the overflow jobs' hits read no mesh cards - ReflectionShade.hlsli g_reflCardFrame)
 #define REFL_NO_ACCUMULATOR (JOB == 2)  // (the G library is at the DXIL limit: ReflectionShade.hlsli g_reflAccPool)
 #define GI_BATCH_CORNERS CORNERS
+#if SKY == 0
+// (these libraries are at the DXIL limit: the overflow jobs' light samples at hits take the lights without the
+// components of the record's pad word - falloff exponent, draw-distance fade, barn doors, specular scale;
+// HitLocalLights.hlsli)
+#define UNX_RT_LIGHT_COMPONENTS 0
+#endif
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/Reflection/ReflectionRay.hlsli"
 #include "Passes/Reflection/ReflectionHit.hlsli"

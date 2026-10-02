@@ -259,6 +259,7 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
                   c.cmd->SetPipelineState(tilesPso);
                   c.cmd->Dispatch(dsTilesX, dsTilesY, 1);
               });
+    const TextureRef channels = options.channels;
     ID3D12PipelineState* samplePso = fc.shaders.compute(areaLights ? "Passes/Shading/MegaLightsSample.AREA1" : "Passes/Shading/MegaLightsSample.AREA0");
     g.addPass("m.ml.sample", QueueType::Graphics,
               [&](PassBuilder& b) {
@@ -279,6 +280,7 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
                       b.use(sets, Use::SrvCompute);
                       b.use(prevDepth, Use::SrvCompute);
                   }
+                  if (channels.valid()) b.use(channels, Use::SrvCompute);
                   b.use(samples, Use::UavCompute);
                   b.use(keys, Use::UavCompute);
               },
@@ -289,7 +291,7 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
                                            dsW, dsH, s.factor | (s.count << 8) | ((guide ? 1u : 0u) | (s.merge ? 2u : 0u)) << 16, ltcSrv,
                                            asUint(s.minSampleWeight), asUint(s.hiddenWeight), asUint(s.hiddenWeightMiss), asUint(s.distanceThreshold),
                                            hasVis ? c.srv(visId) : none, hasVis ? c.srv(clusters) : none, tilesX, tilesY,
-                                           stable, c.srv(tileList), 0, 0 };
+                                           stable, c.srv(tileList), channels.valid() ? c.srv(channels) : none, 0 };
                   c.cmd->SetPipelineState(samplePso);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 24);

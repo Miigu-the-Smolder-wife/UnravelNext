@@ -74,6 +74,9 @@ public:
     // Per scene light the SRV of its source texture (scene::Light::sourceTexture: a rect's image), gpu::kNone for a light
     // without one: what GpuScene::setLightSourceTextures publishes. Valid after sync().
     std::vector<uint32_t> lightSourceTextures() const;
+    // The same lights' image means (gpu::rgb9e5 of level 0's mean linear colour; 0 for a light without an image). A
+    // texture's mean is computed once per upload of the textures.
+    std::vector<uint32_t> lightSourceMeans() const;
     uint64_t gpuBytes() const { return m_gpuBytes; }
 
 private:
@@ -90,6 +93,7 @@ private:
     uint32_t m_revision = UINT32_MAX;
     std::string m_fingerprint;
     std::vector<Resource> m_textures;
+    mutable std::vector<uint64_t> m_meanOf;  // per scene texture: bit 32 = known, bits 0..31 its mean (lightSourceMeans)
     std::vector<Resource> m_coverage;  // per scene texture, cut-out coverage (alpha-tested base colours only)
     std::vector<float> m_slopeRange;
     Resource m_table;

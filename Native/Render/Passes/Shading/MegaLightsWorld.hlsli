@@ -86,7 +86,9 @@ bool mlSampleVisible(RtSceneSrvs scene, float3 x, float3 n, uint light, float2 u
     const GpuLight g = loadLight(light);
     endBias = lightRayEndBias(g, endBias);
     RtLightSample ls;
-    if (!rtLightSample(mlRtLight(g), x, uv.x, uv.y, ls)) return false;
+    RtLight l = mlRtLight(g);
+    if (!rtLightBarnDoors(g, x, l)) return false;  // (a rect with barn doors: the sample's point on the part x sees)
+    if (!rtLightSample(l, x, uv.x, uv.y, ls)) return false;
     RayDesc ray;
     ray.Origin = x + n * (dot(n, ls.wi) < 0 ? -normalBias : normalBias);
     ray.Direction = ls.wi;
