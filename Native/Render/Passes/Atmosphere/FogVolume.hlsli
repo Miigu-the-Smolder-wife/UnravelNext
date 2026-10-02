@@ -13,7 +13,10 @@
 //   integrate FogIntegrate.hlsl, per column front to back: in-scattered radiance and transmittance at each slice's far
 //             face; then zFar more slices from farM to farEndM (equal steps of log depth): the exponential height fog in
 //             closed form (Fog.hlsli fogOpticalDepth) scattering the column's far source - the sun without casters (the
-//             shadow pages are not asked for out there) and the indirect light at farM;
+//             shadow pages are not asked for out there) and the indirect light at farM. The slabs are ordered against the
+//             view's air (atmosphere.fog.air_order: the atmosphere, the particle media), and the frame's cloud layer in
+//             front of surfaces is one more medium of the columns (atmosphere.clouds.veil; the volume then runs without
+//             fog too). The last far slice holds the sky's column: the fog alone;
 //   read      fogAt: one fetch of the integrated volume between its cells. The main view's air lookups (Atmosphere.hlsli
 //             atmosphereAerial / atmosphereAirView) add it, so every layer that takes the air - opaque pixels, the
 //             coverage layer, glass, water, particles - takes the fog at its own depth, and what removes the air from a

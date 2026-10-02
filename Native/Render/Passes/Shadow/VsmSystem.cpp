@@ -1282,7 +1282,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                   });
         // The fog's volume (FogVolume.hlsli): the pages its cells' segments cross (VsmMarkFog.hlsl).
         const FogView fog = fogViewFor(q, fc.frame, main.view.width, main.view.height);
-        if (fog.on)
+        if (fog.on && fog.cells)  // (a volume that holds the cloud layer alone has no cells to shadow)
         {
             ID3D12PipelineState* pf = sh.compute("Passes/Shadow/VsmMarkFog");
             const TextureRef hiz = main.hiz, fogDepth = main.depth;

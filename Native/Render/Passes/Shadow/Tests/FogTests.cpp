@@ -1083,6 +1083,9 @@ int main(int argc, char** argv)
         for (const std::string& o : overrides) tf.quality.applyOverride(o);
         tf.quality.applyOverride("atmosphere.fog.enabled=false");         // the frame's medium (FrameContext::fog) decides
         tf.quality.applyOverride("atmosphere.fog.indirect_light=false");  // (no translucency volume in this frame anyway)
+        // (the twins are the fog alone: FogIntegrate.hlsl's order against the view's air - the atmosphere over the far
+        //  slices' kilometres - is not in them; the frames here hold the form the twins have)
+        tf.quality.applyOverride("atmosphere.fog.air_order=false");
         TestRaster raster(tf);
         raster.install();
         TestHiz hiz;
