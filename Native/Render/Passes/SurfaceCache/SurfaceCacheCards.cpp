@@ -897,6 +897,9 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
     }
 
     // ---- the lighting's shared inputs: sky and sun (GiSky.hlsli), the ray scene
+    // E's grooms on the radiosity rays (HitHair.hlsli): the light header's words 22, 23, before rootConstants. Only when
+    // the frame's density volume is already published - recordHair settles the frame's answer for every later caller.
+    if (fc.resources.hairDensityParams.valid()) rays.recordHair(fc);
     uint32_t sceneWords[8];
     rays.rootConstants(sceneWords);
     const FrameResources& fr = fc.resources;
@@ -908,6 +911,7 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
     const BufferRef fxLights = fr.fxLights, fxLightCount = fr.fxLightCount;
     auto declareShared = [rayScene, atmosphere, luts, fxLights, fxLightCount](PassBuilder& b) {
         rayScene->declareTraversal(b);
+        rayScene->declareHair(b);
         if (atmosphere)
             for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
         if (fxLights.valid()) b.use(fxLights, Use::SrvGraphics);
