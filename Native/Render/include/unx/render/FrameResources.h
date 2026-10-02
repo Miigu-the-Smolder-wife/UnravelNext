@@ -336,7 +336,7 @@ struct FrameResources
                                    // invalid: gi.hit_accumulator_pool off). Readers after
                                    // globalIllumination: SrvCompute (giAccPoolRead)
     // atmosphere.fog (S; Passes/Atmosphere/FogVolume.hlsli): the main view's fog after s.fog.integrate - fogVolume
-    // (Texture3D RGBA16F: in-scattered radiance in nits and transmittance to each slice's far face) and the grid and
+    // (Texture3D RGBA16F: in-scattered radiance x the view's exposure and transmittance to each slice's far face) and the grid and
     // medium (fog; on = false: no fog this frame). Kernels read it through the frame constants (g_fog) inside the air
     // lookups; their passes declare it with declareFog (Frame.h).                                                     [S]
     TextureRef fogVolume;

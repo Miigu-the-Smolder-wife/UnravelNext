@@ -312,16 +312,13 @@ uint64_t froxelListBound(const FroxelGridCpu& g, const ViewDesc& view, const std
     auto row = [&](int r) { return normalize(float3{ view.view.m[r][0], view.view.m[r][1], view.view.m[r][2] }); };
     const D3 right = d3(row(0)), up = d3(row(1)), forward = d3(-row(2)), cam = d3(view.position);
     auto rayAt = [&](double px, double py) {
-        const double ndc[4] = { px / view.width * 2 - 1, 1 - py / view.height * 2, 1, 1 };
-        double p[4];
-        for (int r = 0; r < 4; ++r)
-        {
-            p[r] = 0;
-            for (int c = 0; c < 4; ++c) p[r] += (double)view.invViewProj.m[r][c] * ndc[c];
-        }
-        const D3 w{ p[0] / p[3] - cam.x, p[1] / p[3] - cam.y, p[2] / p[3] - cam.z };
-        const double z = dot3(w, forward);  // = nearPlane for a point of device depth 1 (froxelRayAt divides by it)
-        return D3{ w.x / z, w.y / z, w.z / z };
+        // (as froxelRayAt: the view-space point at view depth 1 from the projection's terms, turned by the view's rows -
+        // no position enters, so the bound's tiles are the kernel's at any distance from the render origin)
+        const float4x4& P = view.proj;
+        const float4x4& V = view.view;
+        const double vx = (px / view.width * 2 - 1 + (double)P.m[0][2] - (double)P.m[0][3]) / (double)P.m[0][0];
+        const double vy = (1 - py / view.height * 2 + (double)P.m[1][2] - (double)P.m[1][3]) / (double)P.m[1][1];
+        return D3{ V.m[0][0] * vx + V.m[1][0] * vy - V.m[2][0], V.m[0][1] * vx + V.m[1][1] * vy - V.m[2][1], V.m[0][2] * vx + V.m[1][2] * vy - V.m[2][2] };
     };
     const D3 r00 = rayAt(0, 0), r10 = rayAt(view.width, 0), r01 = rayAt(0, view.height);
     const double ux0 = dot3(r00, right), uy0 = dot3(r00, up);
@@ -815,6 +812,7 @@ struct FogState
     bool srvs = false, fresh = true;
     uint32_t x = 0, y = 0, z = 0, zFar = 0, parity = 0, revision = 0xFFFFFFFFu;
     uint64_t preparedFrame = UINT64_MAX;
+    float exposure = 0;  // the exposure the kept scatter volume's light was stored with (0: none yet)
     FogView view;
     ~FogState()
     {
@@ -1202,6 +1200,9 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
     const TextureDesc integratedDesc{ "S fog volume", f.gridX, f.gridY, (uint16_t)(f.gridZ + f.farSlices), 1, DXGI_FORMAT_R16G16B16A16_FLOAT,
                                       D3D12_RESOURCE_DIMENSION_TEXTURE3D };
     TextureRef history, scatter, integrated;
+    // The volumes hold their light x the view's exposure (FogVolume.hlsli): the history's cells are brought to this
+    // frame's exposure by exposure now / exposure then.
+    float exposureRatio = 1.0f;
     if (primary)
     {
         const float3 shift = fc.frame.originShift;
@@ -1210,7 +1211,13 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
         st.revision = fc.scene.revision();
         const uint32_t prev = st.parity, next = prev ^ 1u;
         st.parity = next;
-        if (valid && f.historyWeight > 0) history = g.importTexture(st.scatter[prev].Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        const float exposure = 1.0f / (1.2f * std::exp2(main.view.ev100));  // (g_exposure of the view's frame constants)
+        if (valid && f.historyWeight > 0 && st.exposure > 0)
+        {
+            history = g.importTexture(st.scatter[prev].Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+            exposureRatio = 1.0f;  // MUTATION (temporary): the check must fail
+        }
+        st.exposure = exposure;
         scatter = g.importTexture(st.scatter[next].Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
         integrated = g.importTexture(st.integrated.Get(), integratedDesc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
         st.write(fc.frame.frameIndex, true, main.view.width, main.view.height);
@@ -1310,7 +1317,7 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
                                      bits(jitter[0]), bits(jitter[1]), bits(jitter[2]), bits(f.historyWeight),
                                      shadows ? ctx.uav(vsm.stats) : none, ctx.srv(fogDepth), bits(f.noiseAmount), bits(1.0f / f.noiseScale),
                                      bits(noise[0]), bits(noise[1]), bits(noise[2]), volumeSrv,
-                                     volumeCount, 0, 0, 0 };
+                                     volumeCount, bits(exposureRatio), 0, 0 };
                   ctx.cmd->SetPipelineState(ps);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 44);

@@ -10,14 +10,18 @@
 //             samples), per column the slabs' integral; past the cells the closed form in the far slices.
 // Storage tolerance (every comparison with the volume): its texels and the cells' are fp16, and a float written to one
 // is cut toward zero (measured on this hardware: 0.729977 is stored as 0.729492, not as the nearer 0.729980) - a stored
-// value is up to 2^-10 below the one written (relative), and a value past fp16's largest is stored as 65504. A cell's
-// extinction low by 2^-10 moves the optical depth tau to a face by tau 2^-10; its source and the stored radiance add
-// 2^-10 each: transmittance within 2^-10 (1 + tau) + 2e-5, radiance within 2^-10 (3 + tau) + 2e-5 (2e-5: float32 against
-// double over 112 slabs). Two absolute terms, in units of the optical depth (the radiance: x the source per unit of it):
-// a cell's sample point is a float32 position made from the view's matrices (the near plane's point minus the camera:
-// its direction is off by an ulp of the camera's coordinates over the near plane's distance), so the medium is the one a
-// few 1e-6 of the distance away - what that changes of the extinction, per cell (positionSlack: it only matters where
-// the density has an edge, a local volume's fade); and a slab's 1 - e^-tau in float32, 1.2e-7 per slab.
+// value is up to 2^-10 below the one written (relative), and a value past fp16's largest is stored as 65504. The
+// volumes hold their light x the view's exposure (FogVolume.hlsli), so that is the precision of the exposed values:
+// the test reads the volume back, divides by the frame's exposure and compares in nits. A cell's extinction low by
+// 2^-10 moves the optical depth tau to a face by tau 2^-10; its source and the stored radiance add 2^-10 each:
+// transmittance within 2^-10 (1 + tau) + 2e-5, radiance within 2^-10 (3 + tau) + 2e-5 (2e-5: float32 against double
+// over 112 slabs). Under fp16's smallest normal value (6.1e-5: an exposed source per metre in thin fog, an extinction
+// under 6.1e-5 / m, the radiance of the first slices) the cut is an absolute 6e-8 instead (6e-8 / exposure in nits, per
+// metre of the path for a source; x 10 with the history): added per cell where the twin's value is that small. Two more
+// absolute terms, in units of the optical depth (the radiance: x the source per unit of it): a cell's sample point is a
+// float32 position - the camera's + the ray's x the depth, an ulp of its coordinates and 1e-6 of its distance off -, so
+// the medium is the one that far away: what that changes of the extinction, per cell (positionSlack: it only matters
+// where the density has an edge, a local volume's fade); and a slab's 1 - e^-tau in float32, 1.2e-7 per slab.
 //  1. closed     fogOpticalDepth against the integral of fogExtinctionAt by Simpson's rule (pieces split at the height
 //                where the density is held): rays up, down, level, across the fog's height and the hold, the start
 //                distance, the cap of 64 - 1e-7 (the quadrature's own error); the GPU's float evaluation against the twin
@@ -32,8 +36,7 @@
 //                against L(d) = S (1 - e^(-sigma d)), T(d) = e^(-sigma d), near and far slices, history off and on (the
 //                history adds what the sun's transmittance changes over a cell: 5e-4); thin and dense media, a phase
 //                function with g = 0.6 toward a sun inside the view; strong forward scattering toward the full sun, whose
-//                radiance passes fp16's largest value (the volume is in nits, not exposed: it is cut at 65504 - this
-//                check fails as long as that is so);
+//                radiance passes 65504 nits (3e5: the exposed volume holds it);
 //  4. falloff    the same with height falloff for columns looking up and down: the twin at the frame's sample points
 //                (storage tolerance); with the history on the blend of the frames' samples, 0.1 of each new one (plus its
 //                cut in fp16 each frame, 10 x 2^-10) - in every compared column, the last row's too, whose cells' centres
@@ -50,9 +53,19 @@
 //  7. planar     a planar reflection view's volume (fogPrepareSecondary): no fog before the mirror plane;
 //  8. noise      the density's variation: bounds, zero mean (3 standard errors of 2^24 lattice values and of the sample),
 //                the lattice's period 256, GPU against the twin (2e-5); in a frame with the wind's drift.
+//  9. rays       froxelRayAt (FroxelCommon.hlsli: the air volume's, the fog's and the sampled lights' rays) with the camera
+//                at the render origin, 1,000 m and 10,000 m from it, for the main view and a cropped planar reflection
+//                view: the pixel's ray at unit view depth against the camera's own basis in double precision - 0.01 pixel
+//                (float32 on unit vectors gives 1e-3 pixel; 1 pixel = 2 tan(fov / 2) / height); the local volumes in a
+//                frame 1,000 m from the render origin (section volumes);
+// 10. exposure   the history across an exposure change (the cells are rescaled by exposure now / exposure then): the
+//                same 40 frames with the last one 4 stops up (a power of two: the same bits), with the last one 2.6
+//                stops up (3 x 2^-10: the last frame's cut, in the cells and in the volume), with the last 12 frames 2.6
+//                stops up (the history's cut, 10 x 2^-10, + 2 x 2^-10) - each against the run without the change, in
+//                nits, and against the twin.
 //   unx_test_shadow_fogtests [--cpu] [--only name,name] [--no-debug-layer] [--width W --height H] [--set key=value]
 //   (--cpu: the parts that need no device; names: closed grid noise uniform reader falloff start shadow far volumes
-//    rebase planar)
+//    rebase planar rays exposure)
 #include "TestRaster.h"
 
 #include "../../Atmosphere/AtmosphereReference.h"
@@ -214,18 +227,14 @@ struct ViewCpu
 {
     ViewDesc v;
     D3 cam;
-    // The ray through a pixel position scaled to unit view depth (FroxelCommon.hlsli froxelRayAt).
+    // The ray through a pixel position scaled to unit view depth (FroxelCommon.hlsli froxelRayAt: the view-space point
+    // at view depth 1 from the projection's terms, turned to the world by the view matrix's rows).
     D3 rayAt(double px, double py) const
     {
-        const double ndc[4] = { px / v.width * 2 - 1, 1 - py / v.height * 2, 1, 1 };
-        double p[4];
-        for (int r = 0; r < 4; ++r)
-        {
-            p[r] = 0;
-            for (int c = 0; c < 4; ++c) p[r] += (double)v.invViewProj.m[r][c] * ndc[c];
-        }
-        const D3 w{ p[0] / p[3], p[1] / p[3], p[2] / p[3] };
-        return (w - cam) * (1.0 / v.nearPlane);
+        const double x = (px / v.width * 2 - 1 + (double)v.proj.m[0][2] - (double)v.proj.m[0][3]) / (double)v.proj.m[0][0];
+        const double y = (1 - py / v.height * 2 + (double)v.proj.m[1][2] - (double)v.proj.m[1][3]) / (double)v.proj.m[1][1];
+        return D3{ v.view.m[0][0] * x + v.view.m[1][0] * y - v.view.m[2][0], v.view.m[0][1] * x + v.view.m[1][1] * y - v.view.m[2][1],
+                   v.view.m[0][2] * x + v.view.m[1][2] * y - v.view.m[2][2] };
     }
 };
 
@@ -246,7 +255,11 @@ struct Model
     double E[3] = { 0, 0, 0 };           // lux
     double clip[4] = { 0, 0, 0, 0 };     // a planar reflection view's plane (0: none)
     std::vector<Sample> samples;
+    double exposure = 1;                 // the smallest exposure of the frames blended (the volumes hold their light x it)
+    double cuts = 1;                     // fp16 cuts a cell's value carries: 1, with the history up to 10 (weight 0.9)
 };
+constexpr double kHalfNormal = 6.2e-5;   // under it an fp16 value is a denormal ...
+constexpr double kHalfStep = 5.97e-8;    // ... with this absolute step (2^-24)
 
 double phaseHg(double cosine, double g)
 {
@@ -339,16 +352,18 @@ struct Column
 {
     std::vector<double> T, tau;
     std::vector<std::array<double, 3>> L;
-    std::vector<double> slack;               // per face: the optical depth the float32 sample positions may move (absolute)
+    std::vector<double> slack;               // per face: the optical depth the float32 sample positions and the denormal
+                                             // extinctions may move (absolute)
     std::array<double, 3> perTau{ 0, 0, 0 };  // the column's largest source per unit of optical depth (nits)
+    std::vector<std::array<double, 3>> cut;   // per face: the radiance the denormal sources' cut may move (nits, absolute)
 };
 
-// What a cell's extinction changes by over the distance its float32 sample point may be off: an ulp of the camera's
-// largest coordinate over the near plane's distance, of the point's distance from the camera.
+// What a cell's extinction changes by over the distance its float32 sample point may be off: the camera's position + the
+// ray x the depth - an ulp of the point's coordinates and 1e-6 of its distance from the camera.
 double positionSlack(const Model& m, D3 p, double along, double sigma)
 {
-    const double reach = std::max({ std::abs(m.view.cam.x), std::abs(m.view.cam.y), std::abs(m.view.cam.z), (double)m.view.v.nearPlane });
-    const double step = 2.4e-7 * reach / m.view.v.nearPlane * along + 1e-6;
+    const double reach = std::max({ std::abs(m.view.cam.x), std::abs(m.view.cam.y), std::abs(m.view.cam.z) });
+    const double step = 1.2e-7 * (reach + along) + 1e-6 * along + 1e-6;
     double worst = 0;
     for (int axis = 0; axis < 3; ++axis)
         for (double side : { -step, step })
@@ -386,6 +401,7 @@ void farSlices(const Model& m, uint32_t cx, uint32_t cy, const float4* sun, cons
         c.tau.push_back(tau);
         c.L.push_back(L);
         c.slack.push_back(c.slack.empty() ? 0.0 : c.slack.back());
+        c.cut.push_back(c.cut.empty() ? std::array<double, 3>{ 0, 0, 0 } : c.cut.back());
     }
 }
 
@@ -397,7 +413,7 @@ Column twinColumn(const Model& m, uint32_t cx, uint32_t cy, const float4* sun, c
     Column c;
     const double toRay = len(m.view.rayAt((cx + 0.5) * m.grid.cellPx, (cy + 0.5) * m.grid.cellPx));
     double T = 1, tau = 0, slack = 0;
-    std::array<double, 3> L{ 0, 0, 0 };
+    std::array<double, 3> L{ 0, 0, 0 }, cut{ 0, 0, 0 };
     for (uint32_t z = 0; z < m.grid.z; ++z)
     {
         const double d = (depthOfSlice(m.grid, z + 1.0) - depthOfSlice(m.grid, z)) * toRay;
@@ -418,6 +434,10 @@ Column twinColumn(const Model& m, uint32_t cx, uint32_t cy, const float4* sun, c
                 c.perTau[k] = std::max(c.perTau[k], cell.albedo[k] * m.E[k] * sunT[k] * phase);
             }
         }
+        // (the cell's stored values where they are fp16 denormals: an absolute cut)
+        if (sigma < kHalfNormal) slack += kHalfStep * m.cuts * d;
+        for (int k = 0; k < 3; ++k)
+            if (source[k] * m.exposure < kHalfNormal) cut[k] += T * d * kHalfStep * m.cuts / m.exposure;
         const double t = std::exp(-sigma * d);
         for (int k = 0; k < 3; ++k) L[k] += T * (sigma > 1e-7 ? source[k] * ((1 - t) / sigma) : source[k] * d);
         T *= t;
@@ -426,6 +446,7 @@ Column twinColumn(const Model& m, uint32_t cx, uint32_t cy, const float4* sun, c
         c.tau.push_back(tau);
         c.L.push_back(L);
         c.slack.push_back(slack);
+        c.cut.push_back(cut);
     }
     farSlices(m, cx, cy, sun, lit, T, tau, L, c);
     return c;
@@ -440,23 +461,28 @@ Column closedColumn(const Model& m, uint32_t cx, uint32_t cy, const float4* sun)
     const double toRay = len(ray);
     const D3 dir = ray * (1.0 / toRay);
     const double phase = phaseHg(ref::dot(dir, m.sun), m.medium.g);
-    double T = 1, tau = 0;
-    std::array<double, 3> L{ 0, 0, 0 };
+    double T = 1, tau = 0, slack = 0;
+    std::array<double, 3> L{ 0, 0, 0 }, cut{ 0, 0, 0 };
     for (uint32_t z = 0; z < m.grid.z; ++z)
     {
+        const double before = tau, d = (depthOfSlice(m.grid, z + 1.0) - depthOfSlice(m.grid, z)) * toRay;
         tau = opticalDepthClosed(m.medium, m.view.cam, dir, 0.0, depthOfSlice(m.grid, z + 1.0) * toRay);
-        const double face = std::exp(-tau);
+        const double face = std::exp(-tau), sigma = (tau - before) / d;  // (the slice's mean extinction)
         const double sunT[3] = { sun[z].x, sun[z].y, sun[z].z };
+        if (sigma < kHalfNormal) slack += kHalfStep * m.cuts * d;
         for (int k = 0; k < 3; ++k)
         {
-            L[k] += m.medium.albedo[k] * m.E[k] * sunT[k] * phase * (T - face);
-            c.perTau[k] = std::max(c.perTau[k], m.medium.albedo[k] * m.E[k] * sunT[k] * phase);
+            const double perTau = m.medium.albedo[k] * m.E[k] * sunT[k] * phase;
+            if (perTau * sigma * m.exposure < kHalfNormal) cut[k] += T * d * kHalfStep * m.cuts / m.exposure;
+            L[k] += perTau * (T - face);
+            c.perTau[k] = std::max(c.perTau[k], perTau);
         }
         T = face;
         c.T.push_back(T);
         c.tau.push_back(tau);
         c.L.push_back(L);
-        c.slack.push_back(0.0);
+        c.slack.push_back(slack);
+        c.cut.push_back(cut);
     }
     farSlices(m, cx, cy, sun, nullptr, T, tau, L, c);
     return c;
@@ -484,11 +510,13 @@ std::vector<double> cellBound(const Model& m, uint32_t cx, uint32_t cy)
     return bound;
 }
 
-// The integrated volume read back (RGBA16F: rgb = radiance in nits, a = transmittance at each slice's far face).
+// The integrated volume read back (RGBA16F: rgb = radiance x the frame's exposure, a = transmittance at each slice's far
+// face); at() gives the radiance in nits.
 struct Volume
 {
     std::vector<uint8_t> bytes;
     uint32_t x = 0, y = 0, z = 0;
+    double exposure = 1;  // of the frame that wrote it
     const uint8_t* texel(uint32_t cx, uint32_t cy, uint32_t cz) const
     {
         const size_t pitch = TestFrame::rowPitch(x, 8);
@@ -498,7 +526,7 @@ struct Volume
     {
         uint16_t h[4];
         std::memcpy(h, texel(cx, cy, cz), 8);
-        return { halfToFloat(h[0]), halfToFloat(h[1]), halfToFloat(h[2]), halfToFloat(h[3]) };
+        return { halfToFloat(h[0]) / exposure, halfToFloat(h[1]) / exposure, halfToFloat(h[2]) / exposure, halfToFloat(h[3]) };
     }
     bool sameRadiance(uint32_t cx, uint32_t cy, uint32_t za, uint32_t zb) const { return std::memcmp(texel(cx, cy, za), texel(cx, cy, zb), 6) == 0; }
 };
@@ -632,7 +660,9 @@ void compareFaces(const Volume& v, uint32_t cx, uint32_t cy, const Column& r, ui
         t.worstT = std::max(t.worstT, errT / std::max(r.T[z], 1e-6));
         for (int k = 0; k < 3; ++k)
         {
-            const double tolL = (kUlp * (3 + r.tau[z]) + 2e-5 + e) * r.L[z][k] + r.perTau[k] * (r.slack[z] + 1.2e-7 * (z + 1)) + 1e-6;
+            // (the texel's own cut: 2^-10 of it, or the denormals' step)
+            const double tolL = (kUlp * (2 + r.tau[z]) + 2e-5 + e) * r.L[z][k] + std::max(kUlp * r.L[z][k], kHalfStep / v.exposure) + r.cut[z][k] +
+                                r.perTau[k] * (r.slack[z] + 1.2e-7 * (z + 1)) + 1e-6;
             const double errL = std::abs(g[k] - r.L[z][k]);
             bad = bad || !(errL <= tolL);
             t.worstL = std::max(t.worstL, errL / std::max(r.L[z][k], 1e-3));
@@ -768,7 +798,11 @@ struct Options
     bool mirror = false;                                 // a planar reflection view across mirrorPlane too
     float4 mirrorPlane{};
     int phase = -1;                                      // the read frame's index mod 16 (-1: any)
+    int startPhase = -1;                                 // the first frame's index mod 16 (-1: any): runs of the same frames
     float3 rebase{};                                     // GpuScene::rebase before the first frame
+    float ev100 = 14;                                    // the view's exposure (EV100) ...
+    int evFrames = 0;                                    // ... and that of the run's last evFrames frames
+    float evThen = 14;
 };
 struct Result
 {
@@ -784,6 +818,7 @@ struct Result
     Volume planar;
     std::vector<float4> planarSun;
     uint32_t errors = 0;
+    double exposure = 1;     // the read frame's
 };
 } // namespace
 
@@ -1081,9 +1116,11 @@ int main(int argc, char** argv)
         };
 
         // The model of a frame from the test's inputs: FrameContext::fog and fogVolumes, the quality keys, the scene.
-        auto makeModel = [&](const scene::Scene& sc, const ViewDesc& view, uint64_t first, uint64_t readFrame, double time, bool history, bool planar) {
+        auto makeModel = [&](const scene::Scene& sc, const ViewDesc& view, uint64_t first, uint64_t readFrame, double time, bool history, bool planar, double exposure) {
             Model m;
             m.view = { view, d3(view.position) };
+            m.exposure = exposure;
+            m.cuts = history && !planar ? 10 : 1;
             const FogView fv = shadow::fogViewFor(tf.quality, tf.frame, view.width, view.height);
             m.grid = gridOf(fv);
             m.origin = d3(tf.gpuScene.originOffset());
@@ -1156,28 +1193,35 @@ int main(int argc, char** argv)
             tf.frame.mainView = ViewDesc::fromCamera(sc.cameras[0], W, H, float4x4{});
             tf.frame.mainView.prevViewProj = tf.frame.mainView.viewProj;
             tf.frame.deltaTime = 1.0f / 60;
+            // (frames of nothing until the run starts at its place in the cells' 16 frames)
+            while (o.startPhase >= 0 && tf.frame.frameIndex % 16 != (uint64_t)o.startPhase) probe(2, std::vector<float4>(1), 1, 1, noWords);
             int frames = o.frames;
             if (o.phase >= 0)
                 while ((tf.frame.frameIndex + frames - 1) % 16 != (uint64_t)o.phase) ++frames;
             const uint64_t first = tf.frame.frameIndex;
             const uint32_t cellPx = (uint32_t)tf.quality.integer("atmosphere.fog.cell_px");
-            const ViewDesc mirrorView = o.mirror ? ViewDesc::planarReflection(tf.frame.mainView, o.mirrorPlane, 0, 0, W, H) : ViewDesc{};
+            ViewDesc mirrorView = o.mirror ? ViewDesc::planarReflection(tf.frame.mainView, o.mirrorPlane, 0, 0, W, H) : ViewDesc{};
+            auto exposureOf = [](float ev100) { return (double)(1.0f / (1.2f * std::exp2(ev100))); };
+            r.exposure = exposureOf(o.evFrames > 0 ? o.evThen : o.ev100);
+            const double leastExposure = o.evFrames > 0 ? std::min(exposureOf(o.ev100), exposureOf(o.evThen)) : exposureOf(o.ev100);
             for (int f = 0; f < frames; ++f)
             {
                 const bool read = f + 1 == frames;
                 tf.frame.discontinuity = f == 0 ? kDiscontinuityRestore : 0u;  // (every run starts without history)
                 tf.frame.originShift = f == 0 ? o.rebase : float3{};
+                tf.frame.mainView.ev100 = f >= frames - o.evFrames ? o.evThen : o.ev100;
+                mirrorView.ev100 = tf.frame.mainView.ev100;
                 std::shared_ptr<std::vector<uint8_t>> volumeRb, sunRb, readerRb, debugRb, planarRb;
                 std::vector<float4> sunIn;
                 size_t mainPoints = 0;
                 if (read)
                 {
-                    r.model = makeModel(sc, tf.frame.mainView, first, tf.frame.frameIndex, tf.frame.time, o.history, false);
+                    r.model = makeModel(sc, tf.frame.mainView, first, tf.frame.frameIndex, tf.frame.time, o.history, false, leastExposure);
                     for (const auto& c : o.columns) sunPoints(r.model, c.first, c.second, sunIn);
                     mainPoints = sunIn.size();
                     if (o.mirror)
                     {
-                        r.planarModel = makeModel(sc, mirrorView, first, tf.frame.frameIndex, tf.frame.time, false, true);
+                        r.planarModel = makeModel(sc, mirrorView, first, tf.frame.frameIndex, tf.frame.time, false, true, r.exposure);
                         for (const auto& c : o.columns) sunPoints(r.planarModel, c.first, c.second, sunIn);
                     }
                 }
@@ -1219,8 +1263,8 @@ int main(int argc, char** argv)
                 tf.frame.time += tf.frame.deltaTime;
                 if (read)
                 {
-                    if (volumeRb) r.volume = { *volumeRb, r.fog.gridX, r.fog.gridY, r.fog.gridZ + r.fog.farSlices };
-                    if (planarRb) r.planar = { *planarRb, r.planarModel.grid.x, r.planarModel.grid.y, r.planarModel.grid.z + r.planarModel.grid.zFar };
+                    if (volumeRb) r.volume = { *volumeRb, r.fog.gridX, r.fog.gridY, r.fog.gridZ + r.fog.farSlices, r.exposure };
+                    if (planarRb) r.planar = { *planarRb, r.planarModel.grid.x, r.planarModel.grid.y, r.planarModel.grid.z + r.planarModel.grid.zFar, r.exposure };
                     if (sunRb)
                     {
                         const std::vector<float4> all = floatsOf(*sunRb);
@@ -1350,6 +1394,63 @@ int main(int argc, char** argv)
             report(periodDiffers == 0, "noise on the GPU: the same bits 256 lattice points on (pairs differing)", periodDiffers, 0);
         }
 
+        // ---- 9. The views' rays far from the render origin.
+        if (want("rays"))
+        {
+            struct Place
+            {
+                const char* name;
+                float3 position;
+            };
+            const Place places[3] = { { "the camera at the render origin", { 3, 1.7f, -2 } },
+                                      { "the camera 1,000 m from the render origin", { 800, 1.7f, -600 } },
+                                      { "the camera 10,000 m from the render origin", { -6000, 250, 8000 } } };
+            auto cross3 = [](D3 a, D3 b) { return D3{ a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x }; };
+            for (const Place& place : places)
+            {
+                scene::Camera cam = open.cameras[0];
+                cam.position = place.position;
+                cam.forward = normalize(float3{ 0.37f, -0.21f, 0.9f });
+                const ViewDesc view = ViewDesc::fromCamera(cam, W, H, float4x4{});
+                // the camera's basis and its pixels' rays in double (Math.h lookTo, perspectiveReversedInfinite)
+                const D3 forward = ref::normalize(d3(cam.forward)), right = ref::normalize(cross3(d3(cam.up), forward * -1.0)), up = cross3(forward * -1.0, right);
+                const double tanHalf = std::tan((double)cam.verticalFov * 0.5), aspect = (double)W / H, pixelAngle = 2 * tanHalf / H;
+                auto mainRay = [&](double px, double py) { return right * ((px / W * 2 - 1) * aspect * tanHalf) + up * ((1 - py / H * 2) * tanHalf) + forward; };
+                // a mirror 3 m under the camera, tilted; the reflection view of a part of the main view
+                const D3 n = ref::normalize(D3{ 0.2, 1.0, 0.1 });
+                const double offset = -(ref::dot(n, d3(cam.position)) - 3.0);
+                const uint32_t rx = W / 4, ry = H / 3, rw = W / 2, rh = H / 2;
+                const ViewDesc mirror = ViewDesc::planarReflection(view, float4{ (float)n.x, (float)n.y, (float)n.z, (float)offset }, rx, ry, rw, rh);
+                for (int which = 0; which < 2; ++which)
+                {
+                    const uint32_t w = which == 0 ? W : rw, h = which == 0 ? H : rh;
+                    std::vector<float4> queries;
+                    for (uint32_t iy = 0; iy <= 12; ++iy)
+                        for (uint32_t ix = 0; ix <= 16; ++ix) queries.push_back({ (float)(w * ix / 16.0), (float)(h * iy / 12.0), 0, 0 });
+                    for (int i = 0; i < 600; ++i) queries.push_back({ (float)uni(0, w), (float)uni(0, h), 0, 0 });
+                    const uint32_t count = (uint32_t)queries.size();
+                    std::shared_ptr<std::vector<uint8_t>> rb;
+                    tf.fogParams = 0;
+                    const ViewDesc& v = which == 0 ? view : mirror;
+                    tf.run([&](FramePassContext& fc) { rb = probePass(tf, fc, 5, queries, count, 1, fc.frameConstantsFor(v), noWords, TextureRef{}, TextureRef{}); });
+                    const std::vector<float4> out = floatsOf(*rb);
+                    double worst = 0, worstDepth = 0;
+                    for (uint32_t i = 0; i < count; ++i)
+                    {
+                        D3 want0 = which == 0 ? mainRay(queries[i].x, queries[i].y) : mainRay(rx + (double)queries[i].x, ry + (double)queries[i].y);
+                        if (which == 1) want0 = want0 - n * (2 * ref::dot(n, want0));  // (the mirror's view: the main view's ray reflected)
+                        const D3 got{ out[i].x, out[i].y, out[i].z };
+                        const D3 axis = which == 0 ? forward : forward - n * (2 * ref::dot(n, forward));
+                        worst = std::max(worst, len(got - want0) / pixelAngle);
+                        worstDepth = std::max(worstDepth, std::abs(ref::dot(got, axis) - 1.0));
+                    }
+                    const std::string name = std::string(place.name) + (which == 0 ? ", the main view" : ", a cropped planar reflection view");
+                    logf("%s: %u rays, largest error %.4g pixels, view depth off 1 by up to %.3g\n", name.c_str(), count, worst, worstDepth);
+                    report(worst <= 0.01, name + ": froxelRayAt vs the camera's ray in double (pixels)", worst, 0.01);
+                }
+            }
+        }
+
         const std::array<float, 3> white = { 1, 1, 1 };
         tf.frame.fogVolumes.clear();
 
@@ -1422,13 +1523,14 @@ int main(int argc, char** argv)
             setFog(0.01, 0, 0, 0.6, white);
             const Result phase = run(low, o);
             if (volumeThere(phase, "uniform 0.01, g 0.6")) againstTwin(phase, spread, "uniform 0.01, g 0.6, a 20 klx sun in the view");
-            // strong forward scattering toward the full sun in a dense medium: the radiance passes fp16's largest value
+            // strong forward scattering toward the full sun in a dense medium: the radiance passes 65504 nits (fp16's largest
+            // value, where the volume was cut while it held nits)
             low.sun.illuminance = 128000;
             setFog(0.2, 0, 0, 0.8, white);
             const Result strong = run(low, o);
             if (volumeThere(strong, "uniform 0.2, g 0.8"))
             {
-                uint32_t notFinite = 0, texels = 0, cut = 0, inRange = 0;
+                uint32_t notFinite = 0, texels = 0, past = 0;
                 double largest = 0, largestRef = 0;
                 for (uint32_t z = 0; z < total; ++z)
                     for (uint32_t cy = 0; cy < grid.y; ++cy)
@@ -1444,23 +1546,16 @@ int main(int argc, char** argv)
                 {
                     const Column c = twinColumn(strong.model, spread[i].first, spread[i].second, &strong.sun[i * perColumn]);
                     largestRef = std::max({ largestRef, c.L[total - 1][0], c.L[total - 1][1], c.L[total - 1][2] });
-                    // columns that stay inside the range: the twin as everywhere; the others: the values stored as fp16's largest
-                    if (std::max({ c.L[total - 1][0], c.L[total - 1][1], c.L[total - 1][2] }) < 0.9 * kHalfMax)
-                    {
-                        ++inRange;
-                        compareFaces(strong.volume, spread[i].first, spread[i].second, c, 0, total, nullptr, within, "uniform 0.2, g 0.8");
-                    }
-                    else
-                        for (uint32_t z = 0; z < total; ++z)
-                        {
-                            const std::array<double, 4> g = strong.volume.at(spread[i].first, spread[i].second, z);
-                            for (int k = 0; k < 3; ++k) cut += c.L[z][k] > kHalfMax && g[k] >= kHalfMax ? 1 : 0;
-                        }
+                    compareFaces(strong.volume, spread[i].first, spread[i].second, c, 0, total, nullptr, within, "uniform 0.2, g 0.8");
+                    for (uint32_t z = 0; z < total; ++z)
+                        for (int k = 0; k < 3; ++k) past += c.L[z][k] > kHalfMax ? 1 : 0;
                 }
-                logf("uniform 0.2, g 0.8, 128 klx: the reference's largest radiance over the compared columns %.5g nits; the volume's largest %.5g\n", largestRef, largest);
+                logf("uniform 0.2, g 0.8, 128 klx: the reference's largest radiance over the compared columns %.5g nits; the volume's largest %.5g nits (%.4g exposed); "
+                     "%u compared values are past 65504 nits\n", largestRef, largest, largest * strong.exposure, past);
                 report(notFinite == 0, "uniform 0.2, g 0.8: texels of the volume that are not finite (of " + std::to_string(texels) + ")", notFinite, 0);
-                report(inRange > 10 && within.over == 0, "uniform 0.2, g 0.8: columns away from the sun, vs the twin (faces outside the tolerance)", within.over, 0);
-                report(cut == 0, "uniform 0.2, g 0.8: radiance toward the sun past fp16's 65504 nits is kept (values cut at 65504)", cut, 0);
+                report(past > 1000 && within.over == 0, "uniform 0.2, g 0.8: every column, those past 65504 nits toward the sun too, vs the twin (faces outside the tolerance)",
+                       within.over, 0);
+                report(largest >= 0.99 * largestRef, "uniform 0.2, g 0.8: the volume holds the radiance past 65504 nits (its largest, nits)", largest, 0.99 * largestRef);
             }
             // the density's variation in a frame: drifting in still air, then with the scene's wind
             setFog(0.01, 0.02, 0, 0, white, 0, 0.3, 20);
@@ -1752,6 +1847,112 @@ int main(int argc, char** argv)
                          label.c_str(), up.faces, up.worstL, up.worstT, down.faces, down.worstL, down.worstT, largestBound, heldCells);
                     report(up.faces > 0 && up.over == 0, label + ": closed form, columns looking up (faces outside the cells' bound)", up.over, 0);
                     report(down.faces > 0 && down.over == 0, label + ": closed form, columns looking down (faces outside the cells' bound)", down.over, 0);
+                }
+            }
+        }
+
+        // ---- 10. The history across an exposure change: the same 40 frames with and without it.
+        if (want("exposure"))
+        {
+            scene::Scene level = open;
+            level.cameras[0].position = { 0, 20, 0 };
+            level.cameras[0].forward = { 0, 0, 1 };
+            setFog(0.01, 0.02, 20, 0, { 0.9f, 0.7f, 0.5f });
+            Options o;
+            o.columns = spread;
+            o.history = true;
+            o.frames = 40;
+            o.startPhase = 3;
+            const Result same = run(level, o);
+            struct Change
+            {
+                const char* name;
+                int frames;
+                float ev;
+                double limit;
+            };
+            // (a frame's cut differs between the two runs by 2^-10 of the cells' values and of the volume's; a power of two
+            //  moves the exponents alone)
+            const Change changes[4] = { { "the last frame 4 stops up", 1, 10.0f, 3 * kUlp },
+                                        { "the last frame 2.6 stops up", 1, 11.4f, 3 * kUlp },
+                                        { "the last frame 3.3 stops down", 1, 17.3f, 3 * kUlp },
+                                        { "the last 12 frames 2.6 stops up", 12, 11.4f, kHistoryRounding + 2 * kUlp } };
+            if (volumeThere(same, "exposure: no change"))
+            {
+                const std::vector<double> rounding(1, kHistoryRounding + 5e-4);
+                againstTwin(same, spread, "exposure: 40 frames at EV 14, history on", &rounding);
+                for (const Change& c : changes)
+                {
+                    Options oc = o;
+                    oc.evFrames = c.frames;
+                    oc.evThen = c.ev;
+                    // the readers in the changed frame: fogAt (nits) against the volume read back
+                    for (int i = 0; i < 200; ++i)
+                    {
+                        oc.reader.push_back({ (float)uni(0, 1), (float)uni(0, 1), (float)std::exp(uni(std::log(0.05), std::log(1e5))), 1 });
+                        oc.reader.push_back({ 0, 0, 0, 0 });
+                        oc.reader.push_back({ 0, 1, 0, 0 });
+                    }
+                    const Result r = run(level, oc);
+                    const std::string name = std::string("exposure: ") + c.name;
+                    if (!volumeThere(r, name)) continue;
+                    report(r.model.samples.size() == same.model.samples.size() && r.exposure != same.exposure, name + ": the same frames at another exposure (ratio of the exposures)",
+                           r.exposure / same.exposure, std::exp2(14.0 - c.ev));
+                    againstTwin(r, spread, name + ": the twin", &rounding);
+                    // against the run without the change, in nits, in the compared columns (the twin's allowance for the
+                    // denormals' cut, for both runs)
+                    double worst = 0;
+                    uint32_t faces = 0;
+                    for (size_t i = 0; i < spread.size(); ++i)
+                    {
+                        const Column col = twinColumn(r.model, spread[i].first, spread[i].second, &r.sun[i * perColumn]);
+                        for (uint32_t z = 0; z < total; ++z)
+                        {
+                            const std::array<double, 4> a = same.volume.at(spread[i].first, spread[i].second, z), b = r.volume.at(spread[i].first, spread[i].second, z);
+                            for (int k = 0; k < 3; ++k)
+                            {
+                                const double allowed = 2 * col.cut[z][k] + kHalfStep * (1 / same.exposure + 1 / r.exposure);
+                                worst = std::max(worst, (std::abs(a[k] - b[k]) - allowed) / std::max(a[k], 1e-9));
+                            }
+                            ++faces;
+                        }
+                    }
+                    // every texel: the transmittance does not know the exposure; a power of two leaves the radiance's bits
+                    uint64_t alphaDiffers = 0, mantissaDiffers = 0, compared = 0;
+                    const double ratio = r.exposure / same.exposure;
+                    const bool power = std::exp2(std::round(std::log2(ratio))) == ratio;
+                    for (uint32_t z = 0; z < total; ++z)
+                        for (uint32_t cy = 0; cy < grid.y; ++cy)
+                            for (uint32_t cx = 0; cx < grid.x; ++cx)
+                            {
+                                uint16_t ha[4], hb[4];
+                                std::memcpy(ha, same.volume.texel(cx, cy, z), 8);
+                                std::memcpy(hb, r.volume.texel(cx, cy, z), 8);
+                                alphaDiffers += ha[3] != hb[3] ? 1 : 0;
+                                for (int k = 0; k < 3 && power; ++k)
+                                {
+                                    const double va = halfToFloat(ha[k]), vb = halfToFloat(hb[k]);
+                                    if (va < kHalfNormal || vb < kHalfNormal || va > 4000 || vb > 4000) continue;  // (normal values inside the range in both)
+                                    ++compared;
+                                    mantissaDiffers += vb != va * ratio ? 1 : 0;
+                                }
+                            }
+                    logf("%s: %u faces of the compared columns, largest relative difference from the run without the change %.3e (in nits)\n", name.c_str(), faces, worst);
+                    report(worst <= c.limit, name + ": the radiance in nits is the unchanged run's (largest rel. difference)", worst, c.limit);
+                    report(alphaDiffers == 0, name + ": the transmittance is the unchanged run's (texels whose bits differ)", (double)alphaDiffers, 0);
+                    if (power) report(compared > 100000 && mantissaDiffers == 0, name + ": a power of two moves the exponent alone (values with other bits)", (double)mantissaDiffers, 0);
+                    uint32_t overFilter = 0;
+                    for (uint32_t i = 0; i < 200 && r.reader.size() >= 6 * 200; ++i)
+                    {
+                        const float4 q = oc.reader[3 * i], at = r.reader[6 * i];
+                        std::array<double, 4> range{};
+                        const std::array<double, 4> expect = readerAt(r.volume, grid, W, H, q.x, q.y, q.z, &range);
+                        const double got[4] = { at.x, at.y, at.z, at.w };
+                        bool bad = false;
+                        for (int k = 0; k < 4; ++k) bad = bad || !(std::abs(got[k] - expect[k]) <= 3.0 / 256 * range[k] + (kUlp + 1e-5) * std::abs(expect[k]) + 1e-7);
+                        overFilter += bad ? 1 : 0;
+                    }
+                    report(r.reader.size() >= 6 * 200 && overFilter == 0, name + ": fogAt gives the volume's nits (queries outside 3/256 of the texels' spread + 2^-10)", overFilter, 0);
                 }
             }
         }
@@ -2071,6 +2272,27 @@ int main(int argc, char** argv)
                 }
                 report(leastOpacity > 0.2, "18 volumes: each of the first 16 is in its column (least opacity through a centre)", leastOpacity, 0.2);
                 report(pastSixteen == 0, "18 volumes: the 17th and 18th leave their columns clear (opacity)", pastSixteen, 0);
+            }
+            // 1,000 m from the render origin (no rebase): the same room, the camera and the volumes moved together
+            {
+                const float3 away{ 800, 0, -600 };
+                scene::Scene farRoom = room;
+                farRoom.cameras[0].position = room.cameras[0].position + away;
+                std::vector<FogVolumeDesc> moved = twoVolumes;
+                for (FogVolumeDesc& v : moved) v.centre[0] += away.x, v.centre[1] += away.y, v.centre[2] += away.z;
+                setFog(0.004, 0.02, 0, 0, { 0.6f, 0.8f, 1.0f });
+                tf.frame.fogVolumes = moved;
+                Options of;
+                of.columns = lattice;
+                const Result r = run(farRoom, of);
+                if (volumeThere(r, "volumes 1,000 m from the render origin"))
+                {
+                    uint32_t inside = 0;
+                    std::vector<uint8_t> clear;
+                    volumeCells(r, lattice, inside, clear);
+                    againstTwin(r, lattice, "ellipsoid + box in the height fog, 1,000 m from the render origin");
+                    report(inside > 500, "1,000 m from the render origin: cells of the compared columns that sample a volume", inside, 500);
+                }
             }
             tf.frame.fogVolumes.clear();
         }

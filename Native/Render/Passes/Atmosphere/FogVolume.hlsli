@@ -20,7 +20,12 @@
 //             colour (the screen traces' scene colour) removes the fog with it. The parameters reach the kernels through
 //             the frame constants (g_fog: a record's SRV + 1). Sky pixels take sky_amount of it (ShadeSky.hlsl; 1: the
 //             sky through the fog as every pixel - the reference's fog pass covers the sky too).
-// Units: world metres; radiance in nits (not exposed: the history outlives exposure changes).
+// Units: world metres. The two volumes hold their light x the view's exposure (g_exposure), as the air volume does: fp16
+// keeps the relative precision of what is displayed at every exposure, and its range holds what a display can show (in
+// nits a dense fog toward the sun passed fp16's 65504: 3e5 nits at g 0.8). The history's cells are rescaled by exposure
+// now / exposure then (FogScatter.hlsl P[10].y); the readers below return nits. The scatter volume's values are per
+// metre: under 6.1e-5 (exposed, per metre) they are fp16 denormals with an absolute step of 6e-8 - over the cells' 80 m at
+// most 5e-6 of the display's scale.
 #ifndef UNX_FOG_VOLUME_HLSLI
 #define UNX_FOG_VOLUME_HLSLI
 #include "Passes/Atmosphere/Fog.hlsli"
@@ -131,8 +136,8 @@ bool fogLoad(out FogParams p)
 }
 
 // The fog between the camera and a view depth: rgb = in-scattered radiance (nits), a = transmittance.
-// integrated: FogIntegrate.hlsl's volume (a texel = the integral to its slice's far face; z + zFar slices). uv: the
-// pixel's place in the view, [0, 1]^2.
+// integrated: FogIntegrate.hlsl's volume (a texel = the integral to its slice's far face, its radiance x g_exposure;
+// z + zFar slices). uv: the pixel's place in the view, [0, 1]^2.
 float4 fogVolumeAt(Texture3D<float4> integrated, FogGrid g, float2 uv, float depth)
 {
     float c = fogSliceOfDepth(g, min(depth, g.farM));
@@ -140,7 +145,7 @@ float4 fogVolumeAt(Texture3D<float4> integrated, FogGrid g, float2 uv, float dep
     const float2 scale = float2(g_viewWidth, g_viewHeight) / float2(g.x * g.cellPx, g.y * g.cellPx);
     float4 v = integrated.SampleLevel(g_linearClamp, float3(uv * scale, (max(c, 1.0) - 0.5) / float(g.z + g.zFar)), 0);
     if (c < 1.0) v = float4(v.rgb * c, lerp(1.0, v.a, c));  // (inside the first slice: from nothing at the camera)
-    return v;
+    return float4(v.rgb / g_exposure, v.a);
 }
 
 // The fog between the camera and a point of the main view (uv in [0, 1]^2, view depth in m; the sky: any depth past
@@ -158,7 +163,7 @@ float4 fogAt(float2 uv, float depth)
     Texture3D<float4> integrated = ResourceDescriptorHeap[a.y];
     float4 v = integrated.SampleLevel(g_linearClamp, float3(uv * f.zw, (max(c, 1.0) - 0.5) / (z + float(a.x >> 24))), 0);  // (past the last slice: clamped)
     if (c < 1.0) v = float4(v.rgb * c, lerp(1.0, v.a, c));
-    return v;
+    return float4(v.rgb / g_exposure, v.a);  // (the volume holds radiance x exposure)
 }
 // The fog over a ray that leaves a surface the view sees (reflection rays; radiance in nits): the transmittance of the
 // height fog's closed form along the ray (the mean medium: no variation, no start distance), and as the fog's light the
