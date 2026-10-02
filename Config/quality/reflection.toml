@@ -141,6 +141,14 @@ lumen_sample_scene_color_at_hit = true # a world ray's hit on a surface the view
                                        # not shaded (reference: SampleSceneColorAtHit 1 = with screen traces); needs lumen_screen_traces
 lumen_sample_scene_color_relative_depth_thickness = 0.01
 lumen_sample_scene_color_normal_threshold = 85.0   # degrees between the seen surface's normal and the direction to the camera
+lumen_distant_screen_traces = true     # a world ray that left the ray scene walks the depth buffer over the stretch past its end
+                                       # (r.Lumen.Reflections.DistantScreenTraces: 16 linear steps; the reference starts them at its
+                                       # ray tracing culling radius and drops them with a far field). Here every instance is in the
+                                       # ray scene to gi.ray_length_m, so the traces run only while that length is shorter than
+                                       # the distance below - with the default 10 km rays: never. Needs lumen_sample_scene_color_at_hit
+lumen_distant_screen_trace_max_distance_m = 2000.0     # DistantScreenTraces.MaxTraceDistance (200000 cm), from the ray's start
+lumen_distant_screen_trace_depth_threshold = 2.0       # DistantScreenTraces.DepthThreshold: the slope compare tolerance
+lumen_distant_screen_trace_step_offset_bias = 0.0      # DistantScreenTraces.StepOffsetBias: moves the centre of the step jitter
 lumen_screen_trace_continue = true     # a ray whose screen trace gave no value starts its world ray where that trace ended in
                                        # front of the scene (the space crossed is empty), not at its surface
 lumen_screen_trace_pullback = 0.08     # ... less this distance, m (reference: HardwareRayTracing.PullbackBias 8)
