@@ -586,3 +586,120 @@ Unreal의 재질 그래프와 Unity 재질이 흔히 쓰는 입력 가운데 렌
 레코드: `DecalRecord` 80 → 128 B, `DecalFrame` 128 → 144 B. `Native/Host`의 `UnxDecalDesc`에는 새 필드가 없다(기본값으로 들어간다) — 호스트 ABI는 후속이다.
 
 실행해서 확인할 것(순서대로): `unx_test_decal_decaltests`(레코드 크기가 바뀌었다), `unx_test_host_hostdecal`, 입자 레이어 테스트(`fx.particles.soft`가 꺼진 기본 `ParticleLayerFrame`은 전과 같은 값이어야 한다), 그 뒤 still: 바닥에 걸친 연기 스프라이트(소프트 켬/끔), 카메라가 스프라이트 안에 있을 때, 멀어지는 데칼(화면 크기 페이드), 수명 페이드 구간, 법선만·roughness만 데칼, `InstanceNoDecals` 인스턴스.
+
+## 12. 쇼케이스 씬 (2026-10-03, 브랜치 `w/cache`) — 코드 작성·빌드 통과, 실행 안 함
+
+2026-10-03에 쓴 기능 가운데 그것을 쓰는 씬이 없는 것이 많다(A/B 배치는 씬이 쓰는 것만 잰다). 생성 씬 세 개를 추가했다: `Tools/SceneGen/src/Showcase.cpp`, 씬 id 12~14, 이름은 `diagnosticScenes()`에 들어 있어 게이트가 `--scene showcase_bathhouse`처럼 바로 안다(`allScenes()`의 스윕과 그 시험 집합에는 넣지 않았다).
+
+**돌린 것은 없다.** 생성기도 돌리지 않았다: 씬 파일을 만든 적이 없고 그림을 본 적이 없다. `generate()`가 부르는 `scene::validate`의 통과도 첫 실행에서 확인된다(규칙은 읽어서 맞췄다). 노출(EV), 광원 세기, 카메라 구도는 계산으로 정한 값이다 — 첫 still에서 고쳐야 할 수 있다. `unx_test_scenegen`에 세 씬의 내용 검사를 썼다(실행 안 함).
+
+### 12.1 씬에 든 것
+
+| 씬 | 장소 | 든 것 |
+|---|---|---|
+| `showcase_bathhouse` | 타일 욕실 10 × 8 × 4 m, 저녁 해(고도 24°)가 +Z 벽의 창으로 든다 | 창 2개 = **창틀(불투명) + 유리(Glass)가 한 메시**(왼쪽 인스턴스는 재질 override로 호박색 유리), 가운데 틈의 **유리만으로 된** 스테인드 글라스 2장(파랑·빨강), 오른쪽 창 밖의 **그림자 전용** 덧문(`InstanceShadowOnly`), 햇빛 자리의 양치 화분(`InstanceNoSelfShadow`), 욕조의 물(Water 클래스)과 그 위의 **김**(`FogVolume`: sourcePlane·riseSpeed·turbulence), 호박색 유리 갓(열린 원뿔, 유리만의 캐스터) 아래 전구가 있는 펜던트 등 3개(그림자 있는 점광), 해석 광원이 없는 9 cm **종이등 6개**(emissive 광원 카드 규칙), 벤치 위의 **이미지 + 반 도어가 있는 rect 광원**, 욕조 위 스폿(쿠키), 벽등(IES), 가운데 펜던트의 gobo, **인물**(Subsurface 피부, 눈 모델의 눈 2개, 가닥 머리카락 groom, cloth 로브; 라이팅 채널 0+1, `InstanceNoDecals`)과 **채널 1만의 림 라이트**, 유약 타일(clearcoat + height 맵 4 mm), 젖은 바닥 타일(UV 45° 회전·타일링, coat ior 1.33), 디테일 맵 나무(벤치·창틀), 버텍스 컬러 줄무늬 수건, 데칼 3개(벽 얼룩: 각도 페이드, 바닥 표식: base colour만, 인물 발밑 물웅덩이: roughness만) |
+| `showcase_atrium` | 안뜰 16 × 16 m, 높이 9 m의 유리 지붕, 해 고도 62° | 지붕 = **강철 격자(불투명) + 유리 4색(투명·호박·파랑·초록)이 한 메시**, 바닥의 색 햇빛 조각, 갤러리(4 m)와 유리만의 난간 8장, 갤러리 아래 6 cm emissive 등 6개와 그림자 있는 스폿 2개, 화분의 카드 나무 4그루(Foliage 투과, 바람), 옻칠(clearcoat) 벤치, cloth 배너 3장과 카펫, **덩어리 유리**(한 면 재질: 구 r 0.6 m, 붉은 각기둥) — 그림자 광선의 흡수, 디테일 맵 돌바닥, 데칼 3개(나침반: 화면 크기 페이드, 포스터: 틴트 + 페이드 인, 균열: 법선만) |
+| `showcase_shore` | 호수(반지름 118 m) 남쪽 기슭, 해 고도 10° | 지형 4 × 4 km(5 m 격자), 호수 물(Water), 갈대 600 × scale, 젖은 판자(coat 1.33)의 잔교와 그 끝의 **등불**(금속 틀 + 유리 4장이 한 메시, 그림자 있는 점광 + IES + flicker), 물가의 젖은 바위, 건너편 기슭에서 시작하는 **숲**(카드 나무 40,000 × scale: 가장자리에서 가장 빽빽하고 1.1 km 뒤에서 끝난다)과 호수 둘레의 풀 150,000 × scale(far field의 인스턴스), 2.6 km 밖의 능선(마루 1.1~1.4 km)이 **구름층(0.9~2.4 km) 안으로** 들어간다, 권운 0.5, 높이 안개 + 갈대밭의 안개 볼륨, `rain` 카메라의 비(extras: 8 mm/h, wetness 0.9) |
+
+### 12.2 카메라와 그것이 쓰는 스위치
+
+"스위치"는 그 기능의 다른 쪽을 고르는 설정 키 또는 게이트 인자다. "없음"은 씬 데이터(플래그·재질 필드)로만 켜지는 기능이다: 스위치로 A/B를 낼 수 없고 그 카메라의 그림 자체가 확인이다.
+
+`showcase_bathhouse`
+
+| 카메라 | 보이는 것 | 스위치 |
+|---|---|---|
+| `room` | 방 전체: 색 햇빛 조각, 물과 김, 등, 종이등의 빛, 벽 얼룩 데칼 | `shadow.vsm.translucent_tint`, `surface_cache.direct_tint`, `raytracing.see_through_translucent`, `surface_cache.mesh_cards_emissive_light_sources`, `atmosphere.fog.local_volumes` |
+| `panes` | 욕조 끝에서 창 벽 쪽: 바닥과 물 위의 유리색(왼쪽 호박, 가운데 파랑·빨강), 덧문의 줄무늬 그림자(덧문은 보이지 않는다) | `shadow.vsm.translucent_tint`(뷰의 태양), `surface_cache.direct_tint`(카드의 태양: 레이어 `cardfinal`, `gi`), `raytracing.see_through_translucent`(끄면 유리가 GI·그림자 광선을 막는다: 방의 바운스가 꺼진다). 그림자 전용·혼합 메시: 없음 |
+| `bath` | 물과 김, 김 속의 쿠키 스폿·gobo 빛줄기, 바닥 표식 데칼 | `atmosphere.fog.local_volumes`(김), `--fog-volume`(게이트의 볼륨으로 바꿔 보기). 광원 함수: 스위치 없음, extras 필요(12.4) |
+| `figure` | 머리와 어깨: 피부, 이 카메라를 보는 눈, 머리카락, 로브의 천, 채널 1 림 라이트(인물에만 닿는다), 덧문 줄무늬 햇빛 | `shading.eye_model`, `shading.subsurface_scatter`, `raytracing.hair`, `visibility.coverage_hair`. 라이팅 채널·cloth: 없음 |
+| `lamp` | 가운데 펜던트 등: 유리 갓, 전구, 천장으로 가는 호박색 빛 | `surface_cache.direct_tint_lights`(카드의 국소광 틴트: 기본 끔 — 켜면 천장 바운스가 호박색), hit의 그림자 광선 틴트는 스위치 없음(항상) |
+| `tiles` | +X 벽을 따라 낮게: 타일 줄눈의 시차, 유약, 젖은 바닥 | `material.parallax_steps`(0: 끔), `material.parallax_shadow`. UV 변환·clearcoat: 없음(`--strip-clearcoat`로 코트 제거) |
+| `bench` | rect 광원 아래 벤치: 나무(디테일 맵)와 벽에 떨어진 이미지의 격자와 반 도어의 경계, 버텍스 컬러 수건, 젖은 바닥에 비친 발광면 | `shading.mega_lights`(끄면 슬롯 경로의 rect 광원). 이미지·반 도어·디테일·버텍스 컬러: 없음 |
+
+
+`showcase_atrium`
+
+| 카메라 | 보이는 것 | 스위치 |
+|---|---|---|
+| `floor` | 바닥의 색 햇빛 조각(지붕 유리 4색), 카펫, 받침대, 나침반 데칼 | `shadow.vsm.translucent_tint`, `surface_cache.direct_tint`, `raytracing.see_through_translucent` |
+| `roof` | 아래에서 본 지붕: 하늘 앞의 유리와 격자 | 없음(반투명 층의 그림) |
+| `banners` | 색 햇빛 속의 cloth 배너, 그 아래 유리 난간 | 없음(cloth), `--strip-clearcoat` 무관 |
+| `sculpture` | 덩어리 유리 구와 각기둥, 받침대·카펫 위의 물든 그림자 | `shadow.vsm.translucent_tint`(뷰), `surface_cache.direct_tint`(카드) |
+| `gallery` | 갤러리 아래 그늘: emissive 등 6개와 스폿 2개의 빛 | `surface_cache.mesh_cards_emissive_light_sources`(끄면 6 cm 등의 카드가 없어 그 빛이 GI에서 빠진다) |
+| `planter` | 햇빛 속 화분 나무: 잎의 투과, 뒤의 옻칠 벤치 | `surface_cache.foliage_transmission` |
+
+`showcase_shore`
+
+| 카메라 | 보이는 것 | 스위치 |
+|---|---|---|
+| `shore` | 남쪽 기슭에서: 잔교와 호수, 건너편 숲 가장자리, 구름 속 능선, 권운 | `raytracing.far_field`(기본 끔: 켜서 비교), `--cirrus 0`, `--clouds 0` |
+| `rain` | 잔교 위에서 등불 쪽: 젖은 판자, 등불의 유리(혼합 메시)와 안개 속 빛 | 비: extras 필요(12.4) + `atmosphere.fog.rain_veil`. IES: extras 필요 |
+| `forest_edge` | 건너편 물 위에서 숲 가장자리를 따라: 인스턴스가 far field 프록시로 넘어가는 거리 | `raytracing.far_field`, `far_field_cull_angle_deg`, `far_field_cull_radius_m`; `shadow.vsm.aggregate_small_casters`, `shadow.vsm.min_caster_texels` |
+| `ridge` | 호수 위 30 m에서 긴 렌즈로 능선 마루: 구름층에 잠긴 지형 | `atmosphere.clouds.veil`, `atmosphere.clouds.filtered_steps` |
+| `reeds` | 갈대 사이 낮게, 안개 볼륨 쪽 | `atmosphere.fog.local_volumes`, `--fog 0` |
+
+### 12.3 배치 그룹 제안 (`Run-Ue6Batch.ps1`의 `$abGroups` 형식; 스크립트는 `w/opt` 소유라 고치지 않았다)
+
+카메라가 씬마다 달라 그룹 하나에 씬 하나다(`Gate`가 그룹 단위다).
+
+```
+@{ Name = "glass_bath"; Scenes = "showcase_bathhouse"; Gate = "--camera panes"; Time = $true; Layers = "shadow,gi,cardfinal"; Rows = @(
+        @{ N = "glass_opaque"; S = "shadow.vsm.translucent_tint=false"; E = "differs" },
+        @{ N = "cards_untinted"; S = "surface_cache.direct_tint=false"; E = "differs" },
+        @{ N = "glass_stops_rays"; S = "raytracing.see_through_translucent=false"; E = "differs" }) },
+@{ Name = "glass_atrium"; Scenes = "showcase_atrium"; Gate = "--camera floor"; Time = $true; Layers = "shadow,gi,cardfinal"; Rows = @(
+        @{ N = "glass_opaque"; S = "shadow.vsm.translucent_tint=false"; E = "differs" },
+        @{ N = "cards_untinted"; S = "surface_cache.direct_tint=false"; E = "differs" },
+        @{ N = "glass_stops_rays"; S = "raytracing.see_through_translucent=false"; E = "differs" }) },
+@{ Name = "glass_lamp"; Scenes = "showcase_bathhouse"; Gate = "--camera lamp"; Time = $true; Layers = "gi,cardfinal"; Rows = @(
+        @{ N = "cards_lights_tinted"; S = "surface_cache.direct_tint_lights=true"; E = "differs" }) },
+@{ Name = "emissive_bath"; Scenes = "showcase_bathhouse"; Gate = "--camera bath"; Layers = "gi,cardfinal"; Rows = @(
+        @{ N = "emissive_cards_off"; S = "surface_cache.mesh_cards_emissive_light_sources=false"; E = "differs" },
+        @{ N = "steam_off"; S = "atmosphere.fog.local_volumes=false"; E = "differs" }) },
+@{ Name = "emissive_atrium"; Scenes = "showcase_atrium"; Gate = "--camera gallery"; Layers = "gi,cardfinal"; Rows = @(
+        @{ N = "emissive_cards_off"; S = "surface_cache.mesh_cards_emissive_light_sources=false"; E = "differs" }) },
+@{ Name = "figure"; Scenes = "showcase_bathhouse"; Gate = "--camera figure"; Time = $true; Layers = "gi,refl"; Rows = @(
+        @{ N = "eye_plain"; S = "shading.eye_model=false"; E = "differs" },
+        @{ N = "scatter_off"; S = "shading.subsurface_scatter=false"; E = "differs" },
+        @{ N = "hair_off_rays"; S = "raytracing.hair=false"; E = "differs" }) },
+@{ Name = "inputs"; Scenes = "showcase_bathhouse"; Gate = "--camera tiles"; Time = $true; Rows = @(
+        @{ N = "parallax_off"; S = "material.parallax_steps=0"; E = "differs" },
+        @{ N = "parallax_shadow"; S = "material.parallax_shadow=true"; E = "differs" }) },
+@{ Name = "leaves"; Scenes = "showcase_atrium"; Gate = "--camera planter"; Layers = "gi"; Rows = @(
+        @{ N = "leaf_transmission_off"; S = "surface_cache.foliage_transmission=false"; E = "differs" }) },
+@{ Name = "farfield"; Scenes = "showcase_shore"; Gate = "--camera forest_edge"; Time = $true; Layers = "gi,refl,shadow"; Rows = @(
+        @{ N = "far_field"; S = "raytracing.far_field=true"; E = "differs" },
+        @{ N = "far_field_2deg"; S = "raytracing.far_field=true,raytracing.far_field_cull_angle_deg=2.0"; E = "differs" },
+        @{ N = "every_caster"; S = "shadow.vsm.min_caster_texels=0"; E = "differs" }) },
+@{ Name = "ridge"; Scenes = "showcase_shore"; Gate = "--camera ridge"; Time = $true; Rows = @(
+        @{ N = "veil_off"; S = "atmosphere.clouds.veil=false"; E = "differs" },
+        @{ N = "steps_unfiltered"; S = "atmosphere.clouds.filtered_steps=false"; E = "differs" }) },
+@{ Name = "mist"; Scenes = "showcase_shore"; Gate = "--camera reeds"; Time = $true; Rows = @(
+        @{ N = "volumes_off"; S = "atmosphere.fog.local_volumes=false"; E = "differs" }) }
+```
+
+기존 그룹에 씬만 더하면 되는 것: `tint`(`showcase_atrium`: 유리 캐스터가 있는 첫 생성 씬), `cards`(`showcase_bathhouse`), `forest`(`showcase_shore`), `hair`(`showcase_bathhouse` + `--camera figure`), `eye`(같음), `fog`(`showcase_shore`).
+
+`far_field` 행의 기대값을 "differs"로 둔 이유: 먼 인스턴스가 상자가 되므로 그림이 같지 않다 — 수치가 그 차이의 크기다(상태 문서 1.4 "첫 실행에서 볼 것"의 5, 6번). 시간 쪽은 `r.as.tlas.static`, `r.gi.*.trace`, `r.refl.lumen.trace`를 나란히 본다.
+
+### 12.4 씬 파일에 없는 것 — 게이트가 받아야 한다
+
+씬 형식(`scene::Scene`)에는 광원 함수(IES·쿠키·gobo), 데칼, 비가 없다. 렌더러는 그것들을 자기 인터페이스로 받는다. 씬 생성기는 그 데이터를 `scenegen::extras(request)`(`SceneGen.h` `SceneExtras`)로 낸다 — `grooms()`가 머리카락을 내는 것과 같은 방식이다. **`RendererGate.cpp`는 아직 이것을 읽지 않는다**(내 파일이 아니다). 읽기 전에는 세 씬에서 광원 함수·데칼·비가 없는 그림이 나온다(광원 자체는 씬에 있어 켜진다).
+
+| extras | 내용 | 게이트가 할 일 |
+|---|---|---|
+| `lightFunctions` | bathhouse: 욕조 위 스폿의 쿠키(64², 0.15 rad/s 회전), 벽등의 IES(batwing), 가운데 펜던트의 gobo(128², 구멍 격자). shore: 등불의 IES + flicker | 씬 광원을 올린 뒤 `lights::lightFunctions(renderer.trackState()).set(light, f)`. `ExtraLightFunction` → `lights::LightFunction`: profile 번호 그대로, IES는 `horizontal = {0}`·`values = iesValues`·`peak = 광원 intensity`, 이미지는 `Image{width, height, rgb}` |
+| `decals` | bathhouse 3개, atrium 3개(재질은 씬 재질: 어느 메시도 쓰지 않는다) | `decal::decals(renderer.trackState()).add(d)`: `ExtraDecal`의 필드는 `decal::Decal`과 이름·뜻이 같다(`instance`는 없음 = world) |
+| `weather` | shore: 카메라 `rain`에 rainRate 8 mm/h, wetness 0.9 | 프레임의 카메라 이름이 같으면 `FrameContext`의 `WeatherFrame.rainRate`, `.wetness` |
+
+소프트 파티클은 씬으로 만들 수 없다: 입자는 VFX 스트림(프로그램 + 에미터)에서 오고 씬 생성기와 게이트에 그 경로가 없다. 욕조의 김은 `FogVolume`이지 입자가 아니다. 입자 씬이 필요하면 FX 쪽 게이트(`Passes/FX`)에 지오메트리와 만나는 스프라이트 에미터를 두는 것이 맞다.
+
+### 12.5 첫 실행에서 볼 것
+
+1. `unx_test_scenegen`(세 씬의 결정성·직렬화 왕복·내용 검사). 여기서 `scene::validate`가 처음 돈다.
+2. 각 씬의 첫 카메라 still: 노출이 맞는지(욕실 EV 11.5, 안뜰 13.5, 기슭 12.5는 계산값), 햇빛 조각의 위치(욕실: 바닥과 욕조 위, 인물까지; 안뜰: 바닥의 -X·-Z 쪽 3/4).
+3. 욕실 `panes`: 유리색이 뷰의 햇빛과 `cardfinal`에서 같은 자리에 같은 색인지(카드 틴트의 첫 확인). 덧문이 뷰·반사에 보이지 않고 줄무늬 그림자만 있는지.
+4. 욕실 `lamp`: 유리 갓 위쪽 천장이 뷰(MegaLights 그림자 광선: 유리 통과, 흰 빛)와 GI(hit의 그림자 광선: 호박색)에서 다르게 물든다 — 알려진 차이(상태 문서 1.3.3).
+5. 욕조 물: Water 클래스 정적 메시가 반투명 층에서 어떻게 그려지는지 이 씬에서 처음 본다(다른 생성 씬의 물은 Standard 재질이다).
+6. 기슭: scale 1에서 인스턴스 약 19만 개. `raytracing.far_field=true`의 로드 로그(`RayScene far field:`, `near set`).
