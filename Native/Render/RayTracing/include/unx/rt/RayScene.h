@@ -2,7 +2,8 @@
 // Ray-traced scene of the R track (ARCHITECTURE 2.7, 2.8, 2.12). Ported from the previous engine's ray scene partition
 // and deformation logic (TitanNative RayScene.cpp / RayPartition.inl), not its structure:
 //  - one BLAS per mesh for rigid instances (original triangles, one geometry per submesh, OPAQUE unless the submesh
-//    material is alpha-tested, PREFER_FAST_TRACE, compacted), shared by every instance of the mesh;
+//    material is alpha-tested or see-through - Glass / Water, raytracing.see_through_translucent -, PREFER_FAST_TRACE,
+//    compacted), shared by every instance of the mesh;
 //  - one BLAS per deformed instance (skinned characters: world-space vertices written by RayTracing/Deform through
 //    deformVertex(), ALLOW_UPDATE, refit each frame);
 //  - a static TLAS (rigid, non-dynamic instances; rebuilt only when that set changes) and a dynamic TLAS (Dynamic and
@@ -48,12 +49,22 @@ constexpr uint32_t kRtMaskGi = 1u, kRtMaskReflection = 2u, kRtMaskEmitter = 4u, 
 // Instances that cast shadows (scene::InstanceCastShadow) carry this bit; shadow rays of lights (shading.mega_lights) use it
 // alone, so a mesh that casts no shadow in S's shadow maps blocks no light here either. No other ray's mask has it.
 constexpr uint32_t kRtMaskShadow = 16u;
+// The shadow casters again, and with them the casters made of Glass / Water alone (which kRtMaskShadow leaves out): the
+// bit a shadow ray that gathers the panes' transmittance adds to its mask (RayShaders.hlsli rtShadowTransmittance).
+constexpr uint32_t kRtMaskShadowTint = 32u;
 // The mask of a scene instance from its gpu::Instance flags (hidden: none).
-constexpr uint32_t rtInstanceMask(uint32_t flags) { return (flags & 0x80000000u) ? 0u : ((flags & 1u) ? kRtMaskAll : (kRtMaskAll & ~kRtMaskShadow)); }
+constexpr uint32_t rtInstanceMask(uint32_t flags)
+{
+    return (flags & 0x80000000u) ? 0u : ((flags & 1u) ? kRtMaskAll : (kRtMaskAll & ~(kRtMaskShadow | kRtMaskShadowTint)));
+}
 // An instance whose every submesh is Glass or Water (raytracing.see_through_translucent): GI rays and shadow rays pass it
-// (the reference leaves translucent meshes out of its Lumen scene; the view's shadow maps give such casters a
-// transmittance, not a depth). Reflection and refraction rays still meet it.
-constexpr uint32_t rtInstanceMask(uint32_t flags, bool seeThrough) { return rtInstanceMask(flags) & (seeThrough ? ~(kRtMaskGi | kRtMaskShadow) : ~0u); }
+// (the reference leaves translucent meshes out of its Lumen scene). It carries the reflection bit alone - reflection and
+// refraction rays meet it - and, when it casts shadows, the tint bit. Not "every bit but GI and shadow": GI rays also ask
+// for the emitters' bit (kRtMaskGi | kRtMaskEmitter), and an instance that kept that bit was still hit by them.
+constexpr uint32_t rtInstanceMask(uint32_t flags, bool seeThrough)
+{
+    return rtInstanceMask(flags) & (seeThrough ? (kRtMaskReflection | kRtMaskShadowTint) : ~0u);
+}
 constexpr uint32_t kRtMaskFluid = 8u;  // W's triangle streams (refraction rays only: no scene records to shade them)
 constexpr uint32_t kRtInstanceEmitter = 0xFFFFFEu;  // RT_INSTANCE_EMITTER (RayScene.hlsli)
 constexpr uint32_t kRtInstanceStreamBase = 0xFFFF00u;  // + stream slot (< 64): RT_INSTANCE_STREAM (RayScene.hlsli)
@@ -268,6 +279,14 @@ private:
     // Every submesh of the scene instance is Glass or Water (m_seeThrough; false for instances the source scene does
     // not hold and with raytracing.see_through_translucent off).
     bool seeThrough(uint32_t sceneInstance) const { return sceneInstance < m_seeThrough.size() && m_seeThrough[sceneInstance] != 0; }
+    // A Glass or Water material of the source scene (false with the switch off): its geometry is non-opaque in every
+    // BLAS, so that the any-hit shader lets GI and shadow rays pass a pane that shares a mesh with opaque submeshes
+    // (RayScene.hlsli: see-through geometry).
+    bool seeThroughMaterial(uint32_t material) const;
+    // The BLAS geometry flags of a submesh with this material: OPAQUE; none for an alpha-tested one; NO_DUPLICATE_ANYHIT
+    // for a see-through one (the any-hit shader adds each pane's optical depth to a shadow ray's payload once).
+    D3D12_RAYTRACING_GEOMETRY_FLAGS geometryFlags(uint32_t material) const;
+    bool m_seeThroughOn = true;  // raytracing.see_through_translucent
     static uint64_t staticKey(const gpu::Instance& in) { return ((uint64_t)(in.flags & gpu::kInstanceHidden) << 32) | in.transformRevision; }
 
     struct Frame  // graph references of the current frame
@@ -292,7 +311,7 @@ private:
         uint64_t offset = 0;  // in the compacted pool of this object's build
         D3D12_GPU_VIRTUAL_ADDRESS address = 0;  // the BLAS (this build's pool, or an inherited one)
         uint32_t geometryBase = gpu::kNone;
-        uint32_t alphaMask = 0;  // per submesh (<= 32): alpha-tested when built (an alpha change rebuilds)
+        uint32_t alphaMask = 0;  // per submesh (<= 32): non-opaque when built - alpha-tested or see-through (a change rebuilds)
         bool anyAlpha = false;
         bool built = false;      // has a BLAS (built here or inherited)
     };

@@ -5,6 +5,15 @@
 // Root constants: P[6], P[7] hold RtSceneSrvs (RayScene.hlsli) for every R ray library; P[0..5] are the library's own.
 // Alpha-tested geometry runs the any-hit shader (ARCHITECTURE 1.3-5: DispatchRays any-hit, never a RayQuery candidate
 // loop); geometries whose material is not alpha-tested are built OPAQUE and skip it in hardware.
+// Glass / Water geometry is non-opaque too (raytracing.see_through_translucent; RayScene.hlsli): the any-hit shader
+// ignores it for a see-through ray - the trace helpers below mark such a ray in the payload's pad word from its mask -
+// and accepts it for the others (reflection and refraction rays).
+//   RT_NO_SEE_THROUGH (defined before this file): the library's any-hit shader is the alpha test alone and its rays
+//   carry no mark - for a library none of whose rays is see-through (every mask has RT_MASK_REFLECTION) and which sits
+//   at the DXIL size limit (ReflectionTraceInline).
+//   RT_SHADOW_TRANSMITTANCE (defined before this file): rtShadowTransmittance gathers what the Glass on a shadow ray
+//   takes (rtGlassOpticalDepth) in the any-hit shader - no closest-hit shading, no further ray. Without it the function
+//   is rtVisible's answer as 0 or 1.
 #ifndef UNX_RT_RAYSHADERS_HLSLI
 #define UNX_RT_RAYSHADERS_HLSLI
 #include "RayTracing/RayScene.hlsli"
@@ -25,7 +34,42 @@ void RtClosestHit(inout RtHit p, in BuiltInTriangleIntersectionAttributes a)
 [shader("anyhit")]
 void RtAnyHit(inout RtHit p, in BuiltInTriangleIntersectionAttributes a)
 {
+#ifdef RT_NO_SEE_THROUGH
     if (!rtAlphaOpaque(rtScene(), InstanceID(), GeometryIndex(), PrimitiveIndex(), a.barycentrics)) IgnoreHit();
+#else
+    const RtSceneSrvs s = rtScene();
+    RtHit h = rtMiss();
+    h.instance = InstanceID();
+    h.geometry = GeometryIndex();
+    h.primitive = PrimitiveIndex();
+    h.barycentrics = a.barycentrics;
+    GpuInstance inst;
+    GpuMesh mesh;
+    RtGeometry g;
+    const GpuMaterial m = loadMaterial(rtMaterial(s, h, inst, mesh, g));
+    if ((p.pad & RT_RAY_SEE_THROUGH) != 0 && rtSeeThroughMaterial(m))
+    {
+#ifdef RT_SHADOW_TRANSMITTANCE
+        // (the payload kept across IgnoreHit: what the pane takes from the light on this ray. Glass alone - a water
+        // surface passes the ray whole: the view's own sun under water is not this function's to decide)
+        if ((p.pad & RT_RAY_TRANSMITTANCE) != 0 && (m.classFlags & 0xFFu) == MATERIAL_GLASS)
+        {
+            const float cosI = rtCandidateCos(s, rtLoadInstance(s, h.instance), g, mesh, h.primitive, ObjectRayDirection());
+            const float3 depth = rtGlassOpticalDepth(m, cosI, HitKind() == HIT_KIND_TRIANGLE_BACK_FACE, RayTCurrent());
+            p.instance = asuint(asfloat(p.instance) + depth.r);
+            p.geometry = asuint(asfloat(p.geometry) + depth.g);
+            p.primitive = asuint(asfloat(p.primitive) + depth.b);
+        }
+#endif
+        IgnoreHit();
+    }
+    if (m.alphaCutoff > 0 && m.baseColorTexture != UNX_NONE)
+    {
+        // The raster's alpha test at the texture's level 0 (rtAlphaOpaque)
+        const RtTriangle tri = rtTriangle(s, g, h.primitive);
+        if (materialBaseColorLevel(m, rtUv(mesh, tri.meshVertex, h.barycentrics), 0).a < m.alphaCutoff) IgnoreHit();
+    }
+#endif
 }
 
 // ---- analytic area lights (INTERFACES 8.2: rect and disk one-sided along +forward, up = forward x right; sphere radius
@@ -133,11 +177,15 @@ void RtMissVisible(inout RtHit p)
 RtHit rtTraceClosest(RtSceneSrvs s, RayDesc ray, uint rayFlags, uint mask)
 {
     RtHit h = rtMiss();
+#ifndef RT_NO_SEE_THROUGH
+    h.pad = (mask & RT_MASK_REFLECTION) == 0 ? RT_RAY_SEE_THROUGH : 0u;  // (the any-hit shader's: RayScene.hlsli)
+#endif
     RaytracingAccelerationStructure dynamicTlas = ResourceDescriptorHeap[s.tlasDynamic];
     TraceRay(dynamicTlas, rayFlags, mask, 0, 0, 0, ray, h);
     if (h.t >= 0) ray.TMax = h.t;
     RaytracingAccelerationStructure staticTlas = ResourceDescriptorHeap[s.tlasStatic];
     TraceRay(staticTlas, rayFlags, mask, 0, 0, 0, ray, h);
+    h.pad = 0;
     return h;
 }
 
@@ -147,6 +195,9 @@ bool rtVisible(RtSceneSrvs s, RayDesc ray, uint mask, uint extraFlags = RAY_FLAG
     const uint flags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER | extraFlags;
     RtHit h = rtMiss();
     h.t = 1;
+#ifndef RT_NO_SEE_THROUGH
+    h.pad = (mask & RT_MASK_REFLECTION) == 0 ? RT_RAY_SEE_THROUGH : 0u;
+#endif
     RaytracingAccelerationStructure staticTlas = ResourceDescriptorHeap[s.tlasStatic];
     TraceRay(staticTlas, flags, mask, 0, 0, 1, ray, h);
     if (h.t >= 0) return false;
@@ -154,6 +205,36 @@ bool rtVisible(RtSceneSrvs s, RayDesc ray, uint mask, uint extraFlags = RAY_FLAG
     RaytracingAccelerationStructure dynamicTlas = ResourceDescriptorHeap[s.tlasDynamic];
     TraceRay(dynamicTlas, flags, mask, 0, 0, 1, ray, h);
     return h.t < 0;
+}
+
+// What a shadow segment lets through to its origin, per channel: 0 when a caster blocks it, else what the Glass it
+// crosses leaves of the light - the panes' transmittance and the solid bodies' absorption (RayScene.hlsli
+// rtGlassOpticalDepth), gathered by the any-hit shader in the payload as the candidates are met (no closest-hit shading,
+// no second ray; the geometry is built NO_DUPLICATE_ANYHIT, so a pane counts once). mask: a shadow mask (RT_MASK_SHADOW,
+// RT_MASK_HIT_SHADOW); the ray also takes RT_MASK_SHADOW_TINT - the shadow casters made of Glass alone, which plain shadow
+// rays never enter.
+// Without RT_SHADOW_TRANSMITTANCE (a library that did not ask for it): rtVisible's answer - Glass passes the ray whole.
+// The same two TraceRay calls as rtVisible either way.
+float3 rtShadowTransmittance(RtSceneSrvs s, RayDesc ray, uint mask, uint extraFlags = RAY_FLAG_NONE)
+{
+#if defined(RT_SHADOW_TRANSMITTANCE) && !defined(RT_NO_SEE_THROUGH)
+    if ((mask & RT_MASK_REFLECTION) == 0)
+    {
+        const uint flags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER | extraFlags;
+        RtHit h = rtMiss();  // (instance, geometry, primitive = 0: the optical depth starts at asfloat(0) = 0)
+        h.t = 1;
+        h.pad = RT_RAY_SEE_THROUGH | RT_RAY_TRANSMITTANCE;
+        RaytracingAccelerationStructure staticTlas = ResourceDescriptorHeap[s.tlasStatic];
+        TraceRay(staticTlas, flags, mask | RT_MASK_SHADOW_TINT, 0, 0, 1, ray, h);
+        if (h.t >= 0) return 0;
+        h.t = 1;
+        RaytracingAccelerationStructure dynamicTlas = ResourceDescriptorHeap[s.tlasDynamic];
+        TraceRay(dynamicTlas, flags, mask | RT_MASK_SHADOW_TINT, 0, 0, 1, ray, h);
+        if (h.t >= 0) return 0;
+        return exp(-max(float3(asfloat(h.instance), asfloat(h.geometry), asfloat(h.primitive)), 0.0));
+    }
+#endif
+    return rtVisible(s, ray, mask, extraFlags) ? float3(1, 1, 1) : float3(0, 0, 0);
 }
 
 #endif

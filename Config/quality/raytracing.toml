@@ -31,11 +31,17 @@ proxy_error_model = "measured"         # a cut's error for the choice: "measured
 proxy_posed_factor = 1.5               # posed / bind-pose error margin of skin-aware cuts (measured up to 1.32)
 near_characters_with_proxy = 64
 dynamic_tlas_instances_max = 100000
-see_through_translucent = true   # instances made of Glass / Water materials alone are left out of the GI rays' and the shadow
-                                 # rays' masks (the reference keeps translucent meshes out of its Lumen scene): sky and sun
-                                 # light enter a room through its windows in the bounce light as they do in the view.
-                                 # Reflection and refraction rays still meet them. false: such meshes stop GI rays as opaque
-                                 # surfaces (the behaviour until 2026-10-03)
+see_through_translucent = true   # Glass / Water surfaces are not there for the GI rays and the shadow rays (the reference
+                                 # keeps translucent meshes out of its Lumen scene): sky and sun light enter a room through
+                                 # its windows in the bounce light as they do in the view. An instance made of such materials
+                                 # alone is left out by its mask; a pane that shares a mesh with opaque submeshes (a window
+                                 # in its frame) is non-opaque geometry the any-hit shader ignores for those rays.
+                                 # Reflection and refraction rays still meet them. A shadow ray shot from a ray hit takes
+                                 # what the Glass it crosses leaves of the light (the pane's tint; RayShaders.hlsli
+                                 # rtShadowTransmittance); the cards' direct light stores one bit a texel and light, and
+                                 # takes Glass as clear. false: such meshes stop GI rays as opaque surfaces (the behaviour
+                                 # until 2026-10-03). A ray traced FORCE_OPAQUE (surface_cache.shadow_rays_opaque) runs no
+                                 # any-hit shader: a pane inside a mixed mesh stops it
 exact_set_max = 8                      # reflection exact set: skinned instances traced with their original mesh (ARCHITECTURE 2.6)
 exact_set_min_hits = 64                # M/G reflection hits in a frame for an instance to enter it
 experiment_disable = 0                 # cost attribution only (recorded in the quality hash): 1 = build every deformed BLAS

@@ -263,11 +263,23 @@ uint32_t RayScene::alphaMaskOf(uint32_t mesh) const
     const scene::Mesh& sm = src->meshes[mesh];
     uint32_t mask = 0;
     for (uint32_t s = 0; s < (uint32_t)sm.submeshes.size() && s < 32; ++s)
-    {
-        const uint32_t mat = sm.submeshes[s].material;
-        if (mat < src->materials.size() && src->materials[mat].alphaCutoff > 0) mask |= 1u << s;
-    }
+        if (geometryFlags(sm.submeshes[s].material) != D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE) mask |= 1u << s;
     return mask;
+}
+
+bool RayScene::seeThroughMaterial(uint32_t material) const
+{
+    if (!m_seeThroughOn) return false;
+    const scene::Scene* src = m_scene.source();
+    return src && material < src->materials.size() &&
+           (src->materials[material].cls == scene::MaterialClass::Glass || src->materials[material].cls == scene::MaterialClass::Water);
+}
+
+D3D12_RAYTRACING_GEOMETRY_FLAGS RayScene::geometryFlags(uint32_t material) const
+{
+    const scene::Scene* src = m_scene.source();
+    if (src && material < src->materials.size() && src->materials[material].alphaCutoff > 0) return D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+    return seeThroughMaterial(material) ? D3D12_RAYTRACING_GEOMETRY_FLAG_NO_DUPLICATE_ANYHIT_INVOCATION : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
 }
 
 RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, const QualityConfig& quality, RayScene* previous)
@@ -331,12 +343,11 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         fail("RayScene: %zu dynamic instances exceed raytracing.dynamic_tlas_instances_max %llu", dynamicRigid.size() + deformed.size(), (unsigned long long)dynamicMax);
 
     // Instances made of Glass / Water alone (their overrides first): GI and shadow rays pass them (RayScene.h rtInstanceMask).
-    if (!quality.has("raytracing.see_through_translucent") || quality.boolean("raytracing.see_through_translucent"))
+    // A pane inside a mesh with opaque submeshes is the any-hit shader's (geometryFlags; RayScene.hlsli).
+    m_seeThroughOn = !quality.has("raytracing.see_through_translucent") || quality.boolean("raytracing.see_through_translucent");
+    if (m_seeThroughOn)
     {
-        auto translucent = [&](uint32_t material) {
-            return material < src->materials.size() &&
-                   (src->materials[material].cls == scene::MaterialClass::Glass || src->materials[material].cls == scene::MaterialClass::Water);
-        };
+        auto translucent = [&](uint32_t material) { return seeThroughMaterial(material); };
         m_seeThrough.assign(src->instances.size(), 0);
         for (uint32_t i = 0; i < (uint32_t)src->instances.size(); ++i)
         {
@@ -349,9 +360,12 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
             m_seeThrough[i] = all ? 1 : 0;
         }
     }
-    auto materialAlpha = [&](uint32_t material) { return material < src->materials.size() && src->materials[material].alphaCutoff > 0; };
+    // (non-opaque geometry: alpha-tested or see-through)
+    auto materialAlpha = [&](uint32_t material) { return geometryFlags(material) != D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE; };
     // Per-submesh alpha of an instance (overrides first); FORCE_NON_OPAQUE is needed when an override turns a submesh the
-    // mesh BLAS built OPAQUE into an alpha-tested one (the any-hit shader accepts opaque materials, so the reverse is exact).
+    // mesh BLAS built OPAQUE into an alpha-tested or a see-through one (the any-hit shader accepts opaque materials, so the
+    // reverse is exact). Such an instance's geometry lacks NO_DUPLICATE_ANYHIT: a shadow ray that gathers transmittance
+    // may count an overridden pane twice.
     auto instanceFlags = [&](uint32_t i) -> UINT {
         const scene::Instance& in = src->instances[i];
         const scene::Mesh& sm = src->meshes[in.mesh];
@@ -665,7 +679,7 @@ void RayScene::buildMeshBlas()
             m_meshBlas[m].anyAlpha |= alpha;
             D3D12_RAYTRACING_GEOMETRY_DESC g{};
             g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-            g.Flags = alpha ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+            g.Flags = geometryFlags(sm.submeshes[s].material);
             g.Triangles.VertexBuffer = { vertices + (uint64_t)gm.vertexOffset * sizeof(gpu::Vertex), sizeof(gpu::Vertex) };
             g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
             g.Triangles.VertexCount = gm.vertexCount;
@@ -926,10 +940,9 @@ std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> RayScene::proxyGeometry(uint32_t sce
     {
         const uint32_t s = p.submesh[k];
         const uint32_t material = s < si.materialOverrides.size() ? si.materialOverrides[s] : sm.submeshes[s].material;
-        const bool alpha = material < src->materials.size() && src->materials[material].alphaCutoff > 0;
         D3D12_RAYTRACING_GEOMETRY_DESC g{};
         g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-        g.Flags = alpha ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+        g.Flags = geometryFlags(material);
         g.Triangles.VertexBuffer = { m_deformedPool.address() + (uint64_t)vertexBase * sizeof(RtDeformedVertex), sizeof(RtDeformedVertex) };
         g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
         g.Triangles.VertexCount = p.vertexCount;
@@ -961,10 +974,9 @@ std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> RayScene::originalGeometry(const Def
     {
         if (sm.submeshes[s].indexCount == 0) continue;
         const uint32_t material = s < si.materialOverrides.size() ? si.materialOverrides[s] : sm.submeshes[s].material;
-        const bool alpha = material < src->materials.size() && src->materials[material].alphaCutoff > 0;
         D3D12_RAYTRACING_GEOMETRY_DESC g{};
         g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-        g.Flags = alpha ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+        g.Flags = geometryFlags(material);
         g.Triangles.VertexBuffer = { (m_deformedPool.resource ? m_deformedPool.address() : 0) + (uint64_t)vertexBase * sizeof(RtDeformedVertex), sizeof(RtDeformedVertex) };
         g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
         g.Triangles.VertexCount = gm.vertexCount;
@@ -2553,7 +2565,7 @@ void RayScene::recordRuntime(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
                 rb.anyAlpha |= alpha;
                 D3D12_RAYTRACING_GEOMETRY_DESC g{};
                 g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-                g.Flags = alpha ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+                g.Flags = geometryFlags(subs[s].material);
                 g.Triangles.VertexBuffer = { vertices + (uint64_t)gm.vertexOffset * sizeof(gpu::Vertex), sizeof(gpu::Vertex) };
                 g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
                 g.Triangles.VertexCount = gm.vertexCount;

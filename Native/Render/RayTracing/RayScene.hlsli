@@ -19,7 +19,24 @@
                                  // never visibility rays (the lights have no body; LTC ignores their occlusion)
 #define RT_MASK_SHADOW 0x10u     // instances that cast shadows (INSTANCE_CAST_SHADOW): the mask of lights' shadow rays
                                  // (shading.mega_lights); every other ray's mask leaves it out
+#define RT_MASK_SHADOW_TINT 0x20u  // the casters of RT_MASK_SHADOW and, besides, the shadow casters made of Glass / Water alone
+                                   // (which are out of RT_MASK_SHADOW): the mask bit a shadow ray that gathers the panes'
+                                   // transmittance adds (RayShaders.hlsli rtShadowTransmittance)
 #define RT_MASK_ALL 0xFFu
+// See-through geometry (raytracing.see_through_translucent; RayScene.h rtInstanceMask): GI rays and shadow rays pass
+// Glass and Water surfaces, reflection and refraction rays meet them - the reference keeps translucent meshes out of
+// its Lumen scene (RAY_TRACING_MASK_OPAQUE, SkipTranslucent). Two mechanisms, one rule:
+//   an instance made of such materials alone carries only RT_MASK_REFLECTION (and RT_MASK_SHADOW_TINT when it casts
+//   shadows): the rays that pass it never enter its BLAS;
+//   a Glass / Water submesh of a mixed mesh (a window frame and its pane in one mesh) is non-opaque geometry, and the
+//   any-hit shader (RayShaders.hlsli) - or an inline query's candidate loop (rtCandidateStops) - ignores it for a
+//   see-through ray.
+// Which rays are see-through is read from their mask: those that do not ask for RT_MASK_REFLECTION (GI rays: RT_MASK_GI
+// with or without the emitters; shadow rays: RT_MASK_SHADOW, RT_MASK_GI). The trace helpers put it in the payload's
+// pad word, where the any-hit shader finds it:
+#define RT_RAY_SEE_THROUGH 0x1u    // Glass / Water geometry is not there for this ray
+#define RT_RAY_TRANSMITTANCE 0x2u  // a visibility ray that gathers what the Glass it passes takes: the payload's instance,
+                                   // geometry and primitive words hold asuint(the optical depth so far, rgb)
 // The mask of a shadow ray shot from a ray hit or a card texel toward the sun or a light: the casters, as the view's
 // shadow maps draw them and as the sampled lights' rays see them (RT_MASK_SHADOW). With RT_MASK_GI here (the rule until
 // 2026-10-03) a mesh that casts no shadow in the view - a lamp's shade, a pane the game marked so - still shadowed the
@@ -289,6 +306,82 @@ bool rtAlphaOpaque(RtSceneSrvs s, uint instance, uint geometry, uint primitive, 
     // The raster's alpha test (V AlphaTest.hlsli) at the texture's level 0 (the scene texture unchanged, M keeps coverage
     // equal across levels): M's published texture and addressing (MaterialTextures.hlsli, INTERFACES v1.11).
     return materialBaseColorLevel(m, uv, 0).a >= m.alphaCutoff;
+}
+
+// See-through geometry: a Glass or Water material (above).
+bool rtSeeThroughMaterial(GpuMaterial m)
+{
+    const uint cls = m.classFlags & 0xFFu;
+    return cls == MATERIAL_GLASS || cls == MATERIAL_WATER;
+}
+
+// Whether a non-opaque candidate stops a ray (an inline query's candidate loop; the any-hit shader's rule, RayShaders.hlsli):
+// see-through geometry does not stop a see-through ray (mask: the ray's instance mask), other geometry takes the alpha
+// test.
+bool rtCandidateStops(RtSceneSrvs s, uint mask, uint instance, uint geometry, uint primitive, float2 barycentrics)
+{
+    RtHit h = rtMiss();
+    h.instance = instance;
+    h.geometry = geometry;
+    h.primitive = primitive;
+    h.barycentrics = barycentrics;
+    GpuInstance inst;
+    GpuMesh mesh;
+    RtGeometry g;
+    const GpuMaterial m = loadMaterial(rtMaterial(s, h, inst, mesh, g));
+    if ((mask & RT_MASK_REFLECTION) == 0 && rtSeeThroughMaterial(m)) return false;
+    if (m.alphaCutoff <= 0 || m.baseColorTexture == UNX_NONE) return true;
+    const RtTriangle tri = rtTriangle(s, g, primitive);
+    return materialBaseColorLevel(m, rtUv(mesh, tri.meshVertex, barycentrics), 0).a >= m.alphaCutoff;
+}
+
+// The optical depth a Glass surface adds to a straight ray that crosses it (a shadow ray: no refraction), from the
+// material's constants (its tint texture is not read):
+//   a pane (a two-sided material: one surface stands for both faces)   -ln T_p, T_p = (1 - F)^2 t / (1 - F^2 t^2) - the
+//        pane's transmittance with its inner reflections, as the view composites it (TranslucentComposite.hlsl), t the
+//        tint (base colour), F the unpolarised dielectric Fresnel reflectance at the ray's angle to the surface;
+//   a face of a solid body (one-sided)   -ln (1 - F), and the body's absorption over the path inside it: sigma_a x the
+//        distance to an exit face, less sigma_a x the distance to an entry face (the two sum to sigma_a x the path
+//        whatever the order the faces are met in; a ray that starts or ends inside a body leaves one face unmatched -
+//        the reader clamps the sum at 0, such a ray takes no absorption).
+// cosI: |cos| of the ray to the face's normal; t: the distance along the ray to the face (m).
+float3 rtGlassOpticalDepth(GpuMaterial m, float cosI, bool backFace, float t)
+{
+    const float eta = 1.0 / max(m.ior, 1.0001);
+    const float c = saturate(cosI);
+    const float sin2T = eta * eta * (1.0 - c * c);
+    const float cosT = sqrt(max(1.0 - sin2T, 0.0));
+    const float rs = (eta * c - cosT) / max(eta * c + cosT, 1e-6), rp = (eta * cosT - c) / max(eta * cosT + c, 1e-6);
+    const float F = saturate(0.5 * (rs * rs + rp * rp));
+    if ((m.classFlags & MATERIAL_TWO_SIDED) != 0)
+    {
+        const float3 tint = saturate(m.baseColor);
+        return -log(max((1 - F) * (1 - F) * tint / (1 - F * F * tint * tint), 1e-6));
+    }
+    return -log(max(1 - F, 1e-6)) + max(m.hairAbsorption, 0.0) * (backFace ? t : -t);
+}
+
+// |cos| between a ray and a candidate triangle's plane, in the BLAS's space: objectDirection = the ray's direction there
+// (ObjectRayDirection(); a deformed instance's BLAS holds world-space vertices under an identity transform).
+float rtCandidateCos(RtSceneSrvs s, RtInstance ri, RtGeometry g, GpuMesh mesh, uint primitive, float3 objectDirection)
+{
+    const RtTriangle tri = rtTriangle(s, g, primitive);
+    float3 p0, p1, p2;
+    if ((ri.flags & RT_INSTANCE_DEFORMED) != 0)
+    {
+        StructuredBuffer<RtDeformedVertex> d = ResourceDescriptorHeap[s.deformed];
+        p0 = d[ri.vertexBase + tri.poolIndex.x].position;
+        p1 = d[ri.vertexBase + tri.poolIndex.y].position;
+        p2 = d[ri.vertexBase + tri.poolIndex.z].position;
+    }
+    else
+    {
+        p0 = loadVertex(mesh, tri.meshVertex.x).position;
+        p1 = loadVertex(mesh, tri.meshVertex.y).position;
+        p2 = loadVertex(mesh, tri.meshVertex.z).position;
+    }
+    const float3 n = cross(p1 - p0, p2 - p0);
+    return abs(dot(n, objectDirection)) / max(length(n) * length(objectDirection), 1e-30);
 }
 
 // Whether an area light's specular belongs to the ray paths this frame (COVERAGE 12.4 structure 2): M's stable bits
