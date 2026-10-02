@@ -50,6 +50,10 @@ constexpr uint32_t kRtMaskGi = 1u, kRtMaskReflection = 2u, kRtMaskEmitter = 4u, 
 constexpr uint32_t kRtMaskShadow = 16u;
 // The mask of a scene instance from its gpu::Instance flags (hidden: none).
 constexpr uint32_t rtInstanceMask(uint32_t flags) { return (flags & 0x80000000u) ? 0u : ((flags & 1u) ? kRtMaskAll : (kRtMaskAll & ~kRtMaskShadow)); }
+// An instance whose every submesh is Glass or Water (raytracing.see_through_translucent): GI rays and shadow rays pass it
+// (the reference leaves translucent meshes out of its Lumen scene; the view's shadow maps give such casters a
+// transmittance, not a depth). Reflection and refraction rays still meet it.
+constexpr uint32_t rtInstanceMask(uint32_t flags, bool seeThrough) { return rtInstanceMask(flags) & (seeThrough ? ~(kRtMaskGi | kRtMaskShadow) : ~0u); }
 constexpr uint32_t kRtMaskFluid = 8u;  // W's triangle streams (refraction rays only: no scene records to shade them)
 constexpr uint32_t kRtInstanceEmitter = 0xFFFFFEu;  // RT_INSTANCE_EMITTER (RayScene.hlsli)
 constexpr uint32_t kRtInstanceStreamBase = 0xFFFF00u;  // + stream slot (< 64): RT_INSTANCE_STREAM (RayScene.hlsli)
@@ -260,7 +264,10 @@ private:
     void recordDynamicTlas(ID3D12GraphicsCommandList7* cmd, D3D12_GPU_VIRTUAL_ADDRESS descs);
     void recordStaticTlas(ID3D12GraphicsCommandList7* cmd, D3D12_GPU_VIRTUAL_ADDRESS descs);
     // INTERFACES 6.3 (v1.8): the instance's current transform and visibility (hidden = mask 0: no ray can hit it).
-    void refreshDesc(D3D12_RAYTRACING_INSTANCE_DESC& d, const gpu::Instance& in, bool worldSpace) const;
+    void refreshDesc(D3D12_RAYTRACING_INSTANCE_DESC& d, const gpu::Instance& in, bool worldSpace, uint32_t sceneInstance) const;
+    // Every submesh of the scene instance is Glass or Water (m_seeThrough; false for instances the source scene does
+    // not hold and with raytracing.see_through_translucent off).
+    bool seeThrough(uint32_t sceneInstance) const { return sceneInstance < m_seeThrough.size() && m_seeThrough[sceneInstance] != 0; }
     static uint64_t staticKey(const gpu::Instance& in) { return ((uint64_t)(in.flags & gpu::kInstanceHidden) << 32) | in.transformRevision; }
 
     struct Frame  // graph references of the current frame
@@ -432,6 +439,7 @@ private:
     uint8_t* m_descRingMapped = nullptr;
     uint64_t m_descSlotBytes = 0;
     std::vector<uint32_t> m_staticScene;   // scene instance of each static descriptor
+    std::vector<uint8_t> m_seeThrough;     // per source-scene instance: all its materials are Glass or Water (seeThrough)
     std::vector<uint64_t> m_staticKeys;    // visibility + transform revision the static TLAS was built with
     uint32_t m_tlasStaticSrv = gpu::kNone, m_tlasDynamicSrv = gpu::kNone;
     RaySceneStats m_stats;

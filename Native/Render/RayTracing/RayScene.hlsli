@@ -20,6 +20,13 @@
 #define RT_MASK_SHADOW 0x10u     // instances that cast shadows (INSTANCE_CAST_SHADOW): the mask of lights' shadow rays
                                  // (shading.mega_lights); every other ray's mask leaves it out
 #define RT_MASK_ALL 0xFFu
+// The mask of a shadow ray shot from a ray hit or a card texel toward the sun or a light: the casters, as the view's
+// shadow maps draw them and as the sampled lights' rays see them (RT_MASK_SHADOW). With RT_MASK_GI here (the rule until
+// 2026-10-03) a mesh that casts no shadow in the view - a lamp's shade, a pane the game marked so - still shadowed the
+// hit, and the bounce light of what it "hid" was missing.
+#ifndef RT_MASK_HIT_SHADOW
+#define RT_MASK_HIT_SHADOW RT_MASK_SHADOW
+#endif
 // InstanceID of the emitter instance (RtHit.instance; RtHit.primitive = the light's index in the scene's light buffer).
 #define RT_INSTANCE_EMITTER 0xFFFFFEu
 

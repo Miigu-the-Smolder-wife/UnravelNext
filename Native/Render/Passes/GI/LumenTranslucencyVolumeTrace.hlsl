@@ -132,7 +132,7 @@ void LumenTranslucencyVolumeTraceGen()
                         sr.TMin = 0;
                         sr.TMax = giRayLength();
                         L.sunIlluminance = e0;
-                        L.sunVisibility = rtVisible(scene, sr, RT_MASK_GI) ? 1.0 : 0.0;
+                        L.sunVisibility = rtVisible(scene, sr, RT_MASK_HIT_SHADOW) ? 1.0 : 0.0;
                     }
                 }
                 L.local = rtHitLocalSample(scene, s, m, -ray.Direction, hit.t * 1.2, bias, seed * 3u + id.z * 7919u + texel.x * 31u + texel.y * 131u);

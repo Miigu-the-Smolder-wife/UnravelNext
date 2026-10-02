@@ -330,6 +330,25 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     if (dynamicRigid.size() + deformed.size() > dynamicMax)
         fail("RayScene: %zu dynamic instances exceed raytracing.dynamic_tlas_instances_max %llu", dynamicRigid.size() + deformed.size(), (unsigned long long)dynamicMax);
 
+    // Instances made of Glass / Water alone (their overrides first): GI and shadow rays pass them (RayScene.h rtInstanceMask).
+    if (!quality.has("raytracing.see_through_translucent") || quality.boolean("raytracing.see_through_translucent"))
+    {
+        auto translucent = [&](uint32_t material) {
+            return material < src->materials.size() &&
+                   (src->materials[material].cls == scene::MaterialClass::Glass || src->materials[material].cls == scene::MaterialClass::Water);
+        };
+        m_seeThrough.assign(src->instances.size(), 0);
+        for (uint32_t i = 0; i < (uint32_t)src->instances.size(); ++i)
+        {
+            const scene::Instance& si = src->instances[i];
+            if (si.mesh >= src->meshes.size()) continue;
+            const scene::Mesh& sm = src->meshes[si.mesh];
+            bool all = !sm.submeshes.empty();
+            for (uint32_t s = 0; s < (uint32_t)sm.submeshes.size() && all; ++s)
+                all = translucent(s < (uint32_t)si.materialOverrides.size() ? si.materialOverrides[s] : sm.submeshes[s].material);
+            m_seeThrough[i] = all ? 1 : 0;
+        }
+    }
     auto materialAlpha = [&](uint32_t material) { return material < src->materials.size() && src->materials[material].alphaCutoff > 0; };
     // Per-submesh alpha of an instance (overrides first); FORCE_NON_OPAQUE is needed when an override turns a submesh the
     // mesh BLAS built OPAQUE into an alpha-tested one (the any-hit shader accepts opaque materials, so the reverse is exact).
@@ -403,7 +422,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         D3D12_RAYTRACING_INSTANCE_DESC d{};
         transformOf(in, d);
         d.InstanceID = (UINT)m_instances.size();
-        d.InstanceMask = rtInstanceMask(in.flags);
+        d.InstanceMask = rtInstanceMask(in.flags, seeThrough(i));
         d.InstanceContributionToHitGroupIndex = 0;
         d.Flags = instanceFlags(i);  // DXR's default winding = CCW front in our right-handed frame (verified by Tests/RayScene)
         d.AccelerationStructure = m_meshBlas[in.mesh].address;
@@ -473,7 +492,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         D3D12_RAYTRACING_INSTANCE_DESC desc{};
         desc.Transform[0][0] = desc.Transform[1][1] = desc.Transform[2][2] = 1;  // world-space vertices
         desc.InstanceID = (UINT)m_instances.size();
-        desc.InstanceMask = rtInstanceMask(instances[d.sceneInstance].flags);
+        desc.InstanceMask = rtInstanceMask(instances[d.sceneInstance].flags, seeThrough(d.sceneInstance));
         desc.Flags = instanceFlags(d.sceneInstance);
         desc.AccelerationStructure = m_deformedBlasPool.address() + d.blasOffset;
         m_dynamicRecord.push_back((uint32_t)m_instances.size());
@@ -1494,7 +1513,7 @@ void RayScene::updateDynamic(ID3D12GraphicsCommandList7* cmd, bool refit)
     globalBarrier(cmd, kSyncBuild, kAsWrite, kSyncTrace | kSyncBuild, kAsRead);
 }
 
-void RayScene::refreshDesc(D3D12_RAYTRACING_INSTANCE_DESC& d, const gpu::Instance& in, bool worldSpace) const
+void RayScene::refreshDesc(D3D12_RAYTRACING_INSTANCE_DESC& d, const gpu::Instance& in, bool worldSpace, uint32_t sceneInstance) const
 {
     if (!worldSpace)
         for (int r = 0; r < 3; ++r)
@@ -1504,7 +1523,7 @@ void RayScene::refreshDesc(D3D12_RAYTRACING_INSTANCE_DESC& d, const gpu::Instanc
             d.Transform[r][2] = in.objectToWorld[r].z;
             d.Transform[r][3] = in.objectToWorld[r].w;
         }
-    d.InstanceMask = rtInstanceMask(in.flags);
+    d.InstanceMask = rtInstanceMask(in.flags, seeThrough(sceneInstance));
 }
 
 void RayScene::record(FramePassContext& fc)
@@ -1559,7 +1578,7 @@ void RayScene::record(FramePassContext& fc)
             continue;
         }
         const RtInstance& ri = m_instances[m_dynamicRecord[k]];
-        refreshDesc(m_dynamicDescs[k], sceneInstances[ri.sceneInstance], (ri.flags & kRtInstanceDeformed) != 0);
+        refreshDesc(m_dynamicDescs[k], sceneInstances[ri.sceneInstance], (ri.flags & kRtInstanceDeformed) != 0, ri.sceneInstance);
         slotDescs[k] = m_dynamicDescs[k];
         if ((ri.flags & kRtInstanceDeformed) == 0) continue;
         // A skinned instance in the reflection exact set is traced with its original mesh (its slot's BLAS and record).
@@ -1634,7 +1653,7 @@ void RayScene::record(FramePassContext& fc)
         // its cells (GiShift moves them) and only the TLAS is rebuilt.
         const bool change = !rebase;
         if (change && m_staticDescs[k].InstanceMask != 0) m_changes.push_back(descBounds(m_staticDescs[k], sphere));  // where it was (B3)
-        refreshDesc(m_staticDescs[k], in, false);
+        refreshDesc(m_staticDescs[k], in, false, m_staticScene[k]);
         if (change && m_staticDescs[k].InstanceMask != 0) m_changes.push_back(descBounds(m_staticDescs[k], sphere));  // where it is now
         staticChanged = true;
     }

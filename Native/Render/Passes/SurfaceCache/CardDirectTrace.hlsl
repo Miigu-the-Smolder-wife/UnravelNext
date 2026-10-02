@@ -58,7 +58,7 @@ void CardDirectTraceGen()
         ray.Origin = texel.position + texel.normal * bias;
         ray.TMin = 0;
         ray.TMax = asfloat(P[1].w);
-        mask = RT_MASK_GI;
+        mask = RT_MASK_HIT_SHADOW;  // (the sun's casters, as the view's shadow maps: RayScene.hlsli)
     }
     else
     {

@@ -144,7 +144,7 @@ void CardRadiosityTraceGen()
                         sr.TMin = 0;
                         sr.TMax = giRayLength();
                         L.sunIlluminance = e0;
-                        L.sunVisibility = rtVisible(scene, sr, RT_MASK_GI) ? 1.0 : 0.0;
+                        L.sunVisibility = rtVisible(scene, sr, RT_MASK_HIT_SHADOW) ? 1.0 : 0.0;
                     }
                 }
                 L.local = rtHitLocalSample(scene, s, m, -ray.Direction, hit.t * 0.74, bias, thread * 9781u + P[0].z * 26699u);

@@ -31,7 +31,7 @@ float3 rtHitLocalSample(RtSceneSrvs scene, RtSurface s, GpuMaterial m, float3 v,
     mc.roughness = sqrt(sqrt(alpha * alpha + g_rtHitCone * g_rtHitCone));
     const float3 f = rtLocalLightBrdfCos(mc, s.normal, v, ls.wi, false);
     if (!any(f > 0)) return 0;
-    if (ls.castShadow && !rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, bias), RT_MASK_GI)) return 0;
+    if (ls.castShadow && !rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, bias), RT_MASK_HIT_SHADOW)) return 0;
     return f * ls.weight;
 }
 #endif

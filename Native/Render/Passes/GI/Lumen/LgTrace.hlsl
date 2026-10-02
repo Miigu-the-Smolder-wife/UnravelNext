@@ -252,7 +252,7 @@ void LgTraceGen()
                     sr.TMin = 0;
                     sr.TMax = giRayLength();
                     L.sunIlluminance = e0;
-                    L.sunVisibility = rtVisible(scene, sr, RT_MASK_GI) ? 1.0 : 0.0;
+                    L.sunVisibility = rtVisible(scene, sr, RT_MASK_HIT_SHADOW) ? 1.0 : 0.0;
                 }
             }
             // a hit without cards: one local-light sample (HitLocalSample.hlsli; experiment 128: none, as the reference)
