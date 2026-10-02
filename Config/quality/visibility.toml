@@ -44,8 +44,17 @@ brick_residual_max = 0.05         # largest allowed residual P99 of a mesh's vox
 strands_per_pixel_max = 2         # hair/grass LOD: blades or strands per pixel width before switching to bricks
 # Capacities of one cull run (a view or a raster-service request). Exceeding one drops geometry and is reported in
 # unx::visibility::Stats::overflow (tests and gates fail on it); they are sizes, not quality settings.
-max_visible_clusters = 1048576    # visible-list entries (each draw list has the same capacity)
-raster_amplification = true       # tile-local raster runs (DepthRasterRequest::tileLocal): an amplification stage launches each
+max_visible_clusters = 1048576    # visible-list entries (each draw list has the same capacity); with
+                                  # visible_clusters_follow_need the floor of every run's capacity
+visible_clusters_follow_need = true   # a cull run's visible-list capacity is 1.5 x the need of its latest completed frame (a
+                                  # power of two from the floor up to visible_clusters_limit; shrinks below a quarter), as
+                                  # S's shadow overflow list: the forest's main view needed 7.58 M entries against 1 M. The
+                                  # frame whose need jumps past the capacity still drops geometry and sets the overflow
+                                  # bit; the next completed frame's capacity holds it. false = the fixed capacity (as
+                                  # before). Written 2026-10-03, built, not run
+visible_clusters_limit = 8388608  # the most a run's capacity grows to: 2^23, the vis id's cluster field (40 B an entry:
+                                  # 335 MB of transient buffers for a run at the limit)
+raster_amplification = true      # tile-local raster runs (DepthRasterRequest::tileLocal): an amplification stage launches each
                                   # (cluster, tile run) pair from the visible entry's tile rectangle (no pair is stored: no pair
                                   # capacity); false = the stored pair list of capacity max_visible_clusters (A/B)
 max_node_items = 4194304          # hierarchy traversal work items (instance, node) of both phases
@@ -123,3 +132,69 @@ coverage_compute_raster = false   # with the buckets: a compute kernel (Coverage
 coverage_statistics = false       # counts only (gate summaries): the coverage fragments by outcome - evaluated, behind band
                                   # A, behind the cover, cut by alpha, without weight - from per-wave atomics in the
                                   # fragment kernels (a pixel kernel variant: its time is not the layer's)
+# The band A raster of a full view in raster bins (RasterBins.hlsl; the reference's raster bins, depth buckets and its
+# software rasteriser). Written 2026-10-03, built, not run: each switch off is the raster as before.
+raster_depth_sort = false         # after each cull phase the entries it added to the four band A lists (the raster
+                                  # pipelines: back-face culled or not, alpha tested or not) are sorted by their
+                                  # cluster's nearest distance (256 log2 bins, a counting sort) and the mesh raster draws
+                                  # the sorted copy, nearer first: the depth test drops what nearer clusters of the same
+                                  # draw cover before the pixel kernel (the alpha test's texture loads) and the writes.
+                                  # The same depth and vis ids up to the order of equal depths. Costs 4 small passes a
+                                  # phase and 4 B x 4 lists x the capacity. Off until the A/B says what the order gains
+software_raster = false           # clusters without alpha test whose rectangle on screen is at most
+                                  # software_raster_max_px a side (rigid or wind-deformed, a perspective view) are
+                                  # rasterised by a compute kernel (VisRasterSw.hlsl) into a 64-bit depth | vis id word
+                                  # per pixel by atomic max, and a pass writes those pixels into the depth buffer and the
+                                  # vis id target under the depth test before the HiZ is built; the mesh raster draws the
+                                  # rest. The same pixels as the hardware (1 / 256 px snap, top-left rule, pixel centres)
+                                  # up to the depth's float rounding. Needs 64-bit atomics on descriptor-heap resources
+                                  # (without them the mesh raster draws everything); not in debug.deterministic mode.
+                                  # In a raster request with an atlas (S's shadow pages) the same split, by the
+                                  # cluster's rectangle in its view (DepthRasterSw.hlsl). 8 B a pixel in the main view
+software_raster_max_px = 32       # the largest cluster rectangle the software rasteriser takes (1 .. 64: its integer
+                                  # edge functions hold 64 px). The reference decides per cluster by its triangles' size;
+                                  # here the cluster's rectangle bounds every triangle's loop
+software_raster_pages = 256       # a raster request's software pages (one per set tile of its views, 4 B a texel: 64 KB
+                                  # for a 128 px shadow page): the floor of the capacity, which is 1.5 x the set tiles
+                                  # of the request's latest completed frame, a power of two up to
+                                  # software_raster_pages_limit and the atlas's slots. A tile past the capacity loses
+                                  # nothing: the clusters over it stay with the mesh raster
+software_raster_pages_limit = 4096  # the most (<= 16384; 4096 pages of 128 px: 268 MB of transient memory for a request
+                                  # that draws them all)
+# Compressed cluster vertices (Tools/ClusterBuilder ClusterStream.h; the reference's cluster encoding). A cook setting:
+# it changes what the builder returns, not the cached hierarchies. Written 2026-10-03, built, not run.
+cluster_compression = false       # clusters of rigid meshes (no skin, blend shapes or vertex animation) carry their own
+                                  # vertices as a bit stream - positions on the mesh's grid less the cluster's smallest,
+                                  # in the bits its extent needs; octahedral normal; tangent as an angle around it; uv
+                                  # in the cluster's range. The cook puts those meshes' positions on a power-of-two grid
+                                  # first (clusterbuilder::snapPositions: at most half a millimetre), so the stream's
+                                  # positions are the vertex pool's floats. Its readers (about 10 B a vertex instead of
+                                  # an index and 32 B): the vis buffer and depth rasters, the material resolve, the
+                                  # motion vectors, the history reprojections. The 32 B vertex pool stays whole - the
+                                  # rays' hit attributes, the coverage raster and shading, the composites, skinned
+                                  # instances - so the scene's memory grows by the stream (the cook's log gives the
+                                  # sizes); the stream is what a streamed cluster page holds (cluster_streaming)
+cluster_position_step = 0.0009765625  # m (1 / 1024): the position grid of a mesh is the largest power of two at most
+                                  # this and a 4096th of the mesh's half diagonal (raised when the mesh is too large
+                                  # for 2^23 steps from its origin or a cluster for 21 bits an axis)
+cluster_normal_bits = 10          # per octahedral axis (4 .. 12)
+cluster_tangent_bits = 8          # the tangent's angle around the normal (4 .. 11), and one bit for the bitangent sign
+cluster_uv_bits = 12              # per axis over the cluster's uv range (4 .. 15)
+# Cluster streaming (Visibility.h ClusterPageSource, unx/visibility/ClusterPages.h; the reference's streaming pages).
+# Written 2026-10-03, built, not run. With cluster_compression: the cook setting decides what the build returns, the
+# others what the renderer does with it.
+cluster_streaming = false         # the compressed vertex bits of every group that a coarser one can stand in for go
+                                  # into 64 KB pages (whole groups) in a page file instead of the scene's buffer; each
+                                  # mesh's coarsest groups stay resident. The cull kernels stamp the pages their cuts
+                                  # want; the renderer requests those and what they depend on, a DirectStorage streamer
+                                  # brings them into a VRAM pool, and each frame has a page table: a group whose page
+                                  # is not resident is not drawn and the clusters simplified from it are drawn in its
+                                  # place (a page is requested in the frame after the cut wanted it and is drawn two or
+                                  # more frames later). What is streamed is the stream the vis buffer and depth rasters
+                                  # read; the 32 B vertex pool, which the material resolve and the rays read, stays
+                                  # resident whole - so this adds the pool of pages and saves no memory until those
+                                  # readers take the stream too
+cluster_streaming_keep_frames = 30  # a page stays requested this many frames after a cut last wanted it; then it is the
+                                  # streamer's to evict, least recently requested first
+cluster_streaming_pool_mb = 256   # the pages' VRAM pool (64 MB heaps; 0: a quarter of the device's free budget)
+cluster_streaming_upload_mb = 16  # page bytes uploaded per frame at most

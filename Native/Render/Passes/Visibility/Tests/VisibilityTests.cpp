@@ -481,6 +481,49 @@ UNX_TEST(vis_id_decodes_to_the_covering_triangle)
     CHECK(checked > 100000);
 }
 
+// Raster bins and the software rasteriser of the main view (RasterBins.hlsl, VisRasterSw.hlsl; written 2026-10-03, not
+// run yet). Sorted: the same draws in another order, so the depth is bit-identical (vis ids may differ where depths tie).
+// Software: the compute rasteriser covers the pixels the hardware covers for the same snapped vertices; its vertex and
+// depth arithmetic is another compilation, so a depth may differ by float rounding, and a vertex that rounds to the
+// other side of a 1 / 256 px snap step moves an edge - such pixels must stay rare.
+UNX_TEST(software_raster_matches_hardware)
+{
+    const scene::Scene s = makeScene();
+    const auto cams = movingCameras(3);
+    const uint32_t width = 2560, height = 1440;
+    const RunOut hardware = renderRun(s, quality({ "visibility.raster_depth_sort = false", "visibility.software_raster = false" }), cams, width, height);
+    const RunOut sorted = renderRun(s, quality({ "visibility.raster_depth_sort = true", "visibility.software_raster = false" }), cams, width, height);
+    const RunOut software = renderRun(s, quality({ "visibility.software_raster = true", "visibility.software_raster_max_px = 64" }), cams, width, height);
+    logStats("hardware", hardware.stats);
+    logStats("sorted  ", sorted.stats);
+    logStats("software", software.stats);
+    logf("    software raster: %u clusters, %u triangles past set-up (band A: %u clusters)\n", software.stats.softwareClusters, software.stats.softwareTriangles,
+         software.stats.bandClusters[0]);
+    CHECK(hardware.stats.overflow == 0 && sorted.stats.overflow == 0 && software.stats.overflow == 0);
+    CHECK(hardware.stats.softwareClusters == 0 && sorted.stats.softwareClusters == 0);
+    CHECK(software.stats.softwareClusters > 0);  // (else the device has no 64-bit atomics, or no cluster is under 64 px here)
+    for (size_t f = 0; f < cams.size(); ++f)
+    {
+        const FrameOut &h = hardware.frames[f], &o = sorted.frames[f], &w = software.frames[f];
+        size_t sortedDiffer = 0, rounding = 0, other = 0, skyDiffer = 0;
+        for (size_t i = 0; i < h.depth.size(); ++i)
+        {
+            if (std::memcmp(&h.depth[i], &o.depth[i], 4) != 0) ++sortedDiffer;
+            if ((w.depth[i] == 0) != (w.visId[i] == kVisNone)) fail("frame %zu pixel %zu: software run depth %g with vis id 0x%08x", f, i, w.depth[i], w.visId[i]);
+            if ((h.depth[i] == 0) != (w.depth[i] == 0)) ++skyDiffer;
+            else if (std::memcmp(&h.depth[i], &w.depth[i], 4) != 0)
+            {
+                if (std::fabs(h.depth[i] - w.depth[i]) <= 1e-6f + 1e-4f * h.depth[i]) ++rounding;
+                else ++other;
+            }
+        }
+        logf("    frame %zu: sorted %zu pixels differ; software %zu differ by rounding, %zu by more, %zu covered in one run only (of %zu)\n", f, sortedDiffer, rounding,
+             other, skyDiffer, h.depth.size());
+        if (sortedDiffer) fail("frame %zu: %zu pixels' depth differs with the band A lists sorted", f, sortedDiffer);
+        if ((other + skyDiffer) * 10000 > h.depth.size()) fail("frame %zu: %zu pixels differ between the software and the hardware rasteriser", f, other + skyDiffer);
+    }
+}
+
 UNX_TEST(depth_ties_choose_stable_primitive)
 {
     scene::Scene scene = makeScene();
@@ -972,12 +1015,15 @@ UNX_TEST(raster_service)
     device().deferRelease(rbFine);
 }
 
-UNX_TEST(raster_service_tile_atlas)
+// S's VSM depth atlas (v1.32, request 20260925_S_vsm_depth_atlas.md): the sparse mask of raster_service over the
+// orthographic 1024^2 terrain view, drawn tile-local into a view-sized D32 target (the reference) and in atlas mode
+// into D32 and D16 atlases of 3 x 11 slots of 128 px, the 30 set tiles in scrambled slots and 3 slots unused.
+// With visibility.software_raster (written 2026-10-03, not run yet) the D32 atlas request sends its small clusters to
+// the compute rasteriser (DepthRasterSw.hlsl) and merges its pages into the slots; the reference and the D16 atlas stay
+// with the mesh raster, and the comparison is the same (the frame is one: whether a cluster went that way is in the
+// run's statistics of a later frame, which this test does not have - the gate's "software raster" lines show it).
+void tileAtlasTest(const QualityConfig& q)
 {
-    // S's VSM depth atlas (v1.32, request 20260925_S_vsm_depth_atlas.md): the sparse mask of raster_service over the
-    // orthographic 1024^2 terrain view, drawn tile-local into a view-sized D32 target (the reference) and in atlas mode
-    // into D32 and D16 atlases of 3 x 11 slots of 128 px, the 30 set tiles in scrambled slots and 3 slots unused.
-    const QualityConfig q = quality();
     const scene::Scene s = makeScene();
     GpuScene gs(device());
     gs.upload(s);
@@ -1178,6 +1224,9 @@ UNX_TEST(raster_service_tile_atlas)
          texels, set, covered, exact, withinSnap, worstSnap, edgeFlips, bad, worst16, 1.0 / 65535, bad16, leaked);
     CHECK(covered == texels && bad == 0 && edgeFlips * 1000 <= texels && bad16 == 0 && leaked == 0);
 }
+
+UNX_TEST(raster_service_tile_atlas) { tileAtlasTest(quality({ "visibility.software_raster = false" })); }
+UNX_TEST(raster_service_tile_atlas_software) { tileAtlasTest(quality({ "visibility.software_raster = true", "visibility.software_raster_max_px = 64" })); }
 
 UNX_TEST(planar_mask_draws_only_mirror_pixels)
 {

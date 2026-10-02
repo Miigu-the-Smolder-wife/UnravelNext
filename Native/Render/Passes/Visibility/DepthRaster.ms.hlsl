@@ -20,7 +20,7 @@
 //        with tile occluders in two phases), list capacity, views SRV, viewport per view (0 = one viewport)
 //   P[2] tile rectangles SRV (TILE=1,2: read by the amplification stage), atlas slots SRV (raw, TILE=2), atlas tiles per
 //        row, atlas size (w | h << 16)
-//   P[3] tile mask SRV (raw, TILE=1,2)
+//   P[3] tile mask SRV (raw, TILE=1,2), the frame's cluster page table's SRV + 1 (visibility.cluster_streaming; 0: none)
 // AS=0 with TILE (visibility.raster_amplification false, A/B): the group is a draw-list entry of the stored pair list
 // (P[2].x: uint3 (visible index, tile rectangle) per pair), dispatched directly.
 #include "Passes/Visibility/VisibilityCommon.hlsli"
@@ -151,11 +151,12 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     const float2 offset = float2(scale.x - 1 + 2 * shift.x / atlasSize.x, 1 - scale.y - 2 * shift.y / atlasSize.y);
 #endif
     SetMeshOutputCounts(vertexCount, triangleCount);
-    StructuredBuffer<uint> clusterVertices = ResourceDescriptorHeap[g_clusterVertexIndices];
+    // (visibility.cluster_compression: the cluster's own vertices, in the stream or in its resident page)
+    const ClusterVertexSource vertexSource = clusterVertexSource(itemIndex(entry), P[3].y);
     for (uint i = lane; i < vertexCount; i += 64)
     {
-        const uint meshVertex = clusterVertices[cl.vertexOffset + i];
-        const DeformedVertex d = deformVertex(inst, mesh, meshVertex);
+        VertexData vertex;
+        const DeformedVertex d = deformClusterVertex(inst, mesh, cl, vertexSource, i, vertex);
         const float4 p = mul(v.viewProj, float4(d.world, 1));
 #if TILE == 2
         verts[i].position = float4(p.x * scale.x + p.w * offset.x, p.y * scale.y + p.w * offset.y, p.z, p.w);
@@ -163,12 +164,12 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
         verts[i].position = p;
 #endif
 #if DEPTH != 1
-        const VertexData source = loadVertex(mesh, meshVertex);
-        verts[i].uv = source.uv;
+        verts[i].uv = vertex.uv;
 #endif
 #if DEPTH == 2
+        // (a compressed cluster's normal and tangent are its stream's: quantised - ClusterStream.hlsli)
         verts[i].normal = d.normal;
-        verts[i].tangent = float4(d.tangent, source.tangentSign);
+        verts[i].tangent = float4(d.tangent, vertex.tangentSign);
 #endif
 #if TILE
         verts[i].clip = float4(p.x - ndcLo.x * p.w, ndcHi.x * p.w - p.x, ndcLo.y * p.w - p.y, p.y - ndcHi.y * p.w);

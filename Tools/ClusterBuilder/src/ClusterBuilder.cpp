@@ -2,6 +2,7 @@
 
 #include "FeatureWidth.h"
 #include "unx/clusterbuilder/ClusterHierarchy.h"
+#include "unx/clusterbuilder/ClusterStream.h"
 #include "unx/core/Jobs.h"
 #include "unx/core/Sha256.h"
 #include "unx/core/Log.h"
@@ -937,6 +938,13 @@ MeshOut buildMesh(const scene::Mesh& m, const Settings& settings, const std::vec
         }
     }
     out.lodPositions.assign(vertices.positions.begin() + vertexCount, vertices.positions.end());
+    // Compressed cluster vertices store grid coordinates (ClusterStream.h): the builder's own vertices go on the mesh's
+    // grid, as the cook puts the mesh's (snapPositions).
+    if (settings.compression && streamMesh(m))
+    {
+        const float step = positionStep(m.positions, settings);
+        for (float3& p : out.lodPositions) p = { (float)gridCoordinate(p.x, step) * step, (float)gridCoordinate(p.y, step) * step, (float)gridCoordinate(p.z, step) * step };
+    }
     out.lodSources = std::move(vertices.source);
     out.stats.lodVertices = (uint32_t)out.lodPositions.size();
 
@@ -1001,6 +1009,15 @@ Settings Settings::fromQuality(const QualityConfig& q)
     if (s.clusterVertices < 3 || s.clusterVertices > 128) fail("visibility.cluster_vertices must be 3..128 (V's mesh shaders output at most 128 vertices)");
     if (s.clusterMinTriangles < 1 || s.clusterMinTriangles > s.clusterTriangles) fail("visibility.cluster_min_triangles must be 1..cluster_triangles");
     if (!(s.sheetOrientationMinWidth >= 0)) fail("visibility.sheet_orientation_min_width must be >= 0");
+    s.compression = q.has("visibility.cluster_compression") && q.boolean("visibility.cluster_compression");
+    s.streaming = q.has("visibility.cluster_streaming") && q.boolean("visibility.cluster_streaming");
+    s.positionStep = q.has("visibility.cluster_position_step") ? (float)q.number("visibility.cluster_position_step") : 1.0f / 1024;
+    s.normalBits = q.has("visibility.cluster_normal_bits") ? (uint32_t)q.integer("visibility.cluster_normal_bits") : 10u;
+    s.tangentBits = q.has("visibility.cluster_tangent_bits") ? (uint32_t)q.integer("visibility.cluster_tangent_bits") : 8u;
+    s.uvBits = q.has("visibility.cluster_uv_bits") ? (uint32_t)q.integer("visibility.cluster_uv_bits") : 12u;
+    if (!(s.positionStep > 0)) fail("visibility.cluster_position_step must be > 0");
+    if (s.normalBits < 4 || s.normalBits > 12 || s.tangentBits < 4 || s.tangentBits > 11 || s.uvBits < 4 || s.uvBits > 15)
+        fail("visibility.cluster_normal_bits 4..12, cluster_tangent_bits 4..11, cluster_uv_bits 4..15 (a vertex is at most 129 bits)");
     return s;
 }
 
@@ -1131,6 +1148,14 @@ std::string meshKey(const scene::Mesh& m, const Settings& settings, const std::v
     h.update(ints, sizeof ints);
     h.update(floats, sizeof floats);
     h.update(&thin, sizeof thin);
+    // (compression moves the builder's own vertices onto the mesh's grid: a hierarchy with them is another entry. The
+    // stream itself is made from the hierarchy afterwards and is in no entry)
+    if (settings.compression && settings.thinPreserveArea)
+    {
+        const uint32_t compressed = 1;
+        h.update(&compressed, sizeof compressed);
+        h.update(&settings.positionStep, sizeof settings.positionStep);
+    }
     const std::array<uint8_t, 32> d = h.finish();
     return std::string(reinterpret_cast<const char*>(d.data()), d.size());
 }
@@ -1495,8 +1520,9 @@ void LodVertices::appendTo(scene::Scene& scene) const
     }
 }
 
-render::ClusterData build(const scene::Scene& scene, const Settings& requested, BuildStats* stats, LodVertices* lodVertices)
+render::ClusterData build(const scene::Scene& scene, const Settings& requested, BuildStats* stats, LodVertices* lodVertices, StreamPages* pages)
 {
+    StreamGroups streamGroups;  // (the groups as the clusters are put together below: the stream's pages are whole groups)
     const auto t0 = std::chrono::steady_clock::now();
     // Without a place for the builder's own vertices, no cluster may index one: thin geometry stays as it is.
     Settings settings = requested;
@@ -1627,6 +1653,8 @@ render::ClusterData build(const scene::Scene& scene, const Settings& requested, 
                     data.clusterTriangles.push_back((uint32_t)localTriangles[3 * t] | (uint32_t)localTriangles[3 * t + 1] << 8 | (uint32_t)localTriangles[3 * t + 2] << 16 |
                                                     (cut ? cutEdges.flags(&c.indices[3 * t], positions, rc.lodError) << kCutEdgeShift : 0u));
                 data.clusters.push_back(rc);
+                streamGroups.clusterGroup.push_back((uint32_t)(streamGroups.groups.size() + gi));
+                streamGroups.clusterRefined.push_back(c.refined < 0 ? render::gpu::kNone : (uint32_t)(streamGroups.groups.size() + (size_t)c.refined));
                 const float4 sphere{ c.lod.center[0], c.lod.center[1], c.lod.center[2], c.lod.radius };
                 appendNamed(data, kClusterLodSpheres, &sphere, sizeof sphere, sizeof(float4));
                 const SheetOrientation sheet = sheetOrientation(positions, c.indices.data(), indexCount);
@@ -1638,6 +1666,8 @@ render::ClusterData build(const scene::Scene& scene, const Settings& requested, 
                 appendNamed(data, kClusterSheets, &sheetData, sizeof sheetData, sizeof(float4));
             }
         }
+
+        for (const GroupOut& g : mo.groups) streamGroups.groups.push_back({ clusterBase + g.firstCluster, g.clusterCount, g.simplified.error == FLT_MAX });
 
         // Hierarchy nodes.
         std::vector<gpu::ClusterNode> nodes(mo.nodes.size());
@@ -1743,6 +1773,17 @@ render::ClusterData build(const scene::Scene& scene, const Settings& requested, 
         range.lodLevelCount = (uint32_t)data.lodLevels.size() - range.lodLevelOffset;
         meshStats[mi].lodLevels = range.lodLevelCount;
         meshStats[mi].coarsestTriangles = range.lodLevelCount ? data.lodLevels.back().triangleCount : 0;
+    }
+    // Compressed cluster vertices: from the hierarchy as put together (global cluster indices are the handles').
+    if (settings.compression && !settings.noSimplification)  // (run-time meshes are installed uncompressed: GpuScene::addRuntimeMesh)
+    {
+        LodVertices own;
+        if (!lodVertices)
+        {
+            own.meshes.assign(built.size(), {});
+            for (size_t i = 0; i < built.size(); ++i) own.meshes[i] = { built[i]->lodPositions, built[i]->lodSources };
+        }
+        encodeStream(scene, settings, lodVertices ? lodVertices : &own, streamGroups, data, settings.streaming ? pages : nullptr);
     }
     if (stats)
     {

@@ -15,6 +15,7 @@
 // P[0] = { filtered SRV, depth SRV, gbuffer SRV, output UAV }, P[1] = { width, height, flags (bit 0: the previous frame's
 // history is valid), exposure ratio (float) }, P[2] = { previous keys SRV, keys UAV, previous value SRV, vis id SRV },
 // P[3] = { visible clusters SRV, N, 0, 0 }, P[4..7] = the previous frame's inverse view-projection (rows). b1 = the view.
+#define UNX_CLUSTER_STREAM 1  // (a vis id's triangle from its cluster's stream when it is compressed: ClusterStream.hlsli)
 #include "Passes/GI/GiCache.hlsli"
 #include "Passes/GI/GiScreenInputs.hlsli"
 #include "Passes/GI/GiScreenHistory.hlsli"

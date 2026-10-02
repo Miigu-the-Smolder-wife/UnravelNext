@@ -12,6 +12,7 @@
 // P[1] = { width, height, factor | flags << 8 (1: history valid, 2: temporal on), clamp scale (float) }
 // P[2] = { previous output, previous view depth, vis id, visible clusters } (UNX_NONE: none)
 // P[3] = { output UAV, view depth UAV, max frames (float), history distance threshold (float) }
+#define UNX_CLUSTER_STREAM 1  // (a vis id's triangle from its cluster's stream when it is compressed: ClusterStream.hlsli)
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"

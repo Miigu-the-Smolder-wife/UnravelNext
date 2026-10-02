@@ -179,9 +179,9 @@ bool deformInstanceStill(GpuInstance inst)
            all(inst.objectToWorld[2] == inst.prevObjectToWorld[2]);
 }
 
-DeformedVertex deformVertex(GpuInstance inst, GpuMesh mesh, uint meshVertex)
+// v: the vertex as loaded; meshVertex: its mesh vertex index (the skin and morph fetches).
+DeformedVertex deformLoadedVertex(GpuInstance inst, GpuMesh mesh, VertexData v, uint meshVertex)
 {
-    const VertexData v = loadVertex(mesh, meshVertex);
     float3 p = v.position, n = v.normal, t = v.tangent;
     float3 pp = p, pn = n, pt = t;
     if (inst.morph != UNX_NONE)
@@ -206,5 +206,27 @@ DeformedVertex deformVertex(GpuInstance inst, GpuMesh mesh, uint meshVertex)
     d.tangent = normalize(transformVector(inst.objectToWorld, t));
     return d;
 }
+
+DeformedVertex deformVertex(GpuInstance inst, GpuMesh mesh, uint meshVertex) { return deformLoadedVertex(inst, mesh, loadVertex(mesh, meshVertex), meshVertex); }
+
+#if UNX_CLUSTER_STREAM && defined(UNX_CLUSTER_STREAM_HLSLI)
+// Local vertex 'local' of a cluster (loadClusterVertex, ClusterStream.hlsli: the cluster's stream when it has one - then
+// the mesh is rigid and no fetch by mesh vertex follows). v: the vertex as loaded (its uv for the alpha test).
+DeformedVertex deformClusterVertex(GpuInstance inst, GpuMesh mesh, GpuCluster cl, ClusterVertexSource source, uint local, out VertexData v)
+{
+    uint meshVertex;
+    v = loadClusterVertex(mesh, cl, source, local, meshVertex);
+    return deformLoadedVertex(inst, mesh, v, meshVertex);
+}
+
+// The three deformed corners of triangle t of cluster 'cluster' (a vis id's triangle: motion, history).
+void deformClusterTriangle(GpuInstance inst, GpuMesh mesh, GpuCluster c, uint cluster, uint t, out DeformedVertex d0, out DeformedVertex d1, out DeformedVertex d2)
+{
+    const ClusterCorners k = loadClusterCorners(mesh, c, cluster, t);
+    d0 = deformLoadedVertex(inst, mesh, k.v[0], k.meshVertex.x);
+    d1 = deformLoadedVertex(inst, mesh, k.v[1], k.meshVertex.y);
+    d2 = deformLoadedVertex(inst, mesh, k.v[2], k.meshVertex.z);
+}
+#endif
 
 #endif

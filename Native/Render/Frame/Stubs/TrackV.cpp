@@ -7,4 +7,5 @@ namespace unx::render::tracks
 {
 void visibility(FramePassContext&, ViewResources&) { pending("V.visibility (track disabled in this build)"); }
 void rasterizeDepth(FramePassContext&, const DepthRasterRequest&) { pending("V.rasterizeDepth (track disabled in this build)"); }
+uint32_t clusterPageTable(FramePassContext&) { return 0; }
 } // namespace unx::render::tracks

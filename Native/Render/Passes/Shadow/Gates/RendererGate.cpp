@@ -48,6 +48,11 @@
 #if __has_include("unx/clusterbuilder/ClusterBuilder.h") && defined(UNX_HAS_SCENEGEN)
 #define S_RENDERER_GATE 1
 #include "unx/clusterbuilder/ClusterBuilder.h"
+#include "unx/clusterbuilder/ClusterStream.h"
+#if __has_include("unx/streaming/Streaming.h")
+#include "unx/visibility/ClusterPages.h"
+#define S_GATE_CLUSTER_PAGES 1
+#endif
 #include "unx/scenegen/SceneGen.h"
 #include "unx/visibility/Visibility.h"
 #endif
@@ -821,7 +826,12 @@ int main(int argc, char** argv)
         // scene's meshes before anything reads vertices through cluster indices)
         clusterbuilder::LodVertices lodVertices;
         clusterbuilder::BuildStats buildStats;
-        ClusterData clusters = clusterbuilder::build(s, clusterbuilder::Settings::fromQuality(quality), &buildStats, &lodVertices);
+        const clusterbuilder::Settings clusterSettings = clusterbuilder::Settings::fromQuality(quality);
+        // (visibility.cluster_compression: the rigid meshes' positions onto their grids first, ClusterStream.h)
+        if (clusterSettings.compression) clusterbuilder::snapPositions(s, clusterSettings);
+        // (visibility.cluster_streaming: the streamed groups' vertex bits come back as pages; a file and a streamer below)
+        clusterbuilder::StreamPages clusterPages;
+        ClusterData clusters = clusterbuilder::build(s, clusterSettings, &buildStats, &lodVertices, &clusterPages);
         logf("scene %s (%s), %zu instances, %zu clusters, camera %s\n", sceneName.c_str(), scene::contentHash(s).substr(0, 16).c_str(), s.instances.size(),
              clusters.clusters.size(), moving ? "path 0 (moving)" : (cameraName.empty() ? "0 (static)" : cameraName.c_str()));
         {
@@ -836,6 +846,10 @@ int main(int argc, char** argv)
         GpuScene gpuScene(device);
         gpuScene.upload(s);
         gpuScene.setClusters(std::move(clusters));
+#if S_GATE_CLUSTER_PAGES
+        const std::shared_ptr<visibility::ClusterPageFile> clusterPageFile = visibility::openClusterPages(device, quality, clusterPages, "", 2);
+        if (clusterPageFile) logf("cluster streaming: %u pages in %s\n", clusterPageFile->pages, clusterPageFile->path.c_str());
+#endif
         Harness harness(device, quality);
         const std::vector<std::string> resolutions = resolutionArg == "both"  ? std::vector<std::string>{ "4K", "1440p" }
                                                    : resolutionArg == "all" ? std::vector<std::string>{ "4K", "1440p", "1080p" }
@@ -852,6 +866,9 @@ int main(int argc, char** argv)
             else
                 res = resolutionFromString(rs, quality);
             FrameRenderer renderer(device, shaders, quality, gpuScene, 2);
+#if S_GATE_CLUSTER_PAGES
+            visibility::installClusterPages(renderer.trackState(), clusterPageFile);
+#endif
             shadow::setKeepFroxels(renderer.trackState(), true);  // no consumer of the volume yet (M): measure it anyway
 #if S_GATE_HAIR
             // The scene's grooms (SceneGen.h grooms: hair_ball) as E's hair bodies: one joint at the head, ticked every
@@ -1563,6 +1580,14 @@ int main(int argc, char** argv)
                      "translucent two-sided %u\n",
                      vs.listEntries[0], vs.listEntries[1], vs.listEntries[2], vs.listEntries[3], vs.listEntries[4], vs.listEntries[5], vs.listEntries[6],
                      vs.listEntries[7]);
+                // visibility.software_raster (the A/B's measure of how much of band A the compute rasteriser took) and the
+                // visible-list capacity the run has now (visibility.visible_clusters_follow_need).
+                logf("  V software raster: %u clusters, %u triangles past set-up (band A: %u clusters, %u triangles); visible-list capacity %u\n", vs.softwareClusters,
+                     vs.softwareTriangles, vs.bandClusters[0], vs.triangles[0], vs.visibleCapacity);
+                // visibility.cluster_streaming: the pages of the last frame, and what the main view drew for pages not there.
+                if (const visibility::ClusterStreamStats cst = visibility::clusterStreamStats(renderer.trackState()); cst.pages)
+                    logf("  V cluster streaming: %u pages, %u requested, %u resident; main view: %u stand-in clusters, %u groups waiting for their page\n", cst.pages,
+                         cst.wanted, cst.resident, vs.streamStandIns, vs.streamWaiting);
                 // Every cull run's last frame (the raster requests: shadow pages, cards) and the error bits of all its frames.
                 uint32_t vBits = 0;
                 for (const auto& [name, run] : visibility::latestStatsOfRuns(renderer.trackState()))
@@ -1572,6 +1597,12 @@ int main(int argc, char** argv)
                     logf("  V run %-24s %u instances, %u nodes, %u clusters tested, %u visible (%u tile pairs), %.3f M triangles, error bits 0x%x\n", name.c_str(),
                          run.instancesVisible, run.nodesTested, run.clustersTested, run.visibleClusters, run.tilePairs,
                          ((double)run.triangles[0] + run.triangles[1] + run.triangles[2]) / 1e6, run.overflowSeen);
+                    if (run.streamStandIns || run.streamWaiting)
+                        logf("    cluster streaming: %u clusters drawn in place of a finer group that is not resident, %u groups waiting for their page\n",
+                             run.streamStandIns, run.streamWaiting);
+                    if (run.softwareTiles || run.softwareClusters)
+                        logf("    software raster: %u clusters, %u triangles past set-up, %u set tiles (each wants a software page); visible-list capacity %u\n",
+                             run.softwareClusters, run.softwareTriangles, run.softwareTiles, run.visibleCapacity);
                 }
                 // (0x100, 0x2000, 0x4000: pools that grow from the measured need - a frame over one after a cut is expected)
                 const bool vOk = (vBits & ~visibility::kOverflowGrowingPools) == 0;

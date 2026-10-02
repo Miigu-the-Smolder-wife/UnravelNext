@@ -427,8 +427,12 @@ struct FrameConstants
     // materialInputs: StructuredBuffer<MaterialInputs> (kNone: no material has one). meshAttributes: StructuredBuffer<uint>
     // per mesh, 1 + the mesh's first record in vertexAttributes (StructuredBuffer<VertexAttributes>), 0: the mesh has
     // neither a second uv set nor vertex colours (kNone: no mesh has).
+    // clusterStream: the SRV + 1 of the compressed cluster vertices (ClusterData::named "clusterStream", Tools/
+    // ClusterBuilder ClusterStream.h; Passes/Common/ClusterStream.hlsli loadClusterVertex), 0 = the scene has none.
+    // clusterPages: the SRV + 1 of the frame's cluster page table (visibility.cluster_streaming: tracks::
+    // clusterPageTable), 0 = no streaming this frame. Frame.hlsli declares the two only with UNX_CLUSTER_STREAM.
     uint32_t blueNoise, fog, materialInputs;
-    uint32_t meshAttributes, vertexAttributes, pad3, pad4;
+    uint32_t meshAttributes, vertexAttributes, clusterStream, clusterPages;
 };
 static_assert(sizeof(FrameConstants) == 608);
 } // namespace unx::render::gpu

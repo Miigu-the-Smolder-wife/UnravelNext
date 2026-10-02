@@ -5,6 +5,8 @@
 // to cluster culling and an internal node pushes its children.
 // Frustum + clip plane on the node's sphere (encloses all geometry below), raster-service tile mask; HiZ occlusion as
 // in CullInstances (PHASE=1: previous frame, occluded nodes deferred; PHASE=2: this frame, occluded nodes dropped).
+// Cluster streaming (PAGE_TABLE): a leaf whose group's page is not resident does not pass its group (CullClusters draws
+// the clusters simplified from it in its place) and notes the page as wanted; a resident one is noted too (its use).
 //   QUEUE=0: one level of the traversal, node items [VS_NODE_BEGIN, VS_NODE_END): a pass per tree level, each after a
 //            CullPrepare pass (visibility.traversal_work_queue false).
 //   QUEUE=1: the whole traversal in one dispatch of a fixed number of groups (visibility.traversal_worker_groups), the
@@ -27,7 +29,7 @@
 
 struct NodeResult
 {
-    bool pushChildren, pushGroup, defer;
+    bool pushChildren, pushGroup, defer, waiting;
     uint2 item;  // the tested item (packItem: instance, node, view)
     ClusterNode node;
 };
@@ -74,6 +76,13 @@ NodeResult testNode(uint2 it)
     }
     r.pushGroup = keep && r.node.leaf != 0;
     r.pushChildren = keep && r.node.leaf == 0;
+    if (r.pushGroup && PAGE_TABLE != 0)
+    {
+        const uint page = clusterStreamPages(r.node.first).x;  // (a group's clusters share a page)
+        pageWanted(page);
+        r.waiting = !pageResident(page);
+        r.pushGroup = !r.waiting;
+    }
     return r;
 }
 
@@ -103,6 +112,8 @@ void emitNodes(RWByteAddressBuffer state, NodeResult r, uint processed, uint gro
         deferred[d] = r.item;
     }
     if (WaveIsFirstLane() && processed > 0) state.InterlockedAdd(4 * VS_STAT_NODES, processed);
+    const uint waiting = WaveActiveCountBits(r.waiting);
+    if (WaveIsFirstLane() && waiting > 0) state.InterlockedAdd(4 * VS_STREAM_WAITING, waiting);
 }
 
 #if QUEUE == 0

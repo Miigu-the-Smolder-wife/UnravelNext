@@ -29,9 +29,14 @@ MCutFrame mCutFrame(uint visId, uint visibleClustersSrv, MSurface s)
     const GpuInstance inst = loadInstance(vc.instance);
     const GpuCluster c = loadCluster(vc.cluster);
     const GpuMesh mesh = loadMesh(inst.mesh);
-    const uint3 tri = loadClusterTriangle(c, visTriangle(visId));
     StructuredBuffer<uint> words = ResourceDescriptorHeap[g_clusterTriangles];
+#if UNX_CLUSTER_STREAM
+    const ClusterCorners k = loadClusterCorners(mesh, c, vc.cluster, visTriangle(visId));
+    const VertexData v0 = k.v[0], v1 = k.v[1], v2 = k.v[2];
+#else
+    const uint3 tri = loadClusterTriangle(c, visTriangle(visId));
     const VertexData v0 = loadVertex(mesh, tri.x), v1 = loadVertex(mesh, tri.y), v2 = loadVertex(mesh, tri.z);
+#endif
     const MVertex w0 = mTriangleVertex(visId, visibleClustersSrv, 0), w1 = mTriangleVertex(visId, visibleClustersSrv, 1),
                   w2 = mTriangleVertex(visId, visibleClustersSrv, 2);
     MCutFrame f;

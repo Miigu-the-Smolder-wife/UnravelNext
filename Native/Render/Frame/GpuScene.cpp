@@ -1933,6 +1933,10 @@ void GpuScene::fill(gpu::FrameConstants& f) const
     f.lightCount = m_source ? (uint32_t)m_source->lights.size() : 0;
     f.materialCount = (uint32_t)m_materials.size();
     f.sceneRevision = m_revision;
+    f.clusterStream = 0;  // (SRV + 1: 0 = none)
+    f.clusterPages = 0;   // (FrameRenderer::allocateFrameConstants: V's page table of the frame)
+    for (const auto& [name, b] : m_named)
+        if (name == "clusterStream") f.clusterStream = b.srv + 1;
 }
 
 ID3D12Resource* GpuScene::buffer(const char* name) const

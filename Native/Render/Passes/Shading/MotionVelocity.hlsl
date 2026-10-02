@@ -14,6 +14,7 @@
 // P[0] = { vis id SRV, visible clusters SRV, velocity UAV, asuint(jitter change x) }, P[1] = { width, height, rotation
 // stage, asuint(jitter change y) },
 // P[2..4] = asfloat rows of Q^T (view space, xyz + 0); frame constants of the view.
+#define UNX_CLUSTER_STREAM 1  // (the triangle's vertices from its cluster's stream when it is compressed: ClusterStream.hlsli)
 #include "Bindless.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
 
@@ -42,8 +43,13 @@ void main(uint2 id : SV_DispatchThreadID)
         viewModel = (inst.flags & INSTANCE_VIEW_MODEL) != 0;
         const GpuCluster c = loadCluster(vc.cluster);
         const GpuMesh mesh = loadMesh(inst.mesh);
+#if UNX_CLUSTER_STREAM
+        DeformedVertex d0, d1, d2;
+        deformClusterTriangle(inst, mesh, c, vc.cluster, visTriangle(visId), d0, d1, d2);
+#else
         const uint3 tri = loadClusterTriangle(c, visTriangle(visId));
         const DeformedVertex d0 = deformVertex(inst, mesh, tri.x), d1 = deformVertex(inst, mesh, tri.y), d2 = deformVertex(inst, mesh, tri.z);
+#endif
         const float3 r0 = d0.world - g_cameraPosition;
         const float3 e1 = d1.world - d0.world, e2 = d2.world - d0.world;
         const float3 n = cross(e1, e2);

@@ -77,10 +77,16 @@ MVertex mTriangleVertex(uint visId, uint visibleClustersSrv, uint corner)
     const GpuInstance inst = loadInstance(vc.instance);
     const GpuCluster c = loadCluster(vc.cluster);
     const GpuMesh mesh = loadMesh(inst.mesh);
+#if UNX_CLUSTER_STREAM  // (the cluster's own vertices when it is compressed: ClusterStream.hlsli)
+    uint meshVertex;
+    const VertexData v = loadClusterCorner(mesh, c, vc.cluster, visTriangle(visId), corner, meshVertex);
+    const DeformedVertex d = deformLoadedVertex(inst, mesh, v, meshVertex);
+#else
     const uint3 tri = loadClusterTriangle(c, visTriangle(visId));
     const uint meshVertex = corner == 0 ? tri.x : (corner == 1 ? tri.y : tri.z);
     const DeformedVertex d = deformVertex(inst, mesh, meshVertex);
     const VertexData v = loadVertex(mesh, meshVertex);
+#endif
     MVertex o;
     o.world = d.world;
     o.normal = d.normal;
@@ -95,10 +101,17 @@ void mTriangleRest(uint visId, uint visibleClustersSrv, out float3 r0, out float
 {
     const GpuVisibleCluster vc = loadVisibleCluster(visibleClustersSrv, visVisibleCluster(visId));
     const GpuMesh mesh = loadMesh(loadInstance(vc.instance).mesh);
+#if UNX_CLUSTER_STREAM
+    const ClusterCorners k = loadClusterCorners(mesh, loadCluster(vc.cluster), vc.cluster, visTriangle(visId));
+    r0 = k.v[0].position;
+    r1 = k.v[1].position;
+    r2 = k.v[2].position;
+#else
     const uint3 tri = loadClusterTriangle(loadCluster(vc.cluster), visTriangle(visId));
     r0 = loadVertex(mesh, tri.x).position;
     r1 = loadVertex(mesh, tri.y).position;
     r2 = loadVertex(mesh, tri.z).position;
+#endif
 }
 
 // The triangle a vis id names as coverage needs it (records loaded once): deformed world positions, material, and the
@@ -116,14 +129,24 @@ MTriangleCorners mTriangleCorners(uint visId, uint visibleClustersSrv)
     const GpuInstance inst = loadInstance(vc.instance);
     const GpuCluster c = loadCluster(vc.cluster);
     const GpuMesh mesh = loadMesh(inst.mesh);
-    const uint3 tri = loadClusterTriangle(c, visTriangle(visId));
     MTriangleCorners o;
+#if UNX_CLUSTER_STREAM
+    const ClusterCorners k = loadClusterCorners(mesh, c, vc.cluster, visTriangle(visId));
+    o.w0 = deformLoadedVertex(inst, mesh, k.v[0], k.meshVertex.x).world;
+    o.w1 = deformLoadedVertex(inst, mesh, k.v[1], k.meshVertex.y).world;
+    o.w2 = deformLoadedVertex(inst, mesh, k.v[2], k.meshVertex.z).world;
+    o.uv0 = k.v[0].uv;
+    o.uv1 = k.v[1].uv;
+    o.uv2 = k.v[2].uv;
+#else
+    const uint3 tri = loadClusterTriangle(c, visTriangle(visId));
     o.w0 = deformVertex(inst, mesh, tri.x).world;
     o.w1 = deformVertex(inst, mesh, tri.y).world;
     o.w2 = deformVertex(inst, mesh, tri.z).world;
     o.uv0 = loadVertex(mesh, tri.x).uv;
     o.uv1 = loadVertex(mesh, tri.y).uv;
     o.uv2 = loadVertex(mesh, tri.z).uv;
+#endif
     o.material = clusterMaterial(inst, c);
     return o;
 }

@@ -22,6 +22,8 @@
 
 namespace unx::clusterbuilder
 {
+struct StreamPages;
+
 struct Settings
 {
     uint32_t clusterTriangles = 0;     // visibility.cluster_triangles
@@ -36,6 +38,15 @@ struct Settings
     // Thin geometry has LOD and keeps its area (see above). The enlarged pieces need vertices of their own, so it
     // takes effect only in a build that returns them (build's lodVertices); other builds keep such groups terminal.
     bool thinPreserveArea = false;          // visibility.lod_thin_preserve_area
+
+    // Compressed cluster vertices (ClusterStream.h): the clusters of rigid meshes get a bit stream of their own vertices and
+    // the GPU's cluster vertex pool their handles. Not part of a mesh's cached hierarchy: the stream is made from it
+    // when the scene's data is put together, so cache entries serve both settings.
+    bool compression = false;               // visibility.cluster_compression
+    bool streaming = false;                 // visibility.cluster_streaming: with compression and build's 'pages', the
+                                            // groups' vertex bits go into streaming pages (ClusterStream.h)
+    float positionStep = 0;                 // visibility.cluster_position_step (m): the position grid is at most this
+    uint32_t normalBits = 0, tangentBits = 0, uvBits = 0;  // visibility.cluster_normal_bits, _tangent_bits, _uv_bits
 
     // Source clusters only, no LOD DAG (C2b runtime meshes: shallow hierarchies for GpuScene::addRuntimeMesh; meshes with
     // blend shapes or a vertex animation get this regardless). Not a quality key: exact at every distance.
@@ -94,7 +105,10 @@ struct LodVertices
 // costs only the new and changed meshes; identical meshes in one scene are built once.
 // lodVertices: where the builder's own vertices go. Without it no cluster indexes a vertex the mesh does not have, and
 // Settings::thinPreserveArea has no effect (the output is that of the setting off).
-render::ClusterData build(const scene::Scene& scene, const Settings& settings, BuildStats* stats = nullptr, LodVertices* lodVertices = nullptr);
+// pages (ClusterStream.h StreamPages): with Settings::compression and Settings::streaming, where the streamed groups'
+// vertex bits go - the cook writes them to a page file (streaming::PageFileWriter) for the renderer's page source.
+render::ClusterData build(const scene::Scene& scene, const Settings& settings, BuildStats* stats = nullptr, LodVertices* lodVertices = nullptr,
+                          StreamPages* pages = nullptr);
 // Forgets the previous build's hierarchies (tests that compare two cold builds).
 void clearMeshCache();
 // Disk cache of hierarchies (C1, incremental cooking): a mesh whose key (content, settings, builder source hash) has an

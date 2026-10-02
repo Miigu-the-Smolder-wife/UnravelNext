@@ -487,4 +487,10 @@ uint3 loadClusterTriangle(GpuCluster c, uint t)
     return uint3(verts[c.vertexOffset + (packed & 0xFFu)], verts[c.vertexOffset + ((packed >> 8) & 0xFFu)], verts[c.vertexOffset + ((packed >> 16) & 0xFFu)]);
 }
 
+// Compressed cluster vertices (visibility.cluster_compression): loadClusterVertex, the fetch of a cluster's local vertex -
+// in the kernels that read them (UNX_CLUSTER_STREAM 1 before the kernel's first include; Frame.hlsli).
+#if UNX_CLUSTER_STREAM
+#include "ClusterStream.hlsli"
+#endif
+
 #endif
