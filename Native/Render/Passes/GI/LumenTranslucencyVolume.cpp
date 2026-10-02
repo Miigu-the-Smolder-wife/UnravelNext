@@ -46,6 +46,7 @@ struct Settings
     uint32_t clipmapBias = 3;        // ShareRadianceCacheWithOpaque.ClipmapBias
     float depthThreshold = 64.0f;    // OffsetThresholdToAcceptDepthBufferOffset (reference 1; LumenTranslucencyVolumeGrid.hlsli)
     float traceDistance = 200.0f;
+    float farStart = 0;              // lumen.radiance_cache_far_field: the far field's start (m), 0: none
 };
 Settings settingsOf(const QualityConfig& q)
 {
@@ -64,6 +65,11 @@ Settings settingsOf(const QualityConfig& q)
     s.clipmapBias = (uint32_t)num("lumen.translucency_volume_clipmap_bias", 3);
     s.depthThreshold = (float)num("lumen.translucency_volume_depth_offset_threshold", 64.0);
     s.traceDistance = (float)num("lumen.radiance_cache_trace_distance_m", 200.0);
+    if (flag("lumen.radiance_cache_far_field", false))
+    {
+        s.traceDistance = std::max(s.traceDistance, (float)num("lumen.radiance_cache_far_field_distance_m", 10000.0));
+        s.farStart = (float)num("surface_cache.mesh_cards_max_distance_m", 300.0);
+    }
     if (!(s.endDistance > 1) || s.filterSamples > 8 || !(s.historyWeight >= 0 && s.historyWeight < 1)) fail("lumen.translucency_volume: parameters out of range");
     return s;
 }
@@ -367,6 +373,7 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
                   k[36] = bits(s.maxRayIntensity);
                   k[37] = cache ? c.srv(rcDepth) : 0xFFFFFFFFu;
                   k[38] = bits(s.depthThreshold);
+                  k[39] = bits(s.farStart);
                   c.bindFrameConstants(cb);
                   // bands of whole slices, each at most kMaxRaysPerDispatch rays
                   const uint32_t perSlice = gridX * kTraceRes * gridY * kTraceRes;

@@ -50,6 +50,15 @@ float3 giSunIlluminance(float3 p)
 #endif
 }
 
+// Far-field hits (lumen.radiance_cache_far_field): a hit at least startM from the camera lies past the mesh cards - no
+// bounce light is stored for it. The sky's light on it stands in for that (the sky's radiance along the normal x pi: a
+// uniform sky's irradiance, unoccluded; under the horizon the sky LUT holds the ground's reflection). startM 0: none.
+float3 giFarSkyIrradiance(float3 position, float3 normal, float startM)
+{
+    if (!(startM > 0) || distance(position, g_cameraPosition) < startM) return 0;
+    return 3.14159265358979 * giSkyRadiance(normal);
+}
+
 // Uniform direction within the solar disk.
 float3 giSunDirection(uint seed)
 {

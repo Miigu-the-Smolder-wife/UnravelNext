@@ -50,6 +50,7 @@ struct Settings
 {
     uint32_t clipmaps, grid, probeResolution, atlasProbes, budget, keepFrames, traceCapacity, markTile;
     float extent, base, reprojection, traceDistance, downsampleDistance, maxHitAngle;
+    float farStart;  // lumen.radiance_cache_far_field: the far field's start (the mesh cards' end), 0: no far field
     bool filter, occlusion;
     bool operator==(const Settings&) const = default;
 };
@@ -68,6 +69,13 @@ Settings settings(const QualityConfig& q)
     s.base = (float)q.number("lumen.radiance_cache_distribution_base");
     s.reprojection = (float)q.number("lumen.radiance_cache_reprojection_radius_scale");
     s.traceDistance = (float)q.number("lumen.radiance_cache_trace_distance_m");
+    // the far field: the rays run on to its distance; hits past the mesh cards take the sky's light (GiSky.hlsli)
+    s.farStart = 0;
+    if (q.has("lumen.radiance_cache_far_field") && q.boolean("lumen.radiance_cache_far_field"))
+    {
+        s.traceDistance = std::max(s.traceDistance, (float)q.number("lumen.radiance_cache_far_field_distance_m"));
+        s.farStart = (float)q.number("surface_cache.mesh_cards_max_distance_m");
+    }
     s.downsampleDistance = (float)q.number("lumen.radiance_cache_downsample_distance_m");
     s.maxHitAngle = (float)q.number("lumen.radiance_cache_filter_max_hit_angle");
     s.filter = q.boolean("lumen.radiance_cache_filter");
@@ -404,6 +412,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
     const uint32_t experiment = in.experiment;
     const float traceDistance = s.traceDistance;
     const bool occlusion = s.occlusion;
+    const float farStart = s.farStart;
     uint32_t sceneWords[8];
     rays.rootConstants(sceneWords);
     const std::array<uint32_t, 8> sceneSrvs = std::to_array(sceneWords);
@@ -440,6 +449,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   k[16] = paramsSrv;
                   k[17] = c.srv(counters);
                   k[19] = occlusion ? 1u : 0u;  // P[4].w
+                  k[21] = bits(farStart);       // P[5].y
                   k[20] = cards.valid() ? c.srv(cards.frame) : 0xFFFFFFFFu;
                   std::memcpy(&k[24], sceneSrvs.data(), 32);
                   c.bindFrameConstants(cb);

@@ -15,7 +15,8 @@
 // the trace's place, and the hit distance into the probe's place of the depth atlas.
 // P[0] = { world cache SRV (UNX_NONE: none), trace records SRV, temporary radiance UAV (RGBA16F), depth atlas UAV (R16_UINT) }
 // P[1], P[2], P[3] = sky and sun (GiSky.hlsli), P[1].w = the trace distance; P[3].w = gi.experiment_disable bits (8, 16, 128)
-// P[4] = { parameters SRV (LrcParams), state SRV, the dispatch's first trace record, probe occlusion on }, P[5].x = card frame SRV
+// P[4] = { parameters SRV (LrcParams), state SRV, the dispatch's first trace record, probe occlusion on },
+// P[5].y = asuint(far-field start, m; 0: none - GiSky.hlsli giFarSkyIrradiance), P[5].x = card frame SRV
 // (CardLayout.hlsli mcFrame; UNX_NONE: none). One dispatch holds at most 262,144 rays (LumenRadianceCache.cpp: chunks
 // of probes).
 // P[6], P[7] = RtSceneSrvs
@@ -116,6 +117,7 @@ void LumenRadianceCacheTraceGen()
                 const GiHeader h = giHeader(cache);
                 giCacheLightingAt(cache, h, s.position, s.normal, reflect(r.Direction, s.normal), giLevelForSize(h, footprint), L.irradiance, L.specularRadiance);
             }
+            if (!fromSurfaceCache) L.irradiance += giFarSkyIrradiance(s.position, s.normal, asfloat(P[5].y));
             const float3 l = normalize(g_sunDirection);
             if (!fromSurfaceCache && (dot(s.normal, l) > 0 || foliage) && (P[3].w & 16) == 0)
             {

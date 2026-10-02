@@ -17,7 +17,8 @@
 // P[0] = { world cache SRV, ray info SRV (R16_UINT), trace radiance UAV, trace word UAV (R32_UINT) },
 // P[1], P[2], P[3] = sky and sun (GiSky.hlsli), ray length; P[3].w = gi.experiment_disable bits (8, 16, 128 as GiTrace),
 // P[4] = { sky band (tests), flags (bit 0: LgScreenTrace ran before - gi.lumen_screen_traces; bit 1: no world-cache
-// read at hits - gi.lumen_hit_fallback = false), normal bias (float, m),
+// read at hits - gi.lumen_hit_fallback = false; bits 16..31: the far field's start in metres, 0: none - GiSky.hlsli
+// giFarSkyIrradiance), normal bias (float, m),
 // moving threshold (float) }, P[5].x = card frame SRV (CardLayout.hlsli mcFrame;
 // 0xFFFFFFFF: none - gi.lumen_hit_surface_cache off, surface_cache.mesh_cards off or no card yet),
 // P[5].y / .z / .w = radiance cache params (raw SRV) / indirection SRV / atlas SRV (P[5].y = 0xFFFFFFFF: none -
@@ -205,6 +206,7 @@ void LgTraceGen()
                 giCacheLightingAt(cache, h, s.position, s.normal, mirror, giLevelForSize(h, footprint), L.irradiance, L.specularRadiance);
                 g_giStrictVisibility = false;
             }
+            if (!fromCards) L.irradiance += giFarSkyIrradiance(s.position, s.normal, float(P[4].y >> 16));
             const float3 l = normalize(g_sunDirection);
             const float cosSun = dot(s.normal, l);
             if (!fromCards && (cosSun > 0 || (m.classFlags & 0xFFu) == MATERIAL_FOLIAGE) && (P[3].w & 16) == 0)

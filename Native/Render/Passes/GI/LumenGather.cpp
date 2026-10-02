@@ -339,6 +339,12 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
         lumenTranslucencyVolume(fc, view, rays, tv, rc);
     }
     const bool farField = rc.on;
+    // lumen.radiance_cache_far_field: hits past the mesh cards take the sky's light (GiSky.hlsli giFarSkyIrradiance; the
+    // trace's flags carry the start in whole metres)
+    const QualityConfig& fq = fc.quality;
+    const uint32_t farStartMetres = fq.has("lumen.radiance_cache_far_field") && fq.boolean("lumen.radiance_cache_far_field")
+                                        ? std::min<uint32_t>((uint32_t)fq.number("surface_cache.mesh_cards_max_distance_m"), 65535u)
+                                        : 0u;
     const TextureRef rcIndirection = rc.indirection, rcAtlas = rc.atlas, rcDepth = rc.depth;
     const uint32_t rcParamsSrv = rc.params;
     g.addPass("r.gi.lg.screendata", QueueType::Compute,
@@ -520,7 +526,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   k[14] = bits(sun.z);
                   k[15] = experiment;
                   k[16] = bits(skyBand);
-                  k[17] = (screenTraced ? 1u : 0u) | (!cache.valid() || (!L.hitFallback && cards.valid()) ? 2u : 0u);
+                  k[17] = (screenTraced ? 1u : 0u) | (!cache.valid() || (!L.hitFallback && cards.valid()) ? 2u : 0u) | farStartMetres << 16;
                   k[18] = bits(L.normalBias);
                   k[19] = bits(L.movingSpeed);
                   k[20] = cards.valid() ? c.srv(cards.frame) : 0xFFFFFFFFu;

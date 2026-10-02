@@ -18,7 +18,8 @@
 // P[5] = { card frame SRV (UNX_NONE: none), radiance cache params SRV (UNX_NONE: none), indirection SRV, atlas SRV }
 // P[6], P[7] = RtSceneSrvs
 // P[8] = { asuint(cell jitter xyz), frame }, P[9] = { asuint(ray intensity cap, exposed units; 0: none), the radiance
-// cache's depth atlas SRV (UNX_NONE: no probe visibility test), asuint(the depth constraint's threshold, slices) }
+// cache's depth atlas SRV (UNX_NONE: no probe visibility test), asuint(the depth constraint's threshold, slices),
+// asuint(far-field start, m; 0: none - GiSky.hlsli giFarSkyIrradiance) }
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
@@ -97,6 +98,7 @@ void LumenTranslucencyVolumeTraceGen()
                 g_rtHitCone = 0.6;  // (a ray of the 3 x 3 sphere map: a cone of about 39 degrees half angle)
                 const float bias = 1e-3 + 2e-4 * distance(s.position, g_cameraPosition);
                 RtHitLighting L = (RtHitLighting)0;
+                L.irradiance = giFarSkyIrradiance(s.position, s.normal, asfloat(P[9].w));
                 const float3 l = normalize(g_sunDirection);
                 if (dot(s.normal, l) > 0 || (m.classFlags & 0xFFu) == MATERIAL_FOLIAGE)
                 {
