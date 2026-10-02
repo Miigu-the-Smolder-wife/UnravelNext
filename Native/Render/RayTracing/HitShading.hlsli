@@ -12,6 +12,9 @@
 //                                                 lobe is about a texel wide; narrower lobes see the texel average,
 //                                                 wider ones the bilinear texel instead of the lobe average.
 // Material textures at hits: rtHitMaterial (M's published textures, INTERFACES v1.11, at the ray cone's level of detail).
+// Material inputs at hits (scene::Material; Scene.hlsli GpuMaterialInputs): the uv transform (with the level of detail
+// by its determinant), the emissive mask and the vertex tint (RT_HIT_INPUTS; the emission's scale is in the material's
+// emissive). No parallax, no detail maps, no second uv set: a hit is a cone's footprint.
 //   local lights                                  one next-event sample per hit (HitLocalLights.hlsli, the reference's
 //                                                 estimator), visibility by one shadow ray: unbiased, averaged by the
 //                                                 hit's history.
@@ -30,28 +33,47 @@ float rtTextureLod(Texture2D t, float uvPerWorldArea, float footprintLog2)
     return 0.5 * log2(max((float)w * h * uvPerWorldArea, 1e-20)) + footprintLog2;
 }
 
-// uvColor: where the base colour is read (the surface's uv; an eye's iris point).
+// uvColor: where the base colour is read (the surface's uv; an eye's iris point), on the mesh's uv.
 GpuMaterial rtHitMaterialAt(GpuMaterial m, RtSurface s, float2 uvColor, float coneWidth, float cosTheta)
 {
     const float footprint = log2(max(coneWidth, 1e-8) / max(abs(cosTheta), 1e-3));
+    float2 uv = s.uv;
+    float uvPerWorldArea = s.uvPerWorldArea;
+    if (m.inputs != UNX_NONE)
+    {
+        // the material's uv transform: its uv, and its texture area per world area by the determinant
+        const GpuMaterialInputs r = loadMaterialInputs(m.inputs);
+        uv = materialInputsUv(r, uv);
+        uvColor = materialInputsUv(r, uvColor);
+        uvPerWorldArea *= abs(r.uvU.x * r.uvV.y - r.uvU.y * r.uvV.x);
+#if RT_HIT_INPUTS
+        if ((r.flags & MATERIAL_INPUT_VERTEX_TINT) != 0) m.baseColor *= s.color.rgb;
+        if (r.emissiveMaskTexture != UNX_NONE)
+        {
+            Texture2D t = ResourceDescriptorHeap[r.emissiveMaskTexture];
+            const float lod = rtTextureLod(t, uvPerWorldArea, footprint);
+            m.emissive *= (r.textureClamp & 8u) ? t.SampleLevel(g_anisoClamp, uv, lod).x : t.SampleLevel(g_anisoWrap, uv, lod).x;
+        }
+#endif
+    }
     if (m.baseColorTexture != UNX_NONE)
     {
         Texture2D t = ResourceDescriptorHeap[m.baseColorTexture];
-        m.baseColor *= materialBaseColorLevel(m, uvColor, rtTextureLod(t, s.uvPerWorldArea, footprint)).rgb;
+        m.baseColor *= materialBaseColorLevelAt(m, uvColor, rtTextureLod(t, uvPerWorldArea, footprint)).rgb;
     }
     if (m.roughMetalTexture != UNX_NONE)
     {
         Texture2D<float4> t = ResourceDescriptorHeap[m.roughMetalTexture];
-        const float lod = rtTextureLod(t, s.uvPerWorldArea, footprint);
-        const float2 rm = (m.textureClamp & MATERIAL_TEXTURE_ROUGH_METAL) ? t.SampleLevel(g_anisoClamp, s.uv, lod).rg : t.SampleLevel(g_anisoWrap, s.uv, lod).rg;
+        const float lod = rtTextureLod(t, uvPerWorldArea, footprint);
+        const float2 rm = (m.textureClamp & MATERIAL_TEXTURE_ROUGH_METAL) ? t.SampleLevel(g_anisoClamp, uv, lod).rg : t.SampleLevel(g_anisoWrap, uv, lod).rg;
         m.roughness *= rm.r;
         m.metallic *= rm.g;
     }
     if (m.emissiveTexture != UNX_NONE)
     {
         Texture2D<float4> t = ResourceDescriptorHeap[m.emissiveTexture];
-        const float lod = rtTextureLod(t, s.uvPerWorldArea, footprint);
-        m.emissive *= (m.textureClamp & MATERIAL_TEXTURE_EMISSIVE) ? t.SampleLevel(g_anisoClamp, s.uv, lod).rgb : t.SampleLevel(g_anisoWrap, s.uv, lod).rgb;
+        const float lod = rtTextureLod(t, uvPerWorldArea, footprint);
+        m.emissive *= (m.textureClamp & MATERIAL_TEXTURE_EMISSIVE) ? t.SampleLevel(g_anisoClamp, uv, lod).rgb : t.SampleLevel(g_anisoWrap, uv, lod).rgb;
     }
     return m;
 }

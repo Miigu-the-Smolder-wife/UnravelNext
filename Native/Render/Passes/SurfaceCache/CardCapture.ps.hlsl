@@ -101,18 +101,26 @@ CardPixel main(CardVertex i)
     }
     else
     {
+        // (material inputs: the uv transform and the emissive mask; the card keeps the surface's uv otherwise - no
+        // parallax, detail or vertex colour in a card)
+        const float2 uv = materialUv(m, i.uv);
         if (m.baseColorTexture != UNX_NONE)
         {
-            const float4 c = ccSample(m.baseColorTexture, (m.textureClamp & M_TEX_BASE_COLOR) != 0, i.uv);
+            const float4 c = ccSample(m.baseColorTexture, (m.textureClamp & M_TEX_BASE_COLOR) != 0, uv);
             baseColor *= c.rgb;
             alpha = c.a;
         }
-        if (m.roughMetalTexture != UNX_NONE) metallic *= ccSample(m.roughMetalTexture, (m.textureClamp & M_TEX_ROUGH_METAL) != 0, i.uv).g;
-        if (m.emissiveTexture != UNX_NONE) emissive *= ccSample(m.emissiveTexture, (m.textureClamp & M_TEX_EMISSIVE) != 0, i.uv).rgb;
+        if (m.roughMetalTexture != UNX_NONE) metallic *= ccSample(m.roughMetalTexture, (m.textureClamp & M_TEX_ROUGH_METAL) != 0, uv).g;
+        if (m.emissiveTexture != UNX_NONE) emissive *= ccSample(m.emissiveTexture, (m.textureClamp & M_TEX_EMISSIVE) != 0, uv).rgb;
+        if (m.inputs != UNX_NONE)
+        {
+            const GpuMaterialInputs r = loadMaterialInputs(m.inputs);
+            if (r.emissiveMaskTexture != UNX_NONE) emissive *= ccSample(r.emissiveMaskTexture, (r.textureClamp & 8u) != 0, uv).x;
+        }
         if (tableSrv != UNX_NONE)
         {
             const MTextureSet ts = mLoadTextureSet(tableSrv, material);
-            if (ts.moments != UNX_NONE) slope = (ccSample(ts.moments, (ts.flags & M_TEX_NORMAL) != 0, i.uv).xy * 2 - 1) * ts.slopeRange;
+            if (ts.moments != UNX_NONE) slope = (ccSample(ts.moments, (ts.flags & M_TEX_NORMAL) != 0, uv).xy * 2 - 1) * ts.slopeRange;
         }
     }
     if (m.alphaCutoff > 0 && alpha < m.alphaCutoff) discard;

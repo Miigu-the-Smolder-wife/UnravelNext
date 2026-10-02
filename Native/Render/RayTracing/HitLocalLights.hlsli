@@ -391,15 +391,30 @@ RtEmissiveTriangle rtEmissiveTriangleOf(uint sceneInstance, uint meshTriangle, u
     o.m = loadMaterial(instanceMaterial(inst, loadSubmesh(mesh.submeshOffset + submesh), submesh));
     return o;
 }
-// Emitted radiance at uv (emissive x its texture at level 0).
+// Emitted radiance at the mesh's uv (emissive x its texture at level 0, at the material's uv; with RT_HIT_INPUTS x its
+// mask).
 float3 rtEmissionAt(GpuMaterial m, float2 uv)
 {
     float3 e = m.emissive;
+    GpuMaterialInputs r = (GpuMaterialInputs)0;
+    r.emissiveMaskTexture = UNX_NONE;
+    if (m.inputs != UNX_NONE)
+    {
+        r = loadMaterialInputs(m.inputs);
+        uv = materialInputsUv(r, uv);
+    }
     if (m.emissiveTexture != UNX_NONE)
     {
         Texture2D<float4> t = ResourceDescriptorHeap[m.emissiveTexture];
         e *= (m.textureClamp & MATERIAL_TEXTURE_EMISSIVE) ? t.SampleLevel(g_anisoClamp, uv, 0).rgb : t.SampleLevel(g_anisoWrap, uv, 0).rgb;
     }
+#if RT_HIT_INPUTS
+    if (r.emissiveMaskTexture != UNX_NONE)
+    {
+        Texture2D<float4> t = ResourceDescriptorHeap[r.emissiveMaskTexture];
+        e *= (r.textureClamp & 8u) ? t.SampleLevel(g_anisoClamp, uv, 0).x : t.SampleLevel(g_anisoWrap, uv, 0).x;
+    }
+#endif
     return e;
 }
 // Solid-angle pdf of drawing the point seen from x at distance 'distance' along wi on the given triangle (entry e).
