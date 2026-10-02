@@ -301,8 +301,10 @@ TextureRef upscalePreviousColor(FramePassContext& fc, const ViewResources& view)
         }
         return s.previousScene;
     }
-    // (the history under a lens projection is not the rendered view's picture: no previous colour for the traces)
-    if (upscaleLens(fc, view).active) return TextureRef{};
+    // (the history under a lens projection is not the rendered view's picture: no previous colour for the traces -
+    // this frame's lens, or the one the history was written under: the frame the lens goes off, temporalUpscale starts
+    // the history again and imports it itself)
+    if (upscaleLens(fc, view).active || s.lensD != 0.0f || s.lensS != 0.0f) return TextureRef{};
     // (the history's own size: above the output's with output.upscale_tsr_history_percent - readers take the size from
     // RenderGraph::desc and sample by UV)
     uint32_t hw, hh;
