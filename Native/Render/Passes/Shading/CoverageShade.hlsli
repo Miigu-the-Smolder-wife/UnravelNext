@@ -37,6 +37,7 @@ static uint g_covListed = 0xFFFFFFFFu;
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
 #include "Passes/Material/MaterialEye.hlsli"
+#include "Passes/Material/MaterialInputs.hlsli"
 #include "Passes/Material/SurfaceLayers.hlsli"
 #include "Passes/Lights/LightFunction.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
@@ -230,7 +231,8 @@ struct CovMaterial
 };
 // v0..v2: the triangle's deformed vertices (the ones sf was made from). An eye's fragment (MATERIAL_EYE) reads its base
 // colour at the iris point seen through the cornea, under the limbal ring (MaterialEye.hlsli); it is shaded as the plain
-// Subsurface model (a fragment has no eye word).
+// Subsurface model (a fragment has no eye word). Material inputs (MaterialInputs.hlsli): the uv transform and the vertex
+// tint; no parallax and no detail maps on a fragment.
 CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTextureSet ts, MVertex v0, MVertex v1, MVertex v2)
 {
     float3 baseColor = m.baseColor, n;
@@ -256,34 +258,37 @@ CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTexture
     else
 #endif
     {
+        const MInputUv iu = mInputUv(m, sf.uv, sf.duvdx, sf.duvdy);
         if (ts.roughMetal != UNX_NONE)
         {
             Texture2D<float4> t = ResourceDescriptorHeap[ts.roughMetal];
-            const float2 rm = mSampleGrad(t, (ts.flags & M_TEX_ROUGH_METAL) != 0, sf.uv, sf.duvdx, sf.duvdy).xy;
+            const float2 rm = mSampleGrad(t, (ts.flags & M_TEX_ROUGH_METAL) != 0, iu.uv, iu.duvdx, iu.duvdy).xy;
             roughness *= rm.x;
             metallic *= rm.y;
         }
         if (ts.moments != UNX_NONE)
         {
             Texture2D<float4> t = ResourceDescriptorHeap[ts.moments];
-            const MSlopeMoments mm = mNormalMoments(t, sf.uv, sf.duvdx, sf.duvdy, ts.slopeRange, (ts.flags & M_TEX_NORMAL) != 0);
+            const MSlopeMoments mm = mNormalMoments(t, iu.uv, iu.duvdx, iu.duvdy, ts.slopeRange, (ts.flags & M_TEX_NORMAL) != 0);
+            const float2 slope = mInputSlope(iu.r, mm.mean);
             const float3 B = sf.tangentSign * cross(sf.normal, sf.tangent);
-            n = normalize(sf.tangent * mm.mean.x + B * mm.mean.y + sf.normal);
+            n = normalize(sf.tangent * slope.x + B * slope.y + sf.normal);
             variance += mm.variance;
         }
         else n = normalize(sf.normal);
-        float2 uvColor = sf.uv;
+        float2 uvColor = iu.uv;
         if ((m.classFlags & MATERIAL_EYE) != 0)
         {
             const MEye e = mEyeEvaluate(visId, P[1].x, sf, m, n, v0, v1, v2);
-            uvColor = e.uv;
+            uvColor = iu.on ? materialInputsUv(iu.r, e.uv) : e.uv;
             baseColor *= e.darkening;
         }
         if (ts.baseColor != UNX_NONE)
         {
             Texture2D<float4> t = ResourceDescriptorHeap[ts.baseColor];
-            baseColor *= mSampleGrad(t, (ts.flags & M_TEX_BASE_COLOR) != 0, uvColor, sf.duvdx, sf.duvdy).rgb;
+            baseColor *= mSampleGrad(t, (ts.flags & M_TEX_BASE_COLOR) != 0, uvColor, iu.duvdx, iu.duvdy).rgb;
         }
+        if ((iu.r.flags & MATERIAL_INPUT_VERTEX_TINT) != 0) baseColor *= mVertexStreams(visId, P[1].x, sf).color.rgb;
     }
     CovMaterial o;
     o.baseColor = baseColor;
@@ -371,10 +376,16 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
     s.specular = m.specular;
     s.transmission = m.transmission;
     float3 radiance = m.emissive;
-    if (ts.emissive != UNX_NONE)
+    if (mEmissivePerPixel(ts))
     {
-        Texture2D<float4> t = ResourceDescriptorHeap[ts.emissive];
-        radiance = m.emissive * mSampleGrad(t, (ts.flags & M_TEX_EMISSIVE) != 0, sf.uv, sf.duvdx, sf.duvdy).rgb;
+        // (the emission x its texture x its mask at the material's uv, as the resolve)
+        const MInputUv eu = mInputUv(m, sf.uv, sf.duvdx, sf.duvdy);
+        if (ts.emissive != UNX_NONE)
+        {
+            Texture2D<float4> t = ResourceDescriptorHeap[ts.emissive];
+            radiance *= mSampleGrad(t, (ts.flags & M_TEX_EMISSIVE) != 0, eu.uv, eu.duvdx, eu.duvdy).rgb;
+        }
+        radiance *= mInputEmissiveMask(eu);
     }
 #if COV_PART == 2 && COV_PART_EXPOSED
     radiance = 0;  // (the emission is part 1's)

@@ -5,3 +5,8 @@ normal_filter = "lean"            # normal-map to roughness filtering (LEAN/Toks
 # Cost attribution only (gate --set): bit mask of resolve work left out, 0 in every gate and image. 1 = base colour and
 # roughness/metallic textures, 2 = normal-map moments, 4 = the whole surface reconstruction (constant G-buffer).
 experiment_disable = 0
+# Parallax occlusion mapping of materials with a height map (scene::Material::heightTexture; Passes/Material/
+# MaterialInputs.hlsli mParallax): the view ray is marched through the height field in this many equal depth steps, then
+# one secant step (the bound on the height reads per pixel: 1 + steps, and steps / 2 more with the shadow). 0: no parallax.
+parallax_steps = 16               # 0..64
+parallax_shadow = false           # the height field's shadow of the sun at the pixel (the sun alone: local lights do not take it)

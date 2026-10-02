@@ -102,6 +102,8 @@
 // P[9].y A9 anisotropy word (Resolve.hlsl; UNX_NONE = no anisotropic and no eye material): read by the LAYERED variants,
 //        whose anisotropic pixels shade the base specular with the anisotropic lobe (AnisoShading.hlsli), and by the
 //        Subsurface variant for an eye's pixels (the eye word; SHADE_PART 3 reads its mask)
+//        and by every variant's part 1 for the pixels of a height-mapped material: the sun's visibility through the
+//        height field (material.parallax_shadow; bits 0..7)
 // P[8].xy (SHADE_PART 3) the vis buffer and V's visible clusters in frames whose view models are drawn through
 //        viewmodel.fov_override_degrees (UNX_NONE: none): a view-model pixel scatters at its true size
 // P[10].y the stochastic local lights' result (shading.mega_lights, MegaLights.hlsli; RGBA16F exposed radiance, m.ml.spatial;
@@ -467,7 +469,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     if (false)
 #else
     float3 radiance = m.emissive;
-    if (P[1].w != UNX_NONE && mLoadTextureSet(P[4].y, materialIndex).emissive != UNX_NONE)
+    if (P[1].w != UNX_NONE && mEmissivePerPixel(mLoadTextureSet(P[4].y, materialIndex)))
 #endif
 #if SHADE_PART == 1
     {
@@ -494,6 +496,15 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     {
         Texture2D<uint> shadow = ResourceDescriptorHeap[P[2].x];
         sunVisibility = shadowSlot(shadow[pixel], 0);
+    }
+    // material.parallax_shadow (MaterialInputs.hlsli mParallax): the pixel's height field hides the sun - the resolve left
+    // the visibility in the class word of a height-mapped material's pixels (not an anisotropic material's or an eye's:
+    // the word is theirs)
+    if (m.inputs != UNX_NONE && P[9].y != UNX_NONE && (m.classFlags & (MATERIAL_ANISOTROPIC | MATERIAL_EYE)) == 0 &&
+        loadMaterialInputs(m.inputs).heightTexture != UNX_NONE)
+    {
+        Texture2D<uint> classWords = ResourceDescriptorHeap[P[9].y];
+        sunVisibility *= (classWords[pixel] & 0xFFu) / 255.0;
     }
     if (P[8].w != UNX_NONE)
     {
