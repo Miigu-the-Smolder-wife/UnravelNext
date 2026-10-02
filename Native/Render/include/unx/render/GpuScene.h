@@ -112,6 +112,19 @@ struct RuntimeCapacity
 };
 constexpr uint32_t kRuntimeMaxDepth = 6;  // hierarchy depth limit of a runtime mesh (V runs at least this many node passes)
 
+namespace gpu
+{
+// Scene.hlsli INSTANCE_MOVABLE_FLAGS / instanceMovable: the instance's geometry can be elsewhere in another frame of the
+// same scene revision (Dynamic, Skinned, Wind, a view model, a bone palette, morph or terrain patch). Readers that split
+// instances by it (V's RasterView::instanceSet, S's static / dynamic shadow pages) also count the instances past
+// GpuScene::staticInstanceCount() as movable.
+inline bool instanceMovable(const Instance& in)
+{
+    return (in.flags & (scene::InstanceDynamic | scene::InstanceSkinned | scene::InstanceWind | kInstanceViewModel)) != 0 || in.bonePalette != kNone ||
+           in.morph != kNone || in.patch != kNone;
+}
+} // namespace gpu
+
 // The class-specific slots of a material's GPU record (gpu::Material hairAbsorption .. cutDamageWidth, shared by the
 // classes: Hair, Water, Glass, Cut, Subsurface); every other class leaves them 0. CPU only (GpuScene's records and tests).
 void packMaterialClass(const scene::Material& m, gpu::Material& g);

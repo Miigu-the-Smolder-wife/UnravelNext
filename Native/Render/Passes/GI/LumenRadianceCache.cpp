@@ -8,6 +8,7 @@
 #include "unx/render/Device.h"
 #include "unx/render/Frame.h"
 #include "unx/render/GpuScene.h"
+#include "unx/render/PassChain.h"
 #include "unx/render/RenderGraph.h"
 #include "unx/render/Shaders.h"
 #include "unx/rt/RayPipeline.h"
@@ -272,8 +273,11 @@ LumenRcFrame lumenRadianceCacheBegin(FramePassContext& fc, const ViewResources& 
     const TextureRef indirection = f.indirection, depth = main.depth;
     const D3D12_GPU_VIRTUAL_ADDRESS cb = main.frameConstants;
     ShaderLibrary& shaders = fc.shaders;
+    // lumen.radiance_cache_fold_passes: the reset, the cells' clear and the mark are one pass (PassChain.h: the same
+    // dispatches in order, a barrier between them; they write the indirection, the slots and the counters as UAVs).
+    PassChain chain(g, QueueType::Compute, !fc.quality.has("lumen.radiance_cache_fold_passes") || fc.quality.boolean("lumen.radiance_cache_fold_passes"));
     if (reset)
-        g.addPass("r.gi.rc.reset", QueueType::Compute,
+        chain.add("r.gi.rc.reset",
                   [&](PassBuilder& b) {
                       b.use(slots, Use::UavCompute);
                       b.use(counters, Use::UavCompute);
@@ -286,7 +290,7 @@ LumenRcFrame lumenRadianceCacheBegin(FramePassContext& fc, const ViewResources& 
                       c.computeConstants(k, 4);
                       c.cmd->Dispatch((maxProbes + 63) / 64, 1, 1);
                   });
-    g.addPass("r.gi.rc.clear", QueueType::Compute,
+    chain.add("r.gi.rc.clear",
               [&](PassBuilder& b) {
                   b.use(indirection, Use::UavCompute);
                   b.use(counters, Use::UavCompute);
@@ -300,7 +304,7 @@ LumenRcFrame lumenRadianceCacheBegin(FramePassContext& fc, const ViewResources& 
                   c.cmd->Dispatch(s.grid * s.clipmaps / 4, s.grid / 4, s.grid / 4);
               });
     const uint32_t W = main.view.width, H = main.view.height, tile = s.markTile;
-    g.addPass("r.gi.rc.mark", QueueType::Compute,
+    chain.add("r.gi.rc.mark",
               [&](PassBuilder& b) {
                   b.use(depth, Use::SrvCompute);
                   b.use(indirection, Use::UavCompute);
@@ -313,6 +317,7 @@ LumenRcFrame lumenRadianceCacheBegin(FramePassContext& fc, const ViewResources& 
                   c.computeConstants(k, 8);
                   c.cmd->Dispatch(((W + tile - 1) / tile + 7) / 8, ((H + tile - 1) / tile + 7) / 8, 1);
               });
+    chain.flush("r.gi.rc.mark");
     return f;
 }
 
@@ -343,10 +348,13 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
     const TextureRef traced = g.createTexture({ "r.gi.rc traced", tempSize, tempSize, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
     const TextureRef filtered = g.createTexture({ "r.gi.rc filtered", tempSize, tempSize, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
 
+    // lumen.radiance_cache_fold_passes: the four bookkeeping steps are one pass (each reads what the one before wrote in
+    // the same buffers, all UAVs: PassChain.h).
+    PassChain chain(g, QueueType::Compute, !fc.quality.has("lumen.radiance_cache_fold_passes") || fc.quality.boolean("lumen.radiance_cache_fold_passes"));
     auto bookkeeping = [&](const char* name, const char* kernel, uint32_t x, uint32_t y, uint32_t z, bool cells, bool list, bool queue) {
         ID3D12PipelineState* pso = shaders.compute(kernel);
-        g.addPass(name, QueueType::Compute,
-                  [&](PassBuilder& b) {
+        chain.add(name,
+                  [=](PassBuilder& b) {
                       if (cells) b.use(indirection, Use::UavCompute);
                       b.use(slots, Use::UavCompute);
                       b.use(counters, Use::UavCompute);
@@ -368,6 +376,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
     bookkeeping("r.gi.rc.allocate", "Passes/GI/LumenRadianceCacheUpdate.MODE3", cellsX, cellsYZ, cellsYZ, true, true, false);
     bookkeeping("r.gi.rc.select", "Passes/GI/LumenRadianceCacheUpdate.MODE4", 1, 1, 1, false, false, false);
     bookkeeping("r.gi.rc.traces", "Passes/GI/LumenRadianceCacheUpdate.MODE5", slotGroups, 1, 1, false, false, true);
+    chain.flush("r.gi.rc.bookkeeping");
 
     // ---- the probe rays: the dispatch description's size is the queued trace count (written on the GPU)
     const FrameResources& fr = fc.resources;
@@ -504,6 +513,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   }
               });
     bookkeeping("r.gi.rc.validate", "Passes/GI/LumenRadianceCacheUpdate.MODE8", cellsX, cellsYZ, cellsYZ, true, false, false);
+    chain.flush("r.gi.rc.validate");
 
     frame.updated = true;
     st.record = frame;

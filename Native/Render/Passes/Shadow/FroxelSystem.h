@@ -46,7 +46,8 @@ uint32_t froxelListCapacity(TrackState& state);
 // shadowPages: the froxel light lists of the main view (FrameResources::froxelLights) with each entry's shadow-slot bit
 // (slotOfLightSrv: StructuredBuffer<uint> scene light -> shadow slot, or 0xFFFFFFFF: none). The local-light page marks
 // and the visibility slots read them.
-void recordFroxelLists(FramePassContext& fc, const ViewResources& main, uint32_t slotOfLightSrv);
+// shadowSlots: S assigned local shadow slots this frame - the visibility slots 1-3 read the lists' head order.
+void recordFroxelLists(FramePassContext& fc, const ViewResources& main, uint32_t slotOfLightSrv, bool shadowSlots);
 // atmosphere.fog: the fog volume's grid for a view size and the medium (on = false: off). Shared by the volume's passes
 // (recordFroxels) and the page requests (VsmSystem.cpp s.vsm.markfog).
 FogView fogViewFor(const QualityConfig& q, const FrameContext& frame, uint32_t width, uint32_t height);

@@ -44,6 +44,8 @@ uint vsmBlockOffset(uint m) { return m == 0 ? 0u : m == 1 ? 256u : m == 2 ? 320u
 
 // Page table entry .x
 #define VSM_PHYS_MASK 0x003FFFFFu
+#define VSM_FLAG_DIRTY_DYNAMIC (1u << 27)  // static_separate: its movable casters are drawn anew this frame over its kept static copy
+#define VSM_FLAG_STALE_DYNAMIC (1u << 28)  // static_separate: a movable caster changed under it (its static copy holds)
 #define VSM_FLAG_DIRTY (1u << 29)      // rendered this frame
 #define VSM_FLAG_STALE (1u << 30)      // content invalid: render when next requested
 #define VSM_FLAG_RESIDENT (1u << 31)
@@ -51,6 +53,8 @@ uint vsmBlockOffset(uint m) { return m == 0 ? 0u : m == 1 ? 256u : m == 2 ? 320u
 #define VSM_REQ_PIXEL 1u
 #define VSM_REQ_PROPAGATED 2u
 #define VSM_REQ_AIR 4u  // requested by the air marks (VsmMarkAir; with VSM_REQ_PROPAGATED: the same page handling)
+#define VSM_REQ_COARSE 8u  // one of the coarse pages requested every frame (VsmMarkCoarse)
+#define VSM_REQ_DYNAMIC (1u << 30)  // VsmCache MODE 3 -> VsmScan: a kept page whose movable casters are drawn anew (static_separate)
 
 // A clipmap level (64 B). Each level keeps the sun basis its pages were rendered with (moving sun: levels refresh to the
 // current sun in turn, S_STATUS_KO.md 7; the lookup error of a basis Delta theta old is <= 2 Delta theta / (pi tan

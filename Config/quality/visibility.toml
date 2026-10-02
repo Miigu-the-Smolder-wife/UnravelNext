@@ -49,6 +49,26 @@ raster_amplification = true       # tile-local raster runs (DepthRasterRequest::
                                   # (cluster, tile run) pair from the visible entry's tile rectangle (no pair is stored: no pair
                                   # capacity); false = the stored pair list of capacity max_visible_clusters (A/B)
 max_node_items = 4194304          # hierarchy traversal work items (instance, node) of both phases
+traversal_work_queue = true       # the hierarchy traversal of a cull run (main view, every raster-service request: shadow
+                                  # pages, cards) is one dispatch whose waves take node items from a work queue until it
+                                  # is empty (CullNodes QUEUE=1, the reference's persistent cull) - a pass for the whole
+                                  # tree where each level took a prepare pass and a node pass (10 passes a phase at depth
+                                  # 5). The same nodes, groups and deferrals as the level passes. false: the level passes (A/B)
+traversal_worker_groups = 1024    # its dispatch: groups of 64 threads, each wave a worker (a size, as the reference's
+                                  # persistent thread group count; an empty queue ends every worker after one read)
+cull_pass_merge = true            # a cull run takes fewer passes: the kernel that appends a pass's items keeps that pass's
+                                  # dispatch arguments current, so the argument passes between them go (chunk items, deferred
+                                  # chunks, and with traversal_work_queue the groups), and dispatches that do not read each
+                                  # other's results share a pass (the reset with the chunk and instance dispatches after it;
+                                  # the indirect instance dispatches; phase 2's deferred instances with its node seed, and its
+                                  # two cluster dispatches; a raster request's statistics copy at the end of its raster
+                                  # pass). The same kernels on the same items. With both switches a raster request is 7
+                                  # passes where it was 21 (depth 5), the main view's cull 11 where it was 37.
+                                  # false: one pass per dispatch and the argument passes (A/B)
+fold_small_passes = true          # dispatches that were small passes of their own share one (PassChain.h): a HiZ build's levels
+                                  # (five per dispatch, each after the one before), a planar view's mask clear with its tiles, the
+                                  # translucent layer's depth copy with its count clear. The same commands in order. false: a
+                                  # pass each (A/B)
 max_group_items = 1048576         # hierarchy leaves reached (instance, group)
 max_deferred_items = 1048576      # phase-1 occluded instances / nodes / clusters retested in phase 2
 coverage_table_slots = 32         # unused since INTERFACES v1.41 (tile ranges replace the chunk tables); kept so binaries

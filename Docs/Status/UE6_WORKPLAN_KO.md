@@ -195,3 +195,106 @@
 | 함수 | MegaLights 볼륨의 1/d²는 프록셀 반지름으로 바이어스(스파이크 제거, 원본과 같은 식) | 완료 |
 
 high 티어: 같은 커밋에서의 비교가 아직 없다(Batch2 기본 vs Batch4 high는 커밋이 다르다) — Batch5 결과로 다시 본다.
+
+### 8.1 구조 변경 (2026-10-03, 브랜치 `w/opt`)
+
+**이 절의 변경은 모두 컴파일만 했다. GPU에서는 테스트·게이트·캡처를 하나도 돌리지 않았다.** "그림이 같다"는 코드에서 따진 것이고(같은 클러스터·페이지·광원 집합이 같은 소비자에게 간다), 변경마다 옛 경로로 돌아가는 스위치가 있다. 시간과 그림은 다음 배치에서 스위치 A/B로 잰다.
+
+스위치(모두 새 경로가 기본값이다. 다음 배치에서 문제가 나면 위에서부터 끄면서 가른다 — 실행 검증 없이 넣은 것 가운데 동시성에 기대는 순서):
+
+| 스위치 | 기본 | 끄면 | 항목 |
+|---|---|---|---|
+| `visibility.traversal_work_queue` | true | 레벨당 prepare + nodes 패스 | (1) |
+| `shadow.vsm.static_separate` | true | 아틀라스 하나, 변한 캐스터 밑 페이지 전체 다시 그림 | (7) |
+| `shadow.vsm.static_hzb_cull` | true | 움직이는 캐스터를 가림 검사 없이 래스터 | (9) |
+| `visibility.cull_pass_merge` | true | 디스패치마다 패스, 인자 패스 있음 | (2) |
+| `shadow.vsm.fold_small_passes`, `atmosphere.froxels.fold_small_passes`, `visibility.fold_small_passes`, `lumen.radiance_cache_fold_passes`, `surface_cache.mesh_cards_fold_passes` | true | 작은 디스패치마다 패스 | (6) |
+| `shadow.vsm.cache_hzb_filter` | true | 변한 캐스터 밑의 모든 페이지가 stale | (10) |
+| `shadow.vsm.min_caster_texels` | 1.0 | 0: 모든 캐스터를 모든 레벨에 | (3) |
+| `shadow.vsm.coarse_pages`, `shadow.vsm.page_dilation` | 2, 0.05 | 0: 굵은 페이지·팽창 없음 | (8) |
+| `atmosphere.froxels.candidates_once`, `atmosphere.froxels.sort_head_for_slots_only` | true | 두 패스가 각자 컬, 머리 항상 정렬 | (4) |
+
+**(1) 계층 컬을 한 커널의 작업 큐로** — `visibility.traversal_work_queue`(기본 true), `visibility.traversal_worker_groups`(1024).
+V의 컬 한 번(메인 뷰, 그리고 `rasterizeDepth` 요청마다: VSM 태양 레벨·국소광·분류 페이지가 모두 이 경로다 — VSM에 따로 된 계층 컬은 없다)이 노드 순회를 레벨마다 `prepare.nodes` + `nodes` 두 패스로 돌던 것을(깊이 5에서 단계당 10패스), 노드 항목을 작업 큐로 쓰는 디스패치 하나(`nodes.p1` / `nodes.p2`, `CullNodes.hlsl` QUEUE=1)로 바꿨다. 원본의 persistent cull(`NaniteHierarchyTraversal.ush`)과 같은 구조다: 고정된 수의 그룹을 띄우고, 웨이브 하나가 작업자 하나로 큐가 빌 때까지 돈다.
+- 큐의 단어: `VS_NODE_WRITE`(예약), `VS_NODE_COMMIT`(여기까지 저장됨), `VS_NODE_READ`(여기까지 가져감), `VS_NODE_PENDING`(처리가 안 끝난 항목 수). 작업자는 COMMIT 아래에서만 CAS로 한 웨이브만큼 가져가고, 자식은 예약 → 저장 → **예약 순서대로** COMMIT을 올린다(자기 앞 구간이 올라올 때까지 CAS 반복). 그래서 읽는 쪽이 본 항목은 항상 저장이 끝난 것이다 — 원본은 버퍼를 미리 지우고 "아직 안 쓰인 칸"을 표식으로 가리는데, 여기 노드 버퍼는 프레임마다 내용이 정해지지 않은 그래프 버퍼라 지우는 비용(32 MB) 대신 순서 있는 공개를 썼다.
+- 종료: 가져갈 것이 없고 PENDING이 0이면 끝. PENDING은 자식을 저장하기 **전에** 더하고(같은 원자 연산에서 처리한 항목 수를 뺀다) 그래서 자식이 남아 있는 동안 0으로 읽히지 않는다.
+- 루프 상한(INTERFACES 3.6): 작업자 한 명은 최대 `CAP_NODES + 65536` 라운드(항목을 하나 이상 가져가거나, 다른 작업자에게 뺏기거나, 공개된 것이 없거나 — 마지막은 65536번까지), 공개 대기는 65536번. 상한에 닿은 작업자는 항목을 쥐지 않은 채 떠나므로 남은 작업자가 큐를 비운다. 공개가 상한에 닿으면 `OVERFLOW_ITERATION_LIMIT`, 작업자가 모두 떠난 뒤 PENDING이 남으면 `OVERFLOW_NODE_DEPTH`(둘 다 기존 비트, `CullPrepare` MODE 3이 검사).
+- 인스턴스 패스와 2단계 시드(`CullInstances`, `CullSeed`)는 같은 예약 함수(`nodeReserve`)로 루트를 넣고 COMMIT을 `InterlockedMax`로 올린다(순회 전이라 읽는 쪽이 없다). 이 두 커널은 두 경로가 같이 쓴다.
+- 그림: 노드 판정 함수(`testNode`)는 레벨 패스와 같은 코드다. 큐에 들어간 항목은 정확히 한 번 처리되므로 그룹·지연 노드의 집합이 같다(버퍼 안 순서만 다르다 — 레벨 패스에서도 웨이브 사이 순서는 정해져 있지 않았다). 용량 초과 비트도 같은 자리에서 선다.
+- 패스 수(코드에서 센 값, 깊이 5, 청크 있음): 메인 뷰의 컬 37 → 19, 래스터 요청 하나(타일 마스크·래스터·통계 포함) 21 → 13. GPU가 쓴 인스턴스가 있으면 각각 +1.
+- **잴 것**: 가벼운 씬에서 한 디스패치(1024 그룹)가 레벨 패스 10개보다 싼지, 숲처럼 노드가 수백만인 씬에서 한 단어에 몰리는 원자 연산(라운드당 약 8번, 레벨 패스는 3번)이 병목이 되는지, 작업자 그룹 수.
+
+**(2) 빈 래스터 요청의 패스 수** — `visibility.cull_pass_merge`(기본 true).
+먼저 조사 결과: "CPU가 이미 아는 빈 요청"은 없다. 요청이 비는지는 그 프레임의 페이지 요청(깊이 버퍼에서 GPU가 표시)과 페이지 캐시 상태(GPU의 페이지 테이블)로 정해지고, CPU가 아는 것은 몇 프레임 전의 readback뿐이다. readback으로 요청을 건너뛰면 새 페이지가 필요한 프레임에 그 페이지가 안 그려진다(그림이 달라진다). 그래서 요청을 빼는 대신 **요청 하나가 드는 패스**를 줄였다. 기본 설정(MegaLights가 국소광 그림자를 맡음)에서는 래스터 요청이 태양 레벨 요청뿐이고, 레벨들은 이미 한 요청의 여러 뷰다(리스트 상한을 넘을 때만 나뉜다) — 요청 수를 줄이는 것은 (3)의 상한 조임이다.
+- 인자 패스 제거: 항목을 덧붙이는 커널이 다음 패스의 디스패치 인자를 `InterlockedMax`로 직접 올린다(`raiseDispatch`; GI의 `GiProbeMapOwners`와 같은 방식). `CullChunks` PHASE1 → 청크 인스턴스 패스, `CullNodes` QUEUE1 → 클러스터 패스. 1단계의 `prepare.draw`가 2단계의 시작값(그룹 시작 위치, 지연 청크 인자)을 같이 쓴다. 없어진 패스: `prepare.chunks.p1`, `prepare.chunks.p2`, `prepare.groups.p1/p2`(작업 큐일 때). `prepare.p2`는 남는다(지연 인스턴스 수가 `chunks.p2` 뒤에야 정해지고, 그 패스는 인자 버퍼를 인자로 읽는 중이라 쓸 수 없다).
+- 서로의 결과를 읽지 않는 디스패치를 한 패스로: `seed.p1` = 리셋 → (장벽) → 청크 컬 + 평면 인스턴스 컬, `instances.indirect.p1` = GPU 인스턴스 + 청크 구성원, `seed.p2` = 지연 인스턴스 + 지연 노드 시드, `clusters.p2` = 그룹 클러스터 + 지연 클러스터. 한 패스 안의 디스패치들은 서로 다른 항목을 쓰고 상태 단어는 원자 연산으로만 공유한다. 패스 안 장벽은 MegaLights의 `m.ml.tiles`와 같은 전역 UAV 장벽이다.
+- 래스터 요청의 통계 복사(`*.stats`)는 래스터 패스의 마지막 명령이 됐다(래스터는 컬 상태를 읽기만 한다).
+- 그림: 커널과 판정은 그대로이고 인자 값도 `CullPrepare`가 쓰던 값과 같다(스위치를 끄면 `CullPrepare` 패스가 같은 값을 덮어쓴다). 달라지는 것은 리스트 안의 항목 순서뿐이다.
+- 패스 수(코드에서 센 값, 깊이 5): 래스터 요청 하나 21 → 13((1)만) → 7(타일 마스크, seed, instances.indirect, nodes, clusters, prepare.draw, raster). 메인 뷰의 컬 37 → 19 → 11. 4K 로비 프레임 전체로는 메인 뷰 −26, 태양 요청당 −14.
+- **잴 것**: 빈 요청 하나의 시간(0.2 ms였다), 패스당 타임스탬프가 합쳐지므로 `seed.p1` 안의 몫은 따로 볼 수 없다.
+- **안 한 것**: 국소광 요청(MegaLights를 끈 설정)은 요청당 252뷰 제한(작업 항목의 뷰 필드 8비트) 때문에 광원 6개마다 요청 하나다. 뷰 필드를 16비트로 넓히면(인스턴스 쪽 워드의 남는 8비트) 한 요청으로 합칠 수 있으나 vis 버퍼·청크 항목·지연 항목의 패킹이 모두 바뀌어 실행 검증 없이 넣지 않았다.
+
+**(3) 그림자 뷰가 텍셀보다 작은 인스턴스를 뺀다** — `shadow.vsm.min_caster_texels`(기본 1.0, 0 = 끔). **그림이 달라지는 항목이다.**
+`RasterView::minInstanceTexels` → 컬 뷰 레코드의 `minInstancePx`(CullView 372 B). V의 인스턴스 컬(`CullInstances`, `instanceBelowView`)이 경계 구의 반지름이 그 뷰의 텍셀로 이 값보다 작게 투영되는 인스턴스를 그 뷰에서 뺀다(직교 뷰: 반지름 × 텍셀/m, 원근 면: 구의 가장 가까운 점까지의 거리로 나눔 — 가장 크게 보일 때 기준). S는 태양 레벨 뷰와 국소광 면의 밉 뷰에 이 값을 준다. 분류 페이지(`cls`)는 모든 캐스터를 유지한다(거기서 "밝음"이면 모든 밉에서 밝아야 하므로).
+- 요청을 나누는 CPU 상한(`levelBound`, `levelBatches`, `localBounds`)도 같은 캐스터를 뺀다. CPU의 구는 V의 구보다 작지 않으므로(가장 큰 축 배율 × 1.001 + 1 mm) 상한에서 뺀 캐스터는 V도 뺀다 — 상한은 계속 상한이다.
+- 캐시와의 관계: 직교 레벨에서 빠지는지는 인스턴스 반지름(바람 항 포함 — 씬 바람이 바뀌면 모든 페이지를 다시 그린다)과 레벨 텍셀만의 함수라 프레임 사이에 뒤집히지 않는다. 스킨 인스턴스는 경계가 프레임마다 변하지만 그 밑의 페이지는 어차피 매 프레임 stale이다.
+- 보이는 결과(설정 주석에도 적었다): 레벨의 텍셀보다 작은 캐스터는 그 레벨부터 그림자를 드리우지 않는다 — 반지름 0.3 m 풀 포기는 0.5 m 레벨부터(1080줄에서 약 500 m 밖의 수신면), 4 m 나무는 8 m 레벨부터. 그런 캐스터 여럿이 합쳐 만들던 어둠(먼 풀밭·먼 숲 바닥)도 같이 없어진다. 수신면보다 굵은 레벨을 읽는 차단체 탐색·넓은 반그림자도 같은 캐스터를 못 본다.
+- **잴 것**: 숲 씬의 요청 수(`S VSM: N sun ... raster requests` 로그)와 `s.vsm` 묶음 시간, `s.vsm.raster10`의 넘침이 없어지는지, 먼 풀밭의 밝기 차이(스위치 0과 1의 그림).
+
+**(4) `s.froxel.lists`** — `atmosphere.froxels.candidates_once`(기본 true), `atmosphere.froxels.sort_head_for_slots_only`(기본 true).
+- 타일 후보를 한 번만: count 패스가 타일마다 조명 × 타일 절두체 검사로 만든 후보(조명 인덱스 순으로 압축된 것)를 버퍼에 남기고(타일당 512 B: 개수 + 16비트 인덱스 254개까지), fill 패스가 그것을 읽는다. 후보가 254개를 넘는 타일은 fill이 전처럼 다시 검사한다(같은 검사, 같은 조명 → 같은 후보). 읽는 뷰가 없어 건너뛰는 타일은 두 패스가 같은 조건으로 건너뛴다. 리스트 내용은 그대로다.
+- 정렬 머리: 머리의 중요도 순서를 읽는 소비자는 하나뿐이다 — S의 가시성 슬롯 1~3이 리스트 순서로 처음 세 그림자 캐스터에 배정된다(`shadowSlotOfLight`, `ShadowVisibility`, `ShadowFragments`, `ShadowOverflow`, `ShadeOpaque`의 슬롯 조회). 나머지 소비자(MegaLights 표본, coverage·머리카락·입자·볼륨·물·타일 조명·L3 분류)는 리스트 전체를 돌고 순서에 기대지 않는다(개수로만 가르는 곳: 64개 초과). 그래서 국소 그림자 슬롯이 없는 프레임(MegaLights가 국소광 그림자를 맡는 기본 설정, 또는 그림자 조명이 없음)에는 fill이 삽입 정렬 없이 조명 인덱스 순으로 쓴다. 슬롯이 있는 프레임은 전과 같다.
+- 그림: 모든 프록셀 리스트에 같은 조명이 들어간다. 순서가 달라지므로 (a) 리스트를 돌며 표본을 뽑는 MegaLights는 같은 분포의 다른 난수열을 쓰게 되고(잡음 무늬가 달라진다, 기대값은 같다) (b) 리스트를 더하는 곳은 float 덧셈 순서가 달라진다(마지막 비트). 비트 단위로 같은 그림을 원하면 `sort_head_for_slots_only = false`.
+- `FroxelTests`는 정렬된 머리를 검사하므로 그 테스트만 스위치를 끄고 돈다(돌려 보지는 않았다).
+- **잴 것**: `s.froxel.count` + `s.froxel.lists` 시간(4K 로비 0.9 ms 묶음의 몫), 정렬을 뺀 fill의 시간.
+
+**(5) 게이트 통계** — RendererGate 요약에 V의 메인 뷰 컬(인스턴스·노드·클러스터 수, 2단계로 넘어간 수, 청크), 대역별 클러스터·삼각형(A/B/C, 혼합 시트), 리스트별 항목 수, 래스터 요청마다 한 줄(보이는 클러스터·타일 쌍·삼각형), 그리고 `V error bits` 줄을 더했다. `V error bits`는 모든 실행·모든 프레임의 `Stats::overflow`를 OR한 값이고(`Stats::overflowSeen`), 수요에 따라 커지는 풀(0x100, 0x2000, 0x4000)을 뺀 비트가 서면 게이트가 실패한다 — (1)의 작업 큐가 상한에 닿거나 리스트가 넘치면 여기에 보인다. 실행별 통계는 `visibility::latestStatsOfRuns`.
+
+**(6) 그 밖의 작은 패스 접기** — `shadow.vsm.fold_small_passes`, `atmosphere.froxels.fold_small_passes`, `visibility.fold_small_passes`, `lumen.radiance_cache_fold_passes`, `surface_cache.mesh_cards_fold_passes`(모두 기본 true).
+`PassChain`(`Native/Render/include/unx/render/PassChain.h`): 이어지는 작은 디스패치들을 그래프 패스 하나로 만든다. 선언한 사용을 합치고(한 패스가 같이 선언할 수 있는 조합만: 쓰는 쪽은 전부 UAV), 두 번째부터는 전역 UAV 장벽 뒤에서 같은 순서로 실행한다 — 뒤 디스패치가 앞 디스패치의 결과를 보는 것은 별도 패스일 때와 같다. 스위치를 끄면 각자 제 이름의 패스다.
+- VSM: `s.vsm.begin` + `cache.reset` → 1, `propagate` + `cache.keep` + `cache.free` + `scan.count` + `scan.prefix` + `scan.assign` → `s.vsm.scan` 1, `s.shadow.listclear` + `s.shadow.visibility` → 1, `overflow.scan.blocks` + `scan.top` → 1.
+- **CPU가 아는 빈 패스**: 국소 그림자 슬롯이 없는 뷰(MegaLights 기본 설정에서는 항상)는 가시성 패스가 프록셀 리스트를 읽지 않으므로 넘침 타일이 생기지 않는다. 그 뷰에서는 `s.shadow.overflow.count / scan.blocks / scan.top / overflow` 네 패스를 기록하지 않는다(머리 텍스처는 가시성 패스가 0으로 채우고, fallback 리스트는 clear가 비운다 — 소비자가 읽는 값은 같다).
+- 프록셀 리스트: `begin` + `count` + `scan.blocks` + `scan.top` → `s.froxel.count` 1(fill은 따로: 스캔 결과를 SRV로 읽는다).
+- V: HiZ 빌드의 디스패치들(레벨 5개씩) → `v.hiz.<tag>` 1, 평면 반사 뷰의 `planar.clear` + `planar.tiles` → 1, `v.translucent.copy` + `clear` → 1.
+- radiance cache(`LumenRadianceCache.cpp`): `r.gi.rc.reset`(리셋 프레임만) + `clear` + `mark` → `r.gi.rc.mark` 1, `reuse` + `allocate` + `select` + `traces` → `r.gi.rc.bookkeeping` 1. 네 단계는 indirection·슬롯·카운터·free list·trace 큐를 모두 UAV로 쓰고 앞 단계의 결과를 읽는다. `r.gi.rc.args`(복사 대상)와 `finish`(같은 버퍼를 UAV로)는 한 패스가 될 수 없어 그대로다.
+- 카드(`CardLighting.cpp`): 페이지 선택의 `r.card.select.priority` + `bucket` + `list` → `r.card.select` 1(카드 프레임은 SRV, select·pageLight는 UAV). `r.card.frame`은 카드 프레임을 UAV로 쓰므로 따로다.
+- 패스 수(코드에서 센 값, 기본 설정·내부 1080p·가림 켬): 프레임당 VSM −11, 프록셀 −3, V −4(유리 있으면 −5), radiance cache −4(리셋 프레임 −5), 카드 −2.
+- **안 한 것**: GI와 카드의 나머지 패스(추적·필터·저장, 직접광·radiosity)는 앞 패스가 UAV로 쓴 것을 SRV로 읽거나 간접 인자로 읽어 접히지 않는다. coverage 층의 11패스는 직접/간접 디스패치가 번갈아 나와(인자 버퍼가 UAV ↔ 인자) (2)의 "덧붙이는 커널이 인자를 올리는" 방식으로 커널을 고쳐야 접힌다.
+- **잴 것**: 접은 패스 이름으로 시간이 합쳐진다(`s.vsm.scan`, `s.froxel.count`, `v.hiz.*`, `r.gi.rc.mark`, `r.gi.rc.bookkeeping`, `r.card.select`). 패스 타임스탬프 자체의 비용은 `--no-pass-timestamps`로 따로.
+
+### 8.2 가상 그림자 맵: 언리얼과의 남은 차이 (2026-10-03, 브랜치 `w/opt`)
+
+`UE6_PORT_STATUS_KO.md` 2.2의 남은 항목이다. **모두 코드 작성·빌드 통과, 실행 안 함.** 항목마다 옛 동작으로 돌아가는 스위치가 있다.
+
+**(8) 항상 상주하는 굵은 페이지와 페이지 팽창** — `shadow.vsm.coarse_pages`(2; 0 = 끔), `coarse_level_first` / `coarse_level_last`(9 / 16), `shadow.vsm.page_dilation`(0.05; 0 = 끔).
+- 굵은 페이지(`VsmMarkCoarse.hlsl`, 언리얼의 `MarkCoarsePages`): 레벨 9~16에서 카메라 둘레 2 × 2 페이지를 매 프레임 요청한다(텍셀 0.5 m ~ 64 m, 카메라에서 최소 32 m ~ 4 km, 32페이지). 다른 페이지와 똑같이 스캔이 물리 페이지를 주고 캐시가 유지한다. 제 레벨에 페이지가 없는 조회(컷 직후 요청이 아틀라스를 넘은 프레임, 화면 밖 반사·GI hit, 평면 반사 뷰)는 원래 있던 "더 굵은 상주 레벨로 올라가기"(`vsmHeightAt`, `vsmFetchQuad`, `shadowSunResidentLevel`)로 이 페이지에 닿는다. 제 페이지가 있는 픽셀은 전과 같이 제 페이지를 읽는다. `fold_small_passes`가 켜져 있으면 `s.vsm.scan` 패스 안의 디스패치 하나라 패스는 늘지 않는다.
+- 달라질 수 있는 그림: 넓은 반그림자에서 영역 분류(`vsmRegionClassify`)가 전에는 상주 페이지가 없어 탭으로 넘어가던 굵은 레벨에서 끝날 수 있다(그 레벨의 높이장에 대해 정확한 분류).
+- 팽창(`VsmMark.hlsl`, 언리얼의 `PageDilationBorderSizeDirectional`): 제 페이지 경계에서 페이지의 5 % 안에 있는 픽셀은 경계 너머 페이지도 요청한다(대각선 한 쌍, 픽셀 짝홀로 방향을 번갈아). 경계 근처 픽셀의 탐색·반그림자 탭이 굵은 조상 대신 같은 레벨의 이웃 페이지를 읽게 된다 — 요청 페이지가 조금 늘고 그 자리의 그림자는 더 고운 텍셀에서 읽힌다.
+- 이 렌더러는 요청한 페이지를 그 프레임에 모두 그리므로(언리얼처럼 한 프레임 늦지 않다) "느린 이동에서 안 그려진 페이지가 드러나는" 경우는 원래 없었다. 팽창이 주는 것은 위의 탭 품질이다.
+- **잴 것**: 요청 페이지 수 변화(`pages requested`), `s.vsm` 시간, 컷 직후 프레임의 그림(스위치 0과 비교).
+
+**(7) 정적 / 동적 페이지 분리와 병합** — `shadow.vsm.static_separate`(기본 true; 페이지 캐시가 켜져 있을 때만).
+- 캐스터를 둘로 나눈다. **움직일 수 있는 것**: Dynamic·Skinned·Wind·뷰 모델 플래그, 본 팔레트·morph·지형 패치가 있는 인스턴스, 그리고 씬과 함께 올라오지 않은 인스턴스(런타임·GPU가 쓴 것). 나머지는 변환 리비전이 그대로인 한 자리와 모양이 같다. 같은 정의를 V(`instanceInSet`, `RasterView::instanceSet`), S의 캐시(`VsmCache.hlsl` MODE 0), CPU 상한(`gpu::instanceMovable`)이 쓴다.
+- 태양 페이지마다 **정적 사본**(두 번째 아틀라스 `S VSM static atlas`, 같은 물리 페이지 위치)을 둔다. 새로 그리는 페이지: 정적 캐스터 → 정적 아틀라스(`s.vsm.static*` 요청), 움직이는 캐스터 → 표본 아틀라스(`s.vsm.raster*` 요청), 그 뒤 `s.vsm.merge`가 페이지마다 사각형 하나로 정적 사본의 깊이를 깊이 테스트(GREATER) 아래 표본 페이지에 넣는다.
+- 변한 캐스터가 지금도, 페이지를 그릴 때도 움직이는 쪽이었으면 그 밑의 페이지는 `VSM_FLAG_STALE_DYNAMIC`만 받는다. 그런 페이지는 물리 페이지와 정적 사본을 **유지**하고(`VSM_REQ_DYNAMIC`), 표본 페이지를 지운 뒤 움직이는 캐스터만 다시 그리고 병합한다. 정적 캐스터가 변했거나 캐스터의 집합이 바뀌었으면(상태 단어에 집합 비트가 있어 "변함"으로 잡힌다) 전처럼 페이지 전체를 다시 그린다.
+- **병합 결과 = 전부 그린 결과** (구성상): 깊이 버퍼는 그려진 프래그먼트 가운데 가장 가까운 것을 순서와 무관하게 남긴다. 모든 캐스터는 두 집합 가운데 정확히 하나에 있고, 두 래스터는 같은 뷰·같은 LOD 규칙·같은 타일 클립·같은 아틀라스 위치를 쓰므로 프래그먼트가 한 번에 그릴 때와 같다. 따라서 max(정적, 동적) = 한 번에 그린 깊이. 유지된 정적 사본은 정적 캐스터가 그 페이지에서 변하지 않은 동안 옳다(변하면 `VSM_FLAG_STALE`).
+- 리스트: 유지되며 동적 부분만 다시 그리는 페이지는 스캔(MODE 2)이 `S VSM dynamic page list`에 원자적으로 덧붙이고 페이지별 패스(지우기, 병합, `pagemax`)의 두 번째 디스패치가 그것을 돈다. 타일 마스크와 슬롯은 두 벌이다(정적 뷰: 새 페이지, 동적 뷰: 새 페이지 + 동적 재그림 페이지).
+- 비용: 아틀라스 하나 더(페이지당 64 KB: 4096페이지에 256 MB), 태양 래스터 요청이 두 계열. 요청 상한은 집합별로 따로 센다(합은 전과 같다).
+- V의 청크 컬은 집합으로 거르지 않는다 — 청크 구성원이 청크를 다시 만들지 않고도 움직이는 쪽이 될 수 있어서(런타임에 지형 패치가 걸릴 때). 동적 뷰는 보이는 청크의 구성원을 모두 검사하고 인스턴스마다 거른다.
+- **이미 있던 한계(그대로)**: GPU가 쓴 인스턴스(메시 파티클)는 캐시의 캐스터 상태에 없어 움직여도 페이지를 stale로 만들지 않는다. 분리 뒤에도 그렇다(동적 계열이 그리기는 한다).
+- 게이트 요약의 `T_sun`(= `s.vsm.raster` 실행의 삼각형 수)은 이제 움직이는 캐스터만이다. 실행별 줄(`V run ...`)에 두 계열이 따로 나온다.
+- **잴 것**: city_night(3.0 ms)·city_block 4K(2.4 ms)의 `s.vsm` 묶음, `page cache` 줄의 "movable casters drawn anew" 수, VRAM, 스위치 A/B의 그림 차이(없어야 한다).
+
+**(9) 그림자 뷰의 HZB 가림** — `shadow.vsm.static_hzb_cull`(기본 true; `static_separate`가 켜져 있을 때만).
+- HZB: 정적 사본을 그린 프레임에 `s.vsm.statichzb`(`VsmStaticHzb.hlsl`)가 페이지마다 8텍셀 블록의 "가장 먼 저장 깊이"(빈 텍셀이 있으면 0)와 16·32·64·128텍셀 블록의 값을 만든다(물리 페이지당 float 341개, 1.4 KB). 유지되는 페이지는 사본을 그릴 때 만든 것을 그대로 쓴다.
+- 검사(`VisibilityCommon.hlsli` `tilesOcclude`; `DepthRasterRequest::tileOccluders`): **움직이는 캐스터의 뷰**에서 V의 인스턴스·노드·클러스터 컬이, 경계 구가 걸치는(2 × 2 타일 이하) 그릴 타일마다 구의 가장 가까운 깊이가 그 타일 정적 사본의 가장 먼 깊이보다 멀면 그리지 않는다. 구가 근평면에 닿거나 타일 2 × 2를 넘으면 검사하지 않는다(보임).
+- 왜 정확한가: 움직이는 캐스터는 지워진 표본 페이지에 그려진 뒤 정적 사본과 병합된다. 발자국 전체에서 정적 깊이보다 먼 캐스터의 프래그먼트는 병합 뒤 하나도 남지 않으므로 빼도 페이지가 같다. 가림체는 정적 사본뿐이다 — 언리얼은 동적 인스턴스를 이전 프레임의 병합 HZB로 가리는데(가림체가 움직이면 한 프레임 틀릴 수 있다), 여기서는 그 프레임에 유효한 정적 깊이만 쓴다. 대신 **정적 캐스터끼리의 가림은 거르지 않는다**(새로 그리는 정적 페이지에는 아직 유효한 깊이가 없다 — 메인 뷰 같은 2단계 가림을 그림자 뷰에 넣는 것이 남은 일이다).
+- 스위치를 유지 페이지 위에서 켜면(사본에 HZB가 없다) 그 프레임은 모든 페이지를 다시 그린다.
+- **잴 것**: 움직이는 캐스터가 지붕·다리 아래에 많은 씬에서 `s.vsm.raster*`의 보이는 클러스터 수(게이트의 `V run` 줄)와 시간, `s.vsm.statichzb` 패스 시간.
+
+**(10) HZB로 거른 무효화** — `shadow.vsm.cache_hzb_filter`(기본 true).
+`VsmCache.hlsl` MODE 2(`sphereUnderPage`): 변한 캐스터의 구가 어떤 페이지에서 그 페이지에 저장된 표면 **아래에 통째로** 있으면(발자국이 닿는 블록마다 가장 낮은 저장 높이 > 구의 꼭대기) 그 페이지를 stale로 만들지 않는다. 페이지의 HZB는 새로 만들지 않았다 — `VsmPageMax`의 블록 계층(`VsmBlock::range.x` = 블록의 최소 높이, 빈 텍셀이 있으면 0)이 이미 그것이다. 발자국이 블록 2 × 2 안에 들어오는 레벨에서 읽는다.
+- 왜 정확한가: 그런 캐스터는 그 페이지에 제 텍셀이 하나도 없다. 그릴 때 있던 자리에서도(이전 구), 지금 자리에서도(현재 구) 저장된 캐스터들 뒤에 있으므로 다시 그려도 깊이가 같다. 두 구를 따로 검사하고, 페이지에 보이는 캐스터는 제 텍셀의 저장 높이 ≤ 제 꼭대기라서 "아래"로 판정되지 않는다. 가리던 캐스터가 움직이면 그 캐스터의 구가 페이지를 stale로 만든다.
+- 얻는 것: 지붕·다리·수관 아래에서 움직이는 물체가 그 위 레벨의 페이지를 다시 그리게 하지 않는다. 언리얼의 HZB-filtered invalidation과 같은 규칙이다.
+- 게이트 요약에 `page cache` 줄(유지·그림·HZB가 남긴 (캐스터, 페이지) 쌍 수)을 더했다.
+- **잴 것**: city_night·city_block에서 `dirty` 페이지 수와 `s.vsm` 시간(스위치 A/B).

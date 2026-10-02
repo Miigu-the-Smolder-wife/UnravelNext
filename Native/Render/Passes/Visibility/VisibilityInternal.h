@@ -6,7 +6,7 @@
 
 namespace unx::visibility::detail
 {
-struct CullView  // 320 B
+struct CullView  // 384 B
 {
     float4x4 viewProj;
     float4x4 prevViewProj;
@@ -32,6 +32,9 @@ struct CullView  // 320 B
     uint32_t runtimeFirst, runtimeCount;  // C2b runtime instances (GpuScene::staticInstanceCount onwards)
     uint32_t gpuFirst, gpuCapacity;       // GPU-written instances (GpuScene::gpuInstanceRange; live count in g_patchData)
     uint32_t instanceFirst, instanceEnd;  // RasterView's instance batch (instanceEnd 0: every instance)
+    float minInstancePx;                  // RasterView::minInstanceTexels (0: every instance)
+    uint32_t instanceSet;                 // RasterView::instanceSet (0 every instance, 1 not movable, 2 movable)
+    uint32_t occluderSrv, occluderSlotsSrv;  // DepthRasterRequest::tileOccludersSrv, atlasSlotsSrv (kViewTileOccluders)
 };
 
 // C3 instance hierarchy (VisibilityCommon.hlsli CullScene, CullChunk).
@@ -56,18 +59,20 @@ static_assert(sizeof(SkinJointSphere) == 32);
 constexpr uint32_t kChunkInstances = 256;  // CHUNK_INSTANCES
 constexpr float kChunkCell = 64.0f;         // metres (ARCHITECTURE 2.1: 64 m cells)
 constexpr uint32_t kSkinJointOrigin = 0xFFFFFFFFu;
-static_assert(sizeof(CullView) == 368);
+static_assert(sizeof(CullView) == 384);
 
 constexpr uint32_t kViewOcclusion = 1;
 constexpr uint32_t kViewCullBack = 2;
 constexpr uint32_t kViewTileSingle = 4;  // tile-local pairs are single tiles (atlas mode)
+constexpr uint32_t kViewTileOccluders = 8;  // tested against the request's tile occluders (RasterView::tileOccluders)
 
 // Cull state words.
 constexpr uint32_t kStateNodeWrite = 0, kStateNodeEnd = 2, kStateGroupWrite = 3, kStateVisible = 5, kStateDeferInstances = 6, kStateDeferNodes = 7,
                    kStateDeferClusters = 8, kStateListCount = 9, kStateCovSpecial = 17, kStateOceanEdges = 18, kStateOverflow = 21, kStateStatInstances = 22, kStateStatNodes = 23, kStateStatClusters = 24,
                    kStateStatTriangles = 25, kStateTilePairs = 29, kStateCovPool = 30, kStateCovInvocations = 31, kStateCovFragments = 32, kStateCovTiles = 33, kStateCovMeasured = 34,
                    kStateStatBandClusters = 35, kStateCovBlocks = 38, kStateCovHeavy = 39, kStateStatMixedClusters = 40,
-                   kStateStatMixedTriangles = 41, kStateChunkItems = 42, kStateDeferChunks = 43, kStateStatChunks = 44, kStateListPhase1 = 48, kStateWords = 56;
+                   kStateStatMixedTriangles = 41, kStateChunkItems = 42, kStateDeferChunks = 43, kStateStatChunks = 44, kStateNodeCommit = 45, kStateNodeRead = 46,
+                   kStateNodePending = 47, kStateListPhase1 = 48, kStateWords = 56;
 constexpr uint32_t kLists = 8;
 constexpr uint32_t kListABack = 0, kListANone = 1, kListAAlphaBack = 2, kListAAlphaNone = 3, kListB = 4, kListC = 5, kListTBack = 6, kListTNone = 7;
 constexpr uint32_t kBandLists = 6;  // lists of the cull bands (the depth raster service draws these)

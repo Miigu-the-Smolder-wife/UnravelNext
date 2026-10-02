@@ -6,8 +6,9 @@
 //        instance mask
 //   P[4] cluster nodes SRV, mesh roots SRV, cluster LOD spheres SRV, tile mask SRV (UNX_NONE = none)
 //   P[5] capacity: node items, group items, visible (= each list), deferred items
-//   P[6] view count, instance count, band mode (BAND_MODE_*), tile pairs UAV (uint3; UNX_NONE = not tile-local: list
-//        entries are visible indices; else they index the pairs, VisibilityCommon.hlsli)
+//   P[6] view count, instance count, band mode (BAND_MODE_*, bits 0-7) | TILE_STORED_PAIRS << 8 | NODE_WORK_QUEUE << 9,
+//        tile pairs UAV (uint3; UNX_NONE = not tile-local: list entries are visible indices; else they index the pairs,
+//        VisibilityCommon.hlsli)
 //   P[7] band A minimum width px | band C maximum width px << 16 (f16 each), cluster sheets SRV (float4), coarse tile mask
 //        SRV (TileMaskCoarse.hlsl), its words per view
 #ifndef UNX_CULL_SHARED_HLSLI
@@ -42,6 +43,7 @@
 #define INSTANCE_COUNT P[6].y
 #define BAND_MODE (P[6].z & 0xFFu)
 #define TILE_STORED_PAIRS ((P[6].z >> 8) & 1u)  // visibility.raster_amplification false: the stored pair list (A/B)
+#define NODE_WORK_QUEUE ((P[6].z >> 9) & 1u)    // visibility.traversal_work_queue: the traversal is CullNodes QUEUE=1
 #define TILE_PAIRS_UAV P[6].w
 #define BAND_A_MIN_PX f16tof32(P[7].x)
 #define BAND_C_MAX_PX f16tof32(P[7].x >> 16)
@@ -82,6 +84,15 @@ bool cullViewTilesEmpty(CullView v, uint view)
     uint any = 0;
     [loop] for (uint w = 0; w < TILE_COARSE_WORDS; ++w) any |= coarse.Load(4 * (view * TILE_COARSE_WORDS + w));
     return any == 0;
+}
+
+// Raises the dispatch arguments at 'word' to 'groups' groups (65535 per row, as CullPrepare's storeDispatch). The kernel
+// that appends a pass's items keeps that pass's arguments current with it, so no pass stands between the two
+// (visibility.cull_pass_merge); CullReset leaves such arguments at (0, 0, 1). Both words only grow with the item count.
+void raiseDispatch(RWByteAddressBuffer args, uint word, uint groups)
+{
+    args.InterlockedMax(4 * word, min(groups, 65535u));
+    args.InterlockedMax(4 * (word + 1), (groups + 65534u) / 65535u);
 }
 
 // Raster-service tile mask test of a bounding sphere (true without a mask).

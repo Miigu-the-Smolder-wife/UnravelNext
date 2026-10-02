@@ -28,10 +28,57 @@ height_margin_m = 500.0         # caster height range margin (dynamic casters) a
 cache_min_change_texels = 0.5   # what makes a cached sun page stale (VsmCache.hlsl): a moved caster at least this many of the level's
                                 # texels in radius; a wind-moved one once the wind can have moved it this far since the page was drawn
                                 # (coarse levels never, middle levels every few frames). 0: every changed caster, every frame
+min_caster_texels = 1.0         # a shadow view (a sun level, a local light's face mip) leaves out the instances whose bounding
+                                # sphere is under this many of its texels in radius (V's instance cull; perspective faces: at the
+                                # sphere's nearest point). A coarse level gets less than a texel from such a caster, and a forest's
+                                # coarse levels each drew every tuft of grass (s.vsm.raster10 over its lists, the VSM group 99 ms).
+                                # What it shows: small casters stop casting where the level in use is coarser than they are - a
+                                # 0.3 m tuft from the 0.5 m level on (receivers past about 500 m at 1080 lines), a 4 m tree from
+                                # the 8 m level on - and with them the summed shade of many such casters (a far meadow's or a far
+                                # stand's darkening of the ground under it). Blocker searches and wide penumbrae that read a
+                                # coarser level than the receiver's miss them the same way. The requests' packing bounds leave
+                                # the same casters out. 0: every caster in every view (A/B)
+static_separate = true          # sun pages keep a static copy (the reference's r.Shadow.Virtual.Cache.StaticSeparate): the casters
+                                # that are not movable (not Dynamic, Skinned, Wind or a view model, no morph or terrain patch,
+                                # uploaded with the scene) are drawn into a second atlas, the movable ones into the sampled page,
+                                # and the static copy is merged in under the depth test. A page under a changed movable caster
+                                # keeps its static copy: only the movable casters there are drawn again (1,024 movers made their
+                                # pages redraw the whole city under them every frame). The sampled page holds what one raster of
+                                # all its casters gives - a depth buffer keeps the nearest fragment in any order. Costs a second
+                                # atlas (64 KB per page: 256 MB at 4096 pages) and a second family of sun raster requests
+                                # (s.vsm.static*). Needs cache. false: one atlas, a changed caster redraws its pages whole (A/B)
+static_hzb_cull = true          # with static_separate: the movable casters' views are culled against the HZB of the pages' static
+                                # copies (VsmStaticHzb.hlsl; the reference's per-page HZB): an instance, hierarchy node or cluster
+                                # that lies under the static surface in every page it would be drawn into is not drawn - after the
+                                # merge it would have no texel (cars under bridges and roofs, actors indoors). The pages hold the
+                                # same depth. Costs 1.4 KB per page and one pass that reads the static copies drawn in the frame.
+                                # false: every movable caster in the frustum of a drawn page is rastered (A/B)
+cache_hzb_filter = true         # a changed caster makes a cached sun page stale only where it can show in it: a caster whose
+                                # bounding sphere lies under the page's stored surface over its whole footprint there (the page's
+                                # block hierarchy, its HZB) has no texel in the page before or after the change, so the page stays
+                                # (the reference's HZB-filtered invalidation: movers under roofs, bridges, canopies). The pages
+                                # hold the same depth as a redraw would give. false: every page under a changed caster (A/B)
 cache = true                    # sun page cache (VsmCache.hlsl; a design choice): a requested sun page keeps its content
                                 # when it was resident last frame and no changed caster (moved, deformed, skinned, wind, morph,
                                 # shown / hidden) touched it; the sun, the caster range, a scene revision, an origin rebase or a
                                 # restore redraws every page (the one path, the budget's worst case). false = the one path always
+coarse_pages = 2                # the pages around the camera on the coarse levels are requested every frame (VsmMarkCoarse; the
+coarse_level_first = 9          # reference's coarse pages, r.Shadow.Virtual.MarkCoarsePagesDirectional): coarse_pages per axis
+coarse_level_last = 16          # (2: the reference's four) on each level of [first, last] - texel 0.5 m .. 64 m, at least 32 m ..
+                                # 4 km around the camera, 32 pages. Ordinary cached pages: drawn once, redrawn when a caster under
+                                # them changes by a texel of theirs. A lookup with no page on its own level walks up to them: the
+                                # frame after a cut whose requests ran past the atlas, reflection and GI hits outside the view,
+                                # planar views. Pixels with their own page read that, as before. 0: no coarse pages (A/B)
+page_dilation = 0.05            # a pixel within this fraction of a page of its page's border also requests the page across it (the
+                                # reference's PageDilationBorderSizeDirectional 0.05): its search and penumbra taps find that
+                                # neighbour on the pixel's own level where they fell back to a coarser ancestor. More requested
+                                # pages near borders; the shadow there is read at the finer texel. 0: the pixel's page alone (A/B)
+fold_small_passes = true        # the page update's and the visibility's small dispatches share passes (PassChain.h): the
+                                # counters' clear with the cache's reset; the request propagation, the cache's keep and free
+                                # list and the scan's three steps; the pixel list's clear with the visibility pass; the
+                                # overflow scan's two levels. The same dispatches in the same order, a barrier between them.
+                                # And a view without local shadow slots (shading.mega_lights shadows the local lights) records
+                                # no overflow count, scan and fill: they ran over an empty tile list. false: a pass each (A/B)
 use_stats = 0                     # 1: count which sun pages lookups read, by request kind (measurement only; RendererGate)
 subtile_stats = 0                 # 1: count the 32^2 sub-tiles of requested pages that pixels sample (measurement only)
 fragment_check = 0                # 1: the fragment pass evaluates every coverage record and counts those whose settled pixel

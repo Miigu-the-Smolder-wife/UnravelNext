@@ -8,7 +8,7 @@
 #include "Passes/Visibility/ClusterHierarchy.hlsli"
 #include "Passes/ViewModel/ViewModel.hlsli"
 
-// One view of a cull run (main view: one; depth raster service: one per RasterView). 320 B.
+// One view of a cull run (main view: one; depth raster service: one per RasterView). 384 B.
 struct CullView
 {
     row_major float4x4 viewProj;
@@ -35,7 +35,25 @@ struct CullView
     uint runtimeFirst, runtimeCount;   // C2b: runtime instances [first, first + count) follow the flat list
     uint gpuFirst, gpuCapacity;        // GPU-written instances (A3 mesh particles) after them; live count gpuInstanceCount()
     uint instanceFirst, instanceEnd;   // RasterView's instance batch: only these scene instances (instanceEnd 0: every instance)
+    float minInstancePx;               // RasterView::minInstanceTexels: instances whose bounds project to a smaller radius are
+                                       // not drawn into the view (0: every instance)
+    uint instanceSet;                  // RasterView::instanceSet: 0 every instance, 1 the ones that are not movable, 2 the movable
+                                       // ones (instanceInSet)
+    uint occluderSrv, occluderSlotsSrv; // CULL_VIEW_TILE_OCCLUDERS: the request's tile occluders and atlas slots (raw SRVs)
 };
+
+// The view's instance set (RasterView::instanceSet): movable = INSTANCE_MOVABLE_FLAGS, a bone palette, morph or terrain
+// patch, or an instance past the scene's uploaded ones (run-time and GPU-written: v.runtimeFirst on). Judged per
+// instance from its record of this frame; chunks are not skipped by set (a member can become movable - a terrain patch
+// set at run time - without its chunk being rebuilt), so a view of the movable set tests the members of every chunk it
+// sees.
+bool instanceInSet(CullView v, GpuInstance inst, uint instance)
+{
+    if (v.instanceSet == 0) return true;
+    const bool movable = (inst.flags & INSTANCE_MOVABLE_FLAGS) != 0 || inst.bonePalette != UNX_NONE || inst.morph != UNX_NONE || inst.patch != UNX_NONE ||
+                         instance >= v.runtimeFirst;
+    return (v.instanceSet == 2) == movable;
+}
 
 // Live count of the GPU-written instances (GpuScene::gpuInstanceRange; GpuSceneLayout.h kGpuInstanceCountElement).
 uint gpuInstanceCount(CullView v)
@@ -60,7 +78,7 @@ struct CullScene
 struct CullChunk
 {
     float4 sphere;  // world; radius < 0 until ChunkBounds ran
-    uint first, count, pad0, pad1;
+    uint first, count, pad0, pad1;  // pad0: the members' largest wind inflation per (m/s)^2 (float bits, ChunkBounds.hlsl)
 };
 
 #define CHUNK_INSTANCES 256u
@@ -89,13 +107,14 @@ uint skinSlot(CullScene cs, uint instance)
 #define CULL_VIEW_OCCLUSION 1u   // HiZ occlusion (two-phase) for this view
 #define CULL_VIEW_CULL_BACK 2u   // back faces of one-sided materials are culled (cone test allowed)
 #define CULL_VIEW_TILE_SINGLE 4u // tile-local pairs are single tiles (DepthRasterRequest atlas mode: one slot per tile)
+#define CULL_VIEW_TILE_OCCLUDERS 8u  // tested against the request's tile occluders (tilesOcclude)
 
 // Cull state words (RWByteAddressBuffer, 4 B each).
 #define VS_NODE_WRITE 0u
 #define VS_NODE_BEGIN 1u
 #define VS_NODE_END 2u
 #define VS_GROUP_WRITE 3u
-#define VS_GROUP_BEGIN 4u
+#define VS_GROUP_BEGIN 4u     // first group item of the phase's cluster pass (0; phase 2: phase 1's end)
 #define VS_VISIBLE 5u
 #define VS_DEFER_INSTANCES 6u
 #define VS_DEFER_NODES 7u
@@ -109,7 +128,7 @@ uint skinSlot(CullScene cs, uint instance)
 #define VS_STAT_NODES 23u     // node items processed
 #define VS_STAT_CLUSTERS 24u  // clusters tested
 #define VS_STAT_TRIANGLES 25u // + band (3): triangles of visible clusters per band A, B, C
-#define VS_GROUP_END 28u      // group items of the current cluster pass: [VS_GROUP_BEGIN, VS_GROUP_END)
+#define VS_GROUP_END 28u      // CullPrepare MODE=1 only: the group items its arguments covered
 #define VS_TILE_PAIRS 29u     // tile-local raster: (cluster, tile rectangle) pairs appended
 #define VS_COV_POOL 30u       // coverage record capacity of the frame (records; CoverageBuild MODE 2, for the statistics)
 #define VS_COV_INVOCATIONS 31u // coverage pixel kernel invocations (measurement stages only)
@@ -125,6 +144,10 @@ uint skinSlot(CullScene cs, uint instance)
 #define VS_CHUNK_ITEMS 42u    // (chunk, view) items of the chunks that passed CullChunks in this phase
 #define VS_DEFER_CHUNKS 43u   // chunks occluded against the previous HiZ in phase 1 (tested again in phase 2)
 #define VS_STAT_CHUNKS 44u    // chunk items expanded to their instances (both phases)
+#define VS_NODE_COMMIT 45u    // node work queue (CullNodes QUEUE=1): node items [0, min(this, capacity)) are stored
+#define VS_NODE_READ 46u      // node work queue: node items claimed by the traversal's workers
+#define VS_NODE_PENDING 47u   // node work queue: items kept in the queue whose processing has not finished (0: the
+                              // traversal is complete)
 #define VS_LIST_PHASE1 48u    // + list (words 48 .. 55): entries of phase 1 (snapshot)
 #define VS_WORDS 56u
 
@@ -164,7 +187,8 @@ uint skinSlot(CullScene cs, uint instance)
 #define OVERFLOW_DEFER_INSTANCES 8u
 #define OVERFLOW_DEFER_NODES 16u
 #define OVERFLOW_DEFER_CLUSTERS 32u
-#define OVERFLOW_NODE_DEPTH 64u        // node items left unprocessed after the last traversal iteration
+#define OVERFLOW_NODE_DEPTH 64u        // node items left unprocessed after the last traversal iteration (work queue: after
+                                       // its workers left)
 #define OVERFLOW_TILE_PAIRS 128u
 #define OVERFLOW_COVERAGE 256u         // the coverage record pool ran out (its fragments are lost; the pool grows)
 #define OVERFLOW_COVERAGE_DEPTH 512u   // unused since v1.41 (was: a coverage tile past its extension tree)
@@ -185,6 +209,38 @@ uint waveAppend(RWByteAddressBuffer state, uint word, uint n, uint capacity, uin
     base = WaveReadLaneFirst(base);
     if (total > 0 && base + total > capacity && WaveIsFirstLane()) state.InterlockedOr(4 * VS_OVERFLOW, overflowBit);
     return base + prefix;
+}
+
+// Node queue append (the hierarchy traversal's items; CullNodes.hlsl). Wave-aggregated like waveAppend: 'n' entries per
+// lane, returns this lane's first index; 'first' and 'total' are the wave's (uniform). The entries kept (below the
+// capacity) are counted in VS_NODE_PENDING before they are stored, less 'retired' (uniform over the wave: the items the
+// wave finished with these appends, 0 outside the traversal), so the count never reads 0 while entries are still to come.
+// After storing them the caller publishes them: nodePublish in the passes that run before the traversal, the
+// traversal's own ordered publish while its workers read the queue. Uniform control flow.
+uint nodeReserve(RWByteAddressBuffer state, uint n, uint capacity, uint retired, out uint first, out uint total)
+{
+    total = WaveActiveSum(n);
+    const uint prefix = WavePrefixSum(n);
+    uint base = 0;
+    if (WaveIsFirstLane())
+    {
+        if (total > 0)
+        {
+            state.InterlockedAdd(4 * VS_NODE_WRITE, total, base);
+            if (base + total > capacity) state.InterlockedOr(4 * VS_OVERFLOW, OVERFLOW_NODES);
+        }
+        const uint kept = min(base + total, capacity) - min(base, capacity);
+        if (kept != retired) state.InterlockedAdd(4 * VS_NODE_PENDING, kept - retired);  // (two's complement: may subtract)
+    }
+    first = WaveReadLaneFirst(base);
+    return first + prefix;
+}
+
+// Publishes a wave's node items [first, first + total) from a pass that runs before the traversal (nothing reads the
+// queue meanwhile): the queue's end is the largest published end, which is VS_NODE_WRITE once the pass is done.
+void nodePublish(RWByteAddressBuffer state, uint first, uint total)
+{
+    if (total > 0 && WaveIsFirstLane()) state.InterlockedMax(4 * VS_NODE_COMMIT, first + total);
 }
 
 uint packItem(uint index, uint view) { return index | (view << 24); }
@@ -300,6 +356,10 @@ float projectedLength(CullView v, float4 s, float worldLength)
     const float d = max(length(s.xyz - v.position) - s.w, v.nearPlane);
     return worldLength * v.lodScale / d;
 }
+
+// An instance too small for the view (RasterView::minInstanceTexels): its bounding sphere's radius projects to under the
+// view's minimum, taken at the sphere's nearest point (the largest it can appear).
+bool instanceBelowView(CullView v, float4 bounds) { return v.minInstancePx > 0 && projectedLength(v, bounds, bounds.w) < v.minInstancePx; }
 
 // Screen rectangle (pixels, inclusive) and nearest device depth of a world sphere under viewProj; false when the
 // sphere's box reaches the near plane (then it can never be occluded).
@@ -514,6 +574,56 @@ bool tileAnySet(CullView v, uint view, TileMasks masks, uint2 a, uint2 b)
         }
     }
     return false;
+}
+
+// Tile occluders of a raster-service view (DepthRasterRequest::tileOccluders, CULL_VIEW_TILE_OCCLUDERS): true when the
+// sphere is hidden in every set tile under it - in each, its nearest device depth is farther than the farthest depth
+// stored over the blocks its rectangle touches in the tile (341 floats per atlas slot: blocks of tilePx / 16 pixels, then
+// of 2, 4, 8 and 16 times that; read on the block level where the rectangle spans at most 2 x 2 blocks; 0 = a pixel with
+// nothing stored: not hidden). False (not hidden) without occluders, when the sphere reaches the view's near plane, or
+// when it spans more than 2 x 2 tiles. Reversed Z: nearer = larger.
+bool tilesOcclude(CullView v, uint maskSrv, float4 s)
+{
+    if ((v.flags & CULL_VIEW_TILE_OCCLUDERS) == 0 || v.cullMaskOffset == UNX_NONE || maskSrv == UNX_NONE) return false;
+    float4 rect;
+    float nearest;
+    if (!projectSphere(v.viewProj, v.viewportSize, s, rect, nearest)) return false;
+    rect = clamp(rect, 0, float4(v.viewportSize, v.viewportSize) - 1);
+    if (rect.z < rect.x || rect.w < rect.y) return false;
+    const uint2 p0 = uint2(rect.xy), p1 = uint2(rect.zw);
+    const uint2 a = p0 / v.tilePx, b = p1 / v.tilePx;
+    if (b.x - a.x > 1 || b.y - a.y > 1) return false;
+    ByteAddressBuffer mask = ResourceDescriptorHeap[maskSrv];
+    ByteAddressBuffer slots = ResourceDescriptorHeap[v.occluderSlotsSrv];
+    ByteAddressBuffer occluders = ResourceDescriptorHeap[v.occluderSrv];
+    const uint blockPx = max(v.tilePx / 16, 1u);
+    bool any = false;
+    [unroll] for (uint t = 0; t < 4; ++t)
+    {
+        const uint2 tile = a + uint2(t & 1, t >> 1);
+        if (tile.x > b.x || tile.y > b.y) continue;
+        const uint i = tile.y * v.tilesX + tile.x;
+        if (((mask.Load(4 * (v.cullMaskOffset + (i >> 5))) >> (i & 31u)) & 1u) == 0) continue;  // not drawn: nothing to hide from
+        any = true;
+        const uint slot = slots.Load(4 * (v.cullMaskOffset * 32 + i));
+        // the rectangle inside the tile, in blocks; the level where it spans at most 2 x 2 of them
+        const uint2 origin = tile * v.tilePx;
+        const uint2 lo = (max(p0, origin) - origin) / blockPx, hi = (min(p1, origin + v.tilePx - 1) - origin) / blockPx;
+        uint m = 0;
+        [unroll] for (uint q = 0; q < 4; ++q)
+            if ((hi.x >> m) - (lo.x >> m) > 1 || (hi.y >> m) - (lo.y >> m) > 1) ++m;
+        const uint perTile = 16u >> m;
+        const uint offset = m == 0 ? 0u : m == 1 ? 256u : m == 2 ? 320u : m == 3 ? 336u : 340u;
+        const uint2 b0 = min(lo >> m, perTile - 1), b1 = min(hi >> m, perTile - 1);
+        float farthest = 1;
+        [unroll] for (uint c = 0; c < 4; ++c)
+        {
+            const uint2 blk = uint2((c & 1) ? b1.x : b0.x, (c & 2) ? b1.y : b0.y);
+            farthest = min(farthest, asfloat(occluders.Load(4 * (slot * 341 + offset + blk.y * perTile + blk.x))));
+        }
+        if (!(nearest < farthest)) return false;  // it can show in this tile
+    }
+    return any;
 }
 
 // Tile mask of a raster-service view: true when the sphere's viewport rectangle covers a set tile (or no mask).

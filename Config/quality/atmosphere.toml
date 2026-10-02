@@ -110,6 +110,17 @@ depth_slices = 64                    # exponential in view depth between near_m 
 lights_max = 32                      # ordered head of each froxel list (even, <= 96, FROXEL_SORTED_MAX): the strongest lights by
                                      # importance come first; every other light reaching the froxel follows (nothing is dropped
                                      # or merged, RENDERER_REDESIGN_V2 14.1)
+fold_small_passes = true             # the lists' header, count and two scan levels are one pass (the same dispatches in order, a
+                                     # barrier between them); the fill is the other. false: five passes (A/B)
+candidates_once = true               # the lights x tiles frustum test runs once a frame: the count pass keeps each tile's candidates
+                                     # (up to 254) and the fill pass takes them; a tile with more is culled again by the fill pass.
+                                     # The same lists. false: both passes cull (A/B)
+sort_head_for_slots_only = true      # the head's importance order has one reader, S's visibility slots 1-3 (the first three
+                                     # shadow-casting lights of a list); a frame without local shadow slots (shading.mega_lights
+                                     # shadows the local lights with its samples' rays) writes its lists in light-index order and
+                                     # skips the head's insertion sort. Every list holds the same lights; their order differs, so
+                                     # a sampler that walks a list (MegaLights) draws another, equally distributed, sample
+                                     # sequence, and sums over a list differ in the last float bits. false: always ordered (A/B)
 list_capacity_forced = 0             # tests only (0: off): entry capacity of the lists buffer. Normally the capacity is an upper
                                      # bound of the scene lights' entries (FroxelSystem.cpp froxelListBound) + an allowance for FX
                                      # particle lights grown from the measured need; a frame needing more lists the scene lights alone

@@ -5,7 +5,10 @@
 //  1. the tile's frustum (four planes through the camera) culls every light's bounding sphere, the group's threads taking
 //     the lights in turn (512 lights x 14.4 k tiles at 4K = 7.4 M sphere tests): the scene's, then the FX particle lights
 //     of the buffer's tail (froxelLightTotal, A3: + 14.4 k F tests at 4K). Candidates are compacted in light-index order
-//     (a ballot per batch of 64), so the lists never depend on which thread finished first;
+//     (a ballot per batch of 64), so the lists never depend on which thread finished first. MODE=0 keeps a tile's
+//     candidates (P[1].w: FROXEL_STORED of them at most, 16 bits each after their count) and MODE=1 takes them from
+//     there: the lights x tiles test runs once a frame. A tile with more candidates than are kept is culled again by
+//     MODE=1 (the same test on the same lights: the same candidates);
 //  2. each slice keeps the candidates whose bounds reach its froxel: view-depth range, bounding sphere of the froxel
 //     (not for the last slice, which extends to infinity), spot cone, emitter plane of one-sided area lights;
 //  3. MODE=0 (count): the number of lights reaching the froxel goes to the header (first 0, scene lights | all << 16). FroxelScan.hlsl then
@@ -18,6 +21,10 @@
 //     is truncated or merged: a froxel lists every light that reaches it. A list is cut only by the buffer's capacity
 //     (FroxelGrid::capacity, a size: entries that would lie past it are lost and counted in the header statistics; the
 //     gates require 0).
+//     The head's order has one reader: S's visibility slots 1-3 go to the first three shadow-casting lights of a list, so
+//     the strongest take them. In a frame without local shadow slots (P[2].x bit 0: shading.mega_lights takes the local
+//     lights' shadows with its samples' rays, or no light casts) no reader looks at the order, and the list is written
+//     in light-index order without the head's insertion sort: the same lights in every list.
 //  4. header words (first entry, count) and 16-bit indices into the froxel's run (FroxelCommon.hlsli).
 // P[0].x froxelLights UAV (raw; header written by FroxelBegin), P[0].y lights_max (the ordered head, even, <= 96),
 // P[0].z slot of light SRV (StructuredBuffer<uint>: shadow slot or VSM_LOCAL_NONE per scene light; 0xFFFFFFFF: no local
@@ -26,7 +33,9 @@
 // neighbourhood holds a read pixel (planar views: tiles without mirror pixels) gets empty lists and no culling.
 // P[1].x block offsets SRV (raw, FroxelScan MODE=1's exclusive block sums: all lights at 0, scene lights at 8192; MODE=1
 // only), P[1].y tests: 1 forces the fallback below, P[1].z scene allocation SRV (raw, FroxelScan MODE=0: each froxel's
-// exclusive prefix over the scene lights alone; MODE=1 only).
+// exclusive prefix over the scene lights alone; MODE=1 only), P[1].w tile candidates (raw, FROXEL_STORED_BYTES per tile:
+// MODE=0 UAV, MODE=1 SRV; 0xFFFFFFFF: each mode culls for itself).
+// P[2].x bit 0: no reader of the head's order this frame (MODE=1: light-index order, no sort).
 // Frame constants of the view.
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
@@ -35,6 +44,8 @@
 
 #define FROXEL_CANDIDATES 1024u
 #define FROXEL_SORTED_MAX 96u   // ordered head kept in groupshared memory per slice (64 x 96 x 4 B = 24 KB)
+#define FROXEL_STORED 254u      // a tile's candidates kept from MODE=0 for MODE=1: a count word + 127 words of two
+#define FROXEL_STORED_BYTES 512u  // (FroxelSystem.cpp kTileCandidateBytes)
 
 groupshared uint gs_candidates[FROXEL_CANDIDATES];
 groupshared uint gs_candidateCount;
@@ -146,7 +157,27 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
 
     // 1. Tile frustum; candidates compacted in light-index order (one ballot per batch of 64 lights).
     const uint lightTotal = froxelLightTotal();
-    for (uint base = 0; base < lightTotal; base += 64)
+    const uint tileBytes = (tile.y * g.gridX + tile.x) * FROXEL_STORED_BYTES;
+    uint kept = 0xFFFFFFFFu;  // the candidates MODE=0 kept for this tile (their count; above FROXEL_STORED: not kept)
+#if MODE == 1
+    if (P[1].w != 0xFFFFFFFFu)
+    {
+        ByteAddressBuffer stored = ResourceDescriptorHeap[P[1].w];
+        kept = stored.Load(tileBytes);
+        if (kept <= FROXEL_STORED)
+        {
+            for (uint w = s; 2 * w < kept; w += 64)
+            {
+                const uint pair = stored.Load(tileBytes + 4 + w * 4);
+                gs_candidates[2 * w] = pair & 0xFFFFu;
+                if (2 * w + 1 < kept) gs_candidates[2 * w + 1] = pair >> 16;
+            }
+            if (s == 0) gs_candidateCount = kept;
+            GroupMemoryBarrierWithGroupSync();
+        }
+    }
+#endif
+    for (uint base = 0; base < (kept <= FROXEL_STORED ? 0u : lightTotal); base += 64)  // (uniform over the group)
     {
         if (s == 0) { gs_batchBits[0] = 0; gs_batchBits[1] = 0; }
         GroupMemoryBarrierWithGroupSync();
@@ -172,12 +203,22 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         GroupMemoryBarrierWithGroupSync();
     }
     const uint candidates = min(gs_candidateCount, FROXEL_CANDIDATES);
+#if MODE == 0
+    if (P[1].w != 0xFFFFFFFFu)
+    {
+        RWByteAddressBuffer stored = ResourceDescriptorHeap[P[1].w];
+        if (s == 0) stored.Store(tileBytes, gs_candidateCount);
+        if (gs_candidateCount <= FROXEL_STORED)
+            for (uint w = s; 2 * w < candidates; w += 64)
+                stored.Store(tileBytes + 4 + w * 4, gs_candidates[2 * w] | (2 * w + 1 < candidates ? gs_candidates[2 * w + 1] : 0u) << 16);
+    }
+#endif
 
     // 2-3. This slice's list.
     uint count = 0, sceneCount = 0;
 #if MODE == 1
     uint sorted = 0, stored = 0, pendingEntry = 0, droppedFx = 0, listed = 0;
-    bool fallback = false;
+    bool fallback = false, unordered = false;
     uint first = 0, limit = 0;  // the run [first, first + count) cut at the capacity: limit = entries this run may store
 #endif
     if (s < g.slices)
@@ -201,6 +242,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             ByteAddressBuffer blocks = ResourceDescriptorHeap[P[1].x];
             first = buffer.Load(g.headerBase + froxel * 8) + blocks.Load((froxel >> 11) * 4);
         }
+        unordered = (P[2].x & 1u) != 0;
         fallback = buffer.Load(28) > g.capacity || P[1].y != 0;  // P[1].y: tests force the fallback
         if (fallback)
         {
@@ -231,7 +273,8 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             // written straight into the run (this thread owns every word of its run: the head starts at the even entry
             // 'first' and listMax is even, so no word is shared with another thread or with the head).
             uint leaving = 0xFFFFFFFFu;  // key leaving the head this step (none)
-            if (sorted == listMax && key <= gs_keys[keys + sorted - 1]) leaving = key;
+            if (unordered) leaving = key & 0xFFFFu;  // no head: every light goes straight into the run, in candidate order
+            else if (sorted == listMax && key <= gs_keys[keys + sorted - 1]) leaving = key;
             else
             {
                 if (sorted == listMax) leaving = gs_keys[keys + sorted - 1];
@@ -245,7 +288,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             }
             if (leaving != 0xFFFFFFFFu)
             {
-                const uint pos = sorted + stored;  // tail position within the run (sorted == listMax here)
+                const uint pos = sorted + stored;  // tail position within the run (sorted == listMax here; no head: 0)
                 if (pos < limit)
                 {
                     const uint e = froxelEntryOf(0xFFFFu - (leaving & 0xFFFFu));

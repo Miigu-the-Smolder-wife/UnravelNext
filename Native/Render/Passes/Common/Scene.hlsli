@@ -161,6 +161,12 @@ struct GpuVisibleCluster
 // its bounding sphere was in the previous rendered frame (caches keyed by the old place invalidate from it).
 #define INSTANCE_MOTION_BREAK (1u << 30)
 #define INSTANCE_VIEW_MODEL (1u << 29)  // gpu::kInstanceViewModel: a first-person view model (Passes/ViewModel)
+// The instance's flags and deformation inputs let its geometry be elsewhere in another frame of the same scene revision:
+// Dynamic, Skinned, Wind or a view model, a bone palette, morph or terrain patch (gpu::instanceMovable, GpuScene.h). Readers
+// that split instances in two sets by it (V's RasterView::instanceSet, S's static / dynamic shadow pages) also count every
+// instance past the scene's uploaded ones (run-time and GPU-written instances) as movable. The others keep their place
+// and shape while their transform revision holds.
+#define INSTANCE_MOVABLE_FLAGS (INSTANCE_DYNAMIC | INSTANCE_SKINNED | INSTANCE_WIND | INSTANCE_VIEW_MODEL)
 // scene::MaterialClass
 #define MATERIAL_STANDARD 0u
 #define MATERIAL_FOLIAGE 1u
