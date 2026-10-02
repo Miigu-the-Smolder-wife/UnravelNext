@@ -3,6 +3,7 @@
 #include "unx/render/ViewDesc.h"
 
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace unx::render
@@ -220,6 +221,18 @@ struct ColorGradingDesc
     float highlightsMin = 0.5f;    // ... from which the highlights' values weigh in, fully from highlightsMax
     float highlightsMax = 1.0f;
 };
+// The post settings a game changes while it runs (the host's UnxFrameSetPost), held until changed like the fog: the
+// values of the quality file's keys named beside them, for this frame. A NaN (blades: -1) leaves the file's value.
+struct PostSettingsDesc
+{
+    float exposureMinEv = std::numeric_limits<float>::quiet_NaN();     // shading.exposure_min_ev: the automatic exposure's
+    float exposureMaxEv = std::numeric_limits<float>::quiet_NaN();     // shading.exposure_max_ev: metering range (EV100)
+    float bloomStrength = std::numeric_limits<float>::quiet_NaN();     // shading.post_bloom_strength, [0, 1]
+    float vignette = std::numeric_limits<float>::quiet_NaN();          // shading.post_vignette, [0, 1]
+    float motionBlurShutter = std::numeric_limits<float>::quiet_NaN(); // shading.motion_blur_shutter, [0, 1]: the blur's amount
+    int32_t diaphragmBlades = -1;                                      // shading.dof_diaphragm_blades (0: a disc; 4 .. 16)
+    float lensFullAperture = std::numeric_limits<float>::quiet_NaN();  // shading.dof_diaphragm_full_aperture (m)
+};
 // The scene description's weather (scene::Scene::clouds, fog, fogVolumes): FrameRenderer gives a frame the scene's cloud
 // layer, fog or fog volumes where the frame brings none of its own (coverage 0, enabled false, no volumes) while that
 // item's bit is set in FrameContext::sceneWeather. A producer that decides an item itself clears its bit, and its "none"
@@ -250,6 +263,7 @@ struct FrameContext
     FogDesc fog;            // the height fog (enabled false: the quality file's)
     std::vector<FogVolumeDesc> fogVolumes;  // local fog volumes (at most kMaxFogVolumes take effect)
     ColorGradingDesc grading;  // the colour grading before the tone curve (enabled false: the quality file's)
+    PostSettingsDesc post;     // the game's run-time post settings (unset values: the quality file's)
     uint32_t sceneWeather = kSceneClouds | kSceneFog | kSceneFogVolumes;  // the scene's weather fills the items above that are empty
     // Validation runs: the main view's colour is linear radiance x exposure in RGBA32F (metrics, INTERFACES 9)
     // instead of the display-encoded RGB10A2.
@@ -275,6 +289,14 @@ struct FrameContext
     // display-referred linear Rec.709 light, 1 = paper white, after the tone curve generalised to that peak (M, Post.cpp;
     // at 1 exactly the SDR curve); the host encodes it for the swap chain.
     float displayPeak = 0;
+    // The HDR output's encoding (displayPeak >= 1; M's final pass, PostFinal.hlsl): -1 = the quality file's
+    // output.hdr_encoding; 0 = the linear light above, the host encodes it; 1 = scRGB - linear Rec.709 with 1 = 80 cd/m2,
+    // what an R16G16B16A16 FLOAT swap chain in DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 shows; 2 = HDR10 - Rec.2020
+    // primaries under the ST 2084 curve (DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020), the colour then R10G10B10A2 UNORM
+    // (dithered) or R16G16B16A16 FLOAT. displayPaperWhite: paper white's luminance in cd/m2 for encodings 1 and 2
+    // (0 = the quality file's output.hdr_paper_white_nits); the display's peak is displayPeak x it.
+    int32_t displayEncoding = -1;
+    float displayPaperWhite = 0;
     // v1.51 (A5, COVERAGE 14.12 (2c)): the physical camera's lens for the aperture integral (depth of field): aperture
     // diameter (m; 0 = pinhole, no depth of field - the gate camera) and focus distance (m, along the view axis). The
     // circle of confusion of a depth z is f_px A |1/z - 1/z_focus| pixels (f_px = (H/2) proj[1][1]).

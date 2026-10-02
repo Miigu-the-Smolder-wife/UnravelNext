@@ -24,7 +24,7 @@
 // resurrected pixel is not disoccluded for the update (its history is the kept frame's).
 // P[0] = { colour SRV (internal, exposed linear), reprojected guide SRV (R10G10B10A2), decimate mask SRV (RG8),
 //          rejection UAV (RGBA8: rejection, history clamp disable, validity decrease, a x 255: bit 0 not disoccluded,
-//          bit 1 resurrected) }
+//          bit 1 resurrected, bit 2 the vector is hole-filled - the decimate mask's bit 8 passed on) }
 // P[1] = { guide UAV (R10G10B10A2, next frame's history: guide colour, a = this frame's reprojection edge), AA input UAV
 //          (RG8: LDR luma, mask), width, height }, P[2] = { asuint(theoretic blend factor), moire error SRV (R16F,
 //          TsrFlicker.hlsl; UNX_NONE: no flickering heuristic), thin geometry relaxation SRV (R8, TsrThin.hlsl;
@@ -352,7 +352,7 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     RWTexture2D<float4> rejectionOut = ResourceDescriptorHeap[P[0].w];
     // (the stores round down: a value is never raised by its 8 bits)
     rejectionOut[pixel] = float4(floor(float3(rejection, disableClamp, 1.0 - increaseValidity) * float3(255, 255, 255) + float3(0, 0, 0.999)) / 255.0,
-                                 ((disoccluded ? 0.0 : 1.0) + (resurrected ? 2.0 : 0.0)) / 255.0);
+                                 ((disoccluded ? 0.0 : 1.0) + (resurrected ? 2.0 : 0.0) + ((maskBits & 8u) != 0 ? 4.0 : 0.0)) / 255.0);
     RWTexture2D<float2> aaInput = ResourceDescriptorHeap[P[1].y];
     const float luma = dot(min(input, 65504.0), float3(0.299, 0.587, 0.114));
     aaInput[pixel] = float2(luma / (0.5 + luma), antiAlias ? 1.0 : 0.0);

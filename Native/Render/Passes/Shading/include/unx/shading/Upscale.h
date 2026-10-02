@@ -9,6 +9,18 @@ namespace unx::render::shading
 bool upscaleActive(FramePassContext& fc, const ViewResources& view);
 // The view at the output's size (the post chain after the upscale writes view.color at it).
 ViewResources upscaleOutputView(FramePassContext& fc, const ViewResources& view);
+// output.lens_panini_d / lens_panini_s (the reference's r.LensDistortion.Panini.D / S): the lens projection the upscaled
+// picture is in (Lens.hlsli) - with output.upscale_tsr on an upscaled main view; the history update applies it, so the
+// passes after the upscale work on the lens picture and the ones that read the rendered view's data per pixel
+// (the motion blur's vectors) go through lensToRendered. Inactive: the picture is the rendered view's.
+struct LensProjection
+{
+    bool active = false;
+    float tanX = 0, tanY = 0;  // of the rendered view's half field of view
+    float d = 0, s = 0;
+    float scale = 0;           // the centre's magnification (the rendered width fills the picture)
+};
+LensProjection upscaleLens(FramePassContext& fc, const ViewResources& view);
 // The output-resolution image (RGBA16F, exposed linear; it is also the next frame's history) from 'src' (the view's
 // exposed-linear image at the internal resolution) and the previous output.
 // The previous frame's upscaled colour (the history temporalUpscale reads this frame) in this frame's graph, for passes

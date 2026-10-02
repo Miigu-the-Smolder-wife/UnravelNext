@@ -15,5 +15,10 @@ struct DepthOfFieldProducts
     BufferRef maxima, reach;
     TextureRef colour[8], shape[8];  // the octave pyramid's levels 1..7
 };
+// With shading.dof_diaphragm and no products asked for, the diaphragm path below does it.
 BufferRef depthOfField(FramePassContext& fc, const ViewResources& view, TextureRef src, TextureRef dst, DepthOfFieldProducts* products = nullptr);
+// shading.dof_diaphragm: the reference's diaphragm depth of field (DiaphragmDof.cpp) in place of the octave gather -
+// the same lens, src and dst; the statistics buffer it returns is zero.
+bool diaphragmDepthOfFieldOn(FramePassContext& fc);
+BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view, TextureRef src, TextureRef dst);
 } // namespace unx::render::shading

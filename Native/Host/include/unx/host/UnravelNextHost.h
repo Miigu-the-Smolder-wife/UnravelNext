@@ -993,6 +993,73 @@ typedef struct UnxPassTiming
 // Writes min(capacity, passes) entries; *count receives the frame's pass count.
 UNX_API int32_t UNX_CALL UnxFramePassTimingsLatest(UnxRenderer r, UnxPassTiming* passes, uint32_t capacity, uint32_t* count);
 
+// ---- The picture's settings a game changes while it runs (optional exports within ABI 6; after commit, any time). Each
+// is held until changed: every frame queued afterwards takes the current values. What a run keeps fixed stays in the
+// quality file (UnxRendererQualityOverride before commit); these are for what changes with the scene or the moment.
+
+// The colour grading before the tone curve (render::ColorGradingDesc; the quality file's shading.post_grading_* hold
+// the same values for a whole run). Null: the quality file's. Each of a range's five values is r, g, b and a master
+// that multiplies them (offset: adds to them); the shadows', midtones' and highlights' values combine with the global
+// ones by their share of the pixel's luma range. All 1 (offset 0, temperature 6500, tint 0): the picture is unchanged
+// and the chain does not build its grading table.
+typedef struct UnxColorGradingRange
+{
+    float saturation[4];        // about the luma (0: grey)
+    float contrast[4];          // about scene grey 0.18
+    float gamma[4];             // the value to the power 1 / gamma
+    float gain[4];
+    float offset[4];
+} UnxColorGradingRange;
+typedef struct UnxColorGradingDesc
+{
+    uint32_t size, version;     // sizeof, 1
+    float temperature;          // K, 1667 .. 25000: the scene's white the picture is balanced from (6500: none)
+    float tint;                 // across the temperature's line (+ green, - magenta)
+    UnxColorGradingRange global, shadows, midtones, highlights;
+    float shadowsMax;           // the luma below which the shadows' values weigh in (> 0; the default 0.09)
+    float highlightsMin;        // ... from which the highlights' weigh in (the default 0.5), fully from
+    float highlightsMax;        // highlightsMax (> highlightsMin; the default 1)
+    float reserved;             // 0
+} UnxColorGradingDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxColorGradingDesc) == 352, "UnxColorGradingDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetColorGrading(UnxRenderer r, const UnxColorGradingDesc* grading);
+
+// The post settings (render::PostSettingsDesc and FrameContext::exposureCompensation). Null: all of them the quality
+// file's, no exposure compensation. A NaN (diaphragmBlades: -1) leaves that one value to the quality file's key named
+// beside it. The depth of field's aperture and focus distance are UnxFrameSetLens's.
+typedef struct UnxPostSettingsDesc
+{
+    uint32_t size, version;     // sizeof, 1
+    float exposureCompensation; // stops over the automatic exposure, + brighter (0: none; finite)
+    float exposureMinEv100;     // the automatic exposure's metering range: the EV100 it settles at stays inside
+    float exposureMaxEv100;     // (min < max); shading.exposure_min_ev / exposure_max_ev
+    float bloomIntensity;       // the share of the light the bloom spreads, 0 .. 1; shading.post_bloom_strength
+    float vignette;             // the natural vignetting's strength, 0 .. 1; shading.post_vignette
+    float motionBlurAmount;     // the shutter as a fraction of the frame interval, 0 .. 1 (0: none, 0.5: 180 degrees);
+                                // shading.motion_blur_shutter
+    int32_t diaphragmBlades;    // depth of field: the diaphragm's blades, 0 (a disc) or 4 .. 16; shading.dof_diaphragm_blades
+    float lensFullAperture;     // ... and the lens's widest aperture (diameter, m; 0: straight blades);
+                                // shading.dof_diaphragm_full_aperture
+    float reserved[2];          // 0
+} UnxPostSettingsDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxPostSettingsDesc) == 48, "UnxPostSettingsDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetPost(UnxRenderer r, const UnxPostSettingsDesc* post);
+
+// How an HDR frame (UnxFrameDesc::displayPeak >= 1) is written for the display (FrameContext::displayEncoding):
+//   -1  the quality file's output.hdr_encoding (the default);
+//    0  linear Rec.709 light with 1 = paper white into R16G16B16A16 FLOAT: the host encodes it for its swap chain;
+//    1  scRGB: linear Rec.709 with 1 = 80 cd/m2 into R16G16B16A16 FLOAT - what a swap chain of that format in
+//       DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 shows;
+//    2  HDR10: Rec.2020 primaries under the SMPTE ST 2084 curve (DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020); the frame's
+//       output texture may then be R10G10B10A2 UNORM (the HDR10 swap chain's format; dithered) or R16G16B16A16 FLOAT.
+// paperWhiteNits: paper white's luminance in cd/m2 for encodings 1 and 2 (40 .. 1000; 0: the quality file's
+// output.hdr_paper_white_nits). The display's peak is displayPeak x paper white.
+UNX_API int32_t UNX_CALL UnxFrameSetDisplayEncoding(UnxRenderer r, int32_t encoding, float paperWhiteNits);
+
 #ifdef __cplusplus
 }
 // The managed bridge (Assets/UnravelNextBridge/Runtime/Native/UnravelNextNative.cs) checks the same sizes at start.

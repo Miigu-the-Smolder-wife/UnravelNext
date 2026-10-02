@@ -1567,6 +1567,11 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.lensFocus = m_lensFocus;
     packet.whiteBalanceKelvin = m_whiteBalanceKelvin;
     packet.whiteBalanceTint = m_whiteBalanceTint;
+    packet.grading = m_grading;
+    packet.post = m_post;
+    packet.exposureCompensation = m_exposureCompensation;
+    packet.displayEncoding = m_displayEncoding;
+    packet.displayPaperWhite = m_displayPaperWhite;
     if (m_meshAssetsChanged)
     {
         packet.meshAssets.emplace(m_meshAssetMap.begin(), m_meshAssetMap.end());
@@ -1920,6 +1925,11 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     fc.lensFocus = p.lensFocus;
     fc.whiteBalanceKelvin = p.whiteBalanceKelvin;
     fc.whiteBalanceTint = p.whiteBalanceTint;
+    fc.grading = p.grading;
+    fc.post = p.post;
+    fc.exposureCompensation = p.exposureCompensation;
+    fc.displayEncoding = p.displayEncoding;
+    fc.displayPaperWhite = p.displayPaperWhite;
     fc.timing = m_profiler ? m_profiler->lastCompleted() : nullptr;  // (the debug HUD, E)
     fc.originShift = p.originShift;  // C9
     for (int a = 0; a < 3; ++a)
@@ -2445,10 +2455,14 @@ void HostRenderer::renderOnHost(uint64_t ticket, const HostExecute& execute)
     if (od.Width != p.width || od.Height != p.height || !(od.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))
         fail("output texture is %llux%u flags 0x%x; the frame needs %ux%u with random write", (unsigned long long)od.Width, od.Height, (unsigned)od.Flags, p.width,
              p.height);
-    const DXGI_FORMAT format = p.displayPeak > 0 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R10G10B10A2_UNORM;
+    // (an HDR frame may be written straight into the HDR10 swap chain's 10-bit format: the chain then requires the
+    // ST 2084 encoding - the frame's, or the quality file's output.hdr_encoding - and says so otherwise)
+    const bool tenBitOutput = od.Format == DXGI_FORMAT_R10G10B10A2_UNORM || od.Format == DXGI_FORMAT_R10G10B10A2_TYPELESS;
+    const DXGI_FORMAT format = p.displayPeak > 0 && !tenBitOutput ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R10G10B10A2_UNORM;
     if (od.Format != format && !(format == DXGI_FORMAT_R10G10B10A2_UNORM && od.Format == DXGI_FORMAT_R10G10B10A2_TYPELESS) &&
         !(format == DXGI_FORMAT_R16G16B16A16_FLOAT && od.Format == DXGI_FORMAT_R16G16B16A16_TYPELESS))
-        fail("output texture format %u; the frame needs %s", (unsigned)od.Format, p.displayPeak > 0 ? "R16G16B16A16 FLOAT (HDR display)" : "R10G10B10A2 UNORM");
+        fail("output texture format %u; the frame needs %s", (unsigned)od.Format,
+             p.displayPeak > 0 ? "R16G16B16A16 FLOAT (HDR display; R10G10B10A2 UNORM too under the ST 2084 encoding)" : "R10G10B10A2 UNORM");
     const uint32_t slot = beginFrame(p);
     TextureDesc desc;
     desc.name = "host output";
@@ -2604,5 +2618,51 @@ void HostRenderer::renderStandalone(uint64_t ticket, void* readback, size_t read
         D3D12_RANGE none{ 0, 0 };
         s.readback->Unmap(0, &none);
     }
+}
+
+// ---- The picture's settings a game changes while it runs (UnxFrameSetColorGrading, UnxFrameSetPost,
+// UnxFrameSetDisplayEncoding): validated here, held under m_mutex, copied into every queued frame's packet.
+void HostRenderer::setColorGrading(const render::ColorGradingDesc& g)
+{
+    if (g.enabled)
+    {
+        bool ok = std::isfinite(g.temperature) && g.temperature >= 1667 && g.temperature <= 25000 && std::isfinite(g.tint) && g.shadowsMax > 0 &&
+                  std::isfinite(g.shadowsMax) && std::isfinite(g.highlightsMin) && std::isfinite(g.highlightsMax) && g.highlightsMax > g.highlightsMin;
+        for (const render::ColorGradingRange* r : { &g.global, &g.shadows, &g.midtones, &g.highlights })
+            for (int c = 0; c < 4; ++c)
+                ok = ok && std::isfinite(r->saturation[c]) && r->saturation[c] >= 0 && std::isfinite(r->contrast[c]) && r->contrast[c] >= 0 &&
+                     std::isfinite(r->gamma[c]) && r->gamma[c] > 0 && std::isfinite(r->gain[c]) && r->gain[c] >= 0 && std::isfinite(r->offset[c]);
+        if (!ok)
+            fail("colour grading: temperature %g K in [1667, 25000], finite values, saturation / contrast / gain >= 0, gamma > 0, shadows max %g > 0, "
+                 "highlights max %g > min %g",
+                 g.temperature, g.shadowsMax, g.highlightsMax, g.highlightsMin);
+    }
+    std::lock_guard lock(m_mutex);
+    m_grading = g;
+}
+
+void HostRenderer::setPost(const render::PostSettingsDesc& p, float exposureCompensation)
+{
+    // (a NaN leaves the value to the quality file; a set value must be one the chain takes)
+    auto unsetOr = [](float v, float lo, float hi) { return std::isnan(v) || (v >= lo && v <= hi); };
+    const bool range = std::isnan(p.exposureMinEv) || std::isnan(p.exposureMaxEv) || p.exposureMinEv < p.exposureMaxEv;
+    if (!std::isfinite(exposureCompensation) || std::abs(exposureCompensation) > 16 || !unsetOr(p.exposureMinEv, -30, 30) || !unsetOr(p.exposureMaxEv, -30, 30) ||
+        !range || !unsetOr(p.bloomStrength, 0, 1) || !unsetOr(p.vignette, 0, 1) || !unsetOr(p.motionBlurShutter, 0, 1) ||
+        !(p.diaphragmBlades == -1 || p.diaphragmBlades == 0 || (p.diaphragmBlades >= 4 && p.diaphragmBlades <= 16)) || !unsetOr(p.lensFullAperture, 0, 1))
+        fail("post settings: exposure compensation %g stops (|c| <= 16), metering range %g .. %g EV100 (min < max, within +-30), bloom %g, vignette %g and "
+             "motion blur %g in [0, 1], diaphragm blades %d (-1, 0 or 4 .. 16), full aperture %g m in [0, 1]; NaN leaves a value to the quality file",
+             exposureCompensation, p.exposureMinEv, p.exposureMaxEv, p.bloomStrength, p.vignette, p.motionBlurShutter, p.diaphragmBlades, p.lensFullAperture);
+    std::lock_guard lock(m_mutex);
+    m_post = p;
+    m_exposureCompensation = exposureCompensation;
+}
+
+void HostRenderer::setDisplayEncoding(int32_t encoding, float paperWhiteNits)
+{
+    if (encoding < -1 || encoding > 2 || !std::isfinite(paperWhiteNits) || !(paperWhiteNits == 0 || (paperWhiteNits >= 40 && paperWhiteNits <= 1000)))
+        fail("display encoding %d (-1 the quality file's, 0 linear, 1 scRGB, 2 ST 2084) and paper white %g cd/m2 (0, or 40 .. 1000)", encoding, paperWhiteNits);
+    std::lock_guard lock(m_mutex);
+    m_displayEncoding = encoding;
+    m_displayPaperWhite = paperWhiteNits;
 }
 } // namespace unx::host

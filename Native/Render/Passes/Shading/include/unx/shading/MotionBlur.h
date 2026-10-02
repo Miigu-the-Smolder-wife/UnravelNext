@@ -16,7 +16,9 @@ void motionBlur(FramePassContext& fc, const ViewResources& view, TextureRef src,
 bool motionBlurAfterUpscale(FramePassContext& fc);
 // The exposure integral of the upscaled image 'src' into 'dst' (both at the output resolution, a float format), centred
 // on the frame's time. view: the internal view; motion: its samples' output-UV offsets to the previous frame (RG32F,
-// shading::UpscaleProducts::motion); depth: the device depth of the surfaces those vectors are of.
+// shading::UpscaleProducts::motion); depth: the device depth of the surfaces those vectors are of. A camera turn the
+// rotation stage engages on (shading.motion_blur_after_upscale_rotation) is taken out of the vectors and blurred along
+// its own arcs after the gather.
 void motionBlurUpscaled(FramePassContext& fc, const ViewResources& view, TextureRef src, TextureRef dst, TextureRef motion, TextureRef depth);
 // ... with a given velocity (RG16F, pixels per frame) and the view's depth (tests; motionBlur uses motionVelocity).
 void motionBlurWithVelocity(FramePassContext& fc, const ViewResources& view, TextureRef src, TextureRef dst, TextureRef velocity);

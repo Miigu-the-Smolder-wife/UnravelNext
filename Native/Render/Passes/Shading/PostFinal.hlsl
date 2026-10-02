@@ -7,9 +7,14 @@
 // peak, tone curve (0 film shFilm, 1 PBR Neutral) }, P[3] = { exposure correction SRV (raw: float c; UNX_NONE: none: a
 // snap frame's own metering, Exposure.cpp), white balance on (v1.91: P[4..6].xyz = the rows of the 3 x 3 Bradford
 // adaptation of the camera's white point to D65 in linear Rec.709, Post.cpp whiteBalanceMatrix; 0 = no multiply),
-// 0, 0 }: peak 0 = SDR (above); peak >= 1 = an HDR display (peak over paper
+// HDR encoding, asuint(paper white, cd/m2) }: peak 0 = SDR (above); peak >= 1 = an HDR display (peak over paper
 // white): the curve generalised to that peak,
 // the LUT on its output over the peak, grain, then linear light with 1 = paper white (RGBA16F output, no OETF, no dither).
+// The HDR encoding (FrameContext::displayEncoding; bit 8: the output is a 10-bit UNORM texture):
+//   0  that linear Rec.709 light, 1 = paper white (the host encodes it);
+//   1  scRGB: linear Rec.709, 1 = 80 cd/m2 (an R16G16B16A16 FLOAT swap chain in DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709);
+//   2  HDR10: Rec.2020 primaries under the ST 2084 curve of the absolute luminance (DXGI_COLOR_SPACE_RGB_FULL_G2084_
+//      NONE_P2020), into the swap chain's R10G10B10A2 (a triangular dither of one code) or a float texture.
 // Local exposure (shading.post_local_exposure, LocalExposure.hlsli), first of all: P[7] = { grid SRV (UNX_NONE: off),
 // blurred SRV, asuint(uv scale x), asuint(uv scale y) }, P[8] = { asuint(highlight), asuint(shadow), asuint(detail),
 // asuint(blend) }, P[9].x = asuint(log2 middle grey). The bloom tail is of the image with it (PostDownsample.hlsl).
@@ -26,6 +31,15 @@
 #include "Bindless.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Shading/LocalExposure.hlsli"
+
+// SMPTE ST 2084's inverse EOTF: a luminance over 10 000 cd/m2 to the code value.
+float3 st2084(float3 y)
+{
+    const float m1 = 2610.0 / 16384.0, m2 = 2523.0 / 4096.0 * 128.0;
+    const float c1 = 3424.0 / 4096.0, c2 = 2413.0 / 4096.0 * 32.0, c3 = 2392.0 / 4096.0 * 32.0;
+    const float3 p = pow(saturate(y), m1);
+    return pow((c1 + c2 * p) / (1.0 + c3 * p), m2);
+}
 
 float hashUnit(uint3 v)  // [0, 1), deterministic (PCG3D)
 {
@@ -166,7 +180,23 @@ void main(uint2 id : SV_DispatchThreadID)
     if (hdrDisplay)
     {
         RWTexture2D<float4> linearOutput = ResourceDescriptorHeap[P[0].z];
-        linearOutput[id] = float4(d * range, 1);
+        float3 light = d * range;  // linear Rec.709, 1 = paper white
+        const uint encoding = P[3].z & 0xFFu;
+        const float paperWhite = asfloat(P[3].w);
+        if (encoding == 1u) light *= paperWhite / 80.0;
+        else if (encoding == 2u)
+        {
+            // Rec.709 to Rec.2020 primaries (ITU-R BT.2087; both D65), the absolute luminance, the curve
+            const float3 wide = float3(dot(light, float3(0.6274, 0.3293, 0.0433)), dot(light, float3(0.0691, 0.9195, 0.0114)),
+                                       dot(light, float3(0.0164, 0.0880, 0.8956)));
+            light = st2084(max(wide, 0.0) * (paperWhite / 10000.0));
+            if ((P[3].z & 0x100u) != 0)
+            {
+                const float e10 = hashUnit(uint3(id, P[1].w ^ 0x5bd1e995u)) + hashUnit(uint3(id.yx, P[1].w + 104729u)) - 1.0;
+                light = round(saturate(light + e10 / 1023.0) * 1023.0) / 1023.0;
+            }
+        }
+        linearOutput[id] = float4(light, 1);
         return;
     }
     float3 o = float3(shSrgbOetf(d.r), shSrgbOetf(d.g), shSrgbOetf(d.b));
