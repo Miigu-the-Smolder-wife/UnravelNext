@@ -2,6 +2,10 @@
 // C++ mirror: Passes/Visibility/VisibilityInternal.h (sizes and word offsets checked there).
 #ifndef UNX_VISIBILITY_COMMON_HLSLI
 #define UNX_VISIBILITY_COMMON_HLSLI
+// (V's kernels read compressed cluster vertices: Frame.hlsli's two words and ClusterStream.hlsli - before the first include)
+#if !defined(UNX_CLUSTER_STREAM) && !defined(UNX_FRAME_HLSLI)
+#define UNX_CLUSTER_STREAM 1
+#endif
 #include "Bindless.hlsli"
 #include "Deformation.hlsli"
 #include "Scene.hlsli"

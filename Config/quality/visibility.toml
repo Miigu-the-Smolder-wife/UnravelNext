@@ -166,12 +166,14 @@ software_raster_pages_limit = 4096  # the most (<= 16384; 4096 pages of 128 px: 
 cluster_compression = false       # clusters of rigid meshes (no skin, blend shapes or vertex animation) carry their own
                                   # vertices as a bit stream - positions on the mesh's grid less the cluster's smallest,
                                   # in the bits its extent needs; octahedral normal; tangent as an angle around it; uv
-                                  # in the cluster's range - and the vertex fetch (loadVertex) decodes it: about 10 B a
-                                  # vertex read instead of 32 B. The 32 B vertex pool stays (rays, reference, skinned
-                                  # instances), so the scene's memory grows by the stream; the stream is what a
-                                  # streamed cluster page holds (cluster_streaming). Rays see the mesh's own positions:
-                                  # up to half a grid step per axis from the rasterised ones, unless the cook puts the
-                                  # positions on the grid first (clusterbuilder::snapPositions)
+                                  # in the cluster's range. The cook puts those meshes' positions on a power-of-two grid
+                                  # first (clusterbuilder::snapPositions: at most half a millimetre), so the stream's
+                                  # positions are the vertex pool's floats. Its readers (about 10 B a vertex instead of
+                                  # an index and 32 B): the vis buffer and depth rasters, the material resolve, the
+                                  # motion vectors, the history reprojections. The 32 B vertex pool stays whole - the
+                                  # rays' hit attributes, the coverage raster and shading, the composites, skinned
+                                  # instances - so the scene's memory grows by the stream (the cook's log gives the
+                                  # sizes); the stream is what a streamed cluster page holds (cluster_streaming)
 cluster_position_step = 0.0009765625  # m (1 / 1024): the position grid of a mesh is the largest power of two at most
                                   # this and a 4096th of the mesh's half diagonal (raised when the mesh is too large
                                   # for 2^23 steps from its origin or a cluster for 21 bits an axis)

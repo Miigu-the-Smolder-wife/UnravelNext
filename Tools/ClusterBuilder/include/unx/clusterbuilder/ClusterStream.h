@@ -34,10 +34,12 @@
 // that hold the clusters simplified from its groups (StreamPages::dependencies; "clusterPageDeps"): the runtime keeps a
 // page resident only with them, so no group is drawn together with a stand-in for it.
 //
-// What it changes: V's vis buffer and depth rasters read the stream (about 10 B a vertex at the defaults, the cluster's
+// What it changes: the kernels compiled with UNX_CLUSTER_STREAM - V's vis buffer and depth rasters, the material resolve,
+// the motion vectors and the history reprojections - read the stream (about 10 B a vertex at the defaults, the cluster's
 // vertices in a row) instead of an index and the 32 B vertex, and a cluster's vertices are self-contained (a streaming
-// page's payload, Passes/Streaming). It does not shrink the scene: the 32 B vertex pool stays for the material
-// resolve, the ray scene, the reference and every skinned instance.
+// page's payload, Passes/Streaming). It does not shrink the scene: the 32 B vertex pool and the cluster vertex pool
+// stay whole for the rays (hit attributes of every mesh), the coverage raster and shading, the composites and the
+// kernels at the DXIL limit, the reference and every skinned instance. The build's log line gives the three sizes.
 #include "unx/clusterbuilder/ClusterBuilder.h"
 
 namespace unx::clusterbuilder

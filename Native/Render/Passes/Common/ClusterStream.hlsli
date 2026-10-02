@@ -9,10 +9,13 @@
 // The decoded position is the mesh vertex's float (the cook puts the positions of a compressed mesh on its grid), so
 // a reader of the stream and a reader of the 32 B vertex pool see the same triangle; normal, tangent and uv are
 // quantised (the pool's are not).
-// Who reads it: V's raster kernels (loadClusterVertex / deformClusterVertex, Deformation.hlsli). The readers that go
-// from a vis id to the triangle (loadClusterTriangle, then loadVertex: the material resolve, motion, history) keep the
-// pool: the decode inlined at each of their fetches put three kernels past the 200 KB limit (CoverageComposite,
-// GiTrace, ReflectionTraceInline). loadClusterVertex is the fetch for them once those have room.
+// Who reads it: the kernels compiled with UNX_CLUSTER_STREAM 1 (defined before their first include: the two frame
+// constants and this file exist only there) - V's raster kernels (loadClusterVertex / deformClusterVertex,
+// Deformation.hlsli) and, of the readers that go from a vis id to the triangle, the material resolve, the motion vectors
+// and the history reprojections (loadClusterCorner(s), deformClusterTriangle). The other readers of a vis id's triangle -
+// the coverage shading, the translucent and edge composites, the kernels at the DXIL limit - and the rays keep the
+// vertex pool through loadClusterTriangle / loadVertex: the decode inlined at each of their fetches does not fit
+// three of them (CoverageComposite, GiTrace, ReflectionTraceInline).
 // Cost of a decode: the record (three loads, the same words for every vertex of the cluster) and a five-word window
 // of the vertex's bits (two loads); a kernel that takes only the position leaves the rest undone.
 #ifndef UNX_CLUSTER_STREAM_HLSLI
@@ -161,6 +164,38 @@ VertexData loadClusterVertex(GpuMesh mesh, GpuCluster cl, ClusterVertexSource so
     StructuredBuffer<uint> verts = ResourceDescriptorHeap[g_clusterVertexIndices];
     meshVertex = verts[cl.vertexOffset + local];
     return loadVertex(mesh, meshVertex);
+}
+
+// ---- the readers that go from a vis id to its triangle
+// Corner 'corner' (0 .. 2) of triangle t of cluster 'cluster' (c = loadCluster(cluster)) as loaded; meshVertex as
+// loadClusterVertex's. The page table is the frame's (g_clusterPages).
+VertexData loadClusterCorner(GpuMesh mesh, GpuCluster c, uint cluster, uint t, uint corner, out uint meshVertex)
+{
+    StructuredBuffer<uint> tris = ResourceDescriptorHeap[g_clusterTriangles];
+    const uint local = (tris[c.triangleOffset + t] >> (8 * corner)) & 0xFFu;
+    return loadClusterVertex(mesh, c, clusterVertexSource(cluster, g_clusterPages), local, meshVertex);
+}
+
+// The three corners at once (one decode's code: a loop).
+struct ClusterCorners
+{
+    VertexData v[3];
+    uint3 meshVertex;
+};
+
+ClusterCorners loadClusterCorners(GpuMesh mesh, GpuCluster c, uint cluster, uint t)
+{
+    StructuredBuffer<uint> tris = ResourceDescriptorHeap[g_clusterTriangles];
+    const uint packed = tris[c.triangleOffset + t];
+    const ClusterVertexSource source = clusterVertexSource(cluster, g_clusterPages);
+    ClusterCorners o;
+    [loop] for (uint k = 0; k < 3; ++k)
+    {
+        uint meshVertex;
+        o.v[k] = loadClusterVertex(mesh, c, source, (packed >> (8 * k)) & 0xFFu, meshVertex);
+        o.meshVertex[k] = meshVertex;
+    }
+    return o;
 }
 
 #endif

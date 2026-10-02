@@ -33,8 +33,13 @@ void giPreviousSurface(uint visIdSrv, uint visibleClustersSrv, uint2 pixel, floa
     const GpuInstance inst = loadInstance(vc.instance);
     if (deformInstanceStill(inst)) return;  // the point itself (no vertex loads)
     const GpuMesh mesh = loadMesh(inst.mesh);
+#if UNX_CLUSTER_STREAM
+    DeformedVertex d0, d1, d2;
+    deformClusterTriangle(inst, mesh, loadCluster(vc.cluster), vc.cluster, visTriangle(visId), d0, d1, d2);
+#else
     const uint3 tri = loadClusterTriangle(loadCluster(vc.cluster), visTriangle(visId));
     const DeformedVertex d0 = deformVertex(inst, mesh, tri.x), d1 = deformVertex(inst, mesh, tri.y), d2 = deformVertex(inst, mesh, tri.z);
+#endif
     const float3 e1 = d1.world - d0.world, e2 = d2.world - d0.world, q = p - d0.world;
     const float3 ng = cross(e1, e2);
     const float area2 = dot(ng, ng);

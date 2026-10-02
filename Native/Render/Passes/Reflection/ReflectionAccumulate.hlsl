@@ -22,6 +22,7 @@
 // P[2] = { previous keys UAV (RG32: instance + 1, linear depth), accumulation out UAV, keys out UAV, historyMax }
 // P[3] = { width, height, asuint(lobe shift), flags (bit 0 reset, bit 1 off, bit 2 diagnostics: rgb = n / 32, min(motion, 1), state) }
 // P[4] = { asuint(previous camera position xyz), asuint(pixel angle) }; frame constants b1 = main view.
+#define UNX_CLUSTER_STREAM 1  // (the triangle's vertices from its cluster's stream when it is compressed: ClusterStream.hlsli)
 #include "Passes/Reflection/ReflectionInternal.hlsli"
 #include "Passes/Reflection/Reflection.hlsli"
 #include "Passes/Common/VisBuffer.hlsli"
@@ -87,8 +88,13 @@ void main(uint2 pixel : SV_DispatchThreadID)
         if (!deformInstanceStill(inst))
         {
             const GpuMesh mesh = loadMesh(inst.mesh);
+#if UNX_CLUSTER_STREAM
+            DeformedVertex d0, d1, d2;
+            deformClusterTriangle(inst, mesh, loadCluster(vc.cluster), vc.cluster, visTriangle(visId), d0, d1, d2);
+#else
             const uint3 tri = loadClusterTriangle(loadCluster(vc.cluster), visTriangle(visId));
             const DeformedVertex d0 = deformVertex(inst, mesh, tri.x), d1 = deformVertex(inst, mesh, tri.y), d2 = deformVertex(inst, mesh, tri.z);
+#endif
             const float3 e1 = d1.world - d0.world, e2 = d2.world - d0.world, q = s.position - d0.world;
             const float3 ng = cross(e1, e2);
             const float area2 = dot(ng, ng);

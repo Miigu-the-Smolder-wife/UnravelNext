@@ -34,6 +34,7 @@
 // frame's phase (frame % N), bits 4-6 N. P[2] = { previous keys SRV (Texture2D<uint2>), keys UAV, previous value SRV,
 // vis id SRV }, P[3].x visible clusters SRV, P[4..7] the previous frame's inverse view-projection (rows, the jittered one
 // of the previous frame's main view). b1 = the main view.
+#define UNX_CLUSTER_STREAM 1  // (a vis id's triangle from its cluster's stream when it is compressed: ClusterStream.hlsli)
 #include "Passes/GI/GiCache.hlsli"
 #include "Passes/GI/GiScreenInputs.hlsli"
 #include "Passes/GI/GiScreenHistory.hlsli"

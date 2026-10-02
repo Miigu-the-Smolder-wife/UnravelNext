@@ -24,6 +24,7 @@
 // P[9].z bits 24-31 (the reference's Temporal.RejectBasedOnNormal, off by default there and here: 0): the cosine x 255
 // of the widest angle between a history pixel's normal and the pixel's previous normal that still counts (its
 // Temporal.NormalThreshold, 45 degrees) - less streaking where surfaces meet (a character's feet), at the filter's cost.
+#define UNX_CLUSTER_STREAM 1  // (a vis id's triangle from its cluster's stream when it is compressed: ClusterStream.hlsli)
 #include "Passes/GI/Lumen/LgSurface.hlsli"
 #include "Scene.hlsli"
 

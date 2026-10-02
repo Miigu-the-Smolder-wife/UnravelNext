@@ -33,6 +33,7 @@
 // travel beyond the camera's rotation - over 10 px of a 1920-wide view at 60 Hz, less a half (the flickering
 // heuristic keeps its history only on what stands still: the reference's IsMovingMask); an animated layer moves.
 // Frame constants of the (jittered) main view.
+#define UNX_CLUSTER_STREAM 1  // (the triangle's vertices from its cluster's stream when it is compressed: ClusterStream.hlsli)
 #include "Bindless.hlsli"
 #include "Passes/Common/Frame.hlsli"
 #include "Passes/Common/VisBuffer.hlsli"
@@ -58,8 +59,13 @@ float3 previousPointOf(uint visId, uint visibleClustersSrv, float3 p)
     const GpuInstance inst = loadInstance(vc.instance);
     if (deformInstanceStill(inst)) return p;  // the point itself (no vertex loads)
     const GpuMesh mesh = loadMesh(inst.mesh);
+#if UNX_CLUSTER_STREAM
+    DeformedVertex d0, d1, d2;
+    deformClusterTriangle(inst, mesh, loadCluster(vc.cluster), vc.cluster, visTriangle(visId), d0, d1, d2);
+#else
     const uint3 tri = loadClusterTriangle(loadCluster(vc.cluster), visTriangle(visId));
     const DeformedVertex d0 = deformVertex(inst, mesh, tri.x), d1 = deformVertex(inst, mesh, tri.y), d2 = deformVertex(inst, mesh, tri.z);
+#endif
     const float3 e1 = d1.world - d0.world, e2 = d2.world - d0.world, q = p - d0.world;
     const float3 ng = cross(e1, e2);
     const float area2 = dot(ng, ng);

@@ -157,7 +157,7 @@ void encodeStream(const scene::Scene& scene, const Settings& settings, const Lod
     std::vector<StreamRecord> records(clusterCount);
     for (StreamRecord& r : records) r.dataOffset = r.page = r.refinedPage = none;
     std::vector<std::vector<uint32_t>> bits(clusterCount);  // each compressed cluster's vertex bits
-    uint64_t vertices = 0, vertexBitsTotal = 0;
+    uint64_t vertices = 0, vertexBitsTotal = 0, meshVertices = 0;
     uint32_t compressedMeshes = 0, offGrid = 0;
     for (size_t mi = 0; mi < scene.meshes.size() && mi < data.meshes.size(); ++mi)
     {
@@ -186,6 +186,7 @@ void encodeStream(const scene::Scene& scene, const Settings& settings, const Lod
         const bool hasTangents = m.tangents.size() >= own, hasUv = m.uv0.size() >= own;
         const render::ClusterData::MeshRange& range = data.meshes[mi];
         ++compressedMeshes;
+        meshVertices += own + lod.positions.size();
         for (uint32_t c = range.clusterOffset; c < range.clusterOffset + range.clusterCount; ++c)
         {
             const render::gpu::Cluster& cl = data.clusters[c];
@@ -321,9 +322,12 @@ void encodeStream(const scene::Scene& scene, const Settings& settings, const Lod
         data.named.push_back(std::move(n));
     };
     named(kClusterStream, words);
-    logf("cluster builder: compressed %llu cluster vertices of %u meshes: %.1f bits a vertex, the stream %.2f MB (an index and a 32 B vertex each: %.2f MB)\n",
-         (unsigned long long)vertices, compressedMeshes, vertices ? (double)vertexBitsTotal / (double)vertices : 0.0, (double)words.size() * 4 / 1048576.0,
-         (double)vertices * 36 / 1048576.0);
+    // (what the stream stands beside: those clusters' entries of the cluster vertex pool, 4 B each, and the meshes'
+    // 32 B vertices - a mesh vertex is in several clusters, of its own level and of the coarser ones)
+    logf("cluster builder: compressed %llu cluster vertices of %u meshes: %.1f bits a vertex, %.2f MB of bits (with the records and what is not paged: the "
+         "buffer %.2f MB); the same clusters' vertex pool entries %.2f MB, the meshes' %llu vertices in the 32 B pool %.2f MB\n",
+         (unsigned long long)vertices, compressedMeshes, vertices ? (double)vertexBitsTotal / (double)vertices : 0.0, (double)vertexBitsTotal / 8 / 1048576.0,
+         (double)words.size() * 4 / 1048576.0, (double)vertices * 4 / 1048576.0, (unsigned long long)meshVertices, (double)meshVertices * 32 / 1048576.0);
     if (offGrid)
         logf("cluster builder: %u rigid meshes are not on their position grid (clusterbuilder::snapPositions before the build): left uncompressed\n", offGrid);
     if (!pages) return;

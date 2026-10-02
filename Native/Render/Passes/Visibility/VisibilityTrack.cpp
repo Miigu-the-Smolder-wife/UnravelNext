@@ -2850,6 +2850,13 @@ void waterLayer(FramePassContext& fc, State& s, const Run& r, ViewResources& vie
     }
 }
 
+uint32_t clusterPageTable(FramePassContext& fc)
+{
+    State& s = state(fc);
+    clusterStreamingFrame(fc, s, Settings::load(fc.quality));
+    return s.stream.tableSrv;
+}
+
 void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
 {
     State& s = state(fc);

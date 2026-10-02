@@ -26,6 +26,10 @@ void particleLights(FramePassContext& fc, const ViewResources& main);
 // Writes view.depth, visId, visibleClusters, hiz and the coverage layer (coverageTiles, coverageRecords, coverageTileList,
 // coverageTilePixels, coverageDepthRange).
 void visibility(FramePassContext& fc, ViewResources& view);
+// visibility.cluster_streaming: the frame's cluster page table for the frame constants (gpu::FrameConstants::clusterPages:
+// SRV + 1; 0: no streaming this frame). The first call of a frame does the frame's streaming work (feedback, requests,
+// the table); called when a view's constants are made.
+uint32_t clusterPageTable(FramePassContext& fc);
 // Service behind FrameServices::rasterizeDepth.
 void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request);
 
