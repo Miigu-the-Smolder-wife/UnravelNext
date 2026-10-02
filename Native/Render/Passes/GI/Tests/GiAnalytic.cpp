@@ -843,6 +843,16 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
     }
     return out;
 }
+
+// The quality files with the world cache and its screen probes on: these tests evaluate screenProbeIrradiance against
+// closed forms, and gi.lumen (the final gather that replaces the probes; with gi.lumen_only no cache is allocated)
+// publishes neither view.screenProbes nor the cache.
+QualityConfig loadQuality()
+{
+    QualityConfig q = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+    q.applyOverride("gi.lumen=false");
+    return q;
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -866,7 +876,7 @@ int main(int argc, char** argv)
             else if (a == "--furnace-albedo" && i + 1 < argc) furnaceAlbedo = std::stof(argv[++i]);  // bright rooms (0.9: 10 bounces carry 65 %)
             else fail("unknown argument %s", a.c_str());
         }
-        QualityConfig quality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+        QualityConfig quality = loadQuality();
         // The closed forms below are Lambert answers: GI hits shade diffuse only (gi.experiment_disable 1024). The v1 model's
         // specular lobe at hits (Schlick grazing term even at f0 = 0) has no closed form here; it is checked against the
         // reference path tracer (Results/R/GiInterior, bathhouse and train interiors).
@@ -885,7 +895,7 @@ int main(int argc, char** argv)
             // atomic arrival order (selection, entry indices as seeds) makes them differ (shows the check can fail).
             for (const bool on : { false, true })
             {
-                QualityConfig q = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+                QualityConfig q = loadQuality();
                 q.applyOverride("gi.experiment_disable=1024");
                 q.applyOverride(on ? "gi.deterministic=true" : "gi.deterministic=false");
                 const float le = 1.0f, rho = 0.5f;
@@ -920,16 +930,16 @@ int main(int argc, char** argv)
                     return g.at(p.x, p.z);
                 };
                 const scene::Scene sc = lightNearScene(k, I, rho8);
-                QualityConfig q8 = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+                QualityConfig q8 = loadQuality();
                 q8.applyOverride("gi.experiment_disable=1536");  // Lambert hits, one bounce
                 for (const std::string& o : overrides) q8.applyOverride(o);
-                QualityConfig fp = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+                QualityConfig fp = loadQuality();
                 fp.applyOverride("gi.experiment_disable=1536");
                 fp.applyOverride("gi.hit_light_footprint=true");
                 const Outcome o8 = run(device, shaders, q8, sc, { 0, 0, 0 }, { 0, 0, 0 }, expected8, -1, lightNearFrames, 1920, 1080);
                 const Outcome f8 = run(device, shaders, fp, sc, { 0, 0, 0 }, { 0, 0, 0 }, expected8, -1, lightNearFrames, 1920, 1080);
                 // 9. The hit-cell direct-light accumulator (gi.hit_accumulator, V2.3 12.1): the same energy as the point path
-                QualityConfig qa = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+                QualityConfig qa = loadQuality();
                 qa.applyOverride("gi.experiment_disable=1536");
                 for (const std::string& o : overrides) qa.applyOverride(o);
                 qa.applyOverride("gi.hit_accumulator=true");
@@ -979,11 +989,11 @@ int main(int argc, char** argv)
             back.up = normalize(cross(cross(back.forward, float3{ 0, 1, 0 }), back.forward));
             auto at = [&](uint32_t f) { return f < cutFrame ? room.cameras[0] : back; };
             auto uniform = [&](float3, float3) { return (double)kPi * le / (1 - rho); };
-            QualityConfig off = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+            QualityConfig off = loadQuality();
             off.applyOverride("gi.experiment_disable=1024");
             for (const std::string& o : overrides) off.applyOverride(o);
             for (const char* o : { "gi.update_tiers=false", "gi.parent_prior=false", "gi.relight_restart=false" }) off.applyOverride(o);
-            QualityConfig on = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+            QualityConfig on = loadQuality();
             on.applyOverride("gi.experiment_disable=1024");
             for (const std::string& o : overrides) on.applyOverride(o);
             for (const char* o : { "gi.update_tiers=true", "gi.parent_prior=true" }) on.applyOverride(o);  // (off by default: gi.toml)
@@ -1197,7 +1207,7 @@ int main(int argc, char** argv)
             // Control: the texel rays alone (gi.experiment_disable 256). Both estimators are unbiased for the same cache, so
             // their means agree; the emitter samples with MIS must cut the per-probe error (P99) at least in half. What both
             // share (a small excess where E falls steeply: the cache cells' spatial resolution) is judged by the 1 % mean.
-            QualityConfig textelOnly = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+            QualityConfig textelOnly = loadQuality();
             for (const std::string& ov : overrides) textelOnly.applyOverride(ov);
             textelOnly.applyOverride("gi.experiment_disable=1280");  // 256 | 1024 (Lambert hits, as 'quality')
             const Outcome g = run(device, shaders, textelOnly, emissivePanel(panelLe), { 0, 0, 0 }, { 0, 0, 0 }, panelExpected, 0, frames, 1920, 1080);

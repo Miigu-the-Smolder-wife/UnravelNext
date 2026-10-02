@@ -259,6 +259,7 @@ std::pair<float3, float3> descBounds(const D3D12_RAYTRACING_INSTANCE_DESC& d, co
 uint32_t RayScene::alphaMaskOf(uint32_t mesh) const
 {
     const scene::Scene* src = m_scene.source();
+    if (mesh >= src->meshes.size()) return 0;  // a runtime mesh (not in the source scene; its BLAS is recordRuntime's)
     const scene::Mesh& sm = src->meshes[mesh];
     uint32_t mask = 0;
     for (uint32_t s = 0; s < (uint32_t)sm.submeshes.size() && s < 32; ++s)
@@ -312,8 +313,11 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
 
     // Classify instances (INTERFACES 6.2 flags): deformed = skinned with a palette and skin stream; dynamic rigid =
     // InstanceDynamic; the rest is static (wind-affected foliage uses its rest pose in RT, ARCHITECTURE 2.7).
+    // The uploaded instances only: runtime instances (GpuScene::addRuntimeInstance, slots after staticInstanceCount()) and
+    // their meshes are recordRuntime's, and the source scene holds neither (src->instances, src->meshes end before them).
     std::vector<uint32_t> staticList, dynamicRigid, deformed;
-    for (uint32_t i = 0; i < (uint32_t)instances.size(); ++i)
+    const uint32_t uploadedInstances = std::min((uint32_t)instances.size(), scene.staticInstanceCount());
+    for (uint32_t i = 0; i < uploadedInstances; ++i)
     {
         const gpu::Instance& in = instances[i];
         const gpu::Mesh& m = meshes[in.mesh];

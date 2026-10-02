@@ -2298,8 +2298,8 @@ UNX_TEST(gpu_lock_slice_protocol)
 {
     // GpuLockSlice (INTERFACES 3.3, v1.42) on a private mutex and lock folder: acquire writes current.json and an acquire
     // line and sets UNX_GPU_LOCK, release removes both and writes the release line; HOLD blocks every acquire with its
-    // reason; a correctness slice yields to a live timing waiter and takes the lock once that process has ended (and
-    // removes its waiting file).
+    // reason; a slice yields to a live waiter that came before it, whatever the kinds (v1.85: first come), and takes the
+    // lock once that process has ended (and removes its waiting file).
     namespace fs = std::filesystem;
     const std::string tag = std::to_string(GetCurrentProcessId());
     const fs::path dir = fs::temp_directory_path() / ("unx_gpulock_test_" + tag);
@@ -2321,9 +2321,22 @@ UNX_TEST(gpu_lock_slice_protocol)
         wchar_t cmd[] = L"cmd.exe /c ping -n 3 127.0.0.1 >nul";
         CHECK(CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi));
         const fs::path waiter = dir / "waiting" / (std::to_string(pi.dwProcessId) + ".json");
-        std::ofstream(waiter) << "{\"track\":\"W\",\"kind\":\"timing\",\"pid\":" << pi.dwProcessId << ",\"since\":\"x\",\"command\":\"waiter\"}";
+        // The waiter came first: its "since" is one second before now (the slice's own is the time of its acquire call; a
+        // waiting file counts while its process is not more than 5 s younger than its "since").
+        SYSTEMTIME earlier{};
+        GetLocalTime(&earlier);
+        FILETIME earlierTime{};
+        CHECK(SystemTimeToFileTime(&earlier, &earlierTime));
+        ULARGE_INTEGER ticks;
+        ticks.LowPart = earlierTime.dwLowDateTime, ticks.HighPart = earlierTime.dwHighDateTime;
+        ticks.QuadPart -= 10000000ull;
+        earlierTime.dwLowDateTime = ticks.LowPart, earlierTime.dwHighDateTime = ticks.HighPart;
+        CHECK(FileTimeToSystemTime(&earlierTime, &earlier));
+        char since[32];
+        std::snprintf(since, sizeof since, "%04u-%02u-%02uT%02u:%02u:%02u", earlier.wYear, earlier.wMonth, earlier.wDay, earlier.wHour, earlier.wMinute, earlier.wSecond);
+        std::ofstream(waiter) << "{\"track\":\"W\",\"kind\":\"timing\",\"pid\":" << pi.dwProcessId << ",\"since\":\"" << since << "\",\"command\":\"waiter\"}";
         CHECK(!slice.acquire(std::chrono::milliseconds(600)));
-        CHECK(slice.lastBlocker().rfind("timing waiter W", 0) == 0);
+        CHECK(slice.lastBlocker().rfind("in line behind W (timing", 0) == 0);
         WaitForSingleObject(pi.hProcess, 10000);
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
@@ -2481,6 +2494,9 @@ int main(int argc, char** argv)
         TerminateProcess(GetCurrentProcess(), 0);  // (no teardown on a lost device: the line stays last)
     }
     int failed = 0, run = 0;
+    // Tests named zz_* run after every other one, wherever the file defines them: zz_device_removed_throw_policy leaves
+    // this process's device marked removed, and a GPU test after it would run on waits that return at once.
+    std::stable_partition(registry().begin(), registry().end(), [](const TestCase& t) { return std::strncmp(t.name, "zz_", 3) != 0; });
     for (const TestCase& t : registry())
     {
         if (filter && !std::strstr(t.name, filter)) continue;

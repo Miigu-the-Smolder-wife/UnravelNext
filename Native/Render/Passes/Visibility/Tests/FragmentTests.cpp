@@ -70,7 +70,12 @@ ShaderLibrary& shaders()
 }
 QualityConfig quality()
 {
-    return QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+    QualityConfig q = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+    // The oracles project triangles with the requested view and the readbacks use the requested size: the main view at
+    // its output resolution, without the temporal upscale's internal size and per-frame jitter.
+    q.applyOverride("output.render_scale=1");
+    q.applyOverride("output.render_height_max=0");
+    return q;
 }
 
 // A closed box of (2s)^2 quads per face, counter-clockwise from outside.
