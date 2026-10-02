@@ -109,16 +109,15 @@ TSR에서 아직 없는 것: history resurrection, reprojection field(자코비�
 반사에는 `reflection.lumen_downsample`(기본 1, 2 = 2×2당 광선 1개 + 이웃 블록 광선으로 resolve)이 있다. 언리얼의 DownsampleFactor와 같은 손잡이로, 첫 실행에서 시간과 그림을 둘 다 재고 정한다.
 국소 노출·샤픈·렌즈 플레어는 언리얼에서도 기본 꺼짐이라 뒤로 둔다.
 
-### 2.4 작업 순서
+### 2.4 작업 순서와 현재 위치
 
-1. Lumen 마무리(1.1 표, 옛 GI 캐시 제거, 반사 정리, 기본값).
-2. 시간 업스케일을 TSR 구조로(거부·disocclusion·공간 AA·깜빡임).
-3. 톤 파이프라인·블룸·국소 노출·기본값("한눈에 예쁜" 부분).
-4. 짧은 거리 AO + 스페큘러 가림, 접촉 그림자, MegaLights 화면 추적.
-5. 안개(높이 + 볼류메트릭).
-6. 그림자 페이지 구조(정적/동적, 굵은 페이지, HZB).
-7. 서브서피스, 반투명 속도.
-8. 지오메트리(소프트웨어 래스터, 복셀 클러스터, 압축, 스트리밍).
+1. Lumen 마무리(1.1 표, 옛 GI 캐시를 읽던 곳 교체, 반사 단독 경로, 기본값) — 코드 완료.
+2. 시간 업스케일을 TSR 구조로 — 코드 완료(2.3.1).
+3. 톤 파이프라인·블룸·비네트 기본값 — 코드 완료(2.3.1).
+4. **첫 GPU 실행(5절)** — 여기까지의 코드를 한 번에 확인한다. 그림(컷 직후 f60·f61·f63, 회전 중)과 패스별 시간을 보고 아래 순서를 정한다.
+5. 실행 뒤 후보(그림·시간으로 고름): 반사 2×2 다운샘플 채택 여부, 표면 캐시 피드백(고해상도 페이지), TSR 나머지(resurrection, reprojection field), 서브서피스(재질 파라미터가 먼저 필요), 그림자 페이지 구조(정적/동적 분리, 굵은 페이지, HZB), 지오메트리(소프트웨어 래스터, 압축, 스트리밍 연결), 옛 경로 코드 삭제.
+
+지오메트리(V)와 그림자(S)는 지금 구조를 그대로 둔다. 2.1·2.2의 차이는 성능 구조 쪽이고, 지금 게임 씬(실내, 가벼운 그래픽)에서 병목으로 측정된 적이 없다. 첫 실행의 패스별 시간에서 V·S가 예산을 넘으면 그때 해당 항목을 구현한다.
 
 ## 3. 언리얼과 다르게 둔 점
 
@@ -142,9 +141,15 @@ TSR에서 아직 없는 것: history resurrection, reprojection field(자코비�
 - `surface_cache.shadow_rays_opaque = false`(언리얼 기본은 true: 알파 마스크 무시)
 - `gi.lumen_max_ray_intensity`, `reflection.lumen_max_ray_intensity = 40`, `reflection.lumen_max_roughness = 0.4`, `reflection.lumen_ggx_sampling_bias = 0.1`
 
-## 5. 완성 뒤 한 번 돌릴 실행
+## 5. 한 번 돌릴 실행
 
-- 장면: BathhouseTycoon lobby·bath·lounge, TrainExorcist lounge (`Cache/ReflJudge/scenes/`의 고정 사본).
-- 게임 경로(`--capture-output`, 내부 해상도 → 출력 1080p·1440p·4K), `gi.deterministic=true`.
-- 데운 뒤 컷 f60·f61·f63, 회전 중 프레임을 그림으로. 장치 제거 시 `UNX_DRED=1`.
-- 패스별 시간(`--out DIR`의 패스 CSV)으로 6.06 ms 대비 표.
+`powershell -File Tools\Verify\Run-Ue6Final.ps1` (GPU lock의 `HOLD`가 있으면 실행하지 않고 멈춘다. 스크립트는 `HOLD`를 지우지 않는다.)
+
+- 장면: `C:\Users\USER\UnravelNext-refl\Cache\ReflJudge\scenes`의 bt_lobby, bt_bath, bt_lounge, te_lounge.
+- 출력 해상도 1080p·1440p·4K 각각, 게임 경로(내부 해상도 → TSR), 자동 노출, `gi.deterministic=true`.
+- 그림: 60프레임 정지(캐시가 참) → f60에서 90° 돌린 시야로 컷 → 이후 20°/s 회전. f59(데운 뒤), f60·f61·f63(컷 직후), f75·f120·f179(회전 중)를 PFM으로 받고 `Tools\Verify\pfm_to_png.py`가 표시 변환(필름 곡선)을 거쳐 PNG로 바꾼다.
+- 시간: 회전 600프레임, 정지 600프레임의 패스별 GPU 시간(`timing_*` 폴더).
+- 모든 실행은 `GpuLock.ps1`을 거치고 로그를 남긴다. 장치 제거(`DEVICE_REMOVED/HUNG`)가 로그에 보이면 스크립트가 즉시 멈추고 그 로그를 알려 준다(`UNX_DRED=1`).
+- 결과 폴더: `Cache\Ue6Final\<장면>\<해상도>\`.
+
+판정은 f60·f61·f63과 회전 중 프레임의 그림, 그리고 6.06 ms 대비 패스별 시간표로 한다. 수렴한 정지 프레임(f59)은 캐시가 찼는지 확인하는 용도일 뿐 진전의 근거가 아니다.
