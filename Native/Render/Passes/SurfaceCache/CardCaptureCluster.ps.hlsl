@@ -74,6 +74,10 @@ void main(DepthRasterPixel p, bool front : SV_IsFrontFace)
     s.uv = p.uv;
     s.uvDx = uvDx;
     s.uvDy = uvDy;
+    s.uv1 = p.uv;  // (the service gives a pixel one uv set and no vertex colour: the second set is the first, the colour white)
+    s.uv1Dx = uvDx;
+    s.uv1Dy = uvDy;
+    s.color = 1;
     s.normal = n;
     s.tangent = tangent;
     s.scaled = cap.cardOrigin + ax * card.x + ay * card.y + az * card.z;

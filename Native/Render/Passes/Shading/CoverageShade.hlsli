@@ -29,6 +29,7 @@
 // at the 4 depths of S's sun profile, R32_UINT; UNX_NONE: none) - a cluster fragment's sun visibility times its value.
 // P[10].zw = E's decals of the view (ViewResources::decalFrames, decalTiles; UNX_NONE: none live): a fragment's material
 // takes them as the resolve's pixels do (Passes/Decal/Decal.hlsli decalApply), before the surface layers.
+// P[8].w = material.parallax_steps (0: no parallax on fragments; covFragmentMaterial).
 // COV_PRESHADE_CLASSES (CoverageSpecial.hlsl MODE=1, 2): covFragmentMaterial takes the material of its class as the
 // resolve - 1 Cut, 2 Terrain; COV_PRESHADE_LIGHT (MODE=3): covShadeFragment lights the material those kernels stored.
 #ifndef UNX_M_COVERAGE_SHADE_HLSLI
@@ -287,9 +288,12 @@ struct CovMaterial
 };
 // v0..v2: the triangle's deformed vertices (the ones sf was made from). An eye's fragment (MATERIAL_EYE) reads its base
 // colour at the iris point seen through the cornea, under the limbal ring (MaterialEye.hlsli); it is shaded as the plain
-// Subsurface model (a fragment has no eye word). Material inputs (MaterialInputs.hlsli): the uv transform and the vertex
-// tint; no parallax and no detail maps on a fragment.
-CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTextureSet ts, MVertex v0, MVertex v1, MVertex v2)
+// Subsurface model (a fragment has no eye word). Material inputs (MaterialInputs.hlsli), as the resolve applies them: the
+// uv transform, the second uv set and the vertex colour (the streams of the fragment's triangle), the parallax through
+// the height field - 'parallax': material.parallax_steps in bits 0..7, 0 none; a fragment has no class word, so the
+// field's own shadow of the sun is the resolve's alone -, the detail colour and normal (with the normal's variance in
+// the footprint's) and the vertex tint. The occlusion map is not read (a fragment's indirect light takes none).
+CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTextureSet ts, MVertex v0, MVertex v1, MVertex v2, uint parallax)
 {
     float3 baseColor = m.baseColor, n;
     float roughness = m.roughness, metallic = m.metallic;
@@ -314,7 +318,23 @@ CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTexture
     else
 #endif
     {
-        const MInputUv iu = mInputUv(m, sf.uv, sf.duvdx, sf.duvdy);
+        MInputUv iu = mInputUv(m, sf.uv, sf.duvdx, sf.duvdy);
+        // the streams the material reads, then the parallax: every texture on uv set 0 moves with it, the detail maps'
+        // set 0 by the same step taken back through the uv transform (Resolve.hlsl)
+        MVertexStreams streams;
+        streams.uv1 = sf.uv, streams.duv1dx = sf.duvdx, streams.duv1dy = sf.duvdy;
+        streams.color = 1;
+        if ((iu.r.flags & (MATERIAL_INPUT_DETAIL_UV1 | MATERIAL_INPUT_VERTEX_TINT | MATERIAL_INPUT_VERTEX_BLEND)) != 0) streams = mVertexStreams(visId, P[1].x, sf);
+        float2 uvDetail = sf.uv;
+        if (iu.r.heightTexture != UNX_NONE && (m.classFlags & MATERIAL_EYE) == 0 && (parallax & 0xFFu) != 0)
+        {
+            const float2 before = iu.uv;
+            float unusedSun;
+            mParallax(iu.r, sf, iu.uv, iu.duvdx, iu.duvdy, parallax & 0xFFu, false, unusedSun);
+            const float2 moved = iu.uv - before;
+            const float det = iu.r.uvU.x * iu.r.uvV.y - iu.r.uvU.y * iu.r.uvV.x;
+            uvDetail += float2(iu.r.uvV.y * moved.x - iu.r.uvU.y * moved.y, iu.r.uvU.x * moved.y - iu.r.uvV.x * moved.x) / det;
+        }
         if (ts.roughMetal != UNX_NONE)
         {
             Texture2D<float4> t = ResourceDescriptorHeap[ts.roughMetal];
@@ -322,16 +342,25 @@ CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTexture
             roughness *= rm.x;
             metallic *= rm.y;
         }
+        const float3 B = sf.tangentSign * cross(sf.normal, sf.tangent);
+        float3 nSum = sf.normal;
         if (ts.moments != UNX_NONE)
         {
             Texture2D<float4> t = ResourceDescriptorHeap[ts.moments];
             const MSlopeMoments mm = mNormalMoments(t, iu.uv, iu.duvdx, iu.duvdy, ts.slopeRange, (ts.flags & M_TEX_NORMAL) != 0);
             const float2 slope = mInputSlope(iu.r, mm.mean);
-            const float3 B = sf.tangentSign * cross(sf.normal, sf.tangent);
-            n = normalize(sf.tangent * slope.x + B * slope.y + sf.normal);
+            nSum = sf.tangent * slope.x + B * slope.y + sf.normal;
             variance += mm.variance;
         }
-        else n = normalize(sf.normal);
+        float3 detailColor = 1;
+        if (iu.r.detailColorTexture != UNX_NONE || iu.r.detailNormalTexture != UNX_NONE)
+        {
+            const MDetail detail = mDetail(iu.r, sf, uvDetail, streams, sf.tangent, B);
+            detailColor = detail.colorFactor;
+            nSum += detail.normalTerm;
+            variance += detail.variance;
+        }
+        n = normalize(nSum);
         float2 uvColor = iu.uv;
         if ((m.classFlags & MATERIAL_EYE) != 0)
         {
@@ -344,7 +373,8 @@ CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTexture
             Texture2D<float4> t = ResourceDescriptorHeap[ts.baseColor];
             baseColor *= mSampleGrad(t, (ts.flags & M_TEX_BASE_COLOR) != 0, uvColor, iu.duvdx, iu.duvdy).rgb;
         }
-        if ((iu.r.flags & MATERIAL_INPUT_VERTEX_TINT) != 0) baseColor *= mVertexStreams(visId, P[1].x, sf).color.rgb;
+        baseColor *= detailColor;
+        if ((iu.r.flags & MATERIAL_INPUT_VERTEX_TINT) != 0) baseColor *= streams.color.rgb;
     }
     CovMaterial o;
     o.baseColor = baseColor;
@@ -402,7 +432,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
     ByteAddressBuffer preshaded = ResourceDescriptorHeap[P[5].y];
     const CovMaterial cmat = covLoadMaterial(preshaded, g_covPreshadeSlot);
 #else
-    const CovMaterial cmat = covFragmentMaterial(visId, sf, m, ts, v0, v1, v2);
+    const CovMaterial cmat = covFragmentMaterial(visId, sf, m, ts, v0, v1, v2, P[8].w);  // P[8].w: material.parallax_steps
 #endif
     float3 baseColor = cmat.baseColor, n = cmat.normal;
     float roughness = cmat.roughness, metallic = cmat.metallic, variance = cmat.variance;

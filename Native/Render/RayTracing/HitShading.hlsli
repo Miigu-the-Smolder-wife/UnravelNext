@@ -13,8 +13,12 @@
 //                                                 wider ones the bilinear texel instead of the lobe average.
 // Material textures at hits: rtHitMaterial (M's published textures, INTERFACES v1.11, at the ray cone's level of detail).
 // Material inputs at hits (scene::Material; Scene.hlsli GpuMaterialInputs): the uv transform (with the level of detail
-// by its determinant), the emissive mask and the vertex tint (the emission's scale is in the material's emissive). No
-// parallax, no detail maps, no second uv set: a hit is a cone's footprint.
+// by its determinant), the emissive mask, the vertex tint (the emission's scale is in the material's emissive) and the
+// detail colour on its uv set - the mesh's first or second (RtSurface::uv1) -, weighed by the vertex alpha where the
+// material says so: the base colour a mirror or the bounce light carries is the resolve's (MaterialInputs.hlsli mDetail's
+// colour factor at the cone's level of detail). Not at hits: the detail normal (a hit shades its interpolated normal; the
+// base normal map is not read either), the occlusion map, and the parallax - a hit's textures are read at the surface's
+// uv, not where the ray would meet the height field (in a mirror a parallax wall's bricks sit where the flat wall's do).
 //   local lights                                  one next-event sample per hit (HitLocalLights.hlsli, the reference's
 //                                                 estimator), visibility by one shadow ray: unbiased, averaged by the
 //                                                 hit's history.
@@ -47,6 +51,19 @@ GpuMaterial rtHitMaterialAt(GpuMaterial m, RtSurface s, float2 uvColor, float co
         uvColor = materialInputsUv(r, uvColor);
         uvPerWorldArea *= abs(r.uvU.x * r.uvV.y - r.uvU.y * r.uvV.x);
         if ((r.flags & MATERIAL_INPUT_VERTEX_TINT) != 0) m.baseColor *= s.color.rgb;
+        if (r.detailColorTexture != UNX_NONE)
+        {
+            // the detail colour over the base: lerp(1, detail x 2^2.2, w x strength), on the detail's uv set (the mesh's
+            // uv, not the material's) x its scale, at the cone's level in that set
+            const bool set1 = (r.flags & MATERIAL_INPUT_DETAIL_UV1) != 0;
+            const float2 scale = float2(r.detailScaleU, r.detailScaleV);
+            const float2 uvDetail = (set1 ? s.uv1 : s.uv) * scale + r.detailOffset;
+            Texture2D t = ResourceDescriptorHeap[r.detailColorTexture];
+            const float lod = rtTextureLod(t, (set1 ? s.uv1PerWorldArea : s.uvPerWorldArea) * abs(scale.x * scale.y), footprint);
+            const float3 detail = (r.textureClamp & 1u) ? t.SampleLevel(g_anisoClamp, uvDetail, lod).rgb : t.SampleLevel(g_anisoWrap, uvDetail, lod).rgb;
+            const float weight = (r.flags & MATERIAL_INPUT_VERTEX_BLEND) != 0 ? saturate(s.color.a) : 1.0;
+            m.baseColor *= lerp(1.0, detail * 4.59479380, weight * r.detailColor);
+        }
         if (r.emissiveMaskTexture != UNX_NONE)
         {
             Texture2D t = ResourceDescriptorHeap[r.emissiveMaskTexture];
