@@ -311,7 +311,9 @@ struct FrameConstants
     float upscaleRatio;
     // blueNoise: SRV of the blue-noise tile (unx/render/BlueNoise.h: 64 x 64 RGBA16_UNORM, four patterns; Passes/Common/
     // BlueNoise.hlsli blueNoise4); kNone = none (the readers fall back to a hash).
-    uint32_t blueNoise, pad1, pad2;
+    // fog: the main view's fog parameters (Passes/Atmosphere/FogVolume.hlsli FogParams; a raw buffer's SRV + 1), 0 = no
+    // fog in this view. The air lookups of every layer (atmosphereAerial / atmosphereAirView) take the fog with it.
+    uint32_t blueNoise, fog, pad2;
 };
 static_assert(sizeof(FrameConstants) == 592);
 } // namespace unx::render::gpu

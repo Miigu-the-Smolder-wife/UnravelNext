@@ -13,6 +13,11 @@
 // shadows), each with the program's phase function (Henyey-Greenstein, g = medium_phase), once at the particle centre;
 // material 0 is emissive (colour = radiance, nit). Every particle then takes S's air between the camera and its centre:
 // premultiplied colour = alpha (T_air L + inscatter) (request 4: the surface behind already carries the full path).
+#if ML == 0 && GIV == 0
+// This variant (the lists' lights with S's shadow maps, the world cache: neither is the default path) stands 256 B under
+// the kernel size limit: its particles take the air without the height fog (Atmosphere.hlsli).
+#define UNX_AIR_WITHOUT_FOG
+#endif
 #include "Passes/FX/ParticleLayerPass.hlsli"
 #include "Passes/FX/FxParticleAt.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"

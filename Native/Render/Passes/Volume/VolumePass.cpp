@@ -253,7 +253,7 @@ VolumeOutput VolumePass::recordImpl(const fx::ParticleRenderInputs* particlesIn,
         for (const BufferRef& x : { L.vsmPageTable, L.vsmPool, L.vsmBlocks, L.vsmSearchBound, L.vsmLayers, froxelLights })
             if (x.valid()) b.use(x, Use::SrvCompute);
         declareGiSource(b, L.gi, Use::SrvCompute);
-        for (const TextureRef& x : { L.vsmAtlas, L.airVolume, L.transmittanceLut, L.multiScatterLut })
+        for (const TextureRef& x : { L.vsmAtlas, L.airVolume, L.transmittanceLut, L.multiScatterLut, L.fogVolume })
             if (x.valid()) b.use(x, Use::SrvCompute);
         b.use(o.records, Use::UavCompute);
         useLists(b);

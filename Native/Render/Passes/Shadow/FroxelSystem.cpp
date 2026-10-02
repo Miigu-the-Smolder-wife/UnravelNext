@@ -218,6 +218,9 @@ FogView fogViewFor(const QualityConfig& q, uint32_t width, uint32_t height)
         fail("atmosphere.fog: sky_amount in [0, 1], history_weight in [0, 1), shadow_texels_per_cell >= 0.25");
     f.gridX = (width + f.cellPx - 1) / f.cellPx;
     f.gridY = (height + f.cellPx - 1) / f.cellPx;
+    f.farSlices = (uint32_t)q.integer("atmosphere.fog.far_slices");
+    f.farEndM = (float)q.number("atmosphere.fog.far_distance_m");
+    if (f.farSlices > 64 || (f.farSlices != 0 && !(f.farEndM > f.farM))) fail("atmosphere.fog: far_slices <= 64, far_distance_m > volumetric_distance_m");
     f.k = 32.0f / f.farM;                                // (the reference's depth distribution scale)
     f.b = (float)f.gridZ / std::log2(33.0f);             // slice(farM) = gridZ
     f.on = f.density > 0;
@@ -717,20 +720,136 @@ SampledLocal recordSampledLocal(FramePassContext& fc, const ViewResources& view,
 
 namespace
 {
-// The fog's volume of the main view (FogVolume.hlsli): s.fog.scatter and s.fog.integrate; publishes
-// FrameResources::fog / fogVolume / fogFarSource for M's m.fog. lights: the view's froxel lists (the air grid the sampled
-// local light lives on).
+// The fog's volume of the main view (FogVolume.hlsli): its textures live in the track's state with stable SRVs, and a
+// ring of parameter records (one per frame in flight) names them - the main view's frame constants carry the record's
+// SRV, so every kernel that looks the air up (Atmosphere.hlsli) finds the fog with it.
+constexpr uint32_t kFogRing = 4, kFogParamBytes = 80;
+struct FogParamsGpu  // FogVolume.hlsli FogParams
+{
+    uint32_t slices, volumeSrv;
+    float k, b;
+    float farM, farScale;
+    float uvScale[2];
+    float skyAmount;
+    float density, falloff, height, g;
+    float albedo[3];
+    float start;
+    uint32_t grid;
+    float farEndM;
+    uint32_t pad;
+};
+static_assert(sizeof(FogParamsGpu) == kFogParamBytes, "FogParams is 80 B (FogVolume.hlsli)");
 struct FogState
 {
     Device* device = nullptr;
-    ComPtr<ID3D12Resource> scatter[2];
-    uint32_t x = 0, y = 0, z = 0, parity = 0, revision = 0xFFFFFFFFu;
-    bool fresh = true;
+    ComPtr<ID3D12Resource> scatter[2], integrated, ring;
+    uint32_t integratedSrv = 0, ringSrv[kFogRing] = {};
+    uint8_t* ringMapped = nullptr;
+    bool srvs = false, fresh = true;
+    uint32_t x = 0, y = 0, z = 0, zFar = 0, parity = 0, revision = 0xFFFFFFFFu;
+    uint64_t preparedFrame = UINT64_MAX;
+    FogView view;
     ~FogState()
     {
         if (!device) return;
-        for (auto& t : scatter)
-            if (t) device->deferRelease(t);
+        releaseTextures();
+        if (ring) device->deferRelease(ring);
+        if (srvs)
+        {
+            DescriptorHeaps* h = &device->descriptors();
+            for (uint32_t s : { integratedSrv }) device->deferCall([h, s] { h->freeResource(s); });
+            for (uint32_t s : ringSrv) device->deferCall([h, s] { h->freeResource(s); });
+        }
+    }
+    void releaseTextures()
+    {
+        for (ComPtr<ID3D12Resource>* t : { std::addressof(scatter[0]), std::addressof(scatter[1]), std::addressof(integrated) })
+        {
+            if (*t) device->deferRelease(*t);
+            t->Reset();
+        }
+    }
+    void ensure(Device& d, const FogView& f)
+    {
+        device = &d;
+        if (!srvs)
+        {
+            integratedSrv = d.descriptors().allocateResource();
+            D3D12_HEAP_PROPERTIES upload{ D3D12_HEAP_TYPE_UPLOAD };
+            D3D12_RESOURCE_DESC1 desc{};
+            desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            desc.Width = (uint64_t)kFogRing * kFogParamBytes;
+            desc.Height = desc.DepthOrArraySize = desc.MipLevels = 1;
+            desc.SampleDesc.Count = 1;
+            desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            check(d.d3d()->CreateCommittedResource3(&upload, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&ring)),
+                  "S fog parameters");
+            ring->SetName(L"S fog parameters ring");
+            D3D12_RANGE none{ 0, 0 };
+            check(ring->Map(0, &none, reinterpret_cast<void**>(&ringMapped)), "map S fog parameters");
+            std::memset(ringMapped, 0, (size_t)kFogRing * kFogParamBytes);
+            for (uint32_t k = 0; k < kFogRing; ++k)
+            {
+                ringSrv[k] = d.descriptors().allocateResource();
+                D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+                sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                sd.Format = DXGI_FORMAT_R32_TYPELESS;
+                sd.Buffer.FirstElement = k * (kFogParamBytes / 4);
+                sd.Buffer.NumElements = kFogParamBytes / 4;
+                sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+                d.d3d()->CreateShaderResourceView(ring.Get(), &sd, d.descriptors().resourceCpu(ringSrv[k]));
+            }
+            srvs = true;
+        }
+        if (scatter[0] && x == f.gridX && y == f.gridY && z == f.gridZ && zFar == f.farSlices) return;
+        releaseTextures();
+        D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+        auto texture = [&](ComPtr<ID3D12Resource>& out, uint32_t slices, const wchar_t* name) {
+            D3D12_RESOURCE_DESC1 rd{};
+            rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+            rd.Width = f.gridX;
+            rd.Height = f.gridY;
+            rd.DepthOrArraySize = (UINT16)slices;
+            rd.MipLevels = 1;
+            rd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            rd.SampleDesc.Count = 1;
+            rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&out)),
+                  "S fog volume");
+            out->SetName(name);
+        };
+        texture(scatter[0], f.gridZ, L"S fog scatter 0");
+        texture(scatter[1], f.gridZ, L"S fog scatter 1");
+        texture(integrated, f.gridZ + f.farSlices, L"S fog volume");
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+        sd.Texture3D.MipLevels = 1;
+        d.d3d()->CreateShaderResourceView(integrated.Get(), &sd, d.descriptors().resourceCpu(integratedSrv));
+        x = f.gridX; y = f.gridY; z = f.gridZ; zFar = f.farSlices;
+        fresh = true;
+    }
+    // This frame's record: on = false says "no volume" (FogVolume.hlsli fogLoad).
+    void write(uint64_t frame, bool on, uint32_t width = 0, uint32_t height = 0)
+    {
+        FogParamsGpu p{};
+        if (on)
+        {
+            p.grid = view.gridX | view.gridY << 16;
+            p.slices = view.gridZ | view.cellPx << 16 | view.farSlices << 24;
+            p.farM = view.farM; p.k = view.k; p.b = view.b;
+            p.volumeSrv = integratedSrv; p.farEndM = view.farEndM;
+            p.farScale = view.farSlices ? (float)view.farSlices / std::log2(view.farEndM / view.farM) : 0.0f;
+            p.uvScale[0] = (float)width / (float)(view.gridX * view.cellPx);
+            p.uvScale[1] = (float)height / (float)(view.gridY * view.cellPx);
+            p.skyAmount = view.skyAmount;
+            p.density = view.density; p.falloff = view.falloff; p.height = view.height; p.g = view.g;
+            for (int c = 0; c < 3; ++c) p.albedo[c] = view.albedo[c];
+            p.start = view.start;
+        }
+        std::memcpy(ringMapped + (size_t)(frame % kFogRing) * kFogParamBytes, &p, sizeof p);
     }
 };
 float fogHalton(uint32_t index, uint32_t base)
@@ -745,6 +864,18 @@ float fogHalton(uint32_t index, uint32_t base)
 }
 void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef lights, const SampledLocal& sampled);
 } // namespace
+
+uint32_t fogPrepare(FramePassContext& fc, const ViewDesc& view)
+{
+    const FogView f = fogViewFor(fc.quality, view.width, view.height);
+    if (!f.on || !fc.trackState) return 0;
+    FogState& st = fc.state<FogState>("S.fog.volume");
+    st.ensure(fc.device, f);
+    st.view = f;
+    st.preparedFrame = fc.frame.frameIndex;
+    st.write(fc.frame.frameIndex, false);
+    return st.ringSrv[fc.frame.frameIndex % kFogRing] + 1;
+}
 
 void recordPlanarFroxels(FramePassContext& fc, ViewResources& view)
 {
@@ -918,37 +1049,15 @@ void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef 
 {
     fc.resources.fog = FogView{};
     fc.resources.fogVolume = {};
-    fc.resources.fogFarSource = {};
-    const FogView f = fogViewFor(fc.quality, main.view.width, main.view.height);
+    fc.resources.fogDebug = {};
     const FrameResources r = fc.resources;
-    if (!f.on || !fc.trackState || !main.hiz.valid() || !r.transmittanceLut.valid()) return;
-    RenderGraph& g = fc.graph;
+    if (!fc.trackState || !main.hiz.valid() || !r.transmittanceLut.valid()) return;
     FogState& st = fc.state<FogState>("S.fog.volume");
+    if (st.preparedFrame != fc.frame.frameIndex) return;  // (fogPrepare: the fog is on and this frame's record exists)
+    const FogView f = st.view;
+    if (f.gridX != (main.view.width + f.cellPx - 1) / f.cellPx || f.gridY != (main.view.height + f.cellPx - 1) / f.cellPx) return;
+    RenderGraph& g = fc.graph;
     const TextureDesc desc{ "S fog scatter", f.gridX, f.gridY, (uint16_t)f.gridZ, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D };
-    if (!st.scatter[0] || st.x != f.gridX || st.y != f.gridY || st.z != f.gridZ)
-    {
-        st.device = &fc.device;
-        D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
-        D3D12_RESOURCE_DESC1 rd{};
-        rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
-        rd.Width = f.gridX;
-        rd.Height = f.gridY;
-        rd.DepthOrArraySize = (UINT16)f.gridZ;
-        rd.MipLevels = 1;
-        rd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        rd.SampleDesc.Count = 1;
-        rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        for (auto& t : st.scatter)
-        {
-            if (t) fc.device.deferRelease(t);
-            t.Reset();
-            check(fc.device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&t)),
-                  "S fog scatter volume");
-            t->SetName(L"S fog scatter");
-        }
-        st.x = f.gridX; st.y = f.gridY; st.z = f.gridZ;
-        st.fresh = true;
-    }
     const float3 shift = fc.frame.originShift;
     const bool valid = !st.fresh && st.revision == fc.scene.revision() && fc.frame.discontinuity == 0 && shift.x == 0 && shift.y == 0 && shift.z == 0;
     st.fresh = false;
@@ -958,9 +1067,11 @@ void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef 
     TextureRef history;
     if (valid && f.historyWeight > 0) history = g.importTexture(st.scatter[prev].Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     const TextureRef scatter = g.importTexture(st.scatter[next].Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-    const TextureRef integrated =
-        g.createTexture({ "S fog volume", f.gridX, f.gridY, (uint16_t)f.gridZ, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D });
-    const TextureRef farSource = g.createTexture({ "S fog far source", f.gridX, f.gridY, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+    const TextureRef integrated = g.importTexture(
+        st.integrated.Get(),
+        { "S fog volume", f.gridX, f.gridY, (uint16_t)(f.gridZ + f.farSlices), 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D },
+        D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    st.write(fc.frame.frameIndex, true, main.view.width, main.view.height);
 
     VsmFrameRefs vsm;
     const bool shadows = frameRefs(fc, vsm);
@@ -974,7 +1085,7 @@ void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef 
     const uint32_t index = (uint32_t)(fc.frame.frameIndex % 16u) + 1u;
     const float jitter[3] = { fogHalton(index, 2), fogHalton(index, 3), fogHalton(index, 5) };
     auto bits = [](float v) { uint32_t u; std::memcpy(&u, &v, 4); return u; };
-    const uint32_t grid0 = f.gridX | f.gridY << 16, grid1 = f.gridZ | f.cellPx << 16;
+    const uint32_t grid0 = f.gridX | f.gridY << 16, grid1 = f.gridZ | f.cellPx << 16 | f.farSlices << 24;
     const D3D12_GPU_VIRTUAL_ADDRESS constants = main.frameConstants;
     ID3D12PipelineState* ps = fc.shaders.compute("Passes/Atmosphere/FogScatter");
     ID3D12PipelineState* pi = fc.shaders.compute("Passes/Atmosphere/FogIntegrate");
@@ -1030,12 +1141,12 @@ void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef 
                       b.use(ambientD, Use::SrvCompute);
                   }
                   b.use(integrated, Use::UavCompute);
-                  b.use(farSource, Use::UavCompute);
+                  b.keep();  // (persistent: read through the frame constants' record)
               },
               [=](PassContext& ctx) {
                   const uint32_t none = 0xFFFFFFFFu;
                   uint32_t k[28] = { grid0, grid1, bits(f.farM), bits(f.k),
-                                     bits(f.b), ctx.srv(scatter), ctx.uav(integrated), ctx.uav(farSource),
+                                     bits(f.b), ctx.srv(scatter), ctx.uav(integrated), bits(f.farEndM),
                                      bits(f.density), bits(f.falloff), bits(f.height), bits(f.g),
                                      bits(f.albedo[0]), bits(f.albedo[1]), bits(f.albedo[2]), bits(f.start),
                                      0, 0, 0, 0, 0, 0, 0, 0,
@@ -1047,7 +1158,27 @@ void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef 
               });
     fc.resources.fog = f;
     fc.resources.fogVolume = integrated;
-    fc.resources.fogFarSource = farSource;
+    if (fc.quality.boolean("atmosphere.fog.debug_view") && main.depth.valid())
+    {
+        const uint32_t w = main.view.width, h = main.view.height;
+        const TextureRef view = g.createTexture({ "S fog debug view", w, h, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+        const TextureRef depth = main.depth;
+        ID3D12PipelineState* pd = fc.shaders.compute("Passes/Atmosphere/FogDebug");
+        g.addPass("s.fog.debug", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(depth, Use::SrvCompute);
+                      b.use(integrated, Use::SrvCompute);
+                      b.use(view, Use::UavCompute);
+                  },
+                  [=](PassContext& ctx) {
+                      const uint32_t k[4] = { ctx.srv(depth), ctx.uav(view), 0, 0 };
+                      ctx.cmd->SetPipelineState(pd);
+                      ctx.bindFrameConstants(constants);
+                      ctx.computeConstants(k, 4);
+                      ctx.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                  });
+        fc.resources.fogDebug = view;
+    }
 }
 } // namespace
 
@@ -1064,6 +1195,7 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
     const TextureRef sampledLocal = sampled.inScattering;
     fc.resources.localFluence = sampled.fluence;  // lit particles and particle media (FxLayerSetup.hlsl, VolumeSetup.hlsl)
     fc.resources.localMoment = sampled.moment;
+    recordFogVolume(fc, main, lights, sampled);  // (before every reader of the main view's air: the media below, M, W, E)
     // E's particle media (smoke, fire) on this grid, between the lists and the integration (invalid: none this frame); a
     // view whose volumeSlices a producer already set keeps them (tests: FroxelTests 7).
     ViewResources mediaView = main;
@@ -1071,7 +1203,6 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
     // Turbid basins (defect queue 13 (75), shading.water_turbid): added to the media slices (or their own) - WaterMedia.hlsl.
     const TextureRef media = recordWaterMedia(fc, main, lights, particleMedia, froxelGridFor(fc.quality, main.view.width, main.view.height));
     const TextureRef volume = recordIntegration(fc, main, lights, s.keep, readers, "", media, sampledLocal, sampled.fluence, sampled.moment);
-    recordFogVolume(fc, main, lights, sampled);
     fc.resources.froxels = volume;
     fc.resources.aerialPerspective = volume;  // atmosphereAerial / atmosphereAirView read it (Atmosphere.hlsli)
 

@@ -729,6 +729,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             if (atmosphere)
                 for (TextureRef t : { r.transmittanceLut, r.multiScatterLut, r.skyViewLut }) b.use(t, Use::SrvCompute);
             if (air) b.use(v.airVolume, Use::SrvCompute);
+            declareFog(b, r, Use::SrvCompute);
             if (froxelLists) b.use(v.froxelLights, Use::SrvCompute);
             if (froxelLists && r.fxLights.valid()) b.use(r.fxLights, Use::SrvCompute);  // v1.81: the lists index the FX light tail
             if (overflow)
@@ -880,6 +881,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              if (atmosphere)
                                  for (TextureRef t : { r.transmittanceLut, r.multiScatterLut }) b.use(t, Use::SrvCompute);
                              if (air) b.use(v.airVolume, Use::SrvCompute);
+                             declareFog(b, r, Use::SrvCompute);
                              if (froxelLists) b.use(v.froxelLights, Use::SrvCompute);
             if (froxelLists && r.fxLights.valid()) b.use(r.fxLights, Use::SrvCompute);  // v1.81: the lists index the FX light tail
                              if (vsm)
@@ -1228,6 +1230,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             if (atmosphere)
                 for (TextureRef t : { r.transmittanceLut, r.multiScatterLut }) b.use(t, Use::SrvCompute);
             if (air) b.use(v.airVolume, Use::SrvCompute);
+            declareFog(b, r, Use::SrvCompute);
             if (v.screenProbes.valid()) b.use(v.screenProbes, Use::SrvCompute);
             if (v.screenProbeMaps.valid()) b.use(v.screenProbeMaps, Use::SrvCompute);
             declareGiSource(b, giSrc, Use::SrvCompute);
@@ -1614,6 +1617,7 @@ void translucentComposite(FramePassContext& fc, const ViewResources& view, Textu
                   declareGiSource(b, giSource(r), Use::SrvCompute);
                   for (const TextureRef& t : { r.transmittanceLut, r.multiScatterLut, view.airVolume })
                       if (t.valid()) b.use(t, Use::SrvCompute);
+                  declareFog(b, r, Use::SrvCompute);
                   for (const BufferRef& x : { r.vsmPageTable, r.vsmBlocks, r.vsmSearchBound, r.vsmLayers })
                       if (x.valid()) b.use(x, Use::SrvCompute);
                   if (r.vsmAtlas.valid()) b.use(r.vsmAtlas, Use::SrvCompute);
@@ -1681,40 +1685,6 @@ void translucentComposite(FramePassContext& fc, const ViewResources& view, Textu
     }
 }
 
-// m.fog (Passes/Atmosphere/FogApply.hlsl): S's fog volume over the lit opaque image of the main view, in place. After
-// the scene colour is kept for the screen traces (they read the light before the fog), before the water, the coverage
-// layer and the translucent layer (those do not take the fog yet: UE6_WORKPLAN_KO.md 1).
-void fogApply(FramePassContext& fc, const ViewResources& view, TextureRef colour)
-{
-    const FrameResources& r = fc.resources;
-    if (view.view.kind != gpu::ViewKind::Main || !r.fog.on || !r.fogVolume.valid() || !r.fogFarSource.valid() || !view.depth.valid()) return;
-    if (fc.graph.desc(colour).format != DXGI_FORMAT_R16G16B16A16_FLOAT) return;  // (a linear float image: with the post chain or the upscale)
-    const FogView f = r.fog;
-    const TextureRef volume = r.fogVolume, farSource = r.fogFarSource, depth = view.depth;
-    const uint32_t w = view.view.width, h = view.view.height;
-    const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
-    ID3D12PipelineState* pso = fc.shaders.compute("Passes/Atmosphere/FogApply");
-    fc.graph.addPass("m.fog", QueueType::Graphics,
-                     [&](PassBuilder& b) {
-                         b.use(volume, Use::SrvCompute);
-                         b.use(farSource, Use::SrvCompute);
-                         b.use(depth, Use::SrvCompute);
-                         b.use(colour, Use::UavCompute);
-                     },
-                     [=](PassContext& c) {
-                         auto bits = [](float v) { uint32_t u; std::memcpy(&u, &v, 4); return u; };
-                         const uint32_t k[20] = { f.gridX | f.gridY << 16, f.gridZ | f.cellPx << 16, bits(f.farM), bits(f.k),
-                                                  bits(f.b), c.srv(volume), c.srv(farSource), c.uav(colour),
-                                                  bits(f.density), bits(f.falloff), bits(f.height), bits(f.g),
-                                                  bits(f.albedo[0]), bits(f.albedo[1]), bits(f.albedo[2]), bits(f.start),
-                                                  bits(f.skyAmount), c.srv(depth), 0, 0 };
-                         c.cmd->SetPipelineState(pso);
-                         c.bindFrameConstants(cb);
-                         c.computeConstants(k, 20);
-                         c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                     });
-}
-
 void shade(FramePassContext& fc, ViewResources& view)
 {
     // Views the frame does not record as the lighting group (planar reflection views through renderView, tests): M's own
@@ -1737,7 +1707,6 @@ void shade(FramePassContext& fc, ViewResources& view)
     const material::ResolveOutputs& o = material::resolveOutputs(fc, target);
     fc.graph.addBandedGroup(view.view.kind != gpu::ViewKind::Main ? "m.lit.planar" : "m.lit", o.height, o.bands, passes);
     keepSceneColor(fc, target, target.color);  // (main view with the upscale: the next frame's screen-trace source)
-    fogApply(fc, target, target.color);
     tracks::water(fc, target);  // W (engine 1): the water surfaces' refraction targets are the shaded opaque scene and its depth
     shadingComposite(fc, target);
     view.exposureCorrection = target.exposureCorrection;  // a snap frame's own metering (Exposure.cpp): the chain and the caller

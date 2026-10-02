@@ -15,6 +15,7 @@
 #include "Frame.hlsli"
 #include "Passes/Atmosphere/AtmosphereCommon.hlsli"
 #include "Passes/Atmosphere/CloudCommon.hlsli"  // definitions only (the dome's parameterization); no code unless called
+#include "Passes/Atmosphere/FogVolume.hlsli"    // the height fog's volume: the air lookups below take it with the air
 
 struct AtmosphereSrvs
 {
@@ -274,10 +275,14 @@ float3 atmosphereSkyRadianceClouded(AtmosphereSrvs s, float3 worldDir, float2 uv
 //  - Across tiles: bilinear (airVolumeCoord; optical depth across a row lifted below the surface: in altitude).
 //  - Direction: the phase of the tile-centre ray, interpolated across tiles: within 0.1 % of the pixel's own Mie phase
 //    (g = 0.8, 0.67 deg tiles at 4K; S_STATUS_KO.md), Rayleigh exact to 1e-5.
+// With the height fog on (FogVolume.hlsli; the frame constants' g_fog) both carry the fog to that depth too.
 void atmosphereAerial(AtmosphereSrvs s, float2 uv, float linearDepth, out float3 inscatter, out float3 transmittance)
 {
     float3 sunT;
     airViewLookup(s, uv, linearDepth, false, inscatter, transmittance, sunT);
+#ifndef UNX_AIR_WITHOUT_FOG
+    fogOverAir(uv, linearDepth, inscatter, transmittance);
+#endif
 }
 
 // atmosphereAerial plus the unshadowed solar illuminance (lux) at the surface point (main view): the air volume's sun
@@ -288,6 +293,9 @@ void atmosphereAirView(AtmosphereSrvs s, float2 uv, float linearDepth, out float
     float3 sunT;
     airViewLookup(s, uv, linearDepth, true, inscatter, transmittance, sunT);
     sunIlluminance = sunT * (g_sunIlluminance * g_sunColor);
+#ifndef UNX_AIR_WITHOUT_FOG  // (a kernel at the size limit leaves the fog out: FxLayerSetup's ML = 0, GIV = 0 variant)
+    fogOverAir(uv, linearDepth, inscatter, transmittance);
+#endif
 }
 
 #endif

@@ -333,6 +333,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
         declareGiSource(b, giSource(r), Use::SrvCompute);
         for (const TextureRef& t : { r.transmittanceLut, r.multiScatterLut, view.airVolume })
             if (t.valid()) b.use(t, Use::SrvCompute);
+        declareFog(b, r, Use::SrvCompute);
         for (const BufferRef& x : { r.vsmPageTable, r.vsmBlocks, r.vsmSearchBound, r.vsmLayers })
             if (x.valid()) b.use(x, Use::SrvCompute);
         if (r.vsmAtlas.valid()) b.use(r.vsmAtlas, Use::SrvCompute);

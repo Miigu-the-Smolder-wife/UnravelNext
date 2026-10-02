@@ -38,7 +38,8 @@ cbuffer FrameConstants : register(b1)
     uint g_fxLightCount, g_fxLightCapacity;  // v1.79 A3 FX lights: StructuredBuffer<uint> [0] = F at lights[g_lightCount..) (kNone: none), F_max
     float g_upscaleRatio;  // internal / output height of an upscaled main view, 0 = native (GpuSceneLayout.h)
     uint g_blueNoise;  // the blue-noise tile's SRV (BlueNoise.hlsli), UNX_NONE: none
-    uint g_framePad1, g_framePad2;
+    uint g_fog;  // the view's fog parameters' SRV + 1 (FogVolume.hlsli), 0: none
+    uint g_framePad2;
 };
 
 // Reversed-Z infinite projection: device depth d = near / viewDistance (1 at the near plane, 0 = sky).

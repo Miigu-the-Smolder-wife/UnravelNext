@@ -57,6 +57,7 @@ private:
     bool m_upscaleValid = false;
     void setupUpscale(FrameContext& frame);
     BlueNoiseTexture m_blueNoise;        // FrameConstants::blueNoise of every view
+    uint32_t m_fogParams = 0;            // FrameConstants::fog of the main view this frame (tracks::fogParams)
     uint32_t m_debugDraw = 0xFFFFFFFFu;  // this frame's FrameConstants::debugDraw (tracks::debugBegin)
     float m_viewModelScale = 1.0f;       // this frame's FrameConstants::viewModelScale (tracks::viewModelPrepare)
 };

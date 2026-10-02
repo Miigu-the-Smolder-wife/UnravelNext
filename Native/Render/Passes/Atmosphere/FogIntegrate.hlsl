@@ -4,11 +4,11 @@
 // length d, the slice adds T x S (1 - e^(-s d)) / s and T becomes T e^(-s d) (the integral of a homogeneous slab: no
 // energy is lost to the slice's own thickness). Stored per slice: rgb = radiance in-scattered between the camera and
 // the slice's far face (nits), a = transmittance to that face.
-// The column's far source (2D, rgb nits per unit of optical depth): what the fog beyond the volume scatters toward the
-// camera - the sun through the phase function without casters (the shadow pages are not asked for out there), and the
-// indirect light at the volume's end. FogApply.hlsl multiplies it by the closed-form opacity of the fog past farM.
-// P[0] = { grid x | y << 16, z | cell px << 16, asuint(far m), asuint(k) }
-// P[1] = { asuint(b), scatter SRV, integrated UAV (Texture3D RGBA16F), far source UAV (Texture2D RGBA16F) }
+// Past the volume's end the integration goes on through zFar slices (fogFarDepth) with the exponential height fog in
+// closed form (Fog.hlsli fogOpticalDepth) and the column's far source (nits per unit of optical depth): the sun through
+// the phase function without casters (the shadow pages are not asked for out there) and the indirect light at farM.
+// P[0] = { grid x | y << 16, z | cell px << 16 | zFar << 24, asuint(far m), asuint(k) }
+// P[1] = { asuint(b), scatter SRV, integrated UAV (Texture3D RGBA16F, z + zFar slices), asuint(far end m) }
 // P[2] = asuint{ density, height falloff, height, phase g }, P[3] = asuint{ albedo r, g, b, start distance }
 // P[6] = { -, -, previous translucency volume params SRV (UNX_NONE: none), transmittance LUT SRV }
 // Frame constants of the main view.
@@ -22,7 +22,7 @@
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
 {
-    const FogGrid g = fogGrid(P[0], P[1].x);
+    const FogGrid g = fogGrid(P[0], P[1].x, P[1].w);
     if (id.x >= g.x || id.y >= g.y) return;
     Texture3D<float4> scatter = ResourceDescriptorHeap[P[1].y];
     RWTexture3D<float4> integrated = ResourceDescriptorHeap[P[1].z];
@@ -59,6 +59,11 @@ void main(uint3 id : SV_DispatchThreadID)
     if (P[6].z != 0xFFFFFFFFu) inScattered += ltvInscatter(P[6].z, p, dir, fog.g);
     float3 farSource = fog.albedo * inScattered;
     if (any(isnan(farSource)) || any(isinf(farSource))) farSource = 0;
-    RWTexture2D<float4> farOut = ResourceDescriptorHeap[P[1].w];
-    farOut[id.xy] = float4(farSource, 1);
+    [loop] for (uint i = 0; i < g.zFar; ++i)
+    {
+        const float t = exp(-fogOpticalDepth(fog, g_cameraPosition, dir, fogFarDepth(g, float(i)) * toRay, fogFarDepth(g, float(i) + 1.0) * toRay));
+        L += T * farSource * (1 - t);
+        T *= t;
+        integrated[uint3(id.xy, g.z + i)] = float4(L, T);
+    }
 }

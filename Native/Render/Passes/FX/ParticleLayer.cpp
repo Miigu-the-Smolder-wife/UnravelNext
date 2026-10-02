@@ -245,7 +245,7 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
         for (const BufferRef& x : { lighting.vsmPageTable, lighting.vsmPool, lighting.vsmBlocks, lighting.vsmSearchBound, lighting.vsmLayers, lighting.froxelLights, lighting.fxLights })
             if (x.valid()) b.use(x, Use::SrvCompute);
         declareGiSource(b, lighting.gi, Use::SrvCompute);
-        for (const TextureRef& x : { lighting.vsmAtlas, lighting.airVolume, lighting.transmittanceLut, lighting.multiScatterLut })
+        for (const TextureRef& x : { lighting.vsmAtlas, lighting.airVolume, lighting.transmittanceLut, lighting.multiScatterLut, lighting.fogVolume })
             if (x.valid()) b.use(x, Use::SrvCompute);
         b.use(o.records, Use::UavCompute);
         b.use(o.tileCounts, Use::UavCompute);
@@ -309,7 +309,7 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
         b.use(o.edges, Use::UavCompute);
         b.use(o.ribbonVertices, Use::UavCompute);
         b.use(o.ribbonAppearance, Use::UavCompute);
-        for (const TextureRef& x : { lighting.airVolume, lighting.transmittanceLut, lighting.multiScatterLut })
+        for (const TextureRef& x : { lighting.airVolume, lighting.transmittanceLut, lighting.multiScatterLut, lighting.fogVolume })
             if (x.valid()) b.use(x, Use::SrvCompute);
     });
     return out;

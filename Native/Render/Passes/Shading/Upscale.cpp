@@ -230,6 +230,7 @@ void keepSceneColor(FramePassContext& fc, const ViewResources& view, TextureRef 
                   b.use(kept, Use::UavCompute);
                   if (air)
                       for (TextureRef t : { transmittance, multiScatter, airVolume }) b.use(t, Use::SrvCompute);
+                  if (air) declareFog(b, fc.resources, Use::SrvCompute);
                   b.keep();
               },
               [=](PassContext& c) {

@@ -31,6 +31,13 @@ class GpuScene;
 
 struct FramePassContext;
 
+// A pass whose kernel reads the main view's air (atmosphereAerial / atmosphereAirView: Passes/Atmosphere/Atmosphere.hlsli)
+// reads the fog's volume with it (FogVolume.hlsli fogAt, through the frame constants): it declares these beside the air.
+inline void declareFog(PassBuilder& b, const FrameResources& r, Use use)
+{
+    if (r.fogVolume.valid()) b.use(r.fogVolume, use);
+}
+
 // Every resource a reader of the mesh-card surface cache touches (FrameResources::cards), as shader resources of 'use'
 // (SrvCompute, or SrvGraphics for DispatchRays passes).
 inline void declareSurfaceCacheCards(PassBuilder& b, const SurfaceCacheCardRefs& r, Use use)

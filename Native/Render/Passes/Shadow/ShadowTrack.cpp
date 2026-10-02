@@ -16,6 +16,11 @@ void froxels(FramePassContext& fc, const ViewResources& main)
     shadow::recordFroxels(fc, main);
 }
 
+uint32_t fogParams(FramePassContext& fc, const ViewDesc& view)
+{
+    return shadow::fogPrepare(fc, view);
+}
+
 void shadowVisibility(FramePassContext& fc, ViewResources& view)
 {
     shadow::recordVisibility(fc, view);

@@ -38,9 +38,12 @@ indirect_light = true                # the Lumen translucency volume (the previo
 # The fog's volume (FogVolume.hlsli; the reference's volumetric fog grid: 8 px x 128 slices at Epic, 16 x 64 at High, to 60 m)
 cell_px = 16                         # (Q) pixels per cell (4 .. 64, a power of two)
 depth_slices = 96                    # (Q) slices to volumetric_distance_m: slice = log2(depth x 32 / distance + 1) x slices / log2(33)
-volumetric_distance_m = 80.0         # the volume's end; farther fog is the height fog's closed form, lit by the sun without casters
+volumetric_distance_m = 80.0         # the cells' end; farther fog is the height fog's closed form, lit by the sun without casters,
+far_slices = 16                      # integrated per column into this many more slices (equal steps of log depth) out to
+far_distance_m = 65536.0             # this distance
 history_weight = 0.9                 # the history's share of a cell each frame (the reference's 0.9), the sample point jittered per frame
 shadow_texels_per_cell = 1.0         # the sun's shadow in a cell is read at the page level whose texel is the cell's width / this
+debug_view = false                   # measurement only: the fog alone per pixel (FogDebug.hlsl) for the gate's capture layer "fog"
 sky_amount = 0.0                     # how much of the fog sky pixels take (0: none - the reference fogs opaque pixels only under a
                                      # sky atmosphere; 1: the sky through the fog to the horizon)
 

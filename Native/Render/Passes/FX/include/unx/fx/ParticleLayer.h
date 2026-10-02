@@ -19,6 +19,7 @@ struct ParticleLighting
     render::GiSource gi;  // the indirect light (unx/render/Frame.h: the translucency volume or the world GI cache)
     render::BufferRef fxLights;  // v1.81: the scene light buffer with the FX tail (declared so the FX writer comes first)
     render::TextureRef vsmAtlas, airVolume, transmittanceLut, multiScatterLut;
+    render::TextureRef fogVolume;  // atmosphere.fog (FrameResources): read with the air (declared beside it)
     // shading.mega_lights: the froxel grid's sampled local light (FrameResources::localFluence / localMoment; invalid: the
     // setup loops over the froxel list's lights with S's shadow maps)
     render::TextureRef localFluence, localMoment;

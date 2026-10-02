@@ -45,7 +45,10 @@ void imagePost(FramePassContext& fc, ViewResources& view, TextureRef image);
 // ---- S: shadows and sky - Passes/Shadow, Passes/Atmosphere
 void atmosphere(FramePassContext& fc);                            // sky/aerial LUTs -> FrameResources
 void shadowPages(FramePassContext& fc, const ViewResources& main);  // VSM marking, dirty page raster (via rasterizeDepth)
-void froxels(FramePassContext& fc, const ViewResources& main);    // light lists + froxel integration
+void froxels(FramePassContext& fc, const ViewResources& main);
+// atmosphere.fog: the main view's fog parameters for its frame constants (gpu::FrameConstants::fog: SRV + 1; 0: no fog).
+// Called before the main view's constants are made; the volume itself is recorded by froxels().
+uint32_t fogParams(FramePassContext& fc, const ViewDesc& view);    // light lists + froxel integration
 void shadowVisibility(FramePassContext& fc, ViewResources& view); // writes view.shadowVisibility
 
 // ---- Banded lighting group (v1.31, INTERFACES_KO.md 4): FrameRenderer records S's shadow visibility and M's edge

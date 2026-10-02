@@ -118,6 +118,8 @@ D3D12_GPU_VIRTUAL_ADDRESS FrameRenderer::allocateFrameConstants(const FrameConte
     gpu::FrameConstants c = frameConstants(m_scene, frame, view);
     c.debugDraw = m_debugDraw;
     c.blueNoise = m_blueNoise.srv;
+    // (the fog's volume is the main view's own)
+    c.fog = view.kind == gpu::ViewKind::Main && view.width == frame.mainView.width && view.height == frame.mainView.height ? m_fogParams : 0;
     c.viewModelScale = view.kind == gpu::ViewKind::Main ? m_viewModelScale : 1.0f;  // other views see the true geometry
     // (the main view renders below the output: its texture footprints over the output pixel, GpuSceneLayout.h)
     const bool upscaled = frame.upscale.outputHeight > view.height && view.kind == gpu::ViewKind::Main && view.width == frame.mainView.width &&
@@ -367,6 +369,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
         return view;
     };
 
+    m_fogParams = tracks::fogParams(fc, frame.mainView);  // S: before the main view's constants
     ViewResources main;
     main.view = frame.mainView;
     main.frameConstants = fc.frameConstantsFor(main.view);
@@ -442,6 +445,7 @@ void FrameRenderer::recordImage(RenderGraph& graph, const FrameContext& in, Text
     FrameServices services;
     FramePassContext fc{ m_device, graph, m_shaders, m_quality, m_scene, frame, resources, services,
                          [this, &frame](const ViewDesc& v) { return allocateFrameConstants(frame, v); }, &m_trackState, m_framesInFlight };
+    m_fogParams = 0;
     ViewResources main;
     main.view = frame.mainView;
     main.frameConstants = fc.frameConstantsFor(main.view);

@@ -31,7 +31,7 @@
 // --capture-frames a,b,c: captures of these frame indices (the files get _f<frame> before .pfm) instead of the last
 // frame; --capture-layers final,gi,refl,shadow,reflmode,depth,ao,roughspec,carddirect,cardindirect,cardfinal,cardalbedo:
 // (ao = the short-range AO, roughspec = the gather's rough specular, card* = the mesh cards' atlases, direct = the local
-// lights' direct light of shading.mega_lights after its filters)
+// lights' direct light of shading.mega_lights after its filters, fog = the fog alone with atmosphere.fog.debug_view on)
 // besides the capture (final), the main view's internal
 // layers of the same frames as PFM (_<layer>): gi = view.giIrradiance (E x near occlusion x exposure; an _alpha file with
 // its data flag), refl = view.reflection (radiance, weight in _alpha), shadow = the first three light slots of
@@ -481,11 +481,11 @@ int main(int argc, char** argv)
                     const size_t comma = v.find(',', at);
                     const std::string l = v.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
                     static const char* const kLayers[] = { "final", "gi", "refl", "shadow", "reflmode", "depth", "ao", "roughspec", "carddirect", "cardindirect",
-                                                           "cardfinal", "cardalbedo", "direct" };
+                                                           "cardfinal", "cardalbedo", "direct", "fog" };
                     bool known = false;
                     for (const char* name : kLayers) known = known || l == name;
                     if (!known)
-                        fail("--capture-layers: unknown layer '%s' (final, gi, refl, shadow, reflmode, depth, ao, roughspec, carddirect, cardindirect, cardfinal, cardalbedo, direct)",
+                        fail("--capture-layers: unknown layer '%s' (final, gi, refl, shadow, reflmode, depth, ao, roughspec, carddirect, cardindirect, cardfinal, cardalbedo, direct, fog)",
                              l.c_str());
                     captureLayers.push_back(l);
                     if (comma == std::string::npos) break;
@@ -980,6 +980,7 @@ int main(int argc, char** argv)
                         else if (layer == "ao") source = rendered.shortRangeAO;
                         else if (layer == "roughspec") source = rendered.giRoughSpecular;
                         else if (layer == "direct") source = rendered.localDirect;  // (shading.mega_lights: the local lights' filtered direct light)
+                        else if (layer == "fog") source = renderer.lastResources().fogDebug;  // (atmosphere.fog.debug_view: rgb in-scatter x exposure; transmittance in _alpha)
                         // the mesh cards' atlases after the frame's update (CardLighting.hlsli: direct and indirect in
                         // lux x 1/64, final in nits x 1/16; a texel without a surface holds 0)
                         else if (layer == "carddirect") source = renderer.lastResources().cards.direct;
@@ -1243,7 +1244,7 @@ int main(int argc, char** argv)
                 }
                 const uint32_t outH = c.imageRows && c.imageRows < c.height ? c.imageRows : c.height;  // (refl: the image rows)
                 writePfm(c.path, c.width, outH, rgb);
-                const bool withAlpha = !alpha.empty() && (c.layer == "gi" || c.layer == "refl" || (c.layer == "final" && captureUpscaled));
+                const bool withAlpha = !alpha.empty() && (c.layer == "gi" || c.layer == "refl" || c.layer == "fog" || (c.layer == "final" && captureUpscaled));
                 if (withAlpha)
                 {
                     std::vector<float> a3(alpha.size() * 3);

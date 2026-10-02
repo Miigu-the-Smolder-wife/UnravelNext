@@ -8,6 +8,7 @@ namespace unx::render::tracks
 void atmosphere(FramePassContext&) { pending("S.atmosphere (track disabled in this build)"); }
 void shadowPages(FramePassContext&, const ViewResources&) { pending("S.shadowPages (track disabled in this build)"); }
 void froxels(FramePassContext&, const ViewResources&) { pending("S.froxels (track disabled in this build)"); }
+uint32_t fogParams(FramePassContext&, const ViewDesc&) { return 0; }
 void shadowVisibility(FramePassContext&, ViewResources&) { pending("S.shadowVisibility (track disabled in this build)"); }
 std::vector<RenderGraph::BandedPass> shadowVisibilityPasses(FramePassContext&, ViewResources&)
 {

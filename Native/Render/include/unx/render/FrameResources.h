@@ -206,6 +206,8 @@ struct FogView
 {
     bool on = false;
     uint32_t gridX = 0, gridY = 0, gridZ = 0, cellPx = 0;
+    uint32_t farSlices = 0;        // slices past farM, to farEndM (the closed-form fog)
+    float farEndM = 0;
     float farM = 0, k = 0, b = 0;  // slice(depth) = log2(depth k + 1) b
     float density = 0, falloff = 0, height = 0, g = 0, start = 0;  // extinction (1/m) at height, its halving per metre, m, HG g, m
     float albedo[3] = { 1, 1, 1 };
@@ -322,11 +324,12 @@ struct FrameResources
                                    // invalid: gi.hit_accumulator_pool off). Readers after
                                    // globalIllumination: SrvCompute (giAccPoolRead)
     // atmosphere.fog (S; Passes/Atmosphere/FogVolume.hlsli): the main view's fog after s.fog.integrate - fogVolume
-    // (Texture3D RGBA16F: in-scattered radiance in nits and transmittance to each slice's far face), fogFarSource
-    // (Texture2D RGBA16F per column: the source of the fog beyond the volume) and the grid and medium (fog; on = false:
-    // no fog this frame). M's m.fog pass applies it to the lit opaque image (FogApply.hlsl).                           [S]
-    TextureRef fogVolume, fogFarSource;
+    // (Texture3D RGBA16F: in-scattered radiance in nits and transmittance to each slice's far face) and the grid and
+    // medium (fog; on = false: no fog this frame). Kernels read it through the frame constants (g_fog) inside the air
+    // lookups; their passes declare it with declareFog (Frame.h).                                                     [S]
+    TextureRef fogVolume;
     FogView fog;
+    TextureRef fogDebug;  // atmosphere.fog.debug_view: the fog alone per pixel (FogDebug.hlsl; the gate's layer "fog")
     // shading.mega_lights_volume (A; Passes/Atmosphere/MegaLightsVolume.hlsl): the main view's froxel grid, RGBA16F, the
     // local lights' sampled visible fluence (rgb x exposure) and its luminance-weighted direction moment (xyz): lit
     // particles read them (FxLayerSetup.hlsl). Invalid = off.                                                         [A]
