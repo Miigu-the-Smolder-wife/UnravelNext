@@ -266,6 +266,10 @@ void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs
     const BufferRef select = g.createBuffer({ "r.card select", (selectBytes + 15) & ~15ull, 0 });
     const BufferRef tileLights = g.createBuffer({ "r.card tile lights", (uint64_t)directCapacity * kTileLightBytes, 0 });
     const BufferRef tileShadow = g.createBuffer({ "r.card tile shadow", (uint64_t)directCapacity * kTileShadowBytes, 0 });
+    // The tint words (CardLighting.hlsli): 64 words a tinted slot of a listed tile - 256 B a tile for the sun alone, 2,304 B
+    // for every slot. A FORCE_OPAQUE shadow ray runs no any-hit shader and gathers nothing: no tint with shadow_rays_opaque.
+    const uint32_t tintSlots = in.direct && !in.shadowRaysOpaque ? (in.directTintSlots >= 9 ? 9u : in.directTintSlots >= 1 ? 1u : 0u) : 0u;
+    const BufferRef tileTint = tintSlots != 0 ? g.createBuffer({ "r.card tile tint", (uint64_t)directCapacity * tintSlots * 256, 0 }) : BufferRef{};
 
     const D3D12_GPU_VIRTUAL_ADDRESS cb = in.frameConstants;
     const uint32_t frame = in.frame, pageCount = std::min(set.cardPageCount, capacity);
@@ -362,13 +366,15 @@ void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs
                       b.use(select, Use::SrvGraphics);
                       b.use(tileLights, Use::SrvGraphics);
                       b.use(tileShadow, Use::UavGraphics);
+                      if (tileTint.valid()) b.use(tileTint, Use::UavGraphics);
                   },
-                  [&directTrace, cb, sharedConstants, frameBuffer, select, tileLights, tileShadow, frame, lightFlags, capacity, directCapacity, endBias](PassContext& c) {
+                  [&directTrace, cb, sharedConstants, frameBuffer, select, tileLights, tileShadow, tileTint, tintSlots, frame, lightFlags, capacity, directCapacity,
+                   endBias](PassContext& c) {
                       uint32_t k[32] = {};
                       sharedConstants(c, k);
                       k[0] = c.srv(frameBuffer), k[1] = c.srv(select), k[2] = frame, k[3] = lightFlags;
                       k[16] = c.srv(tileLights), k[17] = c.uav(tileShadow), k[19] = capacity;
-                      k[20] = directCapacity, k[21] = bits(endBias), k[22] = 0, k[23] = 0;
+                      k[20] = directCapacity, k[21] = bits(endBias), k[22] = tileTint.valid() ? c.uav(tileTint) : 0xFFFFFFFFu, k[23] = tintSlots;
                       c.bindFrameConstants(cb);
                       const uint64_t threads = (uint64_t)directCapacity * kTraceThreads;
                       for (uint64_t first = 0; first < threads; first += kThreadsPerDispatch)
@@ -386,17 +392,19 @@ void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs
                       b.use(select, Use::SrvGraphics);
                       b.use(tileLights, Use::SrvGraphics);
                       b.use(tileShadow, Use::SrvGraphics);
+                      if (tileTint.valid()) b.use(tileTint, Use::SrvGraphics);
                       b.use(uniformBits, Use::UavGraphics);
                       b.use(indirect, Use::SrvGraphics);
                       b.use(direct, Use::UavGraphics);
                       b.use(final, Use::UavGraphics);
                       b.keep();
                   },
-                  [store, cb, sharedConstants, frameBuffer, select, uniformBits, tileLights, tileShadow, direct, indirect, final, frame, lightFlags, capacity,
-                   directCapacity](PassContext& c) {
+                  [store, cb, sharedConstants, frameBuffer, select, uniformBits, tileLights, tileShadow, tileTint, tintSlots, direct, indirect, final, frame, lightFlags,
+                   capacity, directCapacity](PassContext& c) {
                       uint32_t k[32] = {};
                       sharedConstants(c, k);
-                      k[0] = c.srv(frameBuffer), k[1] = c.srv(select), k[2] = frame, k[3] = lightFlags;
+                      k[0] = c.srv(frameBuffer), k[1] = c.srv(select), k[2] = frame, k[3] = lightFlags | (tintSlots > 1 ? 4096u : 0u);
+                      k[15] = tileTint.valid() ? c.srv(tileTint) : 0xFFFFFFFFu;  // P[3].w
                       k[16] = c.srv(tileLights), k[17] = c.srv(tileShadow), k[18] = c.uav(uniformBits), k[19] = capacity;
                       k[20] = directCapacity, k[21] = c.uav(direct), k[22] = c.uav(final), k[23] = c.srv(indirect);
                       c.cmd->SetPipelineState(store);

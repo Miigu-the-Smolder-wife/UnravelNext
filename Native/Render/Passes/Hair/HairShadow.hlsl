@@ -18,7 +18,9 @@
 //           pixel with records, the transmittance towards the sun at the 4 depths of S's fragment profile - z_near +
 //           (z_far - z_near) k / 3 on the pixel's ray (ViewResources::coverageDepthRange) -, 4 x unorm8 (R32_UINT;
 //           a pixel without records: all 255). The composite multiplies a cluster fragment's sun visibility by the
-//           value at its depth; the hair records do not read it (a strand counts the hair itself).
+//           value at its depth; the hair records do not read it (a strand counts the hair itself). The same four
+//           values carry FX's particle shadow (the sun's particle transmittance map, P[2].y; ParticleShadow.hlsli): the
+//           pass runs for either, and a frame without a density volume passes UNX_NONE for the hair.
 // The hair records are not this kernel's: a strand counts the hair in front of it itself (CoverageHair.hlsl).
 // The march reads the cells along the whole path (hairTransmittance: steps of a coarse cell, the ones with hair in four
 // samples of the cells), its samples moved along the path by a number drawn per pixel and frame (the blue-noise tile):
@@ -34,7 +36,7 @@
 // P[1] = { this view's camera - the volume's origin camera (FrameResources::hairOrigin), xyz (m, floats),
 //          shading.hair_march_jitter (0: the midpoint rule) }
 // P[2] = { MODE 0: S's froxel light lists (raw SRV; UNX_NONE: the local slots are left); MODE 1: the sample texture's
-//          width, height, factor | N << 8, 0 }
+//          width, height, factor | N << 8, 0; MODE 2: 0, FX's particle shadow map parameters (raw SRV; UNX_NONE: none) }
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
 #include "Passes/Common/BlueNoise.hlsli"
@@ -47,6 +49,7 @@
 #include "Passes/Shading/MegaLights.hlsli"
 #endif
 #include "Passes/Hair/HairDensity.hlsli"
+#include "Passes/FX/ParticleShadow.hlsli"
 
 #if MODE == 0
 [numthreads(8, 8, 1)]
@@ -109,7 +112,7 @@ void main(uint3 id : SV_DispatchThreadID)
         [unroll] for (uint k = 0; k < 4; ++k)
         {
             const float3 p = lerp(pNear, pFar, zFar > zNear ? k / 3.0 : 0.0);
-            word |= (uint)round(hairTransmittance(P[0].x, p + offset, sun, 3.0e38f, P[0].w, jitter) * 255.0) << (8u * k);
+            word |= (uint)round(hairTransmittance(P[0].x, p + offset, sun, 3.0e38f, P[0].w, jitter) * fxParticleShadow(P[2].y, p) * 255.0) << (8u * k);
         }
     }
     profile[pixel] = word;

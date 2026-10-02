@@ -6,13 +6,21 @@
 // - when the light's visibility was uniform over the tile at its last update - a texel that is not the first of its
 // 2 x 2 (the store copies that one's bit).
 // A light's ray: from the texel's point moved by the bias to the light's side, to the light's centre less its radius
-// and end bias, shadow casters only. The sun's: toward its centre, TMin 0, the GI mask.
+// and end bias, shadow casters only. The sun's: toward its centre, TMin 0, the casters' mask (and the far field's).
+// Light through Glass (surface_cache.direct_tint; CardLighting.hlsli): a tinted slot's ray gathers what the Glass it
+// crosses leaves of the light - the any-hit shader's sum in the payload (RayShaders.hlsli rtShadowTransmittance: the
+// same one ray, and the casters made of Glass alone are met too) - and the thread stores it in the texel's tint word
+// before it sets the visible bit. The sun's slot is tinted as the view's shadow maps tint the sun
+// (shadow.vsm.translucent_tint); the lights' slots only with surface_cache.direct_tint_lights. An untinted slot's ray
+// passes Glass as clear (rtVisible).
 // P[0] = { card frame SRV, select SRV, frame index, flags (bit 10: lights without their shadow rays, bit 11: alpha-tested
 //          casters taken as opaque) }
 // P[1].w = the sun ray's length
 // P[4] = { tile lights SRV (raw), tile shadow UAV (raw), the dispatch's first thread, page capacity }
-// P[5] = { direct list capacity, asuint(default ray end bias, m), 0, 0 }
+// P[5] = { direct list capacity, asuint(default ray end bias, m), tile tint UAV (raw; UNX_NONE: none), tinted slots of a
+//          tile (1: the sun's; CL_SLOTS: every slot's) }
 // P[6], P[7] = RtSceneSrvs
+#define RT_SHADOW_TRANSMITTANCE  // (the tinted slots' rays: RayShaders.hlsli)
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/SurfaceCache/CardLighting.hlsli"
 
@@ -83,7 +91,20 @@ void CardDirectTraceGen()
     const float dd = dot(ray.Direction, ray.Direction);
     if (!(all(abs(ray.Origin) < 1e9) && dd > 0.98 && dd < 1.02 && ray.TMin >= 0 && ray.TMax >= ray.TMin && ray.TMax < 1e30)) return;
     const uint rayFlags = (P[0].w & 2048u) != 0 ? RAY_FLAG_FORCE_OPAQUE : RAY_FLAG_NONE;
-    if (rtVisible(rtScene(), ray, mask, rayFlags))
+    bool visible;
+    if (P[5].z != UNX_NONE && (sun || P[5].w > 1u))
+    {
+        const float3 through = rtShadowTransmittance(rtScene(), ray, mask, rayFlags);
+        visible = any(through > 0);
+        if (visible)
+        {
+            RWByteAddressBuffer tileTint = ResourceDescriptorHeap[P[5].z];
+            tileTint.Store(clTintOffset(index, P[5].w, slot, t), clTintPack(through));
+        }
+    }
+    else
+        visible = rtVisible(rtScene(), ray, mask, rayFlags);
+    if (visible)
     {
         RWByteAddressBuffer tileShadow = ResourceDescriptorHeap[P[4].y];
         tileShadow.InterlockedOr(index * CL_TILE_SHADOW_BYTES + slot * 8 + (t >> 5) * 4, 1u << (t & 31u));

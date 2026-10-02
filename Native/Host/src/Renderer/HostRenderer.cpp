@@ -505,6 +505,14 @@ void HostRenderer::setInstanceLightingChannels(uint32_t instance, uint32_t chann
     m_scene.instances[instance].flags = scene::withLightingChannels(m_scene.instances[instance].flags, channels);
 }
 
+void HostRenderer::setInstanceReceivesDecals(uint32_t instance, bool receives)
+{
+    requireOpen();
+    if (instance >= m_scene.instances.size()) fail("receives decals: instance %u of %zu", instance, m_scene.instances.size());
+    uint32_t& flags = m_scene.instances[instance].flags;
+    flags = receives ? flags & ~(uint32_t)scene::InstanceNoDecals : flags | scene::InstanceNoDecals;
+}
+
 void HostRenderer::applyEdits(const FramePacket& p, scene::Scene& s)
 {
     for (const auto& [i, m] : p.materialEdits)
@@ -1123,6 +1131,17 @@ void HostRenderer::debugText(float3 anchor, std::string_view text, uint32_t colo
 
 namespace
 {
+// A decal's fields beyond the frozen description (HostRenderer::decalSetExtra), from one decal into another.
+void copyDecalExtra(const decal::Decal& from, decal::Decal& to)
+{
+    to.color = from.color;
+    to.channels = from.channels;
+    to.blend = from.blend;
+    to.emissive = from.emissive;
+    to.fadeScreenSize = from.fadeScreenSize;
+    to.fadeInStart = from.fadeInStart, to.fadeInDuration = from.fadeInDuration;
+    to.fadeOutStart = from.fadeOutStart, to.fadeOutDuration = from.fadeOutDuration;
+}
 void checkDecal(const decal::Decal& d, uint32_t materials, uint32_t instances)
 {
     for (int r = 0; r < 3; ++r)
@@ -1154,8 +1173,39 @@ void HostRenderer::decalUpdate(uint32_t id, const decal::Decal& d)
     std::lock_guard lock(m_mutex);
     if (id >= m_decalLive.size() || !m_decalLive[id]) fail("decal %u is not live", id);
     checkDecal(d, m_hostMaterials, m_hostInstances);
-    m_decals.update(id, d);
+    // (the frozen description has none of the extra fields: the decal keeps the ones decalSetExtra gave it)
+    decal::Decal next = d;
+    copyDecalExtra(m_decals.get(id), next);
+    m_decals.update(id, next);
     m_decalsChanged = true;
+}
+
+void HostRenderer::decalSetExtra(uint32_t id, const decal::Decal& extra)
+{
+    requireCommitted();
+    std::lock_guard lock(m_mutex);
+    if (id >= m_decalLive.size() || !m_decalLive[id]) fail("decal %u is not live", id);
+    for (float v : { extra.color.x, extra.color.y, extra.color.z, extra.emissive, extra.fadeScreenSize, extra.fadeInDuration, extra.fadeOutDuration })
+        if (!std::isfinite(v) || v < 0) fail("decal %u: colour, emissive scale, screen-size fade and fade durations are finite and not negative", id);
+    if (!std::isfinite(extra.fadeInStart) || !std::isfinite(extra.fadeOutStart)) fail("decal %u: fade start times are finite", id);
+    if (extra.channels == 0 || extra.channels > (decal::DecalAllChannels | decal::DecalEmissive)) fail("decal %u: channels 0x%x (1..15)", id, extra.channels);
+    if ((uint32_t)extra.blend > (uint32_t)decal::DecalBlend::Emissive) fail("decal %u: blend %u", id, (uint32_t)extra.blend);
+    decal::Decal next = m_decals.get(id);
+    copyDecalExtra(extra, next);
+    m_decals.update(id, next);
+    m_decalsChanged = true;
+}
+
+void HostRenderer::setSpriteLook(uint32_t index, const fx::SpriteLook* look)
+{
+    requireCommitted();
+    if (look)
+        for (uint32_t t : { look->texture, look->normalTexture, look->motionTexture })
+            if (t != fx::kNoTexture && t >= m_scene.textures.size()) fail("sprite look %u: texture %u of %zu committed textures", index, t, m_scene.textures.size());
+    std::lock_guard lock(m_mutex);
+    if (look) m_spriteLooks.set(index, *look);
+    else m_spriteLooks.remove(index);
+    m_spriteLooksChanged = true;
 }
 
 void HostRenderer::decalRemove(uint32_t id)
@@ -1711,6 +1761,8 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.debugTriangles = std::move(m_pending.debugTriangles);
     packet.debugGlyphs = std::move(m_pending.debugGlyphs);
     if (m_decalsChanged) packet.decals = std::make_shared<const decal::DecalSet>(m_decals);
+    if (m_spriteLooksChanged) packet.spriteLooks = std::make_shared<const fx::SpriteLooks>(m_spriteLooks);
+    m_spriteLooksChanged = false;
     packet.viewModelOps = std::move(m_pending.viewModelOps);
     packet.hairOps = std::move(m_pending.hairOps);
     packet.hairFraction = m_pending.hairFraction;
@@ -1756,6 +1808,7 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
         next.surfaceDeltas.insert(next.surfaceDeltas.begin(), std::make_move_iterator(dropped.surfaceDeltas.begin()), std::make_move_iterator(dropped.surfaceDeltas.end()));
         if (!next.surfaceHalfLives) next.surfaceHalfLives = dropped.surfaceHalfLives;
         if (!next.decals) next.decals = dropped.decals;
+        if (!next.spriteLooks) next.spriteLooks = dropped.spriteLooks;
         next.viewModelOps.insert(next.viewModelOps.begin(), dropped.viewModelOps.begin(), dropped.viewModelOps.end());
         next.hairOps.insert(next.hairOps.begin(), std::make_move_iterator(dropped.hairOps.begin()), std::make_move_iterator(dropped.hairOps.end()));
         if (!next.hairFraction) next.hairFraction = dropped.hairFraction;
@@ -1796,6 +1849,7 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         carried.surfaceDeltas.insert(carried.surfaceDeltas.end(), std::make_move_iterator(old.surfaceDeltas.begin()), std::make_move_iterator(old.surfaceDeltas.end()));
         if (old.surfaceHalfLives) carried.surfaceHalfLives = old.surfaceHalfLives;
         if (old.decals) carried.decals = old.decals;
+        if (old.spriteLooks) carried.spriteLooks = old.spriteLooks;
         carried.viewModelOps.insert(carried.viewModelOps.end(), old.viewModelOps.begin(), old.viewModelOps.end());
         carried.hairOps.insert(carried.hairOps.end(), std::make_move_iterator(old.hairOps.begin()), std::make_move_iterator(old.hairOps.end()));
         if (old.hairFraction) carried.hairFraction = old.hairFraction;
@@ -1830,6 +1884,7 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         p.surfaceDeltas.insert(p.surfaceDeltas.begin(), std::make_move_iterator(carried.surfaceDeltas.begin()), std::make_move_iterator(carried.surfaceDeltas.end()));
         if (!p.surfaceHalfLives) p.surfaceHalfLives = carried.surfaceHalfLives;
         if (!p.decals) p.decals = carried.decals;
+        if (!p.spriteLooks) p.spriteLooks = carried.spriteLooks;
         p.viewModelOps.insert(p.viewModelOps.begin(), carried.viewModelOps.begin(), carried.viewModelOps.end());
         p.hairOps.insert(p.hairOps.begin(), std::make_move_iterator(carried.hairOps.begin()), std::make_move_iterator(carried.hairOps.end()));
         if (!p.hairFraction) p.hairFraction = carried.hairFraction;
@@ -2096,6 +2151,7 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     field.setTime(p.surfaceTime);
     // A7 decals (the host's latest snapshot) and A15 debug primitives of this frame
     if (p.decals) decal::decals(m_frameRenderer->trackState()) = *p.decals;
+    if (p.spriteLooks) fx::spriteLooks(m_frameRenderer->trackState()) = *p.spriteLooks;  // FX sprite looks (the latest snapshot)
     // A3 mesh particles (render C): the table of this frame, runtime mesh ids resolved now (a removed one draws nothing)
     if (p.meshAssets) m_meshAssetsRender = *p.meshAssets;
     if (!m_meshAssetsRender.empty() || !fx::meshAssets(m_frameRenderer->trackState()).empty())

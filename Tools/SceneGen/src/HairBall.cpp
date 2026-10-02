@@ -114,6 +114,7 @@ Scene hairBall(const Request& rq)
 std::vector<Groom> grooms(const Request& rq)
 {
     std::vector<Groom> out;
+    if (rq.id == SceneId::ShowcaseBathhouse) (void)showcase(rq, &out, nullptr);  // the figure's hair (Showcase.cpp)
     if (rq.id != SceneId::HairBall) return out;
     Scene s;
     build(s, &out);

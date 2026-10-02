@@ -263,6 +263,12 @@ private:
     std::vector<RtGeometry> m_runtimeGeometries;
     std::vector<uint8_t> m_runtimeSeen;      // per GpuScene instance: drawn last frame (appear / disappear -> GI changes)
     uint32_t m_dynamicCountNow = 0;          // dynamic TLAS instances this frame (load-time ones + live runtime ones)
+    // Mesh particles (fx.particles.mesh_in_rays; off: m_particleCap 0): the GPU instance range's slots follow the frame's
+    // dynamic descriptors in a buffer a kernel writes (RayTracing/ParticleInstances.hlsl: every descriptor is checked
+    // there, a slot that fails is written inactive), their RtInstance records follow the runtime ones. m_particleMeshes:
+    // per committed mesh { BLAS address low, high, geometry base, 1 = traceable }.
+    uint32_t m_particleCap = 0, m_particleRecordBase = 0, m_particleCountNow = 0;
+    Buffer m_particleDescs, m_particleRecords, m_particleMeshes;
     void setupRuntime();
     // Writes the runtime instances' descriptors after the load-time dynamic ones (slot) and records the frame's BLAS
     // builds and record copy.

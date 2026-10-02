@@ -191,7 +191,8 @@ RayScene::~RayScene()
     for (Buffer& b : m_inheritedPools) release(b);
     for (Buffer* b : { &m_farRecords, &m_farBlas, &m_meshBlasPool, &m_emitterAabbs, &m_emitterBlas, &m_deformedPool, &m_deformedBlasPool, &m_deformedScratch, &m_deformJobs, &m_deformGroups, &m_instanceBuffer, &m_geometryBuffer,
                        &m_indexPool, &m_vertexMap, &m_tlasStatic, &m_tlasDynamic, &m_tlasScratch, &m_staticDescBuffer, &m_dynamicDescBuffer, &m_staticScratch,
-                       &m_exactCounts, &m_exactZero, &m_runtimePool, &m_runtimeScratch, &m_decalAabbs, &m_decalBlas, &m_decalBlasScratch, &m_decalTlas, &m_decalTlasScratch, &m_decalDesc })
+                       &m_exactCounts, &m_exactZero, &m_runtimePool, &m_runtimeScratch, &m_decalAabbs, &m_decalBlas, &m_decalBlasScratch, &m_decalTlas, &m_decalTlasScratch, &m_decalDesc,
+                       &m_particleDescs, &m_particleRecords, &m_particleMeshes })
         release(*b);
     if (m_decalTlasSrv != 0xFFFFFFFFu)
     {
@@ -315,6 +316,8 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         m_skinAwareCuts = cuts == "skin_aware";
     }
     m_experiment = (uint32_t)quality.integer("raytracing.experiment_disable");
+    // Mesh particles in the ray scene (off unless the key is there and true): the GPU instance range's capacity
+    if (quality.has("fx.particles.mesh_in_rays") && quality.boolean("fx.particles.mesh_in_rays")) m_particleCap = scene.gpuInstanceRange().capacity;
     {
         // the far field (RayScene.h FarSettings; off unless the key is there and true)
         auto number = [&](const char* key, double fallback) { return quality.has(key) ? quality.number(key) : fallback; };
@@ -344,6 +347,12 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
             if (sm.submeshes[s].indexCount > 0) m_geometries.push_back({ meshes[m].indexOffset + sm.submeshes[s].indexOffset, s, 0, gpu::kNone });
         return meshGeometryBase[m];
     };
+
+    // (mesh particles in rays: a particle may draw any committed mesh - each one with triangles gets a BLAS and its
+    // geometry records, whether an instance of the scene uses it or not)
+    if (m_particleCap)
+        for (uint32_t m = 0; m < (uint32_t)std::min(meshes.size(), src->meshes.size()); ++m)
+            if (meshes[m].triangleCount > 0) m_meshBlas[m].geometryBase = geometryBase(m);
 
     // Classify instances (INTERFACES 6.2 flags): deformed = skinned with a palette and skin stream; dynamic rigid =
     // InstanceDynamic; the rest is static (wind-affected foliage uses its rest pose in RT, ARCHITECTURE 2.7).
@@ -551,6 +560,13 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     m_stats.deformedInstances = (uint32_t)m_deformed.size();
 
     setupRuntime();  // runtime records after the load-time ones (placeholders), before the record buffers are made
+    if (m_particleCap)
+    {
+        // the mesh particles' records after those (placeholders: ParticleInstances.hlsl writes them every frame)
+        if (m_instances.size() + m_particleCap > 0xFFFFFFu) fail("RayScene: %zu instance records + %u mesh particles exceed the 24-bit InstanceID", m_instances.size(), m_particleCap);
+        m_particleRecordBase = (uint32_t)m_instances.size();
+        m_instances.resize(m_instances.size() + m_particleCap, RtInstance{});
+    }
     m_instanceBuffer = createStructured(m_instances.data(), sizeof(RtInstance), (uint32_t)m_instances.size(), L"RT instances");
     if (!m_exact.empty())
     {
@@ -595,6 +611,24 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         check(m_patchRing->Map(0, &none, reinterpret_cast<void**>(&m_patchRingMapped)), "map patch ring");
     }
     m_geometryBuffer = createStructured(m_geometries.data(), sizeof(RtGeometry), (uint32_t)m_geometries.size(), L"RT geometries");
+    if (m_particleCap)
+    {
+        // per committed mesh its BLAS and geometry records, for the kernel that writes the particles' descriptors
+        std::vector<uint32_t> table(4 * std::max<size_t>(meshes.size(), 1), 0);
+        for (uint32_t m = 0; m < (uint32_t)meshes.size() && m < (uint32_t)m_meshBlas.size(); ++m)
+        {
+            const MeshBlas& b = m_meshBlas[m];
+            if (!b.built || b.address == 0 || b.geometryBase == gpu::kNone) continue;
+            table[4 * m] = (uint32_t)(b.address & 0xFFFFFFFFull);
+            table[4 * m + 1] = (uint32_t)(b.address >> 32);
+            table[4 * m + 2] = b.geometryBase;
+            table[4 * m + 3] = 1;
+        }
+        m_particleMeshes = createStructured(table.data(), 16, (uint32_t)(table.size() / 4), L"RT particle mesh table");
+        m_particleDescs = createBuffer((uint64_t)(m_dynamicDescs.size() + m_runtimeInstanceCap + kMaxTriangleStreams + m_particleCap) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC),
+                                       true, false, L"RT dynamic instance descs with mesh particles");
+        m_particleRecords = createBuffer((uint64_t)m_particleCap * sizeof(RtInstance), true, false, L"RT mesh particle records");
+    }
 
     // The static TLAS: inherited when the static set (descriptors, their BLASes and keys) is the previous one's.
     if (sameStatic && previous->m_tlasStatic.resource)
@@ -2072,6 +2106,7 @@ void RayScene::record(FramePassContext& fc)
     }
     D3D12_GPU_VIRTUAL_ADDRESS dynamicDescs = m_descRing->GetGPUVirtualAddress() + slotOffset;
     std::optional<BufferRef> dynamicDescCopy;
+    m_particleCountNow = 0;
     if ((m_experiment & 4) != 0 && m_dynamicDescBuffer.resource && !m_dynamicDescs.empty())
     {
         // Attribution: the builder reads the descriptors from video memory (copied from the upload ring first).
@@ -2082,6 +2117,52 @@ void RayScene::record(FramePassContext& fc)
                   [copy, ring, slotOffset, bytes](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(copy), 0, ring, slotOffset, bytes); });
         dynamicDescCopy = copy;
         dynamicDescs = m_dynamicDescBuffer.address();
+    }
+    // Mesh particles (fx.particles.mesh_in_rays): the frame's descriptors go into the buffer the kernel can write, the
+    // kernel writes the GPU instance range's slots after them (checked there: a slot that fails is inactive) and their
+    // records, the records are copied behind the runtime ones, and the builder reads that buffer.
+    const GpuScene::GpuInstanceRange particleRange = m_scene.gpuInstanceRange();
+    if (m_particleCap && particleRange.capacity == m_particleCap && m_particleDescs.resource &&
+        (uint64_t)(m_dynamicCountNow + m_particleCap) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC) <= m_particleDescs.bytes)
+    {
+        const BufferRef descs = g.importBuffer(m_particleDescs.resource.Get(), { "RT dynamic instance descs with mesh particles", m_particleDescs.bytes, 0 });
+        const BufferRef stage = g.importBuffer(m_particleRecords.resource.Get(), { "RT mesh particle records", m_particleRecords.bytes, 0 });
+        const BufferRef meshTable = g.importBuffer(m_particleMeshes.resource.Get(), { "RT particle mesh table", m_particleMeshes.bytes, 16 });
+        const BufferRef records = m_frame.instances, marker = fc.resources.particleMeshCounters;
+        ID3D12Resource* ring = m_descRing.Get();
+        const uint32_t dynamicCount = m_dynamicCountNow, cap = m_particleCap, first = particleRange.first, recordBase = m_particleRecordBase;
+        const uint32_t meshCount = (uint32_t)(m_particleMeshes.bytes / 16);
+        const D3D12_GPU_VIRTUAL_ADDRESS constants = fc.frameConstantsFor(fc.frame.mainView);
+        ID3D12PipelineState* pso = fc.shaders.compute("RayTracing/ParticleInstances");
+        if (dynamicCount)
+            g.addPass("r.as.particles.descs", QueueType::Graphics, [&](PassBuilder& b) { b.use(descs, Use::CopyDst); },
+                      [=](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(descs), 0, ring, slotOffset, (uint64_t)dynamicCount * sizeof(D3D12_RAYTRACING_INSTANCE_DESC)); });
+        g.addPass("r.as.particles", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(descs, Use::UavCompute);
+                      b.use(stage, Use::UavCompute);
+                      b.use(meshTable, Use::SrvCompute);
+                      if (marker.valid()) b.use(marker, Use::SrvCompute);  // (after FX's writer of the instances)
+                  },
+                  [=](PassContext& c) {
+                      const uint32_t k[12] = { c.uav(descs), c.uav(stage), c.srv(meshTable), meshCount, first, cap, dynamicCount, recordBase,
+                                               gpu::kGpuInstanceCountElement, kRtMaskScene, 0, 0 };
+                      c.cmd->SetPipelineState(pso);
+                      c.bindFrameConstants(constants);
+                      c.computeConstants(k, 12);
+                      c.cmd->Dispatch((cap + 63) / 64, 1, 1);
+                  });
+        g.addPass("r.as.particles.records", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(stage, Use::CopySrc);
+                      b.use(records, Use::CopyDst);
+                  },
+                  [=](PassContext& c) {
+                      c.cmd->CopyBufferRegion(c.resource(records), (uint64_t)recordBase * sizeof(RtInstance), c.resource(stage), 0, (uint64_t)cap * sizeof(RtInstance));
+                  });
+        dynamicDescCopy = descs;
+        dynamicDescs = m_particleDescs.address();
+        m_particleCountNow = m_particleCap;
     }
     bool staticChanged = false;
     const float3 shift = fc.frame.originShift;
@@ -2206,12 +2287,14 @@ void RayScene::recordDynamicTlas(ID3D12GraphicsCommandList7* cmd, D3D12_GPU_VIRT
     inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
     inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
     inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-    inputs.NumDescs = (UINT)(descs ? m_dynamicCountNow : (uint32_t)m_dynamicDescs.size());  // the ring has the runtime ones too
+    // (the ring has the runtime ones too; with mesh particles the descriptors' buffer holds their slots after those)
+    inputs.NumDescs = (UINT)(descs ? m_dynamicCountNow + m_particleCountNow : (uint32_t)m_dynamicDescs.size());
     if (!m_tlasDynamic.resource)
     {
         D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO sizes{};
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS capacity = inputs;
-        capacity.NumDescs = (UINT)(m_dynamicDescs.size() + m_runtimeInstanceCap + kMaxTriangleStreams);  // room for every runtime instance and stream
+        // room for every runtime instance and stream, and for the mesh particles' slots
+        capacity.NumDescs = (UINT)(m_dynamicDescs.size() + m_runtimeInstanceCap + kMaxTriangleStreams + m_particleCap);
         m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&capacity, &sizes);
         m_tlasDynamic = createBuffer(sizes.ResultDataMaxSizeInBytes, false, true, L"RT dynamic TLAS");
         m_tlasScratch = createBuffer(sizes.ScratchDataSizeInBytes, true, false, L"RT dynamic TLAS scratch");

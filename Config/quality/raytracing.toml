@@ -38,10 +38,10 @@ see_through_translucent = true   # Glass / Water surfaces are not there for the 
                                  # in its frame) is non-opaque geometry the any-hit shader ignores for those rays.
                                  # Reflection and refraction rays still meet them. A shadow ray shot from a ray hit takes
                                  # what the Glass it crosses leaves of the light (the pane's tint; RayShaders.hlsli
-                                 # rtShadowTransmittance); the cards' direct light stores one bit a texel and light, and
-                                 # takes Glass as clear. false: such meshes stop GI rays as opaque surfaces (the behaviour
-                                 # until 2026-10-03). A ray traced FORCE_OPAQUE (surface_cache.shadow_rays_opaque) runs no
-                                 # any-hit shader: a pane inside a mixed mesh stops it
+                                 # rtShadowTransmittance), and so does the cards' direct light for the sun
+                                 # (surface_cache.direct_tint; the local lights' behind direct_tint_lights). false: such meshes
+                                 # stop GI rays as opaque surfaces (the behaviour until 2026-10-03). A ray traced FORCE_OPAQUE
+                                 # (surface_cache.shadow_rays_opaque) runs no any-hit shader: a pane inside a mixed mesh stops it
 # The far field (RayScene.h; the reference's r.RayTracing.Culling and its far-field scene of merged proxies). With a
 # million static instances every ray walks a TLAS of all of them out to gi.ray_length_m. true: the static TLAS holds
 # only what the reference's culling rule keeps near the camera (and every instance too large to stand in a box), and

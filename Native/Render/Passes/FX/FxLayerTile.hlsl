@@ -85,6 +85,7 @@ float4 composite(uint count, float2 p, float opaqueFar, float opaqueNear, bool l
         float a, sampleDepth;
         float3 colour;
         uint blend = FX_BLEND_ALPHA;
+        float2 travel = fxRecordMotion(r);  // (a strip: its points' along the segment)
         float q = dot(d, d) / (r.radius * r.radius);
         if (looked)
         {
@@ -98,7 +99,7 @@ float4 composite(uint count, float2 p, float opaqueFar, float opaqueNear, bool l
         }
         else if (strip)
         {
-            if (!fxStripSampleOf(c, x, r, p, layer ? (float)FX_LAYER_SCALE : 1.0f, a, colour, sampleDepth, blend)) continue;
+            if (!fxStripSampleOf(c, x, r, p, layer ? (float)FX_LAYER_SCALE : 1.0f, a, colour, sampleDepth, blend, travel)) continue;
         }
         else if (!fxLayerSample(c, r, p, a, colour, sampleDepth)) continue;
         if (ball)
@@ -127,7 +128,7 @@ float4 composite(uint count, float2 p, float opaqueFar, float opaqueNear, bool l
             if (!(sampleDepth > opaqueFar)) continue;
             if (layer && sampleDepth < opaqueNear) { edge = true; continue; }
         }
-        moved += T * a * float3(fxRecordMotion(r), 1);
+        moved += T * a * float3(travel, 1);
         L += T * (blend == FX_BLEND_PREMULTIPLIED ? colour : a * colour);
         if (blend != FX_BLEND_ADDITIVE) T *= 1.0f - a;
         depthRange = float2(depthRange.x == 0 ? sampleDepth : min(depthRange.x, sampleDepth), max(depthRange.y, sampleDepth));

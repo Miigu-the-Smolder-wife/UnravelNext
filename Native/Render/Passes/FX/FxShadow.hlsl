@@ -9,7 +9,9 @@
 //           it, at distance d from its centre across the sun's direction (q = d^2 / R^2 < 1): the optical depth
 //           -ln(1 - alpha (1 - q)^2) x the look's shadow density, added; the ball's chord there, centre +- R sqrt(1 - q)
 //           along the sun's direction, widens the texel's span (atomic max and min). A ball wider than
-//           FX_SHADOW_SPAN texels is taken over its middle FX_SHADOW_SPAN (the loop's bound).
+//           FX_SHADOW_SPAN texels is taken over its middle FX_SHADOW_SPAN (the loop's bound). A look with a texture:
+//           the opacity is alpha x the image's alpha at the texel (the frame of the particle's age, the level whose
+//           texel covers a map texel), over the image's whole square.
 //   STEP=2: S's screen visibility of a view, after S's passes (as the hair's shadow, HairShadow.hlsl MODE 0): the sun's
 //           slot times the map's transmittance at the pixel's surface.
 // STEP 0, 1: P[0] = { posAge cur, velocity cur, posAge prev, velocity prev }, P[1] = { dynamic cur, dynamic prev,
@@ -131,8 +133,18 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID)
     if (!fxParticleAt(c, rr, k, birth, row, p, pos, age, dying)) return;
     const float u = saturate(age / p.lifetime);
     const float R = 0.5f * p.size * e.sizeScale * shadowCurve1(p.sizeKeys, p.sizeCount, u);
-    const float alpha = saturate(p.color.a * e.colorScale.a * shadowCurve1(p.alphaKeys, p.alphaCount, u)) ;
+    const float alpha = saturate(p.color.a * e.colorScale.a * shadowCurve1(p.alphaKeys, p.alphaCount, u));
     if (!(R > 0) || !(alpha > 0)) return;
+    // a look's image: the frame of this age (FxLayerSetup.hlsl's rule, its floor)
+    const bool textured = look.texture != UNX_NONE;
+    const float2 cells = float2(max(p.columns, 1u), max(p.rows, 1u));
+    const uint frames = max(p.columns, 1u) * max(p.rows, 1u);
+    float frame = min((float)p.firstFrame, frames - 1.0f);
+    if (frames > 1u)
+    {
+        if ((look.flags & FX_LOOK_FRAMES_OVER_LIFE) != 0u) frame += u * (frames - 1.0f - frame);
+        else frame = fmod(frame + age * max(p.framesPerSecond, 0.0f), (float)frames);
+    }
 
     const FxShadowParams m = shadowParams();
     const float3 d = g_cameraPosition + pos - m.centre;
@@ -142,16 +154,28 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID)
     const int2 lo = max((int2)floor(s - reach), 0), hi = min((int2)floor(s + reach), (int)m.resolution - 1);
     if (any(hi < lo)) return;
     RWByteAddressBuffer map = ResourceDescriptorHeap[P[3].y];
+    const float2 perTexel = look.textureSize / cells * m.texel / (2.0f * R);  // the image's texels per map texel
+    const float lod = max(log2(max(max(perTexel.x, perTexel.y), 1e-6f)), 0.0f);
+    const float2 border = 0.5f * exp2(lod) * cells / max(look.textureSize, 1.0f);
     [loop] for (int y = lo.y; y <= hi.y; ++y)
         [loop] for (int x = lo.x; x <= hi.x; ++x)
         {
             const float2 o = (float2(x, y) + 0.5f - s) * m.texel;
             const float q = dot(o, o) / (R * R);
-            if (q >= 1.0f) continue;
-            const float a = min(alpha * (1.0f - q) * (1.0f - q), 0.999f);
-            const uint tau = (uint)round(-log(1.0f - a) * look.shadowDensity / FX_SHADOW_TAU_UNIT);
+            float a;
+            if (textured)
+            {
+                if (any(abs(o) > R)) continue;
+                a = alpha * fxLookTexel(look.texture, (uint)frame, float2(0.5f + 0.5f * o.x / R, 0.5f - 0.5f * o.y / R), cells, border, lod).a;
+            }
+            else
+            {
+                if (q >= 1.0f) continue;
+                a = alpha * (1.0f - q) * (1.0f - q);
+            }
+            const uint tau = (uint)round(-log(1.0f - min(a, 0.999f)) * look.shadowDensity / FX_SHADOW_TAU_UNIT);
             if (tau == 0u) continue;
-            const float h = R * sqrt(1.0f - q);
+            const float h = R * sqrt(saturate(1.0f - q));
             const uint top = (uint)round(saturate((z + h) / m.depthRange * 0.5f + 0.5f) * FX_SHADOW_DEPTH_STEPS);
             const uint bottom = (uint)round(saturate((z - h) / m.depthRange * 0.5f + 0.5f) * FX_SHADOW_DEPTH_STEPS);
             const uint at = FX_SHADOW_TEXEL_BYTES * ((uint)y * m.resolution + (uint)x);

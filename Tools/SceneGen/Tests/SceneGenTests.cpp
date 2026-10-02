@@ -5,6 +5,9 @@
 //                1M grass clumps with 40k leaves / 100 blades each (checked on a reduced scale for the counts' formula)
 //   round trip   serialize/deserialize keeps the hash
 //   diagnostic   the diagnostic scenes are deterministic and valid; shading_ball holds what SceneGen.h states
+//   showcase     the showcase scenes hold the content their cameras are for (panes in frames, shadow-only and
+//                no-self-shadow instances, lighting channels, steam, the cloud layer over the crest) and their extras
+//                (light functions, decals, rain) name lights, materials and cameras of their scene
 #include "unx/core/Log.h"
 #include "unx/scenegen/SceneGen.h"
 
@@ -150,7 +153,113 @@ int main(int argc, char** argv)
                     CHECK(again.size() == 2 && std::memcmp(again[1].restPositions.data(), grooms[1].restPositions.data(), grooms[1].restPositions.size() * sizeof(float3)) == 0);
                 }
             }
+            else if (id == scenegen::SceneId::ShowcaseBathhouse)
+            {
+                // showcase_bathhouse's figure: one groom of a Hair material, its roots outside the head
+                const std::vector<scenegen::Groom> grooms = scenegen::grooms(rq);
+                CHECK(grooms.size() == 1);
+                for (const scenegen::Groom& g : grooms)
+                {
+                    CHECK(g.material < a.materials.size() && a.materials[g.material].cls == scene::MaterialClass::Hair);
+                    CHECK(g.nodesPerStrand == 12 && g.restPositions.size() == 2500u * 12 && g.follows.size() == 2500u * 16);
+                    for (uint32_t k = 0; k < 2500; ++k) CHECK(length(g.restPositions[k * 12]) > g.headRadius);
+                    for (const scenegen::Groom::Follow& f : g.follows) CHECK(f.guide < 2500u);
+                }
+            }
             else CHECK(scenegen::grooms(rq).empty());
+            // The scenes' extras (SceneGen.h extras): the showcase scenes have them, the others none; each names a light, a
+            // material or a camera of its scene, and the same request gives the same extras.
+            {
+                const scenegen::SceneExtras e = scenegen::extras(rq);
+                bool showcase = false;
+                for (scenegen::SceneId k : scenegen::showcaseScenes()) showcase = showcase || k == id;
+                CHECK(showcase == !(e.lightFunctions.empty() && e.decals.empty() && e.weather.empty()));
+                for (const scenegen::ExtraLightFunction& f : e.lightFunctions)
+                {
+                    CHECK(f.light < a.lights.size() && f.profile >= 1 && f.profile <= 3);
+                    if (f.profile == 1) CHECK(f.iesVertical.size() >= 2 && f.iesValues.size() == f.iesVertical.size());
+                    else CHECK(f.imageWidth > 0 && f.imageRgb.size() == (size_t)f.imageWidth * f.imageHeight * 3);
+                    // (a cookie belongs to a spot, a gobo to a point light)
+                    if (f.light < a.lights.size() && f.profile == 2) CHECK(a.lights[f.light].type == scene::LightType::Spot);
+                    if (f.light < a.lights.size() && f.profile == 3) CHECK(a.lights[f.light].type == scene::LightType::Point);
+                }
+                for (const scenegen::ExtraDecal& d : e.decals) CHECK(d.material < a.materials.size() && d.channels >= 1 && d.channels <= 7);
+                for (const scenegen::ExtraWeather& w : e.weather)
+                {
+                    bool found = false;
+                    for (const scene::Camera& c : a.cameras) found = found || c.name == w.camera;
+                    CHECK(found);
+                }
+                const scenegen::SceneExtras again = scenegen::extras(rq);
+                CHECK(again.lightFunctions.size() == e.lightFunctions.size() && again.decals.size() == e.decals.size() && again.weather.size() == e.weather.size());
+            }
+            if (id == scenegen::SceneId::ShowcaseBathhouse || id == scenegen::SceneId::ShowcaseAtrium || id == scenegen::SceneId::ShowcaseShore)
+            {
+                // what the showcase scenes are for: a mesh that holds an opaque and a Glass submesh (a pane in its frame),
+                // and per scene the content its cameras show
+                uint32_t mixed = 0, shadowOnly = 0, noSelfShadow = 0, channelled = 0, noDecals = 0, glassAlone = 0;
+                auto materialOf = [&](const scene::Instance& in, size_t sm) {
+                    return sm < in.materialOverrides.size() && in.materialOverrides[sm] != scene::kNone ? in.materialOverrides[sm] : a.meshes[in.mesh].submeshes[sm].material;
+                };
+                for (const scene::Instance& in : a.instances)
+                {
+                    uint32_t glass = 0, opaque = 0;
+                    for (size_t sm = 0; sm < a.meshes[in.mesh].submeshes.size(); ++sm)
+                        (a.materials[materialOf(in, sm)].cls == scene::MaterialClass::Glass ? glass : opaque) += 1;
+                    mixed += glass > 0 && opaque > 0;
+                    glassAlone += glass > 0 && opaque == 0;
+                    shadowOnly += (in.flags & scene::InstanceShadowOnly) != 0 && (in.flags & scene::InstanceCastShadow) != 0;
+                    noSelfShadow += (in.flags & scene::InstanceNoSelfShadow) != 0;
+                    channelled += scene::instanceLightingChannels(in.flags) != 1;
+                    noDecals += (in.flags & scene::InstanceNoDecals) != 0;
+                }
+                CHECK(mixed >= 1);
+                const scenegen::SceneExtras e = scenegen::extras(rq);
+                if (id == scenegen::SceneId::ShowcaseBathhouse)
+                {
+                    CHECK(a.cameras.size() == 7 && a.cameras[0].name == "room" && a.cameras[3].name == "figure" && a.cameras[6].name == "bench");
+                    // the two windows; the stained panes and the lamps' shades; the shutter; the fern; the figure's four parts
+                    CHECK(mixed == 2 && glassAlone == 5 && shadowOnly == 1 && noSelfShadow == 1 && channelled == 4 && noDecals == 4);
+                    uint32_t channelLights = 0, imageLights = 0, barnDoors = 0, steam = 0, eyes = 0, cloth = 0, water = 0, heights = 0, coloured = 0;
+                    for (const scene::Light& l : a.lights)
+                    {
+                        channelLights += l.lightingChannels != 1;
+                        imageLights += l.type == scene::LightType::Rect && l.sourceTexture != scene::kNone;
+                        barnDoors += l.barnDoorLength > 0;
+                    }
+                    for (const scene::FogVolume& v : a.fogVolumes) steam += v.riseSpeed > 0 && v.turbulence > 0;
+                    for (const scene::Material& m : a.materials)
+                    {
+                        eyes += m.eyeIrisRadius > 0;
+                        cloth += m.cloth > 0;
+                        water += m.cls == scene::MaterialClass::Water;
+                        heights += m.heightTexture != scene::kNone && m.heightScale > 0;
+                    }
+                    for (const scene::Mesh& m : a.meshes) coloured += !m.colors.empty();
+                    CHECK(channelLights == 1 && imageLights == 1 && barnDoors == 1 && steam == 1 && eyes == 1 && cloth == 2 && water == 1 && heights == 3 && coloured == 1);
+                    CHECK(e.lightFunctions.size() == 3 && e.decals.size() == 3 && e.weather.empty());
+                }
+                if (id == scenegen::SceneId::ShowcaseAtrium)
+                {
+                    CHECK(a.cameras.size() == 6 && a.cameras[0].name == "floor" && a.cameras[1].name == "roof");
+                    // the roof: one mesh of the steel grid and the four pane colours
+                    uint32_t roofs = 0;
+                    for (const scene::Mesh& m : a.meshes) roofs += m.name == "atrium_roof" && m.submeshes.size() == 5;
+                    CHECK(roofs == 1 && mixed == 1 && glassAlone == 10);
+                    CHECK(e.lightFunctions.empty() && e.decals.size() == 3 && e.weather.empty());
+                }
+                if (id == scenegen::SceneId::ShowcaseShore)
+                {
+                    CHECK(a.cameras.size() == 5 && a.cameras[0].name == "shore" && a.cameras[1].name == "rain");
+                    CHECK(a.clouds.coverage > 0 && a.clouds.cirrusCoverage > 0 && a.fog.enabled && a.fogVolumes.size() == 1);
+                    CHECK(a.instances.size() > 150000);  // (scale 1: 40,000 trees, 150,000 grass clumps)
+                    // the crest stands in the cloud layer, the lake's bank at the water's level
+                    CHECK(scenegen::terrainHeight(id, 0.0f, -2600.0f) > a.clouds.baseAltitude && scenegen::terrainHeight(id, 0.0f, -2600.0f) < a.clouds.topAltitude);
+                    CHECK(scenegen::terrainHeight(id, 0.0f, 0.0f) == -5.0f && std::fabs(scenegen::terrainHeight(id, 118.0f, 0.0f)) < 1e-4f);
+                    CHECK(std::isnan(scenegen::terrainHeight(id, 0.0f, 500.0f)));
+                    CHECK(e.lightFunctions.size() == 1 && e.decals.empty() && e.weather.size() == 1 && e.weather[0].camera == "rain");
+                }
+            }
             if (id == scenegen::SceneId::ShadingBall)
             {
                 CHECK(a.cameras.size() == 5 && a.cameras[0].name == "front" && a.cameras[1].name == "back" && a.cameras[2].name == "skin_close" &&

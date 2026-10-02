@@ -706,11 +706,12 @@ Unreal의 재질 그래프와 Unity 재질이 흔히 쓰는 입력 가운데 렌
 
 실행해서 확인할 것(순서대로): `unx_test_decal_decaltests`(레코드 크기가 바뀌었다), `unx_test_host_hostdecal`, 입자 레이어 테스트(`fx.particles.soft`가 꺼진 기본 `ParticleLayerFrame`은 전과 같은 값이어야 한다), 그 뒤 still: 바닥에 걸친 연기 스프라이트(소프트 켬/끔), 카메라가 스프라이트 안에 있을 때, 멀어지는 데칼(화면 크기 페이드), 수명 페이드 구간, 법선만·roughness만 데칼, `InstanceNoDecals` 인스턴스.
 
+<<<<<<< HEAD
 ### 11.3 목록을 작업으로 (4차, 2026-10-03)
 
 **코드 작성·빌드 통과, 실행 안 함.** 테스트 실행 파일·still·게이트를 돌리지 않았다.
 
-**스프라이트 look** (`unx/fx/SpriteLooks.h`, `SpriteLooks.cpp`). VFX 스트림은 플립북 배치(`columns`, `rows`, `first_frame`, `frames_per_second`, `uv`, `uv_scroll`, 회전 곡선)만 나르고 이미지와 그리는 방식은 나르지 않는다. 그래서 렌더러에 표를 뒀다: 프로그램의 `material`이 2 + i이면 look i로 그린다(0 방출, 1 매질 조명은 그대로; look이 없는 값은 전처럼 거부). 스트림 ABI는 건드리지 않았다. 표를 채우는 호스트 ABI는 없다(후속: `fx::spriteLooks(trackState).set(i, look)`).
+**스프라이트 look** (`unx/fx/SpriteLooks.h`, `SpriteLooks.cpp`). VFX 스트림은 플립북 배치(`columns`, `rows`, `first_frame`, `frames_per_second`, `uv`, `uv_scroll`, 회전 곡선)만 나르고 이미지와 그리는 방식은 나르지 않는다. 그래서 렌더러에 표를 뒀다: 프로그램의 `material`이 2 + i이면 look i로 그린다(0 방출, 1 매질 조명은 그대로; look이 없는 값은 전처럼 거부). 스트림 ABI는 건드리지 않았다. 표를 채우는 호스트 ABI는 5차에 썼다(11.4 ①).
 
 | | 코드에 있는 것 | 파일 |
 |---|---|---|
@@ -724,15 +725,36 @@ Unreal의 재질 그래프와 Unity 재질이 흔히 쓰는 입력 가운데 렌
 
 하지 않은 것과 이유 [코드]:
 
-- **VSM 투과율 층에 입자 그림자**: 그 층(`VsmLayer.hlsli`)은 읽는 코드만 있고 쓰는 커널이 트리에 없다(init에서 지우기만 한다). 캐시된 페이지 단위라 매 프레임 바뀌는 입자와도 맞지 않는다. 태양 공간 맵을 따로 뒀다. 그 맵을 읽지 않는 곳: coverage 프래그먼트의 태양(합성 커널 한도), 안개·공기, 광선 hit, 국소광(맵은 태양만).
+- **VSM 투과율 층에 입자 그림자**: 그 층(`VsmLayer.hlsli`)은 읽는 코드만 있고 쓰는 커널이 트리에 없다(init에서 지우기만 한다). 캐시된 페이지 단위라 매 프레임 바뀌는 입자와도 맞지 않는다. 태양 공간 맵을 따로 뒀다. 그 맵을 읽지 않는 곳(5차 뒤, 11.4 ②): 광선 hit, 국소광(맵은 태양만).
 - **광선 장면의 메시 입자**: 메시 입자는 GPU가 쓰는 인스턴스이고 R의 TLAS 디스크립터는 CPU가 업로드 링에 만든다. 넣으려면 (1) 디스크립터를 GPU가 쓸 수 있는 버퍼로 옮기고 꼬리에 입자 수만큼 자리를 두고, (2) 메시 → BLAS 주소·geometry base 표를 GPU에 올리고, (3) 입자 인스턴스를 쓰는 커널이 디스크립터와 `RtInstance` 기록을 같이 쓰고, (4) 죽은 자리는 mask 0으로 빌드해야 한다. `RayScene.cpp`의 동적 TLAS 경로 전체를 바꾸는 일이고 틀린 디스크립터는 장치를 잃는다 — 실행 없이 쓰지 않았다.
 - **메시 데칼**: 가시성 버퍼에는 픽셀당 표면이 하나뿐이라 데칼 메시와 그 아래 표면을 함께 알 수 없다. V에 데칼 메시용 두 번째 vis 타깃(깊이 바이어스, 불투명 깊이와 near-or-equal)을 두고 resolve가 그 삼각형의 재질을 투영 데칼처럼 섞어야 한다. V 내부 작업이라 하지 않았다. coverage 층에 see-through 프래그먼트로 넣는 방법은 기록 수가 덮는 픽셀 수만큼 늘어 맞지 않는다.
 - **coverage 프래그먼트의 데칼**: 합성 커널 203,280 B / 204,800 B.
-- 입자 look의 한계: 그림자 맵은 텍스처 알파를 읽지 않는다(둥근 프로파일 × 입자 알파). 한 텍셀에 구간 하나(사이가 빈 두 층의 연기는 하나로 채워진다). 리본은 점 단위 매질 조명만 받는다(픽셀 법선 없음). 속도·축 정렬 스프라이트에는 회전을 적용하지 않는다. 입자당 광원은 프레임마다 집합이 바뀔 수 있다(광원 색인이 프레임 사이에 안정적이지 않다: MegaLights의 광원별 히스토리가 그만큼 짧아진다).
+- 입자 look의 한계(5차 뒤): 그림자 맵에서 텍스처는 태양이 보는 공의 원반에 입힌다(스프라이트의 facing·회전·가로세로비는 카메라 기준이라 맵에 없다). 한 텍셀에 구간 하나(사이가 빈 두 층의 연기는 하나로 채워진다). 속도·축 정렬 스프라이트에는 회전을 적용하지 않는다. 입자당 광원은 프레임마다 집합이 바뀔 수 있다(광원 색인이 프레임 사이에 안정적이지 않다: MegaLights의 광원별 히스토리가 그만큼 짧아진다).
 
 레코드 변화: `LayerRecord` 32 → 64 B, `DecalFrame` 144 → 160 B, `gpu::Light`는 그대로. `FxLayerSetup`은 조명을 스레드당 한 번만 계산하게 고쳐(스프라이트와 리본 점이 따로 두 번 인라인되어 있었다) 가장 큰 변형이 204,544 → 99,172 B가 됐고, 그 변형에서 뺐던 안개와 광원 구성요소를 되돌렸다.
 
 실행해서 확인할 것(순서대로): `unx_test_fx_particlelayertests`(기록 크기와 edge 블록의 depth range가 바뀌었다: look 없는 스프라이트는 전과 같은 값이어야 한다), `unx_test_fx_fxlighttests`(`particle_lights_max` = 0과 64), `unx_test_decal_decaltests`, `unx_test_raytracing_decalhits`, 방출 텍스처가 있는 씬의 still(emissive 텍스처를 모든 픽셀이 읽게 바뀌었다), 그 뒤 look을 등록한 씬: 플립북 연기(프레임 블렌드, 모션 벡터), 불꽃(additive, 속도 정렬 + 늘이기), 바닥 위 연기의 그림자와 자기 그림자, 굽은 리본, 업스케일 켠 채 움직이는 연기.
+
+### 11.4 남은 것 (5차, 2026-10-03)
+
+**코드 작성·빌드 통과, 실행 안 함.**
+
+| | 코드에 있는 것 | 파일 |
+|---|---|---|
+| ① 호스트 ABI | ABI 6 안의 선택 export, 헤더와 `RendererAbi.cpp`의 맨 끝 한 블록: `UnxSpriteLookDefaults` / `UnxVfxSetSpriteLook`(look 표), `UnxDecalExtraDefaults` / `UnxDecalSetExtra`(tint, 채널, 블렌드, emissive 배율, 화면 크기·수명 페이드), `UNX_INSTANCE_NO_DECALS` / `UnxSceneSetInstanceReceivesDecals`. `UnxDecalDesc`는 80 B 그대로이고 `UnxDecalUpdate`는 데칼의 extra 필드를 유지한다. look 표는 데칼 집합과 같은 방식으로(바뀐 뒤 다음 프레임 패킷의 스냅샷) 렌더 스레드에 간다. 새 구조체: `UnxSpriteLookDesc` 88 B, `UnxDecalExtraDesc` 56 B | `UnravelNextHost.h`, `RendererAbi.cpp`, `HostRenderer.cpp/.h`, `Decals.h`(`DecalSet::get`) |
+| ② 입자 그림자 맵의 독자 | coverage 프래그먼트: 합성이 이미 읽는 태양 프로파일(4개 깊이, `HairShadow.hlsl` MODE 2)에 맵의 투과율을 곱해 넣는다 — 합성 커널(204,576 B / 204,800 B)은 건드리지 않았고 그 패스는 머리카락이나 입자 맵 어느 쪽이 있어도 돈다. 안개 셀(`FogScatter.hlsl` P[11].w)과 공기 슬라이스(`FroxelSlice.hlsli`, `FroxelIntegrate`의 P[9].w): 머리카락 투과율을 곱하는 자리에서 같이 곱한다. 텍스처가 있는 look은 맵에 이미지의 알파(입자 나이의 프레임)로 들어간다 | `HairShadow.hlsl`, `ShadingSystem.cpp`, `FogScatter.hlsl`, `FroxelSlice.hlsli`, `FroxelSystem.cpp`, `FxShadow.hlsl` |
+| ③ 리본의 픽셀 조명 · 모션 벡터 | 점마다 모멘트(월드)와 화면 이동을 둔다(`FxRibbonAppearance` 8 → 24 B). 픽셀 법선: 스트립 위의 관(side × 폭 방향 위치 + 뷰어 쪽 스트립 법선), 또는 스트립 좌표계(+x 길이, +y 폭)의 법선 텍스처. 음영 = × max(0, 1 + 2 m·n), 스프라이트와 같다. 스트립의 모션은 두 점 사이를 보간해 레이어의 motion 타깃에 들어간다 | `ParticleLayerPass.hlsli`(`fxStripSampleOf`), `FxLayerSetup.hlsl`, `FxLayerTile.hlsl` |
+| ④ 광선 장면의 메시 입자 | **스위치 `fx.particles.mesh_in_rays = false`(기본 꺼짐).** 켜면: 커밋된 모든 메시에 BLAS와 geometry 기록을 만든다. 동적 TLAS 용량에 GPU 인스턴스 범위만큼 자리를 더한다. 프레임마다 CPU 디스크립터를 GPU가 쓸 수 있는 버퍼로 복사하고(`r.as.particles.descs`), 커널이 그 뒤에 슬롯마다 디스크립터와 `RtInstance` 기록을 쓰고(`r.as.particles`), 기록을 런타임 기록 뒤에 복사하고(`r.as.particles.records`), 빌더가 그 버퍼를 읽는다. **쓰기 전 GPU에서 검사**: 슬롯이 살아 있고 hidden이 아닐 것, 메시 색인이 표 안이고 BLAS가 있을 것, 변환 12개 값이 유한하고 1e7 미만일 것, 세 축 길이가 1e-4~1e4, 행렬식 ≠ 0. 하나라도 어기면 비활성으로 쓴다(단위 변환, mask 0, BLAS 주소 0 — 빌더가 건너뛴다). FX의 인스턴스 쓰기 패스 뒤에 돌도록 그 패스의 카운터 버퍼를 선언한다 | `RayTracing/ParticleInstances.hlsl`, `RayScene.cpp/.h`, `MeshParticles.cpp`, `fx.toml` |
+
+한계 [코드]:
+
+- ④: 런타임 메시(비트 31 id)를 그리는 입자는 광선에 없다(표에 BLAS가 없다). 입자가 움직인 자리의 GI 캐시 무효화(`m_changes`)를 하지 않는다. alpha-test 재질의 override는 인스턴스 플래그에 반영하지 않는다(BLAS가 만든 대로). 스위치를 켜면 인스턴스가 없는 메시에도 BLAS가 생긴다(메모리·빌드 시간). 처음 켤 때 볼 것: 죽은 슬롯이 mask 0 · 주소 0인지(`RT mesh particle records`의 마지막 워드 1), `r.as.tlas.dynamic` 시간.
+- ②: 광선 hit과 국소광은 맵을 읽지 않는다.
+- ③: 리본은 텍스처 프레임 애니메이션이 없다(`first_frame` 고정).
+- ①: Unity 쪽 관리 브리지(C#)에는 새 export의 선언이 없다(이 워크트리에 그 파일이 없다).
+
+실행해서 확인할 것(순서대로): `unx_test_host_hostabi`·`unx_test_host_hostdecal`(새 export는 선택이므로 기존 검사는 그대로여야 한다), `unx_test_fx_particlelayertests`(리본 appearance의 stride가 바뀌었다), 연기 아래 풀(coverage)과 안개의 still, 조명 받는 리본, 그 뒤 `fx.particles.mesh_in_rays = true`로 메시 입자가 있는 씬의 반사.
+
 ## 12. 물: 원본과의 비교 (2026-10-03, 브랜치 `w/atmo`)
 
 읽은 것: `Native/Render/Passes/Water/*`(수면 셰이딩 `WaterSurface.hlsli`, 매질 `WaterMedia.hlsl`, 태양 지도·코스틱 `WaterLight.hlsli`·`WaterCaustics.hlsl`, 수조 `Pool*`·`RoundPool*`, 유체 표면, 바다 FFT·뷰 격자·거품·물결), R의 굴절 서비스(`RefractionLumenTrace.hlsl`), 설계 `FEATURES_GAME_KO.md` 1절. 원본은 `SingleLayerWater*.ush/.usf`, `SingleLayerWaterRendering.cpp`, `WaterInfoTexture*`. **원본 트리에는 Water 플러그인이 없다**(Gerstner 파도, 수중 후처리 재질, 물결 시뮬레이션, 메시 LOD는 플러그인·재질 쪽이라 비교할 소스가 없다). 아래 "구현"은 모두 **코드 작성·빌드 통과, 실행 안 함**이다.
@@ -850,3 +872,121 @@ Unreal의 재질 그래프와 Unity 재질이 흔히 쓰는 입력 가운데 렌
 - **선언과 순서**: `PassChain`의 단계는 각자 선언한다; 2단계 가림의 순서(래스터 1 → `statichzb.p1` → 컬 2 → 래스터 2); 틴트 아틀라스는 `s.vsm.tint.ready`가 읽을 수 있는 상태로 둔다; 2배 높이 가시성 텍스처의 읽는 쪽은 모두 화소로 인덱싱한다; 머리카락 밀도 텍스처는 `declareHair`와 각 패스가 선언한다; 안개 볼륨의 뜻이 바뀐 것(노출 전 저장, 구름 장막)은 모든 읽는 쪽이 `FogVolume.hlsli`를 거친다.
 - **씬 파일과 호스트**: 선택 블록의 순서가 쓰기와 읽기에서 같다(MRPH, HAIR, CUTS, TERR, COAT, SHEN, GATT, ANIS, FILM, LEND, LCMP, SUBS, CLTH, EYES, MINP, VATT, CLDS, CIRR, FOGS, FGL2, FVST — 세 브랜치가 각자 끝에 붙였다); 호스트 ABI의 새 진입점(기술 → 씬·프레임 필드, 커밋 뒤 편집의 패킷 전달과 밀린 프레임의 이월, 재질을 다시 기술할 때 캐릭터·입력 값 유지); 저장하는 씬의 날씨는 호스트가 줄 수 있는 필드만 담는다(권운·둘째 층·김은 호스트 ABI에 아직 없다).
 - **루프**: 오늘 더해진 루프는 모두 상수나 CPU가 정한 수로 묶여 있다(순회 작업 큐, coverage bins·compute 래스터, 추측 레벨, 머리카락 행진, `clFeedback`, parallax ≤ 64걸음). 조용히 자르던 셋은 위에 적었다(틴트 레벨: 고침; 머리카락 body: 실패로; 층 fragment 16개: 남음).
+=======
+## 15. 쇼케이스 씬 (2026-10-03, 브랜치 `w/cache`) — 코드 작성·빌드 통과, 실행 안 함
+
+2026-10-03에 쓴 기능 가운데 그것을 쓰는 씬이 없는 것이 많다(A/B 배치는 씬이 쓰는 것만 잰다). 생성 씬 세 개를 추가했다: `Tools/SceneGen/src/Showcase.cpp`, 씬 id 12~14, 이름은 `diagnosticScenes()`에 들어 있어 게이트가 `--scene showcase_bathhouse`처럼 바로 안다(`allScenes()`의 스윕과 그 시험 집합에는 넣지 않았다).
+
+**돌린 것은 없다.** 생성기도 돌리지 않았다: 씬 파일을 만든 적이 없고 그림을 본 적이 없다. `generate()`가 부르는 `scene::validate`의 통과도 첫 실행에서 확인된다(규칙은 읽어서 맞췄다). 노출(EV), 광원 세기, 카메라 구도는 계산으로 정한 값이다 — 첫 still에서 고쳐야 할 수 있다. `unx_test_scenegen`에 세 씬의 내용 검사를 썼다(실행 안 함).
+
+### 15.1 씬에 든 것
+
+| 씬 | 장소 | 든 것 |
+|---|---|---|
+| `showcase_bathhouse` | 타일 욕실 10 × 8 × 4 m, 저녁 해(고도 24°)가 +Z 벽의 창으로 든다 | 창 2개 = **창틀(불투명) + 유리(Glass)가 한 메시**(왼쪽 인스턴스는 재질 override로 호박색 유리), 가운데 틈의 **유리만으로 된** 스테인드 글라스 2장(파랑·빨강), 오른쪽 창 밖의 **그림자 전용** 덧문(`InstanceShadowOnly`), 햇빛 자리의 양치 화분(`InstanceNoSelfShadow`), 욕조의 물(Water 클래스)과 그 위의 **김**(`FogVolume`: sourcePlane·riseSpeed·turbulence), 호박색 유리 갓(열린 원뿔, 유리만의 캐스터) 아래 전구가 있는 펜던트 등 3개(그림자 있는 점광), 해석 광원이 없는 9 cm **종이등 6개**(emissive 광원 카드 규칙), 벤치 위의 **이미지 + 반 도어가 있는 rect 광원**, 욕조 위 스폿(쿠키), 벽등(IES), 가운데 펜던트의 gobo, **인물**(Subsurface 피부, 눈 모델의 눈 2개, 가닥 머리카락 groom, cloth 로브; 라이팅 채널 0+1, `InstanceNoDecals`)과 **채널 1만의 림 라이트**, 유약 타일(clearcoat + height 맵 4 mm), 젖은 바닥 타일(UV 45° 회전·타일링, coat ior 1.33), 디테일 맵 나무(벤치·창틀), 버텍스 컬러 줄무늬 수건, 데칼 3개(벽 얼룩: 각도 페이드, 바닥 표식: base colour만, 인물 발밑 물웅덩이: roughness만) |
+| `showcase_atrium` | 안뜰 16 × 16 m, 높이 9 m의 유리 지붕, 해 고도 62° | 지붕 = **강철 격자(불투명) + 유리 4색(투명·호박·파랑·초록)이 한 메시**, 바닥의 색 햇빛 조각, 갤러리(4 m)와 유리만의 난간 8장, 갤러리 아래 6 cm emissive 등 6개와 그림자 있는 스폿 2개, 화분의 카드 나무 4그루(Foliage 투과, 바람), 옻칠(clearcoat) 벤치, cloth 배너 3장과 카펫, **덩어리 유리**(한 면 재질: 구 r 0.6 m, 붉은 각기둥) — 그림자 광선의 흡수, 디테일 맵 돌바닥, 데칼 3개(나침반: 화면 크기 페이드, 포스터: 틴트 + 페이드 인, 균열: 법선만) |
+| `showcase_shore` | 호수(반지름 118 m) 남쪽 기슭, 해 고도 10° | 지형 4 × 4 km(5 m 격자), 호수 물(Water), 갈대 600 × scale, 젖은 판자(coat 1.33)의 잔교와 그 끝의 **등불**(금속 틀 + 유리 4장이 한 메시, 그림자 있는 점광 + IES + flicker), 물가의 젖은 바위, 건너편 기슭에서 시작하는 **숲**(카드 나무 40,000 × scale: 가장자리에서 가장 빽빽하고 1.1 km 뒤에서 끝난다)과 호수 둘레의 풀 150,000 × scale(far field의 인스턴스), 2.6 km 밖의 능선(마루 1.1~1.4 km)이 **구름층(0.9~2.4 km) 안으로** 들어간다, 권운 0.5, 높이 안개 + 갈대밭의 안개 볼륨, `rain` 카메라의 비(extras: 8 mm/h, wetness 0.9) |
+
+### 15.2 카메라와 그것이 쓰는 스위치
+
+"스위치"는 그 기능의 다른 쪽을 고르는 설정 키 또는 게이트 인자다. "없음"은 씬 데이터(플래그·재질 필드)로만 켜지는 기능이다: 스위치로 A/B를 낼 수 없고 그 카메라의 그림 자체가 확인이다.
+
+`showcase_bathhouse`
+
+| 카메라 | 보이는 것 | 스위치 |
+|---|---|---|
+| `room` | 방 전체: 색 햇빛 조각, 물과 김, 등, 종이등의 빛, 벽 얼룩 데칼 | `shadow.vsm.translucent_tint`, `surface_cache.direct_tint`, `raytracing.see_through_translucent`, `surface_cache.mesh_cards_emissive_light_sources`, `atmosphere.fog.local_volumes` |
+| `panes` | 욕조 끝에서 창 벽 쪽: 바닥과 물 위의 유리색(왼쪽 호박, 가운데 파랑·빨강), 덧문의 줄무늬 그림자(덧문은 보이지 않는다) | `shadow.vsm.translucent_tint`(뷰의 태양), `surface_cache.direct_tint`(카드의 태양: 레이어 `cardfinal`, `gi`), `raytracing.see_through_translucent`(끄면 유리가 GI·그림자 광선을 막는다: 방의 바운스가 꺼진다). 그림자 전용·혼합 메시: 없음 |
+| `bath` | 물과 김, 김 속의 쿠키 스폿·gobo 빛줄기, 바닥 표식 데칼 | `atmosphere.fog.local_volumes`(김), `--fog-volume`(게이트의 볼륨으로 바꿔 보기). 광원 함수: 스위치 없음, extras 필요(12.4) |
+| `figure` | 머리와 어깨: 피부, 이 카메라를 보는 눈, 머리카락, 로브의 천, 채널 1 림 라이트(인물에만 닿는다), 덧문 줄무늬 햇빛 | `shading.eye_model`, `shading.subsurface_scatter`, `raytracing.hair`, `visibility.coverage_hair`. 라이팅 채널·cloth: 없음 |
+| `lamp` | 가운데 펜던트 등: 유리 갓, 전구, 천장으로 가는 호박색 빛 | `surface_cache.direct_tint_lights`(카드의 국소광 틴트: 기본 끔 — 켜면 천장 바운스가 호박색), hit의 그림자 광선 틴트는 스위치 없음(항상) |
+| `tiles` | +X 벽을 따라 낮게: 타일 줄눈의 시차, 유약, 젖은 바닥 | `material.parallax_steps`(0: 끔), `material.parallax_shadow`. UV 변환·clearcoat: 없음(`--strip-clearcoat`로 코트 제거) |
+| `bench` | rect 광원 아래 벤치: 나무(디테일 맵)와 벽에 떨어진 이미지의 격자와 반 도어의 경계, 버텍스 컬러 수건, 젖은 바닥에 비친 발광면 | `shading.mega_lights`(끄면 슬롯 경로의 rect 광원). 이미지·반 도어·디테일·버텍스 컬러: 없음 |
+
+
+`showcase_atrium`
+
+| 카메라 | 보이는 것 | 스위치 |
+|---|---|---|
+| `floor` | 바닥의 색 햇빛 조각(지붕 유리 4색), 카펫, 받침대, 나침반 데칼 | `shadow.vsm.translucent_tint`, `surface_cache.direct_tint`, `raytracing.see_through_translucent` |
+| `roof` | 아래에서 본 지붕: 하늘 앞의 유리와 격자 | 없음(반투명 층의 그림) |
+| `banners` | 색 햇빛 속의 cloth 배너, 그 아래 유리 난간 | 없음(cloth), `--strip-clearcoat` 무관 |
+| `sculpture` | 덩어리 유리 구와 각기둥, 받침대·카펫 위의 물든 그림자 | `shadow.vsm.translucent_tint`(뷰), `surface_cache.direct_tint`(카드) |
+| `gallery` | 갤러리 아래 그늘: emissive 등 6개와 스폿 2개의 빛 | `surface_cache.mesh_cards_emissive_light_sources`(끄면 6 cm 등의 카드가 없어 그 빛이 GI에서 빠진다) |
+| `planter` | 햇빛 속 화분 나무: 잎의 투과, 뒤의 옻칠 벤치 | `surface_cache.foliage_transmission` |
+
+`showcase_shore`
+
+| 카메라 | 보이는 것 | 스위치 |
+|---|---|---|
+| `shore` | 남쪽 기슭에서: 잔교와 호수, 건너편 숲 가장자리, 구름 속 능선, 권운 | `raytracing.far_field`(기본 끔: 켜서 비교), `--cirrus 0`, `--clouds 0` |
+| `rain` | 잔교 위에서 등불 쪽: 젖은 판자, 등불의 유리(혼합 메시)와 안개 속 빛 | 비: extras 필요(12.4) + `atmosphere.fog.rain_veil`. IES: extras 필요 |
+| `forest_edge` | 건너편 물 위에서 숲 가장자리를 따라: 인스턴스가 far field 프록시로 넘어가는 거리 | `raytracing.far_field`, `far_field_cull_angle_deg`, `far_field_cull_radius_m`; `shadow.vsm.aggregate_small_casters`, `shadow.vsm.min_caster_texels` |
+| `ridge` | 호수 위 30 m에서 긴 렌즈로 능선 마루: 구름층에 잠긴 지형 | `atmosphere.clouds.veil`, `atmosphere.clouds.filtered_steps` |
+| `reeds` | 갈대 사이 낮게, 안개 볼륨 쪽 | `atmosphere.fog.local_volumes`, `--fog 0` |
+
+### 15.3 배치 그룹 제안 (`Run-Ue6Batch.ps1`의 `$abGroups` 형식; 스크립트는 `w/opt` 소유라 고치지 않았다)
+
+카메라가 씬마다 달라 그룹 하나에 씬 하나다(`Gate`가 그룹 단위다).
+
+```
+@{ Name = "glass_bath"; Scenes = "showcase_bathhouse"; Gate = "--camera panes"; Time = $true; Layers = "shadow,gi,cardfinal"; Rows = @(
+        @{ N = "glass_opaque"; S = "shadow.vsm.translucent_tint=false"; E = "differs" },
+        @{ N = "cards_untinted"; S = "surface_cache.direct_tint=false"; E = "differs" },
+        @{ N = "glass_stops_rays"; S = "raytracing.see_through_translucent=false"; E = "differs" }) },
+@{ Name = "glass_atrium"; Scenes = "showcase_atrium"; Gate = "--camera floor"; Time = $true; Layers = "shadow,gi,cardfinal"; Rows = @(
+        @{ N = "glass_opaque"; S = "shadow.vsm.translucent_tint=false"; E = "differs" },
+        @{ N = "cards_untinted"; S = "surface_cache.direct_tint=false"; E = "differs" },
+        @{ N = "glass_stops_rays"; S = "raytracing.see_through_translucent=false"; E = "differs" }) },
+@{ Name = "glass_lamp"; Scenes = "showcase_bathhouse"; Gate = "--camera lamp"; Time = $true; Layers = "gi,cardfinal"; Rows = @(
+        @{ N = "cards_lights_tinted"; S = "surface_cache.direct_tint_lights=true"; E = "differs" }) },
+@{ Name = "emissive_bath"; Scenes = "showcase_bathhouse"; Gate = "--camera bath"; Layers = "gi,cardfinal"; Rows = @(
+        @{ N = "emissive_cards_off"; S = "surface_cache.mesh_cards_emissive_light_sources=false"; E = "differs" },
+        @{ N = "steam_off"; S = "atmosphere.fog.local_volumes=false"; E = "differs" }) },
+@{ Name = "emissive_atrium"; Scenes = "showcase_atrium"; Gate = "--camera gallery"; Layers = "gi,cardfinal"; Rows = @(
+        @{ N = "emissive_cards_off"; S = "surface_cache.mesh_cards_emissive_light_sources=false"; E = "differs" }) },
+@{ Name = "figure"; Scenes = "showcase_bathhouse"; Gate = "--camera figure"; Time = $true; Layers = "gi,refl"; Rows = @(
+        @{ N = "eye_plain"; S = "shading.eye_model=false"; E = "differs" },
+        @{ N = "scatter_off"; S = "shading.subsurface_scatter=false"; E = "differs" },
+        @{ N = "hair_off_rays"; S = "raytracing.hair=false"; E = "differs" }) },
+@{ Name = "inputs"; Scenes = "showcase_bathhouse"; Gate = "--camera tiles"; Time = $true; Rows = @(
+        @{ N = "parallax_off"; S = "material.parallax_steps=0"; E = "differs" },
+        @{ N = "parallax_shadow"; S = "material.parallax_shadow=true"; E = "differs" }) },
+@{ Name = "leaves"; Scenes = "showcase_atrium"; Gate = "--camera planter"; Layers = "gi"; Rows = @(
+        @{ N = "leaf_transmission_off"; S = "surface_cache.foliage_transmission=false"; E = "differs" }) },
+@{ Name = "farfield"; Scenes = "showcase_shore"; Gate = "--camera forest_edge"; Time = $true; Layers = "gi,refl,shadow"; Rows = @(
+        @{ N = "far_field"; S = "raytracing.far_field=true"; E = "differs" },
+        @{ N = "far_field_2deg"; S = "raytracing.far_field=true,raytracing.far_field_cull_angle_deg=2.0"; E = "differs" },
+        @{ N = "every_caster"; S = "shadow.vsm.min_caster_texels=0"; E = "differs" }) },
+@{ Name = "ridge"; Scenes = "showcase_shore"; Gate = "--camera ridge"; Time = $true; Rows = @(
+        @{ N = "veil_off"; S = "atmosphere.clouds.veil=false"; E = "differs" },
+        @{ N = "steps_unfiltered"; S = "atmosphere.clouds.filtered_steps=false"; E = "differs" }) },
+@{ Name = "mist"; Scenes = "showcase_shore"; Gate = "--camera reeds"; Time = $true; Rows = @(
+        @{ N = "volumes_off"; S = "atmosphere.fog.local_volumes=false"; E = "differs" }) }
+```
+
+기존 그룹에 씬만 더하면 되는 것: `tint`(`showcase_atrium`: 유리 캐스터가 있는 첫 생성 씬), `cards`(`showcase_bathhouse`), `forest`(`showcase_shore`), `hair`(`showcase_bathhouse` + `--camera figure`), `eye`(같음), `fog`(`showcase_shore`).
+
+`far_field` 행의 기대값을 "differs"로 둔 이유: 먼 인스턴스가 상자가 되므로 그림이 같지 않다 — 수치가 그 차이의 크기다(상태 문서 1.4 "첫 실행에서 볼 것"의 5, 6번). 시간 쪽은 `r.as.tlas.static`, `r.gi.*.trace`, `r.refl.lumen.trace`를 나란히 본다.
+
+### 15.4 씬 파일에 없는 것 — 게이트가 받아야 한다
+
+씬 형식(`scene::Scene`)에는 광원 함수(IES·쿠키·gobo), 데칼, 비가 없다. 렌더러는 그것들을 자기 인터페이스로 받는다. 씬 생성기는 그 데이터를 `scenegen::extras(request)`(`SceneGen.h` `SceneExtras`)로 낸다 — `grooms()`가 머리카락을 내는 것과 같은 방식이다. **`RendererGate.cpp`는 아직 이것을 읽지 않는다**(내 파일이 아니다). 읽기 전에는 세 씬에서 광원 함수·데칼·비가 없는 그림이 나온다(광원 자체는 씬에 있어 켜진다).
+
+| extras | 내용 | 게이트가 할 일 |
+|---|---|---|
+| `lightFunctions` | bathhouse: 욕조 위 스폿의 쿠키(64², 0.15 rad/s 회전), 벽등의 IES(batwing), 가운데 펜던트의 gobo(128², 구멍 격자). shore: 등불의 IES + flicker | 씬 광원을 올린 뒤 `lights::lightFunctions(renderer.trackState()).set(light, f)`. `ExtraLightFunction` → `lights::LightFunction`: profile 번호 그대로, IES는 `horizontal = {0}`·`values = iesValues`·`peak = 광원 intensity`, 이미지는 `Image{width, height, rgb}` |
+| `decals` | bathhouse 3개, atrium 3개(재질은 씬 재질: 어느 메시도 쓰지 않는다) | `decal::decals(renderer.trackState()).add(d)`: `ExtraDecal`의 필드는 `decal::Decal`과 이름·뜻이 같다(`instance`는 없음 = world) |
+| `weather` | shore: 카메라 `rain`에 rainRate 8 mm/h, wetness 0.9 | 프레임의 카메라 이름이 같으면 `FrameContext`의 `WeatherFrame.rainRate`, `.wetness` |
+
+소프트 파티클은 씬으로 만들 수 없다: 입자는 VFX 스트림(프로그램 + 에미터)에서 오고 씬 생성기와 게이트에 그 경로가 없다. 욕조의 김은 `FogVolume`이지 입자가 아니다. 입자 씬이 필요하면 FX 쪽 게이트(`Passes/FX`)에 지오메트리와 만나는 스프라이트 에미터를 두는 것이 맞다.
+
+### 15.5 첫 실행에서 볼 것
+
+1. `unx_test_scenegen`(세 씬의 결정성·직렬화 왕복·내용 검사). 여기서 `scene::validate`가 처음 돈다.
+2. 각 씬의 첫 카메라 still: 노출이 맞는지(욕실 EV 11.5, 안뜰 13.5, 기슭 12.5는 계산값), 햇빛 조각의 위치(욕실: 바닥과 욕조 위, 인물까지; 안뜰: 바닥의 -X·-Z 쪽 3/4).
+3. 욕실 `panes`: 유리색이 뷰의 햇빛과 `cardfinal`에서 같은 자리에 같은 색인지(카드 틴트의 첫 확인). 덧문이 뷰·반사에 보이지 않고 줄무늬 그림자만 있는지.
+4. 욕실 `lamp`: 유리 갓 위쪽 천장이 뷰(MegaLights 그림자 광선: 유리 통과, 흰 빛)와 GI(hit의 그림자 광선: 호박색)에서 다르게 물든다 — 알려진 차이(상태 문서 1.3.3).
+5. 욕조 물: Water 클래스 정적 메시가 반투명 층에서 어떻게 그려지는지 이 씬에서 처음 본다(다른 생성 씬의 물은 Standard 재질이다).
+6. 기슭: scale 1에서 인스턴스 약 19만 개. `raytracing.far_field=true`의 로드 로그(`RayScene far field:`, `near set`).
+>>>>>>> w/cache

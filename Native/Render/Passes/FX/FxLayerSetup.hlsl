@@ -228,8 +228,10 @@ float3 curve3(uint first, uint count, float u) { return count >= 2u ? nv_curve(f
 // is written invalid: born after it (the newest births, the range's tail) or already dead (the oldest dying ones, its head);
 // the valid points are one window. A killed emitter or a refused material writes invalid points (nothing drawn).
 // alive: the particle at the frame time (setup); radiance, size, alpha, age: its appearance there.
-// program, look: the point's program and its look + 1 (0: none), for the segment's record.
-void ribbonPoint(LayerConstants c, uint birth, uint row, bool alive, float3 pos, float age, float size, float3 radiance, float alpha, uint program, uint look)
+// program, look: the point's program and its look + 1 (0: none), for the segment's record. moment: a look lit per pixel -
+// the light's first moment over its fluence (world), else 0; motion: the point's travel on screen since the previous frame.
+void ribbonPoint(LayerConstants c, uint birth, uint row, bool alive, float3 pos, float age, float size, float3 radiance, float alpha, uint program, uint look,
+                 float3 moment, float2 motion)
 {
     if (c.ribbonRows == UNX_NONE) return;
     StructuredBuffer<uint2> rows = ResourceDescriptorHeap[c.ribbonRows];
@@ -238,12 +240,13 @@ void ribbonPoint(LayerConstants c, uint birth, uint row, bool alive, float3 pos,
     const uint index = place.x + (birth - place.y);
     if (index >= c.ribbonCapacity) { fxLayerStatus(c, FX_LAYER_STATUS_RANGE); return; }
     RWStructuredBuffer<FxRibbonPoint> points = ResourceDescriptorHeap[c.ribbonPoints];
-    RWStructuredBuffer<uint2> appearance = ResourceDescriptorHeap[c.ribbonAppearance];
+    RWStructuredBuffer<FxRibbonAppearance> appearance = ResourceDescriptorHeap[c.ribbonAppearance];
     FxRibbonPoint rp = (FxRibbonPoint)0;
+    FxRibbonAppearance app = (FxRibbonAppearance)0;
     if (!alive)
     {
         points[index] = rp;  // valid = 0
-        appearance[index] = uint2(0, 0);
+        appearance[index] = app;
         return;
     }
     const float distance = -mul((float3x3)g_view, pos).z;
@@ -262,7 +265,10 @@ void ribbonPoint(LayerConstants c, uint birth, uint row, bool alive, float3 pos,
     rp.program = program;
     rp.look = look;
     points[index] = rp;
-    appearance[index] = fxPackHalf4(float4(radiance * g_exposure, alpha));
+    app.radianceAlpha = fxPackHalf4(float4(radiance * g_exposure, alpha));
+    app.moment = fxPackHalf4(float4(moment, 0));
+    app.motion = fxPackHalf2(motion);
+    appearance[index] = app;
 }
 
 LayerRecord setup(LayerConstants c, uint t, uint group)
@@ -303,7 +309,7 @@ LayerRecord setup(LayerConstants c, uint t, uint group)
     if (sprite && (!(size > 0) || !(alpha > 0))) alive = false;
     if (!alive)
     {
-        if (ribbon) ribbonPoint(c, birth, row, false, 0, 0, 0, 0, 0, 0u, 0u);
+        if (ribbon) ribbonPoint(c, birth, row, false, 0, 0, 0, 0, 0, 0u, 0u, 0, 0);
         return rec;
     }
 
@@ -372,7 +378,7 @@ LayerRecord setup(LayerConstants c, uint t, uint group)
     // medium, as fluence and moment for a look lit per pixel
     const float linearZ = max(distance, g_nearPlane);  // (v.z along the view axis: the view depth)
     const float footprint = 2.0f * linearZ / (g_proj[1][1] * g_viewHeight);
-    const bool pixelLit = lit && looked && sprite && fxLookNormal(look) != FX_NORMAL_NONE;
+    const bool pixelLit = lit && looked && fxLookNormal(look) != FX_NORMAL_NONE;
     float3 radiance = colour, moment = 0;
     if (lit)
     {
@@ -385,12 +391,22 @@ LayerRecord setup(LayerConstants c, uint t, uint group)
             radiance = colour * light.fluence / (4.0f * SH_PI);
             const float lum = fxLuminance(light.fluence);
             const float3 m = lum > 0 ? light.moment / lum : float3(0, 0, 0);
-            moment = float3(dot(m, right), dot(m, up), dot(m, facing));
+            // (a sprite's: in its quad's frame; a ribbon point's: world - the strip's frame is the pixel's, FxLayerTile)
+            moment = sprite ? float3(dot(m, right), dot(m, up), dot(m, facing)) : m;
         }
+    }
+    // the centre's travel on screen since the previous frame: the particle moved back by its velocity over the frame,
+    // under the previous (unjittered) view
+    float2 motion = 0;
+    if (any(x.prevViewProj[3] != 0) && distance > g_nearPlane)
+    {
+        const float4 before = float4(g_cameraPosition + centreWorld - vel * g_deltaTime, 1);
+        const float3 pc = float3(dot(x.prevViewProj[0], before), dot(x.prevViewProj[1], before), dot(x.prevViewProj[3], before));
+        if (pc.z > 1e-6f) motion = clamp(centre - float2((pc.x / pc.z * 0.5f + 0.5f) * g_viewWidth, (0.5f - 0.5f * pc.y / pc.z) * g_viewHeight), -32000.0f, 32000.0f);
     }
     if (ribbon)
     {
-        ribbonPoint(c, birth, row, true, pos, age, size, radiance, alpha, e.program, looked ? p.material - 1u : 0u);
+        ribbonPoint(c, birth, row, true, pos, age, size, radiance, alpha, e.program, looked ? p.material - 1u : 0u, moment, motion);
         return rec;
     }
 
@@ -455,15 +471,6 @@ LayerRecord setup(LayerConstants c, uint t, uint group)
             if (fxLookBlend(look) != FX_BLEND_ADDITIVE) inscatter = air;
         }
         else radiance = radiance * transmittance + air;
-    }
-    // the centre's travel on screen since the previous frame: the particle moved back by its velocity over the frame,
-    // under the previous (unjittered) view
-    float2 motion = 0;
-    if (any(x.prevViewProj[3] != 0))
-    {
-        const float4 before = float4(g_cameraPosition + centreWorld - vel * g_deltaTime, 1);
-        const float3 pc = float3(dot(x.prevViewProj[0], before), dot(x.prevViewProj[1], before), dot(x.prevViewProj[3], before));
-        if (pc.z > 1e-6f) motion = clamp(centre - float2((pc.x / pc.z * 0.5f + 0.5f) * g_viewWidth, (0.5f - 0.5f * pc.y / pc.z) * g_viewHeight), -32000.0f, 32000.0f);
     }
     rec.radianceAlpha = fxPackHalf4(float4(radiance * g_exposure, alpha * alphaScale));
     rec.extra = fxPackExtra(moment, inscatter * g_exposure, motion);

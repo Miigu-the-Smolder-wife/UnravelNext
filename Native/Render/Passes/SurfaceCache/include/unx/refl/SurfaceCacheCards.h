@@ -39,6 +39,7 @@ struct SurfaceCacheCardSettings  // Config/quality/surface_cache.toml
     bool enabled = false;
     McSettings cards;
     bool direct = true, radiosity = true, shadowRaysOpaque = false;
+    uint32_t directTintSlots = 1;     // surface_cache.direct_tint (the sun: 1), direct_tint_lights (every slot: 9); 0: none
     float radiosityCap = 40.0f, radiosityFrames = 4.0f;
     float radiositySkipBackFace = 0.05f, radiositySkipTwoSided = 0.01f;  // metres; 0: the radiosity rays are not re-shot
     float radiosityMinTraceDistance = 0.10f;

@@ -1848,3 +1848,111 @@ UNX_API int32_t UNX_CALL UnxFrameGetStatistics(UnxRenderer r, UnxFrameStatistics
         }
     });
 }
+
+// ---- Sprite looks, a decal's extra fields, instances that take no decals (UnravelNextHost.h's last block) ---------------
+UNX_API int32_t UNX_CALL UnxSpriteLookDefaults(UnxSpriteLookDesc* d)
+{
+    return call([&] {
+        if (!d) fail("UnxSpriteLookDesc output is null");
+        const fx::SpriteLook l;
+        std::memset(d, 0, sizeof *d);
+        d->size = sizeof *d;
+        d->version = 1;
+        d->texture = d->normalTexture = d->motionTexture = UNX_NONE;
+        d->motionScale = l.motionScale;
+        d->blend = (uint32_t)l.blend;
+        d->facing = (uint32_t)l.facing;
+        d->normal = (uint32_t)l.normal;
+        d->flags = (l.frameBlend ? UNX_SPRITE_LOOK_FRAME_BLEND : 0u) | (l.framesOverLife ? UNX_SPRITE_LOOK_FRAMES_OVER_LIFE : 0u) | (l.lit ? UNX_SPRITE_LOOK_LIT : 0u) |
+                   (l.smooth ? UNX_SPRITE_LOOK_SMOOTH : 0u) | (l.castShadow ? UNX_SPRITE_LOOK_CAST_SHADOW : 0u) |
+                   (l.ribbonUv == fx::RibbonUv::Age ? UNX_SPRITE_LOOK_RIBBON_UV_AGE : 0u);
+        d->axis[0] = l.axis.x, d->axis[1] = l.axis.y, d->axis[2] = l.axis.z;
+        d->aspect = l.aspect;
+        d->rotationRate = l.rotationRate;
+        d->stretch = l.stretch;
+        d->stretchMax = l.stretchMax;
+        d->pivot[0] = l.pivot.x, d->pivot[1] = l.pivot.y;
+        d->shadowDensity = l.shadowDensity;
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxVfxSetSpriteLook(UnxRenderer r, uint32_t index, const UnxSpriteLookDesc* d)
+{
+    return call([&] {
+        if (!d)
+        {
+            find(r)->setSpriteLook(index, nullptr);
+            return;
+        }
+        if (d->size != sizeof(UnxSpriteLookDesc) || d->version != 1) fail("UnxVfxSetSpriteLook: UnxSpriteLookDesc size %u version %u", d->size, d->version);
+        if (d->reserved[0] != 0 || d->reserved[1] != 0) fail("UnxVfxSetSpriteLook: reserved is not 0");
+        if (d->blend > UNX_SPRITE_BLEND_PREMULTIPLIED || d->facing > UNX_SPRITE_FACING_AXIS || d->normal > UNX_SPRITE_NORMAL_MAP)
+            fail("UnxVfxSetSpriteLook: blend %u, facing %u, normal %u", d->blend, d->facing, d->normal);
+        const uint32_t known = UNX_SPRITE_LOOK_FRAME_BLEND | UNX_SPRITE_LOOK_FRAMES_OVER_LIFE | UNX_SPRITE_LOOK_LIT | UNX_SPRITE_LOOK_SMOOTH |
+                               UNX_SPRITE_LOOK_CAST_SHADOW | UNX_SPRITE_LOOK_RIBBON_UV_AGE;
+        if ((d->flags & ~known) != 0) fail("UnxVfxSetSpriteLook: unknown flags 0x%x", d->flags);
+        fx::SpriteLook l;
+        l.texture = d->texture;
+        l.normalTexture = d->normalTexture;
+        l.motionTexture = d->motionTexture;
+        l.motionScale = d->motionScale;
+        l.blend = (fx::SpriteBlend)d->blend;
+        l.facing = (fx::SpriteFacing)d->facing;
+        l.normal = (fx::SpriteNormal)d->normal;
+        l.frameBlend = (d->flags & UNX_SPRITE_LOOK_FRAME_BLEND) != 0;
+        l.framesOverLife = (d->flags & UNX_SPRITE_LOOK_FRAMES_OVER_LIFE) != 0;
+        l.lit = (d->flags & UNX_SPRITE_LOOK_LIT) != 0;
+        l.smooth = (d->flags & UNX_SPRITE_LOOK_SMOOTH) != 0;
+        l.castShadow = (d->flags & UNX_SPRITE_LOOK_CAST_SHADOW) != 0;
+        l.ribbonUv = (d->flags & UNX_SPRITE_LOOK_RIBBON_UV_AGE) != 0 ? fx::RibbonUv::Age : fx::RibbonUv::Distance;
+        l.axis = { d->axis[0], d->axis[1], d->axis[2] };
+        l.aspect = d->aspect;
+        l.rotationRate = d->rotationRate;
+        l.stretch = d->stretch;
+        l.stretchMax = d->stretchMax;
+        l.pivot = { d->pivot[0], d->pivot[1] };
+        l.shadowDensity = d->shadowDensity;
+        find(r)->setSpriteLook(index, &l);
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxDecalExtraDefaults(UnxDecalExtraDesc* d)
+{
+    return call([&] {
+        if (!d) fail("UnxDecalExtraDesc output is null");
+        const decal::Decal e;
+        std::memset(d, 0, sizeof *d);
+        d->size = sizeof *d;
+        d->version = 1;
+        d->color[0] = e.color.x, d->color[1] = e.color.y, d->color[2] = e.color.z;
+        d->channels = e.channels;
+        d->blend = (uint32_t)e.blend;
+        d->emissive = e.emissive;
+        d->fadeScreenSize = e.fadeScreenSize;
+        d->fadeInStart = e.fadeInStart, d->fadeInDuration = e.fadeInDuration;
+        d->fadeOutStart = e.fadeOutStart, d->fadeOutDuration = e.fadeOutDuration;
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxDecalSetExtra(UnxRenderer r, uint32_t id, const UnxDecalExtraDesc* d)
+{
+    return call([&] {
+        if (!d) fail("UnxDecalSetExtra: no description");
+        if (d->size != sizeof(UnxDecalExtraDesc) || d->version != 1) fail("UnxDecalSetExtra: UnxDecalExtraDesc size %u version %u", d->size, d->version);
+        if (d->reserved != 0) fail("UnxDecalSetExtra: reserved is not 0");
+        decal::Decal e;
+        e.color = { d->color[0], d->color[1], d->color[2] };
+        e.channels = d->channels;
+        e.blend = (decal::DecalBlend)d->blend;
+        e.emissive = d->emissive;
+        e.fadeScreenSize = d->fadeScreenSize;
+        e.fadeInStart = d->fadeInStart, e.fadeInDuration = d->fadeInDuration;
+        e.fadeOutStart = d->fadeOutStart, e.fadeOutDuration = d->fadeOutDuration;
+        find(r)->decalSetExtra(id, e);
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxSceneSetInstanceReceivesDecals(UnxRenderer r, uint32_t instance, int32_t receives)
+{
+    return call([&] { find(r)->setInstanceReceivesDecals(instance, receives != 0); });
+}

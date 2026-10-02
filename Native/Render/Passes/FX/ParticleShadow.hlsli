@@ -11,8 +11,12 @@
 // their balls' chords take, top to bottom. A receiver at depth z under a texel is behind the part of that optical
 // depth above it, taken as uniform over the span: T = exp(-tau saturate((top - z) / (top - bottom))) - 1 above the
 // smoke, exp(-tau) below it, and a puff shadows its own lower half by its upper. Read bilinearly (four texels' T).
+// A look with a texture: the texel's opacity is the image's alpha there - the flipbook frame of the particle's age, on
+// the ball's disc as the sun sees it (the image's own facing, rotation and aspect are the camera's and are not in it).
+// Readers: S's screen visibility (the sun's slot), the lit particles, the coverage layer's fragments (the sun profile
+// of HairShadow.hlsl MODE 2), the fog's cells and the air's slices.
 // Limits: one span a texel (two layers of smoke with clear air between count as one column filled between them);
-// the looks' textures are not read (the ball's round profile x the particle's alpha); the sun only.
+// the sun only; ray hits do not read it.
 #ifndef FX_PARTICLE_SHADOW_HLSLI
 #define FX_PARTICLE_SHADOW_HLSLI
 #include "Bindless.hlsli"
