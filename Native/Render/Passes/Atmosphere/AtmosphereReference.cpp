@@ -169,7 +169,7 @@ D3 skyRadiance(const Model& m, D3 p, D3 d, D3 sun, const MsFn& ms, const GroundF
     return radiance;
 }
 
-void aerial(const Model& m, D3 p, D3 d, double distance, D3 sun, const MsFn& ms, D3& inscatter, D3& transmittance, int steps)
+void aerial(const Model& m, D3 p, D3 d, double distance, D3 sun, const MsFn& ms, D3& inscatter, D3& transmittance, int steps, double scale)
 {
     const double nu = dot(d, sun), pr = rayleighPhase(nu), pm = miePhase(nu, m.g);
     D3 L, T{ 1, 1, 1 };
@@ -179,7 +179,10 @@ void aerial(const Model& m, D3 p, D3 d, double distance, D3 sun, const MsFn& ms,
         D3 q = p + d * ((i + 0.5) * dt);
         const double h = altitudeOf(m, q);
         if (h < 0) q = q + upOf(m, q) * (-h);  // surface air below the model's surface (airLiftToSurface)
-        const Coefficients c = coefficients(m, std::max(0.0, h));
+        Coefficients c = coefficients(m, std::max(0.0, h));
+        c.rayleigh = c.rayleigh * scale;
+        c.mie = c.mie * scale;
+        c.extinction = c.extinction * scale;
         const D3 source = (c.rayleigh * pr + c.mie * pm) * sunTransmittance(m, q, sun, 512) + (c.rayleigh + c.mie) * ms(q, d, sun);
         D3 integral;
         for (int k = 0; k < 3; ++k)

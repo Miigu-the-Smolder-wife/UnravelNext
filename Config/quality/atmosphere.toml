@@ -18,6 +18,9 @@ rebuild_every_frame = 0              # 1: rebuild the transmittance LUT and J_ms
 # (64 per side of the true horizon, as the previous engine's 64 per half; the first draft's 108 was coarser).
 sky_view_lut = [192, 128]
 sky_view_segments = 128              # quadratic segments x Gauss-Legendre 4 along each sky ray
+aerial_start_m = 100.0               # where a view's air starts along its rays (the reference's AerialPespectiveStartDepth, 0.1 km):
+                                     # nearer surfaces carry no veil of sun- and sky-lit air (an interior, the ground at one's feet).
+                                     # 0: the air from the camera on (the froxel tests' node-by-node references)
 
 # Height fog (Passes/Atmosphere/Fog.hlsli): the reference's exponential height fog with volumetric fog, as one more medium
 # of the air volume - lit by the sun through the casters' shadow (shafts of light), by the local lights and by the indirect

@@ -104,11 +104,11 @@ void setCloudLayer(TrackState& state, const clouds::CloudLayer& layer)
     s.setByTest = true;
 }
 
-void cloudsPrepare(FramePassContext& fc, uint32_t srvs[2])
+void cloudsPrepare(FramePassContext& fc, uint32_t& recordSrv)
 {
     CloudState& s = fc.state<CloudState>(kCloudKey);
     takeFrameLayer(fc, s);
-    srvs[0] = srvs[1] = 0;
+    recordSrv = 0;
     if (!enabled(s)) return;
     Device& device = fc.device;
     s.device = &device;
@@ -164,7 +164,7 @@ void cloudsPrepare(FramePassContext& fc, uint32_t srvs[2])
         std::memset(m, 0, 256);
         s.zeros->Unmap(0, nullptr);
     }
-    srvs[0] = s.recordSrv + 1;
+    recordSrv = s.recordSrv + 1;
 }
 
 void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)

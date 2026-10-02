@@ -2,6 +2,7 @@
 
 #include "FroxelSystem.h"
 #include "SResources.h"
+#include "../Atmosphere/AtmosphereSystem.h"
 
 #include "unx/render/GpuScene.h"
 #include "unx/render/PassChain.h"
@@ -1375,6 +1376,10 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         std::memcpy(&farBits, &grid.farM, 4);
         std::memcpy(&texelBits, &grid.shadowTexelsPerTile, 4);
         const bool fogOn = false;  // (the fog has its own volume and page requests: s.vsm.markfog below)
+        // (where the view's air starts: slices wholly before it ask for no pages - AtmosphereSystem.cpp aerialStartM)
+        const float airStart = atmosphere::aerialStartM(q);
+        uint32_t airStartBits = 0;
+        std::memcpy(&airStartBits, &airStart, 4);
         g.addPass("s.vsm.markair", QueueType::Compute,
                   [&](PassBuilder& b) {
                       b.use(requests, Use::UavCompute);
@@ -1383,7 +1388,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                   },
                   [=](PassContext& ctx) {
                       const uint32_t k[12] = { ctx.uav(requests), ring, grid.gridX | grid.gridY << 16, grid.slices | grid.tilePx << 16, nearBits, farBits, texelBits,
-                                               ctx.uav(statsBuf), fogOn ? 1u : 0u, 0, 0, 0 };  // P[2].x: the fog needs the near slices' pages
+                                               ctx.uav(statsBuf), fogOn ? 1u : 0u, airStartBits, 0, 0 };  // P[2].x: the fog needs the near slices' pages
                       ctx.cmd->SetPipelineState(pso);
                       ctx.bindFrameConstants(mainConstants);
                       ctx.computeConstants(k, 12);

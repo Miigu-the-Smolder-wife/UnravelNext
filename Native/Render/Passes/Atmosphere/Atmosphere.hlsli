@@ -143,7 +143,7 @@ void airViewLookup(AtmosphereSrvs s, float2 uv, float linearDepth, bool wantSun,
         const float b = dot(o, dir) + bottom * dir.y, disc = b * b - h2;
         if (disc >= 0 && b < 0) kink = tStart + h2 / (-b + sqrt(disc));  // nearer root, stable form
     }
-    kink = max(kink, AIR_VIEW_START_M);  // (the surface air's closed-form tail starts where the view's air does)
+    kink = max(kink, p.Load(int3(10, ph - 1, 0)).w);  // (the surface air's closed-form tail starts where the view's air does: AtmosphereParams::viewStartM)
     const float tDepth = linearDepth * toRay;
     const bool lifted = kink < tDepth;
     float N, d;

@@ -10,7 +10,7 @@
 //                  fraction the air's single scattering uses, so shafts of light come out of the sun's shadow map; the
 //                  local lights from the froxels' sampled fluence and direction moment; the indirect light from the
 //                  Lumen translucency volume of the previous frame).
-// Unlike the atmosphere (AIR_VIEW_START_M) the fog starts at the camera (or at start distance).
+// Unlike the atmosphere (atmosphere.aerial_start_m) the fog starts at the camera (or at start distance).
 #ifndef UNX_FOG_HLSLI
 #define UNX_FOG_HLSLI
 

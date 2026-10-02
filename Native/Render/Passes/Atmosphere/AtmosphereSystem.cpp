@@ -293,9 +293,17 @@ TextureDesc desc(const char* name, uint32_t w, uint32_t h, uint16_t d, D3D12_RES
 }
 } // namespace
 
+float aerialStartM(const QualityConfig& q)
+{
+    const double start = q.has("atmosphere.aerial_start_m") ? q.number("atmosphere.aerial_start_m") : 100.0;
+    if (!(start >= 0 && start <= 1.0e6)) fail("atmosphere.aerial_start_m in [0, 1e6] m");
+    return (float)start;
+}
+
 AtmosphereParams makeParams(const scene::Atmosphere& a, const QualityConfig& q, uint32_t mainHeight)
 {
     AtmosphereParams p{};
+    p.viewStartM = aerialStartM(q);
     p.bottomRadius = a.bottomRadius;
     p.topRadius = a.topRadius;
     p.rayleighScaleHeight = a.rayleighScaleHeight;
@@ -492,19 +500,20 @@ void record(FramePassContext& fc)
     const scene::Scene* src = fc.scene.source();
     const scene::Atmosphere atm = src ? src->atmosphere : scene::Atmosphere{};
     AtmosphereParams p = makeParams(atm, fc.quality, fc.frame.mainView.height);
-    cloudsPrepare(fc, p.clouds);  // B5: the cloud layer's SRVs in the record (0 without clouds)
+    cloudsPrepare(fc, p.clouds);  // B5: the cloud layer's record in the atmosphere's (0 without clouds)
 
     // atmosphere.rebuild_every_frame (measurement only): the transmittance LUT and the J_ms table are rebuilt every frame,
     // so a gate times the build (it otherwise runs only when the medium changes).
     const bool rebuildEveryFrame = fc.quality.integer("atmosphere.rebuild_every_frame") != 0;
     if (rebuildEveryFrame && s.valid) s.lutPending = true;
-    // Only the record's cloud words changed (clouds turned on or off, the view resized): the record row is rewritten and
-    // the LUTs stay.
+    // Only the record's cloud word or the air's start changed (clouds turned on or off, the view resized, a test's
+    // override): the record row is rewritten and the LUTs stay.
     bool recordOnly = false;
     if (s.valid && std::memcmp(&p, &s.params, sizeof p) != 0)
     {
         AtmosphereParams a = p, b = s.params;
-        a.clouds[0] = a.clouds[1] = b.clouds[0] = b.clouds[1] = 0;
+        a.clouds = b.clouds = 0;
+        a.viewStartM = b.viewStartM = 0;
         recordOnly = std::memcmp(&a, &b, sizeof a) == 0;
     }
     if (recordOnly)

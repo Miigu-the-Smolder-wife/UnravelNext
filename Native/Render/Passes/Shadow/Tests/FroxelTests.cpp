@@ -15,6 +15,11 @@
 //  4. the air perspective (atmosphereAirView = atmosphereAerial + sun illuminance, no casters or lights) at arbitrary
 //     (uv, depth) against the double-precision atmosphere reference along the pixel's own ray (AtmosphereReference.h);
 //  5. D3D12 debug layer clean;
+//  8. the air's start (atmosphere.aerial_start_m, 100 m by default): sections 2 - 7 run with the start at 0 (their
+//     references integrate from the camera, with lights and casters within 60 m of it); section 8 runs with the file's
+//     start and compares every node of sampled tile rays against the reference integrated slice by slice with each
+//     slice's share past the start (airNearScale), and the nodes before the start against no air;
+// Every check's line starts with its section, and the run ends with the failed checks per section.
 //  7. particle media (E's volumeSlices; synthetic, MediaSlices.hlsl): the air volume with media against the air-only
 //     volume of the same view composed with them on the CPU (uniform mixture per slice: L = air g(ta + tp) / g(ta) +
 //     S_p g(ta + tp) / g(tp), optical depth ta + tp), node by node; the sky correction (source' - air e^-(tp to far after
@@ -244,12 +249,25 @@ int main(int argc, char** argv)
         // shadow slots
         tf.quality.applyOverride("atmosphere.froxels.sort_head_for_slots_only=false");
         for (const std::string& o : overrides) tf.quality.applyOverride(o);
+        // The air's start (atmosphere.aerial_start_m; AtmosphereCommon.hlsli airNearScale): the node-by-node references
+        // of sections 2, 3, 4 and 7 integrate from the camera on, with their lights and casters within 60 m of it. They
+        // run with the start at 0 - the integration itself, slice for slice; section 8 checks the file's start.
+        const double fileStart = tf.quality.number("atmosphere.aerial_start_m");
+        tf.quality.applyOverride("atmosphere.aerial_start_m=0");
         TestRaster raster(tf);
         raster.install();
         int failures = 0;
+        // (the section a check belongs to: printed with every check, and counted for the summary at the end)
+        std::string section = "0 setup";
+        std::vector<std::pair<std::string, int>> sectionFailures;
         auto report = [&](bool ok, const char* what, double value, double limit) {
-            logf("%-66s %.4g (limit %.4g) %s\n", what, value, limit, ok ? "ok" : "FAIL");
-            if (!ok) ++failures;
+            logf("[%s] %-66s %.4g (limit %.4g) %s\n", section.c_str(), what, value, limit, ok ? "ok" : "FAIL");
+            if (sectionFailures.empty() || sectionFailures.back().first != section) sectionFailures.push_back({ section, 0 });
+            if (!ok)
+            {
+                ++failures;
+                ++sectionFailures.back().second;
+            }
         };
 
         scene::Scene base;
@@ -359,6 +377,7 @@ int main(int argc, char** argv)
         auto uni = [&](float a, float b) { return std::uniform_real_distribution<float>(a, b)(rng); };
 
         // ---- 1. Lists.
+        section = "1 lists";
         {
             scene::Scene sc = base;
             sc.sun.direction = normalize(float3{ 0.3f, 0.8f, 0.2f });
@@ -508,6 +527,7 @@ int main(int argc, char** argv)
             report(disorder == 0, "ordered heads out of importance order (entries)", disorder, 0);
         }
 
+        section = "2 local lights in the air";
         // ---- 2. Local lights in the air (sun below the horizon: no sun term); then the same lights casting shadows (their
         //         VSM shadows their air: the roof above them cuts their glow above it).
 #if defined(FROXEL_TEST_LIGHT_FUNCTIONS)
@@ -908,6 +928,7 @@ int main(int argc, char** argv)
             report(sumRef > 0 && sumErr / std::max(sumRef, 1e-30) < 0.03, (std::string(label) + ": shadowed air in-scattering vs reference (mean rel.)").c_str(),
                    sumErr / std::max(sumRef, 1e-30), 0.03);
         };
+        section = "3 sun shadows in the air (roof)";
         {
             scene::Scene sc = base;  // roof 24 x 16 m at 7 m, sun high
             sc.sun.direction = normalize(float3{ 0.35f, 0.85f, -0.4f });
@@ -915,6 +936,7 @@ int main(int argc, char** argv)
             open.instances.resize(1);  // ground only
             airShadows(sc, open, boxes, 400, 256, 4, "roof");
         }
+        section = "3 sun shadows in the air (ridge)";
         {
             // A ridge 2 km wide and 800 m high, 3 km ahead; low sun behind it: its shadow fills the air 0.3 - 3 km away
             // (god rays against the sun, where only the coarse clipmap levels reach).
@@ -936,6 +958,7 @@ int main(int argc, char** argv)
             const std::vector<Box> ridge = { { { 0, -0.05f, 0 }, { 10000, 0.05f, 10000 } }, { { 0, 400, 3000 }, { 1000, 400, 100 } } };
             airShadows(sc, open, ridge, 6000, 128, 6, "ridge 3 km");
 
+            section = "6 reader bound";
             // ---- 6. Reader bound: production integrates only the slices a reader reaches (FroxelIntegrate.hlsl); every
             //         node a surface pixel of the 3 x 3 tile neighbourhood reads, and the sky correction of tiles with
             //         sky around them, must be the same bits as with every slice integrated.
@@ -1008,6 +1031,7 @@ int main(int argc, char** argv)
             report(skyCompared > 10 && skyDiffering == 0, "reader bound: sky corrections equal every-slice integration (bits)", skyDiffering, 0);
         }
 
+        section = "7 particle media";
         // ---- 7. Particle media in the air volume (FroxelIntegrate.hlsl, E's volumeSlices): the volume with synthetic
         //         media against the air-only volume composed with them on the CPU.
         {
@@ -1134,6 +1158,7 @@ int main(int argc, char** argv)
             report(worstMedia < 2e-3, "media: optical depth to far_m for sky pixels (rel.)", worstMedia, 2e-3);
         }
 
+        section = "4 air perspective";
         // ---- 4. Air perspective at arbitrary (uv, depth) vs the atmosphere reference (no casters, no lights).
         {
             scene::Scene sc;
@@ -1305,11 +1330,78 @@ int main(int argc, char** argv)
             report(worstL < 2e-2, "air in-scattering, all depths to 30 km (rel.)", worstL, 2e-2);
             report(worstT < 1e-2, "air transmittance, all depths to 30 km (rel.)", worstT, 1e-2);
             report(worstE < 2e-3, "sun illuminance at the surface (rel.)", worstE, 2e-3);
+
+            // ---- 8. The air's start (atmosphere.aerial_start_m; AtmosphereCommon.hlsli airNearScale): the sections above
+            //         ran with the start at 0. Here the file's start, in this section's scene (no casters, no lights):
+            //         each slice's air is its coefficients x the share of its segment past the start (1e-6 before it), so
+            //         the reference integrates slice by slice along the tile-centre ray with that scale and is compared
+            //         node by node - no lookup between tiles or nodes is involved. The limits are section 4's (in-
+            //         scattering floor 1e-6 per unit illuminance). Nodes whose slices end before the start hold no air:
+            //         their optical depth against the same path's with the air from the camera on.
+            section = "8 air start";
+            if (fileStart > 0)
+            {
+                tf.quality.applyOverride("atmosphere.aerial_start_m=" + std::to_string(fileStart));
+                run(sc, 1);
+                tf.quality.applyOverride("atmosphere.aerial_start_m=0");
+                double nearL8 = 0, worstL8 = 0, nearT8 = 0, worstT8 = 0, worstBefore = 0;
+                uint32_t nodes8 = 0, before8 = 0, past8 = 0;
+                const ref::D3 cam8 = d3(grid.view.position);
+                for (uint32_t ty = 2; ty < fg.gridY; ty += 9)
+                    for (uint32_t tx = 3; tx < fg.gridX; tx += 13)
+                    {
+                        const ref::D3 ray = grid.tileRay(tx, ty);
+                        const double toRay = std::sqrt(ref::dot(ray, ray));
+                        const ref::D3 dir = ray * (1 / toRay);
+                        ref::D3 L8{}, T8{ 1, 1, 1 };
+                        double fullTau = 0;  // (green) the path's optical depth with the air from the camera on
+                        for (uint32_t nn = 1; nn <= fg.slices; ++nn)
+                        {
+                            const double t0 = grid.node(nn - 1) * toRay, t1 = grid.node(nn) * toRay;
+                            const double scale = std::max(std::clamp((t1 - fileStart) / std::max(t1 - t0, 1e-6), 0.0, 1.0), 1e-6);
+                            ref::D3 sliceL, sliceT;
+                            ref::aerial(model, cam8 + dir * t0, dir, t1 - t0, sun, psi, sliceL, sliceT, 96, scale);
+                            L8 = L8 + T8 * sliceL;
+                            T8 = T8 * sliceT;
+                            fullTau += -std::log(sliceT.y) / scale;
+                            const ref::D3 gL = nodeOf(lastVolume, tx, ty, nn) * (1.0 / sc.sun.illuminance), gTau = nodeOf(lastVolume, tx, ty, nn, 1);
+                            const ref::D3 gT{ std::exp(-gTau.x), std::exp(-gTau.y), std::exp(-gTau.z) };
+                            const double eL = relErr(gL, L8, 1e-6), eT = relErr(gT, T8, 1e-6);
+                            ++nodes8;
+                            worstL8 = std::max(worstL8, eL);
+                            worstT8 = std::max(worstT8, eT);
+                            if (grid.node(nn) <= 700)
+                            {
+                                nearL8 = std::max(nearL8, eL);
+                                nearT8 = std::max(nearT8, eT);
+                            }
+                            if (t1 <= fileStart)
+                            {
+                                ++before8;
+                                worstBefore = std::max(worstBefore, gTau.y / std::max(fullTau, 1e-30));
+                            }
+                            else ++past8;
+                            if (eL > 2e-2 || eT > 1e-2 || (debug && (int)tx == debugTile[0] && (int)ty == debugTile[1]))
+                                logf("  air start: tile (%u,%u) node %u t %.2f..%.2f m scale %.4g: L gpu %.4e %.4e %.4e ref %.4e %.4e %.4e  T gpu %.6f ref %.6f\n", tx, ty,
+                                     nn, t0, t1, scale, gL.x, gL.y, gL.z, L8.x, L8.y, L8.z, gT.y, T8.y);
+                        }
+                    }
+                logf("air start %.6g m: %u nodes of the sampled tile rays (%u in slices that end before the start, %u past it)\n", fileStart, nodes8, before8, past8);
+                report(before8 > 20 && past8 > 100, "air start: nodes on both sides of the start (fewest)", std::min(before8, past8), 20);
+                report(worstBefore <= 1e-4, "air start: optical depth before the start / the air from the camera on", worstBefore, 1e-4);
+                report(nearL8 < 1e-2, "air start: in-scattering nodes, depth <= 700 m (rel.)", nearL8, 1e-2);
+                report(nearT8 < 1e-4, "air start: transmittance nodes, depth <= 700 m (rel.)", nearT8, 1e-4);
+                report(worstL8 < 2e-2, "air start: in-scattering nodes, all depths (rel.)", worstL8, 2e-2);
+                report(worstT8 < 1e-2, "air start: transmittance nodes, all depths (rel.)", worstT8, 1e-2);
+            }
+            else logf("air start: atmosphere.aerial_start_m is 0 in this run - nothing to compare\n");
         }
 
+        section = "5 error bits";
         report(shadow::stats(tf.trackState).errorBitsSeen == 0, "S error bits (INTERFACES 3.6: a shader loop at its hard cap)",
                shadow::stats(tf.trackState).errorBitsSeen, 0);
         if (debugLayer) logf("D3D12 debug layer: enabled (errors abort the run)\n");
+        section = "1b FX particle lights";
         // ---- 1b (run last: section 2's largest-node check depends on the frames run before it, S_STATUS 10). FX particle
         // lights (A3, INTERFACES v1.79): gpu::Light point records after the scene lights, written by a
         // copy as the FX module's pass would (FrameResources::fxLights / fxLightCount); the lists take them like scene lights
@@ -1441,6 +1533,9 @@ int main(int argc, char** argv)
             if (!tf.gpuScene.setFxLightCapacity(0)) fail("FX light capacity 0 refused");
         }
 
+        // which sections disagree
+        for (const auto& [name, failed] : sectionFailures)
+            if (failed) logf("section %s: %d check(s) FAILED\n", name.c_str(), failed);
         logf(failures ? "FAIL (%d)\n" : "PASS\n", failures);
         return failures ? 1 : 0;
     }

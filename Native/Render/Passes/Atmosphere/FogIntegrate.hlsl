@@ -147,7 +147,7 @@ void fogCloudWalkTo(inout FogCloudWalk w, CloudRecord c, CloudFrameLight light, 
 // casters, no local lights -, advanced into the running in-scattering (x the view's exposure) and transmittance.
 void fogSkyAirStep(AtmosphereParams ap, float3 dir, float t0, float t1, inout float3 inScatter, inout float3 transmittance)
 {
-    const float from = max(t0, AIR_VIEW_START_M), len = t1 - from;
+    const float from = max(t0, ap.viewStartM), len = t1 - from;
     if (!(len > 0)) return;
     const float3 sun = normalize(g_sunDirection);
     const float nu = dot(dir, sun);

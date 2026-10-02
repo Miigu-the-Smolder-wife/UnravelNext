@@ -35,8 +35,9 @@ struct AtmosphereParams
     float froxelNearM;
     uint4 multiScatterSize;       // J_ms table (nu, mu_s, mu, r)
     uint2 multiScatterShGrid;     // projection grid: elevation nodes per half, azimuth nodes over [0, pi]
-    uint2 clouds;                 // B5: x = SRV + 1 of the main view's cloud record (CloudCommon.hlsli: layer textures,
-                                  // sun map), 0 = no clouds; y = 0 (CloudSystem.cpp)
+    uint clouds;                  // B5: SRV + 1 of the main view's cloud record (CloudCommon.hlsli: layer textures, sun map),
+                                  // 0 = no clouds (CloudSystem.cpp)
+    float viewStartM;             // where a view's air starts along its rays (atmosphere.aerial_start_m; airNearScale below)
 };
 
 AtmosphereParams airLoadParams(uint rawBuffer)
@@ -64,7 +65,7 @@ AtmosphereParams airParamsFromTexels(uint transmittanceLut)
     a.skyViewSize = asuint(q[7].xy); a.transmittanceSteps = asuint(q[7].z); a.multiScatterDirections = asuint(q[7].w);
     a.multiScatterSteps = asuint(q[8].x); a.skySegments = asuint(q[8].y); a.froxelTilePx = asuint(q[8].z); a.froxelNearM = q[8].w;
     a.multiScatterSize = asuint(q[9]);
-    a.multiScatterShGrid = asuint(q[10].xy); a.clouds = asuint(q[10].zw);
+    a.multiScatterShGrid = asuint(q[10].xy); a.clouds = asuint(q[10].z); a.viewStartM = q[10].w;
     return a;
 }
 
@@ -368,7 +369,8 @@ float3 airGroundIndirect(AtmosphereParams a, uint transmittanceLut, float mus)
 
 // Where a view's atmosphere starts (the reference's aerial perspective start depth: the sky atmosphere component's
 // AerialPespectiveStartDepth, 0.1 km by default; SkyAtmosphere.usf moves the ray's start there and gives nearer pixels
-// no aerial perspective). The air between the camera and anything nearer is not drawn: an interior or the ground at
+// no aerial perspective): atmosphere.aerial_start_m, in the record (AtmosphereParams::viewStartM; 0: the air from the
+// camera on - the froxel tests' node-by-node references integrate that). The air between the camera and anything nearer is not drawn: an interior or the ground at
 // one's feet carries no veil of sun-lit and sky-lit air - the multiple scattering is not reduced by any caster's
 // shadow, so indoors it stayed whole (lobby, 2026-10-02: about 3 nits of blue over 25 m, a third of the picture at
 // EV 4, absent from the path-traced reference).
@@ -376,10 +378,7 @@ float3 airGroundIndirect(AtmosphereParams a, uint transmittanceLut, float mus)
 // the share of the segment past the start; the part before it keeps 1e-6 of the air, so that the air volume's ratios
 // L / (1 - T) stay defined in the near slices (particle media and local lights are stored through them, in the same
 // proportion as before).
-#ifndef AIR_VIEW_START_M
-#define AIR_VIEW_START_M 100.0
-#endif
-float airNearScale(float t0, float len) { return max(saturate((t0 + len - AIR_VIEW_START_M) / max(len, 1e-6)), 1e-6); }
+float airNearScale(float startM, float t0, float len) { return max(saturate((t0 + len - startM) / max(len, 1e-6)), 1e-6); }
 AirCoefficients airScaled(AirCoefficients c, float s)
 {
     c.extinction *= s;
