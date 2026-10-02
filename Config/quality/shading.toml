@@ -160,6 +160,39 @@ post_lens_flare_tint_5 = [0.5, 0.8, 1.0, 0.31]
 post_lens_flare_tint_6 = [0.9, 1.0, 0.8, 0.27]
 post_lens_flare_tint_7 = [1.0, 0.8, 0.4, 0.22]
 post_lens_flare_tint_8 = [0.9, 0.7, 0.7, 0.15]
+# Scene-referred colour grading before the tone curve (Post.cpp gradeLut, PostGradeLut.hlsl; the reference's post process
+# colour grading and its combined LUT, PostProcessCombineLUTs): with any value off its default the grading and the tone
+# curve are baked into one post_grading_lut_size^3 table that the final pass reads once per pixel (rebuilt only when a
+# value changes); at the defaults the curve is evaluated per pixel and the picture is unchanged. A game sets the same
+# values per frame through FrameContext::grading (enabled: its values replace these).
+# Each value is [r, g, b, master]: the master multiplies the three (offset: adds to them). The shadows', midtones' and
+# highlights' values combine with the global ones (products; offsets: sums) and weigh in by the pixel's luma (ACEScg).
+post_grading_temperature = 6500.0                # WhiteTemp: the scene's white the picture is balanced from, K (6500: none)
+post_grading_tint = 0.0                          # WhiteTint: + green, - magenta (1 = 0.05 in CIE 1960 uv)
+post_grading_saturation = [1.0, 1.0, 1.0, 1.0]   # ColorSaturation: about the luma (0: grey)
+post_grading_contrast = [1.0, 1.0, 1.0, 1.0]     # ColorContrast: an exponent about scene grey 0.18
+post_grading_gamma = [1.0, 1.0, 1.0, 1.0]        # ColorGamma: the value to the power 1 / gamma
+post_grading_gain = [1.0, 1.0, 1.0, 1.0]         # ColorGain
+post_grading_offset = [0.0, 0.0, 0.0, 0.0]       # ColorOffset
+post_grading_shadows_saturation = [1.0, 1.0, 1.0, 1.0]     # ColorSaturationShadows .. ColorOffsetShadows
+post_grading_shadows_contrast = [1.0, 1.0, 1.0, 1.0]
+post_grading_shadows_gamma = [1.0, 1.0, 1.0, 1.0]
+post_grading_shadows_gain = [1.0, 1.0, 1.0, 1.0]
+post_grading_shadows_offset = [0.0, 0.0, 0.0, 0.0]
+post_grading_midtones_saturation = [1.0, 1.0, 1.0, 1.0]    # ColorSaturationMidtones .. ColorOffsetMidtones
+post_grading_midtones_contrast = [1.0, 1.0, 1.0, 1.0]
+post_grading_midtones_gamma = [1.0, 1.0, 1.0, 1.0]
+post_grading_midtones_gain = [1.0, 1.0, 1.0, 1.0]
+post_grading_midtones_offset = [0.0, 0.0, 0.0, 0.0]
+post_grading_highlights_saturation = [1.0, 1.0, 1.0, 1.0]  # ColorSaturationHighlights .. ColorOffsetHighlights
+post_grading_highlights_contrast = [1.0, 1.0, 1.0, 1.0]
+post_grading_highlights_gamma = [1.0, 1.0, 1.0, 1.0]
+post_grading_highlights_gain = [1.0, 1.0, 1.0, 1.0]
+post_grading_highlights_offset = [0.0, 0.0, 0.0, 0.0]
+post_grading_shadows_max = 0.09                  # ColorCorrectionShadowsMax: the shadows' values fade out up to this luma
+post_grading_highlights_min = 0.5                # ColorCorrectionHighlightsMin: the highlights' values fade in from this luma ...
+post_grading_highlights_max = 1.0                # ColorCorrectionHighlightsMax: ... and weigh fully from this one
+post_grading_lut_size = 32                       # r.LUT.Size: the combined table's edge (RGBA16F; 32: 0.26 MiB)
 # Display rendering (U2): "film" (default; ShadingCommon.hlsli shFilm: filmic toe and shoulder, highlights roll off to
 # white, scene grey 0.18 stays 0.18) or "neutral" (Khronos PBR Neutral: base colours kept, flatter).
 post_tone_curve = "film"

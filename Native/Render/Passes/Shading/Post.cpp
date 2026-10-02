@@ -3,7 +3,9 @@
 // output: scene colour fringe and sharpen (shading.post_fringe, post_sharpen: the reference's tonemapper terms) -> lens
 // PSF (bloom: a shift-invariant, energy-conserving pyramid kernel, the PSF's tail holding the fraction
 // shading.post_bloom_strength of the energy) -> image-based lens flares (shading.post_lens_flare: PostFlare.hlsl, from
-// the bloom chain's 1/8 level) -> natural vignetting (cos^4 of the field angle) -> tone curve (PBR Neutral,
+// the bloom chain's 1/8 level) -> natural vignetting (cos^4 of the field angle) -> [scene-referred colour grading
+// (shading.post_grading_*, FrameContext::grading): baked with the curve into the combined LUT, gradeLut below, read
+// once in place of the curve] -> tone curve (PBR Neutral,
 // INTERFACES 8.4) -> grading LUT (33^3 .cube, after the curve) -> film grain (deterministic hash, after the curve) ->
 // triangular dither of the 10-bit output -> sRGB. With every term off the chain is not recorded and the writers encode
 // directly (gates and reference comparisons are unchanged: the quality keys default to off). An HDR display
@@ -232,6 +234,168 @@ uint32_t asUint(float f)
     std::memcpy(&u, &f, 4);
     return u;
 }
+
+// The frame's colour grading: the game's (FrameContext::grading) or the quality file's shading.post_grading_*.
+ColorGradingDesc gradingOf(FramePassContext& fc)
+{
+    if (fc.frame.grading.enabled) return fc.frame.grading;
+    const QualityConfig& q = fc.quality;
+    ColorGradingDesc g;
+    auto num = [&](const char* k, float d) { return q.has(k) ? (float)q.number(k) : d; };
+    g.temperature = num("shading.post_grading_temperature", 6500.0f);
+    g.tint = num("shading.post_grading_tint", 0.0f);
+    g.shadowsMax = num("shading.post_grading_shadows_max", 0.09f);
+    g.highlightsMin = num("shading.post_grading_highlights_min", 0.5f);
+    g.highlightsMax = num("shading.post_grading_highlights_max", 1.0f);
+    struct Keys
+    {
+        ColorGradingRange* range;
+        const char* saturation;
+        const char* contrast;
+        const char* gamma;
+        const char* gain;
+        const char* offset;
+    };
+    const Keys keys[4] = {
+        { &g.global, "shading.post_grading_saturation", "shading.post_grading_contrast", "shading.post_grading_gamma", "shading.post_grading_gain",
+          "shading.post_grading_offset" },
+        { &g.shadows, "shading.post_grading_shadows_saturation", "shading.post_grading_shadows_contrast", "shading.post_grading_shadows_gamma",
+          "shading.post_grading_shadows_gain", "shading.post_grading_shadows_offset" },
+        { &g.midtones, "shading.post_grading_midtones_saturation", "shading.post_grading_midtones_contrast", "shading.post_grading_midtones_gamma",
+          "shading.post_grading_midtones_gain", "shading.post_grading_midtones_offset" },
+        { &g.highlights, "shading.post_grading_highlights_saturation", "shading.post_grading_highlights_contrast", "shading.post_grading_highlights_gamma",
+          "shading.post_grading_highlights_gain", "shading.post_grading_highlights_offset" },
+    };
+    for (const Keys& k : keys)
+    {
+        readVector(q, k.saturation, k.range->saturation, 4);
+        readVector(q, k.contrast, k.range->contrast, 4);
+        readVector(q, k.gamma, k.range->gamma, 4);
+        readVector(q, k.gain, k.range->gain, 4);
+        readVector(q, k.offset, k.range->offset, 4);
+    }
+    return g;
+}
+
+// Nothing to grade: every value at its default (the picture is the curve's alone and the chain evaluates it per pixel).
+bool gradingNeutral(const ColorGradingDesc& g)
+{
+    if (g.temperature != 6500.0f || g.tint != 0.0f) return false;
+    for (const ColorGradingRange* r : { &g.global, &g.shadows, &g.midtones, &g.highlights })
+        for (int i = 0; i < 4; ++i)
+            if (r->saturation[i] != 1 || r->contrast[i] != 1 || r->gamma[i] != 1 || r->gain[i] != 1 || r->offset[i] != 0) return false;
+    return true;
+}
+
+// The combined grading LUT (PostGradeLut.hlsl): a persistent N^3 table, rebuilt in the frame whose inputs differ from
+// the ones it was built from.
+struct GradeState
+{
+    Device* device = nullptr;
+    ComPtr<ID3D12Resource> lut;
+    uint32_t size = 0;
+    std::vector<float> key;  // the inputs of the table as it is
+    ~GradeState()
+    {
+        if (device && lut) device->deferRelease(lut);
+    }
+    void ensure(Device& d, uint32_t n)
+    {
+        if (lut && size == n) return;
+        device = &d;
+        if (lut) d.deferRelease(lut);
+        D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+        D3D12_RESOURCE_DESC1 desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+        desc.Width = desc.Height = n;
+        desc.DepthOrArraySize = (UINT16)n;
+        desc.MipLevels = 1;
+        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        desc.SampleDesc.Count = 1;
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
+                                                IID_PPV_ARGS(lut.ReleaseAndGetAddressOf())),
+              "M combined grading LUT");
+        lut->SetName(L"M combined grading LUT");
+        size = n;
+        key.clear();
+    }
+};
+
+// The combined LUT of this frame's grading under the chain's curve and display peak; its build passes when it is stale.
+TextureRef gradeLut(FramePassContext& fc, const ColorGradingDesc& grade, uint32_t curve, float peak, D3D12_GPU_VIRTUAL_ADDRESS cb, uint32_t& sizeOut)
+{
+    const int64_t size = fc.quality.has("shading.post_grading_lut_size") ? fc.quality.integer("shading.post_grading_lut_size") : 32;
+    if (size < 8 || size > 64) fail("shading.post_grading_lut_size %lld: in [8, 64]", (long long)size);
+    if (!(grade.temperature >= 1667 && grade.temperature <= 25000) || !(grade.shadowsMax > 0) || !(grade.highlightsMax > grade.highlightsMin))
+        fail("colour grading: temperature in [1667, 25000] K, shadows max > 0, highlights max > highlights min");
+    const uint32_t n = (uint32_t)size;
+    sizeOut = n;
+    RenderGraph& g = fc.graph;
+    GradeState& s = fc.state<GradeState>("M.post.grade");
+    s.ensure(fc.device, n);
+    const TextureDesc desc{ "m.post.grade lut", n, n, (uint16_t)n, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D };
+    const TextureRef lut = g.importTexture(s.lut.Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    std::vector<float> key = { grade.temperature, grade.tint, grade.shadowsMax, grade.highlightsMin, grade.highlightsMax, (float)curve, peak };
+    const ColorGradingRange* ranges[4] = { &grade.global, &grade.shadows, &grade.midtones, &grade.highlights };
+    for (const ColorGradingRange* r : ranges)
+        for (const float* v : { r->saturation, r->contrast, r->gamma, r->gain, r->offset }) key.insert(key.end(), v, v + 4);
+    if (key == s.key) return lut;
+    s.key = key;
+    // linear Rec.709 -> white-balanced ACEScg (AP1): the Bradford adaptation of the grading's white to D65 (the tint in
+    // the reference's unit: 1 = 0.05 Duv), then ShadingCommon.hlsli shFilm's Rec.709 -> AP1
+    // (6500 K with no tint is the grading's neutral white: no adaptation)
+    float wb[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    if (grade.temperature != 6500.0f || grade.tint != 0.0f) whiteBalanceMatrix(grade.temperature, grade.tint * 0.05f, wb);
+    const float toAp1[9] = { 0.6130973f, 0.3395229f, 0.0473793f, 0.0701942f, 0.9163556f, 0.0134526f, 0.0206156f, 0.1095698f, 0.8698151f };
+    float toWorking[9];
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) toWorking[i * 3 + j] = toAp1[i * 3] * wb[j] + toAp1[i * 3 + 1] * wb[3 + j] + toAp1[i * 3 + 2] * wb[6 + j];
+    TextureDesc workingDesc = desc;
+    workingDesc.name = "m.post.grade working";
+    const TextureRef working = g.createTexture(workingDesc);
+    ID3D12PipelineState* pso = fc.shaders.compute("Passes/Shading/PostGradeLut");
+    const ColorGradingRange global = grade.global;
+    const float shadowsMax = grade.shadowsMax, highlightsMin = grade.highlightsMin, highlightsMax = grade.highlightsMax;
+    for (uint32_t mode = 0; mode < 3; ++mode)
+    {
+        const ColorGradingRange range = *ranges[1 + mode];
+        g.addPass("m.post.grade.range", QueueType::Graphics, [&](PassBuilder& b) { b.use(working, Use::UavCompute); },
+                  [=](PassContext& c) {
+                      uint32_t k[40] = { c.uav(working), 0xFFFFFFFFu, n, mode };
+                      for (int i = 0; i < 3; ++i)
+                      {
+                          for (int j = 0; j < 3; ++j) k[4 + 4 * i + j] = asUint(toWorking[i * 3 + j]);
+                          // the range's values with the global ones: r, g, b times the masters; offsets add
+                          k[16 + i] = asUint(range.saturation[i] * global.saturation[i] * range.saturation[3] * global.saturation[3]);
+                          k[20 + i] = asUint(range.contrast[i] * global.contrast[i] * range.contrast[3] * global.contrast[3]);
+                          k[24 + i] = asUint(1.0f / std::max(range.gamma[i] * global.gamma[i] * range.gamma[3] * global.gamma[3], 1e-3f));
+                          k[28 + i] = asUint(range.gain[i] * global.gain[i] * range.gain[3] * global.gain[3]);
+                          k[32 + i] = asUint(range.offset[i] + global.offset[i] + range.offset[3] + global.offset[3]);
+                      }
+                      k[36] = asUint(shadowsMax);
+                      k[37] = asUint(highlightsMin);
+                      k[38] = asUint(highlightsMax);
+                      c.cmd->SetPipelineState(pso);
+                      c.bindFrameConstants(cb);
+                      c.computeConstants(k, 40);
+                      c.cmd->Dispatch((n + 3) / 4, (n + 3) / 4, (n + 3) / 4);
+                  });
+    }
+    g.addPass("m.post.grade.curve", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(working, Use::UavCompute);
+                  b.use(lut, Use::UavCompute);
+              },
+              [=](PassContext& c) {
+                  const uint32_t k[8] = { c.uav(working), c.uav(lut), n, 3u, curve, asUint(peak), 0, 0 };
+                  c.cmd->SetPipelineState(pso);
+                  c.bindFrameConstants(cb);
+                  c.computeConstants(k, 8);
+                  c.cmd->Dispatch((n + 3) / 4, (n + 3) / 4, (n + 3) / 4);
+              });
+    return lut;
+}
 } // namespace
 
 bool translucentActive(FramePassContext&, const ViewResources& view)
@@ -261,7 +425,8 @@ bool postActive(FramePassContext& fc, const ViewResources& view)
     if (exposureSnapping(fc)) return true;  // a snap frame's exposure correction (Exposure.cpp) is applied by the chain
     const PostParams p = params(fc.quality);
     // (the shading kernels' own display encoding is the film curve: another curve needs the chain)
-    return p.bloom > 0 || p.vignette > 0 || p.grain > 0 || !p.lut.empty() || p.curve != 0 || p.localExposure || p.sharpen > 0 || p.fringe > 0 || p.flare.on;
+    return p.bloom > 0 || p.vignette > 0 || p.grain > 0 || !p.lut.empty() || p.curve != 0 || p.localExposure || p.sharpen > 0 || p.fringe > 0 || p.flare.on ||
+           !gradingNeutral(gradingOf(fc));
 }
 
 TextureRef postTarget(FramePassContext& fc, const ViewResources& view)
@@ -470,6 +635,13 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
     const TextureRef output = view.color;
     const uint32_t lutSrv = lut ? lut->srv : 0xFFFFFFFFu, frame = (uint32_t)fc.frame.frameIndex;
     const float peak = fc.frame.displayPeak;  // 0: SDR
+    // scene-referred colour grading: with any value off its default, the combined LUT in place of the curve
+    TextureRef grade;
+    uint32_t gradeSize = 0;
+    {
+        const ColorGradingDesc grading = gradingOf(fc);
+        if (!gradingNeutral(grading)) grade = gradeLut(fc, grading, p.curve, peak, cb, gradeSize);
+    }
     const BufferRef correction = view.exposureCorrection;  // a snap frame's own metering (Exposure.cpp)
     float wb[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
     const uint32_t wbOn = whiteBalanceOn(p, fc.frame, wb) ? 1u : 0u;  // v1.91 (PostFinal P[3].y, P[4..6])
@@ -485,6 +657,7 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
                       b.use(le.blurred, Use::SrvCompute);
                   }
                   if (flare.valid()) b.use(flare, Use::SrvCompute);
+                  if (grade.valid()) b.use(grade, Use::SrvCompute);
               },
               [=](PassContext& c) {
                   uint32_t k[48] = { c.srv(hdr), bloom.valid() ? c.srv(bloom) : 0xFFFFFFFFu, c.uav(output), lutSrv,
@@ -506,8 +679,9 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
                   k[42] = asUint(fringeG);
                   k[43] = asUint(p.fringeStart);
                   k[44] = flare.valid() ? c.srv(flare) : 0xFFFFFFFFu;  // P[11]: lens flares, the combined grading LUT
-                  k[45] = 0xFFFFFFFFu;
-                  k[46] = k[47] = 0;
+                  k[45] = grade.valid() ? c.srv(grade) : 0xFFFFFFFFu;
+                  k[46] = gradeSize;
+                  k[47] = 0;
                   c.cmd->SetPipelineState(final);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 48);
