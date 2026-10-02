@@ -5,7 +5,7 @@
 #   2  the four game scenes: cut pictures at 1080p with the gi and direct layers (which stage a cut frame's blotch is in),
 #      timings at 1080p, 1440p and 4K;
 #   3  scenegen's scenes (outdoors, night, forest, water, interior): cut pictures and timings at 1080p, timings at 4K;
-#   4  variants, in groups (-Variants high,fog,fogab,far,clouds,nopass,grids; default all): the high tier's timings; the
+#   4  variants, in groups (-Variants high,fog,fogab,far,clouds,thin,nopass,grids; default all): the high tier's timings; the
 #      height fog on (pictures, timings) and each of its parts off in turn; the far field off; the cloud layer with and
 #      without its temporal accumulation; the frame without per-pass timestamps; the view-angle grids against pixel-sized.
 # The summary (<out>\summary.txt): the furnace sheets, every timing run's GPU frame and largest pass groups, the gates
@@ -15,7 +15,7 @@ param(
     [string]$Out = "Cache\Ue6Batch",
     [string[]]$Skip = @(),
     [string]$GeneratedScenes = "city_block,forest_thin,waterside,interior,city_night,ridge_sunset,forest_combat",
-    [string[]]$Variants = @("high", "fog", "fogab", "far", "clouds", "nopass", "grids")
+    [string[]]$Variants = @("high", "fog", "fogab", "far", "clouds", "thin", "nopass", "grids")
 )
 $ErrorActionPreference = "Stop"
 $Skip = @($Skip | ForEach-Object { $_ -split "," } | Where-Object { $_ })
@@ -104,6 +104,14 @@ if ($Skip -notcontains "variants") {
         Final "clouds without temporal accumulation (ridge, city block)" "clouds_notemporal" @("-NoGame", "-Generated", "ridge_sunset,city_block", "-Resolutions", "1080p",
             "-GateArgs", "--clouds 0.5", "-Set", "atmosphere.clouds.temporal=false")
         Final "clouds 4K (ridge timings)" "clouds" @("-NoGame", "-Generated", "ridge_sunset", "-Resolutions", "4K", "-SkipPictures", "-GateArgs", "--clouds 0.5")
+    }
+    if ($Variants -contains "thin") {
+        # thin geometry: the LOD that keeps the area off (the clusters as they were), and the fuller clustering of
+        # disconnected geometry on top of it (visibility.toml: one hierarchy per grass clump instead of one per orientation)
+        Final "thin geometry LOD off (forests, lake)" "thin_off" @("-NoGame", "-Generated", "forest_thin,forest_combat,waterside", "-Resolutions", "1080p",
+            "-Set", "visibility.lod_thin_preserve_area=false")
+        Final "fuller clusters of disconnected geometry (forests, lake)" "thin_fill" @("-NoGame", "-Generated", "forest_thin,forest_combat,waterside", "-Resolutions", "1080p",
+            "-Set", "visibility.cluster_vertices=128,visibility.cluster_min_triangles=64,visibility.sheet_orientation_min_width=0.016")
     }
     if ($Variants -contains "nopass") {
         Final "the frame without per-pass timestamps (lobby 1080p, 4K)" "nopass" @("-Only", "bt_lobby", "-Resolutions", "1080p,4K", "-SkipPictures", "-GateArgs", "--no-pass-timestamps")

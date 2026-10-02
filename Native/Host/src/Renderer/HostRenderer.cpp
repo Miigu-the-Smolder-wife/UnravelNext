@@ -171,7 +171,11 @@ SceneCommitInfo HostRenderer::commit()
     SceneCommitInfo info;
     for (const scene::Mesh& m : m_scene.meshes) info.triangles += m.indices.size() / 3;
 #if UNX_HOST_HAS_CLUSTERBUILDER
-    ClusterData clusters = clusterbuilder::build(m_scene, clusterbuilder::Settings::fromQuality(m_quality));
+    // (the builder's own vertices - enlarged pieces of thin geometry, visibility.lod_thin_preserve_area - go into the
+    // scene's meshes before the upload; a scene is committed once)
+    clusterbuilder::LodVertices lodVertices;
+    ClusterData clusters = clusterbuilder::build(m_scene, clusterbuilder::Settings::fromQuality(m_quality), nullptr, &lodVertices);
+    lodVertices.appendTo(m_scene);
     info.clusters = clusters.clusters.size();
 #else
     fail("this build has no cluster builder (track V): build with Tools/CI/Build.ps1 -Track I");

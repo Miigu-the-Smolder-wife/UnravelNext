@@ -739,9 +739,19 @@ int main(int argc, char** argv)
             }
             return cameraAt(s, moving || pathTime >= 0 || cutAt != UINT64_MAX ? !s.paths.empty() && s.paths[0].keys.size() >= 2 : false, t, cameraName);
         };
-        ClusterData clusters = clusterbuilder::build(s, clusterbuilder::Settings::fromQuality(quality));
+        // (the builder's own vertices - enlarged pieces of thin geometry, visibility.lod_thin_preserve_area - go into the
+        // scene's meshes before anything reads vertices through cluster indices)
+        clusterbuilder::LodVertices lodVertices;
+        clusterbuilder::BuildStats buildStats;
+        ClusterData clusters = clusterbuilder::build(s, clusterbuilder::Settings::fromQuality(quality), &buildStats, &lodVertices);
         logf("scene %s (%s), %zu instances, %zu clusters, camera %s\n", sceneName.c_str(), scene::contentHash(s).substr(0, 16).c_str(), s.instances.size(),
              clusters.clusters.size(), moving ? "path 0 (moving)" : (cameraName.empty() ? "0 (static)" : cameraName.c_str()));
+        {
+            size_t thinned = 0, made = 0;
+            for (const clusterbuilder::MeshStats& ms : buildStats.meshes) thinned += ms.thinnedGroups, made += ms.lodVertices;
+            if (made) logf("thin geometry LOD: %zu groups thinned with their area kept, %zu vertices made\n", thinned, made);
+        }
+        lodVertices.appendTo(s);
         Device device({});
         std::vector<CaptureSlot> captures;  // --capture (last frame wins) or --capture-frames, per layer
         ShaderLibrary shaders(device, executableDirectory() / "shaders");
