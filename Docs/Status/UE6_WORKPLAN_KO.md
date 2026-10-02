@@ -124,9 +124,50 @@
 - 테스트: `coverage_layer_is_exact`의 기존 두 구성은 `coverage_depth_buckets = 1`(전부 저장)로 고정했고, 버킷 구성을 하나 더했다: 기대 fragment가 없어도 되는 조건은 "그 픽셀의 저장된 불투명 레코드 가운데 그보다 뒤가 아닌 것들의 마스크 합집합이 가득"뿐이다. 돌리지 않았다. 대역 B 클러스터가 64개 넘는 장면을 쓰는 다른 테스트(S fragment, M 합성)는 살펴보지 않았다.
 - 남은 것: A/B 배치 한 번(스위치 다섯 개 + 통계), 버킷 수 4 대 8, compute 래스터 판정, 무거운 픽셀 경로(정렬 + 라운드)의 같은 재구성, 프리미티브 속성 축소, 4.6의 대역 A 생략.
 
+**(d) Nanite와의 남은 차이 — 소프트웨어 래스터·래스터 빈·압축·스트리밍 (2026-10-03, 브랜치 `w/coverage` 2차) — 코드 작성·빌드 통과, 실행 안 함**
+
+아무것도 GPU에서 돌리지 않았다. 아래의 "같다"는 코드 구성에서 나온 말이고, 시간은 하나도 재지 않았다. 스위치는 모두 꺼진 쪽이 전의 경로다(1·3·4는 기본 꺼짐, 2도 기본 꺼짐).
+
+1. **작은 클러스터의 소프트웨어 래스터** (`visibility.software_raster = false`, `software_raster_max_px = 32`; `Passes/Visibility/RasterSw.hlsli`, `RasterBins.hlsl`, `VisRasterSw.hlsl`, `VisSwResolve.ps.hlsl`, `DepthRasterSw.hlsl`, `DepthSwMerge.ms/.ps.hlsl`, `CullClusters.hlsl`, `VisibilityTrack.cpp`).
+   - 삼각형 셋업(`RasterSw.hlsli`): 정점을 1/256 px로 스냅, 정수 edge 함수, top-left 규칙, 픽셀 중심, 깊이는 중심에서의 평면 값. 같은 스냅 정점에 대해 하드웨어가 덮는 픽셀과 같다. 클러스터 직사각형 상한 64 px(정수 범위), 삼각형 루프는 변 72 px에서 끊고 오류 비트(0x400)를 세운다.
+   - **주 뷰**: 분류는 컬 뒤의 래스터 빈 패스(2번)가 한다 — 알파 테스트 없는 리스트, 혼합 시트·스키닝·뷰 모델·지형 패치가 아닌 인스턴스, 원근 뷰(클립 평면 없음), 구의 상자가 near 앞에 있고 직사각형이 한 변 `max_px` 이하. 그 항목들은 정렬된 리스트의 뒤쪽 한 구간이 되고 `VisRasterSw`가 항목당 64스레드 그룹으로 그린다: 픽셀당 64비트 워드(깊이 비트 << 32 \| vis id)에 원자 max.
+   - **합치는 방법 — 해소 패스로 정했다**: 깊이·vis id·HiZ를 읽는 쪽(재질 해석, 물·반투명 층의 DSV, HiZ 생성, S)이 D32 깊이 텍스처와 R32 vis id 타깃을 필요로 한다. Nanite처럼 하드웨어 픽셀 셰이더도 원자 버퍼에 쓰게 하면 하드웨어 경로가 early-Z를 잃고 모든 독자가 64비트 버퍼를 풀어야 한다. 그래서 하드웨어 경로는 그대로 두고, 풀스크린 삼각형 하나가 워드가 있는 픽셀의 깊이(SV_Depth)와 vis id를 깊이 테스트 GREATER로 쓴다. 비용: 픽셀당 8 B clear(프레임당 1회) + 단계마다 8 B 로드. 소프트웨어 항목이 없는 프레임도 이 고정비를 낸다.
+   - 64비트 원자(`AtomicInt64OnDescriptorHeapResourceSupported`)가 없는 장치와 `debug.deterministic`에서는 켜도 메시 래스터만 돈다.
+   - **그림자 뷰(아틀라스 요청)**: 아틀라스는 깊이 타깃이라 UAV가 없다. 요청마다 설정된 타일 하나에 소프트웨어 페이지(타일 px² × 4 B) 하나를 준다 — 컬 **앞**의 패스가 타일 마스크에서 페이지를 나눠 주고(`DepthRasterSw` MODE 0·1), `CullClusters`가 직사각형이 작고(≤ 2 × 2 타일) 그 아래 설정 타일이 모두 페이지를 가진 클러스터를 따로 된 리스트(`LIST_SW`)에 넣는다(Nanite도 클러스터 컬에서 하드웨어/소프트웨어를 가른다). 컬 뒤에 페이지 clear + 래스터(32비트 원자 max), 요청의 래스터 패스 끝에서 페이지 쿼드를 아틀라스 슬롯에 깊이 테스트 GREATER로 그린다. 요청마다 자기 깊이 타깃에 합치므로 `shadow.vsm.static_separate`의 두 아틀라스 순서(static → statichzb → dynamic → merge → pagemax)가 그대로 맞는다. 페이지 용량은 직전 프레임의 설정 타일 수 × 1.5(바닥 256, 상한 4096); 용량을 넘은 타일의 클러스터는 하드웨어에 남는다(잃는 것 없음). 대상: 픽셀 커널 없음·양면·D32·타일 64~256 px인 요청 — S의 페이지 요청이 모두 해당한다. 요청당 패스 +2.
+   - 통계: `Stats::softwareClusters / softwareTriangles / softwareTiles`, 게이트의 `V software raster` 줄.
+   - 테스트(작성만): `software_raster_matches_hardware`(주 뷰: 정렬은 깊이 비트 동일, 소프트웨어는 깊이가 반올림 차이 안이고 어긋난 픽셀 ≤ 0.01 %), `raster_service_tile_atlas_software`.
+   - **실행이 허용되면 먼저 볼 것**: (a) 디버그 레이어로 두 테스트 — 새 패스의 리소스 상태, 64비트 원자, `PlanarFill.ms` + SV_Depth PSO. (b) 게이트의 `V software raster` 줄로 실제로 넘어간 클러스터·삼각형 수(0이면 분류 조건을 본다). (c) A/B 시간: `v.cull.raster.p1/p2` 대 `sw.raster` + `sw.resolve` + 빈 4패스, 그림자는 `s.vsm.*.raster` 대 `.sw.pages` + `.sw.raster`. (d) 그림: 이음매 — 하드웨어와 소프트웨어 클러스터가 변을 나누는 곳의 구멍·겹침(두 커널의 정점 계산은 별개 컴파일이라 1/256 px 스냅이 갈릴 수 있다), 그림자 아틀라스의 타일 경계.
+2. **대역 A 래스터 빈·깊이 정렬** (`visibility.raster_depth_sort = false`; `RasterBins.hlsl`).
+   - coverage 층 버킷의 구조를 그대로 옮겼다: 컬 단계마다 그 단계가 더한 네 리스트 항목을 키(깊이 빈 256 + 소프트웨어면 256)로 세고(64항목/그룹) → 접두 합(1스레드, 4 × 512) → 리스트와 같은 배치의 사본에 뿌린다. 메시 래스터는 사본을 읽어 하드웨어 항목을 가까운 순으로 그린다. 원래 리스트는 그대로다.
+   - 재질별 빈은 만들지 않았다: 네 리스트가 이미 파이프라인별 빈이고, vis 픽셀 커널은 재질마다 다르지 않다.
+   - 기본 꺼짐으로 둔 이유: 불투명 리스트의 픽셀 커널은 id 하나를 쓰는 것이라 early-Z가 줄여 주는 일이 작다 — 이득이 있다면 알파 테스트 리스트(텍스처 로드)와 쓰기 대역폭이다. 단계마다 패스 4개와 리스트 사본(용량 × 16 B)이 든다.
+   - **먼저 볼 것**: `software_raster_matches_hardware`의 "sorted" 줄(깊이 비트 동일), 그다음 알파 리스트가 큰 장면(숲)에서 `raster.p1` 시간 A/B.
+3. **클러스터 압축** (`visibility.cluster_compression = false`, `cluster_position_step`, `cluster_normal_bits`, `cluster_tangent_bits`, `cluster_uv_bits`; `Tools/ClusterBuilder` `ClusterStream.h/.cpp`, `Passes/Common/ClusterStream.hlsli`, `Deformation.hlsli`, `GpuScene::fill`).
+   - 형식: 이름 붙은 버퍼 `clusterStream` = 머리 4워드 + 클러스터당 레코드 48 B(위치 최솟값·격자 스텝·데이터 오프셋·비트 수·uv 최솟값과 스텝·페이지 2개) + 정점 비트. 프레임 상수의 남은 워드 하나를 썼다(`clusterStream`, SRV + 1).
+   - **위치는 무손실로 했다.** 클러스터마다 정밀도를 LOD 오차에 맞추면 LOD가 다른 이웃 클러스터가 나누는 경계 정점이 서로 다른 값으로 풀려 금이 간다. 그래서 격자는 메시마다 하나(2의 거듭제곱, `cluster_position_step` 이하이자 크기의 1/4096 이하)이고, 쿡이 메시 위치를 그 격자에 먼저 올린다(`clusterbuilder::snapPositions`: 호스트 commit과 RendererGate가 설정이 켜지면 부른다; 최대 반 스텝 = 0.5 mm). 스트림이 푼 위치는 정점 풀의 float와 비트가 같다 → 래스터(스트림), 재질 해석·레이(풀)가 같은 삼각형을 본다. 격자에 없는 메시는 압축하지 않고 로그에 센다. 빌더가 만드는 LOD 정점(얇은 지오메트리)도 격자에 만든다 — 그 설정은 메시 캐시 키에 들어간다. 스트림 자체는 캐시된 계층에서 조립 때 만들므로 캐시 항목에 없다.
+   - 읽는 쪽: `VisRaster.ms`, `DepthRaster.ms`, `VisRasterSw`, `DepthRasterSw`(`deformClusterVertex`). 알파 테스트의 uv는 스트림의 양자화된 값이다(클러스터 uv 범위의 1/8190 이내).
+   - **하지 못한 것**: 재질 해석의 속성 읽기. `loadVertex` 안에서 디코드하게 했더니 `GiTrace`·`ReflectionTraceInline`·`CoverageComposite`가 200 KB 한도를 넘었다(정점 읽기마다 인라인). 그 커널들을 쪼개거나 M의 삼각형 읽기를 한 루프로 모아야 한다 — 다른 작업자의 파일이라 두었다. `loadClusterVertex`(클러스터 번호 + 지역 정점)가 그때 쓸 함수다. coverage 래스터도 풀을 읽는다(레코드의 법선이 양자화로 달라지지 않게). 스트립 색인 없음. 스키닝·모프 메시는 압축하지 않는다.
+   - 테스트(작성만): `compressed_stream_round_trip`(CPU).
+   - **먼저 볼 것**: (a) CPU 테스트. (b) 쿡 로그의 "bits a vertex"와 압축되지 않은 메시 수. (c) 켠 채로 `vis_id_decodes_to_the_covering_triangle`·그림 비교 — 풀과 스트림이 같은 위치인지(스냅 뒤 `positionStep`이 다시 계산돼 한 단계 달라지는 경계 경우는 "격자에 없음"으로 빠진다). (d) 스냅으로 장면 해시가 바뀐다: 기준 그림과의 차이. (e) 래스터 시간 A/B — 로드 수는 정점당 5개(레코드 3 + 창 2)로 전(2개)보다 많고 바이트는 적다: 어느 쪽이 이기는지 모른다.
+4. **스트리밍 연결** (`visibility.cluster_streaming = false`, `cluster_streaming_keep_frames = 30`, `cluster_streaming_pool_mb = 256`, `cluster_streaming_upload_mb = 16`; `ClusterStream.cpp`의 페이지, `CullNodes.hlsl`, `CullClusters.hlsl`, `VisibilityTrack.cpp` `clusterStreamingFrame`, `unx/visibility/ClusterPages.h`).
+   - 쿡: 더 거친 그룹이 대신할 수 있는 그룹(말단이 아니고 클러스터가 모두 압축된 그룹)의 정점 비트를 64 KB 페이지에 그룹 단위로 담는다. 메시의 가장 거친 그룹들은 장면 버퍼에 남는다(항상 상주: 대신 그릴 조상이 항상 있다). 레코드에 자기 페이지와 "자기가 단순화되어 나온 그룹"의 페이지. 페이지 의존: 그룹 G의 페이지는 G에서 단순화된 클러스터를 가진 그룹들의 페이지를 필요로 한다.
+   - 컬: `CullNodes`가 그룹을 넘기기 전에 페이지를 본다 — 피드백 버퍼(페이지당 워드)에 프레임 번호를 찍고(상주든 아니든: 사용 표시이자 요청), 상주가 아니면 넘기지 않는다. `CullClusters`의 자기 오차 검사는 "더 고운 쪽이 필요"일 때 그 고운 그룹의 페이지가 상주가 아니면 이 클러스터를 그린다. 두 검사가 같은 구·같은 오차를 쓰므로 정확히 하나만 그려진다. 문서의 옛 규칙("늦으면 저해상도 대체 없음")과 다르다: 이번 지시가 Nanite 방식(상주 조상으로 대체)이다.
+   - 런타임(프레임 첫 컬 앞, CPU): 이 슬롯을 지난번에 쓴 프레임의 피드백 사본을 읽고, `keep_frames` 안에 원해진 페이지와 그 의존을 요청(의존이 먼저), 소스 update, **프레임 슬롯별 페이지 테이블**을 쓴다 — 의존이 모두 상주인 페이지만 상주로 적는다(그룹과 그 대체가 함께 그려지는 일이 없도록). 한 프레임의 모든 실행(주 뷰, 그림자 요청)이 같은 테이블을 읽는다. 래스터 커널은 테이블로 풀 힙의 SRV와 워드 위치를 얻는다; 상주가 아닌 페이지의 클러스터를 누가 읽으면 정점 풀로 간다(같은 위치).
+   - 모듈 경계: V 모듈은 C의 스트리밍 모듈을 링크하지 않는다. `visibility::ClusterPageSource`(std::function 묶음)를 받고, `ClusterPages.h`(렌더러 소유자가 include)가 페이지 파일을 쓰고 `streaming::Streamer`를 열어 넘긴다. 호스트 commit과 RendererGate에 그 호출을 넣었다. 예산·축출은 스트리머의 것(VRAM 풀, 프레임당 업로드, 요청 안 된 지 프레임 수가 지난 슬롯의 LRU 재사용).
+   - **지금은 메모리를 줄이지 않는다.** 페이지에 있는 것은 래스터가 읽는 스트림뿐이고 32 B 정점 풀·색인·삼각형·계층은 전부 상주다(3의 "하지 못한 것" 때문). 구조만 연결된 상태다.
+   - 통계: `Stats::streamStandIns / streamWaiting`, `visibility::clusterStreamStats`, 게이트의 `V cluster streaming` 줄.
+   - **먼저 볼 것**: (a) 디버그 레이어 — DirectStorage가 풀 힙의 다른 슬롯에 쓰는 동안 그 힙 버퍼를 SRV로 읽는 것이 허용되는지(스트리머 테스트는 복사로만 읽었다), 피드백 버퍼의 UAV/복사 상태. (b) 카메라를 세운 채 몇 프레임 뒤 `waiting`이 0, `stand-in`이 0이 되는지(수렴), 풀 예산이 작을 때 요청·축출이 진동하지 않는지. (c) 카메라 컷 직후 그림: 대체 클러스터가 그려지는 2~4프레임. (d) 지형 패치 영역에서 원본 페이지가 없을 때 대체 클러스터가 패치와 겹친다(삼각형 제거는 원본 클러스터에만 있다).
+5. **visible 용량** — 3절.
+
 ## 3. 숲 규모
 
 - (2)의 LOD가 먼저. 그 뒤 남는 것: 그림자 레벨의 텍셀보다 작은 인스턴스를 V의 인스턴스 컬에서 제외(뷰 레코드에 최소 반지름), 요청 수 줄이기(빈 요청 1개가 약 0.2 ms).
+- **visible 리스트 용량이 필요량을 따라간다 (2026-10-03, 브랜치 `w/coverage` 2차) — 코드 작성·빌드 통과, 실행 안 함** (`visibility.visible_clusters_follow_need = true`, `visible_clusters_limit = 8388608`; `VisibilityTrack.cpp` `visibleCapacity`).
+  - 숲 주 뷰는 758만 항목을 요청했고 용량은 100만이었다. 컬 커널의 카운터는 용량을 넘어서도 세므로 넘친 프레임이 자기 필요량 전체를 알려 준다. 실행(주 뷰, 뷰별, 래스터 요청 이름별)마다 용량 = 직전 완료 프레임 필요량 × 1.5 이상의 2의 거듭제곱, 바닥은 `max_visible_clusters`(전의 고정값), 상한 2^23(vis id의 클러스터 필드 23비트). 늘 때는 바로, 줄 때는 1/4 아래로 내려갔을 때만(S의 그림자 넘침 목록과 같은 규칙).
+  - 오류 비트는 그대로 둔다: 필요량이 용량을 넘은 프레임은 여전히 넘친 만큼 버리고 `OVERFLOW_VISIBLE`(0x4)을 세운다. 게이트는 그 프레임을 FAIL로 센다(자라는 풀 목록에 넣지 않았다) — 컷 직후 한두 프레임의 FAIL이 정상인지 아닌지는 사용자가 정할 일이다.
+  - 메모리: 항목당 40 B(visible 8 + 리스트 4 × 8). 상한까지 자란 실행 하나가 335 MB의 그래프 버퍼.
+  - S는 아직 바닥 용량으로 뷰를 묶는다(`listCapacity = visibility.max_visible_clusters`): 요청 수는 줄지 않는다. S가 실행의 현재 용량(`Stats::visibleCapacity`)을 쓰면 줄일 수 있다 — S의 파일이라 두었다.
+  - **먼저 볼 것**: forest_thin에서 게이트의 `visible-list capacity` 줄이 몇 프레임 만에 필요량을 넘는지와 그동안의 오류 비트, 용량이 자란 뒤 `v.cull`·래스터 시간(758만 클러스터를 실제로 그리게 된다: 전에는 100만에서 잘렸다), VRAM.
 
 ## 4. 캐릭터 음영
 
