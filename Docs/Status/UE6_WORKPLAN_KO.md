@@ -147,7 +147,7 @@ high 티어: 같은 커밋에서의 비교가 아직 없다(Batch2 기본 vs Bat
 | `shadow.vsm.static_separate` | true | 아틀라스 하나, 변한 캐스터 밑 페이지 전체 다시 그림 | (7) |
 | `shadow.vsm.static_hzb_cull` | true | 움직이는 캐스터를 가림 검사 없이 래스터 | (9) |
 | `visibility.cull_pass_merge` | true | 디스패치마다 패스, 인자 패스 있음 | (2) |
-| `shadow.vsm.fold_small_passes`, `atmosphere.froxels.fold_small_passes`, `visibility.fold_small_passes` | true | 작은 디스패치마다 패스 | (6) |
+| `shadow.vsm.fold_small_passes`, `atmosphere.froxels.fold_small_passes`, `visibility.fold_small_passes`, `lumen.radiance_cache_fold_passes`, `surface_cache.mesh_cards_fold_passes` | true | 작은 디스패치마다 패스 | (6) |
 | `shadow.vsm.cache_hzb_filter` | true | 변한 캐스터 밑의 모든 페이지가 stale | (10) |
 | `shadow.vsm.min_caster_texels` | 1.0 | 0: 모든 캐스터를 모든 레벨에 | (3) |
 | `shadow.vsm.coarse_pages`, `shadow.vsm.page_dilation` | 2, 0.05 | 0: 굵은 페이지·팽창 없음 | (8) |
@@ -189,15 +189,17 @@ V의 컬 한 번(메인 뷰, 그리고 `rasterizeDepth` 요청마다: VSM 태양
 
 **(5) 게이트 통계** — RendererGate 요약에 V의 메인 뷰 컬(인스턴스·노드·클러스터 수, 2단계로 넘어간 수, 청크), 대역별 클러스터·삼각형(A/B/C, 혼합 시트), 리스트별 항목 수, 래스터 요청마다 한 줄(보이는 클러스터·타일 쌍·삼각형), 그리고 `V error bits` 줄을 더했다. `V error bits`는 모든 실행·모든 프레임의 `Stats::overflow`를 OR한 값이고(`Stats::overflowSeen`), 수요에 따라 커지는 풀(0x100, 0x2000, 0x4000)을 뺀 비트가 서면 게이트가 실패한다 — (1)의 작업 큐가 상한에 닿거나 리스트가 넘치면 여기에 보인다. 실행별 통계는 `visibility::latestStatsOfRuns`.
 
-**(6) 그 밖의 작은 패스 접기** — `shadow.vsm.fold_small_passes`, `atmosphere.froxels.fold_small_passes`, `visibility.fold_small_passes`(모두 기본 true).
+**(6) 그 밖의 작은 패스 접기** — `shadow.vsm.fold_small_passes`, `atmosphere.froxels.fold_small_passes`, `visibility.fold_small_passes`, `lumen.radiance_cache_fold_passes`, `surface_cache.mesh_cards_fold_passes`(모두 기본 true).
 `PassChain`(`Native/Render/include/unx/render/PassChain.h`): 이어지는 작은 디스패치들을 그래프 패스 하나로 만든다. 선언한 사용을 합치고(한 패스가 같이 선언할 수 있는 조합만: 쓰는 쪽은 전부 UAV), 두 번째부터는 전역 UAV 장벽 뒤에서 같은 순서로 실행한다 — 뒤 디스패치가 앞 디스패치의 결과를 보는 것은 별도 패스일 때와 같다. 스위치를 끄면 각자 제 이름의 패스다.
 - VSM: `s.vsm.begin` + `cache.reset` → 1, `propagate` + `cache.keep` + `cache.free` + `scan.count` + `scan.prefix` + `scan.assign` → `s.vsm.scan` 1, `s.shadow.listclear` + `s.shadow.visibility` → 1, `overflow.scan.blocks` + `scan.top` → 1.
 - **CPU가 아는 빈 패스**: 국소 그림자 슬롯이 없는 뷰(MegaLights 기본 설정에서는 항상)는 가시성 패스가 프록셀 리스트를 읽지 않으므로 넘침 타일이 생기지 않는다. 그 뷰에서는 `s.shadow.overflow.count / scan.blocks / scan.top / overflow` 네 패스를 기록하지 않는다(머리 텍스처는 가시성 패스가 0으로 채우고, fallback 리스트는 clear가 비운다 — 소비자가 읽는 값은 같다).
 - 프록셀 리스트: `begin` + `count` + `scan.blocks` + `scan.top` → `s.froxel.count` 1(fill은 따로: 스캔 결과를 SRV로 읽는다).
 - V: HiZ 빌드의 디스패치들(레벨 5개씩) → `v.hiz.<tag>` 1, 평면 반사 뷰의 `planar.clear` + `planar.tiles` → 1, `v.translucent.copy` + `clear` → 1.
-- 패스 수(코드에서 센 값, 기본 설정·내부 1080p·가림 켬): 프레임당 VSM −11, 프록셀 −3, V −4(유리 있으면 −5).
-- **안 한 것**: GI(`r.gi` 28개)와 카드(`r.card` 11개)의 작은 패스. 두 시스템의 패스 사이 의존(읽기 SRV / 쓰기 UAV가 섞인 곳)을 하나씩 확인해야 해서 이번에는 손대지 않았다. `PassChain`으로 같은 방식이 된다. coverage 층의 11패스는 직접/간접 디스패치가 번갈아 나와(인자 버퍼가 UAV ↔ 인자) (2)의 "덧붙이는 커널이 인자를 올리는" 방식으로 커널을 고쳐야 접힌다.
-- **잴 것**: 접은 패스 이름으로 시간이 합쳐진다(`s.vsm.scan`, `s.froxel.count`, `v.hiz.*`). 패스 타임스탬프 자체의 비용은 `--no-pass-timestamps`로 따로.
+- radiance cache(`LumenRadianceCache.cpp`): `r.gi.rc.reset`(리셋 프레임만) + `clear` + `mark` → `r.gi.rc.mark` 1, `reuse` + `allocate` + `select` + `traces` → `r.gi.rc.bookkeeping` 1. 네 단계는 indirection·슬롯·카운터·free list·trace 큐를 모두 UAV로 쓰고 앞 단계의 결과를 읽는다. `r.gi.rc.args`(복사 대상)와 `finish`(같은 버퍼를 UAV로)는 한 패스가 될 수 없어 그대로다.
+- 카드(`CardLighting.cpp`): 페이지 선택의 `r.card.select.priority` + `bucket` + `list` → `r.card.select` 1(카드 프레임은 SRV, select·pageLight는 UAV). `r.card.frame`은 카드 프레임을 UAV로 쓰므로 따로다.
+- 패스 수(코드에서 센 값, 기본 설정·내부 1080p·가림 켬): 프레임당 VSM −11, 프록셀 −3, V −4(유리 있으면 −5), radiance cache −4(리셋 프레임 −5), 카드 −2.
+- **안 한 것**: GI와 카드의 나머지 패스(추적·필터·저장, 직접광·radiosity)는 앞 패스가 UAV로 쓴 것을 SRV로 읽거나 간접 인자로 읽어 접히지 않는다. coverage 층의 11패스는 직접/간접 디스패치가 번갈아 나와(인자 버퍼가 UAV ↔ 인자) (2)의 "덧붙이는 커널이 인자를 올리는" 방식으로 커널을 고쳐야 접힌다.
+- **잴 것**: 접은 패스 이름으로 시간이 합쳐진다(`s.vsm.scan`, `s.froxel.count`, `v.hiz.*`, `r.gi.rc.mark`, `r.gi.rc.bookkeeping`, `r.card.select`). 패스 타임스탬프 자체의 비용은 `--no-pass-timestamps`로 따로.
 
 ### 8.2 가상 그림자 맵: 언리얼과의 남은 차이 (2026-10-03, 브랜치 `w/opt`)
 

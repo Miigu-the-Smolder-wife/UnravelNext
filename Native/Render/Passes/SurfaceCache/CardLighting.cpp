@@ -5,6 +5,7 @@
 #include "unx/core/Config.h"
 #include "unx/core/Log.h"
 #include "unx/render/Device.h"
+#include "unx/render/PassChain.h"
 #include "unx/render/RenderGraph.h"
 #include "unx/render/Shaders.h"
 #include "unx/rt/RayPipeline.h"
@@ -281,10 +282,13 @@ void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs
                   c.cmd->Dispatch(1, 1, 1);
               });
 
+    // surface_cache.mesh_cards_fold_passes: the selection's three steps are one pass (each reads what the one before
+    // wrote in the select buffer: PassChain.h).
+    PassChain chain(g, QueueType::Compute, !q.has("surface_cache.mesh_cards_fold_passes") || q.boolean("surface_cache.mesh_cards_fold_passes"));
     for (uint32_t stage = 0; stage < 3; ++stage)
     {
         static const char* const kNames[3] = { "r.card.select.priority", "r.card.select.bucket", "r.card.select.list" };
-        g.addPass(kNames[stage], QueueType::Compute,
+        chain.add(kNames[stage],
                   [&](PassBuilder& b) {
                       declareSet(b, false, false);
                       b.use(select, Use::UavCompute);
@@ -300,6 +304,7 @@ void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs
                       c.cmd->Dispatch(stage == 1 ? 1 : (std::max(pageCount, 1u) + 63) / 64, 1, 1);
                   });
     }
+    chain.flush("r.card.select");
 
     if (in.direct)
     {

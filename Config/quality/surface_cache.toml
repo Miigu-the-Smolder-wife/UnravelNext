@@ -65,6 +65,8 @@ mesh_cards = true                     # the cache as lighting on mesh cards (the
                                       # range keeps cards captured into atlases whatever the view sees; update selection by
                                       # page priority, direct light per card tile (8 lights + the sun), radiosity per card
                                       # probe, the final lighting atlas; hits read the cards of their instance
+mesh_cards_fold_passes = true         # the page selection's three steps (priority, bucket, list) are one pass (PassChain.h:
+                                      # the same dispatches in order, a barrier between them). false: a pass each (A/B)
 mesh_cards_atlas_size = 4096          # card atlas side, texels (reference: r.LumenScene.SurfaceCache.AtlasSize 4096)
 mesh_cards_captures_per_frame = 300   # card pages captured a frame at most (reference: CardCapturesPerFrame 300); with
                                       # capture_factor: texels captured a frame = atlas texels / capture_factor
