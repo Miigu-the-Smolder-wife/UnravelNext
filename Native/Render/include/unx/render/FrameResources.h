@@ -114,6 +114,9 @@ struct ViewResources
     // xyz = world bent normal x AO, a = accumulated frames + 1 (0: no surface). Invalid = off. Readers use
     // lumenShortRangeAO / lumenAoMultibounce / lumenAoSpecular of that header.                                       [A]
     TextureRef shortRangeAO;
+    // shading.mega_lights: the local lights' direct light after its filters (m.ml.spatial's result, RGBA16F W x H, x
+    // exposure). For the gate's captures (layer "direct"); the shading kernels get it by their own constant. Invalid = off. [M]
+    TextureRef localDirect;
     // shading.mega_lights_volume on a view other than the main one (planar reflection views; S records them with the view's
     // froxels): the view's froxel grid, the local lights' sampled visible fluence and direction moment, as
     // FrameResources::localFluence / localMoment are the main view's. Invalid = off.                                  [A]

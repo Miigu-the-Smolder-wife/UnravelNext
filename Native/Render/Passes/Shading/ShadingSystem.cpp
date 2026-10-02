@@ -619,6 +619,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              });
             megaLightsDenoise(fc, view, o.materialWord, ml);
             megaLighting = ml.lighting;
+            view.localDirect = megaLighting;
             table.views.back().second.megaLighting = megaLighting;
         }
 

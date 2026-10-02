@@ -30,7 +30,8 @@
 // the sun turns by deg at frame F (about the same axis as --sun-deg-per-s).
 // --capture-frames a,b,c: captures of these frame indices (the files get _f<frame> before .pfm) instead of the last
 // frame; --capture-layers final,gi,refl,shadow,reflmode,depth,ao,roughspec,carddirect,cardindirect,cardfinal,cardalbedo:
-// (ao = the short-range AO, roughspec = the gather's rough specular, card* = the mesh cards' atlases)
+// (ao = the short-range AO, roughspec = the gather's rough specular, card* = the mesh cards' atlases, direct = the local
+// lights' direct light of shading.mega_lights after its filters)
 // besides the capture (final), the main view's internal
 // layers of the same frames as PFM (_<layer>): gi = view.giIrradiance (E x near occlusion x exposure; an _alpha file with
 // its data flag), refl = view.reflection (radiance, weight in _alpha), shadow = the first three light slots of
@@ -480,11 +481,11 @@ int main(int argc, char** argv)
                     const size_t comma = v.find(',', at);
                     const std::string l = v.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
                     static const char* const kLayers[] = { "final", "gi", "refl", "shadow", "reflmode", "depth", "ao", "roughspec", "carddirect", "cardindirect",
-                                                           "cardfinal", "cardalbedo" };
+                                                           "cardfinal", "cardalbedo", "direct" };
                     bool known = false;
                     for (const char* name : kLayers) known = known || l == name;
                     if (!known)
-                        fail("--capture-layers: unknown layer '%s' (final, gi, refl, shadow, reflmode, depth, ao, roughspec, carddirect, cardindirect, cardfinal, cardalbedo)",
+                        fail("--capture-layers: unknown layer '%s' (final, gi, refl, shadow, reflmode, depth, ao, roughspec, carddirect, cardindirect, cardfinal, cardalbedo, direct)",
                              l.c_str());
                     captureLayers.push_back(l);
                     if (comma == std::string::npos) break;
@@ -978,6 +979,7 @@ int main(int argc, char** argv)
                         else if (layer == "depth") source = rendered.depth;
                         else if (layer == "ao") source = rendered.shortRangeAO;
                         else if (layer == "roughspec") source = rendered.giRoughSpecular;
+                        else if (layer == "direct") source = rendered.localDirect;  // (shading.mega_lights: the local lights' filtered direct light)
                         // the mesh cards' atlases after the frame's update (CardLighting.hlsli: direct and indirect in
                         // lux x 1/64, final in nits x 1/16; a texel without a surface holds 0)
                         else if (layer == "carddirect") source = renderer.lastResources().cards.direct;

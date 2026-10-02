@@ -9,6 +9,8 @@
 # script at once and names the log (UNX_DRED = 1 leaves the breadcrumbs in it).
 #   powershell -File Tools\Verify\Run-Ue6Final.ps1 [-Scenes DIR] [-Out DIR] [-Resolutions 1080p,1440p,4K] [-Only bt_lobby]
 #                                                  [-SkipTimings] [-SkipPictures] [-Layers gi,refl] [-Set k=v,k=v]
+#                                                  [-Generated city_block,forest_thin] [-NoGame]
+# -Generated adds scenegen's scenes by name (the gate generates them); -NoGame leaves the saved game scenes out.
 # -Layers adds the main view's internal layers of the captured frames (the gate's --capture-layers) beside the final picture.
 # The GPU lock's HOLD file (.gpulock\HOLD in the main checkout) must be gone: this script does not remove it.
 param(
@@ -19,13 +21,16 @@ param(
     [switch]$SkipTimings,
     [switch]$SkipPictures,
     [string[]]$Layers = @(),
-    [string[]]$Set = @()
+    [string[]]$Set = @(),
+    [string[]]$Generated = @(),
+    [switch]$NoGame
 )
 $ErrorActionPreference = "Stop"
 # (powershell -File passes "a,b" as one string)
 $Resolutions = @($Resolutions | ForEach-Object { $_ -split "," } | Where-Object { $_ })
 $Layers = @($Layers | ForEach-Object { $_ -split "," } | Where-Object { $_ })
 $Set = @($Set | ForEach-Object { $_ -split "," } | Where-Object { $_ })
+$Generated = @($Generated | ForEach-Object { $_ -split "," } | Where-Object { $_ })
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Set-Location $root
 $exe = Join-Path $root "build\all\bin\unx_gate_shadow_renderergate.exe"
@@ -34,8 +39,14 @@ if (Test-Path "C:\Users\USER\UnravelNext\.gpulock\HOLD") { throw "the GPU lock i
 $sets = @("gi.deterministic=true") + $Set
 $setArgs = @()
 foreach ($s in $sets) { $setArgs += @("--set", $s) }
-$files = Get-ChildItem -Path $Scenes -Filter *.unxscene | Where-Object { $Only -eq "" -or $_.BaseName -like "$Only*" }
-if (-not $files) { throw "no .unxscene in $Scenes" }
+# the runs' scenes: name (the output folder) and the gate's --scene argument
+$entries = @()
+if (-not $NoGame) {
+    $files = Get-ChildItem -Path $Scenes -Filter *.unxscene | Where-Object { $Only -eq "" -or $_.BaseName -like "$Only*" }
+    foreach ($f in $files) { $entries += @(@{ Name = ($f.BaseName -replace "_\d{8}_\d{4}$", ""); Arg = $f.FullName }) }
+}
+foreach ($gname in $Generated) { $entries += @(@{ Name = $gname; Arg = $gname }) }
+if ($entries.Count -eq 0) { throw "no scene: no .unxscene in $Scenes and no -Generated name" }
 
 function Invoke-Gate([string]$kind, [string]$log, [string[]]$gateArgs) {
     # The breadcrumbs cost GPU time (the device says "not for timings"): on for the pictures only.
@@ -59,8 +70,9 @@ function Invoke-Gate([string]$kind, [string]$log, [string[]]$gateArgs) {
 }
 $failed = @()
 
-foreach ($file in $files) {
-    $name = $file.BaseName -replace "_\d{8}_\d{4}$", ""
+foreach ($entry in $entries) {
+    $name = $entry.Name
+    $sceneArg = $entry.Arg
     foreach ($res in $Resolutions) {
         $dir = Join-Path $root (Join-Path $Out (Join-Path $name $res))
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -68,17 +80,17 @@ foreach ($file in $files) {
             Write-Host "== ${name} ${res}: pictures"
             $layerArgs = @()
             if ($Layers.Count -gt 0) { $layerArgs = @("--capture-layers", ((@("final") + $Layers) -join ",")) }
-            Invoke-Gate "correctness" (Join-Path $dir "pictures.log") (@("--scene", $file.FullName, "--resolution", $res, "--frames", "720", "--warmup-frames", "0", "--auto-exposure",
+            Invoke-Gate "correctness" (Join-Path $dir "pictures.log") (@("--scene", $sceneArg, "--resolution", $res, "--frames", "720", "--warmup-frames", "0", "--auto-exposure",
                     "--path-rotate", "20", "--motion-start", "1000000", "--cut-at", "600:4.5",
                     "--capture-output", (Join-Path $dir "cut.pfm"), "--capture-frames", "599,600,601,603,615,660,719") + $layerArgs + $setArgs)
             & python Tools\Verify\pfm_to_png.py $dir | Out-Null
         }
         if (-not $SkipTimings) {
             Write-Host "== ${name} ${res}: timings (turning)"
-            Invoke-Gate "timing" (Join-Path $dir "timing_turning.log") (@("--scene", $file.FullName, "--resolution", $res, "--frames", "600", "--auto-exposure",
+            Invoke-Gate "timing" (Join-Path $dir "timing_turning.log") (@("--scene", $sceneArg, "--resolution", $res, "--frames", "600", "--auto-exposure",
                     "--path-rotate", "20", "--out", (Join-Path $dir "timing_turning")) + $setArgs)
             Write-Host "== ${name} ${res}: timings (still)"
-            Invoke-Gate "timing" (Join-Path $dir "timing_still.log") (@("--scene", $file.FullName, "--resolution", $res, "--frames", "600", "--auto-exposure",
+            Invoke-Gate "timing" (Join-Path $dir "timing_still.log") (@("--scene", $sceneArg, "--resolution", $res, "--frames", "600", "--auto-exposure",
                     "--out", (Join-Path $dir "timing_still")) + $setArgs)
         }
     }
