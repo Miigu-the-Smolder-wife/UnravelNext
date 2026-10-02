@@ -7,7 +7,7 @@
 #if ALPHA
 uint main(float4 position : SV_Position, float2 uv : TEXCOORD0, nointerpolation uint visId : VISID, nointerpolation uint material : MATERIAL) : SV_Target0
 {
-    if (!alphaTestCovered(material, uv)) discard;
+    if (!alphaTestCoveredAt(material, uv, position.xy)) discard;
     return visId;
 }
 #else

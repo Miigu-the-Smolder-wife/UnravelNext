@@ -22,7 +22,7 @@ uint main(float4 position : SV_Position,
 #endif
 {
 #if ALPHA
-    if (!alphaTestCovered(material, uv)) discard;
+    if (!alphaTestCoveredAt(material, uv, position.xy)) discard;
 #endif
     const uint2 pixel = uint2(position.xy);
     Texture2D<float> depth = ResourceDescriptorHeap[P[2].y];
