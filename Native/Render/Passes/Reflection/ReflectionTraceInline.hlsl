@@ -23,6 +23,7 @@
 #define UNX_RT_LIGHT_COMPONENTS 0
 #endif
 #define RT_NO_SEE_THROUGH  // (at the DXIL limit, and every ray of this library asks for RT_MASK_REFLECTION: RayShaders.hlsli)
+#define RT_NO_FAR_FIELD    // (... and none asks for RT_MASK_FAR)
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/Reflection/ReflectionRay.hlsli"
 #include "Passes/Reflection/ReflectionHit.hlsli"

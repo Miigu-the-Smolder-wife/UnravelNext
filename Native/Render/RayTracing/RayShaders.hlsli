@@ -11,6 +11,8 @@
 //   RT_NO_SEE_THROUGH (defined before this file): the library's any-hit shader is the alpha test alone and its rays
 //   carry no mark - for a library none of whose rays is see-through (every mask has RT_MASK_REFLECTION) and which sits
 //   at the DXIL size limit (ReflectionTraceInline).
+//   RT_NO_FAR_FIELD (defined before this file): the procedural hit group holds the area lights alone - for a library
+//   none of whose rays asks for RT_MASK_FAR and which sits at the DXIL size limit.
 //   RT_SHADOW_TRANSMITTANCE (defined before this file): rtShadowTransmittance gathers what the Glass on a shadow ray
 //   takes (rtGlassOpticalDepth) in the any-hit shader - no closest-hit shading, no further ray. Without it the function
 //   is rtVisible's answer as 0 or 1.
@@ -111,9 +113,60 @@ float rtCapsuleT(float3 o, float3 d, float3 a, float3 b, float r)
     return -1;
 }
 
+#ifndef RT_NO_FAR_FIELD
+// The far field's proxies (RayScene.hlsli) share the area lights' hit group: one procedural instance each, told apart by
+// the instance's id. A proxy of a group that is in the near structure does not exist for the ray. The others: the ray's
+// entry into the box, when it lies in the ray's interval - a ray that starts inside a box leaves it freely (a ray shot
+// from a hit on a proxy, or from a surface among culled small things, is not stopped by the box it stands in) - and
+// only for the share of the rays the proxy's opacity gives: which rays is a hash of the proxy and the ray (its origin
+// and direction, quantised), so the mean over rays is the opacity (the members' projected area over the box's,
+// RayScene.cpp) and a ray shot again from the same place keeps its answer.
+void rtFarIntersect()
+{
+    const RtSceneSrvs s = rtScene();
+    if (s.pad == 0xFFFFFFFFu) return;
+    ByteAddressBuffer lightHeader = ResourceDescriptorHeap[s.pad];
+    const uint headerSrv = lightHeader.Load(40);
+    if (headerSrv == 0xFFFFFFFFu) return;
+    ByteAddressBuffer header = ResourceDescriptorHeap[headerSrv];
+    const uint4 head = header.Load4(0);
+    ByteAddressBuffer records = ResourceDescriptorHeap[head.w];
+    const uint at = PrimitiveIndex() * RT_FAR_RECORD_BYTES;
+    const float4 centreRadius = asfloat(records.Load4(at + 24));
+    const float3 toAnchor = centreRadius.xyz - asfloat(head.xyz);
+    if (dot(toAnchor, toAnchor) <= centreRadius.w * centreRadius.w) return;  // (near: its instances are in the TLAS)
+    const float3 lo = asfloat(records.Load3(at)), hi = asfloat(records.Load3(at + 12));
+    const float3 o = ObjectRayOrigin(), d = ObjectRayDirection();
+    const float3 inv = float3(abs(d.x) > 1e-12 ? 1 / d.x : 1e12, abs(d.y) > 1e-12 ? 1 / d.y : 1e12, abs(d.z) > 1e-12 ? 1 / d.z : 1e12);
+    const float3 t0 = (lo - o) * inv, t1 = (hi - o) * inv;
+    const float3 tNear = min(t0, t1), tFar = max(t0, t1);
+    const float tEnter = max(tNear.x, max(tNear.y, tNear.z)), tExit = min(tFar.x, min(tFar.y, tFar.z));
+    if (!(tEnter <= tExit) || !(tEnter > RayTMin()) || !(tEnter <= RayTCurrent())) return;
+    // (the ray: its origin to 12.5 cm and its direction to 1 / 1024 - a card texel's sun ray keeps its answer while the
+    // camera's distance moves its bias, and while the sun creeps)
+    const int3 qo = int3(floor(o * 8.0)), qd = int3(floor(d * 1024.0));
+    uint hash = PrimitiveIndex() * 0x9E3779B1u + (uint)qo.x * 0x85EBCA77u + (uint)qo.y * 0xC2B2AE3Du + (uint)qo.z * 0x27D4EB2Fu;
+    hash = (hash ^ (hash >> 15)) * 0x2C1B3C6Du + (uint)qd.x * 0x165667B1u + (uint)qd.y * 0xD3A2646Cu + (uint)qd.z * 0xFD7046C5u;
+    hash = (hash ^ (hash >> 13)) * 0x297A2D39u;
+    hash ^= hash >> 16;
+    if ((hash >> 8) * (1.0 / 16777216.0) >= asfloat(records.Load(at + 40))) return;
+    const uint axis = tNear.x >= tNear.y && tNear.x >= tNear.z ? 0u : tNear.y >= tNear.z ? 1u : 2u;
+    RtEmitterAttributes a;
+    a.unused = float2((float)(axis + (d[axis] > 0 ? 3u : 0u)), 0);
+    ReportHit(tEnter, 0, a);
+}
+#endif
+
 [shader("intersection")]
 void RtEmitterIntersect()
 {
+#ifndef RT_NO_FAR_FIELD
+    if (InstanceID() == RT_INSTANCE_FAR)
+    {
+        rtFarIntersect();
+        return;
+    }
+#endif
     StructuredBuffer<GpuLight> lights = ResourceDescriptorHeap[g_lights];
     const GpuLight l = lights[PrimitiveIndex()];
     const uint type = l.typeFlags & 0xFFu;
@@ -154,10 +207,15 @@ void RtEmitterIntersect()
 void RtEmitterClosestHit(inout RtHit p, in RtEmitterAttributes a)
 {
     p.t = RayTCurrent();
+#ifdef RT_NO_FAR_FIELD
     p.instance = RT_INSTANCE_EMITTER;
+    p.barycentrics = 0;
+#else
+    p.instance = InstanceID();   // RT_INSTANCE_EMITTER, or RT_INSTANCE_FAR: the far field's proxy (RayScene.hlsli)
+    p.barycentrics = a.unused;   // (a proxy: x = the face the ray entered by; a light: 0)
+#endif
     p.geometry = 0;
     p.primitive = PrimitiveIndex();
-    p.barycentrics = 0;
     p.frontFace = 1;
 }
 

@@ -22,6 +22,8 @@
 #define RT_MASK_SHADOW_TINT 0x20u  // the casters of RT_MASK_SHADOW and, besides, the shadow casters made of Glass / Water alone
                                    // (which are out of RT_MASK_SHADOW): the mask bit a shadow ray that gathers the panes'
                                    // transmittance adds (RayShaders.hlsli rtShadowTransmittance)
+#define RT_MASK_FAR 0x40u          // the far field's proxies (raytracing.far_field; below): the rays that shade a hit on them
+                                   // add this bit - no scene instance carries it
 #define RT_MASK_ALL 0xFFu
 // See-through geometry (raytracing.see_through_translucent; RayScene.h rtInstanceMask): GI rays and shadow rays pass
 // Glass and Water surfaces, reflection and refraction rays meet them - the reference keeps translucent meshes out of
@@ -46,6 +48,22 @@
 #endif
 // InstanceID of the emitter instance (RtHit.instance; RtHit.primitive = the light's index in the scene's light buffer).
 #define RT_INSTANCE_EMITTER 0xFFFFFEu
+// The far field (raytracing.far_field; RayScene.cpp buildFarField - the reference's r.RayTracing.Culling and its far-field
+// scene of merged proxies): static instances that subtend less than the culling angle from the camera, or lie past the
+// culling radius, are left out of the static TLAS; in their place stands one instance of procedural boxes - per group
+// of instances (a size class in a cell of the world) one box: the members' bounds, the share of the rays through it
+// that they stop, and the material that covers most of them. A box counts only while its group is out of the near
+// structure - the same test, on the same anchor, that puts the members into the TLAS - so a ray meets an instance or
+// its proxy, never both. A ray with RT_MASK_FAR in its mask can hit a proxy: RtHit.instance = RT_INSTANCE_FAR,
+// primitive = the proxy's record, barycentrics.x = the face the ray entered by (axis + 3 when the ray runs along +axis);
+// the kernel shades it with RayTracing/HitFarField.hlsli and must not read mesh records for it (rtMeshHit).
+// Records (raw, RT_FAR_RECORD_BYTES each; source coordinates - the far instance's object space, which the frame's
+// origin shift translates): { float3 lo, hi (the box: also the BLAS's AABB), float3 centre (the group's cell), float
+// radius (the group is near while the centre is within it of the anchor), float opacity, uint material }.
+// The frame's header: a raw SRV in word 10 of the local-light data's header (RtSceneSrvs.pad), 16 B { float3 anchor
+// (source coordinates), records SRV }.
+#define RT_INSTANCE_FAR 0xFFFFFDu
+#define RT_FAR_RECORD_BYTES 48u
 
 // RtInstance.flags
 #define RT_INSTANCE_DEFORMED 0x1u  // vertices come from the deformed pool (world space), not the scene vertex pool
@@ -105,6 +123,9 @@ struct RtHit
     uint frontFace;  // 1 = HIT_KIND_TRIANGLE_FRONT_FACE
     uint pad;
 };
+
+// A hit on a scene mesh: its records can be read (rtSurface, rtMaterial). Not the emitters' proxy, not the far field's.
+bool rtMeshHit(RtHit h) { return h.t >= 0 && h.instance != RT_INSTANCE_EMITTER && h.instance != RT_INSTANCE_FAR; }
 
 RtHit rtMiss()
 {

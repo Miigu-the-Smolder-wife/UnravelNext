@@ -40,6 +40,7 @@
 #include "Passes/GI/LumenHitIndirect.hlsli"
 #include "RayTracing/HitLocalSample.hlsli"
 #include "RayTracing/HitHair.hlsli"
+#include "RayTracing/HitFarField.hlsli"
 
 [shader("raygeneration")]
 void CardRadiosityTraceGen()
@@ -74,10 +75,10 @@ void CardRadiosityTraceGen()
     if (!(all(abs(ray.Origin) < 1e9) && dd > 0.98 && dd < 1.02 && ray.TMax > 0 && ray.TMax < 1e30)) return;
     const RtSceneSrvs scene = rtScene();
     float3 radiance = 0;
-    RtHit hit = rtTraceClosest(scene, ray, RAY_FLAG_NONE, RT_MASK_GI);
+    RtHit hit = rtTraceClosest(scene, ray, RAY_FLAG_NONE, RT_MASK_GI | RT_MASK_FAR);
     // the re-shoot: past a near back face, or just past a near two-sided surface
     const float skipBackFace = asfloat(P[0].w), skipTwoSided = asfloat(P[5].y);
-    if (hit.t >= 0 && hit.instance != RT_INSTANCE_EMITTER && hit.t < max(skipBackFace, skipTwoSided))
+    if (rtMeshHit(hit) && hit.t < max(skipBackFace, skipTwoSided))
     {
         GpuInstance hitInstance;
         GpuMesh hitMesh;
@@ -94,7 +95,7 @@ void CardRadiosityTraceGen()
         {
             RayDesc again = ray;
             again.TMin = skip;
-            hit = rtTraceClosest(scene, again, RAY_FLAG_NONE, RT_MASK_GI);
+            hit = rtTraceClosest(scene, again, RAY_FLAG_NONE, RT_MASK_GI | RT_MASK_FAR);
         }
     }
     // the grooms on the ray: its first fibre before the hit
@@ -111,6 +112,7 @@ void CardRadiosityTraceGen()
     }
     else if (hit.t < 0) radiance = giSkyRadiance(ray.Direction);
     else if (hit.t < asfloat(P[3].w)) radiance = 0;  // (too near to read the cache: the texel's own light)
+    else if (hit.instance == RT_INSTANCE_FAR) radiance = rtFarRadiance(scene, hit, ray.Origin, ray.Direction, true);  // (raytracing.far_field)
     else if (hit.instance != RT_INSTANCE_EMITTER)  // (a light's own surface: the direct light carries it)
     {
         const RtSurface s = rtSurface(scene, hit, ray.Origin, ray.Direction);
@@ -145,7 +147,7 @@ void CardRadiosityTraceGen()
                         sr.TMin = 0;
                         sr.TMax = giRayLength();
                         // (the sun through the Glass on the way: what the panes leave of it - RayShaders.hlsli rtShadowTransmittance)
-                        const float3 through = rtShadowTransmittance(scene, sr, RT_MASK_HIT_SHADOW);
+                        const float3 through = rtShadowTransmittance(scene, sr, RT_MASK_HIT_SHADOW | RT_MASK_FAR);
                         L.sunIlluminance = e0 * through;
                         L.sunVisibility = any(through > 0) ? 1.0 : 0.0;
                     }

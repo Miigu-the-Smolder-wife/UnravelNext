@@ -87,7 +87,7 @@ float3 rtHairRadiance(RtSceneSrvs scene, uint params, RtHairHit hit, float3 orig
             sr.TMin = 0;
             sr.TMax = giRayLength();
             // (... and what the Glass on the way leaves: RayShaders.hlsli rtShadowTransmittance)
-            if (through > 1e-3f) radiance += albedo * e0 * (cosSun * through) * rtShadowTransmittance(scene, sr, RT_MASK_HIT_SHADOW);
+            if (through > 1e-3f) radiance += albedo * e0 * (cosSun * through) * rtShadowTransmittance(scene, sr, RT_MASK_HIT_SHADOW | RT_MASK_FAR);
         }
     }
     if (local)
