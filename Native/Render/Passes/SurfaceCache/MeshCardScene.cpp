@@ -791,6 +791,7 @@ void MeshCardScene::update(std::span<const float3> viewOrigins)
         ++m_stats.hiResRequests;
     }
     m_feedback.clear();
+    m_stats.requests = (uint32_t)m_requests.size();  // (with the feedback's)
 
     // the frame's requests: the nearest buckets, up to the capture count
     std::vector<Request> chosen;

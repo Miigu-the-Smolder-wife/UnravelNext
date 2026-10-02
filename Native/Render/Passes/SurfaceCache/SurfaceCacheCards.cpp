@@ -969,6 +969,9 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
                           b.use(captureList, Use::CopyDst);
                           b.use(cullMask, Use::CopyDst);
                           b.use(atlasSlots, Use::CopyDst);
+                          // (the material images live from here: the service's kernel writes them, r.card.copy reads
+                          // them where the depth holds a surface)
+                          for (const TextureRef& image : { captureAlbedo, captureNormal, captureEmissive }) b.use(image, Use::UavGraphics);
                           b.keep();
                       },
                       [staged, r, captureAlbedo, captureNormal, captureEmissive, captureDepth, scratchDepth, captureList, cullMask, atlasSlots, upload, contextRecord,
