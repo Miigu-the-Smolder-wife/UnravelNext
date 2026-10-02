@@ -93,6 +93,15 @@ exposure_centre_sigma = 0.8
 post_bloom_strength = 0.082
 post_bloom_levels = 6
 post_vignette = 0.4
+post_local_exposure = true                         # local exposure, the reference's bilateral method (LocalExposure.hlsli): a window in a dim room
+                                                   # stays readable, the room does not go black. One grid pass and two lookups in the final pass
+post_local_exposure_highlight_contrast = 0.8       # contrast of regions brighter than middle grey (the reference's project default
+                                                   # r.DefaultFeature.LocalExposure.HighlightContrastScale 0.8; 1 = unchanged)
+post_local_exposure_shadow_contrast = 0.8          # ... and darker (ShadowContrastScale 0.8)
+post_local_exposure_detail_strength = 1.0          # LocalExposureDetailStrength
+post_local_exposure_blurred_blend = 0.6            # LocalExposureBlurredLuminanceBlend: share of the blurred luminance in a region's base
+post_local_exposure_blurred_kernel_percent = 50.0  # LocalExposureBlurredLuminanceKernelSizePercent (of the view's width, a diameter)
+post_local_exposure_middle_grey_bias = 0.0         # LocalExposureMiddleGreyBias (stops)
 post_grain = 0.0
 post_lut = ""
 # Display rendering (U2): "film" (default; ShadingCommon.hlsli shFilm: filmic toe and shoulder, highlights roll off to

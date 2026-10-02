@@ -12,7 +12,16 @@ bool translucentActive(FramePassContext& fc, const ViewResources& view);
 // The exposed-linear RGBA16F target the view is shaded into when the chain is on.
 TextureRef postTarget(FramePassContext& fc, const ViewResources& view);
 // The lens PSF's tail of 'hdr' at half resolution (energy-normalised pyramid over 'levels' octaves; tests read it).
-TextureRef postBloomTail(FramePassContext& fc, TextureRef hdr, uint32_t levels);
+// localExposure: 12 words for PostDownsample's P[1..3] (LocalExposure.hlsli: the first level's source texels take
+// their local exposure), filled at execution; none: the image as it is.
+struct PostLocalExposure
+{
+    TextureRef grid, blurred;
+    float uvScale[2] = { 1, 1 };
+    float highlight = 1, shadow = 1, detail = 1, blend = 0.6f, logMiddleGrey = -2.4739312f;
+    bool valid() const { return grid.valid(); }
+};
+TextureRef postBloomTail(FramePassContext& fc, TextureRef hdr, uint32_t levels, const PostLocalExposure& localExposure = {});
 // Bloom, vignetting, tone curve, grading, grain, dither and encoding from 'hdr' into view.color.
 void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr);
 // v1.91 camera white balance (defect queue 6): the 3 x 3 matrix (row-major, linear Rec.709 -> linear Rec.709) that

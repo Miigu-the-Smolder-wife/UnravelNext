@@ -37,6 +37,9 @@ struct PostParams
     std::string lut;
     uint32_t curve = 0;  // 0 film (shFilm), 1 PBR Neutral
     bool whiteBalance = false;  // v1.91: adapt the frame's white point (FrameContext::whiteBalance*) to D65
+    // Local exposure (LocalExposure.hlsli; the reference's bilateral method)
+    bool localExposure = false;
+    float leHighlight = 0.8f, leShadow = 0.8f, leDetail = 1.0f, leBlend = 0.6f, leMiddleGreyBias = 0.0f, leKernelPercent = 50.0f;
 };
 
 PostParams params(const QualityConfig& q)
@@ -49,6 +52,18 @@ PostParams params(const QualityConfig& q)
     p.levels = q.has("shading.post_bloom_levels") ? (uint32_t)q.integer("shading.post_bloom_levels") : 6u;
     p.lut = q.has("shading.post_lut") ? q.string("shading.post_lut") : std::string();
     p.whiteBalance = q.has("shading.post_white_balance") && q.boolean("shading.post_white_balance");
+    p.localExposure = q.has("shading.post_local_exposure") && q.boolean("shading.post_local_exposure");
+    p.leHighlight = num("shading.post_local_exposure_highlight_contrast", 0.8f);
+    p.leShadow = num("shading.post_local_exposure_shadow_contrast", 0.8f);
+    p.leDetail = num("shading.post_local_exposure_detail_strength", 1.0f);
+    p.leBlend = num("shading.post_local_exposure_blurred_blend", 0.6f);
+    p.leMiddleGreyBias = num("shading.post_local_exposure_middle_grey_bias", 0.0f);
+    p.leKernelPercent = num("shading.post_local_exposure_blurred_kernel_percent", 50.0f);
+    if (p.leHighlight < 0 || p.leHighlight > 1 || p.leShadow < 0 || p.leShadow > 1 || p.leDetail < 0 || p.leDetail > 4 || p.leBlend < 0 || p.leBlend > 1 ||
+        p.leKernelPercent <= 0 || p.leKernelPercent > 100)
+        fail("shading.post_local_exposure_*: contrasts and blend in [0, 1], detail strength in [0, 4], kernel percent in (0, 100]");
+    // (contrasts of 1 and a detail strength of 1 change nothing: off, as the reference)
+    if (p.leHighlight == 1 && p.leShadow == 1 && p.leDetail == 1) p.localExposure = false;
     const std::string curve = q.has("shading.post_tone_curve") ? q.string("shading.post_tone_curve") : std::string("film");
     if (curve == "film") p.curve = 0;
     else if (curve == "neutral") p.curve = 1;
@@ -210,7 +225,7 @@ bool postActive(FramePassContext& fc, const ViewResources& view)
     if (exposureSnapping(fc)) return true;  // a snap frame's exposure correction (Exposure.cpp) is applied by the chain
     const PostParams p = params(fc.quality);
     // (the shading kernels' own display encoding is the film curve: another curve needs the chain)
-    return p.bloom > 0 || p.vignette > 0 || p.grain > 0 || !p.lut.empty() || p.curve != 0;
+    return p.bloom > 0 || p.vignette > 0 || p.grain > 0 || !p.lut.empty() || p.curve != 0 || p.localExposure;
 }
 
 TextureRef postTarget(FramePassContext& fc, const ViewResources& view)
@@ -218,7 +233,59 @@ TextureRef postTarget(FramePassContext& fc, const ViewResources& view)
     return fc.graph.createTexture(TextureDesc{ "m.post.hdr", view.view.width, view.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
 }
 
-TextureRef postBloomTail(FramePassContext& fc, TextureRef hdr, uint32_t levelCount)
+namespace
+{
+// Local exposure's grid and blurred luminance of the exposed image 'hdr' (LocalExposure.hlsli).
+PostLocalExposure localExposureInputs(FramePassContext& fc, TextureRef hdr, const PostParams& p)
+{
+    RenderGraph& g = fc.graph;
+    const TextureDesc hd = g.desc(hdr);
+    const uint32_t w = hd.width, h = hd.height, kTile = 128, kDepth = 32;
+    const uint32_t gx = (w + kTile - 1) / kTile, gy = (h + kTile - 1) / kTile;
+    PostLocalExposure le;
+    le.grid = g.createTexture(TextureDesc{ "m.post.le grid", gx, gy, (uint16_t)kDepth, 1, DXGI_FORMAT_R32G32_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D });
+    const TextureRef mean = g.createTexture(TextureDesc{ "m.post.le tile mean", gx, gy, 1, 1, DXGI_FORMAT_R16_FLOAT });
+    le.blurred = g.createTexture(TextureDesc{ "m.post.le blurred", gx, gy, 1, 1, DXGI_FORMAT_R16_FLOAT });
+    le.uvScale[0] = (float)w / (float)(gx * kTile);
+    le.uvScale[1] = (float)h / (float)(gy * kTile);
+    le.highlight = p.leHighlight;
+    le.shadow = p.leShadow;
+    le.detail = p.leDetail;
+    le.blend = p.leBlend;
+    le.logMiddleGrey = std::log2(0.18f) + p.leMiddleGreyBias;
+    ID3D12PipelineState* gridPso = fc.shaders.compute("Passes/Shading/LocalExposureGrid");
+    ID3D12PipelineState* blurPso = fc.shaders.compute("Passes/Shading/LocalExposureBlur");
+    const TextureRef grid = le.grid, blurred = le.blurred;
+    g.addPass("m.post.le.grid", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(hdr, Use::SrvCompute);
+                  b.use(grid, Use::UavCompute);
+                  b.use(mean, Use::UavCompute);
+              },
+              [=](PassContext& c) {
+                  const uint32_t k[8] = { c.srv(hdr), c.uav(grid), c.uav(mean), 0, w, h, 0, 0 };
+                  c.cmd->SetPipelineState(gridPso);
+                  c.computeConstants(k, 8);
+                  c.cmd->Dispatch(gx, gy, 1);
+              });
+    // the reference's Gaussian radius: kernel percent / 100 x width / 2, here in tiles
+    const float radius = p.leKernelPercent * 0.01f * 0.5f * (float)w / (float)kTile;
+    g.addPass("m.post.le.blur", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(mean, Use::SrvCompute);
+                  b.use(blurred, Use::UavCompute);
+              },
+              [=](PassContext& c) {
+                  const uint32_t k[8] = { c.srv(mean), c.uav(blurred), gx, gy, asUint(radius), 0, 0, 0 };
+                  c.cmd->SetPipelineState(blurPso);
+                  c.computeConstants(k, 8);
+                  c.cmd->Dispatch((gx + 7) / 8, (gy + 7) / 8, 1);
+              });
+    return le;
+}
+} // namespace
+
+TextureRef postBloomTail(FramePassContext& fc, TextureRef hdr, uint32_t levelCount, const PostLocalExposure& localExposure)
 {
     RenderGraph& g = fc.graph;
     const TextureDesc hd = g.desc(hdr);
@@ -242,15 +309,26 @@ TextureRef postBloomTail(FramePassContext& fc, TextureRef hdr, uint32_t levelCou
         {
             const TextureRef src = l == 0 ? hdr : levels[l - 1], dst = levels[l];
             const TextureDesc dd = g.desc(dst);
+            const bool first = l == 0 && localExposure.valid();
+            const PostLocalExposure le = localExposure;
             g.addPass("m.post.down", QueueType::Graphics,
                       [&](PassBuilder& b) {
                           b.use(src, Use::SrvCompute);
                           b.use(dst, Use::UavCompute);
+                          if (first)
+                          {
+                              b.use(le.grid, Use::SrvCompute);
+                              b.use(le.blurred, Use::SrvCompute);
+                          }
                       },
                       [=](PassContext& c) {
-                          const uint32_t k[4] = { c.srv(src), c.uav(dst), dd.width, dd.height };
+                          // (every word each time: the constants persist between dispatches)
+                          const uint32_t k[16] = { c.srv(src), c.uav(dst), dd.width, dd.height,
+                                                   first ? c.srv(le.grid) : 0xFFFFFFFFu, first ? c.srv(le.blurred) : 0xFFFFFFFFu, asUint(le.uvScale[0]), asUint(le.uvScale[1]),
+                                                   asUint(le.highlight), asUint(le.shadow), asUint(le.detail), asUint(le.blend),
+                                                   asUint(le.logMiddleGrey), 0, 0, 0 };
                           c.cmd->SetPipelineState(down);
-                          c.computeConstants(k, 4);
+                          c.computeConstants(k, 16);
                           c.cmd->Dispatch((dd.width + 7) / 8, (dd.height + 7) / 8, 1);
                       });
         }
@@ -283,8 +361,10 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
     const uint32_t w = view.view.width, h = view.view.height;
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
     RenderGraph& g = fc.graph;
+    PostLocalExposure le;
+    if (p.localExposure) le = localExposureInputs(fc, hdr, p);
     TextureRef bloom;
-    if (p.bloom > 0) bloom = postBloomTail(fc, hdr, p.levels);
+    if (p.bloom > 0) bloom = postBloomTail(fc, hdr, p.levels, le);
     LutState* lut = nullptr;
     if (!p.lut.empty())
     {
@@ -304,16 +384,30 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
                   if (bloom.valid()) b.use(bloom, Use::SrvCompute);
                   b.use(output, Use::UavCompute);
                   if (correction.valid()) b.use(correction, Use::SrvCompute);
+                  if (le.valid())
+                  {
+                      b.use(le.grid, Use::SrvCompute);
+                      b.use(le.blurred, Use::SrvCompute);
+                  }
               },
               [=](PassContext& c) {
-                  uint32_t k[28] = { c.srv(hdr), bloom.valid() ? c.srv(bloom) : 0xFFFFFFFFu, c.uav(output), lutSrv,
+                  uint32_t k[40] = { c.srv(hdr), bloom.valid() ? c.srv(bloom) : 0xFFFFFFFFu, c.uav(output), lutSrv,
                                      asUint(p.bloom), asUint(p.vignette), asUint(p.grain), frame, w, h, asUint(peak), p.curve,
                                      correction.valid() ? c.srv(correction) : 0xFFFFFFFFu, wbOn, 0, 0 };
                   for (uint32_t i = 0; i < 3; ++i)
                       for (uint32_t j = 0; j < 3; ++j) k[16 + i * 4 + j] = asUint(wb[i * 3 + j]);  // P[4..6].xyz: the rows
+                  k[28] = le.valid() ? c.srv(le.grid) : 0xFFFFFFFFu;  // P[7..9]: local exposure (LocalExposure.hlsli)
+                  k[29] = le.valid() ? c.srv(le.blurred) : 0xFFFFFFFFu;
+                  k[30] = asUint(le.uvScale[0]);
+                  k[31] = asUint(le.uvScale[1]);
+                  k[32] = asUint(le.highlight);
+                  k[33] = asUint(le.shadow);
+                  k[34] = asUint(le.detail);
+                  k[35] = asUint(le.blend);
+                  k[36] = asUint(le.logMiddleGrey);
                   c.cmd->SetPipelineState(final);
                   c.bindFrameConstants(cb);
-                  c.computeConstants(k, 28);
+                  c.computeConstants(k, 40);
                   c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
               });
 }

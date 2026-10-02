@@ -9,9 +9,13 @@
 // 0, 0 }: peak 0 = SDR (above); peak >= 1 = an HDR display (peak over paper
 // white): the curve generalised to that peak,
 // the LUT on its output over the peak, grain, then linear light with 1 = paper white (RGBA16F output, no OETF, no dither).
+// Local exposure (shading.post_local_exposure, LocalExposure.hlsli), first of all: P[7] = { grid SRV (UNX_NONE: off),
+// blurred SRV, asuint(uv scale x), asuint(uv scale y) }, P[8] = { asuint(highlight), asuint(shadow), asuint(detail),
+// asuint(blend) }, P[9].x = asuint(log2 middle grey). The bloom tail is of the image with it (PostDownsample.hlsl).
 // Frame constants of the view (its projection gives the field angle).
 #include "Bindless.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
+#include "Passes/Shading/LocalExposure.hlsli"
 
 float hashUnit(uint3 v)  // [0, 1), deterministic (PCG3D)
 {
@@ -28,6 +32,25 @@ void main(uint2 id : SV_DispatchThreadID)
     if (any(id >= P[2].xy)) return;
     Texture2D<float4> hdr = ResourceDescriptorHeap[P[0].x];
     float3 e = hdr[id].rgb;
+    float correctionFactor = 1;
+    if (P[3].x != UNX_NONE)
+    {
+        ByteAddressBuffer correction = ResourceDescriptorHeap[P[3].x];
+        correctionFactor = asfloat(correction.Load(0));  // a snap frame exposed for itself (Exposure.cpp, ExposureMeter.hlsl)
+    }
+    if (P[7].x != UNX_NONE)
+    {
+        LeParams le;
+        le.grid = P[7].x;
+        le.blurred = P[7].y;
+        le.uvScale = asfloat(P[7].zw);
+        le.highlight = asfloat(P[8].x);
+        le.shadow = asfloat(P[8].y);
+        le.detail = asfloat(P[8].z);
+        le.blend = asfloat(P[8].w);
+        le.logMiddleGrey = asfloat(P[9].x);
+        e *= leScale(le, e, (float2(id) + 0.5) / float2(P[2].xy), log2(max(correctionFactor, 1e-6)));
+    }
     const float bloom = asfloat(P[1].x);
     if (P[0].y != UNX_NONE && bloom > 0)
     {
@@ -42,11 +65,7 @@ void main(uint2 id : SV_DispatchThreadID)
         const float3 t01 = tail.Load(int3(clamp(b + int2(0, 1), int2(0, 0), hi), 0)).rgb, t11 = tail.Load(int3(clamp(b + int2(1, 1), int2(0, 0), hi), 0)).rgb;
         e = lerp(e, lerp(lerp(t00, t10, f.x), lerp(t01, t11, f.x), f.y), bloom);  // PSF = (1 - s) delta + s tail
     }
-    if (P[3].x != UNX_NONE)
-    {
-        ByteAddressBuffer correction = ResourceDescriptorHeap[P[3].x];
-        e *= asfloat(correction.Load(0));  // a snap frame exposed for itself (Exposure.cpp, ExposureMeter.hlsl)
-    }
+    e *= correctionFactor;
     if (P[3].y != 0)
     {
         // v1.91 camera white balance: the scene's white (the illuminant the camera is set to) to the display's D65, a

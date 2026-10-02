@@ -1,7 +1,8 @@
 # The gate's captures (PFM: linear radiance x exposure, before the display encoding) as PNGs through the display
-# rendering the renderer applies (ShadingCommon.hlsli shFilm: gamut expansion, blue correction, glow, red modifier, the
-# film curve; then the sRGB OETF), so a capture is seen as the game shows it (without bloom, vignette and grain).
-#   python Tools/Verify/pfm_to_png.py <file.pfm | directory> [--crop x,y,w,h] [--scale n]
+# rendering the renderer applies (local exposure as LocalExposure.hlsli - the final picture only, with the defaults of
+# shading.toml; then ShadingCommon.hlsli shFilm: gamut expansion, blue correction, glow, red modifier, the film curve;
+# then the sRGB OETF), so a capture is seen as the game shows it (without bloom, vignette and grain).
+#   python Tools/Verify/pfm_to_png.py <file.pfm | directory> [--crop x,y,w,h] [--scale n] [--no-local-exposure]
 # A directory converts every .pfm in it (not the _alpha / layer files unless --all). Needs numpy only.
 import os
 import struct
@@ -22,6 +23,68 @@ def read_pfm(path):
         data = np.frombuffer(f.read(w * h * channels * 4), dtype='<f4' if scale < 0 else '>f4')
     img = data.reshape(h, w, channels)[::-1]  # PFM rows run bottom to top
     return np.repeat(img, 3, axis=2) if channels == 1 else img
+
+
+def local_exposure(img, highlight=0.8, shadow=0.8, detail=1.0, blend=0.6, kernel_percent=50.0):
+    """LocalExposure.hlsli on a whole image: the factor per pixel."""
+    depth, tile, log_min, log_max = 32, 128, -14.0, 10.0
+    h, w, _ = img.shape
+    lum = np.maximum(np.maximum(img, 0.0) @ np.array([0.2126, 0.7152, 0.0722]), 2.0 ** log_min)
+    log_lum = np.log2(lum)
+    position = np.clip((log_lum - log_min) / (log_max - log_min), 0.0, 1.0)
+    gx, gy = (w + tile - 1) // tile, (h + tile - 1) // tile
+    # the grid from every second pixel, each sample split between its two nearest buckets
+    ys, xs = np.mgrid[0:h:2, 0:w:2]
+    at = position[0:h:2, 0:w:2] * (depth - 1)
+    b0 = np.minimum(at.astype(np.int64), depth - 1)
+    b1 = np.minimum(b0 + 1, depth - 1)
+    f = at - b0
+    sums = np.zeros((gy, gx, depth))
+    weights = np.zeros((gy, gx, depth))
+    sample_log = log_lum[0:h:2, 0:w:2]
+    for bucket, weight in ((b0, 1 - f), (b1, f)):
+        np.add.at(weights, (ys // tile, xs // tile, bucket), weight)
+        np.add.at(sums, (ys // tile, xs // tile, bucket), weight * sample_log)
+    total = weights.sum(axis=2)
+    mean = np.where(total > 0, sums.sum(axis=2) / np.maximum(total, 1e-12), np.log2(0.18))
+    # the blurred tile means: exp(-16.7 (d / R)^2), R = kernel percent / 100 x width / 2 in tiles, mirrored borders
+    radius = max(kernel_percent * 0.01 * 0.5 * w / tile, 0.5)
+    reach = int(np.clip(np.ceil(radius * 0.6), 1, 16))
+    blurred = np.zeros_like(mean)
+    norm = 0.0
+    for dy in range(-reach, reach + 1):
+        for dx in range(-reach, reach + 1):
+            yy = np.abs(np.arange(gy) + dy)
+            yy = np.clip(np.minimum(yy, 2 * (gy - 1) - yy), 0, gy - 1)
+            xx = np.abs(np.arange(gx) + dx)
+            xx = np.clip(np.minimum(xx, 2 * (gx - 1) - xx), 0, gx - 1)
+            k = np.exp(-16.7 * (dx * dx + dy * dy) / (radius * radius))
+            blurred += k * mean[np.ix_(yy, xx)]
+            norm += k
+    blurred /= norm
+    # per pixel: the grid at (pixel, its own luminance), trilinear with clamped addressing; the blurred value, bilinear
+    py, px = np.mgrid[0:h, 0:w]
+    u = np.clip((px + 0.5) / tile - 0.5, 0, gx - 1)
+    v = np.clip((py + 0.5) / tile - 0.5, 0, gy - 1)
+    z = position * (depth - 1)
+    x0, y0, z0 = np.floor(u).astype(np.int64), np.floor(v).astype(np.int64), np.minimum(np.floor(z).astype(np.int64), depth - 1)
+    x1, y1, z1 = np.minimum(x0 + 1, gx - 1), np.minimum(y0 + 1, gy - 1), np.minimum(z0 + 1, depth - 1)
+    fx, fy, fz = u - x0, v - y0, z - z0
+    cell_sum = np.zeros((h, w))
+    cell_weight = np.zeros((h, w))
+    blurred_at = np.zeros((h, w))
+    for yi, wy in ((y0, 1 - fy), (y1, fy)):
+        for xi, wx in ((x0, 1 - fx), (x1, fx)):
+            blurred_at += wy * wx * blurred[yi, xi]
+            for zi, wz in ((z0, 1 - fz), (z1, fz)):
+                cell_sum += wy * wx * wz * sums[yi, xi, zi]
+                cell_weight += wy * wx * wz * weights[yi, xi, zi]
+    bilateral = np.where(cell_weight < 0.001, blurred_at, cell_sum / np.maximum(cell_weight, 1e-12))
+    base = bilateral + (blurred_at - bilateral) * blend
+    middle = np.log2(0.18)
+    centred = base - middle
+    local = middle + centred * np.where(centred > 0, highlight, shadow) + (log_lum - base) * detail
+    return np.exp2(local - log_lum)
 
 
 def film(color):
@@ -96,8 +159,12 @@ def write_png(path, rgb8):
         f.write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(raw, 6)) + chunk(b'IEND', b''))
 
 
-def convert(path, crop=None, scale=1):
+def convert(path, crop=None, scale=1, local=True):
     img = np.nan_to_num(read_pfm(path).astype(np.float64), nan=0.0, posinf=65504.0, neginf=0.0)
+    name = os.path.basename(path)
+    layer = any(tag in name for tag in ('_alpha', '_gi_', '_refl_', '_shadow_', '_reflmode_', '_depth_'))
+    if local and not layer and img.shape[0] >= 256 and img.shape[1] >= 256:
+        img = img * local_exposure(img)[..., None]  # (the whole image's, before any crop)
     if crop:
         x, y, w, h = crop
         img = img[y:y + h, x:x + w]
@@ -113,7 +180,7 @@ def main(argv):
     if len(argv) < 2:
         print(__doc__ or 'usage: pfm_to_png.py <file.pfm | directory> [--crop x,y,w,h] [--scale n] [--all]')
         return 2
-    crop, scale, every = None, 1, False
+    crop, scale, every, local = None, 1, False, True
     paths = []
     i = 1
     while i < len(argv):
@@ -125,6 +192,9 @@ def main(argv):
             i += 2
         elif argv[i] == '--all':
             every = True
+            i += 1
+        elif argv[i] == '--no-local-exposure':
+            local = False
             i += 1
         else:
             paths.append(argv[i])
@@ -138,7 +208,7 @@ def main(argv):
         else:
             files.append(p)
     for f in files:
-        print(convert(f, crop, scale))
+        print(convert(f, crop, scale, local))
     return 0
 
 

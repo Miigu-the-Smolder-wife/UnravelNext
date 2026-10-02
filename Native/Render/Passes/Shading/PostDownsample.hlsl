@@ -6,8 +6,13 @@
 // (20 x 20 source texels per 8 x 8 group, about 6 loads per thread against 13 filtered taps), so the weights are exact
 // without relying on the texture unit's filter precision; the store rounds to the nearest half (HalfRound.hlsli).
 // P[0] = { source SRV, destination UAV, destination width, height }.
+// The pyramid's first level with local exposure (LocalExposure.hlsli; the reference applies it in its bloom setup, so the
+// lens tail is of the image as it is shown): P[1] = { grid SRV (UNX_NONE: none - every other level), blurred SRV,
+// asuint(uv scale x), asuint(uv scale y) }, P[2] = { asuint(highlight), asuint(shadow), asuint(detail), asuint(blend) },
+// P[3].x = asuint(log2 middle grey): every source texel is scaled by its factor.
 #include "Bindless.hlsli"
 #include "Passes/Shading/HalfRound.hlsli"
+#include "Passes/Shading/LocalExposure.hlsli"
 
 groupshared float3 s_tile[20][20];
 
@@ -20,10 +25,22 @@ void main(uint2 id : SV_DispatchThreadID, uint2 local : SV_GroupThreadID, uint2 
     // the tile covers source texels 16 group - 2 .. 16 group + 17 (clamped at the borders)
     const int2 origin = int2(group) * 16 - 2;
     const int2 hi = int2(sw, sh) - 1;
+    LeParams le = (LeParams)0;
+    le.grid = P[1].x;
+    le.blurred = P[1].y;
+    le.uvScale = asfloat(P[1].zw);
+    le.highlight = asfloat(P[2].x);
+    le.shadow = asfloat(P[2].y);
+    le.detail = asfloat(P[2].z);
+    le.blend = asfloat(P[2].w);
+    le.logMiddleGrey = asfloat(P[3].x);
     for (uint i = flat; i < 400; i += 64)
     {
         const int2 t = int2(i % 20, i / 20);
-        s_tile[t.y][t.x] = src.Load(int3(clamp(origin + t, int2(0, 0), hi), 0)).rgb;
+        const int2 at = clamp(origin + t, int2(0, 0), hi);
+        float3 value = src.Load(int3(at, 0)).rgb;
+        if (le.grid != 0xFFFFFFFFu) value *= leScale(le, value, (float2(at) + 0.5) / float2(sw, sh), 0.0);
+        s_tile[t.y][t.x] = value;
     }
     GroupMemoryBarrierWithGroupSync();
     if (any(id >= P[0].zw)) return;

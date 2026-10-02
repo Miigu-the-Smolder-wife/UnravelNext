@@ -140,7 +140,8 @@ FroxelAirResult froxelAirSlice(FroxelGrid g, uint2 tile, uint s)
     }
     // Casters' shadows in the air: the shadowed fraction of the segment removes that part of the single scattering.
     float f = 0;
-    if (P[1].w != 0xFFFFFFFFu && any(single > 0) && (experiment & 1) == 0)
+    // (a slice wholly before the air's start has no single scattering to shadow: no walk)
+    if (P[1].w != 0xFFFFFFFFu && any(single > 0) && (experiment & 1) == 0 && nearScale > 1e-5)
     {
         VsmResources r;
         r.table = ResourceDescriptorHeap[P[1].x];
