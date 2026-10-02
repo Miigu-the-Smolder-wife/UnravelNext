@@ -138,6 +138,31 @@ bool coverageRectBehindCover(float2 lo, float2 hi, float nearest, uint span)
     return behind;
 }
 
+// The same answer pixel by pixel, for a rectangle of at most COV_COVER_PIXELS pixels of the view (a small triangle: most
+// of band B): every pixel under it has a full cover union and 'nearest' lies behind that pixel's farthest contributor.
+// A covered pixel among uncovered ones of its tile still hides what lies only on it. One 8 B load per pixel.
+#define COV_COVER_PIXELS 8u
+bool coverageRectBehindCoverPixels(float2 lo, float2 hi, float nearest)
+{
+    if (COV_COVER == UNX_NONE) return false;
+    const int2 view = int2(COV_WIDTH, COV_HEIGHT);
+    const int2 p0 = max(int2(floor(lo)), 0), p1 = min(int2(floor(hi)), view - 1);
+    if (any(p1 < p0)) return false;
+    const uint2 size = uint2(p1 - p0 + 1);
+    if (size.x * size.y > COV_COVER_PIXELS) return false;
+    ByteAddressBuffer cover = ResourceDescriptorHeap[COV_COVER];
+    const uint depthBits = asuint(nearest);
+    bool behind = true;
+    for (uint k = 0; k < COV_COVER_PIXELS && k < size.x * size.y && behind; ++k)
+    {
+        const uint2 pixel = uint2(p0) + uint2(k % size.x, k / size.x);
+        const uint key = ((pixel.y / COV_TILE_PX) * COV_TILES_X + pixel.x / COV_TILE_PX) * COV_TILE_PIXELS + (pixel.x % COV_TILE_PX) + COV_TILE_PX * (pixel.y % COV_TILE_PX);
+        const uint2 c = cover.Load2(8 * key);
+        behind = c.x == COV_MASK_FULL && depthBits < ~c.y;
+    }
+    return behind;
+}
+
 // A cluster's world sphere against the tiles' cover (the group-uniform test of the mesh and compute raster kernels).
 // A sphere whose box reaches the near plane is never hidden.
 bool coverageSphereBehindCover(CullView v, float4 s)

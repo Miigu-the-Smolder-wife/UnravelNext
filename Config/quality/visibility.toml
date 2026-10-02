@@ -85,8 +85,9 @@ coverage_depth_buckets = 4        # the band B list is sorted by its clusters' n
 coverage_depth_buckets_min_clusters = 64  # the buckets' passes are recorded when the latest completed frame's band B list
                                   # held at least this many clusters: a frame without thin geometry keeps the one pass
 coverage_triangle_cull = true     # the coverage mesh kernel culls a triangle that can leave no fragment: outside the view,
-                                  # behind band A over its rectangle (4 HiZ loads), behind the buckets' covered tiles
-                                  # (<= 9 tile headers) - the fragment kernel's tests, once per triangle; false = every
+                                  # behind band A over its rectangle (4 HiZ loads), behind the buckets' cover (its pixels
+                                  # when its rectangle holds at most 8, <= 9 tile headers otherwise) - the fragment
+                                  # kernel's tests, once per triangle; false = every
                                   # triangle of a drawn cluster goes to the rasteriser (as before)
 coverage_drop_weightless = true   # a cluster fragment whose area rounds to step 0 of the record's 10 bits and that covers no
                                   # subsample is not stored: its composite weight is area x share = 0 and it adds no bit

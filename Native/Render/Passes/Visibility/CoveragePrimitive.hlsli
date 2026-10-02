@@ -7,8 +7,9 @@
 // near clip, zero area, back faces of one-sided materials in views that cull back faces (the front sign follows the
 // view's mirroring), the other band's triangles of a mixed sheet cluster, triangles a terrain patch replaces; and with
 // visibility.coverage_triangle_cull triangles that can leave no fragment: outside the view, behind band A over the
-// triangle's rectangle, or (depth buckets) behind the tiles' cover (CoverageBuckets.hlsli) - each a test of the whole
-// triangle for what the fragment kernel drops fragment by fragment.
+// triangle's rectangle, or (depth buckets) behind the cover - of each pixel of a small rectangle, of the tiles of a
+// larger one (CoverageBuckets.hlsli) - each a test of the whole triangle for what the fragment kernel drops fragment by
+// fragment.
 #ifndef UNX_COVERAGE_PRIMITIVE_HLSLI
 #define UNX_COVERAGE_PRIMITIVE_HLSLI
 #include "Passes/Visibility/CoverageBuckets.hlsli"
@@ -157,7 +158,7 @@ CoveragePrimitive coveragePrimitive(CoverageDraw d, uint t, uint3 tri, float4 p[
                 cull = true;
                 o.reason = COV_CULL_BAND_A;
             }
-            else if (coverageRectBehindCover(o.lo, o.hi, nearest, COV_TILE_SPAN_TRIANGLE))
+            else if (coverageRectBehindCoverPixels(o.lo, o.hi, nearest) || coverageRectBehindCover(o.lo, o.hi, nearest, COV_TILE_SPAN_TRIANGLE))
             {
                 cull = true;
                 o.reason = COV_CULL_COVER;
