@@ -39,20 +39,26 @@ FogMedium fogMedium(uint4 a, uint4 b, uint4 c)
     return f;
 }
 
-// The fog's optical depth along origin + dir t, t in [t0, t1] (dir unit). The density under the fog's height is held to
-// 64 x the density at it, and a slice's optical depth to 64 (nothing is seen through either).
+// The fog's optical depth along origin + dir t, t in [t0, t1] (dir unit): the integral of the fog's extinction
+// (FogVolume.hlsli fogExtinctionAt: the density under the fog's height is held to 64 x the density at it), itself held
+// to 64 (nothing is seen through either).
 float fogOpticalDepth(FogMedium f, float3 origin, float3 dir, float t0, float t1)
 {
     t0 = max(t0, f.start);
     if (!f.on || !(t1 > t0) || !(f.density > 0)) return 0;
+    // the extinction along the segment is density x min(e^x, 64), x = -k x (the height above the fog's) linear in t
     const float k = f.falloff * 0.69314718;  // 2^(-falloff h) = e^(-k h)
-    const float h0 = origin.y + dir.y * t0 - f.height, h1 = origin.y + dir.y * t1 - f.height;
-    const float x0 = -k * h0, x1 = -k * h1;
-    if (min(x0, x1) >= 60.0) return min(f.density * 64.0 * (t1 - t0), 64.0);  // (far under the fog's height: the held density)
-    const float e0 = exp(clamp(x0, -80.0, 60.0)), e1 = exp(clamp(x1, -80.0, 60.0));
-    const float a = k * (h1 - h0);
-    // mean of e^(-k h) over the segment: (e0 - e1) / a, or the ends' mean where the height barely changes
-    const float mean = abs(a) > 1e-3 ? (e0 - e1) / a : 0.5 * (e0 + e1);
-    return min(f.density * clamp(mean, 0.0, 64.0) * (t1 - t0), 64.0);
+    const float xa = -k * (origin.y + dir.y * t0 - f.height), xb = -k * (origin.y + dir.y * t1 - f.height);
+    const float lo = min(xa, xb), hi = max(xa, xb), held = 4.1588831;  // ln 64: from there down the density is held
+    // mean of min(e^x, 64) over [lo, hi]: the stretch [l, u] above the hold integrates to e^u (1 - e^-(u - l)) (in the
+    // form that stays exact where the height barely changes), the stretch at the hold to 64 x its length
+    float mean = min(exp(lo), 64.0);
+    if (hi - lo > 1e-6)
+    {
+        const float l = min(lo, held), u = min(hi, held), d = u - l;
+        const float above = exp(u) * (d > 1e-2 ? 1.0 - exp(-d) : d * (1.0 - d * (0.5 - d * (1.0 / 6.0))));
+        mean = (above + 64.0 * (max(hi, held) - max(lo, held))) / (hi - lo);
+    }
+    return min(f.density * mean * (t1 - t0), 64.0);
 }
 #endif

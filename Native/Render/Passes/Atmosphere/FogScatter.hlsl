@@ -166,13 +166,15 @@ void main(uint3 id : SV_DispatchThreadID)
         const float4 clip = mul(g_prevViewProj, float4(centre, 1));
         if (clip.w > 1e-4)
         {
-            const float2 uv = float2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
+            // the centre's place in the previous volume, whose cells reach past the view's edge where the view is not a
+            // whole number of cells (1080 rows: the last row's centres lie on the edge - they keep their history too)
+            const float2 scale = float2(g_viewWidth, g_viewHeight) / float2(g.x * g.cellPx, g.y * g.cellPx);
+            const float2 uv = float2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5) * scale;
             const float slice = fogSliceOfDepth(g, clip.w);
             if (all(uv > 0) && all(uv < 1) && slice < float(g.z))
             {
                 Texture3D<float4> history = ResourceDescriptorHeap[P[1].z];
-                const float2 scale = float2(g_viewWidth, g_viewHeight) / float2(g.x * g.cellPx, g.y * g.cellPx);
-                const float4 h = history.SampleLevel(g_linearClamp, float3(uv * scale, clamp(slice / float(g.z), 0.5 / float(g.z), 1.0 - 0.5 / float(g.z))), 0);
+                const float4 h = history.SampleLevel(g_linearClamp, float3(uv, clamp(slice / float(g.z), 0.5 / float(g.z), 1.0 - 0.5 / float(g.z))), 0);
                 if (!any(isnan(h)) && h.a >= 0) value = lerp(value, h, asfloat(P[7].w));  // (a < 0: cells that were hidden)
             }
         }
