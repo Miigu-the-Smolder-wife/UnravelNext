@@ -55,6 +55,10 @@ struct RasterView
     // GPU-written instance). A view of set 1 and a view of set 2 with one projection draw every instance exactly once
     // between them (S's static / dynamic shadow pages).
     uint32_t instanceSet = 0;
+    // First word of the view's tile slots in DepthRasterRequest::atlasSlots (tile i: word atlasSlotOffset + i);
+    // UINT32_MAX = cullMaskOffset * 32, the layout of the mask. Two views with different masks over the same tiles (S's
+    // static and movable casters' views of one face) can then share one set of slots.
+    uint32_t atlasSlotOffset = UINT32_MAX;
     // The view is tested against the request's tile occluders (DepthRasterRequest::tileOccluders).
     bool tileOccluders = false;
     // ... in two phases (DepthRasterRequest::tileGuess): for a view whose tiles' occluders are what the view itself draws.

@@ -121,6 +121,10 @@ struct State
     uint32_t cacheRevision = UINT32_MAX;
     float cacheWind[4] = { -1, 0, 0, 0 };  // the scene wind the kept pages' wind casters were bounded with
     bool noSelfShadow = false;  // this frame's scene has a scene::InstanceNoSelfShadow instance (ShadowSelfSlack.hlsl)
+    // shadow.vsm.local_static_separate: the local lights' pages have static copies too (a change of the switch draws
+    // every local page anew); the raw SRV of the local atlas slots (V's tile occluders of the movable casters' views)
+    bool localSeparate = false;
+    uint32_t localSlotsSrv = UINT32_MAX;
 };
 
 constexpr uint32_t kAtlasPagesPerRow = 128;                                        // VsmCommon.hlsli VSM_ATLAS_PAGES_PER_ROW
@@ -224,8 +228,10 @@ void createState(FramePassContext& fc, State& s, uint32_t pages, bool separate)
     {
         s.table = createBuffer(d, L"S VSM page table", (uint64_t)kTotalSlots * 8);
         s.requests = createBuffer(d, L"S VSM requests", (uint64_t)kTotalSlots * 4);
-        s.localMask = createBuffer(d, L"S VSM local cull mask", (uint64_t)kLocalLights * kLocalLightWords * 4);
+        // (two sets of mask words: every caster / the static casters, then the movable casters - VsmLocalCullMask; one set of slots)
+        s.localMask = createBuffer(d, L"S VSM local cull mask", (uint64_t)kLocalLights * kLocalLightWords * 4 * 2);
         s.localSlots = createBuffer(d, L"S VSM local atlas slots", (uint64_t)kLocalLights * kLocalLightWords * 32 * 4);
+        s.localSlotsSrv = rawSrv(s.localSlots.Get(), (uint64_t)kLocalLights * kLocalLightWords * 32 * 4);
         // L3: the classification atlas, 48 pages per row (VSM_CLS_PAGES_PER_ROW), rows for kLocalLights x 6 pages
         s.clsAtlasBytes = (uint64_t)48 * 128 * ((kLocalLights * 6 + 47) / 48) * 128 * 4;
         s.clsAtlas = createBuffer(d, L"S VSM classification atlas", s.clsAtlasBytes);
@@ -515,17 +521,19 @@ uint64_t levelBound(const CasterBounds& b, const float4x4& vp, float pixelsPerMe
 void cubeBasis(uint32_t face, float3& right, float3& up, float3& axis);
 // Per mip (kLocalMips views of a face, pixels per metre at distance 1 = 64 x 2^mip): the caster's cut at that mip's
 // thresholds over the distances from the light to its LOD spheres (V: max(distance - radius, near 1e-4)).
-void localBounds(const CasterBounds& b, const VsmLocalLightCpu& l, uint64_t (&faces)[6][kLocalMips])
+// set: the views' instance set (RasterView::instanceSet; the casters counted in every view are all movable).
+void localBounds(const CasterBounds& b, const VsmLocalLightCpu& l, uint64_t (&faces)[6][kLocalMips], uint32_t set)
 {
     const float reach = l.farM + l.radius, h = 0.70710678f;
     float3 right[6], up[6], axis[6];
     for (uint32_t f = 0; f < 6; ++f)
     {
         cubeBasis(f, right[f], up[f], axis[f]);
-        for (uint32_t mip = 0; mip < kLocalMips; ++mip) faces[f][mip] = b.everywhere;
+        for (uint32_t mip = 0; mip < kLocalMips; ++mip) faces[f][mip] = set == 1 ? 0 : b.everywhere;
     }
     for (size_t i = 0; i < b.spheres.size(); ++i)
     {
+        if (!inSet(b, i, set)) continue;
         const float4& q = b.spheres[i];
         const float3 d = { q.x - l.position.x, q.y - l.position.y, q.z - l.position.z };
         const float rr = reach + q.w;
@@ -961,6 +969,18 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             for (uint32_t i = 0; i < kLocalLights; ++i)
                 if (s.localLight[i] != 0) ++s.localGen[i];  // its pages are released and drawn anew
     }
+    // shadow.vsm.local_static_separate (with static_separate): the switch changing draws every local page anew (pages kept
+    // from the other path have no static copy, or one the path no longer merges).
+    {
+        const bool sunSeparate = q.has("shadow.vsm.cache") && q.boolean("shadow.vsm.cache") && q.has("shadow.vsm.static_separate") && q.boolean("shadow.vsm.static_separate");
+        const bool wanted = sunSeparate && (!q.has("shadow.vsm.local_static_separate") || q.boolean("shadow.vsm.local_static_separate"));
+        if (wanted != s.localSeparate)
+        {
+            for (uint32_t i = 0; i < kLocalLights; ++i)
+                if (s.localLight[i] != 0) ++s.localGen[i];
+            s.localSeparate = wanted;
+        }
+    }
     // Local lights first: their count sizes the atlas's initial budget with the view's pixels.
     updateLocalLights(fc, s, main);
     const double mpixels = (double)main.view.width * main.view.height / 1e6;
@@ -1086,7 +1106,9 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                                              D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
     const BufferRef table = g.importBuffer(s.table.Get(), BufferDesc{ "S VSM page table", (uint64_t)kTotalSlots * 8, 0 });
     const BufferRef requests = g.importBuffer(s.requests.Get(), BufferDesc{ "S VSM requests", (uint64_t)kTotalSlots * 4, 0 });
-    const BufferRef localMask = g.importBuffer(s.localMask.Get(), BufferDesc{ "S VSM local cull mask", (uint64_t)kLocalLights * kLocalLightWords * 4, 0 });
+    const BufferRef localMask = g.importBuffer(s.localMask.Get(), BufferDesc{ "S VSM local cull mask", (uint64_t)kLocalLights * kLocalLightWords * 4 * 2, 0 });
+    const bool localSeparate = separate && s.localSeparate;
+    const uint32_t localSlotsSrv = s.localSlotsSrv;
     const BufferRef localSlots = g.importBuffer(s.localSlots.Get(), BufferDesc{ "S VSM local atlas slots", (uint64_t)kLocalLights * kLocalLightWords * 32 * 4, 0 });
     // Slots the scan covers: the sun's and those of the assigned local lights (and last frame's, so a shrinking set of
     // local lights clears its old slots).
@@ -1233,7 +1255,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     const uint32_t changedCapacity = 2 * (instanceCount + skinCount) + 64;
     const BufferRef changed = g.createBuffer(BufferDesc{ "S VSM changed casters", 16 + (uint64_t)changedCapacity * 16, 0 });
     // (the page bitmap, then the local lights' changed bits: VsmCache.hlsl localChangedOffset)
-    const BufferRef usedPages = g.createBuffer(BufferDesc{ "S VSM used pages", (uint64_t)(pagesNow + 31) / 32 * 4 + kLocalLights / 32 * 4, 0 });
+    const BufferRef usedPages = g.createBuffer(BufferDesc{ "S VSM used pages", (uint64_t)(pagesNow + 31) / 32 * 4 + 2 * (kLocalLights / 32 * 4), 0 });
     const BufferRef freePages = g.createBuffer(BufferDesc{ "S VSM free pages", 16 + (uint64_t)pagesNow * 4, 0 });
     const BufferRef casterStateRef = cacheOn ? g.importBuffer(s.casterState.Get(), BufferDesc{ "S VSM caster state", (uint64_t)s.casterStateCount * 16, 16 }) : BufferRef{};
     const BufferRef skinBounds = fc.resources.skinBounds;
@@ -1257,7 +1279,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                                           changedCapacity, ctx.uav(table), ctx.uav(requests), ctx.uav(usedPages),
                                           ctx.uav(freePages), pagesNow, scanSlots, cacheable ? 1u : 0u,
                                           skinCount ? ctx.srv(skinBounds) : 0xFFFFFFFFu, skinInstancesSrv, skinCount, ctx.uav(statsBuf),
-                                          localSlotsUsed ? localLightsSrv : 0xFFFFFFFFu, localSlotsUsed, 0xFFFFFFFFu, separate ? 1u : 0u,
+                                          localSlotsUsed ? localLightsSrv : 0xFFFFFFFFu, localSlotsUsed, 0xFFFFFFFFu, (separate ? 1u : 0u) | (localSeparate ? 2u : 0u),
                                           minChangeBits, windChangeBits, (uint32_t)frameIndex, staticInstances };
         std::memcpy(k, w, sizeof w);
     };
@@ -1663,7 +1685,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[8] = { ctx.srv(table), ctx.uav(localMask), activeLocal, activeSrv, ctx.uav(localSlots), 0, 0, 0 };
+                      const uint32_t k[8] = { ctx.srv(table), ctx.uav(localMask), activeLocal, activeSrv, ctx.uav(localSlots), localSeparate ? 1u : 0u, 0, 0 };
                       ctx.cmd->SetPipelineState(pm);
                       ctx.computeConstants(k, 8);
                       ctx.cmd->Dispatch(groups(activeLocal * kLocalLightWords, 64), 1, 1);
@@ -1767,7 +1789,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[4] = { ctx.srv(pageList), ctx.srv(atlasStatic), ctx.uav(staticHzb), 0 };
+                      const uint32_t k[4] = { ctx.srv(pageList), ctx.srv(atlasStatic), ctx.uav(staticHzb), localSeparate ? 1u : 0u };
                       ctx.cmd->SetPipelineState(ph);
                       ctx.computeConstants(k, 4);
                       ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(args), 0, nullptr, 0);
@@ -1872,26 +1894,16 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         }
         return made;
     };
-    if (fc.services.rasterizeDepth)
-    {
-        if (separate)
-        {
-            sunRequests = sunFamily("s.vsm.static", atlasStatic, 0, 1, twoPhase ? 2u : 0u);
-            // The HZB of the static copies drawn just now; then the movable casters' views are culled against it: a
-            // caster under the static surface of every page it would be drawn into leaves no texel after the merge.
-            if (hzbCull) staticHzbPass("s.vsm.statichzb");
-            sunRequests += sunFamily("s.vsm.raster", atlas, kLevels * (kTable * kTable / 32), 2, hzbCull ? 1u : 0u);
-        }
-        else
-            sunRequests = sunFamily("s.vsm.raster", atlas, 0, 0, 0);
-    }
-    if (fc.services.rasterizeDepth && activeLocal > 0)
-    {
-        // Local lights: the (light, face, mip) views (42 per light) packed into requests of at most
-        // shadow.vsm.local_request_views views (whole lights; V's limit: kDepthRasterMaxViews) whose bounds (localBound per
-        // view) sum to at most the list capacity; each view's viewport is its mip's resolution, the tile masks and slots
-        // are packed per light (VsmLocalCullMask). 252 (6 lights) was the limit of V's 8-bit view field: a cull chain per
-        // 6 lights.
+    // The local lights' requests of one instance set into one atlas ('base' names them: base0, base1, ..; maskWords: the
+    // set's first word of the tile mask). The (light, face, mip) views (42 per light) are packed into requests of at
+    // most shadow.vsm.local_request_views views (whole lights; V's limit: kDepthRasterMaxViews) whose bounds (localBounds
+    // per view) sum to at most the list capacity; each view's viewport is its mip's resolution, the tile masks and slots
+    // are packed per light (VsmLocalCullMask). 252 (6 lights) was the limit of V's 8-bit view field: a cull chain per
+    // 6 lights. shadow.vsm.local_static_separate: as the sun's families - the casters that are not movable into the static
+    // atlas where a page is drawn anew, the movable ones into the sampled atlas where a page is drawn anew or its movable
+    // casters changed, culled against the static copies' HZB (occluders).
+    auto localFamily = [&](const std::string& base, TextureRef target, uint32_t maskWords, uint32_t instanceSet, bool occluders) {
+        uint32_t made = 0;
         const uint32_t viewsPerLight = 6 * kLocalMips;
         const int64_t requestViewsWanted = q.has("shadow.vsm.local_request_views") ? q.integer("shadow.vsm.local_request_views") : 252;
         if (requestViewsWanted < (int64_t)viewsPerLight || requestViewsWanted > (int64_t)kDepthRasterMaxViews)
@@ -1899,10 +1911,16 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         const uint32_t requestViews = (uint32_t)requestViewsWanted / viewsPerLight * viewsPerLight;
         auto request = [&]() {
             DepthRasterRequest r;
-            r.name = "s.vsm.localraster" + std::to_string(localRequests++);
+            r.name = base + std::to_string(made++);
             r.instanceMask = scene::InstanceCastShadow;
-            r.depthTarget = atlas;
+            r.depthTarget = target;
             r.atlasSlots = localSlots;
+            if (occluders)
+            {
+                r.tileOccluders = staticHzb;
+                r.tileOccludersSrv = staticHzbSrv;
+                r.atlasSlotsSrv = localSlotsSrv;
+            }
             r.atlasTilesPerRow = kAtlasPagesPerRow;
             r.cullMask = localMask;
             r.cullTilePx = kPage;
@@ -1918,7 +1936,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                 const uint32_t slot = s.localActive[a];
                 const VsmLocalLightCpu& l = s.localData[slot];
                 uint64_t faceBounds[6][kLocalMips] = {};
-                if (split) localBounds(bounds, l, faceBounds);
+                if (split) localBounds(bounds, l, faceBounds, instanceSet);
                 for (uint32_t face = 0; face < 6; ++face)
                     for (uint32_t mip = 0; mip < kLocalMips; ++mip)
                         if (faceBounds[face][mip] > listCapacity)
@@ -1941,12 +1959,38 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                         v.lodPixelsPerMetre = 0.5f * (float)(kPage << mip);  // focal length in texels (90 degree face)
                         v.minInstanceTexels = minCasterTexels;
                         v.userData = slot | face << 7 | mip << 10;
-                        v.cullMaskOffset = a * kLocalLightWords + face * kLocalFaceWords + kLocalViewWordOffset[mip];
+                        v.instanceSet = instanceSet;
+                        v.tileOccluders = occluders;
+                        const uint32_t viewWords = a * kLocalLightWords + face * kLocalFaceWords + kLocalViewWordOffset[mip];
+                        v.cullMaskOffset = maskWords + viewWords;
+                        v.atlasSlotOffset = viewWords * 32;  // (one set of slots for both sets of mask words)
                         r.views.push_back(v);
                         sum += bound;
                     }
             }
             fc.services.rasterizeDepth(fc, r);
+        }
+        return made;
+    };
+    if (fc.services.rasterizeDepth)
+    {
+        const bool locals = activeLocal > 0;
+        if (separate)
+        {
+            sunRequests = sunFamily("s.vsm.static", atlasStatic, 0, 1, twoPhase ? 2u : 0u);
+            if (locals && localSeparate) localRequests = localFamily("s.vsm.localstatic", atlasStatic, 0, 1, false);
+            // The HZB of the static copies drawn just now; then the movable casters' views are culled against it: a
+            // caster under the static surface of every page it would be drawn into leaves no texel after the merge.
+            if (hzbCull) staticHzbPass("s.vsm.statichzb");
+            sunRequests += sunFamily("s.vsm.raster", atlas, kLevels * (kTable * kTable / 32), 2, hzbCull ? 1u : 0u);
+            if (locals)
+                localRequests += localSeparate ? localFamily("s.vsm.localraster", atlas, kLocalLights * kLocalLightWords, 2, hzbCull)
+                                               : localFamily("s.vsm.localraster", atlas, 0, 0, false);
+        }
+        else
+        {
+            sunRequests = sunFamily("s.vsm.raster", atlas, 0, 0, 0);
+            if (locals) localRequests = localFamily("s.vsm.localraster", atlas, 0, 0, false);
         }
     }
     if (fc.services.rasterizeDepth && (s.rasterRequests[0] != sunRequests || s.rasterRequests[1] != localRequests))
@@ -2015,7 +2059,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                 const uint32_t slot = s.localActive[a];
                 const VsmLocalLightCpu& l = s.localData[slot];
                 uint64_t faceBounds[6][kLocalMips] = {};
-                if (split) localBounds(bounds, l, faceBounds);
+                if (split) localBounds(bounds, l, faceBounds, 0);
                 for (uint32_t face = 0; face < 6; ++face)
                 {
                     const uint64_t bound = faceBounds[face][0];
@@ -2079,7 +2123,8 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         // static_separate: the static copy of every page drawn this frame into its sampled page (VsmMergePages.ps: a quad
         // per page whose depth is the static atlas's texel, under the depth test that keeps the nearer): after it a page
         // holds what one raster of all its casters would. The pages drawn anew, then the kept ones whose movable casters
-        // were drawn anew. (A local light's page has no static copy: its static page was cleared, the merge leaves it.)
+        // were drawn anew. (A local light's page: the same with shadow.vsm.local_static_separate; without it its static
+        // page was cleared and the merge leaves the sampled one as it is.)
         MeshPipelineDesc d;
         d.meshShader = "Passes/Shadow/VsmClearPages.ms";
         d.pixelShader = "Passes/Shadow/VsmMergePages.ps";

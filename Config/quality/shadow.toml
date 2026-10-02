@@ -56,6 +56,12 @@ aggregate_small_casters = true  # with min_caster_texels: a sun level draws each
                                 # small is not culled member by member. Dynamic, skinned and run-time instances under the
                                 # radius stay left out. false: min_caster_texels' behaviour - no shadow from them (A/B)
 aggregate_coverage = 0.5        # the share of its bounding disc a small caster's silhouette fills (a tree crown, a grass tuft)
+local_static_separate = true    # with static_separate: the local lights' pages have static copies too. A light whose range meets
+                                # only changes of movable casters keeps its pages and their static copies; the movable casters
+                                # of its pages are drawn anew (culled against the static copies' HZB with static_hzb_cull) and
+                                # merged. A change of a caster that is not movable, or of the light, draws its pages anew.
+                                # false: any changed caster in a light's range draws all of the light's casters anew (A/B).
+                                # Only without shading.mega_lights: with it S draws no local page
 local_request_views = 4032      # local lights' page views (42 per light: 6 faces x 7 mips) in one of V's raster requests - one
                                 # cull chain per request, so 96 lights share one where the list capacity allows it
                                 # (visibility.max_visible_clusters still splits them). 252: six lights per request, the limit

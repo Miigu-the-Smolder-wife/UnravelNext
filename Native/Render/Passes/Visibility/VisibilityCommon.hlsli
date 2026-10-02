@@ -41,7 +41,8 @@ struct CullView
                                        // ones (instanceInSet)
     uint occluderSrv, occluderSlotsSrv; // CULL_VIEW_TILE_OCCLUDERS: the request's tile occluders and atlas slots (raw SRVs)
     uint guessSrv;                     // CULL_VIEW_TILE_TWO_PHASE: the request's tile guesses (raw SRV)
-    uint pad0, pad1, pad2;
+    uint slotOffset;                   // first word of the view's tile slots in the request's atlas slots (tile i: + i)
+    uint pad1, pad2;
 };
 
 // The view's instance set (RasterView::instanceSet): movable = INSTANCE_MOVABLE_FLAGS, a bone palette, morph or terrain
@@ -699,7 +700,7 @@ bool tilesOcclude(CullView v, uint maskSrv, float4 s, bool guess)
             hi = at + (hi >> shift);
         }
         else
-            slot = slots.Load(4 * (v.cullMaskOffset * 32 + i));
+            slot = slots.Load(4 * (v.slotOffset + i));
         if (!(nearest < tileOccluderDepth(occluders, slot, lo, hi, blockPx))) return false;  // it can show in this tile
     }
     return any;

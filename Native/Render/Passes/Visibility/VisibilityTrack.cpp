@@ -690,6 +690,7 @@ CullView viewOf(const RasterView& r, const DepthRasterRequest& req, const Settin
     v.viewportOffset = { (float)r.viewportX, (float)r.viewportY };
     v.cullMaskOffset = req.cullMask.valid() ? r.cullMaskOffset : kNone;
     if (req.atlasSlots.valid()) v.flags |= kViewTileSingle;
+    v.slotOffset = r.atlasSlotOffset != UINT32_MAX ? r.atlasSlotOffset : (v.cullMaskOffset != kNone ? v.cullMaskOffset * 32 : 0);
     v.userData = r.userData;
     v.tilePx = std::max(req.cullTilePx, 1u);
     v.tilesX = (r.viewportWidth + v.tilePx - 1) / v.tilePx;

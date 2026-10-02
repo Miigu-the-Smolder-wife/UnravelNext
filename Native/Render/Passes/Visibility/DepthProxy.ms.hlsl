@@ -87,7 +87,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     const float2 ndcHi = float2(2 * hi.x / v.viewportSize.x - 1, 1 - 2 * hi.y / v.viewportSize.y);
     // tile -> slot by a whole-pixel shift in clip space (DepthRaster.ms.hlsl TILE=2)
     ByteAddressBuffer slots = ResourceDescriptorHeap[P[2].y];
-    const uint slot = draw ? slots.Load(4 * (v.cullMaskOffset * 32 + tileIndex)) : 0;
+    const uint slot = draw ? slots.Load(4 * (v.slotOffset + tileIndex)) : 0;
     const float2 atlasSize = float2(P[2].w & 0xFFFFu, P[2].w >> 16);
     const float2 shift = float2(slot % P[2].z, slot / P[2].z) * v.tilePx - lo;
     const float2 scale = v.viewportSize / atlasSize;

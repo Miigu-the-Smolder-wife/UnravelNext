@@ -36,7 +36,8 @@ struct CullView  // 400 B
     uint32_t instanceSet;                 // RasterView::instanceSet (0 every instance, 1 not movable, 2 movable)
     uint32_t occluderSrv, occluderSlotsSrv;  // DepthRasterRequest::tileOccludersSrv, atlasSlotsSrv (kViewTileOccluders)
     uint32_t guessSrv;                       // DepthRasterRequest::tileGuessSrv (kViewTileTwoPhase)
-    uint32_t pad[3];
+    uint32_t slotOffset;                     // RasterView::atlasSlotOffset (default: cullMaskOffset * 32)
+    uint32_t pad[2];
 };
 
 // C3 instance hierarchy (VisibilityCommon.hlsli CullScene, CullChunk).

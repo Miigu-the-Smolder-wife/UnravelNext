@@ -144,7 +144,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     // the view's clip space: they cut the same tile edges.
     ByteAddressBuffer slots = ResourceDescriptorHeap[P[2].y];
     const uint tile = (pair.y >> 16) * v.tilesX + (pair.y & 0xFFFFu);
-    const uint slot = valid ? slots.Load(4 * (v.cullMaskOffset * 32 + tile)) : 0;
+    const uint slot = valid ? slots.Load(4 * (v.slotOffset + tile)) : 0;
     const float2 atlasSize = float2(P[2].w & 0xFFFFu, P[2].w >> 16);
     const float2 shift = float2(slot % P[2].z, slot / P[2].z) * v.tilePx - lo;
     const float2 scale = v.viewportSize / atlasSize;
