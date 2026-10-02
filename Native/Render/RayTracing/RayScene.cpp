@@ -1804,7 +1804,8 @@ struct RtLightHeader
     uint32_t decal[4];  // words 16..19, per frame (RayScene::recordDecals; HitDecals.hlsli): TLAS, frames, texture table, count
     uint32_t functions[4];  // word 20, per frame: E's light functions (FrameResources::lightFunctions, A8), 0xFFFFFFFF none;
                             // word 21, per frame: the FX lights' groups (recordFxLights, A3), 0xFFFFFFFF none;
-                            // word 22, per frame: E's hair density parameters (recordHair; HitHair.hlsli), 0xFFFFFFFF none
+                            // word 22, per frame: E's hair density parameters (recordHair; HitHair.hlsli), 0xFFFFFFFF none;
+                            // word 23, per frame: the translucency volume of the hair hits' indirect light, 0xFFFFFFFF none
 };
 static_assert(sizeof(RtLightHeader) == 96);
 constexpr uint32_t kLightDecalOffset = 64, kLightFunctionOffset = 80, kLightHairOffset = 88;
@@ -2102,7 +2103,8 @@ void RayScene::publishLightSlot(FramePassContext& fc)
     // Words 16..19, every frame: no decals unless recordDecals writes them after this (a slot keeps an earlier frame's).
     const uint32_t noDecals[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0 };
     std::memcpy(m_lightRingMapped + slot * m_lightSlotBytes + kLightDecalOffset, noDecals, sizeof noDecals);
-    const uint32_t noFunctions[3] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };  // word 20 (light functions), word 21 (FX lights, recordFxLights), word 22 (hair, recordHair)
+    // word 20 (light functions), word 21 (FX lights, recordFxLights), words 22, 23 (hair, recordHair)
+    const uint32_t noFunctions[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
     std::memcpy(m_lightRingMapped + slot * m_lightSlotBytes + kLightFunctionOffset, noFunctions, sizeof noFunctions);
     m_lightSrvNow = m_lightRingSrv[slot];
 }
@@ -2678,13 +2680,20 @@ void RayScene::recordHair(FramePassContext& fc)
     if (m_hairFrame == fc.frame.frameIndex) return;
     m_hairFrame = fc.frame.frameIndex;
     m_frame.hairParams = {};
-    m_frame.hairFine = m_frame.hairCoarse = {};
+    m_frame.hairFine = m_frame.hairCoarse = m_frame.hairAmbient = m_frame.hairDirectional = {};
     const FrameResources& r = fc.resources;
     if (!m_hairEnabled || !r.hairDensityParams.valid() || !r.hairDensity.valid() || !r.hairDensityCoarse.valid()) return;
     m_frame.hairParams = r.hairDensityParams;
     m_frame.hairFine = r.hairDensity;
     m_frame.hairCoarse = r.hairDensityCoarse;
     uint8_t* word = lightSlot(fc) + kLightHairOffset;
+    // the hits' indirect light: the translucency volume the previous frame left (a persistent record: its SRV is known now)
+    if (r.translucencyGiPrevParams != 0xFFFFFFFFu && r.translucencyGiPrevAmbient.valid() && r.translucencyGiPrevDirectional.valid())
+    {
+        m_frame.hairAmbient = r.translucencyGiPrevAmbient;
+        m_frame.hairDirectional = r.translucencyGiPrevDirectional;
+        std::memcpy(word + 4, &r.translucencyGiPrevParams, 4);
+    }
     const BufferRef params = r.hairDensityParams;
     fc.graph.addPass("r.hair.params", QueueType::Compute,
                      [&](PassBuilder& b) {
@@ -2703,5 +2712,10 @@ void RayScene::declareHair(PassBuilder& b) const
     b.use(m_frame.hairParams, Use::SrvGraphics);  // as declareTraversal: ray and compute passes of R
     b.use(m_frame.hairFine, Use::SrvGraphics);
     b.use(m_frame.hairCoarse, Use::SrvGraphics);
+    if (m_frame.hairAmbient.valid())
+    {
+        b.use(m_frame.hairAmbient, Use::SrvGraphics);
+        b.use(m_frame.hairDirectional, Use::SrvGraphics);
+    }
 }
 } // namespace unx::render::rt

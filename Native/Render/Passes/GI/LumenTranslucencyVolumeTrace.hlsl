@@ -10,6 +10,9 @@
 //          a hit without cards: its direct light - the sun by one shadow ray, one local-light sample with its shadow
 //          ray (HitLocalSample.hlsli) - through the material's constants, as r.card.radiosity.trace; the back of a
 //          one-sided surface: 0. A thread traces at most 3 rays: bands of a third of 262,144 threads;
+//   hair   E's grooms (RayTracing/HitHair.hlsli; raytracing.hair): the ray's first fibre in the hair density volume,
+//          where it lies before the hit - except in a groom the cell's point lies inside: the strands take the cell's
+//          light through their own body's hair themselves (CoverageHair.hlsl hairIndirect);
 //   miss   inside the cache's coverage: the cache's radiance in the ray's direction (all 8 probes, weighted); else the sky.
 // The radiance is held to P[9].x exposed units (MaxRayIntensity 20) and stored as nits x LTV_SCALE.
 // P[0] = { trace UAV (Texture3D R11G11B10F, grid xy * 3), depth SRV, depth pyramid SRV, clipmap bias }
@@ -28,6 +31,7 @@
 #include "Passes/GI/LumenRadianceCache.hlsli"
 #include "Passes/GI/LumenTranslucencyVolumeGrid.hlsli"
 #include "RayTracing/HitLocalSample.hlsli"
+#include "RayTracing/HitHair.hlsli"
 
 [shader("raygeneration")]
 void LumenTranslucencyVolumeTraceGen()
@@ -79,7 +83,17 @@ void LumenTranslucencyVolumeTraceGen()
     const RtSceneSrvs scene = rtScene();
     float3 radiance = 0;
     const RtHit hit = rtTraceClosest(scene, ray, RAY_FLAG_NONE, RT_MASK_GI);
-    if (hit.t < 0)
+    const uint hairParams = rtHairParams(scene);
+    const uint hairSeed = seed * 3u + id.z * 7919u + texel.x * 31u + texel.y * 131u;
+    RtHairHit hair;
+    hair.t = -1;
+    hair.body = hair.material = 0;
+    if (hairParams != 0xFFFFFFFFu) hair = rtHairFirst(hairParams, ray.Origin, ray.Direction, hit.t < 0 ? ray.TMax : hit.t, hairSeed, true);
+    if (hair.t >= 0)
+    {
+        radiance = rtHairRadiance(scene, hairParams, hair, ray.Origin, ray.Direction, hair.t * 1.2, 1e-3 + 2e-4 * distance(ray.Origin, g_cameraPosition), hairSeed, true, true);
+    }
+    else if (hit.t < 0)
     {
         if (coverage.valid) radiance = cached.rgb;
         else radiance = giSkyRadiance(ray.Direction);

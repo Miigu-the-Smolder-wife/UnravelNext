@@ -25,6 +25,8 @@
 // transmittance (waterSunLight, the direct parts only); P[10].x its caustics (UNX_NONE: none). P[8].x = E's light function table (A8; UNX_NONE: none),
 // P[8].y = ViewResources::coverageRecordRadiance (raw SRV, v1.75): special records (vis id top bits != 00: hair, streams,
 // M pre-shaded classes) are read from it (their owners shaded them, CoverageSpecial.hlsli), clusters are shaded here.
+// P[11].z = E's grooms between the fragments and the sun (Passes/Hair/HairShadow.hlsl MODE 2: the hair's transmittance
+// at the 4 depths of S's sun profile, R32_UINT; UNX_NONE: none) - a cluster fragment's sun visibility times its value.
 // COV_PRESHADE_CLASSES (CoverageSpecial.hlsl MODE=1, 2): covFragmentMaterial takes the material of its class as the
 // resolve - 1 Cut, 2 Terrain; COV_PRESHADE_LIGHT (MODE=3): covShadeFragment lights the material those kernels stored.
 #ifndef UNX_M_COVERAGE_SHADE_HLSLI
@@ -188,6 +190,15 @@ CovFragmentShadow covFragmentShadow(uint2 pixel, uint element, float linearZ)
         const float x = o.t * 3;
         const uint k = min((uint)x, 2u);
         o.sun = lerp(covByte(w.x, k), covByte(w.x, k + 1u), x - k);
+    }
+    if (P[11].z != UNX_NONE)
+    {
+        // the grooms towards the sun at the fragment's depth (the same 4 points)
+        Texture2D<uint> hairSun = ResourceDescriptorHeap[P[11].z];
+        const uint h = hairSun[pixel];
+        const float x = o.t * 3;
+        const uint k = min((uint)x, 2u);
+        o.sun *= lerp(covByte(h, k), covByte(h, k + 1u), x - k);
     }
     o.nearSlots = w.y;
     o.farSlots = w.z;

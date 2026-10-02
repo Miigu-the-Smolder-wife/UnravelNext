@@ -127,9 +127,11 @@ public:
     // Hair at ray hits (RayTracing/HitHair.hlsli; raytracing.hair): the rays' proxy of E's strands is E's density volume
     // (Passes/Hair/HairDensity.hlsli; FrameResources::hairDensityParams, recorded by tracks::hair after this scene's
     // record) - a ray's first fibre in it is a hit the ray pass shades. Once per frame, before the first pass whose rays
-    // read it takes rootConstants (GI's gather, the reflections): word 22 of this frame's light-grid header = the
-    // parameters' SRV (0xFFFFFFFF: no volume this frame, or the switch off). declareHair adds the volume's reads to such
-    // a pass; hairParams is the buffer for a compute pass that follows the same rays (the screen traces).
+    // read it takes rootConstants (GI's gather, the radiance cache, the translucency volume, the reflections): word 22 of
+    // this frame's light-grid header = the parameters' SRV (0xFFFFFFFF: no volume this frame, or the switch off), word 23
+    // = the previous frame's translucency volume (FrameResources::translucencyGiPrevParams: the hits' indirect light;
+    // 0xFFFFFFFF: none). declareHair adds the volumes' reads to such a pass; hairParams is the buffer for a compute pass
+    // that follows the same rays (the screen traces).
     void recordHair(FramePassContext& fc);
     void declareHair(PassBuilder& b) const;
     BufferRef hairParams() const { return m_frame.hairParams; }
@@ -267,6 +269,7 @@ private:
         BufferRef fxCdf, fxLights;  // A3: the FX lights' groups (FxLightGroups.hlsl) and the scene light buffer they index
         BufferRef hairParams;       // E's hair density volume (recordHair): parameters and the two textures
         TextureRef hairFine, hairCoarse;
+        TextureRef hairAmbient, hairDirectional;  // the translucency volume the hair hits read (invalid: none)
     };
     Frame m_frame;
     uint64_t m_hairFrame = ~0ull;    // the frame recordHair ran for

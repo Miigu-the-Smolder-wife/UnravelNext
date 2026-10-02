@@ -8,7 +8,8 @@
 //              cell's width (VsmMarkFog.hlsl asked for exactly these pages, at the level of the unjittered cell). The
 //              segment stays in front of the surface on the centre ray (the centre pixel's depth): a segment that
 //              would cross it is moved toward the camera by what lies behind (fogSegment; past the surface the ray is
-//              in another space - beyond a wall, outside);
+//              in another space - beyond a wall, outside); x what E's grooms let through from the sample point towards
+//              the sun (Passes/Hair/HairDensity.hlsli hairTransmittance; P[10].y);
 //   local      the air grid's sampled local light (MegaLightsVolume.hlsl: visible fluence and its direction moment per
 //              froxel, shadow rays for every caster), read between its froxels, through the phase function's first two
 //              SH bands;
@@ -30,6 +31,7 @@
 //          [-1, 1]^3 -, then { density, height falloff, 1 / edge, albedo r | g << 8 | b << 16 | shape << 24 }), P[10].x =
 //          their count (FrameContext::fogVolumes). A volume adds density x fade toward its boundary x 2^(-falloff x the
 //          height inside it, 0 .. 1) x the density's variation, with its own albedo; the cell's light is the same.
+// P[10].y = E's hair density parameters (raw SRV; UNX_NONE: none - no hair this frame, or shading.hair_shadows off).
 // Frame constants of the view (the main view, or a planar reflection view: its fog starts at the mirror).
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
@@ -39,6 +41,7 @@
 #include "Passes/Atmosphere/FogVolume.hlsli"
 #include "Passes/Atmosphere/CloudShadowCommon.hlsli"
 #include "Passes/GI/LumenTranslucencyVolume.hlsli"
+#include "Passes/Hair/HairDensity.hlsli"
 
 [numthreads(4, 4, 4)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -135,7 +138,12 @@ void main(uint3 id : SV_DispatchThreadID)
                     }
                 }
             }
-            const float lit = (1 - saturate(shadowed)) * cloudSunTransmittanceFromLut(P[6].w, p);
+            float lit = (1 - saturate(shadowed)) * cloudSunTransmittanceFromLut(P[6].w, p);
+            if (P[10].y != 0xFFFFFFFFu && lit > 0)
+            {
+                ByteAddressBuffer hair = ResourceDescriptorHeap[P[10].y];
+                lit *= hairTransmittance(P[10].y, p - hairDensityOrigin(hair), sun, 3.0e38f, 32u, jitter.z);
+            }
             inScattered += E * airSunTransmittance(a, P[6].w, airLiftToSurface(a, p), sun) * (lit * airMiePhase(dot(dir, sun), fog.g));
         }
         // the local lights

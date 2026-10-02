@@ -339,6 +339,7 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
     std::memcpy(st.ringMapped + (size_t)slot * kParamBytes, &params, sizeof params);
 
     uint32_t sceneWords[8];
+    rays.recordHair(fc);  // E's grooms on the rays (HitHair.hlsli): the header's words 22, 23, before rootConstants
     rays.rootConstants(sceneWords);
     const std::array<uint32_t, 8> sceneSrvs = std::to_array(sceneWords);
     const FrameResources& fr = fc.resources;
@@ -367,6 +368,7 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
                       b.use(rcDepth, Use::SrvGraphics);
                   }
                   rays.declareTraversal(b);
+                  rays.declareHair(b);
                   if (atmosphere)
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
               },
