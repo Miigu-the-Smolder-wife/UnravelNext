@@ -1,5 +1,5 @@
 # Core-owned: the scene description shared by every track (INTERFACES_KO.md 6).
-add_library(unx_scene STATIC src/SceneData.cpp src/MaterialModel.cpp src/TerrainPatch.cpp)
+add_library(unx_scene STATIC src/SceneData.cpp src/MaterialModel.cpp src/TerrainPatch.cpp src/MeshCards.cpp)
 unx_target_defaults(unx_scene)
 target_include_directories(unx_scene PUBLIC include)
 target_link_libraries(unx_scene PUBLIC unx_core)
@@ -30,3 +30,7 @@ target_compile_definitions(unx_test_scene_film PRIVATE UNX_SOURCE_DIR="${CMAKE_S
 add_executable(unx_test_scene_lightendbias Tests/LightEndBiasTests.cpp)
 unx_target_defaults(unx_test_scene_lightendbias)
 target_link_libraries(unx_test_scene_lightendbias PRIVATE unx_scene)
+# Mesh cards (render A, MESH_CARDS_INTERFACE_KO.md): the per-mesh card generator (CPU).
+add_executable(unx_test_scene_meshcards Tests/MeshCardsTests.cpp)
+unx_target_defaults(unx_test_scene_meshcards)
+target_link_libraries(unx_test_scene_meshcards PRIVATE unx_scene)
