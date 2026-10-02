@@ -130,6 +130,46 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     const TextureRef irradiance = g.createTexture({ "lumen probe irradiance", traceX, traceY, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
     const TextureRef radianceBorder = g.createTexture({ "lumen probe radiance (border)", probesX * 10, atlasRows * 10, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
     const TextureRef newDiffuse = g.createTexture({ "lumen diffuse (frame)", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+    // Foliage's back side (the reference's backface diffuse: the probes at the reversed normal, in the diffuse's history)
+    bool foliage = false;
+    for (const gpu::Material& material : fc.scene.materials()) foliage = foliage || (material.classFlags & 0xFFu) == 1u;  // scene::MaterialClass::Foliage
+    foliage = foliage && view.materialWord.valid();
+    TextureRef backface, prevBackface, newBackface;
+    bool backfaceHistory = false;
+    if (foliage)
+    {
+        if (!st.backface[0] || st.backfaceWidth != width || st.backfaceHeight != height)
+        {
+            D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+            D3D12_RESOURCE_DESC1 d{};
+            d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            d.Width = width;
+            d.Height = height;
+            d.DepthOrArraySize = d.MipLevels = 1;
+            d.SampleDesc.Count = 1;
+            d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            d.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            for (int k = 0; k < 2; ++k)
+            {
+                if (st.backface[k]) m_device.deferRelease(st.backface[k]);
+                check(m_device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
+                                                               IID_PPV_ARGS(st.backface[k].ReleaseAndGetAddressOf())),
+                      "GI lumen backface history");
+                st.backface[k]->SetName(k ? L"R lumen backface 1" : L"R lumen backface 0");
+            }
+            st.backfaceWidth = width;
+            st.backfaceHeight = height;
+            st.backfaceHistory = false;
+        }
+        backfaceHistory = st.backfaceHistory && historyValid;
+        st.backfaceHistory = true;
+        backface = import(st.backface[next], "lumen backface", width, height, DXGI_FORMAT_R16G16B16A16_FLOAT);
+        prevBackface = import(st.backface[prev], "lumen backface (previous)", width, height, DXGI_FORMAT_R16G16B16A16_FLOAT);
+        newBackface = g.createTexture({ "lumen backface (frame)", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+    }
+    else
+        st.backfaceHistory = false;
+    const TextureRef materialWord = view.materialWord;
     const TextureRef newSpecular = g.createTexture({ "lumen rough specular (frame)", width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
 
     const TextureRef depth = view.depth, gbuffer = view.gbuffer, visId = view.visId;
@@ -678,10 +718,17 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   b.use(probeMoving, Use::SrvCompute);
                   b.use(newDiffuse, Use::UavCompute);
                   b.use(newSpecular, Use::UavCompute);
+                  if (foliage)
+                  {
+                      b.use(newBackface, Use::UavCompute);
+                      b.use(materialWord, Use::SrvCompute);
+                  }
               },
               [=, &shaders](PassContext& c) {
                   uint32_t k[48] = {};
                   surfaceWords(c, k);
+                  k[14] = foliage ? c.uav(newBackface) : 0xFFFFFFFFu;
+                  k[15] = foliage ? c.srv(materialWord) : 0xFFFFFFFFu;
                   k[4] = c.uav(newDiffuse);
                   k[5] = c.uav(newSpecular);
                   k[6] = c.srv(irradiance);
@@ -711,6 +758,12 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   b.use(diffuse, Use::UavCompute);
                   b.use(specular, Use::UavCompute);
                   b.use(keys, Use::UavCompute);
+                  if (foliage)
+                  {
+                      b.use(newBackface, Use::SrvCompute);
+                      b.use(prevBackface, Use::SrvCompute);
+                      b.use(backface, Use::UavCompute);
+                  }
                   b.keep();
               },
               [=, &shaders](PassContext& c) {
@@ -730,6 +783,10 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   k[15] = bits(L.temporalMaxFast);
                   std::memcpy(&k[16], &prevInvViewProj, 64);
                   std::memcpy(&k[32], common.k, sizeof common.k);
+                  // (P[10].z, P[10].w, P[11].x: the probe words elsewhere - here the backface's frame value, history and output)
+                  k[42] = foliage ? c.srv(newBackface) : 0xFFFFFFFFu;
+                  k[43] = foliage && backfaceHistory ? c.srv(prevBackface) : 0xFFFFFFFFu;
+                  k[44] = foliage ? c.uav(backface) : 0xFFFFFFFFu;
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/Lumen/LgTemporal"));
                   c.computeConstants(k, 48);
                   c.bindFrameConstants(frameConstants);
@@ -737,5 +794,6 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
               });
     view.giIrradiance = diffuse;
     view.giRoughSpecular = specular;
+    view.giBackfaceIrradiance = backface;
 }
 } // namespace unx::render::gi

@@ -360,6 +360,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     // gi.lumen_only's composite (ShadeOpaque.hlsl part 2): the gather's rough specular and the short-range AO
     const bool lumenComposite = !view.screenProbes.valid() && view.giIrradiance.valid();
     const TextureRef roughSpecular = lumenComposite ? view.giRoughSpecular : TextureRef{}, shortRangeAO = lumenComposite ? view.shortRangeAO : TextureRef{};
+    const TextureRef backfaceIrradiance = lumenComposite ? view.giBackfaceIrradiance : TextureRef{};
     // S's coverage fragment visibility (INTERFACES 7.3 v1.41): with it the fragment kernels shade fragments with S's sun
     // profile and local slots (CoverageShade.hlsli covFragmentShadow); without it they stay unshadowed.
     const bool fragmentShadows = v.shadowFragmentVisibility.valid() && v.coverageDepthRange.valid();
@@ -723,6 +724,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             if (v.giIrradiance.valid()) b.use(v.giIrradiance, Use::SrvCompute);  // R's per-pixel front irradiance (P[9].w)
             if (roughSpecular.valid()) b.use(roughSpecular, Use::SrvCompute);  // P[11].y
             if (shortRangeAO.valid()) b.use(shortRangeAO, Use::SrvCompute);    // P[11].z
+            if (backfaceIrradiance.valid()) b.use(backfaceIrradiance, Use::SrvCompute);  // P[11].w
             if (atmosphere)
                 for (TextureRef t : { r.transmittanceLut, r.multiScatterLut, r.skyViewLut }) b.use(t, Use::SrvCompute);
             if (air) b.use(v.airVolume, Use::SrvCompute);
@@ -816,6 +818,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 k32[44] = tileLights ? c.srv(tileRecords) : none;                        // P[11].x: L2 (P[4].w is the histogram)
                 k32[45] = roughSpecular.valid() ? c.srv(roughSpecular) : none;           // P[11].y: gi.lumen_only's rough specular
                 k32[46] = shortRangeAO.valid() ? c.srv(shortRangeAO) : none;             // P[11].z: ... and short-range AO
+                k32[47] = backfaceIrradiance.valid() ? c.srv(backfaceIrradiance) : none;  // P[11].w: ... and Foliage's back side
                 ID3D12PipelineState* lobes = shadeClass == material::ShadeClass::Layered ? lobesLayered : (shadeClass == material::ShadeClass::Sheen ? lobesSheen : nullptr);
                 if (part == 1 && lobes && areaLobes.valid())
                 {
@@ -872,6 +875,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              declareGiSource(b, giSrc, Use::SrvCompute);
                              if (roughSpecular.valid()) b.use(roughSpecular, Use::SrvCompute);  // P[11].y
                              if (shortRangeAO.valid()) b.use(shortRangeAO, Use::SrvCompute);    // P[11].z
+                             if (backfaceIrradiance.valid()) b.use(backfaceIrradiance, Use::SrvCompute);  // P[11].w
                              if (atmosphere)
                                  for (TextureRef t : { r.transmittanceLut, r.multiScatterLut }) b.use(t, Use::SrvCompute);
                              if (air) b.use(v.airVolume, Use::SrvCompute);
@@ -930,6 +934,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              k32[44] = none;                            // P[11].x (the fallback kernel keeps every light per pixel)
                              k32[45] = roughSpecular.valid() ? c.srv(roughSpecular) : none;  // P[11].y
                              k32[46] = shortRangeAO.valid() ? c.srv(shortRangeAO) : none;    // P[11].z
+                             k32[47] = backfaceIrradiance.valid() ? c.srv(backfaceIrradiance) : none;  // P[11].w
                              k32[37] = o.anisoWord.valid() ? c.srv(o.anisoWord) : gpu::kNone;  // P[9].y (A9 anisotropy word)
                              particleConstants(c, k32 + 22);  // P[5].zw
                              k32[16] = r.areaLightStable;     // P[4].x (B2)

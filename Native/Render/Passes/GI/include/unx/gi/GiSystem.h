@@ -246,6 +246,9 @@ private:
     struct LumenState
     {
         ComPtr<ID3D12Resource> probeDepth[2], probePosition[2], probeRadiance[2], diffuse[2], specular[2], keys[2];
+        ComPtr<ID3D12Resource> backface[2];  // Foliage back-side irradiance and its history (made when the scene has Foliage)
+        uint32_t backfaceWidth = 0, backfaceHeight = 0;
+        bool backfaceHistory = false;
         uint32_t width = 0, height = 0, parity = 0, revision = 0, epoch = 0, prevTemporalIndex = 0;
         bool valid = false;
         bool previousHadHistory = false;  // the frame before had a valid history (it was not a first frame, cut or restore)

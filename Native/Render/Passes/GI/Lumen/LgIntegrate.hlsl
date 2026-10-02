@@ -16,10 +16,13 @@
 // (float), probe moving SRV }, P[3] = { short-range AO SRV (A's ViewResources::shortRangeAO, RGBA16F: world bent normal
 // x AO; 0xFFFFFFFF: none - lumen.short_range_ao off), max multibounce albedo (float), 0, 0 }: the irradiance is read
 // along normalize(lerp(bent normal, normal, AO)) and multiplied by lumenAoMultibounce(base colour, AO), the rough
-// specular lobe by lumenAoSpecular (LumenShortRangeAO.hlsli),
+// specular lobe by lumenAoSpecular (LumenShortRangeAO.hlsli); P[3].z = backface irradiance UAV (RGBA16F; 0xFFFFFFFF: the
+// scene has no Foliage) and P[3].w = M's material word SRV: a Foliage pixel also reads the probes' irradiance at its
+// reversed normal (what arrives on its back; the reference's backface diffuse), other pixels store 0,
 // P[10].z adaptive SRV, P[10].w / P[11].y probe depth / position SRVs. b1 = the view.
 #include "Passes/GI/Lumen/LgInterpolate.hlsli"
 #include "Passes/GI/LumenShortRangeAO.hlsli"
+#include "Scene.hlsli"
 
 float3 lgIrradianceAt(Texture2D<float4> map, uint2 atlas, float3 n)
 {
@@ -67,6 +70,11 @@ void main(uint3 id : SV_DispatchThreadID)
     {
         diffuseOut[id.xy] = 0;
         specularOut[id.xy] = 0;
+        if (P[3].z != 0xFFFFFFFFu)
+        {
+            RWTexture2D<float4> backfaceOut = ResourceDescriptorHeap[P[3].z];
+            backfaceOut[id.xy] = 0;
+        }
         return;
     }
     Texture2D<float4> irradiance = ResourceDescriptorHeap[P[1].z];
@@ -125,6 +133,18 @@ void main(uint3 id : SV_DispatchThreadID)
     }
     e *= aoDiffuse;
     diffuseOut[id.xy] = float4(e, lit ? max(moving.x, 0.004) : 0.0);
+    if (P[3].z != 0xFFFFFFFFu)
+    {
+        float3 back = 0;
+        Texture2D<uint> words = ResourceDescriptorHeap[P[3].w];
+        if (materialClass(loadMaterial(words.Load(int3(id.xy, 0)) & 0xFFFFu)) == MATERIAL_FOLIAGE)
+        {
+            [unroll] for (uint cb = 0; cb < 4; ++cb)
+                if (ps.weights[cb] > 0) back += lgIrradianceAt(irradiance, ps.atlas[cb], -s.normal) * ps.weights[cb];
+        }
+        RWTexture2D<float4> backfaceOut = ResourceDescriptorHeap[P[3].z];
+        backfaceOut[id.xy] = float4(back, 1);
+    }
 
     // rough specular
     float3 specular = e / LG_PI;

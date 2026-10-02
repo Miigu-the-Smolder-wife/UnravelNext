@@ -15,6 +15,8 @@
 // threshold (float), fraction for fast mode (float), max fast amount (float) }, P[4..7] = the previous frame's inverse
 // view-projection (rows), P[9].z bit 16 = history valid, P[10].x.. as the common block; P[11].z = exposure ratio (this
 // / previous, float). b1 = the view.
+// Foliage's back-side irradiance (LgIntegrate.hlsl) takes the diffuse's blend: P[10].z = its frame value SRV (0xFFFFFFFF:
+// none), P[10].w = its history SRV (0xFFFFFFFF: none yet), P[11].x = its output UAV.
 #include "Passes/GI/Lumen/LgSurface.hlsli"
 
 uint lgPackKeyNormal(float3 n)
@@ -33,13 +35,26 @@ void main(uint3 id : SV_DispatchThreadID)
     RWTexture2D<float4> specularOut = ResourceDescriptorHeap[P[1].w];
     RWTexture2D<uint2> keysOut = ResourceDescriptorHeap[P[2].x];
     const LgSurface s = lgSurface(id.xy);
+    const bool backfaceOn = P[10].z != 0xFFFFFFFFu;
     if (!s.valid)
     {
         diffuseOut[id.xy] = 0;
         specularOut[id.xy] = 0;
         keysOut[id.xy] = uint2(0, 0);
+        if (backfaceOn)
+        {
+            RWTexture2D<float4> backfaceOut = ResourceDescriptorHeap[P[11].x];
+            backfaceOut[id.xy] = 0;
+        }
         return;
     }
+    float3 outBackface = 0;
+    if (backfaceOn)
+    {
+        Texture2D<float4> newBackface = ResourceDescriptorHeap[P[10].z];
+        outBackface = newBackface[id.xy].rgb;
+    }
+    const float3 freshBackface = outBackface;
     Texture2D<float> depth = ResourceDescriptorHeap[P[0].x];
     keysOut[id.xy] = uint2(asuint(depth[id.xy]), lgPackKeyNormal(s.normal));
     const float4 fresh = newDiffuse[id.xy];
@@ -71,7 +86,7 @@ void main(uint3 id : SV_DispatchThreadID)
             const float2 f = prevPixel - 0.5 - base;
             const float4 bilinear = float4((1 - f.x) * (1 - f.y), f.x * (1 - f.y), (1 - f.x) * f.y, f.x * f.y);
             const float4 plane = float4(prevN, dot(prevP, prevN));
-            float3 sumDiffuse = 0, sumSpecular = 0;
+            float3 sumDiffuse = 0, sumSpecular = 0, sumBackface = 0;
             float sumFrames = 0, sumFast = 0, weight = 0;
             [unroll] for (uint c = 0; c < 4; ++c)
             {
@@ -89,6 +104,11 @@ void main(uint3 id : SV_DispatchThreadID)
                 const float w = bilinear[c];
                 sumDiffuse += d.rgb * w;
                 sumSpecular += sp.rgb * w;
+                if (backfaceOn && P[10].w != 0xFFFFFFFFu)
+                {
+                    Texture2D<float4> prevBackface = ResourceDescriptorHeap[P[10].w];
+                    sumBackface += prevBackface[q].rgb * w;
+                }
                 sumFrames += d.a * w;  // (N_i + 1)
                 sumFast += sp.a * w;
                 weight += w;
@@ -107,10 +127,16 @@ void main(uint3 id : SV_DispatchThreadID)
                 if (!lit && frames >= 1) alpha = 1 / (1 + 4 * frames);
                 outDiffuse = lerp(historyDiffuse, fresh.rgb, alpha);
                 outSpecular = lerp(historySpecular, freshSpecular, alpha);
+                if (backfaceOn && P[10].w != 0xFFFFFFFFu) outBackface = lerp(sumBackface / weight * ratio, freshBackface, alpha);
                 fast = outFast;
             }
         }
     }
     diffuseOut[id.xy] = float4(max(outDiffuse, 0.0), frames + 1);
     specularOut[id.xy] = float4(max(outSpecular, 0.0), fast);
+    if (backfaceOn)
+    {
+        RWTexture2D<float4> backfaceOut = ResourceDescriptorHeap[P[11].x];
+        backfaceOut[id.xy] = float4(max(outBackface, 0.0), 1);
+    }
 }

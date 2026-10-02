@@ -123,6 +123,10 @@ struct ViewResources
     // 0.6 the lobe fades to irradiance / pi, which it is from 0.8 (gi.lumen_max_roughness_rough_specular). The reader
     // multiplies its specular albedo. Invalid without gi.lumen.  [R]
     TextureRef giRoughSpecular;
+    // gi.lumen, scenes with Foliage materials: RGBA16F W x H, the irradiance x g_exposure arriving on the BACK of a
+    // Foliage pixel (the screen probes read at the reversed normal, with the diffuse irradiance's pixel history) - what
+    // its diffuse transmission lights the viewer's side with. 0 on other pixels. Invalid: no Foliage material.      [R]
+    TextureRef giBackfaceIrradiance;
     // The previous frame's scene colour for screen-space traces (shading::upscalePreviousColor, Passes/Shading/Upscale.cpp:
     // M's temporal upscale history of the frame before): RGBA16F at the OUTPUT resolution (FrameContext::upscale
     // outputWidth x outputHeight), rgb = linear radiance x the PREVIOUS frame's exposure (x FrameContext::upscale

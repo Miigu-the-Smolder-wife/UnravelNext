@@ -40,7 +40,8 @@
 //        (UNX_NONE = absent)
 // gi.lumen_only (no screen probes; part 2): P[9].w = the final gather's diffuse irradiance, P[11].y = its rough specular
 //        (view.giRoughSpecular: RGBA16F radiance x exposure; UNX_NONE: none), P[11].z = the short-range AO
-//        (view.shortRangeAO, LumenShortRangeAO.hlsli; UNX_NONE: none)
+//        (view.shortRangeAO, LumenShortRangeAO.hlsli; UNX_NONE: none), P[11].w = the gather's Foliage back-side
+//        irradiance (view.giBackfaceIrradiance: x exposure; UNX_NONE: none - the translucency volume then)
 // P[3] = { atmosphere transmittance, multi-scatter, S's shadow overflow tile heads (main kernel; UNX_NONE = absent), this
 //        view's air volume } (this kernel reads no sky view)
 // P[4] = { B2 stable area lights' mask (raw, 1 bit per scene light; UNX_NONE = none), texture table, experiment mask (0;
@@ -891,14 +892,19 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         //              the rough part alone;
         //   clearcoat  the reflection is the coat's (R traces a coated pixel at its coat's roughness: the top layer);
         //              the base lobe takes the rough specular (the bottom layer);
-        //   Foliage    the back side from the translucency volume (P[2].w; the reference integrates the screen probes
-        //              over the back hemisphere).
+        //   Foliage    the back side from the gather's backface irradiance (the screen probes at the reversed normal:
+        //              the reference's backface diffuse), or without it the translucency volume (P[2].w).
         Texture2D<float4> diffuseIndirect = ResourceDescriptorHeap[P[9].w];
         const float4 bent = lumenShortRangeAO(P[11].z, pixel, nv);
         if ((experiment & 2) == 0)
         {
             irradiance = max(diffuseIndirect[pixel].rgb, 0.0) / g_exposure * lumenAoMultibounce(s.baseColor * (1 - s.metallic), bent.w, 0.5);
-            if (foliage && giSourceIsVolume(P[2].w)) irradianceBack = ltvIrradiance(giSourceVolume(P[2].w), worldPos, -nv);
+            if (foliage && P[11].w != UNX_NONE)
+            {
+                Texture2D<float4> backfaceIndirect = ResourceDescriptorHeap[P[11].w];
+                irradianceBack = max(backfaceIndirect[pixel].rgb, 0.0) / g_exposure;
+            }
+            else if (foliage && giSourceIsVolume(P[2].w)) irradianceBack = ltvIrradiance(giSourceVolume(P[2].w), worldPos, -nv);
         }
         if (NoV > 0 && (experiment & 4) == 0)
         {
