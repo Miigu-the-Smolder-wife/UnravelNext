@@ -113,6 +113,30 @@ int main()
             CHECK(d.shape == 0 && d.density == FogVolume{}.density && d.edge == FogVolume{}.edge);
         }
         CHECK(serialize(mistyBack) == mistyBytes);
+        CHECK(!contains(mistyBytes, "FVST"));
+
+        // steam values on one volume: the FVST block names it, the other keeps its defaults
+        Scene steamy = misty;
+        steamy.fogVolumes[1].sourcePlane = 0.25f;
+        steamy.fogVolumes[1].riseSpeed = 0.4f;
+        steamy.fogVolumes[1].turbulence = 0.8f;
+        steamy.fogVolumes[1].turbulenceScale = 0.3f;
+        validate(steamy);
+        const std::vector<uint8_t> steamyBytes = serialize(steamy);
+        CHECK(contains(steamyBytes, "FVST"));
+        CHECK(steamyBytes.size() == mistyBytes.size() + 4 + 8 + (4 + 4 * 4));  // tag, count, index + 4 floats
+        const Scene steamyBack = deserialize(steamyBytes);
+        CHECK(steamyBack.fogVolumes.size() == 2);
+        if (steamyBack.fogVolumes.size() == 2)
+        {
+            CHECK(steamyBack.fogVolumes[0].riseSpeed == 0 && steamyBack.fogVolumes[0].turbulence == 0 && steamyBack.fogVolumes[0].sourcePlane == 0);
+            const FogVolume& v = steamyBack.fogVolumes[1];
+            CHECK(v.sourcePlane == 0.25f && v.riseSpeed == 0.4f && v.turbulence == 0.8f && v.turbulenceScale == 0.3f);
+        }
+        CHECK(serialize(steamyBack) == steamyBytes);
+        Scene badSteam = steamy;
+        badSteam.fogVolumes[1].turbulence = 1.5f;
+        CHECK(refused(badSteam));
 
         // the height fog and the clouds together: both blocks, clouds first
         Scene both = cloudy;

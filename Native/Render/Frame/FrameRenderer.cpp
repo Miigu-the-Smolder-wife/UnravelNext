@@ -359,6 +359,10 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
                 d.heightFalloff = v.heightFalloff;
                 d.edge = v.edge;
                 d.albedo[0] = v.albedo.x, d.albedo[1] = v.albedo.y, d.albedo[2] = v.albedo.z;
+                d.sourcePlane = v.sourcePlane;
+                d.riseSpeed = v.riseSpeed;
+                d.turbulence = v.turbulence;
+                d.turbulenceScale = v.turbulenceScale;
                 frame.fogVolumes.push_back(d);
             }
     }

@@ -149,8 +149,26 @@ struct FogVolumeDesc
     float heightFalloff = 0;         // the density halves this many times from the volume's bottom to its top (0: uniform)
     float edge = 0.3f;               // (0, 1]: the outer share of the volume over which the density fades to 0 at the boundary
     float albedo[3] = { 1, 1, 1 };   // scattering / extinction
+    // Rising steam (a bath, a kettle, a vent): the volume's own density variation and its source. All 0: the volume as
+    // it was (the fog's own slow variation alone).
+    float sourcePlane = 0;           // [0, 0.95]: the height inside the volume (0 bottom, 1 top) the medium rises from - no
+                                     // density under it, heightFalloff counts from it (the water's surface in a volume that
+                                     // reaches under it)
+    float riseSpeed = 0;             // m/s: the variation's pattern moves up the volume's axis at this speed
+    float turbulence = 0;            // [0, 1]: the variation's share of the density (0.5: from nothing to twice the mean;
+                                     // 1: wisps with gaps); a quarter of it at the source plane, all of it from a third of
+                                     // the height up - a sheet over the water that breaks up as it rises
+    float turbulenceScale = 0.5f;    // m: the variation's largest features (three octaves down to a quarter of it), curled
+                                     // sideways by a slower one
+    // A density grid of the game's own (a simulation, authored wisps): R8 texels, x fastest then y then z, over the
+    // volume's box [-1, 1]^3 along its axes - texel (0, 0, 0) at the corner (-1, -1, -1), the last at (1, 1, 1), read
+    // between texels; a texel is the density's factor (255: 1). It multiplies everything above. Each side 1 .. 32
+    // (kFogGridMax). The pointer stays valid until the frame is recorded (as WindFrame::records). null: none.
+    const uint8_t* grid = nullptr;
+    uint32_t gridSize[3] = { 0, 0, 0 };
 };
 constexpr uint32_t kMaxFogVolumes = 16;  // (the first ones of a frame take effect)
+constexpr uint32_t kFogGridMax = 32;     // texels per side of a volume's density grid
 
 // The frame's colour grading, scene-referred, before the tone curve (Passes/Shading/PostGradeLut.hlsl, Post.cpp; the
 // reference's post process colour grading) - a look the game sets per frame, like the fog. enabled false: the quality

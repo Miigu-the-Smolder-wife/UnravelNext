@@ -211,6 +211,38 @@ float densityScale(float lx, float ly, float lz, float amount)
     return std::max(1.0f + amount * 2.0f * densityNoise(lx, ly, lz), 0.0f);
 }
 
+// A local volume's own variation (FogVolume.hlsli fogSteamScale: rising steam), in the kernels' floats.
+float steamScale(float lx, float ly, float lz, float amount)
+{
+    const float cx = valueNoise(lx * 0.5f + 11.0f, ly * 0.5f, lz * 0.5f + 47.0f), cz = valueNoise(lx * 0.5f + 71.0f, ly * 0.5f, lz * 0.5f + 23.0f);
+    const float x = lx + cx * 0.75f, z = lz + cz * 0.75f;
+    const float n = (valueNoise(x, ly, z) + 0.5f * valueNoise(x * 2.0f + 37.0f, ly * 2.0f + 17.0f, z * 2.0f + 59.0f) +
+                     0.25f * valueNoise(x * 4.0f + 5.0f, ly * 4.0f + 83.0f, z * 4.0f + 29.0f)) * (1.0f / 1.75f);
+    return std::max(1.0f + amount * 2.0f * n, 0.0f);
+}
+// A local volume's density grid at its unit coordinate (FogVolume.hlsli fogVolumeGrid).
+double gridValue(const FogVolumeDesc& v, double ux, double uy, double uz)
+{
+    const uint32_t n[3] = { v.gridSize[0], v.gridSize[1], v.gridSize[2] };
+    const double u[3] = { ux, uy, uz };
+    uint32_t i0[3], i1[3];
+    double f[3];
+    for (int k = 0; k < 3; ++k)
+    {
+        const double p = std::clamp(u[k] * 0.5 + 0.5, 0.0, 1.0) * (n[k] - 1);
+        i0[k] = std::min((uint32_t)p, n[k] - 1);
+        i1[k] = std::min(i0[k] + 1, n[k] - 1);
+        f[k] = p - i0[k];
+    }
+    double sum = 0;
+    for (uint32_t q = 0; q < 8; ++q)
+    {
+        const uint32_t x = (q & 1) ? i1[0] : i0[0], y = (q & 2) ? i1[1] : i0[1], z = (q & 4) ? i1[2] : i0[2];
+        sum += ((q & 1) ? f[0] : 1 - f[0]) * ((q & 2) ? f[1] : 1 - f[1]) * ((q & 4) ? f[2] : 1 - f[2]) * v.grid[((size_t)z * n[1] + y) * n[0] + x];
+    }
+    return sum / 255.0;
+}
+
 // The frame's place inside the cells (FroxelSystem.cpp fogHalton: 16 frames of the Halton points 2, 3, 5).
 float halton(uint32_t index, uint32_t base)
 {
@@ -250,6 +282,7 @@ struct Model
     double noiseAmount = 0, noiseInvScale = 0;
     float noiseOffset[3] = { 0, 0, 0 };  // lattice coordinate = render position x (1, 2, 1) / scale + this
     std::vector<FogVolumeDesc> volumes;  // world; the first kMaxFogVolumes take effect
+    double time = 0;                     // the frame's (a volume's turbulence rises with it)
     D3 origin;                           // world = render + origin (GpuScene::originOffset)
     D3 sun;                              // unit, toward the sun
     double E[3] = { 0, 0, 0 };           // lux
@@ -294,7 +327,21 @@ Cell mediumAt(const Model& m, D3 p, double along)
         const double reach = v.shape != 0 ? std::max({ std::abs(ux), std::abs(uy), std::abs(uz) }) : std::sqrt(ux * ux + uy * uy + uz * uz);
         if (reach >= 1.0) continue;
         const double fade = std::clamp((1.0 - reach) / std::clamp((double)v.edge, 1e-3, 1.0), 0.0, 1.0);
-        const double s = std::max((double)v.density, 0.0) * fade * std::exp2(-std::max((double)v.heightFalloff, 0.0) * (0.5 * uy + 0.5)) * variation;
+        // the height above the source plane (FogVolumeDesc::sourcePlane; 0: the height inside the volume)
+        const double plane = std::clamp((double)v.sourcePlane, 0.0, 0.95), above = (0.5 * uy + 0.5 - plane) / std::max(1.0 - plane, 1e-3);
+        if (above < 0) continue;
+        double s = std::max((double)v.density, 0.0) * fade * std::exp2(-std::max((double)v.heightFalloff, 0.0) * above) * variation;
+        if (v.turbulence > 0)
+        {
+            // (FroxelSystem.cpp fogVolumeGpu: the lattice per unit of the volume's axes, the rise inside 512 points)
+            const double scale = std::max((double)v.turbulenceScale, 0.02);
+            const double risen = std::fmod((double)v.riseSpeed * m.time / scale, 512.0);
+            const float rise = (float)(risen < 0 ? risen + 512.0 : risen);
+            const float amount = std::clamp(v.turbulence, 0.0f, 1.0f) * (float)std::clamp(0.25 + 2.25 * above, 0.0, 1.0);
+            s *= steamScale((float)ux * (float)(v.halfSize[0] / scale) + (float)i * 19.0f, (float)uy * (float)(v.halfSize[1] / scale) - rise,
+                            (float)uz * (float)(v.halfSize[2] / scale) + (float)i * 7.0f, amount);
+        }
+        if (v.grid) s *= gridValue(v, ux, uy, uz);
         sigma += s;
         for (int k = 0; k < 3; ++k) scattering[k] += s * v.albedo[k];
     }
@@ -1126,6 +1173,7 @@ int main(int argc, char** argv)
             m.cuts = history && !planar ? 10 : 1;
             const FogView fv = shadow::fogViewFor(tf.quality, tf.frame, view.width, view.height);
             m.grid = gridOf(fv);
+            m.time = time;
             m.origin = d3(tf.gpuScene.originOffset());
             const FogDesc& fd = tf.frame.fog;
             if (fd.enabled)
@@ -2296,6 +2344,39 @@ int main(int argc, char** argv)
                     againstTwin(r, lattice, "ellipsoid + box in the height fog, 1,000 m from the render origin");
                     report(inside > 500, "1,000 m from the render origin: cells of the compared columns that sample a volume", inside, 500);
                 }
+            }
+            // steam (FogVolumeDesc::sourcePlane, riseSpeed, turbulence, grid): the ellipsoid with rising turbulence, the box
+            // with a source plane, a falloff from it, turbulence and a density grid. One frame's cells (no history: the
+            // turbulence rises with the frame's time, and the twin holds one time).
+            {
+                std::vector<FogVolumeDesc> steam = twoVolumes;
+                steam[0].riseSpeed = 0.35f;
+                steam[0].turbulence = 0.8f;
+                steam[0].turbulenceScale = 0.6f;
+                steam[1].sourcePlane = 0.3f;
+                steam[1].heightFalloff = 2.0f;
+                steam[1].riseSpeed = 0.5f;
+                steam[1].turbulence = 0.5f;
+                steam[1].turbulenceScale = 0.4f;
+                std::vector<uint8_t> texels(6 * 5 * 7);
+                for (size_t i = 0; i < texels.size(); ++i) texels[i] = (uint8_t)((i * 37 + 11) % 256);
+                steam[1].grid = texels.data();
+                steam[1].gridSize[0] = 6, steam[1].gridSize[1] = 5, steam[1].gridSize[2] = 7;
+                setFog(0.004, 0.02, 0, 0, { 0.6f, 0.8f, 1.0f });
+                tf.frame.fogVolumes = steam;
+                Options os;
+                os.columns = lattice;
+                os.history = false;
+                const Result r = run(room, os);
+                if (volumeThere(r, "steam volumes"))
+                {
+                    uint32_t inside = 0;
+                    std::vector<uint8_t> clear;
+                    volumeCells(r, lattice, inside, clear);
+                    againstTwin(r, lattice, "steam: rising turbulence, a source plane and a density grid");
+                    report(inside > 300, "steam: cells of the compared columns that sample a volume", inside, 300);
+                }
+                tf.frame.fogVolumes.clear();  // (the grid's texels end with this block)
             }
             tf.frame.fogVolumes.clear();
         }

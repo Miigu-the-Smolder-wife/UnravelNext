@@ -370,7 +370,9 @@ int main(int argc, char** argv)
         std::string timeArg, placeArg;
         bool autoExposure = false;
         uint64_t shiftAt = UINT64_MAX;  // --origin-shift-at F --origin-shift x,y,z: a C9 rebase at frame F (repros)
-        std::vector<FogVolumeDesc> fogVolumes;  // --fog-volume x,y,z,rx,ry,rz,density[,shape[,height falloff]]: a local fog volume (repeatable)
+        // --fog-volume x,y,z,rx,ry,rz,density[,shape[,height falloff[,rise m/s,turbulence,turbulence scale m[,source plane]]]]:
+        // a local fog volume (repeatable); the values from the rise on make it steam (FogVolumeDesc)
+        std::vector<FogVolumeDesc> fogVolumes;
         bool passTimestamps = true;      // --no-pass-timestamps: the frame's GPU time alone (no per-pass queries, no pass CSV)
         // The scene's own weather (scene::Scene::clouds, fog, fogVolumes) applies where these are not given; given, they
         // decide (--clouds 0, --fog 0: none, whatever the scene says). --no-scene-weather: the scene's blocks are not used.
@@ -450,12 +452,14 @@ int main(int argc, char** argv)
                 std::vector<float> v;
                 std::stringstream list(next());
                 for (std::string item; std::getline(list, item, ',');) v.push_back(std::stof(item));
-                if (v.size() < 7) fail("--fog-volume x,y,z,rx,ry,rz,density[,shape[,height falloff]]");
+                if (v.size() < 7 || v.size() == 10 || v.size() == 11) fail("--fog-volume x,y,z,rx,ry,rz,density[,shape[,height falloff[,rise,turbulence,scale[,source plane]]]]");
                 FogVolumeDesc d;
                 for (int k = 0; k < 3; ++k) d.centre[k] = v[k], d.halfSize[k] = v[3 + k];
                 d.density = v[6];
                 if (v.size() > 7) d.shape = (uint32_t)v[7];
                 if (v.size() > 8) d.heightFalloff = v[8];
+                if (v.size() > 11) d.riseSpeed = v[9], d.turbulence = v[10], d.turbulenceScale = v[11];
+                if (v.size() > 12) d.sourcePlane = v[12];
                 fogVolumes.push_back(d);
             }
             else if (a == "--fog") fogDensity = std::stof(next());  // the frame's height fog (FrameContext::fog) at this density (1/m)

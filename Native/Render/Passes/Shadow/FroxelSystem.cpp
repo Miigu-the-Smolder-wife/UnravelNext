@@ -834,19 +834,50 @@ struct FogParamsGpu  // FogVolume.hlsli FogParams
     uint32_t flags;  // bit 0: on_gi_rays, bit 1: sun_through_fog
 };
 static_assert(sizeof(FogParamsGpu) == kFogParamBytes, "FogParams is 80 B (FogVolume.hlsli)");
-constexpr uint32_t kFogVolumeBytes = 64;
+constexpr uint32_t kFogVolumeBytes = 96;
+constexpr uint32_t kFogGridRunBytes = kMaxFogVolumes * kFogGridMax * kFogGridMax * kFogGridMax;  // a frame's density grids (R8)
 // A local volume as FogScatter.hlsl reads it: the rows of unit-from-render (the unit sphere or the cube [-1, 1]^3), then
-// { density, height falloff, 1 / edge, albedo r | g << 8 | b << 16 | shape << 24 }.
+// { density, height falloff, 1 / edge, albedo r | g << 8 | b << 16 | shape << 24 }, the steam's turbulence and source,
+// and the density grid's place in the frame's grid run.
 struct FogVolumeGpu
 {
     float rows[3][4];
     float density, heightFalloff, inverseEdge;
     uint32_t packed;
+    float lattice[3];      // the turbulence's lattice coordinate per unit of the volume's axes (half size / turbulence scale)
+    float turbulence;
+    float rise;            // the lattice's drift up the volume's axis (rise speed x time / scale, inside 512 points)
+    float sourcePlane;
+    uint32_t gridAt;       // the grid's first byte in the frame's run
+    uint32_t gridSize;     // x | y << 8 | z << 16 (0: none)
 };
-static_assert(sizeof(FogVolumeGpu) == kFogVolumeBytes, "a fog volume record is 64 B (FogScatter.hlsl)");
-FogVolumeGpu fogVolumeGpu(const FogVolumeDesc& v, float3 originOffset)
+static_assert(sizeof(FogVolumeGpu) == kFogVolumeBytes, "a fog volume record is 96 B (FogScatter.hlsl)");
+// Bytes of a volume's density grid (0: none); fails on a size outside 1 .. kFogGridMax.
+uint32_t fogGridBytes(const FogVolumeDesc& v)
+{
+    if (!v.grid) return 0;
+    for (uint32_t n : v.gridSize)
+        if (n < 1 || n > kFogGridMax) fail("fog volume: density grid %u x %u x %u (each side 1 .. %u)", v.gridSize[0], v.gridSize[1], v.gridSize[2], kFogGridMax);
+    return v.gridSize[0] * v.gridSize[1] * v.gridSize[2];
+}
+// time: the frame's (the turbulence rises with it); gridAt: the volume's grid in the frame's run (ignored without one).
+FogVolumeGpu fogVolumeGpu(const FogVolumeDesc& v, float3 originOffset, double time, uint32_t gridAt)
 {
     FogVolumeGpu g{};
+    const float turbulence = std::clamp(v.turbulence, 0.0f, 1.0f);
+    const double scale = std::max((double)v.turbulenceScale, 0.02);
+    for (int r = 0; r < 3; ++r) g.lattice[r] = (float)(std::max((double)v.halfSize[r], 1e-4) / scale);
+    g.turbulence = turbulence;
+    // (in double, inside 512 lattice points: the noise's octaves at half, twice and four times the coordinate all repeat
+    //  there, so the wrap shows nowhere)
+    const double rise = std::fmod((double)v.riseSpeed * time / scale, 512.0);
+    g.rise = (float)(rise < 0 ? rise + 512.0 : rise);
+    g.sourcePlane = std::clamp(v.sourcePlane, 0.0f, 0.95f);
+    if (fogGridBytes(v) != 0)
+    {
+        g.gridAt = gridAt;
+        g.gridSize = v.gridSize[0] | v.gridSize[1] << 8 | v.gridSize[2] << 16;
+    }
     // unit = S^-1 R^T (world - centre), R the turn by yaw about y; world = render + the origin offset
     const double c = std::cos((double)v.yaw), s = std::sin((double)v.yaw);
     const double axes[3][3] = { { c, 0, -s }, { 0, 1, 0 }, { s, 0, c } };  // the rows of R^T
@@ -876,6 +907,39 @@ struct FogState
     uint32_t integratedSrv = 0, ringSrv[kFogRing] = {}, volumeSrv[kFogRing] = {};
     uint8_t* ringMapped = nullptr;
     uint8_t* volumeMapped = nullptr;  // kFogRing x kMaxFogVolumes records of kFogVolumeBytes (FogScatter.hlsl)
+    // The local volumes' density grids (FogVolumeDesc::grid): a run of kFogGridRunBytes per frame of the ring, made when a
+    // frame first brings a grid.
+    ComPtr<ID3D12Resource> gridRing;
+    uint8_t* gridMapped = nullptr;
+    uint32_t gridSrv[kFogRing] = {};
+    void ensureGrids(Device& d)
+    {
+        if (gridRing) return;
+        D3D12_HEAP_PROPERTIES upload{ D3D12_HEAP_TYPE_UPLOAD };
+        D3D12_RESOURCE_DESC1 desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        desc.Width = (uint64_t)kFogRing * kFogGridRunBytes;
+        desc.Height = desc.DepthOrArraySize = desc.MipLevels = 1;
+        desc.SampleDesc.Count = 1;
+        desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        check(d.d3d()->CreateCommittedResource3(&upload, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&gridRing)),
+              "S fog volume grids");
+        gridRing->SetName(L"S fog local volume grids ring");
+        D3D12_RANGE none{ 0, 0 };
+        check(gridRing->Map(0, &none, reinterpret_cast<void**>(&gridMapped)), "map S fog volume grids");
+        for (uint32_t k = 0; k < kFogRing; ++k)
+        {
+            gridSrv[k] = d.descriptors().allocateResource();
+            D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+            sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sd.Format = DXGI_FORMAT_R32_TYPELESS;
+            sd.Buffer.FirstElement = (uint64_t)k * (kFogGridRunBytes / 4);
+            sd.Buffer.NumElements = kFogGridRunBytes / 4;
+            sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+            d.d3d()->CreateShaderResourceView(gridRing.Get(), &sd, d.descriptors().resourceCpu(gridSrv[k]));
+        }
+    }
     bool srvs = false, fresh = true;
     uint32_t x = 0, y = 0, z = 0, zFar = 0, parity = 0, revision = 0xFFFFFFFFu;
     uint64_t preparedFrame = UINT64_MAX;
@@ -887,6 +951,12 @@ struct FogState
         releaseTextures();
         if (ring) device->deferRelease(ring);
         if (volumeRing) device->deferRelease(volumeRing);
+        if (gridRing)
+        {
+            device->deferRelease(gridRing);
+            DescriptorHeaps* h = &device->descriptors();
+            for (uint32_t s : gridSrv) device->deferCall([h, s] { h->freeResource(s); });
+        }
         if (srvs)
         {
             DescriptorHeaps* h = &device->descriptors();
@@ -1342,12 +1412,21 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
     const uint32_t grid0 = f.gridX | f.gridY << 16, grid1 = f.gridZ | f.cellPx << 16 | f.farSlices << 24;
     // The frame's local volumes, in the render space, into this frame's run of the records' ring.
     const uint32_t volumeRun = (uint32_t)(fc.frame.frameIndex % kFogRing), volumeCount = f.volumes;
+    uint32_t gridBytes = 0;  // (the frame's density grids, packed in the volumes' order; each starts on a 4-byte boundary)
     for (uint32_t i = 0; i < volumeCount; ++i)
     {
-        const FogVolumeGpu volume = fogVolumeGpu(fc.frame.fogVolumes[i], fc.scene.originOffset());
+        const FogVolumeDesc& v = fc.frame.fogVolumes[i];
+        const uint32_t bytes = fogGridBytes(v);
+        const FogVolumeGpu volume = fogVolumeGpu(v, fc.scene.originOffset(), fc.frame.time, gridBytes);
         std::memcpy(st.volumeMapped + ((size_t)volumeRun * kMaxFogVolumes + i) * kFogVolumeBytes, &volume, sizeof volume);
+        if (bytes != 0)
+        {
+            st.ensureGrids(fc.device);
+            std::memcpy(st.gridMapped + (size_t)volumeRun * kFogGridRunBytes + gridBytes, v.grid, bytes);
+            gridBytes += (bytes + 3u) & ~3u;
+        }
     }
-    const uint32_t volumeSrv = st.volumeSrv[volumeRun];
+    const uint32_t volumeSrv = st.volumeSrv[volumeRun], gridSrv = gridBytes != 0 ? st.gridSrv[volumeRun] : 0xFFFFFFFFu;
     // The density's variation: the noise's lattice coordinate of a render-space position p is p x (1, 2, 1) / scale + this
     // offset (the lattice repeats every 256: the offset is kept inside one period in double). It follows the world (the
     // origin offset) and drifts with the scene's wind, or along x at noise_drift_mps in still air.
@@ -1423,7 +1502,7 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
                                          bits(jitter[0]), bits(jitter[1]), bits(jitter[2]), bits(f.historyWeight),
                                          shadows ? ctx.uav(vsm.stats) : none, ctx.srv(fogDepth), bits(f.noiseAmount), bits(1.0f / f.noiseScale),
                                          bits(noise[0]), bits(noise[1]), bits(noise[2]), volumeSrv,
-                                         volumeCount, bits(exposureRatio), hairShadow ? ctx.srv(hairParams) : none, 0 };
+                                         volumeCount, bits(exposureRatio), hairShadow ? ctx.srv(hairParams) : none, gridSrv };
                       ctx.cmd->SetPipelineState(ps);
                       ctx.bindFrameConstants(constants);
                       ctx.computeConstants(k, 44);

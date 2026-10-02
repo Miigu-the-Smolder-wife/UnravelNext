@@ -119,6 +119,39 @@ float fogDensityScale(float3 lattice, float amount)
     return max(1.0 + amount * 2.0 * n, 0.0);
 }
 
+// A local volume's own density variation (FrameContext FogVolumeDesc::turbulence: rising steam): three octaves of the
+// value noise at the volume's lattice coordinate (its own axes over turbulence_scale, moving up its axis at rise_speed:
+// FroxelSystem.cpp fogVolumeGpu), the coordinate displaced sideways by a slower octave - the wisps curl as they rise
+// instead of sliding up as a fixed pattern. 1 + 2 x amount x noise, not below 0 (amount over 0.5 opens gaps).
+float fogSteamScale(float3 lattice, float amount)
+{
+    const float3 slow = lattice * 0.5;
+    const float2 curl = float2(fogValueNoise(slow + float3(11.0, 0.0, 47.0)), fogValueNoise(slow + float3(71.0, 0.0, 23.0)));
+    const float3 l = lattice + float3(curl.x, 0.0, curl.y) * 0.75;
+    const float n = (fogValueNoise(l) + 0.5 * fogValueNoise(l * 2.0 + float3(37.0, 17.0, 59.0)) + 0.25 * fogValueNoise(l * 4.0 + float3(5.0, 83.0, 29.0))) * (1.0 / 1.75);
+    return max(1.0 + amount * 2.0 * n, 0.0);
+}
+// A local volume's density grid (FogVolumeDesc::grid) at the volume's unit coordinate u in [-1, 1]^3: the frame's grids
+// lie in one raw buffer (R8 texels, x fastest; 'at' the volume's first byte, size = x | y << 8 | z << 16), texel i of a
+// side at u = -1 + 2 i / (n - 1), read between the 8 texels around u. The density's factor in [0, 1].
+float fogVolumeGrid(uint gridBuffer, uint at, uint size, float3 u)
+{
+    ByteAddressBuffer grids = ResourceDescriptorHeap[gridBuffer];
+    const uint3 n = uint3(size & 0xFFu, (size >> 8) & 0xFFu, (size >> 16) & 0xFFu);
+    const float3 p = saturate(u * 0.5 + 0.5) * float3(n - 1u);
+    const uint3 i0 = min(uint3(p), n - 1u), i1 = min(i0 + 1u, n - 1u);
+    const float3 f = p - float3(i0);
+    float v = 0;
+    [unroll] for (uint q = 0; q < 8u; ++q)
+    {
+        const uint3 i = uint3((q & 1u) ? i1.x : i0.x, (q & 2u) ? i1.y : i0.y, (q & 4u) ? i1.z : i0.z);
+        const uint byteAt = at + (i.z * n.y + i.y) * n.x + i.x;
+        const float texel = float((grids.Load(byteAt & ~3u) >> ((byteAt & 3u) * 8u)) & 0xFFu);
+        v += ((q & 1u) ? f.x : 1.0 - f.x) * ((q & 2u) ? f.y : 1.0 - f.y) * ((q & 4u) ? f.z : 1.0 - f.z) * texel;
+    }
+    return v * (1.0 / 255.0);
+}
+
 // The view's fog record (FroxelSystem.cpp FogParamsGpu; 80 B). The first 32 bytes are all a reader needs.
 struct FogParams
 {

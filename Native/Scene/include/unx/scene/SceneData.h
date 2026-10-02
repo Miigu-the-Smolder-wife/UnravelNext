@@ -383,6 +383,12 @@ struct FogVolume
     float heightFalloff = 0;       // the density halves this many times from the volume's bottom to its top
     float edge = 0.3f;             // (0, 1]: the outer share of the volume over which the density fades to 0
     float3 albedo{ 1, 1, 1 };
+    // rising steam (unx/render/FrameContext.h FogVolumeDesc: the same fields; file block "FVST", written only for
+    // volumes that set any of them)
+    float sourcePlane = 0;         // [0, 0.95]: the height inside the volume the medium rises from
+    float riseSpeed = 0;           // m/s
+    float turbulence = 0;          // [0, 1]
+    float turbulenceScale = 0.5f;  // m
 };
 
 struct Camera
