@@ -39,7 +39,7 @@ def main(argv):
     # a late submission under CPU load) lengthens whichever pass it lands in and so the frame, but moves a pass's median
     # only when it hits that pass in half the frames - the two agree on a quiet machine [measured 2026-10-02: lobby 4K
     # 11.86 / 11.79 quiet, 12.95 / 11.88 with builds running].
-    print('== timings: GPU frame median / p95 (ms), the sum of the passes' medians (ms), passes, then the largest groups (ms)')
+    print('== timings: GPU frame median / p95 (ms), the sum of the pass medians (ms), passes, then the largest groups (ms)')
     rows = []
     for f in sorted(glob.glob(os.path.join(batch, '**', 'timing_*', '*.json'), recursive=True)):
         j = json.load(open(f, encoding='utf-8'))
