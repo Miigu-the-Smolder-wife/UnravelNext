@@ -118,7 +118,7 @@ if ($Skip -notcontains "variants") {
     if ($Variants -contains "thin") {
         # thin geometry: the LOD that keeps the area off (the clusters as they were), and the fuller clustering of
         # disconnected geometry on top of it (visibility.toml: one hierarchy per grass clump instead of one per orientation)
-        Final "thin geometry LOD off (forests, lake)" "thin_off" @("-NoGame", "-Generated", "forest_thin,forest_combat,waterside", "-Resolutions", "1080p",
+        Final "thin geometry LOD off (forest, lake)" "thin_off" @("-NoGame", "-Generated", "forest_thin,waterside", "-Resolutions", "1080p",
             "-Set", "visibility.lod_thin_preserve_area=false")
         Final "fuller clusters of disconnected geometry (forests, lake)" "thin_fill" @("-NoGame", "-Generated", "forest_thin,forest_combat,waterside", "-Resolutions", "1080p",
             "-Set", "visibility.cluster_vertices=128,visibility.cluster_min_triangles=64,visibility.sheet_orientation_min_width=0.016")
