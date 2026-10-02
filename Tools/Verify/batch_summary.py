@@ -35,7 +35,11 @@ def main(argv):
         print('-- ' + name)
         r = subprocess.run([sys.executable, os.path.join(HERE, 'furnace.py'), d], capture_output=True, text=True)
         print((r.stdout or '') + (r.stderr or ''))
-    print('== timings: GPU frame median / p95 (ms), passes, then the largest groups (ms)')
+    # The sum of the passes' medians beside the frame's median: a stall from outside the frame (another process on the GPU,
+    # a late submission under CPU load) lengthens whichever pass it lands in and so the frame, but moves a pass's median
+    # only when it hits that pass in half the frames - the two agree on a quiet machine [measured 2026-10-02: lobby 4K
+    # 11.86 / 11.79 quiet, 12.95 / 11.88 with builds running].
+    print('== timings: GPU frame median / p95 (ms), the sum of the passes' medians (ms), passes, then the largest groups (ms)')
     rows = []
     for f in sorted(glob.glob(os.path.join(batch, '**', 'timing_*', '*.json'), recursive=True)):
         j = json.load(open(f, encoding='utf-8'))
@@ -45,7 +49,8 @@ def main(argv):
         top = sorted(groups_of(passes, 2).items(), key=lambda kv: -kv[1][0])[:10]
         coarse = sorted(groups_of(passes, 1).items(), key=lambda kv: -kv[1][0])
         rows.append(rel)
-        print('%-52s %7.2f / %7.2f   %4d passes   render %s' % (rel, frame.get('median', 0.0), frame.get('p95', 0.0), len(passes), j.get('resolution')))
+        total = sum((v.get('median', 0.0) if isinstance(v, dict) else float(v)) for v in passes.values())
+        print('%-52s %7.2f / %7.2f   sum %7.2f   %4d passes   render %s' % (rel, frame.get('median', 0.0), frame.get('p95', 0.0), total, len(passes), j.get('resolution')))
         print('      tracks: ' + '  '.join('%s %.2f' % (k, v[0]) for k, v in coarse))
         print('      groups: ' + '  '.join('%s %.2f' % (k, v[0]) for k, v in top))
     print('== logs: error bits, failures')
