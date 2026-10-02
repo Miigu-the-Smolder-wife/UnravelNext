@@ -22,6 +22,7 @@ struct VolumeFrame
     fx::ParticleLighting lighting;  // media lighting (the lit sprites' inputs)
     render::BufferRef froxelLights;  // S's lists of this view (FroxelGrid header): required for media
     bool media = false, haze = false;
+    uint32_t mainHeight = 0;         // the frame's main view height (0: this view's): the froxel tile size follows it
 };
 
 struct VolumeOutput
@@ -37,7 +38,8 @@ struct VolumeOutput
 };
 
 // Froxel grid dimensions of a view, S's formula (FroxelSystem.cpp froxelGridFor: quality atmosphere.froxels.*).
-void froxelGridSize(const QualityConfig& quality, uint32_t width, uint32_t height, uint32_t& gridX, uint32_t& gridY, uint32_t& slices, uint32_t& tilePx);
+void froxelGridSize(const QualityConfig& quality, uint32_t width, uint32_t height, uint32_t& gridX, uint32_t& gridY, uint32_t& slices, uint32_t& tilePx,
+                    uint32_t mainHeight = 0);
 
 class VolumePass
 {

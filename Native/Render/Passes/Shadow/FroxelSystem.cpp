@@ -175,10 +175,10 @@ TextureRef recordWaterMedia(FramePassContext& fc, const ViewResources& main, Buf
 }
 } // namespace
 
-FroxelGridCpu froxelGridFor(const QualityConfig& q, uint32_t width, uint32_t height)
+FroxelGridCpu froxelGridFor(const QualityConfig& q, uint32_t width, uint32_t height, uint32_t mainHeight)
 {
     FroxelGridCpu g;
-    g.tilePx = (uint32_t)q.integer("atmosphere.froxels.tile_px");
+    g.tilePx = froxelTilePx(q, mainHeight ? mainHeight : height);
     g.slices = (uint32_t)q.integer("atmosphere.froxels.depth_slices");
     g.nearM = (float)q.number("atmosphere.froxels.near_m");
     g.farM = (float)q.number("atmosphere.froxels.far_m");
@@ -400,7 +400,7 @@ namespace
 BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t slotOfLightSrv, TextureRef readers, const std::string& suffix)
 {
     const QualityConfig& q = fc.quality;
-    const FroxelGridCpu grid = froxelGridFor(q, view.view.width, view.view.height);
+    const FroxelGridCpu grid = froxelGridFor(q, view.view.width, view.view.height, fc.frame.mainView.height);
     const uint32_t listMax = sortedHead(q);
     const uint64_t froxels = (uint64_t)grid.gridX * grid.gridY * grid.slices;
     State& s = fc.state<State>(kStateKey);
@@ -491,7 +491,7 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
 TextureRef recordReaders(FramePassContext& fc, const ViewResources& view, bool fullDepth, const std::string& suffix)
 {
     if (fullDepth || !view.depth.valid()) return {};
-    const FroxelGridCpu grid = froxelGridFor(fc.quality, view.view.width, view.view.height);
+    const FroxelGridCpu grid = froxelGridFor(fc.quality, view.view.width, view.view.height, fc.frame.mainView.height);
     RenderGraph& g = fc.graph;
     const TextureRef readers = g.createTexture(TextureDesc{ "S froxel tile readers", grid.gridX, grid.gridY, 1, 1, DXGI_FORMAT_R32G32_FLOAT });
     const TextureRef depth = view.depth, mask = view.view.planarMask, tileMask = view.view.planarTileMask;
@@ -532,7 +532,7 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
                               TextureRef media = {}, TextureRef sampledLocal = {}, TextureRef fluence = {}, TextureRef moment = {})
 {
     const QualityConfig& q = fc.quality;
-    const FroxelGridCpu grid = froxelGridFor(q, view.view.width, view.view.height);
+    const FroxelGridCpu grid = froxelGridFor(q, view.view.width, view.view.height, fc.frame.mainView.height);
     RenderGraph& g = fc.graph;
     // Air volume: in-scattering, optical depth, sun transmittance; nodes 0..S each (FroxelIntegrate.hlsl).
     const TextureRef volume = g.createTexture(TextureDesc{ suffix.empty() ? "S air volume" : "S air volume (planar view)", grid.gridX, grid.gridY, (uint16_t)(3 * (grid.slices + 1) + 2), 1,
@@ -1001,7 +1001,7 @@ SampledLocal recordSampledLocal(FramePassContext& fc, const ViewResources& view,
     if (!q.has("shading.mega_lights") || !q.boolean("shading.mega_lights") || !q.boolean("shading.mega_lights_volume")) return out;
     const FrameResources r = fc.resources;
     if (!r.tlasStatic.valid() || !r.transmittanceLut.valid() || !fc.trackState) return out;
-    const FroxelGridCpu grid = froxelGridFor(q, view.view.width, view.view.height);
+    const FroxelGridCpu grid = froxelGridFor(q, view.view.width, view.view.height, fc.frame.mainView.height);
     RenderGraph& g = fc.graph;
     const TextureDesc desc{ "S ml volume", grid.gridX, grid.gridY, (uint16_t)grid.slices, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D };
     const TextureDesc fluenceDesc{ "S ml volume fluence", grid.gridX, grid.gridY, (uint16_t)grid.slices, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D };

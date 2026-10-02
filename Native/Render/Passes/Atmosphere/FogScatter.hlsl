@@ -2,7 +2,8 @@
 // s.fog.scatter (FogVolume.hlsli): one thread per cell of the fog's volume. The cell's extinction and the light it
 // scatters toward the camera per metre, at a point jittered inside the cell each frame (P[7]), blended with the cell's
 // history - the previous frame's volume read at the cell centre's place in the previous view.
-//   sun        E x the air's transmittance to the sun x HG(view . sun, g) x (1 - the shadowed fraction of the cell's
+//   sun        E x the air's transmittance to the sun x the cloud layer's (the sun map at the sample point) x
+//              HG(view . sun, g) x (1 - the shadowed fraction of the cell's
 //              segment of its centre ray): the casters' shadow from the sun's shadow pages at the air level of the
 //              cell's width (VsmMarkFog.hlsl asked for exactly these pages, at the level of the unjittered cell). The
 //              segment stays in front of the surface on the centre ray (the centre pixel's depth): a segment that
@@ -32,6 +33,7 @@
 #include "Passes/Atmosphere/FroxelCommon.hlsli"
 #include "Passes/Shadow/VsmAir.hlsli"
 #include "Passes/Atmosphere/FogVolume.hlsli"
+#include "Passes/Atmosphere/CloudShadowCommon.hlsli"
 #include "Passes/GI/LumenTranslucencyVolume.hlsli"
 
 [numthreads(4, 4, 4)]
@@ -109,7 +111,8 @@ void main(uint3 id : SV_DispatchThreadID)
                     }
                 }
             }
-            inScattered += E * airSunTransmittance(a, P[6].w, airLiftToSurface(a, p), sun) * ((1 - saturate(shadowed)) * airMiePhase(dot(dir, sun), fog.g));
+            const float lit = (1 - saturate(shadowed)) * cloudSunTransmittanceFromLut(P[6].w, p);
+            inScattered += E * airSunTransmittance(a, P[6].w, airLiftToSurface(a, p), sun) * (lit * airMiePhase(dot(dir, sun), fog.g));
         }
         // the local lights
         if (P[5].z != 0xFFFFFFFFu && P[6].x != 0xFFFFFFFFu)

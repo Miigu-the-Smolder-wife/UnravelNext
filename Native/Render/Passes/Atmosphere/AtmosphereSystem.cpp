@@ -293,7 +293,7 @@ TextureDesc desc(const char* name, uint32_t w, uint32_t h, uint16_t d, D3D12_RES
 }
 } // namespace
 
-AtmosphereParams makeParams(const scene::Atmosphere& a, const QualityConfig& q)
+AtmosphereParams makeParams(const scene::Atmosphere& a, const QualityConfig& q, uint32_t mainHeight)
 {
     AtmosphereParams p{};
     p.bottomRadius = a.bottomRadius;
@@ -325,7 +325,7 @@ AtmosphereParams makeParams(const scene::Atmosphere& a, const QualityConfig& q)
     p.skyViewSize[1] = u32(s[1]);
     p.froxelSlices = (uint32_t)q.integer("atmosphere.froxels.depth_slices");
     p.froxelFarM = (float)q.number("atmosphere.froxels.far_m");
-    p.froxelTilePx = (uint32_t)q.integer("atmosphere.froxels.tile_px");
+    p.froxelTilePx = froxelTilePx(q, mainHeight);  // (Frame.h: the frame's tile size)
     p.froxelNearM = (float)q.number("atmosphere.froxels.near_m");
     p.transmittanceSteps = (uint32_t)q.integer("atmosphere.transmittance_steps");
     p.multiScatterDirections = (uint32_t)q.integer("atmosphere.multiscatter_directions");
@@ -491,7 +491,7 @@ void record(FramePassContext& fc)
     State& s = fc.state<State>(kStateKey);
     const scene::Scene* src = fc.scene.source();
     const scene::Atmosphere atm = src ? src->atmosphere : scene::Atmosphere{};
-    AtmosphereParams p = makeParams(atm, fc.quality);
+    AtmosphereParams p = makeParams(atm, fc.quality, fc.frame.mainView.height);
     cloudsPrepare(fc, p.clouds);  // B5: the cloud layer's SRVs in the record (0 without clouds)
 
     // atmosphere.rebuild_every_frame (measurement only): the transmittance LUT and the J_ms table are rebuilt every frame,

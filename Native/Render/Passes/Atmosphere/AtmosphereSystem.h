@@ -36,7 +36,8 @@ static_assert(sizeof(AtmosphereParams) == 176);
 
 // Model parameters from the scene, LUT sizes and quadrature counts from Config/quality/atmosphere.toml; the froxel grid
 // of the air volume (built by S's froxels(), FroxelSystem) so its lookups need no other input.
-AtmosphereParams makeParams(const scene::Atmosphere& atmosphere, const QualityConfig& quality);
+// mainHeight: the frame's main view height - the record's froxel tile size follows it (Frame.h froxelTilePx; 0: tile_px).
+AtmosphereParams makeParams(const scene::Atmosphere& atmosphere, const QualityConfig& quality, uint32_t mainHeight = 0);
 
 struct AtmosphereStats
 {

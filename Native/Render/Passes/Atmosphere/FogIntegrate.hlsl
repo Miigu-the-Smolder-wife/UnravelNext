@@ -20,6 +20,7 @@
 #include "Passes/Atmosphere/AtmosphereCommon.hlsli"
 #include "Passes/Atmosphere/FroxelCommon.hlsli"
 #include "Passes/Atmosphere/FogVolume.hlsli"
+#include "Passes/Atmosphere/CloudShadowCommon.hlsli"
 #include "Passes/GI/LumenTranslucencyVolume.hlsli"
 
 // The part of a stretch of the column's ray (view depths za < zb) outside the casters' shadow, from the air volume: slice
@@ -92,12 +93,18 @@ void main(uint3 id : SV_DispatchThreadID)
     {
         const float za = fogFarDepth(g, float(i)), zb = fogFarDepth(g, float(i) + 1.0);
         const float t = exp(-fogOpticalDepth(fog, g_cameraPosition, dir, max(za * toRay, tStart), zb * toRay));
-        float3 farSource = fromSun + fromAround;
-        if (farShadows)
+        // the sun in this slice: outside the casters' shadow, under the cloud layer at the slice's middle (in log depth)
+        float lit = 1;
+        if (any(fromSun > 0))
         {
-            Texture3D<float4> air = ResourceDescriptorHeap[P[6].x];
-            farSource = fromSun * fogFarLit(air, fg, pixel, za, zb) + fromAround;
+            if (farShadows)
+            {
+                Texture3D<float4> air = ResourceDescriptorHeap[P[6].x];
+                lit = fogFarLit(air, fg, pixel, za, zb);
+            }
+            lit *= cloudSunTransmittanceFromLut(P[6].w, g_cameraPosition + dir * max(sqrt(za * zb) * toRay, tStart));
         }
+        const float3 farSource = fromSun * lit + fromAround;
         L += T * farSource * (1 - t);
         T *= t;
         integrated[uint3(id.xy, g.z + i)] = float4(L, T);

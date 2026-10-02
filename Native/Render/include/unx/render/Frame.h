@@ -29,6 +29,18 @@ namespace unx::render
 {
 class GpuScene;
 
+// The froxel grid's tile size (pixels) of a frame - S's lists and air volume, E's media, the atmosphere record all take
+// it from here. atmosphere.froxels.tile_px holds up to main views tile_reference_height pixels high; a higher main view
+// gets tiles larger in proportion (the same angle per tile: the grid's content varies with direction, not per pixel).
+// mainHeight: the frame's main view (every view of a frame shares the tile size: the atmosphere record has one).
+inline uint32_t froxelTilePx(const QualityConfig& q, uint32_t mainHeight)
+{
+    const uint32_t base = (uint32_t)q.integer("atmosphere.froxels.tile_px");
+    const uint32_t reference = q.has("atmosphere.froxels.tile_reference_height") ? (uint32_t)q.integer("atmosphere.froxels.tile_reference_height") : 0u;
+    if (reference == 0 || mainHeight <= reference) return base;
+    return (uint32_t)(((uint64_t)base * mainHeight + reference / 2) / reference);
+}
+
 struct FramePassContext;
 
 // A pass whose kernel reads the main view's air (atmosphereAerial / atmosphereAirView: Passes/Atmosphere/Atmosphere.hlsli)

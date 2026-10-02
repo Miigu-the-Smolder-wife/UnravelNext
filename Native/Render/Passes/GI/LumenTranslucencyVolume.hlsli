@@ -21,7 +21,8 @@
 
 #define LTV_SCALE (1.0 / 64.0)
 #define LTV_TRACE_RES 3u          // rays per cell along one side of its sphere map (TracingOctahedronResolution)
-#define LTV_PIXEL_SIZE 32u        // GridPixelSize
+#define LTV_PIXEL_SIZE 32u        // GridPixelSize at the reference height (lumen.translucency_volume_grid_reference_height):
+                                  // a kernel of the volume takes the frame's from ltvPixelSize()
 #define LTV_Z_SCALE 4.0           // GridDistributionZScale: slices per doubling of (depth + offset)
 #define LTV_Z_OFFSET 1.0          // GridDistributionLogZOffset
 #define LTV_Z_PER_METRE 1.0       // GridDistributionLogZScale (0.01 per cm)

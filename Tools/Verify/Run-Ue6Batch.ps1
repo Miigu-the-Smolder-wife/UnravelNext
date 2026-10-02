@@ -77,6 +77,8 @@ if ($Skip -notcontains "variants") {
         "-Resolutions", "1080p", "-GateArgs", "--clouds 0.5")
     Invoke-Step "clouds without temporal accumulation (ridge, city block)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\clouds_notemporal", "-NoGame",
         "-Generated", "ridge_sunset,city_block", "-Resolutions", "1080p", "-GateArgs", "--clouds 0.5", "-Set", "atmosphere.clouds.temporal=false")
+    Invoke-Step "the frame without per-pass timestamps (lobby 1080p, 4K)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\nopass", "-Only", "bt_lobby",
+        "-Resolutions", "1080p,4K", "-SkipPictures", "-GateArgs", "--no-pass-timestamps")
     Invoke-Step "clouds 4K (ridge timings)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\clouds", "-NoGame", "-Generated", "ridge_sunset",
         "-Resolutions", "4K", "-SkipPictures", "-GateArgs", "--clouds 0.5")
 }

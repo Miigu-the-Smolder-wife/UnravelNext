@@ -54,9 +54,10 @@ uint32_t listCells(uint32_t tilesX, uint32_t tilesY)
 }
 } // namespace
 
-void froxelGridSize(const QualityConfig& q, uint32_t width, uint32_t height, uint32_t& gridX, uint32_t& gridY, uint32_t& slices, uint32_t& tilePx)
+void froxelGridSize(const QualityConfig& q, uint32_t width, uint32_t height, uint32_t& gridX, uint32_t& gridY, uint32_t& slices, uint32_t& tilePx,
+                    uint32_t mainHeight)
 {
-    tilePx = (uint32_t)q.integer("atmosphere.froxels.tile_px");
+    tilePx = render::froxelTilePx(q, mainHeight ? mainHeight : height);
     slices = (uint32_t)q.integer("atmosphere.froxels.depth_slices");
     if (tilePx == 0 || slices == 0 || slices > 64) fail("volume: atmosphere.froxels tile_px > 0 and 1 <= depth_slices <= 64");
     gridX = (width + tilePx - 1) / tilePx;
@@ -109,7 +110,7 @@ VolumeOutput VolumePass::recordImpl(const fx::ParticleRenderInputs* particlesIn,
     if (particlesIn) in = *particlesIn;
     else in.threads = externalCount;
     const uint32_t width = f.view->width, height = f.view->height;
-    froxelGridSize(quality, width, height, out.gridX, out.gridY, out.slices, out.tilePx);
+    froxelGridSize(quality, width, height, out.gridX, out.gridY, out.slices, out.tilePx, f.mainHeight);
     const uint32_t mediaTiles = listCells(out.gridX, out.gridY);  // media list cells (loose quadtree, VolumeCommon.hlsli)
     out.hazeWidth = (width + kHazeScale - 1) / kHazeScale;
     out.hazeHeight = (height + kHazeScale - 1) / kHazeScale;

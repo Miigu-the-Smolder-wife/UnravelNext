@@ -360,6 +360,7 @@ int main(int argc, char** argv)
         std::string timeArg, placeArg;
         bool autoExposure = false;
         uint64_t shiftAt = UINT64_MAX;  // --origin-shift-at F --origin-shift x,y,z: a C9 rebase at frame F (repros)
+        bool passTimestamps = true;      // --no-pass-timestamps: the frame's GPU time alone (no per-pass queries, no pass CSV)
         float fogDensity = 0;            // --fog D: the frame's height fog (FrameContext::fog) at extinction D (1/m), other fields default
         float cloudCoverage = 0;         // --clouds C: B5 cloud layer (FrameContext::clouds) with coverage C, other fields default
         float3 shiftBy{};  // --time YYYY-MM-DDTHH:MM (UT), --place lat,lon: sun, moon, stars (B4)
@@ -419,6 +420,7 @@ int main(int argc, char** argv)
             else if (a == "--auto-exposure") autoExposure = true;
             else if (a == "--origin-shift-at") shiftAt = std::stoull(next());
             else if (a == "--clouds") cloudCoverage = std::stof(next());
+            else if (a == "--no-pass-timestamps") passTimestamps = false;
             else if (a == "--fog") fogDensity = std::stof(next());  // the frame's height fog (FrameContext::fog) at this density (1/m)
             else if (a == "--path-time") pathTime = std::stod(next());
             else if (a == "--path-time-list")
@@ -765,6 +767,7 @@ int main(int argc, char** argv)
             shadow::setKeepFroxels(renderer.trackState(), true);  // no consumer of the volume yet (M): measure it anyway
             HarnessOptions options;
             options.frames = frames;
+            options.passTimestamps = passTimestamps;
             if (warmupSeconds >= 0) options.warmupSeconds = warmupSeconds;
             if (warmupFrames >= 0) options.warmupFrames = (uint32_t)warmupFrames;
             else if (!capturePath.empty() || !luminancePath.empty()) options.warmupFrames = 300;

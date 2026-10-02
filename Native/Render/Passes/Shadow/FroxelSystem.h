@@ -16,7 +16,8 @@ struct FroxelGridCpu
     float shadowTexelsPerTile = 1;  // VSM texels per tile width for the air's shadows (VsmAir.hlsli vsmAirLevel)
 };
 // Grid of a view of width x height pixels from Config/quality/atmosphere.toml ([atmosphere.froxels]).
-FroxelGridCpu froxelGridFor(const QualityConfig& quality, uint32_t width, uint32_t height);
+// mainHeight: the frame's main view height (0: this view is it) - the tile size follows it (Frame.h froxelTilePx).
+FroxelGridCpu froxelGridFor(const QualityConfig& quality, uint32_t width, uint32_t height, uint32_t mainHeight = 0);
 
 struct FroxelStats
 {

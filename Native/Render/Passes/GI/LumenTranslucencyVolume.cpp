@@ -18,7 +18,7 @@ namespace unx::render::gi
 {
 namespace
 {
-constexpr uint32_t kRing = 4, kParamBytes = 96, kPixelSize = 32, kTraceRes = 3;
+constexpr uint32_t kRing = 4, kParamBytes = 96, kPixelShift = 5, kTraceRes = 3;  // (cells of 32 pixels at the reference height)
 constexpr uint32_t kMaxRaysPerDispatch = 262144 / 3;  // threads: one traces at most 3 rays (its own; at a hit without cards the sun's and a light sample's)
 const char* kTraceLibrary[2] = { "Passes/GI/LumenTranslucencyVolumeTrace.SKY0", "Passes/GI/LumenTranslucencyVolumeTrace.SKY1" };
 
@@ -47,6 +47,8 @@ struct Settings
     float depthThreshold = 64.0f;    // OffsetThresholdToAcceptDepthBufferOffset (reference 1; LumenTranslucencyVolumeGrid.hlsli)
     float traceDistance = 200.0f;
     float farStart = 0;              // lumen.radiance_cache_far_field: the far field's start (m), 0: none
+    uint32_t referenceHeight = 0;    // translucency_volume_grid_reference_height: the cells are 32 px up to 1.4 x this view height,
+                                     // then the power of two that keeps their angle (0: 32 px everywhere)
 };
 Settings settingsOf(const QualityConfig& q)
 {
@@ -55,6 +57,7 @@ Settings settingsOf(const QualityConfig& q)
     auto num = [&](const char* key, double fallback) { return q.has(key) ? q.number(key) : fallback; };
     s.enabled = flag("lumen.translucency_volume", false);
     s.endDistance = (float)num("lumen.translucency_volume_end_distance_m", 80.0);
+    s.referenceHeight = (uint32_t)num("lumen.translucency_volume_grid_reference_height", 0.0);
     s.filter = flag("lumen.translucency_volume_spatial_filter", true);
     s.filterSamples = (uint32_t)num("lumen.translucency_volume_filter_samples", 3);
     s.filterDeviation = (float)num("lumen.translucency_volume_filter_deviation", 5.0);
@@ -192,10 +195,18 @@ struct TvState
 };
 
 // The grid of a view and this frame's cell jitter (the same in the mark and the trace).
+// log2 of the cells' pixel size: 32 px at the reference height, the nearest power of two to the same angle above it.
+uint32_t pixelShiftOf(const ViewResources& main, const Settings& s)
+{
+    if (s.referenceHeight == 0 || main.view.height <= s.referenceHeight) return kPixelShift;
+    const long steps = std::lround(std::log2((double)main.view.height / (double)s.referenceHeight));
+    return kPixelShift + (uint32_t)std::clamp(steps, 0l, 3l);
+}
 void gridOf(const ViewResources& main, const Settings& s, uint32_t& x, uint32_t& y, uint32_t& z)
 {
-    x = (main.view.width + kPixelSize - 1) / kPixelSize;
-    y = (main.view.height + kPixelSize - 1) / kPixelSize;
+    const uint32_t pixels = 1u << pixelShiftOf(main, s);
+    x = (main.view.width + pixels - 1) / pixels;
+    y = (main.view.height + pixels - 1) / pixels;
     // slices to the end distance: log2(distance x 1 / m + 1) x 4 (LumenTranslucencyVolume.hlsli ltvSliceOfDepth)
     z = std::clamp((uint32_t)(std::log2(s.endDistance + 1.0f) * 4.0f) + 1u, 4u, 64u);
 }
@@ -257,6 +268,7 @@ void lumenTranslucencyVolumeMark(FramePassContext& fc, const ViewResources& main
     st.markedFrame = fc.frame.frameIndex;
     const TextureRef indirection = rc.indirection, hiz = main.hiz;
     const uint32_t rcParams = rc.params, gridX = st.gridX, gridY = st.gridY, gridZ = st.gridZ, frame = st.frame, bias = s.clipmapBias;
+    const uint32_t gridZWord = gridZ | pixelShiftOf(main, s) << 16;  // P[4].z (LumenTranslucencyVolumeGrid.hlsli)
     const std::array<float, 3> jitter = { st.jitter[0], st.jitter[1], st.jitter[2] };
     const D3D12_GPU_VIRTUAL_ADDRESS cb = main.frameConstants;
     ShaderLibrary& shaders = fc.shaders;
@@ -268,7 +280,7 @@ void lumenTranslucencyVolumeMark(FramePassContext& fc, const ViewResources& main
                      [=, &shaders](PassContext& c) {
                          uint32_t k[36] = {};
                          k[0] = c.uav(indirection), k[1] = rcParams, k[2] = c.srv(hiz), k[3] = bias;
-                         k[16] = gridX, k[17] = gridY, k[18] = gridZ;
+                         k[16] = gridX, k[17] = gridY, k[18] = gridZWord;
                          k[32] = bits(jitter[0]), k[33] = bits(jitter[1]), k[34] = bits(jitter[2]), k[35] = frame;
                          c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenTranslucencyVolumeMark"));
                          c.bindFrameConstants(cb);
@@ -287,6 +299,7 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
     RenderGraph& g = fc.graph;
     ShaderLibrary& shaders = fc.shaders;
     const uint32_t gridX = st.gridX, gridY = st.gridY, gridZ = st.gridZ, frame = st.frame;
+    const uint32_t pixelSize = 1u << pixelShiftOf(main, s), gridZWord = gridZ | pixelShiftOf(main, s) << 16;  // P[4].z
     // history: none on the first frame, after another grid, a scene revision, a cut or a restore
     if (fc.scene.revision() != st.revision || fc.frame.discontinuity != 0) st.history = false;
     st.revision = fc.scene.revision();
@@ -320,8 +333,8 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
     params.gridX = gridX, params.gridY = gridY, params.gridZ = gridZ, params.frame = frame;
     params.ambientSrv = st.ambientSrv[current];
     params.directionalSrv = st.directionalSrv[current];
-    params.uvScale[0] = (float)main.view.width / (float)(gridX * kPixelSize);
-    params.uvScale[1] = (float)main.view.height / (float)(gridY * kPixelSize);
+    params.uvScale[0] = (float)main.view.width / (float)(gridX * pixelSize);
+    params.uvScale[1] = (float)main.view.height / (float)(gridY * pixelSize);
     const uint32_t slot = (uint32_t)(fc.frame.frameIndex % kRing);
     std::memcpy(st.ringMapped + (size_t)slot * kParamBytes, &params, sizeof params);
 
@@ -363,7 +376,7 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
                   k[4] = bits(sky.x), k[5] = bits(sky.y), k[6] = bits(sky.z), k[7] = bits(s.traceDistance);
                   for (int i = 0; i < 4; ++i) k[8 + i] = atmosphere ? c.srv(luts[i]) : 0xFFFFFFFFu;
                   k[12] = bits(sun.x), k[13] = bits(sun.y), k[14] = bits(sun.z);
-                  k[16] = gridX, k[17] = gridY, k[18] = gridZ;
+                  k[16] = gridX, k[17] = gridY, k[18] = gridZWord;
                   k[20] = cards.valid() ? c.srv(cards.frame) : 0xFFFFFFFFu;
                   k[21] = cache ? rcParams : 0xFFFFFFFFu;
                   k[22] = cache ? c.srv(rcIndirection) : 0xFFFFFFFFu;
@@ -401,7 +414,7 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
                           uint32_t k[40] = {};
                           k[0] = c.srv(from), k[1] = c.uav(to), k[2] = axis, k[3] = s.filterSamples;
                           k[4] = c.srv(hiz);
-                          k[16] = gridX, k[17] = gridY, k[18] = gridZ;
+                          k[16] = gridX, k[17] = gridY, k[18] = gridZWord;
                           k[37] = bits(s.filterDeviation);
                           c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenTranslucencyVolumeFilter"));
                           c.bindFrameConstants(cb);
@@ -427,7 +440,7 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
                   uint32_t k[44] = {};
                   k[0] = c.srv(filtered), k[1] = c.srv(hiz), k[2] = c.srv(prevAmbient), k[3] = c.srv(prevDirectional);
                   k[4] = c.uav(ambient), k[5] = c.uav(directional), k[6] = noHistory ? 1u : 0u;
-                  k[16] = gridX, k[17] = gridY, k[18] = gridZ;
+                  k[16] = gridX, k[17] = gridY, k[18] = gridZWord;
                   k[32] = bits(jitter[0]), k[33] = bits(jitter[1]), k[34] = bits(jitter[2]), k[35] = frame;
                   k[38] = bits(s.historyWeight);
                   k[40] = bits(params.uvScale[0]), k[41] = bits(params.uvScale[1]);

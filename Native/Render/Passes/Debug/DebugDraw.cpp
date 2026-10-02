@@ -444,7 +444,7 @@ private:
         case 14: source = view.coverageDepthRange; break;
         }
         const bool available = source.valid() && (mode != 1 || clusters.valid());
-        const uint32_t tilePx = (uint32_t)fc.quality.integer("atmosphere.froxels.tile_px"), slices = (uint32_t)fc.quality.integer("atmosphere.froxels.depth_slices");
+        const uint32_t tilePx = froxelTilePx(fc.quality, fc.frame.mainView.height), slices = (uint32_t)fc.quality.integer("atmosphere.froxels.depth_slices");
         const uint32_t probeX = m_settings.probe[0] >= 0 ? (uint32_t)m_settings.probe[0] : kOff, probeY = m_settings.probe[1] >= 0 ? (uint32_t)m_settings.probe[1] : kOff;
         const uint32_t W = view.view.width, H = view.view.height, index = m_settings.viewIndex;
         const TextureRef colour = view.color;

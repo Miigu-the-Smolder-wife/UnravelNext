@@ -66,6 +66,9 @@ sky_amount = 1.0                     # how much of the fog sky pixels take (1: t
 [atmosphere.froxels]
 integration_queue = true             # same air-slice estimator in dense waves; false is the tile-scheduled A/B path
 tile_px = 24
+tile_reference_height = 720          # tile_px holds for main views up to this height; a higher one gets tiles larger in proportion
+                                     # (1080 internal: 36 px) - the grid keeps its angle per tile, and the lists, the air volume and the
+                                     # sampled local light cost the same at every output. 0: tile_px at every resolution
 depth_slices = 64                    # exponential in view depth between near_m and far_m (<= 64: one thread per slice)
 lights_max = 32                      # ordered head of each froxel list (even, <= 96, FROXEL_SORTED_MAX): the strongest lights by
                                      # importance come first; every other light reaching the froxel follows (nothing is dropped
