@@ -24,7 +24,10 @@
 //      shaded without the layer), with the exact dielectric Fresnel in double; every other pixel unchanged; the
 //      statistics count the pane's pixels.
 //  13. the Subsurface class's scatter pass (shading.subsurface_scatter): the switch off, on without a pixel scattering,
-//      and on, against each other and against the estimate's limit on the CPU (testSubsurfaceScatter; --subsurface: alone).
+//      and on, against each other and against the estimate's limit on the CPU (testSubsurfaceScatter; --subsurface: alone);
+//      then the same three frames in a planar reflection view of the scene (the class's PLANAR = 1 kernels and the
+//      view's own scatter pass): the split kernels without scattering against the unsplit one, the scatter changing the
+//      class's pixels and no other.
 //   unx_test_shading_shadingtests [--no-debug-layer] [--gbv] [--glass] [--set key=value ...]   (--gbv: GPU-based validation;
 //   --set output.band_pixels=65536 runs the banded passes with 8 bands at the tests' 960 x 540)
 #include "FilmCurve.h"
@@ -4512,6 +4515,67 @@ void testSubsurfaceScatter(TestFrame& tf, Report& report)
     report(defaultSpread < 6e-3, "subsurface scatter: the default sample count's spread around the dense grid (of the lit level)", defaultSpread, 6e-3);
     report(behind > 30 && behindRed > 5e-3 && behindRed > 4 * behindBlue, "subsurface scatter: light behind the terminator, red most (mean red, of the lit level)", behindRed, 5e-3);
     report(farPixels > 30 && farBehind < 1e-4, "subsurface scatter: no light far behind the terminator (of the lit level)", farBehind, 1e-4);
+
+    // ---- the class in a planar reflection view: a mirror plane x = -1.2 left of the sphere (the mirrored camera sees its
+    // lit side). SubsurfaceDirect / SubsurfaceIndirect with PLANAR = 1, m.sss.clear.planar and m.sss.scatter.planar are this
+    // view's passes; the stand-in raster draws the whole scene (it does not clip at the mirror plane: the ground behind it
+    // is in the picture, which the comparisons below do not mind).
+    struct PlanarShot
+    {
+        std::shared_ptr<std::vector<uint8_t>> words, lin;
+    };
+    auto shootPlanar = [&](std::initializer_list<const char*> settings) {
+        for (const char* o : settings) tf.quality.applyOverride(o);
+        PlanarShot shot;
+        tf.frame.outputLinearHdr = true;
+        tf.run([&](FramePassContext& fc) {
+            const ViewResources mainV = tf.mainView(fc, W, H, 0);
+            ViewResources v;
+            v.view = ViewDesc::planarReflection(mainV.view, float4{ 1, 0, 0, 1.2f }, 0, 0, W, H);
+            v.frameConstants = fc.frameConstantsFor(v.view);
+            v.color = fc.graph.createTexture({ "m.test.planar.color", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+            tf.vis.record(fc, v);
+            tracks::materialResolve(fc, v);
+            tracks::shading(fc, v);
+            shot.words = tf.readback(fc, material::resolveOutputs(fc, v).materialWord);
+            shot.lin = tf.readback(fc, v.color);
+        });
+        tf.frame.outputLinearHdr = false;
+        for (const std::string& o : restore) tf.quality.applyOverride(o);
+        return shot;
+    };
+    const PlanarShot pOff = shootPlanar({ "shading.subsurface_scatter=false" });
+    const PlanarShot pKept = shootPlanar({ "shading.subsurface_scatter=true", "shading.subsurface_scatter_min_px=1000000000.0" });
+    const PlanarShot pOn = shootPlanar({ "shading.subsurface_scatter=true" });
+    uint32_t planarSkin = 0, planarOther = 0, planarOtherBits = 0, planarChanged = 0;
+    double planarWorstKept = 0;
+    for (uint32_t y = 1; y + 1 < H; ++y)
+        for (uint32_t x = 1; x + 1 < W; ++x)
+        {
+            // (pixels whose 3 x 3 neighbourhood is one material: the edge composite mixes classes at the others)
+            const uint32_t word = texelOf<uint32_t>(*pOff.words, W, x, y) & 0xFFFF;
+            bool interior = true;
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx) interior = interior && (texelOf<uint32_t>(*pOff.words, W, x + dx, y + dy) & 0xFFFF) == word;
+            if (!interior) continue;
+            const float4 o = texelOf<float4>(*pOff.lin, W, x, y), k = texelOf<float4>(*pKept.lin, W, x, y), n = texelOf<float4>(*pOn.lin, W, x, y);
+            if (word != 1)
+            {
+                ++planarOther;
+                planarOtherBits += std::memcmp(&o, &k, 12) != 0 || std::memcmp(&o, &n, 12) != 0;
+                continue;
+            }
+            ++planarSkin;
+            const double scale = std::max({ (double)o.x, (double)o.y, (double)o.z, 1e-3 });
+            planarWorstKept = std::max({ planarWorstKept, std::fabs(k.x - o.x) / scale, std::fabs(k.y - o.y) / scale, std::fabs(k.z - o.z) / scale });
+            planarChanged += std::fabs(n.x - o.x) > 0.01 * scale;
+        }
+    logf("subsurface scatter, planar view: %u pixels of the class, %u of other classes; without scattering vs the switch off: worst %.2e; %u pixels changed by the "
+         "scattering (red, over 1 %%)\n", planarSkin, planarOther, planarWorstKept, planarChanged);
+    report(planarSkin > 5000 && planarOther > 5000, "subsurface scatter, planar view: the view holds the class and others", planarSkin, 5000);
+    report(planarOtherBits == 0, "subsurface scatter, planar view: other classes' pixels differ from the switch off", planarOtherBits, 0);
+    report(planarWorstKept < 1.5e-3, "subsurface scatter, planar view: no pixel scattering = the switch off (rel.)", planarWorstKept, 1.5e-3);
+    report(planarChanged > 200, "subsurface scatter, planar view: the scattering changes the class's pixels", planarChanged, 200);
 }
 
 int main(int argc, char** argv)
