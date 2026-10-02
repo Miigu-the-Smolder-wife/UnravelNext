@@ -98,6 +98,24 @@ int main()
         pass &= check(moon.moon && moon.sun.illuminance > 0.15f && moon.sun.illuminance < 0.3f && ns.moonAltitudeDeg > 20,
                       "full-moon midnight: the moon holds the slot (lux)", moon.sun.illuminance, 0.21, 0.08);
         logf("  full-moon midnight: moon altitude %.1f deg, disk radius %.4f deg\n", ns.moonAltitudeDeg, moon.sun.angularRadius / kDeg);
+        // Through twilight (the same full moon, the sun's altitude set by hand): the sun keeps the slot while its twilight
+        // gives the ground more than the moon does (0.45 lux at 8 degrees of depression against the full moon's 0.2 lux
+        // or less), the moon takes it once it gives more (0.022 lux at 11 degrees), and never with the moon down.
+        sky::CelestialState tw = ns;
+        tw.sunAltitudeDeg = -8;
+        const sky::DirectionalLight at8 = sky::directionalLight(tw, top);
+        tw.sunAltitudeDeg = -11;
+        const sky::DirectionalLight at11 = sky::directionalLight(tw, top);
+        tw.sunAltitudeDeg = -30;
+        tw.moonAltitudeDeg = -5;
+        const sky::DirectionalLight moonDown = sky::directionalLight(tw, top);
+        pass &= check(!at8.moon && at8.sun.illuminance == top.illuminance, "sun 8 deg down, full moon up: the sun holds the slot (lux)", at8.sun.illuminance,
+                      top.illuminance, 0);
+        pass &= check(at11.moon && at11.sun.illuminance < 0.3f, "sun 11 deg down, full moon up: the moon holds the slot (lux)", at11.sun.illuminance, 0.21, 0.09);
+        pass &= check(!moonDown.moon, "sun 30 deg down, moon below the horizon: the sun keeps the slot (moon flag)", moonDown.moon ? 1.0 : 0.0, 0, 0);
+        pass &= check(std::fabs(sky::twilightIlluminance(6) / 3.4 - 1) < 0.01 && std::fabs(sky::twilightIlluminance(12) / 8.0e-3 - 1) < 0.01 &&
+                          sky::twilightIlluminance(40) == sky::twilightIlluminance(18),
+                      "twilight illuminance at the end of civil twilight (lux)", sky::twilightIlluminance(6), 3.4, 0.034);
     }
     logf("RESULT %s\n", pass ? "PASS" : "FAIL");
     return pass ? 0 : 1;

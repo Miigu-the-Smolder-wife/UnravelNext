@@ -45,10 +45,20 @@
 // P[4] = { the air volume's readers SRV (FroxelTileDepth.hlsl: the farthest surface per froxel tile; UNX_NONE: every depth
 //          is read), multi-scatter LUT SRV (the air lookup), bit 0: order, the cloud's stretches (0: no cloud here) }
 // P[5] = { the cloud's lighting word (CloudSystem.cpp cloudSunWord: sun steps | filtered << 8 | ground light << 9), the
-//          air volume SRV for the order and the cloud (UNX_NONE: neither takes the air), 0, 0 }
+//          air volume SRV for the order and the cloud (UNX_NONE: neither takes the air), bit 0: far_sky_light, 0 }
+// atmosphere.fog.far_sky_light: the far slices' ambient light is the sky's and the ground's (the reference's sky light in
+// the fog; its inscattering colour and cubemap are an authored stand-in for this), not the translucency volume's one
+// sample at farM - a point 80 m ahead, perhaps indoors, does not light kilometres of fog. Per slice, as radiances uniform
+// over the two hemispheres: the sky's irradiance on level ground E_sky = the clear sky's (the transmittance LUT's ground
+// row) x what the cloud layer lets through + the sun's direct light the layer turns into diffuse light, with the
+// layer's optical depth toward the sun from the sun map at the slice's middle and a conservative layer's total
+// transmittance 1 / (1 + 0.75 (1 - g) tau), g = 0.85 (two-stream, cloud droplets); the ground's radiance = its albedo
+// x (E_sky + the sun's direct light under the layer) / pi. The fog scatters half of each hemisphere's radiance toward
+// the viewer per unit of albedo (the phase function over a hemisphere of uniform radiance: 1 / 2).
 // P[6] = { air volume SRV (this frame's; UNX_NONE: the far fog without casters), froxel lights SRV (the air's grid;
 //          UNX_NONE: neither far shadows nor readers), previous translucency volume params SRV (UNX_NONE: none),
 //          transmittance LUT SRV }
+// P[7] = asuint{ the medium's second layer: density, height falloff, height, 0 } (Fog.hlsli)
 // Frame constants of the view (the main view, or a planar reflection view).
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
@@ -147,7 +157,7 @@ void fogCloudWalkTo(inout FogCloudWalk w, CloudRecord c, CloudFrameLight light, 
 // casters, no local lights -, advanced into the running in-scattering (x the view's exposure) and transmittance.
 void fogSkyAirStep(AtmosphereParams ap, float3 dir, float t0, float t1, inout float3 inScatter, inout float3 transmittance)
 {
-    const float from = max(t0, AIR_VIEW_START_M), len = t1 - from;
+    const float from = max(t0, ap.viewStartM), len = t1 - from;
     if (!(len > 0)) return;
     const float3 sun = normalize(g_sunDirection);
     const float nu = dot(dir, sun);
@@ -282,23 +292,38 @@ void main(uint3 id : SV_DispatchThreadID)
         integrated[uint3(id.xy, z)] = g.zFar == 0 && z + 1 == g.z ? float4(min(skyL, 65504.0), skyT) : float4(min(L, 65504.0), T);
     }
     // the fog beyond the volume
-    const FogMedium fog = fogMedium(uint4(1, 0, 0, 0), P[2], P[3]);
+    const FogMedium fog = fogMedium(uint4(1, 0, 0, 0), P[2], P[3], P[7]);
+    const bool heightFog = fog.density > 0 || fog.density2 > 0;
     const float3 p = g_cameraPosition + dir * max(g.farM * toRay, tStart);
     float3 fromSun = 0, fromAround = 0;
     const float3 E = g_sunIlluminance * g_sunColor;
-    if (any(E > 0) && fog.density > 0)
+    if (any(E > 0) && heightFog)
     {
         const float3 sun = normalize(g_sunDirection);
         const AtmosphereParams a = airParamsFromTexels(P[6].w);
         fromSun = fog.albedo * E * airSunTransmittance(a, P[6].w, airLiftToSurface(a, p), sun) * airMiePhase(dot(dir, sun), fog.g);
     }
-    if (P[6].z != 0xFFFFFFFFu && fog.density > 0) fromAround = fog.albedo * ltvInscatter(P[6].z, p, dir, fog.g);
+    if (P[6].z != 0xFFFFFFFFu && heightFog) fromAround = fog.albedo * ltvInscatter(P[6].z, p, dir, fog.g);
+    // (far_sky_light: the clear sky's irradiance on level ground and the sun's direct light there, before the cloud layer)
+    const bool farSky = (P[5].z & 1u) != 0 && any(E > 0) && heightFog;
+    float3 skyClear = 0, sunOnGround = 0, groundAlbedo = 0;
+    if (farSky)
+    {
+        const float3 sun = normalize(g_sunDirection);
+        const AtmosphereParams a = airParamsFromTexels(P[6].w);
+        const float3 q = airLiftToSurface(a, p);
+        const float mus = dot(airUp(a, q), sun);
+        skyClear = E * airGroundIndirect(a, P[6].w, mus);
+        sunOnGround = E * airSunTransmittance(a, P[6].w, q, sun) * max(mus, 0.0);
+        groundAlbedo = a.groundAlbedo;
+        if (any(isnan(skyClear)) || any(isinf(skyClear)) || any(isnan(sunOnGround)) || any(isinf(sunOnGround))) skyClear = sunOnGround = 0;
+    }
     if (any(isnan(fromSun)) || any(isinf(fromSun))) fromSun = 0;
     if (any(isnan(fromAround)) || any(isinf(fromAround))) fromAround = 0;
     fromSun *= g_exposure;  // (exposed, as the cells' sources)
     fromAround *= g_exposure;
     const bool farShadows = P[6].x != 0xFFFFFFFFu && any(fromSun > 0);
-    const bool orderFar = air && (P[4].z & 1u) != 0 && fog.density > 0;
+    const bool orderFar = air && (P[4].z & 1u) != 0 && heightFog;
     // (the sky's column: its air, integrated beside the slices)
     AtmosphereParams skyAir = (AtmosphereParams)0;
     if (orderFar) skyAir = airParamsFromTexels(P[6].w);
@@ -309,17 +334,25 @@ void main(uint3 id : SV_DispatchThreadID)
         const float tau = fogOpticalDepth(fog, g_cameraPosition, dir, max(za * toRay, tStart), zb * toRay);
         const float t = exp(-tau);
         // the sun in this slice: outside the casters' shadow, under the cloud layer at the slice's middle (in log depth)
-        float lit = 1;
-        if (any(fromSun > 0))
+        float lit = 1, cloudT = 1;
+        if (any(fromSun > 0) || farSky)
         {
             if (farShadows)
             {
                 Texture3D<float4> airVolume = ResourceDescriptorHeap[P[6].x];
                 lit = fogFarLit(airVolume, fg, pixel, za, zb);
             }
-            lit *= cloudSunTransmittanceFromLut(P[6].w, g_cameraPosition + dir * max(sqrt(za * zb) * toRay, tStart));
+            cloudT = cloudSunTransmittanceFromLut(P[6].w, g_cameraPosition + dir * max(sqrt(za * zb) * toRay, tStart));
+            lit *= cloudT;
         }
-        const float3 farSource = fromSun * lit + fromAround;
+        float3 ambient = fromAround;
+        if (farSky)
+        {
+            const float through = 1.0 / (1.0 + 0.75 * (1.0 - 0.85) * -log(max(cloudT, 1e-6)));  // the layer's direct + diffuse transmittance
+            const float3 sky = skyClear * through + sunOnGround * max(through - cloudT, 0.0);
+            ambient = fog.albedo * (sky + groundAlbedo * (sky + sunOnGround * cloudT)) * (g_exposure / (2.0 * 3.14159265));
+        }
+        const float3 farSource = fromSun * lit + ambient;
         const float middle = sqrt(za * zb);
         if (orderFar)
         {

@@ -542,6 +542,9 @@ Scene ridgeSunset(const Request& rq)
     // The cloud layer over the ridge against the low sun (scene::CloudLayer: the renderer's volumetric clouds; the layer's
     // default altitudes, 1.5 to 4 km - the crest, 0.8 to 0.9 km, stands under it).
     s.clouds.coverage = 0.5f;
+    // and a thin cirrus sheet above it (scene::CloudLayer::cirrus*: optical depth 0.15 where its fibres are densest): the
+    // low sun lights it from under its horizon after the layer below has gone grey
+    s.clouds.cirrusCoverage = 0.4f;
     (void)rq;
     return s;
 }

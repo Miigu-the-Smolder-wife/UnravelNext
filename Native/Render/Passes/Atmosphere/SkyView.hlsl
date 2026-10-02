@@ -16,6 +16,11 @@
 // Dispatch: size.x x size.y groups.
 // P[0].x params, P[0].y transmittance LUT, P[0].z multiple-scattering table (J_ms), P[0].w output UAV (RWTexture2D<float4>,
 // height 3 x size.y)
+// P[1].x = the airglow's zenith radiance (float, nits; 0: none - atmosphere.night_sky_in_lut): the first part's alpha holds
+// the night sky's own light in the texel's direction, in nits (not per unit illuminance: it does not come from the
+// frame's directional light): the airglow's emission layer at 90 km by van Rhijn's slant factor (Celestial.hlsli) x the
+// air's transmittance along the whole ray (luminance), 0 under the horizon. Every reader of the far-field sky - the sky
+// pixels, the rays that escape (GI, reflections), the cloud dome's background - then has the night's floor of light.
 // Frame constants: g_cameraPosition, g_sunDirection.
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
@@ -113,8 +118,15 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
         total += transmittance * a.groundAlbedo / ATMO_PI *
                  (saturate(mus) * airSunTransmittance(a, tlut, p + gup * 0.01, sun) + airGroundIndirect(a, tlut, mus));
     }
+    float night = 0;
+    const float airglow = asfloat(P[1].x);
+    if (airglow > 0 && !airHitsGround(a, origin, d))
+    {
+        const float k = 6360.0 / 6450.0;  // (the emission layer at 90 km over the planet's surface: Celestial.hlsli)
+        night = airglow / sqrt(max(1 - k * k * (1 - d.y * d.y), 1e-4)) * dot(exp(-gs_tau[SKY_THREADS - 1]), float3(0.2126, 0.7152, 0.0722));
+    }
     RWTexture2D<float4> output = ResourceDescriptorHeap[P[0].w];
-    output[id] = float4(total, 0);
+    output[id] = float4(total, night);
     output[uint2(id.x, id.y + a.skyViewSize.y)] = float4(gs_rayleigh[0], 0);
     output[uint2(id.x, id.y + 2 * a.skyViewSize.y)] = float4(gs_mie[0], 0);
 }

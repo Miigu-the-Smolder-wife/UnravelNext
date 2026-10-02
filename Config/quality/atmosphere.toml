@@ -18,6 +18,12 @@ rebuild_every_frame = 0              # 1: rebuild the transmittance LUT and J_ms
 # (64 per side of the true horizon, as the previous engine's 64 per half; the first draft's 108 was coarser).
 sky_view_lut = [192, 128]
 sky_view_segments = 128              # quadratic segments x Gauss-Legendre 4 along each sky ray
+night_sky_in_lut = true              # the frame's airglow (the night sky's own light, FrameContext::celestial) is in the sky view, so
+                                     # escaping GI and reflection rays have it too - a moonless night's ground is lit by the sky's
+                                     # 2e-4 nits, not black. false: sky pixels only (Celestial.hlsli)
+aerial_start_m = 100.0               # where a view's air starts along its rays (the reference's AerialPespectiveStartDepth, 0.1 km):
+                                     # nearer surfaces carry no veil of sun- and sky-lit air (an interior, the ground at one's feet).
+                                     # 0: the air from the camera on (the froxel tests' node-by-node references)
 
 # Height fog (Passes/Atmosphere/Fog.hlsli): the reference's exponential height fog with volumetric fog, as one more medium
 # of the air volume - lit by the sun through the casters' shadow (shafts of light), by the local lights and by the indirect
@@ -39,6 +45,10 @@ filtered_steps = true                # a march step's density is its mean over t
                                      # cloud, and a brighter underside than the whole-path march, sun_steps = 0)
 ground_light = true                  # the ground's light on the cloud's underside (the atmosphere's ground albedo x the sun and sky on
                                      # the ground under the layer; a height ramp as the sky's, not fitted to the path tracer)
+powder = 0.0                         # [0, 1]: the multiple scattering (the octaves past the first) x (1 - powder exp(-2 tau toward the
+                                     # sun)) - darker just under a sunlit surface, where little cloud lies toward the sun. 0: the
+                                     # octave series as it was fitted to the path tracer; a value above 0 moves every ray off that
+                                     # fit until Tests/CloudMsFit --sweep (which now fits the strength with a, b, c) gives the set
 veil = true                          # the cloud in front of surfaces (a peak inside the layer, the ground seen from inside or above
                                      # it): the fog's volume marches the layer along its columns up to the farthest surface around
                                      # each and every layer that reads the air takes it at its own depth (FogIntegrate.hlsl). The
@@ -58,6 +68,13 @@ albedo = [1.0, 1.0, 1.0]             # scattering colour (scattering = density x
 extinction_scale = 1.0
 phase_g = 0.2                        # Henyey-Greenstein asymmetry (VolumetricFogScatteringDistribution)
 start_distance_m = 0.0               # no fog nearer than this
+second_density_per_m = 0.0           # a second layer of the same medium (the reference's SecondFogData): extinction per metre at
+second_height_falloff_per_m = 0.02   # second_height_m, its own falloff - a low ground fog under a thin haze. 0: none. The game's
+second_height_m = 0.0                # fog (FrameContext::fog) brings its own
+rain_veil = true                     # while it rains (the frame's weather record: rain rate R mm/h) the rain itself is a medium:
+                                     # 0.248 R^0.67 per km (the optical attenuation in rain, 1.076 R^0.67 dB/km), uniform in height,
+                                     # as the second layer where the frame sets none - the distance fades in rain. The volume runs
+                                     # for it alone. false: rain leaves the air clear
 indirect_light = true                # the Lumen translucency volume (the previous frame's) lights the fog
 noise_amount = 0.3                   # the density's variation about its mean inside the volume (0: a uniform medium; 0.5: from nothing
                                      # to twice the mean) - what a shaft of light or a lamp's glow shows of the fog itself
@@ -72,6 +89,10 @@ far_slices = 16                      # integrated per column into this many more
 far_distance_m = 65536.0             # this distance
 far_shadows = true                   # the far slices' sun term outside the casters' shadow, as the air volume found it for its own
                                      # slices (a ridge against a low sun shades the fog in front of it); false: no casters out there
+far_sky_light = true                 # the far slices' ambient light is the sky's and the ground's under the cloud layer (the clear sky's
+                                     # ground irradiance, what the clouds turn of the sun into diffuse light, the ground's reflection
+                                     # of both) - a fog bank under an overcast is grey, not black. false: the translucency volume's
+                                     # one sample at volumetric_distance_m for the whole column (the tests' twins hold that form)
 air_order = true                     # the volume's media ordered against the air volume's (the atmosphere, the local lights' glow in
                                      # it, the particle media): a slab's light is taken through the air in front of it and puts back
                                      # the air's light the readers attenuate by it (FogIntegrate.hlsl) - smoke in front of a fog bank

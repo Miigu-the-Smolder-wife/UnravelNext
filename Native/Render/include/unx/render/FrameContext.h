@@ -35,6 +35,7 @@ struct WeatherFrame
 // (Passes/Atmosphere/Celestial.h: sky::celestial, sky::directionalLight, sky::celestialFrame). flags: bit 0 the frame's
 // directional light (Scene::sun) is the moon (the sky pass leaves out its uniform solar disk), bit 1 the moon's disk is
 // drawn (a Lambert sphere lit by sunDirection), bit 2 the stars are drawn. 0 (the default): none of them, as before.
+// (bit 3 is S's, in the GPU record only: the sky view LUT holds the airglow - atmosphere.night_sky_in_lut.)
 struct CelestialFrame
 {
     float3 moonDirection{ 0, -1, 0 };
@@ -116,6 +117,26 @@ struct CloudLayerDesc
     float albedo = 0.99f;                        // single-scattering albedo
     float windX = 0, windZ = 0;                  // m/s
     uint32_t seed = 1;
+    // The cirrus sheet: thin ice cloud at one altitude far above the layer, with its own coverage map - a frame may have
+    // it without the layer (coverage 0). Lit by the same sun and sky (single scattering: its optical depth is small).
+    float cirrusCoverage = 0;                    // [0, 1]: the share of its map that holds cirrus; 0: none
+    float cirrusAltitude = 9000;                 // m
+    float cirrusOpticalDepth = 0.15f;            // vertical, where the map is full (thin cirrus 0.03 .. 0.3)
+    float cirrusWindX = 0, cirrusWindZ = 0;      // m/s: the sheet's own drift
+};
+
+// A lightning flash of this frame (weather content): a source in or under the cloud layer that lights the cloud around
+// it - the layer's image, the cloud in front of surfaces and the sky dome the escaping rays read (CloudLight.hlsli: the
+// direct light through the cloud between, and the light that diffuses from the source through a medium of albedo near
+// 1). The light on the ground is a light of the scene's that the game sets for the flash's frames (at the same place,
+// with the same intensity and a range of kilometres: the local lights are shadowed by rays and reach the froxels); the
+// directional slot stays the sun's or the moon's (its shadow maps would be redrawn for two frames).
+struct LightningDesc
+{
+    double position[3] = { 0, 0, 0 };            // world, m: the channel's brightest stretch
+    float intensity = 0;                         // luminous intensity (cd), the frame's mean over its exposure; 0: no flash
+    float color[3] = { 0.8f, 0.87f, 1.0f };
+    float radius = 30;                           // m: the lit channel's extent (no nearer than this to the source)
 };
 
 // The frame's height fog (Passes/Atmosphere/FogVolume.hlsli) - weather content like the cloud layer. enabled false: the
@@ -133,6 +154,12 @@ struct FogDesc
     float skyAmount = 1;           // [0, 1]: how much of the fog sky pixels take
     float noiseAmount = 0.3f;      // [0, 1]: the density's variation about its mean (0: a uniform medium)
     float noiseScale = 20;         // m: the variation's largest features
+    // A second layer of the same medium (the reference's SecondFogData): its own density, falloff and height, added to
+    // the first everywhere the fog is - a low ground fog under a thin haze. density2 0: none (the rain's veil then takes
+    // the layer while it rains: WeatherFrame::rainRate, atmosphere.fog.rain_veil).
+    float density2 = 0;            // extinction (1/m) at 'height2'
+    float heightFalloff2 = 0.02f;  // the layer's density halves every 1 / this metres of height
+    float height2 = 0;             // world metres
 };
 
 // A local fog volume: extra extinction inside an ellipsoid or a box, added to the frame's height fog in the fog's cells
@@ -149,8 +176,26 @@ struct FogVolumeDesc
     float heightFalloff = 0;         // the density halves this many times from the volume's bottom to its top (0: uniform)
     float edge = 0.3f;               // (0, 1]: the outer share of the volume over which the density fades to 0 at the boundary
     float albedo[3] = { 1, 1, 1 };   // scattering / extinction
+    // Rising steam (a bath, a kettle, a vent): the volume's own density variation and its source. All 0: the volume as
+    // it was (the fog's own slow variation alone).
+    float sourcePlane = 0;           // [0, 0.95]: the height inside the volume (0 bottom, 1 top) the medium rises from - no
+                                     // density under it, heightFalloff counts from it (the water's surface in a volume that
+                                     // reaches under it)
+    float riseSpeed = 0;             // m/s: the variation's pattern moves up the volume's axis at this speed
+    float turbulence = 0;            // [0, 1]: the variation's share of the density (0.5: from nothing to twice the mean;
+                                     // 1: wisps with gaps); a quarter of it at the source plane, all of it from a third of
+                                     // the height up - a sheet over the water that breaks up as it rises
+    float turbulenceScale = 0.5f;    // m: the variation's largest features (three octaves down to a quarter of it), curled
+                                     // sideways by a slower one
+    // A density grid of the game's own (a simulation, authored wisps): R8 texels, x fastest then y then z, over the
+    // volume's box [-1, 1]^3 along its axes - texel (0, 0, 0) at the corner (-1, -1, -1), the last at (1, 1, 1), read
+    // between texels; a texel is the density's factor (255: 1). It multiplies everything above. Each side 1 .. 32
+    // (kFogGridMax). The pointer stays valid until the frame is recorded (as WindFrame::records). null: none.
+    const uint8_t* grid = nullptr;
+    uint32_t gridSize[3] = { 0, 0, 0 };
 };
 constexpr uint32_t kMaxFogVolumes = 16;  // (the first ones of a frame take effect)
+constexpr uint32_t kFogGridMax = 32;     // texels per side of a volume's density grid
 
 // The frame's colour grading, scene-referred, before the tone curve (Passes/Shading/PostGradeLut.hlsl, Post.cpp; the
 // reference's post process colour grading) - a look the game sets per frame, like the fog. enabled false: the quality
@@ -201,6 +246,7 @@ struct FrameContext
     float deltaTime = 0;
     ViewDesc mainView;
     CloudLayerDesc clouds;  // B5 (v1.77): coverage 0 = none
+    LightningDesc lightning;  // intensity 0 = none
     FogDesc fog;            // the height fog (enabled false: the quality file's)
     std::vector<FogVolumeDesc> fogVolumes;  // local fog volumes (at most kMaxFogVolumes take effect)
     ColorGradingDesc grading;  // the colour grading before the tone curve (enabled false: the quality file's)

@@ -24,6 +24,9 @@
 //        fluence.rgb = sum of weight x visible irradiance toward each sampled light at the slice's midpoint (x exposure),
 //        moment.xyz = sum of weight x its luminance x the unit direction to the light; the reader evaluates its phase
 //        function's first two SH bands with them. The same history weight as the in-scattering.
+//        fluence.a = the cloud layer's sun transmittance at the froxel's middle (the sun map; 1 without clouds), in every
+//        froxel, read or not: lit particles take the cloud's shadow from it with the fetch they already make
+//        (FxLayerSetup.hlsl ML = 1 - the kernel has no room for the sun map's lookup).
 // P[6], P[7] = RtSceneSrvs
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
@@ -62,6 +65,9 @@ void MegaLightsVolumeGen()
     }
     ByteAddressBuffer lists = ResourceDescriptorHeap[P[0].x];
     const uint2 h = lists.Load2(g.headerBase + froxelIndex(g, tile, s) * 8);
+    // (the cloud layer's sun transmittance at the froxel's middle: the fluence's alpha)
+    float cloudT = 1;
+    if (P[4].x != UNX_NONE) cloudT = cloudSunTransmittanceFromLut(P[0].z, g_cameraPosition + ray * (0.5 * (zs0 + zs1)));
     if (!wanted || h.y == 0)
     {
         output[id] = float4(0, 0, 0, wanted ? 1 : 0);
@@ -69,7 +75,7 @@ void MegaLightsVolumeGen()
         {
             RWTexture3D<float4> fluenceOut = ResourceDescriptorHeap[P[4].x];
             RWTexture3D<float4> momentOut = ResourceDescriptorHeap[P[4].y];
-            fluenceOut[id] = 0;
+            fluenceOut[id] = float4(0, 0, 0, cloudT);
             momentOut[id] = 0;
         }
         return;
@@ -78,7 +84,7 @@ void MegaLightsVolumeGen()
     const float t0 = max(zs0 * toRay, tStart), len = zs1 * toRay - t0;
     const float3 o = g_cameraPosition + dir * t0;
     const float3 pm = airLiftToSurface(a, o + dir * (0.5 * len));
-    const AirCoefficients cm = airScaled(airCoefficients(a, max(0.0, airAltitude(a, pm))), airNearScale(t0, len));
+    const AirCoefficients cm = airScaled(airCoefficients(a, max(0.0, airAltitude(a, pm))), airNearScale(a.viewStartM, t0, len));
     const float lateral = froxelTileWidth(g, 0.5 * (zs0 + zs1));
     const uint count = clamp(P[1].y, 1u, ML_MAX_SAMPLES);
     const float minWeight = asfloat(P[2].x);
@@ -175,7 +181,7 @@ void MegaLightsVolumeGen()
     {
         RWTexture3D<float4> fluenceOut = ResourceDescriptorHeap[P[4].x];
         RWTexture3D<float4> momentOut = ResourceDescriptorHeap[P[4].y];
-        fluenceOut[id] = float4(min(fluence, 60000.0), n);
+        fluenceOut[id] = float4(min(fluence, 60000.0), cloudT);
         momentOut[id] = float4(clamp(moment, -60000.0, 60000.0), n);
     }
 }
