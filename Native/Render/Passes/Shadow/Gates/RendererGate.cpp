@@ -47,6 +47,7 @@
 #if __has_include("unx/clusterbuilder/ClusterBuilder.h") && defined(UNX_HAS_SCENEGEN)
 #define S_RENDERER_GATE 1
 #include "unx/clusterbuilder/ClusterBuilder.h"
+#include "unx/clusterbuilder/ClusterStream.h"
 #include "unx/scenegen/SceneGen.h"
 #include "unx/visibility/Visibility.h"
 #endif
@@ -780,7 +781,10 @@ int main(int argc, char** argv)
         // scene's meshes before anything reads vertices through cluster indices)
         clusterbuilder::LodVertices lodVertices;
         clusterbuilder::BuildStats buildStats;
-        ClusterData clusters = clusterbuilder::build(s, clusterbuilder::Settings::fromQuality(quality), &buildStats, &lodVertices);
+        const clusterbuilder::Settings clusterSettings = clusterbuilder::Settings::fromQuality(quality);
+        // (visibility.cluster_compression: the rigid meshes' positions onto their grids first, ClusterStream.h)
+        if (clusterSettings.compression) clusterbuilder::snapPositions(s, clusterSettings);
+        ClusterData clusters = clusterbuilder::build(s, clusterSettings, &buildStats, &lodVertices);
         logf("scene %s (%s), %zu instances, %zu clusters, camera %s\n", sceneName.c_str(), scene::contentHash(s).substr(0, 16).c_str(), s.instances.size(),
              clusters.clusters.size(), moving ? "path 0 (moving)" : (cameraName.empty() ? "0 (static)" : cameraName.c_str()));
         {

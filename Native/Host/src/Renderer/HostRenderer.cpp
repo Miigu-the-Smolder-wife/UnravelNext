@@ -15,6 +15,7 @@
 
 #if __has_include("unx/clusterbuilder/ClusterBuilder.h")
 #include "unx/clusterbuilder/ClusterBuilder.h"
+#include "unx/clusterbuilder/ClusterStream.h"
 #define UNX_HOST_HAS_CLUSTERBUILDER 1
 #endif
 
@@ -174,7 +175,11 @@ SceneCommitInfo HostRenderer::commit()
     // (the builder's own vertices - enlarged pieces of thin geometry, visibility.lod_thin_preserve_area - go into the
     // scene's meshes before the upload; a scene is committed once)
     clusterbuilder::LodVertices lodVertices;
-    ClusterData clusters = clusterbuilder::build(m_scene, clusterbuilder::Settings::fromQuality(m_quality), nullptr, &lodVertices);
+    const clusterbuilder::Settings clusterSettings = clusterbuilder::Settings::fromQuality(m_quality);
+    // (visibility.cluster_compression: the rigid meshes' positions go onto their grids first - at most half a millimetre -
+    // so the clusters' streams hold the vertex pool's floats, ClusterStream.h)
+    if (clusterSettings.compression) clusterbuilder::snapPositions(m_scene, clusterSettings);
+    ClusterData clusters = clusterbuilder::build(m_scene, clusterSettings, nullptr, &lodVertices);
     lodVertices.appendTo(m_scene);
     info.clusters = clusters.clusters.size();
 #else

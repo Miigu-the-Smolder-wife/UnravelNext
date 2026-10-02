@@ -56,10 +56,11 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID)
     const GpuMesh mesh = loadMesh(inst.mesh);
     const GpuCluster cl = loadCluster(entry.y & 0xFFFFFFu);
     const uint vertexCount = min(clusterVertexCount(cl), 128u), triangleCount = min(clusterTriangleCount(cl), 128u);
-    StructuredBuffer<uint> clusterVertices = ResourceDescriptorHeap[g_clusterVertexIndices];
+    const uint streamRecord = clusterStreamRecord(entry.y & 0xFFFFFFu);  // (visibility.cluster_compression: the cluster's own vertices)
     for (uint i = lane; i < vertexCount; i += 64)
     {
-        const DeformedVertex d = deformVertex(inst, mesh, clusterVertices[cl.vertexOffset + i]);
+        VertexData vertex;
+        const DeformedVertex d = deformClusterVertex(inst, mesh, cl, streamRecord, i, vertex);
         const float4 p = mul(v.viewProj, float4(d.world, 1));
         const float iw = 1.0 / p.w;  // (the classification: the cluster's sphere lies in front of the near plane)
         gs_pixel[i] = float3((p.x * iw * 0.5 + 0.5) * v.viewportSize.x, (0.5 - p.y * iw * 0.5) * v.viewportSize.y, p.z * iw);

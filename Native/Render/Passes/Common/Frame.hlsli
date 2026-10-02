@@ -39,7 +39,7 @@ cbuffer FrameConstants : register(b1)
     float g_upscaleRatio;  // internal / output height of an upscaled main view, 0 = native (GpuSceneLayout.h)
     uint g_blueNoise;  // the blue-noise tile's SRV (BlueNoise.hlsli), UNX_NONE: none
     uint g_fog;  // the view's fog parameters' SRV + 1 (FogVolume.hlsli), 0: none
-    uint g_framePad2;
+    uint g_clusterStream;  // compressed cluster vertices (ClusterStream.hlsli): the raw words' SRV + 1, 0: none
 };
 
 // Reversed-Z infinite projection: device depth d = near / viewDistance (1 at the near plane, 0 = sky).

@@ -37,6 +37,13 @@ struct Settings
     // takes effect only in a build that returns them (build's lodVertices); other builds keep such groups terminal.
     bool thinPreserveArea = false;          // visibility.lod_thin_preserve_area
 
+    // Compressed cluster vertices (ClusterStream.h): the clusters of rigid meshes get a bit stream of their own vertices and
+    // the GPU's cluster vertex pool their handles. Not part of a mesh's cached hierarchy: the stream is made from it
+    // when the scene's data is put together, so cache entries serve both settings.
+    bool compression = false;               // visibility.cluster_compression
+    float positionStep = 0;                 // visibility.cluster_position_step (m): the position grid is at most this
+    uint32_t normalBits = 0, tangentBits = 0, uvBits = 0;  // visibility.cluster_normal_bits, _tangent_bits, _uv_bits
+
     // Source clusters only, no LOD DAG (C2b runtime meshes: shallow hierarchies for GpuScene::addRuntimeMesh; meshes with
     // blend shapes or a vertex animation get this regardless). Not a quality key: exact at every distance.
     bool noSimplification = false;

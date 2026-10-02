@@ -5,6 +5,7 @@
 //   unx_test_clusterbuilder [filter]
 #include "unx/clusterbuilder/ClusterBuilder.h"
 #include "unx/clusterbuilder/ClusterHierarchy.h"
+#include "unx/clusterbuilder/ClusterStream.h"
 #include "unx/clusterbuilder/Bricks.h"
 #include "unx/core/Config.h"
 #include "unx/core/Log.h"
@@ -16,6 +17,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <cfloat>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -1146,6 +1148,69 @@ UNX_TEST(build_is_deterministic)
     CHECK(a.data.lodLevelClusters == b.data.lodLevelClusters);
     CHECK(a.data.named.size() == b.data.named.size());
     for (size_t i = 0; i < a.data.named.size(); ++i) CHECK(a.data.named[i].bytes == b.data.named[i].bytes);
+}
+
+// Compressed cluster vertices (ClusterStream.h; written 2026-10-03, not run yet): with the positions on the mesh's grid
+// every cluster vertex decodes to its mesh vertex - the position's own float, the normal within the octahedral step, the
+// uv within half a uv step - and the cluster vertex pool is the build's without the setting; a mesh off its grid is
+// left uncompressed.
+UNX_TEST(compressed_stream_round_trip)
+{
+    setDiskCache("");
+    Settings st = settings();
+    st.compression = true;
+    for (int snapped = 0; snapped < 2; ++snapped)
+    {
+        scene::Scene sc = oneMesh(heightfield(96, 20.0f, 1.0f, true));
+        if (snapped) snapPositions(sc, st);
+        const scene::Mesh& m = sc.meshes[0];
+        const render::ClusterData data = build(sc, st);
+        const float step = positionStep(m.positions, st);
+        size_t vertices = 0, compressed = 0;
+        float worstNormal = 1, worstUv = 0;
+        for (uint32_t c = 0; c < (uint32_t)data.clusters.size(); ++c)
+        {
+            const render::gpu::Cluster& cl = data.clusters[c];
+            float2 uvLo{ FLT_MAX, FLT_MAX }, uvHi{ -FLT_MAX, -FLT_MAX };
+            for (uint32_t i = 0; i < (cl.counts & 0xFFu); ++i)
+            {
+                const float2 uv = m.uv0[data.clusterVertexIndices[cl.vertexOffset + i]];
+                uvLo = { std::min(uvLo.x, uv.x), std::min(uvLo.y, uv.y) };
+                uvHi = { std::max(uvHi.x, uv.x), std::max(uvHi.y, uv.y) };
+            }
+            const float uvTolerance = std::max(uvHi.x - uvLo.x, uvHi.y - uvLo.y) / (float)((1u << st.uvBits) - 1) * 0.5f + 1e-6f;
+            for (uint32_t i = 0; i < (cl.counts & 0xFFu); ++i)
+            {
+                const uint32_t mv = data.clusterVertexIndices[cl.vertexOffset + i];
+                ++vertices;
+                StreamVertex v;
+                if (!streamVertex(data, c, i, v)) continue;
+                ++compressed;
+                if (std::memcmp(&v.position, &m.positions[mv], sizeof(float3)) != 0)
+                    fail("cluster %u vertex %u: decoded (%.9g %.9g %.9g), the mesh vertex is (%.9g %.9g %.9g)", c, i, v.position.x, v.position.y, v.position.z,
+                         m.positions[mv].x, m.positions[mv].y, m.positions[mv].z);
+                worstNormal = std::min(worstNormal, dot(v.normal, normalize(m.normals[mv])));
+                const float du = std::fabs(v.uv.x - m.uv0[mv].x), dv = std::fabs(v.uv.y - m.uv0[mv].y);
+                worstUv = std::max({ worstUv, du, dv });
+                if (du > uvTolerance || dv > uvTolerance) fail("cluster %u vertex %u: uv off by (%g, %g), tolerance %g", c, i, du, dv, uvTolerance);
+            }
+        }
+        logf("    %s: %zu cluster vertices, %zu compressed, grid step %g m: worst normal cosine %.7f, worst uv %g\n", snapped ? "on the grid" : "as modelled", vertices,
+             compressed, step, worstNormal, worstUv);
+        if (snapped)
+        {
+            CHECK(compressed == vertices && vertices > 0);
+            CHECK(worstNormal > std::cos(0.5f * 3.14159265f / 180));  // (10 bits an axis: a step is 0.11 degrees at most)
+        }
+        else
+            CHECK(compressed == 0);  // (a sine heightfield's floats are not on a power-of-two grid)
+        // The setting off: no stream, the same hierarchy.
+        st.compression = false;
+        const render::ClusterData plain = build(sc, st);
+        st.compression = true;
+        for (const render::ClusterData::Named& n : plain.named) CHECK(n.name != kClusterStream);
+        CHECK(plain.clusterVertexIndices == data.clusterVertexIndices && plain.clusterTriangles == data.clusterTriangles);
+    }
 }
 
 UNX_TEST(cluster_fill_of_scene_meshes)

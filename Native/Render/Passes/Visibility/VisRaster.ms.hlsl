@@ -57,20 +57,20 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     const GpuCluster cl = loadCluster(entry.y & 0xFFFFFFu);
     const uint vertexCount = valid ? clusterVertexCount(cl) : 0, triangleCount = valid ? clusterTriangleCount(cl) : 0;
     SetMeshOutputCounts(vertexCount, triangleCount);
-    StructuredBuffer<uint> clusterVertices = ResourceDescriptorHeap[g_clusterVertexIndices];
+    const uint streamRecord = clusterStreamRecord(entry.y & 0xFFFFFFu);  // (visibility.cluster_compression: the cluster's own vertices)
     const bool clip = any(v.clipPlane != 0);
 #if ALPHA
     const uint material = clusterMaterial(inst, cl);
 #endif
     for (uint i = lane; i < vertexCount; i += 64)
     {
-        const uint meshVertex = clusterVertices[cl.vertexOffset + i];
-        const DeformedVertex d = deformVertex(inst, mesh, meshVertex);
+        VertexData vertex;
+        const DeformedVertex d = deformClusterVertex(inst, mesh, cl, streamRecord, i, vertex);
         verts[i].position = viewModelClip(inst, mul(v.viewProj, float4(d.world, 1)));  // A12: 1 outside the main view
         verts[i].clip = clip ? dot(v.clipPlane.xyz, d.world) + v.clipPlane.w : 1.0;
         gs_world[i] = d.world;
 #if ALPHA
-        verts[i].uv = loadVertex(mesh, meshVertex).uv;
+        verts[i].uv = vertex.uv;
 #endif
     }
     GroupMemoryBarrierWithGroupSync();

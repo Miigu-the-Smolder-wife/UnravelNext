@@ -143,11 +143,11 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     const float2 offset = float2(scale.x - 1 + 2 * shift.x / atlasSize.x, 1 - scale.y - 2 * shift.y / atlasSize.y);
 #endif
     SetMeshOutputCounts(vertexCount, triangleCount);
-    StructuredBuffer<uint> clusterVertices = ResourceDescriptorHeap[g_clusterVertexIndices];
+    const uint streamRecord = clusterStreamRecord(entry.y & 0xFFFFFFu);  // (visibility.cluster_compression: the cluster's own vertices)
     for (uint i = lane; i < vertexCount; i += 64)
     {
-        const uint meshVertex = clusterVertices[cl.vertexOffset + i];
-        const DeformedVertex d = deformVertex(inst, mesh, meshVertex);
+        VertexData vertex;
+        const DeformedVertex d = deformClusterVertex(inst, mesh, cl, streamRecord, i, vertex);
         const float4 p = mul(v.viewProj, float4(d.world, 1));
 #if TILE == 2
         verts[i].position = float4(p.x * scale.x + p.w * offset.x, p.y * scale.y + p.w * offset.y, p.z, p.w);
@@ -155,7 +155,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
         verts[i].position = p;
 #endif
 #if !DEPTH
-        verts[i].uv = loadVertex(mesh, meshVertex).uv;
+        verts[i].uv = vertex.uv;
 #endif
 #if TILE
         verts[i].clip = float4(p.x - ndcLo.x * p.w, ndcHi.x * p.w - p.x, ndcLo.y * p.w - p.y, p.y - ndcHi.y * p.w);
