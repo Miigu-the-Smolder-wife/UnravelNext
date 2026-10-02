@@ -51,6 +51,7 @@ struct SurfaceCacheCardSettings  // Config/quality/surface_cache.toml
                                       // hierarchy's cut through V's raster service (CardCaptureCluster.ps.hlsl)
     float feedbackResLevelBias = -0.5f;  // surface_cache.feedback_res_level_bias (cards.feedback: the switch)
     bool lightingFeedback = true;        // surface_cache.lighting_feedback
+    bool emissiveLightSources = true;    // surface_cache.mesh_cards_emissive_light_sources (MeshCardScene::addInstance)
     CardHitRules hitRules;               // lumen.skylight_leaking*, lumen.radiance_cache_far_field,
                                          // reflection.lumen_distant_screen_trace* (the card frame carries them to the hits)
     std::string cacheDirectory;       // mesh card files; "" = the default directory, "none" = no disk cache

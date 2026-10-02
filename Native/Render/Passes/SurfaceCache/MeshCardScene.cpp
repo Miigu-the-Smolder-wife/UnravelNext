@@ -343,7 +343,7 @@ void MeshCardScene::removeInstance(uint32_t sceneInstance)
     m_dirty.instanceMap = true;
 }
 
-uint32_t MeshCardScene::addInstance(uint32_t sceneInstance, const scene::MeshCards& cards, const float3x4& objectToWorld)
+uint32_t MeshCardScene::addInstance(uint32_t sceneInstance, const scene::MeshCards& cards, const float3x4& objectToWorld, bool emissiveLightSource)
 {
     if (sceneInstance < m_instanceMap.size() && m_instanceMap[sceneInstance] != mc::kNone)
         throw Error("mesh cards: scene instance " + std::to_string(sceneInstance) + " already has cards");
@@ -358,7 +358,7 @@ uint32_t MeshCardScene::addInstance(uint32_t sceneInstance, const scene::MeshCar
 
     const float3 size = (cards.boundsMax - cards.boundsMin) * scale;
     const float largestFace = std::max(size.y * size.z, std::max(size.x * size.z, size.x * size.y));
-    const float minArea = m_settings.minSize * m_settings.minSize;
+    const float minArea = m_settings.minSize * m_settings.minSize * (emissiveLightSource ? m_settings.emissiveMinAreaScale : 1.0f);
     if (!(largestFace > minArea)) return mc::kNone;
 
     // the cards that pass the size rule (MeshCardCullTest), at most 32
@@ -387,6 +387,7 @@ uint32_t MeshCardScene::addInstance(uint32_t sceneInstance, const scene::MeshCar
     entry.firstCard = addCardSpan((uint32_t)kept.size());
     entry.cardCount = (uint32_t)kept.size();
     entry.mostlyTwoSided = cards.mostlyTwoSided;
+    entry.emissiveLightSource = emissiveLightSource;
     m_meshCards[index] = entry;
     uint32_t slot = entry.firstCard;
     for (uint32_t i : kept)
@@ -727,7 +728,8 @@ void MeshCardScene::update(std::span<const float3> viewOrigins)
             const float maxExtent = std::max(card.extent.x, card.extent.y);
             const float projected = std::min(m_settings.texelDensityScale * maxExtent / distance, m_settings.maxTexelDensity * maxExtent);
             const uint32_t snapped = roundUpPow2(std::min((uint32_t)std::max(projected, 0.0f), m_settings.maxResolution));
-            const bool visible = distance < m_settings.maxDistance && snapped >= m_settings.minResolution;
+            // (an emissive light source: down to a resolution of 1 - the reference's MinCardResolution for it)
+            const bool visible = distance < m_settings.maxDistance && snapped >= (e.emissiveLightSource ? 1u : m_settings.minResolution);
             const uint32_t resLevel = floorLog2(std::max(snapped, 1u << mc::kMinResLevel));
             if (!visible)
             {

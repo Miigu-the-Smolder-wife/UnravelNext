@@ -56,6 +56,7 @@ struct Tracked  // a scene instance as the card scene last saw it
     uint32_t mesh = 0xFFFFFFFFu;
     uint32_t scaleBits = 0, transformRevision = 0, materialKey = 0;
     uint8_t state = 0;  // 0 not in the card scene, 1 waiting for its mesh's cards, 2 added
+    bool emissive = false;  // an emissive light source (emissiveSourceOf) when it was added
 };
 
 struct CopyOp
@@ -179,6 +180,7 @@ SurfaceCacheCardSettings SurfaceCacheCardSettings::fromQuality(const QualityConf
     s.cards.minResolution = (uint32_t)num("surface_cache.mesh_cards_min_resolution", 4);
     s.cards.maxDistance = (float)num("surface_cache.mesh_cards_max_distance_m", 300.0);
     s.cards.minSize = (float)num("surface_cache.mesh_cards_min_size_m", 0.1);
+    s.emissiveLightSources = flag("surface_cache.mesh_cards_emissive_light_sources", true);
     s.cards.refreshFraction = (float)num("surface_cache.mesh_cards_refresh_fraction", 0.125);
     s.captureClusters = flag("surface_cache.mesh_cards_capture_clusters", false);
     s.cards.feedback = flag("surface_cache.feedback", true);
@@ -333,6 +335,26 @@ struct SurfaceCacheCards::Impl
         return h;
     }
 
+    // The reference's bEmissiveLightSource is a mark the artist sets on a primitive; here every instance one of whose
+    // materials emits light GI takes (not the emissive-for-the-view-only kind) is one: its emission is in the scene's
+    // light whether marked or not (surface_cache.mesh_cards_emissive_light_sources).
+    bool emissiveSourceOf(const GpuScene& gs, const scene::Scene& src, uint32_t instance) const
+    {
+        if (!settings.emissiveLightSources) return false;
+        const scene::Instance& in = src.instances[instance];
+        const scene::Mesh& mesh = src.meshes[in.mesh];
+        const std::vector<gpu::Material>& materials = gs.materials();
+        for (size_t sm = 0; sm < mesh.submeshes.size(); ++sm)
+        {
+            const uint32_t material = sm < in.materialOverrides.size() ? in.materialOverrides[sm] : mesh.submeshes[sm].material;
+            if (material >= materials.size()) continue;
+            const gpu::Material& gm = materials[material];
+            if (((gm.classFlags >> 8) & gpu::MaterialEmissiveVisibleOnly) != 0) continue;
+            if (gm.emissive.x > 0 || gm.emissive.y > 0 || gm.emissive.z > 0) return true;
+        }
+        return false;
+    }
+
     // The card scene follows the GPU scene: which instances have cards, where they are.
     void sync(FramePassContext& fc)
     {
@@ -393,6 +415,7 @@ struct SurfaceCacheCards::Impl
                 t.mesh = g.mesh;
                 t.scaleBits = scaleBits;
                 t.materialKey = materialKeyOf(gs, *src, i);
+                t.emissive = emissiveSourceOf(gs, *src, i);
                 t.state = 1;
             }
             if (t.state == 1)
@@ -411,7 +434,7 @@ struct SurfaceCacheCards::Impl
                     ++waiting;
                     continue;
                 }
-                scene->addInstance(i, *cards, matrixOf(g));
+                scene->addInstance(i, *cards, matrixOf(g), t.emissive);
                 t.state = 2;
                 t.transformRevision = g.transformRevision;
                 continue;
@@ -427,7 +450,15 @@ struct SurfaceCacheCards::Impl
                 if (key != t.materialKey)
                 {
                     t.materialKey = key;
-                    scene->refreshInstance(i);
+                    if (emissiveSourceOf(gs, *src, i) != t.emissive)
+                    {
+                        // it became a light source or stopped being one: its cards pass another size rule - added anew
+                        // (the next frame takes it from state 0)
+                        scene->removeInstance(i);
+                        t.state = 0;
+                    }
+                    else
+                        scene->refreshInstance(i);
                 }
             }
         }
