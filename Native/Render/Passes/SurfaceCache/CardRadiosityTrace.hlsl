@@ -8,9 +8,9 @@
 // surface: 0), the sky where it escapes; its largest channel held to P[4].y in exposed units (the reference's
 // MaxRayIntensity).
 // A hit without a card (the reference: 0) takes its direct light - the sun by one shadow ray to the disk's centre and one
-// local-light sample with its shadow ray (HitLocalSample.hlsli) - through the material's constants (no texture, no
-// indirect light): a fifth to a third of the rays' hits read no card (lobby, 2026-10-02) and every bounce lost that
-// share.
+// local-light sample with its shadow ray (HitLocalSample.hlsli) - and the indirect light the card frame names
+// (LumenHitIndirect.hlsli: the previous frame's translucency volume), through the material's constants (no texture):
+// a fifth to a third of the rays' hits read no card (lobby, 2026-10-02) and every bounce lost that share.
 // The re-shoot (the reference's AvoidSelfIntersections in its retrace mode, LumenHardwareRayTracingCommon.ush
 // TraceSurfaceCacheRay): the ray geometry is not the captured surface texel for texel, so a ray can start under it. A
 // first hit on the back of a one-sided surface nearer than P[0].w (SkipBackFaceHitDistance) is shot again from that
@@ -31,6 +31,7 @@
 #include "RayTracing/HitLocalLights.hlsli"
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/SurfaceCache/CardLighting.hlsli"
+#include "Passes/GI/LumenHitIndirect.hlsli"
 #include "RayTracing/HitLocalSample.hlsli"
 
 [shader("raygeneration")]
@@ -108,6 +109,8 @@ void CardRadiosityTraceGen()
                 g_rtHitCone = 0.37;  // (a ray of the 4 x 4 hemisphere map: a cone of about 20 degrees half angle)
                 const float bias = 1e-3 + 2e-4 * distance(s.position, g_cameraPosition);
                 RtHitLighting L = (RtHitLighting)0;
+                L.irradiance = lhiIrradiance(lhiSources(P[0].x), s.position, s.normal, thread * 9781u + P[0].z * 26699u).rgb;
+                L.specularRadiance = L.irradiance / 3.14159265;
                 const float3 l = normalize(g_sunDirection);
                 if (dot(s.normal, l) > 0 || (m.classFlags & 0xFFu) == MATERIAL_FOLIAGE)
                 {

@@ -7,7 +7,9 @@
 //                   cards' light as uniform); no light sample, no shadow ray;
 //   without cards   (a deforming instance: skin, wind; a texel the cards do not cover) the sun through one shadow ray
 //                   to the disk's centre and, with localSample, one local-light sample with its shadow ray
-//                   (HitLocalSample.hlsli: a mirror showed such surfaces unlit); no indirect light;
+//                   (HitLocalSample.hlsli: a mirror showed such surfaces unlit); the indirect light the card frame
+//                   names (LumenHitIndirect.hlsli: this frame's translucency volume, else the radiance cache's
+//                   irradiance probes - a skinned character in a mirror is lit by the room it stands in);
 //   back of a one-sided surface: 0 (inside closed geometry).
 // hiRes (reflection.lumen_hi_res_surface; Unreal's r.Lumen.Reflections.HiResSurface): the hit reads the cards' highest
 // mapped level and reports the page and level its footprint wants (CardLighting.hlsli clFeedback; feedbackCoord: the
@@ -23,6 +25,7 @@
 #include "Passes/SurfaceCache/CardLighting.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
 #include "RayTracing/HitLocalSample.hlsli"
+#include "Passes/GI/LumenHitIndirect.hlsli"
 
 struct RlHit
 {
@@ -100,6 +103,9 @@ RlHit rlShadeHit(RtSceneSrvs scene, RtHit hit, float3 origin, float3 direction, 
     }
     if (!fromCards)
     {
+        const uint hitSeed = DispatchRaysIndex().x * 9781u + DispatchRaysIndex().y * 6271u + g_frameIndex * 26699u;
+        L.irradiance = lhiIrradiance(lhiSources(cardFrame), s.position, s.normal, hitSeed).rgb;
+        L.specularRadiance = L.irradiance / MODEL_PI;
         const float3 l = normalize(g_sunDirection);
         if (dot(s.normal, l) > 0 || materialClass(m) == MATERIAL_FOLIAGE)
         {
@@ -115,11 +121,7 @@ RlHit rlShadeHit(RtSceneSrvs scene, RtHit hit, float3 origin, float3 direction, 
                 L.sunVisibility = rtVisible(scene, sr, RT_MASK_GI) ? 1.0 : 0.0;
             }
         }
-        if (localSample)
-        {
-            const uint seed = DispatchRaysIndex().x * 9781u + DispatchRaysIndex().y * 6271u + g_frameIndex * 26699u;
-            L.local = rtHitLocalSample(scene, s, m, -direction, footprint, 1e-3 + 2e-4 * distance(s.position, g_cameraPosition), seed);
-        }
+        if (localSample) L.local = rtHitLocalSample(scene, s, m, -direction, footprint, 1e-3 + 2e-4 * distance(s.position, g_cameraPosition), hitSeed);
     }
     o.radiance = rtHitRadiance(m, s.normal, -direction, L, coneSpread);
     if (any(isnan(o.radiance)) || any(isinf(o.radiance))) o.radiance = 0;

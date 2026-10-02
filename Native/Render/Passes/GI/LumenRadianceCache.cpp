@@ -32,6 +32,8 @@ constexpr uint32_t kMaxRaysPerDispatch = 262144;
 // A probe texel's thread traces up to this many rays: the line to its ray's start (probe occlusion), its own, and at a
 // hit the sun's and one local light's shadow ray.
 constexpr uint32_t kRaysPerTexel = 4;
+// LumenRadianceCache.hlsli: a probe's irradiance map with its border; the hit-mark list (a 16 B header, 16 B a position)
+constexpr uint32_t kIrradianceBordered = 8, kHitMarks = 2048, kHitMarkBytes = 16 + kHitMarks * 16;
 
 // LumenRadianceCache.hlsli LrcParams
 struct Params
@@ -52,6 +54,8 @@ struct Settings
     float extent, base, reprojection, traceDistance, downsampleDistance, maxHitAngle;
     float farStart;  // lumen.radiance_cache_far_field: the far field's start (the mesh cards' end), 0: no far field
     bool filter, occlusion;
+    bool irradiance;       // lumen.hit_indirect_radiance_cache: irradiance maps and the hits' mark list
+    uint32_t hitMarkBias;  // lumen.hit_indirect_mark_clipmap_bias
     bool operator==(const Settings&) const = default;
 };
 Settings settings(const QualityConfig& q)
@@ -80,6 +84,9 @@ Settings settings(const QualityConfig& q)
     s.maxHitAngle = (float)q.number("lumen.radiance_cache_filter_max_hit_angle");
     s.filter = q.boolean("lumen.radiance_cache_filter");
     s.occlusion = q.boolean("lumen.radiance_cache_probe_occlusion");
+    s.irradiance = (!q.has("lumen.hit_indirect") || q.boolean("lumen.hit_indirect")) &&
+                   (!q.has("lumen.hit_indirect_radiance_cache") || q.boolean("lumen.hit_indirect_radiance_cache"));
+    s.hitMarkBias = q.has("lumen.hit_indirect_mark_clipmap_bias") ? (uint32_t)std::clamp((int)q.integer("lumen.hit_indirect_mark_clipmap_bias"), 0, (int)kMaxClipmaps) : 2u;
     if (s.clipmaps < 1 || s.clipmaps > kMaxClipmaps) fail("lumen.radiance_cache_clipmaps must be in [1, 6]");
     if (s.grid < 8 || s.grid > 252 || s.grid % 4 != 0) fail("lumen.radiance_cache_grid must be a multiple of 4 in [8, 252]");
     if (s.probeResolution < 8 || s.probeResolution > 64 || s.probeResolution % 8 != 0) fail("lumen.radiance_cache_probe_resolution must be 8, 16, ... 64");
@@ -101,7 +108,7 @@ struct RcState
 {
     Device* device = nullptr;
     Settings settings{};
-    ComPtr<ID3D12Resource> indirection, atlas, depth, slots, counters, freeList, ring, descTemplate;
+    ComPtr<ID3D12Resource> indirection, atlas, depth, slots, counters, freeList, ring, descTemplate, irradiance, hitMarks;
     ComPtr<ID3D12CommandSignature> dispatchSignature;
     uint8_t* ringMapped = nullptr;
     uint32_t ringSrv[kRing] = {};
@@ -118,8 +125,10 @@ struct RcState
     {
         if (!device) return;
         for (ComPtr<ID3D12Resource>* r : { std::addressof(indirection), std::addressof(atlas), std::addressof(depth), std::addressof(slots), std::addressof(counters),
-                                           std::addressof(freeList), std::addressof(ring), std::addressof(descTemplate) })
+                                           std::addressof(freeList), std::addressof(ring), std::addressof(descTemplate), std::addressof(irradiance), std::addressof(hitMarks) })
             if (*r) device->deferRelease(*r);
+        irradiance.Reset();
+        hitMarks.Reset();
         if (created)
         {
             DescriptorHeaps* h = &device->descriptors();
@@ -171,6 +180,12 @@ struct RcState
         buffer(freeList, (uint64_t)maxProbes * 4, false, L"R rc free list");
         buffer(ring, (uint64_t)kRing * kParamBytes, true, L"R rc parameters ring");
         buffer(descTemplate, 2 * kDescStride, true, L"R rc ray dispatch template");
+        if (s.irradiance)
+        {
+            texture(irradiance, D3D12_RESOURCE_DIMENSION_TEXTURE2D, s.atlasProbes * kIrradianceBordered, s.atlasProbes * kIrradianceBordered, 1, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                    L"R rc irradiance atlas");
+            buffer(hitMarks, kHitMarkBytes, false, L"R rc hit marks");
+        }
         D3D12_RANGE none{ 0, 0 };
         check(ring->Map(0, &none, reinterpret_cast<void**>(&ringMapped)), "map R rc parameters ring");
         for (uint32_t k = 0; k < kRing; ++k)
@@ -262,6 +277,13 @@ LumenRcFrame lumenRadianceCacheBegin(FramePassContext& fc, const ViewResources& 
                               D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     f.depth = g.importTexture(st.depth.Get(), { "r.gi.rc depth atlas", s.atlasProbes * s.probeResolution, s.atlasProbes * s.probeResolution, 1, 1, DXGI_FORMAT_R16_UINT },
                               D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    if (s.irradiance)
+    {
+        f.irradiance = g.importTexture(st.irradiance.Get(),
+                                       { "r.gi.rc irradiance atlas", s.atlasProbes * kIrradianceBordered, s.atlasProbes * kIrradianceBordered, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
+                                       D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        f.hitMarks = g.importBuffer(st.hitMarks.Get(), BufferDesc{ "r.gi.rc hit marks", kHitMarkBytes, 0 });
+    }
     st.recordedFrame = fc.frame.frameIndex;
     st.record = f;
 
@@ -313,6 +335,29 @@ LumenRcFrame lumenRadianceCacheBegin(FramePassContext& fc, const ViewResources& 
                   c.computeConstants(k, 8);
                   c.cmd->Dispatch(((W + tile - 1) / tile + 7) / 8, ((H + tile - 1) / tile + 7) / 8, 1);
               });
+    if (f.hitMarks.valid())
+    {
+        // The positions last frame's ray hits asked for probes at (lrcHitMark), marked like the screen's, then the list
+        // emptied for this frame's hits. A reset frame (a new cache, another scene, an origin shift: the list is not
+        // written yet, or speaks of other coordinates) only empties it.
+        const BufferRef hitMarks = f.hitMarks;
+        const uint32_t bias = s.hitMarkBias;
+        for (uint32_t clear = reset ? 1u : 0u; clear < 2; ++clear)
+            g.addPass(clear ? "r.gi.rc.hitmark.clear" : "r.gi.rc.hitmark", QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          if (!clear) b.use(indirection, Use::UavCompute);
+                          b.use(hitMarks, Use::UavCompute);
+                          b.keep();
+                      },
+                      [=, &shaders](PassContext& c) {
+                          const uint32_t k[12] = { paramsSrv, clear ? 0xFFFFFFFFu : c.uav(indirection), 0xFFFFFFFFu, 0xFFFFFFFFu,
+                                                   0xFFFFFFFFu, 0xFFFFFFFFu, c.uav(hitMarks), bias, clear, 0, 0, 0 };
+                          c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenRadianceCacheUpdate.MODE9"));
+                          c.bindFrameConstants(cb);
+                          c.computeConstants(k, 12);
+                          c.cmd->Dispatch(clear ? 1u : (kHitMarks + 63) / 64, 1, 1);
+                      });
+    }
     return f;
 }
 
@@ -503,6 +548,31 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                       c.cmd->ExecuteIndirect(signature, 1, c.resource(filterArgs), (uint64_t)chunk * 32 + 16, nullptr, 0);
                   }
               });
+    if (frame.irradiance.valid())
+    {
+        // the traced probes' irradiance maps, from the radiance the store left in the atlas (on the store's dispatch
+        // arguments: one group layer per traced probe, of which the first group works)
+        const TextureRef irradiance = frame.irradiance;
+        g.addPass("r.gi.rc.irradiance", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      for (BufferRef r : { counters, traces }) b.use(r, Use::SrvCompute);
+                      b.use(atlas, Use::SrvCompute);
+                      b.use(irradiance, Use::UavCompute);
+                      b.use(filterArgs, Use::IndirectArgs);
+                      b.keep();
+                  },
+                  [=, &shaders](PassContext& c) {
+                      uint32_t k[8] = { paramsSrv, c.srv(counters), c.srv(traces), c.srv(atlas), c.uav(irradiance), 0, 0, 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenRadianceCacheIrradiance"));
+                      c.bindFrameConstants(cb);
+                      for (uint32_t chunk = 0; chunk < chunks; ++chunk)
+                      {
+                          k[5] = chunk * probesPerDispatch;  // P[1].y: the dispatch's first trace record
+                          c.computeConstants(k, 8);
+                          c.cmd->ExecuteIndirect(signature, 1, c.resource(filterArgs), (uint64_t)chunk * 32 + 16, nullptr, 0);
+                      }
+                  });
+    }
     bookkeeping("r.gi.rc.validate", "Passes/GI/LumenRadianceCacheUpdate.MODE8", cellsX, cellsYZ, cellsYZ, true, false, false);
 
     frame.updated = true;

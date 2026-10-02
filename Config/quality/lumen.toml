@@ -47,6 +47,19 @@ radiance_cache_mark_tile_px = 16                  # the module's own screen mark
 radiance_cache_trace_capacity = 1024              # structural bound of probes traced in one frame (new probes are always
                                                   # traced, past the budget at 1/4 of the rays; past this bound they wait a frame)
 
+# Indirect light at ray hits that have no mesh card (Passes/GI/LumenHitIndirect.hlsli) - deforming instances (skin, wind)
+# and faces no card of their mesh sees. NOT in the reference: its hit without a valid surface-cache sample is black
+# (a skinned character in a mirror shows only what the lights reach directly). true: such a hit takes the irradiance of
+# the translucency volume where it lies in a lit cell of the view's grid, else that of the radiance cache's probes.
+hit_indirect = true
+hit_indirect_radiance_cache = true                # the radiance cache keeps an irradiance map per probe (the reference's
+                                                  # CalculateIrradiance: 6 x 6 normals, + 1 border) for the hits the volume
+                                                  # does not answer - behind the camera, behind what the view sees; such hits
+                                                  # ask for probes where they fall. false: the volume alone
+hit_indirect_mark_clipmap_bias = 2                # ... at a clipmap this many levels coarser than the hit's own (the hits
+                                                  # fall wherever a ray reaches: at the surfaces' probe density they would
+                                                  # take the cache's budget)
+
 # Translucency volume (Passes/GI/LumenTranslucencyVolume.hlsli): indirect light for what is not an opaque surface of the
 # view - air and fog, particles, water, glass - on a view-aligned grid (cells 32 px wide, 26 exponential slices to 80 m),
 # 3 x 3 rays a cell that end in the radiance cache. false (default): not built; those readers get no indirect light from it.

@@ -301,6 +301,51 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     // A's far-field radiance cache (lumen.radiance_cache): cleared and marked from the screen by Begin, marked by the
     // probes here, updated (allocation, probe rays, filter) before the probes' own rays read it.
     LumenRcFrame rc = lumenRadianceCacheBegin(fc, view);
+    // lumen.hit_indirect: the sources of indirect light for ray hits without cards (LumenHitIndirect.hlsli), named in the
+    // card frame once each of this frame's stands - the radiance cache's irradiance probes after the cache's update,
+    // the translucency volume after its own. The frame was written with the previous frame's volume; the ray passes
+    // recorded after a call read what it names (and declare it: FrameResources::cards).
+    const bool hitIndirect = !fc.quality.has("lumen.hit_indirect") || fc.quality.boolean("lumen.hit_indirect");
+    const auto nameHitSources = [&](const char* pass) {
+        SurfaceCacheCardRefs& cards = fc.resources.cards;
+        if (!hitIndirect || !L.hitSurfaceCache || !cards.valid()) return;
+        const FrameResources& res = fc.resources;
+        uint32_t volume = 0xFFFFFFFFu;
+        if (res.translucencyGiParams != 0xFFFFFFFFu && res.translucencyGiAmbient.valid() && res.translucencyGiDirectional.valid())
+        {
+            // this frame's volume in place of the previous frame's
+            volume = res.translucencyGiParams;
+            cards.hitVolumeAmbient = res.translucencyGiAmbient;
+            cards.hitVolumeDirectional = res.translucencyGiDirectional;
+        }
+        else if (cards.hitVolumeAmbient.valid() && res.translucencyGiPrevParams != 0xFFFFFFFFu)
+            volume = res.translucencyGiPrevParams;
+        const bool cache = rc.on && rc.updated && rc.irradiance.valid();
+        if (cache)
+        {
+            cards.hitRcIndirection = rc.indirection;
+            cards.hitRcIrradiance = rc.irradiance;
+            cards.hitRcDepth = rc.depth;
+            cards.hitRcMarks = rc.hitMarks;
+        }
+        const BufferRef frame = cards.frame;
+        const TextureRef indirection = rc.indirection, irradiance = rc.irradiance, depthAtlas = rc.depth;
+        const BufferRef marks = rc.hitMarks;
+        const uint32_t cacheParams = rc.params;
+        g.addPass(pass, QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(frame, Use::UavCompute);
+                      b.keep();
+                  },
+                  [=, &shaders](PassContext& c) {
+                      const uint32_t none = 0xFFFFFFFFu;
+                      const uint32_t k[12] = { c.uav(frame), 0, 0, 0, volume, cache ? cacheParams : none, cache ? c.srv(indirection) : none, cache ? c.srv(irradiance) : none,
+                                               cache ? c.srv(depthAtlas) : none, cache ? c.uav(marks) : none, 0, 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardFrameSources"));
+                      c.computeConstants(k, 12);
+                      c.cmd->Dispatch(1, 1, 1);
+                  });
+    };
     if (rc.on)
     {
         const TextureRef indirection = rc.indirection;
@@ -329,6 +374,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
         in.sunIlluminance = m_sunIlluminance;
         in.experiment = m_settings.experimentDisable;
         lumenRadianceCacheUpdate(fc, view, rays, in, rc);
+        nameHitSources("r.gi.hitsources.cache");
     }
     {
         // lumen.translucency_volume: indirect light for air, particles, water and glass (after the cache's update)
@@ -336,7 +382,9 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
         tv.cards = L.hitSurfaceCache ? fc.resources.cards : SurfaceCacheCardRefs{};
         tv.skyRadiance = m_skyRadiance;
         tv.sunIlluminance = m_sunIlluminance;
+        const uint32_t before = fc.resources.translucencyGiParams;
         lumenTranslucencyVolume(fc, view, rays, tv, rc);
+        if (fc.resources.translucencyGiParams != before) nameHitSources("r.gi.hitsources.volume");
     }
     const bool farField = rc.on;
     // lumen.radiance_cache_far_field: hits past the mesh cards take the sky's light (GiSky.hlsli giFarSkyIrradiance; the

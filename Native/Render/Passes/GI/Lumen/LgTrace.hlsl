@@ -8,9 +8,10 @@
 // cards of its instance (CardLighting.hlsli clReadCards) - the cards' direct light (the sun and the local lights) and
 // radiosity - and shades its own material with it; no light sample, no shadow ray, no world-cache read; its own
 // emission stays. A hit that has no card there (a deforming instance: skin, wind; a texel the cards do not cover)
-// takes the sun (one shadow ray into the disk) and one local-light sample with its shadow ray (HitLocalSample.hlsli), and - only with
-// gi.lumen_hit_fallback - the world cache's irradiance; without the fallback its indirect light is 0, as the
-// reference's invalid surface-cache sample. A ray that meets an analytic area light's proxy returns 0 (M shades
+// takes the sun (one shadow ray into the disk) and one local-light sample with its shadow ray (HitLocalSample.hlsli), and
+// its indirect light from the translucency volume or the radiance cache's irradiance probes (LumenHitIndirect.hlsli;
+// lumen.hit_indirect - the reference's invalid surface-cache sample has none) - or, with gi.lumen_hit_fallback, from
+// the world cache instead. A ray that meets an analytic area light's proxy returns 0 (M shades
 // those lights; the proxy still occludes). A miss returns the sky.
 // Output: radiance x exposure (RGBA16F, a unused) and the trace word (lgEncodeTrace: distance, hit, moving: the hit
 // moves relative to the probe, |probe speed - hit speed| / max(probe depth, 1 m) > P[4].w).
@@ -40,6 +41,7 @@
 #include "Passes/GI/Lumen/LgCommon.hlsli"
 #include "Passes/SurfaceCache/CardLighting.hlsli"
 #include "Passes/GI/Lumen/LgRadianceCache.hlsli"
+#include "Passes/GI/LumenHitIndirect.hlsli"
 #include "RayTracing/HitLocalSample.hlsli"
 
 float lgBias(float3 p) { return 1e-3 + 2e-4 * distance(p, g_cameraPosition); }
@@ -207,7 +209,16 @@ void LgTraceGen()
                 giCacheLightingAt(cache, h, s.position, s.normal, mirror, giLevelForSize(h, footprint), L.irradiance, L.specularRadiance);
                 g_giStrictVisibility = false;
             }
-            if (!fromCards) L.irradiance += giFarSkyIrradiance(s.position, s.normal, float(P[4].y >> 16));
+            // ... or the frame's volume / irradiance probes (no world cache: P[4].y bit 1)
+            bool indirectFound = false;
+            if (!fromCards && (P[4].y & 2u) != 0)
+            {
+                const float4 e = lhiIrradiance(lhiSources(P[5].x), s.position, s.normal, seed);
+                L.irradiance += e.rgb;
+                L.specularRadiance += e.rgb / LG_PI;  // (the lobe at the hit sees that light as uniform, as the cards')
+                indirectFound = e.a > 0;
+            }
+            if (!fromCards && !indirectFound) L.irradiance += giFarSkyIrradiance(s.position, s.normal, float(P[4].y >> 16));
             const float3 l = normalize(g_sunDirection);
             const float cosSun = dot(s.normal, l);
             if (!fromCards && (cosSun > 0 || (m.classFlags & 0xFFu) == MATERIAL_FOLIAGE) && (P[3].w & 16) == 0)

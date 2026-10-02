@@ -747,9 +747,11 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
         set.feedbackBias = s.settings.feedbackResLevelBias;
         set.lightingFeedback = s.settings.lightingFeedback;
     }
-    // hits without cards take their indirect light from the previous frame's translucency volume while the cache's own
-    // passes run (the final gather names this frame's sources afterwards: CardFrameSources.hlsl)
-    if (fc.resources.translucencyGiPrevParams != 0xFFFFFFFFu && fc.resources.translucencyGiPrevAmbient.valid() && fc.resources.translucencyGiPrevDirectional.valid())
+    // lumen.hit_indirect: hits without cards take their indirect light from the previous frame's translucency volume
+    // while the cache's own passes run (the final gather names this frame's sources afterwards: CardFrameSources.hlsl)
+    const bool hitIndirect = !fc.quality.has("lumen.hit_indirect") || fc.quality.boolean("lumen.hit_indirect");
+    if (hitIndirect && fc.resources.translucencyGiPrevParams != 0xFFFFFFFFu && fc.resources.translucencyGiPrevAmbient.valid() &&
+        fc.resources.translucencyGiPrevDirectional.valid())
     {
         set.hitVolumeParams = fc.resources.translucencyGiPrevParams;
         set.hitVolumeAmbient = fc.resources.translucencyGiPrevAmbient;
