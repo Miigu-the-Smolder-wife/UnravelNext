@@ -294,7 +294,7 @@ motion_blur_after_upscale_rotation = true  # ours (the reference has no such sta
 # what the foreground uncovers (radius tiles choose each kernel), bright wide-radius pixels drawn as bokeh sprites,
 # the slight blur near the focus gathered at full resolution, all composed; at the internal resolution before the
 # temporal upscale. false: the octave-pyramid gather (DepthOfField.cpp), kept to compare against.
-dof_diaphragm = true
+dof_diaphragm = false                               # (off until a batch has looked at it: the octave path is the one that has run)
 dof_diaphragm_rings = 5                             # r.DOF.Gather.RingCount, 3 .. 5: the gather kernels' rings (ring i: 8 i samples)
 dof_diaphragm_max_levels = 4                        # r.DOF.Gather.MaxMipMapCount: coarser levels of the gather's input, 1 .. 4
 dof_diaphragm_max_foreground_radius = 0.025         # r.DOF.Kernel.MaxForegroundRadius: the widest blur in front of the focus,
