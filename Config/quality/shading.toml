@@ -277,6 +277,11 @@ motion_blur_max_percent = 5.0          # the longest blur, percent of the output
 motion_blur_samples = 16               # taps along the blur, a multiple of 4 (16: the reference's r.MotionBlurQuality 4)
 motion_blur_half_res_gather = true     # 16 x 16 pixel groups whose blur is longer than the taps gather once per 2 x 2
                                        # pixels (r.MotionBlur.HalfResGather): a quarter of the taps where the blur hides it
+motion_blur_after_upscale_rotation = true  # ours (the reference has no such stage): after the upscale too, a camera turn
+                                       # whose streak at the picture's centre exceeds 16 output pixels is blurred along
+                                       # its own arcs, exact at every depth (MotionRotation.hlsl), and the gather takes
+                                       # the rest of the motion. false: the gather takes the turn as any velocity, up to
+                                       # motion_blur_max_percent
 
 # Depth of field (A5; the lens is the frame's: FrameContext::lensAperture, lensFocus - no lens, no pass).
 # dof_diaphragm = true: the reference's diaphragm depth of field (DiaphragmDof.cpp, Ddof*.hlsl; its DiaphragmDOF passes
