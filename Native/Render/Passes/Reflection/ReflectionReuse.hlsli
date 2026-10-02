@@ -23,24 +23,38 @@
 
 float reuseLuminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
+// The exposure the caps and the tone-mapped means refer to: the frame's, times the snap frame's correction (the
+// gather's LgMeter reference, FrameResources::lumenCapReference: on the first frames, a cut or a restore the frame's
+// exposure was not metered on what it shows - the caps would clip a brighter view's reflections dark for the history's
+// length, and do nothing in a darker one). reuseSnapExposure(srv) sets it; UNX_NONE: the frame's exposure.
+static float g_reuseExposureScale = 1;
+void reuseSnapExposure(uint referenceSrv)
+{
+    if (referenceSrv == UNX_NONE) return;
+    ByteAddressBuffer reference = ResourceDescriptorHeap[referenceSrv];
+    const float c = asfloat(reference.Load(0));
+    if (c > 0 && c < 1e20) g_reuseExposureScale = c;
+}
+float reuseExposure() { return g_exposure * g_reuseExposureScale; }
+
 // The filters' working space: exposed radiance (display-linear: nits x g_exposure) compressed by its luminance over
 // 'range' - a mean taken there weighs a sample by 1 / (1 + luminance / range), so a few very bright samples cannot own
 // it. range <= 0: plain exposed radiance (an energy-preserving mean).
 float3 reuseToFilter(float3 radiance, float range)
 {
-    const float3 v = radiance * g_exposure;
+    const float3 v = radiance * reuseExposure();
     return range > 0 ? v / (1 + reuseLuminance(v) / range) : v;
 }
 float3 reuseFromFilter(float3 v, float range)
 {
     if (range > 0) v = v / max(1 - reuseLuminance(v) / range, 1e-4);
-    return v / max(g_exposure, 1e-20);
+    return v / max(reuseExposure(), 1e-20);
 }
 
 // A ray's radiance held to 'cap' in exposed units (its largest channel); cap <= 0: unchanged.
 float3 reuseCapIntensity(float3 radiance, float cap)
 {
-    const float m = max(radiance.r, max(radiance.g, radiance.b)) * g_exposure;
+    const float m = max(radiance.r, max(radiance.g, radiance.b)) * reuseExposure();
     return cap > 0 && m > cap ? radiance * (cap / m) : radiance;
 }
 

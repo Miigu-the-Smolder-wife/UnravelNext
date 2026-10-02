@@ -517,6 +517,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
         const float centreSigma = (float)q.number("shading.exposure_centre_sigma");
         const BufferRef histogram = g.createBuffer({ "lumen meter histogram", 256, 0 });
         capReference = g.createBuffer({ "lumen cap exposure", 16, 0 });
+        fc.resources.lumenCapReference = capReference;  // (R's reflection filters: the same reference)
         const BufferRef reference = capReference;
         static const char* const meterNames[3] = { "r.gi.lg.meter.clear", "r.gi.lg.meter.bins", "r.gi.lg.meter" };
         for (uint32_t mode = 0; mode < 3; ++mode)

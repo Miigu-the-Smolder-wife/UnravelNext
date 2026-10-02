@@ -311,6 +311,11 @@ struct FrameResources
     // with the indirection (Texture3D R32_UINT) and the atlas (R11G11B10F) as SRVs. Invalid = off.                   [A]
     TextureRef lumenRcIndirection, lumenRcAtlas, lumenRcDepth;
     uint32_t lumenRcParams = 0xFFFFFFFFu;
+    // gi.lumen_cap_snap_exposure (LgMeter.hlsl): on a snap frame (first frames, a cut, a restore: the frame's exposure
+    // was not metered on what it shows) a raw buffer whose first float is c = the exposure metered on the frame's own
+    // traces / the frame's exposure; R's reflection filters take their caps and tone-mapped means in g_exposure x c.
+    // Invalid on every other frame.                                                                                 [R]
+    BufferRef lumenCapReference;
     // lumen.translucency_volume (Passes/GI/LumenTranslucencyVolume.hlsli, unx/gi/LumenTranslucencyVolume.h): the main
     // view's indirect light for what is not an opaque surface - air and fog, particles, water, glass. Readers pass
     // translucencyGiParams (a raw SRV; 0xFFFFFFFF = off) to ltvIrradiance / ltvRadiance and declare the two volume

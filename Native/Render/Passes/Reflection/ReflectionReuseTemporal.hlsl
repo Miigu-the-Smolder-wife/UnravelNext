@@ -93,6 +93,7 @@ void main(uint2 pixel : SV_DispatchThreadID)
     Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[0].z];
     const float range = asfloat(P[4].x);
     g_reflWords = P[4].w;
+    reuseSnapExposure(P[5].x);  // (the snap frame's exposure reference, ReflectionReuse.hlsli; UNX_NONE: none)
     const ReflSurface s = reflSurface(depth, gbuffer, pixel);
     float3 value = reuseToFilter(centre.rgb, range);
     float moment = reuseLuminance(value) * reuseLuminance(value);
