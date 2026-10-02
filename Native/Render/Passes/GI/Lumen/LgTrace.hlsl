@@ -30,6 +30,7 @@
 // P[8..11] = the common block (P[10].z adaptive SRV, P[10].w / P[11].x / P[11].y probe depth / normal / position SRVs),
 // P[11].w = first trace row of this dispatch (the pass splits the atlas into bands of at most gi.lumen_rays_per_dispatch
 // rays: each dispatch's work is bounded by its ray count, whatever the resolution).
+#define GI_SKY_FOG_RETURN  // (GiSky.hlsli: the sky's share of the sun's light the fog scatters - atmosphere.fog.sun_through_fog)
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitDecals.hlsli"
@@ -231,6 +232,13 @@ void LgTraceGen()
         }
     }
     if (!all(radiance == radiance) || any(radiance < 0)) radiance = 0;
+#if SKY == SKY_ATMOSPHERE
+    // atmosphere.fog.on_gi_rays (FogVolume.hlsli fogOverGiRay; off by default): the fog between the probe and what its ray
+    // met - a hit, or the sky (the radiance cache's answer holds its own rays' light).
+    if (!reachedCache)
+        radiance = fogOverGiRay((float2(probePixel) + 0.5) / float2(g_viewWidth, g_viewHeight), probeDepth[atlas], r.Origin, r.Direction,
+                                isHit ? distanceToHit : 65536.0, radiance);
+#endif
     // Experiment 2097152 (statistics): the hit's surface-cache read class as a colour of exposed value 1 - red: no card
     // read, blue: its cards read; rays without a surface hit (sky, emitters, back faces): 0.
     // The GI layer's channel means then give the cosine-weighted shares.

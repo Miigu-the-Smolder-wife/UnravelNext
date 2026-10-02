@@ -260,6 +260,8 @@ FogView fogViewFor(const QualityConfig& q, const FrameContext& context, uint32_t
     f.b = (float)f.gridZ / std::log2(33.0f);             // slice(farM) = gridZ
     f.cells = f.density > 0 || f.volumes > 0;
     f.airOrder = !q.has("atmosphere.fog.air_order") || q.boolean("atmosphere.fog.air_order");
+    f.onGiRays = q.has("atmosphere.fog.on_gi_rays") && q.boolean("atmosphere.fog.on_gi_rays");
+    f.sunThroughFog = f.density > 0 && q.has("atmosphere.fog.sun_through_fog") && q.boolean("atmosphere.fog.sun_through_fog");
     if (veil)
     {
         // The cloud is read between the far slices' faces: a surface in front of a cloud bank shares a slice with the
@@ -581,6 +583,13 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
     // previous frame's translucency volume (this frame's is built after the air)
     const FogSettings fog{};
     const bool clipAtSurface = q.boolean("atmosphere.froxels.clip_at_surface");
+    // atmosphere.fog.sun_through_fog: the volume's sun transmittance (part 2) carries the share of the sun's light that
+    // passes the frame's height fog as direct light (FroxelIntegrate.hlsl P[6].x bit 2; the medium in P[7], in the
+    // frame's render space) - every reader's sun illuminance comes from that part.
+    const FogView sunFogView = fogViewFor(q, fc.frame, view.view.width, view.view.height);
+    const bool sunThroughFog = sunFogView.on && sunFogView.sunThroughFog;
+    const float sunFog[4] = { sunThroughFog ? sunFogView.density : fog.density, sunThroughFog ? sunFogView.falloff : fog.falloff,
+                              sunThroughFog ? sunFogView.height - fc.scene.originOffset().y : fog.height, sunThroughFog ? sunFogView.g : fog.g };
     const bool fogLocal = fog.on && fluence.valid() && moment.valid();
     const bool fogAmbient = fog.on && fog.ambient && fc.resources.translucencyGiPrevParams != 0xFFFFFFFFu && fc.resources.translucencyGiPrevAmbient.valid() &&
                             fc.resources.translucencyGiPrevDirectional.valid();
@@ -648,14 +657,14 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
         k[21] = sampledLocal.valid() ? ctx.srv(sampledLocal) : 0xFFFFFFFFu;  // P[5].y: the local lights' sampled in-scattering
         k[22] = k[23] = 0;
         // P[6..8]: the height fog (Fog.hlsli)
-        k[24] = (fog.on ? 1u : 0u) | (clipAtSurface ? 2u : 0u);  // (bit 1: FroxelSlice.hlsli FROXEL_CLIP_AT_SURFACE)
+        k[24] = (fog.on ? 1u : 0u) | (clipAtSurface ? 2u : 0u) | (sunThroughFog ? 4u : 0u);  // (bit 1: FroxelSlice.hlsli FROXEL_CLIP_AT_SURFACE)
         k[25] = fogAmbient ? fogAmbientParams : 0xFFFFFFFFu;
         k[26] = fogLocal ? ctx.srv(fluence) : 0xFFFFFFFFu;
         k[27] = fogLocal ? ctx.srv(moment) : 0xFFFFFFFFu;
-        std::memcpy(&k[28], &fog.density, 4);
-        std::memcpy(&k[29], &fog.falloff, 4);
-        std::memcpy(&k[30], &fog.height, 4);
-        std::memcpy(&k[31], &fog.g, 4);
+        std::memcpy(&k[28], &sunFog[0], 4);
+        std::memcpy(&k[29], &sunFog[1], 4);
+        std::memcpy(&k[30], &sunFog[2], 4);
+        std::memcpy(&k[31], &sunFog[3], 4);
         std::memcpy(&k[32], fog.albedo, 12);
         std::memcpy(&k[35], &fog.start, 4);
         ctx.bindFrameConstants(constants); ctx.computeConstants(k, 36);
@@ -780,7 +789,7 @@ struct FogParamsGpu  // FogVolume.hlsli FogParams
     float start;
     uint32_t grid;
     float farEndM;
-    uint32_t pad;
+    uint32_t flags;  // bit 0: on_gi_rays, bit 1: sun_through_fog
 };
 static_assert(sizeof(FogParamsGpu) == kFogParamBytes, "FogParams is 80 B (FogVolume.hlsli)");
 constexpr uint32_t kFogVolumeBytes = 64;
@@ -954,6 +963,7 @@ struct FogState
             p.density = view.density; p.falloff = view.falloff; p.height = view.height; p.g = view.g;
             for (int c = 0; c < 3; ++c) p.albedo[c] = view.albedo[c];
             p.start = view.start;
+            p.flags = (view.onGiRays ? 1u : 0u) | (view.sunThroughFog ? 2u : 0u);
         }
         std::memcpy(ringMapped + (size_t)(frame % kFogRing) * kFogParamBytes, &p, sizeof p);
     }
@@ -994,9 +1004,21 @@ uint32_t fogPrepare(FramePassContext& fc, const ViewDesc& view)
     return st.ringSrv[fc.frame.frameIndex % kFogRing] + 1;
 }
 
+bool fogSecondaryFor(FramePassContext& fc, uint64_t key)
+{
+    if (!fc.trackState) return false;
+    const FogSecondary& sec = fc.state<FogSecondary>("S.fog.secondary");
+    for (uint32_t i = 0; sec.frame == fc.frame.frameIndex && i < sec.used; ++i)
+        if (sec.key[i] == key) return true;
+    return false;
+}
+
 uint32_t fogPrepareSecondary(FramePassContext& fc, const ViewDesc& view, uint64_t key)
 {
-    if (!fc.trackState || !fc.quality.has("atmosphere.fog.secondary_views") || !fc.quality.boolean("atmosphere.fog.secondary_views")) return 0;
+    // (planar reflection views: secondary_views; A14's auxiliary views - render textures, mirrors, portals, split screen:
+    //  auxiliary_views)
+    const char* const enabled = view.kind == gpu::ViewKind::PlanarReflection ? "atmosphere.fog.secondary_views" : "atmosphere.fog.auxiliary_views";
+    if (!fc.trackState || !fc.quality.has(enabled) || !fc.quality.boolean(enabled)) return 0;
     FogView f = fogViewFor(fc.quality, fc.frame, view.width, view.height);
     if (!f.on) return 0;
     FogSecondary& sec = fc.state<FogSecondary>("S.fog.secondary");

@@ -20,6 +20,7 @@
 #include "Passes/GI/Lumen/LgRadianceCache.hlsli"
 #include "Passes/Reflection/ScreenTrace.hlsli"
 #include "Scene.hlsli"
+#include "Passes/Atmosphere/FogVolume.hlsli"  // (atmosphere.fog.on_gi_rays: the fog along a screen hit's ray)
 
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -92,6 +93,8 @@ void main(uint3 id : SV_DispatchThreadID)
             }
         }
     }
+    // (atmosphere.fog.on_gi_rays, off by default: the fog between the probe and the screen hit - FogVolume.hlsli)
+    if (hit) radiance = fogOverGiRay((float2(lgProbePixel(adaptive, probe)) + 0.5) / float2(lgViewSize()), depthAtProbe, origin, direction, distance(end, origin), radiance);
     // how far the walk got: to the hit, or to the last point in front of the scene (a clean miss clears 2 cm more)
     const float travelled = min(distance(end, origin) + (!r.hit ? 0.02 : 0.0), maxDistance);
     traceRadiance[coord] = float4(hit ? min(radiance * g_exposure, 64000.0) : float3(0, 0, 0), 1);

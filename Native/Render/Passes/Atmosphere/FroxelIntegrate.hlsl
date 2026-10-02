@@ -69,6 +69,9 @@
 // translucency volume (its parameters' SRV; UNX_NONE: no indirect light in the fog), the froxels' sampled local fluence
 // SRV, their direction moment SRV (MegaLightsVolume.hlsl; UNX_NONE: no local light in the fog) }, P[7] = { density (1/m at
 // the fog's height), height falloff, height (m), phase g }, P[8] = { albedo r, g, b, start distance (m) } (floats).
+// P[6].x bit 2 (atmosphere.fog.sun_through_fog): part 2's sun transmittance x the share of the sun's light that passes
+// the height fog toward the sun as direct light (Fog.hlsli fogSunThrough; the medium in P[7], whether bit 0 is set or
+// not: the fog's own volume is FogVolume.hlsli's).
 // Frame constants of the view (main, or a planar reflection view).
 #include "Passes/Atmosphere/FroxelSlice.hlsli"
 #include "Passes/Shadow/VsmCls.hlsli"
@@ -545,13 +548,17 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         volume[uint3(tile, N + s + 1)] = float4(gs_tau[s], 0);
         // (alpha: the fraction of slice s's segment in the casters' shadow - 0 where the slice was not integrated; the
         // fog's far slices read it: FogIntegrate.hlsl)
-        volume[uint3(tile, 2 * N + s + 1)] = float4(airSunTransmittance(a, tlut, airLiftToSurface(a, node), sun), airShadowed);
+        // (P[6].x bit 2, atmosphere.fog.sun_through_fog: the sun's direct light at the node through the height fog too -
+        //  Fog.hlsli fogSunThrough with the medium in P[7]; every reader's sun illuminance is this slice's)
+        const bool sunThroughFog = (P[6].x & 4u) != 0;
+        volume[uint3(tile, 2 * N + s + 1)] = float4(airSunTransmittance(a, tlut, airLiftToSurface(a, node), sun) * (sunThroughFog ? fogSunThrough(fog, node, sun) : 1.0),
+                                                    airShadowed);
         if (s == 0)
         {
             volume[uint3(tile, 0)] = float4(min(hat0 * g_exposure, 65504.0), 0);
             volume[uint3(tile, N)] = 0;
             const float3 camera = tStart > 0 ? airMirror(g_clipPlane, g_cameraPosition) : g_cameraPosition;
-            volume[uint3(tile, 2 * N)] = float4(airSunTransmittance(a, tlut, airLiftToSurface(a, camera), sun), 0);
+            volume[uint3(tile, 2 * N)] = float4(airSunTransmittance(a, tlut, airLiftToSurface(a, camera), sun) * (sunThroughFog ? fogSunThrough(fog, camera, sun) : 1.0), 0);
             float3 sky = 0;
             for (uint j = 0; j < g.slices; ++j) sky += gs_sky[j];
             volume[uint3(tile, 3 * N)] = float4(clamp(sky * g_exposure, -65504.0, 65504.0), 0);

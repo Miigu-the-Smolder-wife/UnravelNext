@@ -54,14 +54,19 @@ FogView fogViewFor(const QualityConfig& q, const FrameContext& frame, uint32_t w
 // this frame's parameter record; SRV + 1, or 0 with the fog off. The record says "no volume" until recordFroxels has
 // recorded the volume's passes.
 uint32_t fogPrepare(FramePassContext& fc, const ViewDesc& view);
-// A planar reflection view's (tracks::fogParamsSecondary; atmosphere.fog.secondary_views): 0 when the fog is off or the
-// frame's four volumes are taken. recordPlanarFroxels records the volume of the view whose frame constants are at key.
+// Another view's than the main one (tracks::fogParamsSecondary): a planar reflection view's (atmosphere.fog.
+// secondary_views) or an auxiliary view's (A14: render texture, mirror, portal, split screen; atmosphere.fog.
+// auxiliary_views): 0 when the fog is off or the frame's four volumes are taken. recordPlanarFroxels records the volume
+// of the view whose frame constants are at key.
 uint32_t fogPrepareSecondary(FramePassContext& fc, const ViewDesc& view, uint64_t key);
+// Whether the frame gave the view whose frame constants are at key a fog record (fogPrepareSecondary).
+bool fogSecondaryFor(FramePassContext& fc, uint64_t key);
 // froxels(fc, main): the air volume (FrameResources::froxels, ::aerialPerspective); records the lists itself when
 // shadowPages did not.
 void recordFroxels(FramePassContext& fc, const ViewResources& main);
 // Planar reflection views (INTERFACES 7.4, v1.22): the view's own lists and air volume (from the mirror plane on) into
-// view.froxelLights / view.airVolume. Called by shadowVisibility before the view's slots.
+// view.froxelLights / view.airVolume. Called by shadowVisibility before the view's slots. An auxiliary view (A14) with a
+// fog record gets the same: its fog is read inside its air lookups, so it needs its own air (and takes its own lists).
 void recordPlanarFroxels(FramePassContext& fc, ViewResources& view);
 // Counters of the most recent frame whose GPU work has completed (read back without stalling).
 const FroxelStats& froxelStats(TrackState& state);

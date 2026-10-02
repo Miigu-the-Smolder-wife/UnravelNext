@@ -1895,6 +1895,9 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     // (recorded here with its air volume from the mirror plane on).
     const bool mainView = view.view.kind == gpu::ViewKind::Main;
     if (view.view.kind == gpu::ViewKind::PlanarReflection && !view.froxelLights.valid()) recordPlanarFroxels(fc, view);
+    // (A14's auxiliary views with the fog - atmosphere.fog.auxiliary_views: their own lists, air and fog volume, as a
+    //  planar view's; without a fog record they stay as they were, without lists and air)
+    else if (!mainView && !view.froxelLights.valid() && fogSecondaryFor(fc, view.frameConstants)) recordPlanarFroxels(fc, view);
     const BufferRef froxelLists = view.froxelLights.valid() ? view.froxelLights : (mainView ? fc.resources.froxelLights : BufferRef{});
     const bool localSlots = froxelLists.valid() && s.localLightsNow != UINT32_MAX && !megaLightsOwnLocalShadows(fc);
     const uint32_t localLightsSrv = s.localLightsNow, slotOfSrv = s.slotOfNow;

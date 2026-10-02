@@ -86,6 +86,15 @@ on_rays = true                       # reflection rays take the fog along them (
                                      # they hit without the fog between
 secondary_views = true               # planar reflection views get their own volume (up to four a frame; no history): a lake reflects
                                      # the fogged shore and sky. false: mirrors show the world without fog
+auxiliary_views = true               # the frame's auxiliary views (render textures, mirrors, portals, split screen) get their own
+                                     # volume too, out of the same four - and with it their own light lists and air, which the fog is
+                                     # read through. false: those views stay without fog (and without lists and air, as before)
+on_gi_rays = false                   # the screen probes' rays take the fog along them (the reference's r.Lumen.HeightFogOnGI, off
+                                     # there too: it removes the sky's light from a fogged scene's indirect lighting while the direct
+                                     # lighting keeps the sun whole)
+sun_through_fog = false              # the thick-fog term: the sun's direct light on surfaces x exp(-tau (1 - g)) of the height fog
+                                     # toward the sun, and what that removes (x the albedo) returned as light from the sky on the
+                                     # Lumen rays. false: single scattering alone - right while the fog is thin (optical depth < 1)
 debug_view = false                   # measurement only: the fog alone per pixel (FogDebug.hlsl) for the gate's capture layer "fog"
 sky_amount = 1.0                     # how much of the fog sky pixels take (1: the sky through the fog, as every other pixel - a height
                                      # fog covers the horizon and thins toward the zenith; 0: the sky left clear, the look of a

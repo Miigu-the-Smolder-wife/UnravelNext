@@ -23,6 +23,13 @@
 //             colour (the screen traces' scene colour) removes the fog with it. The parameters reach the kernels through
 //             the frame constants (g_fog: a record's SRV + 1). Sky pixels take sky_amount of it (ShadeSky.hlsl; 1: the
 //             sky through the fog as every pixel - the reference's fog pass covers the sky too).
+//   thick fog atmosphere.fog.sun_through_fog (off): the model above is single scattering without the fog's shadow on
+//             itself or on surfaces - right for thin fog, where what the fog removes from the sun's path comes back as
+//             scattered light. In thick fog the sun's direct light on a surface is what passes the fog toward the sun
+//             unscattered or scattered forward, exp(-tau (1 - g)) of it (Fog.hlsli fogSunThrough; the air volume's sun
+//             transmittance carries the factor to every reader: FroxelIntegrate.hlsl), and the rest, x the albedo, is
+//             light from the sky: a uniform radiance over the upper hemisphere with the same irradiance on level ground
+//             (the Lumen rays' sky: GiSky.hlsli giFogSkyReturn). Shadows soften and the ground keeps its light.
 // Units: world metres. The two volumes hold their light x the view's exposure (g_exposure), as the air volume does: fp16
 // keeps the relative precision of what is displayed at every exposure, and its range holds what a display can show (in
 // nits a dense fog toward the sun passed fp16's 65504: 3e5 nits at g 0.8). The history's cells are rescaled by exposure
@@ -126,8 +133,21 @@ struct FogParams
     float start;
     uint grid;                // x | y << 16 (15 bits each) | atmosphere.fog.on_rays << 31
     float farEndM;
-    uint pad;
+    uint flags;               // bit 0: atmosphere.fog.on_gi_rays, bit 1: atmosphere.fog.sun_through_fog (with a height fog)
 };
+// The record's medium: the height fog's mean (no variation, no start distance).
+FogMedium fogMediumOf(FogParams p)
+{
+    FogMedium m;
+    m.on = true;
+    m.density = p.density;
+    m.falloff = p.falloff;
+    m.height = p.height;
+    m.g = p.g;
+    m.albedo = p.albedo;
+    m.start = 0;
+    return m;
+}
 // false: the view has no fog (g_fog 0), or its volume is not there this frame.
 bool fogLoad(out FogParams p)
 {
@@ -174,24 +194,29 @@ float4 fogAt(float2 uv, float depth)
 // cells around the surface hold (the sun outside the casters' shadow, the local lights, the indirect light): a room's
 // fog stays the room's. Where the view's path is too thin to tell its source (opacity under 0.4 %) the ray is left as it
 // is. uv, depth: the surface's place in the main view; t: the ray's length (a miss: any length past the fog).
-float3 fogOverRay(float2 uv, float depth, float3 origin, float3 dir, float t, float3 radiance)
+float3 fogAlongRay(FogParams p, float2 uv, float depth, float3 origin, float3 dir, float t, float3 radiance)
 {
-    FogParams p;
-    if (!fogLoad(p) || (p.grid >> 31) == 0) return radiance;  // (bit 31 of the grid word: atmosphere.fog.on_rays)
-    FogMedium m;
-    m.on = true;
-    m.density = p.density;
-    m.falloff = p.falloff;
-    m.height = p.height;
-    m.g = p.g;
-    m.albedo = p.albedo;
-    m.start = 0;
-    const float T = exp(-fogOpticalDepth(m, origin, dir, 0.0, t));
+    const float T = exp(-fogOpticalDepth(fogMediumOf(p), origin, dir, 0.0, t));
     if (T > 0.999) return radiance;
     const float4 v = fogAt(uv, depth);
     const float opacity = 1.0 - v.a;
     if (opacity < 4e-3) return radiance;
     return radiance * T + v.rgb * ((1.0 - T) / opacity);
+}
+float3 fogOverRay(float2 uv, float depth, float3 origin, float3 dir, float t, float3 radiance)
+{
+    FogParams p;
+    if (!fogLoad(p) || (p.grid >> 31) == 0) return radiance;  // (bit 31 of the grid word: atmosphere.fog.on_rays)
+    return fogAlongRay(p, uv, depth, origin, dir, t, radiance);
+}
+// The same over a GI ray that leaves a surface the view sees (the screen probes' rays: uv, depth = the probe's place in
+// the view), behind atmosphere.fog.on_gi_rays - off by default, as the reference's r.Lumen.HeightFogOnGI: the fog on GI
+// rays takes the sky's light from a fogged scene's indirect lighting while its direct lighting keeps the sun whole.
+float3 fogOverGiRay(float2 uv, float depth, float3 origin, float3 dir, float t, float3 radiance)
+{
+    FogParams p;
+    if (!fogLoad(p) || (p.flags & 1u) == 0) return radiance;
+    return fogAlongRay(p, uv, depth, origin, dir, t, radiance);
 }
 
 // The air's in-scattering and transmittance with the fog in front of and inside it (the fog is the nearer, denser

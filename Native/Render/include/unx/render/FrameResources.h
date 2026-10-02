@@ -220,6 +220,8 @@ struct FogView
     bool cells = false;            // the cells hold a medium (the height fog or local volumes): s.fog.scatter runs, with its
                                    // shadow pages. false with on: the volume is there for the cloud layer alone
     bool airOrder = false;         // atmosphere.fog.air_order (FogIntegrate.hlsl: the volume's media ordered against the air's)
+    bool onGiRays = false;         // atmosphere.fog.on_gi_rays (FogVolume.hlsli fogOverGiRay: the screen probes' rays)
+    bool sunThroughFog = false;    // atmosphere.fog.sun_through_fog (FogVolume.hlsli: the thick-fog term)
     uint32_t cloudSteps = 0;       // atmosphere.clouds.veil: the frame's cloud layer in front of surfaces, marched along the
                                    // volume's columns in this many stretches (FogIntegrate.hlsl; 0: none)
     // the density's variation (FogVolume.hlsli fogDensityScale): its share of the density, its largest features (m), the
