@@ -14,7 +14,8 @@
 //           (ReflectionLumenHit.hlsli).
 // Result per job: lobe radiance, hit distance, hit motion (reflPackResult) - what the resolve passes read.
 // P[0] = { jobs SRV, results UAV (uint3 per job), asuint(exposure ratio of the previous colour), frame (24 bits) | flags
-//          << 24 (bit 0: rays start at their screen traces' ends, bit 1: scene colour at visible hits) }
+//          << 24 (bit 0: rays start at their screen traces' ends, bit 1: scene colour at visible hits, bit 2: the previous
+//          colour's alpha is its frame's depth - the history depth test, ScreenTrace.hlsli) }
 // P[1], P[2], P[3].xyz = sky and sun (GiSky.hlsli; P[1].w = ray length), P[3].w = RayScene's exact set counts UAV (UNX_NONE: none)
 // P[4] = { depth SRV, gbuffer SRV, card frame SRV (UNX_NONE: none), the dispatch's band (bits 0-7) | cos of the normal
 //          threshold as snorm8 (bits 8-15) | GGX sampling bias unorm16 << 16 }
@@ -30,6 +31,7 @@
 #define RL_BAND 262144u
 #define RL_FLAG_SCREEN_START 1u
 #define RL_FLAG_SCENE_COLOUR 2u
+#define RL_FLAG_HISTORY_DEPTH 4u
 
 [shader("raygeneration")]
 void ReflectionLumenTraceGen()
@@ -87,7 +89,7 @@ void ReflectionLumenTraceGen()
                         const float4x4 prevViewProj = float4x4(asfloat(P[8]), asfloat(P[9]), asfloat(P[10]), asfloat(P[11]));
                         const float noise = blueNoise4(pixel, frame).z;
                         float3 colour;
-                        if (sctPreviousColour(previous, uint2(P[5].y & 0xFFFFu, P[5].y >> 16), prevViewProj, hitPoint, asfloat(P[0].z), noise, colour))
+                        if (sctPreviousColour(previous, uint2(P[5].y & 0xFFFFu, P[5].y >> 16), prevViewProj, hitPoint, asfloat(P[0].z), noise, colour, (flags & RL_FLAG_HISTORY_DEPTH) != 0))
                         {
                             results[job] = reflPackResult(reflStorable(colour), hit.t, 0);
                             return;

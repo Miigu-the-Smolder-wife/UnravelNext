@@ -397,7 +397,9 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     if (screenTraced)
     {
         const FrameContext::Upscale up = fc.frame.upscale;
-        const uint32_t prevColorWidth = g.desc(prevColor).width, prevColorHeight = g.desc(prevColor).height;
+        // (output.screen_trace_source = 0: the previous colour's alpha is its frame's depth - the history depth test)
+        const bool historyDepth = fc.quality.has("output.screen_trace_source") && fc.quality.integer("output.screen_trace_source") == 0;
+        const TextureRef words = view.materialWord;  // (the Foliage test at a screen hit)
         g.addPass("r.gi.lg.screentrace", QueueType::Compute,
                   [&](PassBuilder& b) {
                       surface(b);
@@ -405,6 +407,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                       b.use(rayInfo, Use::SrvCompute);
                       b.use(pyramid, Use::SrvCompute);
                       b.use(prevColor, Use::SrvCompute);
+                      if (words.valid()) b.use(words, Use::SrvCompute);
                       b.use(traceRadiance, Use::UavCompute);
                       b.use(traceWord, Use::UavCompute);
                       if (farField) b.use(rcIndirection, Use::SrvCompute);
@@ -417,11 +420,10 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                       k[6] = c.uav(traceWord);
                       k[7] = c.srv(pyramid);
                       k[8] = c.srv(prevColor);
-                      // (the colour's own size: the upscaler's history is the output's, the scene colour the view's)
-                      k[9] = (prevColorWidth & 0xFFFFu) | (prevColorHeight << 16);
+                      k[9] = words.valid() ? c.srv(words) : 0xFFFFFFFFu;  // (the colour's size: the kernel reads the texture's own)
                       k[10] = farField ? rcParamsSrv : 0xFFFFFFFFu;
                       k[11] = bits(up.exposureRatio);
-                      k[12] = (L.screenTraceIterations & 0xFFFFu) | (L.screenTraceThicknessSteps << 16);
+                      k[12] = (L.screenTraceIterations & 0xFFFFu) | ((L.screenTraceThicknessSteps & 0x7FFFu) << 16) | (historyDepth ? 0x80000000u : 0u);
                       k[13] = bits(L.screenTraceThickness);
                       k[14] = farField ? c.srv(rcIndirection) : 0xFFFFFFFFu;
                       k[15] = bits(rayLength);

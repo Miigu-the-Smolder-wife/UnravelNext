@@ -11,7 +11,8 @@
 // P[3] = { asuint(max trace distance), max iterations | GGX sampling bias unorm16 << 16, asuint(relative depth thickness),
 //          asuint(exposure ratio) }
 // P[4..7] = the previous view-projection of the previous colour (rows). Frame constants b1 = main view.
-// P[8].x = M's material word (the top layer's roughness, ReflectionInternal.hlsli g_reflWords; UNX_NONE: none).
+// P[8].x = M's material word (the top layer's roughness, ReflectionInternal.hlsli g_reflWords; UNX_NONE: none),
+// P[8].y != 0: the previous colour's alpha is its frame's depth (the history depth test, ScreenTrace.hlsli).
 #include "Passes/Reflection/ReflectionReuse.hlsli"
 #include "Passes/Reflection/ScreenTrace.hlsli"
 
@@ -49,7 +50,7 @@ void main(uint2 pixel : SV_DispatchThreadID)
     const float4x4 prevViewProj = float4x4(asfloat(P[4]), asfloat(P[5]), asfloat(P[6]), asfloat(P[7]));
     const float noise = reuseUnit(pixel.x + pixel.y * 65536u + (P[1].w & 7u) * 0x9E3779B9u + 0x2545F491u);
     float3 radiance;
-    if (!sctPreviousColour(previous, uint2(P[2].z & 0xFFFFu, P[2].z >> 16), prevViewProj, hit, asfloat(P[3].w), noise, radiance)) return;
+    if (!sctPreviousColour(previous, uint2(P[2].z & 0xFFFFu, P[2].z >> 16), prevViewProj, hit, asfloat(P[3].w), noise, radiance, P[8].y != 0)) return;
     RWStructuredBuffer<uint> jobs = ResourceDescriptorHeap[P[1].x];
     results[job] = reflPackResult(reflStorable(radiance), distance(hit, s.position), 0);
     jobs[job] = jobs[job] | 0x80000000u;

@@ -12,9 +12,10 @@
 //              point where it was last in front is returned for a world ray to go on from).
 //   colour     sctPreviousColour: the hit point in the previous frame's colour (ViewResources::prevSceneColor), unless it
 //              lies near the screen's edge (a dithered fade) or behind the previous camera.
-// Not here (differences from the reference): the previous frame's depth test at the hit (no depth history is kept: a
-// surface uncovered this frame takes the colour of what covered it last frame), moving objects' motion at the hit (the
-// hit point is taken as still).
+//              With output.screen_trace_source = 0 the previous colour's alpha holds that frame's device depth
+//              (UpscaleSceneKeep.hlsl) and the hit takes the reference's history depth test: a point that was hidden
+//              in the previous frame (its depth then against the depth buffer's there) has no colour to take.
+// Not here (a difference from the reference): moving objects' motion at the hit (the hit point is taken as still).
 #ifndef UNX_SCREEN_TRACE_HLSLI
 #define UNX_SCREEN_TRACE_HLSLI
 #include "Bindless.hlsli"
@@ -150,7 +151,11 @@ float sctVignette(float2 ndc)
 // The previous frame's colour at a world point (nits): prevColour = ViewResources::prevSceneColor of prevSize pixels,
 // prevViewProj = FrameContext::upscale.prevViewProj, exposureRatio = FrameContext::upscale.exposureRatio, noise in [0, 1).
 // False when the point was outside that frame or too near its edge (or this frame's).
-bool sctPreviousColour(Texture2D<float4> prevColour, uint2 prevSize, float4x4 prevViewProj, float3 world, float exposureRatio, float noise, out float3 radiance)
+// historyDepth: prevColour's alpha is that frame's device depth - the reference's history depth test (its numbers: the
+// difference of device depths on its 10 cm near plane under 0.005 x (0.5 .. 2 by the noise)).
+#define SCT_HISTORY_DEPTH_THICKNESS 0.005
+bool sctPreviousColour(Texture2D<float4> prevColour, uint2 prevSize, float4x4 prevViewProj, float3 world, float exposureRatio, float noise, out float3 radiance,
+                       bool historyDepth = false)
 {
     radiance = 0;
     const float4 clip = mul(prevViewProj, float4(world, 1));
@@ -160,6 +165,12 @@ bool sctPreviousColour(Texture2D<float4> prevColour, uint2 prevSize, float4x4 pr
     const float4 now = mul(g_viewProj, float4(world, 1));
     if (min(sctVignette(ndc), sctVignette(now.xy / max(now.w, 1e-6))) < noise) return false;
     const float2 at = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * float2(prevSize) - 0.5;
+    if (historyDepth)
+    {
+        const int2 nearest = clamp(int2(floor(at + 0.5)), int2(0, 0), int2(prevSize) - 1);
+        const float seenThen = linearDepth(prevColour.Load(int3(nearest, 0)).a);  // (sky: very far)
+        if (abs(0.1 / seenThen - 0.1 / clip.w) >= SCT_HISTORY_DEPTH_THICKNESS * lerp(0.5, 2.0, noise)) return false;
+    }
     const int2 i0 = int2(floor(at));
     const float2 f = at - floor(at);
     float3 sum = 0;

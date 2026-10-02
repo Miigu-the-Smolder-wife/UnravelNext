@@ -1175,6 +1175,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     if (lumen && s.lumenScreenTraces) screen = screenTraceInputs(fc, main);
     const bool screenTraces = screen.hzb.valid() && screen.prevColor.valid();
     const bool screenContinue = screenTraces && s.lumenScreenContinue;  // world rays start at their screen traces' ends
+    // output.screen_trace_source = 0: the previous colour's alpha is its frame's depth (the history depth test, ScreenTrace.hlsli)
+    const bool historyDepth = fc.quality.has("output.screen_trace_source") && fc.quality.integer("output.screen_trace_source") == 0;
     const BufferRef rayLayers = layers ? g.createBuffer({ "R reflection ray layers", std::max<uint64_t>((uint64_t)rayCapacity * 16, 16), 0 }) : BufferRef{};  // REFL_LAYER_RAY_BYTES
     if (!lumenOnly)
     g.addPass("r.refl.args", QueueType::Compute,
@@ -1307,7 +1309,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           b.use(screen.prevColor, Use::SrvCompute);
                           if (words.valid()) b.use(words, Use::SrvCompute);
                       },
-                      [&shaders, modes, results, depth, gbuffer, jobs, screen, frame, width, height, rayLength, frameConstants, s, samplingBias16, screenContinue, words,
+                      [&shaders, modes, results, depth, gbuffer, jobs, screen, frame, width, height, rayLength, frameConstants, s, samplingBias16, screenContinue, words, historyDepth,
                        outW = g.desc(screen.prevColor).width, outH = g.desc(screen.prevColor).height, ratio = up.exposureRatio,
                        prevViewProj = up.prevViewProj](PassContext& c) {
                           uint32_t k[36] = { c.srv(modes), c.uav(results), c.srv(depth), c.srv(gbuffer), c.uav(jobs), c.srv(screen.hzb), c.srv(screen.prevColor), frame,
@@ -1316,6 +1318,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           for (int r = 0; r < 4; ++r)
                               for (int col = 0; col < 4; ++col) k[16 + 4 * r + col] = asU(prevViewProj.m[r][col]);
                           k[32] = words.valid() ? c.srv(words) : 0xFFFFFFFFu;
+                          k[33] = historyDepth ? 1u : 0u;
                           c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionScreenTrace"));
                           c.computeConstants(k, 36);
                           c.bindFrameConstants(frameConstants);
@@ -1357,7 +1360,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
                   },
                   [&pipeline, jobs, results, depth, gbuffer, cardFrame, hitsUseCards, prevColor, prevW, prevH, sceneColour, screenContinue, exactCounts, luts, atmosphere, sky, sun,
-                   rayLength, frame, scene, samplingBias16, s, frameConstants, argumentResource, variant, timestamps, firstTick, lumenBands, words, ratio = up.exposureRatio,
+                   rayLength, frame, scene, samplingBias16, s, frameConstants, argumentResource, variant, timestamps, firstTick, lumenBands, words, historyDepth, ratio = up.exposureRatio,
                    prevViewProj = up.prevViewProj](PassContext& c) {
                       c.bindFrameConstants(frameConstants);
                       c.cmd->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, firstTick);
@@ -1365,7 +1368,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       k[0] = c.srv(jobs);
                       k[1] = c.uav(results);
                       k[2] = asU(ratio);
-                      k[3] = (frame & 0xFFFFFFu) | ((screenContinue ? 1u : 0u) | (sceneColour ? 2u : 0u)) << 24;
+                      k[3] = (frame & 0xFFFFFFu) | ((screenContinue ? 1u : 0u) | (sceneColour ? 2u : 0u) | (historyDepth ? 4u : 0u)) << 24;
                       k[4] = asU(sky.x), k[5] = asU(sky.y), k[6] = asU(sky.z), k[7] = asU(rayLength);
                       for (int i = 0; i < 4; ++i) k[8 + i] = atmosphere ? c.srv(luts[i]) : 0xFFFFFFFFu;
                       k[12] = asU(sun.x), k[13] = asU(sun.y), k[14] = asU(sun.z);

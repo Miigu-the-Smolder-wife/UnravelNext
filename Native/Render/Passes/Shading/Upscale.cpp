@@ -193,14 +193,23 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
     if (sceneColorSource(fc))
     {
         // the scene colour as it comes in, kept for the next frame's screen traces (slot 'next': read as [parity] then)
-        s.ensureScene(fc.device, w, h, g.desc(src).format);
+        // (with the frame's device depth in alpha: the screen traces' history depth test, UpscaleSceneKeep.hlsl)
+        s.ensureScene(fc.device, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
         const TextureRef kept = g.importTexture(s.scene[next].Get(), { "m.scenecolor", w, h, 1, 1, s.sceneFormat }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        const TextureRef keptDepth = view.depth;
+        ID3D12PipelineState* keepPso = fc.shaders.compute("Passes/Shading/UpscaleSceneKeep");
         g.addPass("m.upscale.scenecolor", QueueType::Graphics,
                   [&](PassBuilder& b) {
-                      b.use(src, Use::CopySrc);
-                      b.use(kept, Use::CopyDst);
+                      b.use(src, Use::SrvCompute);
+                      b.use(keptDepth, Use::SrvCompute);
+                      b.use(kept, Use::UavCompute);
                   },
-                  [src, kept](PassContext& c) { c.cmd->CopyResource(c.resource(kept), c.resource(src)); });
+                  [src, kept, keptDepth, keepPso, w, h](PassContext& c) {
+                      const uint32_t k[8] = { c.srv(src), c.srv(keptDepth), c.uav(kept), 0, w, h, 0, 0 };
+                      c.cmd->SetPipelineState(keepPso);
+                      c.computeConstants(k, 8);
+                      c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                  });
         s.sceneFresh = false;
     }
     const TextureRef motion = g.createTexture(TextureDesc{ "m.upscale.motion", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT });
