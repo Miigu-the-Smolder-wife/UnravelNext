@@ -420,7 +420,7 @@ Unreal의 재질 그래프와 Unity 재질이 흔히 쓰는 입력 가운데 렌
 - `shading_ball`: 구 줄 아래 앞쪽에 판 네 장(UV 변환 체커, 디테일, 벽돌 높이 3 cm, 버텍스 컬러 + emissive 줄무늬 마스크), 카메라 `inputs`. 콘텐츠 해시가 바뀐다.
 - `unx_unit_tests`: `material_inputs_and_scene_blocks`(CPU), `material_inputs_on_the_gpu`(`Passes/Test/MaterialInputs.hlsl`). `unx_test_scenegen`의 shading_ball 내용. `unx_test_host_hostabi`가 입력 재질·메시 스트림·광원 구성요소·채널을 ABI로 넘긴다.
 
-커널 크기(B, 한도 204,800; lumen-ue6 6002fd76을 병합한 뒤. dev 값은 `ReflectionTraceInline`과 `FxLayerSetup`만 dev 소스를 직접 컴파일해 쟀고 나머지는 9절의 기록이다):
+커널 크기(B, 한도 204,800; lumen-ue6 6002fd76을 병합한 뒤. dev 값은 `ReflectionTraceInline`만 dev 소스를 직접 컴파일해 쟀고 나머지는 9절의 기록이다):
 
 | 커널 | 병합 전 dev | 지금 |
 |---|---|---|
