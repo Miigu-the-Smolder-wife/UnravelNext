@@ -145,7 +145,19 @@ FoliageAssets buildFoliage(Scene& s, const Palette& p, uint64_t seed, FoliageSty
 // HairBall (HairBall.cpp): the diagnostic scene of strand hair; its strands are SceneGen.h's grooms.
 Scene hairBall(const Request& rq);
 
+// The showcase scenes (Showcase.cpp): the scene of the request's id; the bathhouse figure's groom and the scenes' extras
+// (SceneGen.h) into the given lists when they are asked for.
+Scene showcase(const Request& rq, std::vector<Groom>* grooms, SceneExtras* extras);
+float showcaseShoreGround(float x, float z);  // showcase_shore's terrain function
+
 // RPP-1 dynamic bodies (Bodies.cpp): adds the content's bodies to the scene as InstanceDynamic instances and records
 // each body's scene instance index.
 void addDynamicBodies(Scene& s, DynamicContent& content);
 } // namespace unx::scenegen::detail
+
+namespace unx::scenegen
+{
+// The eye model's mesh and base colour (Scenes.cpp: shading_ball's eyes; Showcase.cpp: the figure's).
+void eyeball(detail::MeshBuilder& b, int segments, int rings);
+scene::Texture eyeTexture(uint32_t size, float irisRadius);
+} // namespace unx::scenegen

@@ -957,6 +957,9 @@ scene::Scene generate(const Request& rq)
     case SceneId::FurnaceRoomDay: s = furnaceRoom(rq, true); break;
     case SceneId::ShadingBall: s = shadingBall(rq); break;
     case SceneId::HairBall: s = hairBall(rq); break;
+    case SceneId::ShowcaseBathhouse:
+    case SceneId::ShowcaseAtrium:
+    case SceneId::ShowcaseShore: s = showcase(rq, nullptr, nullptr); break;
     default: fail("scenegen: unknown scene id %u", (uint32_t)rq.id);
     }
     DynamicContent content = dynamicContent(rq);
@@ -992,7 +995,10 @@ float terrainHeight(SceneId id, float x, float z)
     case SceneId::FurnaceRoom:
     case SceneId::FurnaceRoomDay:
     case SceneId::ShadingBall:
-    case SceneId::HairBall: return NAN;
+    case SceneId::HairBall:
+    case SceneId::ShowcaseBathhouse:
+    case SceneId::ShowcaseAtrium: return NAN;
+    case SceneId::ShowcaseShore: return std::fabs(x) <= 2000.0f && z >= -3600.0f && z <= 400.0f ? showcaseShoreGround(x, z) : NAN;
     }
     fail("scenegen: unknown scene id %u", (uint32_t)id);
 }
@@ -1002,7 +1008,10 @@ std::vector<SceneId> allScenes()
     return { SceneId::CityBlock, SceneId::ForestThin, SceneId::ForestCard, SceneId::Waterside, SceneId::Interior, SceneId::CityNight, SceneId::RidgeSunset, SceneId::ForestCombat };
 }
 
-std::vector<SceneId> diagnosticScenes() { return { SceneId::FurnaceRoom, SceneId::FurnaceRoomDay, SceneId::ShadingBall, SceneId::HairBall }; }
+std::vector<SceneId> diagnosticScenes()
+{
+    return { SceneId::FurnaceRoom, SceneId::FurnaceRoomDay, SceneId::ShadingBall, SceneId::HairBall, SceneId::ShowcaseBathhouse, SceneId::ShowcaseAtrium, SceneId::ShowcaseShore };
+}
 
 const char* sceneName(SceneId id)
 {
@@ -1020,6 +1029,9 @@ const char* sceneName(SceneId id)
     case SceneId::FurnaceRoomDay: return "furnace_room_day";
     case SceneId::ShadingBall: return "shading_ball";
     case SceneId::HairBall: return "hair_ball";
+    case SceneId::ShowcaseBathhouse: return "showcase_bathhouse";
+    case SceneId::ShowcaseAtrium: return "showcase_atrium";
+    case SceneId::ShowcaseShore: return "showcase_shore";
     }
     fail("scenegen: unknown scene id %u", (uint32_t)id);
 }

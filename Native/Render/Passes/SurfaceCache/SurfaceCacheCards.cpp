@@ -216,6 +216,9 @@ SurfaceCacheCardSettings SurfaceCacheCardSettings::fromQuality(const QualityConf
     s.direct = flag("surface_cache.direct_lighting", true);
     s.radiosity = flag("surface_cache.radiosity", true);
     s.shadowRaysOpaque = flag("surface_cache.shadow_rays_opaque", false);
+    // (the sun through Glass on the cards as the view's shadow maps tint it: only while they do)
+    s.directTintSlots = !flag("surface_cache.direct_tint", true) || !flag("shadow.vsm.translucent_tint", true) ? 0u
+                        : flag("surface_cache.direct_tint_lights", false) ? 9u : 1u;
     s.radiosityCap = (float)num("surface_cache.radiosity_max_ray_intensity", 40.0);
     s.radiosityFrames = (float)num("surface_cache.radiosity_max_frames_accumulated", 4.0);
     const bool reshoot = flag("surface_cache.radiosity_avoid_self_intersections", true);
@@ -1140,6 +1143,7 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
         in.direct = s.settings.direct;
         in.radiosity = s.settings.radiosity;
         in.shadowRaysOpaque = s.settings.shadowRaysOpaque;
+        in.directTintSlots = s.settings.directTintSlots;
         in.radiosityCap = s.settings.radiosityCap;
         in.radiosityFrames = s.settings.radiosityFrames;
         in.radiositySkipBackFace = s.settings.radiositySkipBackFace;

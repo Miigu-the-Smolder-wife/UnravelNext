@@ -356,17 +356,19 @@ bool rtCandidateStops(RtSceneSrvs s, uint mask, uint instance, uint geometry, ui
     return materialBaseColorLevel(m, rtUv(mesh, tri.meshVertex, barycentrics), 0).a >= m.alphaCutoff;
 }
 
-// The optical depth a Glass surface adds to a straight ray that crosses it (a shadow ray: no refraction), from the
-// material's constants (its tint texture is not read):
+// The optical depth a Glass surface adds to a straight ray that crosses it (a shadow ray: no refraction). tint: the
+// surface's base colour (x its texture at the crossing: the caller's):
 //   a pane (a two-sided material: one surface stands for both faces)   -ln T_p, T_p = (1 - F)^2 t / (1 - F^2 t^2) - the
 //        pane's transmittance with its inner reflections, as the view composites it (TranslucentComposite.hlsl), t the
-//        tint (base colour), F the unpolarised dielectric Fresnel reflectance at the ray's angle to the surface;
+//        tint, F the unpolarised dielectric Fresnel reflectance at the ray's angle to the surface - the same
+//        expression the view's sun takes through a pane (Passes/Shadow/VsmTintPixel.ps.hlsl);
 //   a face of a solid body (one-sided)   -ln (1 - F), and the body's absorption over the path inside it: sigma_a x the
 //        distance to an exit face, less sigma_a x the distance to an entry face (the two sum to sigma_a x the path
 //        whatever the order the faces are met in; a ray that starts or ends inside a body leaves one face unmatched -
-//        the reader clamps the sum at 0, such a ray takes no absorption).
+//        the reader clamps the sum at 0, such a ray takes no absorption). (The view's shadow maps do not know the
+//        thickness and take (1 - F) sqrt(tint) a face instead.)
 // cosI: |cos| of the ray to the face's normal; t: the distance along the ray to the face (m).
-float3 rtGlassOpticalDepth(GpuMaterial m, float cosI, bool backFace, float t)
+float3 rtGlassOpticalDepth(GpuMaterial m, float3 tint, float cosI, bool backFace, float t)
 {
     const float eta = 1.0 / max(m.ior, 1.0001);
     const float c = saturate(cosI);
@@ -374,11 +376,7 @@ float3 rtGlassOpticalDepth(GpuMaterial m, float cosI, bool backFace, float t)
     const float cosT = sqrt(max(1.0 - sin2T, 0.0));
     const float rs = (eta * c - cosT) / max(eta * c + cosT, 1e-6), rp = (eta * cosT - c) / max(eta * cosT + c, 1e-6);
     const float F = saturate(0.5 * (rs * rs + rp * rp));
-    if ((m.classFlags & MATERIAL_TWO_SIDED) != 0)
-    {
-        const float3 tint = saturate(m.baseColor);
-        return -log(max((1 - F) * (1 - F) * tint / (1 - F * F * tint * tint), 1e-6));
-    }
+    if ((m.classFlags & MATERIAL_TWO_SIDED) != 0) return -log(max((1 - F) * (1 - F) * tint / max(1 - F * F * tint * tint, 1e-6), 1e-6));
     return -log(max(1 - F, 1e-6)) + max(m.hairAbsorption, 0.0) * (backFace ? t : -t);
 }
 
