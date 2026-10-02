@@ -240,6 +240,9 @@ int main(int argc, char** argv)
             else if (a == "--upload-first") uploadFirst = true;  // diagnostic: probe input declared before the froxel passes
         }
         TestFrame tf(debugLayer, gbv);
+        // the ordered head is one of this test's subjects (section 1): the default orders it only in frames with local
+        // shadow slots
+        tf.quality.applyOverride("atmosphere.froxels.sort_head_for_slots_only=false");
         for (const std::string& o : overrides) tf.quality.applyOverride(o);
         TestRaster raster(tf);
         raster.install();

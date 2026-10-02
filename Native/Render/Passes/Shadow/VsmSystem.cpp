@@ -1022,7 +1022,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     const uint32_t localLightsSrv = s.localLightsNow, slotOfSrv = s.slotOfNow, activeSrv = s.activeNow;
     const uint32_t activeLocal = (uint32_t)s.localActive.size();
     // Froxel light lists (with each entry's shadow-slot bit): the local page marks and the visibility slots read them.
-    recordFroxelLists(fc, main, slotOfSrv);
+    recordFroxelLists(fc, main, slotOfSrv, s.localUsed > 0);
     const BufferRef froxelLists = fc.resources.froxelLights;
     const uint32_t pagesNow = s.atlasPages;
     const BufferRef meta = g.importBuffer(s.meta.Get(), BufferDesc{ "S VSM page metadata", (uint64_t)pagesNow * kMetaBytes, kMetaBytes });

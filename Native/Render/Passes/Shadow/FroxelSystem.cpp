@@ -26,6 +26,7 @@ const char* const kStateKey = "s.froxel";
 constexpr uint32_t kStatsSlots = 4, kHeaderBytes = 64;
 constexpr uint32_t kSortedMax = 96;  // FROXEL_SORTED_MAX (FroxelLists.hlsl): the ordered head of a list
 constexpr uint32_t kScanBlock = 2048;  // froxels per FroxelScan block (two levels: at most 2048 x 2048 froxels)
+constexpr uint32_t kTileCandidateBytes = 512;  // FROXEL_STORED_BYTES (FroxelLists.hlsl): a tile's candidates, count to fill
 
 struct State
 {
@@ -49,6 +50,7 @@ struct State
     // This frame's lists (recordFroxelLists, called by shadowPages).
     uint64_t listsFrame = UINT64_MAX;
     BufferRef lists;
+    bool shadowSlots = false;  // S assigned local shadow slots this frame: the lists' head is read in order
     // Turbid basins (shading.water_turbid; WaterMedia.hlsl): the frame's basin records in an upload ring (raw SRVs).
     std::vector<ComPtr<ID3D12Resource>> waterUploads;
     std::vector<uint32_t> waterSrvs;
@@ -403,9 +405,15 @@ void setFroxelFullDepth(TrackState& state, bool full) { state.get<State>(kStateK
 namespace
 {
 // Lists of one view (its frame constants): begin (header) + lists. Pass names get 'suffix'.
-BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t slotOfLightSrv, TextureRef readers, const std::string& suffix)
+// shadowSlots: S assigned local shadow slots this frame (the readers of the head's order: FroxelLists.hlsl).
+BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t slotOfLightSrv, TextureRef readers, const std::string& suffix, bool shadowSlots)
 {
     const QualityConfig& q = fc.quality;
+    // atmosphere.froxels.candidates_once: the count pass keeps each tile's candidates for the fill pass.
+    const bool candidatesOnce = !q.has("atmosphere.froxels.candidates_once") || q.boolean("atmosphere.froxels.candidates_once");
+    // atmosphere.froxels.sort_head_for_slots_only: the head is ordered only in frames whose lists have a reader of the order.
+    const bool sortForSlotsOnly = !q.has("atmosphere.froxels.sort_head_for_slots_only") || q.boolean("atmosphere.froxels.sort_head_for_slots_only");
+    const uint32_t listFlags = sortForSlotsOnly && !shadowSlots ? 1u : 0u;
     const FroxelGridCpu grid = froxelGridFor(q, view.view.width, view.view.height, fc.frame.mainView.height);
     const uint32_t listMax = sortedHead(q);
     const uint64_t froxels = (uint64_t)grid.gridX * grid.gridY * grid.slices;
@@ -431,6 +439,9 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
     const BufferRef blockSums = g.createBuffer(BufferDesc{ suffix.empty() ? "S froxel list block sums" : "S froxel list block sums (planar view)", (uint64_t)kScanBlock * 4 * 2, 0 });
     // The scene lights' own allocation (FroxelScan's second prefix sum): the runs of a frame whose need exceeds the capacity.
     const BufferRef sceneAlloc = g.createBuffer(BufferDesc{ suffix.empty() ? "S froxel list scene allocation" : "S froxel list scene allocation (planar view)", froxels * 4, 0 });
+    const BufferRef candidates = candidatesOnce ? g.createBuffer(BufferDesc{ suffix.empty() ? "S froxel tile candidates" : "S froxel tile candidates (planar view)",
+                                                                            (uint64_t)grid.gridX * grid.gridY * kTileCandidateBytes, 0 })
+                                                : BufferRef{};
     const D3D12_GPU_VIRTUAL_ADDRESS constants = view.frameConstants;
     ShaderLibrary& sh = fc.shaders;
     ID3D12PipelineState* pb = sh.compute("Passes/Atmosphere/FroxelBegin");
@@ -456,12 +467,17 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
         if (fc.resources.fxLights.valid()) b.use(fc.resources.fxLights, Use::SrvCompute);
         if (fc.resources.fxLightCount.valid()) b.use(fc.resources.fxLightCount, Use::SrvCompute);
     };
-    g.addPass("s.froxel.count" + suffix, QueueType::Compute, [&](PassBuilder& b) { cullInputs(b); },
+    g.addPass("s.froxel.count" + suffix, QueueType::Compute,
+              [&](PassBuilder& b) {
+                  cullInputs(b);
+                  if (candidates.valid()) b.use(candidates, Use::UavCompute);
+              },
               [=](PassContext& ctx) {
-                  const uint32_t k[8] = { ctx.uav(lights), listMax, slotOfLightSrv, readers.valid() ? ctx.srv(readers) : 0xFFFFFFFFu, 0xFFFFFFFFu, 0, 0, 0 };
+                  const uint32_t k[12] = { ctx.uav(lights), listMax, slotOfLightSrv, readers.valid() ? ctx.srv(readers) : 0xFFFFFFFFu,
+                                           0xFFFFFFFFu, 0, 0, candidates.valid() ? ctx.uav(candidates) : 0xFFFFFFFFu, listFlags, 0, 0, 0 };
                   ctx.cmd->SetPipelineState(pc);
                   ctx.bindFrameConstants(constants);
-                  ctx.computeConstants(k, 8);
+                  ctx.computeConstants(k, 12);
                   ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
               });
     g.addPass("s.froxel.scan.blocks" + suffix, QueueType::Compute,
@@ -481,12 +497,19 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
                   ctx.cmd->Dispatch(1, 1, 1);
               });
     g.addPass("s.froxel.lists" + suffix, QueueType::Compute,
-              [&](PassBuilder& b) { cullInputs(b); b.use(blockSums, Use::SrvCompute); b.use(sceneAlloc, Use::SrvCompute); },
+              [&](PassBuilder& b) {
+                  cullInputs(b);
+                  b.use(blockSums, Use::SrvCompute);
+                  b.use(sceneAlloc, Use::SrvCompute);
+                  if (candidates.valid()) b.use(candidates, Use::SrvCompute);
+              },
               [=](PassContext& ctx) {
-                  const uint32_t k[8] = { ctx.uav(lights), listMax, slotOfLightSrv, readers.valid() ? ctx.srv(readers) : 0xFFFFFFFFu, ctx.srv(blockSums), fallbackForced, ctx.srv(sceneAlloc), 0 };
+                  const uint32_t k[12] = { ctx.uav(lights), listMax, slotOfLightSrv, readers.valid() ? ctx.srv(readers) : 0xFFFFFFFFu,
+                                           ctx.srv(blockSums), fallbackForced, ctx.srv(sceneAlloc), candidates.valid() ? ctx.srv(candidates) : 0xFFFFFFFFu,
+                                           listFlags, 0, 0, 0 };
                   ctx.cmd->SetPipelineState(pl);
                   ctx.bindFrameConstants(constants);
-                  ctx.computeConstants(k, 8);
+                  ctx.computeConstants(k, 12);
                   ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
               });
     return lights;
@@ -693,9 +716,10 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
 }
 } // namespace
 
-void recordFroxelLists(FramePassContext& fc, const ViewResources& main, uint32_t slotOfLightSrv)
+void recordFroxelLists(FramePassContext& fc, const ViewResources& main, uint32_t slotOfLightSrv, bool shadowSlots)
 {
     State& s = fc.state<State>(kStateKey);
+    s.shadowSlots = shadowSlots;
     const QualityConfig& q = fc.quality;
     (void)sortedHead(q);
     const scene::Scene* src = fc.scene.source();
@@ -733,7 +757,7 @@ void recordFroxelLists(FramePassContext& fc, const ViewResources& main, uint32_t
         s.statsReadback->Unmap(0, &none);
     }
 
-    const BufferRef lights = recordLists(fc, main, slotOfLightSrv, TextureRef{}, "");
+    const BufferRef lights = recordLists(fc, main, slotOfLightSrv, TextureRef{}, "", shadowSlots);
     fc.resources.froxelLights = lights;
     s.lists = lights;
     s.listsFrame = fc.frame.frameIndex;
@@ -1014,7 +1038,7 @@ void recordPlanarFroxels(FramePassContext& fc, ViewResources& view)
     // then the air from the mirror plane on (FroxelIntegrate.hlsl: g_clipPlane of the view's frame constants).
     // Readers first: tiles without mirror pixels around them get empty lists and no air.
     const TextureRef readers = recordReaders(fc, view, fc.state<State>(kStateKey).fullDepth, ".planar");
-    const BufferRef lists = recordLists(fc, view, fc.resources.vsmSlotOfLight, readers, ".planar");
+    const BufferRef lists = recordLists(fc, view, fc.resources.vsmSlotOfLight, readers, ".planar", fc.state<State>(kStateKey).shadowSlots);
     view.froxelLights = lists;
     // shading.mega_lights: the view's own sampled local light (no history: the view has no identity between frames) - its
     // air takes it in place of the loop over the lists, its lit particles read the fluence and moment.
@@ -1383,7 +1407,7 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
 void recordFroxels(FramePassContext& fc, const ViewResources& main)
 {
     State& s = fc.state<State>(kStateKey);
-    if (s.listsFrame != fc.frame.frameIndex) recordFroxelLists(fc, main, 0xFFFFFFFFu);  // no shadowPages this frame
+    if (s.listsFrame != fc.frame.frameIndex) recordFroxelLists(fc, main, 0xFFFFFFFFu, false);  // no shadowPages this frame
     RenderGraph& g = fc.graph;
     const BufferRef lights = s.lists;
     // shading.mega_lights_volume: the sampled local light first - it needs the lists and the readers only, and the lit
