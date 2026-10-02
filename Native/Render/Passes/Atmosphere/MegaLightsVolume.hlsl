@@ -127,7 +127,10 @@ void MegaLightsVolumeGen()
             const float3 vm = mid - light.position;
             const float dm = max(length(vm), 0.01);
             const float cellRadiusSq = 0.25 * (len * len + 2.0 * lateral * lateral);
-            const float3 Em = light.color * (froxelIntensity(light, vm / dm) * froxelWindow(light, dm) / (dm * dm + cellRadiusSq) * weight);
+            float3 Em = light.color * (froxelIntensity(light, vm / dm) * froxelWindow(light, dm) / (dm * dm + cellRadiusSq) * weight);
+            // (A8: the light's function toward the froxel, as the in-scattering above takes it - lit particles in a
+            // gobo's beam or under a flickering lamp follow the light)
+            if (P[0].w != UNX_NONE) Em *= lightFunction(P[0].w, li, light.forward, light.right, vm / dm, lateral / dm, g_time);
             fluenceNow += Em;
             momentNow += (-vm / dm) * mlLuminance(Em);
         }
