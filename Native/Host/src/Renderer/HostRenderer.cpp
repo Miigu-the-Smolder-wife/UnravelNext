@@ -289,11 +289,93 @@ void HostRenderer::editMaterials(std::span<const std::pair<uint32_t, scene::Mate
     }
 }
 
+void HostRenderer::setCharacterShading(uint32_t material, const CharacterShading& c)
+{
+    auto in = [](float x, float lo, float hi) { return x >= lo && x <= hi; };
+    if (!(c.subsurfaceMeanFreePath.x >= 0 && c.subsurfaceMeanFreePath.y >= 0 && c.subsurfaceMeanFreePath.z >= 0 && std::isfinite(c.subsurfaceMeanFreePath.x) &&
+          std::isfinite(c.subsurfaceMeanFreePath.y) && std::isfinite(c.subsurfaceMeanFreePath.z)))
+        fail("character shading: the mean free path must be >= 0 and finite (m)");
+    if (!(in(c.subsurfaceLobeMix, 0, 1) && c.subsurfaceLobeRoughness.x >= 0 && c.subsurfaceLobeRoughness.y >= 0 && std::isfinite(c.subsurfaceLobeRoughness.x) &&
+          std::isfinite(c.subsurfaceLobeRoughness.y)))
+        fail("character shading: the lobe mix must be in [0, 1], the lobes' roughness scales >= 0 and finite");
+    if (!in(c.cloth, 0, 1)) fail("character shading: cloth %g outside [0, 1]", c.cloth);
+    if (c.eyeIrisRadius != 0)
+    {
+        const float axis2 = c.eyeAxis.x * c.eyeAxis.x + c.eyeAxis.y * c.eyeAxis.y + c.eyeAxis.z * c.eyeAxis.z;
+        if (!(c.eyeIrisRadius > 0 && c.eyeIrisRadius <= 0.5f && c.eyeIrisDepth > 0 && c.eyeIrisDepth <= 2 && in(c.eyeLimbusWidth, 0.01f, 1) && in(c.eyeLimbusDarkening, 0, 1) &&
+              c.eyePupilScale > 0 && c.eyePupilScale <= 8 && in(c.eyeIrisConcavity, 0, 1) && in(c.eyeIor, 1, 2) && std::fabs(axis2 - 1) <= 1e-3f))
+            fail("character shading: an eye needs an iris radius in (0, 0.5], a depth in (0, 2], a limbus width in [0.01, 1], darkening and concavity in [0, 1], a "
+                 "pupil scale in (0, 8], an index in [1, 2] and a unit axis");
+    }
+    if (!m_committed)
+    {
+        if (material >= m_scene.materials.size()) fail("character shading: material %u of %zu", material, m_scene.materials.size());
+        applyCharacter(c, m_scene.materials[material]);
+        return;
+    }
+    std::lock_guard lock(m_mutex);
+    if (material >= m_hostMaterials) fail("character shading: material %u of %u", material, m_hostMaterials);
+    m_pending.characterEdits.push_back({ material, c });
+}
+
+// The groups of 'c' the material's class defines: the skin's and the eye's on a Subsurface material (an eye has no light
+// through thin parts), the cloth factor on a material with a sheen. The others are left at "none".
+void HostRenderer::applyCharacter(const CharacterShading& c, scene::Material& m)
+{
+    const bool subsurface = m.cls == scene::MaterialClass::Subsurface;
+    if (subsurface)
+    {
+        m.subsurfaceMeanFreePath = c.subsurfaceMeanFreePath;
+        m.subsurfaceLobeMix = c.subsurfaceLobeMix;
+        m.subsurfaceLobeRoughness = c.subsurfaceLobeRoughness;
+    }
+    m.eyeIrisRadius = subsurface ? c.eyeIrisRadius : 0.0f;
+    if (m.eyeIrisRadius > 0)
+    {
+        m.eyeIrisDepth = c.eyeIrisDepth;
+        m.eyeLimbusWidth = c.eyeLimbusWidth;
+        m.eyeLimbusDarkening = c.eyeLimbusDarkening;
+        m.eyePupilScale = c.eyePupilScale;
+        m.eyeIrisConcavity = c.eyeIrisConcavity;
+        m.eyeIor = c.eyeIor;
+        m.eyeAxis = normalize(c.eyeAxis);
+        m.transmission = 0;
+    }
+    const bool sheen = m.cls == scene::MaterialClass::Standard && (m.sheenColor.x > 0 || m.sheenColor.y > 0 || m.sheenColor.z > 0);
+    m.cloth = sheen ? c.cloth : 0.0f;
+}
+
+// A material described anew (the ABI's description has no character fields) keeps the old one's while they still apply.
+void HostRenderer::keepCharacter(const scene::Material& old, scene::Material& next)
+{
+    CharacterShading c;
+    c.subsurfaceMeanFreePath = old.subsurfaceMeanFreePath;
+    c.subsurfaceLobeMix = old.subsurfaceLobeMix;
+    c.subsurfaceLobeRoughness = old.subsurfaceLobeRoughness;
+    c.cloth = old.cloth;
+    c.eyeIrisRadius = old.eyeIrisRadius;
+    c.eyeIrisDepth = old.eyeIrisDepth;
+    c.eyeLimbusWidth = old.eyeLimbusWidth;
+    c.eyeLimbusDarkening = old.eyeLimbusDarkening;
+    c.eyePupilScale = old.eyePupilScale;
+    c.eyeIrisConcavity = old.eyeIrisConcavity;
+    c.eyeIor = old.eyeIor;
+    c.eyeAxis = old.eyeAxis;
+    if (old.cls == next.cls) applyCharacter(c, next);
+}
+
 void HostRenderer::applyEdits(const FramePacket& p, scene::Scene& s)
 {
     for (const auto& [i, m] : p.materialEdits)
         if (i == s.materials.size()) s.materials.push_back(m);
-        else s.materials[i] = m;
+        else
+        {
+            scene::Material next = m;
+            keepCharacter(s.materials[i], next);
+            s.materials[i] = std::move(next);
+        }
+    for (const auto& [i, c] : p.characterEdits)
+        if (i < s.materials.size()) applyCharacter(c, s.materials[i]);
     for (const auto& [i, inst] : p.instanceEdits)
         if (i == s.instances.size()) s.instances.push_back(inst);
         else s.instances[i] = inst;
@@ -1333,6 +1415,7 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.worldOrigin = m_mainOriginOffset;
     packet.instanceEdits = std::move(m_pending.instanceEdits);
     packet.materialEdits = std::move(m_pending.materialEdits);
+    packet.characterEdits = std::move(m_pending.characterEdits);
     packet.surfaceDeltas = std::move(m_pending.surfaceDeltas);
     packet.surfaceHalfLives = m_pending.surfaceHalfLives;
     packet.surfaceTime = m_surfaceTime;
@@ -1377,6 +1460,7 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
         next.visibility.insert(next.visibility.begin(), dropped.visibility.begin(), dropped.visibility.end());
         next.instanceEdits.insert(next.instanceEdits.begin(), std::make_move_iterator(dropped.instanceEdits.begin()), std::make_move_iterator(dropped.instanceEdits.end()));
         next.materialEdits.insert(next.materialEdits.begin(), std::make_move_iterator(dropped.materialEdits.begin()), std::make_move_iterator(dropped.materialEdits.end()));
+        next.characterEdits.insert(next.characterEdits.begin(), dropped.characterEdits.begin(), dropped.characterEdits.end());
         next.surfaceDeltas.insert(next.surfaceDeltas.begin(), std::make_move_iterator(dropped.surfaceDeltas.begin()), std::make_move_iterator(dropped.surfaceDeltas.end()));
         if (!next.surfaceHalfLives) next.surfaceHalfLives = dropped.surfaceHalfLives;
         if (!next.decals) next.decals = dropped.decals;
@@ -1415,6 +1499,7 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         carried.visibility.insert(carried.visibility.end(), old.visibility.begin(), old.visibility.end());
         carried.instanceEdits.insert(carried.instanceEdits.end(), std::make_move_iterator(old.instanceEdits.begin()), std::make_move_iterator(old.instanceEdits.end()));
         carried.materialEdits.insert(carried.materialEdits.end(), std::make_move_iterator(old.materialEdits.begin()), std::make_move_iterator(old.materialEdits.end()));
+        carried.characterEdits.insert(carried.characterEdits.end(), old.characterEdits.begin(), old.characterEdits.end());
         carried.surfaceDeltas.insert(carried.surfaceDeltas.end(), std::make_move_iterator(old.surfaceDeltas.begin()), std::make_move_iterator(old.surfaceDeltas.end()));
         if (old.surfaceHalfLives) carried.surfaceHalfLives = old.surfaceHalfLives;
         if (old.decals) carried.decals = old.decals;
@@ -1447,6 +1532,7 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         p.visibility.insert(p.visibility.begin(), carried.visibility.begin(), carried.visibility.end());
         p.instanceEdits.insert(p.instanceEdits.begin(), std::make_move_iterator(carried.instanceEdits.begin()), std::make_move_iterator(carried.instanceEdits.end()));
         p.materialEdits.insert(p.materialEdits.begin(), std::make_move_iterator(carried.materialEdits.begin()), std::make_move_iterator(carried.materialEdits.end()));
+        p.characterEdits.insert(p.characterEdits.begin(), carried.characterEdits.begin(), carried.characterEdits.end());
         p.surfaceDeltas.insert(p.surfaceDeltas.begin(), std::make_move_iterator(carried.surfaceDeltas.begin()), std::make_move_iterator(carried.surfaceDeltas.end()));
         if (!p.surfaceHalfLives) p.surfaceHalfLives = carried.surfaceHalfLives;
         if (!p.decals) p.decals = carried.decals;
@@ -1527,10 +1613,11 @@ uint32_t HostRenderer::beginFrame(const FramePacket& p)
         }
     }
     // Scene edits (the scene already has them, takePacket): materials first, since new instances may override with them.
-    if (!p.materialEdits.empty() || !p.instanceEdits.empty())
+    if (!p.materialEdits.empty() || !p.instanceEdits.empty() || !p.characterEdits.empty())
     {
         std::vector<uint32_t> materials, instances;
         for (const auto& e : p.materialEdits) materials.push_back(e.first);
+        for (const auto& e : p.characterEdits) materials.push_back(e.first);  // (character shading: the material's record again)
         for (const auto& e : p.instanceEdits) instances.push_back(e.first);
         auto unique = [](std::vector<uint32_t>& v) {
             std::sort(v.begin(), v.end());

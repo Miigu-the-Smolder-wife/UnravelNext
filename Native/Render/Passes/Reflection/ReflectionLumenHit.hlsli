@@ -97,7 +97,7 @@ RlHit rlShadeHit(RtSceneSrvs scene, RtHit hit, float3 origin, float3 direction, 
     if (!fromCards)
     {
         const float3 l = normalize(g_sunDirection);
-        if (dot(s.normal, l) > 0 || materialClass(m) == MATERIAL_FOLIAGE)
+        if (dot(s.normal, l) > 0 || rtHitTransmits(m))
         {
             const float3 e0 = giSunIlluminance(s.position);
             if (any(e0 > 0))

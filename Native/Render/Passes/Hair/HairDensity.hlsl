@@ -4,7 +4,7 @@
 //   MODE 0  the accumulation words set to 0 (256 words a thread group);
 //   MODE 1  one thread per segment of one body: its length x mean diameter / cell volume, in up to 8 equal parts along it
 //           (one per half cell), each added to the cell under its middle (atomic add, units of 1 / 1024 per metre);
-//           segments left out by the LOD (radius 0) and parts outside the body's cells add nothing;
+//           parts outside the body's cells add nothing (the LOD's kept strands alone have segments: HairSimulate STEP 2);
 //   MODE 2  the cells' values, R16_FLOAT (4 x 4 x 4 cells a group);
 //   MODE 3  their means over 4 x 4 x 4 cells (the 64 cells' words).
 // P[0] = { segments SRV (StructuredBuffer<float4>, 2 per segment), accumulation UAV (raw: R^3 words per block, cell

@@ -176,6 +176,95 @@ float3 modelEvaluateSubsurface(ModelSurface s, ModelSubsurface k, float3 n, floa
     return albedo + single * compensation;
 }
 
+// ---- Eye (MaterialModel.h "Eye"): mirror of the C++ definition. A Subsurface material with an iris (MATERIAL_EYE) - the
+// sclera, the iris and the cornea over it from one sphere-like mesh. The resolve turns the surface point into the iris
+// point seen through the cornea (modelEyePoint: the base colour's uv, the iris mask, the limbal ring) and leaves the
+// shading kernels one word per pixel (modelEyePack: the iris plane's normal, the mask and the caustic weight, in the
+// resolve's class word texture - the material word is not touched); the kernels shade the cornea's specular lobe at the
+// surface normal and the diffuse light on the iris plane (modelEyeCosine).
+struct ModelEyePoint
+{
+    float2 uv;        // where the base colour is read
+    float mask;       // m: 1 on the iris, 0 on the sclera
+    float darkening;  // the base colour's factor (the limbal ring)
+    float caustic;    // w: the caustic normal's weight
+};
+// The cornea's height over the iris plane at the radius rho (iris radii): a spherical cap of apex height h0 that meets
+// the plane at rho = 1.
+float modelEyeCorneaHeight(float h0, float rho)
+{
+    const float rc = (1 + h0 * h0) / (2 * h0);
+    return max(sqrt(max(rc * rc - rho * rho, 0.0)) - (rc - h0), 0.0);
+}
+// uv: the surface point's; t: the view ray refracted into the eye, in the eye's frame (t . e_u, t . e_v, t . a - the uv
+// directions in the iris plane and the optical axis; t.z < 0: into the eye).
+ModelEyePoint modelEyePoint(GpuMaterialEye e, float2 uv, float3 t)
+{
+    const float2 q = (uv - 0.5) / e.irisRadius;
+    const float rho = length(q);
+    ModelEyePoint o;
+    o.mask = 1 - smoothstep(1 - e.limbusWidth, 1.0, rho);
+    // the iris point: the refracted ray meets the plane after h / (-t.a) along it (the ray at least 0.2 into the eye)
+    const float2 qi = q + t.xy * (modelEyeCorneaHeight(e.irisDepth, min(rho, 1.0)) / max(-t.z, 0.2));
+    const float rhoI = length(qi), rhoC = min(rhoI, 1.0);
+    // the pupil: the iris texture's radius 1 - (1 - rho) x scale, the limbus fixed
+    const float rhoT = 1 - saturate((1 - rhoC) * e.pupilScale);
+    o.uv = lerp(uv, 0.5 + qi * (e.irisRadius * rhoT / max(rhoI, 1e-6)), o.mask);
+    // the limbal ring: darkest where the iris starts to give way (rho = 1 - width), gone 1.5 widths either side
+    o.darkening = 1 - e.limbusDarkening * (1 - smoothstep(0.0, 1.5 * e.limbusWidth, abs(lerp(rho, rhoC, o.mask) - (1 - e.limbusWidth))));
+    o.caustic = saturate(e.concavity * o.mask * rhoC);
+    return o;
+}
+// The eye word (R32_UINT): the iris plane's normal a, octahedral snorm10 x 2 (bits 0..19; one normal per eye, so its
+// rounding is a constant turn of at most a quarter of a degree, not a pattern), the mask m, unorm6 (bits 20..25), and
+// the caustic weight w, unorm6 (bits 26..31). A word of 0 in the mask's bits is the sclera.
+uint modelEyePack(float3 a, float m, float w)
+{
+    a /= abs(a.x) + abs(a.y) + abs(a.z);
+    const float2 e = a.z >= 0 ? a.xy : octWrap(a.xy);
+    const int2 q = int2(round(clamp(e, -1.0, 1.0) * 511.0));
+    return (uint(q.x) & 0x3FFu) | ((uint(q.y) & 0x3FFu) << 10) | (uint(round(saturate(m) * 63.0)) << 20) | (uint(round(saturate(w) * 63.0)) << 26);
+}
+float modelEyeMask(uint word) { return ((word >> 20) & 0x3Fu) / 63.0; }
+// A pixel's eye data: the mask, the iris plane's normal a and the caustic normal c = normalize(a - w r) - a tilted
+// towards the axis by atan(w), r being the direction of the surface normal's part in the iris plane (the cornea's normal
+// leans outwards, away from the axis) -, so the far side of the iris from a light faces it: the cornea's focus there.
+// (The reference blends a towards -n by its weight: the tilt then depends on the cornea's curvature and turns over
+// where the two nearly cancel; here the normal gives the direction only.)
+struct ModelEye
+{
+    float mask;
+    float3 iris, caustic;
+};
+ModelEye modelEyeOf(uint word, float3 n)
+{
+    const float2 e = float2(int2(word << 22, word << 12) >> 22) / 511.0;
+    float3 a = float3(e, 1.0 - abs(e.x) - abs(e.y));
+    if (a.z < 0) a.xy = octWrap(a.xy);
+    ModelEye o;
+    o.mask = modelEyeMask(word);
+    o.iris = normalize(a);
+    const float3 r = n - o.iris * dot(o.iris, n);
+    o.caustic = normalize(o.iris - r * (((word >> 26) / 63.0) * rsqrt(max(dot(r, r), 1e-8))));
+    return o;
+}
+// The caustic towards l: 0.8 + 0.2 (p + 1) saturate(c . l)^p, p = lerp(12, 1, saturate(a . l)) ((p + 1) cos^p has the
+// hemisphere integral 2 pi for every p: the caustic moves a fifth of the light, the flat share 0.8 stays) - a light from
+// the side gathers on the iris's far side, a light along the axis lights it evenly.
+float modelEyeCaustic(ModelEye e, float3 l)
+{
+    const float p = lerp(12.0, 1.0, saturate(dot(e.iris, l)));
+    return 0.8 + 0.2 * (p + 1) * pow(saturate(dot(e.caustic, l)), p);
+}
+// The eye's diffuse cosine towards l (NoL = n . l at the surface): the sclera's is the surface's; the iris takes the
+// light on its plane, saturate(a . l), times the caustic.
+float modelEyeCosine(ModelEye e, float NoL, float3 l)
+{
+    const float sclera = max(NoL, 0.0);
+    if (!(e.mask > 0)) return sclera;
+    return lerp(sclera, saturate(dot(e.iris, l)) * modelEyeCaustic(e, l), e.mask);
+}
+
 // ---- A9 clearcoat (MaterialModel.h evaluateCoated, v1.76): mirror of the C++ definition; tables in g_coatTable.
 struct ModelCoat
 {
@@ -214,6 +303,7 @@ struct ModelSheen
 {
     float3 color;      // C (0: none)
     float roughness;   // r_sh
+    float cloth;       // the cloth blend: the base's specular lobe x (1 - cloth) (0: the sheen over the whole base)
 };
 float modelSheenLookup(uint base, float mu, float r)
 {
@@ -275,12 +365,15 @@ float modelSheenSun(float r, float3 n, float3 v, float3 l0, float rho)
 }
 // The base's scale 1 - max(C) E_sh(n.v) (view side only).
 float modelSheenKeep(ModelSheen sh, float NoV) { return 1 - max(sh.color.r, max(sh.color.g, sh.color.b)) * modelSheenAlbedo(max(NoV, 1e-4), sh.roughness); }
+// The cloth blend (MaterialModel.h evaluateSheen): the fuzz takes the place of the share 'cloth' of the base's specular
+// lobe; the base's diffuse part keeps the sheen's scale alone. cloth = 0: the sheen over the whole base, as before.
 float3 modelEvaluateSheen(ModelSurface s, ModelSheen sh, float3 n, float3 v, float3 l)
 {
     const float3 base = modelEvaluate(s, n, v, l);
     if (!(max(sh.color.r, max(sh.color.g, sh.color.b)) > 0)) return base;
     if (dot(n, v) <= 0 || dot(n, l) <= 0) return base;
-    return sh.color * modelSheenLobe(sh.roughness, n, v, l) + base * modelSheenKeep(sh, dot(n, v));
+    const float3 specular = base - s.baseColor * ((1 - s.metallic) / MODEL_PI);  // (Standard: f_d is the whole albedo)
+    return sh.color * modelSheenLobe(sh.roughness, n, v, l) + (base - specular * sh.cloth) * modelSheenKeep(sh, dot(n, v));
 }
 // The sheen of a material (MATERIAL_SHEEN; none: colour 0).
 ModelSheen modelSheenOf(GpuMaterial m)
@@ -291,6 +384,7 @@ ModelSheen modelSheenOf(GpuMaterial m)
     const GpuMaterialLayers layers = loadMaterialLayers(m.classFlags >> 16);
     sh.color = layers.sheenColor;
     sh.roughness = layers.sheenRoughness;
+    sh.cloth = layers.cloth;
     return sh;
 }
 

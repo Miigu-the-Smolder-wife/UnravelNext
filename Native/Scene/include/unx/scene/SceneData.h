@@ -108,6 +108,20 @@ struct Material
     float3 subsurfaceMeanFreePath{ 0.00130f, 0.00095f, 0.00067f };  // m, >= 0
     float subsurfaceLobeMix = 0.85f;                               // [0, 1]
     float2 subsurfaceLobeRoughness{ 0.75f, 1.30f };                // >= 0
+    // Eye (a Subsurface-class material with an iris: eyeIrisRadius > 0; MaterialModel.h "Eye"): one sphere-like mesh is
+    // sclera, iris and cornea. Its uv (0.5, 0.5) is where the optical axis leaves the eye and eyeAxis that axis in the
+    // mesh's object space; the base colour texture is the whole eye's, the iris painted around the uv centre. The specular
+    // lobe is one lobe (the cornea and the tear film, at roughness), the sclera scatters with subsurfaceMeanFreePath, the
+    // iris is seen through the cornea (refraction onto the iris plane) and lit on its own plane. The class's lobe
+    // parameters and transmission are not used (validation: transmission 0).
+    float eyeIrisRadius = 0.0f;       // uv units, (0, 0.5]: where the iris ends (the limbus); 0 = not an eye
+    float eyeIrisDepth = 0.45f;       // (0, 2]: the cornea's apex above the iris plane, in iris radii (human: about 2.7 mm over 5.9 mm)
+    float eyeLimbusWidth = 0.12f;     // [0.01, 1]: the band, in iris radii, over which the iris gives way to the sclera
+    float eyeLimbusDarkening = 0.6f;  // [0, 1]: the limbal ring's depth
+    float eyePupilScale = 1.0f;       // (0, 8]: the iris texture's radius 1 - (1 - rho) x this (1 = as painted, > 1 a wider pupil)
+    float eyeIrisConcavity = 1.0f;    // [0, 1]: the caustic normal's tilt at the limbus (0 = the flat iris plane: no caustic side)
+    float eyeIor = 1.336f;            // [1, 2]: the aqueous humour's refractive index
+    float3 eyeAxis{ 0, 0, 1 };        // unit: the optical axis in the mesh's object space, out of the eye
     // Terrain class (C5 cooked terrain tiles, FEATURES_GAME 9 direct blending): layer i's weight is channel i % 4 of splat
     // map i / 4 (Rgba8Linear, over the terrain's uv0), normalised by the weights' sum; 1..8 layers (splat 1 needed above 4).
     uint32_t terrainSplat[2] = { kNone, kNone };
@@ -122,6 +136,10 @@ struct Material
     // (linear, [0, 1]; 0 = none) and perceptual roughness sheenRoughness in [0.1, 1].
     float3 sheenColor{ 0, 0, 0 };
     float sheenRoughness = 0.5f;
+    // Cloth blend (with a sheen; MaterialModel.h evaluateSheen): the share of the base's specular lobe the fuzz replaces -
+    // 0 = the sheen over the whole base (as before), 1 = no GGX highlight under the fuzz (cotton, velvet). The reference's
+    // Cloth shading model (FuzzColor, Cloth) is sheenColor = Cloth x FuzzColor, cloth = Cloth.
+    float cloth = 0.0f;                      // [0, 1]
     // Anisotropy (A9, MATERIAL_LAYERS 1.5; Standard class; MaterialModel.h evaluateAnisotropic): the GGX lobe stretched
     // along the cooked tangent rotated by anisotropyRotation (radians, towards the bitangent), alpha_t = alpha + (1 - alpha)
     // anisotropy^2, alpha_b = alpha (KHR_materials_anisotropy). 0 = isotropic. Meshes using it need tangents.

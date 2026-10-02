@@ -5,7 +5,8 @@
 //   1. The next COV_ROUND fragments nearer first, merged from the pixel's sorted runs: each lane holds the heads of runs
 //      lane, lane + 32, ...; per step the wave's nearest head (max depth, then min element) is taken and its run advances.
 //      A head behind the band A surface, or no head, ends the pixel; one more step only looks, so a pixel whose last
-//      fragment is the round's last is finished here.
+//      fragment is the round's last is finished here. A pixel of one run (at most COV_BLOCK records: nearly every heavy
+//      pixel) needs no merge - its sorted pairs are the order, lane t takes the pair t places past the cursor.
 //   2. The taken fragments composite in order in parallel: each lane's visible share uses the mask union of the pixel so
 //      far and of the lanes before it (a groupshared prefix), its weight w = max(0, min(r, 1 - R)) with R the weights
 //      before it (the cap binds once, so the prefix of the uncapped r gives the capped w), and the lanes with w > 0 shade
@@ -57,7 +58,20 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
     uint2 mine = COV_KEY_AFTER_ALL;
     uint taken = 0;
     bool exhausted = false;
-    [loop] for (uint t = 0; t <= COV_ROUND; ++t)
+    if (rec0.w == 1)
+    {
+        // one run: the pairs from the cursor on, as far as they lie in front of the band A surface (nearer first: those
+        // lanes come first); the fragment after the round's last decides whether the pixel is finished, as the merge's
+        // look-ahead step
+        const uint cursor = cursors.Load(4 * rec1.x), end = rec0.y + rec0.z;
+        const uint2 key = cursor + lane < end ? pairs.Load2(8 * (cursor + lane)) : COV_KEY_AFTER_ALL;
+        const bool front = cursor + lane < end && key.x >= bandA;
+        if (front) mine = key;
+        taken = WaveActiveCountBits(front);
+        exhausted = taken < COV_ROUND || cursor + COV_ROUND >= end || pairs.Load(8 * (cursor + COV_ROUND)) < bandA;
+        if (lane == 0) cursors.Store(4 * rec1.x, cursor + taken);
+    }
+    [loop] for (uint t = 0; t <= COV_ROUND && rec0.w != 1; ++t)
     {
         uint2 best = COV_KEY_AFTER_ALL;
         uint bestRun = 0;

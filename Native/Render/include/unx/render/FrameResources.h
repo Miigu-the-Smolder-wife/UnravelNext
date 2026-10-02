@@ -281,9 +281,12 @@ struct FrameResources
     BufferRef hairSegments, hairBodies;
     // The hair density volume (E's Passes/Hair/HairDensity.hlsli; invalid = none): per body rho, the fibres a ray crosses
     // per metre, in cells (R16_FLOAT) and in means over 4^3 cells, and the parameters (raw: the bodies' boxes and the two
-    // textures' SRVs - hairFibreCount takes this buffer's SRV alone; declare the three to read it). For M's hair records.  [E]
+    // textures' SRVs - hairFibreCount takes this buffer's SRV alone; declare the three to read it). For M's hair records
+    // and the hair's shadow on other surfaces (Passes/Hair/HairShadow.hlsl). hairOrigin: the world position the boxes are
+    // relative to (the main view's camera) - a reader in another view adds its camera's offset from it.  [E]
     TextureRef hairDensity, hairDensityCoarse;
     BufferRef hairDensityParams;
+    float3 hairOrigin{};
     // A3 FX particle lights (v1.81, render B's request): the whole scene light buffer (gpu::Light, stride 80; the FX tail at
     // [lightCount, lightCount + F)) and the count word (StructuredBuffer<uint>, element 0 = F), imported once per frame by
     // core so the graph orders the FX writer (Uav) before S, R and M (Srv). Invalid when the scene has no FX light tail

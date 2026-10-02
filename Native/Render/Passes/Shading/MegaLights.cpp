@@ -164,7 +164,7 @@ Settings settings(const QualityConfig& q)
 } // namespace
 
 MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, bool areaLights, uint32_t ltcSrv,
-                                 ID3D12CommandSignature* dispatchSignature, const char* instance)
+                                 ID3D12CommandSignature* dispatchSignature, const char* instance, const MegaLightsOptions& options)
 {
     MegaLightsFrame ml;
 #if UNX_M_HAS_RAYTRACING
@@ -296,6 +296,8 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
                   c.cmd->ExecuteIndirect(dispatchSignature, 1, c.resource(tileList), 0, nullptr, 0);
               });
 
+    // (an instance whose rays start elsewhere than at its surface: the hair records')
+    const TextureRef traceKeys = options.traceKeys ? options.traceKeys(keys, dsW, dsH, s.factor | (s.count << 8)) : keys;
     rt::RayScene* rays = &rt::RayScene::get(fc);
     rt::RayPipeline& pipeline = rt::RayPipeline::get(fc.device, fc.shaders, rt::standardRayPipeline("Passes/Shading/MegaLightsTrace", { "MegaLightsTraceGen" }));
     // screen traces: the main view's own depth and its pyramid (tracks::screenTraceInputs published it before GI); the
@@ -305,7 +307,7 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
     g.addPass("m.ml.trace", QueueType::Compute,
               [&](PassBuilder& b) {
                   rays->declareTraversal(b);
-                  b.use(keys, Use::SrvCompute);
+                  b.use(traceKeys, Use::SrvCompute);
                   b.use(samples, Use::UavCompute);
                   if (pyramid.valid())
                   {
@@ -314,7 +316,7 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
                   }
               },
               [=, &pipeline](PassContext& c) {
-                  uint32_t k[32] = { c.uav(samples), c.srv(keys), 0, pyramid.valid() ? c.srv(traceDepth) : 0xFFFFFFFFu,
+                  uint32_t k[32] = { c.uav(samples), c.srv(traceKeys), 0, pyramid.valid() ? c.srv(traceDepth) : 0xFFFFFFFFu,
                                      dsW, dsH, s.factor | (s.count << 8), pyramid.valid() ? c.srv(pyramid) : 0xFFFFFFFFu,
                                      asUint(s.rayBias), asUint(s.rayNormalBias), asUint(s.rayEndBias), 0,
                                      asUint(s.screenNormalBias), asUint(s.screenThickness), asUint(s.screenDistance), s.screenIterations };
@@ -330,6 +332,38 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
                       pipeline.dispatch(c.cmd, 0, width, std::min(bandRows, height - row));
                   }
               });
+    // m.ml.hair (shading.hair_shadows; Passes/Hair/HairShadow.hlsl MODE 1): the hair between a sample's surface point and
+    // its light, from E's density volume - the sample stays visible with the probability exp(-fibres on the path). A
+    // frame without a volume records nothing.
+    if (options.hairShadow && (!fc.quality.has("shading.hair_shadows") || fc.quality.boolean("shading.hair_shadows")) && r.hairDensityParams.valid() &&
+        r.hairDensity.valid() && r.hairDensityCoarse.valid())
+    {
+        const uint32_t hairSteps = fc.quality.has("shading.hair_shadow_steps") ? (uint32_t)fc.quality.integer("shading.hair_shadow_steps") : 32u;
+        if (hairSteps < 2 || hairSteps > 128) fail("shading.hair_shadow_steps must be in [2, 128]");
+        const uint32_t hairJitter = !fc.quality.has("shading.hair_march_jitter") || fc.quality.boolean("shading.hair_march_jitter") ? 1u : 0u;
+        const float3 originOffset = view.view.position - r.hairOrigin;
+        const BufferRef hairParams = r.hairDensityParams;
+        const TextureRef hairFine = r.hairDensity, hairCoarse = r.hairDensityCoarse;
+        ID3D12PipelineState* hairPso = fc.shaders.compute("Passes/Hair/HairShadow.MODE1");
+        g.addPass("m.ml.hair", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(keys, Use::SrvCompute);
+                      b.use(hairParams, Use::SrvCompute);
+                      b.use(hairFine, Use::SrvCompute);
+                      b.use(hairCoarse, Use::SrvCompute);
+                      if (fxLights.valid()) b.use(fxLights, Use::SrvCompute);
+                      b.use(samples, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      uint32_t k[12] = { c.srv(hairParams), c.srv(keys), c.uav(samples), hairSteps, 0, 0, 0, hairJitter, dsW * gridX, dsH * gridY, s.factor | (s.count << 8), 0 };
+                      const float o[3] = { originOffset.x, originOffset.y, originOffset.z };
+                      std::memcpy(&k[4], o, 12);
+                      c.cmd->SetPipelineState(hairPso);
+                      c.bindFrameConstants(cb);
+                      c.computeConstants(k, 12);
+                      c.cmd->Dispatch((dsW * gridX + 7) / 8, (dsH * gridY + 7) / 8, 1);
+                  });
+    }
 #else
     (void)fc;
     (void)view;
@@ -337,6 +371,7 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
     (void)areaLights;
     (void)ltcSrv;
     (void)dispatchSignature;
+    (void)options;
 #endif
     return ml;
 }

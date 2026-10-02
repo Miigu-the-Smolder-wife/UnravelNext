@@ -16,10 +16,14 @@
 // its world ray does (LgTrace.hlsl) - past it the cache answers,
 // P[4..7] = the previous frame's view-projection (rows; upscale.prevViewProj), P[11].w = moving threshold (float),
 // P[10].z adaptive SRV, P[10].w / P[11].x / P[11].y probe depth / normal / position SRVs. b1 = the main view.
+// P[11].z = E's hair density parameters (raw SRV; 0xFFFFFFFF: none): the depth buffer holds no hair, so a ray whose first
+// fibre (RayTracing/HitHair.hlsli: the draw LgTrace makes for the same texel and frame) lies before its screen hit is
+// not final - the world trace shades the groom.
 #include "Passes/GI/Lumen/LgSurface.hlsli"
 #include "Passes/GI/Lumen/LgRadianceCache.hlsli"
 #include "Passes/Reflection/ScreenTrace.hlsli"
 #include "Scene.hlsli"
+#include "RayTracing/HitHair.hlsli"
 
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -66,6 +70,7 @@ void main(uint3 id : SV_DispatchThreadID)
     const SctResult r = sctTrace(depth, pyramid, lgViewSize(), origin, direction, maxDistance, P[3].x & 0xFFFFu, asfloat(P[3].y), (P[3].x >> 16) & 0x7FFFu);
     const float3 end = sctWorld(r.at);
     bool hit = r.hit && !r.uncertain;
+    if (hit && rtHairFirst(P[11].z, positionSpeed.xyz, direction, distance(end, positionSpeed.xyz), rtHairSeed(coord, lgFrame())).t >= 0) hit = false;
     float3 radiance = 0;
     bool moving = false;
     if (hit)

@@ -572,7 +572,6 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
             fail("M textures: material '%s' uses texture '%s' (format %u) as %s", m.name.c_str(), s->textures[tex].name.c_str(), (unsigned)f, slot);
         return m_textures[tex].srv;
     };
-    bool occlusionLogged = false;
     m_published.clear();
     auto clampBit = [&](uint32_t tex, uint32_t bit) { return (tex != scene::kNone && tex < s->textures.size() && !s->textures[tex].wrap) ? bit : 0u; };
     for (const scene::Material& m : s->materials)
@@ -582,15 +581,13 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
         e.moments = srvOf(m.normalTexture, scene::TextureFormat::Rg8Normal, scene::TextureFormat::Rg8Normal, m, "normal");
         e.roughMetal = srvOf(m.roughMetalTexture, scene::TextureFormat::Rg8RoughMetal, scene::TextureFormat::Rg8RoughMetal, m, "roughness/metallic");
         e.emissive = srvOf(m.emissiveTexture, scene::TextureFormat::Rgba8Srgb, scene::TextureFormat::Rgba16Float, m, "emissive");
-        e.occlusion = gpu::kNone;
-        if (m.occlusionTexture != scene::kNone && !occlusionLogged)
-        {
-            logf("M textures: occlusion textures are not used (their use is not defined in INTERFACES 8.1 v1)\n");
-            occlusionLogged = true;
-        }
+        // baked ambient occlusion (R8): the resolve puts it in the pixel's material word (materials without a layer
+        // record; a layered material's word has no room for it), the shading kernel applies it to the indirect light
+        e.occlusion = srvOf(m.occlusionTexture, scene::TextureFormat::R8Linear, scene::TextureFormat::R8Linear, m, "occlusion");
         e.slopeRange = m.normalTexture != scene::kNone ? m_slopeRange[m.normalTexture] : 0.0f;
         e.flags = clampBit(m.baseColorTexture, gpu::MaterialTextureBaseColor) | clampBit(m.normalTexture, gpu::MaterialTextureNormal) |
-                  clampBit(m.roughMetalTexture, gpu::MaterialTextureRoughMetal) | clampBit(m.emissiveTexture, gpu::MaterialTextureEmissive);
+                  clampBit(m.roughMetalTexture, gpu::MaterialTextureRoughMetal) | clampBit(m.emissiveTexture, gpu::MaterialTextureEmissive) |
+                  clampBit(m.occlusionTexture, gpu::MaterialTextureOcclusion);
         e.coverage = (m.alphaCutoff > 0 && m.baseColorTexture != scene::kNone && m.baseColorTexture < m_coverage.size()) ? m_coverage[m.baseColorTexture].srv : gpu::kNone;
         if (m.cls == scene::MaterialClass::Terrain)
         {

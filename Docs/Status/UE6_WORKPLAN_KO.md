@@ -3,11 +3,24 @@
 사용자 지시(2026-10-02): 안개를 잘 만들 것. 얇은 지오메트리 비용, 숲 규모, high 티어, 캐릭터 음영, 원거리 GI, 구름. 배치가 도는 동안에도 코드를 쓸 것. 최적화할 때 표현·함수·알고리즘·수치해석·시스템 구조·하드웨어 매핑·수학/물리 모델을 점검할 것.
 측정 결과는 `UE6_PORT_STATUS_KO.md` 7절. 이 문서는 "무엇이 왜 남았고 어디를 고치는가"만 적는다.
 
-## 0. 작업 방식
+## 0. 작업 방식 (2026-10-03 사용자 지시로 바뀜)
 
-- 배치는 **고정된 스냅샷**(커밋을 체크아웃한 별도 워크트리 `C:\Users\USER\UnravelNext-ue6-run`, 자체 빌드)에서 돌린다. 게이트는 설정을 `UNX_SOURCE_DIR/Config/quality`에서, 셰이더를 실행 파일 옆에서 읽으므로 개발 워크트리의 편집·빌드가 도는 배치를 바꾸지 못한다.
-- 개발 워크트리(`UnravelNext-ue6`)에서는 배치 중에도 코드를 쓰고 낮은 우선순위로 빌드한다.
-- 조사(읽기 전용)는 에이전트에 맡기고 결론만 받는다.
+- **검증하지 않는다.** 테스트 실행 파일·스틸·게이트·배치·GpuLock을 돌리지 않는다(사용자가 실행을 말할 때까지). 확인은 빌드 통과뿐이고, 옳음은 코드와 원본 소스를 읽어 따진다. 새로 쓴 것은 문서에 "코드 작성·빌드 통과, 실행 안 함"으로 적는다.
+- 기능 완성과 구조 최적화를 **분량으로** 한다: 영역별 에이전트가 각자의 워크트리·브랜치에서 쓰고 빌드하며, 주 세션은 겹치지 않는 코드를 쓰고 병합한다. 빌드는 `-Jobs 6 -LowPriority`(사용자가 같은 기계에서 게임 중).
+- 디스크: 병합된 워크트리는 바로 지운다(`git worktree remove --force`; 커밋 안 된 소스는 그 브랜치나 `wip/<이름>`에 커밋한 뒤). 캡처 출력은 남기지 않는다. 옛 세션 워크트리의 미커밋 소스와 텍스트 기록은 `wip/old-*` 브랜치에 있다.
+- 세션이 끊기면 에이전트도 멈춘다. 워크트리와 브랜치는 남으므로 아래 표로 이어서 한다(미커밋 변경은 워크트리에 있다).
+
+| 브랜치 (워크트리 `UnravelNext-ue6-w-<이름>`) | 맡은 것 | 대기 중인 후속 |
+|---|---|---|
+| `w/hair` | 머리카락 2단계: 다른 물체에 그림자, 그림자 경계 계단, 근접 비용, 반사·GI 프록시 (`char-hair2`의 WIP 병합 위에서) | — |
+| `w/char` | 눈(EyeBxDF 대응), 천 fuzz 혼합, 광선 hit·coverage 층·뷰모델의 피부, 호스트 ABI | 재질 입력(UV 변환, 디테일 맵, 시차 맵), 광원 완성(사각광 텍스처·barn door, 채널, 광원별 배율) |
+| `w/atmo` | 안개 노출 전 저장(`fog-tests` WIP), `froxelRayAt` 정밀도, 불투명 앞 구름, 씬 파일의 구름·안개 블록, GI 광선·A14 뷰 안개, 구름 태양 경로의 긴 스텝 앨리어싱 | — |
+| `w/opt` | V·VSM 계층 컬을 작업 큐 한 커널로, 빈 래스터 요청 생략, 그림자 뷰의 텍셀 미만 인스턴스 제외, 프록셀 리스트 후보 1회, 게이트 통계 | VSM 정적/동적 페이지 분리, 굵은 상주 페이지·페이지 팽창, 그림자 뷰 HZB, HZB로 거른 무효화; 그 뒤 V 소프트웨어 래스터·클러스터 압축·스트리밍 연결 |
+| `w/tsr` | TSR resurrection·reprojection field·thin geometry·이력 해상도, 업스케일 뒤 모션 블러, 반투명 속도, 샤픈·렌즈 플레어, 장면 기준 컬러 그레이딩(결합 LUT) | — |
+| `w/cache` | 표면 캐시 해상도 피드백, 클러스터 LOD 카드 캡처, 캡처의 재질 층, radiosity 뒷면 재추적, 카드 없는 hit의 간접광, 수집·반사 커널 재대조 | 표면 캐시 직접광의 광원 함수 |
+| `w/coverage` | coverage 층: 가려진 프래그먼트 저장 안 함(깊이 버킷·타일 HiZ), 삼각형당 비용, 타일×깊이 구간 조명, 통계 | — |
+
+주 세션이 2026-10-03에 직접 넣은 것(코드 작성·빌드 통과, 실행 안 함): 태양 접촉 그림자(`shadow.vsm.screen_ray_length`), 재질 AO 맵의 간접광·스펙큘러 가림 적용(`mWordOcclusion`), 입자용 광량 볼륨의 광원 함수, 구름 태양 경로 24스텝 + 추적 텍셀 전용 디스패치.
 
 ## 1. 안개
 
@@ -110,11 +123,34 @@
 
 | | 현황 | 남은 것 |
 |---|---|---|
-| 피부 | A: 이중 GGX 로브 + 얇은 부분 투과광(`ShadeOpaque` LAYERED=3, `MegaLightsShade`). B: 화면 공간 SSS(`SubsurfaceScatter.hlsli`: Burley 프로파일, d = ℓ / s(A), s(A) = 1.9 − A + 3.5(A − 0.8)², 접평면 표본 16개, 알베도는 산란 뒤). 기본 평균 자유 경로 = 피부 실측 1.30 / 0.95 / 0.67 mm | 광선 hit·coverage 층의 피부, 1인칭 뷰모델 반지름, 면광원·평면 반사 뷰는 컴파일만 됨, 호스트 ABI에 파라미터 없음 |
-| 머리카락 | 가닥 기록 음영: 폭 평균 섬유 모델 + 이중 산란, 몸마다 64³ 밀도 볼륨(빛 쪽 섬유 수), 자체 MegaLights 인스턴스, 반투명 볼륨 SH의 간접광 | 다른 물체에 그림자 없음, 반사·GI에 없음, 근접 비용(373만 기록에서 +18 ms), 머리 그림자 경계의 계단 — 2단계 에이전트 진행 중(`char-hair2`) |
-| 눈 | 없음 | 각막 굴절·홍채 깊이·림버스(원본 `EyeBxDF`) |
-| 천 | Charlie sheen 층 있음(클리어코트와 배타) | fuzz 혼합 |
+| 피부 | A: 이중 GGX 로브 + 얇은 부분 투과광(`ShadeOpaque` LAYERED=3, `MegaLightsShade`). B: 화면 공간 SSS(`SubsurfaceScatter.hlsli`: Burley 프로파일, d = ℓ / s(A), s(A) = 1.9 − A + 3.5(A − 0.8)², 접평면 표본 16개, 알베도는 산란 뒤). 기본 평균 자유 경로 = 피부 실측 1.30 / 0.95 / 0.67 mm. **2026-10-03 추가(코드·빌드만, 실행 안 함)**: 광선 hit(반사·GI·카드 라디오시티·radiance cache·반투명 볼륨)이 법선 뒤쪽의 태양과 국소광 표본에서 얇은 부분 투과광 W를 받는다(`HitShading.hlsli`, `HitLocalLights.hlsli`, `rtHitTransmits`; hit의 그림자 광선 하나가 가림을 정한다 — 화면 공간 패스와 두 번째 로브는 hit에 없다). coverage 층의 MegaLights 인스턴스가 Subsurface 조각을 그 클래스의 커널(LAYERED3.FULL1)로 음영한다. 면광원을 통한 얇은 부분 투과광(뒤쪽 코사인 적분 × 중심 방향의 W / c)과 그 표본 가중치. 1인칭 뷰모델이 `viewmodel.fov_override_degrees`로 그려질 때 산란 패스가 vis 버퍼로 뷰모델 픽셀을 찾아 실제 광선(화면 평면 성분 ÷ 배율)으로 반지름을 잡는다 | 실행 검증 전체(이번 작업은 GPU에서 아무것도 돌리지 않았다). hit·coverage 조각에는 화면 공간 산란이 없다(Lambert). coverage 조각의 레코드별 루프(MegaLights 끔)는 면광원 투과광이 없다. 면광원·평면 반사 뷰의 피부는 여전히 실행으로 확인된 적이 없다 |
+| 머리카락 | 가닥 기록 음영: 폭 평균 섬유 모델 + 이중 산란, 몸마다 64³ 밀도 볼륨(빛 쪽 섬유 수), 자체 MegaLights 인스턴스, 반투명 볼륨 SH의 간접광. 2단계(브랜치 `w/hair`, 4.1절): 다른 표면과 다른 몸의 머리카락에 드리우는 그림자, 그림자 경계의 계단을 없애는 행진 규칙과 지터, 세그먼트 단위 음영·기록 목록·정렬 크기, 반사 광선과 최종 수집 광선의 프록시. **빌드만 했다. GPU에서 실행한 적이 없다(테스트·그림·시간 모두 없음)** | 4.1절의 실행 확인 전부. coverage 층의 클러스터 프래그먼트·안개·`mega_lights` 없는 국소광에는 머리 그림자가 없다. 광선이 보는 머리카락에는 간접광과 섬유 모델이 없다. 기록 수(가닥이 지키는 광학 두께 × 실루엣)는 그대로다 |
+| 눈 | **2026-10-03 구현(코드·빌드만, 실행 안 함)**. 눈 = 홍채가 있는 Subsurface 재질(`scene::Material::eyeIrisRadius > 0`; 새 클래스 없음, GPU 플래그 `MATERIAL_EYE` + 층 버퍼의 64 B 레코드). 구 모양 메시 하나가 공막·홍채·각막이다: uv (0.5, 0.5)가 광축이 나오는 점, `eyeAxis`가 메시 object 공간의 광축. 리졸브(`Passes/Material/MaterialEye.hlsli`): 픽셀 삼각형의 rest 변과 변형된 변으로 광축을 월드로 옮기고(강체·스키닝·모프 공통, 탄젠트 불필요), 시선을 음영 법선에서 굴절시켜(수양액 굴절률) 각막 캡 아래 홍채 평면과 만나는 점의 uv에서 base colour를 읽는다 — 홍채 깊이·시차, 동공 배율, 림버스 어두운 고리. 픽셀마다 눈 워드 하나(홍채 평면 법선 10+10비트, 마스크 6비트, caustic 가중 6비트)를 비등방 워드 텍스처에 쓴다(재질 워드는 건드리지 않는다). 음영(`ShadeOpaque` LAYERED=3, `SubsurfaceDirect`, `MegaLightsShade`): 스펙큘러는 표면 법선의 한 로브(각막), 확산은 마스크만큼 홍채 평면에서 받고 caustic 항 0.8 + 0.2(p + 1)cos^p(c·l)로 비스듬한 빛이 반대편에 모인다(태양·점광·스폿·면광원). 공막은 피부 SSS로 산란하고 홍채는 자기 빛을 유지한다(평균 자유 경로 × (1 − 마스크)). 스위치 `shading.eye_model`. 모델 정의는 `MaterialModel.h` "Eye"(C++이 기준, HLSL은 거울). 진단 씬 `shading_ball`에 10배 크기 눈 두 개(front 카메라를 본다)와 카메라 `eye_close` | 실행 검증 전체. 광선 hit·coverage 조각·카드에서는 굴절 없는 한 로브 Subsurface로 보인다(base colour는 표면 uv). 홍채의 간접광은 표면 법선의 것이다. MegaLights는 각막 표면의 지평선 아래 광원을 그 픽셀에 뽑지 않는다(홍채 평면은 볼 수 있어도). 홍채 전용 노멀맵 없음(평면 + caustic 기울기) |
+| 천 | Charlie sheen 층(클리어코트와 배타). **2026-10-03 추가(코드·빌드만, 실행 안 함)**: cloth 혼합 `scene::Material::cloth` ∈ [0, 1] — f = C·f_sh + (f_d + (1 − cloth)·f_spec)(1 − max(C)·E_sh). 0이면 기존 sheen과 비트 단위로 같고 1이면 fuzz 아래 GGX 하이라이트가 없다. 원본 Cloth 모델(FuzzColor, Cloth)은 sheenColor = Cloth × FuzzColor, cloth = Cloth. 적용: 태양·점광·스폿·면광원 LTC 로브·간접 스펙큘러(`ShadeOpaque` LAYERED=2), MegaLights, coverage 사전 음영 레코드, 광선 hit, 참조 패스 트레이서(`evaluateSheen`) | 실행 검증 전체. sheen과 클리어코트는 여전히 배타. fuzz 로브의 Fresnel(원본은 Schlick(FuzzColor))은 없다: 색은 상수 C |
 | 클리어코트 | 있음 | — |
+
+게임 입력(2026-10-03, 코드·빌드만): `UnxSceneSetCharacterShading(renderer, material, UnxCharacterShadingDesc*)` — ABI 6 안의 선택 export. 재질 기술(`UnxMaterialDesc`)에 없는 피부(평균 자유 경로, 두 로브의 혼합과 거칠기 배율)·눈(홍채 반지름·깊이·림버스 폭과 어둡기·동공 배율·concavity·굴절률·광축)·천(cloth) 값을 이미 추가된 재질에 준다. 커밋 전에는 씬 재질에 바로, 커밋 뒤에는 다음 프레임의 재질 편집으로 들어간다(동공 배율을 매 프레임 바꿀 수 있다). `UnxSceneEditMaterials`로 재질을 다시 기술해도 클래스가 같으면 이 값들이 유지된다. 씬 파일에는 선택 블록 "CLTH", "EYES"로 저장된다(없는 씬의 바이트와 해시는 그대로). C# 브리지는 이 저장소 밖이라 고치지 않았다.
+
+테스트(작성만, 실행 안 함): `unx_unit_tests`의 `eye_model_and_scene_blocks`(CPU: 각막 캡·홍채 점·마스크와 림버스·눈 워드·확산 코사인·GPU 레코드·씬 블록), `eye_model_on_the_gpu`(`Passes/Test/EyeModel.hlsl` 대 C++), `unx_test_scene_sheen` 7번(cloth 혼합: 0에서 비트 일치, 선형성, 퍼니스, 블록), `unx_test_scenegen`의 shading_ball 내용, `unx_test_host_hostabi`가 캐릭터 재질 세 개를 ABI로 넘긴다.
+
+### 4.1 머리카락 2단계 (2026-10-03, 브랜치 `w/hair`)
+
+`char-hair2`의 중단 시점 작업을 합치고 이어서 썼다. **전 트랙 빌드만 통과했다. 테스트 실행 파일·still·게이트를 한 번도 돌리지 않았다**(사용자 지시: GPU를 쓰지 않는다). 아래는 코드에 있는 것이고, 그림과 수치로 확인된 것은 없다.
+
+| 항목 | 코드에 있는 것 | 파일 · 스위치 |
+|---|---|---|
+| 1. 다른 물체에 드리우는 그림자 | 태양: S의 화면 가시성(VSM 조회 결과)의 태양 슬롯 × 표면에서 태양까지 밀도 볼륨의 투과율 exp(−섬유 수) (`s.shadow.hair`). 국소광: MegaLights 표본의 가중치 × 표본 광원까지의 투과율, 1/256 아래는 가려진 표본으로(`m.ml.hair`; 머리카락 자체의 인스턴스에는 적용하지 않는다). 다른 몸의 가닥: 가닥이 자기 몸의 섬유에 더해 빛까지의 경로에 있는 다른 몸의 섬유를 센다(수염 위의 머리, 옆 사람의 머리). 국소광까지의 행진은 광원 거리에서 끝난다 | `Passes/Hair/HairShadow.hlsl`, `HairDensity.hlsli`(`hairTransmittance`, `hairFibreCountOthers`), `VsmSystem.cpp`, `MegaLights.cpp`, `CoverageHair.hlsl`. `shading.hair_shadows`, `shading.hair_shadow_steps` |
+| 2. 그림자 경계의 계단 | 원인(코드): 가닥의 행진이 경로 전체의 스텝 길이로 텍스처 하나를 골랐다. 16스텝에서 경로가 24셀(머리 기준 29 cm)을 넘으면 4×4×4 평균(4.7 cm)만, 그것도 최대 6~7셀 간격으로 읽었고, 그룸을 지나는 경로는 거의 다 그랬다. 고른 텍스처가 바뀌는 곳에는 선이 생긴다. 지금: 긴 경로는 처음 steps/2 셀을 한 셀씩 읽고(가닥 바로 옆의 머리카락이 자기 그림자의 경계를 만든다) 나머지는 평균을 거친 셀 한 칸씩 읽는다(최대 steps 칸; 표본 수는 16 → 8 + 나머지 길이/4셀). 머리카락이 아닌 표면의 행진은 거친 셀 한 칸씩 가며 빈 칸은 건너뛰고 찬 칸은 셀 표본 4개로 읽는다(경로 전체가 셀 해상도). 모든 행진의 표본 위상을 픽셀·기록·세그먼트 점과 프레임마다 새로 뽑는다 — 남는 셀 무늬는 시간 필터가 지우는 잡음이 된다(원본의 voxel 순회와 같은 방식) | `HairDensity.hlsli`, `CoverageHair.hlsl`(`hairJitter`). `shading.hair_density_steps`, `shading.hair_march_jitter` |
+| 3. 근접 비용 | 가닥 쪽 계산(태양 커널, 간접광)을 기록마다가 아니라 기록이 있는 세그먼트마다 3점에서 한다(`m.hair.visible`, `m.hair.strands`). 밴드 A 표면 앞의 기록만 목록에 넣어 64스레드 그룹으로 음영한다. 목록 항목이 기록의 타일을 함께 가진다(블록마다 한 번 아는 값; 전에는 기록마다 타일 목록을 이분 탐색했다: 타일 수의 log2회, 12~15회 조회). 무거운 픽셀의 정렬망을 run 크기에 맞춘다(17~32개 run: 16쌍 × 15단, 전에는 512쌍 × 55단 고정), run이 하나인 픽셀은 병합 없이 정렬된 쌍을 그대로 쓴다. 가까운 hair 기록·먼 hair 기록 찾기는 타일 블록 단위 dispatch. LOD가 남기는 가닥의 세그먼트만 프레임 버퍼에 쓴다: 가닥을 해시 순서로 두면 남는 가닥은 그 순서의 앞 K개다(원본이 곡선을 재배열해 LOD를 앞 N개로 두는 것과 같다). 전에는 버린 가닥도 반지름 0으로 자리를 차지해 세그먼트 버퍼·V의 mesh 그룹·밀도 splat·세그먼트 비트와 조명 버퍼가 그룸 전체 크기였다(`hair_ball`: 세그먼트 88만 개 중 그리는 것은 약 7.5만 개 [계산: 비율 0.085]) | `CoverageHair.hlsl` MODE 5, 7~11, `CoverageHeavySort.hlsl`(SIZE 0/1), `CoverageHeavyRound.hlsl`, `ShadingSystem.cpp`, `HairSystem.cpp`·`HairSimulate.hlsl` STEP 2. `shading.hair_segment_shading` |
+| 4. 반사·GI | 그룸은 TLAS에 없다. 광선의 프록시는 밀도 볼륨이다: 광선의 첫 섬유(몸마다 섬유 수의 지수분포에서 뽑은 문턱, 광선마다 한 번)가 광선의 hit보다 앞이면 그것이 hit이다. 그룸 바깥을 향하는(평균 밀도 기울기의 반대) 무광 표면으로 음영한다: 머리 재질의 base colour, 태양 그림자 광선 1개 + 국소광 표본 1개와 그 그림자 광선, 각각 점에서 빛까지의 머리카락 투과율. 반사(`ReflectionLumenTrace`)와 최종 수집(`LgTrace`)의 월드 광선에 있다. 두 화면 추적은 화면 hit보다 앞에 섬유가 있는 광선을 월드 추적에 넘긴다(같은 픽셀·프레임의 같은 뽑기; 화면 깊이에는 머리카락이 없다). 원본은 같은 광선에서 hair voxel을 순회하고 hit을 검은색으로 둔다 | `RayTracing/HitHair.hlsli`, `RayScene::recordHair`(조명 격자 헤더 22번 워드), `LgTrace.hlsl`, `LgScreenTrace.hlsl`, `ReflectionLumenTrace.hlsl`, `ReflectionScreenTrace.hlsl`. `raytracing.hair` |
+
+비용 점검에서 하지 않은 것과 이유 [계산]:
+
+- 기록 수 상한. `hair_ball`의 373만 기록은 가닥의 투영 면적이다: LOD가 가닥 수를 줄이면 폭을 1/비율로 넓혀 광학 두께를 지키므로 기록 수 ≈ 광학 두께(그룸당 약 5.5) × 실루엣 픽셀 × (폭 + 1)/폭 이고, 남기는 가닥의 폭은 거리와 무관하게 지름 × 가닥 수 / (8 × 길이) 픽셀(이 씬 1.09)이다. 줄이려면 광학 두께를 깎아야 한다.
+- 카메라 쪽 광학 두께로 뒤 기록을 버리는 방법: 두께 4에서 자르면 1.8 %가 뒤 배경으로 새고(밝은 하늘 앞에서 보인다), 6에서 자르면 머리 위(앞쪽 껍질 평균 3~4)에서는 버릴 것이 거의 없다. 새지 않게 하려면 합성이 남은 몫을 머리카락으로 채워야 하는데, 합성 커널(`CoverageComposite` 197,232 B / 한도 204,800 B)을 고쳐야 한다. 하지 않았다.
+- 합성은 이미 마스크 합집합이 차면 멈춘다. 남은 비용은 기록당 정렬과 합성이다.
+
+실행해서 확인할 것(순서대로): `unx_test_hair_hairtests`(밀도 볼륨 3절: 파라미터 배치가 바뀌었다), `unx_test_visibility_haircoveragetests`, `unx_test_host_hosthair`, `hair_ball` still(자기 그림자 경계, 바닥·두피의 그림자, 두 머리 사이 그림자), 거울이나 젖은 바닥이 있는 씬의 반사, 그 뒤 시간 측정(`m.hair*`, `m.coverage*`, `r.refl.lumen.trace`, `r.gi.lg.trace`).
 
 ## 5. 구름
 

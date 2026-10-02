@@ -69,6 +69,7 @@ struct Api
     UNX_FN(UnxFrameStatsLatest)
     UNX_FN(UnxFrameGraphStatsLatest)
     UNX_FN(UnxVideoMemory)
+    UNX_FN(UnxSceneSetCharacterShading)
 #undef UNX_FN
     void load(const std::filesystem::path& path)
     {
@@ -102,6 +103,7 @@ struct Api
         UNX_FN(UnxFrameStatsLatest)
         UNX_FN(UnxFrameGraphStatsLatest)
         UNX_FN(UnxVideoMemory)
+        UNX_FN(UnxSceneSetCharacterShading)
 #undef UNX_FN
     }
     void ok(int32_t r, const char* what) const
@@ -141,7 +143,29 @@ void addLayerMaterials(scene::Scene& s)
     cloth.roughness = 0.8f;
     cloth.sheenColor = { 0.7f, 0.5f, 0.6f };
     cloth.sheenRoughness = 0.35f;
+    cloth.cloth = 0.6f;  // (the cloth blend: UnxSceneSetCharacterShading)
     s.materials.push_back(cloth);
+    scene::Material skin;  // character shading: skin with its own mean free path and lobes, and an eye
+    skin.name = "abi skin deep";
+    skin.cls = scene::MaterialClass::Subsurface;
+    skin.baseColor = { 0.8f, 0.56f, 0.45f };
+    skin.transmission = 0.3f;
+    skin.subsurfaceMeanFreePath = { 0.004f, 0.002f, 0.001f };
+    skin.subsurfaceLobeMix = 0.7f;
+    skin.subsurfaceLobeRoughness = { 0.6f, 1.5f };
+    s.materials.push_back(skin);
+    scene::Material eye;
+    eye.name = "abi eye";
+    eye.cls = scene::MaterialClass::Subsurface;
+    eye.roughness = 0.1f;
+    eye.specular = 0.31f;
+    eye.eyeIrisRadius = 0.2f;
+    eye.eyeIrisDepth = 0.5f;
+    eye.eyeLimbusDarkening = 0.4f;
+    eye.eyePupilScale = 1.5f;
+    eye.eyeIrisConcavity = 0.7f;
+    eye.eyeAxis = { 0, 1, 0 };
+    s.materials.push_back(eye);
     scene::Material glass;
     glass.name = "abi glass";
     glass.cls = scene::MaterialClass::Glass;
@@ -241,6 +265,7 @@ void pushScene(const Api& api, UnxRenderer r, const scene::Scene& s)
         copyName(d.name, t.name);
         api.ok(api.UnxSceneAddTexture(r, &d, nullptr), "UnxSceneAddTexture");
     }
+    uint32_t materialIndex = 0;
     for (const scene::Material& m : s.materials)
     {
         UnxMaterialDesc d{};
@@ -280,6 +305,27 @@ void pushScene(const Api& api, UnxRenderer r, const scene::Scene& s)
         d.occlusionTexture = m.occlusionTexture;
         copyName(d.name, m.name);
         api.ok(api.UnxSceneAddMaterial(r, &d, nullptr), "UnxSceneAddMaterial");
+        // character shading (skin, eye, cloth): the fields the description does not carry
+        if (m.cls == scene::MaterialClass::Subsurface || m.cloth != 0)
+        {
+            UnxCharacterShadingDesc c{};
+            c.size = sizeof c;
+            c.version = 1;
+            put3(c.subsurfaceMeanFreePath, m.subsurfaceMeanFreePath);
+            c.subsurfaceLobeMix = m.subsurfaceLobeMix;
+            c.subsurfaceLobeRoughness[0] = m.subsurfaceLobeRoughness.x, c.subsurfaceLobeRoughness[1] = m.subsurfaceLobeRoughness.y;
+            c.cloth = m.cloth;
+            c.eyeIrisRadius = m.eyeIrisRadius;
+            c.eyeIrisDepth = m.eyeIrisDepth;
+            c.eyeLimbusWidth = m.eyeLimbusWidth;
+            c.eyeLimbusDarkening = m.eyeLimbusDarkening;
+            c.eyePupilScale = m.eyePupilScale;
+            c.eyeIrisConcavity = m.eyeIrisConcavity;
+            c.eyeIor = m.eyeIor;
+            put3(c.eyeAxis, m.eyeAxis);
+            api.ok(api.UnxSceneSetCharacterShading(r, materialIndex, &c), "UnxSceneSetCharacterShading");
+        }
+        ++materialIndex;
     }
     for (const scene::Mesh& m : s.meshes)
     {

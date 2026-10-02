@@ -7,6 +7,8 @@
 //   ray     the pixel's GGX visible-normal direction - the draw the screen trace made for the same pixel and frame
 //           (ReflectionReuse.hlsli reuseRay); it starts where the screen trace ended in front of the scene
 //           (results[job].x, less the pull-back; 0 without screen traces). A job the screen trace finished is skipped.
+//   hair    the ray's first fibre in E's density volume, where it lies before the hit (RayTracing/HitHair.hlsli;
+//           raytracing.hair): the groom's proxy, lit by the sun's shadow ray and one local-light sample.
 //   miss    the sky in the ray's direction.
 //   hit     where the view sees the hit point (the depth buffer at its pixel within the relative thickness, the surface
 //           there turned to the camera by more than the normal threshold): the previous frame's colour there
@@ -28,6 +30,7 @@
 #include "Passes/Reflection/ScreenTrace.hlsli"
 #include "Passes/Reflection/ReflectionLumenHit.hlsli"
 #include "Passes/Atmosphere/FogVolume.hlsli"
+#include "RayTracing/HitHair.hlsli"
 
 #define RL_BAND 87381u
 #define RL_FLAG_SCREEN_START 1u
@@ -66,6 +69,25 @@ void ReflectionLumenTraceGen()
     const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_REFLECTION | RT_MASK_EMITTER);
     // the fog along the ray (FogVolume.hlsli fogOverRay): the surface's place in the view
     const float2 fogUv = (float2(pixel) + 0.5) / float2(size);
+    // the ray cone of the pixel after the lobe (the hit's texture footprint)
+    const float pixelSpread = 2 * g_tanHalfFovY / g_viewHeight;
+    const float coneWidth = pixelSpread * s.linearDepth;
+    const float coneSpread = pixelSpread + 2 * tan(reflectionLobeHalfAngle(s.roughness, dot(s.normal, s.view)));
+    // the grooms on the ray (HitHair.hlsli): the ray's first fibre from its surface point - the draw the screen trace made
+    // for this pixel and frame - where it lies before the hit
+    const uint hairParams = rtHairParams(scene);
+    if (hairParams != UNX_NONE)
+    {
+        const uint seed = rtHairSeed(pixel, frame);
+        const RtHairHit hair = rtHairFirst(hairParams, s.position, direction, hit.t < 0 ? giRayLength() : hit.t, seed);
+        if (hair.t >= 0)
+        {
+            float3 radiance = rtHairRadiance(scene, hairParams, hair, s.position, direction, coneWidth + hair.t * coneSpread, 1e-3 + 2e-4 * s.linearDepth, seed, true, true);
+            if (any(isnan(radiance)) || any(isinf(radiance))) radiance = 0;
+            results[job] = reflPackResult(reflStorable(fogOverRay(fogUv, s.linearDepth, r.Origin, direction, hair.t, radiance)), hair.t, 0);
+            return;
+        }
+    }
     if (hit.t < 0)
     {
         results[job] = reflPackResult(reflStorable(fogOverRay(fogUv, s.linearDepth, r.Origin, direction, 65536.0, giSkyRadiance(direction))), giRayLength(), 0);
@@ -102,10 +124,6 @@ void ReflectionLumenTraceGen()
             }
         }
     }
-    // the ray cone of the pixel after the lobe (the hit's texture footprint)
-    const float pixelSpread = 2 * g_tanHalfFovY / g_viewHeight;
-    const float coneWidth = pixelSpread * s.linearDepth;
-    const float coneSpread = pixelSpread + 2 * tan(reflectionLobeHalfAngle(s.roughness, dot(s.normal, s.view)));
     const RlHit shade = rlShadeHit(scene, hit, r.Origin, direction, coneWidth, coneSpread, P[4].z, P[3].w, true);
     results[job] = reflPackResult(reflStorable(fogOverRay(fogUv, s.linearDepth, r.Origin, direction, hit.t, shade.radiance)), hit.t, shade.motion);
 }

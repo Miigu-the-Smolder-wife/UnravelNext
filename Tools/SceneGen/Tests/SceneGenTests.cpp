@@ -115,7 +115,8 @@ int main(int argc, char** argv)
             logf("%-12s ok  %s\n", a.name.c_str(), ha.substr(0, 16).c_str());
         }
         // Diagnostic scenes (diagnosticScenes: not in the sweep above): deterministic, valid, named, a static path per camera;
-        // shading_ball's content (SceneGen.h): the five spheres' materials, the 5 mm slab, the two lights and cameras.
+        // shading_ball's content (SceneGen.h): the five spheres' materials, the 5 mm slab, the cloth sphere and the two eyes
+        // above them, the two lights and the cameras.
         for (scenegen::SceneId id : scenegen::diagnosticScenes())
         {
             const scenegen::Request rq{ id, 7, 1.0f };
@@ -152,19 +153,36 @@ int main(int argc, char** argv)
             else CHECK(scenegen::grooms(rq).empty());
             if (id == scenegen::SceneId::ShadingBall)
             {
-                CHECK(a.cameras.size() == 3 && a.cameras[0].name == "front" && a.cameras[1].name == "back" && a.cameras[2].name == "skin_close");
+                CHECK(a.cameras.size() == 4 && a.cameras[0].name == "front" && a.cameras[1].name == "back" && a.cameras[2].name == "skin_close" &&
+                      a.cameras[3].name == "eye_close");
                 CHECK(a.lights.size() == 2 && a.lights[0].castShadow && !a.lights[1].castShadow);
-                CHECK(a.instances.size() == 7);
-                uint32_t subsurface = 0, oneLobe = 0, sheen = 0, coat = 0;
+                CHECK(a.instances.size() == 10);
+                uint32_t subsurface = 0, oneLobe = 0, sheen = 0, coat = 0, clothBlend = 0, eyes = 0;
                 for (const scene::Material& m : a.materials)
                 {
-                    const bool skin = m.cls == scene::MaterialClass::Subsurface;
+                    const bool skin = m.cls == scene::MaterialClass::Subsurface && m.eyeIrisRadius == 0.0f;
                     subsurface += skin;
                     oneLobe += skin && m.subsurfaceLobeMix == 1.0f && m.subsurfaceLobeRoughness.x == 1.0f && m.subsurfaceLobeRoughness.y == 1.0f && m.transmission == 0.0f;
                     sheen += m.sheenColor.x > 0;
                     coat += m.clearcoat > 0;
+                    clothBlend += m.sheenColor.x > 0 && m.cloth == 1.0f;
+                    eyes += m.cls == scene::MaterialClass::Subsurface && m.eyeIrisRadius == 0.245f && m.baseColorTexture != scene::kNone && m.transmission == 0.0f;
                 }
-                CHECK(subsurface == 3 && oneLobe == 1 && sheen == 1 && coat == 1);
+                CHECK(subsurface == 3 && oneLobe == 1 && sheen == 2 && coat == 1 && clothBlend == 1 && eyes == 1);
+                // the two eyes: one mesh whose uv centre is on its +Z axis, each instance's +Z towards the front camera
+                uint32_t eyeInstances = 0;
+                for (const scene::Instance& in : a.instances)
+                {
+                    const scene::Mesh& m = a.meshes[in.mesh];
+                    if (m.name != "eye") continue;
+                    ++eyeInstances;
+                    const float3 centre{ in.transform.m[0][3], in.transform.m[1][3], in.transform.m[2][3] };
+                    const float3 axis = normalize(in.transform.transformVector({ 0, 0, 1 }));
+                    CHECK(length(axis - normalize(a.cameras[0].position - centre)) < 1e-5f);
+                    for (size_t v = 0; v < m.positions.size(); ++v)
+                        CHECK(std::fabs(m.uv0[v].x - (0.5f + 0.5f * m.positions[v].x)) < 1e-6f && std::fabs(m.uv0[v].y - (0.5f + 0.5f * m.positions[v].y)) < 1e-6f);
+                }
+                CHECK(eyeInstances == 2);
                 bool slab = false;
                 for (const scene::Mesh& m : a.meshes)
                 {

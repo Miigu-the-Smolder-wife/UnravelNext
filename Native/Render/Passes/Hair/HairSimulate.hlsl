@@ -5,8 +5,10 @@
 //           substeps x (nodes x (1 + localIterations) + 2 x nodes x capsules) per thread)
 //   STEP 1: per guide, its nodes at the frame time (tick states interpolated) and twist-free frames transported from the
 //           root frame along the strand
-//   STEP 2: per follow strand, its nodes (guide node + the rest offset in the guide node's frame, spread to the tip) and
-//           its segments (camera-relative end points and radii; LOD: a strand outside the kept subset writes radius 0)
+//   STEP 2: per follow strand the LOD keeps, its nodes (guide node + the rest offset in the guide node's frame, spread
+//           to the tip) and its segments (camera-relative end points and radii). Thread k writes the k-th kept strand's
+//           segments at place k: every strand in its own order when all are kept, else the k-th of the body's LOD order
+//           (the follows by rising hash; a keep threshold leaves the first 'kept' of them)
 // Constants (raw SRV, HairConstants below).
 #include "Bindless.hlsli"
 
@@ -21,7 +23,7 @@ struct HairConstants
     uint capsuleOffset, frameNodes, frameRotations, followBuffer;  // capsules: 2 float4 each (a, radius), (b, 0)
     uint segments, localIterations, substeps, lodKeep;  // lodKeep: follows with hash < lodKeep are drawn (2^32 fraction;
                                                   // 0xFFFFFFFF = all)
-    uint segmentBase, pad0, pad1, pad2;
+    uint segmentBase, kept, pad1, pad2;           // kept: the strands drawn this frame (the first of the LOD order)
     float3 gravity; float damping;
     float3 wind; float dt;
     float globalStiffness, globalRange, localStiffness, dftlDamping;
@@ -213,16 +215,17 @@ void main(uint3 id : SV_DispatchThreadID)
         rotations[base + i] = frame;
     }
 #else
-    const uint f = id.x;
-    if (f >= c.follows) return;
-    StructuredBuffer<float4> follow = ResourceDescriptorHeap[c.followBuffer];  // (offset xyz, guide), (tipSpread, hash, 0, 0)
+    const uint k = id.x;
+    if (k >= c.kept) return;
+    // (offset xyz, guide), (tipSpread, hash, the k-th follow of the LOD order, 0)
+    StructuredBuffer<float4> follow = ResourceDescriptorHeap[c.followBuffer];
     StructuredBuffer<float4> nodes = ResourceDescriptorHeap[c.frameNodes];
     StructuredBuffer<float4> rotations = ResourceDescriptorHeap[c.frameRotations];
     RWStructuredBuffer<float4> segments = ResourceDescriptorHeap[c.segments];
+    const uint f = c.kept == c.follows ? k : asuint(follow[2 * k + 1].z);
     const float4 f0 = follow[2 * f], f1 = follow[2 * f + 1];
     const uint guide = asuint(f0.w), base = guide * c.nodes;
-    const bool kept = asuint(f1.y) < c.lodKeep || c.lodKeep == 0xFFFFFFFFu;
-    const uint firstSegment = c.segmentBase + f * (c.nodes - 1);
+    const uint firstSegment = c.segmentBase + k * (c.nodes - 1);
     float3 previous = 0;
     for (uint i = 0; i < c.nodes; ++i)
     {
@@ -232,8 +235,8 @@ void main(uint3 id : SV_DispatchThreadID)
         {
             const float r0 = lerp(c.rootRadius, c.tipRadius, float(i - 1) / float(c.nodes - 1)) * c.radiusScale;
             const float r1 = lerp(c.rootRadius, c.tipRadius, s) * c.radiusScale;
-            segments[2 * (firstSegment + i - 1)] = float4(previous, kept ? r0 : 0);
-            segments[2 * (firstSegment + i - 1) + 1] = float4(p, kept ? r1 : 0);
+            segments[2 * (firstSegment + i - 1)] = float4(previous, r0);
+            segments[2 * (firstSegment + i - 1) + 1] = float4(p, r1);
         }
         previous = p;
     }

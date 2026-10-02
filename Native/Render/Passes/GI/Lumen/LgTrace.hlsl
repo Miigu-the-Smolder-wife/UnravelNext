@@ -12,6 +12,9 @@
 // gi.lumen_hit_fallback - the world cache's irradiance; without the fallback its indirect light is 0, as the
 // reference's invalid surface-cache sample. A ray that meets an analytic area light's proxy returns 0 (M shades
 // those lights; the proxy still occludes). A miss returns the sky.
+// E's grooms (RayTracing/HitHair.hlsli; raytracing.hair): the ray's first fibre in the hair density volume, where it lies
+// before the hit, is the hit - the groom's proxy, lit by the sun's shadow ray and one local-light sample; the bounce
+// light behind it is not seen.
 // Output: radiance x exposure (RGBA16F, a unused) and the trace word (lgEncodeTrace: distance, hit, moving: the hit
 // moves relative to the probe, |probe speed - hit speed| / max(probe depth, 1 m) > P[4].w).
 // P[0] = { world cache SRV, ray info SRV (R16_UINT), trace radiance UAV, trace word UAV (R32_UINT) },
@@ -40,6 +43,7 @@
 #include "Passes/SurfaceCache/CardLighting.hlsli"
 #include "Passes/GI/Lumen/LgRadianceCache.hlsli"
 #include "RayTracing/HitLocalSample.hlsli"
+#include "RayTracing/HitHair.hlsli"
 
 float lgBias(float3 p) { return 1e-3 + 2e-4 * distance(p, g_cameraPosition); }
 // The world ray after a screen trace starts this much before the point the screen walk reached (m; Unreal's hardware
@@ -120,7 +124,19 @@ void LgTraceGen()
     uint statClass = 0;  // experiment 2097152: 1 = the hit read no card, 3 = it read its cards
     float distanceToHit = giRayLength();
     bool reachedCache = false;
-    if (hit.t < 0 && coverage.valid)
+    // the grooms on the ray: its first fibre from the probe's point (the draw LgScreenTrace made for this texel and frame)
+    RtHairHit hair;
+    hair.t = -1;
+    hair.body = hair.material = 0;
+    const uint hairParams = rtHairParams(scene);
+    if (hairParams != 0xFFFFFFFFu) hair = rtHairFirst(hairParams, positionSpeed.xyz, r.Direction, hit.t < 0 ? r.TMax : hit.t, rtHairSeed(coord, lgFrame()));
+    if (hair.t >= 0)
+    {
+        isHit = true;
+        distanceToHit = hair.t;
+        radiance = rtHairRadiance(scene, hairParams, hair, positionSpeed.xyz, r.Direction, hair.t * footprintPerMetre, bias, seed, (P[3].w & 16) == 0, (P[3].w & 128) == 0);
+    }
+    else if (hit.t < 0 && coverage.valid)
     {
         const LrcParams rc = lrcParams(P[5].y);
         radiance = cached.rgb;
@@ -209,7 +225,7 @@ void LgTraceGen()
             if (!fromCards) L.irradiance += giFarSkyIrradiance(s.position, s.normal, float(P[4].y >> 16));
             const float3 l = normalize(g_sunDirection);
             const float cosSun = dot(s.normal, l);
-            if (!fromCards && (cosSun > 0 || (m.classFlags & 0xFFu) == MATERIAL_FOLIAGE) && (P[3].w & 16) == 0)
+            if (!fromCards && (cosSun > 0 || rtHitTransmits(m)) && (P[3].w & 16) == 0)
             {
                 const float3 e0 = giSunIlluminance(s.position);
                 if (any(e0 > 0))

@@ -193,9 +193,22 @@ struct MaterialLayers  // 64 B
     float anisotropySin;
     float filmCoverage;         // A9 thin film (MaterialThinFilm; MATERIAL_LAYERS 1.2): cover w and the film's F table
     uint32_t filmTable;         // (scene::model::filmTable, kFilmTableMu RGB points) as a float offset into coatTable
-    float reserved[3];
+    float cloth;                // cloth blend (with MaterialSheen): the share of the base's specular lobe the fuzz replaces
+    float reserved[2];
 };
 static_assert(sizeof(MaterialLayers) == 64);
+
+// The record of an eye material (MaterialEye: a Subsurface material with an iris; scene::model::Eye) - one of the layer
+// buffer's records, at the index in classFlags bits 16..31 (a Subsurface material has no layers).
+struct MaterialEyeRecord  // 64 B
+{
+    float irisRadius, irisDepth, limbusWidth, limbusDarkening;
+    float pupilScale, concavity, eta, reserved0;
+    float axis[3];  // the optical axis in the mesh's object space (unit)
+    float reserved1;
+    float reserved2[4];
+};
+static_assert(sizeof(MaterialEyeRecord) == sizeof(MaterialLayers));
 
 // Textures of one material as M's texture system publishes them (GpuScene::setMaterialTextures, INTERFACES 6.3 v1.10):
 // bindless SRV indices (kNone = none; the SRVs belong to M) and clamp bits (MaterialTextureBit).
@@ -223,6 +236,7 @@ enum MaterialFlags : uint32_t
     MaterialAnisotropic = 1u << 4,  // A9: the record's anisotropy is used (with MaterialLayered; a coat may also be present)
     MaterialThinFilm = 1u << 5,     // A9: the record's film is used (with MaterialLayered; no coat, sheen or anisotropy)
     MaterialEmissiveVisibleOnly = 1u << 6,  // v1.92 (defect queue 13 (76)): emissive for primary and reflection rays only (GI: 0)
+    MaterialEye = 1u << 7,          // a Subsurface material with an iris: a MaterialEyeRecord, index in classFlags bits 16..31
 };
 
 struct Light  // 80 B

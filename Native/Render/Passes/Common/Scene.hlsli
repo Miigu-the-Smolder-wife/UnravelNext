@@ -99,9 +99,28 @@ struct GpuMaterialLayers  // v1.76 (A9): gpu::MaterialLayers, 64 B
     float2 anisotropyRotation;  // (cos, sin)
     float filmCoverage;     // A9 thin film (MATERIAL_THIN_FILM; MaterialModel.hlsli modelFilmBegin): cover w, F table
     uint filmTable;         // offset in g_coatTable (scene::model::filmTable: MODEL_FILM_MU RGB points)
-    float3 reserved;
+    float cloth;            // cloth blend (with MATERIAL_SHEEN): the share of the base's specular lobe the fuzz replaces
+    float2 reserved;
 };
 GpuMaterialLayers loadMaterialLayers(uint i) { StructuredBuffer<GpuMaterialLayers> b = ResourceDescriptorHeap[g_materialLayers]; return b[i]; }
+
+// The record of an eye material (MATERIAL_EYE: a Subsurface material with an iris; gpu::MaterialEye, 64 B), in the layer
+// records' buffer and at the same index bits (MaterialModel.hlsli "Eye", Passes/Material/MaterialEye.hlsli).
+struct GpuMaterialEye
+{
+    float irisRadius;       // uv units around (0.5, 0.5): where the iris ends (the limbus)
+    float irisDepth;        // the cornea's apex above the iris plane, in iris radii
+    float limbusWidth;      // in iris radii: the band over which the iris gives way to the sclera
+    float limbusDarkening;  // [0, 1]: the limbal ring
+    float pupilScale;       // the iris texture's radial remap (1 = as painted, > 1 a wider pupil)
+    float concavity;        // the caustic normal's tilt at the limbus (0 = the flat iris plane)
+    float eta;              // the aqueous humour's refractive index
+    float reserved0;
+    float3 axis;            // the optical axis in the mesh's object space (unit, out of the eye)
+    float reserved1;
+    float4 reserved2;
+};
+GpuMaterialEye loadMaterialEye(uint i) { StructuredBuffer<GpuMaterialEye> b = ResourceDescriptorHeap[g_materialLayers]; return b[i]; }
 
 struct GpuTerrainLayer  // v1.74: a Standard material read at terrain uv0 x scale + offset
 {
@@ -159,6 +178,7 @@ struct GpuVisibleCluster
 #define MATERIAL_ANISOTROPIC (1u << 12)  // A9: the record's anisotropy is used (with MATERIAL_LAYERED)
 #define MATERIAL_THIN_FILM (1u << 13)    // A9: the record's thin film is used (with MATERIAL_LAYERED)
 #define MATERIAL_EMISSIVE_VISIBLE_ONLY (1u << 14)  // v1.92 (defect queue 13 (76)): the emission is seen by primary and reflection rays only; GI update rays and the emissive cache take 0 (rtEmissionAt's GI callers)
+#define MATERIAL_EYE (1u << 15)  // a Subsurface material with an iris: its GpuMaterialEye record's index in classFlags bits 16..31 (loadMaterialEye)
 // scene::LightType
 #define LIGHT_POINT 0u
 #define LIGHT_SPOT 1u

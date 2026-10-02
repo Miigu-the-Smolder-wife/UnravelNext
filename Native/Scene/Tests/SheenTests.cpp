@@ -238,6 +238,71 @@ int main(int argc, char** argv)
     bad.materials[1].cls = MaterialClass::Foliage;
     CHECK(fails(bad));
 
+    // 7. The cloth blend (Sheen::cloth): 0 is the sheen layer bit for bit; 1 leaves the fuzz over the diffuse term alone;
+    // in between the value is linear in the factor; the furnace of a white fuzz is E_sh + (1 - E_sh) (D + (1 - c) (B - D))
+    // (D the base's diffuse reflectance), never above the sheen layer's.
+    {
+        double linear = 0, furnaceCloth = 0;
+        for (float r : { 0.2f, 0.6f })
+            for (float rb : { 0.1f, 0.5f })
+                for (float mu : { 0.1f, 0.6f, 1.0f })
+                {
+                    Surface su;
+                    su.baseColor = { 0.5f, 0.4f, 0.3f };
+                    su.roughness = rb;
+                    Sheen sh;
+                    sh.color = { 1, 0.8f, 0.6f };
+                    sh.roughness = r;
+                    const float3 n{ 0, 0, 1 }, v = dirAt(mu), l = normalize(float3{ -0.4f, 0.3f, 0.7f });
+                    const float keep = 1 - sheenAlbedo(mu, r);  // (max(C) = 1)
+                    const float3 base = evaluate(su, n, v, l), fuzz = sh.color * evaluateSheenLobe(r, n, v, l), fd = su.baseColor * (1 / kPi);
+                    const float3 f0 = evaluateSheen(su, sh, n, v, l), layer = fuzz + base * keep;
+                    CHECK(f0.x == layer.x && f0.y == layer.y && f0.z == layer.z);
+                    sh.cloth = 1;
+                    const float3 f1 = evaluateSheen(su, sh, n, v, l), fuzzOnly = fuzz + fd * keep;
+                    CHECK(std::fabs(f1.x - fuzzOnly.x) <= 1e-5f * fuzzOnly.x + 1e-7f && std::fabs(f1.z - fuzzOnly.z) <= 1e-5f * fuzzOnly.z + 1e-7f);
+                    CHECK(f1.x <= f0.x && f1.y <= f0.y && f1.z <= f0.z);
+                    sh.cloth = 0.25f;
+                    const float3 fq = evaluateSheen(su, sh, n, v, l);
+                    linear = std::max(linear, (double)std::fabs(fq.y - (0.75f * f0.y + 0.25f * f1.y)) / f0.y);
+                    // behind the surface the base alone, whatever the factor
+                    const float3 behind = evaluateSheen(su, sh, n, v, float3{ l.x, l.y, -l.z }), baseBehind = evaluate(su, n, v, float3{ l.x, l.y, -l.z });
+                    CHECK(behind.x == baseBehind.x && behind.y == baseBehind.y && behind.z == baseBehind.z);
+                    // the furnace of a white fuzz at the factor 1: E_sh + (1 - E_sh) x the base's diffuse reflectance
+                    Sheen white;
+                    white.color = { 1, 1, 1 };
+                    white.roughness = r;
+                    white.cloth = 1;
+                    double total = 0;
+                    const uint32_t nt = 512, np = 256;  // (the furnace's grid of 3)
+                    for (uint32_t i = 0; i < nt; ++i)
+                        for (uint32_t j = 0; j < np; ++j)
+                        {
+                            const float c = (i + 0.5f) / nt, sn = std::sqrt(1 - c * c), ph = 2 * kPiF * (j + 0.5f) / np;
+                            total += evaluateSheen(su, white, n, v, float3{ sn * std::cos(ph), sn * std::sin(ph), c }).x * c;
+                        }
+                    total *= 2 * kPiF / (nt * np);
+                    const double e = sheenAlbedo(mu, r), expect = e + (1 - e) * su.baseColor.x;
+                    furnaceCloth = std::max(furnaceCloth, std::abs(total - expect));
+                    CHECK(std::abs(total - expect) <= 0.01 && total <= 1.0);
+                }
+        std::printf("cloth blend: linear in the factor to %.2e (relative); furnace at the factor 1 vs E_sh + (1 - E_sh) D, worst %.4f\n", linear, furnaceCloth);
+        CHECK(linear <= 1e-5);
+        // the scene file's block and validation: a cloth factor needs a sheen and lies in [0, 1]
+        Scene withCloth = s;
+        withCloth.materials[1].cloth = 0.6f;
+        CHECK(!fails(withCloth));
+        const Scene clothBack = deserialize(serialize(withCloth));
+        CHECK(clothBack.materials[1].cloth == 0.6f && clothBack.materials[0].cloth == 0 && serialize(clothBack) == serialize(withCloth));
+        CHECK(serialize(withCloth).size() == serialize(s).size() + 4 + 8 + 4 + 4);
+        bad = withCloth;
+        bad.materials[1].cloth = 1.2f;
+        CHECK(fails(bad));
+        bad = withCloth;
+        bad.materials[0].cloth = 0.5f;  // (the plain material: no sheen)
+        CHECK(fails(bad));
+    }
+
     if (g_failures) std::fprintf(stderr, "unx_test_scene_sheen: %u failure(s)\n", g_failures);
     else std::printf("unx_test_scene_sheen: PASS\n");
     return g_failures ? 1 : 0;

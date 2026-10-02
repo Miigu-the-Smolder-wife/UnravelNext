@@ -1213,7 +1213,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
 
     uint32_t scene[8];
     rays.recordDecals(fc, main);  // decals at hits (HitDecals.hlsli): header words before rootConstants
+    rays.recordHair(fc);          // E's grooms on the rays (HitHair.hlsli): the header's word 22
     rays.rootConstants(scene);
+    const BufferRef hairParams = rays.hairParams();  // (invalid: no density volume this frame, or raytracing.hair off)
     const FrameResources& fr = fc.resources;
     const bool atmosphere = fr.transmittanceLut.valid() && fr.multiScatterLut.valid() && fr.skyViewLut.valid() && fr.aerialPerspective.valid();
     const TextureRef luts[4] = { fr.transmittanceLut, fr.multiScatterLut, fr.skyViewLut, fr.aerialPerspective };
@@ -1315,8 +1317,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           b.use(screen.prevColor, Use::SrvCompute);
                           if (words.valid()) b.use(words, Use::SrvCompute);
                           declareFog(b, fc.resources, Use::SrvCompute);  // (the fog along the rays: FogVolume.hlsli fogOverRay)
+                          rays.declareHair(b);  // (a ray that meets a groom first is the world trace's)
                       },
-                      [&shaders, modes, results, depth, gbuffer, jobs, screen, frame, width, height, rayLength, frameConstants, s, samplingBias16, screenContinue, words, historyDepth,
+                      [&shaders, modes, results, depth, gbuffer, jobs, screen, frame, width, height, rayLength, frameConstants, s, samplingBias16, screenContinue, words, historyDepth, hairParams, lumenOnly,
                        outW = g.desc(screen.prevColor).width, outH = g.desc(screen.prevColor).height, ratio = up.exposureRatio,
                        prevViewProj = up.prevViewProj](PassContext& c) {
                           uint32_t k[36] = { c.srv(modes), c.uav(results), c.srv(depth), c.srv(gbuffer), c.uav(jobs), c.srv(screen.hzb), c.srv(screen.prevColor), frame,
@@ -1326,6 +1329,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                               for (int col = 0; col < 4; ++col) k[16 + 4 * r + col] = asU(prevViewProj.m[r][col]);
                           k[32] = words.valid() ? c.srv(words) : 0xFFFFFFFFu;
                           k[33] = historyDepth ? 1u : 0u;
+                          k[34] = lumenOnly && hairParams.valid() ? c.srv(hairParams) : 0xFFFFFFFFu;  // (the Lumen trace shades the grooms)
                           c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionScreenTrace"));
                           c.computeConstants(k, 36);
                           c.bindFrameConstants(frameConstants);
@@ -1366,6 +1370,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       if (exactCounts.valid()) b.use(exactCounts, Use::UavGraphics);
                       rays.declareTraversal(b);
                       rays.declareDecals(b);
+                      rays.declareHair(b);
                       if (atmosphere)
                           for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
                   },

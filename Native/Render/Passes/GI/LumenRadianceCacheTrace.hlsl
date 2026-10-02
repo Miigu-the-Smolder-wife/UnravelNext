@@ -94,7 +94,7 @@ void LumenRadianceCacheTraceGen()
             rtHitDecals(scene, s, footprint, m);
         }
         if ((m.classFlags & MATERIAL_EMISSIVE_VISIBLE_ONLY) != 0) m.emissive = 0;  // (not light for GI: INTERFACES v1.92)
-        const bool twoSided = (m.classFlags & MATERIAL_TWO_SIDED) != 0, foliage = (m.classFlags & 0xFFu) == MATERIAL_FOLIAGE;
+        const bool twoSided = (m.classFlags & MATERIAL_TWO_SIDED) != 0;
         depthWord = lrcEncodeDepth(hit.t, true, s.frontFace, twoSided);
         if (s.frontFace || twoSided)
         {
@@ -119,7 +119,7 @@ void LumenRadianceCacheTraceGen()
             }
             if (!fromSurfaceCache) L.irradiance += giFarSkyIrradiance(s.position, s.normal, asfloat(P[5].y));
             const float3 l = normalize(g_sunDirection);
-            if (!fromSurfaceCache && (dot(s.normal, l) > 0 || foliage) && (P[3].w & 16) == 0)
+            if (!fromSurfaceCache && (dot(s.normal, l) > 0 || rtHitTransmits(m)) && (P[3].w & 16) == 0)
             {
                 const float3 e0 = giSunIlluminance(s.position);
                 if (any(e0 > 0))
