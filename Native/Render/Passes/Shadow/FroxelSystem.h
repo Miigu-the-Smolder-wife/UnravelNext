@@ -48,7 +48,7 @@ uint32_t froxelListCapacity(TrackState& state);
 void recordFroxelLists(FramePassContext& fc, const ViewResources& main, uint32_t slotOfLightSrv);
 // atmosphere.fog: the fog volume's grid for a view size and the medium (on = false: off). Shared by the volume's passes
 // (recordFroxels) and the page requests (VsmSystem.cpp s.vsm.markfog).
-FogView fogViewFor(const QualityConfig& q, uint32_t width, uint32_t height);
+FogView fogViewFor(const QualityConfig& q, const FogDesc& frame, uint32_t width, uint32_t height);
 // The main view's fog parameters for its frame constants (tracks::fogParams): makes the fog's persistent textures and
 // this frame's parameter record; SRV + 1, or 0 with the fog off. The record says "no volume" until recordFroxels has
 // recorded the volume's passes.

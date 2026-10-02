@@ -360,6 +360,7 @@ int main(int argc, char** argv)
         std::string timeArg, placeArg;
         bool autoExposure = false;
         uint64_t shiftAt = UINT64_MAX;  // --origin-shift-at F --origin-shift x,y,z: a C9 rebase at frame F (repros)
+        float fogDensity = 0;            // --fog D: the frame's height fog (FrameContext::fog) at extinction D (1/m), other fields default
         float cloudCoverage = 0;         // --clouds C: B5 cloud layer (FrameContext::clouds) with coverage C, other fields default
         float3 shiftBy{};  // --time YYYY-MM-DDTHH:MM (UT), --place lat,lon: sun, moon, stars (B4)
         // P0 motion and change options (see the head comment).
@@ -418,6 +419,7 @@ int main(int argc, char** argv)
             else if (a == "--auto-exposure") autoExposure = true;
             else if (a == "--origin-shift-at") shiftAt = std::stoull(next());
             else if (a == "--clouds") cloudCoverage = std::stof(next());
+            else if (a == "--fog") fogDensity = std::stof(next());  // the frame's height fog (FrameContext::fog) at this density (1/m)
             else if (a == "--path-time") pathTime = std::stod(next());
             else if (a == "--path-time-list")
             {
@@ -888,6 +890,11 @@ int main(int argc, char** argv)
                 cam.position = cam.position - offset;
                 fc.mainView = ViewDesc::fromCamera(cam, rr.width, rr.height, prev);
                 fc.clouds.coverage = cloudCoverage;
+                if (fogDensity > 0)
+                {
+                    fc.fog.enabled = true;
+                    fc.fog.density = fogDensity;
+                }
                 if (gustPeriodS > 0)
                 {
                     const bool gust = ((uint64_t)(fc.time / gustPeriodS) & 1) != 0;

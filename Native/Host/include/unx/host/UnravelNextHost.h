@@ -43,7 +43,7 @@ enum UnxResult
                             //    UnxFrameSetRuntimeTransforms (C2b), UnxFrameSetTerrainDeformation (C5), UnxFrameSetOcean (B7),
                             //    UnxSceneSetTerrainLayers (C5 terrain material, v1.74), UnxFrameSetClouds (B5, v1.77),
                             //    UnxFrameSetPools, UnxFrameAddPoolSources (W2, v1.78), UnxPoolStatsLatest (W2, v1.90),
-                            //    UnxFrameSetWhiteBalance (v1.91)
+                            //    UnxFrameSetWhiteBalance (v1.91), UnxFrameSetFog (the height fog)
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -602,6 +602,25 @@ typedef struct UnxCloudDesc
 static_assert(sizeof(UnxCloudDesc) == 48, "UnxCloudDesc is part of the ABI");
 #endif
 UNX_API int32_t UNX_CALL UnxFrameSetClouds(UnxRenderer r, const UnxCloudDesc* clouds);
+
+// The height fog (optional export within ABI 6; after commit, any time): weather content held until changed
+// (render::FogDesc). Null: the quality file's atmosphere.fog decides (off unless the file turns it on).
+typedef struct UnxFogDesc
+{
+    uint32_t size, version;             // sizeof (48), 1
+    float density;                      // extinction (1/m) at 'height', >= 0 (0: no fog)
+    float heightFalloff;                // the density halves every 1 / this metres of height, >= 0
+    float height;                       // world metres
+    float albedo[3];                    // scattering / extinction, [0, 1]
+    float phaseG;                       // Henyey-Greenstein asymmetry, (-1, 1)
+    float startDistance;                // m, >= 0
+    float skyAmount;                    // [0, 1]: how much of the fog sky pixels take (0: opaque pixels only)
+    uint32_t reserved;                  // 0
+} UnxFogDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxFogDesc) == 48, "UnxFogDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetFog(UnxRenderer r, const UnxFogDesc* fog);
 
 // C5 terrain material (optional export within ABI 6, INTERFACES v1.74; before UnxSceneCommit): the layers of a material
 // added with UNX_MATERIAL_TERRAIN - 1..8 Standard materials read at layer uv = uv0 x scale + offset, weighted by channel

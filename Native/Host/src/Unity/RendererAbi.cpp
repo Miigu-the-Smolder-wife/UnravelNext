@@ -611,6 +611,22 @@ UNX_API int32_t UNX_CALL UnxFrameSetClouds(UnxRenderer r, const UnxCloudDesc* cl
     });
 }
 
+UNX_API int32_t UNX_CALL UnxFrameSetFog(UnxRenderer r, const UnxFogDesc* fog)
+{
+    return call([&] {
+        render::FogDesc f;  // null: the quality file's fog
+        if (fog)
+        {
+            if (fog->size != sizeof(UnxFogDesc) || fog->version != 1) fail("UnxFrameSetFog: UnxFogDesc size %u version %u", fog->size, fog->version);
+            f.enabled = true;
+            f.density = fog->density, f.heightFalloff = fog->heightFalloff, f.height = fog->height;
+            f.albedo[0] = fog->albedo[0], f.albedo[1] = fog->albedo[1], f.albedo[2] = fog->albedo[2];
+            f.phaseG = fog->phaseG, f.startDistance = fog->startDistance, f.skyAmount = fog->skyAmount;
+        }
+        find(r)->setFog(f);
+    });
+}
+
 UNX_API int32_t UNX_CALL UnxFrameSetOcean(UnxRenderer r, const UnxOceanDesc* ocean)
 {
     return call([&] {

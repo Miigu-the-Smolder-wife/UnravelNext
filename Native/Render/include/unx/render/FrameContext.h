@@ -118,6 +118,21 @@ struct CloudLayerDesc
     uint32_t seed = 1;
 };
 
+// The frame's height fog (Passes/Atmosphere/FogVolume.hlsli) - weather content like the cloud layer. enabled false: the
+// quality file's atmosphere.fog decides (its own enabled switch and medium); true: this medium, whatever the file says.
+// The volume's grid (cell size, slices, distances) stays the quality file's.
+struct FogDesc
+{
+    bool enabled = false;
+    float density = 0.002f;        // extinction (1/m) at 'height'
+    float heightFalloff = 0.02f;   // the density halves every 1 / this metres of height
+    float height = 0;              // world metres
+    float albedo[3] = { 1, 1, 1 }; // scattering / extinction
+    float phaseG = 0.2f;           // Henyey-Greenstein asymmetry, (-1, 1)
+    float startDistance = 0;       // m: no fog nearer than this
+    float skyAmount = 0;           // [0, 1]: how much of the fog sky pixels take
+};
+
 // A14 (FEATURES_GAME 8; Requests/20260926_C_per_view_history.md): a full auxiliary view drawn in this frame before the
 // main view (render-texture camera, mirror, portal, split screen). Its id is stable across frames (the key of every
 // track's per-view history; nonzero, unique). 'reads' lists the views whose outputs this view's materials read: those
@@ -138,6 +153,7 @@ struct FrameContext
     float deltaTime = 0;
     ViewDesc mainView;
     CloudLayerDesc clouds;  // B5 (v1.77): coverage 0 = none
+    FogDesc fog;            // the height fog (enabled false: the quality file's)
     // Validation runs: the main view's colour is linear radiance x exposure in RGBA32F (metrics, INTERFACES 9)
     // instead of the display-encoded RGB10A2.
     bool outputLinearHdr = false;

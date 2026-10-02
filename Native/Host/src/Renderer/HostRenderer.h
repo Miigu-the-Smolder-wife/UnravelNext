@@ -189,6 +189,7 @@ struct FramePacket
     std::array<uint64_t, 6> fluidStamp{};  // NRC_GpuWorldStamp of their tick (world, generation, epoch, tick, branch, phase)
     std::optional<render::OceanFrame> ocean;  // B7: the sea in this frame's coordinates (FrameContext::ocean)
     render::CloudLayerDesc clouds;            // B5: the cloud layer (FrameContext::clouds)
+    render::FogDesc fog;                      // the height fog (FrameContext::fog)
     // W2 closed basins (v1.78): the basins every frame takes (this frame's coordinates; the sources pointers are set when
     // the frame is recorded) and this frame's sources (each handed to one frame; a dropped frame's carry into the next).
     std::vector<render::PoolFrame> pools;
@@ -403,6 +404,8 @@ public:
     bool poolStats(uint32_t id, water::PoolStats& out) const;
     // B5 clouds (v1.77): held until changed; every queued frame takes the current layer.
     void setClouds(const render::CloudLayerDesc& clouds);
+    // The height fog: held until changed; every queued frame takes the current medium.
+    void setFog(const render::FogDesc& fog);
     render::CloudLayerDesc clouds()
     {
         std::lock_guard lock(m_mutex);
@@ -613,6 +616,7 @@ private:
     std::shared_ptr<const std::vector<FramePacket::Fluid>> m_fluids;  // (m_mutex) the fluids every queued frame takes
     std::array<uint64_t, 6> m_fluidStamp{};                          // (m_mutex)
     std::optional<OceanInput> m_ocean;                               // (m_mutex) the sea every queued frame takes
+    render::FogDesc m_fog;                                           // (m_mutex) the height fog every queued frame takes
     render::CloudLayerDesc m_clouds;                                 // (m_mutex) B5 the cloud layer every queued frame takes
     std::optional<render::OceanFrame> oceanFrameLocked() const;      // (m_mutex held) m_ocean in the current coordinates
     std::vector<PoolInput> m_pools;                                  // (m_mutex) W2 basins every queued frame takes (world)

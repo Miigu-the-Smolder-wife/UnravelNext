@@ -1278,7 +1278,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
                   });
         // The fog's volume (FogVolume.hlsli): the pages its cells' segments cross (VsmMarkFog.hlsl).
-        const FogView fog = fogViewFor(q, main.view.width, main.view.height);
+        const FogView fog = fogViewFor(q, fc.frame.fog, main.view.width, main.view.height);
         if (fog.on)
         {
             ID3D12PipelineState* pf = sh.compute("Passes/Shadow/VsmMarkFog");

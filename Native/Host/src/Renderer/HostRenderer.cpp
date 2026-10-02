@@ -1079,6 +1079,19 @@ void HostRenderer::setClouds(const render::CloudLayerDesc& c)
     m_clouds = c;
 }
 
+void HostRenderer::setFog(const render::FogDesc& f)
+{
+    requireCommitted();
+    const bool finite = std::isfinite(f.density) && std::isfinite(f.heightFalloff) && std::isfinite(f.height) && std::isfinite(f.albedo[0]) &&
+                        std::isfinite(f.albedo[1]) && std::isfinite(f.albedo[2]) && std::isfinite(f.phaseG) && std::isfinite(f.startDistance) &&
+                        std::isfinite(f.skyAmount);
+    if (!finite || f.density < 0 || f.heightFalloff < 0 || !(f.phaseG > -1 && f.phaseG < 1) || f.startDistance < 0 || f.skyAmount < 0 || f.skyAmount > 1)
+        fail("fog: density %g >= 0, falloff %g >= 0, phase g %g in (-1, 1), start %g >= 0, sky amount %g in [0, 1]", f.density, f.heightFalloff, f.phaseG,
+             f.startDistance, f.skyAmount);
+    std::lock_guard lock(m_mutex);
+    m_fog = f;
+}
+
 namespace
 {
 // Whether world (x, z) lies in the basin (its samples 0..256 per axis, half a sample of slack for rounding).
@@ -1314,6 +1327,7 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.fluidStamp = m_fluidStamp;
     packet.ocean = oceanFrameLocked();  // in this frame's coordinates (the origin shifts applied so far)
     packet.clouds = m_clouds;
+    packet.fog = m_fog;
     poolsLocked(packet);  // W2: the basins (a state) and this frame's sources (handed over once)
     m_decalsChanged = false;
     m_pending = FramePacket{};
@@ -1642,6 +1656,7 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     fc.fluidCount = (uint32_t)fluidFrames.size();
     fc.ocean = p.ocean ? &*p.ocean : nullptr;
     fc.clouds = p.clouds;
+    fc.fog = p.fog;
     // W2: the basins with their sources grouped (valid until record() returns); sources of basins no longer present drop.
     m_poolFrames = p.pools;
     m_poolSourceFrames.clear();

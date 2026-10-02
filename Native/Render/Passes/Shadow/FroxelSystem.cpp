@@ -191,24 +191,41 @@ FroxelGridCpu froxelGridFor(const QualityConfig& q, uint32_t width, uint32_t hei
     return g;
 }
 
-FogView fogViewFor(const QualityConfig& q, uint32_t width, uint32_t height)
+FogView fogViewFor(const QualityConfig& q, const FogDesc& frame, uint32_t width, uint32_t height)
 {
     FogView f;
-    if (!q.has("atmosphere.fog.enabled") || !q.boolean("atmosphere.fog.enabled")) return f;
-    const float scale = (float)q.number("atmosphere.fog.extinction_scale");
-    f.density = (float)q.number("atmosphere.fog.density_per_m") * scale;
-    f.falloff = (float)q.number("atmosphere.fog.height_falloff_per_m");
-    f.height = (float)q.number("atmosphere.fog.height_m");
-    f.g = (float)q.number("atmosphere.fog.phase_g");
-    f.start = (float)q.number("atmosphere.fog.start_distance_m");
+    if (!q.has("atmosphere.fog.enabled")) return f;
+    if (frame.enabled)
+    {
+        // the frame's medium (FrameContext::fog: the game's weather)
+        f.density = frame.density;
+        f.falloff = frame.heightFalloff;
+        f.height = frame.height;
+        f.g = frame.phaseG;
+        f.start = frame.startDistance;
+        f.skyAmount = frame.skyAmount;
+        for (int k = 0; k < 3; ++k) f.albedo[k] = frame.albedo[k];
+        if (!(f.density >= 0) || !(f.falloff >= 0) || !(f.g > -1 && f.g < 1) || !(f.start >= 0))
+            fail("FrameContext::fog: density and falloff >= 0, phase g in (-1, 1), start distance >= 0");
+    }
+    else
+    {
+        if (!q.boolean("atmosphere.fog.enabled")) return f;
+        const float scale = (float)q.number("atmosphere.fog.extinction_scale");
+        f.density = (float)q.number("atmosphere.fog.density_per_m") * scale;
+        f.falloff = (float)q.number("atmosphere.fog.height_falloff_per_m");
+        f.height = (float)q.number("atmosphere.fog.height_m");
+        f.g = (float)q.number("atmosphere.fog.phase_g");
+        f.start = (float)q.number("atmosphere.fog.start_distance_m");
+        f.skyAmount = (float)q.number("atmosphere.fog.sky_amount");
+        const std::vector<double> albedo = q.numbers("atmosphere.fog.albedo");
+        if (albedo.size() != 3 || !(scale > 0) || !(f.density >= 0) || !(f.falloff >= 0) || !(f.g > -1 && f.g < 1) || !(f.start >= 0))
+            fail("atmosphere.fog: albedo of 3 numbers, extinction_scale > 0, density and falloff >= 0, phase_g in (-1, 1), start distance >= 0");
+        for (int k = 0; k < 3; ++k) f.albedo[k] = (float)albedo[k] / scale;
+    }
     f.indirect = q.boolean("atmosphere.fog.indirect_light");
-    f.skyAmount = (float)q.number("atmosphere.fog.sky_amount");
     f.historyWeight = (float)q.number("atmosphere.fog.history_weight");
     f.shadowTexelsPerCell = (float)q.number("atmosphere.fog.shadow_texels_per_cell");
-    const std::vector<double> albedo = q.numbers("atmosphere.fog.albedo");
-    if (albedo.size() != 3 || !(scale > 0) || !(f.density >= 0) || !(f.falloff >= 0) || !(f.g > -1 && f.g < 1) || !(f.start >= 0))
-        fail("atmosphere.fog: albedo of 3 numbers, extinction_scale > 0, density and falloff >= 0, phase_g in (-1, 1), start distance >= 0");
-    for (int k = 0; k < 3; ++k) f.albedo[k] = (float)albedo[k] / scale;
     f.cellPx = (uint32_t)q.integer("atmosphere.fog.cell_px");
     f.gridZ = (uint32_t)q.integer("atmosphere.fog.depth_slices");
     f.farM = (float)q.number("atmosphere.fog.volumetric_distance_m");
@@ -867,7 +884,7 @@ void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef 
 
 uint32_t fogPrepare(FramePassContext& fc, const ViewDesc& view)
 {
-    const FogView f = fogViewFor(fc.quality, view.width, view.height);
+    const FogView f = fogViewFor(fc.quality, fc.frame.fog, view.width, view.height);
     if (!f.on || !fc.trackState) return 0;
     FogState& st = fc.state<FogState>("S.fog.volume");
     st.ensure(fc.device, f);
