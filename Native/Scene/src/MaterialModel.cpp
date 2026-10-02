@@ -456,6 +456,51 @@ float3 evaluate(const Surface& s, float3 n, float3 v, float3 l)
     return diffuse + single * compensation;
 }
 
+// ---- Subsurface class (stage A: two specular lobes, light through thin parts)
+Subsurface subsurfaceOf(const Material& m)
+{
+    Subsurface k;
+    k.lobeMix = m.subsurfaceLobeMix;
+    k.lobeRoughness = m.subsurfaceLobeRoughness;
+    return k;
+}
+
+float3 subsurfaceRoughness(const Subsurface& k, float roughness)
+{
+    const float r0 = saturate(roughness * k.lobeRoughness.x), r1 = saturate(roughness * k.lobeRoughness.y);
+    return { r0, r1, k.lobeMix * r0 + (1 - k.lobeMix) * r1 };
+}
+
+float subsurfaceThin(float c, float3 v, float3 l)
+{
+    const float x = saturate(-dot(l, v)), x2 = x * x, x4 = x2 * x2;
+    const float inScatter = x4 * x4 * x4;  // S
+    return c + (std::sqrt(c) - c) * inScatter;
+}
+
+float3 evaluateSubsurface(const Surface& s, const Subsurface& k, float3 n, float3 v, float3 l)
+{
+    const float NoV = dot(n, v), NoL = dot(n, l);
+    const float3 albedo = s.baseColor * ((1 - s.metallic) / kPi);
+    if (s.transmission > 0 && NoV * NoL < 0)
+    {
+        const float c = std::fabs(NoL);
+        return albedo * (s.transmission * subsurfaceThin(c, v, l) / c);  // light through a thin part
+    }
+    if (NoV <= 0 || NoL <= 0) return {};
+    const float3 h = normalize(v + l);
+    const float NoH = saturate(dot(n, h)), VoH = saturate(dot(v, h));
+    const float3 r = subsurfaceRoughness(k, s.roughness);
+    const float3 f = f0(s);
+    const float3 nxh = cross(n, h);
+    const float sinSqNH = dot(nxh, nxh);
+    const float d = k.lobeMix * distributionGgx(NoH, sinSqNH, alphaFromRoughness(r.x)) + (1 - k.lobeMix) * distributionGgx(NoH, sinSqNH, alphaFromRoughness(r.y));
+    const float3 single = fresnelSchlick(f, VoH) * (d * visibilitySmithGgxCorrelated(NoV, NoL, alphaFromRoughness(r.z)));
+    const float e = directionalAlbedo(NoV, r.z);
+    const float3 compensation = float3{ 1, 1, 1 } + f * (1 / e - 1);
+    return albedo + single * compensation;
+}
+
 // ---- Anisotropy (A9, MATERIAL_LAYERS 1.5)
 float2 anisoAlphas(float roughness, float strength)
 {

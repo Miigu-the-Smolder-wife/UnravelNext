@@ -17,6 +17,8 @@
 // bilinearly at x = mu * 31, y = r * 31.
 // Foliage class: front side uses Standard with f_d scaled by (1 - transmission); the back side (n.l < 0 < n.v or the
 // reverse) is diffuse transmission transmission * (1 - metallic) * baseColor / pi.
+// Subsurface class: evaluateSubsurface below (two specular lobes, light through thin parts); evaluate() on a Subsurface
+// surface is that model with one lobe and no transmission - the Standard model.
 #include "unx/core/Math.h"
 #include "unx/scene/SceneData.h"
 
@@ -58,6 +60,32 @@ float2 specularAlbedo(float NoV, float roughness);
 
 // BRDF value (without the cosine), world-space unit vectors: n shading normal, v towards the viewer, l towards the light.
 float3 evaluate(const Surface& s, float3 n, float3 v, float3 l);
+
+// Subsurface class (skin and similar), stage A: the Standard model with the specular's distribution taken from two GGX
+// lobes (ue6-main ShadingModels.ush DualSpecularGGX and SubsurfaceProfileBxDF read as a reference; the code is ours):
+//   r_0 = saturate(r s_0), r_1 = saturate(r s_1), r_a = m r_0 + (1 - m) r_1      m = lobeMix, s = lobeRoughness
+//   D   = m D(alpha(r_0)) + (1 - m) D(alpha(r_1))
+//   f_s = D V(alpha(r_a)) F (1 + f0 (1 / E(n.v, r_a) - 1))
+//   f   = f_d + f_s                       for n.l > 0 and n.v > 0, f_d Lambert as Standard
+// One visibility term and one compensation at the mix-weighted average roughness stand for the two lobes' (the
+// reference's choice). With m = 1 and s = (1, 1) every operation is the Standard model's: the result equals evaluate()
+// bit for bit.
+// Thin parts (the simple model: no thickness; t = transmission > 0): light arriving on the side of the shading normal the
+// viewer is not on (n.l n.v < 0), c = |n.l|:
+//   f_t = t f_d W / c,   W = lerp(c, sqrt(c), S),   S = saturate(l . -v)^12
+// so the light through the part is t f_d E W for an illuminance E facing the light: Lambert transmission (W = c, as
+// Foliage's), raised towards sqrt(c) where the viewer looks through the part towards the light (the in-scatter lobe of
+// the reference's SubsurfaceBxDF). W is 0 at the terminator, so the term starts there without a step. The mean free
+// path of scene::Material is not part of this stage.
+struct Subsurface
+{
+    float lobeMix = 0.85f;                 // m: the weight of lobe 0
+    float2 lobeRoughness{ 0.75f, 1.30f };  // s_0, s_1
+};
+Subsurface subsurfaceOf(const Material& m);
+float3 subsurfaceRoughness(const Subsurface& k, float roughness);  // (r_0, r_1, r_a)
+float subsurfaceThin(float c, float3 v, float3 l);                 // W
+float3 evaluateSubsurface(const Surface& s, const Subsurface& k, float3 n, float3 v, float3 l);
 
 // Clearcoat layer (A9; MATERIAL_LAYERS_KO.md 1.1 as measured by C: R1 with candidates A2 and S, Results/C/MaterialLayers/
 // clearcoat_r1e.md - within the section 3 criteria on dielectric bases; metal bases under a coat fail on lobe shape and

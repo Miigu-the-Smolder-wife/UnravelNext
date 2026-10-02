@@ -23,7 +23,7 @@
 // Order = bit in the tile class mask; MaterialSystem.h ShadeClass mirrors it.
 #define M_CLASS_SKY 0u
 #define M_CLASS_OPAQUE 1u      // Standard and Foliage (INTERFACES 8.1)
-#define M_CLASS_SUBSURFACE 2u
+#define M_CLASS_SUBSURFACE 2u  // Subsurface materials: ShadeOpaque LAYERED=3 (part 1)
 #define M_CLASS_WATER 3u
 #define M_CLASS_LAYERED 4u     // A9: Standard materials with a clearcoat (MATERIAL_LAYERED): ShadeOpaque LAYERED=1
 #define M_CLASS_SHEEN 5u       // A9: Standard materials with a sheen (MATERIAL_LAYERED | MATERIAL_SHEEN): ShadeOpaque LAYERED=2

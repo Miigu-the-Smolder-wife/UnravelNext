@@ -627,6 +627,101 @@ Scene furnaceRoom(const Request& rq, bool day)
     return s;
 }
 
+// ShadingBall (diagnostic): the shading models side by side on a neutral ground. A row of five spheres of radius 0.25 m
+// at eye height, from -x: Standard; Subsurface with the class's default lobes and transmission 0.5; Subsurface with one
+// lobe (mix 1, scales (1, 1)) and no transmission - by the model the first sphere again -; a sheen (cloth); a clearcoat.
+// Beside them a 5 mm slab (Subsurface, transmission 0.8) with a point light 0.4 m behind it that casts no shadow and
+// reaches only the slab: the light through a thin part. Key: one shadow-casting point light, front-left, 2.1 m from the
+// row's centre. The sun is low and dim (4 degrees up, 100 lux above the atmosphere): it shows the sun's terms without
+// competing with the key.
+// Cameras: "front" (the key's side) and "back".
+Scene shadingBall(const Request& rq)
+{
+    Scene s;
+    s.name = "shading_ball";
+    commonSky(s, 4.0f, 60.0f);
+    s.sun.illuminance = 100.0f;
+    s.windSpeed = 0.0f;
+    Material ground;
+    ground.name = "shading_ground";
+    ground.baseColor = f3(0.5f, 0.5f, 0.5f);
+    ground.roughness = 0.9f;
+    {
+        MeshBuilder b("shading_ground");
+        b.material(addMaterial(s, ground));
+        b.box({ -6.0f, -0.3f, -6.0f }, { 6.0f, 0.0f, 6.0f }, 0.5f);
+        addInstance(s, addMesh(s, b.finish(false)), float3x4{});
+    }
+    const float3 skinTone = f3(0.80f, 0.56f, 0.45f);
+    Material standard;
+    standard.name = "ball_standard";
+    standard.baseColor = skinTone;
+    standard.roughness = 0.5f;
+    Material skin;
+    skin.name = "ball_subsurface";
+    skin.cls = scene::MaterialClass::Subsurface;
+    skin.baseColor = skinTone;
+    skin.roughness = 0.45f;
+    skin.specular = 0.35f;
+    skin.transmission = 0.5f;
+    Material oneLobe = standard;  // the Standard sphere's parameters in the Subsurface class
+    oneLobe.name = "ball_subsurface_one_lobe";
+    oneLobe.cls = scene::MaterialClass::Subsurface;
+    oneLobe.subsurfaceLobeMix = 1.0f;
+    oneLobe.subsurfaceLobeRoughness = { 1.0f, 1.0f };
+    oneLobe.transmission = 0.0f;
+    Material cloth;
+    cloth.name = "ball_sheen";
+    cloth.baseColor = f3(0.30f, 0.06f, 0.10f);
+    cloth.roughness = 0.8f;
+    cloth.sheenColor = f3(0.9f, 0.7f, 0.7f);
+    cloth.sheenRoughness = 0.4f;
+    Material coated;
+    coated.name = "ball_clearcoat";
+    coated.baseColor = f3(0.60f, 0.05f, 0.05f);
+    coated.roughness = 0.5f;
+    coated.clearcoat = 1.0f;
+    coated.clearcoatRoughness = 0.05f;
+    const float eye = 1.6f, radius = 0.25f, spacing = 0.7f;
+    const Material* balls[5] = { &standard, &skin, &oneLobe, &cloth, &coated };
+    for (int i = 0; i < 5; ++i)
+    {
+        MeshBuilder b(balls[i]->name);
+        b.material(addMaterial(s, *balls[i]));
+        b.sphere({ (i - 2) * spacing, eye, 0.0f }, radius, 96, 48);
+        addInstance(s, addMesh(s, b.finish(false)), float3x4{});
+    }
+    Material thin = skin;
+    thin.name = "slab_subsurface";
+    thin.transmission = 0.8f;
+    const float3 slab{ 2.5f, eye, 0.0f };
+    {
+        MeshBuilder b("slab");
+        b.material(addMaterial(s, thin));
+        b.box(slab - f3(0.3f, 0.3f, 0.0025f), slab + f3(0.3f, 0.3f, 0.0025f));
+        addInstance(s, addMesh(s, b.finish(false)), float3x4{});
+    }
+    scene::Light key;
+    key.type = scene::LightType::Point;
+    key.position = f3(-1.2f, 2.4f, 1.5f);
+    key.intensity = 600.0f;  // about 135 lux at the row's centre
+    key.range = 12.0f;
+    key.castShadow = true;
+    s.lights.push_back(key);
+    scene::Light behind;
+    behind.type = scene::LightType::Point;
+    behind.position = slab - f3(0.0f, 0.0f, 0.4f);
+    behind.intensity = 20.0f;  // 125 lux on the slab's far face
+    behind.range = 1.0f;       // (the nearest sphere, 0.9 m away, takes under 2 lux; the ground none)
+    behind.castShadow = false;
+    s.lights.push_back(behind);
+    s.cameras.push_back(camera("front", f3(0.55f, eye, 3.5f), f3(0.55f, eye, 0.0f), 6.0f, 45.0f));
+    s.cameras.push_back(camera("back", f3(0.55f, eye, -3.5f), f3(0.55f, eye, 0.0f), 6.0f, 45.0f));
+    for (const auto& c : s.cameras) s.paths.push_back(staticPath(c));
+    (void)rq;
+    return s;
+}
+
 scene::Scene generate(const Request& rq)
 {
     Scene s;
@@ -642,6 +737,7 @@ scene::Scene generate(const Request& rq)
     case SceneId::ForestCombat: s = forestCombat(rq); break;
     case SceneId::FurnaceRoom: s = furnaceRoom(rq, false); break;
     case SceneId::FurnaceRoomDay: s = furnaceRoom(rq, true); break;
+    case SceneId::ShadingBall: s = shadingBall(rq); break;
     default: fail("scenegen: unknown scene id %u", (uint32_t)rq.id);
     }
     DynamicContent content = dynamicContent(rq);
@@ -675,7 +771,8 @@ float terrainHeight(SceneId id, float x, float z)
     case SceneId::Interior: return inside(100.0f) ? -0.2f : NAN;
     case SceneId::RidgeSunset: return inside(10000.0f) ? ridgeTerrain(x, z) : NAN;
     case SceneId::FurnaceRoom:
-    case SceneId::FurnaceRoomDay: return NAN;
+    case SceneId::FurnaceRoomDay:
+    case SceneId::ShadingBall: return NAN;
     }
     fail("scenegen: unknown scene id %u", (uint32_t)id);
 }
@@ -685,7 +782,7 @@ std::vector<SceneId> allScenes()
     return { SceneId::CityBlock, SceneId::ForestThin, SceneId::ForestCard, SceneId::Waterside, SceneId::Interior, SceneId::CityNight, SceneId::RidgeSunset, SceneId::ForestCombat };
 }
 
-std::vector<SceneId> diagnosticScenes() { return { SceneId::FurnaceRoom, SceneId::FurnaceRoomDay }; }
+std::vector<SceneId> diagnosticScenes() { return { SceneId::FurnaceRoom, SceneId::FurnaceRoomDay, SceneId::ShadingBall }; }
 
 const char* sceneName(SceneId id)
 {
@@ -701,6 +798,7 @@ const char* sceneName(SceneId id)
     case SceneId::ForestCombat: return "forest_combat";
     case SceneId::FurnaceRoom: return "furnace_room";
     case SceneId::FurnaceRoomDay: return "furnace_room_day";
+    case SceneId::ShadingBall: return "shading_ball";
     }
     fail("scenegen: unknown scene id %u", (uint32_t)id);
 }

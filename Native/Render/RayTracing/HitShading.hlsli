@@ -93,6 +93,8 @@ struct RtHitSplit
     float3 stochastic;
     float3 albedo;
 };
+// A Subsurface-class hit is shaded as Standard here: one specular lobe at the material's roughness (not the class's two
+// lobes, MaterialModel.hlsli ModelSubsurface) and no light through thin parts.
 float3 rtHitRadianceSplit(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float pixelAngle, bool wantSun, out float3 sunFull, out RtHitSplit split)
 {
     ModelSurface s;

@@ -4,6 +4,7 @@
 //   gate content CityNight at scale 1 has exactly 512 lights, 128 shadowed; ForestThin at scale 1 has 100k trees and
 //                1M grass clumps with 40k leaves / 100 blades each (checked on a reduced scale for the counts' formula)
 //   round trip   serialize/deserialize keeps the hash
+//   diagnostic   the diagnostic scenes are deterministic and valid; shading_ball holds what SceneGen.h states
 #include "unx/core/Log.h"
 #include "unx/scenegen/SceneGen.h"
 
@@ -110,6 +111,45 @@ int main(int argc, char** argv)
                     if (m.name.rfind("tree_", 0) == 0) CHECK(m.submeshes.back().indexCount / 3 == (thin ? 80000u : 3000u));
                     if (m.name.rfind("grass_", 0) == 0) CHECK(m.indices.size() / 3 == (thin ? 200u : 16u));
                 }
+            }
+            logf("%-12s ok  %s\n", a.name.c_str(), ha.substr(0, 16).c_str());
+        }
+        // Diagnostic scenes (diagnosticScenes: not in the sweep above): deterministic, valid, named, a static path per camera;
+        // shading_ball's content (SceneGen.h): the five spheres' materials, the 5 mm slab, the two lights and cameras.
+        for (scenegen::SceneId id : scenegen::diagnosticScenes())
+        {
+            const scenegen::Request rq{ id, 7, 1.0f };
+            const scene::Scene a = scenegen::generate(rq);
+            const std::string ha = scene::contentHash(a);
+            CHECK(scene::contentHash(scenegen::generate(rq)) == ha);
+            CHECK(scene::contentHash(scene::deserialize(scene::serialize(a))) == ha);
+            CHECK(a.name == scenegen::sceneName(id));
+            CHECK(!a.cameras.empty() && a.paths.size() == a.cameras.size());
+            if (id == scenegen::SceneId::ShadingBall)
+            {
+                CHECK(a.cameras.size() == 2 && a.cameras[0].name == "front" && a.cameras[1].name == "back");
+                CHECK(a.lights.size() == 2 && a.lights[0].castShadow && !a.lights[1].castShadow);
+                CHECK(a.instances.size() == 7);
+                uint32_t subsurface = 0, oneLobe = 0, sheen = 0, coat = 0;
+                for (const scene::Material& m : a.materials)
+                {
+                    const bool skin = m.cls == scene::MaterialClass::Subsurface;
+                    subsurface += skin;
+                    oneLobe += skin && m.subsurfaceLobeMix == 1.0f && m.subsurfaceLobeRoughness.x == 1.0f && m.subsurfaceLobeRoughness.y == 1.0f && m.transmission == 0.0f;
+                    sheen += m.sheenColor.x > 0;
+                    coat += m.clearcoat > 0;
+                }
+                CHECK(subsurface == 3 && oneLobe == 1 && sheen == 1 && coat == 1);
+                bool slab = false;
+                for (const scene::Mesh& m : a.meshes)
+                {
+                    if (m.name != "slab") continue;
+                    float lo = 1e9f, hi = -1e9f;
+                    for (const float3& v : m.positions) lo = std::fmin(lo, v.z), hi = std::fmax(hi, v.z);
+                    slab = std::fabs((hi - lo) - 0.005f) < 1e-6f;
+                    CHECK(a.materials[m.submeshes[0].material].cls == scene::MaterialClass::Subsurface && a.materials[m.submeshes[0].material].transmission == 0.8f);
+                }
+                CHECK(slab);
             }
             logf("%-12s ok  %s\n", a.name.c_str(), ha.substr(0, 16).c_str());
         }

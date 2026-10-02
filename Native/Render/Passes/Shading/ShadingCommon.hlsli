@@ -36,6 +36,16 @@ float3 shSpecular(float3 f0, float alpha, float3 compensation, float3 n, float3 
     return modelFresnel(f0, VoH) * (modelD(NoH, dot(nxh, nxh), alpha) * modelV(NoV, NoL, alpha)) * compensation;
 }
 
+// The Subsurface class's specular lobe f_s (MaterialModel.hlsli ModelSubsurface): the two lobes' D, the visibility term at
+// their average roughness; 'compensation' is the caller's, at the average roughness too.
+float3 shSpecularSubsurface(float3 f0, ModelSubsurface k, float3 compensation, float3 n, float3 v, float3 l, float NoV, float NoL)
+{
+    const float3 h = normalize(v + l);
+    const float NoH = saturate(dot(n, h)), VoH = saturate(dot(v, h));
+    const float3 nxh = cross(n, h);
+    return modelFresnel(f0, VoH) * (modelSubsurfaceD(k, NoH, dot(nxh, nxh)) * modelV(NoV, NoL, modelAlpha(k.roughness))) * compensation;
+}
+
 // ---------------------------------------------------------------- sun disk
 // Specular reflection of the solar disk: I = L_sun int_cap f_s (n.l) dw, L_sun = E / (pi sin^2 theta_s) (INTERFACES
 // 8.3), E = illuminance on a surface facing the sun (transmittance included). Regimes by the lobe width alpha

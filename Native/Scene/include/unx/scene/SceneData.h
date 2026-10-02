@@ -70,7 +70,8 @@ struct Material
     float specular = 0.5f;                   // dielectric f0 = 0.08 * specular (0.5 -> 0.04)
     float3 emissive{ 0, 0, 0 };              // nits
     float alphaCutoff = 0.0f;                // 0 = opaque; otherwise alpha-tested against baseColor texture alpha
-    float transmission = 0.0f;               // Foliage: fraction of diffuse transmitted to the back side
+    float transmission = 0.0f;               // Foliage: fraction of diffuse transmitted to the back side; Subsurface:
+                                             // strength of the light coming through thin parts (0 = none)
     float ior = 1.5f;                        // Glass / Water
     // Water (v1.92, defect queue 13 (75)): the medium's scattering coefficient (1/m, rgb; 0 = clear: the absorption
     // -ln baseColor alone) and the Henyey-Greenstein asymmetry of its phase function (-1 < g < 1; bath water ~ 0.7-0.9)
@@ -97,6 +98,13 @@ struct Material
     // boundary edges is cutDamageWidth metres wide.
     float cutScale = 1.0f;                   // > 0
     float cutDamageWidth = 0.01f;            // >= 0
+    // Subsurface class (skin and similar; MaterialModel.h Subsurface, Passes/Common/MaterialModel.hlsli): the specular is
+    // two GGX lobes at the roughnesses saturate(roughness x subsurfaceLobeRoughness[i]), lobe 0 weighing subsurfaceLobeMix
+    // and lobe 1 the rest; transmission is the light through thin parts. subsurfaceMeanFreePath (per colour channel) is the
+    // screen-space scattering pass's (not read by any pass yet: the file and the GPU record carry it).
+    float3 subsurfaceMeanFreePath{ 0.0120f, 0.0064f, 0.0045f };  // m, >= 0
+    float subsurfaceLobeMix = 0.85f;                               // [0, 1]
+    float2 subsurfaceLobeRoughness{ 0.75f, 1.30f };                // >= 0
     // Terrain class (C5 cooked terrain tiles, FEATURES_GAME 9 direct blending): layer i's weight is channel i % 4 of splat
     // map i / 4 (Rgba8Linear, over the terrain's uv0), normalised by the weights' sum; 1..8 layers (splat 1 needed above 4).
     uint32_t terrainSplat[2] = { kNone, kNone };

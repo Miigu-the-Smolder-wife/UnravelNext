@@ -24,6 +24,8 @@ enum class SceneId : uint32_t
                       // of the indirect lighting must hold is known in closed form (kFurnace*, Tools/Verify/furnace.py)
     FurnaceRoomDay = 9,  // the same room with the sun up outside: the same numbers hold, and whatever a stage lets
                          // through the walls reads as light over them (a leak is thousands of times the room's light)
+    ShadingBall = 10,    // diagnostic: the shading models side by side - five spheres (Standard, Subsurface, Subsurface
+                         // with one lobe, sheen, clearcoat) and a thin Subsurface slab with a light behind it
     // New scenes are appended (never renumbered) through the interface-change procedure.
 };
 

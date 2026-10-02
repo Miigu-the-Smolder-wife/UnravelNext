@@ -112,6 +112,10 @@ struct RuntimeCapacity
 };
 constexpr uint32_t kRuntimeMaxDepth = 6;  // hierarchy depth limit of a runtime mesh (V runs at least this many node passes)
 
+// The class-specific slots of a material's GPU record (gpu::Material hairAbsorption .. cutDamageWidth, shared by the
+// classes: Hair, Water, Glass, Cut, Subsurface); every other class leaves them 0. CPU only (GpuScene's records and tests).
+void packMaterialClass(const scene::Material& m, gpu::Material& g);
+
 class GpuScene
 {
 public:

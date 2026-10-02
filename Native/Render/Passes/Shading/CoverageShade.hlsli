@@ -391,6 +391,14 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
     const bool foliage = s.cls == MATERIAL_FOLIAGE;
     const float3 front = foliage ? diffuse * (1 - s.transmission) : diffuse;
     const float3 back = foliage ? diffuse * s.transmission : 0;
+    // The Subsurface class's model, by class (as ShadeOpaque LAYERED=3; MaterialModel.hlsli ModelSubsurface): its two
+    // specular lobes at the fragment's roughness and f_d x transmission for the light through thin parts (0: none). A
+    // fragment of another class takes none of it.
+    const bool subsurface = s.cls == MATERIAL_SUBSURFACE;
+    ModelSubsurface skin = (ModelSubsurface)0;
+    if (subsurface) skin = modelSubsurfaceOf(m, s.roughness);
+    const float3 thin = subsurface ? diffuse * s.transmission : 0;
+    const float lobeRoughness = subsurface ? skin.roughness : s.roughness;  // the roughness of the specular's compensation
 #if COV_COAT
     ModelCoat coat = modelCoatOf(m);
     coat.roughness = cmat.coatRoughness;
@@ -442,13 +450,24 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
         {
             if (above > 0)
             {
-                const float e = modelDirectionalAlbedo(NoV, s.roughness);
+                const float e = modelDirectionalAlbedo(NoV, lobeRoughness);
                 const float3 compensation = 1 + f0 * (1 / e - 1);
-                sun = front * above * cap + shSunSpecular(f0, s.roughness, alpha, compensation, n, v, NoV, l0, E, shPixelAngle(D, Dx));
+                sun = front * above * cap;
+                // the specular lobe - the Subsurface class's two, each at its own roughness and weighed by the mix -
+                // through one inlined disk integral
+                const uint lobes = subsurface && skin.mix < 1 ? 2 : 1;
+                [loop] for (uint lobe = 0; lobe < lobes; ++lobe)
+                {
+                    const float lr = subsurface ? (lobe == 1 ? skin.roughness1 : skin.roughness0) : s.roughness;
+                    const float3 spec = shSunSpecular(f0, lr, modelAlpha(lr), compensation, n, v, NoV, l0, E, shPixelAngle(D, Dx));
+                    sun += subsurface ? spec * (lobe == 1 ? 1 - skin.mix : skin.mix) : spec;
+                }
             }
             if (foliage) sun += back * below * cap;
+            if (subsurface && s.transmission > 0 && below > 0) sun += thin * (modelSubsurfaceThin(below, v, l0) * cap);
         }
         else if (foliage) sun = back * above * cap;
+        else if (subsurface && s.transmission > 0 && above > 0) sun = thin * (modelSubsurfaceThin(above, v, l0) * cap);
 #if COV_COAT
         if (cover > 0 && NoV > 0)
             sun = keep * sun + cover * (shSunSpecular(1.0.xxx, coat.roughness, modelAlpha(coat.roughness), 1.0.xxx, n, v, NoV, l0, E, shPixelAngle(D, Dx)) *
@@ -479,7 +498,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
     }
     else if (froxels.lights != UNX_NONE && (experiment & 32) == 0)
     {
-        const float e = modelDirectionalAlbedo(max(NoV, 1e-4), s.roughness);
+        const float e = modelDirectionalAlbedo(max(NoV, 1e-4), lobeRoughness);
         const float3 compensation = 1 + f0 * (1 / e - 1);
         const uint2 range = froxelLightRange(froxels, pixel, linearZ);
         const uint indexBase = froxelIndexBase(froxels);
@@ -494,8 +513,17 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
 #if AREA
         const float3x3 frame = shShadingFrame(n, v, NoV);
         const float3x3 frameBack = float3x3(frame[0], -frame[1], -frame[2]);
-        const float3x3 specular = mul(shLtcInverse(P[3].y, max(NoV, 1e-4), s.roughness), frame);
-        const float3 specularAlbedo = shSpecularAlbedo(f0, max(NoV, 1e-4), s.roughness);
+        // (the Subsurface class: lobe 0's LTC and albedo here, lobe 1's beside them, the albedos weighed by the mix)
+        const float3x3 specular = mul(shLtcInverse(P[3].y, max(NoV, 1e-4), subsurface ? skin.roughness0 : s.roughness), frame);
+        float3 specularAlbedo = shSpecularAlbedo(f0, max(NoV, 1e-4), subsurface ? skin.roughness0 : s.roughness);
+        float3x3 specular1 = frame;
+        float3 specularAlbedo1 = 0;
+        if (subsurface)
+        {
+            specularAlbedo *= skin.mix;
+            specular1 = mul(shLtcInverse(P[3].y, max(NoV, 1e-4), skin.roughness1), frame);
+            specularAlbedo1 = (1 - skin.mix) * shSpecularAlbedo(f0, max(NoV, 1e-4), skin.roughness1);
+        }
 #if COV_COAT
         float3x3 coatSpecular = frame, coatBase = frame;
         float coatAlbedo = 0;
@@ -574,16 +602,23 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
                     tvtl = (1 - modelCoatEms(coat, NoV)) * (1 - modelCoatEms(coat, muL)) / (coat.eta * coat.eta);
                 }
 #endif
+                if (subsurface && NoV > 0 && skin.mix < 1) last = 6;  // integral 5: the Subsurface class's lobe 1 (3, 4: the coat's)
                 [loop] for (uint j = first; j < last; ++j)
                 {
                     if ((j == 1 || j >= 3) && specularInReflections) continue;
                     if (j == 2 && !foliage) continue;
+                    if (subsurface && (j == 3 || j == 4)) continue;
 #if COV_COAT
-                    const float3x3 T = j == 0 ? frame : (j == 1 ? specular : (j == 3 ? coatSpecular : (j == 4 ? coatBase : (NoV > 0 ? frameBack : frame))));
+                    const float3x3 T = j == 0 ? frame : (j == 1 ? specular : (j == 3 ? coatSpecular : (j == 4 ? coatBase : (j == 5 ? specular1 : (NoV > 0 ? frameBack : frame)))));
 #else
-                    const float3x3 T = j == 0 ? frame : (j == 1 ? specular : (NoV > 0 ? frameBack : frame));
+                    const float3x3 T = j == 0 ? frame : (j == 1 ? specular : (j == 5 ? specular1 : (NoV > 0 ? frameBack : frame)));
 #endif
                     const float I = shAreaIntegral(light, p, T, j == 0 || j == 2);
+                    if (j == 5)
+                    {
+                        radiance += Lw * (specularAlbedo1 * I);
+                        continue;
+                    }
 #if COV_COAT
                     if (j == 0) coatId = I;
                     if (j >= 3)
@@ -612,7 +647,13 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
                 El *= lightFunction(P[8].x, lightIndex, light.forward, light.right, -l, linearZ * (2 * g_tanHalfFovY / g_viewHeight) / max(length(toLight), 1e-4), g_time);
             const float cosL = dot(n, l);
             float3 f = 0;
-            if (NoV > 0 && cosL > 0) f = front + shSpecular(f0, alpha, compensation, n, v, l, NoV, cosL);
+            if (subsurface)
+            {
+                // the Subsurface class's lobes; the far side adds the light through thin parts (the fragment's visibility)
+                if (NoV > 0 && cosL > 0) f = front + shSpecularSubsurface(f0, skin, compensation, n, v, l, NoV, cosL);
+                else if (s.transmission > 0 && NoV * cosL < 0) f = thin * (modelSubsurfaceThin(abs(cosL), v, l) / abs(cosL));
+            }
+            else if (NoV > 0 && cosL > 0) f = front + shSpecular(f0, alpha, compensation, n, v, l, NoV, cosL);
             else if (foliage && NoV * cosL < 0) f = back;
 #if COV_COAT
             if (cover > 0) f = keep * f + cover * (modelCoatLobe(coat, n, v, l) + modelCoatUnder(s, coat, n, v, l));

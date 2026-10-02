@@ -3,7 +3,8 @@
 // m.ml.sample (MegaLights.hlsli): one group per listed downsampled tile (m.ml.tiles), one thread per downsampled pixel. The pixel of the block this frame stands on gives the
 // surface (G-buffer, depth, material word); every light of its froxel list is weighed by
 //   w = log2(1 + L m(L)),  L = luminance of the light's unshadowed radiance at the pixel x exposure
-// (the base model's diffuse and specular; area lights by their exact diffuse and LTC integrals; m: the smooth cut under the
+// (the base model's diffuse and specular - a Subsurface pixel's two lobes and its light through thin parts, as m.ml.shade's
+// LAYERED = 3 variant shades them -; area lights by their exact diffuse and LTC integrals; m: the smooth cut under the
 // minimum sample weight), times the hidden weight when the light was not among the visible lights of the previous
 // frame's tile; a stratified weighted reservoir (one random number, N strata) keeps N of them, each with weight
 // sum(w) / w. A sample of a shadow-casting light asks for a ray; consecutive samples of one light share one ray unless
@@ -21,6 +22,7 @@
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
 #define ML_AREA AREA
+#define ML_SUBSURFACE 1
 #include "Passes/Shading/MegaLightsSampling.hlsli"  // the point, the target weight and the reservoir (shared with world points)
 #include "Passes/Atmosphere/Froxel.hlsli"
 #include "Passes/GI/GiScreenHistory.hlsli"
@@ -70,7 +72,8 @@ void main(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID)
     s.metallic = mWordMetallic(word);
     s.specular = m.specular;
     s.transmission = m.transmission;
-    const MlPoint surfacePoint = mlPointOf(s, offset, n, v, P[2].w);
+    MlPoint surfacePoint = mlPointOf(s, offset, n, v, P[2].w);
+    if (s.cls == MATERIAL_SUBSURFACE) mlPointSubsurface(surfacePoint, s, modelSubsurfaceOf(m, s.roughness), P[2].w);
 
     // ---- the previous frame's tile sets at this surface point (a random offset of half a tile stands in for a bilinear
     // lookup of the sets); without history every light counts as visible

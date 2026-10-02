@@ -129,6 +129,53 @@ float3 modelEvaluate(ModelSurface s, float3 n, float3 v, float3 l)
     return diffuse + single * compensation;
 }
 
+// ---- Subsurface class (MaterialModel.h Subsurface, evaluateSubsurface): mirror of the C++ definition. The specular's
+// distribution is two GGX lobes, D = m D(alpha(r_0)) + (1 - m) D(alpha(r_1)); the visibility term and the compensation
+// are taken at the lobes' mix-weighted average roughness r_a. Light through thin parts (transmission > 0): W below.
+struct ModelSubsurface
+{
+    float mix;                     // m: the weight of lobe 0
+    float roughness0, roughness1;  // r_0, r_1 = saturate(r x the lobe's scale)
+    float roughness;               // r_a = m r_0 + (1 - m) r_1
+};
+ModelSubsurface modelSubsurface(float mix, float2 scale, float roughness)
+{
+    ModelSubsurface k;
+    k.mix = mix;
+    k.roughness0 = saturate(roughness * scale.x);
+    k.roughness1 = saturate(roughness * scale.y);
+    k.roughness = mix * k.roughness0 + (1 - mix) * k.roughness1;
+    return k;
+}
+// The lobes of a Subsurface material (its record's class slots, Scene.hlsli GpuMaterial) at the surface's roughness.
+ModelSubsurface modelSubsurfaceOf(GpuMaterial m, float roughness) { return modelSubsurface(m.hairBetaN, float2(m.cutScale, m.cutDamageWidth), roughness); }
+float modelSubsurfaceD(ModelSubsurface k, float NoH, float sinSqNH)
+{
+    return k.mix * modelD(NoH, sinSqNH, modelAlpha(k.roughness0)) + (1 - k.mix) * modelD(NoH, sinSqNH, modelAlpha(k.roughness1));
+}
+// W = lerp(c, sqrt(c), S), S = saturate(l . -v)^12: the light through a thin part per unit illuminance facing the light,
+// over transmission x f_d; c = the light's cosine on the side the viewer is not on (subsurfaceThin in C++).
+float modelSubsurfaceThin(float c, float3 v, float3 l)
+{
+    const float x = saturate(-dot(l, v)), x2 = x * x, x4 = x2 * x2;
+    return c + (sqrt(c) - c) * (x4 * x4 * x4);
+}
+float3 modelEvaluateSubsurface(ModelSurface s, ModelSubsurface k, float3 n, float3 v, float3 l)
+{
+    const float NoV = dot(n, v), NoL = dot(n, l);
+    const float3 albedo = s.baseColor * ((1 - s.metallic) / MODEL_PI);
+    if (s.transmission > 0 && NoV * NoL < 0) return albedo * (s.transmission * modelSubsurfaceThin(abs(NoL), v, l) / abs(NoL));
+    if (NoV <= 0 || NoL <= 0) return 0;
+    const float3 h = normalize(v + l);
+    const float NoH = saturate(dot(n, h)), VoH = saturate(dot(v, h));
+    const float3 f0 = modelF0(s);
+    const float3 nxh = cross(n, h);
+    const float3 single = modelFresnel(f0, VoH) * (modelSubsurfaceD(k, NoH, dot(nxh, nxh)) * modelV(NoV, NoL, modelAlpha(k.roughness)));
+    const float e = modelDirectionalAlbedo(NoV, k.roughness);
+    const float3 compensation = 1 + f0 * (1 / e - 1);
+    return albedo + single * compensation;
+}
+
 // ---- A9 clearcoat (MaterialModel.h evaluateCoated, v1.76): mirror of the C++ definition; tables in g_coatTable.
 struct ModelCoat
 {

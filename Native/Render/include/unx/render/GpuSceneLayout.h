@@ -153,10 +153,13 @@ struct Material  // 112 B
     uint32_t textureClamp;   // bit per texture (MaterialTextureBit): 1 = clamp addressing (g_anisoClamp), 0 = wrap
     // Hair class (v1.66): sigma_a (scene::model::hairAbsorption), beta_N, cuticle tilt; beta_M = roughness, eta = ior.
     // Glass class (A10 R-2): hairAbsorption holds the solid body's sigma_a = -ln(baseColor) / attenuationDistance (1/m).
+    // Subsurface class: hairAbsorption holds the mean free path (m, rgb; the screen-space scattering pass's) and hairBetaN
+    // the specular lobes' mix (scene::Material::subsurfaceLobeMix).
     float3 hairAbsorption;
     float hairBetaN;
     float hairTilt;
     // Cut class (v1.66): triplanar texture repeats per metre, damage band width (m).
+    // Subsurface class: the two specular lobes' roughness scales (scene::Material::subsurfaceLobeRoughness).
     float cutScale;
     float cutDamageWidth;
     // Terrain class (v1.74): its layers in FrameConstants::terrainLayers, first | count << 24 (count 1..8).
