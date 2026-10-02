@@ -104,6 +104,10 @@
 //        Subsurface variant for an eye's pixels (the eye word; SHADE_PART 3 reads its mask)
 //        and by every variant's part 1 for the pixels of a height-mapped material: the sun's visibility through the
 //        height field (material.parallax_shadow; bits 0..7)
+// P[11].zw (part 1 without MEGA_LIGHTS: the froxel lists' light loop) the vis buffer and V's visible clusters (UNX_NONE:
+//        none): the pixel's instance gives the receiver's lighting channels (Scene.hlsli g_lightChannels), so a light
+//        in none of them adds nothing. Part 2 reads the gather's textures there (above); with MEGA_LIGHTS the sampling
+//        tests the channels (MegaLightsSample.hlsl).
 // P[8].xy (SHADE_PART 3) the vis buffer and V's visible clusters in frames whose view models are drawn through
 //        viewmodel.fov_override_degrees (UNX_NONE: none): a view-model pixel scatters at its true size
 // P[10].y the stochastic local lights' result (shading.mega_lights, MegaLights.hlsli; RGBA16F exposed radiance, m.ml.spatial;
@@ -656,6 +660,16 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #else
         const uint2 range = froxelLightRange(froxels, pixel, linearZ);
         const uint indexBase = froxelIndexBase(froxels);
+#if SHADE_PART == 1
+        // lighting channels: the receiver's are its instance's (the pixel's vis id), for every light of the loop below
+        if (P[11].z != UNX_NONE)
+        {
+            Texture2D<uint> channelVis = ResourceDescriptorHeap[P[11].z];
+            const uint channelVisId = channelVis[pixel];
+            if (channelVisId != VIS_NONE)
+                g_lightChannels = instanceLightingChannels(loadInstance(loadVisibleCluster(P[11].w, visVisibleCluster(channelVisId)).instance).flags);
+        }
+#endif
 #endif
         uint shadowOrdinal = 0, overflowRecord = 0xFFFFFFFFu;
         uint2 overflowPacked = uint2(0xFFFFFFFFu, 0);
@@ -978,10 +992,11 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
             if (NoV > 0 && cosL > 0) f -= (f - frontL) * sheen.cloth;  // (the cloth blend: the base's specular lobe x (1 - cloth))
 #endif
 #if LAYERED == 1
-            if (cover > 0) f = keep * f + cover * (modelCoatLobe(coat, n, v, l) + modelCoatUnder(s, coat, n, v, l));
+            // (the coat's and the sheen's lobes take the light's specular scale: ShadingCommon.hlsli shLightSpecular)
+            if (cover > 0) f = keep * f + cover * (modelCoatLobe(coat, n, v, l) * shLightSpecular() + modelCoatUnder(s, coat, n, v, l));
 #endif
 #if LAYERED == 2
-            if (NoV > 0 && cosL > 0) f = keepS * f + sheen.color * modelSheenLobe(sheen.roughness, n, v, l);
+            if (NoV > 0 && cosL > 0) f = keepS * f + sheen.color * (modelSheenLobe(sheen.roughness, n, v, l) * shLightSpecular());
 #endif
 #if MEGA_LIGHTS
             {

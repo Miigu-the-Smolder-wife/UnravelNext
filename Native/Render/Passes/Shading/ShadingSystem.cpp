@@ -425,6 +425,9 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     const bool megaWanted = false;
 #endif
     const bool tileLights = fc.quality.boolean("shading.tile_lights") && froxelLists && view.view.kind == gpu::ViewKind::Main && !megaWanted;
+    // Lighting channels in the kernels' own light loop (the froxel lists without shading.mega_lights, whose sampling tests
+    // them): part 1 reads the pixel's instance through the vis buffer (ShadeOpaque.hlsl P[11].zw).
+    const bool channelVis = froxelLists && !megaWanted && view.visId.valid() && view.visibleClusters.valid();
     const BufferRef tileRecords = tileLights && part != Part::Scatter ? fc.graph.createBuffer({ "M tile lights", (uint64_t)tileCount * 96, 0 }) : BufferRef{};
     if (emissiveLights.valid())
     {
@@ -929,6 +932,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             if (emissiveIrradiance.valid()) b.use(emissiveIrradiance, Use::SrvCompute);  // 14.1b
             if (tileLights) b.use(tileRecords, Use::SrvCompute);  // L2
             if (megaLighting.valid()) b.use(megaLighting, Use::SrvCompute);  // shading.mega_lights (P[10].y)
+            if (channelVis)
+            {
+                b.use(v.visId, Use::SrvCompute);
+                b.use(v.visibleClusters, Use::SrvCompute);
+            }
             if (r.vsmTileLit.valid()) b.use(r.vsmTileLit, Use::SrvCompute);  // L3 (P[10].w)
             if (meter) b.use(histogram.buffer, Use::UavCompute);
             if (scatter)
@@ -1005,6 +1013,13 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 k32[45] = roughSpecular.valid() ? c.srv(roughSpecular) : none;           // P[11].y: gi.lumen_only's rough specular
                 k32[46] = shortRangeAO.valid() ? c.srv(shortRangeAO) : none;             // P[11].z: ... and short-range AO
                 k32[47] = backfaceIrradiance.valid() ? c.srv(backfaceIrradiance) : none;  // P[11].w: ... and Foliage's back side
+                if (part == 1)
+                {
+                    // part 1's own light loop (the froxel lists, without shading.mega_lights): the vis buffer for the pixel's
+                    // lighting channels (ShadeOpaque.hlsl P[11].zw; part 2 reads the gather's textures there)
+                    k32[46] = channelVis ? c.srv(v.visId) : none;
+                    k32[47] = channelVis ? c.srv(v.visibleClusters) : none;
+                }
                 if (scatter && shadeClass == material::ShadeClass::Subsurface)
                 {
                     // shading.subsurface_scatter (SSS_SPLIT kernels): the class's diffuse texture, and the local lights'
@@ -1108,6 +1123,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              if (emissiveIrradiance.valid()) b.use(emissiveIrradiance, Use::SrvCompute);  // 14.1b
                              if (tileLights) b.use(tileRecords, Use::SrvCompute);  // L2
                              if (megaLighting.valid()) b.use(megaLighting, Use::SrvCompute);  // shading.mega_lights (P[10].y)
+                             if (channelVis)
+                             {
+                                 b.use(v.visId, Use::SrvCompute);
+                                 b.use(v.visibleClusters, Use::SrvCompute);
+                             }
                              if (scatter)
                              {
                                  b.use(scatterDiffuse, Use::UavComputeDisjoint);  // shading.subsurface_scatter: the Subsurface run's P[9].z
@@ -1167,6 +1187,10 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                  k32[41] = split ? (scatterMlSpecular.valid() ? c.srv(scatterMlSpecular) : none) : localWord;
                              };
                              // every run's part 1 (with its lobe kernel), one barrier, every run's part 2
+                             // (part 1's P[11].zw: the vis buffer for the pixel's lighting channels; part 2's: the gather's textures)
+                             const uint32_t gatherZ = k32[46], gatherW = k32[47];
+                             k32[46] = channelVis ? c.srv(v.visId) : none;
+                             k32[47] = channelVis ? c.srv(v.visibleClusters) : none;
                              for (size_t run = 0; run < fallbackRuns.size(); ++run)
                              {
                                  const auto& [kernel, classes] = fallbackRuns[run];
@@ -1184,6 +1208,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                  c.cmd->ExecuteIndirect(signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
                              }
                              lobeBarrier(c);
+                             k32[46] = gatherZ, k32[47] = gatherW;
                              for (size_t run = 0; run < fallbackRuns.size(); ++run)
                              {
                                  k32[6] = fallbackRuns[run].second;  // P[1].z
