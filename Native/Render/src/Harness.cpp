@@ -334,7 +334,7 @@ HarnessResult Harness::run(const Resolution& resolution, const HarnessOptions& o
                << ", \"tail_ms\": " << jsonDistribution(result.queueTailMs[q]) << ", \"gap_ms\": " << jsonDistribution(result.queueGapMs[q]) << "}";
         js << "},\n";
         const RenderGraphStats& g = result.graph;
-        js << " \"graph\": {\"declared_passes\": " << g.declaredPasses << ", \"live_passes\": " << g.livePasses << ", \"transients\": " << g.transientResources
+        js << " \"graph\": {\"declared_passes\": " << g.declaredPasses << ", \"live_passes\": " << g.livePasses << ", \"pass_scopes\": " << g.passScopes << ", \"transients\": " << g.transientResources
            << ", \"barrier_batches\": " << g.barrierBatches << ", \"barriers\": " << g.barriers << ", \"cross_queue_syncs\": " << g.crossQueueSyncs
            << ", \"command_lists\": " << g.commandLists << ", \"transient_bytes_aliased\": " << g.transientBytesAliased << ", \"transient_bytes_unaliased\": " << g.transientBytesUnaliased << "},\n";
         js << " \"passes\": {\n";

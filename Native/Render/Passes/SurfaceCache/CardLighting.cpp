@@ -285,8 +285,10 @@ void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs
         }
     };
 
+    // surface_cache.mesh_cards_fold_passes: the card frame and the selection's three steps are one scope (PassChain.h).
+    PassChain chain(g, QueueType::Compute, !q.has("surface_cache.mesh_cards_fold_passes") || q.boolean("surface_cache.mesh_cards_fold_passes"));
     // the card frame with this update's counter and page count; the select buffer's head and histograms cleared
-    g.addPass("r.card.frame", QueueType::Compute,
+    chain.add("r.card.frame",
               [&](PassBuilder& b) {
                   b.use(frameBuffer, Use::UavCompute);
                   b.use(select, Use::UavCompute);
@@ -300,9 +302,6 @@ void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs
                   c.cmd->Dispatch(1, 1, 1);
               });
 
-    // surface_cache.mesh_cards_fold_passes: the selection's three steps are one pass (each reads what the one before
-    // wrote in the select buffer: PassChain.h).
-    PassChain chain(g, QueueType::Compute, !q.has("surface_cache.mesh_cards_fold_passes") || q.boolean("surface_cache.mesh_cards_fold_passes"));
     for (uint32_t stage = 0; stage < 3; ++stage)
     {
         static const char* const kNames[3] = { "r.card.select.priority", "r.card.select.bucket", "r.card.select.list" };

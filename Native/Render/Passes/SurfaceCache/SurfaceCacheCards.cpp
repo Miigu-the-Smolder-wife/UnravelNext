@@ -6,6 +6,7 @@
 #include "unx/core/Log.h"
 #include "unx/render/Device.h"
 #include "unx/render/GpuScene.h"
+#include "unx/render/PassChain.h"
 #include "unx/render/RenderGraph.h"
 #include "unx/render/Shaders.h"
 
@@ -854,12 +855,14 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
         const uint32_t copySlot = (uint32_t)(fc.frame.frameIndex % kFeedbackSlots);
         // (not on the table's first frame - nothing has written it - and not when the set starts from nothing)
         const bool copy = s.feedbackWritten && !s.restart;
+        // (surface_cache.mesh_cards_fold_passes: the copy and the clear are one scope)
+        PassChain chain(g, QueueType::Compute, !fc.quality.has("surface_cache.mesh_cards_fold_passes") || fc.quality.boolean("surface_cache.mesh_cards_fold_passes"));
         if (copy)
         {
             ID3D12Resource* readback = s.feedbackReadback.Get();
             // (on the queue of the passes that write the table - the cache's, GI's and the reflections' ray passes - so
             // the copy follows the last frame's writes whatever the queues' pace)
-            g.addPass("r.card.feedback.readback", QueueType::Compute,
+            chain.add("r.card.feedback.readback",
                       [&](PassBuilder& b) {
                           b.use(table, Use::CopySrc);
                           b.keep();
@@ -868,7 +871,7 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
         }
         s.feedbackSlotFrame[copySlot] = copy ? fc.frame.frameIndex : UINT64_MAX;
         s.feedbackWritten = true;
-        g.addPass("r.card.feedback.clear", QueueType::Compute,
+        chain.add("r.card.feedback.clear",
                   [&](PassBuilder& b) {
                       b.use(table, Use::UavCompute);
                       b.keep();
@@ -879,6 +882,7 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
                       c.computeConstants(k, 4);
                       c.cmd->Dispatch((kFeedbackHashSlots + 63) / 64, 1, 1);
                   });
+        chain.flush("r.card.feedback.clear");
         const uint32_t tile = s.settings.cards.feedbackTileSize;
         set.feedback = table;
         set.feedbackDither = feedbackTileJitter(tile, fc.frame.frameIndex) | (tile - 1) << 16;

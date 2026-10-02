@@ -1470,12 +1470,17 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
     };
     ID3D12CommandSignature* dispatchSig = s.dispatchSignature.Get();
     ID3D12CommandSignature* meshSig = s.meshSignature.Get();
+    // visibility.fold_small_passes: the layer's single-group steps are timed with the pass they prepare (PassChain.h):
+    // prepare with the clear, the bins' header and prefix with the classify and scatter around them, the cover's
+    // arguments with the cover, the count's arguments with the count, the scan with the offsets, the special list's
+    // header with the scatter, and the heavy tiles with the blocks.
+    PassChain chain(g, QueueType::Graphics, r.cfg.foldSmall);
     // Compute pass of CoverageBuild: direct (groupsX > 0), or indirect at argWord of the cull args (fromList: of the tile
     // list, which the pass then reads as an SRV).
     auto build = [&](const char* name, uint32_t mode, uint32_t groupsX, uint32_t groupsY, uint32_t argWord, uint32_t uses, bool fromList = false) {
         ID3D12PipelineState* pso = fc.shaders.compute("Passes/Visibility/CoverageBuild.MODE" + std::to_string(mode));
         const bool indirect = groupsX == 0;
-        g.addPass(std::string("v.coverage.") + name, QueueType::Graphics,
+        chain.add(std::string("v.coverage.") + name,
                   [&](PassBuilder& b) {
                       b.use(run.state, Use::UavCompute);
                       if (indirect && !fromList) b.use(run.args, Use::IndirectArgs);
@@ -1516,6 +1521,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
     }
     build("prepare", 0, 1, 1, 0, kUseArgs | kUseListRead);
     build("clear", 1, 0, 0, kArgCovClear, kUseListRead | kUseTiles | kUseCounters | kUseRange | coverUse);
+    chain.flush("v.coverage.clear");
 
     // The pixel kernel's variant: the measurement stage, and the fragment counters (visibility.coverage_statistics).
     const std::string psVariant = ".STAGE" + std::to_string(r.cfg.coverageDebugStage) + (r.cfg.coverageStatistics ? ".STATS1" : ".STATS0");
@@ -1586,7 +1592,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
         auto bin = [&](const char* name, uint32_t mode, uint32_t groupsX, uint32_t argWord, uint32_t uses, uint32_t bucket) {
             ID3D12PipelineState* pso = fc.shaders.compute("Passes/Visibility/CoverageBins.MODE" + std::to_string(mode));
             const bool indirect = groupsX == 0;
-            g.addPass(std::string("v.coverage.") + name, QueueType::Graphics,
+            chain.add(std::string("v.coverage.") + name,
                       [&](PassBuilder& b) {
                           b.use(run.state, Use::UavCompute);
                           b.use(bins, (uses & kBinRead) ? Use::SrvCompute : Use::UavCompute);
@@ -1641,6 +1647,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
         bin("bins.classify", 1, 0, kCovArgEntries, kBinLists | kBinVisible | kBinHiz, 0);
         bin("bins.prefix", 2, 1, 0, kBinArgs, 0);
         bin("bins.scatter", 3, 0, kCovArgEntries, kBinLists, 0);
+        chain.flush("v.coverage.bins");
         // The compute rasteriser of a bucket's small triangles, before its mesh raster (which skips what this took).
         ID3D12PipelineState* swPso = computeRaster ? fc.shaders.compute(std::string("Passes/Visibility/CoverageRasterSw.STATS") + (r.cfg.coverageStatistics ? "1" : "0")) : nullptr;
         auto addComputeRaster = [&](uint32_t bucket) {
@@ -1688,6 +1695,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
             {
                 bin("cover.args", 4, 1, 0, kBinArgs, bucket);
                 bin("cover", 5, 0, kCovArgCover, kBinRead | kBinStream | kBinCover, bucket);
+                chain.flush("v.coverage.cover");
             }
         }
     }
@@ -1838,12 +1846,16 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
     if (fc.services.coverageAppend) fc.services.coverageAppend(fc, view);
     build("args", 2, 1, 1, 0, kUseArgs);
     build("count", 6, 0, 0, kArgCovRecords, kUseList | kUseTiles | kUseCounters | kUseStream);
+    chain.flush("v.coverage.count");
     build("scan", 7, 1, 1, 0, kUseList | kUseTiles | kUseScratch);
     build("offsets", 9, 0, 0, kCovListArgs, kUseListRead | kUseTiles | kUseCounters | kUseStarts | kUseScratch, true);
+    chain.flush("v.coverage.offsets");
     build("scatter", 8, 0, 0, kArgCovRecords, kUseCounters | kUseStream | kUseRecords | kUseSpecial);
     build("special", 10, 1, 1, 0, kUseSpecial);
+    chain.flush("v.coverage.scatter");
     build("blocks", 3, 0, 0, kCovListBlockArgs, kUseListRead | kUseTiles | kUseRecordsRead | kUseRange | kUseScratch | kUseDepthA, true);
     build("heavy", 5, 0, 0, kCovListHeavyArgs, kUseListRead | kUseTiles | kUseRange | kUseScratch | kUseDepthA, true);
+    chain.flush("v.coverage.blocks");
 }
 
 // Reads the named run's statistics of the frame that last used this frame's slot (complete: the caller waited for
