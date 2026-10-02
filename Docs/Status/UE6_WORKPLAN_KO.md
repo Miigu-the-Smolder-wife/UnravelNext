@@ -174,3 +174,13 @@ V의 컬 한 번(메인 뷰, 그리고 `rasterizeDepth` 요청마다: VSM 태양
 - **잴 것**: `s.froxel.count` + `s.froxel.lists` 시간(4K 로비 0.9 ms 묶음의 몫), 정렬을 뺀 fill의 시간.
 
 **(5) 게이트 통계** — RendererGate 요약에 V의 메인 뷰 컬(인스턴스·노드·클러스터 수, 2단계로 넘어간 수, 청크), 대역별 클러스터·삼각형(A/B/C, 혼합 시트), 리스트별 항목 수, 래스터 요청마다 한 줄(보이는 클러스터·타일 쌍·삼각형), 그리고 `V error bits` 줄을 더했다. `V error bits`는 모든 실행·모든 프레임의 `Stats::overflow`를 OR한 값이고(`Stats::overflowSeen`), 수요에 따라 커지는 풀(0x100, 0x2000, 0x4000)을 뺀 비트가 서면 게이트가 실패한다 — (1)의 작업 큐가 상한에 닿거나 리스트가 넘치면 여기에 보인다. 실행별 통계는 `visibility::latestStatsOfRuns`.
+
+**(6) 그 밖의 작은 패스 접기** — `shadow.vsm.fold_small_passes`, `atmosphere.froxels.fold_small_passes`, `visibility.fold_small_passes`(모두 기본 true).
+`PassChain`(`Native/Render/include/unx/render/PassChain.h`): 이어지는 작은 디스패치들을 그래프 패스 하나로 만든다. 선언한 사용을 합치고(한 패스가 같이 선언할 수 있는 조합만: 쓰는 쪽은 전부 UAV), 두 번째부터는 전역 UAV 장벽 뒤에서 같은 순서로 실행한다 — 뒤 디스패치가 앞 디스패치의 결과를 보는 것은 별도 패스일 때와 같다. 스위치를 끄면 각자 제 이름의 패스다.
+- VSM: `s.vsm.begin` + `cache.reset` → 1, `propagate` + `cache.keep` + `cache.free` + `scan.count` + `scan.prefix` + `scan.assign` → `s.vsm.scan` 1, `s.shadow.listclear` + `s.shadow.visibility` → 1, `overflow.scan.blocks` + `scan.top` → 1.
+- **CPU가 아는 빈 패스**: 국소 그림자 슬롯이 없는 뷰(MegaLights 기본 설정에서는 항상)는 가시성 패스가 프록셀 리스트를 읽지 않으므로 넘침 타일이 생기지 않는다. 그 뷰에서는 `s.shadow.overflow.count / scan.blocks / scan.top / overflow` 네 패스를 기록하지 않는다(머리 텍스처는 가시성 패스가 0으로 채우고, fallback 리스트는 clear가 비운다 — 소비자가 읽는 값은 같다).
+- 프록셀 리스트: `begin` + `count` + `scan.blocks` + `scan.top` → `s.froxel.count` 1(fill은 따로: 스캔 결과를 SRV로 읽는다).
+- V: HiZ 빌드의 디스패치들(레벨 5개씩) → `v.hiz.<tag>` 1, 평면 반사 뷰의 `planar.clear` + `planar.tiles` → 1, `v.translucent.copy` + `clear` → 1.
+- 패스 수(코드에서 센 값, 기본 설정·내부 1080p·가림 켬): 프레임당 VSM −11, 프록셀 −3, V −4(유리 있으면 −5).
+- **안 한 것**: GI(`r.gi` 28개)와 카드(`r.card` 11개)의 작은 패스. 두 시스템의 패스 사이 의존(읽기 SRV / 쓰기 UAV가 섞인 곳)을 하나씩 확인해야 해서 이번에는 손대지 않았다. `PassChain`으로 같은 방식이 된다. coverage 층의 11패스는 직접/간접 디스패치가 번갈아 나와(인자 버퍼가 UAV ↔ 인자) (2)의 "덧붙이는 커널이 인자를 올리는" 방식으로 커널을 고쳐야 접힌다.
+- **잴 것**: 접은 패스 이름으로 시간이 합쳐진다(`s.vsm.scan`, `s.froxel.count`, `v.hiz.*`). 패스 타임스탬프 자체의 비용은 `--no-pass-timestamps`로 따로.

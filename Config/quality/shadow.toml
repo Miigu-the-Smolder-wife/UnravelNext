@@ -38,6 +38,12 @@ cache = true                    # sun page cache (VsmCache.hlsl; a design choice
                                 # when it was resident last frame and no changed caster (moved, deformed, skinned, wind, morph,
                                 # shown / hidden) touched it; the sun, the caster range, a scene revision, an origin rebase or a
                                 # restore redraws every page (the one path, the budget's worst case). false = the one path always
+fold_small_passes = true        # the page update's and the visibility's small dispatches share passes (PassChain.h): the
+                                # counters' clear with the cache's reset; the request propagation, the cache's keep and free
+                                # list and the scan's three steps; the pixel list's clear with the visibility pass; the
+                                # overflow scan's two levels. The same dispatches in the same order, a barrier between them.
+                                # And a view without local shadow slots (shading.mega_lights shadows the local lights) records
+                                # no overflow count, scan and fill: they ran over an empty tile list. false: a pass each (A/B)
 use_stats = 0                     # 1: count which sun pages lookups read, by request kind (measurement only; RendererGate)
 subtile_stats = 0                 # 1: count the 32^2 sub-tiles of requested pages that pixels sample (measurement only)
 fragment_check = 0                # 1: the fragment pass evaluates every coverage record and counts those whose settled pixel

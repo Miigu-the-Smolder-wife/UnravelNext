@@ -4,6 +4,7 @@
 #include "SResources.h"
 
 #include "unx/render/GpuScene.h"
+#include "unx/render/PassChain.h"
 #include "unx/render/Tracks.h"
 
 #include <algorithm>
@@ -1006,6 +1007,12 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     s.initialized = true;
 
     RenderGraph& g = fc.graph;
+    // shadow.vsm.fold_small_passes: the page update's bookkeeping dispatches share passes (PassChain.h): the counters'
+    // clear with the cache's reset (s.vsm.begin), and the request propagation, the cache's keep and free list and the
+    // three scan steps (s.vsm.scan) - each a group or a few, all writing the same buffers as UAVs, each reading what the
+    // one before wrote.
+    const bool foldSmall = !q.has("shadow.vsm.fold_small_passes") || q.boolean("shadow.vsm.fold_small_passes");
+    PassChain chain(g, QueueType::Compute, foldSmall);
     const TextureRef atlas = g.importTexture(s.atlas.Get(),
                                              TextureDesc{ "S VSM atlas", kAtlasPagesPerRow * kPage, s.atlasPages / kAtlasPagesPerRow * kPage, 1, 1, DXGI_FORMAT_D32_FLOAT },
                                              D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
@@ -1120,7 +1127,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     }
     {
         ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmBegin");
-        g.addPass("s.vsm.begin", QueueType::Compute,
+        chain.add("s.vsm.begin",
                   [&](PassBuilder& b) {
                       b.use(statsBuf, Use::UavCompute);
                       b.keep();
@@ -1168,7 +1175,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     };
     {
         ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmCache.MODE5");
-        g.addPass("s.vsm.cache.reset", QueueType::Compute,
+        chain.add("s.vsm.cache.reset",
                   [&](PassBuilder& b) {
                       b.use(changed, Use::UavCompute);
                       b.use(usedPages, Use::UavCompute);
@@ -1181,6 +1188,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.cmd->Dispatch(1, 1, 1);
                   });
     }
+    chain.flush("s.vsm.begin");
     if (cacheOn)
     {
         if (skinCount > 0)
@@ -1390,7 +1398,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     }
     {
         ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmPropagate");
-        g.addPass("s.vsm.propagate", QueueType::Compute,
+        chain.add("s.vsm.propagate",
                   [&](PassBuilder& b) {
                       b.use(requests, Use::UavCompute);
                       b.keep();
@@ -1406,7 +1414,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         // Sun page cache: the requests that keep their page (cacheable frames), then the free physical pages in order.
         ID3D12PipelineState* keep = sh.compute("Passes/Shadow/VsmCache.MODE3");
         ID3D12PipelineState* free = sh.compute("Passes/Shadow/VsmCache.MODE4");
-        g.addPass("s.vsm.cache.keep", QueueType::Compute,
+        chain.add("s.vsm.cache.keep",
                   [&](PassBuilder& b) {
                       b.use(changed, Use::UavCompute);
                       b.use(table, Use::UavCompute);
@@ -1421,7 +1429,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.computeConstants(k, kCacheWords);
                       ctx.cmd->Dispatch(cacheable ? groups(scanSlots, 256) : 1, 1, 1);  // (sun and local slots)
                   });
-        g.addPass("s.vsm.cache.free", QueueType::Compute,
+        chain.add("s.vsm.cache.free",
                   [&](PassBuilder& b) {
                       b.use(usedPages, Use::UavCompute);
                       b.use(freePages, Use::UavCompute);
@@ -1445,7 +1453,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                                      ctx.uav(pageList), ctx.uav(meta), localLightsSrv, ctx.uav(args), ctx.uav(freePages), 0, 0, 0 };
             std::memcpy(k, w, sizeof w);
         };
-        g.addPass("s.vsm.scan.count", QueueType::Compute,
+        chain.add("s.vsm.scan.count",
                   [&](PassBuilder& b) {
                       b.use(requests, Use::UavCompute);
                       b.use(scanGroupsBuf, Use::UavCompute);
@@ -1459,7 +1467,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.computeConstants(k, 16);
                       ctx.cmd->Dispatch(scanGroups, 1, 1);
                   });
-        g.addPass("s.vsm.scan.prefix", QueueType::Compute,
+        chain.add("s.vsm.scan.prefix",
                   [&](PassBuilder& b) {
                       b.use(scanGroupsBuf, Use::UavCompute);
                       b.use(statsBuf, Use::UavCompute);
@@ -1475,7 +1483,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.computeConstants(k, 16);
                       ctx.cmd->Dispatch(1, 1, 1);
                   });
-        g.addPass("s.vsm.scan.assign", QueueType::Compute,
+        chain.add("s.vsm.scan.assign",
                   [&](PassBuilder& b) {
                       b.use(requests, Use::UavCompute);
                       b.use(table, Use::UavCompute);
@@ -1494,6 +1502,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.cmd->Dispatch(scanGroups, 1, 1);
                   });
     }
+    chain.flush("s.vsm.scan");
     {
         ID3D12PipelineState* pm = sh.compute("Passes/Shadow/VsmCullMask");
         g.addPass("s.vsm.cullmask", QueueType::Compute,
@@ -1907,6 +1916,10 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
         return;
     }
     RenderGraph& g = fc.graph;
+    // shadow.vsm.fold_small_passes: the list clear is the visibility pass's first dispatch, the overflow scan's two
+    // levels are one pass, and a view without local shadow slots records no overflow passes (below).
+    const bool foldSmall = !fc.quality.has("shadow.vsm.fold_small_passes") || fc.quality.boolean("shadow.vsm.fold_small_passes");
+    PassChain chain(g, QueueType::Compute, foldSmall);
     const uint32_t w = view.view.width, h = view.view.height;
     const TextureRef out = g.createTexture(TextureDesc{ "S shadow visibility", w, h, 1, 1, DXGI_FORMAT_R32_UINT });
     view.shadowVisibility = out;
@@ -1983,7 +1996,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     // The penumbra's filtered pixels (STAGE=0 -> STAGE=1): count, then 16 B records from byte 16.
     const BufferRef filterList = g.createBuffer(BufferDesc{ "S penumbra filter list", 16 + (uint64_t)w * h * 16, 0 });
     const BufferRef filterArgs = g.createBuffer(BufferDesc{ "S penumbra filter args", 16, 0 });
-    g.addPass("s.shadow.listclear", QueueType::Compute,
+    chain.add("s.shadow.listclear",
               [&](PassBuilder& b) {
                   b.use(list, Use::UavCompute);
                   if (overflowList)
@@ -1999,7 +2012,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   ctx.computeConstants(k, 4);
                   ctx.cmd->Dispatch(1, 1, 1);
               });
-    g.addPass("s.shadow.visibility", QueueType::Compute,
+    chain.add("s.shadow.visibility",
               [&](PassBuilder& b) {
                   b.use(depth, Use::SrvCompute);
                   b.use(gbuffer, Use::SrvCompute);
@@ -2036,6 +2049,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   ctx.computeConstants(k, 24);
                   ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
               });
+    chain.flush("s.shadow.visibility");
     g.addPass("s.shadow.listargs", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(list, Use::SrvCompute);
@@ -2204,6 +2218,10 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     // Overflow tiles (indirect, one group per listed tile; without local slots the list is empty and the dispatches have
     // no groups): count each tile's need, allocate in tile order (two-level prefix sum), then fill: the lights past the
     // third, one block per tile from the capacity.
+    // shadow.vsm.fold_small_passes: a view without local shadow slots lists no tile - the visibility pass reads no froxel
+    // list then, so no pixel has a light past the third, every tile's head is 0 from that pass and the fallback list is
+    // empty from the clear - and the count, the scan and the fill, which would run over nothing, are not recorded.
+    if (foldSmall && !localSlots) return;
     const uint32_t scanBlocks = (tiles + 2047) / 2048;
     g.addPass("s.shadow.overflow.count", QueueType::Compute,
               [&](PassBuilder& b) {
@@ -2225,7 +2243,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   ctx.computeConstants(k, 20);
                   ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(overflowTiles), 4, nullptr, 0);
               });
-    g.addPass("s.shadow.overflow.scan.blocks", QueueType::Compute,
+    chain.add("s.shadow.overflow.scan.blocks",
               [&](PassBuilder& b) { b.use(needs, Use::UavCompute); b.use(blockSums, Use::UavCompute); },
               [=](PassContext& ctx) {
                   const uint32_t k[4] = { ctx.uav(needs), ctx.uav(blockSums), tiles, 0 };
@@ -2233,7 +2251,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   ctx.computeConstants(k, 4);
                   ctx.cmd->Dispatch(scanBlocks, 1, 1);
               });
-    g.addPass("s.shadow.overflow.scan.top", QueueType::Compute,
+    chain.add("s.shadow.overflow.scan.top",
               [&](PassBuilder& b) { b.use(needs, Use::UavCompute); b.use(blockSums, Use::UavCompute); },
               [=](PassContext& ctx) {
                   const uint32_t k[4] = { ctx.uav(needs), ctx.uav(blockSums), scanBlocks, 0 };
@@ -2241,6 +2259,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   ctx.computeConstants(k, 4);
                   ctx.cmd->Dispatch(1, 1, 1);
               });
+    chain.flush("s.shadow.overflow.scan");
     g.addPass("s.shadow.overflow", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(depth, Use::SrvCompute);

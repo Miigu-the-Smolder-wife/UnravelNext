@@ -24,6 +24,7 @@
 #include "unx/clusterbuilder/ClusterHierarchy.h"
 #include "unx/core/Log.h"
 #include "unx/render/GpuScene.h"
+#include "unx/render/PassChain.h"
 #include "unx/visibility/Visibility.h"
 
 #include <algorithm>
@@ -52,6 +53,7 @@ struct Settings
     bool rasterAmplification = true;  // visibility.raster_amplification (tile-local raster runs: no stored pairs)
     bool workQueue = true;            // visibility.traversal_work_queue (the node traversal in one dispatch)
     bool passMerge = true;            // visibility.cull_pass_merge (no argument passes; dispatches that share a pass)
+    bool foldSmall = true;            // visibility.fold_small_passes (HiZ levels, mask and layer clears: PassChain.h)
     uint32_t workerGroups = 0;        // visibility.traversal_worker_groups (its dispatch: groups of 64 threads)
     double coveragePoolMinPerPixel = 0;
     uint32_t oceanEdgesMin = 0;  // ocean edge pixel list capacity floor (entries)
@@ -82,6 +84,7 @@ struct Settings
         s.rasterAmplification = q.has("visibility.raster_amplification") ? q.boolean("visibility.raster_amplification") : true;
         s.workQueue = q.has("visibility.traversal_work_queue") ? q.boolean("visibility.traversal_work_queue") : true;
         s.passMerge = q.has("visibility.cull_pass_merge") ? q.boolean("visibility.cull_pass_merge") : true;
+        s.foldSmall = q.has("visibility.fold_small_passes") ? q.boolean("visibility.fold_small_passes") : true;
         const int64_t workers = q.has("visibility.traversal_worker_groups") ? q.integer("visibility.traversal_worker_groups") : 1024;
         if (workers < 1 || workers > 65535) fail("visibility.traversal_worker_groups = %lld: 1 .. 65535 (one dispatch row)", (long long)workers);
         s.workerGroups = (uint32_t)workers;
@@ -968,22 +971,24 @@ void planarTileMask(FramePassContext& fc, Run& r, const ViewDesc& view)
     const BufferRef bits = r.tileMask;
     const TextureRef mask = view.planarMask;
     const uint32_t width = view.width, height = view.height;
+    PassChain chain(fc.graph, QueueType::Graphics, r.cfg.foldSmall);  // (the clear, then the tiles: one pass)
     for (uint32_t mode = 0; mode < 2; ++mode)
     {
         ID3D12PipelineState* pso = fc.shaders.compute("Passes/Visibility/PlanarMask.MODE" + std::to_string(mode));
-        fc.graph.addPass(r.prefix + (mode == 0 ? "planar.clear" : "planar.tiles"), QueueType::Graphics,
-                         [&](PassBuilder& b) {
-                             if (mode == 1) b.use(mask, Use::SrvCompute);
-                             b.use(bits, Use::UavCompute);
-                         },
-                         [=](PassContext& c) {
-                             const uint32_t k[8] = { mode == 1 ? c.srv(mask) : kNone, c.uav(bits), width, height, tilesX, words, kPlanarTilePx, 0 };
-                             c.cmd->SetPipelineState(pso);
-                             c.computeConstants(k, 8);
-                             if (mode == 0) c.cmd->Dispatch((words + 63) / 64, 1, 1);
-                             else c.cmd->Dispatch(tilesX, tilesY, 1);
-                         });
+        chain.add(r.prefix + (mode == 0 ? "planar.clear" : "planar.tiles"),
+                  [=](PassBuilder& b) {
+                      if (mode == 1) b.use(mask, Use::SrvCompute);
+                      b.use(bits, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      const uint32_t k[8] = { mode == 1 ? c.srv(mask) : kNone, c.uav(bits), width, height, tilesX, words, kPlanarTilePx, 0 };
+                      c.cmd->SetPipelineState(pso);
+                      c.computeConstants(k, 8);
+                      if (mode == 0) c.cmd->Dispatch((words + 63) / 64, 1, 1);
+                      else c.cmd->Dispatch(tilesX, tilesY, 1);
+                  });
     }
+    chain.flush(r.prefix + "planar.tiles");
 }
 
 // One cull phase: instances (phase 1: all x views; phase 2: deferred), the traversal (one dispatch over the node work
@@ -1214,10 +1219,13 @@ void resolveDepthTies(FramePassContext& fc, State& s, const Run& r, const ViewRe
     }
 }
 
-// HiZ from the depth buffer: five levels per pass (HiZ.hlsl), each pass after the previous one's writes.
-void hizPasses(FramePassContext& fc, const Hiz& h, TextureRef hizRef, TextureRef depth, uint32_t width, uint32_t height, const std::string& tag)
+// HiZ from the depth buffer: five levels per dispatch (HiZ.hlsl), each after the previous one's writes.
+// fold (visibility.fold_small_passes): the dispatches are one pass "v.hiz.<tag>" (they write mips of one texture as UAVs,
+// each after a barrier); else a pass each.
+void hizPasses(FramePassContext& fc, const Hiz& h, TextureRef hizRef, TextureRef depth, uint32_t width, uint32_t height, const std::string& tag, bool fold)
 {
     auto mipSize = [](uint32_t m, uint32_t base) { return (base + (1u << m) - 1) >> m; };
+    PassChain chain(fc.graph, QueueType::Graphics, fold);
     for (uint32_t first = 0; first < h.mips; first += 5)
     {
         const bool fromDepth = first == 0;
@@ -1226,30 +1234,31 @@ void hizPasses(FramePassContext& fc, const Hiz& h, TextureRef hizRef, TextureRef
         const uint32_t w0 = mipSize(first, h.width), h0 = mipSize(first, h.height);
         const uint32_t srcW = fromDepth ? width : mipSize(first - 1, h.width), srcH = fromDepth ? height : mipSize(first - 1, h.height);
         const std::vector<uint32_t> uavs = h.uavs;
-        fc.graph.addPass("v.hiz." + tag + "." + std::to_string(first), QueueType::Graphics,
-                         [&](PassBuilder& b) {
-                             if (fromDepth) b.use(depth, Use::SrvCompute);
-                             b.use(hizRef, Use::UavCompute);
-                         },
-                         [=](PassContext& c) {
-                             uint32_t k[12] = {};
-                             k[0] = fromDepth ? c.srv(depth) : uavs[first - 1];
-                             k[1] = srcW;
-                             k[2] = srcH;
-                             k[3] = levels;
-                             for (uint32_t l = 0; l < 5; ++l)
-                             {
-                                 const uint32_t u = l < levels ? uavs[first + l] : uavs[first];
-                                 if (l < 4) k[4 + l] = u;
-                                 else k[8] = u;
-                             }
-                             k[9] = w0;
-                             k[10] = h0;
-                             c.cmd->SetPipelineState(pso);
-                             c.computeConstants(k, 12);
-                             c.cmd->Dispatch((w0 + 15) / 16, (h0 + 15) / 16, 1);
-                         });
+        chain.add("v.hiz." + tag + "." + std::to_string(first),
+                  [=](PassBuilder& b) {
+                      if (fromDepth) b.use(depth, Use::SrvCompute);
+                      b.use(hizRef, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      uint32_t k[12] = {};
+                      k[0] = fromDepth ? c.srv(depth) : uavs[first - 1];
+                      k[1] = srcW;
+                      k[2] = srcH;
+                      k[3] = levels;
+                      for (uint32_t l = 0; l < 5; ++l)
+                      {
+                          const uint32_t u = l < levels ? uavs[first + l] : uavs[first];
+                          if (l < 4) k[4 + l] = u;
+                          else k[8] = u;
+                      }
+                      k[9] = w0;
+                      k[10] = h0;
+                      c.cmd->SetPipelineState(pso);
+                      c.computeConstants(k, 12);
+                      c.cmd->Dispatch((w0 + 15) / 16, (h0 + 15) / 16, 1);
+                  });
     }
+    chain.flush("v.hiz." + tag);
 }
 
 ComPtr<ID3D12Resource> createCoverageBuffer(Device& device, uint64_t bytes, const wchar_t* name)
@@ -1818,12 +1827,12 @@ void visibility(FramePassContext& fc, ViewResources& view)
         recordStats(fc, s, r, statsName);  // the frame's last planar reflection view (R's planar reflection costs)
         return;
     }
-    hizPasses(fc, vs->hiz, r.hiz, view.depth, width, height, occlusion ? "p1" : "final");
+    hizPasses(fc, vs->hiz, r.hiz, view.depth, width, height, occlusion ? "p1" : "final", cfg.foldSmall);
     if (occlusion)
     {
         cullPhase(fc, s, r, 2);
         rasterPass(fc, s, r, view, 2);
-        hizPasses(fc, vs->hiz, r.hiz, view.depth, width, height, "final");
+        hizPasses(fc, vs->hiz, r.hiz, view.depth, width, height, "final", cfg.foldSmall);
     }
     resolveDepthTies(fc, s, r, view, view.depth, view.visId, 0, kAListCount);
     waterLayer(fc, s, r, view);
@@ -1858,7 +1867,9 @@ void translucentLayer(FramePassContext& fc, State& s, const Run& r, ViewResource
     const TextureRef vis = g.createTexture({ "v.translucent.vis", width, height, 1, 1, DXGI_FORMAT_R32_UINT });
     const TextureRef linear = g.createTexture({ "v.translucent.depth", width, height, 1, 1, DXGI_FORMAT_R32_FLOAT });
     const TextureRef cls = g.createTexture({ "v.translucent.class", width, height, 1, 1, DXGI_FORMAT_R8_UINT });
-    g.addPass("v.translucent.copy", QueueType::Graphics,
+    // (visibility.fold_small_passes: the depth copy and the count's clear are one pass - they touch different textures)
+    PassChain chain(g, QueueType::Graphics, r.cfg.foldSmall);
+    chain.add("v.translucent.copy",
               [&](PassBuilder& b) {
                   b.use(depthA, Use::CopySrc);
                   b.use(depth, Use::CopyDst);
@@ -1900,13 +1911,14 @@ void translucentLayer(FramePassContext& fc, State& s, const Run& r, ViewResource
         }
     };
     ID3D12PipelineState* clearPso = fc.shaders.compute("Passes/Visibility/TranslucentClass.MODE0");
-    g.addPass("v.translucent.clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(count, Use::UavCompute); },
+    chain.add("v.translucent.clear", [&](PassBuilder& b) { b.use(count, Use::UavCompute); },
               [=](PassContext& c) {
                   const uint32_t k[8] = { kNone, kNone, kNone, c.uav(count), kNone, width, height, 0 };
                   c.cmd->SetPipelineState(clearPso);
                   c.computeConstants(k, 8);
                   c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
               });
+    chain.flush("v.translucent.clear");
     g.addPass("v.translucent.count", QueueType::Graphics,
               [&](PassBuilder& b) {
                   b.use(run.args, Use::IndirectArgs);

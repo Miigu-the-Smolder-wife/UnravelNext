@@ -4,6 +4,7 @@
 #include "VsmSystem.h"
 
 #include "unx/render/GpuScene.h"
+#include "unx/render/PassChain.h"
 #include "unx/scene/SceneData.h"
 #include "unx/render/Tracks.h"
 #if UNX_S_HAS_RAYTRACING
@@ -435,6 +436,10 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
     const uint64_t bytes = froxelListBytes(grid, capacity);
     const uint32_t fallbackForced = (uint32_t)q.integer("atmosphere.froxels.list_fallback_forced");  // tests: scene lights only this frame
     RenderGraph& g = fc.graph;
+    // atmosphere.froxels.fold_small_passes: the header, the count and the two scan levels are one pass (PassChain.h: each
+    // dispatch after a barrier; all write the lists buffer as a UAV), the fill is the other.
+    const bool foldSmall = !q.has("atmosphere.froxels.fold_small_passes") || q.boolean("atmosphere.froxels.fold_small_passes");
+    PassChain chain(g, QueueType::Compute, foldSmall);
     const BufferRef lights = g.createBuffer(BufferDesc{ suffix.empty() ? "S froxel light lists" : "S froxel light lists (planar view)", bytes, 0 });
     const BufferRef blockSums = g.createBuffer(BufferDesc{ suffix.empty() ? "S froxel list block sums" : "S froxel list block sums (planar view)", (uint64_t)kScanBlock * 4 * 2, 0 });
     // The scene lights' own allocation (FroxelScan's second prefix sum): the runs of a frame whose need exceeds the capacity.
@@ -452,7 +457,7 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
     uint32_t nearBits, farBits;
     std::memcpy(&nearBits, &grid.nearM, 4);
     std::memcpy(&farBits, &grid.farM, 4);
-    g.addPass("s.froxel.begin" + suffix, QueueType::Compute, [&](PassBuilder& b) { b.use(lights, Use::UavCompute); },
+    chain.add("s.froxel.begin" + suffix, [&](PassBuilder& b) { b.use(lights, Use::UavCompute); },
               [=](PassContext& ctx) {
                   const uint32_t k[8] = { ctx.uav(lights), grid.gridX, grid.gridY, grid.slices, grid.tilePx, nearBits, farBits, capacity };
                   ctx.cmd->SetPipelineState(pb);
@@ -467,7 +472,7 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
         if (fc.resources.fxLights.valid()) b.use(fc.resources.fxLights, Use::SrvCompute);
         if (fc.resources.fxLightCount.valid()) b.use(fc.resources.fxLightCount, Use::SrvCompute);
     };
-    g.addPass("s.froxel.count" + suffix, QueueType::Compute,
+    chain.add("s.froxel.count" + suffix,
               [&](PassBuilder& b) {
                   cullInputs(b);
                   if (candidates.valid()) b.use(candidates, Use::UavCompute);
@@ -480,7 +485,7 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
                   ctx.computeConstants(k, 12);
                   ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
               });
-    g.addPass("s.froxel.scan.blocks" + suffix, QueueType::Compute,
+    chain.add("s.froxel.scan.blocks" + suffix,
               [&](PassBuilder& b) { b.use(lights, Use::UavCompute); b.use(blockSums, Use::UavCompute); b.use(sceneAlloc, Use::UavCompute); },
               [=](PassContext& ctx) {
                   const uint32_t k[4] = { ctx.uav(lights), ctx.uav(blockSums), (uint32_t)froxels, ctx.uav(sceneAlloc) };
@@ -488,7 +493,7 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
                   ctx.computeConstants(k, 4);
                   ctx.cmd->Dispatch(blocks, 1, 1);
               });
-    g.addPass("s.froxel.scan.top" + suffix, QueueType::Compute,
+    chain.add("s.froxel.scan.top" + suffix,
               [&](PassBuilder& b) { b.use(lights, Use::UavCompute); b.use(blockSums, Use::UavCompute); },
               [=](PassContext& ctx) {
                   const uint32_t k[4] = { ctx.uav(lights), ctx.uav(blockSums), blocks, 0 };
@@ -496,6 +501,7 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
                   ctx.computeConstants(k, 4);
                   ctx.cmd->Dispatch(1, 1, 1);
               });
+    chain.flush("s.froxel.count" + suffix);
     g.addPass("s.froxel.lists" + suffix, QueueType::Compute,
               [&](PassBuilder& b) {
                   cullInputs(b);
