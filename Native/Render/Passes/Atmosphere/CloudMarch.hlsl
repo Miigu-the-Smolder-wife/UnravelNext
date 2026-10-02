@@ -32,7 +32,7 @@
 // Modes 0 and 3 start the span with short steps: the first is the ray's footprint where the span begins (not under
 // CLOUD_STEP_MIN), each next one CLOUD_STEP_GROWTH times longer until the equal steps' length is reached - a span that
 // begins at the camera (the camera inside the layer) is not sampled first at half a 200 m step from it. At most
-// CLOUD_RAMP_STEPS more steps than CLOUD_MARCH_STEPS. The tests' modes keep the equal steps of their CPU twins.
+// CLOUD_RAMP_STEPS more steps than the equal steps would be. The tests' modes keep the equal steps of their CPU twins.
 // P[3].z bits 8.. (mode 0 with a history) = the dispatch's phase: 1 = a thread per 2 x 2 block marches the block's texel of
 // this frame (every lane of a wave marches: a dispatch over all texels with a quarter of its lanes marching takes as
 // long as one with all of them); 2 = a thread per texel fills the block's other texels (the frame's own texel is left).
@@ -53,7 +53,8 @@
 #define CLOUD_AIR_STEPS 16u
 #define CLOUD_STEP_MIN 25.0
 #define CLOUD_STEP_GROWTH 1.15
-#define CLOUD_RAMP_STEPS 24u     // (25 m x 1.15^20 = 409 m: the ramp reaches the longest equal step, 400 m, in 20 steps)
+#define CLOUD_RAMP_STEPS 32u     // (25 m x 1.15^20 = 409 m: the ramp reaches a 400 m equal step in 20 steps; a span cut to
+                                 // CLOUD_MARCH_STEPS has longer ones - 2 km in 32)
 
 [numthreads(8, 8, 1)]
 void main(uint2 id : SV_DispatchThreadID)

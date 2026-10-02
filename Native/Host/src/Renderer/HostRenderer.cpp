@@ -650,6 +650,9 @@ scene::Scene HostRenderer::snapshot(bool photo) const
     std::vector<viewmodel::ViewModels::Entry> viewModels;
     scene::Camera camera;
     bool haveCamera = false;
+    render::CloudLayerDesc cloudsNow;
+    render::FogDesc fogNow;
+    std::vector<render::FogVolumeDesc> fogVolumesNow;
     {
         std::lock_guard lock(m_mutex);
         {
@@ -665,6 +668,9 @@ scene::Scene HostRenderer::snapshot(bool photo) const
         applyEdits(m_pending, s);
         overlay(m_pending, state);
         originOffset = m_mainOriginOffset;
+        cloudsNow = m_clouds;
+        fogNow = m_fog;
+        fogVolumesNow = m_fogVolumes;
         if (photo)
         {
             runtimeMeshes = m_runtimeMeshData;
@@ -678,6 +684,41 @@ scene::Scene HostRenderer::snapshot(bool photo) const
     }
     // Lights stay where they were added; the GPU scene moves them by every origin shift (GpuScene::rebase).
     for (scene::Light& l : s.lights) l.position = l.position - originOffset;
+    // The weather the host set (UnxFrameSetClouds / SetFog / SetFogVolumes), in the saved scene's coordinates: a gate that
+    // loads the file shows the frame's clouds and fog (scene::Scene's CLDS and FOGS blocks).
+    {
+        s.clouds.coverage = cloudsNow.coverage;
+        s.clouds.baseAltitude = cloudsNow.baseAltitude - originOffset.y;
+        s.clouds.topAltitude = cloudsNow.topAltitude - originOffset.y;
+        s.clouds.sigmaMax = cloudsNow.sigmaMax;
+        s.clouds.albedo = cloudsNow.albedo;
+        s.clouds.windX = cloudsNow.windX;
+        s.clouds.windZ = cloudsNow.windZ;
+        s.fog.enabled = fogNow.enabled;
+        s.fog.density = fogNow.density;
+        s.fog.heightFalloff = fogNow.heightFalloff;
+        s.fog.height = fogNow.height - originOffset.y;
+        s.fog.albedo = { fogNow.albedo[0], fogNow.albedo[1], fogNow.albedo[2] };
+        s.fog.phaseG = fogNow.phaseG;
+        s.fog.startDistance = fogNow.startDistance;
+        s.fog.skyAmount = fogNow.skyAmount;
+        s.fog.noiseAmount = fogNow.noiseAmount;
+        s.fog.noiseScale = fogNow.noiseScale;
+        s.fogVolumes.clear();
+        for (const render::FogVolumeDesc& v : fogVolumesNow)
+        {
+            scene::FogVolume o;
+            o.centre = { (float)(v.centre[0] - originOffset.x), (float)(v.centre[1] - originOffset.y), (float)(v.centre[2] - originOffset.z) };
+            o.halfSize = { v.halfSize[0], v.halfSize[1], v.halfSize[2] };
+            o.yaw = v.yaw;
+            o.shape = v.shape;
+            o.density = v.density;
+            o.heightFalloff = v.heightFalloff;
+            o.edge = v.edge;
+            o.albedo = { v.albedo[0], v.albedo[1], v.albedo[2] };
+            s.fogVolumes.push_back(o);
+        }
+    }
     if (photo)
     {
         // A12: view models where the frames draw them, the host's latest frame camera x their pose

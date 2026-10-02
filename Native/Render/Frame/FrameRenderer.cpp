@@ -1,6 +1,7 @@
 #include "unx/render/FrameRenderer.h"
 
 #include "unx/render/Tracks.h"
+#include "unx/scene/SceneData.h"
 
 #include <cmath>
 #include <cstring>
@@ -313,6 +314,53 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     // History discontinuity (v1.35): no previous view in this frame; a restore also has no previous transforms or
     // palettes. The tracks reset their own temporal state from frame.discontinuity.
     FrameContext frame = in;
+    // The scene description's weather where the frame brings none of its own (FrameContext::sceneWeather): the scene's
+    // coordinates are the world's - the fog's height and the volumes' centres go through the origin offset as the
+    // frame's own do (S), the cloud layer's altitudes are above the planet's surface.
+    if (const scene::Scene* src = m_scene.source())
+    {
+        if ((frame.sceneWeather & kSceneClouds) != 0 && !(frame.clouds.coverage > 0) && src->clouds.coverage > 0)
+        {
+            const scene::CloudLayer& c = src->clouds;
+            frame.clouds.coverage = c.coverage;
+            frame.clouds.baseAltitude = c.baseAltitude;
+            frame.clouds.topAltitude = c.topAltitude;
+            frame.clouds.sigmaMax = c.sigmaMax;
+            frame.clouds.albedo = c.albedo;
+            frame.clouds.windX = c.windX;
+            frame.clouds.windZ = c.windZ;
+        }
+        if ((frame.sceneWeather & kSceneFog) != 0 && !frame.fog.enabled && src->fog.enabled)
+        {
+            const scene::Fog& f = src->fog;
+            frame.fog.enabled = true;
+            frame.fog.density = f.density;
+            frame.fog.heightFalloff = f.heightFalloff;
+            frame.fog.height = f.height;
+            frame.fog.albedo[0] = f.albedo.x;
+            frame.fog.albedo[1] = f.albedo.y;
+            frame.fog.albedo[2] = f.albedo.z;
+            frame.fog.phaseG = f.phaseG;
+            frame.fog.startDistance = f.startDistance;
+            frame.fog.skyAmount = f.skyAmount;
+            frame.fog.noiseAmount = f.noiseAmount;
+            frame.fog.noiseScale = f.noiseScale;
+        }
+        if ((frame.sceneWeather & kSceneFogVolumes) != 0 && frame.fogVolumes.empty())
+            for (const scene::FogVolume& v : src->fogVolumes)
+            {
+                FogVolumeDesc d;
+                d.centre[0] = v.centre.x, d.centre[1] = v.centre.y, d.centre[2] = v.centre.z;
+                d.halfSize[0] = v.halfSize.x, d.halfSize[1] = v.halfSize.y, d.halfSize[2] = v.halfSize.z;
+                d.yaw = v.yaw;
+                d.shape = v.shape;
+                d.density = v.density;
+                d.heightFalloff = v.heightFalloff;
+                d.edge = v.edge;
+                d.albedo[0] = v.albedo.x, d.albedo[1] = v.albedo.y, d.albedo[2] = v.albedo.z;
+                frame.fogVolumes.push_back(d);
+            }
+    }
     // A new recording: per-frame allocations restart even when a failed attempt left this frame index behind (the views
     // of a frame that failed kept counting, and every later attempt failed with "more than 16 views").
     m_trackState.beginRecord();

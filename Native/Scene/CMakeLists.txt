@@ -30,6 +30,10 @@ target_compile_definitions(unx_test_scene_film PRIVATE UNX_SOURCE_DIR="${CMAKE_S
 add_executable(unx_test_scene_lightendbias Tests/LightEndBiasTests.cpp)
 unx_target_defaults(unx_test_scene_lightendbias)
 target_link_libraries(unx_test_scene_lightendbias PRIVATE unx_scene)
+# The scene's weather (cloud layer, fog, fog volumes) in the scene file: the optional CLDS and FOGS blocks.
+add_executable(unx_test_scene_weather Tests/WeatherBlockTests.cpp)
+unx_target_defaults(unx_test_scene_weather)
+target_link_libraries(unx_test_scene_weather PRIVATE unx_scene)
 # Mesh cards (render A, MESH_CARDS_INTERFACE_KO.md): the per-mesh card generator (CPU).
 add_executable(unx_test_scene_meshcards Tests/MeshCardsTests.cpp)
 unx_target_defaults(unx_test_scene_meshcards)

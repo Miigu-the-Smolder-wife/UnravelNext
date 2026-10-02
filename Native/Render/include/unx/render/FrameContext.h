@@ -152,6 +152,12 @@ struct FogVolumeDesc
 };
 constexpr uint32_t kMaxFogVolumes = 16;  // (the first ones of a frame take effect)
 
+// The scene description's weather (scene::Scene::clouds, fog, fogVolumes): FrameRenderer gives a frame the scene's cloud
+// layer, fog or fog volumes where the frame brings none of its own (coverage 0, enabled false, no volumes) while that
+// item's bit is set in FrameContext::sceneWeather. A producer that decides an item itself clears its bit, and its "none"
+// is then none (a gate's --clouds 0 on a scene with clouds).
+constexpr uint32_t kSceneClouds = 1, kSceneFog = 2, kSceneFogVolumes = 4;
+
 // A14 (FEATURES_GAME 8; Requests/20260926_C_per_view_history.md): a full auxiliary view drawn in this frame before the
 // main view (render-texture camera, mirror, portal, split screen). Its id is stable across frames (the key of every
 // track's per-view history; nonzero, unique). 'reads' lists the views whose outputs this view's materials read: those
@@ -174,6 +180,7 @@ struct FrameContext
     CloudLayerDesc clouds;  // B5 (v1.77): coverage 0 = none
     FogDesc fog;            // the height fog (enabled false: the quality file's)
     std::vector<FogVolumeDesc> fogVolumes;  // local fog volumes (at most kMaxFogVolumes take effect)
+    uint32_t sceneWeather = kSceneClouds | kSceneFog | kSceneFogVolumes;  // the scene's weather fills the items above that are empty
     // Validation runs: the main view's colour is linear radiance x exposure in RGBA32F (metrics, INTERFACES 9)
     // instead of the display-encoded RGB10A2.
     bool outputLinearHdr = false;
