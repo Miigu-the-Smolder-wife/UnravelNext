@@ -76,8 +76,15 @@ hair_density_resolution = 64      # cells along the longest side of a body's box
                                   # every strand is then shaded with no fibre in front and hair_fibres_behind behind)
 hair_density_bodies = 16          # the nearest bodies that get a block of the volume (resolution^3 x 6 B each); the others
                                   # are shaded as with resolution 0
-hair_density_steps = 16           # samples of a march through the volume towards a light (the indirect light's four
-                                  # marches take half as many)
+hair_density_steps = 16           # samples of a strand's march through the volume towards a light (the indirect light's
+                                  # four marches take half as many). A path longer than 1.5 cells a sample spends half of
+                                  # them on its first cells, one each - the hair next to the strand at the cells' size,
+                                  # which draws the edge of the hair's shadow on itself - and the rest on the remainder
+                                  # (the cells' means from 3 cells a sample on)
+hair_march_jitter = true          # every march through the volume (the strands', hair_shadows') takes its samples at a
+                                  # phase drawn per pixel / record / segment point and frame, so the cells' pattern along
+                                  # a shadow's edge becomes noise the temporal filters remove (Unreal's hair voxel
+                                  # traversal does the same); false: the midpoint rule, the same every frame
 hair_lights_spatial = false       # with mega_lights: the spatial filter on the hair records' local lights (Unreal runs its hair
                                   # input without one: "no proper reconstruction filter"); the temporal filter always runs
 hair_fibres_behind = 2.0          # fibres taken to lie behind a strand whose body has no block (the neighbourhood's backward
@@ -89,7 +96,10 @@ hair_shadows = true               # the hair's shadow on what is not hair (Passe
                                   # block (hair_density_bodies; the nearest 64 at most). Not shadowed: the coverage layer's
                                   # cluster fragments under the sun, the local lights without mega_lights, the air.
                                   # Frames without a density volume record no pass.
-hair_shadow_steps = 32            # samples of that march from a surface towards a light (2..128)
+hair_shadow_steps = 32            # that march's steps through a body at most (2..128). A step is one coarse cell (4 cells):
+                                  # empty ones are skipped, the others read in 4 samples of the cells, so the shadow has
+                                  # the cells' size wherever the path is. A path of more coarse cells than this (resolution
+                                  # 128: up to 56) reads the cells' means alone
 hair_lights_ray_depths = true     # with mega_lights: the shadow rays of the hair records' light samples start where the pixel's
                                   # ray first meets the groom in the density volume (a quantile per frame; the temporal filter
                                   # keeps the mean), not at the pixel's nearest record - an opaque caster's shadow edge then

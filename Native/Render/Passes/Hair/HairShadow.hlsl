@@ -12,16 +12,22 @@
 //           without noise; the instance reads a sample of smaller weight as a likelier one, so its history is
 //           shorter where hair shadows a light (MegaLightsUpsample.hlsli's confidence).
 // The hair records are not this kernel's: a strand counts the hair in front of it itself (CoverageHair.hlsl).
-// Limits: the volume's cells (about 1 cm on a head; a long march reads their means over 4 cm) - the shadow has no strands
-// in it, and a surface nearer to the hair than half a cell is not shadowed by that half cell; the bodies with a block
-// (shading.hair_density_bodies, at most HAIR_SHADOW_BODIES); the fibres' directions are not kept (pi / 4 for all).
-// Frames without a density volume record neither pass.
+// The march reads the cells along the whole path (hairTransmittance: steps of a coarse cell, the ones with hair in four
+// samples of the cells), its samples moved along the path by a number drawn per pixel and frame (the blue-noise tile):
+// what is left of the cells' pattern in a shadow's edge is noise for the temporal filters, as the reference's voxel
+// shadow (a jittered traversal converged by its temporal filter).
+// Limits: the volume's cells (about 1 cm on a head) - the shadow has no strands in it, and a surface nearer to the hair
+// than half a cell is not shadowed by that half cell; the bodies with a block (shading.hair_density_bodies, at most
+// HAIR_SHADOW_BODIES); the fibres' directions are not kept (pi / 4 for all). Frames without a density volume record
+// neither pass.
 // P[0] = { density parameters (raw), the view's device depth (MODE 1: the downsampled key, R32G32_UINT), S's visibility
-//          UAV (R32_UINT; MODE 1: the samples UAV, R32G32_UINT), march steps }
-// P[1] = { this view's camera - the volume's origin camera (FrameResources::hairOrigin), xyz (m, floats), 0 }
+//          UAV (R32_UINT; MODE 1: the samples UAV, R32G32_UINT), the march's steps at most (shading.hair_shadow_steps) }
+// P[1] = { this view's camera - the volume's origin camera (FrameResources::hairOrigin), xyz (m, floats),
+//          shading.hair_march_jitter (0: the midpoint rule) }
 // P[2] = { MODE 1: the sample texture's width, height, factor | N << 8, 0 }
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
+#include "Passes/Common/BlueNoise.hlsli"
 #if MODE == 1
 #include "RayTracing/HitLocalLights.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
@@ -43,7 +49,7 @@ void main(uint3 id : SV_DispatchThreadID)
     const uint sun = word & 0xFFu;
     if (sun == 0) return;
     const float3 p = worldFromDepth(float2(pixel), depth) - g_cameraPosition + asfloat(P[1].xyz);
-    const float through = hairTransmittance(P[0].x, p, normalize(g_sunDirection), 3.0e38f, P[0].w);
+    const float through = hairTransmittance(P[0].x, p, normalize(g_sunDirection), 3.0e38f, P[0].w, P[1].w != 0 ? blueNoise1(pixel, g_frameIndex) : 0.5f);
     if (through < 1) visibility[pixel] = (word & 0xFFFFFF00u) | (uint)round(sun * through);
 }
 #else
@@ -87,7 +93,7 @@ void main(uint3 id : SV_DispatchThreadID)
     const float3 offset = D * linearZ;
     RtLightSample ls;
     if (!rtLightSample(hairShadowLight(loadLight(s.light)), g_cameraPosition + offset, s.uv.x, s.uv.y, ls)) return;
-    const float through = hairTransmittance(P[0].x, offset + asfloat(P[1].xyz), ls.wi, ls.distance, P[0].w);
+    const float through = hairTransmittance(P[0].x, offset + asfloat(P[1].xyz), ls.wi, ls.distance, P[0].w, P[1].w != 0 ? blueNoise4(texel, g_frameIndex).y : 0.5f);
     if (through < 1) samples[texel] = through < 1.0 / 256 ? uint2(stored.x & 0x7FFFFFFFu, stored.y) : uint2(stored.x, asuint(s.weight * through));
 }
 #endif

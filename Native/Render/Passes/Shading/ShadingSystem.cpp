@@ -1575,6 +1575,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 for (int mode = 0; mode < 12; ++mode) hairKernel[mode] = fc.shaders.compute(("Passes/Shading/CoverageHair.MODE" + std::to_string(mode)).c_str());
                 const bool segmentShading = !fc.quality.has("shading.hair_segment_shading") || fc.quality.boolean("shading.hair_segment_shading");
                 const bool rayDepths = density && (!fc.quality.has("shading.hair_lights_ray_depths") || fc.quality.boolean("shading.hair_lights_ray_depths"));
+                const bool marchJitter = !fc.quality.has("shading.hair_march_jitter") || fc.quality.boolean("shading.hair_march_jitter");
                 auto useHair = [=](PassBuilder& b) {
                     b.use(v.coverageRecords, Use::SrvCompute);
                     b.use(hairSegments, Use::SrvCompute);
@@ -1594,7 +1595,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                     k[4] = c.srv(hairSegments);
                     k[5] = c.srv(hairBodies);
                     k[6] = density ? c.srv(densityParams) : gpu::kNone;
-                    k[20] = steps;
+                    k[20] = steps | (marchJitter ? 0x80000000u : 0u);  // (CoverageHair.hlsl HAIR_STEPS, hairJitter)
                     std::memcpy(&k[21], &fibresBehind, 4);
                     k[22] = experiment;
                     k[23] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : gpu::kNone;

@@ -340,6 +340,7 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
     {
         const uint32_t hairSteps = fc.quality.has("shading.hair_shadow_steps") ? (uint32_t)fc.quality.integer("shading.hair_shadow_steps") : 32u;
         if (hairSteps < 2 || hairSteps > 128) fail("shading.hair_shadow_steps must be in [2, 128]");
+        const uint32_t hairJitter = !fc.quality.has("shading.hair_march_jitter") || fc.quality.boolean("shading.hair_march_jitter") ? 1u : 0u;
         const float3 originOffset = view.view.position - r.hairOrigin;
         const BufferRef hairParams = r.hairDensityParams;
         const TextureRef hairFine = r.hairDensity, hairCoarse = r.hairDensityCoarse;
@@ -354,7 +355,7 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
                       b.use(samples, Use::UavCompute);
                   },
                   [=](PassContext& c) {
-                      uint32_t k[12] = { c.srv(hairParams), c.srv(keys), c.uav(samples), hairSteps, 0, 0, 0, 0, dsW * gridX, dsH * gridY, s.factor | (s.count << 8), 0 };
+                      uint32_t k[12] = { c.srv(hairParams), c.srv(keys), c.uav(samples), hairSteps, 0, 0, 0, hairJitter, dsW * gridX, dsH * gridY, s.factor | (s.count << 8), 0 };
                       const float o[3] = { originOffset.x, originOffset.y, originOffset.z };
                       std::memcpy(&k[4], o, 12);
                       c.cmd->SetPipelineState(hairPso);

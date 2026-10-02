@@ -429,8 +429,11 @@ public:
         const uint32_t densityColumns = densityBodies ? std::min(densityBodies, 2048u / densityRes) : 0u;
         const uint32_t densityRows = densityBodies ? (densityBodies + densityColumns - 1) / densityColumns : 0u;
         if (densityRows * densityRes > 2048u) fail("shading.hair_density_bodies: %u blocks of %u cells exceed a 3D texture", densityBodies, densityRes);
-        // (parameters: header, the bodies' words, then the bodies with a block - their count and indices, nearest first)
-        std::vector<uint32_t> densityParams(4 + 8 * bodies.size() + 1 + densityBodies, 0);
+        // (parameters, HairDensity.hlsli: header, the bodies' words, then the bodies with a block - their count and per body
+        // its index and material, nearest first)
+        constexpr size_t kDensityHeader = 8, kDensityBody = 8, kDensityEntry = 2;  // HAIR_DENSITY_HEADER, _BODY_WORDS, _LIST_WORDS
+        const size_t densityListAt = kDensityHeader + kDensityBody * bodies.size();
+        std::vector<uint32_t> densityParams(densityListAt + 1 + kDensityEntry * densityBodies, 0);
         struct DensityBody
         {
             uint32_t body, block;
@@ -443,6 +446,8 @@ public:
             std::stable_sort(order.begin(), order.end(), [&](uint32_t x, uint32_t y) { return boxes[x].distance < boxes[y].distance; });
             densityParams[0] = (uint32_t)bodies.size();
             densityParams[1] = densityRes;
+            const float origin[3] = { v.position.x, v.position.y, v.position.z };  // (what the boxes are relative to)
+            std::memcpy(&densityParams[4], origin, 12);
             for (uint32_t k = 0; k < densityBodies; ++k)
             {
                 const Box& box = boxes[order[k]];
@@ -451,15 +456,16 @@ public:
                 if (!(longest > 0)) continue;
                 const float cell = longest / (float)densityRes;
                 const float f[4] = { box.lo.x, box.lo.y, box.lo.z, cell };
-                uint32_t* w = &densityParams[4 + 8 * order[k]];
+                uint32_t* w = &densityParams[kDensityHeader + kDensityBody * order[k]];
                 std::memcpy(w, f, 16);
                 const float extent[3] = { size.x, size.y, size.z };
                 for (int axis = 0; axis < 3; ++axis) w[4 + axis] = std::clamp((uint32_t)std::ceil(extent[axis] / cell), 1u, densityRes);
                 w[7] = (k % densityColumns) | ((k / densityColumns) << 16);
-                densityParams[4 + 8 * bodies.size() + 1 + densityList.size()] = order[k];
+                densityParams[densityListAt + 1 + kDensityEntry * densityList.size()] = order[k];
+                densityParams[densityListAt + 2 + kDensityEntry * densityList.size()] = bodies[order[k]]->desc.material;
                 densityList.push_back({ order[k], k });
             }
-            densityParams[4 + 8 * bodies.size()] = (uint32_t)densityList.size();
+            densityParams[densityListAt] = (uint32_t)densityList.size();
         }
         const uint64_t constantsBytes = constants.size() * kConstantSlot, inputsBytes = std::max<size_t>(inputs.size(), 1) * 16,
                        headerBytes = (header.size() * 4 + 15) / 16 * 16, densityBytes = densityBodies ? (densityParams.size() * 4 + 15) / 16 * 16 : 0;

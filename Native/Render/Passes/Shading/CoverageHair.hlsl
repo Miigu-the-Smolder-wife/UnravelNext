@@ -40,6 +40,9 @@
 //              across. The neighbourhood's backward lobe counts with 1 - exp(-mean count of the four directions).
 //              Not seen: opaque geometry nearer than the volume's cells (the head under the hair).
 // Then the air in front of the record and the exposure, as covShadeFragment.
+// Every march through the density volume takes its samples at a phase drawn for the evaluation (the pixel, the record,
+// the segment's point) and the frame (hairJitter): the volume's cells leave no fixed pattern along a shadow's edge on
+// the hair - the temporal filters (the instance's, the upscaler's) take the mean.
 // The light per-record modes (1, 2, 8) walk V's records by block (one group of 256 threads per block of the tile list,
 // 4 records a thread; the group finds its tile once, a record's pixel is its place in the tile) and take the hair
 // records; MODE 5 goes by a list (a thread per entry, groups of 64: the record kernel is slower in larger groups - 1.2
@@ -76,7 +79,8 @@
 //          MODE 6: the rays' key UAV (R32G32_UINT), 0, 0, factor | N << 8 }
 // P[4] = { MODE 5: S's fragment visibility, V's coverageDepthRange, S's per-record sun bytes, froxel lights (the loop
 //          without mega_lights; UNX_NONE each: none) }
-// P[5] = { march steps, fibres behind a strand whose body has no block (float), experiment mask, light function table }
+// P[5] = { march steps | shading.hair_march_jitter << 31, fibres behind a strand whose body has no block (float),
+//          experiment mask, light function table }
 // P[6] = { MODE 5: atmosphere transmittance, multi-scatter, air volume; MODE 5, 11: the indirect light's source word
 //          (GiSource.hlsli) }
 // P[7] = { MODE 5: the hair instance's lighting at the nearest record (RGBA16F, exposed; UNX_NONE: the froxel loop),
@@ -122,6 +126,7 @@
 #define HAIR_BODIES_MAX 4096u  // (the body search's bound, as HairRaster.ms)
 #define HAIR_SEGMENT_POINTS 3u  // points along a segment at which MODE 11 evaluates the strand (ShadingSystem.cpp kHairSegmentPoints)
 #define HAIR_SEGMENT_LIST 4u    // header words of the segment list: count, MODE 11's dispatch arguments
+#define HAIR_STEPS (P[5].x & 0xFFFFu)  // shading.hair_density_steps
 
 // A block of V's records (CoverageTiles.hlsli; the walk of MegaLightsCoverage.hlsl): its tile's coordinate, records and
 // record base, and the block's first record in the tile. false: no such block (uniform over the group).
@@ -233,24 +238,28 @@ float3 hairNormal(HairPoint p)
     return l > 1e-4 ? n / l : p.side;
 }
 float3 hairLocal(HairPoint p, float3 w) { return float3(dot(w, p.tangent), dot(w, p.side), dot(w, p.up)); }
-// Fibres from the point towards d and past it (x, y); a body without a block: none in front, P[5].y behind.
-float2 hairCounts(HairPoint p, float3 d, uint steps)
+// Fibres from the point towards d and past it (x, y); a body without a block: none in front, P[5].y behind. jitter: the
+// marches' phase (HairDensity.hlsli), a number of the evaluation's own that changes every frame - hairJitter.
+float2 hairCounts(HairPoint p, float3 d, uint steps, float jitter)
 {
-    const float front = hairFibreCount(P[1].z, p.body, p.offset, d, steps);
+    const float front = hairFibreCount(P[1].z, p.body, p.offset, d, steps, jitter);
     if (front < 0) return float2(0, asfloat(P[5].y));
-    return float2(front, max(hairFibreCount(P[1].z, p.body, p.offset, -d, steps), 0.0));
+    return float2(front, max(hairFibreCount(P[1].z, p.body, p.offset, -d, steps, jitter), 0.0));
 }
+// A unit number for evaluation 'id' (a pixel, a record, a segment's point) and its k-th march, new every frame.
+// (shading.hair_march_jitter off: the midpoint rule)
+float hairJitter(uint id, uint k) { return (P[5].x >> 31) != 0 ? hairDensityUnit(id * 0x9E3779B1u + (g_frameIndex & 0xFFFFu) * 0x85EBCA77u, k) : 0.5f; }
 // The strand's radiance per unit of illuminance E on the plane facing l (unit, world).
-float3 hairLit(HairPoint p, HairStrand strand, float3 l)
+float3 hairLit(HairPoint p, HairStrand strand, float3 l, float jitter)
 {
     const float3 wi = hairLocal(p, l);
-    const float2 n = hairCounts(p, l, P[5].x);
+    const float2 n = hairCounts(p, l, HAIR_STEPS, jitter);
     return hairStrandLight(strand, hairAverage(wi.x, p.eta, p.absorption, p.betaM, p.betaN, p.tilt), wi, n.x, n.y);
 }
 
 #if MODE == 4 || MODE == 5
 // A local light's radiance from the strand, before the opaque scene's visibility (its light function included).
-float3 hairLocalLight(HairPoint p, HairStrand strand, GpuLight light, uint lightIndex)
+float3 hairLocalLight(HairPoint p, HairStrand strand, GpuLight light, uint lightIndex, float jitter)
 {
     const float3 toLight = (light.position - g_cameraPosition) - p.offset;
     float3 l, E;
@@ -270,14 +279,14 @@ float3 hairLocalLight(HairPoint p, HairStrand strand, GpuLight light, uint light
             E *= lightFunction(P[5].w, lightIndex, light.forward, light.right, -l, p.linearZ * (2 * g_tanHalfFovY / g_viewHeight) / max(length(toLight), 1e-4), g_time);
     }
     if (all(E == 0)) return 0;
-    return E * hairLit(p, strand, l);
+    return E * hairLit(p, strand, l, jitter);
 }
 #endif
 
 #if MODE == 5 || MODE == 11
 // The strand's indirect light at its point: the translucency volume's SH through the hair, on the strand's moments (the
-// header's 'indirect'). No volume: 0.
-float3 hairIndirect(HairPoint p, HairStrand strand)
+// header's 'indirect'). No volume: 0. id: the evaluation's (hairJitter).
+float3 hairIndirect(HairPoint p, HairStrand strand, uint id)
 {
     if (!giSourceIsVolume(P[6].w)) return 0;
     const LtvSh sh = ltvSample(ltvParams(giSourceVolume(P[6].w)), g_cameraPosition + p.offset);
@@ -286,11 +295,11 @@ float3 hairIndirect(HairPoint p, HairStrand strand)
                                            float3(-0.57735027, 0.57735027, -0.57735027), float3(-0.57735027, -0.57735027, 0.57735027) };
     float3 mean = 0, gx = 0, gy = 0, gz = 0;
     float around = 0;
-    const uint steps = max(P[5].x / 2, 1u);
+    const uint steps = max(HAIR_STEPS / 2, 1u);
     [loop] for (uint k = 0; k < 4; ++k)
     {
         const float3 d = kDirections[k];
-        float count = hairFibreCount(P[1].z, p.body, p.offset, d, steps);
+        float count = hairFibreCount(P[1].z, p.body, p.offset, d, steps, hairJitter(id, 8 + k));
         float behind = count;
         if (count < 0)
         {
@@ -419,8 +428,9 @@ void main(uint3 id : SV_DispatchThreadID)
     if (mls.count > 0)
     {
         const HairStrand strand = hairStrand(p.outgoing, p.eta, p.absorption, p.betaM, p.betaN, p.tilt);
+        const uint marches = pixel.x + pixel.y * 65536u;  // (hairJitter's id)
         [loop] for (uint i = 0; i < mls.count; ++i)
-            if (mls.weight[i] > 0) sum += hairLocalLight(p, strand, loadLight(mls.light[i]), mls.light[i]) * mls.weight[i];
+            if (mls.weight[i] > 0) sum += hairLocalLight(p, strand, loadLight(mls.light[i]), mls.light[i], hairJitter(marches, i)) * mls.weight[i];
         // the pixel's farthest hair record under the same samples
         Texture2D<uint> farElement = ResourceDescriptorHeap[P[8].y];
         const uint ef = farElement[pixel];
@@ -434,7 +444,7 @@ void main(uint3 id : SV_DispatchThreadID)
                 const HairStrand strandFar = hairStrand(q.outgoing, q.eta, q.absorption, q.betaM, q.betaN, q.tilt);
                 sumFar = 0;
                 [loop] for (uint j = 0; j < mls.count; ++j)
-                    if (mls.weight[j] > 0) sumFar += hairLocalLight(q, strandFar, loadLight(mls.light[j]), mls.light[j]) * mls.weight[j];
+                    if (mls.weight[j] > 0) sumFar += hairLocalLight(q, strandFar, loadLight(mls.light[j]), mls.light[j], hairJitter(marches, 16 + j)) * mls.weight[j];
             }
         }
     }
@@ -546,7 +556,7 @@ void hairShadeRecord(uint element, CoverageFragment f, uint2 pixel, bool listed)
     }
     if (sunVisibility > 0 && (experiment & 16) == 0)
     {
-        if (!bySegment) sunKernel = hairLit(p, strand, normalize(g_sunDirection));
+        if (!bySegment) sunKernel = hairLit(p, strand, normalize(g_sunDirection), hairJitter(element, 0));
         radiance += E * sunVisibility * sunKernel;
     }
 
@@ -595,13 +605,13 @@ void hairShadeRecord(uint element, CoverageFragment f, uint2 pixel, bool listed)
                     const uint a = shadowSlotAmong(nearCasters, lightIndex), b = shadowSlotAmong(farCasters, lightIndex);
                     visibility = lerp(a >= 1 && a <= 3 ? hairByte(nearSlots, a) : 1, b >= 1 && b <= 3 ? hairByte(farSlots, b) : 1, depthT);
                 }
-                if (visibility > 0) radiance += hairLocalLight(p, strand, loadLight(lightIndex), lightIndex) * visibility;
+                if (visibility > 0) radiance += hairLocalLight(p, strand, loadLight(lightIndex), lightIndex, hairJitter(element, 1 + (i & 3u))) * visibility;
             }
         }
     }
 
     // ---- indirect
-    if (!bySegment && (experiment & 6) != 6) indirect = hairIndirect(p, strand);
+    if (!bySegment && (experiment & 6) != 6) indirect = hairIndirect(p, strand, element);
     radiance += indirect;
     output.Store2(element * 8, covPackRadiance((radiance * airTransmittance + airInscatter) * g_exposure));
 }
@@ -781,8 +791,8 @@ void main(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
     {
         const uint experiment = P[5].z;
         const HairStrand strand = hairStrand(p.outgoing, p.eta, p.absorption, p.betaM, p.betaN, p.tilt);
-        if ((experiment & 16) == 0) sunKernel = hairLit(p, strand, normalize(g_sunDirection));
-        if ((experiment & 6) != 6) indirect = hairIndirect(p, strand);
+        if ((experiment & 16) == 0) sunKernel = hairLit(p, strand, normalize(g_sunDirection), hairJitter(s * HAIR_SEGMENT_POINTS + node, 0));
+        if ((experiment & 6) != 6) indirect = hairIndirect(p, strand, s * HAIR_SEGMENT_POINTS + node);
     }
     light.Store4(16 * (s * HAIR_SEGMENT_POINTS + node), uint4(covPackRadiance(sunKernel), covPackRadiance(indirect * g_exposure)));
 }
