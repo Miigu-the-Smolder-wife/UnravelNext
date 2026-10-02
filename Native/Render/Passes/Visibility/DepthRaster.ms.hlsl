@@ -1,5 +1,5 @@
 // unx-kernel: ms_6_6 main
-// unx-variants: TILE=0,1,2 DEPTH=0,1 OUT=64,128 AS=0,1
+// unx-variants: TILE=0,1,2 DEPTH=0,1,2 OUT=64,128 AS=0,1
 // Depth raster service (FrameServices::rasterizeDepth, INTERFACES 5.3): one mesh-shader group per draw-list entry,
 // any number of views (the visible entry carries the view). Outputs match struct DepthRasterPixel (DepthRaster.hlsli)
 // for the requester's pixel kernel: position, uv (alpha test), userData, material, instance.
@@ -13,6 +13,8 @@
 // DEPTH=1 (no pixel kernel: hardware depth only): only the position, the clip distances, the viewport and the cull flag
 // are exported. The attributes a pixel kernel reads (uv, userData, material, instance) are dead there, and each mesh
 // shader group's output size limits how many groups an SM holds at once.
+// DEPTH=2 (DepthRasterRequest::pixelNormals): the pixel kernel's attributes and each vertex's world normal and tangent
+// (deformVertex's: the surface frame the main view shades with).
 //   P[0] visible SRV (uint2), lists SRV (raw), state SRV (raw), list
 //   P[1] phase (always 1: the service culls in one phase), list capacity, views SRV, viewport per view (0 = one viewport)
 //   P[2] tile rectangles SRV (TILE=1,2: read by the amplification stage), atlas slots SRV (raw, TILE=2), atlas tiles per
@@ -34,8 +36,12 @@
 struct VertexOut
 {
     float4 position : SV_Position;
-#if !DEPTH
+#if DEPTH != 1
     float2 uv : TEXCOORD0;
+#endif
+#if DEPTH == 2
+    float3 normal : NORMAL;
+    float4 tangent : TANGENT;
 #endif
 #if TILE
     float4 clip : SV_ClipDistance0;  // >= 0 inside the pair's tile rectangle (left, right, top, bottom)
@@ -44,7 +50,7 @@ struct VertexOut
 
 struct PrimitiveOut
 {
-#if !DEPTH
+#if DEPTH != 1
     uint userData : USERDATA;
     uint material : MATERIAL;
     uint instance : INSTANCE;
@@ -154,8 +160,13 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
 #else
         verts[i].position = p;
 #endif
-#if !DEPTH
-        verts[i].uv = loadVertex(mesh, meshVertex).uv;
+#if DEPTH != 1
+        const VertexData source = loadVertex(mesh, meshVertex);
+        verts[i].uv = source.uv;
+#endif
+#if DEPTH == 2
+        verts[i].normal = d.normal;
+        verts[i].tangent = float4(d.tangent, source.tangentSign);
 #endif
 #if TILE
         verts[i].clip = float4(p.x - ndcLo.x * p.w, ndcHi.x * p.w - p.x, ndcLo.y * p.w - p.y, p.y - ndcHi.y * p.w);
@@ -171,7 +182,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
         const uint packed = clusterTriangles[cl.triangleOffset + t];
         const uint3 tri = uint3(packed & 0xFFu, (packed >> 8) & 0xFFu, (packed >> 16) & 0xFFu);
         tris[t] = tri;
-#if !DEPTH
+#if DEPTH != 1
         prims[t].userData = v.userData;
         prims[t].material = material;
         prims[t].instance = instance;

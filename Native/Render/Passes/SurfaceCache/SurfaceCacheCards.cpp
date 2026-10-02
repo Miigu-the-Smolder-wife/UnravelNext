@@ -29,9 +29,8 @@ namespace
 {
 constexpr uint32_t kCaptureBytes = 80;        // CardCaptureList.hlsli CC_CAPTURE_BYTES
 // The clusters' capture (surface_cache.mesh_cards_capture_clusters): a page's views of V's raster service are laid in
-// tiles of kCaptureTile texels (the smallest card allocation); a request holds at most kCaptureViews views (V's limit:
-// 255). The capture context (CardCaptureCluster.ps.hlsl): one record of kContextBytes per round, per frame in flight.
-constexpr uint32_t kCaptureTile = 8, kCaptureViews = 255, kContextBytes = 32, kContextRounds = 64, kContextFrames = 4;
+// tiles of kCaptureTile texels (the smallest card allocation); a request holds at most kCaptureViews views (V's limit).
+constexpr uint32_t kCaptureTile = 8, kCaptureViews = kDepthRasterMaxViews;
 constexpr uint32_t kPageGroups = 256;         // 16 x 16 groups of 8 x 8 texels: a page of at most 128 x 128
 constexpr uint32_t kUploadSlots = 4;
 // The readers' feedback table (CardLighting.hlsli CL_FEEDBACK_*): a header and (element + 1, hits) pairs; its copies
@@ -256,11 +255,7 @@ struct SurfaceCacheCards::Impl
     bool feedbackWritten = false;  // the table has been emptied once (before that its content is undefined: no copy)
     uint32_t feedbackDropped = 0;
     uint64_t feedbackLogFrame = 0;
-    // the clusters' capture: the context records its pixel kernel reads (an upload buffer with its own raw SRV: V hands
-    // a requester's pixel constants on as given, before the graph's views exist), the newest overflow seen of its runs
-    ComPtr<ID3D12Resource> captureContext;
-    uint8_t* captureContextMapped = nullptr;
-    uint32_t captureContextSrv = 0xFFFFFFFFu;
+    // the clusters' capture: the newest overflow seen of its runs
     uint64_t captureOverflowFrame = UINT64_MAX;
     uint32_t captureOverflowBits = 0;
 
@@ -441,22 +436,6 @@ struct SurfaceCacheCards::Impl
                 atlas[a] = makeAtlas(settings.cards.atlasSize, kAtlasFormats[a], kAtlasNamesW[a]);
             }
             atlasSize = settings.cards.atlasSize;
-        }
-        if (settings.captureClusters && !captureContext)
-        {
-            const uint64_t bytes = (uint64_t)kContextFrames * kContextRounds * kContextBytes;
-            captureContext = makeBuffer(bytes, D3D12_HEAP_TYPE_UPLOAD, L"R card capture context");
-            D3D12_RANGE none{ 0, 0 };
-            check(captureContext->Map(0, &none, reinterpret_cast<void**>(&captureContextMapped)), "map the mesh card capture context");
-            std::memset(captureContextMapped, 0xFF, (size_t)bytes);
-            captureContextSrv = device->descriptors().allocateResource();
-            D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
-            sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-            sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            sd.Format = DXGI_FORMAT_R32_TYPELESS;
-            sd.Buffer.NumElements = (UINT)(bytes / 4);
-            sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-            device->d3d()->CreateShaderResourceView(captureContext.Get(), &sd, device->descriptors().resourceCpu(captureContextSrv));
         }
         if (settings.cards.feedback && !feedback)
         {
@@ -668,16 +647,6 @@ SurfaceCacheCards::~SurfaceCacheCards()
     s.cache.reset();  // (joins the generation workers)
     for (auto& u : s.upload)
         if (u.buffer) u.buffer->Unmap(0, nullptr);
-    if (s.captureContext)
-    {
-        s.captureContext->Unmap(0, nullptr);
-        if (s.device && s.captureContextSrv != 0xFFFFFFFFu)
-        {
-            DescriptorHeaps* heaps = &s.device->descriptors();
-            s.device->deferCall([heaps, srv = s.captureContextSrv] { heaps->freeResource(srv); });
-        }
-        s.release(s.captureContext);
-    }
     if (s.feedbackReadback) s.feedbackReadback->Unmap(0, nullptr);
     s.release(s.feedback);
     s.release(s.feedbackReadback);
@@ -769,7 +738,7 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
     auto staged = std::make_shared<std::vector<Round>>(rounds);
     s.staging.clear();
     // surface_cache.mesh_cards_capture_clusters: through V's raster service, when the frame has it
-    const bool clusters = s.settings.captureClusters && fc.services.rasterizeDepth && s.captureContext && rounds <= kContextRounds;
+    const bool clusters = s.settings.captureClusters && fc.services.rasterizeDepth;
     for (Round& round : *staged) s.stageRound(fc, round, tableSrv, clusters);
     s.lastStats = s.scene->stats();
     s.lastStats.feedbackDropped = s.feedbackDropped;
@@ -957,40 +926,34 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
 
         if (clusters)
         {
-            // The capture through V's raster service. r.card.vcapture.begin: the round's lists, the cleared depths, the
-            // context record; then per batch of at most kCaptureViews pages r.card.vdepth (the nearest surface of every
-            // texel) and r.card.vmaterial (that surface's material, written once) - each a run of the service: its cull
-            // of the batch's instances at the pages' texel size, then its raster.
+            // The capture through V's raster service. r.card.vcapture.begin: the round's lists and the cleared images;
+            // then per batch of at most kCaptureViews pages one run of the service (r.card.vcapture<round>.<batch>): its
+            // cull of the batch's instances at the pages' texel size, then its raster into the depth and the three
+            // material images at once - the depth test keeps the surface nearest the card's front, as the
+            // source-triangle capture's does.
             const BufferRef cullMask = g.createBuffer({ "r.card capture tile mask", (uint64_t)std::max(round.maskWords, 1u) * 4, 0 });
             const BufferRef atlasSlots = g.createBuffer({ "r.card capture tile slots", (uint64_t)std::max(round.maskWords, 1u) * 32 * 4, 0 });
-            const TextureRef scratchDepth = g.createTexture({ "r.card capture scratch depth", captureSize, captureSize, 1, 1, DXGI_FORMAT_D16_UNORM });
-            const uint32_t contextOffset = ((uint32_t)(fc.frame.frameIndex % kContextFrames) * kContextRounds + r) * kContextBytes;
-            uint8_t* contextRecord = s.captureContextMapped + contextOffset;
             g.addPass("r.card.vcapture.begin", QueueType::Graphics,
                       [&](PassBuilder& b) {
                           b.use(captureDepth, Use::DepthWrite);
-                          b.use(scratchDepth, Use::DepthWrite);
                           b.use(captureList, Use::CopyDst);
                           b.use(cullMask, Use::CopyDst);
                           b.use(atlasSlots, Use::CopyDst);
-                          // (the material images live from here: the service's kernel writes them, r.card.copy reads
-                          // them where the depth holds a surface)
-                          for (const TextureRef& image : { captureAlbedo, captureNormal, captureEmissive }) b.use(image, Use::UavGraphics);
+                          for (const TextureRef& image : { captureAlbedo, captureNormal, captureEmissive }) b.use(image, Use::RenderTarget);
                           b.keep();
                       },
-                      [staged, r, captureAlbedo, captureNormal, captureEmissive, captureDepth, scratchDepth, captureList, cullMask, atlasSlots, upload, contextRecord,
-                       tableSrv](PassContext& c) {
+                      [staged, r, captureAlbedo, captureNormal, captureEmissive, captureDepth, captureList, cullMask, atlasSlots, upload](PassContext& c) {
                           const Round& round = (*staged)[r];
                           if (round.captures == 0) return;
                           c.cmd->CopyBufferRegion(c.resource(captureList), 0, upload, round.capturesAt, (uint64_t)round.captures * kCaptureBytes);
                           c.cmd->CopyBufferRegion(c.resource(cullMask), 0, upload, round.maskAt, (uint64_t)round.maskWords * 4);
                           c.cmd->CopyBufferRegion(c.resource(atlasSlots), 0, upload, round.slotsAt, (uint64_t)round.maskWords * 32 * 4);
-                          // (the service's depth is reversed: 0 = nothing drawn)
+                          // (the service's depth is reversed: 0 = nothing drawn; the images as the source-triangle capture clears them)
                           c.cmd->ClearDepthStencilView(c.dsv(captureDepth), D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
-                          c.cmd->ClearDepthStencilView(c.dsv(scratchDepth), D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
-                          const uint32_t words[kContextBytes / 4] = { c.srv(captureList), c.srv(captureDepth), c.uav(captureAlbedo), c.uav(captureNormal),
-                                                                      c.uav(captureEmissive), tableSrv, 0, 0 };
-                          std::memcpy(contextRecord, words, sizeof words);
+                          const float zero[4] = {}, half[4] = { 0.5f, 0.5f, 0, 0 };
+                          c.cmd->ClearRenderTargetView(c.rtv(captureAlbedo), zero, 0, nullptr);
+                          c.cmd->ClearRenderTargetView(c.rtv(captureNormal), half, 0, nullptr);
+                          c.cmd->ClearRenderTargetView(c.rtv(captureEmissive), zero, 0, nullptr);
                       });
             for (size_t first = 0; first < round.views.size(); first += kCaptureViews)
             {
@@ -1005,17 +968,14 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
                 request.tileLocal = true;
                 request.atlasSlots = atlasSlots;
                 request.atlasTilesPerRow = captureSize / kCaptureTile;
-                request.name = "r.card.vdepth" + suffix;
+                request.name = "r.card.vcapture" + suffix;
                 request.depthTarget = captureDepth;
-                request.pixelKernel = "Passes/SurfaceCache/CardCaptureCluster.ps.PASS0";
-                fc.services.rasterizeDepth(fc, request);
-                request.name = "r.card.vmaterial" + suffix;
-                request.depthTarget = scratchDepth;
-                request.pixelKernel = "Passes/SurfaceCache/CardCaptureCluster.ps.PASS1";
-                request.textureUses = { { captureDepth, Use::SrvGraphics }, { captureAlbedo, Use::UavGraphics }, { captureNormal, Use::UavGraphics }, { captureEmissive, Use::UavGraphics } };
+                request.colorTargets = { captureAlbedo, captureNormal, captureEmissive };
+                request.pixelKernel = "Passes/SurfaceCache/CardCaptureCluster.ps";
+                request.pixelNormals = true;
                 request.bufferUses = { { captureList, Use::SrvGraphics } };
-                request.pixelConstants[0] = s.captureContextSrv;
-                request.pixelConstants[1] = contextOffset;
+                request.pixelViews = { { 0, {}, captureList } };  // P[4].x: the round's captures
+                request.pixelConstants[1] = tableSrv;
                 fc.services.rasterizeDepth(fc, request);
             }
         }

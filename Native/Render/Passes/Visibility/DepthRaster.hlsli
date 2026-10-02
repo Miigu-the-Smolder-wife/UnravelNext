@@ -17,6 +17,11 @@
 //   #define DEPTH_RASTER_COVERAGE 1
 //   #include "Passes/Visibility/DepthRaster.hlsli"
 //   void main(DepthRasterPixel p) { const DepthRasterCoverage c = depthRasterCoverage(p); if (!(c.area > 0)) return; ... }
+//
+// Surface frame (DepthRasterRequest::pixelNormals, v2): the kernel defines DEPTH_RASTER_NORMALS 1 before the include and
+// reads p.normal and p.tangent - the vertices' world normal and tangent, deformed like their positions (skin, wind,
+// morphs: deformVertex) and interpolated (not unit); tangent.w is the bitangent's sign (bitangent = w cross(normal,
+// tangent)). A request with render targets (DepthRasterRequest::colorTargets) returns their values (SV_Target0 ..).
 #ifndef UNX_DEPTH_RASTER_HLSLI
 #define UNX_DEPTH_RASTER_HLSLI
 #include "Bindless.hlsli"
@@ -27,6 +32,10 @@ struct DepthRasterPixel
 {
     float4 position : SV_Position;           // viewport pixel centre, z = device depth of the view
     float2 uv : TEXCOORD0;                   // material uv (alpha test)
+#if DEPTH_RASTER_NORMALS
+    float3 normal : NORMAL;                  // world, interpolated: normalise before use
+    float4 tangent : TANGENT;                // world xyz, interpolated; w = the bitangent's sign
+#endif
     nointerpolation uint userData : USERDATA; // RasterView::userData of the view being rasterised
     nointerpolation uint material : MATERIAL; // scene material of the triangle (instance overrides applied)
     nointerpolation uint instance : INSTANCE; // scene instance of the triangle (loadInstance)

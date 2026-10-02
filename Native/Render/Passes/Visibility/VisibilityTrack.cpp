@@ -2369,6 +2369,12 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     const DXGI_FORMAT depthFormat = request.depthTarget.valid() ? fc.graph.desc(request.depthTarget).format : DXGI_FORMAT_UNKNOWN;
     if (request.depthTarget.valid() && depthFormat != DXGI_FORMAT_D32_FLOAT && depthFormat != DXGI_FORMAT_D16_UNORM)
         fail("rasterizeDepth '%s': depth target format %u (D32_FLOAT or D16_UNORM)", request.name.c_str(), (unsigned)depthFormat);
+    if (request.colorTargets.size() > 4 || (!request.colorTargets.empty() && request.pixelKernel.empty()))
+        fail("rasterizeDepth '%s': %zu render targets (at most 4, written by a pixel kernel)", request.name.c_str(), request.colorTargets.size());
+    if (request.pixelNormals && request.pixelKernel.empty()) fail("rasterizeDepth '%s': pixelNormals without a pixel kernel", request.name.c_str());
+    for (const DepthRasterRequest::PixelView& pv : request.pixelViews)
+        if (pv.word >= 16 || pv.texture.valid() == pv.buffer.valid())
+            fail("rasterizeDepth '%s': a pixel view names one resource and a word of pixelConstants (word %u)", request.name.c_str(), pv.word);
     const bool atlas = request.atlasSlots.valid();
     uint32_t atlasWidth = 0, atlasHeight = 0;
     if (atlas)
@@ -2423,15 +2429,25 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
         // DEPTH1: no pixel kernel reads the attributes (hardware depth only), so the kernel exports none of them
         if (amplify) d.amplificationShader = std::string("Passes/Visibility/DepthRaster.as.TILE") + (atlas ? "2" : "1");
         d.meshShader = std::string("Passes/Visibility/DepthRaster.ms.TILE") + (atlas ? "2" : request.tileLocal ? "1" : "0") +
-                       (request.pixelKernel.empty() ? ".DEPTH1" : ".DEPTH0") + (out64 ? ".OUT64" : ".OUT128") + (amplify ? ".AS1" : ".AS0");
+                       (request.pixelKernel.empty() ? ".DEPTH1" : request.pixelNormals ? ".DEPTH2" : ".DEPTH0") + (out64 ? ".OUT64" : ".OUT128") +
+                       (amplify ? ".AS1" : ".AS0");
         d.pixelShader = request.pixelKernel;
         d.depthFormat = depthOut ? depthFormat : DXGI_FORMAT_UNKNOWN;
-        d.depthWrite = depthOut;
+        d.depthWrite = depthOut && request.depthWrite;
         d.cull = back ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
         d.conservative = request.conservative;
+        d.multiplyBlend = request.colorMultiply && !request.colorTargets.empty();
+        std::string targets;  // (the render targets' formats are part of the pipeline)
+        for (const TextureRef& t : request.colorTargets)
+        {
+            d.renderTargets.push_back(fc.graph.desc(t).format);
+            targets += "|rt" + std::to_string((unsigned)d.renderTargets.back());
+        }
         pso[l] = fc.shaders.mesh("v.depth|" + request.pixelKernel + (back ? "|back" : "|none") +
                                      (depthOut ? (depthFormat == DXGI_FORMAT_D16_UNORM ? "|d16" : "|d32") : "|uav") + (request.conservative ? "|cons" : "") +
-                                     (atlas ? "|atlas" : request.tileLocal ? "|tile" : "") + (amplify ? "|as" : "") + (out64 ? "|out64" : ""), d);
+                                     (atlas ? "|atlas" : request.tileLocal ? "|tile" : "") + (amplify ? "|as" : "") + (out64 ? "|out64" : "") +
+                                     (request.pixelNormals ? "|normals" : "") + (d.depthWrite || !depthOut ? "" : "|test") + (d.multiplyBlend ? "|multiply" : "") + targets,
+                                 d);
     }
     std::vector<D3D12_VIEWPORT> viewports;
     std::vector<D3D12_RECT> scissors;
@@ -2466,18 +2482,41 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                          if (r.tilePairs.valid()) b.use(r.tilePairs, Use::SrvGraphics);
                          if (amplify) b.use(req.cullMask, Use::SrvGraphics);  // (the amplification stage's pairs)
                          if (req.atlasSlots.valid()) b.use(req.atlasSlots, Use::SrvGraphics);
-                         if (req.depthTarget.valid()) b.use(req.depthTarget, Use::DepthWrite);
+                         if (req.depthTarget.valid()) b.use(req.depthTarget, req.depthWrite ? Use::DepthWrite : Use::DepthRead);
+                         for (const TextureRef& t : req.colorTargets) b.use(t, Use::RenderTarget);
                          for (const auto& [t, u] : req.textureUses) b.use(t, u);
                          for (const auto& [bu, u] : req.bufferUses) b.use(bu, u);
+                         // (a pixel view the uses do not name is read)
+                         for (const DepthRasterRequest::PixelView& pv : req.pixelViews)
+                         {
+                             bool named = false;
+                             for (const auto& [t, u] : req.textureUses) named = named || (pv.texture.valid() && t.id == pv.texture.id);
+                             for (const auto& [bu, u] : req.bufferUses) named = named || (pv.buffer.valid() && bu.id == pv.buffer.id);
+                             if (named) continue;
+                             if (pv.texture.valid()) b.use(pv.texture, Use::SrvGraphics);
+                             else b.use(pv.buffer, Use::SrvGraphics);
+                         }
                      },
                      [=](PassContext& c) {
+                         D3D12_CPU_DESCRIPTOR_HANDLE rtv[4] = {};
+                         for (size_t i = 0; i < req.colorTargets.size(); ++i) rtv[i] = c.rtv(req.colorTargets[i]);
                          if (req.depthTarget.valid())
                          {
-                             const D3D12_CPU_DESCRIPTOR_HANDLE dsv = c.dsv(req.depthTarget);
-                             c.cmd->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
+                             const D3D12_CPU_DESCRIPTOR_HANDLE dsv = req.depthWrite ? c.dsv(req.depthTarget) : c.dsvReadOnly(req.depthTarget);
+                             c.cmd->OMSetRenderTargets((UINT)req.colorTargets.size(), rtv, FALSE, &dsv);
                          }
                          else
-                             c.cmd->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+                             c.cmd->OMSetRenderTargets((UINT)req.colorTargets.size(), rtv, FALSE, nullptr);
+                         // The pixel kernel's constants with this pass's view indices (DepthRasterRequest::pixelViews).
+                         uint32_t pixelConstants[16];
+                         std::memcpy(pixelConstants, req.pixelConstants, sizeof pixelConstants);
+                         for (const DepthRasterRequest::PixelView& pv : req.pixelViews)
+                         {
+                             bool written = false;
+                             for (const auto& [t, u] : req.textureUses) written = written || (pv.texture.valid() && t.id == pv.texture.id && u == Use::UavGraphics);
+                             for (const auto& [bu, u] : req.bufferUses) written = written || (pv.buffer.valid() && bu.id == pv.buffer.id && u == Use::UavGraphics);
+                             pixelConstants[pv.word] = pv.texture.valid() ? (written ? c.uav(pv.texture) : c.srv(pv.texture)) : (written ? c.uav(pv.buffer) : c.srv(pv.buffer));
+                         }
                          c.cmd->RSSetViewports((UINT)viewports.size(), viewports.data());
                          c.cmd->RSSetScissorRects((UINT)scissors.size(), scissors.data());
                          c.bindFrameConstants(r.frameConstants);
@@ -2486,7 +2525,7 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                              uint32_t k[32] = { c.srv(r.visible), c.srv(r.lists), c.srv(r.state), l, 1, r.cfg.capVisible, r.viewsSrv, sameViewport ? 0u : 1u,
                                                 r.tilePairs.valid() ? c.srv(r.tilePairs) : kNone, req.atlasSlots.valid() ? c.srv(req.atlasSlots) : kNone,
                                                 req.atlasTilesPerRow, atlasWidth | atlasHeight << 16, amplify ? c.srv(req.cullMask) : kNone };
-                             std::memcpy(&k[16], req.pixelConstants, sizeof req.pixelConstants);
+                             std::memcpy(&k[16], pixelConstants, sizeof pixelConstants);
                              c.cmd->SetPipelineState(pso[l]);
                              c.graphicsConstants(k, 32);
                              c.cmd->ExecuteIndirect(sig, 1, c.resource(r.args), (kArgMesh + 3 * l) * 4, nullptr, 0);

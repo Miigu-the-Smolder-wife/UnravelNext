@@ -79,16 +79,17 @@ mesh_cards = true                     # the cache as lighting on mesh cards (the
                                       # range keeps cards captured into atlases whatever the view sees; update selection by
                                       # page priority, direct light per card tile (8 lights + the sun), radiosity per card
                                       # probe, the final lighting atlas; hits read the cards of their instance
-mesh_cards_fold_passes = true         # the page selection's three steps (priority, bucket, list) are one pass (PassChain.h:
-                                      # the same dispatches in order, a barrier between them). false: a pass each (A/B)
+mesh_cards_fold_passes = true         # the card frame and the page selection's three steps (priority, bucket, list), and the
+                                      # feedback table's copy and clear, are timed as one scope each (PassChain.h: the same
+                                      # passes and barriers, one timestamp). false: a scope each (A/B)
 mesh_cards_capture_clusters = false   # the card captures are drawn from the cluster hierarchy's cut at the page's texel
                                       # size through V's raster service (the reference captures its cards through Nanite):
                                       # a dense mesh costs by the page's texels, not by its source triangles. A page is a
-                                      # view of a service request (at most 255 a request, two runs of the service each:
-                                      # the nearest surface, then its material). The texel's normal is then the drawn
-                                      # triangle's (the service gives a pixel no vertex normal: a smooth-shaded
-                                      # low-polygon mesh shows its facets in the card). false: the mesh's source
-                                      # triangles in a mesh shader of the cache's own. NOT run yet: off
+                                      # view of a service request (at most 4096 a request), one run of the service each:
+                                      # the depth and the three material images are its depth and render targets, and
+                                      # the texel's normal and tangent are the vertices' interpolated ones (the service's
+                                      # pixelNormals). false: the mesh's source triangles in a mesh shader of the cache's
+                                      # own. NOT run yet: off (the capture feeds every GI result; one A/B first)
 mesh_cards_atlas_size = 4096          # card atlas side, texels (reference: r.LumenScene.SurfaceCache.AtlasSize 4096)
 mesh_cards_captures_per_frame = 300   # card pages captured a frame at most (reference: CardCapturesPerFrame 300); with
                                       # capture_factor: texels captured a frame = atlas texels / capture_factor

@@ -72,6 +72,31 @@ struct DepthRasterRequest
     std::vector<std::pair<TextureRef, Use>> textureUses;  // resources the pixel kernel touches
     std::vector<std::pair<BufferRef, Use>> bufferUses;
     uint32_t pixelConstants[16] = {};              // root constants 16..31 for the pixel kernel
+    // Graph resources whose bindless view index the pixel kernel needs (v2: the surface cache's cluster capture). When
+    // the raster pass executes, V writes each one's index into pixelConstants[word]: its UAV where the uses above declare
+    // it written (UavGraphics), its SRV otherwise (one not named in the uses is declared SrvGraphics). The indices of
+    // graph resources exist only then: a requester need not keep a buffer of its own to pass them.
+    struct PixelView
+    {
+        uint32_t word = 0;
+        TextureRef texture;  // one of the two
+        BufferRef buffer;
+    };
+    std::vector<PixelView> pixelViews;
+    // The pixel kernel's interpolated surface frame (v2): the mesh kernel also exports each vertex's world normal and
+    // tangent (deformed like its position: skin, wind, morphs), and the kernel - compiled with DEPTH_RASTER_NORMALS 1
+    // before DepthRaster.hlsli - reads DepthRasterPixel::normal and ::tangent (w: the bitangent's sign). Without it a
+    // kernel has only the triangle's normal, from its depth's steps.
+    bool pixelNormals = false;
+    // Render targets of the pixel kernel (v2: SV_Target0 .., at most 4; needs a pixel kernel). With depthTarget the depth
+    // test settles which fragment's outputs a pixel keeps, so one run draws depth and attributes - a kernel that wrote
+    // them through UAVs needed a depth run first. In atlas mode they are atlases laid out like depthTarget. The requester
+    // clears them. colorMultiply: every target's rgb = stored x written, a = max(stored, written) (a transmittance
+    // product with the nearest depth beside it: S's see-through casters). depthWrite false: tested against depthTarget,
+    // nothing written to it.
+    std::vector<TextureRef> colorTargets;
+    bool colorMultiply = false;
+    bool depthWrite = true;
     bool conservative = false;
     D3D12_CULL_MODE cull = D3D12_CULL_MODE_NONE;   // default both faces (shadows); BACK culls back faces of one-sided
                                                    // materials only (two-sided materials are never culled)
