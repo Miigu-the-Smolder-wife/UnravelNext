@@ -316,6 +316,17 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
         }
     }
     st.planarViews[ring] = planarViews;
+    // The streams whose water is a medium of the view's air volume this frame (slot row word 3; WaterSurface.hlsli
+    // waterSlotMedium): the basins S took (FroxelSystem.cpp recordWaterMedia) among the basins' streams (PoolTrack.cpp).
+    uint64_t mediumSlots = 0;
+    {
+        const std::vector<uint64_t>& taken = fc.state<std::vector<uint64_t>>("W.mediaPools");
+        const std::vector<uint64_t>& streams = fc.state<std::vector<uint64_t>>("W.poolStreams");
+        if (!taken.empty() && !streams.empty() && taken[0] == fc.frame.frameIndex && streams[0] == fc.frame.frameIndex)
+            for (size_t i = 1; i < streams.size(); ++i)
+                if ((streams[i] >> 32) < kSlots && std::find(taken.begin() + 1, taken.end(), streams[i] & 0xFFFFFFFFull) != taken.end())
+                    mediumSlots |= 1ull << (streams[i] >> 32);
+    }
     const TextureRef particleLayer = view.particleLayer;
     const BufferRef particleEdges = view.particleEdges;
     uint8_t* tableMapped = st.tableMapped[ring];
@@ -358,6 +369,8 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
             {
                 const uint32_t row[2] = { c.srv(vertices[i]), materials[i] };
                 std::memcpy(tableMapped + 16 * slots[i], row, 8);
+                const uint32_t medium = (mediumSlots >> slots[i] & 1ull) != 0 ? 1u : gpu::kNone;
+                std::memcpy(tableMapped + 16 * slots[i] + 12, &medium, 4);
             }
             uint32_t pyramid[1 + kMaxLevels] = { uint32_t(levels.size()) };
             for (size_t l = 0; l < levels.size(); ++l) pyramid[1 + l] = c.srv(levels[l]);

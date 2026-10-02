@@ -105,6 +105,17 @@ struct PoolFrame
     float yaw = 0;                // about +y (rad): local x -> (cos, 0, -sin), local z -> (sin, 0, cos)
     const PoolSourceFrame* sources = nullptr;
     uint32_t sourceCount = 0;
+    // The basin's weather (the host's UnxFrameSetPoolWeather). Steam over hot water: a local fog volume over the basin
+    // (FrameRenderer adds it to FrameContext::fogVolumes: FogVolumeDesc's rising steam from the still surface up to
+    // steamHeight, fading at the basin's rim) - lit as the fog's cells are. Rain: the share of the frame's rain
+    // (FrameContext::weather.rainRate) that reaches the surface disturbs it (W's poolGeometry: the drops' impulses as
+    // sources); 0 under a roof.
+    float steamDensity = 0;             // extinction (1/m) of the steam at the surface; 0: none
+    float steamHeight = 1.5f;           // m above the still surface
+    float steamRiseSpeed = 0.3f;        // m/s
+    float steamTurbulence = 0.6f;       // [0, 1] (FogVolumeDesc::turbulence)
+    float steamTurbulenceScale = 0.4f;  // m
+    float rainExposure = 0;             // [0, 1]
 };
 
 // B5 (render B, INTERFACES v1.77): the frame's cloud layer - weather content (an environment input, not a quality key).
