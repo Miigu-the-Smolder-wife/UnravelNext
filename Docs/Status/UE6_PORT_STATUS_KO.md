@@ -110,28 +110,28 @@ GPU에서 돌린 것은 없다(시험 실행 파일·캡처·게이트·furnace 
 | 카드 직접광의 잎 투과 | 언리얼에 없음 | 언리얼은 카드 직접광에서 투과를 끄고(`bUseSubsurfaceTransmission = false`) 카드 알베도에 SubsurfaceColor를 더한다. 여기는 14번(hit이 반대쪽 카드를 읽음) |
 | 스킨·애니메이션 메시의 카드 | 언리얼에 없음 | 1.3.4 |
 
-#### 1.3.3 코드에서 본 것 — 유리·물 메시와 Lumen 광선 (고치지 않았다, 결정 필요)
+#### 1.3.3 유리·물 메시와 Lumen 광선 — 고쳤다 (코드 작성·빌드 통과, 실행 안 함)
 
-사실(코드):
+고치기 전: 재질 클래스가 인스턴스 마스크에 들어가지 않았고 any-hit는 알파만 봤다. Glass·Water 메시는 GI·반사·그림자 광선 모두에 불투명 표면이었다: 유리창 안쪽의 화면 프로브·radiosity 광선이 유리에서 멈췄고, 캐스터가 아닌 유리 뒤의 바닥은 뷰에서는 햇빛, 카드에서는 그늘이었다. 언리얼의 Lumen 광선은 반투명 메시를 보지 않는다(`RAY_TRACING_MASK_OPAQUE`, `SkipTranslucent`).
 
-- `rtInstanceMask`(`RayScene.h`): 숨긴 인스턴스 0, 그림자 캐스터는 전체 비트, 아니면 SHADOW 비트만 뺀 전체. 재질 클래스는 마스크에 들어가지 않는다. BLAS 지오메트리는 알파 테스트 재질만 non-opaque이고 any-hit는 알파만 본다. 그래서 Glass·Water 재질의 메시는 GI·반사·그림자 광선 모두에 불투명 표면이다.
-- 카드 캡처는 Glass·Water·Hair 클래스를 버린다(카드 없음). GI 광선이 유리를 맞히면 "카드 없는 hit"으로, 유리의 base colour를 가진 불투명 면으로 음영된다.
-- 카드와 hit의 **태양** 그림자 광선은 `RT_MASK_GI`(모든 인스턴스)다. 국소광 그림자 광선은 `RT_MASK_SHADOW`(캐스터만). 직접 뷰의 VSM은 `InstanceCastShadow` 인스턴스만 그린다.
+고친 것:
 
-거기서 나오는 것(실행으로 확인하지 않았다):
+1. (00d39675, 주 세션) Glass/Water만으로 된 인스턴스를 GI·그림자 마스크에서 뺐다(`raytracing.see_through_translucent`). hit과 카드 텍셀에서 쏘는 그림자 광선은 캐스터만 본다(`RT_MASK_HIT_SHADOW` = `RT_MASK_SHADOW`, 뷰의 그림자 맵과 같은 집합).
+2. (37713ee0) 그 마스크의 오류: "GI·SHADOW 비트만 뺀 전부"는 emitter 비트(0x4)를 남겼는데, 화면 프로브 광선과 radiance cache 광선의 마스크는 `RT_MASK_GI | RT_MASK_EMITTER`다 — 그 두 광선은 유리만으로 된 인스턴스를 여전히 맞혔다(translucency volume·radiosity 광선은 GI 비트만 써서 통과했다). 이제 그런 인스턴스는 반사 비트만 갖는다(그림자를 드리우면 `RT_MASK_SHADOW_TINT`도).
+3. (37713ee0) 섞인 메시의 유리(창틀과 유리가 한 메시): Glass/Water 서브메시의 지오메트리를 모든 BLAS(메시, 스킨 인스턴스의 프록시와 원본, 런타임 메시)에서 non-opaque로 만들고, any-hit 셰이더가 see-through 광선에서 그 후보를 무시한다. 어느 광선이 see-through인지는 마스크에서 읽는다: `RT_MASK_REFLECTION`을 요구하지 않는 광선(GI 광선, 그림자 광선). `rtTraceClosest`·`rtVisible`이 payload의 pad 워드에 표시하므로 호출부는 바뀌지 않았다. inline RayQuery 커널 2개의 후보 루프도 같은 규칙이다(`rtCandidateStops`; 둘 다 해시 셀 표면 캐시의 커널이라 기본값에서 돌지 않는다). `ReflectionTraceInline`은 DXIL 한도에 붙어 있고 광선이 전부 반사 마스크라서 옛 any-hit를 그대로 둔다(`RT_NO_SEE_THROUGH`; 203,852 B, 한도 204,800 B).
+4. (5968d4f2) hit의 그림자 광선이 유리가 남기는 빛만 받는다(`rtShadowTransmittance`): any-hit 셰이더가 payload에 광학 깊이를 더한다 — closest-hit 음영도 추가 광선도 없다. pane(양면 재질): 뷰 합성(`TranslucentComposite.hlsl`)의 T_p = (1 − F)² t / (1 − F² t²), F는 광선과 면이 이루는 각의 Fresnel, t는 base colour. 덩어리(한 면 재질): 면마다 (1 − F), 안을 지난 길이 × 흡수 계수(들어가는 면과 나오는 면의 거리 차로, 만나는 순서와 무관). 유리 지오메트리는 `NO_DUPLICATE_ANYHIT`으로 만든다. 유리만으로 된 캐스터는 그림자 마스크 밖이므로 이 광선은 `RT_MASK_SHADOW_TINT`를 더한다. 쓰는 곳: Lumen hit 라이브러리 6개(화면 프로브, radiance cache, translucency volume, 카드 radiosity, 반사, 굴절 서비스)의 태양·국소광 표본·머리카락 프록시 그림자 광선.
 
-- 유리창 안쪽의 화면 프로브·radiosity 광선은 유리에서 멈춘다: 창 밖의 하늘과 햇빛 받은 바닥을 보지 못한다.
-- 캐스터가 아닌 유리 뒤의 바닥은 뷰에서는 햇빛을 받는데(VSM), 카드에서는 그늘이다(태양 그림자 광선이 유리에 막힘). 그 바닥에서 튕기는 빛이 표면 캐시에 없다.
+남은 차이:
 
-언리얼: Lumen 광선의 마스크는 `RAY_TRACING_MASK_OPAQUE`(반투명 메시 제외, `SkipTranslucent`), 그림자 광선은 `RAY_TRACING_MASK_OPAQUE_SHADOW`(bCastRayTracedShadows인 것만).
+- **카드 직접광**(표면 캐시 바운스의 주된 원천)은 텍셀·광원당 1비트를 저장해 색을 실을 수 없다: 유리를 투명(T = 1)으로 본다. 색유리 창을 지난 햇빛이 바닥에서 튕길 때 뷰는 물든 빛, 카드는 흰 빛이다. 실으려면 타일·광원마다 평균 투과색을 저장해야 한다(`CardDirectTrace`·`CardDirectStore`의 형식 변경).
+- 뷰의 국소광 그림자 광선(`MegaLightsWorld.hlsli`, M 소유)은 유리를 그대로 통과한다(T = 1). `rtShadowTransmittance`는 모든 광선 라이브러리에 있다.
+- 물(Water)은 그림자 광선을 그대로 통과시킨다. 틴트 텍스처는 읽지 않는다(재질 상수만).
+- 덩어리 유리 안에서 시작하거나 끝나는 광선은 그 덩어리의 흡수를 받지 않는다.
+- `FORCE_OPAQUE` 광선(`surface_cache.shadow_rays_opaque = true`; 기본 false)은 any-hit가 돌지 않아 섞인 메시의 유리에 막힌다.
+- 재질 override로 불투명 서브메시가 유리가 된 인스턴스는 `FORCE_NON_OPAQUE`로 돌고 `NO_DUPLICATE_ANYHIT`이 없다: 투과가 두 번 세어질 수 있다.
+- 뷰의 그림자 맵이 유리 캐스터를 깊이로 그리는지 투과로 다루는지는 이 작업에서 확인하지 않았다.
 
-고칠 자리는 `RayTracing/RayScene.cpp`(R 공용 파일, 이 작업 범위 밖)이다. 방법:
-
-- (a) 인스턴스의 재질이 전부 Glass/Water면 GI·SHADOW 비트를 뺀다(반사 비트는 남긴다). 창틀과 유리가 한 메시면 가르지 못한다.
-- (b) 유리·물 지오메트리를 non-opaque로 만들고, any-hit가 광선 payload의 표시를 보고 무시한다(언리얼의 방식). 지오메트리 단위라 섞인 메시도 된다.
-- 태양 그림자 광선의 마스크를 `RT_MASK_SHADOW`로 바꾸는 것(표면 캐시와 hit 커널, `HitHair.hlsli`, `HitLocalSample.hlsli`)은 뷰의 그림자와 맞추는 별도 변경이다. 유리가 캐스터 플래그를 갖고 있으면 이것만으로는 달라지지 않는다.
-
-7절의 "로비 간접광 부족"의 원인이라고 말하지 않는다: 로비에 유리가 있는지, 그 인스턴스의 캐스터 플래그가 무엇인지 이 작업에서 보지 않았다.
+7절의 "로비 간접광 부족"의 원인이라고 말하지 않는다: 로비의 유리와 그 캐스터 플래그는 이 작업에서 보지 않았다.
 
 #### 1.3.4 스킨·애니메이션 인스턴스의 카드 — 구현하지 않았다
 
@@ -190,6 +190,55 @@ GPU에서 돌린 것은 없다(시험 실행 파일·캡처·게이트·furnace 
 | `Passes/Shadow/Gates/RendererGate.cpp` | `giCache` 계열 리소스와 `reflection.g_rays_per_sample`(다른 트랙의 게이트) |
 
 설정을 덮어쓰는 것은 `GiAnalytic.cpp`뿐이다. 나머지가 기본 설정(lumen_only)에서 무엇을 검사하게 되는지는 실행하지 않아 모른다.
+
+### 1.4 2026-10-03 세 번째 구간 (브랜치 `w/cache`) — 광선 씬의 far field (코드 작성·빌드 통과, 실행 안 함)
+
+GPU에서 돌린 것은 없다. 확인은 `build ok`뿐이다(이 구간의 커밋 넷 가운데 유리 둘은 한 번, far field는 한 번 빌드했다). 공유 any-hit·교차 셰이더가 커져서 한도에 가까운 광선 라이브러리: `GiTrace.SKY0.SPLIT1` 200,024 B, `ReflectionTraceInline.SKY0.JOB2.CORNERS1` 203,852 B(한도 204,800 B; 뒤의 것은 `RT_NO_SEE_THROUGH`·`RT_NO_FAR_FIELD`로 새 코드를 뺐다). 기본값은 **꺼짐**(`raytracing.far_field = false`)이고, 꺼져 있으면 광선 씬은 전과 같다(달라지는 것: 씬 인스턴스의 마스크에서 0x40 비트가 빠지고, Lumen 광선의 마스크에 그 비트가 붙는다 — 그 비트를 가진 인스턴스가 없으므로 맞는 것이 없다).
+
+문제: 숲 씬은 정적 인스턴스 110만 개가 정적 TLAS 하나(212 MB)에 있고, 모든 Lumen 광선이 `gi.ray_length_m`(10 km)까지 그것을 걷는다. 언리얼은 광선 씬의 인스턴스를 거리·입체각으로 덜어내고(`r.RayTracing.Culling` 3, 반경 300 m, 각 1°), 먼 곳은 HLOD를 합친 far field TLAS로 본다.
+
+구조(`RayScene.cpp` `buildFarField`, `selectNear`; `RayShaders.hlsli` `rtFarIntersect`; `HitFarField.hlsli`):
+
+- **그룹**: 경계 반지름이 32 m 미만인 정적 인스턴스는 모두 (크기 등급, 셀)의 그룹에 든다. 등급 = 반지름의 2의 거듭제곱 구간(0.25 m부터 7등급), 셀 = 등급별 격자(16 m 이상, 등급 반지름의 4배 이상). 32 m 이상(지형, 건물)은 그룹이 없고 항상 TLAS에 있다.
+- **near 판정**: 그룹은 그 셀 중심이 기준점(anchor)에서 등급 반경 안에 있으면 near다. 등급 반경 = min(300 m, 등급 최소 반지름 / tan 1°) + 셀 반대각선 + 재선택 거리. 그래서 언리얼 규칙으로 카메라 가까이에 있어야 할 인스턴스는 셀 안 어디에 있든, 카메라가 기준점에서 얼마나 벗어났든 near다. 등급별 값(기본 설정): 0.25 m → 14 m, 0.5 → 29, 1 → 57, 2 → 115, 4 → 229, 8 이상 → 300 (여기에 셀·재선택 여유 30~70 m가 붙는다).
+- **near TLAS**: 정적 TLAS는 "항상 near인 것 + near 그룹의 멤버"만 갖는다. 카메라가 기준점에서 16 m 넘게 벗어나면 기준점을 카메라로 옮기고 다시 고른다(16 m 안에서 왔다 갔다 하면 다시 만들지 않는다). 정적 인스턴스가 바뀔 때와 원점 이동 때도 다시 고른다. 상한 262,144개(TLAS 크기): 넘으면 작은 등급부터 빠지고 로그에 센다. 고르기는 CPU에서 그룹 목록을 한 번 훑는다(인스턴스 110만 개가 아니라 그룹 수만큼의 거리 검사).
+- **far 프록시**: 그룹마다 상자 하나 — 멤버 경계의 합, 불투명도 = 1 − exp(−멤버들의 평균 투영 면적 합 / 상자의 평균 투영 면적), 멤버 면적의 과반을 덮는 재질. 메시의 삼각형 면적은 메시마다 한 번 CPU에서 더한다(양면·Foliage 재질 메시는 면적의 1/2, 닫힌 메시는 1/4을 평균 투영 면적으로). 불투명도 2% 미만인 그룹은 상자가 없다(멀리 가면 그냥 없어진다). 상자 전부가 procedural AABB BLAS 하나, 동적 TLAS의 인스턴스 하나다(id `RT_INSTANCE_FAR`, 마스크 `RT_MASK_FAR`, 면광원과 같은 hit group — 새 셰이더 export가 없다).
+- **교차**: 상자의 그룹이 near면 그 상자는 광선에 없다(같은 검사, 같은 기준점 — 프레임마다 헤더로 전달). 그래서 광선은 인스턴스나 그 프록시 중 하나만 만난다. 그 밖의 상자: 광선이 상자에 들어가는 점이 hit이고(상자 안에서 출발한 광선은 그냥 나간다), 불투명도만큼의 광선만 맞는다 — 어느 광선인지는 (상자, 광선 원점·방향)의 해시다.
+- **hit 음영**: 상자의 들어간 면을 무광 표면으로, 색 = 대표 재질의 base colour × 텍스처 마지막 mip(평균색) × (1 − metallic). 빛 = 태양(그림자 광선 1개: 캐스터 + 다른 프록시) + 가려지지 않은 하늘 irradiance — 카드 끝 밖의 모든 hit에 쓰는 far field 규칙과 같다. Lumen 커널 6개가 그 hit을 처리한다(화면 프로브, radiance cache, translucency volume, 카드 radiosity, 반사, 굴절 서비스). 스레드당 광선 수는 그대로다(프록시 hit의 그림자 광선은 카드 없는 hit의 태양 그림자 광선 자리).
+- 그룹과 상자는 소스 좌표(업로드된 씬의 좌표)에 있고, 원점 이동은 far 인스턴스의 변환이 따라간다(면광원 인스턴스와 같은 방식).
+- 인스턴스 편집으로 `RayScene`이 다시 만들어질 때, 정적 집합이 같으면 그룹·상자·BLAS·near 상태를 이전 객체에서 물려받는다.
+
+| 설정 | 기본 | 뜻 |
+|---|---|---|
+| `raytracing.far_field` | false | 전체 스위치 |
+| `far_field_cull_radius_m` | 300 | 언리얼 Culling.Radius |
+| `far_field_cull_angle_deg` | 1.0 | 언리얼 Culling.Angle |
+| `far_field_rebuild_distance_m` | 16 | near 집합을 다시 고르는 카메라 이동 거리 |
+| `far_field_near_instances_max` | 262144 | 정적 TLAS의 상한 |
+| `far_field_proxy_size_m` | 16 | 그룹 셀의 최소 크기 |
+| `far_field_proxy_max_radius_m` | 32 | 이보다 큰 인스턴스는 상자가 되지 않는다 |
+| `far_field_proxy_min_opacity` | 0.02 | 이보다 옅은 그룹은 상자가 없다 |
+| `far_field_proxies_max` | 1048576 | 상자 수 상한(불투명한 것부터 남긴다) |
+
+언리얼과 다른 점:
+
+- 언리얼의 far field는 HLOD로 합친 메시와 그 카드(표면 캐시 조명)다. 여기는 상자와 재질 평균색, 태양 + 하늘이다 — 프록시에는 저장된 바운스가 없다.
+- 언리얼은 인스턴스마다 실제 반지름으로 판정한다. 여기는 등급의 최소 반지름과 셀 중심으로 판정한다(인스턴스와 프록시의 판정이 정확히 맞물리게 하려고). 등급 안의 큰 인스턴스는 언리얼보다 조금 일찍 프록시가 된다 — 여유(셀 반대각선 + 재선택 거리)가 그 반대 방향으로 30~70 m를 더한다.
+- 큰 인스턴스(반지름 32 m 이상)는 거리와 무관하게 TLAS에 남는다(언리얼은 300 m 밖이면 HLOD로 넘긴다).
+- 상자의 불투명도는 광선마다 확률로 적용된다(해시). 언리얼의 HLOD 메시는 형태가 있다.
+- 태양 그림자 광선(카드 직접광, hit의 태양 광선, 머리카락 프록시)은 프록시를 본다: far로 넘어간 인스턴스가 상자의 불투명도만큼 그림자를 드리운다. 해시의 입력은 광선 원점(12.5 cm로 양자화)과 방향(1/1024)이라, 카드 텍셀의 태양 광선은 갱신마다 같은 답을 받는다(고정된 디더). 국소광 그림자 광선(카드, hit, 뷰의 MegaLights)은 프록시를 보지 않는다: far로 넘어간 인스턴스는 국소광 그림자를 드리우지 않는다(언리얼도 컬링된 인스턴스는 RT 그림자가 없다).
+
+켜면 달라지는 화질(결정 대상): 반사에 비치는 먼 작은 물체가 상자가 된다. 뷰의 국소광 그림자(MegaLights의 그림자 광선)에서, 카메라에서 등급 반경 밖의 작은 캐스터(반지름 0.25 m면 약 45 m 밖)가 그림자를 잃는다. 광선 씬을 외부에서 프레임 없이 추적하는 시험은 far field를 켜면 정적 인스턴스를 보지 못한다(near 집합은 첫 프레임의 카메라로 정해진다).
+
+**첫 실행에서 볼 것**:
+
+1. 로드 로그의 `RayScene far field:` 줄 — 프록시 수, 그룹 수, 항상 near인 인스턴스 수, BLAS 크기, 만드는 데 걸린 시간(110만 인스턴스 분류는 로드 때 CPU 한 번).
+2. `near set` 줄 — near 인스턴스 수, 상한을 넘어 빠진 수(0이 아니면 상한을 올리거나 각을 키운다), 고르는 CPU 시간.
+3. 카메라가 16 m를 넘을 때마다 도는 `r.as.tlas.static` 패스의 GPU 시간(near TLAS 재빌드)과 그 프레임의 끊김.
+4. 광선 패스 시간(`r.gi.lg.trace`, `r.gi.rc.trace`, `r.gi.ltv.trace`, `r.card.radiosity.trace`, `r.refl.lumen.trace`)을 `far_field = false`와 나란히. 정적 TLAS 메모리(로그의 TLAS static MB).
+5. 프록시의 확률 불투명도가 프로브·거울에 만드는 잡음, 인스턴스가 프록시로 넘어가는 거리에서의 밝기 변화(카드 조명 → 태양 + 하늘).
+6. 숲 바닥의 간접광이 `far_field = false`와 얼마나 다른지(먼 나무가 하늘을 가리는 양: 불투명도 식의 검증).
+7. furnace 방: 프록시 hit은 가려지지 않은 하늘을 받는다(기존 far field 규칙). 닫힌 방 안에는 프록시가 없지만, 방이 반지름 32 m 미만의 메시들로 지어졌고 카메라가 300 m 밖에 있으면 방 자체가 상자가 된다.
 
 ### 1.1 최종 수집·반사 대조 결과 (2026-10-02, 코드 대조)
 
@@ -345,8 +394,9 @@ GPU에서 한 번도 돌리지 않았다. 아래는 코드에 적힌 내용이�
 21. distant screen traces(코드 작성·빌드 통과, 실행 안 함): 언리얼은 광선 씬의 컬링 반경에서 시작, 여기는 광선의 끝(`gi.ray_length_m`)에서 시작. 기본 광선 길이에서는 돌지 않는다.
 22. 굴절 서비스(front layer 반사 + ray-traced translucency의 여기 형태): job은 거울 방향 광선 1개이고 디노이저가 없다. 언리얼의 front layer 반사는 거칠기 로브를 표본해 반사 디노이저를 지난다(1.3.2).
 23. 발광 광원 카드 규칙의 대상: 언리얼은 아티스트가 표시한 프리미티브, 여기는 발광 재질(뷰 전용 제외)을 가진 인스턴스 전부(코드 작성·빌드 통과, 실행 안 함).
-24. 유리·물 메시는 GI·그림자 광선에 불투명하다(언리얼은 Lumen 광선에서 반투명 메시를 뺀다). 고치지 않았다: 1.3.3.
+24. 유리·물 메시는 GI·그림자 광선이 통과한다(코드 작성·빌드 통과, 실행 안 함; 1.3.3). 언리얼과 다른 점: hit의 그림자 광선은 유리의 투과색을 받는다(언리얼의 Lumen 그림자 광선은 반투명을 그냥 통과). 카드 직접광은 유리를 투명으로 본다.
 25. far field: 광선 씬 하나를 10 km까지 추적하고, 카드 밖 hit은 태양 + 가려지지 않은 하늘 irradiance. 언리얼은 HLOD TLAS와 far field 카드의 표면 캐시 조명(1.3.2).
+26. 광선 씬의 인스턴스 컬링과 far field 프록시(`raytracing.far_field`, 기본 끔; 코드 작성·빌드 통과, 실행 안 함): 언리얼의 컬링 규칙(300 m, 1°)을 크기 등급과 셀 단위로 적용하고, 먼 인스턴스는 그룹마다 확률 불투명도를 가진 상자 하나로 대신한다. 언리얼은 HLOD 메시와 그 카드(1.4).
 
 ## 4. 품질을 내주는 값(언리얼 기본값에서 시작, 사용자 결정 대상)
 
@@ -359,6 +409,7 @@ GPU에서 한 번도 돌리지 않았다. 아래는 코드에 적힌 내용이�
 - `reflection.lumen_refraction_max_ray_intensity = 0`(상한 없음. 언리얼: front layer 반사 40, ray-traced translucency 1000. 디노이저 없는 거울 광선이라 상한은 밝은 반사를 어둡게만 한다. 2026-10-03 추가, 실행 안 함)
 - `reflection.lumen_refraction_path_throughput_threshold = 0.001`(언리얼 기본. 그보다 약한 경로는 끊는다. 2026-10-03 추가, 실행 안 함)
 - `lumen.skylight_leaking = 0`(언리얼 기본. 올리면 실내가 밝아지는 대신 가림 없는 빛이 샌다 — furnace 규칙이 깨진다. 2026-10-03 추가, 실행 안 함)
+- `raytracing.far_field = false`(켜면 먼 작은 인스턴스가 반사에서 상자가 되고, 뷰의 국소광 그림자에서 먼 작은 캐스터가 빠진다 — 광선 시간과 정적 TLAS 212 MB를 줄이는 값이다. `far_field_cull_angle_deg = 1`, `far_field_cull_radius_m = 300`은 언리얼 기본. 2026-10-03 추가, 실행 안 함)
 
 ## 5. 실행 방법
 

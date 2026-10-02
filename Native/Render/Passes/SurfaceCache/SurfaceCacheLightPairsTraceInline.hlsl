@@ -57,7 +57,8 @@ void main(uint3 id : SV_DispatchThreadID)
                 q.Abort();
                 break;
             }
-            if (rtAlphaOpaque(scene, q.CandidateInstanceID(), q.CandidateGeometryIndex(), q.CandidatePrimitiveIndex(), q.CandidateTriangleBarycentrics()))
+            // (the any-hit shader's rule: see-through geometry does not stop a shadow ray - RayScene.hlsli)
+            if (rtCandidateStops(scene, mask, q.CandidateInstanceID(), q.CandidateGeometryIndex(), q.CandidatePrimitiveIndex(), q.CandidateTriangleBarycentrics()))
                 q.CommitNonOpaqueTriangleHit();
         }
         if (q.CommittedStatus() != COMMITTED_NOTHING) visible = false;
