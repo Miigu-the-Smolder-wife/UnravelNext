@@ -257,10 +257,12 @@ float3 atmosphereSkyRadianceView(AtmosphereSrvs s, float3 worldDir, float2 uv)
 
 // atmosphereSkyRadianceView with the cloud layer (B5) in front of the sky: for ShadeSky's sky pixels (one call site; the
 // other readers stay without it so M's large kernels keep their DXIL size).
-float3 atmosphereSkyRadianceClouded(AtmosphereSrvs s, float3 worldDir, float2 uv)
+// behind: the layer's transmittance at the pixel - what lies behind it (the sun's disk, the moon, the stars) takes it.
+float3 atmosphereSkyRadianceClouded(AtmosphereSrvs s, float3 worldDir, float2 uv, out float3 behind)
 {
-    float3 sky = atmosphereSkyRadianceView(s, worldDir, uv), unit = 1;
-    airApplyClouds(s, uv, 3.0e38, sky, unit);
+    float3 sky = atmosphereSkyRadianceView(s, worldDir, uv);
+    behind = 1;
+    airApplyClouds(s, uv, 3.0e38, sky, behind);
     return sky;
 }
 

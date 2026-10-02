@@ -74,9 +74,10 @@ float3 shadeSky(uint2 pixel, Texture2D<uint> words)
     atm.aerial = P[1].w;
     float3 radiance;
     float3 sun;
+    float3 behindClouds = 1;  // the cloud layer's transmittance at the pixel (the disk, the moon and the stars are behind it)
     if (atm.transmittance != UNX_NONE)
     {
-        radiance = atmosphereSkyRadianceClouded(atm, dir, (float2(pixel) + 0.5) / float2(g_viewWidth, g_viewHeight));  // B5: the view sky with the cloud layer (none: atmosphereSkyRadianceView)
+        radiance = atmosphereSkyRadianceClouded(atm, dir, (float2(pixel) + 0.5) / float2(g_viewWidth, g_viewHeight), behindClouds);  // B5: the view sky with the cloud layer (none: atmosphereSkyRadianceView)
         sun = atmosphereSunRadiance(atm, g_cameraPosition);
     }
     else
@@ -88,10 +89,10 @@ float3 shadeSky(uint2 pixel, Texture2D<uint> words)
     // S's celestial objects (v1.49, B4; P[2].y = FrameResources::celestial): the moon with its phase, the stars, the airglow.
     // When the frame's directional light is the moon, g_sun* describe the moon: its disk is drawn by atmosphereCelestial
     // with its phase, not as a uniform disk.
-    radiance += atmosphereCelestial(atm, P[2].y, D, Dx, Dy);
+    radiance += atmosphereCelestial(atm, P[2].y, D, Dx, Dy) * behindClouds;
     // Planar reflection views leave the disk out: their reader adds the sun's specular lobe analytically over the disk
     // (M's mirror pixels, W's calm water), as R's reflection rays exclude it - drawn here it would count twice.
-    if (!celestialMoonHoldsLight(P[2].y) && g_viewKind != VIEW_PLANAR_REFLECTION) radiance += sun * shSunDiskCoverage(D, Dx, Dy);
+    if (!celestialMoonHoldsLight(P[2].y) && g_viewKind != VIEW_PLANAR_REFLECTION) radiance += sun * behindClouds * shSunDiskCoverage(D, Dx, Dy);
     // The height fog over the sky (atmosphere.fog.sky_amount; 0: the sky is left alone): along the ray to the far slices' end.
     {
         FogParams fogParams;
