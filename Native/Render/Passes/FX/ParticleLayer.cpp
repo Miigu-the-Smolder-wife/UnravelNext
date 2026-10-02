@@ -124,7 +124,7 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
     // ribbons: this frame's points, their half4 appearance, FxRibbon's links, vertices (2 per point), run starts, tangents
     const uint32_t rb = std::max<uint32_t>(ribbons, 1);
     const BufferRef ribbonPoints = g.createBuffer(BufferDesc{ "fx.layer.ribbonPoints", (uint64_t)rb * 32, 32 });
-    out.ribbonAppearance = g.createBuffer(BufferDesc{ "fx.layer.ribbonAppearance", (uint64_t)rb * 8, 8 });
+    out.ribbonAppearance = g.createBuffer(BufferDesc{ "fx.layer.ribbonAppearance", (uint64_t)rb * 24, 24 });  // FxRibbonAppearance
     const BufferRef ribbonLinks = g.createBuffer(BufferDesc{ "fx.layer.ribbonLinks", (uint64_t)rb * 4, 4 });
     out.ribbonVertices = g.createBuffer(BufferDesc{ "fx.layer.ribbonVertices", (uint64_t)rb * 64, 32 });
     const BufferRef ribbonRunStart = g.createBuffer(BufferDesc{ "fx.layer.ribbonRunStart", (uint64_t)rb * 4, 4 });

@@ -98,7 +98,7 @@ struct LayerConstants
     uint shadowPageTable, shadowPool, shadowBlocks, shadowSearchBound;  // S's ShadowSrvs (stage 2 lighting)
     uint shadowConstants, shadowLights, shadowSlotOfLight, shadowLayers;
     uint giCache, froxelLights, airVolume, transmittance;
-    uint multiScatter, ribbonAppearance, ribbonCapacity, stripBase;  // per-point half4 appearance; points; strip records at
+    uint multiScatter, ribbonAppearance, ribbonCapacity, stripBase;  // per-point FxRibbonAppearance; points; strip records at
                                                                       // stripBase + point (after the sprite records)
     uint ribbonRows;                    // per emitter row uint2 (first point, its birth: the row's dying_birth); x = none: no ribbon
     float3 streamAxes;                  // stream space -> renderer axis signs (the Unity World: (1, 1, -1)); offsets are in stream space
@@ -140,6 +140,11 @@ uint fxRecordLook(LayerRecord r) { return (r.flags >> 8) & 0xFFFu; }  // look + 
 // the segment's record)
 struct FxRibbonPoint { float3 position; float width; float age; uint valid; uint program, look; };  // 32 B (Particles.hlsli RibbonPoint)
 struct FxRibbonVertex { float3 position; float3 normal; float2 uv; };                          // 32 B (FxRibbon.hlsl)
+// A ribbon point's appearance (FxLayerSetup's ribbonPoint), 24 B: radianceAlpha - half4, radiance x exposure before the
+// air and the look's texture, opacity; moment - half4, a look lit per pixel: the light's first moment over its
+// fluence, world axes (the strip's pixel shows radiance x max(0, 1 + 2 moment . normal)), else 0; motion - half2, the
+// point's travel on screen since the previous frame, pixels.
+struct FxRibbonAppearance { uint2 radianceAlpha; uint2 moment; uint motion; uint pad; };
 
 LayerConstants fxLayerConstants()
 {
@@ -210,7 +215,10 @@ bool fxRayTriangle(float3 D, float3 a, float3 b, float3 c, out float t, out floa
 // linearly between the ends. A straight segment is one piece: the quad above.
 // A look (the record's; unx/fx/SpriteLooks.h): its texture over the strip - across by e; along by the strip's distance
 // over the program's ribbon_uv (the texture repeats) or by the points' age over the lifetime (once over the ribbon:
-// Niagara's tiled and scaled UV modes) - its alpha in place of the profile, and its blend.
+// Niagara's tiled and scaled UV modes) - its alpha in place of the profile, and its blend. Lit per pixel (the look's
+// normal mode, as the sprites): the points' moments run along the segment and the pixel's normal is a tube's over the
+// strip - the strip's side and its normal toward the viewer, by the place across - or the look's normal texture in the
+// strip's frame (+x along it, +y across). motion: the points' travel on screen, along the segment.
 #define FX_RIBBON_PIECE_ANGLE 0.13089969f  // pi / 24
 float3 fxHermite(float3 p0, float3 m0, float3 p1, float3 m1, float s)
 {
@@ -218,12 +226,14 @@ float3 fxHermite(float3 p0, float3 m0, float3 p1, float3 m1, float s)
     return (2 * s3 - 3 * s2 + 1) * p0 + (s3 - 2 * s2 + s) * m0 + (3 * s2 - 2 * s3) * p1 + (s3 - s2) * m1;
 }
 float4 fxLookTexel(uint srv, uint frame, float2 uv, float2 cells, float2 border, float lod);
-bool fxStripSampleOf(LayerConstants c, LayerExtra x, LayerRecord r, float2 p, float footprint, out float a, out float3 colour, out float depth, out uint blend)
+bool fxStripSampleOf(LayerConstants c, LayerExtra x, LayerRecord r, float2 p, float footprint, out float a, out float3 colour, out float depth, out uint blend,
+                     out float2 motion)
 {
     a = 0;
     colour = 0;
     depth = 0;
     blend = FX_BLEND_ALPHA;
+    motion = 0;
     const uint k = r.radianceAlpha.x, j = r.radianceAlpha.y;
     RWStructuredBuffer<FxRibbonVertex> vertices = ResourceDescriptorHeap[c.ribbonVertices];  // (UAVs: written earlier in the pass)
     const FxRibbonVertex va0 = vertices[2u * j], vb0 = vertices[2u * k];
@@ -264,17 +274,21 @@ bool fxStripSampleOf(LayerConstants c, LayerExtra x, LayerRecord r, float2 p, fl
         }
     }
     if (!hit || !(t > g_nearPlane)) return false;
-    RWStructuredBuffer<uint2> appearance = ResourceDescriptorHeap[c.ribbonAppearance];
-    const float4 pa4 = fxUnpackHalf4(appearance[j]), pb4 = fxUnpackHalf4(appearance[k]);
-    const float4 ca = lerp(pa4, pb4, saturate(s));
+    RWStructuredBuffer<FxRibbonAppearance> appearance = ResourceDescriptorHeap[c.ribbonAppearance];
+    const FxRibbonAppearance appA = appearance[j], appB = appearance[k];
+    const float4 ca = lerp(fxUnpackHalf4(appA.radianceAlpha), fxUnpackHalf4(appB.radianceAlpha), saturate(s));
+    motion = lerp(fxUnpackHalf2(appA.motion), fxUnpackHalf2(appB.motion), saturate(s));
     const float across = 2 * saturate(e) - 1;
     float4 tex = float4(1, 1, 1, (1 - across * across) * (1 - across * across));
+    float shade = 1;
     const uint lookId = fxRecordLook(r);
     if (lookId != 0u)
     {
         StructuredBuffer<FxSpriteLook> looks = ResourceDescriptorHeap[x.looks];
         const FxSpriteLook look = looks[lookId - 1u];
         blend = fxLookBlend(look);
+        const uint normalMode = fxLookNormal(look);
+        float3 nt = float3(0, across, sqrt(saturate(1.0f - across * across)));  // (a tube's normal over the strip: along, across, out)
         if (look.texture != UNX_NONE)
         {
             StructuredBuffer<StreamProgram> programs = ResourceDescriptorHeap[c.programs];
@@ -293,11 +307,31 @@ bool fxStripSampleOf(LayerConstants c, LayerExtra x, LayerRecord r, float2 p, fl
             const float pixelWorld = 2.0f * t / (g_proj[1][1] * g_viewHeight);
             const float2 perPixel = look.textureSize / cells * abs(scale) * float2(abs(ub - ua), 1.0f) * pixelWorld / max(float2(len, 2.0f * length(lerp(sa, sb, saturate(s)))), 1e-6f);
             const float lod = max(log2(max(perPixel.x, perPixel.y) * footprint), 0.0f);
-            tex = fxLookTexel(look.texture, min(pr.firstFrame, (uint)(cells.x * cells.y) - 1u), uv, cells, 0.5f * exp2(lod) * cells / max(look.textureSize, 1.0f), lod);
+            const uint frame = min(pr.firstFrame, (uint)(cells.x * cells.y) - 1u);
+            const float2 border = 0.5f * exp2(lod) * cells / max(look.textureSize, 1.0f);
+            tex = fxLookTexel(look.texture, frame, uv, cells, border, lod);
+            if (normalMode == FX_NORMAL_MAP)
+            {
+                const float2 n2 = fxLookTexel(look.normalTexture, frame, uv, cells, border, lod).rg * 2.0f - 1.0f;
+                nt = float3(n2, sqrt(saturate(1.0f - dot(n2, n2))));
+            }
+        }
+        if (normalMode != FX_NORMAL_NONE)
+        {
+            // the strip's frame at the hit: along it, across it (its side), and its normal on the viewer's side
+            const float3 side = normalize(lerp(sa, sb, saturate(s)));
+            float3 out3 = lerp(va0.normal, vb0.normal, saturate(s));
+            out3 -= side * dot(out3, side);
+            out3 = dot(out3, out3) > 1e-12f ? normalize(out3) : normalize(cross(side, pb - pa));
+            if (dot(out3, D) > 0) out3 = -out3;
+            const float3 along = cross(side, out3);
+            const float3 n = normalize(along * nt.x + side * nt.y + out3 * nt.z);
+            const float3 m = lerp(fxUnpackHalf4(appA.moment).xyz, fxUnpackHalf4(appB.moment).xyz, saturate(s));
+            shade = max(0.0f, 1.0f + 2.0f * dot(m, n));
         }
     }
     a = saturate(ca.w * tex.a);
-    colour = ca.rgb * tex.rgb;
+    colour = ca.rgb * tex.rgb * shade;
     if (blend == FX_BLEND_PREMULTIPLIED) colour *= ca.w;
     depth = g_nearPlane / t;
     if (c.airVolume != UNX_NONE && c.transmittance != UNX_NONE)
@@ -319,7 +353,8 @@ bool fxStripSampleOf(LayerConstants c, LayerExtra x, LayerRecord r, float2 p, fl
 bool fxStripSample(LayerConstants c, LayerRecord r, float2 p, out float a, out float3 colour, out float depth)
 {
     uint blend;
-    return fxStripSampleOf(c, (LayerExtra)0, r, p, 1.0f, a, colour, depth, blend);
+    float2 motion;
+    return fxStripSampleOf(c, (LayerExtra)0, r, p, 1.0f, a, colour, depth, blend, motion);
 }
 
 // ---- a look's sprite at a point

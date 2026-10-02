@@ -668,7 +668,7 @@ Unreal의 재질 그래프와 Unity 재질이 흔히 쓰는 입력 가운데 렌
 
 **코드 작성·빌드 통과, 실행 안 함.** 테스트 실행 파일·still·게이트를 돌리지 않았다.
 
-**스프라이트 look** (`unx/fx/SpriteLooks.h`, `SpriteLooks.cpp`). VFX 스트림은 플립북 배치(`columns`, `rows`, `first_frame`, `frames_per_second`, `uv`, `uv_scroll`, 회전 곡선)만 나르고 이미지와 그리는 방식은 나르지 않는다. 그래서 렌더러에 표를 뒀다: 프로그램의 `material`이 2 + i이면 look i로 그린다(0 방출, 1 매질 조명은 그대로; look이 없는 값은 전처럼 거부). 스트림 ABI는 건드리지 않았다. 표를 채우는 호스트 ABI는 없다(후속: `fx::spriteLooks(trackState).set(i, look)`).
+**스프라이트 look** (`unx/fx/SpriteLooks.h`, `SpriteLooks.cpp`). VFX 스트림은 플립북 배치(`columns`, `rows`, `first_frame`, `frames_per_second`, `uv`, `uv_scroll`, 회전 곡선)만 나르고 이미지와 그리는 방식은 나르지 않는다. 그래서 렌더러에 표를 뒀다: 프로그램의 `material`이 2 + i이면 look i로 그린다(0 방출, 1 매질 조명은 그대로; look이 없는 값은 전처럼 거부). 스트림 ABI는 건드리지 않았다. 표를 채우는 호스트 ABI는 5차에 썼다(11.4 ①).
 
 | | 코드에 있는 것 | 파일 |
 |---|---|---|
@@ -682,15 +682,36 @@ Unreal의 재질 그래프와 Unity 재질이 흔히 쓰는 입력 가운데 렌
 
 하지 않은 것과 이유 [코드]:
 
-- **VSM 투과율 층에 입자 그림자**: 그 층(`VsmLayer.hlsli`)은 읽는 코드만 있고 쓰는 커널이 트리에 없다(init에서 지우기만 한다). 캐시된 페이지 단위라 매 프레임 바뀌는 입자와도 맞지 않는다. 태양 공간 맵을 따로 뒀다. 그 맵을 읽지 않는 곳: coverage 프래그먼트의 태양(합성 커널 한도), 안개·공기, 광선 hit, 국소광(맵은 태양만).
+- **VSM 투과율 층에 입자 그림자**: 그 층(`VsmLayer.hlsli`)은 읽는 코드만 있고 쓰는 커널이 트리에 없다(init에서 지우기만 한다). 캐시된 페이지 단위라 매 프레임 바뀌는 입자와도 맞지 않는다. 태양 공간 맵을 따로 뒀다. 그 맵을 읽지 않는 곳(5차 뒤, 11.4 ②): 광선 hit, 국소광(맵은 태양만).
 - **광선 장면의 메시 입자**: 메시 입자는 GPU가 쓰는 인스턴스이고 R의 TLAS 디스크립터는 CPU가 업로드 링에 만든다. 넣으려면 (1) 디스크립터를 GPU가 쓸 수 있는 버퍼로 옮기고 꼬리에 입자 수만큼 자리를 두고, (2) 메시 → BLAS 주소·geometry base 표를 GPU에 올리고, (3) 입자 인스턴스를 쓰는 커널이 디스크립터와 `RtInstance` 기록을 같이 쓰고, (4) 죽은 자리는 mask 0으로 빌드해야 한다. `RayScene.cpp`의 동적 TLAS 경로 전체를 바꾸는 일이고 틀린 디스크립터는 장치를 잃는다 — 실행 없이 쓰지 않았다.
 - **메시 데칼**: 가시성 버퍼에는 픽셀당 표면이 하나뿐이라 데칼 메시와 그 아래 표면을 함께 알 수 없다. V에 데칼 메시용 두 번째 vis 타깃(깊이 바이어스, 불투명 깊이와 near-or-equal)을 두고 resolve가 그 삼각형의 재질을 투영 데칼처럼 섞어야 한다. V 내부 작업이라 하지 않았다. coverage 층에 see-through 프래그먼트로 넣는 방법은 기록 수가 덮는 픽셀 수만큼 늘어 맞지 않는다.
 - **coverage 프래그먼트의 데칼**: 합성 커널 203,280 B / 204,800 B.
-- 입자 look의 한계: 그림자 맵은 텍스처 알파를 읽지 않는다(둥근 프로파일 × 입자 알파). 한 텍셀에 구간 하나(사이가 빈 두 층의 연기는 하나로 채워진다). 리본은 점 단위 매질 조명만 받는다(픽셀 법선 없음). 속도·축 정렬 스프라이트에는 회전을 적용하지 않는다. 입자당 광원은 프레임마다 집합이 바뀔 수 있다(광원 색인이 프레임 사이에 안정적이지 않다: MegaLights의 광원별 히스토리가 그만큼 짧아진다).
+- 입자 look의 한계(5차 뒤): 그림자 맵에서 텍스처는 태양이 보는 공의 원반에 입힌다(스프라이트의 facing·회전·가로세로비는 카메라 기준이라 맵에 없다). 한 텍셀에 구간 하나(사이가 빈 두 층의 연기는 하나로 채워진다). 속도·축 정렬 스프라이트에는 회전을 적용하지 않는다. 입자당 광원은 프레임마다 집합이 바뀔 수 있다(광원 색인이 프레임 사이에 안정적이지 않다: MegaLights의 광원별 히스토리가 그만큼 짧아진다).
 
 레코드 변화: `LayerRecord` 32 → 64 B, `DecalFrame` 144 → 160 B, `gpu::Light`는 그대로. `FxLayerSetup`은 조명을 스레드당 한 번만 계산하게 고쳐(스프라이트와 리본 점이 따로 두 번 인라인되어 있었다) 가장 큰 변형이 204,544 → 99,172 B가 됐고, 그 변형에서 뺐던 안개와 광원 구성요소를 되돌렸다.
 
 실행해서 확인할 것(순서대로): `unx_test_fx_particlelayertests`(기록 크기와 edge 블록의 depth range가 바뀌었다: look 없는 스프라이트는 전과 같은 값이어야 한다), `unx_test_fx_fxlighttests`(`particle_lights_max` = 0과 64), `unx_test_decal_decaltests`, `unx_test_raytracing_decalhits`, 방출 텍스처가 있는 씬의 still(emissive 텍스처를 모든 픽셀이 읽게 바뀌었다), 그 뒤 look을 등록한 씬: 플립북 연기(프레임 블렌드, 모션 벡터), 불꽃(additive, 속도 정렬 + 늘이기), 바닥 위 연기의 그림자와 자기 그림자, 굽은 리본, 업스케일 켠 채 움직이는 연기.
+
+### 11.4 남은 것 (5차, 2026-10-03)
+
+**코드 작성·빌드 통과, 실행 안 함.**
+
+| | 코드에 있는 것 | 파일 |
+|---|---|---|
+| ① 호스트 ABI | ABI 6 안의 선택 export, 헤더와 `RendererAbi.cpp`의 맨 끝 한 블록: `UnxSpriteLookDefaults` / `UnxVfxSetSpriteLook`(look 표), `UnxDecalExtraDefaults` / `UnxDecalSetExtra`(tint, 채널, 블렌드, emissive 배율, 화면 크기·수명 페이드), `UNX_INSTANCE_NO_DECALS` / `UnxSceneSetInstanceReceivesDecals`. `UnxDecalDesc`는 80 B 그대로이고 `UnxDecalUpdate`는 데칼의 extra 필드를 유지한다. look 표는 데칼 집합과 같은 방식으로(바뀐 뒤 다음 프레임 패킷의 스냅샷) 렌더 스레드에 간다. 새 구조체: `UnxSpriteLookDesc` 88 B, `UnxDecalExtraDesc` 56 B | `UnravelNextHost.h`, `RendererAbi.cpp`, `HostRenderer.cpp/.h`, `Decals.h`(`DecalSet::get`) |
+| ② 입자 그림자 맵의 독자 | coverage 프래그먼트: 합성이 이미 읽는 태양 프로파일(4개 깊이, `HairShadow.hlsl` MODE 2)에 맵의 투과율을 곱해 넣는다 — 합성 커널(204,576 B / 204,800 B)은 건드리지 않았고 그 패스는 머리카락이나 입자 맵 어느 쪽이 있어도 돈다. 안개 셀(`FogScatter.hlsl` P[11].w)과 공기 슬라이스(`FroxelSlice.hlsli`, `FroxelIntegrate`의 P[9].w): 머리카락 투과율을 곱하는 자리에서 같이 곱한다. 텍스처가 있는 look은 맵에 이미지의 알파(입자 나이의 프레임)로 들어간다 | `HairShadow.hlsl`, `ShadingSystem.cpp`, `FogScatter.hlsl`, `FroxelSlice.hlsli`, `FroxelSystem.cpp`, `FxShadow.hlsl` |
+| ③ 리본의 픽셀 조명 · 모션 벡터 | 점마다 모멘트(월드)와 화면 이동을 둔다(`FxRibbonAppearance` 8 → 24 B). 픽셀 법선: 스트립 위의 관(side × 폭 방향 위치 + 뷰어 쪽 스트립 법선), 또는 스트립 좌표계(+x 길이, +y 폭)의 법선 텍스처. 음영 = × max(0, 1 + 2 m·n), 스프라이트와 같다. 스트립의 모션은 두 점 사이를 보간해 레이어의 motion 타깃에 들어간다 | `ParticleLayerPass.hlsli`(`fxStripSampleOf`), `FxLayerSetup.hlsl`, `FxLayerTile.hlsl` |
+| ④ 광선 장면의 메시 입자 | **스위치 `fx.particles.mesh_in_rays = false`(기본 꺼짐).** 켜면: 커밋된 모든 메시에 BLAS와 geometry 기록을 만든다. 동적 TLAS 용량에 GPU 인스턴스 범위만큼 자리를 더한다. 프레임마다 CPU 디스크립터를 GPU가 쓸 수 있는 버퍼로 복사하고(`r.as.particles.descs`), 커널이 그 뒤에 슬롯마다 디스크립터와 `RtInstance` 기록을 쓰고(`r.as.particles`), 기록을 런타임 기록 뒤에 복사하고(`r.as.particles.records`), 빌더가 그 버퍼를 읽는다. **쓰기 전 GPU에서 검사**: 슬롯이 살아 있고 hidden이 아닐 것, 메시 색인이 표 안이고 BLAS가 있을 것, 변환 12개 값이 유한하고 1e7 미만일 것, 세 축 길이가 1e-4~1e4, 행렬식 ≠ 0. 하나라도 어기면 비활성으로 쓴다(단위 변환, mask 0, BLAS 주소 0 — 빌더가 건너뛴다). FX의 인스턴스 쓰기 패스 뒤에 돌도록 그 패스의 카운터 버퍼를 선언한다 | `RayTracing/ParticleInstances.hlsl`, `RayScene.cpp/.h`, `MeshParticles.cpp`, `fx.toml` |
+
+한계 [코드]:
+
+- ④: 런타임 메시(비트 31 id)를 그리는 입자는 광선에 없다(표에 BLAS가 없다). 입자가 움직인 자리의 GI 캐시 무효화(`m_changes`)를 하지 않는다. alpha-test 재질의 override는 인스턴스 플래그에 반영하지 않는다(BLAS가 만든 대로). 스위치를 켜면 인스턴스가 없는 메시에도 BLAS가 생긴다(메모리·빌드 시간). 처음 켤 때 볼 것: 죽은 슬롯이 mask 0 · 주소 0인지(`RT mesh particle records`의 마지막 워드 1), `r.as.tlas.dynamic` 시간.
+- ②: 광선 hit과 국소광은 맵을 읽지 않는다.
+- ③: 리본은 텍스처 프레임 애니메이션이 없다(`first_frame` 고정).
+- ①: Unity 쪽 관리 브리지(C#)에는 새 export의 선언이 없다(이 워크트리에 그 파일이 없다).
+
+실행해서 확인할 것(순서대로): `unx_test_host_hostabi`·`unx_test_host_hostdecal`(새 export는 선택이므로 기존 검사는 그대로여야 한다), `unx_test_fx_particlelayertests`(리본 appearance의 stride가 바뀌었다), 연기 아래 풀(coverage)과 안개의 still, 조명 받는 리본, 그 뒤 `fx.particles.mesh_in_rays = true`로 메시 입자가 있는 씬의 반사.
+
 ## 12. 물: 원본과의 비교 (2026-10-03, 브랜치 `w/atmo`)
 
 읽은 것: `Native/Render/Passes/Water/*`(수면 셰이딩 `WaterSurface.hlsli`, 매질 `WaterMedia.hlsl`, 태양 지도·코스틱 `WaterLight.hlsli`·`WaterCaustics.hlsl`, 수조 `Pool*`·`RoundPool*`, 유체 표면, 바다 FFT·뷰 격자·거품·물결), R의 굴절 서비스(`RefractionLumenTrace.hlsl`), 설계 `FEATURES_GAME_KO.md` 1절. 원본은 `SingleLayerWater*.ush/.usf`, `SingleLayerWaterRendering.cpp`, `WaterInfoTexture*`. **원본 트리에는 Water 플러그인이 없다**(Gerstner 파도, 수중 후처리 재질, 물결 시뮬레이션, 메시 LOD는 플러그인·재질 쪽이라 비교할 소스가 없다). 아래 "구현"은 모두 **코드 작성·빌드 통과, 실행 안 함**이다.

@@ -69,6 +69,7 @@
 // translucency volume (its parameters' SRV; UNX_NONE: no indirect light in the fog), the froxels' sampled local fluence
 // SRV, their direction moment SRV (MegaLightsVolume.hlsl; UNX_NONE: no local light in the fog) }, P[7] = { density (1/m at
 // the fog's height), height falloff, height (m), phase g }, P[8] = { albedo r, g, b, start distance (m) } (floats).
+// P[9].w FX's particle shadow map parameters (raw SRV; UNX_NONE: none): FroxelSlice.hlsli froxelAirSlice.
 // P[6].x bit 2 (atmosphere.fog.sun_through_fog): part 2's sun transmittance x the share of the sun's light that passes
 // the height fog toward the sun as direct light (Fog.hlsli fogSunThrough; the medium in P[7], whether bit 0 is set or
 // not: the fog's own volume is FogVolume.hlsli's). P[9] = the medium's second layer { density, falloff, height, 0 }.
