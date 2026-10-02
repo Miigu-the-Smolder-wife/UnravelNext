@@ -7,6 +7,7 @@
 #include "unx/gi/GiSystem.h"
 
 #include "unx/gi/LumenRadianceCache.h"
+#include "unx/gi/LumenTranslucencyVolume.h"
 #include "unx/rt/RayPipeline.h"
 #if defined(UNX_GI_HAS_SHADING)
 #include "unx/shading/Exposure.h"
@@ -277,10 +278,20 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
         in.cards = L.hitSurfaceCache ? fc.resources.cards : SurfaceCacheCardRefs{};
         // (with the cards and without gi.lumen_hit_fallback the hits read no world cache)
         in.worldCache = in.cards.valid() && !L.hitFallback ? BufferRef{} : cache;
+        // the translucency volume's cells mark the probes their rays end in, before the cache allocates and traces
+        lumenTranslucencyVolumeMark(fc, view, rc);
         in.skyRadiance = m_skyRadiance;
         in.sunIlluminance = m_sunIlluminance;
         in.experiment = m_settings.experimentDisable;
         lumenRadianceCacheUpdate(fc, view, rays, in, rc);
+    }
+    {
+        // lumen.translucency_volume: indirect light for air, particles, water and glass (after the cache's update)
+        LumenTvInputs tv;
+        tv.cards = L.hitSurfaceCache ? fc.resources.cards : SurfaceCacheCardRefs{};
+        tv.skyRadiance = m_skyRadiance;
+        tv.sunIlluminance = m_sunIlluminance;
+        lumenTranslucencyVolume(fc, view, rays, tv, rc);
     }
     const bool farField = rc.on;
     const TextureRef rcIndirection = rc.indirection, rcAtlas = rc.atlas;

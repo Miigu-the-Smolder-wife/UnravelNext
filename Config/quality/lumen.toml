@@ -39,3 +39,18 @@ radiance_cache_mark_tile_px = 16                  # the module's own screen mark
                                                   # probes' spacing); the gather marks its probes itself
 radiance_cache_trace_capacity = 1024              # structural bound of probes traced in one frame (new probes are always
                                                   # traced, past the budget at 1/4 of the rays; past this bound they wait a frame)
+
+# Translucency volume (Passes/GI/LumenTranslucencyVolume.hlsli): indirect light for what is not an opaque surface of the
+# view - air and fog, particles, water, glass - on a view-aligned grid (cells 32 px wide, 26 exponential slices to 80 m),
+# 3 x 3 rays a cell that end in the radiance cache. false (default): not built; those readers get no indirect light from it.
+translucency_volume = false
+translucency_volume_end_distance_m = 80.0         # EndDistanceFromCamera (8000 cm)
+translucency_volume_spatial_filter = true         # SpatialFilter
+translucency_volume_filter_samples = 3            # SpatialFilter.SampleCount: cells either side, per axis
+translucency_volume_filter_deviation = 5.0        # SpatialFilter.StandardDeviation (cells): close to a box
+translucency_volume_temporal = true               # TemporalReprojection
+translucency_volume_history_weight = 0.9          # (Q) Temporal.HistoryWeight: the history's share of a cell each frame
+translucency_volume_jitter = true                 # Temporal.Jitter: the cells' sample points move inside the cell per frame
+translucency_volume_max_ray_intensity = 20.0      # (Q) MaxRayIntensity: a ray's exposed radiance is held to this; 0 = no cap
+translucency_volume_clipmap_bias = 3              # ShareRadianceCacheWithOpaque.ClipmapBias: the volume's cells use radiance
+                                                  # cache probes this many levels coarser than the opaque gather's

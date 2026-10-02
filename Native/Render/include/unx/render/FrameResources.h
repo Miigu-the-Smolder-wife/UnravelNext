@@ -309,5 +309,11 @@ struct FrameResources
     // with the indirection (Texture3D R32_UINT) and the atlas (R11G11B10F) as SRVs. Invalid = off.                   [A]
     TextureRef lumenRcIndirection, lumenRcAtlas, lumenRcDepth;
     uint32_t lumenRcParams = 0xFFFFFFFFu;
+    // lumen.translucency_volume (Passes/GI/LumenTranslucencyVolume.hlsli, unx/gi/LumenTranslucencyVolume.h): the main
+    // view's indirect light for what is not an opaque surface - air and fog, particles, water, glass. Readers pass
+    // translucencyGiParams (a raw SRV; 0xFFFFFFFF = off) to ltvIrradiance / ltvRadiance and declare the two volume
+    // textures as shader resources. Published by the final gather (tracks::globalIllumination).                      [R]
+    TextureRef translucencyGiAmbient, translucencyGiDirectional;
+    uint32_t translucencyGiParams = 0xFFFFFFFFu;
 };
 } // namespace unx::render
