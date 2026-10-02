@@ -73,6 +73,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -360,6 +361,7 @@ int main(int argc, char** argv)
         std::string timeArg, placeArg;
         bool autoExposure = false;
         uint64_t shiftAt = UINT64_MAX;  // --origin-shift-at F --origin-shift x,y,z: a C9 rebase at frame F (repros)
+        std::vector<FogVolumeDesc> fogVolumes;  // --fog-volume x,y,z,rx,ry,rz,density[,shape[,height falloff]]: a local fog volume (repeatable)
         bool passTimestamps = true;      // --no-pass-timestamps: the frame's GPU time alone (no per-pass queries, no pass CSV)
         float fogDensity = 0;            // --fog D: the frame's height fog (FrameContext::fog) at extinction D (1/m), other fields default
         float cloudCoverage = 0;         // --clouds C: B5 cloud layer (FrameContext::clouds) with coverage C, other fields default
@@ -421,6 +423,19 @@ int main(int argc, char** argv)
             else if (a == "--origin-shift-at") shiftAt = std::stoull(next());
             else if (a == "--clouds") cloudCoverage = std::stof(next());
             else if (a == "--no-pass-timestamps") passTimestamps = false;
+            else if (a == "--fog-volume")
+            {
+                std::vector<float> v;
+                std::stringstream list(next());
+                for (std::string item; std::getline(list, item, ',');) v.push_back(std::stof(item));
+                if (v.size() < 7) fail("--fog-volume x,y,z,rx,ry,rz,density[,shape[,height falloff]]");
+                FogVolumeDesc d;
+                for (int k = 0; k < 3; ++k) d.centre[k] = v[k], d.halfSize[k] = v[3 + k];
+                d.density = v[6];
+                if (v.size() > 7) d.shape = (uint32_t)v[7];
+                if (v.size() > 8) d.heightFalloff = v[8];
+                fogVolumes.push_back(d);
+            }
             else if (a == "--fog") fogDensity = std::stof(next());  // the frame's height fog (FrameContext::fog) at this density (1/m)
             else if (a == "--path-time") pathTime = std::stod(next());
             else if (a == "--path-time-list")
@@ -908,6 +923,7 @@ int main(int argc, char** argv)
                     fc.fog.enabled = true;
                     fc.fog.density = fogDensity;
                 }
+                fc.fogVolumes = fogVolumes;
                 if (gustPeriodS > 0)
                 {
                     const bool gust = ((uint64_t)(fc.time / gustPeriodS) & 1) != 0;

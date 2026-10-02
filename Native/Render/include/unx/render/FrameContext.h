@@ -135,6 +135,23 @@ struct FogDesc
     float noiseScale = 20;         // m: the variation's largest features
 };
 
+// A local fog volume: extra extinction inside an ellipsoid or a box, added to the frame's height fog in the fog's cells
+// (FogVolume.hlsli; lit as the cells are: the sun and its shadows, the local lights, the indirect light). Only inside the
+// fog's near volume (atmosphere.fog.volumetric_distance_m): a volume farther than that is not seen. The fog's volume runs
+// when the frame has any, also without height fog (atmosphere.fog.local_volumes).
+struct FogVolumeDesc
+{
+    double centre[3] = { 0, 0, 0 };  // world, m
+    float halfSize[3] = { 1, 1, 1 }; // m: the ellipsoid's radii or the box's half extents, along the volume's axes
+    float yaw = 0;                   // rad: the volume's turn about the world's up axis
+    uint32_t shape = 0;              // 0 ellipsoid, 1 box
+    float density = 0.05f;           // extinction (1/m) at the volume's bottom, away from its boundary
+    float heightFalloff = 0;         // the density halves this many times from the volume's bottom to its top (0: uniform)
+    float edge = 0.3f;               // (0, 1]: the outer share of the volume over which the density fades to 0 at the boundary
+    float albedo[3] = { 1, 1, 1 };   // scattering / extinction
+};
+constexpr uint32_t kMaxFogVolumes = 16;  // (the first ones of a frame take effect)
+
 // A14 (FEATURES_GAME 8; Requests/20260926_C_per_view_history.md): a full auxiliary view drawn in this frame before the
 // main view (render-texture camera, mirror, portal, split screen). Its id is stable across frames (the key of every
 // track's per-view history; nonzero, unique). 'reads' lists the views whose outputs this view's materials read: those
@@ -156,6 +173,7 @@ struct FrameContext
     ViewDesc mainView;
     CloudLayerDesc clouds;  // B5 (v1.77): coverage 0 = none
     FogDesc fog;            // the height fog (enabled false: the quality file's)
+    std::vector<FogVolumeDesc> fogVolumes;  // local fog volumes (at most kMaxFogVolumes take effect)
     // Validation runs: the main view's colour is linear radiance x exposure in RGBA32F (metrics, INTERFACES 9)
     // instead of the display-encoded RGB10A2.
     bool outputLinearHdr = false;

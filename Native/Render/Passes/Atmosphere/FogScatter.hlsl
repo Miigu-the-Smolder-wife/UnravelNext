@@ -26,6 +26,10 @@
 //          transmittance LUT SRV }
 // P[7] = asuint{ jitter x, y, z in [0, 1), history weight }, P[8] = { VSM stats UAV (the walk's error word), depth SRV,
 //          asuint(the density's noise amount), asuint(1 / its scale in m) }, P[9].xyz = asuint(the noise's lattice offset)
+// P[9].w = the local volumes' records SRV (raw, 64 B each: the rows of unit-from-render - the unit sphere or the cube
+//          [-1, 1]^3 -, then { density, height falloff, 1 / edge, albedo r | g << 8 | b << 16 | shape << 24 }), P[10].x =
+//          their count (FrameContext::fogVolumes). A volume adds density x fade toward its boundary x 2^(-falloff x the
+//          height inside it, 0 .. 1) x the density's variation, with its own albedo; the cell's light is the same.
 // Frame constants of the view (the main view, or a planar reflection view: its fog starts at the mirror).
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
@@ -71,8 +75,28 @@ void main(uint3 id : SV_DispatchThreadID)
     const float3 p = g_cameraPosition + ray * zs;
 
     const FogMedium fog = fogMedium(uint4(1, 0, 0, 0), P[2], P[3]);
-    float sigma = fogExtinctionAt(fog, p.y) * fogDensityScale(p * float3(1, 2, 1) * asfloat(P[8].w) + asfloat(P[9].xyz), asfloat(P[8].z));
+    const float variation = fogDensityScale(p * float3(1, 2, 1) * asfloat(P[8].w) + asfloat(P[9].xyz), asfloat(P[8].z));
+    float sigma = fogExtinctionAt(fog, p.y) * variation;
     if (zs * toRay < fog.start) sigma = 0;
+    // the local volumes
+    float3 albedo = fog.albedo;
+    if (P[10].x != 0)
+    {
+        ByteAddressBuffer volumes = ResourceDescriptorHeap[P[9].w];
+        float3 scattering = fog.albedo * sigma;
+        [loop] for (uint i = 0; i < P[10].x; ++i)
+        {
+            const float4 r0 = asfloat(volumes.Load4(i * 64)), r1 = asfloat(volumes.Load4(i * 64 + 16)), r2 = asfloat(volumes.Load4(i * 64 + 32));
+            const float3 u = float3(dot(r0.xyz, p) + r0.w, dot(r1.xyz, p) + r1.w, dot(r2.xyz, p) + r2.w);
+            const uint4 c = volumes.Load4(i * 64 + 48);
+            const float reach = (c.w >> 24) != 0 ? max(abs(u.x), max(abs(u.y), abs(u.z))) : length(u);
+            if (reach >= 1.0) continue;
+            const float s = asfloat(c.x) * saturate((1.0 - reach) * asfloat(c.z)) * exp2(-asfloat(c.y) * (0.5 * u.y + 0.5)) * variation;
+            sigma += s;
+            scattering += s * float3(c.w & 0xFFu, (c.w >> 8) & 0xFFu, (c.w >> 16) & 0xFFu) * (1.0 / 255.0);
+        }
+        if (sigma > 0) albedo = scattering / sigma;
+    }
     if (!clipPlaneKeeps(p)) sigma = 0;  // (a planar reflection view: the ray before the mirror is not a path of light)
     float3 inScattered = 0;
     if (sigma > 0)
@@ -131,7 +155,7 @@ void main(uint3 id : SV_DispatchThreadID)
         // the indirect light
         if (P[6].z != 0xFFFFFFFFu) inScattered += ltvInscatter(P[6].z, p, dir, fog.g);
     }
-    float4 value = float4(fog.albedo * inScattered * sigma, sigma);
+    float4 value = float4(albedo * inScattered * sigma, sigma);
     if (any(isnan(value)) || any(isinf(value))) value = 0;
 
     // history: the cell's centre in the previous view

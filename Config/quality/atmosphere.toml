@@ -56,6 +56,8 @@ far_shadows = true                   # the far slices' sun term outside the cast
                                      # slices (a ridge against a low sun shades the fog in front of it); false: no casters out there
 history_weight = 0.9                 # the history's share of a cell each frame (the reference's 0.9), the sample point jittered per frame
 shadow_texels_per_cell = 1.0         # the sun's shadow in a cell is read at the page level whose texel is the cell's width / this
+local_volumes = true                 # the frame's local fog volumes (FrameContext::fogVolumes: steam, mist in a hollow): extra density in
+                                     # the fog's cells, lit as they are; the volume runs for them alone when the height fog is off
 on_rays = true                       # reflection rays take the fog along them (the reference's Lumen.SampleFog): its closed form's
                                      # transmittance, lit as the volume is around the reflecting surface. false: reflections show what
                                      # they hit without the fog between

@@ -628,6 +628,23 @@ UNX_API int32_t UNX_CALL UnxFrameSetFog(UnxRenderer r, const UnxFogDesc* fog)
     });
 }
 
+UNX_API int32_t UNX_CALL UnxFrameSetFogVolumes(UnxRenderer r, const UnxFogVolumeDesc* volumes, uint32_t count)
+{
+    return call([&] {
+        if (count && !volumes) fail("UnxFrameSetFogVolumes: no volumes");
+        std::vector<render::FogVolumeDesc> in(count);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const UnxFogVolumeDesc& d = volumes[i];
+            if (d.size != sizeof(UnxFogVolumeDesc) || d.version != 1) fail("UnxFrameSetFogVolumes: UnxFogVolumeDesc %u size %u version %u", i, d.size, d.version);
+            render::FogVolumeDesc& v = in[i];
+            for (int k = 0; k < 3; ++k) v.centre[k] = d.centre[k], v.halfSize[k] = d.halfSize[k], v.albedo[k] = d.albedo[k];
+            v.yaw = d.yaw, v.shape = d.shape, v.density = d.density, v.heightFalloff = d.heightFalloff, v.edge = d.edge;
+        }
+        find(r)->setFogVolumes(in);
+    });
+}
+
 UNX_API int32_t UNX_CALL UnxFrameSetOcean(UnxRenderer r, const UnxOceanDesc* ocean)
 {
     return call([&] {

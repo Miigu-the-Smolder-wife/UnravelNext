@@ -190,6 +190,7 @@ struct FramePacket
     std::optional<render::OceanFrame> ocean;  // B7: the sea in this frame's coordinates (FrameContext::ocean)
     render::CloudLayerDesc clouds;            // B5: the cloud layer (FrameContext::clouds)
     render::FogDesc fog;                      // the height fog (FrameContext::fog)
+    std::vector<render::FogVolumeDesc> fogVolumes;  // local fog volumes (FrameContext::fogVolumes; world coordinates)
     // W2 closed basins (v1.78): the basins every frame takes (this frame's coordinates; the sources pointers are set when
     // the frame is recorded) and this frame's sources (each handed to one frame; a dropped frame's carry into the next).
     std::vector<render::PoolFrame> pools;
@@ -406,6 +407,8 @@ public:
     void setClouds(const render::CloudLayerDesc& clouds);
     // The height fog: held until changed; every queued frame takes the current medium.
     void setFog(const render::FogDesc& fog);
+    // Local fog volumes: the current set, held until changed.
+    void setFogVolumes(const std::vector<render::FogVolumeDesc>& volumes);
     render::CloudLayerDesc clouds()
     {
         std::lock_guard lock(m_mutex);
@@ -617,6 +620,7 @@ private:
     std::array<uint64_t, 6> m_fluidStamp{};                          // (m_mutex)
     std::optional<OceanInput> m_ocean;                               // (m_mutex) the sea every queued frame takes
     render::FogDesc m_fog;                                           // (m_mutex) the height fog every queued frame takes
+    std::vector<render::FogVolumeDesc> m_fogVolumes;                 // (m_mutex) the local fog volumes every queued frame takes
     render::CloudLayerDesc m_clouds;                                 // (m_mutex) B5 the cloud layer every queued frame takes
     std::optional<render::OceanFrame> oceanFrameLocked() const;      // (m_mutex held) m_ocean in the current coordinates
     std::vector<PoolInput> m_pools;                                  // (m_mutex) W2 basins every queued frame takes (world)

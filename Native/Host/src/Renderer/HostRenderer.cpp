@@ -1083,6 +1083,21 @@ void HostRenderer::setClouds(const render::CloudLayerDesc& c)
     m_clouds = c;
 }
 
+void HostRenderer::setFogVolumes(const std::vector<render::FogVolumeDesc>& volumes)
+{
+    requireCommitted();
+    for (size_t i = 0; i < volumes.size(); ++i)
+    {
+        const render::FogVolumeDesc& v = volumes[i];
+        bool ok = std::isfinite(v.yaw) && std::isfinite(v.density) && std::isfinite(v.heightFalloff) && std::isfinite(v.edge) && v.shape <= 1 && v.density >= 0 &&
+                  v.heightFalloff >= 0 && v.edge > 0 && v.edge <= 1;
+        for (int k = 0; k < 3; ++k) ok = ok && std::isfinite(v.centre[k]) && std::isfinite(v.halfSize[k]) && v.halfSize[k] > 0 && v.albedo[k] >= 0 && v.albedo[k] <= 1;
+        if (!ok) fail("fog volume %zu: finite values, half sizes > 0, shape 0 or 1, density and height falloff >= 0, edge in (0, 1], albedo in [0, 1]", i);
+    }
+    std::lock_guard lock(m_mutex);
+    m_fogVolumes = volumes;
+}
+
 void HostRenderer::setFog(const render::FogDesc& f)
 {
     requireCommitted();
@@ -1333,6 +1348,7 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.ocean = oceanFrameLocked();  // in this frame's coordinates (the origin shifts applied so far)
     packet.clouds = m_clouds;
     packet.fog = m_fog;
+    packet.fogVolumes = m_fogVolumes;
     poolsLocked(packet);  // W2: the basins (a state) and this frame's sources (handed over once)
     m_decalsChanged = false;
     m_pending = FramePacket{};
@@ -1662,6 +1678,7 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     fc.ocean = p.ocean ? &*p.ocean : nullptr;
     fc.clouds = p.clouds;
     fc.fog = p.fog;
+    fc.fogVolumes = p.fogVolumes;
     // W2: the basins with their sources grouped (valid until record() returns); sources of basins no longer present drop.
     m_poolFrames = p.pools;
     m_poolSourceFrames.clear();

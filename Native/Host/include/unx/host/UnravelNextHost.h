@@ -43,7 +43,7 @@ enum UnxResult
                             //    UnxFrameSetRuntimeTransforms (C2b), UnxFrameSetTerrainDeformation (C5), UnxFrameSetOcean (B7),
                             //    UnxSceneSetTerrainLayers (C5 terrain material, v1.74), UnxFrameSetClouds (B5, v1.77),
                             //    UnxFrameSetPools, UnxFrameAddPoolSources (W2, v1.78), UnxPoolStatsLatest (W2, v1.90),
-                            //    UnxFrameSetWhiteBalance (v1.91), UnxFrameSetFog (the height fog)
+                            //    UnxFrameSetWhiteBalance (v1.91), UnxFrameSetFog, UnxFrameSetFogVolumes (the height fog, local fog volumes)
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -623,6 +623,27 @@ typedef struct UnxFogDesc
 static_assert(sizeof(UnxFogDesc) == 56, "UnxFogDesc is part of the ABI");
 #endif
 UNX_API int32_t UNX_CALL UnxFrameSetFog(UnxRenderer r, const UnxFogDesc* fog);
+// Local fog volumes (optional export within ABI 6; after commit, any time): the current set, held until changed
+// (render::FogVolumeDesc; at most 16 take effect). Extra fog inside an ellipsoid or a box - steam over a bath, mist in a
+// hollow - lit as the fog is (the sun and its shadows, the local lights, the indirect light); seen within the fog's
+// near volume (80 m by default). count 0: none.
+typedef struct UnxFogVolumeDesc
+{
+    uint32_t size, version;             // sizeof (80), 1
+    double centre[3];                   // world, m
+    float halfSize[3];                  // m, > 0: the ellipsoid's radii or the box's half extents along its axes
+    float yaw;                          // rad, about the up axis
+    uint32_t shape;                     // 0 ellipsoid, 1 box
+    float density;                      // extinction (1/m) at the volume's bottom, away from its boundary, >= 0
+    float heightFalloff;                // the density halves this many times from the bottom to the top, >= 0 (0: uniform)
+    float edge;                         // (0, 1]: the outer share of the volume over which the density fades to 0
+    float albedo[3];                    // scattering / extinction, [0, 1]
+    uint32_t reserved;                  // 0
+} UnxFogVolumeDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxFogVolumeDesc) == 80, "UnxFogVolumeDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetFogVolumes(UnxRenderer r, const UnxFogVolumeDesc* volumes, uint32_t count);
 
 // C5 terrain material (optional export within ABI 6, INTERFACES v1.74; before UnxSceneCommit): the layers of a material
 // added with UNX_MATERIAL_TERRAIN - 1..8 Standard materials read at layer uv = uv0 x scale + offset, weighted by channel

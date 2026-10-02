@@ -5,7 +5,7 @@
 #   2  the four game scenes: cut pictures at 1080p with the gi and direct layers (which stage a cut frame's blotch is in),
 #      timings at 1080p, 1440p and 4K;
 #   3  scenegen's scenes (outdoors, night, forest, water, interior): cut pictures and timings at 1080p, timings at 4K;
-#   4  variants, in groups (-Variants high,fog,fogab,far,clouds,thin,nopass,grids; default all): the high tier's timings; the
+#   4  variants, in groups (-Variants high,fog,fogab,fogvol,far,clouds,thin,nopass,grids; default all): the high tier's timings; the
 #      height fog on (pictures, timings) and each of its parts off in turn; the far field off; the cloud layer with and
 #      without its temporal accumulation; the frame without per-pass timestamps; the view-angle grids against pixel-sized.
 # The summary (<out>\summary.txt): the furnace sheets, every timing run's GPU frame and largest pass groups, the gates
@@ -15,7 +15,7 @@ param(
     [string]$Out = "Cache\Ue6Batch",
     [string[]]$Skip = @(),
     [string]$GeneratedScenes = "city_block,forest_thin,waterside,interior,city_night,ridge_sunset,forest_combat",
-    [string[]]$Variants = @("high", "fog", "fogab", "far", "clouds", "thin", "nopass", "grids")
+    [string[]]$Variants = @("high", "fog", "fogab", "fogvol", "far", "clouds", "thin", "nopass", "grids")
 )
 $ErrorActionPreference = "Stop"
 $Skip = @($Skip | ForEach-Object { $_ -split "," } | Where-Object { $_ })
@@ -93,6 +93,13 @@ if ($Skip -notcontains "variants") {
         Final "fog: none in the mirror views (lake)" "fog_nomirror" @("-NoGame", "-Generated", "waterside", "-Resolutions", "1080p", "-SkipTimings", "-Set", "$fogOn,atmosphere.fog.secondary_views=false")
         Final "fog under the cloud layer (ridge, city block)" "fog_clouds" @("-NoGame", "-Generated", "ridge_sunset,city_block", "-Resolutions", "1080p", "-SkipTimings", "-Set", $fogOn,
             "-GateArgs", "--clouds 0.5")
+    }
+    if ($Variants -contains "fogvol") {
+        # a local fog volume alone (ground mist in the street ahead of the camera, a box 16 x 5 x 60 m), and inside the height fog
+        Final "local fog volume (night city)" "fog_volume" @("-NoGame", "-Generated", "city_night", "-Resolutions", "1080p",
+            "-GateArgs", "--fog-volume -38,2.5,80,8,2.5,30,0.06,1,2")
+        Final "local fog volume in the height fog (night city)" "fog_volume_in_fog" @("-NoGame", "-Generated", "city_night", "-Resolutions", "1080p", "-SkipTimings",
+            "-Set", $fogOn, "-GateArgs", "--fog-volume -38,2.5,80,8,2.5,30,0.06,1,2")
     }
     if ($Variants -contains "far") {
         Final "far field off (ridge, city block, lake)" "far_off" @("-NoGame", "-Generated", "ridge_sunset,city_block,waterside", "-Resolutions", "1080p", "-Layers", "gi",

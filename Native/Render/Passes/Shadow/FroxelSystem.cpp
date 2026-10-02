@@ -191,10 +191,14 @@ FroxelGridCpu froxelGridFor(const QualityConfig& q, uint32_t width, uint32_t hei
     return g;
 }
 
-FogView fogViewFor(const QualityConfig& q, const FogDesc& frame, uint32_t width, uint32_t height)
+FogView fogViewFor(const QualityConfig& q, const FrameContext& context, uint32_t width, uint32_t height)
 {
     FogView f;
     if (!q.has("atmosphere.fog.enabled")) return f;
+    const FogDesc& frame = context.fog;
+    // the frame's local volumes: the fog's volume runs for them alone too (a medium of density 0 around them)
+    const bool volumes = !context.fogVolumes.empty() && q.has("atmosphere.fog.local_volumes") && q.boolean("atmosphere.fog.local_volumes");
+    f.volumes = volumes ? (uint32_t)std::min<size_t>(context.fogVolumes.size(), kMaxFogVolumes) : 0u;
     if (frame.enabled)
     {
         // the frame's medium (FrameContext::fog: the game's weather)
@@ -212,9 +216,10 @@ FogView fogViewFor(const QualityConfig& q, const FogDesc& frame, uint32_t width,
     }
     else
     {
-        if (!q.boolean("atmosphere.fog.enabled")) return f;
+        const bool fileFog = q.boolean("atmosphere.fog.enabled");
+        if (!fileFog && !volumes) return f;
         const float scale = (float)q.number("atmosphere.fog.extinction_scale");
-        f.density = (float)q.number("atmosphere.fog.density_per_m") * scale;
+        f.density = fileFog ? (float)q.number("atmosphere.fog.density_per_m") * scale : 0.0f;
         f.falloff = (float)q.number("atmosphere.fog.height_falloff_per_m");
         f.height = (float)q.number("atmosphere.fog.height_m");
         f.g = (float)q.number("atmosphere.fog.phase_g");
@@ -249,7 +254,7 @@ FogView fogViewFor(const QualityConfig& q, const FogDesc& frame, uint32_t width,
     if (f.farSlices > 64 || (f.farSlices != 0 && !(f.farEndM > f.farM))) fail("atmosphere.fog: far_slices <= 64, far_distance_m > volumetric_distance_m");
     f.k = 32.0f / f.farM;                                // (the reference's depth distribution scale)
     f.b = (float)f.gridZ / std::log2(33.0f);             // slice(farM) = gridZ
-    f.on = f.density > 0;
+    f.on = f.density > 0 || f.volumes > 0;
     return f;
 }
 
@@ -765,12 +770,48 @@ struct FogParamsGpu  // FogVolume.hlsli FogParams
     uint32_t pad;
 };
 static_assert(sizeof(FogParamsGpu) == kFogParamBytes, "FogParams is 80 B (FogVolume.hlsli)");
+constexpr uint32_t kFogVolumeBytes = 64;
+// A local volume as FogScatter.hlsl reads it: the rows of unit-from-render (the unit sphere or the cube [-1, 1]^3), then
+// { density, height falloff, 1 / edge, albedo r | g << 8 | b << 16 | shape << 24 }.
+struct FogVolumeGpu
+{
+    float rows[3][4];
+    float density, heightFalloff, inverseEdge;
+    uint32_t packed;
+};
+static_assert(sizeof(FogVolumeGpu) == kFogVolumeBytes, "a fog volume record is 64 B (FogScatter.hlsl)");
+FogVolumeGpu fogVolumeGpu(const FogVolumeDesc& v, float3 originOffset)
+{
+    FogVolumeGpu g{};
+    // unit = S^-1 R^T (world - centre), R the turn by yaw about y; world = render + the origin offset
+    const double c = std::cos((double)v.yaw), s = std::sin((double)v.yaw);
+    const double axes[3][3] = { { c, 0, -s }, { 0, 1, 0 }, { s, 0, c } };  // the rows of R^T
+    const double centre[3] = { v.centre[0] - originOffset.x, v.centre[1] - originOffset.y, v.centre[2] - originOffset.z };
+    for (int r = 0; r < 3; ++r)
+    {
+        const double inv = 1.0 / std::max((double)v.halfSize[r], 1e-4);
+        double t = 0;
+        for (int k = 0; k < 3; ++k)
+        {
+            g.rows[r][k] = (float)(axes[r][k] * inv);
+            t -= axes[r][k] * centre[k];
+        }
+        g.rows[r][3] = (float)(t * inv);
+    }
+    g.density = std::max(v.density, 0.0f);
+    g.heightFalloff = std::max(v.heightFalloff, 0.0f);
+    g.inverseEdge = 1.0f / std::clamp(v.edge, 1e-3f, 1.0f);
+    auto unorm = [](float x) { return (uint32_t)std::lround(std::clamp(x, 0.0f, 1.0f) * 255.0f); };
+    g.packed = unorm(v.albedo[0]) | unorm(v.albedo[1]) << 8 | unorm(v.albedo[2]) << 16 | (v.shape != 0 ? 1u : 0u) << 24;
+    return g;
+}
 struct FogState
 {
     Device* device = nullptr;
-    ComPtr<ID3D12Resource> scatter[2], integrated, ring;
-    uint32_t integratedSrv = 0, ringSrv[kFogRing] = {};
+    ComPtr<ID3D12Resource> scatter[2], integrated, ring, volumeRing;
+    uint32_t integratedSrv = 0, ringSrv[kFogRing] = {}, volumeSrv[kFogRing] = {};
     uint8_t* ringMapped = nullptr;
+    uint8_t* volumeMapped = nullptr;  // kFogRing x kMaxFogVolumes records of kFogVolumeBytes (FogScatter.hlsl)
     bool srvs = false, fresh = true;
     uint32_t x = 0, y = 0, z = 0, zFar = 0, parity = 0, revision = 0xFFFFFFFFu;
     uint64_t preparedFrame = UINT64_MAX;
@@ -780,11 +821,13 @@ struct FogState
         if (!device) return;
         releaseTextures();
         if (ring) device->deferRelease(ring);
+        if (volumeRing) device->deferRelease(volumeRing);
         if (srvs)
         {
             DescriptorHeaps* h = &device->descriptors();
             for (uint32_t s : { integratedSrv }) device->deferCall([h, s] { h->freeResource(s); });
             for (uint32_t s : ringSrv) device->deferCall([h, s] { h->freeResource(s); });
+            for (uint32_t s : volumeSrv) device->deferCall([h, s] { h->freeResource(s); });
         }
     }
     void releaseTextures()
@@ -826,6 +869,26 @@ struct FogState
                 sd.Buffer.NumElements = kFogParamBytes / 4;
                 sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
                 d.d3d()->CreateShaderResourceView(ring.Get(), &sd, d.descriptors().resourceCpu(ringSrv[k]));
+            }
+            // the local volumes' records, one run of kMaxFogVolumes per frame of the ring
+            const uint32_t runBytes = kMaxFogVolumes * kFogVolumeBytes;
+            desc.Width = (uint64_t)kFogRing * runBytes;
+            check(d.d3d()->CreateCommittedResource3(&upload, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&volumeRing)),
+                  "S fog volumes");
+            volumeRing->SetName(L"S fog local volumes ring");
+            check(volumeRing->Map(0, &none, reinterpret_cast<void**>(&volumeMapped)), "map S fog volumes");
+            std::memset(volumeMapped, 0, (size_t)kFogRing * runBytes);
+            for (uint32_t k = 0; k < kFogRing; ++k)
+            {
+                volumeSrv[k] = d.descriptors().allocateResource();
+                D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+                sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                sd.Format = DXGI_FORMAT_R32_TYPELESS;
+                sd.Buffer.FirstElement = k * (runBytes / 4);
+                sd.Buffer.NumElements = runBytes / 4;
+                sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+                d.d3d()->CreateShaderResourceView(volumeRing.Get(), &sd, d.descriptors().resourceCpu(volumeSrv[k]));
             }
             srvs = true;
         }
@@ -905,7 +968,7 @@ std::string fogStateKey(uint32_t slot) { return slot == 0 ? std::string("S.fog.v
 
 uint32_t fogPrepare(FramePassContext& fc, const ViewDesc& view)
 {
-    FogView f = fogViewFor(fc.quality, fc.frame.fog, view.width, view.height);
+    FogView f = fogViewFor(fc.quality, fc.frame, view.width, view.height);
     if (!f.on || !fc.trackState) return 0;
     f.height -= fc.scene.originOffset().y;  // (the kernels' positions are the frame's render space: world - the origin offset)
     FogState& st = fc.state<FogState>("S.fog.volume");
@@ -919,7 +982,7 @@ uint32_t fogPrepare(FramePassContext& fc, const ViewDesc& view)
 uint32_t fogPrepareSecondary(FramePassContext& fc, const ViewDesc& view, uint64_t key)
 {
     if (!fc.trackState || !fc.quality.has("atmosphere.fog.secondary_views") || !fc.quality.boolean("atmosphere.fog.secondary_views")) return 0;
-    FogView f = fogViewFor(fc.quality, fc.frame.fog, view.width, view.height);
+    FogView f = fogViewFor(fc.quality, fc.frame, view.width, view.height);
     if (!f.on) return 0;
     FogSecondary& sec = fc.state<FogSecondary>("S.fog.secondary");
     if (sec.frame != fc.frame.frameIndex)
@@ -1176,6 +1239,14 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
     const std::string suffix = primary ? "" : ".planar";
     auto bits = [](float v) { uint32_t u; std::memcpy(&u, &v, 4); return u; };
     const uint32_t grid0 = f.gridX | f.gridY << 16, grid1 = f.gridZ | f.cellPx << 16 | f.farSlices << 24;
+    // The frame's local volumes, in the render space, into this frame's run of the records' ring.
+    const uint32_t volumeRun = (uint32_t)(fc.frame.frameIndex % kFogRing), volumeCount = f.volumes;
+    for (uint32_t i = 0; i < volumeCount; ++i)
+    {
+        const FogVolumeGpu volume = fogVolumeGpu(fc.frame.fogVolumes[i], fc.scene.originOffset());
+        std::memcpy(st.volumeMapped + ((size_t)volumeRun * kMaxFogVolumes + i) * kFogVolumeBytes, &volume, sizeof volume);
+    }
+    const uint32_t volumeSrv = st.volumeSrv[volumeRun];
     // The density's variation: the noise's lattice coordinate of a render-space position p is p x (1, 2, 1) / scale + this
     // offset (the lattice repeats every 256: the offset is kept inside one period in double). It follows the world (the
     // origin offset) and drifts with the scene's wind, or along x at noise_drift_mps in still air.
@@ -1228,7 +1299,7 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
               },
               [=](PassContext& ctx) {
                   const uint32_t none = 0xFFFFFFFFu;
-                  uint32_t k[40] = { grid0, grid1, bits(f.farM), bits(f.k),
+                  uint32_t k[44] = { grid0, grid1, bits(f.farM), bits(f.k),
                                      bits(f.b), ctx.uav(scatter), history.valid() ? ctx.srv(history) : none, clip ? 1u : 0u,
                                      bits(f.density), bits(f.falloff), bits(f.height), bits(f.g),
                                      bits(f.albedo[0]), bits(f.albedo[1]), bits(f.albedo[2]), bits(f.start),
@@ -1238,10 +1309,11 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
                                      local ? ctx.srv(fluence) : none, local ? ctx.srv(moment) : none, ambient ? ambientParams : none, ctx.srv(tlut),
                                      bits(jitter[0]), bits(jitter[1]), bits(jitter[2]), bits(f.historyWeight),
                                      shadows ? ctx.uav(vsm.stats) : none, ctx.srv(fogDepth), bits(f.noiseAmount), bits(1.0f / f.noiseScale),
-                                     bits(noise[0]), bits(noise[1]), bits(noise[2]), 0 };
+                                     bits(noise[0]), bits(noise[1]), bits(noise[2]), volumeSrv,
+                                     volumeCount, 0, 0, 0 };
                   ctx.cmd->SetPipelineState(ps);
                   ctx.bindFrameConstants(constants);
-                  ctx.computeConstants(k, 40);
+                  ctx.computeConstants(k, 44);
                   ctx.cmd->Dispatch((f.gridX + 3) / 4, (f.gridY + 3) / 4, (f.gridZ + 3) / 4);
               });
     g.addPass("s.fog.integrate" + suffix, QueueType::Compute,
