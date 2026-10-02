@@ -3,6 +3,10 @@
 // the pixel's surface and the froxel list's lights; a world-space consumer (S2's surface cache direct light) feeds it a
 // point and the lights of R's world light grid (MegaLightsWorld.hlsli wraps that walk and the shadow ray).
 // ML_AREA (default 1): area lights by their exact diffuse and LTC integrals; 0 compiles them out (scenes without them).
+// ML_SUBSURFACE (default 0; m.ml.sample sets 1): a point can carry the Subsurface class's model (mlPointSubsurface: its two
+// specular lobes and the light through thin parts under point and spot lights, as ShadeOpaque's Subsurface variant shades
+// them; under area lights one lobe at the two's average roughness - a sampling weight, the shading takes both); world
+// points have none.
 #ifndef UNX_MEGA_LIGHTS_SAMPLING_HLSLI
 #define UNX_MEGA_LIGHTS_SAMPLING_HLSLI
 #include "Passes/Shading/ShadingCommon.hlsli"
@@ -10,6 +14,9 @@
 #include "Passes/Shading/MegaLights.hlsli"
 #ifndef ML_AREA
 #define ML_AREA 1
+#endif
+#ifndef ML_SUBSURFACE
+#define ML_SUBSURFACE 0
 #endif
 
 struct MlPoint
@@ -24,6 +31,11 @@ struct MlPoint
 #if ML_AREA
     float3x3 frame, frameBack, specularLtc;
     float3 specularAlbedo;
+#endif
+#if ML_SUBSURFACE
+    bool subsurface;       // the Subsurface class: the specular lobe is 'skin' (alpha, compensation, LTC: its average roughness)
+    ModelSubsurface skin;
+    float3 thin;           // f_d x transmission: the light through thin parts (0: none)
 #endif
 };
 
@@ -49,8 +61,30 @@ MlPoint mlPointOf(ModelSurface s, float3 offset, float3 n, float3 v, uint ltcSrv
     p.specularLtc = mul(shLtcInverse(ltcSrv, max(p.NoV, 1e-4), s.roughness), p.frame);
     p.specularAlbedo = shSpecularAlbedo(p.f0, max(p.NoV, 1e-4), s.roughness);
 #endif
+#if ML_SUBSURFACE
+    p.subsurface = false;
+    p.skin = (ModelSubsurface)0;
+    p.thin = 0;
+#endif
     return p;
 }
+
+#if ML_SUBSURFACE
+// Turns the point of a Subsurface-class surface (mlPointOf's) into that class's model: 'skin' = its lobes
+// (modelSubsurfaceOf at the surface's roughness).
+void mlPointSubsurface(inout MlPoint p, ModelSurface s, ModelSubsurface skin, uint ltcSrv)
+{
+    p.subsurface = true;
+    p.skin = skin;
+    p.thin = s.transmission > 0 ? s.baseColor * ((1 - s.metallic) / SH_PI) * s.transmission : 0;
+    p.alpha = modelAlpha(skin.roughness);
+    p.compensation = 1 + p.f0 * (1 / modelDirectionalAlbedo(max(p.NoV, 1e-4), skin.roughness) - 1);
+#if ML_AREA
+    p.specularLtc = mul(shLtcInverse(ltcSrv, max(p.NoV, 1e-4), skin.roughness), p.frame);
+    p.specularAlbedo = shSpecularAlbedo(p.f0, max(p.NoV, 1e-4), skin.roughness);
+#endif
+}
+#endif
 
 // A Lambert point of a world-space store (no viewer, no specular): its radiance is albedo / pi x irradiance.
 MlPoint mlPointLambert(float3 worldPos, float3 n, float3 albedo)
@@ -104,6 +138,14 @@ float3 mlLightUnshadowed(MlPoint p, GpuLight light, uint lightIndex, uint stable
     const float cosL = dot(p.n, l);
     if (all(E == 0)) return 0;
     float3 f = 0;
+#if ML_SUBSURFACE
+    if (p.subsurface)
+    {
+        if (p.NoV > 0 && cosL > 0) f = p.front + shSpecularSubsurface(p.f0, p.skin, p.compensation, p.n, p.v, l, p.NoV, cosL);
+        else if (p.NoV * cosL < 0) f = p.thin * (modelSubsurfaceThin(abs(cosL), p.v, l) / abs(cosL));
+        return f * E * abs(cosL);
+    }
+#endif
     if (p.NoV > 0 && cosL > 0) f = p.front + (p.specular ? shSpecular(p.f0, p.alpha, p.compensation, p.n, p.v, l, p.NoV, cosL) : 0.0);
     else if (p.foliage && p.NoV * cosL < 0) f = p.back;
     return f * E * abs(cosL);

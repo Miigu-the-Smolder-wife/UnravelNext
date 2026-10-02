@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: AREA=0,1 LAYERED=0,1,2 FULL=0,1
+// unx-variants: AREA=0,1 LAYERED=0,1,2,3 FULL=0,1
 // m.ml.shade (MegaLights.hlsli): ShadeOpaque.hlsl compiled with MEGA_LIGHTS = 1 - the same tiles, classes, per-pixel setup
 // and light models (punctual lights, area lights by LTC, A9 layers, Foliage, light functions), with the local-light loop
 // running over the lights of the pixel's light samples instead of the froxel list and each light's visibility replaced
@@ -10,6 +10,8 @@
 // << 16), P[11].z = minimum sample weight (float), P[11].w = factor | N << 8.
 // FULL = 1: one group per 8 x 8 pixel tile of the whole view (SV_GroupID.xy) and no class tile list - the coverage layer's
 // instance (MegaLightsCoverage.hlsl), whose surface has no tile classification; P[1].z is then a shade class mask.
+// LAYERED = 3: the Subsurface class's variant (ShadeOpaque.hlsl header: its two specular lobes and the light through thin
+// parts from the samples' point and spot lights).
 #define ML_FULLSCREEN FULL
 #define MEGA_LIGHTS 1
 #define SHADE_PART 1

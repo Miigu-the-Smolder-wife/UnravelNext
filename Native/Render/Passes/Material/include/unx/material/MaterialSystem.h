@@ -13,7 +13,7 @@ enum class ShadeClass : uint32_t
 {
     Sky = 0,
     Opaque = 1,      // Standard + Foliage (INTERFACES 8.1)
-    Subsurface = 2,
+    Subsurface = 2,  // Subsurface materials, ShadeOpaque LAYERED=3 (part 1)
     Water = 3,
     Layered = 4,     // A9: Standard materials with a clearcoat, ShadeOpaque LAYERED=1
     Sheen = 5,       // A9: Standard materials with a sheen, ShadeOpaque LAYERED=2

@@ -295,12 +295,15 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         for (const scene::Light& l : src->lights) areaLights = areaLights || l.type > scene::LightType::Spot;
     // A9: clearcoat materials shade in their own class with the LAYERED=1 variant, sheen materials in theirs with LAYERED=2;
     // the fallback kernel runs once per variant the scene needs, each over its classes (P[1].z mask).
-    bool layeredMaterials = false, sheenMaterials = false;
+    // Subsurface materials shade their part 1 with the LAYERED=3 variant (the class's two specular lobes and its light
+    // through thin parts; ShadeOpaque.hlsl header), in the class's own tile list and in a fallback run of its own.
+    bool layeredMaterials = false, sheenMaterials = false, subsurfaceMaterials = false;
     if (const scene::Scene* src = fc.scene.source())
         for (const scene::Material& mt : src->materials)
         {
             layeredMaterials = layeredMaterials || mt.clearcoat > 0 || mt.anisotropy > 0 || mt.thinFilmThickness > 0;  // (A9 anisotropy and thin films shade in the layered variants)
             sheenMaterials = sheenMaterials || mt.sheenColor.x > 0 || mt.sheenColor.y > 0 || mt.sheenColor.z > 0;
+            subsurfaceMaterials = subsurfaceMaterials || mt.cls == scene::MaterialClass::Subsurface;
         }
     // Two kernels per class (ShadeOpaque.hlsl header): part 1 (direct light -> the direct radiance texture) and part 2
     // (ShadeIndirect: indirect light, air, output), bit-identical to the one kernel; one UAV barrier between them.
@@ -318,6 +321,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     ID3D12PipelineState* opaque = opaqueKernel(false, 0);
     ID3D12PipelineState* opaqueLayered = layeredMaterials ? opaqueKernel(false, 1) : nullptr;
     ID3D12PipelineState* opaqueSheen = sheenMaterials ? opaqueKernel(false, 2) : nullptr;
+    ID3D12PipelineState* opaqueSubsurface = subsurfaceMaterials ? opaqueKernel(false, 3) : opaque;  // (part 2: the plain kernel's)
     ID3D12PipelineState* indirect = indirectKernel(false, 0);
     ID3D12PipelineState* indirectLayered = layeredMaterials ? indirectKernel(false, 1) : nullptr;
     ID3D12PipelineState* indirectSheen = sheenMaterials ? indirectKernel(false, 2) : nullptr;
@@ -549,6 +553,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             ID3D12PipelineState* mlPlain = mlKernel(0);
             ID3D12PipelineState* mlLayered = layeredMaterials ? mlKernel(1) : nullptr;
             ID3D12PipelineState* mlSheen = sheenMaterials ? mlKernel(2) : nullptr;
+            ID3D12PipelineState* mlSubsurface = subsurfaceMaterials ? mlKernel(3) : mlPlain;
             const TextureRef samples = ml.samples, keys = ml.keys, outDiffuse = ml.resolvedDiffuse, outSpecular = ml.resolvedSpecular;
             auto half = [](float f) {  // positive, in the half range (the weight caps)
                 uint32_t u;
@@ -585,6 +590,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                                                           material::ShadeClass::Layered, material::ShadeClass::Sheen })
                                  {
                                      ID3D12PipelineState* kernel = shadeClass == material::ShadeClass::Layered ? mlLayered : (shadeClass == material::ShadeClass::Sheen ? mlSheen : mlPlain);
+                                     if (shadeClass == material::ShadeClass::Subsurface) kernel = mlSubsurface;
                                      if (!kernel) continue;
                                      c.cmd->SetPipelineState(kernel);
                                      const uint32_t cls = (uint32_t)shadeClass;
@@ -779,8 +785,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 c.computeConstants(k, 32);
                 c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
             }
-            // Surface classes (Subsurface and Water use the opaque model until theirs are defined; A9 layered materials
-            // with the LAYERED variant): every class's part 1 (and the A9 lobe kernel before it), one UAV barrier, then
+            // Surface classes (Water uses the opaque model until its own is defined; A9 layered materials with the LAYERED
+            // variant, Subsurface with its part 1): every class's part 1 (and the A9 lobe kernel before it), one UAV barrier, then
             // every class's part 2 (ShadeOpaque.hlsl header).
             for (uint32_t part = 1; part <= 2; ++part)
             for (material::ShadeClass shadeClass : { material::ShadeClass::Opaque, material::ShadeClass::Subsurface, material::ShadeClass::Water,
@@ -792,6 +798,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 if (part == 2 && shadeClass == material::ShadeClass::Opaque && band == firstBand) lobeBarrier(c);  // part 1's writes before part 2's reads
                 c.cmd->SetPipelineState(part == 1 ? (shadeClass == material::ShadeClass::Layered ? opaqueLayered : (shadeClass == material::ShadeClass::Sheen ? opaqueSheen : opaque))
                                                   : (shadeClass == material::ShadeClass::Layered ? indirectLayered : (shadeClass == material::ShadeClass::Sheen ? indirectSheen : indirect)));
+                if (part == 1 && shadeClass == material::ShadeClass::Subsurface) c.cmd->SetPipelineState(opaqueSubsurface);
                 const uint32_t cls = (uint32_t)shadeClass;
                 const uint32_t k[22] = { c.srv(v.gbuffer), c.srv(v.depth), c.srv(o.materialWord), c.uav(v.color),
                                          c.srv(o.tiles), o.firstTile(cls, band), cls, o.emissive.valid() ? c.srv(o.emissive) : none,
@@ -843,14 +850,18 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     if (fallback)
     {
         // one run per LAYERED variant over its classes (P[1].z mask, bit 31): the clearcoat or plain variant over every
-        // class but Sheen, then the sheen variant over Sheen
-        const uint32_t sheenBit = 1u << (uint32_t)material::ShadeClass::Sheen;
-        std::vector<std::pair<ID3D12PipelineState*, uint32_t>> fallbackRuns = { { opaqueKernel(true, layeredMaterials ? 1 : 0), 0xFFFFFFFFu & ~(sheenMaterials ? sheenBit : 0u) } };
+        // class but Sheen and Subsurface, then the sheen variant over Sheen and the Subsurface variant over Subsurface
+        const uint32_t sheenBit = 1u << (uint32_t)material::ShadeClass::Sheen, subsurfaceBit = 1u << (uint32_t)material::ShadeClass::Subsurface;
+        std::vector<std::pair<ID3D12PipelineState*, uint32_t>> fallbackRuns = {
+            { opaqueKernel(true, layeredMaterials ? 1 : 0), 0xFFFFFFFFu & ~(sheenMaterials ? sheenBit : 0u) & ~(subsurfaceMaterials ? subsurfaceBit : 0u) } };
         if (sheenMaterials) fallbackRuns.push_back({ opaqueKernel(true, 2), 0x80000000u | sheenBit });
+        if (subsurfaceMaterials) fallbackRuns.push_back({ opaqueKernel(true, 3), 0x80000000u | subsurfaceBit });
         std::vector<ID3D12PipelineState*> fallbackIndirect = { indirectKernel(true, layeredMaterials ? 1 : 0) };
         if (sheenMaterials) fallbackIndirect.push_back(indirectKernel(true, 2));
+        if (subsurfaceMaterials) fallbackIndirect.push_back(indirectKernel(true, 0));
         std::vector<ID3D12PipelineState*> fallbackLobes = { lobesOn && anisoMaterials ? lobeKernel(true, 1) : nullptr };
         if (sheenMaterials) fallbackLobes.push_back(lobesOn ? lobeKernel(true, 2) : nullptr);
+        if (subsurfaceMaterials) fallbackLobes.push_back(nullptr);
         ShadowSrvRing& ring = fc.state<ShadowSrvRing>("M.shadowSrvRing");
         if (vsm) ring.ensure(fc.device);
         ShadowSrvRing* ringPtr = vsm ? &ring : nullptr;

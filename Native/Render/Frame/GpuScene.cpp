@@ -584,6 +584,12 @@ gpu::Material GpuScene::packMaterial(const scene::Material& m) const
     g.baseColorTexture = g.normalTexture = g.roughMetalTexture = g.emissiveTexture = g.occlusionTexture = gpu::kNone;  // setMaterialTextures
     g.textureClamp = 0;
     g.revision = m_revision;
+    packMaterialClass(m, g);
+    return g;
+}
+
+void packMaterialClass(const scene::Material& m, gpu::Material& g)
+{
     if (m.cls == scene::MaterialClass::Hair)
     {
         g.hairAbsorption = scene::model::hairAbsorption(m);
@@ -606,7 +612,15 @@ gpu::Material GpuScene::packMaterial(const scene::Material& m) const
         g.cutScale = m.cutScale;
         g.cutDamageWidth = m.cutDamageWidth;
     }
-    return g;
+    if (m.cls == scene::MaterialClass::Subsurface)
+    {
+        // Subsurface: the mean free path (m, rgb); hairBetaN = the specular lobes' mix; cutScale, cutDamageWidth = the two
+        // lobes' roughness scales (MaterialModel.hlsli modelSubsurfaceOf)
+        g.hairAbsorption = m.subsurfaceMeanFreePath;
+        g.hairBetaN = m.subsurfaceLobeMix;
+        g.cutScale = m.subsurfaceLobeRoughness.x;
+        g.cutDamageWidth = m.subsurfaceLobeRoughness.y;
+    }
 }
 
 // An instance record at the current revision, with no motion (previous = current). 'palette' (upload only) receives the

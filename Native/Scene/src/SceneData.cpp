@@ -466,6 +466,45 @@ void writeLightEnd(Writer& w, const Scene& s)
         }
 }
 
+// Subsurface extension block, written only when a Subsurface-class material's parameters are not the defaults (scenes
+// written before the parameters existed, and scenes that keep the defaults, have the same bytes and content hashes as
+// before): u32 tag "SUBS", u64 count, then per material its index, subsurfaceMeanFreePath, subsurfaceLobeMix,
+// subsurfaceLobeRoughness. The last block of the file.
+constexpr uint32_t kSubsurfaceTag = 0x53425553u;  // "SUBS"
+
+bool hasSubsurface(const Material& m)
+{
+    static const Material d;
+    return m.cls == MaterialClass::Subsurface &&
+           (m.subsurfaceMeanFreePath.x != d.subsurfaceMeanFreePath.x || m.subsurfaceMeanFreePath.y != d.subsurfaceMeanFreePath.y ||
+            m.subsurfaceMeanFreePath.z != d.subsurfaceMeanFreePath.z || m.subsurfaceLobeMix != d.subsurfaceLobeMix ||
+            m.subsurfaceLobeRoughness.x != d.subsurfaceLobeRoughness.x || m.subsurfaceLobeRoughness.y != d.subsurfaceLobeRoughness.y);
+}
+
+bool anySubsurface(const Scene& s)
+{
+    for (const Material& m : s.materials)
+        if (hasSubsurface(m)) return true;
+    return false;
+}
+
+void writeSubsurface(Writer& w, const Scene& s)
+{
+    w.pod(kSubsurfaceTag);
+    uint64_t count = 0;
+    for (const Material& m : s.materials) count += hasSubsurface(m);
+    w.pod(count);
+    for (uint32_t i = 0; i < s.materials.size(); ++i)
+    {
+        const Material& m = s.materials[i];
+        if (!hasSubsurface(m)) continue;
+        w.pod(i);
+        w.pod(m.subsurfaceMeanFreePath);
+        w.pod(m.subsurfaceLobeMix);
+        w.pod(m.subsurfaceLobeRoughness);
+    }
+}
+
 std::vector<uint8_t> serialize(const Scene& s)
 {
     Writer w;
@@ -495,6 +534,7 @@ std::vector<uint8_t> serialize(const Scene& s)
     if (anyAnisotropy(s)) writeAnisotropy(w, s);
     if (anyFilm(s)) writeFilm(w, s);
     if (anyLightEnd(s)) writeLightEnd(w, s);
+    if (anySubsurface(s)) writeSubsurface(w, s);
     return std::move(w.out);
 }
 
@@ -673,6 +713,20 @@ Scene deserialize(const std::vector<uint8_t>& bytes)
         }
         tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
     }
+    if (tag == kSubsurfaceTag)
+    {
+        const uint64_t count = r.pod<uint64_t>();
+        for (uint64_t k = 0; k < count; ++k)
+        {
+            const uint32_t i = r.pod<uint32_t>();
+            if (i >= s.materials.size()) fail("unxscene: subsurface parameters of material %u of %zu", i, s.materials.size());
+            Material& m = s.materials[i];
+            m.subsurfaceMeanFreePath = r.pod<float3>();
+            m.subsurfaceLobeMix = r.pod<float>();
+            m.subsurfaceLobeRoughness = r.pod<float2>();
+        }
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
     if (tag != 0) fail("unxscene: unknown extension block 0x%08x", tag);
     if (r.at != bytes.size()) fail("unxscene: %zu trailing bytes", bytes.size() - r.at);
     return s;
@@ -718,6 +772,13 @@ void validate(const Scene& s)
             fail("material %zu '%s': water scattering >= 0 (finite) and anisotropy in (-1, 1)", i, m.name.c_str());
         if (m.cls == MaterialClass::Cut && !(m.cutScale > 0 && m.cutDamageWidth >= 0 && std::isfinite(m.cutScale) && std::isfinite(m.cutDamageWidth)))
             fail("material %zu '%s': a cut material needs cutScale > 0 and cutDamageWidth >= 0", i, m.name.c_str());
+        if (m.cls == MaterialClass::Subsurface &&
+            !(m.subsurfaceLobeMix >= 0 && m.subsurfaceLobeMix <= 1 && m.subsurfaceLobeRoughness.x >= 0 && m.subsurfaceLobeRoughness.y >= 0 &&
+              std::isfinite(m.subsurfaceLobeRoughness.x) && std::isfinite(m.subsurfaceLobeRoughness.y) && m.subsurfaceMeanFreePath.x >= 0 &&
+              m.subsurfaceMeanFreePath.y >= 0 && m.subsurfaceMeanFreePath.z >= 0 && std::isfinite(m.subsurfaceMeanFreePath.x) &&
+              std::isfinite(m.subsurfaceMeanFreePath.y) && std::isfinite(m.subsurfaceMeanFreePath.z)))
+            fail("material %zu '%s': a subsurface material needs subsurfaceLobeMix in [0, 1], lobe roughness scales >= 0 and a mean free path >= 0 (finite)",
+                 i, m.name.c_str());
         if (m.clearcoat != 0)
         {
             if (!(m.clearcoat > 0 && m.clearcoat <= 1 && m.clearcoatRoughness >= 0 && m.clearcoatRoughness <= 1))

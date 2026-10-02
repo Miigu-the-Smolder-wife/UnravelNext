@@ -1391,6 +1391,268 @@ UNX_TEST(clearcoat_model)
     CHECK(throws([&] { scene::validate(bad); }));
 }
 
+UNX_TEST(subsurface_model_and_scene_block)
+{
+    // Subsurface class, stage A (MaterialModel.h evaluateSubsurface), CPU:
+    //   1  one lobe (mix 1, scales (1, 1)) without transmission is the Standard model bit for bit; a mix of 1 at any scales
+    //      is the Standard model at lobe 0's roughness;
+    //   2  finite and non-negative over roughness, lobes, transmission and directions on both sides of the normal;
+    //   3  the two lobes' directional albedo against the single lobe's at their average roughness;
+    //   4  the thin parts' term: none without transmission, t f_d W across the surface, W between c and sqrt(c), 0 at the
+    //      terminator;
+    //   5  the parameters in the GPU record's class slots, and in the scene file's block.
+    namespace m = scene::model;
+    const float3 n{ 0, 0, 1 };
+    auto dir = [](float mu, float phi) {
+        const float st = std::sqrt(std::max(0.0f, 1 - mu * mu));
+        return float3{ st * std::cos(phi), st * std::sin(phi), mu };
+    };
+    auto same = [](float3 a, float3 b) { return std::memcmp(&a, &b, sizeof a) == 0; };
+    const float3 skinTone{ 0.80f, 0.56f, 0.45f };
+    const float lightMu[] = { -1.0f, -0.5f, -1e-4f, 1e-4f, 0.1f, 0.4f, 0.7f, 0.95f, 1.0f };
+    const float phis[] = { 0.0f, 1.1f, 2.5f, 3.14159265f, 4.9f };
+
+    // 1. the invariant
+    m::Subsurface one;
+    one.lobeMix = 1;
+    one.lobeRoughness = { 1, 1 };
+    m::Subsurface firstOnly;  // the default scales, all the weight on lobe 0
+    firstOnly.lobeMix = 1;
+    uint32_t compared = 0;
+    for (float r : { 0.0f, 0.05f, 0.2f, 0.45f, 0.7f, 1.0f })
+        for (float metallic : { 0.0f, 1.0f })
+            for (float muV : { 0.05f, 0.3f, 0.7f, 1.0f })
+                for (float muL : lightMu)
+                    for (float phi : phis)
+                    {
+                        m::Surface skin;
+                        skin.cls = scene::MaterialClass::Subsurface;
+                        skin.baseColor = skinTone;
+                        skin.roughness = r;
+                        skin.metallic = metallic;
+                        skin.specular = 0.35f;
+                        m::Surface standard = skin;
+                        standard.cls = scene::MaterialClass::Standard;
+                        const float3 v = dir(muV, 0.3f), l = dir(muL, phi);
+                        CHECK(same(m::evaluateSubsurface(skin, one, n, v, l), m::evaluate(standard, n, v, l)));
+                        CHECK(same(m::evaluateSubsurface(skin, one, n, v, l), m::evaluate(skin, n, v, l)));  // (evaluate() leaves the class to the caller)
+                        standard.roughness = m::subsurfaceRoughness(firstOnly, r).x;
+                        CHECK(same(m::evaluateSubsurface(skin, firstOnly, n, v, l), m::evaluate(standard, n, v, l)));
+                        ++compared;
+                    }
+
+    // 2. the sweep
+    uint32_t swept = 0;
+    const float2 scales[] = { { 0.75f, 1.30f }, { 0.0f, 2.5f }, { 1.0f, 1.0f }, { 0.2f, 4.0f } };
+    for (float mix : { 0.0f, 0.3f, 0.85f, 1.0f })
+        for (float2 scale : scales)
+            for (float r : { 0.0f, 0.02f, 0.3f, 0.6f, 1.0f })
+                for (float t : { 0.0f, 0.5f, 1.0f })
+                    for (float muV : { 1e-3f, 0.1f, 0.5f, 1.0f })
+                        for (float muL : lightMu)
+                            for (float phi : phis)
+                            {
+                                m::Surface skin;
+                                skin.cls = scene::MaterialClass::Subsurface;
+                                skin.baseColor = skinTone;
+                                skin.roughness = r;
+                                skin.specular = 0.35f;
+                                skin.transmission = t;
+                                m::Subsurface k;
+                                k.lobeMix = mix;
+                                k.lobeRoughness = scale;
+                                const float3 f = m::evaluateSubsurface(skin, k, n, dir(muV, 0.3f), dir(muL, phi));
+                                if (!(std::isfinite(f.x) && std::isfinite(f.y) && std::isfinite(f.z) && f.x >= 0 && f.y >= 0 && f.z >= 0))
+                                    fail("subsurface: f = (%g, %g, %g) at mix %g scales (%g, %g) r %g t %g n.v %g n.l %g phi %g", f.x, f.y, f.z, mix, scale.x, scale.y, r, t, muV, muL,
+                                         phi);
+                                ++swept;
+                            }
+
+    // 3. energy. The directional albedo, integrated over the half vector with the lobes' own GGX distributions as the
+    // measure (a (u, phi) grid per lobe, weighed as the mixture): sharp lobes are resolved as well as broad ones.
+    auto albedo = [&](const std::function<float(float3, float3)>& f, float mu, double a0, double a1, double w0) {
+        const double pi = 3.14159265358979323846;
+        const float3 v = dir(mu, 0);
+        auto D = [&](double c2, double a) {
+            const double tt = (1 - c2) + a * a * c2;
+            return a * a / (pi * tt * tt);
+        };
+        const int NU = 512, NP = 256;
+        double sum = 0;
+        for (int lobe = 0; lobe < 2; ++lobe)
+        {
+            const double a = lobe == 0 ? a0 : a1, w = lobe == 0 ? w0 : 1 - w0;
+            if (!(w > 0)) continue;
+            for (int i = 0; i < NU; ++i)
+                for (int j = 0; j < NP; ++j)
+                {
+                    const double u = (i + 0.5) / NU, ph = 2 * pi * (j + 0.5) / NP;
+                    const double c2 = (1 - u) / (1 + (a * a - 1) * u), ch = std::sqrt(c2), sh = std::sqrt(1 - c2);
+                    const float3 h{ (float)(sh * std::cos(ph)), (float)(sh * std::sin(ph)), (float)ch };
+                    const float VoH = dot(v, h);
+                    if (VoH <= 0) continue;
+                    const float3 l = h * (2 * VoH) - v;
+                    if (l.z <= 0) continue;
+                    const double pdf = (w0 * D(c2, a0) + (1 - w0) * D(c2, a1)) * ch;  // of h under the mixture
+                    sum += w * f(v, l) * l.z * 4 * VoH / pdf;
+                }
+        }
+        return sum / (NU * NP);
+    };
+    double worstEnergy = 0, worstEnergyGrazing = 0;
+    const m::Subsurface defaults;
+    for (float f0 : { 1.0f, 0.028f })  // a white metal (F = 1) and skin's f0 = 0.08 x 0.35
+        for (float r : { 0.2f, 0.45f, 0.7f, 1.0f })
+            for (float mu : { 1.0f, 0.7f, 0.4f, 0.2f })
+            {
+                m::Surface skin;  // (metallic 1: no diffuse, f0 = baseColor)
+                skin.cls = scene::MaterialClass::Subsurface;
+                skin.baseColor = { f0, f0, f0 };
+                skin.metallic = 1;
+                skin.roughness = r;
+                const float3 lobes = m::subsurfaceRoughness(defaults, r);
+                m::Surface single = skin;
+                single.roughness = lobes.z;
+                const double dual = albedo([&](float3 v, float3 l) { return m::evaluateSubsurface(skin, defaults, n, v, l).x; }, mu,
+                                           m::alphaFromRoughness(lobes.x), m::alphaFromRoughness(lobes.y), defaults.lobeMix);
+                const double average = albedo([&](float3 v, float3 l) { return m::evaluate(single, n, v, l).x; }, mu, m::alphaFromRoughness(lobes.z),
+                                              m::alphaFromRoughness(lobes.z), 1.0);
+                const double rel = std::fabs(dual - average) / average;
+                (mu >= 0.4f ? worstEnergy : worstEnergyGrazing) = std::max(mu >= 0.4f ? worstEnergy : worstEnergyGrazing, rel);
+                CHECK(std::isfinite(dual) && dual > 0 && dual < 1.08);
+            }
+    logf("    subsurface: %u points equal the Standard model bit for bit; %u points finite and non-negative; the two lobes' albedo against the average lobe's: worst %.2f %% "
+         "(n.v >= 0.4), %.2f %% (n.v 0.2)\n",
+         compared, swept, 100 * worstEnergy, 100 * worstEnergyGrazing);
+    CHECK(worstEnergy < 0.04 && worstEnergyGrazing < 0.04);  // [measured: 3.1 % and 3.3 %, both on the dielectric at r 0.7]
+
+    // 4. thin parts
+    {
+        m::Surface skin;
+        skin.cls = scene::MaterialClass::Subsurface;
+        skin.baseColor = skinTone;
+        skin.transmission = 0.8f;
+        const float3 fd = skinTone * (1 / m::kPi);
+        for (float muV : { 0.1f, 0.6f, 1.0f })
+            for (float c : { 1e-6f, 0.01f, 0.3f, 0.8f, 1.0f })
+                for (float phi : phis)
+                {
+                    const float3 v = dir(muV, 0.3f), l = dir(-c, phi);
+                    const float W = m::subsurfaceThin(c, v, l);
+                    CHECK(W >= c * (1 - 1e-6f) && W <= std::sqrt(c) * (1 + 1e-6f));
+                    const float3 f = m::evaluateSubsurface(skin, defaults, n, v, l);
+                    CHECK(std::fabs(f.y * c - 0.8f * fd.y * W) <= 1e-5f * fd.y);
+                }
+        // looking through the part at the light: sqrt(c); the light off the view axis: Lambert's c; nothing at the terminator
+        const float3 v = dir(0.6f, 0.0f);
+        CHECK(std::fabs(m::subsurfaceThin(0.6f, v, float3{ -v.x, -v.y, -v.z }) - std::sqrt(0.6f)) < 1e-6f);
+        CHECK(std::fabs(m::subsurfaceThin(0.25f, float3{ 0, 0, 1 }, dir(-0.25f, 1.0f)) - (0.25f + 0.25f * std::pow(0.25f, 12.0f))) < 1e-6f);
+        CHECK(m::subsurfaceThin(0.0f, v, dir(0.0f, 3.14159265f)) == 0.0f);
+        CHECK(m::subsurfaceThin(1e-6f, v, dir(-1e-6f, 3.14159265f)) < 2e-3f);
+    }
+
+    // 5. the GPU record's class slots (MaterialModel.hlsli modelSubsurfaceOf reads them back) ...
+    scene::Material skin;
+    skin.name = "skin";
+    skin.cls = scene::MaterialClass::Subsurface;
+    skin.subsurfaceMeanFreePath = { 0.02f, 0.01f, 0.005f };
+    skin.subsurfaceLobeMix = 0.6f;
+    skin.subsurfaceLobeRoughness = { 0.5f, 1.75f };
+    {
+        gpu::Material g{};
+        packMaterialClass(skin, g);
+        CHECK(g.hairAbsorption.x == 0.02f && g.hairAbsorption.y == 0.01f && g.hairAbsorption.z == 0.005f);
+        CHECK(g.hairBetaN == 0.6f && g.cutScale == 0.5f && g.cutDamageWidth == 1.75f && g.hairTilt == 0.0f);
+        m::Subsurface unpacked;
+        unpacked.lobeMix = g.hairBetaN;
+        unpacked.lobeRoughness = { g.cutScale, g.cutDamageWidth };
+        const float3 a = m::subsurfaceRoughness(unpacked, 0.45f), b = m::subsurfaceRoughness(m::subsurfaceOf(skin), 0.45f);
+        CHECK(same(a, b) && a.x == 0.45f * 0.5f && a.y == 0.45f * 1.75f);
+        CHECK(m::subsurfaceRoughness(unpacked, 0.8f).y == 1.0f);  // saturated
+        // the defaults, and the other classes' slots as before
+        gpu::Material d{};
+        scene::Material plain;
+        plain.cls = scene::MaterialClass::Subsurface;
+        packMaterialClass(plain, d);
+        CHECK(d.hairAbsorption.x == 0.0120f && d.hairAbsorption.y == 0.0064f && d.hairAbsorption.z == 0.0045f && d.hairBetaN == 0.85f && d.cutScale == 0.75f &&
+              d.cutDamageWidth == 1.30f);
+        gpu::Material st{};
+        packMaterialClass(scene::Material{}, st);
+        CHECK(st.hairAbsorption.x == 0 && st.hairBetaN == 0 && st.hairTilt == 0 && st.cutScale == 0 && st.cutDamageWidth == 0);
+        scene::Material cut;
+        cut.cls = scene::MaterialClass::Cut;
+        cut.cutScale = 2.5f, cut.cutDamageWidth = 0.03f;
+        gpu::Material gc{};
+        packMaterialClass(cut, gc);
+        CHECK(gc.cutScale == 2.5f && gc.cutDamageWidth == 0.03f && gc.hairBetaN == 0 && gc.hairAbsorption.x == 0);
+    }
+    // ... and the scene file: no block for the defaults (a file written before the parameters existed has none either:
+    // it loads to the defaults), the block and an exact round trip otherwise
+    {
+        auto contains = [](const std::vector<uint8_t>& bytes, const char* tag) {
+            for (size_t i = 0; i + 4 <= bytes.size(); ++i)
+                if (std::memcmp(bytes.data() + i, tag, 4) == 0) return true;
+            return false;
+        };
+        scene::Scene before = tinyScene();
+        scene::Material old;  // a Subsurface material as a scene saved it before this stage: the class and the common fields only
+        old.name = "skin";
+        old.cls = scene::MaterialClass::Subsurface;
+        old.baseColor = skinTone;
+        old.transmission = 0.25f;
+        before.materials.push_back(old);
+        scene::validate(before);
+        const std::vector<uint8_t> beforeBytes = scene::serialize(before);
+        CHECK(!contains(beforeBytes, "SUBS"));
+        scene::Scene sameSize = before;  // the same scene with that material in the Standard class: byte for byte the same length
+        sameSize.materials.back().cls = scene::MaterialClass::Standard;
+        CHECK(scene::serialize(sameSize).size() == beforeBytes.size());
+        const scene::Scene loaded = scene::deserialize(beforeBytes);
+        const scene::Material defaults0;
+        const scene::Material& l0 = loaded.materials.back();
+        CHECK(l0.cls == scene::MaterialClass::Subsurface && l0.transmission == 0.25f && l0.subsurfaceLobeMix == defaults0.subsurfaceLobeMix &&
+              l0.subsurfaceLobeRoughness.x == defaults0.subsurfaceLobeRoughness.x && l0.subsurfaceLobeRoughness.y == defaults0.subsurfaceLobeRoughness.y &&
+              l0.subsurfaceMeanFreePath.x == defaults0.subsurfaceMeanFreePath.x && l0.subsurfaceMeanFreePath.y == defaults0.subsurfaceMeanFreePath.y &&
+              l0.subsurfaceMeanFreePath.z == defaults0.subsurfaceMeanFreePath.z);
+        CHECK(l0.subsurfaceLobeMix == 0.85f && l0.subsurfaceLobeRoughness.x == 0.75f && l0.subsurfaceLobeRoughness.y == 1.30f);
+        CHECK(scene::serialize(loaded) == beforeBytes);
+
+        scene::Scene with = before;
+        with.materials.push_back(skin);
+        scene::validate(with);
+        const std::vector<uint8_t> withBytes = scene::serialize(with);
+        CHECK(contains(withBytes, "SUBS"));
+        scene::Scene withDefault = before;  // the same material with the defaults: no block, so the difference is the block
+        scene::Material skinDefaults = skin;
+        skinDefaults.subsurfaceMeanFreePath = defaults0.subsurfaceMeanFreePath;
+        skinDefaults.subsurfaceLobeMix = defaults0.subsurfaceLobeMix;
+        skinDefaults.subsurfaceLobeRoughness = defaults0.subsurfaceLobeRoughness;
+        withDefault.materials.push_back(skinDefaults);
+        const std::vector<uint8_t> withDefaultBytes = scene::serialize(withDefault);
+        CHECK(!contains(withDefaultBytes, "SUBS"));
+        CHECK(withBytes.size() == withDefaultBytes.size() + 4 + 8 + (4 + 12 + 4 + 8));  // tag, count, { index, mean free path, mix, scales }
+        const scene::Scene back = scene::deserialize(withBytes);
+        const scene::Material& b0 = back.materials[back.materials.size() - 2];
+        const scene::Material& b1 = back.materials.back();
+        CHECK(b0.subsurfaceLobeMix == 0.85f && b0.subsurfaceLobeRoughness.x == 0.75f);  // (not in the block: the defaults)
+        CHECK(b1.subsurfaceMeanFreePath.x == 0.02f && b1.subsurfaceMeanFreePath.y == 0.01f && b1.subsurfaceMeanFreePath.z == 0.005f && b1.subsurfaceLobeMix == 0.6f &&
+              b1.subsurfaceLobeRoughness.x == 0.5f && b1.subsurfaceLobeRoughness.y == 1.75f);
+        CHECK(scene::serialize(back) == withBytes);
+        CHECK(scene::contentHash(with) != scene::contentHash(withDefault));
+        // a block naming a material the scene does not have is refused; so are parameters outside their ranges
+        std::vector<uint8_t> broken = withBytes;
+        const uint32_t bad = 99;
+        std::memcpy(broken.data() + withDefaultBytes.size() + 4 + 8, &bad, 4);
+        CHECK(throws([&] { scene::deserialize(broken); }));
+        scene::Scene invalid = with;
+        invalid.materials.back().subsurfaceLobeMix = 1.5f;
+        CHECK(throws([&] { scene::validate(invalid); }));
+        invalid = with;
+        invalid.materials.back().subsurfaceLobeRoughness.y = -1.0f;
+        CHECK(throws([&] { scene::validate(invalid); }));
+    }
+}
+
 UNX_TEST(reflection_view_geometry)
 {
     scene::Camera cam;
@@ -1862,6 +2124,106 @@ UNX_TEST(clearcoat_model_on_the_gpu)
     }
     rb->Unmap(0, nullptr);
     logf("    coated BRDF on the GPU vs scene::model over %u points: worst relative %.2e\n", n, worst);
+    CHECK(worst < 1e-4);
+    testDevice().deferRelease(constants);
+    testDevice().deferRelease(rb);
+}
+
+UNX_TEST(subsurface_model_on_the_gpu)
+{
+    // Subsurface class, stage A: MaterialModel.hlsli's modelEvaluateSubsurface equals scene::model::evaluateSubsurface to
+    // float rounding at 4096 points - both sides of the surface, metal and dielectric, every roughness and transmission -
+    // with the lobes read from the scene's material records (modelSubsurfaceOf: GpuScene's class slots), which equal the
+    // materials' (Passes/Test/SubsurfaceModel.hlsl).
+    scene::Scene s = tinyScene();
+    const uint32_t firstMaterial = (uint32_t)s.materials.size();
+    {
+        scene::Material skin;
+        skin.name = "skin";
+        skin.cls = scene::MaterialClass::Subsurface;
+        s.materials.push_back(skin);  // the class's defaults
+        skin.subsurfaceLobeMix = 1.0f;
+        skin.subsurfaceLobeRoughness = { 1.0f, 1.0f };
+        s.materials.push_back(skin);  // one lobe
+        skin.subsurfaceLobeMix = 0.4f;
+        skin.subsurfaceLobeRoughness = { 0.5f, 2.0f };
+        s.materials.push_back(skin);
+    }
+    const uint32_t materialCount = (uint32_t)s.materials.size() - firstMaterial;
+    scene::validate(s);
+    GpuScene gs(testDevice());
+    gs.upload(s);
+    gpu::FrameConstants fc{};
+    gs.fill(fc);
+    CHECK(fc.materialModelLut != gpu::kNone);
+    ComPtr<ID3D12Resource> constants, rb;
+    const uint32_t n = 4096, bytes = n * 80;
+    {
+        D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD }, rp{ D3D12_HEAP_TYPE_READBACK };
+        D3D12_RESOURCE_DESC1 rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = (sizeof(gpu::FrameConstants) + 255) / 256 * 256;
+        rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        check(testDevice().d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&constants)),
+              "constants");
+        void* mapped = nullptr;
+        check(constants->Map(0, nullptr, &mapped), "map constants");
+        std::memcpy(mapped, &fc, sizeof fc);
+        constants->Unmap(0, nullptr);
+        rd.Width = bytes;
+        check(testDevice().d3d()->CreateCommittedResource3(&rp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&rb)), "readback");
+    }
+    ID3D12PipelineState* pso = shaders().compute("Passes/Test/SubsurfaceModel");
+    RenderGraph g(testDevice());
+    const BufferRef out = g.createBuffer({ "subsurface out", bytes, 0 });
+    const D3D12_GPU_VIRTUAL_ADDRESS address = constants->GetGPUVirtualAddress();
+    g.addPass("subsurface", QueueType::Graphics, [&](PassBuilder& b) { b.use(out, Use::UavCompute); },
+              [=](PassContext& ctx) {
+                  const uint32_t k[4] = { ctx.uav(out), n, firstMaterial, materialCount };
+                  ctx.cmd->SetPipelineState(pso);
+                  ctx.bindFrameConstants(address);
+                  ctx.computeConstants(k, 4);
+                  ctx.cmd->Dispatch((n + 63) / 64, 1, 1);
+              });
+    ID3D12Resource* dst = rb.Get();
+    g.addPass("subsurface readback", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(out, Use::CopySrc);
+                  b.keep();
+              },
+              [=](PassContext& ctx) { ctx.cmd->CopyBufferRegion(dst, 0, ctx.resource(out), 0, bytes); });
+    g.execute(nullptr);
+    for (uint32_t q = 0; q < kQueueTypeCount; ++q) testDevice().queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
+    const float* v = nullptr;
+    check(rb->Map(0, nullptr, (void**)&v), "map readback");
+    double worst = 0, worstLobes = 0;
+    uint32_t across = 0;
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        const float* p = v + 20 * i;
+        scene::model::Surface su;
+        su.cls = scene::MaterialClass::Subsurface;
+        su.baseColor = { p[6], p[7], p[8] };
+        su.roughness = p[9];
+        su.metallic = p[10];
+        su.specular = 0.5f;
+        su.transmission = p[11];
+        const scene::model::Subsurface k = scene::model::subsurfaceOf(s.materials[firstMaterial + i % materialCount]);
+        const float3 lobes = scene::model::subsurfaceRoughness(k, su.roughness);
+        worstLobes = std::max({ worstLobes, std::fabs((double)p[12] - k.lobeMix), std::fabs((double)p[13] - lobes.x), std::fabs((double)p[14] - lobes.y),
+                                std::fabs((double)p[15] - lobes.z) });
+        across += p[5] < 0 && su.transmission > 0;
+        const float3 want = scene::model::evaluateSubsurface(su, k, { 0, 0, 1 }, { p[0], p[1], p[2] }, { p[3], p[4], p[5] });
+        const float got[3] = { p[16], p[17], p[18] }, w[3] = { want.x, want.y, want.z };
+        for (int c = 0; c < 3; ++c) worst = std::max(worst, std::fabs((double)got[c] - w[c]) / std::max(std::fabs((double)w[c]), 1e-3));
+    }
+    rb->Unmap(0, nullptr);
+    logf("    subsurface BRDF on the GPU vs scene::model over %u points (%u through a thin part): worst relative %.2e; the records' lobes: worst %.2e\n", n, across, worst,
+         worstLobes);
+    CHECK(across > 0);
+    CHECK(worstLobes < 1e-6);
     CHECK(worst < 1e-4);
     testDevice().deferRelease(constants);
     testDevice().deferRelease(rb);

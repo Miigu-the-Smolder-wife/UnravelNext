@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: FALLBACK=0,1 AREA=0,1 PLANAR=0,1 LAYERED=0,1,2
+// unx-variants: FALLBACK=0,1 AREA=0,1 PLANAR=0,1 LAYERED=0,1,2,3
 // Two kernels since 2026-10-01 (the DXIL limit: the one kernel's FALLBACK variants stood at 204,260 of 204,800 B):
 //   part 1 (this file as compiled, SHADE_PART 1): the per-pixel setup, emission, the sun, the local lights (slots, the
 //          overflow list or S's VSM in fallback tiles), L2's tile FAR term and the 14.1b emissive irradiance -> the
@@ -20,7 +20,8 @@
 //   air      S's air volume between the camera and the surface (main view, atmosphereAirView: atmosphere, casters'
 //            shadows in the air, local lights' air) and the sun's illuminance at the surface;
 // then exposure, tone map and the final 4 B (OUTPUT=0) or linear radiance x exposure (OUTPUT=1).
-// Classes without their own model yet (Subsurface, Water: INTERFACES 8.1 defines them before P3/P4) use this kernel.
+// Classes without their own model yet (Water: INTERFACES 8.1 defines it before P4) use this kernel. Subsurface has its
+// own part 1 (LAYERED=3 below) and this kernel's part 2 (its indirect specular is the Standard lobe's).
 // Local lights: the pixel's froxel list (S, Froxel.hlsli), punctual lights exactly (INTERFACES 8.2); shadow-casting
 // lights take S's slots 1-3 in list order (7.3); those past the third read S's overflow list (7.3, v1.20: tile head,
 // pixel record, 8-bit run), loads only. Tiles over the list's capacity are left to FALLBACK=1, which runs on S's fallback
@@ -31,7 +32,18 @@
 // comes from R's screen probes in the main view (PLANAR=0) and from R's world cache in planar reflection views (PLANAR=1);
 // each kernel compiles only its own path.
 // P[0] = { gbuffer, depth, material word, color UAV }
-// LAYERED: 1 = A9 clearcoat (shade class Layered), 2 = A9 sheen (shade class Sheen; MATERIAL_LAYERS 1.4).
+// LAYERED: 1 = A9 clearcoat (shade class Layered), 2 = A9 sheen (shade class Sheen; MATERIAL_LAYERS 1.4), 3 = the
+//        Subsurface class's model (shade class Subsurface; MaterialModel.hlsli ModelSubsurface) - no A9 layer: the
+//        variant compiles as LAYERED 0 with SUBSURFACE 1, part 1 only (and MegaLightsShade). Its pixels are all of that
+//        class (the tile list's, or the fallback run's class mask), so the record's class slots are read without a test:
+//          sun      each of the two lobes by the disk rules at its own roughness (as the Standard lobe), weighed by the
+//                   mix, the compensation at the average roughness;
+//          points   the model exactly (the two lobes' D, V and the compensation at the average roughness);
+//          area     each lobe's LTC integral and albedo, weighed by the mix (two Standard lobes);
+//          thin     transmission > 0: the light through thin parts (modelSubsurfaceThin) from the sun and from point and
+//                   spot lights on the far side of the shading normal - the light's one visibility decides, so a part
+//                   thicker than the shadow bias shadows itself -; not from area lights, the emissive irradiance or the
+//                   indirect light.
 // P[1] = { tile lists (raw), list offset (entries), shade class (bit 31 set: a mask of classes, 0xFFFFFFFF every non-sky
 //        class - the fallback kernel runs once per LAYERED variant over its classes), emissive or
 //        UNX_NONE }
@@ -86,6 +98,13 @@
 #endif
 #ifndef OUTPUT
 #define OUTPUT 0      // (part 1 writes no output)
+#endif
+#if LAYERED == 3
+#define SUBSURFACE 1  // the Subsurface class's variant (see the header)
+#undef LAYERED
+#define LAYERED 0
+#else
+#define SUBSURFACE 0
 #endif
 #if LAYERED == 1
 #define MODEL_FILM 1  // A9 thin film (MaterialModel.hlsli modelFresnel)
@@ -324,6 +343,12 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     const bool foliage = s.cls == MATERIAL_FOLIAGE;
     const float3 front = foliage ? diffuse * (1 - s.transmission) : diffuse;
     const float3 back = foliage ? diffuse * s.transmission : 0;
+#if SUBSURFACE
+    // The Subsurface class's two specular lobes at the pixel's roughness, and f_d x transmission for the light through
+    // thin parts (0: none).
+    const ModelSubsurface skin = modelSubsurfaceOf(m, s.roughness);
+    const float3 thin = diffuse * s.transmission;
+#endif
 #if LAYERED == 1
     // A9 clearcoat (MATERIAL_LAYERS 1.1, MaterialModel.hlsli): f = (1 - c) f_base + c (f_c + f_under); the coat's roughness
     // from the material word (footprint-filtered). The base terms below are scaled by (1 - c) at the end of each light.
@@ -418,7 +443,11 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         {
             if (above > 0)
             {
+#if SUBSURFACE
+                const float e = modelDirectionalAlbedo(NoV, skin.roughness);  // (the compensation at the lobes' average roughness)
+#else
                 const float e = modelDirectionalAlbedo(NoV, s.roughness);
+#endif
                 const float3 compensation = 1 + f0 * (1 / e - 1);
                 sun = front * above * cap;
                 // lobe 0: the base's specular; A9 lobe 1: the coat's (F = 1 through the same disk rules, then the exact
@@ -428,12 +457,18 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #if LAYERED == 1
                 if (cover > 0) lobes = 2;
 #endif
+#if SUBSURFACE
+                if (skin.mix < 1) lobes = 2;  // (the Subsurface class's lobes 0 and 1 through the same disk integral)
+#endif
                 [loop] for (uint lobe = 0; lobe < lobes; ++lobe)
                 {
                     const bool coatLobe = lobe == 1;
 #if LAYERED == 1
                     const float3 lf0 = coatLobe ? 1.0.xxx : f0, lcomp = coatLobe ? 1.0.xxx : compensation;
                     const float lr = coatLobe ? coat.roughness : s.roughness;
+#elif SUBSURFACE
+                    const float3 lf0 = f0, lcomp = compensation;
+                    const float lr = lobe == 1 ? skin.roughness1 : skin.roughness0;
 #else
                     const float3 lf0 = f0, lcomp = compensation;
                     const float lr = s.roughness;
@@ -451,12 +486,23 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                         continue;
                     }
 #endif
+#if SUBSURFACE
+                    sun += spec * (lobe == 1 ? 1 - skin.mix : skin.mix);
+#else
                     sun += spec;
+#endif
                 }
             }
             if (foliage) sun += back * below * cap;
+#if SUBSURFACE
+            // the sun through a thin part: the disk's part below the horizon is the light's cosine on the far side
+            if (s.transmission > 0 && below > 0) sun += thin * (modelSubsurfaceThin(below, v, l0) * cap);
+#endif
         }
         else if (foliage) sun = back * above * cap;  // viewer behind the shading normal: only light crossing the leaf
+#if SUBSURFACE
+        else if (s.transmission > 0 && above > 0) sun = thin * (modelSubsurfaceThin(above, v, l0) * cap);
+#endif
 #if LAYERED == 1
         // the coat lobe over the disk; the base through the coat at the disk centre (its lobe is widened by the coat)
         if (cover > 0 && NoV > 0)
@@ -500,7 +546,11 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
             Texture2D<uint> shadow = ResourceDescriptorHeap[P[2].x];
             shadowPacked = shadow[pixel];
         }
+#if SUBSURFACE
+        const float e = modelDirectionalAlbedo(max(NoV, 1e-4), skin.roughness);  // (the lobes' average roughness)
+#else
         const float e = modelDirectionalAlbedo(max(NoV, 1e-4), s.roughness);
+#endif
         const float3 compensation = 1 + f0 * (1 / e - 1);
 #if MEGA_LIGHTS
         const uint2 range = uint2(0, mls.count);
@@ -527,8 +577,17 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         // LTC transform of the specular lobe, formed once per pixel.
         const float3x3 frame = shShadingFrame(n, v, NoV);
         const float3x3 frameBack = float3x3(frame[0], -frame[1], -frame[2]);
+#if SUBSURFACE
+        // the Subsurface class's two lobes over an area light: each lobe's LTC and albedo (a Standard lobe at its
+        // roughness), weighed by the mix
+        float3x3 specular = mul(shLtcInverse(P[5].y, max(NoV, 1e-4), skin.roughness0), frame);
+        float3 specularAlbedo = skin.mix * shSpecularAlbedo(f0, max(NoV, 1e-4), skin.roughness0);
+        const float3x3 specular1 = mul(shLtcInverse(P[5].y, max(NoV, 1e-4), skin.roughness1), frame);
+        const float3 specularAlbedo1 = (1 - skin.mix) * shSpecularAlbedo(f0, max(NoV, 1e-4), skin.roughness1);
+#else
         float3x3 specular = mul(shLtcInverse(P[5].y, max(NoV, 1e-4), s.roughness), frame);
         float3 specularAlbedo = shSpecularAlbedo(f0, max(NoV, 1e-4), s.roughness);
+#endif
 #if LAYERED
 #endif
 #if LAYERED == 1
@@ -622,7 +681,12 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 cosL = dot(n, l);
                 // Every lobe below is 0 off (NoV > 0, cosL > 0) and the Foliage back side (the coat and sheen lobes too:
                 // MaterialModel.hlsli returns 0 for NoL <= 0), and E = 0 outside the window or the spot cone.
+#if SUBSURFACE
+                // (the Subsurface class: the far side adds the light through thin parts)
+                if (all(E == 0) || !((NoV > 0 && cosL > 0) || (s.transmission > 0 && NoV * cosL < 0))) continue;
+#else
                 if (all(E == 0) || !((NoV > 0 && cosL > 0) || (foliage && NoV * cosL < 0))) continue;
+#endif
             }
             float visibility = 1;
 #if MEGA_LIGHTS
@@ -675,6 +739,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #if LAYERED == 2
                 scaleBase = keepS;  // (the sheen lobe over area lights: the lobe texture, AreaLobes.hlsl)
 #endif
+#if SUBSURFACE
+                if (NoV > 0 && skin.mix < 1) last = 4;  // integral 3: the Subsurface class's lobe 1 (integral 1 is its lobe 0)
+#endif
 #if LAYERED == 1
                 // A9 (MATERIAL_LAYERS 3.1): integrals 3 (the coat lobe, its own LTC, albedo E_ms(n.v)) and 4 (the base
                 // lobe through the coat, the LTC of the outside-equivalent roughness alpha_eq ~ eta alpha'_b) in the same
@@ -699,10 +766,23 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                     if (j == 2 && !foliage) continue;
 #if LAYERED == 1
                     const float3x3 T = j == 0 ? frame : (j == 1 ? specular : (j == 3 ? coatSpecular : (j == 4 ? coatBase : (NoV > 0 ? frameBack : frame))));
+#elif SUBSURFACE
+                    const float3x3 T = j == 0 ? frame : (j == 1 ? specular : (j == 3 ? specular1 : (NoV > 0 ? frameBack : frame)));
 #else
                     const float3x3 T = j == 0 ? frame : (j == 1 ? specular : (NoV > 0 ? frameBack : frame));
 #endif
                     const float I = shAreaIntegral(light, p, T, j == 0 || j == 2);
+#if SUBSURFACE
+                    if (j == 3)
+                    {
+#if MEGA_LIGHTS
+                        mlSpecular += Lw * (specularAlbedo1 * I);
+#else
+                        radiance += Lw * (specularAlbedo1 * I);
+#endif
+                        continue;
+                    }
+#endif
 #if LAYERED == 1
                     if (j == 0) coatId = I;
                     if (j >= 3)
@@ -744,8 +824,13 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 E *= lightFunction(P[6].w, lightIndex, light.forward, light.right, -l, footprint, g_time);
             }
             float3 f = 0;
+#if SUBSURFACE
+            if (NoV > 0 && cosL > 0) f = frontL + shSpecularSubsurface(f0, skin, compensation, n, v, l, NoV, cosL);
+            else if (NoV * cosL < 0) f = thin * (modelSubsurfaceThin(abs(cosL), v, l) / abs(cosL));  // (transmission > 0: the test above)
+#else
             if (NoV > 0 && cosL > 0) f = frontL + shSpecular(f0, alpha, compensation, n, v, l, NoV, cosL);
             else if (foliage && NoV * cosL < 0) f = back;
+#endif
 #if LAYERED
             if (aniso.on && NoV > 0 && cosL > 0) f = frontL + shAnisoSpecular(aniso, f0, n, v, l);
 #endif
@@ -762,6 +847,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 float3 fd = 0;
                 if (NoV > 0 && cosL > 0) fd = frontL;
                 else if (foliage && NoV * cosL < 0) fd = back;
+#if SUBSURFACE
+                else if (NoV * cosL < 0) fd = f;  // (the light through a thin part: diffuse)
+#endif
 #if LAYERED == 1
                 if (cover > 0) fd *= keep;
 #endif
