@@ -50,8 +50,9 @@ far_distance_m = 65536.0             # this distance
 history_weight = 0.9                 # the history's share of a cell each frame (the reference's 0.9), the sample point jittered per frame
 shadow_texels_per_cell = 1.0         # the sun's shadow in a cell is read at the page level whose texel is the cell's width / this
 debug_view = false                   # measurement only: the fog alone per pixel (FogDebug.hlsl) for the gate's capture layer "fog"
-sky_amount = 0.0                     # how much of the fog sky pixels take (0: none - the reference fogs opaque pixels only under a
-                                     # sky atmosphere; 1: the sky through the fog to the horizon)
+sky_amount = 1.0                     # how much of the fog sky pixels take (1: the sky through the fog, as every other pixel - a height
+                                     # fog covers the horizon and thins toward the zenith; 0: the sky left clear, the look of a
+                                     # sky dome painted with its own haze)
 
 [atmosphere.froxels]
 integration_queue = true             # same air-slice estimator in dense waves; false is the tile-scheduled A/B path

@@ -130,7 +130,7 @@ struct FogDesc
     float albedo[3] = { 1, 1, 1 }; // scattering / extinction
     float phaseG = 0.2f;           // Henyey-Greenstein asymmetry, (-1, 1)
     float startDistance = 0;       // m: no fog nearer than this
-    float skyAmount = 0;           // [0, 1]: how much of the fog sky pixels take
+    float skyAmount = 1;           // [0, 1]: how much of the fog sky pixels take
 };
 
 // A14 (FEATURES_GAME 8; Requests/20260926_C_per_view_history.md): a full auxiliary view drawn in this frame before the

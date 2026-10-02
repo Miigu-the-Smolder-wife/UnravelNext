@@ -614,7 +614,7 @@ typedef struct UnxFogDesc
     float albedo[3];                    // scattering / extinction, [0, 1]
     float phaseG;                       // Henyey-Greenstein asymmetry, (-1, 1)
     float startDistance;                // m, >= 0
-    float skyAmount;                    // [0, 1]: how much of the fog sky pixels take (0: opaque pixels only)
+    float skyAmount;                    // [0, 1]: how much of the fog sky pixels take (1: as every pixel; 0: opaque pixels only)
     uint32_t reserved;                  // 0
 } UnxFogDesc;
 #ifdef __cplusplus

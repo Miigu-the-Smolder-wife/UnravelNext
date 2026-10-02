@@ -18,8 +18,8 @@
 //             atmosphereAerial / atmosphereAirView) add it, so every layer that takes the air - opaque pixels, the
 //             coverage layer, glass, water, particles - takes the fog at its own depth, and what removes the air from a
 //             colour (the screen traces' scene colour) removes the fog with it. The parameters reach the kernels through
-//             the frame constants (g_fog: a record's SRV + 1). Sky pixels take sky_amount of it (ShadeSky.hlsl; 0: none -
-//             the reference fogs rendered opaque pixels only when a sky atmosphere is there).
+//             the frame constants (g_fog: a record's SRV + 1). Sky pixels take sky_amount of it (ShadeSky.hlsl; 1: the
+//             sky through the fog as every pixel - the reference's fog pass covers the sky too).
 // Units: world metres; radiance in nits (not exposed: the history outlives exposure changes).
 #ifndef UNX_FOG_VOLUME_HLSLI
 #define UNX_FOG_VOLUME_HLSLI

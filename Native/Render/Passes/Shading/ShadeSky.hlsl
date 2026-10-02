@@ -92,7 +92,7 @@ float3 shadeSky(uint2 pixel, Texture2D<uint> words)
     // Planar reflection views leave the disk out: their reader adds the sun's specular lobe analytically over the disk
     // (M's mirror pixels, W's calm water), as R's reflection rays exclude it - drawn here it would count twice.
     if (!celestialMoonHoldsLight(P[2].y) && g_viewKind != VIEW_PLANAR_REFLECTION) radiance += sun * shSunDiskCoverage(D, Dx, Dy);
-    // The height fog over the sky (atmosphere.fog.sky_amount; 0: the sky is left alone): along the ray to 100 km.
+    // The height fog over the sky (atmosphere.fog.sky_amount; 0: the sky is left alone): along the ray to the far slices' end.
     {
         FogParams fogParams;
         if (fogLoad(fogParams) && fogParams.skyAmount > 0)
