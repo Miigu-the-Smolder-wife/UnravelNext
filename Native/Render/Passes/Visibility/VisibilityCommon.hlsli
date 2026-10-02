@@ -95,7 +95,7 @@ uint skinSlot(CullScene cs, uint instance)
 #define VS_NODE_BEGIN 1u
 #define VS_NODE_END 2u
 #define VS_GROUP_WRITE 3u
-#define VS_GROUP_BEGIN 4u
+#define VS_GROUP_BEGIN 4u     // first group item of the phase's cluster pass (0; phase 2: phase 1's end)
 #define VS_VISIBLE 5u
 #define VS_DEFER_INSTANCES 6u
 #define VS_DEFER_NODES 7u
@@ -109,7 +109,7 @@ uint skinSlot(CullScene cs, uint instance)
 #define VS_STAT_NODES 23u     // node items processed
 #define VS_STAT_CLUSTERS 24u  // clusters tested
 #define VS_STAT_TRIANGLES 25u // + band (3): triangles of visible clusters per band A, B, C
-#define VS_GROUP_END 28u      // group items of the current cluster pass: [VS_GROUP_BEGIN, VS_GROUP_END)
+#define VS_GROUP_END 28u      // CullPrepare MODE=1 only: the group items its arguments covered
 #define VS_TILE_PAIRS 29u     // tile-local raster: (cluster, tile rectangle) pairs appended
 #define VS_COV_POOL 30u       // coverage record capacity of the frame (records; CoverageBuild MODE 2, for the statistics)
 #define VS_COV_INVOCATIONS 31u // coverage pixel kernel invocations (measurement stages only)

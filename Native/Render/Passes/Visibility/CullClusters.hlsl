@@ -1,9 +1,9 @@
 // unx-kernel: cs_6_6 main
 // unx-variants: MODE=0,1
 // Cluster culling and band classification.
-//   MODE=0: one 32-thread group per group item (a hierarchy leaf reached by the traversal) in [VS_GROUP_BEGIN,
-//           VS_GROUP_END); each thread tests one cluster of the group (own-error LOD test: the group's parent test
-//           was the leaf's).
+//   MODE=0: one 32-thread group per group item (a hierarchy leaf reached by the traversal) of the phase: from
+//           VS_GROUP_BEGIN (0, then phase 1's end: CullPrepare MODE=3) to the items appended; each thread tests one
+//           cluster of the group (own-error LOD test: the group's parent test was the leaf's).
 //   MODE=1: one thread per cluster deferred by phase 1 (phase 2 only). The phase is the root constant (CULL_PHASE).
 // Tests: own error <= threshold, frustum + clip plane, normal cone (one-sided, undeformed), HiZ occlusion (phase 1:
 // previous frame, occluded clusters deferred; phase 2: this frame), tile mask (raster service). Visible clusters get a
@@ -220,7 +220,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupThreadID)
 {
     RWByteAddressBuffer state = ResourceDescriptorHeap[STATE_UAV];
     const uint item = state.Load(4 * VS_GROUP_BEGIN) + group.x + group.y * 65535;  // 2D dispatch (65535 per row)
-    if (item >= state.Load(4 * VS_GROUP_END)) return;  // uniform over the group
+    if (item >= min(state.Load(4 * VS_GROUP_WRITE), CAP_GROUPS)) return;  // uniform over the group
     RWStructuredBuffer<uint2> groups = ResourceDescriptorHeap[GROUP_ITEMS_UAV];
     const uint2 g = groups[item];
     StructuredBuffer<ClusterNode> nodes = ResourceDescriptorHeap[NODES_SRV];

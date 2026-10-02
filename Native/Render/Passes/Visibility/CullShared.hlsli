@@ -86,6 +86,15 @@ bool cullViewTilesEmpty(CullView v, uint view)
     return any == 0;
 }
 
+// Raises the dispatch arguments at 'word' to 'groups' groups (65535 per row, as CullPrepare's storeDispatch). The kernel
+// that appends a pass's items keeps that pass's arguments current with it, so no pass stands between the two
+// (visibility.cull_pass_merge); CullReset leaves such arguments at (0, 0, 1). Both words only grow with the item count.
+void raiseDispatch(RWByteAddressBuffer args, uint word, uint groups)
+{
+    args.InterlockedMax(4 * word, min(groups, 65535u));
+    args.InterlockedMax(4 * (word + 1), (groups + 65534u) / 65535u);
+}
+
 // Raster-service tile mask test of a bounding sphere (true without a mask).
 bool tileVisible(CullView v, uint view, float4 s) { return TILE_MASK_SRV == UNX_NONE || tileMaskCovered(v, view, tileMasks(), s); }
 

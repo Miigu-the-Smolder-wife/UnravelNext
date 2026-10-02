@@ -64,8 +64,10 @@ NodeResult testNode(uint2 it)
     return r;
 }
 
-// The group, deferral and statistics of a wave's tested nodes ('processed' of them; uniform control flow).
-void emitNodes(RWByteAddressBuffer state, NodeResult r, uint processed)
+// The group, deferral and statistics of a wave's tested nodes ('processed' of them; uniform control flow). QUEUE=1 keeps
+// the cluster pass's arguments current with the groups it appends (one group per item past 'groupBegin', the phase's
+// first group item; CullPrepare MODE=1 stores the same): the level passes cannot, their dispatch reads the arguments.
+void emitNodes(RWByteAddressBuffer state, NodeResult r, uint processed, uint groupBegin)
 {
     const uint g = waveAppend(state, VS_GROUP_WRITE, r.pushGroup ? 1 : 0, CAP_GROUPS, OVERFLOW_GROUPS);
     if (r.pushGroup && g < CAP_GROUPS)
@@ -73,6 +75,14 @@ void emitNodes(RWByteAddressBuffer state, NodeResult r, uint processed)
         RWStructuredBuffer<uint2> groups = ResourceDescriptorHeap[GROUP_ITEMS_UAV];
         groups[g] = uint2(r.instance, r.packed);
     }
+#if QUEUE == 1
+    const uint pushed = WaveActiveCountBits(r.pushGroup);
+    if (pushed > 0 && WaveIsFirstLane())  // (the first lane's 'g' is the wave's first group item)
+    {
+        RWByteAddressBuffer args = ResourceDescriptorHeap[ARGS_UAV];
+        raiseDispatch(args, VA_GROUPS, min(g + pushed, CAP_GROUPS) - min(groupBegin, CAP_GROUPS));
+    }
+#endif
     const uint d = waveAppend(state, VS_DEFER_NODES, r.defer ? 1 : 0, CAP_DEFERRED, OVERFLOW_DEFER_NODES);
     if (r.defer && d < CAP_DEFERRED)
     {
@@ -102,7 +112,7 @@ void main(uint i : SV_DispatchThreadID)
         for (uint k = 0; k < r.node.count; ++k)
             if (childBase + k < CAP_NODES) items[childBase + k] = uint2(r.instance, packItem(r.node.first + k, itemView(r.packed)));
     }
-    emitNodes(state, r, WaveActiveCountBits(item < end));
+    emitNodes(state, r, WaveActiveCountBits(item < end), 0);
 }
 #else
 #define TRAVERSE_IDLE_ROUNDS 65536u    // rounds a worker may find nothing published before it leaves
@@ -123,6 +133,7 @@ void main()
     globallycoherent RWByteAddressBuffer queue = ResourceDescriptorHeap[STATE_UAV];
     globallycoherent RWStructuredBuffer<uint2> items = ResourceDescriptorHeap[NODE_ITEMS_UAV];
     const uint lanes = WaveActiveCountBits(true), lane = WavePrefixCountBits(true);  // every exit below is uniform over the wave
+    const uint groupBegin = state.Load(4 * VS_GROUP_BEGIN);  // (the phase's first group item: fixed while the traversal runs)
     uint idle = 0;
     [loop] for (uint round = 0; round < CAP_NODES + TRAVERSE_IDLE_ROUNDS; ++round)
     {
@@ -185,7 +196,7 @@ void main()
                 if (!published) queue.InterlockedOr(4 * VS_OVERFLOW, OVERFLOW_ITERATION_LIMIT);
             }
         }
-        emitNodes(state, r, count);
+        emitNodes(state, r, count, groupBegin);
     }
 }
 #endif
