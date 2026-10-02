@@ -256,6 +256,7 @@ struct FrameStats
     uint64_t frameIndex = UINT64_MAX;              // host frame number the GPU numbers belong to
     double gpuMs = 0, cpuRecordMs = 0, cpuSubmitMs = 0;
     uint32_t passes = 0;
+    uint32_t renderWidth = 0, renderHeight = 0;    // the main view's internal resolution in that frame
     GraphFrameStats graph;                         // the same frame's render graph
     struct QueueGaps
     {
@@ -263,6 +264,17 @@ struct FrameStats
         double headMs = 0, tailMs = 0, gapMs = 0;
     } queues[2];                                   // graphics, compute: time outside the passes (profiler list marks)
     std::vector<std::pair<std::string, double>> passMs;  // the same frame's passes in graph order
+};
+
+// UnxFrameGetStatistics: the main view's sizes in the newest frame recorded and the dynamic resolution's controller
+// (render::tracks::DynamicResolutionStatus; output.dynamic_resolution_target_ms).
+struct FramePacing
+{
+    uint32_t outputWidth = 0, outputHeight = 0;
+    uint32_t renderWidth = 0, renderHeight = 0;    // the internal resolution (the output's when the view is not upscaled)
+    bool dynamicResolution = false;                // the controller is running
+    float targetMs = 0, controllerMs = 0;          // its GPU time budget; the weighted frame time of its last decision
+    uint32_t minRenderHeight = 0, maxRenderHeight = 0;  // the range the internal height moves in
 };
 
 // B11 photo mode (FEATURES_GAME 17): E's GPU reference tracer on the renderer's device renders a snapshot of the scene
@@ -389,6 +401,8 @@ public:
     void setColorGrading(const render::ColorGradingDesc& grading);
     void setPost(const render::PostSettingsDesc& post, float exposureCompensation);
     void setDisplayEncoding(int32_t encoding, float paperWhiteNits);
+    // UnxFrameGetStatistics (read-only; with latestStats): what a game paces its frames by.
+    FramePacing framePacing() const;
     // A3 mesh particles (render C): the scene mesh a program's mesh_asset draws (committed mesh index or runtime mesh id;
     // 0xFFFFFFFF removes the mapping: its particles are not drawn and counted unmapped)
     void mapMeshAsset(uint64_t asset, uint32_t mesh);
@@ -647,10 +661,12 @@ private:
     HostState m_applied;
     uint64_t m_nextTicket = 1;
     FrameStats m_stats;
+    FramePacing m_pacing;  // (m_mutex)
 
     // Submission thread only.
     std::vector<std::array<uint64_t, 3>> m_slotFence;
     std::vector<uint64_t> m_slotHostFrame;
+    std::vector<std::array<uint32_t, 2>> m_slotRenderSize;  // the main view's internal size of the frame recorded in each slot
     std::vector<GraphFrameStats> m_slotGraph;  // the render graph of the frame recorded in each slot
     uint64_t m_recordedFrames = 0;
     float4x4 m_prevViewProj{};
