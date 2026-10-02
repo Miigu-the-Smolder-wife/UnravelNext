@@ -25,6 +25,9 @@
 // P[2] = { transmittance LUT SRV (mode 0), stats UAV (mode 0), distance UAV (mode 0: R16F, km, extinction-weighted mean),
 // multiple-scattering table SRV (mode 0) }.
 // P[3].w (modes 0 and 3) = the sun path's marched steps (cloudSunTauNear; 0: the whole path, cloudSunTauMarch).
+// P[3].z bits 8.. (mode 0 with a history) = the dispatch's phase: 1 = a thread per 2 x 2 block marches the block's texel of
+// this frame (every lane of a wave marches: a dispatch over all texels with a quarter of its lanes marching takes as
+// long as one with all of them); 2 = a thread per texel fills the block's other texels (the frame's own texel is left).
 // P[3] (mode 0) = { last frame's layer SRV (UNX_NONE: every texel is marched), last frame's distance SRV, this frame's
 // texel of each 2 x 2 block (0..3: x | y << 1), 0 }: a texel that is not this frame's takes last frame's value at the
 // place the previous view (g_prevViewProj) saw its direction - a cloud's direction places it, kilometres away - and is
@@ -47,14 +50,17 @@
 void main(uint2 id : SV_DispatchThreadID)
 {
     const bool test = P[1].z == 1 || P[1].z == 2 || P[1].z == 4, dome = P[1].z == 3, approximate = P[1].z == 0 || P[1].z >= 3;
+    const uint block = P[3].z & 3u, phase = P[1].z == 0 ? P[3].z >> 8 : 0u;
+    if (phase == 1) id = id * 2 + uint2(block & 1u, block >> 1);
     if (P[1].z == 0 || P[1].z == 3) id.y += P[1].w;
     if (any(id >= P[1].xy)) return;
+    if (phase == 2 && ((id.x & 1u) | ((id.y & 1u) << 1)) == block) return;
     const CloudRecord c = cloudLoad(P[0].x);
     const float scale = (float)P[0].w;
     const float2 pixel = (float2(id) + 0.5) * scale - 0.5;  // the view pixel at the texel's centre (worldFromDepth adds 0.5)
     const float3 far = worldFromDepth(pixel, 1e-6);
     const float3 dir = dome ? cloudDomeDir((float2(id) + 0.5) / float2(P[1].xy)) : normalize(far - g_cameraPosition);
-    if (P[1].z == 0 && P[3].x != 0xFFFFFFFFu && ((id.x & 1u) | ((id.y & 1u) << 1)) != P[3].z)
+    if (P[1].z == 0 && P[3].x != 0xFFFFFFFFu && ((id.x & 1u) | ((id.y & 1u) << 1)) != block)
     {
         const float4 clip = mul(g_prevViewProj, float4(g_cameraPosition + dir * 1.0e5, 1));
         const float2 uv = float2(clip.x, -clip.y) / max(clip.w, 1e-6) * 0.5 + 0.5;

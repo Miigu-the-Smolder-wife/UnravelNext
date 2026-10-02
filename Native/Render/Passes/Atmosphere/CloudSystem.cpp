@@ -259,10 +259,22 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
                   // TDR limit: 0.19 us per cloudy texel [measured] x the rows).
                   for (uint32_t row = 0; row < h; row += kBandRows)
                   {
-                      const uint32_t k[16] = { recordSrv, c.uav(radiance), 0xFFFFFFFFu, 4, w, h, 0, row, c.srv(transmittanceLut), c.uav(stats), c.uav(distance), c.srv(msTable),
-                                               history ? c.srv(previousRadiance) : 0xFFFFFFFFu, history ? c.srv(previousDistance) : 0xFFFFFFFFu, blockTexel, sunSteps };
+                      const uint32_t rows = std::min(kBandRows, h - row);
+                      uint32_t k[16] = { recordSrv, c.uav(radiance), 0xFFFFFFFFu, 4, w, h, 0, row, c.srv(transmittanceLut), c.uav(stats), c.uav(distance), c.srv(msTable),
+                                         history ? c.srv(previousRadiance) : 0xFFFFFFFFu, history ? c.srv(previousDistance) : 0xFFFFFFFFu, blockTexel, sunSteps };
+                      if (!history)
+                      {
+                          c.computeConstants(k, 16);
+                          c.cmd->Dispatch(groups(w, 8), groups(rows, 8), 1);
+                          continue;
+                      }
+                      // (CloudMarch.hlsl P[3].z: the frame's texel of every block in a dispatch of its own, then the others)
+                      k[14] = blockTexel | 1u << 8;
                       c.computeConstants(k, 16);
-                      c.cmd->Dispatch(groups(w, 8), groups(std::min(kBandRows, h - row), 8), 1);
+                      c.cmd->Dispatch(groups((w + 1) / 2, 8), groups((rows + 1) / 2, 8), 1);
+                      k[14] = blockTexel | 2u << 8;
+                      c.computeConstants(k, 16);
+                      c.cmd->Dispatch(groups(w, 8), groups(rows, 8), 1);
                   }
               });
     // The sky dome for R's escaping rays (GiSky.hlsli: atmosphereSkyRadianceCloudy): mode 3, one dispatch (24,576 texels).

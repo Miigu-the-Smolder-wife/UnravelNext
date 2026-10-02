@@ -25,10 +25,10 @@ sky_view_segments = 128              # quadratic segments x Gauss-Legendre 4 alo
 # FogHeightFalloff 0.2 -> 0.02 / m, volumetric scattering distribution 0.2, albedo white, extinction scale 1).
 # The cloud layer (CloudSystem.cpp; a frame turns it on with a coverage: FrameContext::clouds, the gate's --clouds).
 [atmosphere.clouds]
-sun_steps = 12                       # (Q) a sample's path toward the sun is marched this many steps (20 m, doubling every second step
-                                     # from the fifth: 12 steps reach 1,280 m), then the sun map gives the rest. 0: the whole path in
-                                     # 20 m steps (up to 256 of them at a low sun - 5.7 ms a frame at 1080p against the layer's shape
-                                     # error of about 1 %)
+sun_steps = 24                       # (Q) a sample's path toward the sun is marched this many steps (20 m, doubling every second step
+                                     # from the fifth up to 320 m: 24 steps reach 5,120 m), then the sun map gives the rest. 0: the
+                                     # whole path in 20 m steps (256 of them to the same 5,120 m at a low sun: 5.7 ms a frame at 1080p).
+                                     # 12 (1,280 m) shows the map's levels as contours under the clouds
 temporal = true                      # of each 2 x 2 block of the layer's texels one is marched a frame, the others take last
                                      # frame's value where the previous view saw their direction; the rays' sky dome is refreshed
                                      # 16 rows a frame. false: every texel and the whole dome every frame

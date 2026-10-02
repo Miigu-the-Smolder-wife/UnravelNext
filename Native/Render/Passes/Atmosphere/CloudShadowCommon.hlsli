@@ -141,17 +141,18 @@ bool cloudSunMapCovers(CloudRecord c, float3 x)
 }
 
 // The sun's optical depth at a sample for the frame's picture (atmosphere.clouds.sun_steps): 'steps' midpoint steps
-// toward the sun - CLOUD_SUN_NEAR_STEPS of CLOUD_SUN_STEP, then doubling every second step (12 steps: 1,280 m) - and
-// the sun map from where they end. The march is exact where the cloud's own shape decides the light (the sample's
-// surroundings); the map, whose texel rays blend across cloud edges, gives the far part, where that blending is the
-// scale of the answer anyway. A sample the map does not reach (clouds toward the horizon, past its extent) marches on
+// toward the sun - CLOUD_SUN_NEAR_STEPS of CLOUD_SUN_STEP, then doubling every second step up to CLOUD_SUN_STEP_MAX
+// (24 steps: 5,120 m, where cloudSunTauMarch's 256 steps end too) - and the sun map from where they end. The steps are
+// fine where the cloud's own shape decides the light (the sample's surroundings) and coarse where the path only
+// attenuates. The map earlier than that shows: from 1.3 km on (12 steps) its levels drew contours under the clouds
+// [measured 2026-10-02, ridge at sunset]. A sample the map does not reach (clouds toward the horizon, past its extent) marches on
 // in its last, longest steps for as many steps again.
 float cloudSunTauNear(CloudRecord c, float3 x, uint steps)
 {
     float tau = 0, t = 0, dt = CLOUD_SUN_STEP;
     [loop] for (uint k = 0; k < steps && tau < CLOUD_SUN_TAU_MAX; ++k)
     {
-        if (k >= CLOUD_SUN_NEAR_STEPS && ((k - CLOUD_SUN_NEAR_STEPS) & 1) == 0) dt *= 2;
+        if (k >= CLOUD_SUN_NEAR_STEPS && ((k - CLOUD_SUN_NEAR_STEPS) & 1) == 0) dt = min(dt * 2, CLOUD_SUN_STEP_MAX);
         const float3 y = x + c.sunDir * (t + 0.5 * dt);
         const float a = cloudAltitude(c, y);
         if (a > c.top || a < c.base - 1) return tau;
