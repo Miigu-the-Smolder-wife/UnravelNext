@@ -6,12 +6,14 @@
 //                          pixel moves is the pixel's own surface: no disocclusion;
 //   reprojection edge      over the dilated vectors of the 3 x 3 neighbourhood: 0 where a neighbour's vector differs by
 //                          a pixel along its offset (the history on either side of such an edge is another surface's);
-//   guide                  the previous frame's guide reprojected (Catmull-Rom) with the exposure change applied.
+//   guide                  the previous frame's guide reprojected (Catmull-Rom) with the exposure change applied;
+//   flickering history     the previous frame's (TsrFlicker.hlsl), nearest texel at a position dithered within a texel.
 // P[0] = { dilated motion SRV (RG32F), info SRV (RGBA16F, TsrDilate.hlsl), scatter SRV (R32_UINT), previous guide SRV
 //          (R10G10B10A2: guide colour, a = uncertainty; UNX_NONE: no history) }
 // P[1] = { reprojected guide UAV (R10G10B10A2), mask UAV (RG8: r = bits / 255 - 1 off screen or cut, 2 parallax
 //          disocclusion; g = reprojection edge), width, height }
 // P[2] = { asuint(jitter x), asuint(jitter y), asuint(exposure ratio), flags (1: reset - first frame, cut, restore) }
+// P[3] = { previous flickering history SRV (RGBA8; UNX_NONE: none), reprojected flickering history UAV (RGBA8), frame, 0 }
 // Frame constants b1 = the main view.
 #include "Passes/Shading/Tsr.hlsli"
 #include "Passes/Common/Frame.hlsli"
@@ -29,7 +31,7 @@ void main(uint2 id : SV_DispatchThreadID)
     const float2 jitter = asfloat(P[2].xy);
     const float4 info = infoTexture.Load(int3(id, 0));
     const float previousZ = info.x, zError = info.y;
-    const bool hasOffset = info.w > 0.5;
+    const bool hasOffset = info.w > 0.75;
 
     // the reprojection edge over the neighbourhood's vectors (pixels)
     float2 v[9];
@@ -98,5 +100,26 @@ void main(uint2 id : SV_DispatchThreadID)
         guide.rgb = saturate(tsrLinearToGuide(tsrGuideToLinear(guide.rgb) * asfloat(P[2].z)));
     }
     guideOut[id] = guide;
+    if (P[3].y != UNX_NONE)
+    {
+        // (no history: luma 0, gradient 0 - its code is 127 / 255 -, no variation)
+        float4 flicker = float4(0, 127.0 / 255.0, 0, 0);
+        if (!offScreen && P[3].x != UNX_NONE)
+        {
+            Texture2D<float4> previousFlicker = ResourceDescriptorHeap[P[3].x];
+            uint3 h = uint3(id, P[3].z & 7u) * uint3(1664525u, 22695477u, 2891336453u) + 1013904223u;
+            h.x += h.y * h.z;
+            h.y += h.z * h.x;
+            h ^= h >> 16;
+            const float2 e = float2(h.xy & 0xFFFFu) / 65536.0;
+            const int2 at = clamp(int2(floor(previousUv * float2(size) + e - 0.5)), 0, size - 1);
+            flicker = previousFlicker.Load(int3(at, 0));
+            // the luma's exposure (the guide space, as a grey)
+            const float linearLuma = flicker.r * min(0.17 / max(1.0 - flicker.r, 1e-6), 65504.0) * asfloat(P[2].z);
+            flicker.r = saturate(linearLuma / (linearLuma + 0.17));
+        }
+        RWTexture2D<float4> flickerOut = ResourceDescriptorHeap[P[3].y];
+        flickerOut[id] = flicker;
+    }
     maskOut[id] = float2(((offScreen ? 1.0 : 0.0) + (disoccluded ? 2.0 : 0.0)) / 255.0, edge);
 }

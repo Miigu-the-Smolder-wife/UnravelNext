@@ -104,7 +104,9 @@
 | 톤 파이프라인 | 필름 곡선 앞뒤로 gamut 확장(1.0), blue correction(0.6), ACES glow, red modifier | `ShadingCommon.hlsli` `shFilm` |
 | 블룸·비네트 기본값 | 블룸 0.082(언리얼 기본 세기 0.675 × 6단 틴트 / 6의 몫), 비네트 0.4(모서리 원 기준 cos⁴) | `Config/quality/shading.toml`, `PostFinal.hlsl` |
 
-TSR에서 아직 없는 것: 깜빡임(moire) 휴리스틱, history resurrection, reprojection field(자코비안·경계), thin geometry 검출, 출력보다 큰 이력 해상도.
+깜빡임(moire) 휴리스틱도 들어 있다(`TsrFlicker.hlsl`, `output.upscale_tsr_flickering`): 서 있는 화소의 luma가 지터 주기로 뒤집히면(타일 줄눈·격자) 그 진폭 안에서는 이력을 버리지 않는다. 언리얼은 반투명 이전 색을 따라가고, 여기서는 최종 장면 색을 따라간다.
+TSR에서 아직 없는 것: history resurrection, reprojection field(자코비안·경계), thin geometry 검출, 출력보다 큰 이력 해상도.
+반사에는 `reflection.lumen_downsample`(기본 1, 2 = 2×2당 광선 1개 + 이웃 블록 광선으로 resolve)이 있다. 언리얼의 DownsampleFactor와 같은 손잡이로, 첫 실행에서 시간과 그림을 둘 다 재고 정한다.
 국소 노출·샤픈·렌즈 플레어는 언리얼에서도 기본 꺼짐이라 뒤로 둔다.
 
 ### 2.4 작업 순서

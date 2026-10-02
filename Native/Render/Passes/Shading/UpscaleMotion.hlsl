@@ -8,8 +8,11 @@
 // RG32F (UV offsets need more than half precision at 4K: 1/3840 per pixel).
 // P[0] = { vis id SRV (UNX_NONE: none), visible clusters SRV, depth SRV, motion UAV }, P[1] = { width, height,
 // asuint(jitter x), asuint(jitter y) } (internal pixels), P[2..5] = rows of the previous unjittered view-projection.
-// P[6].x = previous depth UAV (R32F; UNX_NONE: none): the point's view depth in the previous frame (0: the sky, or
-// behind the previous camera) - the temporal super resolution's parallax test (Tsr.hlsli).
+// P[6].x = previous depth UAV (RG32F; UNX_NONE: none): r = the point's view depth in the previous frame (0: the sky, or
+// behind the previous camera) - the temporal super resolution's parallax test (Tsr.hlsli); g = how much the point
+// moves (0 still .. 1): its own displacement in the world over two pixel radii less one, or its parallax - the screen
+// travel beyond the camera's rotation - over 10 px of a 1920-wide view at 60 Hz, less a half (the flickering
+// heuristic keeps its history only on what stands still: the reference's IsMovingMask).
 // Frame constants of the (jittered) main view.
 #include "Bindless.hlsli"
 #include "Passes/Common/Frame.hlsli"
@@ -32,6 +35,7 @@ void main(uint2 id : SV_DispatchThreadID)
     const float2 uvNow = (float2(id) + 0.5 - jitter) / float2(size);
     const float d = depth.Load(int3(id, 0));
     float4 prevClip;
+    float moving = 0;
     if (!(d > 0))
     {
         const float3 dir = worldFromDepth(float2(id), 1e-6) - g_cameraPosition;  // a point far along the pixel's ray
@@ -44,6 +48,13 @@ void main(uint2 id : SV_DispatchThreadID)
         uint instance;
         giPreviousSurface(P[0].x, P[0].y, id, p, float3(0, 0, 1), prevP, prevN, instance);
         prevClip = prevClipOf(float4(prevP, 1));
+        // is-moving: the point's own displacement, or its parallax beyond the camera's rotation
+        const float radius = linearDepth(d) * g_tanHalfFovY / g_viewHeight;
+        const float4 still = prevClipOf(float4(p, 1)), turned = prevClipOf(float4(p - g_cameraPosition, 0));
+        float parallax = 0;
+        if (still.w > 1e-6 && turned.w > 1e-6) parallax = 0.5 * length((turned.xy / turned.w - still.xy / still.w) * float2(size));
+        const float maxParallax = max(g_deltaTime * 60.0, 1e-3) * 10.0 * (float)size.x / 1920.0;
+        moving = max(saturate(distance(p, prevP) / max(2.0 * radius, 1e-9) - 1.0), saturate(parallax / maxParallax - 0.5));
     }
     float2 m = float2(2, 2);
     if (prevClip.w > 1e-6)
@@ -54,7 +65,7 @@ void main(uint2 id : SV_DispatchThreadID)
     motion[id] = all(isfinite(m)) ? m : float2(2, 2);
     if (P[6].x != UNX_NONE)
     {
-        RWTexture2D<float> previousDepth = ResourceDescriptorHeap[P[6].x];
-        previousDepth[id] = d > 0 && prevClip.w > 1e-6 && isfinite(prevClip.w) ? prevClip.w : 0.0;
+        RWTexture2D<float2> previousDepth = ResourceDescriptorHeap[P[6].x];
+        previousDepth[id] = float2(d > 0 && prevClip.w > 1e-6 && isfinite(prevClip.w) ? prevClip.w : 0.0, isfinite(moving) ? moving : 1.0);
     }
 }

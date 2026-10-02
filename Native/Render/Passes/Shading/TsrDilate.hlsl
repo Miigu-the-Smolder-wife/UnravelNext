@@ -5,10 +5,11 @@
 // (1: the dilated vector is the pixel's own, 0: a pixel or more apart), and the scatter: the pixel written, with its
 // previous device depth, to the four pixels around where it was in the previous frame (atomic max: the closest surface
 // that was there, among this frame's surfaces).
-// P[0] = { depth SRV, motion SRV (RG32F, output-UV offsets; UpscaleMotion.hlsl), previous depth SRV (R32F view depth),
-//          dilated motion UAV (RG32F) }
-// P[1] = { info UAV (RGBA16F: previous closest device depth, device depth error, reprojection edge, 1 = the vector came
-//          from a neighbour), scatter UAV (R32_UINT, cleared), width, height }. Frame constants b1 = the main view.
+// P[0] = { depth SRV, motion SRV (RG32F, output-UV offsets; UpscaleMotion.hlsl), previous depth SRV (RG32F: view depth,
+//          is-moving), dilated motion UAV (RG32F) }
+// P[1] = { info UAV (RGBA16F: previous closest device depth, device depth error, reprojection edge, a = (1: the vector
+//          came from a neighbour) + is-moving / 2), scatter UAV (R32_UINT, cleared), width, height }. Frame constants
+// b1 = the main view.
 #include "Passes/Shading/Tsr.hlsli"
 #include "Passes/Common/Frame.hlsli"
 
@@ -28,7 +29,7 @@ void main(uint2 id : SV_DispatchThreadID)
     if (any(int2(id) >= size)) return;
     Texture2D<float> depth = ResourceDescriptorHeap[P[0].x];
     Texture2D<float2> motion = ResourceDescriptorHeap[P[0].y];
-    Texture2D<float> previousDepth = ResourceDescriptorHeap[P[0].z];
+    Texture2D<float2> previousDepth = ResourceDescriptorHeap[P[0].z];
     RWTexture2D<float2> dilated = ResourceDescriptorHeap[P[0].w];
     RWTexture2D<float4> info = ResourceDescriptorHeap[P[1].x];
     RWTexture2D<uint> scatter = ResourceDescriptorHeap[P[1].y];
@@ -66,12 +67,13 @@ void main(uint2 id : SV_DispatchThreadID)
     }
     const int2 from = clamp(int2(id) + offset, 0, size - 1);
     const float2 own = motion.Load(int3(id, 0)), vector = motion.Load(int3(from, 0));
-    const float previousView = previousDepth.Load(int3(from, 0));
+    const float2 previousSample = previousDepth.Load(int3(from, 0));
+    const float previousView = previousSample.x;
     const float previousZ = previousView > 0 ? g_nearPlane / previousView : 0.0;
     const float2 deltaPixels = (vector - own) * float2(size);
     const float edge = saturate(1.1 - dot(abs(deltaPixels), float2(1.1, 1.1)));
     dilated[id] = vector;
-    info[id] = float4(previousZ, depthError, edge, any(offset != 0) ? 1.0 : 0.0);
+    info[id] = float4(previousZ, depthError, edge, (any(offset != 0) ? 1.0 : 0.0) + 0.5 * saturate(previousSample.y));
 
     // scatter to the previous position (in this frame's pixel grid)
     const float2 velocityPixels = vector * float2(size);

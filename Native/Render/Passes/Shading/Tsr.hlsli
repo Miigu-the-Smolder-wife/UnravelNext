@@ -9,6 +9,9 @@
 //   m.tsr.decimate      parallax disocclusion (something closer landed where this pixel was: it was hidden then), the
 //                       previous guide - a low-resolution copy of the history in a perceptual space - reprojected, the
 //                       reprojection edge over the dilated vectors;
+//   m.tsr.flicker       the flickering heuristic: each pixel's luma followed over time; a gradient that flips its sign
+//                       every frame on a still surface is the jitter beating against a pattern finer than the pixels,
+//                       and its amplitude is the band inside which the rejection lets the history be;
 //   m.tsr.reject        the shading rejection: input and reprojected guide compared at low frequency after each was
 //                       clamped into the other's 3 x 3 range (their aliasing differs every frame and is no change of
 //                       shading); what the comparison's clamp box removes from the filtered guide, over the larger of
@@ -21,8 +24,9 @@
 //                       while it refines; the history reprojected (Catmull-Rom), clamped to the samples' range only as
 //                       far as the rejection says, its weight a validity in [0, 1] of 16 samples, held down where the
 //                       pixel moves (4 samples at one output pixel a frame) and where it was rejected (2 samples).
-// Not here yet: the flickering (moire) heuristic, history resurrection, the reprojection field's jacobian and boundary
-// (sub-pixel reprojection edges), thin geometry detection, a history above the output resolution, lens distortion.
+// Not here yet: history resurrection, the reprojection field's jacobian and boundary (sub-pixel reprojection edges),
+// thin geometry detection, a history above the output resolution, lens distortion. The flickering heuristic follows
+// the final scene colour (the reference: the colour before translucency, and less by what translucency changed).
 #ifndef UNX_TSR_HLSLI
 #define UNX_TSR_HLSLI
 #include "Bindless.hlsli"

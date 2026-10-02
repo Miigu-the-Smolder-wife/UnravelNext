@@ -80,6 +80,7 @@ struct UpscaleState
     // output.upscale_tsr (Tsr.hlsli): the guide history at the internal resolution (R10G10B10A2: the scene colour in
     // the guide space at low frequency, a = the reprojection edge); guide[parity] is the last one written.
     ComPtr<ID3D12Resource> guide[2];
+    ComPtr<ID3D12Resource> flicker[2];  // the flickering heuristic's history (RGBA8, TsrFlicker.hlsl), as the guide
     uint32_t guideWidth = 0, guideHeight = 0;
     bool guideFresh = true;
     void ensureGuide(Device& d, uint32_t w, uint32_t h)
@@ -102,6 +103,13 @@ struct UpscaleState
                                                     IID_PPV_ARGS(guide[k].ReleaseAndGetAddressOf())),
                   "M upscale guide");
             guide[k]->SetName(k ? L"M upscale guide 1" : L"M upscale guide 0");
+            if (flicker[k]) d.deferRelease(flicker[k]);
+            D3D12_RESOURCE_DESC1 fd = desc;
+            fd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &fd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
+                                                    IID_PPV_ARGS(flicker[k].ReleaseAndGetAddressOf())),
+                  "M upscale flickering history");
+            flicker[k]->SetName(k ? L"M upscale flickering history 1" : L"M upscale flickering history 0");
         }
         guideWidth = w;
         guideHeight = h;
@@ -111,6 +119,8 @@ struct UpscaleState
     {
         if (!device) return;
         for (auto& t : guide)
+            if (t) device->deferRelease(t);
+        for (auto& t : flicker)
             if (t) device->deferRelease(t);
         for (auto& t : history)
             if (t) device->deferRelease(t);
@@ -247,7 +257,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
     const TextureRef motion = g.createTexture(TextureDesc{ "m.upscale.motion", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT });
     // output.upscale_tsr: the temporal super resolution's structure (Tsr.hlsli) in place of the one-pass accumulation
     const bool tsr = !fc.quality.has("output.upscale_tsr") || fc.quality.boolean("output.upscale_tsr");
-    const TextureRef previousDepth = tsr ? g.createTexture(TextureDesc{ "m.upscale.previous depth", w, h, 1, 1, DXGI_FORMAT_R32_FLOAT }) : TextureRef{};
+    const TextureRef previousDepth = tsr ? g.createTexture(TextureDesc{ "m.upscale.previous depth", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT }) : TextureRef{};
     const TextureRef depth = view.depth, vis = view.visId;
     const BufferRef clusters = view.visibleClusters;
     const bool hasVis = vis.valid() && clusters.valid();
@@ -293,6 +303,18 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
         const TextureRef rejection = g.createTexture(TextureDesc{ "m.tsr.rejection", w, h, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM });
         const TextureRef aaInput = g.createTexture(TextureDesc{ "m.tsr.aa input", w, h, 1, 1, DXGI_FORMAT_R8G8_UNORM });
         const TextureRef aa = g.createTexture(TextureDesc{ "m.tsr.aa", w, h, 1, 1, DXGI_FORMAT_R8G8_UINT });
+        // output.upscale_tsr_flickering (the reference's r.TSR.ShadingRejection.Flickering, default on)
+        const bool flickering = !fc.quality.has("output.upscale_tsr_flickering") || fc.quality.boolean("output.upscale_tsr_flickering");
+        TextureRef previousFlicker, nextFlicker, reprojectedFlicker, moireError;
+        if (flickering)
+        {
+            previousFlicker = g.importTexture(s.flicker[prev].Get(), { "m.tsr.flicker (previous)", w, h, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+            nextFlicker = g.importTexture(s.flicker[next].Get(), { "m.tsr.flicker", w, h, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+            reprojectedFlicker = g.createTexture(TextureDesc{ "m.tsr.reprojected flicker", w, h, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM });
+            moireError = g.createTexture(TextureDesc{ "m.tsr.moire error", w, h, 1, 1, DXGI_FORMAT_R16_FLOAT });
+        }
+        ID3D12PipelineState* flickerPso = flickering ? fc.shaders.compute("Passes/Shading/TsrFlicker") : nullptr;
+        const uint32_t frameIndex = (uint32_t)fc.frame.frameIndex;
         ShaderLibrary& shaders = fc.shaders;
         ID3D12PipelineState* clearPso = shaders.compute("Passes/Shading/TsrClear");
         ID3D12PipelineState* dilatePso = shaders.compute("Passes/Shading/TsrDilate");
@@ -335,15 +357,39 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       b.use(previousGuide, Use::SrvCompute);
                       b.use(reprojected, Use::UavCompute);
                       b.use(decimateMask, Use::UavCompute);
+                      if (flickering)
+                      {
+                          b.use(previousFlicker, Use::SrvCompute);
+                          b.use(reprojectedFlicker, Use::UavCompute);
+                      }
                   },
                   [=](PassContext& c) {
-                      const uint32_t k[12] = { c.srv(dilated), c.srv(info), c.srv(scatter), c.srv(previousGuide), c.uav(reprojected), c.uav(decimateMask), w, h,
-                                               asUint(jx), asUint(jy), asUint(exposureRatio), guideReset ? 1u : 0u };
+                      const uint32_t k[16] = { c.srv(dilated), c.srv(info), c.srv(scatter), c.srv(previousGuide), c.uav(reprojected), c.uav(decimateMask), w, h,
+                                               asUint(jx), asUint(jy), asUint(exposureRatio), guideReset ? 1u : 0u,
+                                               flickering ? c.srv(previousFlicker) : 0xFFFFFFFFu, flickering ? c.uav(reprojectedFlicker) : 0xFFFFFFFFu, frameIndex, 0 };
                       c.cmd->SetPipelineState(decimatePso);
                       c.bindFrameConstants(cb);
-                      c.computeConstants(k, 12);
+                      c.computeConstants(k, 16);
                       c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
                   });
+        if (flickering)
+            g.addPass("m.tsr.flicker", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(src, Use::SrvCompute);
+                          b.use(reprojectedFlicker, Use::SrvCompute);
+                          b.use(decimateMask, Use::SrvCompute);
+                          b.use(info, Use::SrvCompute);
+                          b.use(moireError, Use::UavCompute);
+                          b.use(nextFlicker, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          const uint32_t k[12] = { c.srv(src), c.srv(reprojectedFlicker), c.srv(decimateMask), c.srv(info), c.uav(moireError), c.uav(nextFlicker), w, h,
+                                                   guideReset ? 1u : 0u, 0, 0, 0 };
+                          c.cmd->SetPipelineState(flickerPso);
+                          c.bindFrameConstants(cb);
+                          c.computeConstants(k, 12);
+                          c.cmd->Dispatch((w + 15) / 16, (h + 15) / 16, 1);
+                      });
         g.addPass("m.tsr.reject", QueueType::Graphics,
                   [&](PassBuilder& b) {
                       b.use(src, Use::SrvCompute);
@@ -352,10 +398,11 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       b.use(rejection, Use::UavCompute);
                       b.use(nextGuide, Use::UavCompute);
                       b.use(aaInput, Use::UavCompute);
+                      if (flickering) b.use(moireError, Use::SrvCompute);
                   },
                   [=](PassContext& c) {
                       const uint32_t k[12] = { c.srv(src), c.srv(reprojected), c.srv(decimateMask), c.uav(rejection), c.uav(nextGuide), c.uav(aaInput), w, h,
-                                               asUint(theoreticBlend), 0, 0, 0 };
+                                               asUint(theoreticBlend), flickering ? c.srv(moireError) : 0xFFFFFFFFu, 0, 0 };
                       c.cmd->SetPipelineState(rejectPso);
                       c.computeConstants(k, 12);
                       c.cmd->Dispatch((w + 15) / 16, (h + 15) / 16, 1);

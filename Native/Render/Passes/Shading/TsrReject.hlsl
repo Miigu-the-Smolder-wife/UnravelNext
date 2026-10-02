@@ -18,7 +18,9 @@
 // P[0] = { colour SRV (internal, exposed linear), reprojected guide SRV (R10G10B10A2), decimate mask SRV (RG8),
 //          rejection UAV (RGBA8: rejection, history clamp disable, validity decrease, bit 0 of a x 255: not disoccluded) }
 // P[1] = { guide UAV (R10G10B10A2, next frame's history: guide colour, a = this frame's reprojection edge), AA input UAV
-//          (RG8: LDR luma, mask), width, height }, P[2] = { asuint(theoretic blend factor), 0, 0, 0 }
+//          (RG8: LDR luma, mask), width, height }, P[2] = { asuint(theoretic blend factor), moire error SRV (R16F,
+//          TsrFlicker.hlsl; UNX_NONE: no flickering heuristic), 0, 0 }: inside the moire error (x 3: luma to a
+//          channel) the filtered guide is not clamped, and the denominator is at least the error's share of the channel
 #include "Passes/Shading/Tsr.hlsli"
 
 #define TILE 16
@@ -159,6 +161,7 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
 
     // 4: the clamp box, what it removes from the filtered guide, the raw rejection
     const float q = TSR_QUANTIZATION_ERROR, filteringWeight = 0.25;
+    const bool moire = P[2].y != 0xFFFFFFFFu;
     for (i = lane; i < CELLS; i += TILE * TILE)
     {
         const int2 c = int2(i % SIDE, i / SIDE);
@@ -173,9 +176,26 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
         const float3 range = unpack(gG[i]);
         const float3 clampError = max(max(float3(q, q, q), blurredVariation), range * (filteringWeight * 0.25)) + q;
         const float3 filteredGuide = unpack(gD[i]), filteredInput = unpack(gC[i]);
-        const float3 clamped = clamp(filteredGuide, boxMin - clampError, boxMax + clampError);
-        const float3 delta = max(abs(filteredInput - filteredGuide), range * filteringWeight + q * 2.0 * filteringWeight);
+        float3 lo = boxMin - clampError, hi = boxMax + clampError;
+        float3 boxSize = range * filteringWeight + q * 2.0 * filteringWeight;
+        float moireError = 0;
+        if (moire)
+        {
+            Texture2D<float> moireTexture = ResourceDescriptorHeap[P[2].y];
+            moireError = moireTexture.Load(int3(clamp(origin + c, 0, size - 1), 0));
+            const float3 widened = 3.0 * moireError;
+            const float3 stableLo = min(lo, hi - widened), stableHi = max(hi, lo + widened);
+            lo = stableLo;
+            hi = stableHi;
+        }
+        const float3 clamped = clamp(filteredGuide, lo, hi);
         const float3 energy = abs(clamped - filteredGuide);
+        if (moire)
+        {
+            const float total = energy.r + energy.g + energy.b;
+            boxSize = max(boxSize, (total > 0 ? energy / total : float3(0, 0, 0)) * (filteringWeight * 3.0 * moireError));
+        }
+        const float3 delta = max(abs(filteredInput - filteredGuide), boxSize);
         gE[i] = pack(energy);
         gF[i] = asuint(min3(saturate(1.0 - energy / delta)));
     }
@@ -217,7 +237,15 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
         clampBlend = min(clampBlend, asfloat(gB[ni]));
     })
     const uint ci = cellIndex(cell);
-    const float3 delta = max(abs(unpack(gC[ci]) - unpack(gD[ci])), unpack(gG[ci]) * filteringWeight + q * 2.0 * filteringWeight);
+    float3 boxSize = unpack(gG[ci]) * filteringWeight + q * 2.0 * filteringWeight;
+    if (moire)
+    {
+        Texture2D<float> moireTexture = ResourceDescriptorHeap[P[2].y];
+        const float3 energy = unpack(gE[ci]);
+        const float total = energy.r + energy.g + energy.b;
+        boxSize = max(boxSize, (total > 0 ? energy / total : float3(0, 0, 0)) * (filteringWeight * 3.0 * moireTexture.Load(int3(pixel, 0))));
+    }
+    const float3 delta = max(abs(unpack(gC[ci]) - unpack(gD[ci])), boxSize);
     const float rejection = min3(saturate(1.0 - filteredEnergy / delta));
 
     Texture2D<float2> decimateMask = ResourceDescriptorHeap[P[0].z];

@@ -41,6 +41,9 @@ upscale_tsr = true                      # the temporal upscale in the structure 
                                         # frame after a cut), a history of 16 samples held to 4 where the pixel moves an output pixel
                                         # a frame and to 2 where rejected. false: the one-pass accumulation below (upscale_kernel,
                                         # upscale_history_frames*, which the TSR path does not read)
+upscale_tsr_flickering = true           # with upscale_tsr: the flickering heuristic (TsrFlicker.hlsl; the reference's
+                                        # r.TSR.ShadingRejection.Flickering): a still pixel whose luma flips every frame with the
+                                        # jitter (tile joints, gratings) keeps its history inside the flicker's amplitude
 screen_trace_source = 0                # the previous frame colour screen-space traces read (GI, reflections): 0 = the scene colour
                                         # before the upscale, as the reference (r.Lumen.ScreenTracingSource 0), kept with its
                                         # frame's depth in alpha - the traces' history depth test (UpscaleSceneKeep.hlsl);
