@@ -755,7 +755,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
             {
 #if AREA
                 // L w (f_d pi I + E_s I_ltc) on the viewer's side of n; Foliage transmits what arrives on the other.
-                const float3 Lw = light.color * (light.intensity * window * visibility);
+                const float3 Lw = shAreaColor(light, p) * (light.intensity * window * visibility);  // (a rect's source texture: AreaLight.hlsli)
 #if AREA_LOBES || (MEGA_LIGHTS && LAYERED)
                 // A9 the lobes no LTC represents, over the light (AreaQuadrature.hlsli): the anisotropic base (MATERIAL_LAYERS
                 // 1.5; under a coat scaled like the base) and the sheen (1.4) - on the viewer's side. The lobe kernel

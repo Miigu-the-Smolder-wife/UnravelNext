@@ -595,7 +595,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
                 const float3 p = (light.position - g_cameraPosition) - offset;
                 const float window = shAreaWindow(light, p);
                 if (window <= 0) continue;
-                const float3 Lw = light.color * (light.intensity * window * visibility);
+                const float3 Lw = shAreaColor(light, p) * (light.intensity * window * visibility);
                 uint first = NoV > 0 ? 0 : 2, last = foliage ? 3 : 2;
                 const bool specularInReflections = shSpecularInReflections(P[7].y, lightIndex);  // P[7].y: B2 mask
                 float scaleBase = 1;
@@ -667,8 +667,9 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
             else if (NoV > 0 && cosL > 0) f = front + shSpecular(f0, alpha, compensation, n, v, l, NoV, cosL);
             else if (foliage && NoV * cosL < 0) f = back;
 #if COV_COAT
-            if (cover > 0) f = keep * f + cover * (modelCoatLobe(coat, n, v, l) + modelCoatUnder(s, coat, n, v, l));
-            if (sheenOn && cosL > 0) f = keepS * f + sheen.color * modelSheenLobe(sheen.roughness, n, v, l);
+            // (the coat's and the sheen's lobes are specular light: the light's specular scale, ShadingCommon.hlsli)
+            if (cover > 0) f = keep * f + cover * (modelCoatLobe(coat, n, v, l) * shLightSpecular() + modelCoatUnder(s, coat, n, v, l));
+            if (sheenOn && cosL > 0) f = keepS * f + sheen.color * (modelSheenLobe(sheen.roughness, n, v, l) * shLightSpecular());
 #endif
             radiance += f * El * (abs(cosL) * visibility);
         }

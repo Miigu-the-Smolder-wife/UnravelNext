@@ -15,8 +15,10 @@
 // premultiplied colour = alpha (T_air L + inscatter) (request 4: the surface behind already carries the full path).
 #if ML == 0 && GIV == 0
 // This variant (the lists' lights with S's shadow maps, the world cache: neither is the default path) stands 256 B under
-// the kernel size limit: its particles take the air without the height fog (Atmosphere.hlsli).
+// the kernel size limit: its particles take the air without the height fog (Atmosphere.hlsli), and the lists' lights
+// without their light components (Scene.hlsli UNX_LIGHT_COMPONENTS: scales, falloff exponent, draw-distance fade).
 #define UNX_AIR_WITHOUT_FOG
+#define UNX_LIGHT_COMPONENTS 0
 #endif
 #include "Passes/FX/ParticleLayerPass.hlsli"
 #include "Passes/FX/FxParticleAt.hlsli"
@@ -155,7 +157,7 @@ float3 fxLitRadiance(LayerConstants c, float3 albedo, float3 offset, float3 D, f
                                  : type == LIGHT_DISK ? SH_PI * light.size.x * light.size.x * facing
                                  : type == LIGHT_SPHERE ? SH_PI * light.size.x * light.size.x
                                                         : 2.0f * light.size.y * light.size.x + SH_PI * light.size.y * light.size.y;
-                El = light.color * (light.intensity * area * shAreaWindow(light, p) / d2);
+                El = light.color * (light.intensity * lightDiffuseScale(light) * area * shAreaWindow(light, p) / d2);
             }
             float v = 1;
             if (lightCastsShadow(light) && c.shadowPageTable != UNX_NONE && c.shadowLights != UNX_NONE) v = shadowVisibilityDirect(sh, index, worldPos, -D);

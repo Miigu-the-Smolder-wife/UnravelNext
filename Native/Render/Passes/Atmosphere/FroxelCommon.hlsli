@@ -70,14 +70,9 @@ float froxelLightRadius(GpuLight l)
                        : (lightType(l) == LIGHT_RECT ? 0.5 * length(l.size) : (lightType(l) == LIGHT_DISK || lightType(l) == LIGHT_SPHERE ? l.size.x : 0.0));
     return l.range + extent;
 }
-// Distance window w(d) = saturate(1 - (d / range)^4)^2.
-float froxelWindow(GpuLight l, float d)
-{
-    const float x = d / max(l.range, 1e-6);
-    const float x2 = x * x;
-    const float w = saturate(1 - x2 * x2);
-    return w * w;
-}
+// Distance window w(d) = saturate(1 - (d / range)^4)^2 (Scene.hlsli lightWindow: a falloff exponent's form and the
+// view's draw-distance fade included).
+float froxelWindow(GpuLight l, float d) { return lightWindow(l, d); }
 // Largest luminous intensity of the light over directions (candela; area lights: luminance x largest projected area).
 float froxelPeakIntensity(GpuLight l)
 {
@@ -87,21 +82,24 @@ float froxelPeakIntensity(GpuLight l)
     if (t == LIGHT_DISK || t == LIGHT_SPHERE) return l.intensity * 3.14159265 * l.size.x * l.size.x;
     return l.intensity * (2 * l.size.y * l.size.x + 3.14159265 * l.size.y * l.size.y);
 }
-// Luminous intensity of the light towards a point in direction 'toPoint' (unit, from the light), in candela.
+// Luminous intensity of the light towards a point in direction 'toPoint' (unit, from the light), in candela, as the air
+// scatters it: times the light's volumetric scattering scale (scene::Light::volumetricScattering - the air's and the
+// fog's in-scattering, and the light volume the fog and the lit particles read).
 // Area lights: luminance x projected area (a point-source intensity; exact far from the emitter).
 float froxelIntensity(GpuLight l, float3 toPoint)
 {
     const uint t = lightType(l);
-    if (t == LIGHT_POINT) return l.intensity;
+    const float i = l.intensity * lightVolumetricScale(l);
+    if (t == LIGHT_POINT) return i;
     if (t == LIGHT_SPOT)
     {
         const float s = saturate(dot(toPoint, l.forward) * l.spotScale + l.spotOffset);
-        return l.intensity * s * s;
+        return i * s * s;
     }
-    if (t == LIGHT_RECT) return l.intensity * l.size.x * l.size.y * saturate(dot(toPoint, l.forward));
-    if (t == LIGHT_DISK) return l.intensity * 3.14159265 * l.size.x * l.size.x * saturate(dot(toPoint, l.forward));
-    if (t == LIGHT_SPHERE) return l.intensity * 3.14159265 * l.size.x * l.size.x;
-    return l.intensity * (2 * l.size.y * l.size.x + 3.14159265 * l.size.y * l.size.y);  // tube: capsule silhouette
+    if (t == LIGHT_RECT) return i * l.size.x * l.size.y * saturate(dot(toPoint, l.forward));
+    if (t == LIGHT_DISK) return i * 3.14159265 * l.size.x * l.size.x * saturate(dot(toPoint, l.forward));
+    if (t == LIGHT_SPHERE) return i * 3.14159265 * l.size.x * l.size.x;
+    return i * (2 * l.size.y * l.size.x + 3.14159265 * l.size.y * l.size.y);  // tube: capsule silhouette
 }
 
 // Lights the froxel lists take: the scene's g_lightCount, then the FX particle lights at the buffer's tail (A3, INTERFACES
