@@ -181,6 +181,7 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     s.lumen.only = s.lumen.enabled && q.has("gi.lumen_only") && q.boolean("gi.lumen_only");
     if (s.lumen.only) s.lumen.hitFallback = false;  // (the fallback is the world cache's read)
     if (q.has("gi.lumen_screen_traces")) s.lumen.screenTraces = q.boolean("gi.lumen_screen_traces");
+    if (q.has("gi.lumen_compact_traces")) s.lumen.compactTraces = q.boolean("gi.lumen_compact_traces");
     if (q.has("gi.lumen_screen_trace_skip_after_cut")) s.lumen.screenTraceSkipAfterCut = q.boolean("gi.lumen_screen_trace_skip_after_cut");
     if (q.has("gi.lumen_rays_per_dispatch")) s.lumen.raysPerDispatch = (uint32_t)q.integer("gi.lumen_rays_per_dispatch");
     if (s.lumen.raysPerDispatch < 4096) fail("gi.lumen_rays_per_dispatch must be at least 4096");

@@ -146,6 +146,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.lumenDisocclusionTonemap = flag("reflection.lumen_disocclusion_tonemap", true);
     s.lumenRoughFromGather = flag("reflection.lumen_rough_specular_from_gather", true);
     s.lumenScreenTraces = flag("reflection.lumen_screen_traces", true);
+    s.lumenCompactTraces = flag("reflection.lumen_compact_traces", true);
     s.lumenRefractionSurfaceCache = flag("reflection.lumen_refraction_hit_surface_cache", true);
     s.lumenRefractionSceneColor = flag("reflection.lumen_refraction_scene_color_at_hit", true);
     s.lumenRefractionThroughput = std::clamp(num("reflection.lumen_refraction_path_throughput_threshold", 0.001), 0.0f, 1.0f);
@@ -1385,14 +1386,58 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         // (a thread traces at most 2 rays - its world ray and, at a hit without cards, the sun's shadow ray: kBand calls a band)
         constexpr uint32_t kLumenBand = kBand / 3;  // ReflectionLumenTrace.hlsl RL_BAND (a thread: its ray, the sun's, a light sample's)
         const uint32_t lumenBands = bandsFor((uint64_t)width * height, kLumenBand);
-        g.addPass("r.refl.lumen.args", QueueType::Compute, [&](PassBuilder& b) { b.use(args, Use::UavCompute); },
-                  [&shaders, args, lumenBands](PassContext& c) {
-                      const uint32_t k[8] = { c.uav(args), 2, kDescStride, kLumenDescOffset + (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width),
-                                              kArgumentsBytes, kLumenBand, lumenBands, 0 };
-                      c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionLumenArgs"));
-                      c.computeConstants(k, 8);
-                      c.cmd->Dispatch(1, 1, 1);
-                  });
+        // reflection.lumen_compact_traces (the reference's CompactTraces before its hardware ray tracing): after the
+        // screen traces the world rays are dispatched over a list of the jobs that still need one
+        // (ReflectionCompactTraces.hlsl), not over every job - the threads of the jobs the screen trace finished would
+        // return at once. The same rays into the same results. Without screen traces every job needs its ray: no list.
+        const bool compactTraces = screenTraces && s.lumenCompactTraces;
+        const uint32_t jobCapacity = width * height;
+        const BufferRef traceList = compactTraces ? g.createBuffer({ "R reflection trace list", 16 + (uint64_t)jobCapacity * 4, 0 }) : BufferRef{};
+        if (compactTraces)
+        {
+            g.addPass("r.refl.lumen.compact.begin", QueueType::Compute, [&](PassBuilder& b) { b.use(traceList, Use::UavCompute); },
+                      [&shaders, traceList](PassContext& c) {
+                          const uint32_t k[4] = { c.uav(traceList), 0, 0, 0 };
+                          c.cmd->SetPipelineState(shaders.compute("RayTracing/CompactDispatch.MODE0"));
+                          c.computeConstants(k, 4);
+                          c.cmd->Dispatch(1, 1, 1);
+                      });
+            g.addPass("r.refl.lumen.compact", QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          b.use(modes, Use::SrvCompute);
+                          b.use(jobs, Use::SrvCompute);
+                          b.use(reflection, Use::SrvCompute);
+                          b.use(traceList, Use::UavCompute);
+                      },
+                      [&shaders, modes, jobs, reflection, traceList, width, height, jobCapacity](PassContext& c) {
+                          const uint32_t k[8] = { c.srv(modes), c.srv(jobs), c.srv(reflection), c.uav(traceList), width, height, height, jobCapacity };
+                          c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionCompactTraces"));
+                          c.computeConstants(k, 8);
+                          c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                      });
+            // (the bands' description widths from the list's count: band b takes its entries [b x kLumenBand, ...))
+            g.addPass("r.refl.lumen.args", QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          b.use(traceList, Use::UavCompute);
+                          b.use(args, Use::UavCompute);
+                      },
+                      [&shaders, args, traceList, lumenBands, jobCapacity](PassContext& c) {
+                          const uint32_t k[12] = { c.uav(traceList), jobCapacity, c.uav(args), kLumenDescOffset + (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width),
+                                                   kArgumentsBytes, kLumenBand, lumenBands, 2, kDescStride, 0, 0, 0 };
+                          c.cmd->SetPipelineState(shaders.compute("RayTracing/CompactDispatch.MODE1"));
+                          c.computeConstants(k, 12);
+                          c.cmd->Dispatch(1, 1, 1);
+                      });
+        }
+        else
+            g.addPass("r.refl.lumen.args", QueueType::Compute, [&](PassBuilder& b) { b.use(args, Use::UavCompute); },
+                      [&shaders, args, lumenBands](PassContext& c) {
+                          const uint32_t k[8] = { c.uav(args), 2, kDescStride, kLumenDescOffset + (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width),
+                                                  kArgumentsBytes, kLumenBand, lumenBands, 0 };
+                          c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionLumenArgs"));
+                          c.computeConstants(k, 8);
+                          c.cmd->Dispatch(1, 1, 1);
+                      });
         const bool sceneColour = screenTraces && s.lumenSceneColorAtHit;
         const FrameContext::Upscale& up = fc.frame.upscale;
         const TextureRef prevColor = sceneColour ? screen.prevColor : TextureRef{};
@@ -1401,6 +1446,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   [&](PassBuilder& b) {
                       b.use(args, Use::IndirectArgs);
                       b.use(jobs, Use::SrvGraphics);
+                      if (compactTraces) b.use(traceList, Use::SrvGraphics);
                       b.use(results, Use::UavGraphics);
                       b.use(depth, Use::SrvGraphics);
                       b.use(gbuffer, Use::SrvGraphics);
@@ -1415,7 +1461,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       if (atmosphere)
                           for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
                   },
-                  [&pipeline, jobs, results, depth, gbuffer, cardFrame, hitsUseCards, prevColor, prevW, prevH, sceneColour, screenContinue, exactCounts, luts, atmosphere, sky, sun,
+                  [&pipeline, traceList, compactTraces, jobs, results, depth, gbuffer, cardFrame, hitsUseCards, prevColor, prevW, prevH, sceneColour, screenContinue, exactCounts, luts, atmosphere, sky, sun,
                    rayLength, frame, scene, samplingBias16, s, frameConstants, argumentResource, variant, timestamps, firstTick, lumenBands, words, historyDepth, ratio = up.exposureRatio,
                    prevViewProj = up.prevViewProj](PassContext& c) {
                       c.bindFrameConstants(frameConstants);
@@ -1424,9 +1470,12 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       k[0] = c.srv(jobs);
                       k[1] = c.uav(results);
                       k[2] = asU(ratio);
-                      k[3] = (frame & 0xFFFFFFu) | ((screenContinue ? 1u : 0u) | (sceneColour ? 2u : 0u) | (historyDepth ? 4u : 0u) | (s.lumenHiResSurface ? 8u : 0u)) << 24;
+                      k[3] = (frame & 0xFFFFFFu) |
+                             ((screenContinue ? 1u : 0u) | (sceneColour ? 2u : 0u) | (historyDepth ? 4u : 0u) | (s.lumenHiResSurface ? 8u : 0u) | (compactTraces ? 16u : 0u)) << 24;
                       k[4] = asU(sky.x), k[5] = asU(sky.y), k[6] = asU(sky.z), k[7] = asU(rayLength);
                       for (int i = 0; i < 4; ++i) k[8 + i] = atmosphere ? c.srv(luts[i]) : 0xFFFFFFFFu;
+                      // (ReflectionLumenTrace.hlsl RL_TRACE_LIST: the sky word its variant leaves free)
+                      if (compactTraces) k[atmosphere ? 4 : 8] = c.srv(traceList);
                       k[12] = asU(sun.x), k[13] = asU(sun.y), k[14] = asU(sun.z);
                       k[15] = exactCounts.valid() ? c.uav(exactCounts) : 0xFFFFFFFFu;
                       k[16] = c.srv(depth);

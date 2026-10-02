@@ -29,6 +29,10 @@
 //          top layer's roughness, ReflectionInternal.hlsli g_reflWords; UNX_NONE: none) }
 // P[6], P[7] = RtSceneSrvs; P[8..11] = the previous colour's view-projection (rows). b1 = the main view.
 #define RT_SHADOW_TRANSMITTANCE  // (the hits' shadow rays take what the Glass they cross leaves of the light: RayShaders.hlsli)
+// reflection.lumen_compact_traces (flag bit 4; the reference's CompactTraces): a thread's job is entry
+// DispatchRaysIndex().x + band x RL_BAND of the list of the jobs the screen traces left (ReflectionCompactTraces.hlsl),
+// not that job index itself. The list's SRV is in the sky word the variant leaves free: P[1].x with the atmosphere (the
+// constant sky's red), P[2].x without (the atmosphere's first LUT).
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/Reflection/ReflectionReuse.hlsli"
@@ -42,11 +46,22 @@
 #define RL_FLAG_SCENE_COLOUR 2u
 #define RL_FLAG_HISTORY_DEPTH 4u
 #define RL_FLAG_HI_RES 8u
+#define RL_FLAG_COMPACT 16u
+#if SKY == SKY_ATMOSPHERE
+#define RL_TRACE_LIST P[1].x
+#else
+#define RL_TRACE_LIST P[2].x
+#endif
 
 [shader("raygeneration")]
 void ReflectionLumenTraceGen()
 {
-    const uint job = DispatchRaysIndex().x + (P[4].w & 0xFFu) * RL_BAND;
+    uint job = DispatchRaysIndex().x + (P[4].w & 0xFFu) * RL_BAND;
+    if (((P[0].w >> 24) & RL_FLAG_COMPACT) != 0)
+    {
+        ByteAddressBuffer traceList = ResourceDescriptorHeap[RL_TRACE_LIST];
+        job = traceList.Load(16 + 4 * job);
+    }
     g_reflWords = P[5].w;
     StructuredBuffer<uint> jobs = ResourceDescriptorHeap[P[0].x];
     const uint entry = jobs[job];

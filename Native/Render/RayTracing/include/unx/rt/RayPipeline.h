@@ -48,6 +48,12 @@ public:
     D3D12_DISPATCH_RAYS_DESC dispatchDesc(uint32_t rayGen, uint32_t width, uint32_t height, uint32_t depth) const;
     // ExecuteIndirect of one D3D12_DISPATCH_RAYS_DESC at 'offset' of 'arguments' (the pass declares it IndirectArgs).
     void dispatchIndirect(ID3D12GraphicsCommandList7* cmd, ID3D12Resource* arguments, uint64_t offset) const;
+    // The descriptions of the ray generation shaders with Width = Height = Depth = 0, kDispatchDescStride apart (shader i
+    // at i x kDispatchDescStride), in an upload buffer that lives as long as the pipeline: a pass whose dispatch sizes a
+    // kernel writes copies one per chunk into its argument buffer (CopyBufferRegion; RayTracing/CompactDispatch.hlsl
+    // writes the sizes of a compacted list's chunks).
+    static constexpr uint32_t kDispatchDescStride = (uint32_t)((sizeof(D3D12_DISPATCH_RAYS_DESC) + 7) / 8 * 8);
+    ID3D12Resource* dispatchTemplate() const { return m_template.Get(); }
     double createMs() const { return m_createMs; }
 
     // Pipelines are created once per (device, library) and live as long as the device.
@@ -60,6 +66,7 @@ private:
     ComPtr<ID3D12StateObject> m_state;
     ComPtr<ID3D12CommandSignature> m_indirect;
     ComPtr<ID3D12Resource> m_table;
+    ComPtr<ID3D12Resource> m_template;
     std::vector<D3D12_GPU_VIRTUAL_ADDRESS> m_rayGen;
     D3D12_GPU_VIRTUAL_ADDRESS m_miss = 0, m_hit = 0;
     uint64_t m_missStride = 0, m_missBytes = 0, m_hitStride = 0, m_hitBytes = 0;

@@ -43,6 +43,10 @@ mega_lights_max_shading_weight = 20.0             # MaxShadingWeight: cap of a s
 mega_lights_max_shading_weight_hidden = 5.0       # MaxShadingWeightForHiddenLight
 mega_lights_screen_traces = true                  # ScreenTraces: a sample's ray is walked across the depth buffer first (contact shadows, and
                                                   # shadows of what the ray scene does not hold as drawn); a hit hides the sample
+mega_lights_compact_traces = true                 # CompactLightSampleTraces: the samples' rays are dispatched over a list of the samples that
+                                                  # ask for one, a thread per ray. false: a thread per texel of the sample texture - those of
+                                                  # samples without a light, of lights that cast no shadow, of merged samples and of pixels
+                                                  # without a surface return at once and leave their waves partly idle (A/B)
 mega_lights_screen_trace_max_iterations = 50      # ScreenTraces.MaxIterations
 mega_lights_screen_trace_max_distance_m = 1.0     # ScreenTraces.MaxDistance (100 cm)
 mega_lights_screen_trace_relative_thickness = 0.005  # ScreenTraces.RelativeDepthThickness

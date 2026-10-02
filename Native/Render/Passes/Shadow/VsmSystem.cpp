@@ -1043,7 +1043,15 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         Device& d = fc.device;
         DescriptorHeaps& h = d.descriptors();
         if (s.tintAtlas) d.deferRelease(s.tintAtlas);
-        if (s.tintSrv == UINT32_MAX) s.tintSrv = h.allocateResource();
+        // (a new descriptor with a new atlas, as the page atlas's: the frames in flight read the old atlas through the
+        // index their constants hold)
+        if (s.tintSrv != UINT32_MAX)
+        {
+            DescriptorHeaps* heaps = &h;
+            const uint32_t old = s.tintSrv;
+            d.deferCall([heaps, old] { heaps->freeResource(old); });
+        }
+        s.tintSrv = h.allocateResource();
         D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
         D3D12_RESOURCE_DESC1 rd{};
         rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;

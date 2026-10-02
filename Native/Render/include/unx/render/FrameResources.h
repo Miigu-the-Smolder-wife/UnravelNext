@@ -174,6 +174,9 @@ struct ViewResources
     // encoding, a = history weight; Upscale.cpp), for captures of the upscaled image; invalid when the frame renders at
     // its output resolution.                                                                  [M]
     TextureRef upscaled;
+    // What the post chain encodes of an upscaled view: 'upscaled' after the time integral that follows the upscale
+    // (shading.motion_blur_after_upscale; the same texture without it), for captures (renderergate's chain layer). [M]
+    TextureRef chainInput;
 };
 
 // A triangle stream the GPU makes in the frame (INTERFACES v1.60; W's water surface and fluid surface, request

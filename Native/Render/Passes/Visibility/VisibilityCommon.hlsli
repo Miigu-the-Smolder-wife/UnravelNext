@@ -90,6 +90,10 @@ struct CullChunk
 };
 
 #define CHUNK_INSTANCES 256u
+// The proxy kernel's DispatchMesh grid (DepthProxy.ms.hlsl; CullPrepare MODE=3 VA_PROXIES): rows of this many groups.
+// CHUNK_INSTANCES / 64 groups an item: 2^20 chunk items - the largest visibility.max_deferred_items a request with
+// proxies takes - are 2^22 groups, 2048 x 2048, D3D12's limit on a dispatch's groups (rows of 65535 passed it by 65471).
+#define PROXY_DISPATCH_ROW 2048u
 
 CullScene loadCullScene(uint srv)
 {

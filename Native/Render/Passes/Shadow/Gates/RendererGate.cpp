@@ -29,9 +29,10 @@
 // --light-toggle-at F,i: at frame F light i goes off (on again when it was off; GpuScene::setLights). --sun-step-at F,deg:
 // the sun turns by deg at frame F (about the same axis as --sun-deg-per-s).
 // --capture-frames a,b,c: captures of these frame indices (the files get _f<frame> before .pfm) instead of the last
-// frame; --capture-layers final,gi,refl,shadow,reflmode,depth,ao,roughspec,carddirect,cardindirect,cardfinal,cardalbedo:
+// frame; --capture-layers final,gi,refl,shadow,reflmode,depth,ao,roughspec,carddirect,cardindirect,cardfinal,cardalbedo,chain:
 // (ao = the short-range AO, roughspec = the gather's rough specular, card* = the mesh cards' atlases, direct = the local
-// lights' direct light of shading.mega_lights after its filters, fog = the fog alone with atmosphere.fog.debug_view on)
+// lights' direct light of shading.mega_lights after its filters, fog = the fog alone with atmosphere.fog.debug_view on,
+// chain = an upscaled view's image as the post chain takes it: after the motion blur that follows the upscale)
 // besides the capture (final), the main view's internal
 // layers of the same frames as PFM (_<layer>): gi = view.giIrradiance (E x near occlusion x exposure; an _alpha file with
 // its data flag), refl = view.reflection (radiance, weight in _alpha), shadow = the first three light slots of
@@ -386,6 +387,12 @@ int main(int argc, char** argv)
         float cloudBase = -1, cloudTop = -1;  // altitudes base and top (m; a layer low enough for a peak to stand in it), other fields default
         // --cirrus C[,altitude,optical depth]: the cirrus sheet (CloudLayerDesc::cirrus*) with coverage C; 0: none
         float cirrusCoverage = -1, cirrusAltitude = -1, cirrusDepth = -1;
+        // --lens A,F: the camera's lens - aperture diameter and focus distance, m (FrameContext::lensAperture / lensFocus).
+        // Without it the gate's camera is a pinhole and no depth of field runs.
+        float lensAperture = 0, lensFocus = 0;
+        float rainRate = 0;              // --rain R: the frame's weather record rains R mm/h (WeatherFrame::rainRate: the fog's rain veil)
+        float displayPeak = 0;           // --display-peak P: an HDR frame (FrameContext::displayPeak; the gate's 10-bit output then
+                                         // needs output.hdr_encoding 2)
         // --lightning x,y,z,cd[,first frame,frames]: a lightning flash at a world position with a luminous intensity, in
         // the frames [first, first + frames) (default: every frame) - the clouds' light from it (FrameContext::lightning)
         std::vector<float> lightning;
@@ -465,6 +472,16 @@ int main(int argc, char** argv)
                 cirrusCoverage = v[0];
                 if (v.size() == 3) cirrusAltitude = v[1], cirrusDepth = v[2];
             }
+            else if (a == "--lens")
+            {
+                std::vector<float> v;
+                std::stringstream list(next());
+                for (std::string item; std::getline(list, item, ',');) v.push_back(std::stof(item));
+                if (v.size() != 2 || !(v[0] >= 0) || !(v[1] > 0)) fail("--lens aperture,focus (m)");
+                lensAperture = v[0], lensFocus = v[1];
+            }
+            else if (a == "--rain") rainRate = std::stof(next());
+            else if (a == "--display-peak") displayPeak = std::stof(next());
             else if (a == "--lightning")
             {
                 std::stringstream list(next());
@@ -1025,6 +1042,10 @@ int main(int argc, char** argv)
                 }
                 fc.fogVolumes = fogVolumes;
                 if (!fogVolumes.empty()) fc.sceneWeather &= ~kSceneFogVolumes;
+                fc.lensAperture = lensAperture;
+                fc.lensFocus = lensFocus;
+                if (rainRate > 0) fc.weather.rainRate = rainRate;
+                fc.displayPeak = displayPeak;
                 if (!sceneWeather) fc.sceneWeather = 0;
                 if (gustPeriodS > 0)
                 {
@@ -1132,6 +1153,7 @@ int main(int argc, char** argv)
                         else if (layer == "ao") source = rendered.shortRangeAO;
                         else if (layer == "roughspec") source = rendered.giRoughSpecular;
                         else if (layer == "direct") source = rendered.localDirect;  // (shading.mega_lights: the local lights' filtered direct light)
+                        else if (layer == "chain") source = rendered.chainInput;  // (an upscaled view: what the post chain encodes)
                         else if (layer == "fog") source = renderer.lastResources().fogDebug;  // (atmosphere.fog.debug_view: rgb in-scatter x exposure; transmittance in _alpha)
                         // the mesh cards' atlases after the frame's update (CardLighting.hlsli: direct and indirect in
                         // lux x 1/64, final in nits x 1/16; a texel without a surface holds 0)
@@ -1167,7 +1189,9 @@ int main(int argc, char** argv)
                             // view.reflection holds per-tile rows below the image (ReflectionSystem: height + tiles): all
                             // rows are copied, the conversion masks the untouched tiles and keeps the image rows
                             slot->height = td.height;
-                            slot->imageRows = layer == "refl" ? std::min(td.height, rendered.view.height) : 0;
+                            // (view.shadowVisibility holds the sun's transmittance colour below the image in frames with
+                            // glass casters, shadow.vsm.translucent_tint: the layer is the image rows)
+                            slot->imageRows = layer == "refl" || layer == "shadow" ? std::min(td.height, rendered.view.height) : 0;
                             D3D12_RESOURCE_DESC rd{};
                             rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
                             rd.Width = slot->width;
