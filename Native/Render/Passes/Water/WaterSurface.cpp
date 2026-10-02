@@ -1,5 +1,6 @@
 // Water surface shading, stage 1 (track W). See include/unx/water/WaterSurface.h and WaterSurface.hlsli.
 #include "unx/water/WaterSurface.h"
+#include "unx/water/FluidSurface.h"
 #include "unx/water/LinearDispatch.h"
 
 #include "unx/core/Log.h"
@@ -7,6 +8,7 @@
 #include "unx/render/Shaders.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -669,6 +671,73 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                           else c.cmd->ExecuteIndirect(signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
                       });
             if (rays) traceAndApply(radiance);
+        }
+    }
+    // The waterline at the lens (WaterLine.hlsl; shading.water_waterline): a basin whose still level the near plane's
+    // rectangle can reach, with the camera over it - the surface meets the lens.
+    if (mainView && interiorPass && (!q.has("shading.water_waterline") || q.boolean("shading.water_waterline")) && fc.frame.poolCount)
+    {
+        const float width = (q.has("shading.water_waterline_mm") ? (float)q.number("shading.water_waterline_mm") : 1.0f) * 1e-3f;
+        const float strength = q.has("shading.water_waterline_strength") ? (float)q.number("shading.water_waterline_strength") : 0.6f;
+        if (!(width > 0) || !(strength >= 0 && strength <= 1)) fail("shading: water_waterline_mm > 0, water_waterline_strength in [0, 1]");
+        // (the near plane's corners lie this far from the eye at most; the ripples' and the meniscus' reach on top)
+        const float tanX = 1.0f / view.view.proj.m[0][0], tanY = 1.0f / view.view.proj.m[1][1];
+        const float reach = view.view.nearPlane * std::sqrt(1.0f + tanX * tanX + tanY * tanY) + 0.05f + 8 * width;
+        const float3 eye = view.view.position;
+        struct Line
+        {
+            float centre[3];
+            TextureRef field;
+            float cosYaw, sinYaw, sizeX, sizeZ;
+        };
+        std::vector<Line> lines;
+        const std::vector<FluidSurfaceInput::Basin>& fields = fc.state<std::vector<FluidSurfaceInput::Basin>>("W.poolBasins");
+        for (uint32_t i = 0; i < fc.frame.poolCount && lines.size() < 4; ++i)
+        {
+            const PoolFrame& p = fc.frame.pools[i];
+            const float dx = eye.x - (float)p.centre[0], dy = eye.y - (float)p.centre[1], dz = eye.z - (float)p.centre[2];
+            if (std::abs(dy) > reach) continue;
+            const float c = std::cos(p.yaw), sn = std::sin(p.yaw);
+            const float lx = dx * c - dz * sn, lz = dx * sn + dz * c;
+            const bool round = p.shape == 1;
+            if (round ? std::hypot(lx, lz) > 0.5f * p.sizeX + reach : (std::abs(lx) > 0.5f * p.sizeX + reach || std::abs(lz) > 0.5f * p.sizeZ + reach)) continue;
+            Line line{ { (float)p.centre[0], (float)p.centre[1], (float)p.centre[2] }, TextureRef{}, c, sn, p.sizeX, round ? 0.0f : p.sizeZ };
+            // (a rectangular basin's ripples: this frame's field, as the fluids' seam finds it - by its place and size)
+            for (const FluidSurfaceInput::Basin& b : fields)
+                if (!round && b.centre[0] == line.centre[0] && b.centre[1] == line.centre[1] && b.centre[2] == line.centre[2] && b.sizeX == p.sizeX && b.sizeZ == p.sizeZ)
+                    line.field = b.field;
+            lines.push_back(line);
+        }
+        if (!lines.empty())
+        {
+            ID3D12PipelineState* lineKernel = fc.shaders.compute("Passes/Water/WaterLine");
+            g.addPass("w.surface.waterline", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(colour, Use::UavCompute);
+                          if (bandARadiance.valid()) b.use(bandARadiance, Use::UavCompute);
+                          for (const Line& l : lines)
+                              if (l.field.valid()) b.use(l.field, Use::SrvCompute);
+                      },
+                      [=](PassContext& c) {
+                          uint32_t k[48] = {};
+                          k[0] = c.uav(colour);
+                          k[1] = bandARadiance.valid() ? c.uav(bandARadiance) : none;
+                          k[2] = (uint32_t)lines.size();
+                          std::memcpy(&k[4], &width, 4);
+                          std::memcpy(&k[5], &strength, 4);
+                          for (size_t i = 0; i < lines.size(); ++i)
+                          {
+                              const Line& l = lines[i];
+                              std::memcpy(&k[8 + 8 * i], l.centre, 12);
+                              k[8 + 8 * i + 3] = l.field.valid() ? c.srv(l.field) : none;
+                              const float axes[4] = { l.cosYaw, l.sinYaw, l.sizeX, l.sizeZ };
+                              std::memcpy(&k[12 + 8 * i], axes, 16);
+                          }
+                          c.cmd->SetPipelineState(lineKernel);
+                          c.bindFrameConstants(cb);
+                          c.computeConstants(k, 8 + 8 * (uint32_t)lines.size());
+                          c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                      });
         }
     }
     ID3D12Resource* readback = st.readback.Get();

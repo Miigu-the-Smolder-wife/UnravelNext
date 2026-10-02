@@ -9,6 +9,15 @@
 //   weatherValues(srv)    rain rate (mm/h), wetness, snow rate (mm/h), snow depth (m), fog density, cloud cover.
 // Record: { rain, wetness, snow rate, snow depth, fog, cloud cover, 0, 0, rain direction xyz, map SRV, map origin xyz
 // (texel (0, 0) corner on the top plane), cell m, axis u xyz, texels per side, axis v xyz, 0 }.
+// Shores (from byte 96: the count, then from byte 112 48 B per water body - the frame's basins and its sea, the nearest
+// WEATHER_SHORES of them; AtmosphereSystem.cpp publishWeather):
+//   { centre x, still level y, centre z, band (m above the level that the water wets: its ripples and splashes) },
+//   { half size x, half size z (a round body: its radius in x), cos, sin of the body's yaw },
+//   { shape (0 rectangle, 1 circle, 2 without bounds: the open sea), margin (m beyond the outline over which the wetness
+//     ends), depth (m of water; 0: no floor), 0 }.
+//   shoreWetness(srv, x, under)  how wet the water bodies leave a surface point: 1 under a still level (under = 1: the
+//                         point is in the water), falling to 0 over the band above it and over the margin beyond the
+//                         outline; nothing under a body's floor (the room below a bath).
 #ifndef UNX_ATMOSPHERE_WEATHER_FIELD_HLSLI
 #define UNX_ATMOSPHERE_WEATHER_FIELD_HLSLI
 #include "Bindless.hlsli"
@@ -70,5 +79,35 @@ float rainExposure(uint srv, float3 x)
         surface += (o.x ? f.x : 1 - f.x) * (o.y ? f.y : 1 - f.y) * map.Load(int3(t, 0));
     }
     return depth <= surface + 0.05 ? 1.0 : 0.0;
+}
+
+#define WEATHER_SHORES 8u
+float shoreWetness(uint srv, float3 x, out float under)
+{
+    under = 0;
+    if (srv == 0xFFFFFFFFu) return 0;
+    ByteAddressBuffer b = ResourceDescriptorHeap[srv];
+    const uint count = min(b.Load(96), WEATHER_SHORES);
+    float wet = 0;
+    [loop] for (uint i = 0; i < count; ++i)
+    {
+        const uint at = 112 + 48 * i;
+        const float4 r0 = asfloat(b.Load4(at)), r1 = asfloat(b.Load4(at + 16)), r2 = asfloat(b.Load4(at + 32));
+        const float h = x.y - r0.y;  // above the still level
+        if (h >= r0.w || (r2.z > 0 && h < -(r2.z + r2.y))) continue;
+        float outside = -1;  // m outside the body's outline
+        if (r2.x < 1.5)
+        {
+            // the body's axes (Pool.cpp: local x = dx cos - dz sin, local z = dx sin + dz cos)
+            const float2 d = x.xz - r0.xz;
+            const float2 l = float2(d.x * r1.z - d.y * r1.w, d.x * r1.w + d.y * r1.z);
+            outside = r2.x < 0.5 ? max(abs(l.x) - r1.x, abs(l.y) - r1.y) : length(l) - r1.x;
+        }
+        if (outside >= r2.y) continue;
+        const float across = saturate(1.0 - max(outside, 0.0) / max(r2.y, 1e-3));
+        wet = max(wet, across * (h <= 0 ? 1.0 : saturate(1.0 - h / max(r0.w, 1e-3))));
+        if (h <= 0 && outside <= 0) under = 1;
+    }
+    return wet;
 }
 #endif

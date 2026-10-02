@@ -17,6 +17,10 @@
 // with the square of the wetness (a damp surface keeps its relief, a soaked one shines). A metal's colour is its
 // surface reflection and stays. The film as its own layer (the clearcoat of ior 1.33, A9) is M's to add in the resolve;
 // this is the single-lobe form until then.
+// Shores (S's weather record: WeatherField.hlsli shoreWetness; shading.water_shore_wet): the frame's water bodies wet
+// what they touch - the surfaces under a basin's or the sea's still level and a band above it. A surface in the water
+// takes the film's albedo (its pores hold water) and keeps its own lobe: the film's surface is the water's, shaded by W.
+// A kernel at the size limit compiles without them (UNX_LAYERS_WITHOUT_SHORE).
 // Layer materials [authoring values of measured order; constants until a game needs its own]: soot (charcoal albedo
 // 0.02-0.05), mineral dust (0.3-0.45), fresh blood (red ~0.3, green/blue ~0.01, liquid gloss), hoarfrost (0.7-0.8),
 // fresh snow (0.85-0.95 visible).
@@ -84,12 +88,16 @@ void surfaceLayersApply(SurfaceLayerInputs in_, float3 world, float3 geometricNo
             wet = max(wet, saturate(w.wetness) * exposure);
         }
     }
+    float under = 0;
+#ifndef UNX_LAYERS_WITHOUT_SHORE
+    if (in_.weather != 0xFFFFFFFFu) wet = max(wet, shoreWetness(in_.weather, world, under));
+#endif
     if (wet > 0)
     {
         const float3 a = m.baseColor;
         const float3 film = 0.98f * a * (1.0f - SL_WET_INTERNAL) / (1.0f - SL_WET_INTERNAL * a);
         m.baseColor = lerp(a, lerp(film, a, m.metallic), wet);
-        m.roughness = lerp(m.roughness, min(m.roughness, SL_WET_ROUGHNESS), wet * wet);
+        m.roughness = lerp(m.roughness, min(m.roughness, SL_WET_ROUGHNESS), wet * wet * (1.0f - under));
     }
     slBlend(m, saturate(st.blood), float3(0.30f, 0.012f, 0.010f), 0.2f, false, geometricNormal, geometricVariance);
     slBlend(m, saturate(st.scorch), float3(0.03f, 0.03f, 0.03f), 0.9f, false, geometricNormal, geometricVariance);

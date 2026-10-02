@@ -11,6 +11,7 @@
 #include <cstring>
 #include <memory>
 #include <utility>
+#include <vector>
 
 namespace unx::render::atmosphere
 {
@@ -181,9 +182,48 @@ void publishWeather(FramePassContext& fc, State& s)
 {
     const WeatherFrame& w = fc.frame.weather;
     const bool rain = w.rainRate > 0 || w.wetness > 0 || w.snowRate > 0 || w.snowDepth > 0;
-    if (!rain && w.fogDensity <= 0 && w.cloudCover <= 0) return;
+    // The frame's shores (WeatherField.hlsli shoreWetness: the surfaces a water body wets): its basins and its sea, the
+    // nearest kShores to the camera.
+    constexpr uint32_t kShores = 8;
+    struct Shore
+    {
+        float centreX, level, centreZ, band;
+        float halfX, halfZ, cosYaw, sinYaw;
+        float shape, margin, depth, pad;
+    };
+    std::vector<std::pair<float, Shore>> shores;
+    const QualityConfig& q = fc.quality;
+    if (!q.has("shading.water_shore_wet") || q.boolean("shading.water_shore_wet"))
+    {
+        const float band = q.has("shading.water_shore_band_m") ? (float)q.number("shading.water_shore_band_m") : 0.06f;
+        const float margin = q.has("shading.water_shore_margin_m") ? (float)q.number("shading.water_shore_margin_m") : 0.25f;
+        if (!(band > 0) || !(margin > 0)) fail("shading.water_shore_band_m and water_shore_margin_m must be positive");
+        const float3 eye = fc.frame.mainView.position;
+        for (uint32_t i = 0; i < fc.frame.poolCount; ++i)
+        {
+            const PoolFrame& p = fc.frame.pools[i];
+            const bool round = p.shape == 1;  // (sizeX = the diameter)
+            Shore sh{ (float)p.centre[0], (float)p.centre[1], (float)p.centre[2], band, 0.5f * p.sizeX, round ? 0.5f * p.sizeX : 0.5f * p.sizeZ,
+                      std::cos(p.yaw), std::sin(p.yaw), round ? 1.0f : 0.0f, margin, p.depth, 0.0f };
+            const float dx = sh.centreX - eye.x, dy = sh.level - eye.y, dz = sh.centreZ - eye.z;
+            shores.push_back({ dx * dx + dy * dy + dz * dz, sh });
+        }
+        if (const OceanFrame* sea = fc.frame.ocean)
+        {
+            // (the waves run up the shore: half the sea state's significant wave height - the fetch-limited JONSWAP sea's
+            //  1.6e-3 sqrt(g F) U / g -, not under the basins' band and not over the sea's vertical bound)
+            const float significant = 1.6e-3f * std::sqrt(9.81f * std::max(sea->fetch, 0.0f)) * std::max(sea->windSpeed, 0.5f) / 9.81f;
+            const float runUp = std::clamp(0.5f * significant, band, std::max(band, sea->verticalBound));
+            Shore sh{ sea->lakeCentre[0], sea->level, sea->lakeCentre[1], runUp, sea->lakeRadius, sea->lakeRadius, 1.0f, 0.0f,
+                      sea->lake ? 1.0f : 2.0f, margin, 0.0f, 0.0f };
+            shores.push_back({ -1.0f, sh });  // (kept before every basin)
+        }
+        std::sort(shores.begin(), shores.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+        if (shores.size() > kShores) shores.resize(kShores);
+    }
+    if (!rain && w.fogDensity <= 0 && w.cloudCover <= 0 && shores.empty()) return;
     s.device = &fc.device;
-    constexpr uint32_t kRecordBytes = 96, kTexels = 512;
+    constexpr uint32_t kRecordBytes = 96 + 16 + kShores * 48, kTexels = 512;
     constexpr float kCell = 0.25f, kTop = 400, kReach = 600;
     if (!s.weatherRing)
     {
@@ -222,6 +262,12 @@ void publishWeather(FramePassContext& fc, State& s)
     std::memcpy(&head[11], &mapSrv, 4);
     std::memcpy(&head[19], &texels, 4);
     std::memcpy(s.weatherMapped + slot * (uint64_t)kRecordBytes, head, sizeof head);
+    {
+        uint8_t* at = s.weatherMapped + slot * (uint64_t)kRecordBytes + sizeof head;
+        const uint32_t count[4] = { (uint32_t)shores.size(), 0, 0, 0 };
+        std::memcpy(at, count, sizeof count);
+        for (size_t i = 0; i < shores.size(); ++i) std::memcpy(at + 16 + i * sizeof(Shore), &shores[i].second, sizeof(Shore));
+    }
     const uint32_t recordSrv = s.weatherSrv[slot];
     fc.resources.weather = recordSrv;
     // The map is traced by R right after its ray scene record (RayTracingTrack.cpp: the frame's TLAS refs exist then).
