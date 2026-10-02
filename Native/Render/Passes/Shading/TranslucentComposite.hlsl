@@ -31,6 +31,7 @@
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
+#include "Passes/Atmosphere/CloudShadowCommon.hlsli"
 #include "Passes/GI/GiCache.hlsli"
 #include "Passes/GI/GiSource.hlsli"
 #include "Passes/Reflection/Reflection.hlsli"
@@ -149,6 +150,8 @@ void main(uint3 id : SV_DispatchThreadID)
             stats.InterlockedAdd(4 * TRANSLUCENT_STAT_UNLIT, 1);
         }
     }
+    // (B5: the sun through the cloud layer at the surface, as S's sun slot of opaque pixels has it - no glint under a cloud)
+    if (atm.transmittance != UNX_NONE && sunVisibility > 0) sunVisibility *= cloudSunTransmittanceFromLut(atm.transmittance, worldPos);
     const float3 l0 = normalize(g_sunDirection);
     float3 radiance = 0;
     if (sunVisibility > 0 && dot(n, l0) > 0)

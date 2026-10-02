@@ -2111,7 +2111,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                                            ctx.srv(table), ctx.srv(atlas), ctx.srv(bound), ctx.srv(blocks),
                                            ring, localLightsSrv, slotOfSrv, (localSlots && !second) ? ctx.srv(froxelLists) : 0xFFFFFFFFu,
                                            second ? ctx.uav(fragmentSun) : 0u, ctx.srv(layers), second ? 0u : ctx.srv(depth), second ? 0u : ctx.srv(gbuffer),
-                                           ctx.uav(statsBuf), second ? ctx.srv(ranges) : 0u, 0, 0 };
+                                           ctx.uav(statsBuf), second ? ctx.srv(ranges) : 0u, tlut.valid() ? ctx.srv(tlut) : 0xFFFFFFFFu, 0 };
             return k;
         };
         g.addPass("s.shadow.fragments", QueueType::Compute,
@@ -2130,6 +2130,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                       b.use(gbuffer, Use::SrvCompute);
                       b.use(statsBuf, Use::UavCompute);
                       if (localSlots) b.use(froxelLists, Use::SrvCompute);
+                      if (tlut.valid()) b.use(tlut, Use::SrvCompute);  // (the cloud layer's shadow on the fragments)
                   },
                   [=](PassContext& ctx) {
                       const auto k = words(ctx, false);
@@ -2152,6 +2153,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                       b.use(bound, Use::SrvCompute);
                       b.use(blocks, Use::SrvCompute);
                       b.use(layers, Use::SrvCompute);
+                      if (tlut.valid()) b.use(tlut, Use::SrvCompute);
                   },
                   [=](PassContext& ctx) {
                       const auto k = words(ctx, true);

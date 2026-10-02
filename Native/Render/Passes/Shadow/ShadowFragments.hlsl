@@ -19,7 +19,9 @@
 // P[2] = { VSM constants CBV, local lights SRV, slot of light SRV, froxel lists SRV (0xFFFFFFFF: none) }
 // P[3] = { fragment sun UAV (raw), layers SRV (0xFFFFFFFF: none), band A depth SRV, G-buffer SRV }
 // P[4] = { VSM stats UAV (raw: words 25 pixels with records, 26 pair pixels, 27..29 the check below), depth range SRV
-//          (MODE 1, for the check) }
+//          (MODE 1, for the check), transmittance LUT SRV (0xFFFFFFFF: none): the sun bytes x the cloud layer's sun
+//          transmittance (B5, CloudShadowCommon.hlsli) - leaves and grass under a cloud's shadow as the ground under
+//          them is (the pixel passes' sun slot has it); once per pixel at the nearest record (MODE 0), per record (MODE 1) }
 // shadow.vsm.fragment_check (VsmConstants::fragmentCheck, verification only): MODE 1 evaluates every record; for records of
 // settled pixels it compares the per-record SMRT with the value M reads (the 4-point sun bytes interpolated at the
 // record's linear depth) and counts differences above 1/255 (words 27 checked, 28 mismatches, 29 largest x 255).
@@ -29,6 +31,7 @@
 #include "Passes/Atmosphere/Froxel.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 #include "Passes/Visibility/CoverageTiles.hlsli"
+#include "Passes/Atmosphere/CloudShadowCommon.hlsli"
 
 ShadowSrvs fragmentSrvs()
 {
@@ -55,6 +58,7 @@ VsmResources fragmentVsm()
 }
 float pixelFootprint(float deviceDepth) { return 2 * linearDepth(deviceDepth) * g_tanHalfFovY / g_viewHeight; }
 float fragmentSunT(ShadowSrvs s, float3 p, float footprint) { return P[3].y != 0xFFFFFFFFu ? shadowSunTransmittanceAt(s, p, footprint, footprint) : 1.0; }
+float fragmentCloudT(float3 p) { return P[4].z != 0xFFFFFFFFu ? cloudSunTransmittanceFromLut(P[4].z, p) : 1.0; }
 
 #if MODE == 0
 // Local slots 1-3 (bytes 1..3; 255 = no slot) of the pixel's froxel list at view depth z, receiver at p with normal n.
@@ -113,11 +117,12 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
     uint sun = 0, pair = 0;
     if (cls == VSM_REGION_LIT)
     {
+        const float cloudT = fragmentCloudT(pNear);  // (the layer's shadow does not change over the pixel's fragments)
         [unroll] for (uint k = 0; k < 4; ++k)
         {
             const float z = lerp(linearDepth(dNear), linearDepth(dFar), k / 3.0);
             const float3 p = lerp(pNear, pFar, (z - linearDepth(dNear)) / max(linearDepth(dFar) - linearDepth(dNear), 1e-30));
-            sun |= (uint)round(saturate(fragmentSunT(s, p, footprint)) * 255.0) << (8 * k);
+            sun |= (uint)round(saturate(fragmentSunT(s, p, footprint) * cloudT) * 255.0) << (8 * k);
         }
     }
     else if (cls == VSM_REGION_MIXED)
@@ -186,7 +191,7 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
         const float footprint = pixelFootprint(d);
         uint path;
         const float v = vsmSunVisibility(r, world, coverageFragmentNormal(f), footprint, vc.tanSunRadius, vc.searchTaps, vc.filterTaps, path) *
-                        fragmentSunT(s, world, footprint);
+                        fragmentSunT(s, world, footprint) * fragmentCloudT(world);
         if (!pairPixel)
         {
             // The value M reads for a settled pixel: the 4-point bytes interpolated at the record's linear depth.
