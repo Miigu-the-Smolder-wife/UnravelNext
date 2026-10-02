@@ -128,6 +128,9 @@ struct McStats
     uint32_t evictedPages = 0;                         // this frame: feedback pages that left (unused, or for room)
     uint32_t feedbackDropped = 0;                      // the newest completed frame's reports that found no place in the
                                                        // GPU's table (set by SurfaceCacheCards; not 0: the table overflowed)
+    uint32_t captureOverflow = 0;                      // V's overflow bits of the newest cluster capture run that dropped
+                                                       // geometry (set by SurfaceCacheCards; the pages it drew lack it
+                                                       // until the refresh comes round)
 };
 
 class MeshCardScene

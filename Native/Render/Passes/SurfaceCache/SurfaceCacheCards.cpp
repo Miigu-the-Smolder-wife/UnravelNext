@@ -26,7 +26,11 @@ namespace unx::render::refl
 {
 namespace
 {
-constexpr uint32_t kCaptureBytes = 48;        // CardCaptureList.hlsli CC_CAPTURE_BYTES
+constexpr uint32_t kCaptureBytes = 80;        // CardCaptureList.hlsli CC_CAPTURE_BYTES
+// The clusters' capture (surface_cache.mesh_cards_capture_clusters): a page's views of V's raster service are laid in
+// tiles of kCaptureTile texels (the smallest card allocation); a request holds at most kCaptureViews views (V's limit:
+// 255). The capture context (CardCaptureCluster.ps.hlsl): one record of kContextBytes per round, per frame in flight.
+constexpr uint32_t kCaptureTile = 8, kCaptureViews = 255, kContextBytes = 32, kContextRounds = 64, kContextFrames = 4;
 constexpr uint32_t kPageGroups = 256;         // 16 x 16 groups of 8 x 8 texels: a page of at most 128 x 128
 constexpr uint32_t kUploadSlots = 4;
 // The readers' feedback table (CardLighting.hlsli CL_FEEDBACK_*): a header and (element + 1, hits) pairs; its copies
@@ -75,7 +79,48 @@ struct Round  // one update of the cache, staged at record time
     uint32_t captures = 0;
     bool anyResample = false;
     uint32_t pageCount = 0;
+    // the clusters' capture: a view of V's raster service per capture, their tile masks (every tile of a view set) and
+    // the tiles' slots in the capture atlas, in the frame's staging
+    std::vector<RasterView> views;
+    uint64_t maskAt = 0, slotsAt = 0;
+    uint32_t maskWords = 0;
 };
+
+// A capture as a view of V's raster service: world -> the page's clip space - x, y over the page's rectangle of the
+// card (y down the page, as the source-triangle capture lays it), z = 1 at the card's front and 0 at its back (the
+// service's depth is reversed); orthographic, so the hierarchy's cut is taken at lodPixelsPerMetre = the page's texels
+// per metre. Only the capture's own instance is drawn.
+RasterView captureView(const McCardGpu& card, const McCapture& cap, uint32_t index, bool mirrored)
+{
+    float x[3], y[3], z[3], centre[3];
+    for (int r = 0; r < 3; ++r) x[r] = card.cardToWorld[r][0], y[r] = card.cardToWorld[r][1], z[r] = card.cardToWorld[r][2], centre[r] = card.cardToWorld[r][3];
+    const float ex = std::max(card.extent[0], 1e-6f), ey = std::max(card.extent[1], 1e-6f), ez = std::max(card.extent[2], 1e-6f);
+    const float width = std::max(cap.cardUvRect[2] - cap.cardUvRect[0], 1e-8f), height = std::max(cap.cardUvRect[3] - cap.cardUvRect[1], 1e-8f);
+    const float sx = 1.0f / width, sy = 1.0f / height, ox = -cap.cardUvRect[0] * sx, oy = -cap.cardUvRect[1] * sy;
+    const float kx = sx / ex, ky = sy / ey, kz = 0.5f / ez;
+    const auto dot3 = [](const float* a, const float* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+    RasterView v;
+    for (int c = 0; c < 3; ++c)
+    {
+        v.viewProj.m[0][c] = x[c] * kx;
+        v.viewProj.m[1][c] = -y[c] * ky;
+        v.viewProj.m[2][c] = z[c] * kz;
+        v.viewProj.m[3][c] = 0;
+    }
+    v.viewProj.m[0][3] = -dot3(centre, x) * kx + (sx + 2 * ox - 1);
+    v.viewProj.m[1][3] = dot3(centre, y) * ky + (1 - sy - 2 * oy);
+    v.viewProj.m[2][3] = -dot3(centre, z) * kz + 0.5f;
+    v.viewProj.m[3][3] = 1;
+    v.viewportX = cap.captureRect[0];
+    v.viewportY = cap.captureRect[1];
+    v.viewportWidth = cap.captureRect[2];
+    v.viewportHeight = cap.captureRect[3];
+    v.lodPixelsPerMetre = std::max((float)cap.captureRect[2] / (2 * ex * width), (float)cap.captureRect[3] / (2 * ey * height));
+    v.userData = index | (mirrored ? 0x80000000u : 0u);
+    v.instanceFirst = cap.sceneInstance;
+    v.instanceEnd = cap.sceneInstance + 1;
+    return v;
+}
 
 float3x4 matrixOf(const gpu::Instance& g)
 {
@@ -135,6 +180,7 @@ SurfaceCacheCardSettings SurfaceCacheCardSettings::fromQuality(const QualityConf
     s.cards.maxDistance = (float)num("surface_cache.mesh_cards_max_distance_m", 300.0);
     s.cards.minSize = (float)num("surface_cache.mesh_cards_min_size_m", 0.1);
     s.cards.refreshFraction = (float)num("surface_cache.mesh_cards_refresh_fraction", 0.125);
+    s.captureClusters = flag("surface_cache.mesh_cards_capture_clusters", false);
     s.cards.feedback = flag("surface_cache.feedback", true);
     s.cards.feedbackMinPageHits = (uint32_t)std::max(num("surface_cache.feedback_min_page_hits", 16), 0.0);
     {
@@ -209,6 +255,13 @@ struct SurfaceCacheCards::Impl
     bool feedbackWritten = false;  // the table has been emptied once (before that its content is undefined: no copy)
     uint32_t feedbackDropped = 0;
     uint64_t feedbackLogFrame = 0;
+    // the clusters' capture: the context records its pixel kernel reads (an upload buffer with its own raw SRV: V hands
+    // a requester's pixel constants on as given, before the graph's views exist), the newest overflow seen of its runs
+    ComPtr<ID3D12Resource> captureContext;
+    uint8_t* captureContextMapped = nullptr;
+    uint32_t captureContextSrv = 0xFFFFFFFFu;
+    uint64_t captureOverflowFrame = UINT64_MAX;
+    uint32_t captureOverflowBits = 0;
 
     void release(ComPtr<ID3D12Resource>& r)
     {
@@ -388,6 +441,22 @@ struct SurfaceCacheCards::Impl
             }
             atlasSize = settings.cards.atlasSize;
         }
+        if (settings.captureClusters && !captureContext)
+        {
+            const uint64_t bytes = (uint64_t)kContextFrames * kContextRounds * kContextBytes;
+            captureContext = makeBuffer(bytes, D3D12_HEAP_TYPE_UPLOAD, L"R card capture context");
+            D3D12_RANGE none{ 0, 0 };
+            check(captureContext->Map(0, &none, reinterpret_cast<void**>(&captureContextMapped)), "map the mesh card capture context");
+            std::memset(captureContextMapped, 0xFF, (size_t)bytes);
+            captureContextSrv = device->descriptors().allocateResource();
+            D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+            sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sd.Format = DXGI_FORMAT_R32_TYPELESS;
+            sd.Buffer.NumElements = (UINT)(bytes / 4);
+            sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+            device->d3d()->CreateShaderResourceView(captureContext.Get(), &sd, device->descriptors().resourceCpu(captureContextSrv));
+        }
         if (settings.cards.feedback && !feedback)
         {
             feedback = makeBuffer(kFeedbackBytes, D3D12_HEAP_TYPE_DEFAULT, L"R card feedback", true);
@@ -473,8 +542,9 @@ struct SurfaceCacheCards::Impl
 
     // One update's CPU side: resolutions and allocation, then what the GPU needs of it (records that changed, the
     // capture list, the capture's draws).
-    void stageRound(FramePassContext& fc, Round& round, uint32_t tableSrv)
+    void stageRound(FramePassContext& fc, Round& round, uint32_t tableSrv, bool clusters)
     {
+        std::vector<uint32_t> mask, slots;  // (the clusters' capture: tile masks and atlas slots of the round's views)
         const float3 origins[1] = { fc.frame.mainView.position };
         scene->update(origins);
         MeshCardScene::Dirty dirty = scene->takeDirty();
@@ -511,6 +581,40 @@ struct SurfaceCacheCards::Impl
             r[7] = cap.atlasRect[2] | (cap.atlasRect[3] << 16);
             std::memcpy(&r[8], cap.cardUvRect, 16);
             round.anyResample = round.anyResample || cap.resample;
+            if (clusters)
+            {
+                // (a view per capture, whatever comes of it below: RasterView::userData is the capture's index)
+                const uint32_t tilesX = cap.captureRect[2] / kCaptureTile, tilesY = cap.captureRect[3] / kCaptureTile, tiles = tilesX * tilesY;
+                RasterView view;
+                bool drawn = false;
+                if (cap.sceneInstance < instances.size() && cap.sceneInstance < src.instances.size() && cap.card < scene->cardsGpu().size() && tiles > 0)
+                {
+                    const McCardGpu& card = scene->cardsGpu()[cap.card];
+                    float3 ax, ay, az;
+                    scene::meshCardAxes(card.packed & 7u, ax, ay, az);
+                    // (the page's image shows the card's x to the right and its y downward: a mirror image of the side
+                    // the card is seen from when its axes are a right-handed set)
+                    const bool mirrored = dot(cross(ax, ay), az) > 0;
+                    view = captureView(card, cap, (uint32_t)c, mirrored);
+                    std::memcpy(&r[12], card.extent, 12);
+                    r[15] = (card.packed & 7u) | (mirrored ? 1u << 8 : 0u);
+                    std::memcpy(&r[16], card.origin, 12);
+                    drawn = true;
+                }
+                view.cullMaskOffset = (uint32_t)mask.size();
+                if (!drawn) view.viewportWidth = view.viewportHeight = 0;
+                else
+                {
+                    // every tile of the page is drawn, into the page's place in the capture atlas
+                    for (uint32_t first = 0; first < tiles; first += 32) mask.push_back(tiles - first >= 32 ? 0xFFFFFFFFu : (1u << (tiles - first)) - 1u);
+                    slots.resize(mask.size() * 32, 0u);
+                    const uint32_t perRow = this->scene->captureAtlasSize() / kCaptureTile;
+                    for (uint32_t t = 0; t < tiles; ++t)
+                        slots[(size_t)view.cullMaskOffset * 32 + t] = (cap.captureRect[1] / kCaptureTile + t / tilesX) * perRow + cap.captureRect[0] / kCaptureTile + t % tilesX;
+                    round.views.push_back(view);
+                }
+                continue;
+            }
             if (cap.sceneInstance >= instances.size() || cap.sceneInstance >= src.instances.size() || cap.card >= scene->cardsGpu().size()) continue;
             const gpu::Instance& g = instances[cap.sceneInstance];
             const scene::Instance& in = src.instances[cap.sceneInstance];
@@ -544,6 +648,14 @@ struct SurfaceCacheCards::Impl
             }
         }
         round.capturesAt = stage(records.data(), records.size() * 4);
+        if (clusters)
+        {
+            if (mask.empty()) mask.push_back(0u);
+            slots.resize(mask.size() * 32, 0u);
+            round.maskWords = (uint32_t)mask.size();
+            round.maskAt = stage(mask.data(), mask.size() * 4);
+            round.slotsAt = stage(slots.data(), slots.size() * 4);
+        }
     }
 };
 
@@ -555,6 +667,16 @@ SurfaceCacheCards::~SurfaceCacheCards()
     s.cache.reset();  // (joins the generation workers)
     for (auto& u : s.upload)
         if (u.buffer) u.buffer->Unmap(0, nullptr);
+    if (s.captureContext)
+    {
+        s.captureContext->Unmap(0, nullptr);
+        if (s.device && s.captureContextSrv != 0xFFFFFFFFu)
+        {
+            DescriptorHeaps* heaps = &s.device->descriptors();
+            s.device->deferCall([heaps, srv = s.captureContextSrv] { heaps->freeResource(srv); });
+        }
+        s.release(s.captureContext);
+    }
     if (s.feedbackReadback) s.feedbackReadback->Unmap(0, nullptr);
     s.release(s.feedback);
     s.release(s.feedbackReadback);
@@ -645,9 +767,25 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
     const uint32_t rounds = s.loadingState && loadWork ? s.settings.loadRounds : 1u;
     auto staged = std::make_shared<std::vector<Round>>(rounds);
     s.staging.clear();
-    for (Round& round : *staged) s.stageRound(fc, round, tableSrv);
+    // surface_cache.mesh_cards_capture_clusters: through V's raster service, when the frame has it
+    const bool clusters = s.settings.captureClusters && fc.services.rasterizeDepth && s.captureContext && rounds <= kContextRounds;
+    for (Round& round : *staged) s.stageRound(fc, round, tableSrv, clusters);
     s.lastStats = s.scene->stats();
     s.lastStats.feedbackDropped = s.feedbackDropped;
+    if (clusters && fc.trackState)
+    {
+        // V's report of a capture run whose lists overflowed (geometry was dropped from the pages it drew; it comes
+        // framesInFlight later): the pages are drawn again as the refresh comes round
+        for (const auto& [name, overflow] : fc.state<DepthRasterOverflows>(kDepthRasterOverflowKey))
+            if (name.rfind("r.card.v", 0) == 0 && overflow.frame != UINT64_MAX && (s.captureOverflowFrame == UINT64_MAX || overflow.frame > s.captureOverflowFrame))
+            {
+                s.captureOverflowFrame = overflow.frame;
+                s.captureOverflowBits = overflow.bits;
+                logf("surface cache: the cluster capture '%s' overflowed V's lists in frame %llu (bits 0x%x): its pages lack geometry until they are refreshed\n", name.c_str(),
+                     (unsigned long long)overflow.frame, overflow.bits);
+            }
+    }
+    s.lastStats.captureOverflow = s.captureOverflowBits;
     const bool generating = s.waiting > 0 || s.cache->pending() > 0;
     if (s.loadingState)
     {
@@ -813,6 +951,68 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
         const TextureRef resampledIndirect = g.createTexture({ "r.card resampled indirect", captureSize, captureSize, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
         const BufferRef captureList = g.createBuffer({ "r.card captures", (uint64_t)std::max(round.captures, 1u) * kCaptureBytes, 0 });
 
+        if (clusters)
+        {
+            // The capture through V's raster service. r.card.vcapture.begin: the round's lists, the cleared depths, the
+            // context record; then per batch of at most kCaptureViews pages r.card.vdepth (the nearest surface of every
+            // texel) and r.card.vmaterial (that surface's material, written once) - each a run of the service: its cull
+            // of the batch's instances at the pages' texel size, then its raster.
+            const BufferRef cullMask = g.createBuffer({ "r.card capture tile mask", (uint64_t)std::max(round.maskWords, 1u) * 4, 0 });
+            const BufferRef atlasSlots = g.createBuffer({ "r.card capture tile slots", (uint64_t)std::max(round.maskWords, 1u) * 32 * 4, 0 });
+            const TextureRef scratchDepth = g.createTexture({ "r.card capture scratch depth", captureSize, captureSize, 1, 1, DXGI_FORMAT_D16_UNORM });
+            const uint32_t contextOffset = ((uint32_t)(fc.frame.frameIndex % kContextFrames) * kContextRounds + r) * kContextBytes;
+            uint8_t* contextRecord = s.captureContextMapped + contextOffset;
+            g.addPass("r.card.vcapture.begin", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(captureDepth, Use::DepthWrite);
+                          b.use(scratchDepth, Use::DepthWrite);
+                          b.use(captureList, Use::CopyDst);
+                          b.use(cullMask, Use::CopyDst);
+                          b.use(atlasSlots, Use::CopyDst);
+                          b.keep();
+                      },
+                      [staged, r, captureAlbedo, captureNormal, captureEmissive, captureDepth, scratchDepth, captureList, cullMask, atlasSlots, upload, contextRecord,
+                       tableSrv](PassContext& c) {
+                          const Round& round = (*staged)[r];
+                          if (round.captures == 0) return;
+                          c.cmd->CopyBufferRegion(c.resource(captureList), 0, upload, round.capturesAt, (uint64_t)round.captures * kCaptureBytes);
+                          c.cmd->CopyBufferRegion(c.resource(cullMask), 0, upload, round.maskAt, (uint64_t)round.maskWords * 4);
+                          c.cmd->CopyBufferRegion(c.resource(atlasSlots), 0, upload, round.slotsAt, (uint64_t)round.maskWords * 32 * 4);
+                          // (the service's depth is reversed: 0 = nothing drawn)
+                          c.cmd->ClearDepthStencilView(c.dsv(captureDepth), D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
+                          c.cmd->ClearDepthStencilView(c.dsv(scratchDepth), D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
+                          const uint32_t words[kContextBytes / 4] = { c.srv(captureList), c.srv(captureDepth), c.uav(captureAlbedo), c.uav(captureNormal),
+                                                                      c.uav(captureEmissive), tableSrv, 0, 0 };
+                          std::memcpy(contextRecord, words, sizeof words);
+                      });
+            for (size_t first = 0; first < round.views.size(); first += kCaptureViews)
+            {
+                const size_t last = std::min(round.views.size(), first + kCaptureViews);
+                const std::string suffix = std::to_string(r) + "." + std::to_string(first / kCaptureViews);
+                DepthRasterRequest request;
+                request.views.assign(round.views.begin() + (std::ptrdiff_t)first, round.views.begin() + (std::ptrdiff_t)last);
+                request.instanceMask = 0;  // (every instance; a view draws its own alone: RasterView::instanceFirst)
+                request.cull = D3D12_CULL_MODE_NONE;  // (the kernel discards the backs of one-sided surfaces itself)
+                request.cullMask = cullMask;
+                request.cullTilePx = kCaptureTile;
+                request.tileLocal = true;
+                request.atlasSlots = atlasSlots;
+                request.atlasTilesPerRow = captureSize / kCaptureTile;
+                request.name = "r.card.vdepth" + suffix;
+                request.depthTarget = captureDepth;
+                request.pixelKernel = "Passes/SurfaceCache/CardCaptureCluster.ps.PASS0";
+                fc.services.rasterizeDepth(fc, request);
+                request.name = "r.card.vmaterial" + suffix;
+                request.depthTarget = scratchDepth;
+                request.pixelKernel = "Passes/SurfaceCache/CardCaptureCluster.ps.PASS1";
+                request.textureUses = { { captureDepth, Use::SrvGraphics }, { captureAlbedo, Use::UavGraphics }, { captureNormal, Use::UavGraphics }, { captureEmissive, Use::UavGraphics } };
+                request.bufferUses = { { captureList, Use::SrvGraphics } };
+                request.pixelConstants[0] = s.captureContextSrv;
+                request.pixelConstants[1] = contextOffset;
+                fc.services.rasterizeDepth(fc, request);
+            }
+        }
+        else
         g.addPass("r.card.capture", QueueType::Graphics,
                   [&](PassBuilder& b) {
                       b.use(captureAlbedo, Use::RenderTarget);
@@ -893,16 +1093,17 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
                       b.keep();
                   },
                   [staged, r, &shaders, captureList, captureDepth, captureAlbedo, captureNormal, captureEmissive, resampledDirect, resampledIndirect, light, atlasSize, resampleFrames,
-                   a0 = atlas[0], a1 = atlas[1], a2 = atlas[2], a3 = atlas[3]](PassContext& c) {
+                   clusters, a0 = atlas[0], a1 = atlas[1], a2 = atlas[2], a3 = atlas[3]](PassContext& c) {
                       const Round& round = (*staged)[r];
                       if (round.captures == 0) return;
-                      const uint32_t k[20] = { c.srv(captureList), round.captures, c.srv(captureDepth), c.srv(captureAlbedo),
+                      const uint32_t k[24] = { c.srv(captureList), round.captures, c.srv(captureDepth), c.srv(captureAlbedo),
                                                c.srv(captureNormal), c.srv(captureEmissive), c.uav(a0), c.uav(a1),
                                                c.uav(a2), c.uav(a3), c.uav(light.direct), c.uav(light.indirect),
                                                c.uav(light.final), c.uav(light.frames), c.uav(light.uniformBits), c.uav(light.pageLight),
-                                               c.srv(resampledDirect), c.srv(resampledIndirect), atlasSize, bits(resampleFrames) };
+                                               c.srv(resampledDirect), c.srv(resampledIndirect), atlasSize, bits(resampleFrames),
+                                               clusters ? 1u : 0u, 0, 0, 0 };  // (the clusters' capture: V's reversed depth)
                       c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardCopy"));
-                      c.computeConstants(k, 20);
+                      c.computeConstants(k, 24);
                       c.cmd->Dispatch(kPageGroups, round.captures, 1);
                   });
 
