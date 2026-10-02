@@ -603,6 +603,9 @@ void writeEye(Writer& w, const Scene& s)
 // blocks of the file.
 constexpr uint32_t kCloudTag = 0x53444C43u;  // "CLDS"
 constexpr uint32_t kFogTag = 0x53474F46u;    // "FOGS"
+// "CIRR", after CLDS and before FOGS, written when the scene has a cirrus sheet (cirrusCoverage > 0): cirrusCoverage,
+// cirrusAltitude, cirrusOpticalDepth, cirrusWindX, cirrusWindZ (5 floats).
+constexpr uint32_t kCirrusTag = 0x52524943u;  // "CIRR"
 // "FVST", after FOGS, written when a fog volume has steam values (source plane, rise speed, turbulence): u64 count, then
 // per such volume its index (u32), sourcePlane, riseSpeed, turbulence, turbulenceScale. A scene without them keeps the
 // bytes it had.
@@ -690,6 +693,15 @@ std::vector<uint8_t> serialize(const Scene& s)
     if (anyCloth(s)) writeCloth(w, s);
     if (anyEye(s)) writeEye(w, s);
     if (anyClouds(s)) writeClouds(w, s);
+    if (s.clouds.cirrusCoverage > 0)
+    {
+        w.pod(kCirrusTag);
+        w.pod(s.clouds.cirrusCoverage);
+        w.pod(s.clouds.cirrusAltitude);
+        w.pod(s.clouds.cirrusOpticalDepth);
+        w.pod(s.clouds.cirrusWindX);
+        w.pod(s.clouds.cirrusWindZ);
+    }
     if (anyFog(s)) writeFog(w, s);
     if (s.fog.density2 > 0)
     {
@@ -963,6 +975,16 @@ Scene deserialize(const std::vector<uint8_t>& bytes)
         c.albedo = r.pod<float>();
         c.windX = r.pod<float>();
         c.windZ = r.pod<float>();
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
+    if (tag == kCirrusTag)
+    {
+        CloudLayer& c = s.clouds;
+        c.cirrusCoverage = r.pod<float>();
+        c.cirrusAltitude = r.pod<float>();
+        c.cirrusOpticalDepth = r.pod<float>();
+        c.cirrusWindX = r.pod<float>();
+        c.cirrusWindZ = r.pod<float>();
         tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
     }
     if (tag == kFogTag)
@@ -1255,6 +1277,10 @@ void validate(const Scene& s)
                             std::isfinite(c.albedo) && std::isfinite(c.windX) && std::isfinite(c.windZ);
         if (!finite || c.coverage < 0 || c.coverage > 1 || (c.coverage > 0 && !(c.topAltitude > c.baseAltitude && c.sigmaMax > 0 && c.albedo >= 0 && c.albedo <= 1)))
             fail("clouds: coverage in [0, 1]; with coverage: base altitude < top altitude, sigmaMax > 0, albedo in [0, 1]");
+        const bool cirrusFinite = std::isfinite(c.cirrusCoverage) && std::isfinite(c.cirrusAltitude) && std::isfinite(c.cirrusOpticalDepth) &&
+                                  std::isfinite(c.cirrusWindX) && std::isfinite(c.cirrusWindZ);
+        if (!cirrusFinite || c.cirrusCoverage < 0 || c.cirrusCoverage > 1 || (c.cirrusCoverage > 0 && !(c.cirrusAltitude > 0 && c.cirrusOpticalDepth > 0)))
+            fail("clouds: the cirrus sheet's coverage in [0, 1]; with coverage: altitude and optical depth > 0");
         const Fog& f = s.fog;
         const bool fogFinite = std::isfinite(f.density) && std::isfinite(f.heightFalloff) && std::isfinite(f.height) && std::isfinite(f.albedo.x) &&
                                std::isfinite(f.albedo.y) && std::isfinite(f.albedo.z) && std::isfinite(f.phaseG) && std::isfinite(f.startDistance) &&

@@ -327,6 +327,16 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     // frame's own do (S), the cloud layer's altitudes are above the planet's surface.
     if (const scene::Scene* src = m_scene.source())
     {
+        // (the cirrus sheet comes with the scene's layer record, where the frame brings neither a layer nor a sheet)
+        if ((frame.sceneWeather & kSceneClouds) != 0 && !(frame.clouds.cirrusCoverage > 0) && src->clouds.cirrusCoverage > 0)
+        {
+            const scene::CloudLayer& c = src->clouds;
+            frame.clouds.cirrusCoverage = c.cirrusCoverage;
+            frame.clouds.cirrusAltitude = c.cirrusAltitude;
+            frame.clouds.cirrusOpticalDepth = c.cirrusOpticalDepth;
+            frame.clouds.cirrusWindX = c.cirrusWindX;
+            frame.clouds.cirrusWindZ = c.cirrusWindZ;
+        }
         if ((frame.sceneWeather & kSceneClouds) != 0 && !(frame.clouds.coverage > 0) && src->clouds.coverage > 0)
         {
             const scene::CloudLayer& c = src->clouds;

@@ -7,16 +7,17 @@ namespace unx::render::clouds
 {
 // The three noise textures, uploaded once (shape Texture3D RG8 128^3 and detail Texture3D RG8 32^3 with every mip: the
 // noise, and the deviation of the level-0 texels under a mip's texel x 2 - CloudCommon.hlsli cloudDensityFiltered;
-// weather Texture2D RG8 512^2) with their SRVs.
+// weather Texture2D RG8 512^2; cirrus Texture2D R8 512^2 with every mip - the sheet is seen at grazing angles) with their
+// SRVs.
 struct CloudTextures
 {
-    ComPtr<ID3D12Resource> shape, detail, weather;
-    uint32_t shapeSrv = 0, detailSrv = 0, weatherSrv = 0;
+    ComPtr<ID3D12Resource> shape, detail, weather, cirrus;
+    uint32_t shapeSrv = 0, detailSrv = 0, weatherSrv = 0, cirrusSrv = 0;
 };
 CloudTextures uploadTextures(Device& device, const CloudNoise& noise);
 void releaseTextures(Device& device, CloudTextures& t);
 
-// The cloud record (CloudCommon.hlsli layout, 176 B).
+// The cloud record (CloudCommon.hlsli layout, 240 B).
 struct CloudRecord
 {
     float base, top, coverage, sigmaMax;
@@ -32,8 +33,14 @@ struct CloudRecord
     float sunDir[3], shadowHalfExtent;
     float shadowCentre[3], shadowTexels;
     float sunIlluminance[3], skyRadianceTest;  // skyRadianceTest: CloudMarch mode 4 only (tests; the frame takes the sky from the air)
+    float cirrusAltitude, cirrusOpticalDepth, cirrusCoverage, invCirrus;  // the cirrus sheet (coverage 0: none)
+    float cirrusOffset[2];
+    uint32_t cirrus;       // its map's SRV
+    float powder;          // atmosphere.clouds.powder (the frame; 0: the fitted octaves alone)
+    float flashPosition[3], flashRadius;   // a lightning flash (FrameContext::lightning; renderer space, m)
+    float flashIntensity[3], pad3;         // cd x colour (0: none)
 };
-static_assert(sizeof(CloudRecord) == 176);
+static_assert(sizeof(CloudRecord) == 240);
 // shadow: the deep opacity map's SRV (filled per frame); sunDir: unit, toward the sun; shadow area: centre (renderer
 // space), half extent (m), texels per side.
 CloudRecord makeRecord(const CloudLayer& layer, const CloudOffsets& offsets, const CloudTextures& textures, double bottomRadius, const float sunDir[3],

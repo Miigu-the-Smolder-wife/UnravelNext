@@ -117,6 +117,26 @@ struct CloudLayerDesc
     float albedo = 0.99f;                        // single-scattering albedo
     float windX = 0, windZ = 0;                  // m/s
     uint32_t seed = 1;
+    // The cirrus sheet: thin ice cloud at one altitude far above the layer, with its own coverage map - a frame may have
+    // it without the layer (coverage 0). Lit by the same sun and sky (single scattering: its optical depth is small).
+    float cirrusCoverage = 0;                    // [0, 1]: the share of its map that holds cirrus; 0: none
+    float cirrusAltitude = 9000;                 // m
+    float cirrusOpticalDepth = 0.15f;            // vertical, where the map is full (thin cirrus 0.03 .. 0.3)
+    float cirrusWindX = 0, cirrusWindZ = 0;      // m/s: the sheet's own drift
+};
+
+// A lightning flash of this frame (weather content): a source in or under the cloud layer that lights the cloud around
+// it - the layer's image, the cloud in front of surfaces and the sky dome the escaping rays read (CloudLight.hlsli: the
+// direct light through the cloud between, and the light that diffuses from the source through a medium of albedo near
+// 1). The light on the ground is a light of the scene's that the game sets for the flash's frames (at the same place,
+// with the same intensity and a range of kilometres: the local lights are shadowed by rays and reach the froxels); the
+// directional slot stays the sun's or the moon's (its shadow maps would be redrawn for two frames).
+struct LightningDesc
+{
+    double position[3] = { 0, 0, 0 };            // world, m: the channel's brightest stretch
+    float intensity = 0;                         // luminous intensity (cd), the frame's mean over its exposure; 0: no flash
+    float color[3] = { 0.8f, 0.87f, 1.0f };
+    float radius = 30;                           // m: the lit channel's extent (no nearer than this to the source)
 };
 
 // The frame's height fog (Passes/Atmosphere/FogVolume.hlsli) - weather content like the cloud layer. enabled false: the
@@ -226,6 +246,7 @@ struct FrameContext
     float deltaTime = 0;
     ViewDesc mainView;
     CloudLayerDesc clouds;  // B5 (v1.77): coverage 0 = none
+    LightningDesc lightning;  // intensity 0 = none
     FogDesc fog;            // the height fog (enabled false: the quality file's)
     std::vector<FogVolumeDesc> fogVolumes;  // local fog volumes (at most kMaxFogVolumes take effect)
     ColorGradingDesc grading;  // the colour grading before the tone curve (enabled false: the quality file's)

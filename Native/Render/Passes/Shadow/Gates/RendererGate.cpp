@@ -379,6 +379,11 @@ int main(int argc, char** argv)
         float fogDensity = -1;           // --fog D: the frame's height fog (FrameContext::fog) at extinction D (1/m), other fields default
         float cloudCoverage = -1;        // --clouds C[,base,top]: B5 cloud layer (FrameContext::clouds) with coverage C between the
         float cloudBase = -1, cloudTop = -1;  // altitudes base and top (m; a layer low enough for a peak to stand in it), other fields default
+        // --cirrus C[,altitude,optical depth]: the cirrus sheet (CloudLayerDesc::cirrus*) with coverage C; 0: none
+        float cirrusCoverage = -1, cirrusAltitude = -1, cirrusDepth = -1;
+        // --lightning x,y,z,cd[,first frame,frames]: a lightning flash at a world position with a luminous intensity, in
+        // the frames [first, first + frames) (default: every frame) - the clouds' light from it (FrameContext::lightning)
+        std::vector<float> lightning;
         bool sceneWeather = true;
         float3 shiftBy{};  // --time YYYY-MM-DDTHH:MM (UT), --place lat,lon: sun, moon, stars (B4)
         // P0 motion and change options (see the head comment).
@@ -446,6 +451,21 @@ int main(int argc, char** argv)
                 if (v.size() == 3) cloudBase = v[1], cloudTop = v[2];
             }
             else if (a == "--no-scene-weather") sceneWeather = false;
+            else if (a == "--cirrus")
+            {
+                std::vector<float> v;
+                std::stringstream list(next());
+                for (std::string item; std::getline(list, item, ',');) v.push_back(std::stof(item));
+                if (v.size() != 1 && v.size() != 3) fail("--cirrus C[,altitude,optical depth]");
+                cirrusCoverage = v[0];
+                if (v.size() == 3) cirrusAltitude = v[1], cirrusDepth = v[2];
+            }
+            else if (a == "--lightning")
+            {
+                std::stringstream list(next());
+                for (std::string item; std::getline(list, item, ',');) lightning.push_back(std::stof(item));
+                if (lightning.size() != 4 && lightning.size() != 6) fail("--lightning x,y,z,cd[,first frame,frames]");
+            }
             else if (a == "--no-pass-timestamps") passTimestamps = false;
             else if (a == "--fog-volume")
             {
@@ -967,6 +987,18 @@ int main(int argc, char** argv)
                     fc.clouds.coverage = cloudCoverage;
                     if (cloudTop > cloudBase) fc.clouds.baseAltitude = cloudBase, fc.clouds.topAltitude = cloudTop;
                     fc.sceneWeather &= ~kSceneClouds;
+                }
+                if (cirrusCoverage >= 0)
+                {
+                    fc.clouds.cirrusCoverage = cirrusCoverage;
+                    if (cirrusAltitude > 0 && cirrusDepth > 0) fc.clouds.cirrusAltitude = cirrusAltitude, fc.clouds.cirrusOpticalDepth = cirrusDepth;
+                    fc.sceneWeather &= ~kSceneClouds;
+                }
+                if (lightning.size() >= 4 && (lightning.size() < 6 || (frame >= (uint64_t)lightning[4] && frame < (uint64_t)(lightning[4] + lightning[5]))))
+                {
+                    // (the position is the scene's: the frame's is after the origin shifts)
+                    fc.lightning.position[0] = lightning[0], fc.lightning.position[1] = lightning[1], fc.lightning.position[2] = lightning[2];
+                    fc.lightning.intensity = lightning[3];
                 }
                 if (fogDensity >= 0)
                 {

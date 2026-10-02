@@ -45,6 +45,10 @@ filtered_steps = true                # a march step's density is its mean over t
                                      # cloud, and a brighter underside than the whole-path march, sun_steps = 0)
 ground_light = true                  # the ground's light on the cloud's underside (the atmosphere's ground albedo x the sun and sky on
                                      # the ground under the layer; a height ramp as the sky's, not fitted to the path tracer)
+powder = 0.0                         # [0, 1]: the multiple scattering (the octaves past the first) x (1 - powder exp(-2 tau toward the
+                                     # sun)) - darker just under a sunlit surface, where little cloud lies toward the sun. 0: the
+                                     # octave series as it was fitted to the path tracer; a value above 0 moves every ray off that
+                                     # fit until Tests/CloudMsFit --sweep (which now fits the strength with a, b, c) gives the set
 veil = true                          # the cloud in front of surfaces (a peak inside the layer, the ground seen from inside or above
                                      # it): the fog's volume marches the layer along its columns up to the farthest surface around
                                      # each and every layer that reads the air takes it at its own depth (FogIntegrate.hlsl). The

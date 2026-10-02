@@ -358,6 +358,12 @@ struct CloudLayer
     float sigmaMax = 0.04f;                         // peak extinction (1/m)
     float albedo = 0.99f;                           // single-scattering albedo
     float windX = 0, windZ = 0;                     // m/s: the layer's drift
+    // the cirrus sheet (CloudLayerDesc::cirrus*; file block "CIRR", written only with a coverage): thin ice cloud at one
+    // altitude far above the layer, with or without the layer
+    float cirrusCoverage = 0;                       // [0, 1]; 0: none
+    float cirrusAltitude = 9000;                    // m
+    float cirrusOpticalDepth = 0.15f;               // vertical, where its map is full
+    float cirrusWindX = 0, cirrusWindZ = 0;         // m/s
 };
 struct Fog
 {

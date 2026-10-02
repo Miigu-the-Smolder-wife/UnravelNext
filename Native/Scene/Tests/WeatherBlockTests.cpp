@@ -83,6 +83,33 @@ int main()
         CHECK(cloudyBack.clouds.sigmaMax == 0.03f && cloudyBack.clouds.albedo == 0.97f && cloudyBack.clouds.windX == 4.0f && cloudyBack.clouds.windZ == -2.5f);
         CHECK(!cloudyBack.fog.enabled && cloudyBack.fogVolumes.empty());
         CHECK(serialize(cloudyBack) == cloudyBytes);
+        CHECK(!contains(cloudyBytes, "CIRR"));
+
+        // the cirrus sheet: its own block, with the layer and without it
+        Scene wispy = cloudy;
+        wispy.clouds.cirrusCoverage = 0.4f;
+        wispy.clouds.cirrusAltitude = 10500.0f;
+        wispy.clouds.cirrusOpticalDepth = 0.2f;
+        wispy.clouds.cirrusWindX = 30.0f;
+        wispy.clouds.cirrusWindZ = -5.0f;
+        validate(wispy);
+        const std::vector<uint8_t> wispyBytes = serialize(wispy);
+        CHECK(contains(wispyBytes, "CIRR"));
+        CHECK(wispyBytes.size() == cloudyBytes.size() + 4 + 5 * 4);
+        const Scene wispyBack = deserialize(wispyBytes);
+        CHECK(wispyBack.clouds.coverage == 0.5f && wispyBack.clouds.cirrusCoverage == 0.4f && wispyBack.clouds.cirrusAltitude == 10500.0f);
+        CHECK(wispyBack.clouds.cirrusOpticalDepth == 0.2f && wispyBack.clouds.cirrusWindX == 30.0f && wispyBack.clouds.cirrusWindZ == -5.0f);
+        CHECK(serialize(wispyBack) == wispyBytes);
+        Scene sheetOnly = plainScene();
+        sheetOnly.clouds.cirrusCoverage = 0.3f;
+        validate(sheetOnly);
+        const std::vector<uint8_t> sheetBytes = serialize(sheetOnly);
+        CHECK(contains(sheetBytes, "CIRR") && !contains(sheetBytes, "CLDS"));
+        const Scene sheetBack = deserialize(sheetBytes);
+        CHECK(sheetBack.clouds.coverage == 0 && sheetBack.clouds.cirrusCoverage == 0.3f && sheetBack.clouds.cirrusAltitude == 9000.0f);
+        Scene badSheet = sheetOnly;
+        badSheet.clouds.cirrusOpticalDepth = 0.0f;
+        CHECK(refused(badSheet));
         CHECK(contentHash(plain) != contentHash(cloudy));
 
         // fog volumes alone: the block, the height fog stays disabled
