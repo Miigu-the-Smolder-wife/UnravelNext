@@ -339,7 +339,9 @@ void main(uint3 id : SV_DispatchThreadID)
         }
         else
         {
-            L += T * ((orderFar ? airT : float3(1, 1, 1)) * (farSource * (1 - t)) + (1 - t) * (orderFar ? airIn : float3(0, 0, 0)));
+            // (unordered: the expression the sky's column has, to the bit - the tests' twins and their history of numbers)
+            if (orderFar) L += T * (airT * (farSource * (1 - t)) + (1 - t) * airIn);
+            else L += T * farSource * (1 - t);
             T *= t;
         }
         // (the last slice: the sky's column)
