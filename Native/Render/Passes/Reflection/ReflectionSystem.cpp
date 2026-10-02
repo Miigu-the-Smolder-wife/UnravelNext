@@ -175,7 +175,6 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.scDirectShadowInline = flag("surface_cache.direct_shadow_inline", false);
     s.scDirectPairs = flag("surface_cache.direct_pairs", true);
     s.scMeshCards = s.surfaceCache && flag("surface_cache.mesh_cards", false);
-    s.scMeshCardsTestSet = flag("surface_cache.mesh_cards_test_set", false);
     // (the pairs hold direct_analytic lighting alone; the other modes are r.sc.cells' - asked for together, neither a silent
     // drop of the mode nor a silent return to the path that stops the device is right)
     if (s.surfaceCache && !s.scMeshCards && s.scDirectPairs && (s.scDirectStochastic || s.scRemainderLight || !s.scDirectAnalytic))
@@ -1124,22 +1123,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         surfaceCache = surfaceCacheBuffer(fc);
     }
     const bool hitsUseSurfaceCache = surfaceCache.valid() && lumen && s.lumenHitSurfaceCache;
-    // surface_cache.mesh_cards (CardLighting.cpp): the card set of the frame and the card frame hits read through
-    CardSet cardSet;
-    BufferRef cardFrame;
-    if (s.scMeshCards)
-    {
-        if (s.scMeshCardsTestSet)
-        {
-            if (!m_cardTestSet) m_cardTestSet = std::make_unique<CardTestSet>(m_device);
-            cardSet = m_cardTestSet->record(fc);
-        }
-        if (cardSet.valid)
-        {
-            if (!m_cardLighting) m_cardLighting = std::make_unique<CardLighting>(m_device);
-            cardFrame = m_cardLighting->prepare(fc);
-        }
-    }
+    // surface_cache.mesh_cards (unx/refl/SurfaceCacheCards.h, recorded before GI): the card frame hits read through
+    const SurfaceCacheCardRefs cardRefs = s.scMeshCards ? fc.resources.cards : SurfaceCacheCardRefs{};
+    const BufferRef cardFrame = cardRefs.frame;
     const bool hitsUseCards = cardFrame.valid() && lumen && s.lumenHitSurfaceCache;
     // Screen traces before the world rays (ReflectionScreenTrace.hlsl): a ray that meets a visible surface takes the
     // previous frame's colour there and its job traces no world ray. Without that colour (no upscale history) every
@@ -1248,7 +1234,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         if (gi) b.use(cache, Use::UavGraphics);
         if (gi && accPool.valid()) b.use(accPool, Use::SrvGraphics);  // (the passes that shade: the accumulator's cell means)
         if (gi && hitsUseSurfaceCache) b.use(surfaceCache, Use::UavGraphics);  // (the passes that shade: hits mark and read their cells)
-        if (gi && hitsUseCards) m_cardLighting->declareRead(fc, b, Use::SrvGraphics);  // (the passes that shade: hits read their cards)
+        if (gi && hitsUseCards) declareSurfaceCacheCards(b, cardRefs, Use::SrvGraphics);  // (the passes that shade: hits read their cards)
         if (gi && layers)  // (the passes that shade or combine: the layer records)
         {
             b.use(rayLayers, Use::UavGraphics);
@@ -1358,26 +1344,6 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   });
     };
     rayArgs("r.refl.rayargs", 0);
-    if (cardSet.valid)
-    {
-        // The surface cache on mesh cards: this frame's update selection, direct light, radiosity and final lighting -
-        // before this frame's hits read the cards.
-        CardLightingInputs cin;
-        cin.set = cardSet;
-        cin.frame = frame;
-        cin.skyVariant = variant;
-        cin.frameConstants = frameConstants;
-        cin.direct = s.scDirect;
-        cin.radiosity = s.scRadiosity;
-        cin.shadowRaysOpaque = s.scShadowRaysOpaque;
-        cin.radiosityCap = s.scRadiosityCap;
-        cin.radiosityFrames = s.scRadiosityFrames;
-        cin.directFactor = s.scDirectFactor;
-        cin.radiosityFactor = s.scRadiosityFactor;
-        cin.declareShared = [&](PassBuilder& b) { declareShared(b, false); };
-        cin.sharedConstants = [constantsFor](PassContext& c, uint32_t* k) { constantsFor(c, k, false); };
-        m_cardLighting->record(fc, cin);
-    }
     if (surfaceCache.valid())
     {
         // The surface cache's frame (SurfaceCache.hlsli): the upkeep of cells and probes marked up to last frame, the

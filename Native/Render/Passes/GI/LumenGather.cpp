@@ -274,8 +274,9 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                       c.cmd->Dispatch((probesX + 7) / 8, (atlasRows + 7) / 8, 1);
                   });
         LumenRcInputs in;
-        in.worldCache = cache;
-        in.surfaceCache = L.hitSurfaceCache ? fc.resources.surfaceCache : BufferRef{};
+        in.cards = L.hitSurfaceCache ? fc.resources.cards : SurfaceCacheCardRefs{};
+        // (with the cards and without gi.lumen_hit_fallback the hits read no world cache)
+        in.worldCache = in.cards.valid() && !L.hitFallback ? BufferRef{} : cache;
         in.skyRadiance = m_skyRadiance;
         in.sunIlluminance = m_sunIlluminance;
         in.experiment = m_settings.experimentDisable;
@@ -369,8 +370,8 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     const float skyBand = m_skyBand, rayLength = m_settings.rayLength;
     const uint32_t experiment = m_settings.experimentDisable;
     const uint32_t raysPerDispatch = L.raysPerDispatch;
-    // gi.lumen_hit_surface_cache: the hits read the surface cache (tracks::surfaceCache published it before GI).
-    const BufferRef surfaceCache = L.hitSurfaceCache ? fc.resources.surfaceCache : BufferRef{};
+    // gi.lumen_hit_surface_cache: the hits read the mesh-card surface cache (tracks::surfaceCache updated it before GI).
+    const SurfaceCacheCardRefs cards = L.hitSurfaceCache ? fc.resources.cards : SurfaceCacheCardRefs{};
     // Screen traces before the world rays (gi.lumen_screen_traces): the shared depth pyramid and last frame's colour
     // (tracks::screenTraceInputs published them before GI; without a colour history the walk is skipped).
     const TextureRef pyramid = fc.resources.screenTraceHzb, prevColor = view.prevSceneColor;
@@ -426,7 +427,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   b.use(rayInfo, Use::SrvGraphics);
                   b.use(traceRadiance, Use::UavGraphics);
                   b.use(traceWord, Use::UavGraphics);
-                  if (surfaceCache.valid()) b.use(surfaceCache, Use::UavGraphics);
+                  declareSurfaceCacheCards(b, cards, Use::SrvGraphics);
                   if (farField)
                   {
                       b.use(rcIndirection, Use::SrvGraphics);
@@ -453,10 +454,10 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   k[14] = bits(sun.z);
                   k[15] = experiment;
                   k[16] = bits(skyBand);
-                  k[17] = (screenTraced ? 1u : 0u) | (!L.hitFallback && surfaceCache.valid() ? 2u : 0u);
+                  k[17] = (screenTraced ? 1u : 0u) | (!L.hitFallback && cards.valid() ? 2u : 0u);
                   k[18] = bits(L.normalBias);
                   k[19] = bits(L.movingSpeed);
-                  k[20] = surfaceCache.valid() ? c.uav(surfaceCache) : 0xFFFFFFFFu;
+                  k[20] = cards.valid() ? c.srv(cards.frame) : 0xFFFFFFFFu;
                   k[21] = farField ? rcParamsSrv : 0xFFFFFFFFu;
                   k[22] = farField ? c.srv(rcIndirection) : 0xFFFFFFFFu;
                   k[23] = farField ? c.srv(rcAtlas) : 0xFFFFFFFFu;

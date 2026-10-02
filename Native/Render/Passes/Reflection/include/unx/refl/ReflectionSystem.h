@@ -18,7 +18,6 @@
 // the pixel bound from area, distance and corner pixel density, and the screen rectangle). The exact set (original BLASes of characters and wind
 // foliage near curved mirrors) is not implemented yet.
 #include "unx/gi/GiSystem.h"
-#include "unx/refl/CardLighting.h"
 #include "unx/render/Frame.h"
 #include "unx/rt/RayScene.h"
 
@@ -76,9 +75,9 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     uint32_t scEntriesLog2 = 22, scMaxUnused = 255, scCaptureFactor = 64, scCaptureBounces = 3, scDirectFactor = 32, scRadiosityFactor = 64;
     float scRadiosityCap = 40.0f, scRadiosityFrames = 4.0f;
     uint32_t scDebugCount = 0;              // surface_cache.debug_count: radiosity ray hits / empty reads in the header (view component 7)
-    // surface_cache.mesh_cards: the cache is lighting on mesh cards (CardLighting.cpp) in place of the hashed cells; the
-    // card set is A's (unx/refl/MeshCards.h, not there yet) or surface_cache.mesh_cards_test_set's hand-made one
-    bool scMeshCards = false, scMeshCardsTestSet = false;
+    // surface_cache.mesh_cards: the cache is lighting on mesh cards (unx/refl/SurfaceCacheCards.h, recorded before GI:
+    // FrameResources::cards) in place of the hashed cells
+    bool scMeshCards = false;
     bool scDirectPairs = true;  // surface_cache.direct_pairs (A): the direct light as (cell, light) pairs, SurfaceCacheLightPairs.cpp
     bool scDirectShadowInline = false;  // surface_cache.direct_shadow_inline: the lights' shadow rays as inline queries, after the evaluation
     bool scShadowRaysOpaque = false;  // surface_cache.shadow_rays_opaque: the cells' shadow rays run no alpha test
@@ -131,6 +130,8 @@ public:
         m_skyRadiance = radiance;
         m_sunIlluminance = sunIlluminance;
     }
+    float3 constantSkyRadiance() const { return m_skyRadiance; }
+    float3 constantSunIlluminance() const { return m_sunIlluminance; }
     const ReflectionSettings& settings() const { return m_settings; }
     struct Stats
     {
@@ -205,8 +206,6 @@ private:
     uint32_t m_surfaceCacheEntries = 0, m_surfaceCacheRevision = 0;
     ScreenTraceInputs m_screenInputs;       // screenTraceInputs of frame m_screenFrame
     uint64_t m_screenFrame = ~0ull;
-    std::unique_ptr<CardLighting> m_cardLighting;  // surface_cache.mesh_cards
-    std::unique_ptr<CardTestSet> m_cardTestSet;    // surface_cache.mesh_cards_test_set
     BufferRef m_surfaceCacheRef;            // its import into the frame's graph (surfaceCacheBuffer)
     uint64_t m_surfaceCacheFrame = ~0ull;
     uint32_t m_accumParity = 0, m_accumSceneRevision = 0;

@@ -61,10 +61,10 @@ void shadingComposite(FramePassContext& fc, ViewResources& view);               
 
 // ---- R: rays, GI, reflections - RayTracing, Passes/GI, Passes/Reflection
 void accelerationStructures(FramePassContext& fc);                // static/dynamic TLAS, BLAS refits -> FrameResources
-// The surface cache's buffer of this frame into fc.resources.surfaceCache, before the tracks whose ray hits mark and
-// read it (GI records before reflections, where the cache's own passes run). Invalid: surface_cache.enabled off, or
-// before its first frame.
-void surfaceCache(FramePassContext& fc);
+// The surface cache of this frame, before the tracks whose ray hits read it. surface_cache.mesh_cards: the mesh-card
+// cache's whole update (instances, captures, lighting: unx/refl/SurfaceCacheCards.h) and fc.resources.cards. Otherwise
+// the hashed-cell cache's buffer into fc.resources.surfaceCache (its passes run with the reflections). Invalid: off.
+void surfaceCache(FramePassContext& fc, ViewResources& main);
 // The shared screen trace's inputs for GI's probe rays (gi.lumen with gi.lumen_screen_traces): the depth pyramid into
 // fc.resources.screenTraceHzb and the previous frame's colour into main.prevSceneColor, before globalIllumination
 // (refl::ReflectionSystem::screenTraceInputs records them once per frame, whoever asks first).

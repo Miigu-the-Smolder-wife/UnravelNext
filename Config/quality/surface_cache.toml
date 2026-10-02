@@ -60,12 +60,31 @@ debug_count = 0                       # diagnostics (1; 2 = of the empty reads o
 base_cells = true                     # a mark also keeps the cell 3 levels coarser (8 x the size) at the point, and a read that
                                       # finds no lit cell at the point's level takes that base cell (reference: every mesh in
                                       # range keeps its lowest-resolution cards). false: such a read gets nothing
-mesh_cards = false                    # the cache as lighting on mesh cards (the reference's shipping structure; S2:
-                                      # Passes/SurfaceCache/CardLighting.hlsli) in place of the hashed cells: update selection by
-                                      # page priority, direct light per card tile (8 lights + the sun), radiosity per card probe,
-                                      # the final lighting atlas; hits read the cards of their instance. Needs a card set
-mesh_cards_test_set = false           # a hand-made card set (CardTestSet.cpp: six axis cards per rigid instance, material
-                                      # constants, built on the CPU) - S2's fixture until A's capture is there. NOT a renderer path
+mesh_cards = false                    # the cache as lighting on mesh cards (the reference's shipping structure:
+                                      # unx/refl/SurfaceCacheCards.h) in place of the hashed cells: every rigid instance in
+                                      # range keeps cards captured into atlases whatever the view sees; update selection by
+                                      # page priority, direct light per card tile (8 lights + the sun), radiosity per card
+                                      # probe, the final lighting atlas; hits read the cards of their instance
+mesh_cards_atlas_size = 4096          # card atlas side, texels (reference: r.LumenScene.SurfaceCache.AtlasSize 4096)
+mesh_cards_captures_per_frame = 300   # card pages captured a frame at most (reference: CardCapturesPerFrame 300); with
+                                      # capture_factor: texels captured a frame = atlas texels / capture_factor
+mesh_cards_texel_density_scale = 100.0  # a card's texels along its longer side = this x half size / distance (reference:
+                                      # CardTexelDensityScale 100)
+mesh_cards_max_texels_per_m = 20.0    # ... at most this many per metre of half size (reference: CardMaxTexelDensity 0.2 / cm)
+mesh_cards_max_resolution = 512       # ... and at most this many (reference: CardMaxResolution 512)
+mesh_cards_min_resolution = 4         # a card under this many texels is not kept (reference: CardMinResolution 4)
+mesh_cards_max_distance_m = 300.0     # cards exist for instances within this of the camera (reference: the ray tracing
+                                      # culling radius, 30000 cm)
+mesh_cards_min_size_m = 0.1           # meshes and cards smaller than this have no cards (reference: MeshCardsMinSize 10 cm)
+mesh_cards_refresh_fraction = 0.125   # share of a frame's captures spent on drawing resident pages again, so materials that
+                                      # change reach the cache (reference: CardCaptureRefreshFraction 0.125)
+mesh_cards_load_rounds = 8            # NOT in the reference: while a level loads (a new scene, a restore) the cache runs this
+                                      # many updates a frame instead of one, so its cards are captured and lit within a few
+                                      # frames of the load instead of about a hundred. 1 = the reference's pace
+mesh_cards_load_lighting_rounds = 96  # ... and this many more updates after the load's last card was captured (every
+                                      # page's direct light, then the radiosity's bounces), before the pace returns to 1
+mesh_cards_cache_dir = ""             # where generated mesh cards are kept: "" = %LOCALAPPDATA%/UnravelNext/MeshCards,
+                                      # "none" = no disk cache (every load generates)
 mesh_cards_update_distance_m = 25     # the distance at which a card page's update speed halves (reference: the first clipmap's extent)
 mesh_cards_frustum_margin_m = 5       # pages within this of the view frustum update twice as fast
 mesh_cards_depth_bias_m = 0.10        # a hit reads a card texel whose depth is within this of the hit (reference: 10 cm)

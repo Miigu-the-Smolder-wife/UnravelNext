@@ -4,20 +4,22 @@
 // trace texel). The trace's direction: its texel and level from LgGenerateRays.hlsl (level 1: 8 x 8 map, level 0:
 // 16 x 16), the point inside the texel from this frame's ray index of the probe's tile, through the equal-area sphere
 // mapping, world space. From the probe's position, lifted off the surface along its normal.
-// Hit lighting: with the surface cache (SurfaceCache.hlsli, as the reflection hits use it) the hit marks its cell and,
-// where the cell has been lit, takes the cell's irradiance (local lights + multi-bounce) - no light sample, no shadow
-// ray, no world-cache read; its own material, emission and sun term stay. Without the cache, or at a cell not lit yet,
-// the hit is shaded as the GI cache's own hits are - the sun (one shadow ray into the disk), one local-light sample
-// with its shadow ray, and the world cache's irradiance and mirror radiance at the hit (read only). A ray that meets
-// an analytic area light's proxy returns 0 (M shades those lights; the proxy still occludes). A miss returns the sky.
+// Hit lighting (Unreal's default, r.Lumen.HardwareRayTracing.LightingMode 0: the surface cache): the hit reads the mesh
+// cards of its instance (CardLighting.hlsli clReadCards) - the cards' direct light (the sun and the local lights) and
+// radiosity - and shades its own material with it; no light sample, no shadow ray, no world-cache read; its own
+// emission stays. A hit that has no card there (a deforming instance: skin, wind; a texel the cards do not cover)
+// takes the sun (one shadow ray into the disk) and one local-light sample with its shadow ray, and - only with
+// gi.lumen_hit_fallback - the world cache's irradiance; without the fallback its indirect light is 0, as the
+// reference's invalid surface-cache sample. A ray that meets an analytic area light's proxy returns 0 (M shades
+// those lights; the proxy still occludes). A miss returns the sky.
 // Output: radiance x exposure (RGBA16F, a unused) and the trace word (lgEncodeTrace: distance, hit, moving: the hit
 // moves relative to the probe, |probe speed - hit speed| / max(probe depth, 1 m) > P[4].w).
 // P[0] = { world cache SRV, ray info SRV (R16_UINT), trace radiance UAV, trace word UAV (R32_UINT) },
 // P[1], P[2], P[3] = sky and sun (GiSky.hlsli), ray length; P[3].w = gi.experiment_disable bits (8, 16, 128 as GiTrace),
-// P[4] = { sky band (tests), flags (bit 0: LgScreenTrace ran before - gi.lumen_screen_traces; bit 1: no fallback at hits
-// without a lit surface-cache cell - gi.lumen_hit_fallback = false), normal bias (float, m),
-// moving threshold (float) }, P[5].x = surface cache UAV
-// (0xFFFFFFFF: none - gi.lumen_hit_surface_cache off, surface_cache.enabled off or before its first frame),
+// P[4] = { sky band (tests), flags (bit 0: LgScreenTrace ran before - gi.lumen_screen_traces; bit 1: no world-cache
+// read at hits - gi.lumen_hit_fallback = false), normal bias (float, m),
+// moving threshold (float) }, P[5].x = card frame SRV (CardLayout.hlsli mcFrame;
+// 0xFFFFFFFF: none - gi.lumen_hit_surface_cache off, surface_cache.mesh_cards off or no card yet),
 // P[5].y / .z / .w = radiance cache params (raw SRV) / indirection SRV / atlas SRV (P[5].y = 0xFFFFFFFF: none -
 // lumen.radiance_cache off): where all 8 cache probes around the screen probe exist the ray stops at the cache's
 // coverage distance, and a ray that reached it without a hit takes the cache's radiance in its direction (x exposure;
@@ -33,7 +35,7 @@
 #include "Passes/GI/GiInternal.hlsli"
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/GI/Lumen/LgCommon.hlsli"
-#include "Passes/SurfaceCache/SurfaceCache.hlsli"
+#include "Passes/SurfaceCache/CardLighting.hlsli"
 #include "Passes/GI/Lumen/LgRadianceCache.hlsli"
 
 float lgBias(float3 p) { return 1e-3 + 2e-4 * distance(p, g_cameraPosition); }
@@ -103,7 +105,7 @@ void LgTraceGen()
 
     float3 radiance = 0;
     bool isHit = false, moving = false;
-    uint statClass = 0;  // experiment 2097152: 1 = the hit's surface-cache cell did not exist, 2 = not lit yet, 3 = valid
+    uint statClass = 0;  // experiment 2097152: 1 = the hit read no card, 3 = it read its cards
     float distanceToHit = giRayLength();
     bool reachedCache = false;
     if (hit.t < 0 && coverage.valid)
@@ -162,36 +164,22 @@ void LgTraceGen()
         if (s.frontFace || twoSided)
         {
             RtHitLighting L = (RtHitLighting)0;
-            bool fromSurfaceCache = false;
-            if (P[5].x != 0xFFFFFFFFu && (m.classFlags & 0xFFu) != MATERIAL_FOLIAGE)
+            bool fromCards = false;  // (the cards' direct light holds the sun and the local lights: the hit adds neither)
+            if (P[5].x != 0xFFFFFFFFu)
             {
-                RWByteAddressBuffer surfaceCache = ResourceDescriptorHeap[P[5].x];
-                const ScLayout layout = scLayout(surfaceCache);
                 const float3 face = dot(s.geometricNormal, r.Direction) > 0 ? -s.geometricNormal : s.geometricNormal;
-                // (experiment 2097152, statistics: did the hit's cell exist before this ray marked it - its own level)
-                bool existed = true;
-                if ((P[3].w & 2097152u) != 0 && layout.entries != 0)
+                const ClSample cards = clReadCards(mcFrame(P[5].x), s.sceneInstance, s.position, face, CL_READ_IRRADIANCE);
+                if (cards.valid)
                 {
-                    const uint level = scLevel(layout, s.position);
-                    existed = scFind(surfaceCache, scKeysOffset(0), layout.entries, scKeyAt(level, scCoord(level, s.position, 1.0), scFace(face))) != SC_NONE;
+                    L.irradiance = cards.direct + cards.indirect;
+                    L.specularRadiance = L.irradiance / LG_PI;  // (the lobe at the hit sees the cards' light as uniform)
+                    fromCards = true;
                 }
-                const float3 bounceAlbedo = saturate(m.baseColor * (1 - m.metallic) + 0.45 * lerp(float3(0.04, 0.04, 0.04), m.baseColor, m.metallic));
-                scMark(surfaceCache, layout, s.position, face, bounceAlbedo, m.emissive);
-                const ScSample cell = scRead(surfaceCache, layout, s.position, face);
-                if (cell.valid)
-                {
-                    L.irradiance = cell.direct + cell.indirect;
-                    L.specularRadiance = L.irradiance / LG_PI;
-                    fromSurfaceCache = true;
-                }
-                // gi.lumen_hit_fallback = false (P[4].y bit 1), the shipping rule of the structure: a hit without a lit
-                // cell takes no light from the caches (Unreal: an invalid surface-cache sample is radiance 0) - no
-                // world-cache read at a footprint-level cell, no light sample. The hit's emission and sun term stay.
-                else if ((P[4].y & 2u) != 0) fromSurfaceCache = true;
-                statClass = !existed ? 1u : (cell.valid ? 3u : 2u);
+                statClass = cards.valid ? 3u : 1u;
             }
-            // indirect light at the hit: the world cache (read only; experiment 512, attribution: none - one bounce)
-            if (!fromSurfaceCache && (P[3].w & 512u) == 0)
+            // indirect light at a hit without cards: the world cache, only with gi.lumen_hit_fallback (P[4].y bit 1 clear;
+            // read only; experiment 512, attribution: none - one bounce)
+            if (!fromCards && (P[4].y & 2u) == 0 && (P[3].w & 512u) == 0)
             {
                 ByteAddressBuffer cache = ResourceDescriptorHeap[P[0].x];
                 const GiHeader h = giHeader(cache);
@@ -207,7 +195,7 @@ void LgTraceGen()
             }
             const float3 l = normalize(g_sunDirection);
             const float cosSun = dot(s.normal, l);
-            if ((cosSun > 0 || (m.classFlags & 0xFFu) == MATERIAL_FOLIAGE) && (P[3].w & 16) == 0)
+            if (!fromCards && (cosSun > 0 || (m.classFlags & 0xFFu) == MATERIAL_FOLIAGE) && (P[3].w & 16) == 0)
             {
                 const float3 e0 = giSunIlluminance(s.position);
                 if (any(e0 > 0))
@@ -221,7 +209,7 @@ void LgTraceGen()
                     L.sunVisibility = rtVisible(scene, sr, RT_MASK_GI) ? 1.0 : 0.0;
                 }
             }
-            if ((P[3].w & 128) == 0 && !fromSurfaceCache)
+            if ((P[3].w & 128) == 0 && !fromCards)
             {
                 const bool oriented = (m.classFlags & 0xFFu) != MATERIAL_FOLIAGE;
                 const RtLocalSample ls = rtLocalLightFinish(scene, rtLocalLightChooseOriented(scene, s.position, s.normal, !oriented, giUnit(seed + 11)), s.position,
@@ -241,8 +229,8 @@ void LgTraceGen()
         }
     }
     if (!all(radiance == radiance) || any(radiance < 0)) radiance = 0;
-    // Experiment 2097152 (statistics): the hit's surface-cache read class as a colour of exposed value 1 - red: no cell,
-    // green: a cell not lit yet, blue: a lit cell; rays without a surface hit (sky, emitters, back faces, foliage): 0.
+    // Experiment 2097152 (statistics): the hit's surface-cache read class as a colour of exposed value 1 - red: no card
+    // read, blue: its cards read; rays without a surface hit (sky, emitters, back faces): 0.
     // The GI layer's channel means then give the cosine-weighted shares.
     if ((P[3].w & 2097152u) != 0)
         radiance = float3(statClass == 1u ? 1.0 : 0.0, statClass == 2u ? 1.0 : 0.0, statClass == 3u ? 1.0 : 0.0) / max(g_exposure, 1e-20);

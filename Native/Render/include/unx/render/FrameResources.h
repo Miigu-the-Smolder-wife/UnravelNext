@@ -178,6 +178,18 @@ struct TriangleStream
 };
 constexpr uint32_t kMaxTriangleStreams = 63;  // slot 63 is the view-grid ocean's (v1.73, COV_OCEAN_ID)  // vis id slot bits (CoverageTiles.hlsli COV_STREAM_ID)
 
+// surface_cache.mesh_cards (Passes/SurfaceCache; unx/refl/SurfaceCacheCards.h): the mesh-card surface cache of this frame
+// after its update. A ray hit reads it with clReadCards(mcFrame(frame SRV), scene instance, position, normal, ...)
+// (Passes/SurfaceCache/CardLighting.hlsli); a pass that does declares every member (declareSurfaceCacheCards, Frame.h).
+struct SurfaceCacheCardRefs
+{
+    BufferRef frame;                                                 // raw: the card frame (CardLayout.hlsli mcFrame)
+    BufferRef instanceMap, meshCards, cards, cardPages, pageTable;   // records
+    TextureRef depth, albedo, normal, emissive;                      // the cards' geometry atlases
+    TextureRef direct, indirect, final;                              // their lighting
+    bool valid() const { return frame.valid(); }
+};
+
 // View-independent products of the current frame. Persistent state (VSM pool, GI cache, TLAS) is imported into the
 // graph each frame by its owner.
 struct FrameResources
@@ -283,6 +295,8 @@ struct FrameResources
     BufferRef surfaceCache;        // the surface cache (Passes/SurfaceCache, SURFACE_CACHE_INTERFACE_KO.md): this frame's  [R]
                                    // import, published by tracks::surfaceCache before GI; ray hits mark and read it as a
                                    // UAV (DispatchRays passes: UavGraphics). Invalid: off, or before its first frame
+    SurfaceCacheCardRefs cards;    // the mesh-card surface cache after this frame's update, published by           [R]
+                                   // tracks::surfaceCache before GI; invalid: surface_cache.mesh_cards off or no card yet
     BufferRef giAccumulator;       // hit direct-light accumulator pool (GiAccPool.hlsli;   [R]
                                    // invalid: gi.hit_accumulator_pool off). Readers after
                                    // globalIllumination: SrvCompute (giAccPoolRead)

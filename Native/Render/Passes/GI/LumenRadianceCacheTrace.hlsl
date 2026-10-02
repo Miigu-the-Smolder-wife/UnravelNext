@@ -4,16 +4,17 @@
 // the texel of the probe's 32 x 32 equal-area map, y = the trace record. A probe far from the camera, or one forced by
 // the budget, is traced at half the resolution (one ray per 2 x 2 texels, the block's value). The ray starts one cell
 // diagonal from the probe's centre (lrcTMin: nearer light belongs to the screen probes' own rays) and runs to the trace
-// distance. Hit lighting is the screen-probe rays' (Lumen/LgTrace.hlsl): with the surface cache the hit marks its cell
-// and takes the cell's irradiance where it has been lit; otherwise the world cache's irradiance, the sun (one shadow ray
-// into the disk) and one local-light sample with its shadow ray; the hit's own material and emission. An analytic area
-// light's proxy returns 0 and occludes. A miss returns the sky.
+// distance. Hit lighting is the screen-probe rays' (Lumen/LgTrace.hlsl): the hit reads the mesh cards of its instance
+// (direct light with the sun, radiosity) and shades its own material; a hit without cards takes the sun (one shadow ray
+// into the disk), one local-light sample with its shadow ray and - when a world cache is bound - that cache's
+// irradiance; the hit's own emission. An analytic area light's proxy returns 0 and occludes. A miss returns the sky.
 // Output: the trace's radiance (nits x LRC_RADIANCE_SCALE) into the temporary atlas at the trace's place, and the hit
 // distance into the probe's place of the depth atlas.
 // P[0] = { world cache SRV (UNX_NONE: none), trace records SRV, temporary radiance UAV (RGBA16F), depth atlas UAV (R16_UINT) }
 // P[1], P[2], P[3] = sky and sun (GiSky.hlsli), P[1].w = the trace distance; P[3].w = gi.experiment_disable bits (8, 16, 128)
-// P[4] = { parameters SRV (LrcParams), state SRV, the dispatch's first trace record, 0 }, P[5].x = surface cache UAV
-// (UNX_NONE: none). One dispatch holds at most 262,144 rays (LumenRadianceCache.cpp: chunks of probes).
+// P[4] = { parameters SRV (LrcParams), state SRV, the dispatch's first trace record, 0 }, P[5].x = card frame SRV
+// (CardLayout.hlsli mcFrame; UNX_NONE: none). One dispatch holds at most 262,144 rays (LumenRadianceCache.cpp: chunks
+// of probes).
 // P[6], P[7] = RtSceneSrvs
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
@@ -21,7 +22,7 @@
 #include "RayTracing/HitLocalLights.hlsli"
 #include "Passes/GI/GiCache.hlsli"
 #include "Passes/GI/GiSky.hlsli"
-#include "Passes/SurfaceCache/SurfaceCache.hlsli"
+#include "Passes/SurfaceCache/CardLighting.hlsli"
 #include "Passes/GI/LumenRadianceCache.hlsli"
 
 float lrcBias(float3 p) { return 1e-3 + 2e-4 * distance(p, g_cameraPosition); }
@@ -76,18 +77,14 @@ void LumenRadianceCacheTraceGen()
         if (s.frontFace || twoSided)
         {
             RtHitLighting L = (RtHitLighting)0;
-            bool fromSurfaceCache = false;
-            if (P[5].x != UNX_NONE && !foliage)
+            bool fromSurfaceCache = false;  // (the cards' direct light holds the sun and the local lights)
+            if (P[5].x != UNX_NONE)
             {
-                RWByteAddressBuffer surfaceCache = ResourceDescriptorHeap[P[5].x];
-                const ScLayout layout = scLayout(surfaceCache);
                 const float3 face = dot(s.geometricNormal, r.Direction) > 0 ? -s.geometricNormal : s.geometricNormal;
-                const float3 bounceAlbedo = saturate(m.baseColor * (1 - m.metallic) + 0.45 * lerp(float3(0.04, 0.04, 0.04), m.baseColor, m.metallic));
-                scMark(surfaceCache, layout, s.position, face, bounceAlbedo, m.emissive);
-                const ScSample cell = scRead(surfaceCache, layout, s.position, face);
-                if (cell.valid)
+                const ClSample cards = clReadCards(mcFrame(P[5].x), s.sceneInstance, s.position, face, CL_READ_IRRADIANCE);
+                if (cards.valid)
                 {
-                    L.irradiance = cell.direct + cell.indirect;
+                    L.irradiance = cards.direct + cards.indirect;
                     L.specularRadiance = L.irradiance / LRC_PI;
                     fromSurfaceCache = true;
                 }
@@ -99,7 +96,7 @@ void LumenRadianceCacheTraceGen()
                 giCacheLightingAt(cache, h, s.position, s.normal, reflect(r.Direction, s.normal), giLevelForSize(h, footprint), L.irradiance, L.specularRadiance);
             }
             const float3 l = normalize(g_sunDirection);
-            if ((dot(s.normal, l) > 0 || foliage) && (P[3].w & 16) == 0)
+            if (!fromSurfaceCache && (dot(s.normal, l) > 0 || foliage) && (P[3].w & 16) == 0)
             {
                 const float3 e0 = giSunIlluminance(s.position);
                 if (any(e0 > 0))

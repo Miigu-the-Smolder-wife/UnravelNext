@@ -396,7 +396,8 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   c.computeConstants(k, 16);
                   c.cmd->Dispatch(1, 1, 1);
               });
-    const BufferRef worldCache = in.worldCache, surfaceCache = in.surfaceCache;
+    const BufferRef worldCache = in.worldCache;
+    const SurfaceCacheCardRefs cards = in.cards;
     const float3 sky = in.skyRadiance, sun = in.sunIlluminance;
     const uint32_t experiment = in.experiment;
     const float traceDistance = s.traceDistance;
@@ -410,7 +411,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   b.use(counters, Use::SrvGraphics);
                   b.use(traced, Use::UavGraphics);
                   b.use(depthAtlas, Use::UavGraphics);
-                  if (surfaceCache.valid()) b.use(surfaceCache, Use::UavGraphics);
+                  declareSurfaceCacheCards(b, cards, Use::SrvGraphics);
                   b.use(rayArgs, Use::IndirectArgs);
                   rays.declareTraversal(b);
                   rays.declareDecals(b);
@@ -435,7 +436,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   k[15] = experiment;
                   k[16] = paramsSrv;
                   k[17] = c.srv(counters);
-                  k[20] = surfaceCache.valid() ? c.uav(surfaceCache) : 0xFFFFFFFFu;
+                  k[20] = cards.valid() ? c.srv(cards.frame) : 0xFFFFFFFFu;
                   std::memcpy(&k[24], sceneSrvs.data(), 32);
                   c.bindFrameConstants(cb);
                   for (uint32_t chunk = 0; chunk < chunks; ++chunk)

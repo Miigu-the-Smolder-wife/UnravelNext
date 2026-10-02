@@ -22,7 +22,7 @@ namespace unx::render::gi
 struct LumenRcInputs
 {
     BufferRef worldCache;      // R's GI cache (hits without a lit surface-cache cell read it); invalid: none
-    BufferRef surfaceCache;    // S2's surface cache; invalid: none
+    SurfaceCacheCardRefs cards;  // the mesh-card surface cache (FrameResources::cards); invalid: none
     float3 skyRadiance{}, sunIlluminance{};  // constants of the SKY1 variant (no atmosphere LUTs in the frame)
     uint32_t experiment = 0;   // gi.experiment_disable bits the hit lighting honours (8, 16, 128)
 };

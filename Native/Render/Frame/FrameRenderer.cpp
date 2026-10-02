@@ -398,7 +398,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     tracks::froxels(fc, main);
     main.froxelLights = resources.froxelLights;  // the main view's per-view S products (v1.22)
     main.airVolume = resources.aerialPerspective;
-    tracks::surfaceCache(fc);
+    tracks::surfaceCache(fc, main);
     tracks::screenTraceInputs(fc, main);
     tracks::globalIllumination(fc, main);
     // S's screen visibility reads the resolve and the shadow pages only and is read only by M's shading: declared right

@@ -38,6 +38,10 @@ struct McSettings
     uint32_t minResolution = 4;           // CardMinResolution: below it the card is hidden
     float maxDistance = 300.0f;           // card range from the camera (r.RayTracing.Culling.Radius 30000)
     float minSize = 0.1f;                 // MeshCardsMinSize 10
+    float refreshFraction = 0.125f;       // CardCaptureRefreshFraction: the share of the frame's captures spent on capturing
+                                          // resident pages again (materials that change: animated emission, edits)
+    uint32_t maxPages = 262144;           // page table entries (the GPU page buffers' fixed size: atlas texels / the
+                                          // smallest allocation's 64)
     bool operator==(const McSettings&) const = default;
 };
 
@@ -85,6 +89,7 @@ struct McCapture
     uint32_t atlasRect[4] = {};   // x, y, width, height in the atlas
     float cardUvRect[4] = {};     // the card uv the page covers (min xy, max zw)
     bool resample = false;        // the card had pages before this frame (its lighting can be carried over)
+    bool refresh = false;         // the page was resident and keeps its place: only its geometry atlases are drawn again
 };
 
 struct McStats
@@ -95,6 +100,8 @@ struct McStats
     uint32_t requests = 0;                             // cards whose level differs from what they ask for (before the frame's budget)
     uint32_t captures = 0, capturedTexels = 0;         // this frame
     uint32_t loweredAllocations = 0;                   // this frame: allocated below the requested level (atlas full)
+    uint32_t pending = 0;                              // requests the frame's budget left for later frames
+    uint32_t refreshed = 0;                            // this frame: resident pages captured again
 };
 
 class MeshCardScene
@@ -109,6 +116,14 @@ public:
     uint32_t addInstance(uint32_t sceneInstance, const scene::MeshCards& cards, const float3x4& objectToWorld);
     // A rigid move (same scale): the cards follow, nothing is captured again.
     void setTransform(uint32_t sceneInstance, const float3x4& objectToWorld);
+    // The instance's cards leave the atlas and the scene (hidden or removed instance, changed mesh, scale or materials:
+    // the caller adds it again and its cards are captured anew).
+    void removeInstance(uint32_t sceneInstance);
+    bool hasInstance(uint32_t sceneInstance) const { return sceneInstance < m_instanceMap.size() && m_instanceMap[sceneInstance] != mc::kNone; }
+    // The instance's resident pages are captured again ahead of the refresh's round (its materials changed); they keep
+    // their places and their lighting.
+    void refreshInstance(uint32_t sceneInstance);
+    uint32_t pageCount() const { return (uint32_t)m_pages.size(); }
 
     // One frame: resolutions from the view origins, allocation, the frame's captures.
     void update(std::span<const float3> viewOrigins);
@@ -176,6 +191,7 @@ private:
         float cardUvRect[4] = {};
         int32_t subAllocX = -1, subAllocY = -1;   // element size of a sub-allocation, -1 = a whole physical page
         int32_t pageCoordX = -1, pageCoordY = -1; // physical page
+        uint32_t capturedFrame = 0;               // the frame of its last capture
         uint32_t rect[4] = {};                    // atlas texels: min x, min y, max x, max y
         uint32_t sampleAtlasBiasX = 0, sampleAtlasBiasY = 0, sampleResLevelX = 0, sampleResLevelY = 0, samplePage = 0;
         bool mapped() const { return pageCoordX >= 0; }
@@ -248,5 +264,13 @@ private:
     std::vector<McPageTableGpu> m_pageTableGpu;
     Dirty m_dirty;
     std::vector<Request> m_requests;
+    std::vector<uint32_t> m_freeMeshCards;          // removed entries, reused by addInstance
+    std::map<uint32_t, uint32_t> m_freeCardSpans;   // offset -> size, coalesced
+    uint32_t m_refreshCursor = 0;                   // page index the refresh captures continue from
+    std::vector<uint32_t> m_refreshQueue;           // pages asked for by refreshInstance (taken from the back)
+    bool spanAvailable(uint32_t size) const;        // room for 'size' more page table entries
+    uint32_t addCardSpan(uint32_t size);
+    void removeCardSpan(uint32_t offset, uint32_t size);
+    void captureOf(uint32_t pageIndex, const PageEntry& page, const PageEntry& capture, uint32_t cardIndex, bool resample, bool refresh);
 };
 } // namespace unx::render::refl

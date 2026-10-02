@@ -1,5 +1,5 @@
 // surface_cache.mesh_cards (unx/refl/CardLighting.h; Passes/SurfaceCache/CardLighting.hlsli): the card lighting's
-// persistent atlases and the frame's passes.
+// persistent atlases and the passes of one update.
 #include "unx/refl/CardLighting.h"
 
 #include "unx/core/Config.h"
@@ -40,13 +40,12 @@ struct CardLighting::Impl
 {
     Device& device;
     uint32_t atlasSize = 0, pageCapacity = 0;
-    uint64_t generation = UINT64_MAX;
     ComPtr<ID3D12Resource> direct, indirect, final, trace, sh[3], frames, pageLight, uniformBits, frameBuffer;
     // this frame's references
-    uint64_t frameIndex = UINT64_MAX;
+    uint64_t frameIndex = UINT64_MAX, recordSerial = UINT64_MAX;
     CardSet set;
-    TextureRef directRef, indirectRef, finalRef;
-    BufferRef pageLightRef, frameRef;
+    CardLightingRefs refs;
+    bool cleared = false;  // r.card.clear ran since the resources were made
 
     explicit Impl(Device& d) : device(d) {}
 
@@ -90,15 +89,21 @@ struct CardLighting::Impl
 };
 
 CardLighting::CardLighting(Device& device) : m(std::make_unique<Impl>(device)) {}
-CardLighting::~CardLighting() = default;
+CardLighting::~CardLighting()
+{
+    Impl& s = *m;
+    s.release(s.direct), s.release(s.indirect), s.release(s.final), s.release(s.trace), s.release(s.frames), s.release(s.uniformBits);
+    s.release(s.pageLight), s.release(s.frameBuffer);
+    for (auto& t : s.sh) s.release(t);
+}
 
-BufferRef CardLighting::frame(const FramePassContext& fc) const { return m->frameIndex == fc.frame.frameIndex ? m->frameRef : BufferRef{}; }
+BufferRef CardLighting::frame(const FramePassContext& fc) const { return m->frameIndex == fc.frame.frameIndex ? m->refs.frame : BufferRef{}; }
 
 void CardLighting::declareRead(const FramePassContext& fc, PassBuilder& b, Use use) const
 {
     const Impl& s = *m;
     if (s.frameIndex != fc.frame.frameIndex) return;
-    b.use(s.frameRef, use);
+    b.use(s.refs.frame, use);
     b.use(s.set.instanceMap, use);
     b.use(s.set.meshCards, use);
     b.use(s.set.cards, use);
@@ -108,33 +113,20 @@ void CardLighting::declareRead(const FramePassContext& fc, PassBuilder& b, Use u
     b.use(s.set.albedo, use);
     b.use(s.set.normal, use);
     b.use(s.set.emissive, use);
-    b.use(s.directRef, use);
-    b.use(s.indirectRef, use);
-    b.use(s.finalRef, use);
+    b.use(s.refs.direct, use);
+    b.use(s.refs.indirect, use);
+    b.use(s.refs.final, use);
 }
 
-BufferRef CardLighting::prepare(FramePassContext& fc)
+const CardLightingRefs& CardLighting::begin(FramePassContext& fc, uint32_t atlasSize, uint32_t pageCapacity)
 {
     Impl& s = *m;
-    if (s.frameIndex == fc.frame.frameIndex) return s.frameRef;
-    if (!s.frameBuffer) s.frameBuffer = s.buffer(kFrameBytes, L"R card frame");
-    s.frameRef = fc.graph.importBuffer(s.frameBuffer.Get(), { "R card frame", kFrameBytes, 0 });
-    s.frameIndex = fc.frame.frameIndex;
-    return s.frameRef;
-}
-
-void CardLighting::record(FramePassContext& fc, const CardLightingInputs& in)
-{
-    Impl& s = *m;
-    if (!in.set.valid) return;
-    const BufferRef frameBuffer = prepare(fc);
-    const CardSet set = in.set;
+    const uint64_t serial = fc.trackState ? fc.trackState->recordSerial() : 0;
+    if (s.frameIndex == fc.frame.frameIndex && s.recordSerial == serial && s.refs.frame.valid()) return s.refs;
     RenderGraph& g = fc.graph;
-    ShaderLibrary& shaders = fc.shaders;
-    const QualityConfig& q = fc.quality;
-    const uint32_t atlas = set.atlasSize, capacity = std::max(set.cardPageCapacity, 1u);
+    const uint32_t atlas = atlasSize, capacity = std::max(pageCapacity, 1u);
     if (atlas == 0 || atlas % 128 != 0) fail("surface_cache.mesh_cards: atlas size %u", atlas);
-    bool clear = false;
+    bool created = false;
     if (s.atlasSize != atlas || !s.direct)
     {
         s.release(s.direct), s.release(s.indirect), s.release(s.final), s.release(s.trace), s.release(s.frames), s.release(s.uniformBits);
@@ -148,20 +140,92 @@ void CardLighting::record(FramePassContext& fc, const CardLightingInputs& in)
         s.frames = s.texture(atlas / kTile, DXGI_FORMAT_R8_UINT, L"R card radiosity frames");
         s.uniformBits = s.buffer((uint64_t)(atlas / kTile) * (atlas / kTile) * kUniformBytes, L"R card shadow uniform bits");
         s.atlasSize = atlas;
-        clear = true;
+        created = true;
     }
     if (s.pageCapacity != capacity || !s.pageLight)
     {
         s.release(s.pageLight);
         s.pageLight = s.buffer((uint64_t)capacity * kPageLightBytes, L"R card page light");
         s.pageCapacity = capacity;
-        clear = true;
+        created = true;
     }
-    if (s.generation != set.generation)
+    if (!s.frameBuffer) s.frameBuffer = s.buffer(kFrameBytes, L"R card frame");
+    if (created) s.cleared = false;
+
+    const uint32_t atlasTiles = (atlas / kTile) * (atlas / kTile);
+    CardLightingRefs r;
+    r.direct = g.importTexture(s.direct.Get(), { "R card direct lighting", atlas, atlas, 1, 1, DXGI_FORMAT_R11G11B10_FLOAT }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    r.indirect = g.importTexture(s.indirect.Get(), { "R card indirect lighting", atlas, atlas, 1, 1, DXGI_FORMAT_R11G11B10_FLOAT }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    r.final = g.importTexture(s.final.Get(), { "R card final lighting", atlas, atlas, 1, 1, DXGI_FORMAT_R11G11B10_FLOAT }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    r.trace = g.importTexture(s.trace.Get(), { "R card radiosity trace", atlas, atlas, 1, 1, DXGI_FORMAT_R11G11B10_FLOAT }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    static const char* const kShNames[3] = { "R card radiosity SH red", "R card radiosity SH green", "R card radiosity SH blue" };
+    for (int c = 0; c < 3; ++c)
+        r.sh[c] = g.importTexture(s.sh[c].Get(), { kShNames[c], atlas / kProbeSpacing, atlas / kProbeSpacing, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    r.frames = g.importTexture(s.frames.Get(), { "R card radiosity frames", atlas / kTile, atlas / kTile, 1, 1, DXGI_FORMAT_R8_UINT }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    r.uniformBits = g.importBuffer(s.uniformBits.Get(), { "R card shadow uniform bits", (uint64_t)atlasTiles * kUniformBytes, 0 });
+    r.pageLight = g.importBuffer(s.pageLight.Get(), { "R card page light", (uint64_t)capacity * kPageLightBytes, 0 });
+    r.frame = g.importBuffer(s.frameBuffer.Get(), { "R card frame", kFrameBytes, 0 });
+    r.created = created;
+    s.refs = r;
+    s.frameIndex = fc.frame.frameIndex;
+    s.recordSerial = serial;
+    return s.refs;
+}
+
+void CardLighting::recordFrame(FramePassContext& fc, const CardSet& set, bool restart, float depthBias, uint32_t frameWord)
+{
+    Impl& s = *m;
+    RenderGraph& g = fc.graph;
+    ShaderLibrary& shaders = fc.shaders;
+    const CardLightingRefs r = s.refs;
+    const uint32_t atlas = s.atlasSize, capacity = s.pageCapacity;
+    s.set = set;
+    if (restart || !s.cleared)
     {
-        s.generation = set.generation;
-        clear = true;
+        s.cleared = true;
+        g.addPass("r.card.clear", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      for (const TextureRef& t : { r.direct, r.indirect, r.final, r.trace, r.sh[0], r.sh[1], r.sh[2], r.frames }) b.use(t, Use::UavCompute);
+                      b.use(r.pageLight, Use::UavCompute);
+                      b.use(r.uniformBits, Use::UavCompute);
+                      b.keep();
+                  },
+                  [&shaders, r, atlas, capacity](PassContext& c) {
+                      const uint32_t k[12] = { c.uav(r.direct), c.uav(r.indirect), c.uav(r.final), c.uav(r.trace), c.uav(r.sh[0]), c.uav(r.sh[1]), c.uav(r.sh[2]),
+                                               c.uav(r.frames), c.uav(r.pageLight), c.uav(r.uniformBits), atlas, capacity };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardClear"));
+                      c.computeConstants(k, 12);
+                      c.cmd->Dispatch((atlas + 7) / 8, (atlas + 7) / 8, 1);
+                  });
     }
+    const uint32_t pageCount = std::min(set.cardPageCount, capacity);
+    g.addPass("r.card.frame", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(r.frame, Use::UavCompute);
+                  b.keep();
+              },
+              [&shaders, set, r, atlas, pageCount, frameWord, depthBias](PassContext& c) {
+                  const uint32_t k[24] = { c.srv(set.instanceMap), c.srv(set.meshCards), c.srv(set.cards), c.srv(set.cardPages), c.srv(set.pageTable), c.srv(set.depth),
+                                           c.srv(set.albedo), c.srv(set.normal), c.srv(set.emissive), atlas, pageCount, frameWord, c.srv(r.final), c.srv(r.direct),
+                                           c.srv(r.indirect), c.srv(r.pageLight), set.instances, bits(depthBias), 0, 0, c.uav(r.frame), 0xFFFFFFFFu, 0, 0 };
+                  c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardFrame"));
+                  c.computeConstants(k, 24);
+                  c.cmd->Dispatch(1, 1, 1);
+              });
+}
+
+void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs& in)
+{
+    Impl& s = *m;
+    if (!in.set.valid) return;
+    const CardSet set = in.set;
+    s.set = set;
+    RenderGraph& g = fc.graph;
+    ShaderLibrary& shaders = fc.shaders;
+    const QualityConfig& q = fc.quality;
+    const CardLightingRefs r = s.refs;
+    const BufferRef frameBuffer = r.frame;
+    const uint32_t atlas = s.atlasSize, capacity = s.pageCapacity;
 
     const uint32_t atlasTiles = (atlas / kTile) * (atlas / kTile);
     const uint32_t directBudget = std::max(atlasTiles / std::max(in.directFactor, 1u), 1u), radiosityBudget = std::max(atlasTiles / std::max(in.radiosityFactor, 1u), 1u);
@@ -169,28 +233,15 @@ void CardLighting::record(FramePassContext& fc, const CardLightingInputs& in)
     if (directCapacity > 65535 || radiosityCapacity > 65535) fail("surface_cache.mesh_cards: %u / %u tiles a frame exceed one dispatch row", directCapacity, radiosityCapacity);
     const float updateDistance = q.has("surface_cache.mesh_cards_update_distance_m") ? (float)q.number("surface_cache.mesh_cards_update_distance_m") : 25.0f;
     const float frustumMargin = q.has("surface_cache.mesh_cards_frustum_margin_m") ? (float)q.number("surface_cache.mesh_cards_frustum_margin_m") : 5.0f;
-    const float depthBias = q.has("surface_cache.mesh_cards_depth_bias_m") ? (float)q.number("surface_cache.mesh_cards_depth_bias_m") : 0.10f;
     const float endBias = q.has("shading.mega_lights_ray_end_bias_m") ? (float)q.number("shading.mega_lights_ray_end_bias_m") : 0.01f;
 
-    const TextureRef direct = g.importTexture(s.direct.Get(), { "R card direct lighting", atlas, atlas, 1, 1, DXGI_FORMAT_R11G11B10_FLOAT }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-    const TextureRef indirect = g.importTexture(s.indirect.Get(), { "R card indirect lighting", atlas, atlas, 1, 1, DXGI_FORMAT_R11G11B10_FLOAT }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-    const TextureRef final = g.importTexture(s.final.Get(), { "R card final lighting", atlas, atlas, 1, 1, DXGI_FORMAT_R11G11B10_FLOAT }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-    const TextureRef trace = g.importTexture(s.trace.Get(), { "R card radiosity trace", atlas, atlas, 1, 1, DXGI_FORMAT_R11G11B10_FLOAT }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-    TextureRef sh[3];
-    static const char* const kShNames[3] = { "R card radiosity SH red", "R card radiosity SH green", "R card radiosity SH blue" };
-    for (int c = 0; c < 3; ++c)
-        sh[c] = g.importTexture(s.sh[c].Get(), { kShNames[c], atlas / kProbeSpacing, atlas / kProbeSpacing, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-    const TextureRef frames = g.importTexture(s.frames.Get(), { "R card radiosity frames", atlas / kTile, atlas / kTile, 1, 1, DXGI_FORMAT_R8_UINT }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-    const BufferRef uniformBits = g.importBuffer(s.uniformBits.Get(), { "R card shadow uniform bits", (uint64_t)atlasTiles * kUniformBytes, 0 });
-    const BufferRef pageLight = g.importBuffer(s.pageLight.Get(), { "R card page light", (uint64_t)capacity * kPageLightBytes, 0 });
+    const TextureRef direct = r.direct, indirect = r.indirect, final = r.final, trace = r.trace, frames = r.frames;
+    const TextureRef sh[3] = { r.sh[0], r.sh[1], r.sh[2] };
+    const BufferRef uniformBits = r.uniformBits, pageLight = r.pageLight;
     const uint64_t selectBytes = kSelectHead + 2ull * kBuckets * 4 + (uint64_t)capacity * 4 + ((uint64_t)directCapacity + radiosityCapacity) * 4;
     const BufferRef select = g.createBuffer({ "r.card select", (selectBytes + 15) & ~15ull, 0 });
     const BufferRef tileLights = g.createBuffer({ "r.card tile lights", (uint64_t)directCapacity * kTileLightBytes, 0 });
     const BufferRef tileShadow = g.createBuffer({ "r.card tile shadow", (uint64_t)directCapacity * kTileShadowBytes, 0 });
-
-    s.set = set;
-    s.directRef = direct, s.indirectRef = indirect, s.finalRef = final;
-    s.pageLightRef = pageLight;
 
     const D3D12_GPU_VIRTUAL_ADDRESS cb = in.frameConstants;
     const uint32_t frame = in.frame, pageCount = std::min(set.cardPageCount, capacity);
@@ -214,34 +265,17 @@ void CardLighting::record(FramePassContext& fc, const CardLightingInputs& in)
         }
     };
 
-    if (clear)
-    {
-        g.addPass("r.card.clear", QueueType::Compute,
-                  [&](PassBuilder& b) {
-                      for (const TextureRef& t : { direct, indirect, final, trace, sh[0], sh[1], sh[2], frames }) b.use(t, Use::UavCompute);
-                      b.use(pageLight, Use::UavCompute);
-                      b.use(uniformBits, Use::UavCompute);
-                      b.keep();
-                  },
-                  [&shaders, direct, indirect, final, trace, sh0 = sh[0], sh1 = sh[1], sh2 = sh[2], frames, pageLight, uniformBits, atlas, capacity](PassContext& c) {
-                      const uint32_t k[12] = { c.uav(direct), c.uav(indirect), c.uav(final), c.uav(trace), c.uav(sh0), c.uav(sh1), c.uav(sh2), c.uav(frames),
-                                               c.uav(pageLight), c.uav(uniformBits), atlas, capacity };
-                      c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardClear"));
-                      c.computeConstants(k, 12);
-                      c.cmd->Dispatch((atlas + 7) / 8, (atlas + 7) / 8, 1);
-                  });
-    }
-
+    // the card frame with this update's counter and page count; the select buffer's head and histograms cleared
     g.addPass("r.card.frame", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(frameBuffer, Use::UavCompute);
                   b.use(select, Use::UavCompute);
                   b.keep();
               },
-              [&shaders, set, direct, indirect, final, pageLight, frameBuffer, select, atlas, pageCount, frame, depthBias](PassContext& c) {
+              [&shaders, set, r, select, atlas, pageCount, frame, depthBias = in.depthBias](PassContext& c) {
                   const uint32_t k[24] = { c.srv(set.instanceMap), c.srv(set.meshCards), c.srv(set.cards), c.srv(set.cardPages), c.srv(set.pageTable), c.srv(set.depth),
-                                           c.srv(set.albedo), c.srv(set.normal), c.srv(set.emissive), atlas, pageCount, frame, c.srv(final), c.srv(direct), c.srv(indirect),
-                                           c.srv(pageLight), set.instances, bits(depthBias), 0, 0, c.uav(frameBuffer), c.uav(select), 0, 0 };
+                                           c.srv(set.albedo), c.srv(set.normal), c.srv(set.emissive), atlas, pageCount, frame, c.srv(r.final), c.srv(r.direct),
+                                           c.srv(r.indirect), c.srv(r.pageLight), set.instances, bits(depthBias), 0, 0, c.uav(r.frame), c.uav(select), 0, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardFrame"));
                   c.computeConstants(k, 24);
                   c.cmd->Dispatch(1, 1, 1);

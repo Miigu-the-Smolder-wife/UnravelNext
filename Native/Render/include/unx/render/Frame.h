@@ -31,6 +31,26 @@ class GpuScene;
 
 struct FramePassContext;
 
+// Every resource a reader of the mesh-card surface cache touches (FrameResources::cards), as shader resources of 'use'
+// (SrvCompute, or SrvGraphics for DispatchRays passes).
+inline void declareSurfaceCacheCards(PassBuilder& b, const SurfaceCacheCardRefs& r, Use use)
+{
+    if (!r.valid()) return;
+    b.use(r.frame, use);
+    b.use(r.instanceMap, use);
+    b.use(r.meshCards, use);
+    b.use(r.cards, use);
+    b.use(r.cardPages, use);
+    b.use(r.pageTable, use);
+    b.use(r.depth, use);
+    b.use(r.albedo, use);
+    b.use(r.normal, use);
+    b.use(r.emissive, use);
+    b.use(r.direct, use);
+    b.use(r.indirect, use);
+    b.use(r.final, use);
+}
+
 // Bands of a banded pass group for a view of width x height (RenderGraph::addBandedGroup): the view's pixels over
 // output.band_pixels (quality key, core; 4K / 8 = L2-sized intermediates), at least 1; band_pixels = 0 is one band (the
 // default since v1.31: M measured a net loss with bands while shading is latency-bound).

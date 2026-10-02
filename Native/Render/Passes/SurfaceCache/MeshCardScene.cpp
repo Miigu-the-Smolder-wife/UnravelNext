@@ -203,6 +203,93 @@ void MeshCardScene::clear()
     m_pageTableGpu.clear();
     m_dirty = {};
     m_dirty.instanceMap = true;
+    m_freeMeshCards.clear();
+    m_freeCardSpans.clear();
+    m_refreshCursor = 0;
+    m_refreshQueue.clear();
+}
+
+bool MeshCardScene::spanAvailable(uint32_t size) const
+{
+    if (m_pages.size() + size <= m_settings.maxPages) return true;
+    for (const auto& span : m_freeSpans)
+        if (span.second >= size) return true;
+    return false;
+}
+
+void MeshCardScene::refreshInstance(uint32_t sceneInstance)
+{
+    if (!hasInstance(sceneInstance)) return;
+    const MeshCardsEntry& e = m_meshCards[m_instanceMap[sceneInstance]];
+    for (uint32_t c = 0; c < e.cardCount; ++c)
+    {
+        const Card& card = m_cards[e.firstCard + c];
+        if (!card.allocated()) continue;
+        for (uint32_t level = card.minAllocatedResLevel; level <= card.maxAllocatedResLevel; ++level)
+        {
+            const MipMap& m = mip(card, level);
+            for (uint32_t local = 0; local < m.pageTableSize; ++local)
+                if (m_pages[(uint32_t)m.pageTableOffset + local].mapped()) m_refreshQueue.push_back((uint32_t)m.pageTableOffset + local);
+        }
+    }
+}
+
+uint32_t MeshCardScene::addCardSpan(uint32_t size)
+{
+    for (auto it = m_freeCardSpans.begin(); it != m_freeCardSpans.end(); ++it)
+        if (it->second >= size)
+        {
+            const uint32_t offset = it->first, rest = it->second - size;
+            m_freeCardSpans.erase(it);
+            if (rest != 0) m_freeCardSpans[offset + size] = rest;
+            return offset;
+        }
+    const uint32_t offset = (uint32_t)m_cards.size();
+    m_cards.resize(m_cards.size() + size);
+    m_cardsGpu.resize(m_cards.size());
+    return offset;
+}
+
+void MeshCardScene::removeCardSpan(uint32_t offset, uint32_t size)
+{
+    auto it = m_freeCardSpans.emplace(offset, size).first;
+    const auto next = std::next(it);
+    if (next != m_freeCardSpans.end() && it->first + it->second == next->first)
+    {
+        it->second += next->second;
+        m_freeCardSpans.erase(next);
+    }
+    if (it != m_freeCardSpans.begin())
+    {
+        const auto prev = std::prev(it);
+        if (prev->first + prev->second == it->first)
+        {
+            prev->second += it->second;
+            m_freeCardSpans.erase(it);
+        }
+    }
+}
+
+void MeshCardScene::removeInstance(uint32_t sceneInstance)
+{
+    if (!hasInstance(sceneInstance)) return;
+    const uint32_t index = m_instanceMap[sceneInstance];
+    MeshCardsEntry& e = m_meshCards[index];
+    for (uint32_t c = 0; c < e.cardCount; ++c)
+    {
+        const uint32_t cardIndex = e.firstCard + c;
+        removeCardFromAtlas(cardIndex);
+        m_cards[cardIndex] = Card{};
+        m_cardsGpu[cardIndex] = McCardGpu{};
+        markDirty(m_dirty.cards, cardIndex);
+    }
+    if (e.cardCount != 0) removeCardSpan(e.firstCard, e.cardCount);
+    e = MeshCardsEntry{};
+    m_meshCardsGpu[index] = McMeshCardsGpu{};
+    markDirty(m_dirty.meshCards, index);
+    m_freeMeshCards.push_back(index);
+    m_instanceMap[sceneInstance] = mc::kNone;
+    m_dirty.instanceMap = true;
 }
 
 uint32_t MeshCardScene::addInstance(uint32_t sceneInstance, const scene::MeshCards& cards, const float3x4& objectToWorld)
@@ -232,14 +319,25 @@ uint32_t MeshCardScene::addInstance(uint32_t sceneInstance, const scene::MeshCar
     }
     if (kept.empty()) return mc::kNone;
 
-    const uint32_t index = (uint32_t)m_meshCards.size();
+    uint32_t index;
+    if (!m_freeMeshCards.empty())
+    {
+        index = m_freeMeshCards.back();
+        m_freeMeshCards.pop_back();
+    }
+    else
+    {
+        index = (uint32_t)m_meshCards.size();
+        m_meshCards.emplace_back();
+        m_meshCardsGpu.emplace_back();
+    }
     MeshCardsEntry entry;
     entry.sceneInstance = sceneInstance;
-    entry.firstCard = (uint32_t)m_cards.size();
+    entry.firstCard = addCardSpan((uint32_t)kept.size());
     entry.cardCount = (uint32_t)kept.size();
     entry.mostlyTwoSided = cards.mostlyTwoSided;
-    m_meshCards.push_back(entry);
-    m_meshCardsGpu.emplace_back();
+    m_meshCards[index] = entry;
+    uint32_t slot = entry.firstCard;
     for (uint32_t i : kept)
     {
         const scene::MeshCard& c = cards.cards[i];
@@ -262,8 +360,7 @@ uint32_t MeshCardScene::addInstance(uint32_t sceneInstance, const scene::MeshCar
             biasX = floorLog2((uint32_t)std::max(1.0f, std::round(1.0f / aspect)));
         card.biasX = (uint8_t)std::min(biasX, mc::kMaxResLevel - mc::kMinResLevel);
         card.biasY = (uint8_t)std::min(biasY, mc::kMaxResLevel - mc::kMinResLevel);
-        m_cards.push_back(card);
-        m_cardsGpu.emplace_back();
+        m_cards[slot++] = card;
     }
     m_instanceMap[sceneInstance] = index;
     m_dirty.instanceMap = true;
@@ -502,6 +599,27 @@ void MeshCardScene::removeCardFromAtlas(uint32_t cardIndex)
     markDirty(m_dirty.cards, cardIndex);
 }
 
+void MeshCardScene::captureOf(uint32_t pageIndex, const PageEntry& page, const PageEntry& capture, uint32_t cardIndex, bool resample, bool refresh)
+{
+    McCapture cap;
+    cap.page = pageIndex;
+    cap.card = cardIndex;
+    cap.sceneInstance = m_meshCards[m_cards[cardIndex].meshCards].sceneInstance;
+    cap.captureRect[0] = capture.rect[0];
+    cap.captureRect[1] = capture.rect[1];
+    cap.captureRect[2] = capture.rect[2] - capture.rect[0];
+    cap.captureRect[3] = capture.rect[3] - capture.rect[1];
+    cap.atlasRect[0] = page.rect[0];
+    cap.atlasRect[1] = page.rect[1];
+    cap.atlasRect[2] = page.rect[2] - page.rect[0];
+    cap.atlasRect[3] = page.rect[3] - page.rect[1];
+    std::memcpy(cap.cardUvRect, page.cardUvRect, sizeof(cap.cardUvRect));
+    cap.resample = resample;
+    cap.refresh = refresh;
+    m_captures.push_back(cap);
+    m_stats.capturedTexels += cap.atlasRect[2] * cap.atlasRect[3];
+}
+
 void MeshCardScene::update(std::span<const float3> viewOrigins)
 {
     ++m_frame;
@@ -516,6 +634,7 @@ void MeshCardScene::update(std::span<const float3> viewOrigins)
     for (uint32_t mcIndex = 0; mcIndex < m_meshCards.size(); ++mcIndex)
     {
         const MeshCardsEntry& e = m_meshCards[mcIndex];
+        if (e.cardCount == 0) continue;  // (a removed entry)
         const float3 translation{ e.objectToWorld.m[0][3], e.objectToWorld.m[1][3], e.objectToWorld.m[2][3] };
         float3 local[8];
         const size_t views = std::min<size_t>(viewOrigins.size(), 8);
@@ -616,7 +735,7 @@ void MeshCardScene::update(std::span<const float3> viewOrigins)
         Card& card = m_cards[request.card];
         uint32_t level = request.resLevel;
         bool canAlloc = m_allocator.spaceAvailable(mipMapDesc(card, level), false);
-        // the atlas is full: a lower level (stage 3b evicts unused higher levels first)
+        // the atlas is full: a lower level
         while (!canAlloc && level > mc::kMinResLevel)
         {
             --level;
@@ -624,6 +743,11 @@ void MeshCardScene::update(std::span<const float3> viewOrigins)
         }
         if (canAlloc && level != request.resLevel) ++m_stats.loweredAllocations;
         if (!captureAllocator.spaceAvailable(mipMapDesc(card, level), false)) canAlloc = false;
+        {
+            // (the page table is a fixed-size GPU buffer: a card that would not fit waits)
+            const MipMapDesc want = mipMapDesc(card, level);
+            if (!mip(card, level).allocated() && !spanAvailable(want.sizeInPagesX * want.sizeInPagesY)) canAlloc = false;
+        }
         if (canAlloc)
         {
             card.visible = true;
@@ -647,26 +771,64 @@ void MeshCardScene::update(std::span<const float3> viewOrigins)
                 capture.pageCoordX = capture.pageCoordY = -1;
                 captureAllocator.allocate(capture);
                 if (!capture.mapped()) throw Error("mesh cards: the capture atlas is full after the space check");
-                McCapture cap;
-                cap.page = pageIndex;
-                cap.card = request.card;
-                cap.sceneInstance = m_meshCards[card.meshCards].sceneInstance;
-                cap.captureRect[0] = capture.rect[0];
-                cap.captureRect[1] = capture.rect[1];
-                cap.captureRect[2] = capture.rect[2] - capture.rect[0];
-                cap.captureRect[3] = capture.rect[3] - capture.rect[1];
-                cap.atlasRect[0] = page.rect[0];
-                cap.atlasRect[1] = page.rect[1];
-                cap.atlasRect[2] = page.rect[2] - page.rect[0];
-                cap.atlasRect[3] = page.rect[3] - page.rect[1];
-                std::memcpy(cap.cardUvRect, page.cardUvRect, sizeof(cap.cardUvRect));
-                cap.resample = resample;
-                m_captures.push_back(cap);
-                m_stats.capturedTexels += cap.atlasRect[2] * cap.atlasRect[3];
+                page.capturedFrame = m_frame;
+                captureOf(pageIndex, page, capture, request.card, resample, false);
             }
             dirtyCards.push_back(request.card);
         }
         if (m_captures.size() >= m_settings.capturesPerFrame) break;
+    }
+    m_stats.pending = m_stats.requests > (uint32_t)dirtyCards.size() ? m_stats.requests - (uint32_t)dirtyCards.size() : 0;
+
+    // Resident pages captured again (LastCapturedPageHeap, CardCaptureRefreshFraction): what the new cards left of the
+    // frame's share, the pages in table order from where the last frame stopped - every resident page comes round.
+    m_stats.refreshed = 0;
+    if (m_settings.refreshFraction > 0 && !m_pages.empty())
+    {
+        const uint32_t refreshPages = (uint32_t)((float)m_settings.capturesPerFrame * m_settings.refreshFraction);
+        const uint64_t refreshTexels =
+            (uint64_t)((double)m_settings.atlasSize * m_settings.atlasSize / std::max(m_settings.captureFactor, 1u) * m_settings.refreshFraction);
+        uint64_t texels = 0;
+        const uint32_t count = (uint32_t)m_pages.size();
+        // 0: the page is not to be captured (skip it), 1: captured, 2: the frame's share or the capture atlas is used up
+        auto refresh = [&](uint32_t pageIndex) -> int {
+            if (pageIndex >= count) return 0;
+            PageEntry& page = m_pages[pageIndex];
+            if (!page.mapped() || page.card < 0 || page.capturedFrame == m_frame) return 0;
+            const uint64_t size = (uint64_t)(page.rect[2] - page.rect[0]) * (page.rect[3] - page.rect[1]);
+            MipMapDesc d{};
+            d.subAllocation = page.subAllocation();
+            d.sizeInPagesX = d.sizeInPagesY = 1;
+            d.resolutionX = page.rect[2] - page.rect[0];
+            d.resolutionY = page.rect[3] - page.rect[1];
+            if ((texels + size > refreshTexels && m_stats.refreshed > 0) || !captureAllocator.spaceAvailable(d, true)) return 2;
+            PageEntry capture = page;
+            capture.pageCoordX = capture.pageCoordY = -1;
+            captureAllocator.allocate(capture);
+            if (!capture.mapped()) return 2;
+            page.capturedFrame = m_frame;
+            captureOf(pageIndex, page, capture, (uint32_t)page.card, false, true);
+            texels += size;
+            ++m_stats.refreshed;
+            return 1;
+        };
+        bool room = true;
+        while (room && !m_refreshQueue.empty() && m_stats.refreshed < refreshPages && m_captures.size() < m_settings.capturesPerFrame)
+        {
+            if (refresh(m_refreshQueue.back()) == 2) room = false;
+            else m_refreshQueue.pop_back();
+        }
+        for (uint32_t step = 0; room && step < count && m_stats.refreshed < refreshPages && m_captures.size() < m_settings.capturesPerFrame; ++step)
+        {
+            const uint32_t pageIndex = (m_refreshCursor + step) % count;
+            const int result = refresh(pageIndex);
+            if (result == 2)
+            {
+                m_refreshCursor = pageIndex;
+                break;
+            }
+            if (result == 1) m_refreshCursor = (pageIndex + 1) % count;
+        }
     }
     m_stats.captures = (uint32_t)m_captures.size();
 
@@ -702,6 +864,7 @@ void MeshCardScene::writeMeshCardsGpu(uint32_t index)
 {
     const MeshCardsEntry& e = m_meshCards[index];
     McMeshCardsGpu& g = m_meshCardsGpu[index];
+    g = McMeshCardsGpu{};
     // world -> mesh cards space: the rotation's transpose; w = the world origin
     for (int r = 0; r < 3; ++r)
     {
