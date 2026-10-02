@@ -33,6 +33,8 @@ radiance_cache_keep_frames = 8                    # NumFramesToKeepCachedProbes:
 radiance_cache_reprojection_radius_scale = 1.5    # ReprojectionRadiusScale: the parallax sphere, in probe TMin radii
 radiance_cache_downsample_distance_m = 40.0       # (Q) DownsampleDistanceFromCamera: farther probes trace 1/4 of the rays
 radiance_cache_trace_distance_m = 200.0           # Lumen's MaxTraceDistance (20000 cm)
+radiance_cache_probe_occlusion = true             # ours (LumenRadianceCache.hlsli): a probe's ray is dropped when the probe's line to its start is
+                                                  # blocked, and a lookup uses only probes that see the asking ray - no light through walls
 radiance_cache_filter = true                      # RadianceCache.SpatialFilterProbes
 radiance_cache_filter_max_hit_angle = 0.2         # SpatialFilterMaxRadianceHitAngle (rad)
 radiance_cache_mark_tile_px = 16                  # the module's own screen marker: one surface point per tile (the screen

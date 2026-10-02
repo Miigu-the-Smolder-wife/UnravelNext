@@ -96,10 +96,19 @@ void LgTraceGen()
         r.TMin = max(lgTraceDistance(screened) - LG_SCREEN_PULLBACK, 0.0);
     }
     // The far field: A's radiance cache (the position is the probe's, as marked by LgRcMark).
+    // Its answer for this ray is taken before the ray: where no probe around both sees the ray's start and holds its
+    // direction (LumenRadianceCache.hlsli, probe occlusion) the ray runs its full length.
     LrcCoverage coverage = (LrcCoverage)0;
+    float4 cached = 0;
     if (P[5].y != 0xFFFFFFFFu)
     {
-        coverage = lrcCoverageChecked(lrcParams(P[5].y), P[5].z, positionSpeed.xyz, lgRcDither(atlas));
+        const LrcParams rc = lrcParams(P[5].y);
+        coverage = lrcCoverageChecked(rc, P[5].z, positionSpeed.xyz, lgRcDither(atlas));
+        if (coverage.valid)
+        {
+            cached = lrcSample(rc, P[5].z, P[5].w, P[11].z, coverage, positionSpeed.xyz, r.Direction, lrcSeenFrom(rc, coverage, r.Origin, r.Direction));
+            coverage.valid = cached.a > 0;
+        }
         if (coverage.valid) r.TMax = min(r.TMax, coverage.minTraceDistance);
     }
     const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_GI | RT_MASK_EMITTER);
@@ -113,7 +122,7 @@ void LgTraceGen()
     if (hit.t < 0 && coverage.valid)
     {
         const LrcParams rc = lrcParams(P[5].y);
-        radiance = lrcSample(rc, P[5].z, P[5].w, coverage, positionSpeed.xyz, r.Direction, -1.0);
+        radiance = cached.rgb;
         reachedCache = true;
         distanceToHit = P[11].z != 0xFFFFFFFFu ? lrcSampleDistance(rc, P[5].z, P[11].z, coverage, positionSpeed.xyz, r.Direction) : r.TMax;
     }

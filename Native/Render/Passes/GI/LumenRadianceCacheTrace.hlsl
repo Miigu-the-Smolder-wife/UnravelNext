@@ -8,11 +8,14 @@
 // (direct light with the sun, radiosity) and shades its own material; a hit without cards takes the sun (one shadow ray
 // into the disk), one local-light sample with its shadow ray and - when a world cache is bound - that cache's
 // irradiance; the hit's own emission. An analytic area light's proxy returns 0 and occludes. A miss returns the sky.
-// Output: the trace's radiance (nits x LRC_RADIANCE_SCALE) into the temporary atlas at the trace's place, and the hit
-// distance into the probe's place of the depth atlas.
+// Probe occlusion (P[4].w != 0; LumenRadianceCache.hlsli): before its ray the thread walks the probe's straight line to
+// the ray's start; anything in the way that is not a two-sided sheet and the texel holds nothing (alpha 0, the depth =
+// the blocker's distance).
+// Output: the trace's radiance (nits x LRC_RADIANCE_SCALE; alpha 1: the texel holds radiance) into the temporary atlas at
+// the trace's place, and the hit distance into the probe's place of the depth atlas.
 // P[0] = { world cache SRV (UNX_NONE: none), trace records SRV, temporary radiance UAV (RGBA16F), depth atlas UAV (R16_UINT) }
 // P[1], P[2], P[3] = sky and sun (GiSky.hlsli), P[1].w = the trace distance; P[3].w = gi.experiment_disable bits (8, 16, 128)
-// P[4] = { parameters SRV (LrcParams), state SRV, the dispatch's first trace record, 0 }, P[5].x = card frame SRV
+// P[4] = { parameters SRV (LrcParams), state SRV, the dispatch's first trace record, probe occlusion on }, P[5].x = card frame SRV
 // (CardLayout.hlsli mcFrame; UNX_NONE: none). One dispatch holds at most 262,144 rays (LumenRadianceCache.cpp: chunks
 // of probes).
 // P[6], P[7] = RtSceneSrvs
@@ -55,12 +58,29 @@ void LumenRadianceCacheTraceGen()
     r.Origin = centre;
     r.TMin = lrcTMin(p, clipmap);
     r.TMax = max(giRayLength(), r.TMin);
-    const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_GI | RT_MASK_EMITTER);
+    // the probe's straight line to the ray's start
+    bool blocked = false;
+    uint depthWord = lrcEncodeDepth(0, false, false, false);
+    if (P[4].w != 0)
+    {
+        RayDesc toStart = r;
+        toStart.TMin = 0;
+        toStart.TMax = r.TMin;
+        const RtHit before = rtTraceClosest(scene, toStart, RAY_FLAG_NONE, RT_MASK_GI);
+        if (before.t >= 0)
+        {
+            const RtSurface bs = rtSurface(scene, before, toStart.Origin, toStart.Direction);
+            blocked = (loadMaterial(bs.material).classFlags & MATERIAL_TWO_SIDED) == 0;  // (a leaf, a cloth: light passes around it)
+            if (blocked) depthWord = lrcEncodeNearDepth(before.t, r.TMin, bs.frontFace);
+        }
+    }
+    RtHit hit = rtMiss();
+    if (!blocked) hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_GI | RT_MASK_EMITTER);
     const uint seed = giRandom(id.x * 9781u + id.y * 6271u + p.frame * 26699u);
 
     float3 radiance = 0;
-    uint depthWord = lrcEncodeDepth(0, false, false, false);
-    if (hit.t < 0) radiance = giSkyRadiance(r.Direction);
+    if (blocked) radiance = 0;
+    else if (hit.t < 0) radiance = giSkyRadiance(r.Direction);
     else if (hit.instance == RT_INSTANCE_EMITTER) depthWord = lrcEncodeDepth(hit.t, true, true, false);
     else
     {
@@ -117,7 +137,7 @@ void LumenRadianceCacheTraceGen()
         }
     }
     if (!all(radiance == radiance) || any(radiance < 0)) radiance = 0;
-    const float4 value = float4(min(radiance * LRC_RADIANCE_SCALE, 60000.0), 1);
+    const float4 value = blocked ? float4(0, 0, 0, 0) : float4(min(radiance * LRC_RADIANCE_SCALE, 60000.0), 1);
     RWTexture2D<float4> temporary = ResourceDescriptorHeap[P[0].z];
     RWTexture2D<uint> depthAtlas = ResourceDescriptorHeap[P[0].w];
     const uint2 temporaryBase = uint2(id.y % p.tempProbes, id.y / p.tempProbes) * res, depthBase = lrcAtlasCoord(p, slot) * res;

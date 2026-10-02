@@ -5,6 +5,7 @@
 #   powershell -File Tools\Verify\Run-Ue6Still.ps1 -Name cap_off [-Scene bt_lobby] [-Set k=v,k=v] [-Frames 600]
 #                                                  [-Capture 599] [-Layers gi] [-Resolution 1080p]
 # -Scene furnace_room -Layers gi,carddirect,cardindirect: the closed room's energy balance, stage by stage (furnace.py).
+# -Scene furnace_room_day: the same with the sun up outside - what a stage holds over its number came through the walls.
 param(
     [Parameter(Mandatory = $true)][string]$Name,
     [string]$Scene = "bt_lobby",
@@ -42,7 +43,7 @@ $text = Get-Content $log -Raw
 if ($text -match "DEVICE_REMOVED|DEVICE_HUNG|DEVICE_RESET|device removed|device hung") { throw "device removal: $log" }
 Write-Host "== $Name ($($Set -join ' ')): exit $code"
 & python Tools\Verify\pfm_to_png.py $dir | Out-Null
-if ($Scene -eq "furnace_room") { & python Tools\Verify\furnace.py $dir }
+if ($Scene -like "furnace_room*") { & python Tools\Verify\furnace.py $dir }
 if ($Scene -eq "bt_lobby" -and $Resolution -eq "1080p") {
     foreach ($line in (Select-String -Path $log -Pattern "captured final .*frame (\d+), ev100 ([-0-9.]+)")) {
         $f = $line.Matches[0].Groups[1].Value

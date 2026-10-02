@@ -15,8 +15,18 @@
 //             light sample); radiance and hit distance per texel;
 //   filter    each traced texel averaged with the 6 neighbour probes' texels that see the same thing (hit-angle
 //             weight, mutual occlusion test), then stored with a 1-texel border for bilinear lookups.
-// Probe radiance is stored as nits x LRC_RADIANCE_SCALE in R11G11B10F (exposure-independent: probes outlive exposure
-// changes).
+// Probe radiance is stored as nits x LRC_RADIANCE_SCALE in RGBA16F (exposure-independent: probes outlive exposure
+// changes), alpha = the texel holds radiance, rgb multiplied by it (a bilinear lookup is then weighted by validity).
+// Probe occlusion (lumen.radiance_cache_probe_occlusion; ours - the reference's radiance probes have none and leak
+// through walls nearer than a cell, its irradiance-field probes test Chebyshev depth): a probe's ray starts lrcTMin
+// from its centre, so near a wall it starts BEYOND the wall and brings the other side's light (the sky into a closed
+// room). Two tests close a closed room:
+//   (i)  the trace first walks the centre's straight line to the ray's start; anything in the way (not a two-sided
+//        sheet) and the texel holds nothing - its depth is the blocker's distance (< lrcTMin: lrcDepthNear);
+//   (ii) a lookup uses a probe only when the probe's depth map sees the asking ray's start (lrcProbeSees): a probe on
+//        the other side of a wall does not.
+// A probe that passes both has its centre and its ray's start in the asking point's own space. Where no probe answers
+// the lookup's weight is 0 and the caller traces its ray to the full length instead.
 #ifndef UNX_LUMEN_RADIANCE_CACHE_HLSLI
 #define UNX_LUMEN_RADIANCE_CACHE_HLSLI
 #include "Bindless.hlsli"
@@ -108,10 +118,24 @@ uint lrcEncodeDepth(float distance, bool hit, bool frontFace, bool twoSided)
     return (f32tof16(clamp(distance, 0.0, 65000.0)) & 0x7FFEu) | (frontFace ? 0x8000u : 0u) | (twoSided ? 1u : 0u);
 }
 float lrcDepthDistance(uint e) { return e == 0xFFFFu ? 65000.0 : f16tof32(e & 0x7FFEu); }
+// The depth of a texel whose ray was not traced: the probe's straight line to the ray's start is blocked at 'distance'
+// (kept under the start distance so that it reads as near: lrcDepthNear).
+uint lrcEncodeNearDepth(float distance, float tMin, bool frontFace) { return lrcEncodeDepth(min(distance, tMin * 0.95), true, frontFace, false); }
 bool lrcDepthHit(uint e) { return e != 0xFFFFu; }
 bool lrcDepthSeesFront(uint e) { return e == 0xFFFFu || (e & 0x8001u) != 0; }
 
 uint2 lrcAtlasCoord(LrcParams p, uint probe) { return uint2(probe % p.atlasProbes, probe / p.atlasProbes); }
+bool lrcDepthNear(LrcParams p, uint clipmap, uint e) { return e != 0xFFFFu && f16tof32(e & 0x7FFEu) < lrcTMin(p, clipmap) * 0.98; }
+// Whether a probe sees a point around it (within about two cells): its depth map toward the point against the distance,
+// less 0.15 cell (a texel of the map is 5.6 degrees wide: 0.1 cell at a cell's distance).
+bool lrcProbeSees(LrcParams p, Texture2D<uint> depth, uint probe, float3 centre, uint clipmap, float3 position)
+{
+    const float3 to = position - centre;
+    const float distance = length(to);
+    if (distance < 1e-3) return true;
+    const uint2 texel = min(uint2(lrcDirectionToUv(to) * float(p.probeResolution)), p.probeResolution - 1);
+    return lrcDepthDistance(depth.Load(int3(lrcAtlasCoord(p, probe) * p.probeResolution + texel, 0))) >= distance - 0.15 * lrcCellSize(p, clipmap);
+}
 
 // ---- consumers ------------------------------------------------------------------------------------------------------
 struct LrcCoverage
@@ -143,14 +167,12 @@ LrcCoverage lrcCoverageChecked(LrcParams p, uint indirectionSrv, float3 worldPos
     return c;
 }
 
-// One probe's radiance toward 'direction' as seen from 'worldPosition' (nits): the direction is taken to the sphere of
-// radius reprojectionRadiusScale x TMin around the probe (the parallax of what the probe saw beyond its start distance),
-// and the value rescaled by the squared distance ratio so that moving between probes shows no grid pattern.
-float3 lrcProbeRadiance(LrcParams p, Texture3D<uint> indirection, Texture2D<float4> atlas, int3 coord, uint clipmap, float3 worldPosition, float3 direction)
+// One probe's radiance toward 'direction' as seen from 'worldPosition' (rgb: nits x a; a: how much of the lookup's
+// texels hold radiance): the direction is taken to the sphere of radius reprojectionRadiusScale x TMin around the probe
+// (the parallax of what the probe saw beyond its start distance), and the value rescaled by the squared distance ratio
+// so that moving between probes shows no grid pattern.
+float4 lrcProbeRadiance(LrcParams p, Texture2D<float4> atlas, uint probe, float3 centre, uint clipmap, float3 worldPosition, float3 direction)
 {
-    const uint probe = lrcIndirection(indirection, p, coord, clipmap);
-    if (probe >= LRC_USED) return 0;
-    const float3 centre = lrcProbePosition(p, uint3(coord), clipmap);
     const float radius = p.reprojectionRadiusScale * lrcTMin(p, clipmap);
     // the far intersection of the ray with the sphere (the position is inside or near it)
     const float3 oc = worldPosition - centre;
@@ -160,7 +182,8 @@ float3 lrcProbeRadiance(LrcParams p, Texture3D<uint> indirection, Texture2D<floa
     const float correction = t * t / max(radius * dot(reprojected, direction), 1e-6);
     const float2 uv = (float2(lrcAtlasCoord(p, probe)) * p.finalResolution + 1 + lrcDirectionToUv(reprojected) * p.probeResolution) /
                       float(p.atlasProbes * p.finalResolution);
-    return atlas.SampleLevel(g_linearClamp, uv, 0).rgb * (correction / LRC_RADIANCE_SCALE);
+    const float4 v = atlas.SampleLevel(g_linearClamp, uv, 0);
+    return float4(v.rgb * (correction / LRC_RADIANCE_SCALE), v.a);
 }
 
 // The distance (m) at which the cache saw something from a covered position toward 'direction': the depth texel of the
@@ -177,29 +200,36 @@ float lrcSampleDistance(LrcParams p, uint indirectionSrv, uint depthSrv, LrcCove
     return max(lrcDepthDistance(depth.Load(int3(lrcAtlasCoord(p, probe) * p.probeResolution + texel, 0))), coverage.minTraceDistance);
 }
 
-// The cache's incident radiance (nits) at a covered position toward 'direction'. random in [0, 1): one of the 8 probes is
-// drawn by its trilinear weight (the default, as the screen probes' many rays average it); random < 0: all 8, weighted.
-float3 lrcSample(LrcParams p, uint indirectionSrv, uint atlasSrv, LrcCoverage coverage, float3 worldPosition, float3 direction, float random)
+// The cache's incident radiance at a covered position toward 'direction': rgb nits, a = the weight that answered (of the
+// 8 probes' trilinear weights: those whose depth map sees 'seenFrom' - a point of the asking ray near its start - times
+// how much of their texels hold radiance). a = 0 (under 2 %): no probe answers, rgb = 0 - the caller traces on.
+// depthSrv UNX_NONE: no visibility test.
+#define LRC_MIN_ANSWER 0.02
+float4 lrcSample(LrcParams p, uint indirectionSrv, uint atlasSrv, uint depthSrv, LrcCoverage coverage, float3 worldPosition, float3 direction, float3 seenFrom)
 {
     Texture3D<uint> indirection = ResourceDescriptorHeap[indirectionSrv];
     Texture2D<float4> atlas = ResourceDescriptorHeap[atlasSrv];
     const float3 f = lrcCoordFloat(p, worldPosition, coverage.clipmap) - 0.5;
     const int3 corner = int3(floor(f));
     const float3 a = f - floor(f);
-    float3 sum = 0;
-    float cumulative = 0;
+    float4 sum = 0;
     for (uint i = 0; i < 8; ++i)
     {
         const int3 o = int3(i & 1, (i >> 1) & 1, i >> 2);
         const float w = (o.x ? a.x : 1 - a.x) * (o.y ? a.y : 1 - a.y) * (o.z ? a.z : 1 - a.z);
-        if (random < 0)
+        if (!(w > 0)) continue;
+        const uint probe = lrcIndirection(indirection, p, corner + o, coverage.clipmap);
+        if (probe >= LRC_USED) continue;
+        const float3 centre = lrcProbePosition(p, uint3(corner + o), coverage.clipmap);
+        if (depthSrv != 0xFFFFFFFFu)
         {
-            if (w > 0) sum += lrcProbeRadiance(p, indirection, atlas, corner + o, coverage.clipmap, worldPosition, direction) * w;
-            continue;
+            Texture2D<uint> depth = ResourceDescriptorHeap[depthSrv];
+            if (!lrcProbeSees(p, depth, probe, centre, coverage.clipmap, seenFrom)) continue;
         }
-        cumulative += w;
-        if (random < cumulative || i == 7) return lrcProbeRadiance(p, indirection, atlas, corner + o, coverage.clipmap, worldPosition, direction);
+        sum += lrcProbeRadiance(p, atlas, probe, centre, coverage.clipmap, worldPosition, direction) * w;
     }
-    return sum;
+    return sum.a >= LRC_MIN_ANSWER ? float4(sum.rgb / sum.a, sum.a) : float4(0, 0, 0, 0);
 }
+// The point of a ray the probes must see (lrcSample seenFrom): a quarter cell along it (off the surface it starts on).
+float3 lrcSeenFrom(LrcParams p, LrcCoverage coverage, float3 origin, float3 direction) { return origin + direction * (0.25 * lrcCellSize(p, coverage.clipmap)); }
 #endif

@@ -8,12 +8,13 @@
 //   this probe must see the point 2 TMin along the neighbour's ray and the neighbour the point 2 TMin along this
 //   probe's ray (each test against the looking probe's own depth map), and a neighbour ray that hit a back face is
 //   dropped. Neighbours' radiance is their stored (already filtered) value from earlier frames; a neighbour first traced
-//   this frame has none yet and is skipped. Result into the second temporary atlas.
+//   this frame has none yet and is skipped. A texel that holds nothing (alpha 0: probe occlusion) stays so, and such a
+//   neighbour texel is skipped. Result into the second temporary atlas.
 // MODE 1 (store): the filtered probe into its place of the cache's atlas with a 1-texel border (the equal-area map's
 //   neighbour across each edge: the same edge mirrored about its centre), for bilinear lookups.
 // P[0] = { parameters SRV, state SRV, trace records SRV, indirection SRV }
 // P[1] = { MODE 0: traced radiance SRV / MODE 1: filtered SRV, depth atlas SRV, probe slots SRV, MODE 0: filtered UAV /
-//          MODE 1: cache atlas UAV (R11G11B10F) }
+//          MODE 1: cache atlas UAV (RGBA16F: rgb x alpha, alpha) }
 // P[2] = { cache atlas SRV (MODE 0), max radiance hit angle (float, rad), the dispatch's first trace record, 0 }
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
@@ -42,7 +43,13 @@ void main(uint3 gid : SV_GroupID, uint3 id : SV_DispatchThreadID)
     Texture2D<float4> atlas = ResourceDescriptorHeap[P[2].x];
     const float3 centre = asfloat(record.xyz);
     const uint2 depthBase = lrcAtlasCoord(p, slot) * res;
-    float3 sum = traced[temporaryBase + texel].rgb;
+    const float4 own = traced[temporaryBase + texel];
+    if (own.a < 0.5)
+    {
+        filtered[temporaryBase + texel] = float4(0, 0, 0, 0);
+        return;
+    }
+    float3 sum = own.rgb;
     float weight = 1;
     const float hitDistance = lrcDepthDistance(depthAtlas[depthBase + texel]);
     const float3 direction = lrcUvToDirection((float2(texel) + 0.5) / res);
@@ -79,7 +86,9 @@ void main(uint3 gid : SV_GroupID, uint3 id : SV_DispatchThreadID)
         const float angle = acos(clamp(dot(toHit, direction) / max(length(toHit), 1e-6), -1.0, 1.0));
         const float w = 1 - saturate(angle / maxAngle);
         if (!(w > 0)) continue;
-        sum += atlas[lrcAtlasCoord(p, neighbour) * p.finalResolution + 1 + texel].rgb * w;
+        const float4 stored = atlas[lrcAtlasCoord(p, neighbour) * p.finalResolution + 1 + texel];
+        if (stored.a < 0.5) continue;
+        sum += stored.rgb * w;
         weight += w;
     }
     filtered[temporaryBase + texel] = float4(sum / weight, 1);
@@ -87,7 +96,7 @@ void main(uint3 gid : SV_GroupID, uint3 id : SV_DispatchThreadID)
     const uint2 texel = id.xy;  // of the bordered probe
     if (any(texel >= p.finalResolution)) return;
     Texture2D<float4> filtered = ResourceDescriptorHeap[P[1].x];
-    RWTexture2D<float3> atlas = ResourceDescriptorHeap[P[1].w];
+    RWTexture2D<float4> atlas = ResourceDescriptorHeap[P[1].w];
     // the interior texel a bordered texel shows: across an edge of the octahedral map the neighbour is the same edge's
     // texel mirrored about the edge's centre
     int2 s = int2(texel) - 1;
@@ -103,6 +112,7 @@ void main(uint3 gid : SV_GroupID, uint3 id : SV_DispatchThreadID)
         s.x = n - 1 - s.x;
     }
     s = clamp(s, 0, n - 1);
-    atlas[lrcAtlasCoord(p, slot) * p.finalResolution + texel] = filtered[temporaryBase + uint2(s)].rgb;
+    const float4 value = filtered[temporaryBase + uint2(s)];
+    atlas[lrcAtlasCoord(p, slot) * p.finalResolution + texel] = value.a < 0.5 ? float4(0, 0, 0, 0) : float4(value.rgb, 1);
 #endif
 }

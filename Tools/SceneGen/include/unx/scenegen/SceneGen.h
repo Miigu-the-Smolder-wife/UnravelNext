@@ -22,6 +22,8 @@ enum class SceneId : uint32_t
     ForestCombat = 7, // gate: RPP-1 forest/combat section, closed canopy at eye level (eye, up, edge cameras)
     FurnaceRoom = 8,  // diagnostic (diagnosticScenes): a closed Lambert room with one point light - the light every stage
                       // of the indirect lighting must hold is known in closed form (kFurnace*, Tools/Verify/furnace.py)
+    FurnaceRoomDay = 9,  // the same room with the sun up outside: the same numbers hold, and whatever a stage lets
+                         // through the walls reads as light over them (a leak is thousands of times the room's light)
     // New scenes are appended (never renumbered) through the interface-change procedure.
 };
 

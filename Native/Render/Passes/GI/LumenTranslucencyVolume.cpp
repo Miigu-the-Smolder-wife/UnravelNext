@@ -327,7 +327,7 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
     const TextureRef depth = main.depth, hiz = main.hiz;
     const SurfaceCacheCardRefs cards = inputs.cards;
     const bool cache = rc.on && rc.updated;
-    const TextureRef rcIndirection = rc.indirection, rcAtlas = rc.atlas;
+    const TextureRef rcIndirection = rc.indirection, rcAtlas = rc.atlas, rcDepth = rc.depth;
     const uint32_t rcParams = rc.params;
     const float3 sky = inputs.skyRadiance, sun = inputs.sunIlluminance;
     const std::array<float, 3> jitter = { st.jitter[0], st.jitter[1], st.jitter[2] };
@@ -343,6 +343,7 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
                   {
                       b.use(rcIndirection, Use::SrvGraphics);
                       b.use(rcAtlas, Use::SrvGraphics);
+                      b.use(rcDepth, Use::SrvGraphics);
                   }
                   rays.declareTraversal(b);
                   if (atmosphere)
@@ -362,6 +363,7 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
                   std::memcpy(&k[24], sceneSrvs.data(), 32);
                   k[32] = bits(jitter[0]), k[33] = bits(jitter[1]), k[34] = bits(jitter[2]), k[35] = frame;
                   k[36] = bits(s.maxRayIntensity);
+                  k[37] = cache ? c.srv(rcDepth) : 0xFFFFFFFFu;
                   c.bindFrameConstants(cb);
                   // bands of whole slices, each at most kMaxRaysPerDispatch rays
                   const uint32_t perSlice = gridX * kTraceRes * gridY * kTraceRes;

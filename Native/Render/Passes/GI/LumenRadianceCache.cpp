@@ -29,8 +29,9 @@ constexpr uint32_t kDescStride = (uint32_t)((sizeof(D3D12_DISPATCH_RAYS_DESC) + 
 // the store run in chunks of probes, each at most this many rays (probe texels); the chunks past the frame's trace count
 // launch nothing.
 constexpr uint32_t kMaxRaysPerDispatch = 262144;
-// A probe texel's thread traces up to this many rays: its own, and at a hit the sun's and one local light's shadow ray.
-constexpr uint32_t kRaysPerTexel = 3;
+// A probe texel's thread traces up to this many rays: the line to its ray's start (probe occlusion), its own, and at a
+// hit the sun's and one local light's shadow ray.
+constexpr uint32_t kRaysPerTexel = 4;
 
 // LumenRadianceCache.hlsli LrcParams
 struct Params
@@ -49,7 +50,7 @@ struct Settings
 {
     uint32_t clipmaps, grid, probeResolution, atlasProbes, budget, keepFrames, traceCapacity, markTile;
     float extent, base, reprojection, traceDistance, downsampleDistance, maxHitAngle;
-    bool filter;
+    bool filter, occlusion;
     bool operator==(const Settings&) const = default;
 };
 Settings settings(const QualityConfig& q)
@@ -70,6 +71,7 @@ Settings settings(const QualityConfig& q)
     s.downsampleDistance = (float)q.number("lumen.radiance_cache_downsample_distance_m");
     s.maxHitAngle = (float)q.number("lumen.radiance_cache_filter_max_hit_angle");
     s.filter = q.boolean("lumen.radiance_cache_filter");
+    s.occlusion = q.boolean("lumen.radiance_cache_probe_occlusion");
     if (s.clipmaps < 1 || s.clipmaps > kMaxClipmaps) fail("lumen.radiance_cache_clipmaps must be in [1, 6]");
     if (s.grid < 8 || s.grid > 252 || s.grid % 4 != 0) fail("lumen.radiance_cache_grid must be a multiple of 4 in [8, 252]");
     if (s.probeResolution < 8 || s.probeResolution > 64 || s.probeResolution % 8 != 0) fail("lumen.radiance_cache_probe_resolution must be 8, 16, ... 64");
@@ -154,7 +156,7 @@ struct RcState
         };
         const uint32_t maxProbes = s.atlasProbes * s.atlasProbes, finalRes = s.probeResolution + 2;
         texture(indirection, D3D12_RESOURCE_DIMENSION_TEXTURE3D, s.grid * s.clipmaps, s.grid, s.grid, DXGI_FORMAT_R32_UINT, L"R rc indirection");
-        texture(atlas, D3D12_RESOURCE_DIMENSION_TEXTURE2D, s.atlasProbes * finalRes, s.atlasProbes * finalRes, 1, DXGI_FORMAT_R11G11B10_FLOAT, L"R rc atlas");
+        texture(atlas, D3D12_RESOURCE_DIMENSION_TEXTURE2D, s.atlasProbes * finalRes, s.atlasProbes * finalRes, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, L"R rc atlas");
         texture(depth, D3D12_RESOURCE_DIMENSION_TEXTURE2D, s.atlasProbes * s.probeResolution, s.atlasProbes * s.probeResolution, 1, DXGI_FORMAT_R16_UINT, L"R rc depth atlas");
         buffer(slots, (uint64_t)maxProbes * 16, false, L"R rc probe slots");
         buffer(counters, 128, false, L"R rc counters");
@@ -248,7 +250,7 @@ LumenRcFrame lumenRadianceCacheBegin(FramePassContext& fc, const ViewResources& 
     f.params = paramsSrv;
     f.indirection = g.importTexture(st.indirection.Get(), { "r.gi.rc indirection", s.grid * s.clipmaps, s.grid, (uint16_t)s.grid, 1, DXGI_FORMAT_R32_UINT, D3D12_RESOURCE_DIMENSION_TEXTURE3D },
                                     D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-    f.atlas = g.importTexture(st.atlas.Get(), { "r.gi.rc atlas", s.atlasProbes * p.finalResolution, s.atlasProbes * p.finalResolution, 1, 1, DXGI_FORMAT_R11G11B10_FLOAT },
+    f.atlas = g.importTexture(st.atlas.Get(), { "r.gi.rc atlas", s.atlasProbes * p.finalResolution, s.atlasProbes * p.finalResolution, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
                               D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     f.depth = g.importTexture(st.depth.Get(), { "r.gi.rc depth atlas", s.atlasProbes * s.probeResolution, s.atlasProbes * s.probeResolution, 1, 1, DXGI_FORMAT_R16_UINT },
                               D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
@@ -401,6 +403,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
     const float3 sky = in.skyRadiance, sun = in.sunIlluminance;
     const uint32_t experiment = in.experiment;
     const float traceDistance = s.traceDistance;
+    const bool occlusion = s.occlusion;
     uint32_t sceneWords[8];
     rays.rootConstants(sceneWords);
     const std::array<uint32_t, 8> sceneSrvs = std::to_array(sceneWords);
@@ -436,6 +439,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   k[15] = experiment;
                   k[16] = paramsSrv;
                   k[17] = c.srv(counters);
+                  k[19] = occlusion ? 1u : 0u;  // P[4].w
                   k[20] = cards.valid() ? c.srv(cards.frame) : 0xFFFFFFFFu;
                   std::memcpy(&k[24], sceneSrvs.data(), 32);
                   c.bindFrameConstants(cb);

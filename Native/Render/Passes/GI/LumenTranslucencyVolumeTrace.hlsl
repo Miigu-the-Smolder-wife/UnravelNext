@@ -17,7 +17,8 @@
 // P[4] = { grid x, grid y, grid z, the band's first slice }
 // P[5] = { card frame SRV (UNX_NONE: none), radiance cache params SRV (UNX_NONE: none), indirection SRV, atlas SRV }
 // P[6], P[7] = RtSceneSrvs
-// P[8] = { asuint(cell jitter xyz), frame }, P[9].x = asuint(ray intensity cap, exposed units; 0: none)
+// P[8] = { asuint(cell jitter xyz), frame }, P[9] = { asuint(ray intensity cap, exposed units; 0: none), the radiance
+// cache's depth atlas SRV (UNX_NONE: no probe visibility test) }
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
@@ -49,6 +50,7 @@ void LumenTranslucencyVolumeTraceGen()
     ray.TMax = giRayLength();
     LrcCoverage coverage = (LrcCoverage)0;
     LrcParams rc = (LrcParams)0;
+    float4 cached = 0;
     if (P[5].y != UNX_NONE)
     {
         rc = lrcParams(P[5].y);
@@ -63,6 +65,12 @@ void LumenTranslucencyVolumeTraceGen()
                 if (lrcIndirection(indirection, rc, corner + int3(i & 1, (i >> 1) & 1, i >> 2), coverage.clipmap) >= LRC_USED) coverage.valid = false;
             coverage.minTraceDistance = lrcTMin(rc, coverage.clipmap) + lrcCellSize(rc, coverage.clipmap) * 1.7320508;
         }
+        // the cache's answer before the ray; none (probe occlusion): the ray runs its full length
+        if (coverage.valid)
+        {
+            cached = lrcSample(rc, P[5].z, P[5].w, P[9].y, coverage, origin, ray.Direction, lrcSeenFrom(rc, coverage, origin, ray.Direction));
+            coverage.valid = cached.a > 0;
+        }
         if (coverage.valid) ray.TMax = min(ray.TMax, coverage.minTraceDistance);
     }
     const float dd = dot(ray.Direction, ray.Direction);
@@ -72,7 +80,7 @@ void LumenTranslucencyVolumeTraceGen()
     const RtHit hit = rtTraceClosest(scene, ray, RAY_FLAG_NONE, RT_MASK_GI);
     if (hit.t < 0)
     {
-        if (coverage.valid) radiance = lrcSample(rc, P[5].z, P[5].w, coverage, origin, ray.Direction, -1.0);
+        if (coverage.valid) radiance = cached.rgb;
         else radiance = giSkyRadiance(ray.Direction);
     }
     else if (hit.instance != RT_INSTANCE_EMITTER && P[5].x != UNX_NONE)

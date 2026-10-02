@@ -583,14 +583,15 @@ Scene forestCombat(const Request& rq)
 // FurnaceRoom (diagnostic; SceneGen.h kFurnace*): six wall slabs of one Lambert material (no specular, roughness 1)
 // closing a room, one shadow-casting point light at its centre, nothing else inside. Each slab is its own mesh and
 // instance (its own mesh cards). The sun cannot enter.
-Scene furnaceRoom(const Request& rq)
+Scene furnaceRoom(const Request& rq, bool day)
 {
     Scene s;
-    s.name = "furnace_room";
+    s.name = day ? "furnace_room_day" : "furnace_room";
     commonSky(s, 45.0f, 30.0f);
     // night outside: whatever a stage lets in through the walls adds nothing, so a leak reads as missing light (with the
-    // sun up the first run's gather stood at 2.27 x: the radiance cache's probes outside the room saw the sky)
-    s.sun.illuminance = 1e-3f;
+    // sun up the first run's gather stood at 2.27 x: the radiance cache's probes outside the room saw the sky).
+    // FurnaceRoomDay keeps the sun: the leak instrument.
+    if (!day) s.sun.illuminance = 1e-3f;
     s.windSpeed = 0.0f;
     Material wall;
     wall.name = "furnace_wall";
@@ -639,7 +640,8 @@ scene::Scene generate(const Request& rq)
     case SceneId::CityNight: s = cityNight(rq); break;
     case SceneId::RidgeSunset: s = ridgeSunset(rq); break;
     case SceneId::ForestCombat: s = forestCombat(rq); break;
-    case SceneId::FurnaceRoom: s = furnaceRoom(rq); break;
+    case SceneId::FurnaceRoom: s = furnaceRoom(rq, false); break;
+    case SceneId::FurnaceRoomDay: s = furnaceRoom(rq, true); break;
     default: fail("scenegen: unknown scene id %u", (uint32_t)rq.id);
     }
     DynamicContent content = dynamicContent(rq);
@@ -672,7 +674,8 @@ float terrainHeight(SceneId id, float x, float z)
     case SceneId::Waterside: return inside(600.0f) ? lakeFloor(x, z) : NAN;
     case SceneId::Interior: return inside(100.0f) ? -0.2f : NAN;
     case SceneId::RidgeSunset: return inside(10000.0f) ? ridgeTerrain(x, z) : NAN;
-    case SceneId::FurnaceRoom: return NAN;
+    case SceneId::FurnaceRoom:
+    case SceneId::FurnaceRoomDay: return NAN;
     }
     fail("scenegen: unknown scene id %u", (uint32_t)id);
 }
@@ -682,7 +685,7 @@ std::vector<SceneId> allScenes()
     return { SceneId::CityBlock, SceneId::ForestThin, SceneId::ForestCard, SceneId::Waterside, SceneId::Interior, SceneId::CityNight, SceneId::RidgeSunset, SceneId::ForestCombat };
 }
 
-std::vector<SceneId> diagnosticScenes() { return { SceneId::FurnaceRoom }; }
+std::vector<SceneId> diagnosticScenes() { return { SceneId::FurnaceRoom, SceneId::FurnaceRoomDay }; }
 
 const char* sceneName(SceneId id)
 {
@@ -697,6 +700,7 @@ const char* sceneName(SceneId id)
     case SceneId::RidgeSunset: return "ridge_sunset";
     case SceneId::ForestCombat: return "forest_combat";
     case SceneId::FurnaceRoom: return "furnace_room";
+    case SceneId::FurnaceRoomDay: return "furnace_room_day";
     }
     fail("scenegen: unknown scene id %u", (uint32_t)id);
 }
