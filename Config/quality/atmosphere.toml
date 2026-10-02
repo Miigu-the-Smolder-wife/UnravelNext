@@ -47,6 +47,8 @@ depth_slices = 96                    # (Q) slices to volumetric_distance_m: slic
 volumetric_distance_m = 80.0         # the cells' end; farther fog is the height fog's closed form, lit by the sun without casters,
 far_slices = 16                      # integrated per column into this many more slices (equal steps of log depth) out to
 far_distance_m = 65536.0             # this distance
+far_shadows = true                   # the far slices' sun term outside the casters' shadow, as the air volume found it for its own
+                                     # slices (a ridge against a low sun shades the fog in front of it); false: no casters out there
 history_weight = 0.9                 # the history's share of a cell each frame (the reference's 0.9), the sample point jittered per frame
 shadow_texels_per_cell = 1.0         # the sun's shadow in a cell is read at the page level whose texel is the cell's width / this
 debug_view = false                   # measurement only: the fog alone per pixel (FogDebug.hlsl) for the gate's capture layer "fog"

@@ -19,7 +19,7 @@
 // A group scan gives node n = sum over slices j < n of e^(-tau before j) x source_j. Volume (RGBA16F, gridX x gridY x
 // 3 (S + 1)): part 0 the in-scattering normalised by the node's 1 - T, L / (1 - T), x exposure of the view (fp16 keeps
 // the relative precision of what is displayed, also at night exposures where local lights' air glow is 1e-4 nits),
-// part 1 optical depth, part 2 sun transmittance at the node. L / (1 - T) is the transmittance-weighted mean source of
+// part 1 optical depth, part 2 sun transmittance at the node (its alpha: the shadowed fraction of the slice before the node). L / (1 - T) is the transmittance-weighted mean source of
 // the path: it varies slowly across tiles where L itself peaks between two tile rows (rays grazing the horizon, one of
 // them lifted below the model's surface), so the lookup blends it across tiles and multiplies by the pixel's own
 // 1 - T (optical depth blended in altitude across that kink): 30 km horizon query at 1080p 3.1 % -> 0.9 % against
@@ -543,7 +543,9 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         if (tn < tStart) node = airMirror(g_clipPlane, node);  // before the mirror: the real path's point
         volume[uint3(tile, s + 1)] = float4(min(hat * g_exposure, 65504.0), 0);  // pre-exposed: fp16 precision follows the display
         volume[uint3(tile, N + s + 1)] = float4(gs_tau[s], 0);
-        volume[uint3(tile, 2 * N + s + 1)] = float4(airSunTransmittance(a, tlut, airLiftToSurface(a, node), sun), 0);
+        // (alpha: the fraction of slice s's segment in the casters' shadow - 0 where the slice was not integrated; the
+        // fog's far slices read it: FogIntegrate.hlsl)
+        volume[uint3(tile, 2 * N + s + 1)] = float4(airSunTransmittance(a, tlut, airLiftToSurface(a, node), sun), airShadowed);
         if (s == 0)
         {
             volume[uint3(tile, 0)] = float4(min(hat0 * g_exposure, 65504.0), 0);

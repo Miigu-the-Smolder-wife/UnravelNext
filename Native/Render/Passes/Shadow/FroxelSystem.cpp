@@ -879,7 +879,7 @@ float fogHalton(uint32_t index, uint32_t base)
     }
     return r;
 }
-void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef lights, const SampledLocal& sampled);
+void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef lights, const SampledLocal& sampled, TextureRef air);
 } // namespace
 
 uint32_t fogPrepare(FramePassContext& fc, const ViewDesc& view)
@@ -1062,7 +1062,8 @@ SampledLocal recordSampledLocal(FramePassContext& fc, const ViewResources& view,
     return out;
 }
 
-void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef lights, const SampledLocal& sampled)
+// air: the main view's air volume of this frame (the far slices take the casters' shadow from it; invalid: none).
+void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef lights, const SampledLocal& sampled, TextureRef air)
 {
     fc.resources.fog = FogView{};
     fc.resources.fogVolume = {};
@@ -1098,6 +1099,7 @@ void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef 
     const TextureRef ambientA = r.translucencyGiPrevAmbient, ambientD = r.translucencyGiPrevDirectional;
     const uint32_t ambientParams = r.translucencyGiPrevParams;
     const bool clip = fc.quality.boolean("atmosphere.froxels.clip_at_surface");
+    const bool farShadows = air.valid() && shadows && fc.quality.has("atmosphere.fog.far_shadows") && fc.quality.boolean("atmosphere.fog.far_shadows");
     // the frame's jitter of the cells' sample points (16 frames of the Halton points 2, 3, 5)
     const uint32_t index = (uint32_t)(fc.frame.frameIndex % 16u) + 1u;
     const float jitter[3] = { fogHalton(index, 2), fogHalton(index, 3), fogHalton(index, 5) };
@@ -1158,6 +1160,11 @@ void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef 
                       b.use(ambientA, Use::SrvCompute);
                       b.use(ambientD, Use::SrvCompute);
                   }
+                  if (farShadows)
+                  {
+                      b.use(air, Use::SrvCompute);
+                      b.use(lights, Use::SrvCompute);
+                  }
                   b.use(integrated, Use::UavCompute);
                   b.keep();  // (persistent: read through the frame constants' record)
               },
@@ -1168,7 +1175,7 @@ void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef 
                                      bits(f.density), bits(f.falloff), bits(f.height), bits(f.g),
                                      bits(f.albedo[0]), bits(f.albedo[1]), bits(f.albedo[2]), bits(f.start),
                                      0, 0, 0, 0, 0, 0, 0, 0,
-                                     none, none, ambient ? ambientParams : none, ctx.srv(tlut) };
+                                     farShadows ? ctx.srv(air) : none, farShadows ? ctx.srv(lights) : none, ambient ? ambientParams : none, ctx.srv(tlut) };
                   ctx.cmd->SetPipelineState(pi);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 28);
@@ -1213,7 +1220,6 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
     const TextureRef sampledLocal = sampled.inScattering;
     fc.resources.localFluence = sampled.fluence;  // lit particles and particle media (FxLayerSetup.hlsl, VolumeSetup.hlsl)
     fc.resources.localMoment = sampled.moment;
-    recordFogVolume(fc, main, lights, sampled);  // (before every reader of the main view's air: the media below, M, W, E)
     // E's particle media (smoke, fire) on this grid, between the lists and the integration (invalid: none this frame); a
     // view whose volumeSlices a producer already set keeps them (tests: FroxelTests 7).
     ViewResources mediaView = main;
@@ -1223,6 +1229,9 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
     const TextureRef volume = recordIntegration(fc, main, lights, s.keep, readers, "", media, sampledLocal, sampled.fluence, sampled.moment);
     fc.resources.froxels = volume;
     fc.resources.aerialPerspective = volume;  // atmosphereAerial / atmosphereAirView read it (Atmosphere.hlsli)
+    // The fog's volume, after the air (its far slices take the casters' shadow the air found) and before every reader of
+    // the main view's air (M, W, E: they read the fog with it).
+    recordFogVolume(fc, main, lights, sampled, volume);
 
     // Header (counters) to the readback ring; harvested at a later record once the GPU passed this frame.
     const uint32_t slot = (uint32_t)(fc.frame.frameIndex % kStatsSlots);
