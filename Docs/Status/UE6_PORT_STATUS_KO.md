@@ -286,7 +286,7 @@ GPU에서 돌린 것은 없다. 확인은 `build ok`뿐이다(이 구간의 커�
 | SMRT 확률 광선 7×8 + TSR | 결정적 차단체 탐색 + 16탭 | 우리 쪽이 첫 프레임 잡음 없음(유지) |
 | 16광원 one-pass 투영 | 슬롯 3 + 넘침 목록, MegaLights가 대체 | MegaLights 기본화로 해결 |
 | 국소광(큐브/스폿 페이지)의 정적/동적 분리와 HZB 가림 | 있음 — 코드 작성·빌드 통과, 실행 안 함 (`shadow.vsm.local_static_separate`; `UE6_WORKPLAN_KO.md` 8.3 (f)). 변화 판정은 광원 단위 | MegaLights 기본 설정에서는 S가 국소 페이지를 그리지 않아 해당 없음 |
-| 반투명 캐스터의 색 투과(언리얼: 광선 추적 그림자의 `bTranslucentShadow`; VSM에는 없음) | 태양: 있음 — 코드 작성·빌드 통과, 실행 안 함 (`shadow.vsm.translucent_tint`; 유리 캐스터의 틴트 아틀라스 `VsmTint.hlsli`; 8.3 (f)). 얇은 캐스터의 투과 층(`VsmLayer.hlsli`)은 스칼라이고 채워지지 않는다(V의 coverage 모드 래스터가 없다) | 유리 아래가 검지 않고 유리 색으로 물든다(불투명 음영); 광선 hit·물·반투명 층의 태양 조회와 국소광 페이지에는 없음 |
+| 반투명 캐스터의 색 투과(언리얼: 광선 추적 그림자의 `bTranslucentShadow`; VSM에는 없음) | 태양: 있음 — 코드 작성·빌드 통과, 실행 안 함 (`shadow.vsm.translucent_tint`; 유리 캐스터의 틴트 아틀라스 `VsmTint.hlsli`; 8.3 (f)). 얇은 캐스터의 투과 층(`VsmLayer.hlsli`)은 스칼라이고 채워지지 않는다(V의 coverage 모드 래스터가 없다) | 유리 아래가 검지 않고 유리 색으로 물든다(불투명 음영); 광선 hit·물·반투명 층의 태양 조회는 틴트의 휘도만 받는다(색 없음; `SHADOW_SUN_TINT_AT` 기본 1, `w/char` 병합 — 코드·빌드만). 국소광 페이지에는 없음 |
 | 프리미티브별 그림자 플래그(`bCastHiddenShadow` 등) | `scene::InstanceShadowOnly`, `scene::InstanceNoSelfShadow` — 코드 작성·빌드 통과, 실행 안 함 (8.3 (f)) | NoSelfShadow는 불투명 뷰의 태양 슬롯에만 |
 | 굵은 레벨의 작은 캐스터 | 프록시(인스턴스당 사각형 하나, 청크 단위) — 코드 작성·빌드 통과, 실행 안 함 (`shadow.vsm.aggregate_small_casters`; 8.3 (f)). 언리얼에는 대응하는 장치가 없다(Nanite는 복셀 클러스터로 계속 단순화) | 레벨 텍셀보다 작은 정적 캐스터의 그림자가 밀도로 남는다 |
 

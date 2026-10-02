@@ -439,7 +439,7 @@ V의 컬 한 번(메인 뷰, 그리고 `rasterizeDepth` 요청마다: VSM 태양
   - 조사: `VsmLayer.hlsli`의 투과 층은 스칼라(T(h) 매듭 4개)이고 **채워진 적이 없다** — 층을 채울 V의 coverage 모드 래스터(`DepthRasterRequest::coverage`)가 구현돼 있지 않아 모든 조회가 1을 받는다. 유리는 불투명 캐스터로 그려졌다(검은 그림자). 언리얼의 VSM에도 반투명 캐스터의 색 투과는 없다(광선 추적 그림자의 `bTranslucentShadow`에만 있다). 넣은 것은 그 층과 별개의 얕은 구조다.
   - 구조(`VsmTint.hlsli`): Glass 클래스 재질이 있는 씬에서 태양 페이지의 불투명 계열은 유리 클러스터를 그리지 않고(`RasterView::materialFilter`), 유리만 그리는 요청 `s.vsm.tint`가 **틴트 아틀라스**(RGBA16, 페이지당 32 × 32 텍셀, 페이지 아틀라스와 같은 배치)에 쓴다: rgb = 텍셀 위 유리 면들이 통과시키는 비율의 곱(블렌드 곱), a = 태양에 가장 가까운 유리의 깊이(블렌드 최대). 화소 커널(`VsmTintPixel.ps`): 판유리(양면 재질)는 (1 − F)² t / (1 − F² t²), 속이 찬 유리는 면마다 (1 − F)√t — t는 base colour(× 텍스처), F는 보간 법선에 대한 태양 입사각의 프레넬. 반투명 합성(`TranslucentComposite.hlsl`)의 판유리 식과 같다.
   - 받는 쪽: 가장 가까운 유리보다 뒤(틴트 텍셀 2개 높이 + 16비트 한 단계 이상)에 있는 점이 그 텍셀의 rgb를 받는다. 뷰의 태양 슬롯(슬롯 0)과 coverage 조각의 태양에는 그 휘도가 곱해지고, 불투명 음영(`ShadeOpaque.hlsl` 파트 1)은 색을 받는다 — 뷰의 그림자 가시성 텍스처가 유리가 있는 프레임에는 세로 2배이고 아래 절반이 화소별 투과색이다(`shadowSunTintChroma`: 음영 커널에 남는 루트 상수가 없어 같은 텍스처에 실었다. 게이트의 `shadow` 층 캡처도 그런 프레임에는 세로 2배다).
-  - 한계: 층이 하나다 — 두 유리 사이의 점은 둘 다의 색을 받는다. 태양에 가파른 유리 면은 제 색을 조금 받는다. 틴트 텍셀이 레벨 텍셀의 4배라 색 그림자 가장자리가 그만큼 무르다. 광선 hit·물·반투명 층의 태양 조회(`shadowSunVisibilityAt`)는 색도 휘도도 받지 않는다(유리 뒤가 온전히 밝다): R의 인라인 추적 커널이 DXIL 한도에 924 B 남아 있어 조회를 넣으면 빌드가 실패한다 — `SHADOW_SUN_TINT_AT 1`로 컴파일하는 커널만 받는다. 국소광 페이지에서는 유리가 여전히 불투명하다. 요청은 하나로 낸다(리스트 상한 계산이 유리만 따로 세지 않는다).
+  - 한계: 층이 하나다 — 두 유리 사이의 점은 둘 다의 색을 받는다. 태양에 가파른 유리 면은 제 색을 조금 받는다. 틴트 텍셀이 레벨 텍셀의 4배라 색 그림자 가장자리가 그만큼 무르다. 광선 hit·물·반투명 층의 태양 조회(`shadowSunVisibilityAt`, `shadowSunClassifyAt`)는 틴트의 휘도를 받는다(색은 받지 않는다: 조회가 스칼라다). 처음에는 R의 인라인 추적 커널이 DXIL 한도에 924 B 남아 있어 뺐고(`SHADOW_SUN_TINT_AT` 기본 0), 그 커널이 줄어든 뒤 `w/char` 병합에서 기본을 1로 바꿨다(13.5; 코드·빌드만). 국소광 페이지에서는 유리가 여전히 불투명하다. 요청은 하나로 낸다(리스트 상한 계산이 유리만 따로 세지 않는다).
   - 비용: 페이지당 8 KB(4096페이지에 32 MB), 유리가 있는 씬에서 프레임당 래스터 요청 하나와 지우기 패스 하나.
 - **작은 캐스터 프록시** — `shadow.vsm.aggregate_small_casters`(기본 true), `aggregate_coverage`(0.5). 8.1 (3)은 레벨 텍셀보다 작은 캐스터를 그 레벨에서 뺐다(먼 숲·풀밭의 그림자가 없어진다). 이제 그런 캐스터 가운데 인스턴스 청크의 구성원(정적 인스턴스)은 **프록시**로 그린다(`DepthProxy.ms.hlsl`, `DepthRasterRequest::proxies`): 경계 구 중심에 태양을 향한 정사각형 하나, 넓이 = 경계 원 넓이 × `aggregate_coverage`. 텍셀보다 작은 사각형은 넓이 비율만큼의 확률로 텍셀 중심을 덮으므로 굵은 레벨의 그림자가 "덮인 땅의 비율"로 남는다. 구성원이 모두 그만큼 작은 청크는 구성원별 컬을 하지 않는다(`chunkBelowView`: `ChunkBounds`가 청크의 최대 구성원 반지름을 남긴다) — 청크 항목 하나가 메시 그룹 4개(구성원 64개씩)로 그려진다.
   - 각 구성원은 한 번만 그려진다: 인스턴스 컬이 빼는 조건(`instanceBelowView`)과 프록시가 그리는 조건이 같은 함수다. 집합(정적/동적)·마스크·배치 범위도 같은 검사를 거친다.
@@ -708,7 +708,7 @@ Unreal의 재질 그래프와 Unity 재질이 흔히 쓰는 입력 가운데 렌
 | 화면 프로브 조회 3회(광선의 g, control variate의 16점, K 값) | `ReflectionTraceInline` JOB2, `ReflectionCombine` | 8,200 → 2,700 | 광선들과 control의 17점을 한 루프로(`reflLobeControlPoint`: 16점 + 가려졌을 때만 K 값). 합과 순서는 `ReflectionCombine`과 같다 |
 | in-block 프로브 맵의 bilinear 8회(프로브 4 × mip 2 unroll) | `giProbeFootprintRadiance`의 아틀라스 없는 경로 | 2,570 → 320 | 루프(`giProbeBlocksRadiance`); 타일 캐시 쪽(음영 커널)은 0을 돌려주는 오버로드라 그 커널들은 변하지 않는다 |
 | 코트가 돌려주는 빛 3회 | `rtHitDirectTerms` | 770 → 260 | 방향 두 개의 루프 |
-| 조명 전체 2회(스프라이트, 리본 점) | `FxLayerSetup` `fxLitRadiance` | 39,300 → 19,650 | 출력마다 "조명 요청까지"와 "조명 뒤"로 나누고 호출을 한 곳에(`FxLitPoint`, `ribbonPointBegin` / `ribbonPointEnd`) |
+| 조명 전체 2회(스프라이트, 리본 점) | `FxLayerSetup` `fxLitRadiance` | 39,300 → 19,650 | 출력마다 "조명 요청까지"와 "조명 뒤"로 나누고 호출을 한 곳에(`FxLitPoint`, `ribbonPointBegin` / `ribbonPointEnd`). 병합 뒤에는 입자 4차의 `fxLight`(스레드당 한 번)가 그 자리다(13.5) |
 | 월드 캐시 조회 6회(축마다 unroll) | `FxLayerSetup` GIV0 | 9,000 → 1,500 | 루프 |
 | 안정 순서 비교 80회(정렬망의 비교기마다 `covBefore`) | `CoverageComposite`(옛 합성 경로) | 9,000 → 약 500 | 정렬망은 깊이 + element로만 비교(`covNearer`), 같은 깊이의 구간만 저장된 키 위에서 삽입 정렬로 `covBefore` 순서로 맞춘다(`COV_SETTLE_TIES`). `covBefore`는 전순서이므로 결과 순서는 같다. 기본 경로의 `CoverageWalk`(67 KB)는 건드리지 않았다 |
 | 다른 모드의 K 조회(죽은 select) | `ReflectionTraceInline` | 740 → 0 | 분기로 |
@@ -747,6 +747,43 @@ Unreal의 재질 그래프와 Unity 재질이 흔히 쓰는 입력 가운데 렌
 - `CoverageShadeWhole`에 면광원 루프를 넣은 한 커널은 202,580 B다(한도 안, 180 KB 밖): 두 파트(`CoverageShadeList`)를 유지한다. 면광원 적분 `shAreaIntegral`(8,100 명령)이 한 커널에 한 번인 것은 이미 그렇다.
 - VSM의 `vsmRegionClassify`·`vsmFetchQuad`가 태양 가시성마다 2번씩 인라인된다(도달 사각형, 반그림자 원판; 2,200 명령 = 약 11 KB, `FxLayerSetup`·hit 커널 공통). S의 코드라 두었다.
 - 기본 설정(`reflection.lumen_only`, `gi.lumen_only`, `mesh_cards`, `mega_lights`, `coverage_compact`)에서 `ReflectionTraceInline`, `GiTrace`, `FxLayerSetup`의 ML0·GIV0 변형, `CoverageComposite`는 돌지 않는 경로다(`UE6_PORT_STATUS_KO.md` 1.3.5). 기본 경로에서 바뀐 것은 태양 구적의 루프(모든 음영 커널), coverage 조각의 데칼·재질 입력, hit의 디테일 색이다.
-- `FxLayerSetup`의 ML·GIV 변형 축은 "두 경로를 한 커널에 넣으면 한도를 넘는다"가 이유였다. 지금은 넷 다 73~94 KB라 한 커널로 합칠 수 있다(합치지 않았다: `ParticleLayer.cpp`의 커널 선택이 바뀐다).
+- `FxLayerSetup`의 ML·GIV 변형 축은 "두 경로를 한 커널에 넣으면 한도를 넘는다"가 이유였다. 지금은 넷 다 78~99 KB(병합 뒤, 13.5)라 한 커널로 합칠 수 있다(합치지 않았다: `ParticleLayer.cpp`의 커널 선택이 바뀐다).
 
 실행해서 확인할 것(순서대로): `unx_test_shading_shadingtests`(태양 구적: 2번 시험의 터미네이터 띠 오차 기준은 그대로여야 한다; coverage 합성 시험은 `shading.coverage_compact=false`로도 한 번 — 옛 합성의 정렬이 바뀌었다), `unx_test_reflection_reflectionanalytic`을 `reflection.lumen_only=false`로, 광선 용량을 넘기는 설정에서도 한 번(넘침 작업의 hit이 카드·눈·재질 입력을 새로 읽고 조합 루프가 바뀌었다: split 경로와 같은 값이어야 한다 — 넘침 경로를 일부러 태우는 시험이 지금 있는지는 확인하지 못했다), 입자 레이어 시험(`FxLayerSetup` 네 변형; ML0·GIV0은 이제 안개와 광원 구성요소를 받으므로 그 둘이 있는 씬에서는 값이 달라지는 것이 맞다), `unx_test_decal_decaltests`·`unx_test_host_hostdecal`·`unx_test_host_hostabi`, 그 뒤 still: 잎·풀 위에 걸친 데칼, 디테일 맵 벽이 거울과 바운스에서 같은 색인지(`shading_ball`의 카메라 `inputs`), 시차 판 위의 coverage 조각.
+
+### 13.5 `lumen-ue6` 병합 뒤 (2026-10-03)
+
+**코드 작성·빌드 통과, 실행 안 함.** `lumen-ue6`(07798c0e: 입자 4차·날씨 export·물·클러스터 카드 캡처·원거리 프록시·see-through 광선, 이어서 8acd9993: `w/tsr` 3차)를 `w/char`에 병합하고 전 트랙을 빌드했다(`build ok`). 크기는 빌드 산출물의 바이트 수다 [실측: 파일 크기].
+
+| 커널 | 3차 뒤 | 병합 뒤 | hit의 태양 틴트 조회를 넣은 뒤 |
+|---|---|---|---|
+| `ReflectionTraceInline.SKY0.JOB2.CORNERS1` | 175,044 | 176,884 | 179,220 |
+| `ReflectionTraceInline.SKY0.JOB1.CORNERS1` | 172,568 | 174,404 | 176,732 |
+| `ReflectionTraceInline.SKY1.JOB2.CORNERS1` / `JOB1` | 169,372 / 166,672 | 170,932 / 168,460 | 173,064 / 170,596 |
+| `FxLayerSetup.STEP0.ML0.GIV0` | 93,904 | 99,212 | 같다 |
+| `FxLayerSetup.STEP0` ML1.GIV0 / ML0.GIV1 / ML1.GIV1 | 78,552 / 88,460 / 73,060 | 83,820 / 93,388 / 77,904 | 같다 |
+| `CoverageComposite.PART1.*.AREA1` | 136,132 | 138,132 | 같다 |
+| `CoverageComposite.PART2.OUTPUT0.*` | 157,840 | 159,264 | 같다 |
+| `CoverageShadeWhole`(기본 경로) | 167,300 | 169,300 | 같다 |
+| `GiTrace.SKY0.SPLIT1` | 151,232 | 152,992 | 같다 |
+| `ReflectionShadeRays.SKY0.CORNERS1` | 121,664 | 121,796 | 123,908 |
+| `WaterInterior` | 162,716 | 167,664 | 169,668 |
+| `SurfaceCacheLight.SKY0` | 181,588 | 183,332 | 같다 |
+| 전체 | 22,074,864 (828개) | 22,927,380 (869개) | 22,977,848 |
+
+세 커널 모두 180,000 B 아래다. 180,000 B를 넘는 커널은 여전히 `SurfaceCacheLight.SKY0` 하나다(한도까지 21 KB; 13.4).
+
+충돌과 남긴 것:
+
+- `FxLayerSetup.hlsl`: 입자 4차의 구조를 남겼다 — `fxLight`가 스레드당 한 번(스프라이트와 리본 점이 같은 호출), 산란광·fluence·moment를 돌려주고, 태양 항은 ML 변형의 볼륨 조회 뒤에 더한다(구름 그림자). 이 브랜치가 3차에 넣은 `FxLitPoint` / `ribbonPointBegin` / `ribbonPointEnd`는 없다: 같은 일(조명을 커널에 한 번)을 다른 길로 한 것이라 둘을 겹치지 않았다. 월드 캐시 조회의 루프도 양쪽에 있었다(그쪽은 축 상수 배열 위의 루프). 두 쪽 다 opt-out define이 없다. 13.2 표의 `FxLayerSetup` 두 행은 3차의 기록이다.
+- `ReflectionTraceInline.hlsl`: opt-out define이 없다. 병합으로 들어온 `UNX_RT_LIGHT_COMPONENTS 0`(이 브랜치에서 읽는 곳이 없어진 define), `RT_NO_SEE_THROUGH`, `RT_NO_FAR_FIELD`를 정의하지 않는다 — any-hit(유리·물을 지나가는 광선)과 원거리 프록시의 hit 그룹이 다른 라이브러리와 같은 코드다. 이 라이브러리의 광선은 모두 `RT_MASK_REFLECTION`을 갖고 `RT_MASK_FAR`를 요청하지 않으므로(split 경로 `ReflectionHit.hlsli`와 같은 마스크) 결과는 같다; 넘침 경로가 원거리를 추적하게 하려면 split 경로와 함께 마스크를 바꿔야 한다(하지 않았다). 두 스위치는 `RayShaders.hlsli`에 남아 있고 정의하는 라이브러리가 없다.
+- `SHADOW_SUN_TINT_AT`(`ShadowVisibility.hlsli`; 8.3 (f)의 유리 캐스터 틴트): hit·물·반투명 층의 태양 조회에 틴트의 휘도를 곱하는 스위치로, "R의 인라인 추적 커널이 한도에 924 B 남았다"가 이유로 기본 0이었고 켜는 커널이 없었다. 기본을 1로 바꿨다: `shadowSunVisibilityAt`과 `shadowSunClassifyAt`을 쓰는 커널(반사·굴절 hit, 물, 반투명 합성, 시험 프로브)이 약 2 KB씩 커졌다. 유리 캐스터가 없는 프레임(`VsmConstants::tint` = 0)에서는 값이 전과 같다. 틴트 아틀라스는 S가 그린 뒤 셰이더 리소스 상태로 두므로(`s.vsm.tint.ready`) 읽는 패스가 선언하지 않아도 된다(그렇게 쓰라고 만든 것이다).
+- `CardCaptureCluster.ps.hlsl`: 한 번 도는 새 형태(서비스의 보간 법선·탄젠트)에 재질 입력 네 줄을 넣었다(둘째 uv = 첫째, 버텍스 컬러 = 흰색: 서비스가 주지 않는다).
+- coverage 조각의 데칼(`CoverageShade.hlsli` `covShadeFragment`): 4차의 방출 데칼이 `DecalMaterial`에 `emissive`를 더했다. 조각 쪽이 0에서 시작하게 하고 그 값을 조각의 방출에 더한다(텍스트 충돌은 아니었다).
+- `UnravelNextHost.h`: "ABI 6 안의 추가 export" 목록에 데칼 구성요소 이름 셋, 그 뒤에 포스트·날씨·`UnxFrameGetStatistics`. 선언과 구현은 자동 병합됐다.
+
+남은 스위치(기능을 빼고 컴파일하는 커널은 없다): `RT_HIT_EYE`(반사·굴절 커널이 켠다), `RT_SHADOW_TRANSMITTANCE`(hit의 그림자 광선이 유리 투과를 모으는 라이브러리가 켠다; `ReflectionTraceInline`의 그림자 광선은 반사 마스크라 해당 없음), `SHADOW_RESIDENCY_LOOP`(`ReflectionTraceInline`: 같은 답의 작은 형태), 그리고 정의하는 곳이 없는 `RT_NO_SEE_THROUGH`·`RT_NO_FAR_FIELD`·`SHADOW_SUN_TINT_AT 0`.
+
+11.3이 "합성 커널 한도"를 이유로 남긴 것 가운데 아직 없는 것: coverage 조각의 태양이 입자 그림자 맵(`fxParticleShadow`)을 읽지 않는다. 자리는 있다(`CoverageComposite.PART1.AREA1` 138 KB, `CoverageShadeWhole` 169 KB). 넣지 않았다(coverage 커널에 맵의 파라미터 슬롯이 필요하다).
+
+실행해서 확인할 것(13.4의 목록에 더해): 유리 캐스터가 있는 씬에서 거울 속·물 위·반투명 표면의 유리 그림자가 뷰의 것과 같은 밝기인지(`unx_test_shadow_vsmtests`의 `ShadowAtProbe`는 유리 캐스터가 있으면 값이 달라지는 것이 맞다), 입자 레이어 시험(병합된 `FxLayerSetup`), 방출 데칼이 걸친 잎·풀.

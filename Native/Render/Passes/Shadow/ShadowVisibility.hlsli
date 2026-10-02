@@ -182,11 +182,11 @@ float shadowSunTransmittanceAt(ShadowSrvs s, float3 worldPos, float footprint, f
 
 // What S's glass casters let through to a world point, as a luminance (shadow.vsm.translucent_tint, VsmTint.hlsli; 1
 // without them): the factor of a sun lookup that carries no colour. The views' slot 0 and the coverage fragments' sun
-// have it. shadowSunVisibilityAt and shadowSunClassifyAt (ray hits, water, the translucent layer) multiply it only in a
-// kernel compiled with SHADOW_SUN_TINT_AT 1: R's inline trace kernel stands at the DXIL limit without it, so by default
-// those lookups see the light past a glass caster whole.
+// have it, and so have shadowSunVisibilityAt and shadowSunClassifyAt (ray hits, water, the translucent layer): the
+// light past a glass caster is dimmed there as in the view. SHADOW_SUN_TINT_AT 0 before this file leaves the lookup out
+// of those two (no kernel does: it was the default while R's inline trace kernel stood at the DXIL limit).
 #ifndef SHADOW_SUN_TINT_AT
-#define SHADOW_SUN_TINT_AT 0
+#define SHADOW_SUN_TINT_AT 1
 #endif
 float shadowSunTintLuminanceAt(ShadowSrvs s, float3 worldPos, float footprint)
 {
