@@ -29,8 +29,11 @@ struct CloudState
     clouds::CloudTextures noise;
     bool noiseReady = false;
     uint32_t noiseSeed = 0;
-    ComPtr<ID3D12Resource> radiance, distance, map, ring, stats, zeros, statsReadback, record, dome;
-    uint32_t radianceSrv = 0, distanceSrv = 0, mapSrv = 0, recordSrv = 0, domeSrv = 0;
+    // radiance, distance: this frame's layer and last frame's (the march rebuilds 3 texels of 4 from it), by parity
+    ComPtr<ID3D12Resource> radiance[2], distance[2], map, ring, stats, zeros, statsReadback, record, dome;
+    uint32_t radianceSrv[2] = {}, distanceSrv[2] = {}, mapSrv = 0, recordSrv = 0, domeSrv = 0;
+    uint32_t parity = 0;
+    bool history = false, domeFilled = false;  // last frame's layer is this view's; the dome has been filled once
     uint8_t* ringMapped = nullptr;
     uint32_t width = 0, height = 0;
     uint64_t frames = 0;
@@ -38,11 +41,12 @@ struct CloudState
     {
         if (!device) return;
         DescriptorHeaps& h = device->descriptors();
-        for (uint32_t i : { radianceSrv, distanceSrv, mapSrv, recordSrv, domeSrv })
+        for (uint32_t i : { radianceSrv[0], radianceSrv[1], distanceSrv[0], distanceSrv[1], mapSrv, recordSrv, domeSrv })
             if (i) h.freeResource(i);
         if (noiseReady) clouds::releaseTextures(*device, noise);
-        for (ComPtr<ID3D12Resource>* r : { std::addressof(radiance), std::addressof(distance), std::addressof(map), std::addressof(ring), std::addressof(stats),
-                                           std::addressof(zeros), std::addressof(statsReadback), std::addressof(record), std::addressof(dome) })
+        for (ComPtr<ID3D12Resource>* r : { std::addressof(radiance[0]), std::addressof(radiance[1]), std::addressof(distance[0]), std::addressof(distance[1]),
+                                           std::addressof(map), std::addressof(ring), std::addressof(stats), std::addressof(zeros), std::addressof(statsReadback),
+                                           std::addressof(record), std::addressof(dome) })
             if (*r) device->deferRelease(*r);
     }
 };
@@ -105,16 +109,20 @@ void cloudsPrepare(FramePassContext& fc, uint32_t srvs[2])
     if (w != s.width || h != s.height)
     {
         DescriptorHeaps& heaps = device.descriptors();
-        for (uint32_t* i : { &s.radianceSrv, &s.distanceSrv })
+        for (uint32_t* i : { &s.radianceSrv[0], &s.radianceSrv[1], &s.distanceSrv[0], &s.distanceSrv[1] })
             if (*i) heaps.freeResource(*i), *i = 0;
-        for (ComPtr<ID3D12Resource>* r : { std::addressof(s.radiance), std::addressof(s.distance) })
+        for (ComPtr<ID3D12Resource>* r : { std::addressof(s.radiance[0]), std::addressof(s.radiance[1]), std::addressof(s.distance[0]), std::addressof(s.distance[1]) })
             if (*r) device.deferRelease(*r);
         const auto T2 = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        s.radiance = createTexture(device, L"S cloud layer", T2, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
-        s.distance = createTexture(device, L"S cloud distance", T2, w, h, 1, DXGI_FORMAT_R16_FLOAT, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
-        s.radianceSrv = textureSrv(device, s.radiance.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-        s.distanceSrv = textureSrv(device, s.distance.Get(), DXGI_FORMAT_R16_FLOAT);
+        for (int k = 0; k < 2; ++k)
+        {
+            s.radiance[k] = createTexture(device, L"S cloud layer", T2, w, h, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+            s.distance[k] = createTexture(device, L"S cloud distance", T2, w, h, 1, DXGI_FORMAT_R16_FLOAT, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+            s.radianceSrv[k] = textureSrv(device, s.radiance[k].Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+            s.distanceSrv[k] = textureSrv(device, s.distance[k].Get(), DXGI_FORMAT_R16_FLOAT);
+        }
         s.width = w, s.height = h;
+        s.history = false;
     }
     if (!s.map)
     {
@@ -150,7 +158,7 @@ void cloudsPrepare(FramePassContext& fc, uint32_t srvs[2])
 void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
 {
     CloudState& s = fc.state<CloudState>(kCloudKey);
-    if (!enabled(s) || !s.radiance) return;
+    if (!enabled(s) || !s.radiance[0]) return;
     RenderGraph& g = fc.graph;
     const ViewDesc& mv = fc.frame.mainView;
     const scene::Scene* src = fc.scene.source();
@@ -163,7 +171,14 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
     const float centre[3] = { mv.position.x, 0.5f * (s.layer.baseAltitude + s.layer.topAltitude), mv.position.z };
     clouds::CloudRecord rec = clouds::makeRecord(s.layer, offsets, s.noise, bottomRadius, sd, one, centre, kMapHalfExtent, kMapTexels);
     rec.shadow = s.mapSrv;
-    rec.layerSrv = s.radianceSrv, rec.distanceSrv = s.distanceSrv, rec.skySrv = s.domeSrv;
+    // this frame's layer (by parity); last frame's is the march's history when the view went on from it
+    const uint32_t previousLayer = s.parity, layer = previousLayer ^ 1u;
+    s.parity = layer;
+    const QualityConfig& q = fc.quality;
+    const bool temporal = !q.has("atmosphere.clouds.temporal") || q.boolean("atmosphere.clouds.temporal");
+    const bool history = temporal && s.history && fc.frame.discontinuity == 0;
+    s.history = true;
+    rec.layerSrv = s.radianceSrv[layer], rec.distanceSrv = s.distanceSrv[layer], rec.skySrv = s.domeSrv;
     const uint32_t slot = (uint32_t)(s.frames++ % kRingSlots);
     std::memcpy(s.ringMapped + slot * kRecordBytes, &rec, sizeof rec);
     const uint32_t recordSrv = s.recordSrv;
@@ -172,8 +187,22 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
 
     const auto L = D3D12_BARRIER_LAYOUT_SHADER_RESOURCE;
     const TextureRef map = g.importTexture(s.map.Get(), textureDesc("S cloud sun map", kMapTexels * 2, kMapTexels, DXGI_FORMAT_R32G32B32A32_UINT), L);
-    const TextureRef radiance = g.importTexture(s.radiance.Get(), textureDesc("S cloud layer", s.width, s.height, DXGI_FORMAT_R16G16B16A16_FLOAT), L);
-    const TextureRef distance = g.importTexture(s.distance.Get(), textureDesc("S cloud distance", s.width, s.height, DXGI_FORMAT_R16_FLOAT), L);
+    const TextureRef radiance = g.importTexture(s.radiance[layer].Get(), textureDesc("S cloud layer", s.width, s.height, DXGI_FORMAT_R16G16B16A16_FLOAT), L);
+    const TextureRef distance = g.importTexture(s.distance[layer].Get(), textureDesc("S cloud distance", s.width, s.height, DXGI_FORMAT_R16_FLOAT), L);
+    TextureRef previousRadiance, previousDistance;
+    if (history)
+    {
+        previousRadiance = g.importTexture(s.radiance[previousLayer].Get(), textureDesc("S cloud layer (previous)", s.width, s.height, DXGI_FORMAT_R16G16B16A16_FLOAT), L);
+        previousDistance = g.importTexture(s.distance[previousLayer].Get(), textureDesc("S cloud distance (previous)", s.width, s.height, DXGI_FORMAT_R16_FLOAT), L);
+    }
+    // this frame's texel of each 2 x 2 block (the order 0, 3, 1, 2: opposite corners in turn)
+    static const uint32_t kBlockOrder[4] = { 0, 3, 1, 2 };
+    const uint32_t blockTexel = kBlockOrder[s.frames % 4];
+    // the dome: 16 rows a frame once it has been filled
+    constexpr uint32_t kDomeBand = 16;
+    const bool domeWhole = !temporal || !s.domeFilled || fc.frame.discontinuity != 0;
+    s.domeFilled = true;
+    const uint32_t domeRow = domeWhole ? 0u : (uint32_t)(s.frames % (kDomeHeight / kDomeBand)) * kDomeBand, domeRows = domeWhole ? kDomeHeight : kDomeBand;
     const TextureRef dome = g.importTexture(s.dome.Get(), textureDesc("S cloud sky dome", kDomeWidth, kDomeHeight, DXGI_FORMAT_R16G16B16A16_FLOAT), L);
     const BufferRef stats = g.importBuffer(s.stats.Get(), BufferDesc{ "S cloud stats", 256, 0 });
     ShaderLibrary& sh = fc.shaders;
@@ -215,6 +244,11 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
                   b.use(radiance, Use::UavCompute);
                   b.use(distance, Use::UavCompute);
                   b.use(stats, Use::UavCompute);
+                  if (history)
+                  {
+                      b.use(previousRadiance, Use::SrvCompute);
+                      b.use(previousDistance, Use::SrvCompute);
+                  }
               },
               [=](PassContext& c) {
                   c.cmd->SetPipelineState(pc);
@@ -223,8 +257,9 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
                   // TDR limit: 0.19 us per cloudy texel [measured] x the rows).
                   for (uint32_t row = 0; row < h; row += kBandRows)
                   {
-                      const uint32_t k[12] = { recordSrv, c.uav(radiance), 0xFFFFFFFFu, 4, w, h, 0, row, c.srv(transmittanceLut), c.uav(stats), c.uav(distance), c.srv(msTable) };
-                      c.computeConstants(k, 12);
+                      const uint32_t k[16] = { recordSrv, c.uav(radiance), 0xFFFFFFFFu, 4, w, h, 0, row, c.srv(transmittanceLut), c.uav(stats), c.uav(distance), c.srv(msTable),
+                                               history ? c.srv(previousRadiance) : 0xFFFFFFFFu, history ? c.srv(previousDistance) : 0xFFFFFFFFu, blockTexel, 0 };
+                      c.computeConstants(k, 16);
                       c.cmd->Dispatch(groups(w, 8), groups(std::min(kBandRows, h - row), 8), 1);
                   }
               });
@@ -240,10 +275,10 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
               [=](PassContext& c) {
                   c.cmd->SetPipelineState(pc);
                   c.bindFrameConstants(cb);
-                  const uint32_t k[12] = { recordSrv, c.uav(dome), 0xFFFFFFFFu, 1, kDomeWidth, kDomeHeight, 3, 0, c.srv(transmittanceLut), 0xFFFFFFFFu, 0xFFFFFFFFu,
-                                           c.srv(msTable) };
-                  c.computeConstants(k, 12);
-                  c.cmd->Dispatch(groups(kDomeWidth, 8), groups(kDomeHeight, 8), 1);
+                  const uint32_t k[16] = { recordSrv, c.uav(dome), 0xFFFFFFFFu, 1, kDomeWidth, kDomeHeight, 3, domeRow, c.srv(transmittanceLut), 0xFFFFFFFFu, 0xFFFFFFFFu,
+                                           c.srv(msTable), 0xFFFFFFFFu, 0xFFFFFFFFu, 0, 0 };
+                  c.computeConstants(k, 16);
+                  c.cmd->Dispatch(groups(kDomeWidth, 8), groups(domeRows, 8), 1);
               });
     // The readers (S's atmosphere functions in M's passes, R's sky) sample the layer through the record's SRVs: this pass
     // puts the textures in the shader-resource layout for them.

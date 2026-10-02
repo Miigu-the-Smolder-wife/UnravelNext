@@ -11,6 +11,7 @@
 #                                                  [-SkipTimings] [-SkipPictures] [-Layers gi,refl] [-Set k=v,k=v]
 #                                                  [-Generated city_block,forest_thin] [-NoGame]
 # -Generated adds scenegen's scenes by name (the gate generates them); -NoGame leaves the saved game scenes out.
+# -GateArgs "--clouds 0.5": extra gate arguments for every run.
 # -Layers adds the main view's internal layers of the captured frames (the gate's --capture-layers) beside the final picture.
 # The GPU lock's HOLD file (.gpulock\HOLD in the main checkout) must be gone: this script does not remove it.
 param(
@@ -23,7 +24,8 @@ param(
     [string[]]$Layers = @(),
     [string[]]$Set = @(),
     [string[]]$Generated = @(),
-    [switch]$NoGame
+    [switch]$NoGame,
+    [string]$GateArgs = ""      # extra gate arguments for every run, space separated (e.g. "--clouds 0.5")
 )
 $ErrorActionPreference = "Stop"
 # (powershell -File passes "a,b" as one string)
@@ -39,6 +41,7 @@ if (Test-Path "C:\Users\USER\UnravelNext\.gpulock\HOLD") { throw "the GPU lock i
 $sets = @("gi.deterministic=true") + $Set
 $setArgs = @()
 foreach ($s in $sets) { $setArgs += @("--set", $s) }
+if ($GateArgs -ne "") { $setArgs += @($GateArgs -split " " | Where-Object { $_ }) }
 # the runs' scenes: name (the output folder) and the gate's --scene argument
 $entries = @()
 if (-not $NoGame) {

@@ -23,6 +23,12 @@ sky_view_segments = 128              # quadratic segments x Gauss-Legendre 4 alo
 # of the air volume - lit by the sun through the casters' shadow (shafts of light), by the local lights and by the indirect
 # light. The numbers are the reference's placed-fog defaults turned to metres (FogDensity 0.02 -> 0.002 / m,
 # FogHeightFalloff 0.2 -> 0.02 / m, volumetric scattering distribution 0.2, albedo white, extinction scale 1).
+# The cloud layer (CloudSystem.cpp; a frame turns it on with a coverage: FrameContext::clouds, the gate's --clouds).
+[atmosphere.clouds]
+temporal = true                      # of each 2 x 2 block of the layer's texels one is marched a frame, the others take last
+                                     # frame's value where the previous view saw their direction; the rays' sky dome is refreshed
+                                     # 16 rows a frame. false: every texel and the whole dome every frame
+
 [atmosphere.fog]
 enabled = false                      # off unless the game asks for it (as the reference: a level has fog when a fog actor is placed).
                                      # The batch of 2026-10-02 had it on everywhere: the sky and distant ground veiled grey, the

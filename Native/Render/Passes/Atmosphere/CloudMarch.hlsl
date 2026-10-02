@@ -24,6 +24,11 @@
 // modes 1-2) or first row (mode 0) };
 // P[2] = { transmittance LUT SRV (mode 0), stats UAV (mode 0), distance UAV (mode 0: R16F, km, extinction-weighted mean),
 // multiple-scattering table SRV (mode 0) }.
+// P[3] (mode 0) = { last frame's layer SRV (UNX_NONE: every texel is marched), last frame's distance SRV, this frame's
+// texel of each 2 x 2 block (0..3: x | y << 1), 0 }: a texel that is not this frame's takes last frame's value at the
+// place the previous view (g_prevViewProj) saw its direction - a cloud's direction places it, kilometres away - and is
+// marched only where that place lies outside the previous view (atmosphere.clouds.temporal; the reference rebuilds its
+// quarter-resolution trace the same way). Mode 3 fills the rows from P[1].w on (the dome is refreshed in bands).
 // Mode 0 stores the layer with the air in front of it folded in (the readers then need one fetch): with in(0, d_c) and
 // T_air(0, d_c) the air's in-scattering and transmittance from the camera to the cloud distance d_c (CLOUD_AIR_STEPS
 // midpoint steps: sun single scattering through the transmittance LUT + the J_ms multiple scattering; the casters'
@@ -41,13 +46,29 @@
 void main(uint2 id : SV_DispatchThreadID)
 {
     const bool test = P[1].z == 1 || P[1].z == 2 || P[1].z == 4, dome = P[1].z == 3, approximate = P[1].z == 0 || P[1].z >= 3;
-    if (P[1].z == 0) id.y += P[1].w;
+    if (P[1].z == 0 || P[1].z == 3) id.y += P[1].w;
     if (any(id >= P[1].xy)) return;
     const CloudRecord c = cloudLoad(P[0].x);
     const float scale = (float)P[0].w;
     const float2 pixel = (float2(id) + 0.5) * scale - 0.5;  // the view pixel at the texel's centre (worldFromDepth adds 0.5)
     const float3 far = worldFromDepth(pixel, 1e-6);
     const float3 dir = dome ? cloudDomeDir((float2(id) + 0.5) / float2(P[1].xy)) : normalize(far - g_cameraPosition);
+    if (P[1].z == 0 && P[3].x != 0xFFFFFFFFu && ((id.x & 1u) | ((id.y & 1u) << 1)) != P[3].z)
+    {
+        const float4 clip = mul(g_prevViewProj, float4(g_cameraPosition + dir * 1.0e5, 1));
+        const float2 uv = float2(clip.x, -clip.y) / max(clip.w, 1e-6) * 0.5 + 0.5;
+        const float2 margin = 1.0 / float2(P[1].xy);  // (a texel: the lookup's whole footprint inside the previous view)
+        if (clip.w > 0 && all(uv > margin) && all(uv < 1 - margin))
+        {
+            Texture2D<float4> previous = ResourceDescriptorHeap[P[3].x];
+            Texture2D<float> previousDistance = ResourceDescriptorHeap[P[3].y];
+            RWTexture2D<float4> out4 = ResourceDescriptorHeap[P[0].y];
+            RWTexture2D<float> out1 = ResourceDescriptorHeap[P[2].z];
+            out4[id] = previous.SampleLevel(g_linearClamp, uv, 0);
+            out1[id] = previousDistance.SampleLevel(g_linearClamp, uv, 0);
+            return;
+        }
+    }
     const float tMax = test ? asfloat(P[1].w) : 3.0e38;
     float3 L = 0, sunIlluminance = c.sunIlluminance, skyRadiance = P[1].z == 4 ? c.skyRadianceTest : 0;
     float distanceSum = 0, distanceWeight = 0;
