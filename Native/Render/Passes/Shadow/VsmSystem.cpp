@@ -2120,7 +2120,9 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             v.viewportX = v.viewportY = 0;
             v.viewportWidth = v.viewportHeight = kTable * kTintPage;
             v.lodPixelsPerMetre = (float)kTintPage / (float)kPage / std::ldexp(1.0f, (int)k - 10);
-            v.minInstanceTexels = minCasterTexels;
+            // (the smallest caster as the page views take it: in the level's texels, not the tint's - a glass caster the
+            // opaque views would have drawn is drawn here)
+            v.minInstanceTexels = minCasterTexels * (float)kTintPage / (float)kPage;
             v.userData = k;
             v.materialFilter = 2;
             v.cullMaskOffset = drawnWords + k * (kTable * kTable / 32);
