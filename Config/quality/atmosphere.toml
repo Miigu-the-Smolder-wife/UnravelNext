@@ -81,7 +81,10 @@ start_distance_m = 0.0               # no fog nearer than this
 second_density_per_m = 0.0           # a second layer of the same medium (the reference's SecondFogData): extinction per metre at
 second_height_falloff_per_m = 0.02   # second_height_m, its own falloff - a low ground fog under a thin haze. 0: none. The game's
 second_height_m = 0.0                # fog (FrameContext::fog) brings its own
-rain_veil = true                     # while it rains (the frame's weather record: rain rate R mm/h) the rain itself is a medium:
+rain_veil = false                    # (off: the veil has no top - uniform in height, its column integrates to 65 km, so any rain
+                                     # gives the zenith an optical depth near 16 and the sky turns fog-coloured; found by reading,
+                                     # 2026-10-03. On again when the veil ends at the cloud base)
+                                     # while it rains (the frame's weather record: rain rate R mm/h) the rain itself is a medium:
                                      # 0.248 R^0.67 per km (the optical attenuation in rain, 1.076 R^0.67 dB/km), uniform in height,
                                      # as the second layer where the frame sets none - the distance fades in rain. The volume runs
                                      # for it alone. false: rain leaves the air clear
