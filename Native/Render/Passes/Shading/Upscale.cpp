@@ -65,8 +65,11 @@ struct UpscaleState
         float lensTanX = 0, lensTanY = 0, lensScale = 0;  // the frame's lens projection (upscaleLens; scale 0: none)
     } kept[kRingSlots];
     float lensD = 0, lensS = 0;  // the lens the history is under (a change restarts the history)
+    // The references below are of one recording's graph: they are keyed by the frame index and the recording's serial
+    // (TrackState::recordSerial) - a frame whose recording failed is recorded again under the same index, and a
+    // reference of the failed graph names another resource in the new one.
     TextureRef previous;           // history[last] in the graph of frame 'previousFrame' (upscalePreviousColor)
-    uint64_t previousFrame = ~0ull;
+    uint64_t previousFrame = ~0ull, previousSerial = ~0ull;
     // output.screen_trace_source = 0: the lit opaque scene colour (the view's resolution; before translucency, the air,
     // the upscale and the display transform), kept for the next frame's screen-space traces - the reference's default
     // source (keepSceneColor, UpscaleSceneKeep.hlsl). scene[parity] is the last one written.
@@ -75,9 +78,9 @@ struct UpscaleState
     DXGI_FORMAT sceneFormat = DXGI_FORMAT_UNKNOWN;
     bool sceneFresh = true;
     TextureRef previousScene;
-    uint64_t previousSceneFrame = ~0ull;
+    uint64_t previousSceneFrame = ~0ull, previousSceneSerial = ~0ull;
     UpscaleMotion motion;  // m.upscale.motion's outputs in the graph of frame 'motionFrame' (upscaleMotion)
-    uint64_t motionFrame = ~0ull;
+    uint64_t motionFrame = ~0ull, motionSerial = ~0ull;
     // The internal-resolution textures (the kept scene colour, the guide ring, the flickering and thin-coverage pairs)
     // under dynamic resolution: the internal size is each frame's own, so a slot has the size of the frame that wrote it.
     // The frame that writes a slot next recreates it at its size (the other slots keep theirs); the readers reproject
@@ -280,6 +283,8 @@ namespace
 // output.screen_trace_source: 0 = the scene colour before the upscale (the reference's default: scene colour ahead of
 // post-processing, its r.Lumen.ScreenTracingSource 0), 1 = the upscale's history (anti-aliased, output resolution).
 bool sceneColorSource(FramePassContext& fc) { return fc.quality.has("output.screen_trace_source") && fc.quality.integer("output.screen_trace_source") == 0; }
+// (this recording, for the references UpscaleState keeps of the frame's graph)
+uint64_t recordSerialOf(FramePassContext& fc) { return fc.trackState ? fc.trackState->recordSerial() : 0; }
 } // namespace
 
 TextureRef upscalePreviousColor(FramePassContext& fc, const ViewResources& view)
@@ -292,12 +297,13 @@ TextureRef upscalePreviousColor(FramePassContext& fc, const ViewResources& view)
         // (the size is the texture's own - RenderGraph::desc - neither the output's nor, under dynamic resolution, this
         // frame's internal size: the readers sample it by UV)
         if (!s.scene[0] || s.sceneFresh || u.reset || s.sceneWidth[s.parity] == 0) return TextureRef{};
-        if (s.previousSceneFrame != fc.frame.frameIndex || !s.previousScene.valid())
+        if (s.previousSceneFrame != fc.frame.frameIndex || s.previousSceneSerial != recordSerialOf(fc) || !s.previousScene.valid())
         {
             s.previousScene = fc.graph.importTexture(s.scene[s.parity].Get(),
                                                      { "m.scenecolor (previous)", s.sceneWidth[s.parity], s.sceneHeight[s.parity], 1, 1, s.sceneFormat },
                                                      D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
             s.previousSceneFrame = fc.frame.frameIndex;
+            s.previousSceneSerial = recordSerialOf(fc);
         }
         return s.previousScene;
     }
@@ -310,11 +316,12 @@ TextureRef upscalePreviousColor(FramePassContext& fc, const ViewResources& view)
     uint32_t hw, hh;
     historySize(fc, u.outputWidth, u.outputHeight, hw, hh);
     if (!s.history[s.last] || s.width != hw || s.height != hh || s.fresh || u.reset) return TextureRef{};
-    if (s.previousFrame != fc.frame.frameIndex || !s.previous.valid())
+    if (s.previousFrame != fc.frame.frameIndex || s.previousSerial != recordSerialOf(fc) || !s.previous.valid())
     {
         s.previous = fc.graph.importTexture(s.history[s.last].Get(), { "m.upscale.history (previous)", hw, hh, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
                                             D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
         s.previousFrame = fc.frame.frameIndex;
+        s.previousSerial = recordSerialOf(fc);
     }
     return s.previous;
 }
@@ -360,7 +367,7 @@ UpscaleMotion upscaleMotion(FramePassContext& fc, const ViewResources& view)
 {
     if (!upscaleActive(fc, view) || !view.depth.valid()) return UpscaleMotion{};
     UpscaleState& s = fc.state<UpscaleState>("M.upscale");
-    if (s.motionFrame == fc.frame.frameIndex && s.motion.motion.valid()) return s.motion;
+    if (s.motionFrame == fc.frame.frameIndex && s.motionSerial == recordSerialOf(fc) && s.motion.motion.valid()) return s.motion;
     const FrameContext::Upscale& u = fc.frame.upscale;
     RenderGraph& g = fc.graph;
     const uint32_t w = view.view.width, h = view.view.height;
@@ -464,6 +471,7 @@ UpscaleMotion upscaleMotion(FramePassContext& fc, const ViewResources& view)
     out.layerMotion = layerMotion;
     s.motion = out;
     s.motionFrame = fc.frame.frameIndex;
+    s.motionSerial = recordSerialOf(fc);
     return out;
 }
 
@@ -495,7 +503,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
     s.lensS = lensS;
     const bool reset = u.reset || s.fresh || lensChanged;
     // (an earlier pass of this frame may hold the previous history already: upscalePreviousColor - one import per frame)
-    const bool imported = !reset && s.previousFrame == fc.frame.frameIndex && s.previous.valid();
+    const bool imported = !reset && s.previousFrame == fc.frame.frameIndex && s.previousSerial == recordSerialOf(fc) && s.previous.valid();
     s.fresh = false;
     const uint32_t prev = s.parity, next = prev ^ 1u;  // (the two-frame histories: flickering, thin coverage, keepSceneColor's)
     s.parity = next;
