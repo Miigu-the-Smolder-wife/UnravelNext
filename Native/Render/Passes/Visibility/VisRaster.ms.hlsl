@@ -7,7 +7,8 @@
 // passes the uv and the triangle's material to the pixel kernel's alpha test.
 //   P[0] visible SRV (uint2), lists SRV (raw; the run's lists, or the depth-sorted copy of RasterBins.hlsl: the same
 //        layout), state SRV (raw), list
-//   P[1] phase (1: entries of phase 1; 2: entries appended in phase 2), list capacity, views SRV, unused
+//   P[1] phase (1: entries of phase 1; 2: entries appended in phase 2), list capacity, views SRV, the frame's cluster
+//        page table's SRV + 1 (visibility.cluster_streaming; 0: none)
 #include "Passes/Visibility/VisibilityCommon.hlsli"
 #include "VisBuffer.hlsli"
 
@@ -57,7 +58,8 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     const GpuCluster cl = loadCluster(entry.y & 0xFFFFFFu);
     const uint vertexCount = valid ? clusterVertexCount(cl) : 0, triangleCount = valid ? clusterTriangleCount(cl) : 0;
     SetMeshOutputCounts(vertexCount, triangleCount);
-    const uint streamRecord = clusterStreamRecord(entry.y & 0xFFFFFFu);  // (visibility.cluster_compression: the cluster's own vertices)
+    // (visibility.cluster_compression: the cluster's own vertices, in the stream or in its resident page)
+    const ClusterVertexSource vertexSource = clusterVertexSource(entry.y & 0xFFFFFFu, P[1].w);
     const bool clip = any(v.clipPlane != 0);
 #if ALPHA
     const uint material = clusterMaterial(inst, cl);
@@ -65,7 +67,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     for (uint i = lane; i < vertexCount; i += 64)
     {
         VertexData vertex;
-        const DeformedVertex d = deformClusterVertex(inst, mesh, cl, streamRecord, i, vertex);
+        const DeformedVertex d = deformClusterVertex(inst, mesh, cl, vertexSource, i, vertex);
         verts[i].position = viewModelClip(inst, mul(v.viewProj, float4(d.world, 1)));  // A12: 1 outside the main view
         verts[i].clip = clip ? dot(v.clipPlane.xyz, d.world) + v.clipPlane.w : 1.0;
         gs_world[i] = d.world;

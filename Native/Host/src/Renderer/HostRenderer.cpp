@@ -16,6 +16,10 @@
 #if __has_include("unx/clusterbuilder/ClusterBuilder.h")
 #include "unx/clusterbuilder/ClusterBuilder.h"
 #include "unx/clusterbuilder/ClusterStream.h"
+#if __has_include("unx/streaming/Streaming.h") && __has_include("unx/visibility/ClusterPages.h")
+#include "unx/visibility/ClusterPages.h"
+#define UNX_HOST_HAS_CLUSTER_PAGES 1
+#endif
 #define UNX_HOST_HAS_CLUSTERBUILDER 1
 #endif
 
@@ -179,7 +183,10 @@ SceneCommitInfo HostRenderer::commit()
     // (visibility.cluster_compression: the rigid meshes' positions go onto their grids first - at most half a millimetre -
     // so the clusters' streams hold the vertex pool's floats, ClusterStream.h)
     if (clusterSettings.compression) clusterbuilder::snapPositions(m_scene, clusterSettings);
-    ClusterData clusters = clusterbuilder::build(m_scene, clusterSettings, nullptr, &lodVertices);
+    // (visibility.cluster_streaming: the streamed groups' vertex bits come back as pages - a page file and a streamer
+    // for V once the renderer exists)
+    clusterbuilder::StreamPages clusterPages;
+    ClusterData clusters = clusterbuilder::build(m_scene, clusterSettings, nullptr, &lodVertices, &clusterPages);
     lodVertices.appendTo(m_scene);
     info.clusters = clusters.clusters.size();
 #else
@@ -192,6 +199,10 @@ SceneCommitInfo HostRenderer::commit()
     m_gpuScene->upload(m_scene);
     m_gpuScene->setClusters(std::move(clusters));
     m_frameRenderer = std::make_unique<FrameRenderer>(*m_device, *m_shaders, m_quality, *m_gpuScene, m_options.framesInFlight);
+#if UNX_HOST_HAS_CLUSTERBUILDER && UNX_HOST_HAS_CLUSTER_PAGES
+    // (the page file's owner is the source V holds: it goes with the renderer's track state)
+    visibility::installClusterPages(m_frameRenderer->trackState(), visibility::openClusterPages(*m_device, m_quality, clusterPages, "", m_options.framesInFlight));
+#endif
     m_graph = std::make_unique<RenderGraph>(*m_device);
     m_profiler = std::make_unique<GpuProfiler>(*m_device, m_options.framesInFlight, 1024);
     m_committed = true;

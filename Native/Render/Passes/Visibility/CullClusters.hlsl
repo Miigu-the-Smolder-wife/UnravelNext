@@ -14,6 +14,9 @@
 // Bands (ARCHITECTURE 2.1): w_face = projected minimum feature width seen face-on, w_min = w_face x (flat sheets) the
 // smallest |cos| between the view direction and the cluster's normals. A: w_min >= band A minimum; C: w_face < band C
 // maximum; B otherwise. The run's band mode picks the list of each band (BAND_MODE_*, CullShared.hlsli).
+// Cluster streaming (PAGE_TABLE): a cluster whose own error is too large is drawn all the same when the group it was
+// simplified from is not resident (CullNodes did not pass that group: this cluster stands in for it - the two tests
+// take the same sphere and error, so exactly one of them is drawn).
 // Raster requests with the software rasteriser (SW_PAGES_SRV; the reference decides hardware or software in its cluster
 // cull too): a cluster softwareCluster accepts goes to LIST_SW instead of its band A list.
 #include "Passes/Visibility/CullShared.hlsli"
@@ -22,7 +25,7 @@
 
 struct ClusterResult
 {
-    bool visible, defer, wholeRange, mixed, software;
+    bool visible, defer, wholeRange, mixed, software, standIn;
     uint list, list2, band, triangles, pairs;  // list2: the coverage list of a mixed sheet cluster (else VS_LISTS)
     uint2 tileA, tileB;
 };
@@ -64,8 +67,13 @@ ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
     {
         StructuredBuffer<float4> spheres = ResourceDescriptorHeap[LOD_SPHERES_SRV];
         const float4 lodSphere = spheres[clusterIndex];
-        if (patchForcesSource(inst, lodSphere)) return r;  // C5: the source clusters are drawn there instead
-        if (projectedError(v, worldSphere(inst, inst.objectToWorld, lodSphere), cl.lodError * scale) > v.lodThreshold) return r;
+        // (C5: the source clusters are drawn in a terrain patch's rectangle instead)
+        const bool finer = patchForcesSource(inst, lodSphere) || projectedError(v, worldSphere(inst, inst.objectToWorld, lodSphere), cl.lodError * scale) > v.lodThreshold;
+        if (finer)
+        {
+            if (PAGE_TABLE == 0 || pageResident(clusterStreamPages(clusterIndex).y)) return r;
+            r.standIn = true;  // (the finer group's page is not resident)
+        }
     }
     const float4 s = worldSphere(inst, inst.objectToWorld, cl.boundsSphere);
     const bool unbounded = skinned || (inst.flags & INSTANCE_VIEW_MODEL) != 0;  // A12 view models: remapped projection
@@ -236,6 +244,8 @@ void emit(RWByteAddressBuffer state, bool active, uint instance, uint clusterInd
         state.InterlockedAdd(4 * VS_STAT_MIXED_CLUSTERS, mixedClusters);
         state.InterlockedAdd(4 * VS_STAT_MIXED_TRIANGLES, mixedTriangles);
     }
+    const uint standIns = WaveActiveCountBits(visible && r.standIn);
+    if (WaveIsFirstLane() && standIns > 0) state.InterlockedAdd(4 * VS_STREAM_STANDINS, standIns);
     const uint tested = WaveActiveCountBits(active);
     if (WaveIsFirstLane() && tested > 0) state.InterlockedAdd(4 * VS_STAT_CLUSTERS, tested);
 }

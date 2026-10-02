@@ -167,7 +167,8 @@ uint skinSlot(CullScene cs, uint instance)
 #define VS_SW_TRIANGLES 68u       // their triangles that reached the pixel loop (not culled, some pixel under the rectangle)
 #define VS_SW_TILES 69u           // raster service: set tiles of the request's views (each wants a software page; may
                                   // exceed the page capacity: the need)
-                                  // words 70 .. 71: unused
+#define VS_STREAM_STANDINS 70u    // visibility.cluster_streaming: clusters drawn in place of a finer group that is not resident
+#define VS_STREAM_WAITING 71u     // ... groups the cut wanted whose page is not resident (not drawn; requested)
 #define VS_WORDS 72u  // (words 64 .. 66: the coverage statistics above; kStateWords, and the readback slot holds them: kReadbackBytes)
 
 #define VS_LISTS 8u

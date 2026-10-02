@@ -11,7 +11,7 @@
 // the same draw already cover before its pixel kernel and its writes - and the software entries are one run after
 // them (LIST_ENTRY_SOFTWARE set), dispatched to VisRasterSw.hlsl. The depth buffer and the vis ids are the same either
 // way up to the order of equal depths; nothing here culls.
-// A cluster is the software rasteriser's when (P[9].z = the largest rectangle in pixels, 0: none) its list has no
+// A cluster is the software rasteriser's when (P[10].z = the largest rectangle in pixels, 0: none) its list has no
 // alpha test, it is not a mixed sheet cluster, its instance is not skinned, a view model or a patched terrain tile (the
 // cluster sphere bounds what is drawn, no triangle is dropped), the view is a perspective view without a clip plane,
 // and the sphere's box lies in front of the near plane with a rectangle of at most that many pixels a side.
@@ -22,14 +22,14 @@
 //          their arguments (one mesh group / one compute group per entry).
 //   MODE=3 scatter (64 entries per group): each entry to its key's next place.
 // Root constants: the cull kernels' (CullShared.hlsli; LISTS_UAV the run's lists, read), and
-//   P[9] bins UAV (raw: header, then a key per entry), bin arguments UAV (raw), software rectangle limit (float), sorted
+//   P[10] bins UAV (raw: header, then a key per entry), bin arguments UAV (raw), software rectangle limit (float), sorted
 //        lists UAV (raw)
 #include "Passes/Visibility/CullShared.hlsli"
 
-#define BINS_UAV P[9].x
-#define BIN_ARGS_UAV P[9].y
-#define SW_LIMIT_PX asfloat(P[9].z)
-#define SORTED_UAV P[9].w
+#define BINS_UAV P[10].x
+#define BIN_ARGS_UAV P[10].y
+#define SW_LIMIT_PX asfloat(P[10].z)
+#define SORTED_UAV P[10].w
 
 #define RB_LISTS VS_A_LISTS
 #define RB_DEPTH_KEYS 256u

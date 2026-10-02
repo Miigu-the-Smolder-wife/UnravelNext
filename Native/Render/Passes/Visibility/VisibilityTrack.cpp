@@ -22,6 +22,7 @@
 #include "VisibilityInternal.h"
 #include "unx/clusterbuilder/ClusterBuilder.h"
 #include "unx/clusterbuilder/ClusterHierarchy.h"
+#include "unx/clusterbuilder/ClusterStream.h"
 #include "unx/core/Log.h"
 #include "unx/render/GpuScene.h"
 #include "unx/render/PassChain.h"
@@ -76,6 +77,8 @@ struct Settings
     bool rasterDepthSort = false, softwareRaster = false;
     float softwareRasterMaxPx = 0;
     uint32_t softwarePages = 0, softwarePagesLimit = 0;  // a raster request's software pages: the floor and the most
+    bool clusterStreaming = false;    // visibility.cluster_streaming: pages of cluster vertex bits by the cuts' need
+    uint32_t streamKeepFrames = 0;    // a page stays requested this many frames after a cut last wanted it
 
     static Settings load(const QualityConfig& q)
     {
@@ -137,6 +140,8 @@ struct Settings
         // (the clear's dispatch is one group per page: 65535 a row; the page's byte offset stays in 32 bits)
         if (s.softwarePages == 0 || s.softwarePages > s.softwarePagesLimit || s.softwarePagesLimit > 16384)
             fail("visibility.software_raster_pages = %u, software_raster_pages_limit = %u: 1 <= pages <= limit <= 16384", s.softwarePages, s.softwarePagesLimit);
+        s.clusterStreaming = q.has("visibility.cluster_streaming") && q.boolean("visibility.cluster_streaming");
+        s.streamKeepFrames = q.has("visibility.cluster_streaming_keep_frames") ? (uint32_t)std::max<int64_t>(q.integer("visibility.cluster_streaming_keep_frames"), 1) : 30u;
         return s;
     }
 };
@@ -163,6 +168,32 @@ struct Coverage
     uint32_t specialCapacity = 0;  // special record list entries (v1.73)
     uint32_t oceanEdgeCapacity = 0;  // ocean edge pixel list entries (v1.73)
     bool fresh = true;      // every tile still to be emptied (CoverageBuild MODE 4)
+};
+
+// Cluster streaming (visibility.cluster_streaming; clusterStreamingFrame): the page source, the pages' dependencies,
+// when a cut last wanted each page, the feedback the cull kernels stamp and its readback, and the page table of every
+// frame slot (a frame's kernels read one table from its first cull to its last raster, whatever the CPU writes next).
+struct ClusterStream
+{
+    visibility::ClusterPageSource source;
+    uint64_t sourceSerial = 0, builtSerial = 0;  // a source installed / the one the buffers below were made for
+    bool active = false;
+    uint32_t pages = 0;
+    std::vector<uint32_t> depOffsets, deps;      // page p needs deps[depOffsets[p] .. depOffsets[p + 1])
+    std::vector<uint64_t> lastWanted;            // the last frame a cut wanted the page (UINT64_MAX: never)
+    std::vector<float> priority;                 // this frame's requests (scratch)
+    std::vector<uint8_t> resident;               // this frame's residency with dependencies (scratch: 0 unknown, 1 yes, 2 no)
+    ComPtr<ID3D12Resource> feedback, readback, table;
+    const uint32_t* readbackMapped = nullptr;
+    uint32_t* tableMapped = nullptr;
+    std::vector<uint64_t> readbackFrames;        // per frame slot: the frame whose feedback copy it holds
+    std::vector<uint32_t> tableSrvs;             // per frame slot
+    std::vector<uint32_t> heapSrvs;              // per pool heap: its raw SRV
+    std::vector<ID3D12Resource*> heapSeen;       // ... of this buffer
+    uint64_t frame = UINT64_MAX, record = UINT64_MAX;
+    BufferRef feedbackRef;                       // this recording's import of the feedback
+    uint32_t tableSrv = 0;                       // this frame's page table SRV + 1 (0: no streaming this frame)
+    visibility::ClusterStreamStats stats;
 };
 
 // A14: what a full view (main, render texture, mirror, portal, split) keeps between frames, per ViewResources::viewId.
@@ -211,6 +242,7 @@ struct State
     uint64_t viewModelRevision = UINT64_MAX;  // GpuScene::viewModelRevision the instance hierarchy was built with
     uint32_t traversalLevels = 0;  // deepest per-depth tree of any mesh (node passes per phase without the work queue)
     int atomic64 = -1;  // 64-bit atomics on descriptor-heap resources (the software rasteriser's depth | vis id word): -1 not asked
+    ClusterStream stream;
 
     // C3: instance chunks, flat list, skinned bounds (persistent; rebuilt at each scene revision).
     struct VBuffer
@@ -852,6 +884,8 @@ struct Run
     bool storedPairs = false;  // tile-local run with the stored pair list (visibility.raster_amplification false, A/B)
     BufferRef swPages;         // raster requests with the software rasteriser: the tiles' software pages (CullClusters)
     float swLimitPx = 0;       // ... and the largest cluster rectangle it takes
+    uint32_t pageTable = 0;    // cluster streaming: the frame's page table SRV + 1 (0: none)
+    BufferRef pageFeedback;    // ... and the feedback the cull kernels stamp
     Settings cfg;
     std::string prefix;
 };
@@ -880,6 +914,8 @@ Run createRun(FramePassContext& fc, const Settings& cfg, const std::string& pref
     const State& st = fc.state<State>("v.state");
     r.chunks = st.chunksRef;
     r.skinBounds = st.skinBoundsRef;
+    r.pageTable = st.stream.tableSrv;  // (clusterStreamingFrame ran for this frame: visibility, rasterizeDepth)
+    r.pageFeedback = st.stream.tableSrv ? st.stream.feedbackRef : BufferRef{};
     r.chunkCount = st.chunkCount;
     r.flatCount = st.flatCount;
     return r;
@@ -901,6 +937,7 @@ void declareCull(PassBuilder& b, const Run& r, Use argsUse)
         b.use(r.occluderSlots, Use::SrvCompute);
     }
     if (r.swPages.valid()) b.use(r.swPages, Use::SrvCompute);
+    if (r.pageFeedback.valid()) b.use(r.pageFeedback, Use::UavCompute);
 }
 
 constexpr uint32_t kCullConstants = 36;  // CullShared.hlsli P[0 .. 8]
@@ -943,6 +980,8 @@ void cullConstants(const PassContext& c, const Run& r, uint32_t phase, uint32_t 
     k[31] = r.tileCoarseWords;
     k[32] = r.swPages.valid() ? c.srv(r.swPages) : kNone;
     std::memcpy(&k[33], &r.swLimitPx, 4);
+    k[34] = r.pageTable;
+    k[35] = r.pageFeedback.valid() ? c.uav(r.pageFeedback) + 1 : 0;
 }
 
 // One dispatch of a cull pass: direct (groupsX > 0) or indirect through the run's args at 'argWord'. 'after': it reads
@@ -1182,15 +1221,15 @@ void rasterBinPasses(FramePassContext& fc, State& s, const Run& r, const RasterB
                              b.use(rb.sorted, Use::UavCompute);
                          },
                          [=](PassContext& c) {
-                             uint32_t k[kCullConstants + 4];  // (RasterBins.hlsl: P[9] after the cull kernels' words)
+                             uint32_t k[44] = {};  // (RasterBins.hlsl: P[10]; P[0 .. 8] the cull kernels' words, P[9] unused)
                              cullConstants(c, r, phase, k, instanceCount);
-                             k[36] = c.uav(rb.bins);
-                             k[37] = indirect ? kNone : c.uav(rb.args);
-                             std::memcpy(&k[38], &softwareLimitPx, 4);
-                             k[39] = c.uav(rb.sorted);
+                             k[40] = c.uav(rb.bins);
+                             k[41] = indirect ? kNone : c.uav(rb.args);
+                             std::memcpy(&k[42], &softwareLimitPx, 4);
+                             k[43] = c.uav(rb.sorted);
                              c.cmd->SetPipelineState(pso);
                              c.bindFrameConstants(r.frameConstants);
-                             c.computeConstants(k, kCullConstants + 4);
+                             c.computeConstants(k, 44);
                              if (indirect) c.cmd->ExecuteIndirect(sig, 1, c.resource(rb.args), kRbArgEntries * 4, nullptr, 0);
                              else c.cmd->Dispatch(mode == 0 ? (kRbHeaderWords + 63) / 64 : 1, 1, 1);
                          });
@@ -1253,7 +1292,7 @@ void softwareRasterPasses(FramePassContext& fc, State& s, const Run& r, const Ra
                          for (uint32_t l : { kListABack, kListANone })
                          {
                              const uint32_t k[16] = { c.srv(r.visible), c.srv(rb.sorted), c.uav(r.state), l, phase, r.cfg.capVisible, r.viewsSrv, c.srv(rb.bins),
-                                                      c.uav(words), c.srv(depth), width, height, mirrored, 0, 0, 0 };
+                                                      c.uav(words), c.srv(depth), width, height, mirrored, r.pageTable, 0, 0 };
                              c.computeConstants(k, 16);
                              c.cmd->ExecuteIndirect(sig, 1, c.resource(rb.args), (kRbArgSw + 3 * l) * 4, nullptr, 0);
                          }
@@ -1358,7 +1397,8 @@ void rasterPass(FramePassContext& fc, State& s, const Run& r, ViewResources& vie
                          c.bindFrameConstants(frameConstants);
                          for (uint32_t l = 0; l < kAListCount; ++l)  // bands B and C: empty lists or the coverage layer
                          {
-                             const uint32_t k[8] = { c.srv(r.visible), rb.valid() ? c.srv(rb.sorted) : c.srv(r.lists), c.srv(r.state), l, phase, r.cfg.capVisible, r.viewsSrv, 0 };
+                             const uint32_t k[8] = { c.srv(r.visible), rb.valid() ? c.srv(rb.sorted) : c.srv(r.lists), c.srv(r.state), l, phase, r.cfg.capVisible, r.viewsSrv,
+                                                     r.pageTable };
                              c.cmd->SetPipelineState(pso[l]);
                              c.graphicsConstants(k, 8);
                              if (rb.valid()) c.cmd->ExecuteIndirect(sig, 1, c.resource(rb.args), (kRbArgHw + 3 * l) * 4, nullptr, 0);
@@ -1489,6 +1529,212 @@ ComPtr<ID3D12Resource> createCoverageBuffer(Device& device, uint64_t bytes, cons
           "V coverage buffer");
     r->SetName(name);
     return r;
+}
+
+// Cluster streaming, once per frame before the frame's first cull run (visibility.cluster_streaming; ClusterStream): the
+// cuts' feedback of the frame that last used this frame's slot, the requests - every page a cut wanted within the keep
+// frames and the pages it depends on, the coarser first - the source's update, and this frame's page table: a page
+// counts as resident only with all it depends on, so a group is never drawn together with a stand-in for it. The
+// kernels of this frame stamp the feedback; its copy for a later frame is the frame's first pass (it holds every stamp
+// up to the frame before).
+// CPU cost per frame: the pages' words read, their requests and the table written (a few words a page).
+void clusterStreamingFrame(FramePassContext& fc, State& s, const Settings& cfg)
+{
+    ClusterStream& cs = s.stream;
+    const uint64_t record = fc.trackState ? fc.trackState->recordSerial() : 0;
+    if (cs.frame == fc.frame.frameIndex && cs.record == record) return;
+    cs.frame = fc.frame.frameIndex;
+    cs.record = record;
+    cs.tableSrv = 0;
+    cs.feedbackRef = {};
+    cs.stats = {};
+    if (!cfg.clusterStreaming || !cs.source.request || !cs.source.update || !cs.source.residentSlot || !cs.source.heapCount || !cs.source.heapBuffer) return;
+    Device& device = fc.device;
+    if (cs.builtSerial != cs.sourceSerial)
+    {
+        // The source's pages against the installed cluster data's (the cook's "clusterPageDeps").
+        cs.builtSerial = cs.sourceSerial;
+        cs.active = false;
+        const ClusterData::Named* named = nullptr;
+        for (const auto& n : fc.scene.clusters().named)
+            if (n.name == clusterbuilder::kClusterPageDeps) named = &n;
+        const uint32_t* w = named ? reinterpret_cast<const uint32_t*>(named->bytes.data()) : nullptr;
+        const size_t words = named ? named->bytes.size() / 4 : 0;
+        const uint32_t pages = words > 0 ? w[0] : 0;
+        if (pages == 0 || pages != cs.source.pageCount || words < (size_t)pages + 2 || words < (size_t)pages + 2 + w[1 + pages] || cs.source.slotBytes < 4 ||
+            cs.source.heapSlots == 0)
+        {
+            logf("V: cluster streaming is off: the page source has %u pages, the installed cluster data %u (visibility.cluster_compression and "
+                 "cluster_streaming at the cook, the source installed after GpuScene::setClusters)\n", cs.source.pageCount, pages);
+            return;
+        }
+        auto retire = [&](ComPtr<ID3D12Resource>& old) {
+            if (old) device.deferRelease(old);
+            old.Reset();
+        };
+        retire(cs.feedback);
+        retire(cs.readback);
+        retire(cs.table);
+        cs.pages = pages;
+        cs.depOffsets.assign(w + 1, w + 2 + pages);
+        cs.deps.assign(w + 2 + pages, w + 2 + pages + cs.depOffsets[pages]);
+        for (uint32_t d : cs.deps)
+            if (d >= pages) fail("V: cluster page dependency %u of %u pages", d, pages);
+        cs.lastWanted.assign(pages, UINT64_MAX);
+        cs.readbackFrames.assign(s.slots, UINT64_MAX);
+        cs.feedback = createCoverageBuffer(device, (uint64_t)pages * 4, L"V cluster page feedback");  // (zero: no page wanted yet)
+        cs.readback = createBuffer(device, (uint64_t)s.slots * pages * 4, D3D12_HEAP_TYPE_READBACK, L"V cluster page feedback readback");
+        cs.table = createBuffer(device, (uint64_t)s.slots * pages * 8, D3D12_HEAP_TYPE_UPLOAD, L"V cluster page table");
+        check(cs.readback->Map(0, nullptr, reinterpret_cast<void**>(const_cast<uint32_t**>(&cs.readbackMapped))), "map V page feedback");
+        D3D12_RANGE none{ 0, 0 };
+        check(cs.table->Map(0, &none, reinterpret_cast<void**>(&cs.tableMapped)), "map V page table");
+        cs.tableSrvs.resize(s.slots, kNone);
+        for (uint32_t slot = 0; slot < s.slots; ++slot)
+        {
+            if (cs.tableSrvs[slot] == kNone) cs.tableSrvs[slot] = device.descriptors().allocateResource();
+            D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+            sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sd.Format = DXGI_FORMAT_UNKNOWN;
+            sd.Buffer.FirstElement = (uint64_t)slot * pages;
+            sd.Buffer.NumElements = pages;
+            sd.Buffer.StructureByteStride = 8;
+            device.d3d()->CreateShaderResourceView(cs.table.Get(), &sd, device.descriptors().resourceCpu(cs.tableSrvs[slot]));
+        }
+        cs.active = true;
+        logf("V: cluster streaming: %u pages, %zu dependencies, kept %u frames after a cut last wanted them\n", pages, cs.deps.size(), cfg.streamKeepFrames);
+    }
+    if (!cs.active) return;
+    const uint32_t pages = cs.pages, slot = (uint32_t)(fc.frame.frameIndex % s.slots);
+    const uint64_t frame = fc.frame.frameIndex;
+
+    // The feedback of the frame that last used this slot (complete: the caller waited for the slot): each page's stamp is
+    // the low 32 bits of the last frame index a cut wanted it, + 1.
+    if (cs.readbackFrames[slot] != UINT64_MAX)
+    {
+        const uint32_t* stamps = cs.readbackMapped + (size_t)slot * pages;
+        for (uint32_t p = 0; p < pages; ++p)
+        {
+            if (stamps[p] == 0) continue;
+            const uint32_t age = (uint32_t)frame - (stamps[p] - 1);  // frames ago (modulo 2^32)
+            if (age < 0x80000000u && (uint64_t)age <= frame) cs.lastWanted[p] = std::max(cs.lastWanted[p] == UINT64_MAX ? 0 : cs.lastWanted[p], frame - age);
+        }
+    }
+
+    // Requests: the pages wanted within the keep frames (the latest first) and what they depend on (before them).
+    const float unwanted = -1e30f;
+    cs.priority.assign(pages, unwanted);
+    std::vector<uint32_t> stack;
+    for (uint32_t p = 0; p < pages; ++p)
+    {
+        if (cs.lastWanted[p] == UINT64_MAX || frame - cs.lastWanted[p] > cfg.streamKeepFrames) continue;
+        const float priority = -(float)(frame - cs.lastWanted[p]);
+        if (priority <= cs.priority[p]) continue;
+        cs.priority[p] = priority;
+        stack.push_back(p);
+        while (!stack.empty())  // (each push raises a page's priority: the loop ends; the dependencies form no cycle)
+        {
+            const uint32_t q = stack.back();
+            stack.pop_back();
+            for (uint32_t k = cs.depOffsets[q]; k < cs.depOffsets[q + 1]; ++k)
+            {
+                const uint32_t d = cs.deps[k];
+                if (cs.priority[d] >= cs.priority[q] + 1) continue;
+                cs.priority[d] = cs.priority[q] + 1;
+                stack.push_back(d);
+            }
+        }
+    }
+    for (uint32_t p = 0; p < pages; ++p)
+        if (cs.priority[p] > unwanted)
+        {
+            cs.source.request(p, cs.priority[p]);
+            ++cs.stats.wanted;
+        }
+    cs.source.update(frame);
+
+    // The pool heaps' buffers as raw SRVs (made when a heap appears or comes back from eviction).
+    const uint32_t heaps = cs.source.heapCount();
+    cs.heapSrvs.resize(heaps, kNone);
+    cs.heapSeen.resize(heaps, nullptr);
+    for (uint32_t h = 0; h < heaps; ++h)
+    {
+        ID3D12Resource* buffer = cs.source.heapBuffer(h);
+        if (!buffer || buffer == cs.heapSeen[h]) continue;
+        cs.heapSeen[h] = buffer;
+        if (cs.heapSrvs[h] == kNone) cs.heapSrvs[h] = device.descriptors().allocateResource();
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Format = DXGI_FORMAT_R32_TYPELESS;
+        sd.Buffer.NumElements = (UINT)((uint64_t)cs.source.heapSlots * cs.source.slotBytes / 4);
+        sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        device.d3d()->CreateShaderResourceView(buffer, &sd, device.descriptors().resourceCpu(cs.heapSrvs[h]));
+    }
+
+    // This frame's table: a page is resident when it has a slot in a heap that is there and everything it depends on is
+    // resident too (depth first over the dependencies; they are coarser pages, a few levels).
+    cs.resident.assign(pages, 0);
+    std::vector<uint32_t> slots(pages, kNone);
+    for (uint32_t p = 0; p < pages; ++p)
+    {
+        const uint32_t at = cs.source.residentSlot(p);
+        const uint32_t heap = at == kNone ? kNone : at / cs.source.heapSlots;
+        if (at != kNone && heap < heaps && cs.heapSeen[heap] && cs.source.heapBuffer(heap) == cs.heapSeen[heap]) slots[p] = at;
+        else cs.resident[p] = 2;
+    }
+    for (uint32_t p = 0; p < pages; ++p)
+    {
+        if (cs.resident[p] != 0) continue;
+        stack.assign(1, p);
+        while (!stack.empty())
+        {
+            const uint32_t q = stack.back();
+            if (cs.resident[q] != 0)
+            {
+                stack.pop_back();
+                continue;
+            }
+            bool all = true, pending = false;
+            for (uint32_t k = cs.depOffsets[q]; k < cs.depOffsets[q + 1] && all; ++k)
+            {
+                const uint32_t d = cs.deps[k];
+                if (cs.resident[d] == 2) all = false;
+                else if (cs.resident[d] == 0)
+                {
+                    if (stack.size() > pages) fail("V: cluster page dependencies form a cycle");
+                    stack.push_back(d);
+                    pending = true;
+                    break;
+                }
+            }
+            if (pending) continue;
+            cs.resident[q] = all ? 1 : 2;
+            stack.pop_back();
+        }
+    }
+    uint32_t* table = cs.tableMapped + (size_t)slot * pages * 2;
+    for (uint32_t p = 0; p < pages; ++p)
+    {
+        const bool in = cs.resident[p] == 1;
+        table[2 * p] = in ? cs.heapSrvs[slots[p] / cs.source.heapSlots] : kNone;
+        table[2 * p + 1] = in ? (slots[p] % cs.source.heapSlots) * (cs.source.slotBytes / 4) : 0;
+        cs.stats.resident += in ? 1u : 0u;
+    }
+    cs.stats.pages = pages;
+    cs.tableSrv = cs.tableSrvs[slot] + 1;
+
+    // The feedback's copy for the frame that will read this slot, before this frame's kernels stamp it.
+    cs.feedbackRef = fc.graph.importBuffer(cs.feedback.Get(), { "v.stream.feedback", (uint64_t)pages * 4, 0 });
+    cs.readbackFrames[slot] = frame;
+    ID3D12Resource* readback = cs.readback.Get();
+    const BufferRef feedback = cs.feedbackRef;
+    fc.graph.addPass("v.stream.feedback", QueueType::Graphics,
+                     [&](PassBuilder& b) {
+                         b.use(feedback, Use::CopySrc);
+                         b.keep();
+                     },
+                     [=](PassContext& c) { c.cmd->CopyBufferRegion(readback, (uint64_t)slot * pages * 4, c.resource(feedback), 0, (uint64_t)pages * 4); });
 }
 
 void ensureCoverage(Device& device, Coverage& cv, uint32_t width, uint32_t height, bool cover)
@@ -2076,6 +2322,8 @@ void readStats(FramePassContext& fc, State& s, const std::string& name)
         st.softwareClusters = w[kStateSwClusters];
         st.softwareTriangles = w[kStateSwTriangles];
         st.softwareTiles = w[kStateSwTiles];
+        st.streamStandIns = w[kStateStreamStandIns];
+        st.streamWaiting = w[kStateStreamWaiting];
         st.visibleCapacity = run.capVisible;
         st.mixedClusters = w[kStateStatMixedClusters];
         st.mixedTriangles = w[kStateStatMixedTriangles];
@@ -2226,6 +2474,7 @@ void visibility(FramePassContext& fc, ViewResources& view)
     ViewState* vs = full ? &s.views[view.viewId] : nullptr;
     if (vs) vs->lastFrame = fc.frame.frameIndex;
     const std::string statsName = main ? std::string("main") : (full ? "view" + std::to_string(view.viewId) : std::string("secondary"));
+    clusterStreamingFrame(fc, s, cfg);  // (once a frame: every run of the frame takes the same page table)
     cfg.capVisible = visibleCapacity(fc, s, statsName, cfg, false);  // (this run's lists: every kernel takes it from the run)
 
     view.depth = g.createTexture({ "v.depth", width, height, 1, 1, DXGI_FORMAT_D32_FLOAT });
@@ -2623,6 +2872,7 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
              (unsigned)D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE);
 
     prepareCullScene(fc, s, s.mainFrameConstants);
+    clusterStreamingFrame(fc, s, cfg);
     cfg.capVisible = visibleCapacity(fc, s, request.name, cfg, request.tileLocal && !amplify);
     Run r = createRun(fc, cfg, request.name + ".", s.mainFrameConstants);
     r.tileMask = request.cullMask;
@@ -2715,11 +2965,11 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                              b.use(swDepth, Use::UavCompute);
                          },
                          [=](PassContext& c) {
-                             const uint32_t k[12] = { c.srv(r.visible), c.srv(r.lists), c.uav(r.state), kListSw, 1, r.cfg.capVisible, r.viewsSrv, c.srv(swPages),
-                                                      c.uav(swDepth), c.srv(swSlots), swCapacity, tilePx };
+                             const uint32_t k[16] = { c.srv(r.visible), c.srv(r.lists), c.uav(r.state), kListSw, 1, r.cfg.capVisible, r.viewsSrv, c.srv(swPages),
+                                                      c.uav(swDepth), c.srv(swSlots), swCapacity, tilePx, r.pageTable, 0, 0, 0 };
                              c.bindFrameConstants(r.frameConstants);
                              c.cmd->SetPipelineState(clear);
-                             c.computeConstants(k, 12);
+                             c.computeConstants(k, 16);
                              c.cmd->ExecuteIndirect(dispatchSig, 1, c.resource(swArgs), kDsaClear * 4, nullptr, 0);
                              D3D12_GLOBAL_BARRIER gb{ D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
                                                       D3D12_BARRIER_ACCESS_UNORDERED_ACCESS };
@@ -2822,7 +3072,7 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                          {
                              uint32_t k[32] = { c.srv(r.visible), c.srv(r.lists), c.srv(r.state), l, 1, r.cfg.capVisible, r.viewsSrv, sameViewport ? 0u : 1u,
                                                 r.tilePairs.valid() ? c.srv(r.tilePairs) : kNone, req.atlasSlots.valid() ? c.srv(req.atlasSlots) : kNone,
-                                                req.atlasTilesPerRow, atlasWidth | atlasHeight << 16, amplify ? c.srv(req.cullMask) : kNone };
+                                                req.atlasTilesPerRow, atlasWidth | atlasHeight << 16, amplify ? c.srv(req.cullMask) : kNone, r.pageTable };
                              std::memcpy(&k[16], req.pixelConstants, sizeof req.pixelConstants);
                              c.cmd->SetPipelineState(pso[l]);
                              c.graphicsConstants(k, 32);
@@ -2849,6 +3099,15 @@ Stats latestStats(render::TrackState& trackState, const std::string& run)
     const auto it = runs.find(run);
     return it == runs.end() ? Stats{} : it->second.latest;
 }
+
+void setClusterPageSource(render::TrackState& trackState, ClusterPageSource source)
+{
+    render::tracks::ClusterStream& cs = trackState.get<render::tracks::State>("v.state").stream;
+    cs.source = std::move(source);
+    ++cs.sourceSerial;
+}
+
+ClusterStreamStats clusterStreamStats(render::TrackState& trackState) { return trackState.get<render::tracks::State>("v.state").stream.stats; }
 
 std::vector<std::pair<std::string, Stats>> latestStatsOfRuns(render::TrackState& trackState)
 {

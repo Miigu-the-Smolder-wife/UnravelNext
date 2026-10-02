@@ -13,7 +13,10 @@
 //        SRV (TileMaskCoarse.hlsl), its words per view
 //   P[8] raster requests with the software rasteriser (visibility.software_raster; DepthRasterSw.hlsl): the tiles' software
 //        pages SRV (raw: a word per mask bit, SW_PAGE_*; UNX_NONE = none in this run), the largest cluster rectangle in
-//        pixels the software rasteriser takes (float), 0, 0. Read by CullClusters only.
+//        pixels the software rasteriser takes (float) - read by CullClusters only; cluster streaming
+//        (visibility.cluster_streaming): the frame's page table's SRV + 1 (StructuredBuffer<uint2>, ClusterStream.hlsli;
+//        0: none - every page counts as resident), the page feedback's UAV + 1 (raw: a word per page, the frame index + 1
+//        of the last frame a cut wanted the page) - read by CullNodes and CullClusters.
 #ifndef UNX_CULL_SHARED_HLSLI
 #define UNX_CULL_SHARED_HLSLI
 #include "Passes/Visibility/VisibilityCommon.hlsli"
@@ -55,6 +58,8 @@
 #define TILE_COARSE_WORDS P[7].w
 #define SW_PAGES_SRV P[8].x
 #define SW_REQUEST_LIMIT_PX asfloat(P[8].y)
+#define PAGE_TABLE P[8].z
+#define PAGE_FEEDBACK P[8].w
 
 // Band modes of a cull run: which list a cluster of each band is drawn from.
 #define BAND_MODE_A 0u         // every band in the band A lists (raster service, secondary views)
@@ -98,6 +103,22 @@ void raiseDispatch(RWByteAddressBuffer args, uint word, uint groups)
 {
     args.InterlockedMax(4 * word, min(groups, 65535u));
     args.InterlockedMax(4 * (word + 1), (groups + 65534u) / 65535u);
+}
+
+// Cluster streaming: whether a page is resident this frame (UNX_NONE - always resident - and every page without a table).
+bool pageResident(uint page)
+{
+    if (page == UNX_NONE || PAGE_TABLE == 0) return true;
+    StructuredBuffer<uint2> table = ResourceDescriptorHeap[PAGE_TABLE - 1];
+    return table[page].x != UNX_NONE;
+}
+
+// ... and the note that a cut wanted it this frame (resident or not: the page's use, and its request).
+void pageWanted(uint page)
+{
+    if (page == UNX_NONE || PAGE_FEEDBACK == 0) return;
+    RWByteAddressBuffer feedback = ResourceDescriptorHeap[PAGE_FEEDBACK - 1];
+    feedback.Store(4 * page, g_frameIndex + 1);
 }
 
 // Raster-service tile mask test of a bounding sphere (true without a mask).

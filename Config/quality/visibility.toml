@@ -178,3 +178,21 @@ cluster_position_step = 0.0009765625  # m (1 / 1024): the position grid of a mes
 cluster_normal_bits = 10          # per octahedral axis (4 .. 12)
 cluster_tangent_bits = 8          # the tangent's angle around the normal (4 .. 11), and one bit for the bitangent sign
 cluster_uv_bits = 12              # per axis over the cluster's uv range (4 .. 15)
+# Cluster streaming (Visibility.h ClusterPageSource, unx/visibility/ClusterPages.h; the reference's streaming pages).
+# Written 2026-10-03, built, not run. With cluster_compression: the cook setting decides what the build returns, the
+# others what the renderer does with it.
+cluster_streaming = false         # the compressed vertex bits of every group that a coarser one can stand in for go
+                                  # into 64 KB pages (whole groups) in a page file instead of the scene's buffer; each
+                                  # mesh's coarsest groups stay resident. The cull kernels stamp the pages their cuts
+                                  # want; the renderer requests those and what they depend on, a DirectStorage streamer
+                                  # brings them into a VRAM pool, and each frame has a page table: a group whose page
+                                  # is not resident is not drawn and the clusters simplified from it are drawn in its
+                                  # place (a page is requested in the frame after the cut wanted it and is drawn two or
+                                  # more frames later). What is streamed is the stream the vis buffer and depth rasters
+                                  # read; the 32 B vertex pool, which the material resolve and the rays read, stays
+                                  # resident whole - so this adds the pool of pages and saves no memory until those
+                                  # readers take the stream too
+cluster_streaming_keep_frames = 30  # a page stays requested this many frames after a cut last wanted it; then it is the
+                                  # streamer's to evict, least recently requested first
+cluster_streaming_pool_mb = 256   # the pages' VRAM pool (64 MB heaps; 0: a quarter of the device's free budget)
+cluster_streaming_upload_mb = 16  # page bytes uploaded per frame at most

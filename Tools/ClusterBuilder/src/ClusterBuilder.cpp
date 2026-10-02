@@ -1010,6 +1010,7 @@ Settings Settings::fromQuality(const QualityConfig& q)
     if (s.clusterMinTriangles < 1 || s.clusterMinTriangles > s.clusterTriangles) fail("visibility.cluster_min_triangles must be 1..cluster_triangles");
     if (!(s.sheetOrientationMinWidth >= 0)) fail("visibility.sheet_orientation_min_width must be >= 0");
     s.compression = q.has("visibility.cluster_compression") && q.boolean("visibility.cluster_compression");
+    s.streaming = q.has("visibility.cluster_streaming") && q.boolean("visibility.cluster_streaming");
     s.positionStep = q.has("visibility.cluster_position_step") ? (float)q.number("visibility.cluster_position_step") : 1.0f / 1024;
     s.normalBits = q.has("visibility.cluster_normal_bits") ? (uint32_t)q.integer("visibility.cluster_normal_bits") : 10u;
     s.tangentBits = q.has("visibility.cluster_tangent_bits") ? (uint32_t)q.integer("visibility.cluster_tangent_bits") : 8u;
@@ -1516,8 +1517,9 @@ void LodVertices::appendTo(scene::Scene& scene) const
     }
 }
 
-render::ClusterData build(const scene::Scene& scene, const Settings& requested, BuildStats* stats, LodVertices* lodVertices)
+render::ClusterData build(const scene::Scene& scene, const Settings& requested, BuildStats* stats, LodVertices* lodVertices, StreamPages* pages)
 {
+    StreamGroups streamGroups;  // (the groups as the clusters are put together below: the stream's pages are whole groups)
     const auto t0 = std::chrono::steady_clock::now();
     // Without a place for the builder's own vertices, no cluster may index one: thin geometry stays as it is.
     Settings settings = requested;
@@ -1648,6 +1650,8 @@ render::ClusterData build(const scene::Scene& scene, const Settings& requested, 
                     data.clusterTriangles.push_back((uint32_t)localTriangles[3 * t] | (uint32_t)localTriangles[3 * t + 1] << 8 | (uint32_t)localTriangles[3 * t + 2] << 16 |
                                                     (cut ? cutEdges.flags(&c.indices[3 * t], positions, rc.lodError) << kCutEdgeShift : 0u));
                 data.clusters.push_back(rc);
+                streamGroups.clusterGroup.push_back((uint32_t)(streamGroups.groups.size() + gi));
+                streamGroups.clusterRefined.push_back(c.refined < 0 ? render::gpu::kNone : (uint32_t)(streamGroups.groups.size() + (size_t)c.refined));
                 const float4 sphere{ c.lod.center[0], c.lod.center[1], c.lod.center[2], c.lod.radius };
                 appendNamed(data, kClusterLodSpheres, &sphere, sizeof sphere, sizeof(float4));
                 const SheetOrientation sheet = sheetOrientation(positions, c.indices.data(), indexCount);
@@ -1659,6 +1663,8 @@ render::ClusterData build(const scene::Scene& scene, const Settings& requested, 
                 appendNamed(data, kClusterSheets, &sheetData, sizeof sheetData, sizeof(float4));
             }
         }
+
+        for (const GroupOut& g : mo.groups) streamGroups.groups.push_back({ clusterBase + g.firstCluster, g.clusterCount, g.simplified.error == FLT_MAX });
 
         // Hierarchy nodes.
         std::vector<gpu::ClusterNode> nodes(mo.nodes.size());
@@ -1774,7 +1780,7 @@ render::ClusterData build(const scene::Scene& scene, const Settings& requested, 
             own.meshes.assign(built.size(), {});
             for (size_t i = 0; i < built.size(); ++i) own.meshes[i] = { built[i]->lodPositions, built[i]->lodSources };
         }
-        encodeStream(scene, settings, lodVertices ? lodVertices : &own, data);
+        encodeStream(scene, settings, lodVertices ? lodVertices : &own, streamGroups, data, settings.streaming ? pages : nullptr);
     }
     if (stats)
     {

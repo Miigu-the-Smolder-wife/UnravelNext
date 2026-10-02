@@ -1204,6 +1204,33 @@ UNX_TEST(compressed_stream_round_trip)
         }
         else
             CHECK(compressed == 0);  // (a sine heightfield's floats are not on a power-of-two grid)
+        if (snapped)
+        {
+            // Streaming pages (visibility.cluster_streaming): the same vertices from the pages; a page fits a pool slot;
+            // a page's dependencies are other pages; a cluster in a page has a record that names it, and one whose finer
+            // group is in a page names that page.
+            st.streaming = true;
+            StreamPages pages;
+            const render::ClusterData paged = build(sc, st, nullptr, nullptr, &pages);
+            st.streaming = false;
+            CHECK(!pages.pages.empty() && pages.dependencies.size() == pages.pages.size());
+            size_t inPages = 0;
+            for (uint32_t c = 0; c < (uint32_t)paged.clusters.size(); ++c)
+                for (uint32_t i = 0; i < (paged.clusters[c].counts & 0xFFu); ++i)
+                {
+                    StreamVertex a, b;
+                    CHECK(streamVertex(data, c, i, a) && streamVertex(paged, c, i, b, &pages));
+                    CHECK(std::memcmp(&a, &b, sizeof a) == 0);
+                    inPages += streamVertex(paged, c, i, b) ? 0 : 1;  // (without the pages: only the resident clusters decode)
+                }
+            for (size_t k = 0; k < pages.pages.size(); ++k)
+            {
+                CHECK(pages.pages[k].size() <= kStreamPageBytes && pages.pages[k].size() % 4 == 0);
+                for (uint32_t d : pages.dependencies[k]) CHECK(d < pages.pages.size() && d != k);
+            }
+            logf("    streaming: %zu pages, %zu of %zu cluster vertices in them\n", pages.pages.size(), inPages, vertices);
+            CHECK(inPages > 0 && inPages < vertices);  // (the coarsest groups stay in the buffer)
+        }
         // The setting off: no stream, the same hierarchy.
         st.compression = false;
         const render::ClusterData plain = build(sc, st);

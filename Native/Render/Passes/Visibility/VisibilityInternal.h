@@ -79,6 +79,7 @@ constexpr uint32_t kStateCovCutBandA = 19, kStateCovCutCover = 20, kStateCovCutW
                    kStateCovFragmentsSw = 61, kStateCovEvaluated = 62;
 // Software rasteriser (VS_SW_*): clusters and triangles it drew, a raster request's listed tiles.
 constexpr uint32_t kStateSwClusters = 67, kStateSwTriangles = 68, kStateSwTiles = 69;
+constexpr uint32_t kStateStreamStandIns = 70, kStateStreamWaiting = 71;  // VS_STREAM_*
 constexpr uint32_t kLists = 8;
 constexpr uint32_t kListABack = 0, kListANone = 1, kListAAlphaBack = 2, kListAAlphaNone = 3, kListB = 4, kListC = 5, kListTBack = 6, kListTNone = 7;
 constexpr uint32_t kBandLists = 6;  // lists of the cull bands (the depth raster service draws these)

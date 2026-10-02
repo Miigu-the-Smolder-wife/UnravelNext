@@ -211,10 +211,10 @@ DeformedVertex deformVertex(GpuInstance inst, GpuMesh mesh, uint meshVertex) { r
 
 // Local vertex 'local' of a cluster (loadClusterVertex, ClusterStream.hlsli: the cluster's stream when it has one - then
 // the mesh is rigid and no fetch by mesh vertex follows). v: the vertex as loaded (its uv for the alpha test).
-DeformedVertex deformClusterVertex(GpuInstance inst, GpuMesh mesh, GpuCluster cl, uint streamRecord, uint local, out VertexData v)
+DeformedVertex deformClusterVertex(GpuInstance inst, GpuMesh mesh, GpuCluster cl, ClusterVertexSource source, uint local, out VertexData v)
 {
     uint meshVertex;
-    v = loadClusterVertex(mesh, cl, streamRecord, local, meshVertex);
+    v = loadClusterVertex(mesh, cl, source, local, meshVertex);
     return deformLoadedVertex(inst, mesh, v, meshVertex);
 }
 

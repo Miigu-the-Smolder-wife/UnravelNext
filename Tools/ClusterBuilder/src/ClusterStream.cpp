@@ -147,16 +147,16 @@ void streamBasis(float3 n, float3& u, float3& v)
     v = { b, s + n.y * n.y * a, -n.y };
 }
 
-void encodeStream(const scene::Scene& scene, const Settings& settings, const LodVertices* lodVertices, render::ClusterData& data)
+void encodeStream(const scene::Scene& scene, const Settings& settings, const LodVertices* lodVertices, const StreamGroups& groups, render::ClusterData& data,
+                  StreamPages* pages)
 {
     const uint32_t normalBits = std::clamp(settings.normalBits, 4u, 12u), tangentBits = std::clamp(settings.tangentBits, 4u, 11u);
     const uint32_t uvBits = std::clamp(settings.uvBits, 4u, 15u);
+    const uint32_t none = render::gpu::kNone;
     const size_t clusterCount = data.clusters.size();
-    std::vector<uint32_t> words(kStreamHeaderWords + kStreamRecordWords * clusterCount, 0);
-    words[0] = kStreamMagic;
-    words[1] = (uint32_t)clusterCount;
     std::vector<StreamRecord> records(clusterCount);
-    for (StreamRecord& r : records) r.dataOffset = render::gpu::kNone;
+    for (StreamRecord& r : records) r.dataOffset = r.page = r.refinedPage = none;
+    std::vector<std::vector<uint32_t>> bits(clusterCount);  // each compressed cluster's vertex bits
     uint64_t vertices = 0, vertexBitsTotal = 0;
     uint32_t compressedMeshes = 0, offGrid = 0;
     for (size_t mi = 0; mi < scene.meshes.size() && mi < data.meshes.size(); ++mi)
@@ -164,8 +164,8 @@ void encodeStream(const scene::Scene& scene, const Settings& settings, const Lod
         const scene::Mesh& m = scene.meshes[mi];
         if (!streamMesh(m)) continue;
         // What the clusters index: the mesh's vertices, then the builder's own (their other streams are their source's).
-        static const LodVertices::Mesh none;
-        const LodVertices::Mesh& lod = lodVertices && mi < lodVertices->meshes.size() ? lodVertices->meshes[mi] : none;
+        static const LodVertices::Mesh noLod;
+        const LodVertices::Mesh& lod = lodVertices && mi < lodVertices->meshes.size() ? lodVertices->meshes[mi] : noLod;
         const size_t own = m.positions.size();
         auto position = [&](uint32_t v) { return v < own ? m.positions[v] : lod.positions[v - own]; };
         auto source = [&](uint32_t v) { return v < own ? v : lod.source[v - own]; };
@@ -219,8 +219,8 @@ void encodeStream(const scene::Scene& scene, const Settings& settings, const Lod
             r.uvMin = hasUv ? uvLo : float2{ 0, 0 };
             r.uvStep = { ub ? (uvHi.x - uvLo.x) / (float)((1u << ub) - 1) : 0.0f, vb ? (uvHi.y - uvLo.y) / (float)((1u << vb) - 1) : 0.0f };
             r.bits = pb[0] | pb[1] << 5 | pb[2] << 10 | normalBits << 15 | tb << 19 | ub << 23 | vb << 27;
-            r.dataOffset = (uint32_t)words.size();
-            BitWriter w{ words, words.size() };
+            r.dataOffset = 0;  // (compressed: placed below)
+            BitWriter w{ bits[c], 0 };
             for (uint32_t i = 0; i < count; ++i)
             {
                 const float3 p = position(index[i]);
@@ -253,31 +253,132 @@ void encodeStream(const scene::Scene& scene, const Settings& settings, const Lod
             vertices += count;
         }
     }
+
+    // Where each group's bits go: a page (whole groups, in order, a mesh's groups together) when a coarser group can
+    // stand in for it - it is not terminal, all its clusters are compressed and it fits a page - else the buffer.
+    const uint32_t pageWords = kStreamPageBytes / 4 - kStreamPadWords;
+    std::vector<uint32_t> groupPage(groups.groups.size(), none);
+    std::vector<std::vector<uint32_t>> pageData;
+    std::vector<uint32_t> pageMesh;  // the mesh of each page (a page holds one mesh's groups)
+    std::vector<uint32_t> clusterMesh(clusterCount, none);
+    for (size_t mi = 0; mi < data.meshes.size(); ++mi)
+        for (uint32_t c = data.meshes[mi].clusterOffset; c < data.meshes[mi].clusterOffset + data.meshes[mi].clusterCount && c < clusterCount; ++c) clusterMesh[c] = (uint32_t)mi;
+    uint64_t pagedWords = 0;
+    if (pages && groups.clusterGroup.size() == clusterCount)
+        for (size_t g = 0; g < groups.groups.size(); ++g)
+        {
+            const StreamGroups::Group& group = groups.groups[g];
+            if (group.terminal || group.clusterCount == 0) continue;
+            size_t size = 0;
+            bool whole = true;
+            for (uint32_t c = group.firstCluster; c < group.firstCluster + group.clusterCount; ++c)
+            {
+                whole = whole && records[c].dataOffset != none;
+                size += bits[c].size();
+            }
+            if (!whole || size == 0 || size > pageWords) continue;
+            const uint32_t mesh = clusterMesh[group.firstCluster];
+            if (pageData.empty() || pageMesh.back() != mesh || pageData.back().size() + size > pageWords)
+            {
+                pageData.emplace_back();
+                pageMesh.push_back(mesh);
+            }
+            groupPage[g] = (uint32_t)pageData.size() - 1;
+            std::vector<uint32_t>& page = pageData.back();
+            for (uint32_t c = group.firstCluster; c < group.firstCluster + group.clusterCount; ++c)
+            {
+                records[c].dataOffset = (uint32_t)page.size();
+                page.insert(page.end(), bits[c].begin(), bits[c].end());
+                pagedWords += bits[c].size();
+            }
+        }
+    // The buffer: header, records, the bits that are always resident.
+    std::vector<uint32_t> words(kStreamHeaderWords + kStreamRecordWords * clusterCount, 0);
+    words[0] = kStreamMagic;
+    words[1] = (uint32_t)clusterCount;
+    words[2] = (uint32_t)pageData.size();
+    const bool grouped = groups.clusterGroup.size() == clusterCount;
+    for (uint32_t c = 0; c < clusterCount; ++c)
+    {
+        StreamRecord& r = records[c];
+        if (grouped)
+        {
+            r.page = groupPage[groups.clusterGroup[c]];
+            r.refinedPage = groups.clusterRefined[c] != none ? groupPage[groups.clusterRefined[c]] : none;
+        }
+        if (r.dataOffset == none || r.page != none) continue;
+        r.dataOffset = (uint32_t)words.size();
+        words.insert(words.end(), bits[c].begin(), bits[c].end());
+    }
     words.resize(words.size() + kStreamPadWords, 0);
     std::memcpy(&words[kStreamHeaderWords], records.data(), records.size() * sizeof(StreamRecord));
-    render::ClusterData::Named n;
-    n.name = kClusterStream;
-    n.stride = 4;
-    n.bytes.resize(words.size() * 4);
-    std::memcpy(n.bytes.data(), words.data(), n.bytes.size());
-    data.named.push_back(std::move(n));
+    auto named = [&](const char* name, const std::vector<uint32_t>& w) {
+        render::ClusterData::Named n;
+        n.name = name;
+        n.stride = 4;
+        n.bytes.resize(w.size() * 4);
+        std::memcpy(n.bytes.data(), w.data(), n.bytes.size());
+        data.named.push_back(std::move(n));
+    };
+    named(kClusterStream, words);
     logf("cluster builder: compressed %llu cluster vertices of %u meshes: %.1f bits a vertex, the stream %.2f MB (an index and a 32 B vertex each: %.2f MB)\n",
          (unsigned long long)vertices, compressedMeshes, vertices ? (double)vertexBitsTotal / (double)vertices : 0.0, (double)words.size() * 4 / 1048576.0,
          (double)vertices * 36 / 1048576.0);
     if (offGrid)
         logf("cluster builder: %u rigid meshes are not on their position grid (clusterbuilder::snapPositions before the build): left uncompressed\n", offGrid);
+    if (!pages) return;
+
+    // The pages and their dependencies: the page of a group needs the pages of the groups that hold the clusters
+    // simplified from it (they are drawn in its place while it is absent; with it resident and one of them not, a
+    // stand-in for that one would be drawn over it).
+    pages->pages.assign(pageData.size(), {});
+    pages->dependencies.assign(pageData.size(), {});
+    for (size_t i = 0; i < pageData.size(); ++i)
+    {
+        pageData[i].resize(pageData[i].size() + kStreamPadWords, 0);
+        pages->pages[i].resize(pageData[i].size() * 4);
+        std::memcpy(pages->pages[i].data(), pageData[i].data(), pages->pages[i].size());
+    }
+    if (grouped)
+        for (uint32_t c = 0; c < clusterCount; ++c)
+        {
+            const uint32_t finer = records[c].refinedPage, own = records[c].page;
+            if (finer == none || own == none || own == finer) continue;
+            std::vector<uint32_t>& d = pages->dependencies[finer];
+            if (std::find(d.begin(), d.end(), own) == d.end()) d.push_back(own);
+        }
+    std::vector<uint32_t> deps{ (uint32_t)pageData.size() };
+    uint32_t offset = 0;
+    for (const std::vector<uint32_t>& d : pages->dependencies)
+    {
+        deps.push_back(offset);
+        offset += (uint32_t)d.size();
+    }
+    deps.push_back(offset);
+    for (const std::vector<uint32_t>& d : pages->dependencies) deps.insert(deps.end(), d.begin(), d.end());
+    named(kClusterPageDeps, deps);
+    logf("cluster builder: %zu cluster pages (%.2f MB of the stream's bits; %.2f MB stay resident with the records)\n", pageData.size(),
+         (double)pagedWords * 4 / 1048576.0, (double)words.size() * 4 / 1048576.0);
 }
 
-bool streamVertex(const render::ClusterData& data, uint32_t cluster, uint32_t local, StreamVertex& out)
+bool streamVertex(const render::ClusterData& data, uint32_t cluster, uint32_t local, StreamVertex& out, const StreamPages* pages)
 {
     const render::ClusterData::Named* stream = streamOf(data);
     if (!stream || stream->bytes.size() < (size_t)kStreamHeaderWords * 4) return false;
-    const uint32_t* words = reinterpret_cast<const uint32_t*>(stream->bytes.data());
-    const size_t wordCount = stream->bytes.size() / 4;
-    if (words[0] != kStreamMagic || cluster >= words[1]) return false;
+    const uint32_t* buffer = reinterpret_cast<const uint32_t*>(stream->bytes.data());
+    if (buffer[0] != kStreamMagic || cluster >= buffer[1]) return false;
     StreamRecord r;
-    std::memcpy(&r, &words[kStreamHeaderWords + (size_t)kStreamRecordWords * cluster], sizeof r);
+    std::memcpy(&r, &buffer[kStreamHeaderWords + (size_t)kStreamRecordWords * cluster], sizeof r);
     if (r.dataOffset == render::gpu::kNone) return false;
+    // The words the bits are in: the buffer, or the cluster's page.
+    const uint32_t* words = buffer;
+    size_t wordCount = stream->bytes.size() / 4;
+    if (r.page != render::gpu::kNone)
+    {
+        if (!pages || r.page >= pages->pages.size()) return false;
+        words = reinterpret_cast<const uint32_t*>(pages->pages[r.page].data());
+        wordCount = pages->pages[r.page].size() / 4;
+    }
     const uint32_t pb[3] = { r.bits & 31u, (r.bits >> 5) & 31u, (r.bits >> 10) & 31u };
     const uint32_t nb = (r.bits >> 15) & 15u, tb = (r.bits >> 19) & 15u, ub = (r.bits >> 23) & 15u, vb = (r.bits >> 27) & 15u;
     const uint32_t vertexBits = pb[0] + pb[1] + pb[2] + 2 * nb + (tb ? tb + 1 : 0) + ub + vb;

@@ -18,7 +18,7 @@
 //   P[0] visible SRV (uint2), sorted lists SRV (raw), state UAV (raw), list
 //   P[1] phase, list capacity, views SRV, bins SRV (raw: RasterBins.hlsl's header)
 //   P[2] 64-bit target UAV (RWStructuredBuffer<uint64_t>, width x height), depth SRV, width, height
-//   P[3] 1: a mirrored view (front faces are clockwise on screen), 0, 0, 0
+//   P[3] 1: a mirrored view (front faces are clockwise on screen), the frame's cluster page table's SRV + 1 (0: none), 0, 0
 #include "Passes/Visibility/VisibilityCommon.hlsli"
 #include "Passes/Visibility/RasterSw.hlsli"
 #include "VisBuffer.hlsli"
@@ -56,11 +56,12 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID)
     const GpuMesh mesh = loadMesh(inst.mesh);
     const GpuCluster cl = loadCluster(entry.y & 0xFFFFFFu);
     const uint vertexCount = min(clusterVertexCount(cl), 128u), triangleCount = min(clusterTriangleCount(cl), 128u);
-    const uint streamRecord = clusterStreamRecord(entry.y & 0xFFFFFFu);  // (visibility.cluster_compression: the cluster's own vertices)
+    // (visibility.cluster_compression: the cluster's own vertices, in the stream or in its resident page)
+    const ClusterVertexSource vertexSource = clusterVertexSource(entry.y & 0xFFFFFFu, P[3].y);
     for (uint i = lane; i < vertexCount; i += 64)
     {
         VertexData vertex;
-        const DeformedVertex d = deformClusterVertex(inst, mesh, cl, streamRecord, i, vertex);
+        const DeformedVertex d = deformClusterVertex(inst, mesh, cl, vertexSource, i, vertex);
         const float4 p = mul(v.viewProj, float4(d.world, 1));
         const float iw = 1.0 / p.w;  // (the classification: the cluster's sphere lies in front of the near plane)
         gs_pixel[i] = float3((p.x * iw * 0.5 + 0.5) * v.viewportSize.x, (0.5 - p.y * iw * 0.5) * v.viewportSize.y, p.z * iw);

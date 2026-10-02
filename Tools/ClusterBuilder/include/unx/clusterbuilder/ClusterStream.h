@@ -21,9 +21,18 @@
 // step being at most positionStep and a 4096th of the mesh's size); a mesh that is not on its grid is not compressed
 // (the stream could not give its floats back). The builder's own vertices (LodVertices) are made on the grid.
 //
-// Buffer "clusterStream" (ClusterData::named, raw words): kStreamHeaderWords words { kStreamMagic, records, 0, 0 }, then
-// one StreamRecord per cluster (global index), then the clusters' vertex bits (each cluster at a word, vertex i at bit
-// i x vertexBits) and four words of padding (the decode loads a five-word window).
+// Buffer "clusterStream" (ClusterData::named, raw words): kStreamHeaderWords words { kStreamMagic, records, pages, 0 },
+// then one StreamRecord per cluster (global index), then the vertex bits of the clusters that are always resident (each
+// cluster at a word, vertex i at bit i x vertexBits) and four words of padding (the decode loads a five-word window).
+//
+// Pages (visibility.cluster_streaming; the reference's streaming pages, NaniteStreamingManager): with StreamPages given
+// to the build, the vertex bits of every group that a coarser one can stand in for go into pages of at most
+// kStreamPageBytes (whole groups, a mesh's groups in order) instead of the buffer; the buffer keeps the records and the
+// bits of the terminal groups (each mesh's coarsest clusters: always resident). A record names its cluster's page and
+// the page of the group it was simplified from: the cull draws a group only when its page is resident, and a cluster
+// whose finer group is not resident in its place (CullNodes, CullClusters). A page depends on the pages of the groups
+// that hold the clusters simplified from its groups (StreamPages::dependencies; "clusterPageDeps"): the runtime keeps a
+// page resident only with them, so no group is drawn together with a stand-in for it.
 //
 // What it changes: V's vis buffer and depth rasters read the stream (about 10 B a vertex at the defaults, the cluster's
 // vertices in a row) instead of an index and the 32 B vertex, and a cluster's vertices are self-contained (a streaming
@@ -35,17 +44,43 @@ namespace unx::clusterbuilder
 {
 constexpr const char* kClusterStream = "clusterStream";
 constexpr uint32_t kStreamMagic = 0x31534C43u;  // "CLS1"
-constexpr uint32_t kStreamHeaderWords = 4, kStreamRecordWords = 10, kStreamPadWords = 4;
+constexpr const char* kClusterPageDeps = "clusterPageDeps";  // raw words: pages, pages + 1 list offsets, the lists (page ids)
+constexpr uint32_t kStreamHeaderWords = 4, kStreamRecordWords = 12, kStreamPadWords = 4;
+constexpr uint32_t kStreamPageBytes = 64 * 1024;  // a page fits a slot of the streaming pool (streaming::Settings::slotBytes)
 
-struct StreamRecord  // 40 B
+struct StreamRecord  // 48 B
 {
     float3 positionMin;   // the cluster's smallest grid coordinate x step (object space)
     float positionStep;   // the mesh's grid step (m, a power of two)
-    uint32_t dataOffset;  // first word of the cluster's vertex bits in the buffer; kNone: the cluster is not compressed
+    uint32_t dataOffset;  // first word of the cluster's vertex bits - in the buffer, or in its page; kNone: the cluster is
+                          // not compressed
     uint32_t bits;        // x | y << 5 | z << 10 (5 bits each) | normal << 15 | tangent << 19 | u << 23 | v << 27 (4 bits each)
     float2 uvMin, uvStep;
+    uint32_t page;        // the page that holds the cluster's group; kNone: always resident (the bits are in the buffer)
+    uint32_t refinedPage; // the page of the group the cluster was simplified from; kNone: none, or always resident
 };
 static_assert(sizeof(StreamRecord) == kStreamRecordWords * 4);
+
+// The groups of the hierarchy as the build put the clusters together (the clusters are in group order).
+struct StreamGroups
+{
+    struct Group
+    {
+        uint32_t firstCluster = 0, clusterCount = 0;  // global cluster indices
+        bool terminal = false;                         // no coarser clusters were made from it (the mesh's coarsest)
+    };
+    std::vector<Group> groups;
+    std::vector<uint32_t> clusterGroup;    // per cluster: its group
+    std::vector<uint32_t> clusterRefined;  // per cluster: the group it was simplified from (kNone: source geometry)
+};
+
+// The streamed part of the stream (build's last argument): the page file's payload (streaming::PageFileWriter::write) and
+// each page's dependencies.
+struct StreamPages
+{
+    std::vector<std::vector<uint8_t>> pages;
+    std::vector<std::vector<uint32_t>> dependencies;
+};
 
 struct StreamVertex
 {
@@ -67,10 +102,12 @@ void snapPositions(scene::Scene& scene, const Settings& settings);
 // Whether the mesh's clusters can be compressed (rigid, with normals).
 bool streamMesh(const scene::Mesh& mesh);
 // Appends the stream to 'data' (build calls it with Settings::compression; lodVertices: the builder's own vertices,
-// which the clusters index after the mesh's).
-void encodeStream(const scene::Scene& scene, const Settings& settings, const LodVertices* lodVertices, render::ClusterData& data);
-// The CPU decode of a cluster's local vertex (the GPU's arithmetic); false when the cluster is not compressed.
-bool streamVertex(const render::ClusterData& data, uint32_t cluster, uint32_t local, StreamVertex& out);
+// which the clusters index after the mesh's). pages: where the streamed groups' bits go (null: everything in the buffer).
+void encodeStream(const scene::Scene& scene, const Settings& settings, const LodVertices* lodVertices, const StreamGroups& groups, render::ClusterData& data,
+                  StreamPages* pages);
+// The CPU decode of a cluster's local vertex (the GPU's arithmetic); false when the cluster is not compressed, or its
+// bits are in a page and 'pages' is not given.
+bool streamVertex(const render::ClusterData& data, uint32_t cluster, uint32_t local, StreamVertex& out, const StreamPages* pages = nullptr);
 // The decode's tangent basis around a unit normal (the GPU mirror: streamBasis, ClusterStream.hlsli).
 void streamBasis(float3 n, float3& u, float3& v);
 } // namespace unx::clusterbuilder
