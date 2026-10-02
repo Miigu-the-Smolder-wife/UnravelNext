@@ -466,6 +466,35 @@ void writeLightEnd(Writer& w, const Scene& s)
         }
 }
 
+// Light components (scene::Light's scales, source texture, barn doors, channels, draw distance, temperature, falloff
+// exponent): an optional block after the ray end bias block, holding the lights that set one - a scene without such
+// lights writes the same bytes as before. u32 tag "LCMP", u64 count, then per light its index and the twelve values.
+constexpr uint32_t kLightComponentsTag = 0x504D434Cu;  // "LCMP"
+
+bool anyLightComponents(const Scene& s)
+{
+    for (const Light& l : s.lights)
+        if (hasLightComponents(l)) return true;
+    return false;
+}
+
+void writeLightComponents(Writer& w, const Scene& s)
+{
+    w.pod(kLightComponentsTag);
+    uint64_t count = 0;
+    for (const Light& l : s.lights) count += hasLightComponents(l);
+    w.pod(count);
+    for (uint32_t i = 0; i < s.lights.size(); ++i)
+    {
+        const Light& l = s.lights[i];
+        if (!hasLightComponents(l)) continue;
+        w.pod(i);
+        w.pod(l.specularScale); w.pod(l.diffuseScale); w.pod(l.volumetricScattering); w.pod(l.indirectIntensity);
+        w.pod(l.sourceTexture); w.pod(l.barnDoorAngle); w.pod(l.barnDoorLength); w.pod(l.lightingChannels);
+        w.pod(l.maxDrawDistance); w.pod(l.maxDistanceFadeRange); w.pod(l.temperature); w.pod(l.falloffExponent);
+    }
+}
+
 // Subsurface extension block, written only when a Subsurface-class material's parameters are not the defaults (scenes
 // written before the parameters existed, and scenes that keep the defaults, have the same bytes and content hashes as
 // before): u32 tag "SUBS", u64 count, then per material its index, subsurfaceMeanFreePath, subsurfaceLobeMix,
@@ -613,7 +642,7 @@ void writeInputs(Writer& w, const Scene& s)
 }
 
 // Vertex attributes extension block, written only when a mesh has a second uv set or vertex colours: u32 tag "VATT",
-// u64 count, then per mesh its index, uv1 and colors (arrays; an absent one is empty). The last block of the file.
+// u64 count, then per mesh its index, uv1 and colors (arrays; an absent one is empty). After it only the weather blocks.
 constexpr uint32_t kAttributesTag = 0x54544156u;  // "VATT"
 
 bool hasAttributes(const Mesh& m) { return !m.uv1.empty() || !m.colors.empty(); }
@@ -638,6 +667,59 @@ void writeAttributes(Writer& w, const Scene& s)
         w.pod(i);
         w.podArray(m.uv1);
         w.podArray(m.colors);
+    }
+}
+
+// The scene's weather, two optional blocks after the material blocks (a scene without them writes the bytes it wrote
+// before). "CLDS", written when the layer has coverage: coverage, baseAltitude, topAltitude, sigmaMax, albedo, windX,
+// windZ (7 floats). "FOGS", written when the fog is enabled or the scene has fog volumes: u32 enabled, density,
+// heightFalloff, height, albedo (3), phaseG, startDistance, skyAmount, noiseAmount, noiseScale (11 floats), u64 volume
+// count, then per volume centre (3), halfSize (3), yaw, u32 shape, density, heightFalloff, edge, albedo (3). The last
+// blocks of the file (after the material inputs and the vertex attributes).
+constexpr uint32_t kCloudTag = 0x53444C43u;  // "CLDS"
+constexpr uint32_t kFogTag = 0x53474F46u;    // "FOGS"
+
+bool anyClouds(const Scene& s) { return s.clouds.coverage > 0; }
+bool anyFog(const Scene& s) { return s.fog.enabled || !s.fogVolumes.empty(); }
+
+void writeClouds(Writer& w, const Scene& s)
+{
+    const CloudLayer& c = s.clouds;
+    w.pod(kCloudTag);
+    w.pod(c.coverage);
+    w.pod(c.baseAltitude);
+    w.pod(c.topAltitude);
+    w.pod(c.sigmaMax);
+    w.pod(c.albedo);
+    w.pod(c.windX);
+    w.pod(c.windZ);
+}
+
+void writeFog(Writer& w, const Scene& s)
+{
+    const Fog& f = s.fog;
+    w.pod(kFogTag);
+    w.pod<uint32_t>(f.enabled ? 1u : 0u);
+    w.pod(f.density);
+    w.pod(f.heightFalloff);
+    w.pod(f.height);
+    w.pod(f.albedo);
+    w.pod(f.phaseG);
+    w.pod(f.startDistance);
+    w.pod(f.skyAmount);
+    w.pod(f.noiseAmount);
+    w.pod(f.noiseScale);
+    w.pod<uint64_t>(s.fogVolumes.size());
+    for (const FogVolume& v : s.fogVolumes)
+    {
+        w.pod(v.centre);
+        w.pod(v.halfSize);
+        w.pod(v.yaw);
+        w.pod(v.shape);
+        w.pod(v.density);
+        w.pod(v.heightFalloff);
+        w.pod(v.edge);
+        w.pod(v.albedo);
     }
 }
 
@@ -670,11 +752,14 @@ std::vector<uint8_t> serialize(const Scene& s)
     if (anyAnisotropy(s)) writeAnisotropy(w, s);
     if (anyFilm(s)) writeFilm(w, s);
     if (anyLightEnd(s)) writeLightEnd(w, s);
+    if (anyLightComponents(s)) writeLightComponents(w, s);
     if (anySubsurface(s)) writeSubsurface(w, s);
     if (anyCloth(s)) writeCloth(w, s);
     if (anyEye(s)) writeEye(w, s);
     if (anyInputs(s)) writeInputs(w, s);
     if (anyAttributes(s)) writeAttributes(w, s);
+    if (anyClouds(s)) writeClouds(w, s);
+    if (anyFog(s)) writeFog(w, s);
     return std::move(w.out);
 }
 
@@ -853,6 +938,20 @@ Scene deserialize(const std::vector<uint8_t>& bytes)
         }
         tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
     }
+    if (tag == kLightComponentsTag)
+    {
+        const uint64_t count = r.pod<uint64_t>();
+        for (uint64_t k = 0; k < count; ++k)
+        {
+            const uint32_t i = r.pod<uint32_t>();
+            if (i >= s.lights.size()) fail("unxscene: light components of light %u of %zu", i, s.lights.size());
+            Light& l = s.lights[i];
+            l.specularScale = r.pod<float>(); l.diffuseScale = r.pod<float>(); l.volumetricScattering = r.pod<float>(); l.indirectIntensity = r.pod<float>();
+            l.sourceTexture = r.pod<uint32_t>(); l.barnDoorAngle = r.pod<float>(); l.barnDoorLength = r.pod<float>(); l.lightingChannels = r.pod<uint32_t>();
+            l.maxDrawDistance = r.pod<float>(); l.maxDistanceFadeRange = r.pod<float>(); l.temperature = r.pod<float>(); l.falloffExponent = r.pod<float>();
+        }
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
     if (tag == kSubsurfaceTag)
     {
         const uint64_t count = r.pod<uint64_t>();
@@ -939,9 +1038,83 @@ Scene deserialize(const std::vector<uint8_t>& bytes)
         }
         tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
     }
+    if (tag == kCloudTag)
+    {
+        CloudLayer& c = s.clouds;
+        c.coverage = r.pod<float>();
+        c.baseAltitude = r.pod<float>();
+        c.topAltitude = r.pod<float>();
+        c.sigmaMax = r.pod<float>();
+        c.albedo = r.pod<float>();
+        c.windX = r.pod<float>();
+        c.windZ = r.pod<float>();
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
+    if (tag == kFogTag)
+    {
+        Fog& f = s.fog;
+        f.enabled = r.pod<uint32_t>() != 0;
+        f.density = r.pod<float>();
+        f.heightFalloff = r.pod<float>();
+        f.height = r.pod<float>();
+        f.albedo = r.pod<float3>();
+        f.phaseG = r.pod<float>();
+        f.startDistance = r.pod<float>();
+        f.skyAmount = r.pod<float>();
+        f.noiseAmount = r.pod<float>();
+        f.noiseScale = r.pod<float>();
+        const uint64_t count = r.pod<uint64_t>();
+        if (count > 4096) fail("unxscene: %llu fog volumes", (unsigned long long)count);
+        s.fogVolumes.resize((size_t)count);
+        for (FogVolume& v : s.fogVolumes)
+        {
+            v.centre = r.pod<float3>();
+            v.halfSize = r.pod<float3>();
+            v.yaw = r.pod<float>();
+            v.shape = r.pod<uint32_t>();
+            v.density = r.pod<float>();
+            v.heightFalloff = r.pod<float>();
+            v.edge = r.pod<float>();
+            v.albedo = r.pod<float3>();
+        }
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
     if (tag != 0) fail("unxscene: unknown extension block 0x%08x", tag);
     if (r.at != bytes.size()) fail("unxscene: %zu trailing bytes", bytes.size() - r.at);
     return s;
+}
+
+float3 colorTemperatureTint(float kelvin)
+{
+    const double T = std::clamp((double)kelvin, 1000.0, 15000.0);
+    // Krystek 1985: the Planckian locus in CIE 1960 (u, v)
+    const double u = (0.860117757 + 1.54118254e-4 * T + 1.28641212e-7 * T * T) / (1.0 + 8.42420235e-4 * T + 7.08145163e-7 * T * T);
+    const double v = (0.317398726 + 4.22806245e-5 * T + 4.20481691e-8 * T * T) / (1.0 - 2.89741816e-5 * T + 1.61456053e-7 * T * T);
+    const double x = 3.0 * u / (2.0 * u - 8.0 * v + 4.0), y = 2.0 * v / (2.0 * u - 8.0 * v + 4.0);
+    // XYZ at Y = 1, then linear Rec.709 (its luminance row gives Y back: luminance 1 before the clamp)
+    const double X = x / y, Z = (1.0 - x - y) / y;
+    double rgb[3] = { 3.2404542 * X - 1.5371385 - 0.4985314 * Z, -0.9692660 * X + 1.8760108 + 0.0415560 * Z, 0.0556434 * X - 0.2040259 + 1.0572252 * Z };
+    for (double& c : rgb) c = std::max(c, 0.0);
+    const double luminance = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    return { (float)(rgb[0] / luminance), (float)(rgb[1] / luminance), (float)(rgb[2] / luminance) };
+}
+
+float3 lightColor(const Light& l)
+{
+    if (!(l.temperature > 0)) return l.color;
+    const float3 tint = colorTemperatureTint(l.temperature);
+    const float3 c{ l.color.x * tint.x, l.color.y * tint.y, l.color.z * tint.z };
+    const float before = 0.2126f * l.color.x + 0.7152f * l.color.y + 0.0722f * l.color.z, after = 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+    return after > 0 ? c * (before / after) : c;
+}
+
+bool hasLightComponents(const Light& l)
+{
+    const Light d;
+    return l.specularScale != d.specularScale || l.diffuseScale != d.diffuseScale || l.volumetricScattering != d.volumetricScattering ||
+           l.indirectIntensity != d.indirectIntensity || l.sourceTexture != d.sourceTexture || l.barnDoorAngle != d.barnDoorAngle ||
+           l.barnDoorLength != d.barnDoorLength || l.lightingChannels != d.lightingChannels || l.maxDrawDistance != d.maxDrawDistance ||
+           l.maxDistanceFadeRange != d.maxDistanceFadeRange || l.temperature != d.temperature || l.falloffExponent != d.falloffExponent;
 }
 
 void save(const Scene& scene, const std::filesystem::path& path)
@@ -1175,10 +1348,49 @@ void validate(const Scene& s)
             fail("instance %zu: transform must be rotation + uniform scale + translation", i);
     }
     for (size_t i = 0; i < s.lights.size(); ++i)
-        if (!unit(s.lights[i].forward)) fail("light %zu: forward not unit", i);
+    {
+        const Light& l = s.lights[i];
+        if (!unit(l.forward)) fail("light %zu: forward not unit", i);
+        for (float v : { l.specularScale, l.diffuseScale, l.volumetricScattering, l.indirectIntensity, l.barnDoorLength, l.maxDrawDistance, l.maxDistanceFadeRange,
+                         l.temperature, l.falloffExponent })
+            if (!std::isfinite(v) || v < 0) fail("light %zu: a light component is negative or not finite", i);
+        if (!std::isfinite(l.barnDoorAngle) || l.barnDoorAngle < 0 || l.barnDoorAngle > 1.5707964f) fail("light %zu: barn door angle outside [0, pi / 2]", i);
+        if (l.lightingChannels > 7) fail("light %zu: lighting channels are 3 bits", i);
+        if (l.sourceTexture != kNone)
+        {
+            if (l.sourceTexture >= s.textures.size()) fail("light %zu: source texture %u of %zu", i, l.sourceTexture, s.textures.size());
+            const TextureFormat f = s.textures[l.sourceTexture].format;
+            if (f != TextureFormat::Rgba8Srgb && f != TextureFormat::Rgba16Float) fail("light %zu: the source texture must be Rgba8Srgb or Rgba16Float", i);
+        }
+    }
     if (!unit(s.sun.direction)) fail("sun direction not unit");
     for (const Camera& c : s.cameras)
         if (!unit(c.forward) || !unit(c.up)) fail("camera '%s': forward/up not unit", c.name.c_str());
+    // the weather
+    {
+        const CloudLayer& c = s.clouds;
+        const bool finite = std::isfinite(c.coverage) && std::isfinite(c.baseAltitude) && std::isfinite(c.topAltitude) && std::isfinite(c.sigmaMax) &&
+                            std::isfinite(c.albedo) && std::isfinite(c.windX) && std::isfinite(c.windZ);
+        if (!finite || c.coverage < 0 || c.coverage > 1 || (c.coverage > 0 && !(c.topAltitude > c.baseAltitude && c.sigmaMax > 0 && c.albedo >= 0 && c.albedo <= 1)))
+            fail("clouds: coverage in [0, 1]; with coverage: base altitude < top altitude, sigmaMax > 0, albedo in [0, 1]");
+        const Fog& f = s.fog;
+        const bool fogFinite = std::isfinite(f.density) && std::isfinite(f.heightFalloff) && std::isfinite(f.height) && std::isfinite(f.albedo.x) &&
+                               std::isfinite(f.albedo.y) && std::isfinite(f.albedo.z) && std::isfinite(f.phaseG) && std::isfinite(f.startDistance) &&
+                               std::isfinite(f.skyAmount) && std::isfinite(f.noiseAmount) && std::isfinite(f.noiseScale);
+        if (!fogFinite || f.density < 0 || f.heightFalloff < 0 || !(f.phaseG > -1 && f.phaseG < 1) || f.startDistance < 0 || f.skyAmount < 0 || f.skyAmount > 1 ||
+            f.noiseAmount < 0 || f.noiseAmount > 1 || (f.enabled && f.noiseScale < 1))
+            fail("fog: density and falloff >= 0, phase g in (-1, 1), start distance >= 0, sky amount and noise amount in [0, 1], noise scale >= 1 m");
+        for (size_t i = 0; i < s.fogVolumes.size(); ++i)
+        {
+            const FogVolume& v = s.fogVolumes[i];
+            const float values[] = { v.centre.x, v.centre.y, v.centre.z, v.halfSize.x, v.halfSize.y, v.halfSize.z, v.yaw, v.density, v.heightFalloff, v.edge,
+                                     v.albedo.x, v.albedo.y, v.albedo.z };
+            bool ok = v.shape <= 1 && v.density >= 0 && v.heightFalloff >= 0 && v.edge > 0 && v.edge <= 1 && v.halfSize.x > 0 && v.halfSize.y > 0 && v.halfSize.z > 0 &&
+                      v.albedo.x >= 0 && v.albedo.x <= 1 && v.albedo.y >= 0 && v.albedo.y <= 1 && v.albedo.z >= 0 && v.albedo.z <= 1;
+            for (float x : values) ok = ok && std::isfinite(x);
+            if (!ok) fail("fog volume %zu: finite values, half sizes > 0, shape 0 or 1, density and height falloff >= 0, edge in (0, 1], albedo in [0, 1]", i);
+        }
+    }
 }
 void evaluateMorph(const Mesh& m, const std::vector<float>& weights, float time, uint32_t v, float3& position, float3& normal)
 {

@@ -9,6 +9,17 @@ coverage_tile_lights = false      # 14.1c (L2c): coverage records' direct light 
                                   # (Passes/Lights/CoverageTileLights.hlsl); NEAR, shadowed and horizon-straddling lights stay per record.
                                   # Gate: ShadingTests coverage |dE|/E P99 <= 1e-3, m.coverage* lounge <= 0.1 ms
 coverage_tile_lights_capacity = 4096  # listed coverage tiles the field holds (6176 B each); tiles past it keep the per-record loop (exact)
+coverage_compact = true           # the coverage composite's light pixels (<= 16 records) in the compact form (CoverageShade.hlsli;
+                                  # written 2026-10-03, built, not run): CoverageWalk weights each pixel's records nearer first
+                                  # and lists those with weight per tile, the list is shaded one record per lane, 64 at a time -
+                                  # in one kernel (CoverageShadeWhole: the surface, material and air once per record) unless
+                                  # the records run the area lights' loop (then CoverageShadeList's two parts, the DXIL limit) -
+                                  # and CoverageGather sums each pixel's entries over band A.
+                                  # false: CoverageComposite shades inside each pixel lane's own loop - a wave then runs the
+                                  # shading as often as its deepest pixel has visible records, the other lanes idle (A/B).
+                                  # The same weights and shading calls; the per-pixel sum stays in float (the composite keeps
+                                  # its direct part in half floats between its two kernels): the picture differs by that
+                                  # rounding. 20 B of transient buffers per record of V's pool
 tile_lights = false               # 14.1/14.2 (L2): per 8x8 tile NEAR/FAR classification of the froxel lists (Passes/Lights/TileLights.hlsl);
                                   # FAR lights' diffuse comes from the tile corners' vector irradiance (1e-3 rule), their specular stays
                                   # per pixel (D-23 pending); every shadow caster is NEAR until 14.3. Gate: tile vs per-pixel |dE|/E P99 <= 1e-3
@@ -99,9 +110,13 @@ hair_shadows = true               # the hair's shadow on what is not hair (Passe
                                   # the grooms on the path to the light let through (exp(-fibres) from the density volume).
                                   # And a body's shadow on another body's strands: a strand counts the other bodies' fibres
                                   # between it and a light with its own (a beard under the head's hair, the next head).
-                                  # The shadow is as fine as the volume's cells (about 1 cm on a head), of the bodies with a
-                                  # block (hair_density_bodies; the nearest 64 at most). Not shadowed: the coverage layer's
-                                  # cluster fragments under the sun, the local lights without mega_lights, the air.
+                                  # The same transmittance reaches: the coverage layer's cluster fragments under the sun
+                                  # (4 depths per pixel with records, HairShadow MODE 2), the fog's cells and the air's
+                                  # slices under the sun, and - without mega_lights - S's local slots 1..3 of the opaque
+                                  # surfaces. The shadow is as fine as the volume's cells (about 1 cm on a head), of the
+                                  # bodies with a block (hair_density_bodies; the nearest 64 at most). Not shadowed: the
+                                  # fog's and the air's local lights, the coverage layer's fragments under local lights
+                                  # without mega_lights, a local light past the pixel's third shadow caster.
                                   # Frames without a density volume record no pass.
 hair_shadow_steps = 32            # that march's steps through a body at most (2..128). A step is one coarse cell (4 cells):
                                   # empty ones are skipped, the others read in 4 samples of the cells, so the shadow has
@@ -144,6 +159,11 @@ exposure_adapt_darker_seconds = 2.5
 exposure_cut_dark = 0.10
 exposure_cut_bright = 0.02
 exposure_centre_sigma = 0.8
+exposure_linear_distance_ev = 0.0      # 0: the EV approaches its target exponentially all the way (the time constants above).
+                                       # > 0: farther than this many stops from the target it moves at a constant rate - the
+                                       # exponential's rate at that distance - so a large change (a door to daylight) takes its
+                                       # time instead of jumping most of the way in the first frames (the reference's linear /
+                                       # exponential adaptation, r.EyeAdaptation.ExponentialTransitionDistance 1.5)
 # HDR post chain (FEATURES_GAME 4, 6; A4; Post.cpp). bloom: the energy fraction the lens PSF scatters into its tail
 # (0 = off; the kernel sums to 1) over bloom_levels octaves - 0.082 is the share Unreal's default bloom adds (intensity
 # 0.675 x its six stage tints / 6 = 0.089 of the scene, here taken out of the core instead of added); vignette: cos^4
@@ -165,6 +185,68 @@ post_local_exposure_blurred_kernel_percent = 50.0  # LocalExposureBlurredLuminan
 post_local_exposure_middle_grey_bias = 0.0         # LocalExposureMiddleGreyBias (stops)
 post_grain = 0.0
 post_lut = ""
+# The tonemapper's sharpen (PostFinal.hlsl; the reference's r.Tonemapper.Sharpen, off in its defaults): 0 = off, 0.5 half,
+# 1 full strength - the pixel less the mean of its four neighbours added back, less next to very bright content.
+post_sharpen = 0.0
+# Scene colour fringe (the reference's chromatic aberration in the tonemapper, SceneFringeIntensity 0 = off): percent by
+# which the image's edge is displaced between the wavelengths - red and green are read nearer the centre than blue;
+# post_fringe_start (ChromaticAberrationStartOffset 0): the distance from the centre, 0 .. 1 of the half-size, beyond
+# which the fringe grows.
+post_fringe = 0.0
+post_fringe_start = 0.0
+# Image-based lens flares (PostFlare.hlsl; the reference's lens flares, off in its project defaults -
+# r.DefaultFeature.LensFlare false): ghosts of the picture's bright parts, each spread to the aperture's shape, added
+# to the picture after the bloom. The values are the reference's post process defaults (its Engine module is not in the
+# reference checkout: these are the documented ones).
+post_lens_flare = false
+post_lens_flare_intensity = 1.0                 # LensFlareIntensity (x the reference's bloom intensity 0.675)
+post_lens_flare_tint = [1.0, 1.0, 1.0]          # LensFlareTint
+post_lens_flare_bokeh_size = 3.0                # LensFlareBokehSize: the aperture shape's size, percent of the view's width
+post_lens_flare_threshold = 8.0                 # LensFlareThreshold: r + g + b of the exposed scene colour from which a pixel flares
+post_lens_flare_blades = 0                      # the shape: 0 a disc, 3 .. 16 a polygon of that many aperture blades (the reference: a
+                                                # bokeh texture, a disc by default)
+post_lens_flare_halo = 0.0                      # ours (the reference has none): a ring of the mirrored bright parts; 0 = none
+post_lens_flare_tint_1 = [1.0, 0.8, 0.4, 0.6]   # LensFlareTints 1 .. 8: each ghost's colour, and in the 4th number its scale about
+post_lens_flare_tint_2 = [1.0, 1.0, 0.6, 0.53]  # the picture's centre, (value - 0.5) x 7: 0.7, 0.21, -0.28, -0.77, -1.33, -1.61,
+post_lens_flare_tint_3 = [0.8, 0.8, 1.0, 0.46]  # -1.96, -2.45 (negative: mirrored through the centre)
+post_lens_flare_tint_4 = [0.5, 1.0, 0.4, 0.39]
+post_lens_flare_tint_5 = [0.5, 0.8, 1.0, 0.31]
+post_lens_flare_tint_6 = [0.9, 1.0, 0.8, 0.27]
+post_lens_flare_tint_7 = [1.0, 0.8, 0.4, 0.22]
+post_lens_flare_tint_8 = [0.9, 0.7, 0.7, 0.15]
+# Scene-referred colour grading before the tone curve (Post.cpp gradeLut, PostGradeLut.hlsl; the reference's post process
+# colour grading and its combined LUT, PostProcessCombineLUTs): with any value off its default the grading and the tone
+# curve are baked into one post_grading_lut_size^3 table that the final pass reads once per pixel (rebuilt only when a
+# value changes); at the defaults the curve is evaluated per pixel and the picture is unchanged. A game sets the same
+# values per frame through FrameContext::grading (enabled: its values replace these).
+# Each value is [r, g, b, master]: the master multiplies the three (offset: adds to them). The shadows', midtones' and
+# highlights' values combine with the global ones (products; offsets: sums) and weigh in by the pixel's luma (ACEScg).
+post_grading_temperature = 6500.0                # WhiteTemp: the scene's white the picture is balanced from, K (6500: none)
+post_grading_tint = 0.0                          # WhiteTint: + green, - magenta (1 = 0.05 in CIE 1960 uv)
+post_grading_saturation = [1.0, 1.0, 1.0, 1.0]   # ColorSaturation: about the luma (0: grey)
+post_grading_contrast = [1.0, 1.0, 1.0, 1.0]     # ColorContrast: an exponent about scene grey 0.18
+post_grading_gamma = [1.0, 1.0, 1.0, 1.0]        # ColorGamma: the value to the power 1 / gamma
+post_grading_gain = [1.0, 1.0, 1.0, 1.0]         # ColorGain
+post_grading_offset = [0.0, 0.0, 0.0, 0.0]       # ColorOffset
+post_grading_shadows_saturation = [1.0, 1.0, 1.0, 1.0]     # ColorSaturationShadows .. ColorOffsetShadows
+post_grading_shadows_contrast = [1.0, 1.0, 1.0, 1.0]
+post_grading_shadows_gamma = [1.0, 1.0, 1.0, 1.0]
+post_grading_shadows_gain = [1.0, 1.0, 1.0, 1.0]
+post_grading_shadows_offset = [0.0, 0.0, 0.0, 0.0]
+post_grading_midtones_saturation = [1.0, 1.0, 1.0, 1.0]    # ColorSaturationMidtones .. ColorOffsetMidtones
+post_grading_midtones_contrast = [1.0, 1.0, 1.0, 1.0]
+post_grading_midtones_gamma = [1.0, 1.0, 1.0, 1.0]
+post_grading_midtones_gain = [1.0, 1.0, 1.0, 1.0]
+post_grading_midtones_offset = [0.0, 0.0, 0.0, 0.0]
+post_grading_highlights_saturation = [1.0, 1.0, 1.0, 1.0]  # ColorSaturationHighlights .. ColorOffsetHighlights
+post_grading_highlights_contrast = [1.0, 1.0, 1.0, 1.0]
+post_grading_highlights_gamma = [1.0, 1.0, 1.0, 1.0]
+post_grading_highlights_gain = [1.0, 1.0, 1.0, 1.0]
+post_grading_highlights_offset = [0.0, 0.0, 0.0, 0.0]
+post_grading_shadows_max = 0.09                  # ColorCorrectionShadowsMax: the shadows' values fade out up to this luma
+post_grading_highlights_min = 0.5                # ColorCorrectionHighlightsMin: the highlights' values fade in from this luma ...
+post_grading_highlights_max = 1.0                # ColorCorrectionHighlightsMax: ... and weigh fully from this one
+post_grading_lut_size = 32                       # r.LUT.Size: the combined table's edge (RGBA16F; 32: 0.26 MiB)
 # Display rendering (U2): "film" (default; ShadingCommon.hlsli shFilm: filmic toe and shoulder, highlights roll off to
 # white, scene grey 0.18 stays 0.18) or "neutral" (Khronos PBR Neutral: base colours kept, flatter).
 post_tone_curve = "film"
@@ -185,3 +267,13 @@ water_turbid = false
 # the exposure [t - s dt, t]; 0.5 = 180 degrees (the user's gate camera, 2026-09-26), 0 = instantaneous. Frames without
 # motion (static camera and scene) are unchanged.
 motion_blur_shutter = 0.5
+# With the temporal upscale the blur runs after it, on the upscaled image at the output resolution, as the reference's
+# (MotionBlur.cpp motionBlurUpscaled; MotionFlatten.hlsl, MotionApply.hlsl): the exposure is then centred on the frame's
+# time (the taps go both ways along the velocity, the reference's MotionBlurAmount 0.5 = this shutter) and a blur spans
+# up to motion_blur_max_percent of the output's width instead of 32 internal pixels. false: before the upscale at the
+# internal resolution, as views at their own resolution always are (the exposure [t - s dt, t], the rotation stage).
+motion_blur_after_upscale = true
+motion_blur_max_percent = 5.0          # the longest blur, percent of the output's width (the reference's MotionBlurMax 5)
+motion_blur_samples = 16               # taps along the blur, a multiple of 4 (16: the reference's r.MotionBlurQuality 4)
+motion_blur_half_res_gather = true     # 16 x 16 pixel groups whose blur is longer than the taps gather once per 2 x 2
+                                       # pixels (r.MotionBlur.HalfResGather): a quarter of the taps where the blur hides it

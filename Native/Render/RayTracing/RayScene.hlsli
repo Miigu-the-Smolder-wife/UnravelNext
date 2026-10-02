@@ -309,9 +309,23 @@ float3 rtEmitterRadiance(uint light, float3 receiver)
 {
     StructuredBuffer<GpuLight> lights = ResourceDescriptorHeap[g_lights];
     const GpuLight l = lights[light];
-    const float x = length(l.position - receiver) / max(l.range, 1e-6), x2 = x * x;
-    const float w = saturate(1 - x2 * x2);
-    return l.intensity * l.color * (w * w);
+    return l.intensity * l.color * lightWindow(l, length(l.position - receiver));
+}
+// The same where the ray met the emitter at hitPoint: a rect that shows an image (scene::Light::sourceTexture) has the
+// image's colour there (its finest level, as the reference's path tracer shades a rect light's hit).
+float3 rtEmitterRadiance(uint light, float3 receiver, float3 hitPoint)
+{
+    StructuredBuffer<GpuLight> lights = ResourceDescriptorHeap[g_lights];
+    const GpuLight l = lights[light];
+    float3 L = l.intensity * l.color * lightWindow(l, length(l.position - receiver));
+    if (l.sourceTexture != 0 && lightType(l) == LIGHT_RECT)
+    {
+        Texture2D<float4> image = ResourceDescriptorHeap[l.sourceTexture - 1];
+        const float3 q = hitPoint - l.position;
+        const float2 uv = float2(dot(q, l.right) / max(l.size.x, 1e-6), -dot(q, cross(l.forward, l.right)) / max(l.size.y, 1e-6)) + 0.5;
+        L *= image.SampleLevel(g_linearClamp, uv, 0).rgb;
+    }
+    return L;
 }
 
 #endif

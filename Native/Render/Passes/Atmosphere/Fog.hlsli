@@ -61,4 +61,16 @@ float fogOpticalDepth(FogMedium f, float3 origin, float3 dir, float t0, float t1
     }
     return min(f.density * mean * (t1 - t0), 64.0);
 }
+
+// atmosphere.fog.sun_through_fog: the share of the sun's light that reaches p as direct light through the height fog -
+// exp(-tau (1 - g)), tau the fog's optical depth from p toward the sun (the closed form: the mean medium from p on) and
+// g its phase function's asymmetry: light scattered forward stays in the beam (the similarity relation's reduced
+// extinction). sun: unit, toward the sun.
+float fogSunThrough(FogMedium f, float3 p, float3 sun)
+{
+    FogMedium m = f;
+    m.on = true;
+    m.start = 0;
+    return exp(-fogOpticalDepth(m, p, sun, 0.0, 1.0e6) * (1.0 - f.g));
+}
 #endif

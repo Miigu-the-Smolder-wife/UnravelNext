@@ -31,6 +31,7 @@
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
+#include "Passes/Atmosphere/CloudShadowCommon.hlsli"
 #include "Passes/GI/GiCache.hlsli"
 #include "Passes/GI/GiSource.hlsli"
 #include "Passes/Reflection/Reflection.hlsli"
@@ -462,6 +463,8 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
         sunVisibility = shadowSunVisibilityAt(s.shadow, P, nv, z * shPixelAngle(D, Dx), resident);
         if (!resident) { sunVisibility = 1; if (s.statistics != UNX_NONE) { RWByteAddressBuffer st = ResourceDescriptorHeap[s.statistics]; st.InterlockedAdd(4 * WATER_STAT_UNLIT, 1); } }
     }
+    // (B5: the sun through the cloud layer at the surface, as S's sun slot of opaque pixels has it - no glint under a cloud)
+    if (s.atm.transmittance != UNX_NONE && sunVisibility > 0) sunVisibility *= cloudSunTransmittanceFromLut(s.atm.transmittance, P);
     const float3 l0 = normalize(g_sunDirection);
     if (sunVisibility > 0 && dot(nv, l0) > 0)
         reflected += shSunSpecular(1.0.xxx, rPixel, alphaPixel, 1.0.xxx, nv, v, max(NoV, 1e-4), l0, E, shPixelAngle(D, Dx)) * sunVisibility;

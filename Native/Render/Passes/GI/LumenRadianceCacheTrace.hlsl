@@ -7,7 +7,12 @@
 // distance. Hit lighting is the screen-probe rays' (Lumen/LgTrace.hlsl): the hit reads the mesh cards of its instance
 // (direct light with the sun, radiosity) and shades its own material; a hit without cards takes the sun (one shadow ray
 // into the disk), one local-light sample with its shadow ray and - when a world cache is bound - that cache's
-// irradiance; the hit's own emission. An analytic area light's proxy returns 0 and occludes. A miss returns the sky.
+// irradiance, else the indirect light the card frame names (LumenHitIndirect.hlsli: while the cache updates, the
+// previous frame's translucency volume); the hit's own emission. An analytic area light's proxy returns 0 and
+// occludes. A miss returns the sky.
+// E's grooms (RayTracing/HitHair.hlsli; raytracing.hair): the ray's first fibre in the hair density volume past the
+// ray's start, where it lies before the hit, is the hit (a two-sided one for the probe's occlusion); a groom the ray
+// starts inside is left out.
 // Probe occlusion (P[4].w != 0; LumenRadianceCache.hlsli): before its ray the thread walks the probe's straight line to
 // the ray's start; anything in the way that is not a two-sided sheet and the texel holds nothing (alpha 0, the depth =
 // the blocker's distance).
@@ -20,6 +25,7 @@
 // (CardLayout.hlsli mcFrame; UNX_NONE: none). One dispatch holds at most 262,144 rays (LumenRadianceCache.cpp: chunks
 // of probes).
 // P[6], P[7] = RtSceneSrvs
+#define GI_SKY_FOG_RETURN  // (GiSky.hlsli: the sky's share of the sun's light the fog scatters - atmosphere.fog.sun_through_fog)
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitDecals.hlsli"
@@ -28,7 +34,9 @@
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/SurfaceCache/CardLighting.hlsli"
 #include "Passes/GI/LumenRadianceCache.hlsli"
+#include "Passes/GI/LumenHitIndirect.hlsli"
 #include "RayTracing/HitLocalSample.hlsli"
+#include "RayTracing/HitHair.hlsli"
 
 float lrcBias(float3 p) { return 1e-3 + 2e-4 * distance(p, g_cameraPosition); }
 
@@ -80,7 +88,19 @@ void LumenRadianceCacheTraceGen()
     const uint seed = giRandom(id.x * 9781u + id.y * 6271u + p.frame * 26699u);
 
     float3 radiance = 0;
+    RtHairHit hair;
+    hair.t = -1;
+    hair.body = hair.material = 0;
+    const uint hairParams = rtHairParams(scene);
+    const float3 hairOrigin = r.Origin + r.Direction * r.TMin;
+    if (hairParams != 0xFFFFFFFFu && !blocked) hair = rtHairFirst(hairParams, hairOrigin, r.Direction, (hit.t < 0 ? r.TMax : hit.t) - r.TMin, seed, true);
     if (blocked) radiance = 0;
+    else if (hair.t >= 0)
+    {
+        depthWord = lrcEncodeDepth(r.TMin + hair.t, true, true, true);
+        radiance = rtHairRadiance(scene, hairParams, hair, hairOrigin, r.Direction, (r.TMin + hair.t) * footprintPerMetre, lrcBias(hairOrigin), seed, (P[3].w & 16) == 0,
+                                  (P[3].w & 128) == 0);
+    }
     else if (hit.t < 0) radiance = giSkyRadiance(r.Direction);
     else if (hit.instance == RT_INSTANCE_EMITTER) depthWord = lrcEncodeDepth(hit.t, true, true, false);
     else
@@ -117,7 +137,15 @@ void LumenRadianceCacheTraceGen()
                 const GiHeader h = giHeader(cache);
                 giCacheLightingAt(cache, h, s.position, s.normal, reflect(r.Direction, s.normal), giLevelForSize(h, footprint), L.irradiance, L.specularRadiance);
             }
-            if (!fromSurfaceCache) L.irradiance += giFarSkyIrradiance(s.position, s.normal, asfloat(P[5].y));
+            bool indirectFound = false;
+            if (!fromSurfaceCache && P[0].x == UNX_NONE)
+            {
+                const float4 e = lhiIrradiance(lhiSources(P[5].x), s.position, s.normal, seed);
+                L.irradiance += e.rgb;
+                L.specularRadiance += e.rgb / LRC_PI;
+                indirectFound = e.a > 0;
+            }
+            if (!fromSurfaceCache && !indirectFound) L.irradiance += giFarSkyIrradiance(s.position, s.normal, asfloat(P[5].y));
             const float3 l = normalize(g_sunDirection);
             if (!fromSurfaceCache && (dot(s.normal, l) > 0 || rtHitTransmits(m)) && (P[3].w & 16) == 0)
             {

@@ -3,7 +3,8 @@
 # the picture against the reference by blocks (ref_blocks.py). For energy questions (which cap or limit loses light), not
 # for judging cuts or motion.
 #   powershell -File Tools\Verify\Run-Ue6Still.ps1 -Name cap_off [-Scene bt_lobby] [-Set k=v,k=v] [-Frames 600]
-#                                                  [-Capture 599] [-Layers gi] [-Resolution 1080p]
+#                                                  [-Capture 599] [-Layers gi] [-Resolution 1080p] [-GateArgs "--clouds 0.5,600,2600"]
+# -GateArgs: extra gate arguments, space separated (as Run-Ue6Final.ps1's).
 # -Scene furnace_room -Layers gi,carddirect,cardindirect: the closed room's energy balance, stage by stage (furnace.py).
 # -Scene furnace_room_day: the same with the sun up outside - what a stage holds over its number came through the walls.
 param(
@@ -14,6 +15,7 @@ param(
     [string]$Capture = "599",
     [string[]]$Layers = @(),
     [string]$Resolution = "1080p",
+    [string]$GateArgs = "",
     [string]$Scenes = "C:\Users\USER\UnravelNext-refl\Cache\ReflJudge\scenes",
     [string]$Reference = "C:\Users\USER\UnravelNext-refl\Cache\Reference\lobby\host_ev4_480x270_4096_7bfe882f2c4eb7f8_69c5228d43176e01"
 )
@@ -29,14 +31,16 @@ $file = Get-ChildItem -Path $Scenes -Filter "$Scene*.unxscene" | Select-Object -
 $sceneArg = if ($file) { $file.FullName } else { $Scene }
 $dir = Join-Path $root "Cache\Ue6Diag\$Name"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
-$gateArgs = @("--scene", $sceneArg, "--resolution", $Resolution, "--frames", "$Frames", "--warmup-frames", "0", "--auto-exposure",
+# (the list is not named gateArgs: PowerShell's names ignore case, and that is the parameter above)
+$runArgs = @("--scene", $sceneArg, "--resolution", $Resolution, "--frames", "$Frames", "--warmup-frames", "0", "--auto-exposure",
     "--capture-output", (Join-Path $dir "still.pfm"), "--capture-frames", $Capture, "--set", "gi.deterministic=true")
-if ($Layers.Count -gt 0) { $gateArgs += @("--capture-layers", ((@("final") + $Layers) -join ",")) }
-foreach ($s in $Set) { $gateArgs += @("--set", $s) }
+if ($Layers.Count -gt 0) { $runArgs += @("--capture-layers", ((@("final") + $Layers) -join ",")) }
+foreach ($s in $Set) { $runArgs += @("--set", $s) }
+if ($GateArgs -ne "") { $runArgs += @($GateArgs -split " " | Where-Object { $_ }) }
 $env:UNX_DRED = "1"
 $log = Join-Path $dir "run.log"
 $ErrorActionPreference = "Continue"
-& powershell -NoProfile -File Tools\CI\GpuLock.ps1 -Track R -Kind correctness -- $exe @gateArgs 2>&1 | ForEach-Object { "$_" } | Out-File -Encoding utf8 $log
+& powershell -NoProfile -File Tools\CI\GpuLock.ps1 -Track R -Kind correctness -- $exe @runArgs 2>&1 | ForEach-Object { "$_" } | Out-File -Encoding utf8 $log
 $code = $LASTEXITCODE
 $ErrorActionPreference = "Stop"
 $text = Get-Content $log -Raw

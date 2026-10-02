@@ -3,6 +3,8 @@
 // over the GPU-written instances (VA_GPU_INSTANCES) gets ceil(live / 64) x views groups from their live count (the
 // direct instance dispatch covers the CPU instances only: sized by the capacity it launched 65536 / 64 x views groups
 // per run, e.g. 258 K per local-light raster request of 252 views, almost all without an instance).
+// With visibility.cull_pass_merge it is the first dispatch of the run's seed pass (the chunk and instance dispatches
+// follow in the same pass, after a barrier).
 #include "Passes/Visibility/CullShared.hlsli"
 
 [numthreads(128, 1, 1)]  // VS_WORDS, VA_WORDS <= 128
@@ -20,6 +22,8 @@ void main(uint i : SV_DispatchThreadID)
             const uint groupsX = (live + 63) / 64;
             v = i == VA_GPU_INSTANCES ? groupsX : groupsX == 0 ? 0 : i == VA_GPU_INSTANCES + 1 ? VIEW_COUNT : 1u;
         }
+        // arguments their appenders raise (raiseDispatch: CullChunks PHASE=1, CullNodes QUEUE=1): no group yet, depth 1
+        if (i == VA_CHUNK_ITEMS + 2 || i == VA_GROUPS + 2) v = 1;
         args.Store(4 * i, v);
     }
 }

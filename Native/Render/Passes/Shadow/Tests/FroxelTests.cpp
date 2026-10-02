@@ -240,6 +240,9 @@ int main(int argc, char** argv)
             else if (a == "--upload-first") uploadFirst = true;  // diagnostic: probe input declared before the froxel passes
         }
         TestFrame tf(debugLayer, gbv);
+        // the ordered head is one of this test's subjects (section 1): the default orders it only in frames with local
+        // shadow slots
+        tf.quality.applyOverride("atmosphere.froxels.sort_head_for_slots_only=false");
         for (const std::string& o : overrides) tf.quality.applyOverride(o);
         TestRaster raster(tf);
         raster.install();
@@ -936,6 +939,12 @@ int main(int argc, char** argv)
             // ---- 6. Reader bound: production integrates only the slices a reader reaches (FroxelIntegrate.hlsl); every
             //         node a surface pixel of the 3 x 3 tile neighbourhood reads, and the sky correction of tiles with
             //         sky around them, must be the same bits as with every slice integrated.
+            //         Without atmosphere.froxels.clip_at_surface: with it the bounded integration samples a slice's light
+            //         in front of the tile's farthest surface only (FroxelSlice.hlsli froxelSampledLength; the every-slice
+            //         mode has no readers and no clip), and the slice that holds the surface is then another number by
+            //         design - the bound itself is what this section compares.
+            const bool clipAtSurface = tf.quality.boolean("atmosphere.froxels.clip_at_surface");
+            tf.quality.applyOverride("atmosphere.froxels.clip_at_surface=false");
             wantDepth = true;
             run(sc, 6);
             const std::vector<uint8_t> full = lastVolume;
@@ -944,6 +953,7 @@ int main(int argc, char** argv)
             shadow::setFroxelFullDepth(tf.trackState, true);
             wantDepth = false;
             const std::vector<uint8_t> bounded = lastVolume;
+            tf.quality.applyOverride(clipAtSurface ? "atmosphere.froxels.clip_at_surface=true" : "atmosphere.froxels.clip_at_surface=false");
             const uint32_t pd = TestFrame::rowPitch(W, 4);
             std::vector<float> tileZ(fg.gridX * fg.gridY, 0.0f);
             std::vector<uint8_t> tileSky(fg.gridX * fg.gridY, 0);

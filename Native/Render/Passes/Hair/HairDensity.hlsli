@@ -248,8 +248,10 @@ float hairDensityUnit(uint seed, uint k)
     return float((word >> 22u) ^ word) * (1.0f / 4294967296.0f);
 }
 // Where the ray p + t d (d unit, t in [0, reach]) first meets a fibre of any body with a block, for the ray drawn with
-// 'seed': the distance (-1: it meets none), the body met and its material.
-float hairFirstFibreAmong(uint paramsSrv, float3 p, float3 d, float reach, uint steps, uint seed, out uint body, out uint material)
+// 'seed': the distance (-1: it meets none), the body met and its material. outsideOnly: a body whose box holds p is left
+// out - for rays that carry light to a point which counts that body's hair itself (the translucency volume's cells: a
+// strand takes the cell's light through its own body's hair, CoverageHair.hlsl hairIndirect).
+float hairFirstFibreAmong(uint paramsSrv, float3 p, float3 d, float reach, uint steps, uint seed, out uint body, out uint material, bool outsideOnly = false)
 {
     body = material = 0;
     if (paramsSrv == 0xFFFFFFFFu) return -1;
@@ -262,6 +264,11 @@ float hairFirstFibreAmong(uint paramsSrv, float3 p, float3 d, float reach, uint 
     {
         const uint2 entry = params.Load2(list + 4 + 4 * HAIR_DENSITY_LIST_WORDS * i);
         if (entry.x >= header.x) continue;
+        if (outsideOnly)
+        {
+            const HairDensityBody b = hairDensityBody(params, entry.x);
+            if (all(p > b.origin) && all(p < b.origin + float3(b.cells) * b.cell)) continue;
+        }
         // the count at which this body's first fibre lies on the ray: exponential, mean 1
         const float target = max(-log(max(1 - hairDensityUnit(seed, i), 1e-30f)), 1e-6f);
         const float t = hairDensityAcross(params, header, entry.x, p, d, 0, nearest >= 0 ? nearest : reach, steps, 0.5f, target);

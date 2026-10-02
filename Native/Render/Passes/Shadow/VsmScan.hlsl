@@ -15,7 +15,12 @@
 // P[0] = { requests UAV (raw), page table UAV (raw), groups UAV (raw), stats UAV (raw) }
 // P[1] = { slots (scanned: the sun's and the assigned local lights'), capacity (atlas pages), VSM constants CBV, groups }
 // P[2] = { page list UAV (raw: count, pad, (slot, page) pairs), page metadata UAV, local lights SRV, indirect args UAV }
-// P[3] = { free pages (raw: count, 0, 0, 0, then pages), 0, 0, 0 }
+// shadow.vsm.static_separate (VsmCache.hlsl): a kept request with VSM_REQ_DYNAMIC keeps its page and static copy and has its
+// movable casters drawn anew - its table entry carries VSM_FLAG_DIRTY_DYNAMIC this frame and MODE 2 appends it to the
+// dynamic page list (P[3].y; order by thread timing: each of its consumers works per page) and adds its group to the
+// second dispatch of the per-page passes (args words 3..5).
+// P[3] = { free pages (raw: count, 0, 0, 0, then pages), dynamic page list UAV (raw: count, pad, (slot, page) pairs;
+//          0xFFFFFFFF: none), 0, 0 }
 // Stats words: 0 requested, 1 assigned, 2 drawn (= assigned), 3 over capacity, 5 requested by pixels, 32 + k per level,
 // 53 sampled 32^2 sub-tiles (shadow.vsm.subtile_stats).
 #include "Passes/Shadow/VsmLocal.hlsli"
@@ -66,6 +71,12 @@ void main(uint lane : SV_GroupIndex)
         list.Store2(0, uint2(assigned, 0));
         RWByteAddressBuffer args = ResourceDescriptorHeap[P[2].w];
         args.Store3(0, uint3(assigned, 1, 1));
+        args.Store3(12, uint3(0, 1, 1));  // the dynamic page list's dispatch: MODE 2 adds a group per page
+        if (P[3].y != 0xFFFFFFFFu)
+        {
+            RWByteAddressBuffer dynamicList = ResourceDescriptorHeap[P[3].y];
+            dynamicList.Store2(0, uint2(0, 0));
+        }
     }
 }
 #else
@@ -134,8 +145,23 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
             {
                 // the page as drawn in an earlier frame: same physical page, tag and metadata
                 const uint2 last = table.Load2(slot * 8);
-                e = uint2(last.x & ~(VSM_FLAG_DIRTY | VSM_FLAG_STALE), last.y);
+                e = uint2(last.x & ~(VSM_FLAG_DIRTY | VSM_FLAG_DIRTY_DYNAMIC | VSM_FLAG_STALE | VSM_FLAG_STALE_DYNAMIC), last.y);
                 meta[last.x & VSM_PHYS_MASK].lastRequested = c.frame;
+                if ((req[j] & VSM_REQ_DYNAMIC) != 0 && P[3].y != 0xFFFFFFFFu)
+                {
+                    // its movable casters are drawn anew over its static copy (each kept page appears once: at most the
+                    // atlas's pages, the list's size)
+                    e.x |= VSM_FLAG_DIRTY_DYNAMIC;
+                    RWByteAddressBuffer dynamicList = ResourceDescriptorHeap[P[3].y];
+                    uint at;
+                    dynamicList.InterlockedAdd(0, 1, at);
+                    dynamicList.Store2(8 + at * 8, uint2(slot, last.x & VSM_PHYS_MASK));
+                    RWByteAddressBuffer args = ResourceDescriptorHeap[P[2].w];
+                    args.InterlockedAdd(12, 1);
+                    stats.InterlockedAdd(4 * 71, 1);
+                    meta[last.x & VSM_PHYS_MASK].renderTime = asuint(c.time);
+                    meta[last.x & VSM_PHYS_MASK].maxHeight = VSM_EMPTY;  // VsmPageMax
+                }
             }
             else
             {

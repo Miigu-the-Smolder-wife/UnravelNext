@@ -3,12 +3,15 @@
 // CL_LIGHTS strongest lights (the reference's MaxLightsPerTile: by unshadowed importance at the tile's mean point,
 // lights wholly behind every texel's horizon left out) and, per light, whether its visibility was uniform over the tile
 // at the tile's last update (then the trace takes one ray per 2 x 2 texels). No ray. The tile's visible bits are cleared.
+// A tile one of whose lights has a function that changes with time (SurfaceCacheLightFunction.hlsli) sets
+// CL_PAGE_ANIMATED in its page's light state: the selection refreshes the page's direct light at the highest speed.
 // P[0] = { card frame SRV, select SRV, frame index, flags (bit 7: no local lights, bit 8: no sun) }
 // P[4] = { tile lights UAV (raw), tile shadow UAV (raw), uniform bits SRV (raw), page capacity }
-// P[5] = { direct list capacity, 0, 0, 0 }
+// P[5] = { direct list capacity, page light UAV (raw), 0, 0 }
 // P[6], P[7] = RtSceneSrvs (the light grid: word 7)
 #include "RayTracing/HitLocalLights.hlsli"
 #include "Passes/SurfaceCache/CardLighting.hlsli"
+#include "Passes/SurfaceCache/SurfaceCacheLightFunction.hlsli"
 
 [numthreads(64, 1, 1)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -110,11 +113,19 @@ void main(uint3 id : SV_DispatchThreadID)
     const uint2 atlasTile = (uint2(page.atlasRect.xy) + tile * MC_TILE) / MC_TILE;
     const uint uniformBase = (atlasTile.x + atlasTile.y * (f.atlasSize / MC_TILE)) * CL_UNIFORM_BYTES;
     uint uniformSlots = 0;
+    const uint functions = scLightFunctionTable(scene.pad);
+    bool animated = false;
     for (k = 0; k < held; ++k)
     {
         tileLights.Store(base + k * 4, chosen[k]);
         const uint bit = chosen[k] & 255u;
         if ((uniformBits.Load(uniformBase + (bit >> 5) * 4) >> (bit & 31u)) & 1u) uniformSlots |= 1u << k;
+        animated = animated || scLightFunctionAnimated(functions, chosen[k]);
+    }
+    if (animated)
+    {
+        RWByteAddressBuffer pageLight = ResourceDescriptorHeap[P[5].y];
+        pageLight.InterlockedOr(pageIndex * CL_PAGE_LIGHT_BYTES + 8, CL_PAGE_ANIMATED);
     }
     const bool sun = (P[0].w & 256u) == 0 && dot(normal, normalize(g_sunDirection)) > -slack;
     if (sun && ((uniformBits.Load(uniformBase + (CL_SUN_BIT >> 5) * 4) >> (CL_SUN_BIT & 31u)) & 1u) != 0) uniformSlots |= 1u << CL_SUN_SLOT;

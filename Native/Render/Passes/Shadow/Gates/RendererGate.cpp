@@ -67,6 +67,9 @@
 #if __has_include("unx/gi/GiSystem.h")
 #include "unx/gi/GiSystem.h"
 #endif
+#if __has_include("unx/shading/ShadingSystem.h")
+#include "unx/shading/ShadingSystem.h"  // (the coverage composite's counts in the summary)
+#endif
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
 #include "unx/render/FrameRenderer.h"
@@ -369,8 +372,12 @@ int main(int argc, char** argv)
         uint64_t shiftAt = UINT64_MAX;  // --origin-shift-at F --origin-shift x,y,z: a C9 rebase at frame F (repros)
         std::vector<FogVolumeDesc> fogVolumes;  // --fog-volume x,y,z,rx,ry,rz,density[,shape[,height falloff]]: a local fog volume (repeatable)
         bool passTimestamps = true;      // --no-pass-timestamps: the frame's GPU time alone (no per-pass queries, no pass CSV)
-        float fogDensity = 0;            // --fog D: the frame's height fog (FrameContext::fog) at extinction D (1/m), other fields default
-        float cloudCoverage = 0;         // --clouds C: B5 cloud layer (FrameContext::clouds) with coverage C, other fields default
+        // The scene's own weather (scene::Scene::clouds, fog, fogVolumes) applies where these are not given; given, they
+        // decide (--clouds 0, --fog 0: none, whatever the scene says). --no-scene-weather: the scene's blocks are not used.
+        float fogDensity = -1;           // --fog D: the frame's height fog (FrameContext::fog) at extinction D (1/m), other fields default
+        float cloudCoverage = -1;        // --clouds C[,base,top]: B5 cloud layer (FrameContext::clouds) with coverage C between the
+        float cloudBase = -1, cloudTop = -1;  // altitudes base and top (m; a layer low enough for a peak to stand in it), other fields default
+        bool sceneWeather = true;
         float3 shiftBy{};  // --time YYYY-MM-DDTHH:MM (UT), --place lat,lon: sun, moon, stars (B4)
         // P0 motion and change options (see the head comment).
         double pathTime = -1;  // --path-time T: still at P(T); negative = not given
@@ -427,7 +434,16 @@ int main(int argc, char** argv)
             else if (a == "--place") placeArg = next();
             else if (a == "--auto-exposure") autoExposure = true;
             else if (a == "--origin-shift-at") shiftAt = std::stoull(next());
-            else if (a == "--clouds") cloudCoverage = std::stof(next());
+            else if (a == "--clouds")
+            {
+                std::vector<float> v;
+                std::stringstream list(next());
+                for (std::string item; std::getline(list, item, ',');) v.push_back(std::stof(item));
+                if (v.size() != 1 && v.size() != 3) fail("--clouds C[,base,top]");
+                cloudCoverage = v[0];
+                if (v.size() == 3) cloudBase = v[1], cloudTop = v[2];
+            }
+            else if (a == "--no-scene-weather") sceneWeather = false;
             else if (a == "--no-pass-timestamps") passTimestamps = false;
             else if (a == "--fog-volume")
             {
@@ -942,13 +958,21 @@ int main(int argc, char** argv)
                 const float3 offset = gpuScene.originOffset();
                 cam.position = cam.position - offset;
                 fc.mainView = ViewDesc::fromCamera(cam, rr.width, rr.height, prev);
-                fc.clouds.coverage = cloudCoverage;
-                if (fogDensity > 0)
+                if (cloudCoverage >= 0)
                 {
-                    fc.fog.enabled = true;
+                    fc.clouds.coverage = cloudCoverage;
+                    if (cloudTop > cloudBase) fc.clouds.baseAltitude = cloudBase, fc.clouds.topAltitude = cloudTop;
+                    fc.sceneWeather &= ~kSceneClouds;
+                }
+                if (fogDensity >= 0)
+                {
+                    fc.fog.enabled = fogDensity > 0;
                     fc.fog.density = fogDensity;
+                    fc.sceneWeather &= ~kSceneFog;
                 }
                 fc.fogVolumes = fogVolumes;
+                if (!fogVolumes.empty()) fc.sceneWeather &= ~kSceneFogVolumes;
+                if (!sceneWeather) fc.sceneWeather = 0;
                 if (gustPeriodS > 0)
                 {
                     const bool gust = ((uint64_t)(fc.time / gustPeriodS) & 1) != 0;
@@ -1451,6 +1475,9 @@ int main(int argc, char** argv)
             logf("  shadow overflow: lights past the third max %u, words needed max %u, tiles over capacity %u %s\n", overflowLightsMax, overflowWordsMax, overTiles,
                  overTiles ? "FAIL" : "ok");
             if (overTiles) ++gateFailures;
+            logf("  page cache (last frame): %u of %u requested pages kept (%u of them with their movable casters drawn anew), %u drawn; %u (changed caster, page) "
+                 "pairs left by the HZB filter\n",
+                 st.cachedPages, st.requested, st.dynamicPages, st.dirty, st.staleSpared);
             logf("  S error bits (INTERFACES 3.6, shader loop caps) 0x%x %s\n", st.errorBitsSeen, st.errorBitsSeen ? "FAIL" : "ok");
             if (st.errorBitsSeen) ++gateFailures;
             // Fragment visibility of the coverage layer (ShadowFragments): pixels with records and pair pixels; with
@@ -1462,6 +1489,62 @@ int main(int argc, char** argv)
                 const visibility::Stats vs = visibility::latestStats(renderer.trackState());
                 logf("  coverage layer: %u records in %u tiles (%u blocks, %u heavy tiles), %u special, pool %u\n", vs.coverageFragments, vs.coverageTiles,
                      vs.coverageBlocks, vs.coverageHeavyTiles, vs.coverageSpecial, vs.coveragePoolRecords);
+                // The main view's cull of the last frame by band: where the layer's records come from (band B and the
+                // mixed sheet clusters are the coverage raster's input; band C with coverage_band_c_visbuffer is the vis
+                // buffer's).
+                logf("  V main view: %u instances, %u nodes and %u clusters tested, %u visible clusters; phase 2 took %u instances, %u nodes, %u clusters; "
+                     "chunk items %u (+ %u deferred)\n",
+                     vs.instancesVisible, vs.nodesTested, vs.clustersTested, vs.visibleClusters, vs.deferredInstances, vs.deferredNodes, vs.deferredClusters,
+                     vs.chunkItems, vs.deferredChunks);
+                logf("  V bands (clusters / triangles): A %u / %u, B %u / %u, C %u / %u; mixed sheet clusters %u (%u triangles, split per triangle between A and B)\n",
+                     vs.bandClusters[0], vs.triangles[0], vs.bandClusters[1], vs.triangles[1], vs.bandClusters[2], vs.triangles[2], vs.mixedClusters,
+                     vs.mixedTriangles);
+                logf("  V lists (entries): A back %u, A two-sided %u, A alpha back %u, A alpha two-sided %u, B (coverage) %u, C %u, translucent back %u, "
+                     "translucent two-sided %u\n",
+                     vs.listEntries[0], vs.listEntries[1], vs.listEntries[2], vs.listEntries[3], vs.listEntries[4], vs.listEntries[5], vs.listEntries[6],
+                     vs.listEntries[7]);
+                // Every cull run's last frame (the raster requests: shadow pages, cards) and the error bits of all its frames.
+                uint32_t vBits = 0;
+                for (const auto& [name, run] : visibility::latestStatsOfRuns(renderer.trackState()))
+                {
+                    vBits |= run.overflowSeen;
+                    if (name == "main" || run.frameIndex == UINT64_MAX) continue;
+                    logf("  V run %-24s %u instances, %u nodes, %u clusters tested, %u visible (%u tile pairs), %.3f M triangles, error bits 0x%x\n", name.c_str(),
+                         run.instancesVisible, run.nodesTested, run.clustersTested, run.visibleClusters, run.tilePairs,
+                         ((double)run.triangles[0] + run.triangles[1] + run.triangles[2]) / 1e6, run.overflowSeen);
+                }
+                // (0x100, 0x2000, 0x4000: pools that grow from the measured need - a frame over one after a cut is expected)
+                const bool vOk = (vBits & ~visibility::kOverflowGrowingPools) == 0;
+                logf("  V error bits (Stats::overflow of every run and frame: capacities, shader loop bounds 0x40 0x400; growing pools 0x100 0x2000 0x4000 not judged) 0x%x %s\n",
+                     vBits, vOk ? "ok" : "FAIL");
+                if (!vOk) ++gateFailures;
+            }
+            {
+                // Where the coverage layer's work went, last frame (the A/B of visibility.coverage_depth_buckets,
+                // coverage_triangle_cull, coverage_compute_raster and shading.coverage_compact): the band B list's clusters
+                // and triangles by the test that removed them, the fragments by outcome (their per-wave counters run with
+                // visibility.coverage_statistics only), and the composite's light pixels.
+                const visibility::Stats cs = visibility::latestStats(renderer.trackState());
+                logf("  coverage clusters: %u band B list entries, %u behind band A (not drawn), %u behind the buckets' cover (not drawn)\n", cs.listEntries[4],
+                     cs.coverageClustersBehindBandA, cs.coverageClustersBehindCover);
+                logf("  coverage triangles: %u to the rasteriser, %u to the compute raster, culled by the mesh kernel: %u behind band A, %u behind the cover "
+                     "(band B + C triangles of the visible clusters: %u)\n",
+                     cs.coverageTriangles, cs.coverageTrianglesCompute, cs.coverageTrianglesBehindBandA, cs.coverageTrianglesBehindCover, cs.triangles[1] + cs.triangles[2]);
+                if (cs.coverageEvaluated)
+                    logf("  coverage fragments: %u with area in their pixel, %u stored (%.1f %%; %u by the compute raster) | dropped: %u behind band A (%.1f %%), %u behind "
+                         "the cover (%.1f %%), %u cut out by alpha, %u without weight\n",
+                         cs.coverageEvaluated, cs.coverageFragments, 100.0 * cs.coverageFragments / cs.coverageEvaluated, cs.coverageFragmentsCompute, cs.coverageCutBandA,
+                         100.0 * cs.coverageCutBandA / cs.coverageEvaluated, cs.coverageCutCover, 100.0 * cs.coverageCutCover / cs.coverageEvaluated, cs.coverageCutAlpha,
+                         cs.coverageCutWeight);
+                else
+                    logf("  coverage fragments: %u stored (%u by the compute raster); the dropped ones by test need visibility.coverage_statistics = true\n",
+                         cs.coverageFragments, cs.coverageFragmentsCompute);
+#if __has_include("unx/shading/ShadingSystem.h")
+                const shading::Stats ms = shading::latestStats(renderer.trackState());
+                logf("  coverage composite: %u light pixels (their walks visited %u records, shaded %u: %.2f per pixel; %u list entries), %u heavy pixels\n",
+                     ms.coverageLightPixels, ms.coverageWalked, ms.coverageShaded, ms.coverageLightPixels ? (double)ms.coverageShaded / ms.coverageLightPixels : 0.0,
+                     ms.coverageEntries, ms.coverageHeavyPixels);
+#endif
             }
             if (quality.integer("shadow.vsm.fragment_check") != 0)
             {

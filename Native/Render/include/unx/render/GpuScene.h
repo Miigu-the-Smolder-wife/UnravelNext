@@ -112,6 +112,19 @@ struct RuntimeCapacity
 };
 constexpr uint32_t kRuntimeMaxDepth = 6;  // hierarchy depth limit of a runtime mesh (V runs at least this many node passes)
 
+namespace gpu
+{
+// Scene.hlsli INSTANCE_MOVABLE_FLAGS / instanceMovable: the instance's geometry can be elsewhere in another frame of the
+// same scene revision (Dynamic, Skinned, Wind, a view model, a bone palette, morph or terrain patch). Readers that split
+// instances by it (V's RasterView::instanceSet, S's static / dynamic shadow pages) also count the instances past
+// GpuScene::staticInstanceCount() as movable.
+inline bool instanceMovable(const Instance& in)
+{
+    return (in.flags & (scene::InstanceDynamic | scene::InstanceSkinned | scene::InstanceWind | kInstanceViewModel)) != 0 || in.bonePalette != kNone ||
+           in.morph != kNone || in.patch != kNone;
+}
+} // namespace gpu
+
 // The class-specific slots of a material's GPU record (gpu::Material hairAbsorption .. cutDamageWidth, shared by the
 // classes: Hair, Water, Glass, Cut, Subsurface); every other class leaves them 0. CPU only (GpuScene's records and tests).
 void packMaterialClass(const scene::Material& m, gpu::Material& g);
@@ -249,6 +262,10 @@ public:
     // angles or shadow flag also bumps the scene revision (S's local pages, the GI epoch, R's ray scene). Call before the
     // frame's constants are allocated.
     void setLights(std::span<const uint32_t> indices);
+    // The rect lights' source textures (scene::Light::sourceTexture) as M's TextureSystem uploaded them: per scene light
+    // the texture's SRV, gpu::kNone for a light without one. The light records' sourceTexture words follow (no scene
+    // revision: the lights' shapes are the same).
+    void setLightSourceTextures(std::span<const uint32_t> srvPerLight);
     // Material textures published by M's texture system (INTERFACES_KO.md 6.3, v1.10): one entry per scene material.
     // Rewrites the material buffer (new SRV; the old one is released when the GPU is done) and bumps the revision of the
     // materials whose textures changed and the scene revision. Call before any frame constants of the frame are
@@ -299,6 +316,7 @@ private:
     gpu::Material packMaterial(const scene::Material& m) const;
     void rawUav(uint32_t& index, const Buffer& b, uint64_t bytes, bool fresh);  // fresh: a new descriptor, the old freed later
     void createLightBuffer(const std::vector<gpu::Light>& lights);  // lights + the FX tail (m_fxLightCapacity)
+    static gpu::Light gpuLight(const scene::Light& l, float3 origin);
     void createFxLightCount();
     struct Upload
     {

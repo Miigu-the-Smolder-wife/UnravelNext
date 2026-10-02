@@ -301,6 +301,51 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     // A's far-field radiance cache (lumen.radiance_cache): cleared and marked from the screen by Begin, marked by the
     // probes here, updated (allocation, probe rays, filter) before the probes' own rays read it.
     LumenRcFrame rc = lumenRadianceCacheBegin(fc, view);
+    // lumen.hit_indirect: the sources of indirect light for ray hits without cards (LumenHitIndirect.hlsli), named in the
+    // card frame once each of this frame's stands - the radiance cache's irradiance probes after the cache's update,
+    // the translucency volume after its own. The frame was written with the previous frame's volume; the ray passes
+    // recorded after a call read what it names (and declare it: FrameResources::cards).
+    const bool hitIndirect = !fc.quality.has("lumen.hit_indirect") || fc.quality.boolean("lumen.hit_indirect");
+    const auto nameHitSources = [&](const char* pass) {
+        SurfaceCacheCardRefs& cards = fc.resources.cards;
+        if (!hitIndirect || !L.hitSurfaceCache || !cards.valid()) return;
+        const FrameResources& res = fc.resources;
+        uint32_t volume = 0xFFFFFFFFu;
+        if (res.translucencyGiParams != 0xFFFFFFFFu && res.translucencyGiAmbient.valid() && res.translucencyGiDirectional.valid())
+        {
+            // this frame's volume in place of the previous frame's
+            volume = res.translucencyGiParams;
+            cards.hitVolumeAmbient = res.translucencyGiAmbient;
+            cards.hitVolumeDirectional = res.translucencyGiDirectional;
+        }
+        else if (cards.hitVolumeAmbient.valid() && res.translucencyGiPrevParams != 0xFFFFFFFFu)
+            volume = res.translucencyGiPrevParams;
+        const bool cache = rc.on && rc.updated && rc.irradiance.valid();
+        if (cache)
+        {
+            cards.hitRcIndirection = rc.indirection;
+            cards.hitRcIrradiance = rc.irradiance;
+            cards.hitRcDepth = rc.depth;
+            cards.hitRcMarks = rc.hitMarks;
+        }
+        const BufferRef frame = cards.frame;
+        const TextureRef indirection = rc.indirection, irradiance = rc.irradiance, depthAtlas = rc.depth;
+        const BufferRef marks = rc.hitMarks;
+        const uint32_t cacheParams = rc.params;
+        g.addPass(pass, QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(frame, Use::UavCompute);
+                      b.keep();
+                  },
+                  [=, &shaders](PassContext& c) {
+                      const uint32_t none = 0xFFFFFFFFu;
+                      const uint32_t k[12] = { c.uav(frame), 0, 0, 0, volume, cache ? cacheParams : none, cache ? c.srv(indirection) : none, cache ? c.srv(irradiance) : none,
+                                               cache ? c.srv(depthAtlas) : none, cache ? c.uav(marks) : none, 0, 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardFrameSources"));
+                      c.computeConstants(k, 12);
+                      c.cmd->Dispatch(1, 1, 1);
+                  });
+    };
     if (rc.on)
     {
         const TextureRef indirection = rc.indirection;
@@ -329,6 +374,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
         in.sunIlluminance = m_sunIlluminance;
         in.experiment = m_settings.experimentDisable;
         lumenRadianceCacheUpdate(fc, view, rays, in, rc);
+        nameHitSources("r.gi.hitsources.cache");
     }
     {
         // lumen.translucency_volume: indirect light for air, particles, water and glass (after the cache's update)
@@ -336,7 +382,9 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
         tv.cards = L.hitSurfaceCache ? fc.resources.cards : SurfaceCacheCardRefs{};
         tv.skyRadiance = m_skyRadiance;
         tv.sunIlluminance = m_sunIlluminance;
+        const uint32_t before = fc.resources.translucencyGiParams;
         lumenTranslucencyVolume(fc, view, rays, tv, rc);
+        if (fc.resources.translucencyGiParams != before) nameHitSources("r.gi.hitsources.volume");
     }
     const bool farField = rc.on;
     // lumen.radiance_cache_far_field: hits past the mesh cards take the sky's light (GiSky.hlsli giFarSkyIrradiance; the
@@ -345,6 +393,9 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     const uint32_t farStartMetres = fq.has("lumen.radiance_cache_far_field") && fq.boolean("lumen.radiance_cache_far_field")
                                         ? std::min<uint32_t>((uint32_t)fq.number("surface_cache.mesh_cards_max_distance_m"), 65535u)
                                         : 0u;
+    // surface_cache.feedback_gather: the probes' hits read the cards' high levels and report (the reference's gather
+    // reads the resident level and reports nothing: default false)
+    const bool hiResHits = fq.has("surface_cache.feedback_gather") && fq.boolean("surface_cache.feedback_gather");
     const TextureRef rcIndirection = rc.indirection, rcAtlas = rc.atlas, rcDepth = rc.depth;
     const uint32_t rcParamsSrv = rc.params;
     g.addPass("r.gi.lg.screendata", QueueType::Compute,
@@ -447,6 +498,8 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     // cut, so its screen-trace input is invalid) and skips the walk. gi.lumen_screen_trace_skip_after_cut (default
     // false, not an Unreal rule) also skips it in the frame after, which reads the cut frame's colour.
     const bool screenTraced = L.screenTraces && pyramid.valid() && prevColor.valid() && !(L.screenTraceSkipAfterCut && previousFrameWasCut);
+    // atmosphere.fog.on_gi_rays: the probes' rays take the fog along them (the kernels read the fog's volume: FogVolume.hlsli)
+    const bool fogOnGiRays = fc.resources.fog.on && fc.resources.fog.onGiRays;
     if (screenTraced)
     {
         const FrameContext::Upscale up = fc.frame.upscale;
@@ -465,6 +518,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                       b.use(traceWord, Use::UavCompute);
                       if (farField) b.use(rcIndirection, Use::SrvCompute);
                       rays.declareHair(b);  // (a ray that meets a groom first is the world trace's)
+                      if (fogOnGiRays) declareFog(b, fc.resources, Use::SrvCompute);  // (FogVolume.hlsli fogOverGiRay)
                   },
                   [=, &shaders](PassContext& c) {
                       uint32_t k[48] = {};
@@ -514,6 +568,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   rays.declareHair(b);
                   if (atmosphere)
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
+                  if (fogOnGiRays) declareFog(b, fc.resources, Use::SrvGraphics);  // (FogVolume.hlsli fogOverGiRay)
               },
               [=, &pipeline](PassContext& c) {
                   uint32_t k[48] = {};
@@ -531,7 +586,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   k[14] = bits(sun.z);
                   k[15] = experiment;
                   k[16] = bits(skyBand);
-                  k[17] = (screenTraced ? 1u : 0u) | (!cache.valid() || (!L.hitFallback && cards.valid()) ? 2u : 0u) | farStartMetres << 16;
+                  k[17] = (screenTraced ? 1u : 0u) | (!cache.valid() || (!L.hitFallback && cards.valid()) ? 2u : 0u) | (hiResHits ? 4u : 0u) | farStartMetres << 16;
                   k[18] = bits(L.normalBias);
                   k[19] = bits(L.movingSpeed);
                   k[20] = cards.valid() ? c.srv(cards.frame) : 0xFFFFFFFFu;
@@ -764,9 +819,17 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
               });
+    // Foliage pixels' history distance and the history's rejection by its normal (LgTemporal.hlsl; lumen.toml)
+    const float foliageDistanceThreshold =
+        fq.has("lumen.gather_temporal_distance_threshold_foliage") ? (float)fq.number("lumen.gather_temporal_distance_threshold_foliage") : 0.03f;
+    const bool rejectByNormal = fq.has("lumen.gather_temporal_reject_normal") && fq.boolean("lumen.gather_temporal_reject_normal");
+    const float rejectNormalDegrees = fq.has("lumen.gather_temporal_normal_threshold_deg") ? (float)fq.number("lumen.gather_temporal_normal_threshold_deg") : 45.0f;
+    const uint32_t rejectNormalBits =
+        rejectByNormal ? std::clamp((uint32_t)std::lround(std::cos(std::clamp(rejectNormalDegrees, 0.0f, 89.0f) * 0.01745329252f) * 255.0f), 1u, 255u) : 0u;
     g.addPass("r.gi.lg.temporal", QueueType::Compute,
               [&](PassBuilder& b) {
                   surface(b);
+                  if (materialWord.valid()) b.use(materialWord, Use::SrvCompute);
                   b.use(newDiffuse, Use::SrvCompute);
                   b.use(newSpecular, Use::SrvCompute);
                   b.use(prevDiffuse, Use::SrvCompute);
@@ -804,6 +867,11 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   k[42] = foliage ? c.srv(newBackface) : 0xFFFFFFFFu;
                   k[43] = foliage && backfaceHistory ? c.srv(prevBackface) : 0xFFFFFFFFu;
                   k[44] = foliage ? c.uav(backface) : 0xFFFFFFFFu;
+                  // (P[11].y, P[11].w: the material word and the foliage pixels' distance threshold; P[9].z bits 24-31:
+                  // the normal rejection's cosine)
+                  k[45] = materialWord.valid() ? c.srv(materialWord) : 0xFFFFFFFFu;
+                  k[47] = bits(foliageDistanceThreshold);
+                  k[38] |= rejectNormalBits << 24;
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/Lumen/LgTemporal"));
                   c.computeConstants(k, 48);
                   c.bindFrameConstants(frameConstants);

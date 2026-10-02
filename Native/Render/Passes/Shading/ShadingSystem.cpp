@@ -232,6 +232,8 @@ Stats latestStats(TrackState& state)
     for (uint32_t c = 0; c < 4; ++c) st.classTiles[c] = w[c];
     st.edgePixels = w[4];
     st.coverageErrors = ring.coverage[slot] ? w[5] : 0;
+    if (ring.coverage[slot])
+        st.coverageEntries = w[11], st.coverageWalked = w[12], st.coverageShaded = w[13], st.coverageLightPixels = w[14], st.coverageHeavyPixels = w[15];
     if (ring.glass[slot]) st.glassPanePixels = w[6], st.glassSolidPixels = w[7], st.glassUnlitPixels = w[8];
     if (ring.dof[slot]) st.dofPixels = w[9], st.dofClampedPixels = w[10];
     st.tiles = ring.tiles[slot];
@@ -1417,7 +1419,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             covMlSpecular = cml.lightingSpecular;
         }
 #endif
-        const BufferRef state = g.createBuffer({ "m.coverage state", 8 * 4, 0 });
+        const BufferRef state = g.createBuffer({ "m.coverage state", 16 * 4, 0 });  // COVS_WORDS
         const BufferRef args = g.createBuffer({ "m.coverage args", 16 * 4, 0 });
         const BufferRef pairs = g.createBuffer({ "m.coverage pairs", std::max<uint64_t>(capacity, 1) * 8, 0 });
         const BufferRef heavy = g.createBuffer({ "m.coverage heavy", heavyCap * 16 * 4, 0 });
@@ -1429,10 +1431,31 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                           fc.shaders.compute("Passes/Shading/CoverageBegin.MODE2") };
         // The fragment shading is split in two parts (the DXIL limit, CoverageComposite.hlsl): part 1 the direct light into
         // a per-pixel sum, part 2 the indirect light and the output; the heavy rounds run once per part.
-        ID3D12PipelineState* light1 = fc.shaders.compute(("Passes/Shading/CoverageComposite.PART1.OUTPUT" + output + ".AREA" + area).c_str());
-        ID3D12PipelineState* light2 = fc.shaders.compute(("Passes/Shading/CoverageComposite.PART2.OUTPUT" + output + ".AREA" + area).c_str());
+        // shading.coverage_compact (CoverageShade.hlsli; written 2026-10-03, built, not run): the light pixels in the
+        // compact form instead - the walk weights the fragments and lists those with weight per tile (CoverageWalk), two
+        // kernels shade the list one fragment per lane (CoverageShadeList: the same two parts) and the gather sums each
+        // pixel's entries with the band A remainder (CoverageGather). The same weights and shading calls; the sums stay
+        // in float. Entry buffers: one entry per record at most (V's record capacity).
+        const bool compact = fc.quality.has("shading.coverage_compact") && fc.quality.boolean("shading.coverage_compact");
+        ID3D12PipelineState* light1 = compact ? nullptr : fc.shaders.compute(("Passes/Shading/CoverageComposite.PART1.OUTPUT" + output + ".AREA" + area).c_str());
+        ID3D12PipelineState* light2 = compact ? nullptr : fc.shaders.compute(("Passes/Shading/CoverageComposite.PART2.OUTPUT" + output + ".AREA" + area).c_str());
+        ID3D12PipelineState* walk = compact ? fc.shaders.compute("Passes/Shading/CoverageWalk") : nullptr;
+        // The list's shading in one kernel (direct and indirect light together: the surface, material and air once per
+        // fragment) where the fragments do not run the area lights' loop - no area light in the scene, or the local
+        // lights come from the coverage MegaLights instance; else in the composite's two parts (the one-kernel form with
+        // that loop is over the DXIL limit).
+        const bool compactWhole = compact && (!areaLights || covMlDiffuse.valid());
+        ID3D12PipelineState* shadeList[2] = {
+            !compact ? nullptr : fc.shaders.compute(compactWhole ? "Passes/Shading/CoverageShadeWhole" : ("Passes/Shading/CoverageShadeList.PART1.AREA" + area).c_str()),
+            !compact || compactWhole ? nullptr : fc.shaders.compute(("Passes/Shading/CoverageShadeList.PART2.AREA" + area).c_str())
+        };
+        ID3D12PipelineState* gather = compact ? fc.shaders.compute(("Passes/Shading/CoverageGather.OUTPUT" + output).c_str()) : nullptr;
+        const BufferRef covEntries = compact ? g.createBuffer({ "m.coverage visible", std::max<uint64_t>(capacity, 1) * 8, 0 }) : BufferRef{};
+        const BufferRef covRadiance = compact ? g.createBuffer({ "m.coverage radiance", std::max<uint64_t>(capacity, 1) * 12, 0 }) : BufferRef{};
+        const BufferRef tileSpans = compact ? g.createBuffer({ "m.coverage tile spans", tiles * 8, 0 }) : BufferRef{};
+        const BufferRef pixelSpans = compact ? g.createBuffer({ "m.coverage pixel spans", tiles * 64 * 8, 0 }) : BufferRef{};
         ID3D12PipelineState* heavyReset = fc.shaders.compute("Passes/Shading/CoverageHeavyReset");
-        const TextureRef directSum = g.createTexture({ "m.coverage direct", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+        const TextureRef directSum = compact ? TextureRef{} : g.createTexture({ "m.coverage direct", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
         ID3D12PipelineState* sort[2] = { fc.shaders.compute("Passes/Shading/CoverageHeavySort.SIZE0"), fc.shaders.compute("Passes/Shading/CoverageHeavySort.SIZE1") };
         ID3D12PipelineState* heavyRounds[2] = { fc.shaders.compute(("Passes/Shading/CoverageHeavyRound.PART1.AREA" + area).c_str()),
                                                 fc.shaders.compute(("Passes/Shading/CoverageHeavyRound.PART2.AREA" + area).c_str()) };
@@ -1452,9 +1475,45 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           c.cmd->Dispatch(1, 1, 1);
                       });
         };
+        // E's grooms between the layer's fragments and the sun (shading.hair_shadows; Passes/Hair/HairShadow.hlsl MODE 2):
+        // per pixel with records the hair's transmittance at the 4 depths of S's sun profile. The cluster fragments
+        // multiply their sun visibility by it (CoverageShade.hlsli covFragmentShadow, P[11].z); the hair records count
+        // the hair themselves. Frames without a density volume record nothing.
+        TextureRef hairSun;
+        if (fragmentShadows && (!fc.quality.has("shading.hair_shadows") || fc.quality.boolean("shading.hair_shadows")) && r.hairDensityParams.valid() &&
+            r.hairDensity.valid() && r.hairDensityCoarse.valid())
+        {
+            const uint32_t hairSteps = fc.quality.has("shading.hair_shadow_steps") ? (uint32_t)fc.quality.integer("shading.hair_shadow_steps") : 32u;
+            if (hairSteps < 2 || hairSteps > 128) fail("shading.hair_shadow_steps must be in [2, 128]");
+            const uint32_t hairJitter = !fc.quality.has("shading.hair_march_jitter") || fc.quality.boolean("shading.hair_march_jitter") ? 1u : 0u;
+            const float3 originOffset = v.view.position - r.hairOrigin;
+            const BufferRef hairParams = r.hairDensityParams;
+            const TextureRef hairFine = r.hairDensity, hairCoarse = r.hairDensityCoarse, ranges = v.coverageDepthRange;
+            const uint32_t hairW = v.view.width, hairH = v.view.height;
+            hairSun = g.createTexture({ "m.coverage hair sun", hairW, hairH, 1, 1, DXGI_FORMAT_R32_UINT });
+            ID3D12PipelineState* hairProfile = fc.shaders.compute("Passes/Hair/HairShadow.MODE2");
+            g.addPass("m.coverage.hairsun", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(ranges, Use::SrvCompute);
+                          b.use(hairParams, Use::SrvCompute);
+                          b.use(hairFine, Use::SrvCompute);
+                          b.use(hairCoarse, Use::SrvCompute);
+                          b.use(hairSun, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          uint32_t k[8] = { c.srv(hairParams), c.srv(ranges), c.uav(hairSun), hairSteps, 0, 0, 0, hairJitter };
+                          const float o3[3] = { originOffset.x, originOffset.y, originOffset.z };
+                          std::memcpy(&k[4], o3, 12);
+                          c.cmd->SetPipelineState(hairProfile);
+                          c.bindFrameConstants(cb);
+                          c.computeConstants(k, 8);
+                          c.cmd->Dispatch((hairW + 7) / 8, (hairH + 7) / 8, 1);
+                      });
+        }
         // The fragment shading kernels' resources (CoverageShade.hlsli: P[1], P[3], P[4], P[5].x).
         auto useShading = [=](PassBuilder& b) {
             b.use(v.coverageRecords, Use::SrvCompute);
+            if (hairSun.valid()) b.use(hairSun, Use::SrvCompute);  // (P[11].z)
             b.use(v.visibleClusters, Use::SrvCompute);
             b.use(v.depth, Use::SrvCompute);
             if (froxelLists) b.use(v.froxelLights, Use::SrvCompute);
@@ -1500,6 +1559,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             waterSunConstants(c, k + 36, 4);  // P[9], P[10].x (v1.77)
             k[44] = covMlDiffuse.valid() ? c.srv(covMlDiffuse) : gpu::kNone;   // P[11].x: shading.mega_lights' coverage instance
             k[45] = covMlSpecular.valid() ? c.srv(covMlSpecular) : gpu::kNone;  // P[11].y
+            k[46] = hairSun.valid() ? c.srv(hairSun) : gpu::kNone;              // P[11].z: the grooms towards the sun
         };
         auto shadingConstants = [=](PassContext& c, uint32_t (&k)[24], uint32_t colour) {
             const uint32_t none = gpu::kNone;
@@ -1980,7 +2040,102 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
                       });
         };
-        addComposite(1);
+        // The compact form's stages (shading.coverage_compact): W the walk, S the list's shading (part 1, part 2), G the gather.
+        auto addWalk = [&] {
+            g.addPass("m.coverage.walk", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(v.coverageRecords, Use::SrvCompute);
+                          b.use(v.visibleClusters, Use::SrvCompute);
+                          b.use(v.depth, Use::SrvCompute);
+                          b.use(v.coverageTilePixels, Use::SrvCompute);
+                          b.use(v.coverageTileList, Use::SrvCompute);
+                          b.use(v.coverageTileList, Use::IndirectArgs);
+                          b.use(state, Use::UavCompute);
+                          b.use(heavy, Use::UavCompute);
+                          for (BufferRef x : { covEntries, pixelSpans, tileSpans }) b.use(x, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          uint32_t k[24] = {};
+                          k[0] = c.srv(v.coverageRecords);
+                          k[1] = c.srv(v.coverageTilePixels);
+                          k[2] = c.srv(v.coverageTileList);
+                          k[3] = c.uav(state);
+                          k[4] = c.srv(v.visibleClusters);  // P[1].x (the sort's tie order)
+                          k[6] = c.srv(v.depth);            // P[1].z
+                          k[8] = c.uav(covEntries);         // P[2]
+                          k[9] = c.uav(pixelSpans);
+                          k[10] = c.uav(tileSpans);
+                          k[11] = c.uav(heavy);
+                          k[21] = hcap;                     // P[5].yzw
+                          k[22] = ccap;
+                          k[23] = (uint32_t)capacity;
+                          c.cmd->SetPipelineState(walk);
+                          c.bindFrameConstants(cb);
+                          c.computeConstants(k, 24);
+                          c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
+                      });
+        };
+        auto addShadeList = [&](uint32_t stage) {  // 0: the one kernel, 1 and 2: the two parts
+            g.addPass(stage == 1 ? "m.coverage direct" : "m.coverage", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          useShading(b);
+                          if (covTileLights) b.use(covTlField, Use::SrvCompute);  // L2c
+                          if (shaded.valid()) b.use(shaded, Use::SrvCompute);
+                          b.use(v.coverageTileList, Use::SrvCompute);
+                          b.use(v.coverageTileList, Use::IndirectArgs);
+                          b.use(covEntries, Use::SrvCompute);
+                          b.use(tileSpans, Use::SrvCompute);
+                          b.use(covRadiance, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          uint32_t k[24] = { c.srv(v.coverageRecords), c.srv(tileSpans), c.srv(v.coverageTileList), c.srv(covEntries) };
+                          shadingConstants(c, k, gpu::kNone);
+                          k[8] = c.uav(covRadiance);  // P[2].x
+                          k[9] = k[10] = k[11] = gpu::kNone;
+                          k[23] = covTileLights ? c.srv(covTlField) : gpu::kNone;  // P[5].w (L2c)
+                          uint32_t k32[48] = {};
+                          std::memcpy(k32, k, sizeof k);
+                          k32[41] = covTileLights ? covTlCapacity : 0;  // P[10].y (L2c)
+                          k32[24] = k32[25] = gpu::kNone;
+                          fragmentConstants(c, k32);  // P[6].zw, P[7], P[8].xy
+                          k32[34] = gpu::kNone;       // P[8].z: no per-pixel direct sum in this form
+                          c.cmd->SetPipelineState(shadeList[stage == 2 ? 1 : 0]);
+                          c.bindFrameConstants(cb);
+                          c.computeConstants(k32, 48);
+                          c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
+                      });
+        };
+        auto addGather = [&] {
+            g.addPass("m.coverage.gather", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          useBandA(b);
+                          b.use(v.coverageTileList, Use::SrvCompute);
+                          b.use(v.coverageTileList, Use::IndirectArgs);
+                          b.use(covRadiance, Use::SrvCompute);
+                          b.use(pixelSpans, Use::SrvCompute);
+                          b.use(tileSpans, Use::SrvCompute);
+                          b.use(v.color, Use::UavCompute);
+                          useParticles(b);
+                      },
+                      [=](PassContext& c) {
+                          uint32_t k[28] = {};
+                          k[0] = c.srv(covRadiance);
+                          k[1] = c.srv(pixelSpans);
+                          k[2] = c.srv(v.coverageTileList);
+                          k[3] = c.srv(tileSpans);
+                          k[7] = c.uav(v.color);         // P[1].w
+                          k[8] = c.srv(edgeRadiance);    // P[2]: the band A radiance under the fragments
+                          k[9] = c.srv(edgeResolved);
+                          k[10] = c.srv(edgeTiles);
+                          particleConstants(c, k + 24);  // P[6].xy
+                          c.cmd->SetPipelineState(gather);
+                          c.bindFrameConstants(cb);
+                          c.computeConstants(k, 28);
+                          c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
+                      });
+        };
+        if (compact) addWalk();
+        else addComposite(1);
         addBegin("m.coverage.heavy args", 1, 0);
         // F1: heavy pixels' runs of COV_BLOCK records sorted into the pair buffer.
         g.addPass("m.coverage.sort", QueueType::Graphics,
@@ -2056,7 +2211,17 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           });
             }
         }
-        addComposite(2);
+        if (compact)
+        {
+            if (compactWhole) addShadeList(0);
+            else
+            {
+                addShadeList(1);
+                addShadeList(2);
+            }
+            addGather();
+        }
+        else addComposite(2);
         // F3: heavy pixels' band A remainder and output; a pixel the rounds left open sets the error bit.
         g.addPass("m.coverage.finish", QueueType::Graphics,
                   [&](PassBuilder& b) {
@@ -2087,7 +2252,12 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           b.use(state, Use::CopySrc);
                           b.keep();
                       },
-                      [dst, slot, state](PassContext& c) { c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes + 20, c.resource(state), 12, 4); });
+                      [dst, slot, state](PassContext& c) {
+                          c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes + 20, c.resource(state), 12, 4);
+                          // (the composite's counts: COVS_ENTRIES, COVS_WALKED, COVS_SHADED, COVS_LIGHT_PIXELS, then COVS_HEAVY)
+                          c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes + 44, c.resource(state), 32, 16);
+                          c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes + 60, c.resource(state), 8, 4);
+                      });
         }
     }
     return {};
@@ -2260,8 +2430,11 @@ void shade(FramePassContext& fc, ViewResources& view)
     // Depth of field (the lens's aperture integral) follows the time integral (FEATURES_GAME 4: time, then lens).
     // Temporal upscale (output.render_height_max): all of the above at the internal resolution into the chain's HDR
     // target (postTarget: the view's size), then the upscale to the output resolution, then the chain into view.color.
+    // With shading.motion_blur_after_upscale the time integral of an upscaled view follows the upscale instead, at the
+    // output resolution (the reference's order: lens, upscale, motion blur; motionBlurUpscaled).
     const bool post = postActive(fc, view);
-    const bool blur = motionBlurActive(fc, view), haze = distortionActive(fc, view), dof = depthOfFieldActive(fc, view);
+    const bool blurAfter = motionBlurActive(fc, view) && upscaleActive(fc, view) && motionBlurAfterUpscale(fc);
+    const bool blur = motionBlurActive(fc, view) && !blurAfter, haze = distortionActive(fc, view), dof = depthOfFieldActive(fc, view);
     const DXGI_FORMAT floatFormat = post ? DXGI_FORMAT_R16G16B16A16_FLOAT : fc.graph.desc(view.color).format;
     auto intermediate = [&](const char* name) { return fc.graph.createTexture(TextureDesc{ name, view.view.width, view.view.height, 1, 1, floatFormat }); };
     ViewResources target = view;
@@ -2314,8 +2487,16 @@ void shade(FramePassContext& fc, ViewResources& view)
     if (upscaleActive(fc, view))
     {
         // the output resolution from the internal image and the history (Upscale.cpp); the chain encodes it (postActive)
-        image = temporalUpscale(fc, view, image);
+        UpscaleProducts products;
+        image = temporalUpscale(fc, view, image, &products);
         view.upscaled = image;  // (captures of the upscaled image: renderergate --capture-output)
+        if (blurAfter)
+        {
+            const TextureDesc upscaled = fc.graph.desc(image);
+            const TextureRef blurred = fc.graph.createTexture(TextureDesc{ "m.motion.blurred", upscaled.width, upscaled.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+            motionBlurUpscaled(fc, view, image, blurred, products.motion, products.depth);
+            image = blurred;
+        }
         postChain(fc, upscaleOutputView(fc, view), image);
         return;
     }

@@ -28,12 +28,24 @@ float3 shSpecularAlbedo(float3 f0, float NoV, float roughness)
 }
 
 // Model specular lobe f_s (without the cosine) for unit n, v, l on the front side (INTERFACES 8.1, v1.4 D).
-float3 shSpecular(float3 f0, float alpha, float3 compensation, float3 n, float3 v, float3 l, float NoV, float NoL)
+float3 shSpecularLobe(float3 f0, float alpha, float3 compensation, float3 n, float3 v, float3 l, float NoV, float NoL)
 {
     const float3 h = normalize(v + l);
     const float NoH = saturate(dot(n, h)), VoH = saturate(dot(v, h));
     const float3 nxh = cross(n, h);
     return modelFresnel(f0, VoH) * (modelD(NoH, dot(nxh, nxh), alpha) * modelV(NoV, NoL, alpha)) * compensation;
+}
+// A local light's specular and diffuse scales (scene::Light; Scene.hlsli) reach the shading through the light's own
+// functions: shPunctualIlluminance returns the illuminance times the diffuse scale and leaves the light's specular scale
+// over its diffuse one here, and the specular lobes of a local light - shSpecular, shSpecularSubsurface - multiply by
+// it (a diffuse scale of 0 counts as 1e-4: the specular scale stays exact). A lobe a kernel evaluates by another
+// function for a local light (a coat, a sheen) multiplies by shLightSpecular() itself; the sun's lobes are
+// shSpecularLobe's (no scale). Area lights: shAreaIntegral (AreaLight.hlsli) scales each integral.
+static float g_shLightSpecular = 1;
+float shLightSpecular() { return g_shLightSpecular; }
+float3 shSpecular(float3 f0, float alpha, float3 compensation, float3 n, float3 v, float3 l, float NoV, float NoL)
+{
+    return shSpecularLobe(f0, alpha, compensation, n, v, l, NoV, NoL) * g_shLightSpecular;
 }
 
 // The Subsurface class's specular lobe f_s (MaterialModel.hlsli ModelSubsurface): the two lobes' D, the visibility term at
@@ -43,7 +55,7 @@ float3 shSpecularSubsurface(float3 f0, ModelSubsurface k, float3 compensation, f
     const float3 h = normalize(v + l);
     const float NoH = saturate(dot(n, h)), VoH = saturate(dot(v, h));
     const float3 nxh = cross(n, h);
-    return modelFresnel(f0, VoH) * (modelSubsurfaceD(k, NoH, dot(nxh, nxh)) * modelV(NoV, NoL, modelAlpha(k.roughness))) * compensation;
+    return modelFresnel(f0, VoH) * (modelSubsurfaceD(k, NoH, dot(nxh, nxh)) * modelV(NoV, NoL, modelAlpha(k.roughness))) * compensation * g_shLightSpecular;
 }
 
 // ---------------------------------------------------------------- sun disk
@@ -82,7 +94,7 @@ float3 shSunSpecularQuadrature(float3 f0, float alpha, float3 compensation, floa
             sincos((k + 0.5) * (2 * SH_PI / 12), sp, cp);
             const float3 l = l0 * c + (t * cp + b * sp) * s;
             const float NoL = dot(n, l);
-            if (NoL > 0) ring += shSpecular(f0, alpha, compensation, n, v, l, NoV, NoL) * NoL;
+            if (NoL > 0) ring += shSpecularLobe(f0, alpha, compensation, n, v, l, NoV, NoL) * NoL;
         }
         sum += ring * (glWeights[i] / 12);
     }
@@ -195,7 +207,7 @@ float3 shSunSpecular(float3 f0, float roughness, float alpha, float3 compensatio
     // Terminator band (the disk crosses the shading normal's horizon): the clipped cosine has a kink inside the disk, which
     // only the per-point quadrature follows; the band is < 1 px wide on curved surfaces, so its cost is negligible.
     const bool terminator = NoL0 < 2 * sinS;
-    if (!terminator && alpha >= 16 * thetaS) return shSpecular(f0, alpha, compensation, n, v, l0, NoV, NoL0) * NoL0 * LOmega;
+    if (!terminator && alpha >= 16 * thetaS) return shSpecularLobe(f0, alpha, compensation, n, v, l0, NoV, NoL0) * NoL0 * LOmega;
     if (!terminator && alpha >= 2 * thetaS) return shSunSpecular4(f0, alpha, compensation, n, v, l0, NoV, cosS) * LOmega;
     if (terminator && alpha >= 2 * thetaS) return shSunSpecularQuadrature(f0, alpha, compensation, n, v, l0, NoV, sinS, cosS) * LOmega;
     return shSpecularAlbedo(f0, NoV, roughness) * shSunLobeFraction(n, v, NoV, l0, alpha, pixelAngle) * E / (SH_PI * sinS * sinS);
@@ -265,20 +277,25 @@ float shSunDiskCoverage(float3 D, float3 Dx, float3 Dy)
 // ---------------------------------------------------------------- local lights (INTERFACES 8.2)
 // Illuminance (lux x colour) at a surface facing a punctual light: I / d^2 w(d), spots x saturate(cos spotScale +
 // spotOffset)^2 on the angle from the light's axis; 'toLight' = light position - surface point (camera-relative
-// difference), 'l' = unit direction to the light.
+// difference), 'l' = unit direction to the light. w(d) is the light's window (Scene.hlsli lightWindow: the range's, or
+// the falloff exponent's; with the view's draw-distance fade); the value carries the light's diffuse scale and
+// g_shLightSpecular its specular one (above).
 float3 shPunctualIlluminance(GpuLight light, float3 toLight, out float3 l)
 {
     const float d2 = dot(toLight, toLight);
     const float d = sqrt(d2);
     l = toLight / max(d, 1e-9);
-    const float x = d / max(light.range, 1e-6), x2 = x * x;
-    const float w = saturate(1 - x2 * x2);
-    float i = light.intensity * w * w / max(d2, 1e-12);
+    float i = light.intensity * lightWindow(light, d) / max(d2, 1e-12);
     if (lightType(light) == LIGHT_SPOT)
     {
         const float sp = saturate(dot(-l, light.forward) * light.spotScale + light.spotOffset);
         i *= sp * sp;
     }
+#if UNX_LIGHT_COMPONENTS
+    const float diffuse = max(lightDiffuseScale(light), 1e-4);
+    g_shLightSpecular = lightSpecularScale(light) / diffuse;
+    i *= diffuse;
+#endif
     return light.color * i;
 }
 

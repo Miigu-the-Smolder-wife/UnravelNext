@@ -3,6 +3,10 @@
 // per clipmap level (one raster view each), one bit per 128-texel viewport tile = window page, set when that page is drawn
 // this frame (a new physical page, VsmScan; kept pages are not redrawn, VsmCache), and the page's atlas slot in word (level x 512 + word) x 32 + bit of the slots
 // buffer. One thread per 32-bit mask word.
+// shadow.vsm.static_separate (P[1].x = 1): a second set of mask words and slots after the first (word VSM_LEVELS x 512 on) for
+// the movable casters' views - the pages drawn anew and the kept pages whose movable casters are drawn anew
+// (VSM_FLAG_DIRTY_DYNAMIC); the first set is the static casters' (the pages drawn anew). A page has the same slot in
+// both: the two atlases hold a page at the same place.
 // P[0].x page table SRV (raw), P[0].y mask UAV (raw), P[0].z VSM constants CBV, P[0].w atlas slots UAV (raw)
 #include "Passes/Shadow/VsmCommon.hlsli"
 
@@ -15,18 +19,27 @@ void main(uint word : SV_DispatchThreadID)
     ByteAddressBuffer table = ResourceDescriptorHeap[P[0].x];
     RWByteAddressBuffer slots = ResourceDescriptorHeap[P[0].w];
     const uint k = word / wordsPerLevel;
-    uint bits = 0;
+    const bool separate = P[1].x != 0;
+    const uint second = VSM_LEVELS * wordsPerLevel;  // the movable casters' set of words
+    uint bits = 0, bitsDynamic = 0;
     [unroll] for (uint i = 0; i < 32; ++i)
     {
         const uint tile = (word % wordsPerLevel) * 32 + i;  // row-major over the window
         const int2 page = vsmOrigin(c, k) + int2(tile % VSM_TABLE, tile / VSM_TABLE);
         const uint e = table.Load(vsmSlot(page, k) * 8);
-        if ((e & (VSM_FLAG_RESIDENT | VSM_FLAG_DIRTY)) == (VSM_FLAG_RESIDENT | VSM_FLAG_DIRTY))  // drawn this frame (kept pages: VsmCache)
+        const bool resident = (e & VSM_FLAG_RESIDENT) != 0;
+        if (resident && (e & VSM_FLAG_DIRTY) != 0)  // drawn this frame (kept pages: VsmCache)
         {
             bits |= 1u << i;
             slots.Store((word * 32 + i) * 4, e & VSM_PHYS_MASK);
         }
+        if (separate && resident && (e & (VSM_FLAG_DIRTY | VSM_FLAG_DIRTY_DYNAMIC)) != 0)
+        {
+            bitsDynamic |= 1u << i;
+            slots.Store(((second + word) * 32 + i) * 4, e & VSM_PHYS_MASK);
+        }
     }
     RWByteAddressBuffer mask = ResourceDescriptorHeap[P[0].y];
     mask.Store(word * 4, bits);
+    if (separate) mask.Store((second + word) * 4, bitsDynamic);
 }

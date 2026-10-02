@@ -53,6 +53,48 @@ upscale_tsr_kernel_by_samples = true    # with upscale_tsr: the update's kernel 
 upscale_tsr_flickering = true           # with upscale_tsr: the flickering heuristic (TsrFlicker.hlsl; the reference's
                                         # r.TSR.ShadingRejection.Flickering): a still pixel whose luma flips every frame with the
                                         # jitter (tile joints, gratings) keeps its history inside the flicker's amplitude
+upscale_tsr_reprojection_field = true   # with upscale_tsr: the reprojection field (TsrDilate.hlsl; the reference's
+                                        # r.TSR.ReprojectionField, on from its high tier up): per internal pixel the vector's
+                                        # jacobian - every output pixel reprojects to its own place under a turn or a zoom, the
+                                        # history stays sharp - and on an edge whose sides move apart the boundary inside the
+                                        # pixel, so an output pixel takes the vector of the side it lies on (no smear one input
+                                        # pixel wide along moving edges). false: one dilated vector per internal pixel
+upscale_tsr_reprojection_field_aa_speed = 0.125  # output pixels a frame the two sides of an edge must move apart by before the
+                                        # boundary is found from the depth edge (r.TSR.ReprojectionField.AntiAliasPixelSpeed);
+                                        # slower edges give the whole pixel to the foreground
+upscale_tsr_resurrection = false        # (off as the reference's default, until one batch has measured its cost and picture)
+                                        # with upscale_tsr: history resurrection (TsrResurrect.hlsl; the reference's
+                                        # r.TSR.Resurrection, off in its defaults): the history keeps every 31st frame (two of them,
+                                        # its Resurrection.PersistentFrameInterval / PersistentFrameCount) beside the previous one;
+                                        # a pixel whose history is rejected or was hidden in the previous frame takes the kept
+                                        # frame's converged colour where that matches what it shows now (a door that closes again,
+                                        # the wall behind a passer-by, a view turned back) instead of starting from this frame's
+                                        # samples. Costs two more histories and guides (4K output at 100 %: 2 x 63 MiB) and one
+                                        # more reprojection and measure of the guide. false: the two-frame history
+upscale_tsr_history_percent = 100.0     # (100 until measured: 200 at a 4K output is an 8K history and four times the update's pixels)
+                                        # with upscale_tsr: the history's size, percent of the output's per axis (100 .. 200; the
+                                        # reference's r.TSR.History.ScreenPercentage, 200 on its epic tier): above 100 the history
+                                        # holds detail beyond the output's pixels, each reprojection resamples it with less blur,
+                                        # and m.tsr.resolve filters it down to the output (TsrResolve.hlsl). 200 at a 4K output: an
+                                        # 8K history (253 MiB a slot, 2 slots, 4 with resurrection) and the update over 4 x the
+                                        # pixels - the tiers below epic keep 100
+upscale_tsr_thin_geometry = true        # with upscale_tsr: thin geometry detection (TsrThin.hlsl; the reference's
+                                        # r.TSR.ThinGeometryDetection, there on with its foliage): geometry under a pixel wide
+                                        # changes its share of the pixel with every jitter offset and would be rejected as a
+                                        # change of shading - it flickers or vanishes. The coverage layer's thin fragments (their
+                                        # share of the pixel, where the reference counts hits) and pixel-wide lines of depth
+                                        # relax the rejection's clamp box to the history's own neighbourhood. false: no relaxation
+upscale_tsr_thin_geometry_error_multiplier = 200.0  # a line of depth is thin geometry where it stands out from both sides by
+                                        # this many pixel sizes in the world (r.TSR.ThinGeometryDetection.ErrorMultiplier)
+upscale_tsr_thin_geometry_max_relaxation = 0.037    # the relaxation weight inside thin geometry's clusters, where the
+                                        # coverage is near a half (r.TSR.ThinGeometryDetection.Coverage.MaxRelaxationWeight)
+upscale_layer_motion = true             # with upscale_tsr: the layers over the opaque surface move by themselves
+                                        # (UpscaleMotion.hlsl; the reference's translucent velocity output and has-pixel-animation
+                                        # mark): a glass pane, the water surface and the coverage layer's thin fragments (a third of
+                                        # the pixel or more) give the pixel their own vector and depth; particles and see-through
+                                        # fragments, which have no vector, hold the history's clamp and shorten it by their opacity,
+                                        # and a glass or water whose background moves otherwise holds the clamp. false: every pixel
+                                        # moves as the opaque surface behind its layers (they smear when either moves)
 screen_trace_source = 0                # the previous frame colour screen-space traces read (GI, reflections): 0 = the scene colour
                                         # before the upscale, as the reference (r.Lumen.ScreenTracingSource 0), kept with its
                                         # frame's depth in alpha - the traces' history depth test (UpscaleSceneKeep.hlsl);

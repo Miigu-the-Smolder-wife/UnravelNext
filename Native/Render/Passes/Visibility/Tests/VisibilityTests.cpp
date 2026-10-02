@@ -1911,16 +1911,25 @@ UNX_TEST(coverage_layer_is_exact)
         const char* name;
         std::vector<std::string> keys;
     };
+    // The first two store every fragment in front of band A (the list drawn whole: visibility.coverage_depth_buckets = 1).
+    // "depth buckets" (CoverageBuckets.hlsli; written 2026-10-03, not run yet): the list drawn nearer first in 4 buckets
+    // from the frame whose statistics show a band B list; an expected fragment may then be absent exactly when the stored
+    // opaque records of its pixel that are not behind it fill the mask union (weight zero in the composite).
     const Config configs[] = {
-        { "defaults", { "visibility.coverage_layer = true", "visibility.occlusion_culling = false" } },
+        { "defaults", { "visibility.coverage_layer = true", "visibility.occlusion_culling = false", "visibility.coverage_depth_buckets = 1" } },
         { "small capacity floor",
-          { "visibility.coverage_layer = true", "visibility.occlusion_culling = false", "visibility.coverage_pool_min_fragments_per_pixel = 0.05" } },
+          { "visibility.coverage_layer = true", "visibility.occlusion_culling = false", "visibility.coverage_pool_min_fragments_per_pixel = 0.05",
+            "visibility.coverage_depth_buckets = 1" } },
+        { "depth buckets",
+          { "visibility.coverage_layer = true", "visibility.occlusion_culling = false", "visibility.coverage_depth_buckets = 4",
+            "visibility.coverage_depth_buckets_min_clusters = 1" } },
     };
     for (const Config& config : configs)
     {
         const QualityConfig q = quality(config.keys);
         const uint32_t width = 640, height = 360, tilesX = (width + 7) / 8, tileCount = tilesX * ((height + 7) / 8);
         const bool smallFloor = std::string(config.name) == "small capacity floor";
+        const bool depthBuckets = std::string(config.name) == "depth buckets";
         std::vector<scene::Camera> cams(4, camera({ 0, 0, 0 }, { 0, 0, 1 }));
         cams[1].position = { 0.004f, 0.002f, 0 };  // moves every fragment: last frame's tiles must be emptied
         cams[2].position = { -0.003f, 0.001f, 0 };  // (and the statistics of frame 0 are read back by frame 2)
@@ -1989,6 +1998,8 @@ UNX_TEST(coverage_layer_is_exact)
                 uint32_t foundRecord[4] = {};
             };
             std::map<std::pair<uint64_t, uint32_t>, Expect> expected;  // (triangle key, pixel)
+            // depth buckets: per pixel the stored opaque records with a subsample (depth bits, mask) - the cover's contributors
+            std::vector<std::vector<std::pair<uint32_t, uint32_t>>> storedOpaque(depthBuckets ? (size_t)width * height : 0);
             size_t culledBack = 0, occluded = 0, marginal = 0;
             for (uint32_t ii = 2; ii < s.instances.size(); ++ii)
             {
@@ -2110,6 +2121,7 @@ UNX_TEST(coverage_layer_is_exact)
                     if (seeThrough != (s.instances[instance].mesh == cs.stackMesh))
                         fail("frame %zu: pixel (%u, %u): see-through flag %d on a record of instance %u", f, px, py, (int)seeThrough, instance);
                     seeThroughRecords += seeThrough;
+                    if (depthBuckets && !seeThrough && fr[2] != 0) storedOpaque[pi].push_back({ depthBits, fr[2] });
                     const gpu::Cluster& c = cd.clusters[cluster];
                     const uint32_t tp = cd.clusterTriangles[c.triangleOffset + tri];
                     uint32_t mv[3];
@@ -2221,12 +2233,31 @@ UNX_TEST(coverage_layer_is_exact)
             }
             for (size_t pi = 0; pi < rangeSeen.size(); ++pi)
                 if (!rangeSeen[pi] && (fo.range[2 * pi] != 0 || fo.range[2 * pi + 1] != 0xFFFFFFFFu)) ++staleRanges;
-            size_t missing = 0;
+            size_t missing = 0, hidden = 0;
             for (const auto& [k, e] : expected)
             {
-                if (!e.found && e.required)
-                    if (++missing <= 5) logf("    missing: pixel %u, area %g, depth %g\n", k.second, e.area, e.depth);
+                if (e.found || !e.required) continue;
+                if (depthBuckets)
+                {
+                    // Absent by the cover's rule: the stored opaque records of its pixel that are not behind it (within
+                    // the float projection's margin) fill the mask union, so the composite gives it no weight.
+                    const double margin = 1e-7 + 2e-4 * e.depth;
+                    uint32_t unionMask = 0;
+                    for (const auto& [bits, mask] : storedOpaque[k.second])
+                    {
+                        float depth;
+                        std::memcpy(&depth, &bits, 4);
+                        if (depth > e.depth - margin) unionMask |= mask;
+                    }
+                    if (unionMask == 0xFFFFFFFFu)
+                    {
+                        ++hidden;
+                        continue;
+                    }
+                }
+                if (++missing <= 5) logf("    missing: pixel %u, area %g, depth %g\n", k.second, e.area, e.depth);
             }
+            if (depthBuckets) logf("    [%s] frame %zu: %zu expected fragments absent behind a full union of nearer stored opaque records\n", config.name, f, hidden);
             const bool full = fragmentSum < capacity;  // a frame at capacity may have lost fragments (OVERFLOW_COVERAGE)
             logf("    [%s] frame %zu: %u tiles (%u of more than one block, deepest %u records), %llu records of capacity %u (%llu blocks); %zu checked against the "
                  "exact clip (%zu duplicates of clipped pieces; worst area error %.2e px, depth %.2e relative, slivers < 1e-2 px2 %.2e, normal %.2f degrees); %zu "
@@ -2237,11 +2268,12 @@ UNX_TEST(coverage_layer_is_exact)
                  occluded, marginal, staleTiles, staleRanges);
             CHECK(staleTiles == 0 && staleRanges == 0 && checked == fragmentSum && depthOver == 0);
             CHECK(missing == 0 || (smallFloor && !full));
-            if (full) CHECK(culledBack > 0 && occluded > 0 && coveredPixels > 0 && opaqueBits > 0 && seeThroughRecords > 16384 && deepest > 16 * 1024 && heavyCount > 0);
+            // (the scene's proportions with every fragment stored; the buckets' frames keep fewer of the stack's)
+            if (full && !depthBuckets) CHECK(culledBack > 0 && occluded > 0 && coveredPixels > 0 && opaqueBits > 0 && seeThroughRecords > 16384 && deepest > 16 * 1024 && heavyCount > 0);
             if (smallFloor && f == 0) CHECK(!full);  // the floor is below the first frame's need
         }
     }
-    logf("    coverage layer exact over %zu frames in 2 configurations\n", (size_t)3);
+    logf("    coverage layer exact over %zu frames in 3 configurations\n", (size_t)4);
 }
 
 int main(int argc, char** argv)

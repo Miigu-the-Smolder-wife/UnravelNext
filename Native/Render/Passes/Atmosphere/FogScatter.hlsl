@@ -1,14 +1,16 @@
 // unx-kernel: cs_6_6 main
 // s.fog.scatter (FogVolume.hlsli): one thread per cell of the fog's volume. The cell's extinction and the light it
 // scatters toward the camera per metre, at a point jittered inside the cell each frame (P[7]), blended with the cell's
-// history - the previous frame's volume read at the cell centre's place in the previous view.
+// history - the previous frame's volume read at the cell centre's place in the previous view. The light is stored x the
+// view's exposure; the history's is brought to this frame's exposure first (P[10].y).
 //   sun        E x the air's transmittance to the sun x the cloud layer's (the sun map at the sample point) x
 //              HG(view . sun, g) x (1 - the shadowed fraction of the cell's
 //              segment of its centre ray): the casters' shadow from the sun's shadow pages at the air level of the
 //              cell's width (VsmMarkFog.hlsl asked for exactly these pages, at the level of the unjittered cell). The
 //              segment stays in front of the surface on the centre ray (the centre pixel's depth): a segment that
 //              would cross it is moved toward the camera by what lies behind (fogSegment; past the surface the ray is
-//              in another space - beyond a wall, outside);
+//              in another space - beyond a wall, outside); x what E's grooms let through from the sample point towards
+//              the sun (Passes/Hair/HairDensity.hlsli hairTransmittance; P[10].z);
 //   local      the air grid's sampled local light (MegaLightsVolume.hlsl: visible fluence and its direction moment per
 //              froxel, shadow rays for every caster), read between its froxels, through the phase function's first two
 //              SH bands;
@@ -16,7 +18,8 @@
 // A cell wholly behind the farthest surface of its pixels is not computed (extinction -1): the integration passes
 // through it, and a history lookup that touches such a cell is dropped (a disoccluded cell starts from this frame).
 // P[0] = { grid x | y << 16, z | cell px << 16, asuint(far m), asuint(k) }
-// P[1] = { asuint(b), scatter UAV (Texture3D RGBA16F: rgb nits / m, a 1 / m), history SRV (UNX_NONE: none), flags }
+// P[1] = { asuint(b), scatter UAV (Texture3D RGBA16F: rgb nits / m x g_exposure, a 1 / m), history SRV (UNX_NONE: none),
+//          flags }
 // P[2] = asuint{ density (1/m at the fog's height), height falloff, height (m), phase g }
 // P[3] = asuint{ albedo r, g, b, start distance (m) }
 // P[4] = { VSM table SRV, atlas SRV, blocks SRV, constants CBV (UNX_NONE: no sun shadows) }
@@ -30,6 +33,8 @@
 //          [-1, 1]^3 -, then { density, height falloff, 1 / edge, albedo r | g << 8 | b << 16 | shape << 24 }), P[10].x =
 //          their count (FrameContext::fogVolumes). A volume adds density x fade toward its boundary x 2^(-falloff x the
 //          height inside it, 0 .. 1) x the density's variation, with its own albedo; the cell's light is the same.
+// P[10].y = asuint(this frame's exposure / the history's: the history's light at this frame's exposure; 1 without history)
+// P[10].z = E's hair density parameters (raw SRV; UNX_NONE: none - no hair this frame, or shading.hair_shadows off).
 // Frame constants of the view (the main view, or a planar reflection view: its fog starts at the mirror).
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
@@ -39,6 +44,7 @@
 #include "Passes/Atmosphere/FogVolume.hlsli"
 #include "Passes/Atmosphere/CloudShadowCommon.hlsli"
 #include "Passes/GI/LumenTranslucencyVolume.hlsli"
+#include "Passes/Hair/HairDensity.hlsli"
 
 [numthreads(4, 4, 4)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -135,7 +141,12 @@ void main(uint3 id : SV_DispatchThreadID)
                     }
                 }
             }
-            const float lit = (1 - saturate(shadowed)) * cloudSunTransmittanceFromLut(P[6].w, p);
+            float lit = (1 - saturate(shadowed)) * cloudSunTransmittanceFromLut(P[6].w, p);
+            if (P[10].z != 0xFFFFFFFFu && lit > 0)
+            {
+                ByteAddressBuffer hair = ResourceDescriptorHeap[P[10].z];
+                lit *= hairTransmittance(P[10].z, p - hairDensityOrigin(hair), sun, 3.0e38f, 32u, jitter.z);
+            }
             inScattered += E * airSunTransmittance(a, P[6].w, airLiftToSurface(a, p), sun) * (lit * airMiePhase(dot(dir, sun), fog.g));
         }
         // the local lights
@@ -155,8 +166,9 @@ void main(uint3 id : SV_DispatchThreadID)
         // the indirect light
         if (P[6].z != 0xFFFFFFFFu) inScattered += ltvInscatter(P[6].z, p, dir, fog.g);
     }
-    float4 value = float4(albedo * inScattered * sigma, sigma);
+    float4 value = float4(albedo * inScattered * (sigma * g_exposure), sigma);  // (rgb: x the view's exposure)
     if (any(isnan(value)) || any(isinf(value))) value = 0;
+    value.rgb = min(value.rgb, 65504.0);
 
     // history: the cell's centre in the previous view
     if (P[1].z != 0xFFFFFFFFu)
@@ -175,7 +187,8 @@ void main(uint3 id : SV_DispatchThreadID)
             {
                 Texture3D<float4> history = ResourceDescriptorHeap[P[1].z];
                 const float4 h = history.SampleLevel(g_linearClamp, float3(uv, clamp(slice / float(g.z), 0.5 / float(g.z), 1.0 - 0.5 / float(g.z))), 0);
-                if (!any(isnan(h)) && h.a >= 0) value = lerp(value, h, asfloat(P[7].w));  // (a < 0: cells that were hidden)
+                // (a < 0: cells that were hidden)
+                if (!any(isnan(h)) && h.a >= 0) value = lerp(value, float4(min(h.rgb * asfloat(P[10].y), 65504.0), h.a), asfloat(P[7].w));
             }
         }
     }

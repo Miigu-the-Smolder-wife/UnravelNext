@@ -65,6 +65,13 @@ void main(uint3 id : SV_DispatchThreadID)
 #if PHASE == 1
     const uint a = waveAppend(state, VS_CHUNK_ITEMS, visible ? 1 : 0, CAP_DEFERRED, OVERFLOW_CHUNK_ITEMS);
     if (visible && a < CAP_DEFERRED) work[a] = packItem(chunk, view);
+    // the chunk instance pass's arguments (one group per item; CullPrepare MODE=4 stores the same)
+    const uint added = WaveActiveCountBits(visible);
+    if (added > 0 && WaveIsFirstLane())  // (the first lane's 'a' is the wave's first item)
+    {
+        RWByteAddressBuffer args = ResourceDescriptorHeap[ARGS_UAV];
+        raiseDispatch(args, VA_CHUNK_ITEMS, min(a + added, CAP_DEFERRED));
+    }
     const uint d = waveAppend(state, VS_DEFER_CHUNKS, defer ? 1 : 0, CAP_DEFERRED, OVERFLOW_DEFER_CHUNKS);
     if (defer && d < CAP_DEFERRED) work[CAP_DEFERRED + d] = packItem(chunk, view);
 #else

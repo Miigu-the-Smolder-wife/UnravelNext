@@ -2,16 +2,27 @@
 // (ue6-main Engine/Shaders/Private/TemporalSuperResolution/*, PostProcess/TemporalSuperResolution.cpp, read 2026-10-02 as
 // a reference; the code is ours). Per frame, at the internal resolution unless stated:
 //   m.upscale.motion    each sample's reprojection vector and its point's previous view depth (UpscaleMotion.hlsl);
+//                       with output.upscale_layer_motion the vector and depth of the front-most layer the picture is
+//                       of (glass, water, the coverage layer's thin fragments) and the layers' marks;
 //   m.tsr.dilate        the closest depth of the 3 x 3 neighbourhood and its vector (edges take the foreground's), the
 //                       depth error of the neighbourhood's slope, the reprojection edge (how much the dilated vector
 //                       differs from the pixel's own), and every pixel scattered to where it was in the previous frame
-//                       with its previous depth: the closest occluder there among this frame's surfaces;
+//                       with its previous depth: the closest occluder there among this frame's surfaces. With
+//                       output.upscale_tsr_reprojection_field the reprojection field: besides the vector its jacobian
+//                       (how the vector changes across the pixel, from the neighbours on the pixel's own surface) and,
+//                       on an edge whose two sides move apart, the boundary - where in the pixel the foreground ends,
+//                       found by following the depth edge both ways as the spatial anti-aliaser follows a luma edge;
 //   m.tsr.decimate      parallax disocclusion (something closer landed where this pixel was: it was hidden then), the
 //                       previous guide - a low-resolution copy of the history in a perceptual space - reprojected, the
-//                       reprojection edge over the dilated vectors;
+//                       reprojection edge over the dilated vectors; the kept frame's guide reprojected by the cameras;
+//   m.tsr.thin          thin geometry detection (output.upscale_tsr_thin_geometry): the coverage history of the
+//                       coverage layer's thin fragments and pixel-wide lines of depth give the relaxation weight by
+//                       which the rejection's clamp box opens to the history's own neighbourhood;
 //   m.tsr.flicker       the flickering heuristic: each pixel's luma followed over time; a gradient that flips its sign
 //                       every frame on a still surface is the jitter beating against a pattern finer than the pixels,
 //                       and its amplitude is the band inside which the rejection lets the history be;
+//   m.tsr.resurrect     history resurrection (output.upscale_tsr_resurrection): the kept frame's guide measured as the
+//                       previous frame's is; a pixel it matches better takes the kept frame's history;
 //   m.tsr.reject        the shading rejection: input and reprojected guide compared at low frequency after each was
 //                       clamped into the other's 3 x 3 range (their aliasing differs every frame and is no change of
 //                       shading); what the comparison's clamp box removes from the filtered guide, over the larger of
@@ -19,20 +30,26 @@
 //                       LDR luma and mask of the spatial anti-aliaser;
 //   m.tsr.aa            spatial anti-aliasing of the pixels whose history is rejected or missing: the edge through the
 //                       pixel is followed both ways (8 steps) and the pixel's sample position moves across it;
-//   m.upscale           (output resolution) the history update: 5 input samples around the output pixel under a kernel
-//                       as wide as an input pixel while the history is missing or rejected and as an output pixel
-//                       while it refines; the history reprojected (Catmull-Rom), clamped to the samples' range only as
-//                       far as the rejection says, its weight a validity in [0, 1] of 16 samples, held down where the
-//                       pixel moves (4 samples at one output pixel a frame) and where it was rejected (2 samples).
-// Not here yet: history resurrection, the reprojection field's jacobian and boundary (sub-pixel reprojection edges),
-// thin geometry detection, a history above the output resolution, lens distortion. The flickering heuristic follows
-// the final scene colour (the reference: the colour before translucency, and less by what translucency changed).
+//   m.upscale           (history resolution: the output's, or output.upscale_tsr_history_percent of it) the history
+//                       update: 5 input samples around the history pixel under a kernel as wide as an input pixel
+//                       while the history is missing or rejected and as a history pixel while it refines; the history
+//                       reprojected (Catmull-Rom), clamped to the samples' range only as far as the rejection says,
+//                       its weight a validity in [0, 1] of 16 samples an output pixel, held down where the pixel moves
+//                       (4 samples at one output pixel a frame) and where it was rejected (2 samples);
+//   m.tsr.resolve       a history above the output resolution filtered down to it (Mitchell-Netravali over 4 x 4).
+// The history update reads the field per output pixel: on a boundary the vector of the side the output pixel lies on,
+// and that vector carried to the output pixel's own position by the jacobian (a turn or a zoom reprojects every output
+// pixel to its own place instead of all of an input pixel's to one offset).
+// Not here: lens distortion, the reference's hole filling of a disoccluded pixel's vector by its occluder's, its
+// high-contrast line detection (the coverage layer has the thin fragments' share itself), thin geometry inside the
+// flickering heuristic. The flickering heuristic follows the final scene colour (the reference: the colour before
+// translucency, and less by what translucency changed).
 #ifndef UNX_TSR_HLSLI
 #define UNX_TSR_HLSLI
 #include "Bindless.hlsli"
 
 // The reference's settings (r.TSR.History.SampleCount 16, ShadingRejection.SampleCount 2, Velocity.WeightClampingSampleCount
-// 4, Velocity.WeightClampingPixelSpeed 1; history at the output resolution).
+// 4, Velocity.WeightClampingPixelSpeed 1), per output pixel: TsrUpdate.hlsl scales them to its history pixels.
 #define TSR_HISTORY_SAMPLES 16.0
 #define TSR_HYSTERESIS (1.0 / TSR_HISTORY_SAMPLES)
 #define TSR_WEIGHT_CLAMPING_REJECTION (1.0 - 2.0 * TSR_HYSTERESIS)
@@ -111,6 +128,55 @@ void tsrDecodeHoleVelocity(uint encoded, out float angle, out float len)
     angle = (float)((encoded >> TSR_HOLE_LENGTH_BITS) & 31u) * (2.0 * 3.14159265 / 32.0) - 3.14159265;
 }
 float tsrMaxHoleLength() { return ((float)(1u << TSR_HOLE_LENGTH_BITS) - 1.5) / TSR_HOLE_LENGTH_PRECISION; }
+
+// The reprojection field (m.tsr.dilate -> m.upscale; the reference's TSRReprojectionField.ush), RGBA32_UINT per internal
+// pixel: x = the jacobian, y = the dilation's offset and the boundary, z = the closest device depth's bits.
+//   jacobian   rows d(vector) / dx and d(vector) / dy in input pixels per input pixel, 8 bits a component over +- 2 on
+//              a square-root scale (small values keep their precision);
+//   offset     the neighbour the dilated vector came from, [-1, 1]^2 in 4 bits;
+//   boundary   the vector from the edge's line through the pixel to the pixel's corner deepest in the foreground, 11 bits
+//              a component over [-1, 1] input pixels. (0, 1) with any offset: the whole pixel is the foreground's.
+#define TSR_JACOBIAN_RANGE 2.0
+uint tsrEncodeJacobian(float2 dx, float2 dy)
+{
+    float4 j = clamp(float4(dx, dy), -TSR_JACOBIAN_RANGE, TSR_JACOBIAN_RANGE);
+    j = sign(j) * sqrt(abs(j)) * sqrt(TSR_JACOBIAN_RANGE);
+    const uint4 q = uint4(j * (127.0 / TSR_JACOBIAN_RANGE) + 127.5);
+    return q.x | (q.y << 8) | (q.z << 16) | (q.w << 24);
+}
+void tsrDecodeJacobian(uint encoded, out float2 dx, out float2 dy)
+{
+    float4 j = float4(encoded & 255u, (encoded >> 8) & 255u, (encoded >> 16) & 255u, encoded >> 24) * (TSR_JACOBIAN_RANGE / 127.0) - TSR_JACOBIAN_RANGE;
+    j = j * abs(j) / TSR_JACOBIAN_RANGE;
+    dx = j.xy;
+    dy = j.zw;
+}
+// How much the reprojection magnifies the history (>= 1), from the jacobian alone.
+float tsrJacobianUpscale(float2 dx, float2 dy)
+{
+    const float2 e = float2(1, 0) + dx, s = float2(0, 1) + dy;
+    return sqrt(max(dot(e, e), 1.0) * max(dot(s, s), 1.0));
+}
+uint tsrEncodeBoundary(int2 offset, float2 boundary)
+{
+    const int2 bits = clamp(int2(round(boundary * 1023.0)) + 1024, 1, 2047);
+    return (uint)(offset.x + 1) | ((uint)(offset.y + 1) << 2) | ((uint)bits.x << 4) | ((uint)bits.y << 15);
+}
+int2 tsrDecodeBoundaryOffset(uint encoded) { return int2(encoded & 3u, (encoded >> 2) & 3u) - 1; }
+float2 tsrDecodeBoundary(uint encoded)
+{
+    return clamp(float2(int2((encoded >> 4) & 2047u, (encoded >> 15) & 2047u) - 1024) / 1023.0, -1.0, 1.0);
+}
+// The field's code of a pixel with no offset and the whole pixel inside (nothing to choose).
+#define TSR_NO_BOUNDARY (5u | (1024u << 4) | (2047u << 15))
+// Whether an output pixel at dKO (input pixels from the input pixel's centre), outputPixel input pixels wide, reaches
+// over the boundary into the foreground's side.
+bool tsrInsideBoundary(float2 dKO, float2 boundary, float outputPixel)
+{
+    const float2 toCorner = float2(boundary.x < 0 ? -0.5 : 0.5, boundary.y < 0 ? -0.5 : 0.5);  // (-0: positive, as the store rounds)
+    const float2 fromBoundary = boundary - toCorner + dKO + toCorner * outputPixel;
+    return dot(fromBoundary, boundary) > 0;
+}
 
 // Catmull-Rom of t at uv (size texels): the 4 x 4 texels' separable weights as 5 bilinear taps (the corner taps left out).
 float4 tsrCatmullRom(Texture2D<float4> t, float2 uv, float2 size)

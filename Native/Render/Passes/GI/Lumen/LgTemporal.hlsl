@@ -18,7 +18,14 @@
 // / previous, float). b1 = the view.
 // Foliage's back-side irradiance (LgIntegrate.hlsl) takes the diffuse's blend: P[10].z = its frame value SRV (0xFFFFFFFF:
 // none), P[10].w = its history SRV (0xFFFFFFFF: none yet), P[11].x = its output UAV.
+// A foliage pixel (a Foliage or Subsurface material: the reference's pixel with backface diffuse) keeps its history over
+// a wider distance - P[11].w (float; the reference's Temporal.DistanceThresholdForFoliage 0.03: foliage is full of edges
+// and discontinuities) in place of P[3].y; P[11].y = M's material word SRV (0xFFFFFFFF: none - every pixel P[3].y).
+// P[9].z bits 24-31 (the reference's Temporal.RejectBasedOnNormal, off by default there and here: 0): the cosine x 255
+// of the widest angle between a history pixel's normal and the pixel's previous normal that still counts (its
+// Temporal.NormalThreshold, 45 degrees) - less streaking where surfaces meet (a character's feet), at the filter's cost.
 #include "Passes/GI/Lumen/LgSurface.hlsli"
+#include "Scene.hlsli"
 
 uint lgPackKeyNormal(float3 n)
 {
@@ -63,6 +70,14 @@ void main(uint3 id : SV_DispatchThreadID)
     const bool lit = fresh.a > 0;
     const float moving = abs(fresh.a);
     const float maxFrames = asfloat(P[3].x);
+    float distanceThreshold = asfloat(P[3].y);
+    if (P[11].y != 0xFFFFFFFFu)
+    {
+        Texture2D<uint> words = ResourceDescriptorHeap[P[11].y];
+        const uint cls = materialClass(loadMaterial(words.Load(int3(id.xy, 0)) & 0xFFFFu));
+        if (cls == MATERIAL_FOLIAGE || cls == MATERIAL_SUBSURFACE) distanceThreshold = asfloat(P[11].w);
+    }
+    const float rejectNormalCos = (P[9].z >> 24) / 255.0;  // (0: no rejection by the normal)
     float3 outDiffuse = fresh.rgb, outSpecular = freshSpecular;
     float frames = 0, fast = 0;
     bool hasHistory = false;
@@ -101,7 +116,8 @@ void main(uint3 id : SV_DispatchThreadID)
                 const float2 ndc = float2((q.x + 0.5) / lgViewSize().x * 2 - 1, 1 - (q.y + 0.5) / lgViewSize().y * 2);
                 const float4 hp = mul(invPrev, float4(ndc, asfloat(key.x), 1));
                 const float3 prevPoint = hp.xyz / hp.w;
-                if (abs(dot(float4(prevPoint, -1), plane)) > asfloat(P[3].y) * max(prevDepth, 1e-3)) continue;
+                if (abs(dot(float4(prevPoint, -1), plane)) > distanceThreshold * max(prevDepth, 1e-3)) continue;
+                if (rejectNormalCos > 0 && dot(lgDecodeNormal(float2(key.y & 0x7FFFu, (key.y >> 15) & 0x7FFFu) / 32767.0), prevN) < rejectNormalCos) continue;
                 const float4 d = prevDiffuse[q];
                 if (!(d.a > 0)) continue;
                 const float4 sp = prevSpecular[q];
@@ -159,7 +175,7 @@ void main(uint3 id : SV_DispatchThreadID)
                 if (!(d.a > 0)) continue;
                 const LgSurface n = lgSurface((uint2)q);
                 if (!n.valid || dot(n.normal, s.normal) < 0.9) continue;
-                if (abs(dot(float4(n.position, -1), plane)) > asfloat(P[3].y) * max(s.depth, 1e-3)) continue;
+                if (abs(dot(float4(n.position, -1), plane)) > distanceThreshold * max(s.depth, 1e-3)) continue;
                 sumDiffuse += d.rgb;
                 sumSpecular += newSpecular[q].rgb;
                 weight += 1;

@@ -160,6 +160,6 @@ void main(uint3 id : SV_DispatchThreadID)
     l.spotOffset = 0;
     l.revision = 0;
     RWByteAddressBuffer lights = ResourceDescriptorHeap[P[3].y];
-    lights.Store<GpuLight>((P[3].w + slot) * 80u, l);
+    lights.Store<GpuLight>((P[3].w + slot) * 112u, l);  // (sizeof(gpu::Light); the light components stay 0: a plain light)
 }
 #endif

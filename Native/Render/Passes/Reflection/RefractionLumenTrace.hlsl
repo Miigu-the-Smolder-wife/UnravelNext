@@ -8,7 +8,9 @@
 // P[0] = { jobs SRV (raw: header 16 B { count, dispatch x, y, z }, then 48 B jobs), results UAV (raw), max jobs, stream
 //          table SRV (raw: per triangle stream slot its vertex buffer SRV) }
 // P[1], P[2], P[3].xyz = sky and sun (GiSky.hlsli; P[1].w = ray length)
-// P[4] = { card frame SRV (UNX_NONE: none), frame, 0, 0 }; P[6], P[7] = RtSceneSrvs. b1 = the main view.
+// P[4] = { card frame SRV (UNX_NONE: none), frame, 1: hits read the cards' high levels and report what they want
+//          (reflection.lumen_hi_res_surface; one job in a feedback tile's worth reports a frame), 0 };
+// P[6], P[7] = RtSceneSrvs. b1 = the main view.
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/Reflection/ReflectionLumenHit.hlsli"
@@ -101,7 +103,7 @@ void RefractionGen()
             inside = false;
             continue;
         }
-        L = throughput * rlShadeHit(scene, hit, o, d, 0, 2e-3, P[4].x, UNX_NONE).radiance;
+        L = throughput * rlShadeHit(scene, hit, o, d, 0, 2e-3, P[4].x, UNX_NONE, false, P[4].z != 0, uint2(job, job >> 4)).radiance;
         break;
     }
     const float3 e = L * g_exposure;

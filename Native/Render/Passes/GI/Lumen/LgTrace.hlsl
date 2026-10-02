@@ -8,9 +8,10 @@
 // cards of its instance (CardLighting.hlsli clReadCards) - the cards' direct light (the sun and the local lights) and
 // radiosity - and shades its own material with it; no light sample, no shadow ray, no world-cache read; its own
 // emission stays. A hit that has no card there (a deforming instance: skin, wind; a texel the cards do not cover)
-// takes the sun (one shadow ray into the disk) and one local-light sample with its shadow ray (HitLocalSample.hlsli), and - only with
-// gi.lumen_hit_fallback - the world cache's irradiance; without the fallback its indirect light is 0, as the
-// reference's invalid surface-cache sample. A ray that meets an analytic area light's proxy returns 0 (M shades
+// takes the sun (one shadow ray into the disk) and one local-light sample with its shadow ray (HitLocalSample.hlsli), and
+// its indirect light from the translucency volume or the radiance cache's irradiance probes (LumenHitIndirect.hlsli;
+// lumen.hit_indirect - the reference's invalid surface-cache sample has none) - or, with gi.lumen_hit_fallback, from
+// the world cache instead. A ray that meets an analytic area light's proxy returns 0 (M shades
 // those lights; the proxy still occludes). A miss returns the sky.
 // E's grooms (RayTracing/HitHair.hlsli; raytracing.hair): the ray's first fibre in the hair density volume, where it lies
 // before the hit, is the hit - the groom's proxy, lit by the sun's shadow ray and one local-light sample; the bounce
@@ -20,8 +21,9 @@
 // P[0] = { world cache SRV, ray info SRV (R16_UINT), trace radiance UAV, trace word UAV (R32_UINT) },
 // P[1], P[2], P[3] = sky and sun (GiSky.hlsli), ray length; P[3].w = gi.experiment_disable bits (8, 16, 128 as GiTrace),
 // P[4] = { sky band (tests), flags (bit 0: LgScreenTrace ran before - gi.lumen_screen_traces; bit 1: no world-cache
-// read at hits - gi.lumen_hit_fallback = false; bits 16..31: the far field's start in metres, 0: none - GiSky.hlsli
-// giFarSkyIrradiance), normal bias (float, m),
+// read at hits - gi.lumen_hit_fallback = false; bit 2: hits read the cards' high levels and report what they want -
+// surface_cache.feedback_gather, CardLighting.hlsli clReadCardsAt; bits 16..31: the far field's start in metres, 0:
+// none - GiSky.hlsli giFarSkyIrradiance), normal bias (float, m),
 // moving threshold (float) }, P[5].x = card frame SRV (CardLayout.hlsli mcFrame;
 // 0xFFFFFFFF: none - gi.lumen_hit_surface_cache off, surface_cache.mesh_cards off or no card yet),
 // P[5].y / .z / .w = radiance cache params (raw SRV) / indirection SRV / atlas SRV (P[5].y = 0xFFFFFFFF: none -
@@ -33,6 +35,7 @@
 // P[8..11] = the common block (P[10].z adaptive SRV, P[10].w / P[11].x / P[11].y probe depth / normal / position SRVs),
 // P[11].w = first trace row of this dispatch (the pass splits the atlas into bands of at most gi.lumen_rays_per_dispatch
 // rays: each dispatch's work is bounded by its ray count, whatever the resolution).
+#define GI_SKY_FOG_RETURN  // (GiSky.hlsli: the sky's share of the sun's light the fog scatters - atmosphere.fog.sun_through_fog)
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitDecals.hlsli"
@@ -42,6 +45,7 @@
 #include "Passes/GI/Lumen/LgCommon.hlsli"
 #include "Passes/SurfaceCache/CardLighting.hlsli"
 #include "Passes/GI/Lumen/LgRadianceCache.hlsli"
+#include "Passes/GI/LumenHitIndirect.hlsli"
 #include "RayTracing/HitLocalSample.hlsli"
 #include "RayTracing/HitHair.hlsli"
 
@@ -197,7 +201,7 @@ void LgTraceGen()
             if (P[5].x != 0xFFFFFFFFu)
             {
                 const float3 face = dot(s.geometricNormal, r.Direction) > 0 ? -s.geometricNormal : s.geometricNormal;
-                const ClSample cards = clReadCards(mcFrame(P[5].x), s.sceneInstance, s.position, face, CL_READ_IRRADIANCE);
+                const ClSample cards = clReadCardsAt(mcFrame(P[5].x), s.sceneInstance, s.position, face, CL_READ_IRRADIANCE, (P[4].y & 4u) != 0, 0.5 * footprint, coord);
                 if (cards.valid)
                 {
                     L.irradiance = cards.direct + cards.indirect;
@@ -222,7 +226,16 @@ void LgTraceGen()
                 giCacheLightingAt(cache, h, s.position, s.normal, mirror, giLevelForSize(h, footprint), L.irradiance, L.specularRadiance);
                 g_giStrictVisibility = false;
             }
-            if (!fromCards) L.irradiance += giFarSkyIrradiance(s.position, s.normal, float(P[4].y >> 16));
+            // ... or the frame's volume / irradiance probes (no world cache: P[4].y bit 1)
+            bool indirectFound = false;
+            if (!fromCards && (P[4].y & 2u) != 0)
+            {
+                const float4 e = lhiIrradiance(lhiSources(P[5].x), s.position, s.normal, seed);
+                L.irradiance += e.rgb;
+                L.specularRadiance += e.rgb / LG_PI;  // (the lobe at the hit sees that light as uniform, as the cards')
+                indirectFound = e.a > 0;
+            }
+            if (!fromCards && !indirectFound) L.irradiance += giFarSkyIrradiance(s.position, s.normal, float(P[4].y >> 16));
             const float3 l = normalize(g_sunDirection);
             const float cosSun = dot(s.normal, l);
             if (!fromCards && (cosSun > 0 || rtHitTransmits(m)) && (P[3].w & 16) == 0)
@@ -247,6 +260,13 @@ void LgTraceGen()
         }
     }
     if (!all(radiance == radiance) || any(radiance < 0)) radiance = 0;
+#if SKY == SKY_ATMOSPHERE
+    // atmosphere.fog.on_gi_rays (FogVolume.hlsli fogOverGiRay; off by default): the fog between the probe and what its ray
+    // met - a hit, or the sky (the radiance cache's answer holds its own rays' light).
+    if (!reachedCache)
+        radiance = fogOverGiRay((float2(probePixel) + 0.5) / float2(g_viewWidth, g_viewHeight), probeDepth[atlas], r.Origin, r.Direction,
+                                isHit ? distanceToHit : 65536.0, radiance);
+#endif
     // Experiment 2097152 (statistics): the hit's surface-cache read class as a colour of exposed value 1 - red: no card
     // read, blue: its cards read; rays without a surface hit (sky, emitters, back faces): 0.
     // The GI layer's channel means then give the cosine-weighted shares.

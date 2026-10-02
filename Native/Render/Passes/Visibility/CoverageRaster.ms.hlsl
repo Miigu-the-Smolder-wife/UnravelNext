@@ -9,11 +9,17 @@
 // normals (world, octahedral 16 + 16 bits, so the record's 8 + 8 bits are the only coarse rounding) go along for the
 // record's interpolated normal; COV_FLAG_BACK marks a
 // primitive seen from behind (two-sided materials), whose normals the pixel kernel turns towards the viewer.
+// (The primitive is CoveragePrimitive.hlsli's, shared with the compute rasteriser.)
 // A6 (v1.67): the same kernel draws the translucent lists (COV_RASTER_LIST, COV_RASTER_TRANSLUCENT): a mixed sheet cluster
 // there keeps its band A triangles (its band B ones are in LIST_B), and every primitive carries COV_FLAG_TRANSLUCENT (the
 // pixel kernel keeps only the pixels of translucent class 2).
-#include "Passes/Visibility/CoverageLayer.hlsli"
-#include "VisBuffer.hlsli"
+// Depth buckets (CoverageBuckets.hlsli; COV_BINS): the group's entry is sorted entry 'first of the bucket + group' of
+// the binned list instead of list entry 'group'; a cluster behind the tiles' cover outputs nothing; triangles the
+// compute rasteriser took (COV_RASTER_COMPUTE: bit per triangle beside the sorted entry) are skipped; with
+// visibility.coverage_triangle_cull a triangle outside the view, behind band A or behind the tiles' cover is culled
+// (CoveragePrimitive.hlsli). Counted per group into the cull state: triangles sent to the rasteriser and those culled
+// by each of the two occlusion tests, clusters behind the cover.
+#include "Passes/Visibility/CoveragePrimitive.hlsli"
 
 struct VertexOut
 {
@@ -40,123 +46,93 @@ groupshared float2 gs_uv[128];
 groupshared float3 gs_normal[128];
 groupshared float3 gs_world[128];  // mixed sheet clusters: the per-triangle band test
 
-float4 toScreen(float4 p, float2 viewport)
-{
-    const float iw = 1.0 / p.w;
-    return float4((p.x * iw * 0.5 + 0.5) * viewport.x, (0.5 - p.y * iw * 0.5) * viewport.y, p.z * iw, iw);
-}
-
 [outputtopology("triangle")]
 [numthreads(64, 1, 1)]
 void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices VertexOut verts[128], out primitives PrimitiveOut prims[128],
           out indices uint3 tris[128])
 {
     RWByteAddressBuffer state = ResourceDescriptorHeap[COV_STATE];  // the pass writes it (pixel kernel counters)
-    ByteAddressBuffer lists = ResourceDescriptorHeap[COV_LISTS];
     const uint capacity = COV_LIST_CAPACITY;
     const uint list = COV_RASTER_LIST;
     const bool translucent = COV_RASTER_TRANSLUCENT;
-    const uint count = min(state.Load(4 * (VS_LIST_COUNT + list)), capacity);
     const uint index = group.x + group.y * 65535;
-    const bool valid = index < count;  // uniform over the group
-    const uint listEntry = valid ? lists.Load(4 * (list * capacity + index)) : 0;
-    const uint visibleIndex = listEntry & ~LIST_ENTRY_MIXED;
-    const bool mixed = (listEntry & LIST_ENTRY_MIXED) != 0;  // band B: this raster keeps the cluster's band B triangles
-    StructuredBuffer<uint2> visible = ResourceDescriptorHeap[COV_VISIBLE];
-    const uint2 entry = valid ? visible[visibleIndex] : uint2(0, 0);
-    StructuredBuffer<CullView> views = ResourceDescriptorHeap[COV_VIEWS];
-    const CullView v = views[entry.y >> 24];
-    const GpuInstance inst = loadInstance(entry.x);
-    const GpuMesh mesh = loadMesh(inst.mesh);
-    const GpuCluster cl = loadCluster(entry.y & 0xFFFFFFu);
-    const uint material = clusterMaterial(inst, cl);
-    const GpuMaterial m = loadMaterial(material);
-    const bool oneSided = (m.classFlags & MATERIAL_TWO_SIDED) == 0 && (v.flags & CULL_VIEW_CULL_BACK) != 0;
-    const uint alphaFlag = (m.classFlags & MATERIAL_ALPHA_TESTED) != 0 ? COV_FLAG_ALPHA : 0u;
-    // Opaque for the view: not a see-through class (a leaf's transmission is light, not view; an alpha-tested fragment
-    // hides what its mask covers after the test).
-    const uint materialClass = m.classFlags & 0xFFu;
-    const uint opaqueFlag = materialClass != MATERIAL_GLASS && materialClass != MATERIAL_WATER ? COV_FLAG_OPAQUE : 0u;
-    // v1.73: M pre-shaded classes (shaded by M before the composite, which then only reads the value): Cut, Terrain (v1.75).
-    // A9: layered Standard materials (clearcoat) too
-    const uint preshade = materialClass == MATERIAL_CUT || materialClass == MATERIAL_TERRAIN ||
-                                  (materialClass == MATERIAL_STANDARD && (m.classFlags & MATERIAL_LAYERED) != 0) ? COV_PRESHADE_ID : 0u;
-    const uint vertexCount = valid ? clusterVertexCount(cl) : 0, triangleCount = valid ? clusterTriangleCount(cl) : 0;
+    const bool binned = COV_BINS != UNX_NONE;
+    bool valid = false;  // uniform over the group
+    uint listEntry = 0;
+    uint4 taken = 0;     // triangles of this entry the compute rasteriser took
+    if (binned)
+    {
+        ByteAddressBuffer bins = ResourceDescriptorHeap[COV_BINS];
+        const uint bucket = COV_RASTER_BUCKET;
+        const uint sorted = bins.Load(4 * (COVB_FIRST + bucket)) + index;
+        valid = index < bins.Load(4 * (COVB_COUNT + bucket)) && sorted < capacity;
+        if (valid)
+        {
+            listEntry = bins.Load(4 * covbSorted(capacity, sorted));
+            if (COV_RASTER_COMPUTE) taken = bins.Load4(4 * covbTaken(capacity, sorted));
+        }
+    }
+    else
+    {
+        ByteAddressBuffer lists = ResourceDescriptorHeap[COV_LISTS];
+        valid = index < min(state.Load(4 * (VS_LIST_COUNT + list)), capacity);
+        if (valid) listEntry = lists.Load(4 * (list * capacity + index));
+    }
+    const CoverageDraw draw = coverageDraw(listEntry, valid, translucent);
+    const bool hidden = valid && coverageDrawBehindCover(draw);
+    if (hidden && lane == 0) state.InterlockedAdd(4 * VS_COV_CLUSTERS_TILE, 1);
+    const bool drawn = valid && !hidden;
+    const uint vertexCount = drawn ? clusterVertexCount(draw.cl) : 0, triangleCount = drawn ? clusterTriangleCount(draw.cl) : 0;
     SetMeshOutputCounts(vertexCount, triangleCount);
     StructuredBuffer<uint> clusterVertices = ResourceDescriptorHeap[g_clusterVertexIndices];
     for (uint i = lane; i < vertexCount; i += 64)
     {
-        const uint meshVertex = clusterVertices[cl.vertexOffset + i];
-        const DeformedVertex dv = deformVertex(inst, mesh, meshVertex);
-        const float4 p = viewModelClip(inst, mul(v.viewProj, float4(dv.world, 1)));  // A12: 1 outside the main view
+        const uint meshVertex = clusterVertices[draw.cl.vertexOffset + i];
+        const DeformedVertex dv = deformVertex(draw.inst, draw.mesh, meshVertex);
+        const float4 p = viewModelClip(draw.inst, mul(draw.v.viewProj, float4(dv.world, 1)));  // A12: 1 outside the main view
         verts[i].position = p;
         gs_clip[i] = p;
-        gs_uv[i] = loadVertex(mesh, meshVertex).uv;
+        gs_uv[i] = loadVertex(draw.mesh, meshVertex).uv;
         gs_normal[i] = dv.normal;
         gs_world[i] = dv.world;
     }
     GroupMemoryBarrierWithGroupSync();
     StructuredBuffer<uint> clusterTriangles = ResourceDescriptorHeap[g_clusterTriangles];
+    uint sent = 0, behindBandA = 0, behindCover = 0;
     for (uint t = lane; t < triangleCount; t += 64)
     {
-        const uint packed = clusterTriangles[cl.triangleOffset + t];
+        const uint packed = clusterTriangles[draw.cl.triangleOffset + t];
         const uint3 tri = uint3(packed & 0xFFu, (packed >> 8) & 0xFFu, (packed >> 16) & 0xFFu);
         tris[t] = tri;
         const float4 p[3] = { gs_clip[tri.x], gs_clip[tri.y], gs_clip[tri.z] };
         const float2 uv[3] = { gs_uv[tri.x], gs_uv[tri.y], gs_uv[tri.z] };
         const float3 nv[3] = { gs_normal[tri.x], gs_normal[tri.y], gs_normal[tri.z] };
-        // Near clip (keep w - z >= 0): Sutherland-Hodgman against one plane leaves 3 or 4 vertices (0 when behind).
-        // Clip-space interpolation is linear in the world position, so the uvs interpolate with the same parameter.
-        float4 q[4];
-        float2 tq[4];
-        float3 nq[4];
-        uint n = 0;
-        [unroll] for (uint k = 0; k < 3; ++k)
-        {
-            const uint j = k == 2 ? 0 : k + 1;
-            const float ek = p[k].w - p[k].z, ej = p[j].w - p[j].z;
-            if (ek >= 0)
-            {
-                q[n] = p[k];
-                tq[n] = uv[k];
-                nq[n] = nv[k];
-                ++n;
-            }
-            if ((ek >= 0) != (ej >= 0))
-            {
-                const float s = ek / (ek - ej);
-                q[n] = lerp(p[k], p[j], s);
-                tq[n] = lerp(uv[k], uv[j], s);
-                nq[n] = lerp(nv[k], nv[j], s);
-                ++n;
-            }
-        }
-        PrimitiveOut o = (PrimitiveOut)0;
-        o.visId = packVisId(visibleIndex, t) | preshade;
-        o.material = material;
-        bool cull = n < 3 || (mixed && sheetTriangleBandB(v, gs_world[tri.x], gs_world[tri.y], gs_world[tri.z]) == translucent) || patchDropsTriangle(inst, mesh, cl, tri);  // C5
-        if (!cull)
-        {
-            if (n == 3)
-            {
-                q[3] = q[2];
-                tq[3] = tq[2];
-                nq[3] = nq[2];
-            }
-            o.a = toScreen(q[0], v.viewportSize);
-            o.b = toScreen(q[1], v.viewportSize);
-            o.c = toScreen(q[2], v.viewportSize);
-            o.d = toScreen(q[3], v.viewportSize);
-            o.tab = float4(tq[0], tq[1]);
-            o.tcd = float4(tq[2], tq[3]);
-            o.normals = uint4(coverageOct32(nq[0]), coverageOct32(nq[1]), coverageOct32(nq[2]), coverageOct32(nq[3]));
-            // Signed area of the polygon (shoelace), y-down pixels.
-            const float area2 = (o.a.x * o.b.y - o.b.x * o.a.y) + (o.b.x * o.c.y - o.c.x * o.b.y) + (o.c.x * o.d.y - o.d.x * o.c.y) + (o.d.x * o.a.y - o.a.x * o.d.y);
-            const bool back = COV_FRONT_SIGN * area2 > 0;
-            o.flags = alphaFlag | opaqueFlag | (n == 4 ? COV_FLAG_QUAD : 0u) | (back ? COV_FLAG_BACK : 0u) | (translucent ? COV_FLAG_TRANSLUCENT : 0u);
-            cull = area2 == 0 || (oneSided && back);
-        }
-        o.cull = cull;
+        const float3 world[3] = { gs_world[tri.x], gs_world[tri.y], gs_world[tri.z] };
+        const CoveragePrimitive cp = coveragePrimitive(draw, t, tri, p, uv, nv, world);
+        const bool computed = ((taken[(t >> 5) & 3] >> (t & 31)) & 1u) != 0;  // (the compute rasteriser stored its fragments)
+        PrimitiveOut o;
+        o.visId = cp.visId;
+        o.flags = cp.flags;
+        o.material = cp.material;
+        o.a = cp.a;
+        o.b = cp.b;
+        o.c = cp.c;
+        o.d = cp.d;
+        o.tab = cp.tab;
+        o.tcd = cp.tcd;
+        o.normals = cp.normals;
+        o.cull = cp.cull || computed;
         prims[t] = o;
+        if (!o.cull) ++sent;
+        else if (!computed && cp.reason == COV_CULL_BAND_A) ++behindBandA;
+        else if (!computed && cp.reason == COV_CULL_COVER) ++behindCover;
+    }
+    // The group's triangles by outcome (every lane is back here: one atomic per wave and nonzero counter).
+    const uint sentSum = WaveActiveSum(sent), bandASum = WaveActiveSum(behindBandA), coverSum = WaveActiveSum(behindCover);
+    if (WaveIsFirstLane())
+    {
+        if (sentSum > 0) state.InterlockedAdd(4 * VS_COV_TRIANGLES, sentSum);
+        if (bandASum > 0) state.InterlockedAdd(4 * VS_COV_TRIANGLES_HIZ, bandASum);
+        if (coverSum > 0) state.InterlockedAdd(4 * VS_COV_TRIANGLES_TILE, coverSum);
     }
 }

@@ -11,6 +11,13 @@ bool motionBlurActive(FramePassContext& fc, const ViewResources& view);
 TextureRef motionVelocity(FramePassContext& fc, const ViewResources& view);
 // The exposure integral of 'src' (exposed linear radiance) into 'dst' (same size, a float format).
 void motionBlur(FramePassContext& fc, const ViewResources& view, TextureRef src, TextureRef dst);
+// shading.motion_blur_after_upscale: an upscaled view's blur runs after the temporal upscale, at the output resolution
+// (motionBlurUpscaled), in place of motionBlur before it.
+bool motionBlurAfterUpscale(FramePassContext& fc);
+// The exposure integral of the upscaled image 'src' into 'dst' (both at the output resolution, a float format), centred
+// on the frame's time. view: the internal view; motion: its samples' output-UV offsets to the previous frame (RG32F,
+// shading::UpscaleProducts::motion); depth: the device depth of the surfaces those vectors are of.
+void motionBlurUpscaled(FramePassContext& fc, const ViewResources& view, TextureRef src, TextureRef dst, TextureRef motion, TextureRef depth);
 // ... with a given velocity (RG16F, pixels per frame) and the view's depth (tests; motionBlur uses motionVelocity).
 void motionBlurWithVelocity(FramePassContext& fc, const ViewResources& view, TextureRef src, TextureRef dst, TextureRef velocity);
 // The rotation stage alone for a given rotation Q (rows; view space, R_cur R_prev^T) - tests; false when Q does not engage it

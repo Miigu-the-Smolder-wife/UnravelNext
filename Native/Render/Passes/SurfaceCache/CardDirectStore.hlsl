@@ -2,17 +2,21 @@
 // unx-variants: SKY=0,1
 // r.card.direct.store (CardLighting.hlsli): one group (8 x 8 threads) per tile of the frame's direct list, one thread per
 // texel. The texel's direct irradiance = the sum over the tile's lights of the light's unshadowed irradiance at the texel
-// (its integral over the light: mlLightUnshadowed with a Lambert point) x its visible bit, plus the sun's; stored in the
+// (its integral over the light: mlLightUnshadowed with a Lambert point) x a punctual light's function toward the texel
+// (SurfaceCacheLightFunction.hlsli: profile, cookie or gobo at the texel's angle from the light, keys and flicker at the
+// frame's time) x its visible bit, plus the sun's; stored in the
 // direct atlas, and the final lighting atlas gets (direct + indirect) x albedo / pi + emission. The group's first thread
 // writes the tile's uniform bits: per light, whether the rays traced this update all agreed.
 // P[0] = { card frame SRV, select SRV, frame index, flags (bit 10: lights without their shadow rays) }
 // P[1], P[2], P[3] = sky and sun (GiSky.hlsli)
 // P[4] = { tile lights SRV (raw), tile shadow SRV (raw), uniform bits UAV (raw), page capacity }
 // P[5] = { direct list capacity, direct atlas UAV, final atlas UAV, indirect atlas SRV }
+// P[6], P[7] = RtSceneSrvs (the light data: its header names the frame's light function table)
 #include "RayTracing/HitLocalLights.hlsli"
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/Shading/MegaLightsSampling.hlsli"
 #include "Passes/SurfaceCache/CardLighting.hlsli"
+#include "Passes/SurfaceCache/SurfaceCacheLightFunction.hlsli"
 
 [numthreads(8, 8, 1)]
 void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
@@ -72,6 +76,8 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     }
     float3 e = 0;
     const MlPoint lambert = mlPointLambert(texel.position, texel.normal, float3(1, 1, 1));  // (its radiance is irradiance / pi)
+    const uint functions = scLightFunctionTable(rtSceneSrvs(P[6], P[7]).pad);
+    const float texelSize = 2 * max(page.cardUvTexelScale.x * card.extent.x, page.cardUvTexelScale.y * card.extent.y);
     [loop] for (uint k = 0; k < CL_LIGHTS; ++k)
     {
         const uint light = tileLights.Load(base + k * 4);
@@ -83,6 +89,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
             if (((tileShadow.Load(shadowBase + k * 8 + (from >> 5) * 4) >> (from & 31u)) & 1u) == 0) continue;
         }
         float3 el = 3.14159265 * mlLightUnshadowed(lambert, g, light, UNX_NONE);
+        if (any(el > 0)) el *= scLightFunction(functions, g, light, texel.position, texelSize);
         if (!all(el >= 0) || !all(el < 1e30)) el = 0;  // (NaN, infinite: no light)
         e += el;
     }

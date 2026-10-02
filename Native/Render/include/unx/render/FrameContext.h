@@ -152,6 +152,35 @@ struct FogVolumeDesc
 };
 constexpr uint32_t kMaxFogVolumes = 16;  // (the first ones of a frame take effect)
 
+// The frame's colour grading, scene-referred, before the tone curve (Passes/Shading/PostGradeLut.hlsl, Post.cpp; the
+// reference's post process colour grading) - a look the game sets per frame, like the fog. enabled false: the quality
+// file's shading.post_grading_* decide; true: these values, whatever the file says. Neutral values (the defaults) leave
+// the picture as it is. Each of a range's five values is r, g, b and a master that multiplies (offset: adds to) them;
+// the shadows', midtones' and highlights' values combine with the global ones (products; offsets: sums).
+struct ColorGradingRange
+{
+    float saturation[4] = { 1, 1, 1, 1 };  // about the luma (0: grey)
+    float contrast[4] = { 1, 1, 1, 1 };    // about scene grey 0.18, an exponent
+    float gamma[4] = { 1, 1, 1, 1 };       // the value to the power 1 / gamma
+    float gain[4] = { 1, 1, 1, 1 };
+    float offset[4] = { 0, 0, 0, 0 };
+};
+struct ColorGradingDesc
+{
+    bool enabled = false;
+    float temperature = 6500;      // K: the scene's white the picture is balanced from (6500: none)
+    float tint = 0;                // across the temperature's line (+ green, - magenta; 1 = 0.05 in CIE 1960 uv)
+    ColorGradingRange global, shadows, midtones, highlights;
+    float shadowsMax = 0.09f;      // the luma (ACEScg) below which the shadows' values weigh in
+    float highlightsMin = 0.5f;    // ... from which the highlights' values weigh in, fully from highlightsMax
+    float highlightsMax = 1.0f;
+};
+// The scene description's weather (scene::Scene::clouds, fog, fogVolumes): FrameRenderer gives a frame the scene's cloud
+// layer, fog or fog volumes where the frame brings none of its own (coverage 0, enabled false, no volumes) while that
+// item's bit is set in FrameContext::sceneWeather. A producer that decides an item itself clears its bit, and its "none"
+// is then none (a gate's --clouds 0 on a scene with clouds).
+constexpr uint32_t kSceneClouds = 1, kSceneFog = 2, kSceneFogVolumes = 4;
+
 // A14 (FEATURES_GAME 8; Requests/20260926_C_per_view_history.md): a full auxiliary view drawn in this frame before the
 // main view (render-texture camera, mirror, portal, split screen). Its id is stable across frames (the key of every
 // track's per-view history; nonzero, unique). 'reads' lists the views whose outputs this view's materials read: those
@@ -174,6 +203,8 @@ struct FrameContext
     CloudLayerDesc clouds;  // B5 (v1.77): coverage 0 = none
     FogDesc fog;            // the height fog (enabled false: the quality file's)
     std::vector<FogVolumeDesc> fogVolumes;  // local fog volumes (at most kMaxFogVolumes take effect)
+    ColorGradingDesc grading;  // the colour grading before the tone curve (enabled false: the quality file's)
+    uint32_t sceneWeather = kSceneClouds | kSceneFog | kSceneFogVolumes;  // the scene's weather fills the items above that are empty
     // Validation runs: the main view's colour is linear radiance x exposure in RGBA32F (metrics, INTERFACES 9)
     // instead of the display-encoded RGB10A2.
     bool outputLinearHdr = false;

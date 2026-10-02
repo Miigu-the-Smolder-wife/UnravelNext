@@ -81,6 +81,7 @@ struct ExposureState
 struct Params
 {
     float minEv, maxEv, targetGrey, tauUp, tauDown, cutLow, cutHigh, centreSigma;
+    float linearDistance = 0;  // shading.exposure_linear_distance_ev (0: exponential all the way)
 };
 
 Params params(const QualityConfig& q)
@@ -94,6 +95,8 @@ Params params(const QualityConfig& q)
     p.cutLow = (float)q.number("shading.exposure_cut_dark");
     p.cutHigh = (float)q.number("shading.exposure_cut_bright");
     p.centreSigma = (float)q.number("shading.exposure_centre_sigma");
+    p.linearDistance = q.has("shading.exposure_linear_distance_ev") ? (float)q.number("shading.exposure_linear_distance_ev") : 0.0f;
+    if (!(p.linearDistance >= 0)) fail("shading.exposure_linear_distance_ev must be >= 0");
     if (!(p.minEv < p.maxEv) || !(p.targetGrey > 0) || !(p.tauUp > 0) || !(p.tauDown > 0) || p.cutLow < 0 || p.cutHigh < 0 || p.cutLow + p.cutHigh >= 1 ||
         !(p.centreSigma > 0))
         fail("shading.exposure_*: invalid (min < max ev, grey > 0, time constants > 0, 0 <= cuts with cut sum < 1, sigma > 0)");
@@ -161,7 +164,19 @@ float autoExposureEv100(TrackState& state, Device& device, const QualityConfig& 
         }
         else if (!s.snapPending)
         {
-            const float dt = std::max(frame.deltaTime, 0.0f), tau = target > s.ev ? p.tauUp : p.tauDown;
+            float dt = std::max(frame.deltaTime, 0.0f);
+            const float tau = target > s.ev ? p.tauUp : p.tauDown;
+            // Farther than the linear distance from the target the EV moves at a constant rate - the rate the exponential
+            // has at that distance - and exponentially from there on (the reference's linear / exponential adaptation and
+            // its r.EyeAdaptation.ExponentialTransitionDistance): a large change does not jump most of the way at once.
+            float remaining = std::abs(target - s.ev);
+            if (p.linearDistance > 0 && remaining > p.linearDistance)
+            {
+                const float rate = p.linearDistance / tau, linearTime = std::min(dt, (remaining - p.linearDistance) / rate);
+                remaining -= rate * linearTime;
+                dt -= linearTime;
+                s.ev = target + (s.ev > target ? remaining : -remaining);
+            }
             s.ev += (target - s.ev) * (1.0f - std::exp(-dt / tau));
         }
         s.initialized = true;

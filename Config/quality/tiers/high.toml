@@ -18,3 +18,5 @@ mega_lights_samples = 2     # light samples per downsampled pixel (the reference
 
 [output]
 upscale_tsr_flickering = false  # no flickering (moire) heuristic: sub-pixel gratings may shimmer where they stand still
+upscale_tsr_history_percent = 100.0   # the history at the output resolution (the reference's 200 is its epic tier's): a
+                                # quarter of the update's pixels and of the history's memory; a little more blur per reprojection

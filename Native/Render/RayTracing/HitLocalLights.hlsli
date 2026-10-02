@@ -285,6 +285,14 @@ RtLocalSample rtLocalLightFinish(RtSceneSrvs scene, RtLocalChoice c, float3 x, f
     o.wi = s.wi;
     o.distance = s.distance;
     o.weight = s.L / (s.pdf * c.probability);
+    // A light with a falloff exponent or a draw distance (the record's pad bit 0, RayScene.cpp): the sampler's window is
+    // the plain range window - the weight takes the light's own (Scene.hlsli lightWindow: the exponent's form, the
+    // view's fade) over it. The scales are in the record's intensity (indirect x diffuse: what GI carries on).
+    if (l.pad != 0 && li < g_lightCount)
+    {
+        const float plain = rtLightWindow(l, x);
+        o.weight *= plain > 0 ? lightWindow(loadLight(li), length(l.position - x)) / plain : 0.0;
+    }
     if (l.type == kRtLightPoint || l.type == kRtLightSpot)
         o.weight *= lightFunction(b.Load(80), li, l.forward, l.right, -s.wi, footprintWidth / max(s.distance, 1e-4), g_time);
     return o;
@@ -331,7 +339,8 @@ float3 rtLocalLightBrdfCos(GpuMaterial m, float3 n, float3 v, float3 wi, bool di
     const float alpha = modelAlpha(s.roughness);
     const float3 f0 = modelF0(s);
     const float3 compensation = 1 + f0 * (1 / modelDirectionalAlbedo(NoV, s.roughness) - 1);
-    const float3 specular = shSpecular(f0, alpha, compensation, n, v, wi, NoV, NoL) * NoL;
+    // (the unscaled lobe: R's light records carry one scale - indirect x diffuse, RayScene.cpp - for both lobes)
+    const float3 specular = shSpecularLobe(f0, alpha, compensation, n, v, wi, NoV, NoL) * NoL;
     const float3 base = diffuse + specular;
     if ((m.classFlags & MATERIAL_LAYERED) != 0 && !foliage)
     {

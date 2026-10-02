@@ -9,11 +9,13 @@ void main(uint i : SV_DispatchThreadID)
     RWByteAddressBuffer state = ResourceDescriptorHeap[STATE_UAV];
     const uint count = min(state.Load(4 * VS_DEFER_NODES), CAP_DEFERRED);
     const bool valid = i < count;
-    const uint base = waveAppend(state, VS_NODE_WRITE, valid ? 1 : 0, CAP_NODES, OVERFLOW_NODES);
+    uint first, total;
+    const uint base = nodeReserve(state, valid ? 1 : 0, CAP_NODES, 0, first, total);
     if (valid && base < CAP_NODES)
     {
         RWStructuredBuffer<uint2> deferred = ResourceDescriptorHeap[DEFER_NODES_UAV];
         RWStructuredBuffer<uint2> items = ResourceDescriptorHeap[NODE_ITEMS_UAV];
         items[base] = deferred[i];
     }
+    nodePublish(state, first, total);
 }

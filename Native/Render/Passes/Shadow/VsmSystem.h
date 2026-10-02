@@ -110,6 +110,10 @@ struct VsmStats
     // The air's shadowed (slice, light) items (atmosphere.froxels.walk_stats, words 68..70; main and planar views): added
     // lit over the classification pages (L4 part 2, exact), added lit by the bounded omission (walk_omission, L4), walked.
     uint32_t airClsLit = 0, airOmitted = 0, airWalked = 0;
+    // Page cache (words 71..): (changed caster, page) pairs the HZB filter left unchanged (shadow.vsm.cache_hzb_filter).
+    uint32_t staleSpared = 0;
+    // shadow.vsm.static_separate: kept pages whose movable casters were drawn anew over their static copy.
+    uint32_t dynamicPages = 0;
 };
 
 // shadowPages: requests, page assignment and the raster of every requested page for this frame.

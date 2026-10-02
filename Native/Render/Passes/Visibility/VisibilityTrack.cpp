@@ -1,7 +1,8 @@
 // Track entry points of V (visibility) (INTERFACES_KO.md 5.2, 5.3; ARCHITECTURE 2.1).
 //
 // A cull run (one view, or every view of a raster-service request) walks instances -> per-depth hierarchy roots ->
-// hierarchy nodes (one pass per tree level, indirect) -> hierarchy leaves (groups) -> clusters, with the DAG cut test
+// hierarchy nodes (one dispatch over the node work queue, CullNodes QUEUE=1; visibility.traversal_work_queue false: one
+// pass per tree level, indirect) -> hierarchy leaves (groups) -> clusters, with the DAG cut test
 // (a leaf is reached while its group error projects above the threshold; a cluster is drawn when its own error
 // projects at or below it), frustum, clip plane, normal cone and, for the main view, two-phase HiZ occlusion: phase 1
 // tests against the previous frame's HiZ with previous transforms and defers what it rejects; after the phase-1
@@ -23,6 +24,7 @@
 #include "unx/clusterbuilder/ClusterHierarchy.h"
 #include "unx/core/Log.h"
 #include "unx/render/GpuScene.h"
+#include "unx/render/PassChain.h"
 #include "unx/visibility/Visibility.h"
 
 #include <algorithm>
@@ -41,7 +43,8 @@ namespace hier = unx::clusterbuilder::gpu;
 
 constexpr uint32_t kNone = gpu::kNone;
 constexpr uint32_t kViewsPerSlot = 4096;  // cull views of one upload chunk per frame in flight (more chunks as a frame needs)
-constexpr uint32_t kReadbackBytes = 256;
+constexpr uint32_t kReadbackBytes = 320;  // >= kStateWords x 4 (a slot holds one copy of the cull state)
+static_assert(kReadbackBytes >= kStateWords * 4);
 
 struct Settings
 {
@@ -49,11 +52,21 @@ struct Settings
     uint32_t coverageDebugStage = 0;
     bool coverageHair = false;  // visibility.coverage_hair (B10 strands in the coverage layer)
     bool rasterAmplification = true;  // visibility.raster_amplification (tile-local raster runs: no stored pairs)
+    bool workQueue = true;            // visibility.traversal_work_queue (the node traversal in one dispatch)
+    bool passMerge = true;            // visibility.cull_pass_merge (no argument passes; dispatches that share a pass)
+    bool foldSmall = true;            // visibility.fold_small_passes (HiZ levels, mask and layer clears: PassChain.h)
+    uint32_t workerGroups = 0;        // visibility.traversal_worker_groups (its dispatch: groups of 64 threads)
     double coveragePoolMinPerPixel = 0;
     uint32_t oceanEdgesMin = 0;  // ocean edge pixel list capacity floor (entries)
     uint32_t coverageSpecialMin = 0;  // special record list capacity floor (entries)
     float lodErrorPx = 0, bandAMinPx = 0, bandCMaxPx = 0, bandAHysteresisPx = 0;
     bool occlusion = true, coverageLayer = false, coverageBandC = true, coverageBandCVisible = false;
+    // The coverage raster's depth buckets and what goes with them (CoverageBuckets.hlsli): buckets the band B list is
+    // drawn in, nearer first (1: drawn whole, as before); the fewest list entries of the latest completed frame that turn
+    // them on; the mesh kernel's triangle tests; the compute rasteriser of small triangles; the fragment counters.
+    uint32_t coverageDepthBuckets = 1, coverageBucketsMinClusters = 0;
+    bool coverageTriangleCull = false, coverageComputeRaster = false, coverageStatistics = false;
+    bool coverageDropWeightless = false;  // fragments without weight (no area step, no subsample) are not stored
 
     static Settings load(const QualityConfig& q)
     {
@@ -76,6 +89,12 @@ struct Settings
         s.coverageBandCVisible = q.has("visibility.coverage_band_c_visbuffer") && q.boolean("visibility.coverage_band_c_visbuffer");
         s.coverageHair = q.boolean("visibility.coverage_hair");
         s.rasterAmplification = q.has("visibility.raster_amplification") ? q.boolean("visibility.raster_amplification") : true;
+        s.workQueue = q.has("visibility.traversal_work_queue") ? q.boolean("visibility.traversal_work_queue") : true;
+        s.passMerge = q.has("visibility.cull_pass_merge") ? q.boolean("visibility.cull_pass_merge") : true;
+        s.foldSmall = q.has("visibility.fold_small_passes") ? q.boolean("visibility.fold_small_passes") : true;
+        const int64_t workers = q.has("visibility.traversal_worker_groups") ? q.integer("visibility.traversal_worker_groups") : 1024;
+        if (workers < 1 || workers > 65535) fail("visibility.traversal_worker_groups = %lld: 1 .. 65535 (one dispatch row)", (long long)workers);
+        s.workerGroups = (uint32_t)workers;
         const int64_t stage = q.integer("visibility.coverage_debug_stage");
         if (stage < 0 || stage > 4) fail("visibility.coverage_debug_stage = %lld: 0 (the layer), 1 .. 4 (measurement variants)", (long long)stage);
         s.coverageDebugStage = (uint32_t)stage;
@@ -83,6 +102,19 @@ struct Settings
         s.coverageSpecialMin = (uint32_t)q.integer("visibility.coverage_special_min");
         s.oceanEdgesMin = (uint32_t)q.integer("visibility.ocean_edges_min");
         if (!(s.coveragePoolMinPerPixel > 0)) fail("visibility.coverage_pool_min_fragments_per_pixel = %g: must be positive", s.coveragePoolMinPerPixel);
+        // (keys newer than some quality files in use: absent = the layer as it was)
+        if (q.has("visibility.coverage_depth_buckets"))
+        {
+            const int64_t buckets = q.integer("visibility.coverage_depth_buckets");
+            if (buckets < 1 || buckets > (int64_t)kCovBucketsMax) fail("visibility.coverage_depth_buckets = %lld: 1 (the list drawn whole) .. %u", (long long)buckets, kCovBucketsMax);
+            s.coverageDepthBuckets = (uint32_t)buckets;
+        }
+        if (q.has("visibility.coverage_depth_buckets_min_clusters"))
+            s.coverageBucketsMinClusters = (uint32_t)std::max<int64_t>(q.integer("visibility.coverage_depth_buckets_min_clusters"), 0);
+        s.coverageTriangleCull = q.has("visibility.coverage_triangle_cull") && q.boolean("visibility.coverage_triangle_cull");
+        s.coverageComputeRaster = q.has("visibility.coverage_compute_raster") && q.boolean("visibility.coverage_compute_raster");
+        s.coverageStatistics = q.has("visibility.coverage_statistics") && q.boolean("visibility.coverage_statistics");
+        s.coverageDropWeightless = q.has("visibility.coverage_drop_weightless") && q.boolean("visibility.coverage_drop_weightless");
         return s;
     }
 };
@@ -103,6 +135,7 @@ struct Hiz
 struct Coverage
 {
     ComPtr<ID3D12Resource> headers, counters, list, depthRange;
+    ComPtr<ID3D12Resource> cover;  // depth buckets: per pixel { opaque union, ~farthest } of the buckets drawn (CoverageBuckets.hlsli)
     uint32_t width = 0, height = 0, tilesX = 0, tiles = 0;
     uint32_t capacity = 0;  // records
     uint32_t specialCapacity = 0;  // special record list entries (v1.73)
@@ -143,6 +176,7 @@ struct State
         uint8_t* mapped = nullptr;
         std::vector<uint64_t> frames;
         visibility::Stats latest;
+        uint32_t overflowSeen = 0;  // every read frame's overflow bits
         bool overflowReported = false;
     };
     std::map<std::string, StatsRun> stats;
@@ -151,7 +185,7 @@ struct State
     uint64_t mainFrameConstantsFrame = UINT64_MAX;
     uint32_t sceneRevision = UINT32_MAX;
     uint64_t viewModelRevision = UINT64_MAX;  // GpuScene::viewModelRevision the instance hierarchy was built with
-    uint32_t traversalLevels = 0;  // deepest per-depth tree of any mesh (node passes per phase)
+    uint32_t traversalLevels = 0;  // deepest per-depth tree of any mesh (node passes per phase without the work queue)
 
     // C3: instance chunks, flat list, skinned bounds (persistent; rebuilt at each scene revision).
     struct VBuffer
@@ -660,6 +694,16 @@ CullView viewOf(const RasterView& r, const DepthRasterRequest& req, const Settin
     v.tilesX = (r.viewportWidth + v.tilePx - 1) / v.tilePx;
     v.instanceFirst = r.instanceFirst;
     v.instanceEnd = r.instanceEnd;
+    v.minInstancePx = r.minInstanceTexels;
+    v.instanceSet = r.instanceSet;
+    if (r.tileOccluders && req.tileOccluders.valid() && req.atlasSlots.valid())
+    {
+        if (req.cullTilePx != 128 || req.tileOccludersSrv == UINT32_MAX || req.atlasSlotsSrv == UINT32_MAX)
+            fail("rasterizeDepth '%s': tile occluders need 128 px tiles and the persistent SRVs of the occluders and the atlas slots", req.name.c_str());
+        v.flags |= kViewTileOccluders;
+        v.occluderSrv = req.tileOccludersSrv;
+        v.occluderSlotsSrv = req.atlasSlotsSrv;
+    }
     return v;
 }
 
@@ -771,6 +815,7 @@ struct Run
     BufferRef tileCoarse;  // runs with a tile mask: bit per 8 x 8 tiles (TileMaskCoarse.hlsl)
     BufferRef chunkWork;   // C3: visible chunk items [0, capDeferred), deferred chunks [capDeferred, 2 capDeferred)
     BufferRef chunks, skinBounds;  // C3 persistent buffers imported for this frame (read by the cull kernels)
+    BufferRef tileOccluders, occluderSlots;  // raster service: the request's tile occluders and atlas slots (tilesOcclude)
     uint32_t chunkCount = 0, flatCount = 0;
     uint32_t tileCoarseWords = 0;  // per view
     TextureRef hiz;
@@ -823,6 +868,11 @@ void declareCull(PassBuilder& b, const Run& r, Use argsUse)
     if (r.tileMask.valid()) b.use(r.tileMask, Use::SrvCompute);
     if (r.tilePairs.valid()) b.use(r.tilePairs, Use::UavCompute);
     if (r.tileCoarse.valid()) b.use(r.tileCoarse, Use::SrvCompute);
+    if (r.tileOccluders.valid())
+    {
+        b.use(r.tileOccluders, Use::SrvCompute);
+        b.use(r.occluderSlots, Use::SrvCompute);
+    }
 }
 
 void cullConstants(const PassContext& c, const Run& r, uint32_t phase, uint32_t k[32], uint32_t instanceCount)
@@ -855,7 +905,7 @@ void cullConstants(const PassContext& c, const Run& r, uint32_t phase, uint32_t 
     k[23] = r.cfg.capDeferred;
     k[24] = r.viewCount;
     k[25] = instanceCount;
-    k[26] = r.bandMode | (r.storedPairs ? 256u : 0u);  // CullShared.hlsli BAND_MODE, TILE_STORED_PAIRS
+    k[26] = r.bandMode | (r.storedPairs ? 256u : 0u) | (r.cfg.workQueue ? 512u : 0u);  // CullShared.hlsli BAND_MODE, TILE_STORED_PAIRS, NODE_WORK_QUEUE
     k[27] = r.tilePairs.valid() ? c.uav(r.tilePairs) : kNone;
     k[28] = halfBits(r.cfg.bandAMinPx) | halfBits(r.cfg.bandCMaxPx) << 16;
     k[29] = r.sheetsSrv;
@@ -863,24 +913,59 @@ void cullConstants(const PassContext& c, const Run& r, uint32_t phase, uint32_t 
     k[31] = r.tileCoarseWords;
 }
 
-// A cull kernel pass: direct dispatch (groupsX > 0) or indirect through the run's args at 'argWord'. Prepare and
-// direct passes write the args (UAV); indirect passes consume them.
-void cullPass(FramePassContext& fc, State& s, const Run& r, const std::string& name, const std::string& kernel, uint32_t phase, uint32_t groupsX, uint32_t groupsY,
-              uint32_t argWord)
+// One dispatch of a cull pass: direct (groupsX > 0) or indirect through the run's args at 'argWord'. 'after': it reads
+// what the pass's earlier dispatches wrote (a barrier stands before it).
+struct CullStep
 {
-    ID3D12PipelineState* pso = fc.shaders.compute(kernel);
+    std::string kernel;
+    uint32_t groupsX = 0, groupsY = 0, argWord = 0;
+    bool after = false;
+};
+
+// A cull pass of one or more dispatches: all direct (prepare and direct dispatches write the args: UAV) or all indirect
+// (the args are their arguments). Dispatches of one pass without 'after' between them do not read each other's
+// results: they write disjoint items and share the state's counters through atomics only (visibility.cull_pass_merge).
+void cullPass(FramePassContext& fc, State& s, const Run& r, const std::string& name, uint32_t phase, const std::vector<CullStep>& steps)
+{
+    const bool direct = steps.front().groupsX > 0;
+    std::vector<ID3D12PipelineState*> pso;
+    for (const CullStep& st : steps)
+    {
+        if ((st.groupsX > 0) != direct) fail("V: cull pass '%s' mixes direct and indirect dispatches", name.c_str());
+        pso.push_back(fc.shaders.compute(st.kernel));
+    }
     const uint32_t instanceCount = (uint32_t)fc.scene.instances().size();
     ID3D12CommandSignature* sig = s.dispatchSignature.Get();
-    fc.graph.addPass(r.prefix + name, QueueType::Graphics, [&](PassBuilder& b) { declareCull(b, r, groupsX > 0 ? Use::UavCompute : Use::IndirectArgs); },
+    fc.graph.addPass(r.prefix + name, QueueType::Graphics, [&](PassBuilder& b) { declareCull(b, r, direct ? Use::UavCompute : Use::IndirectArgs); },
                      [=](PassContext& c) {
                          uint32_t k[32];
                          cullConstants(c, r, phase, k, instanceCount);
-                         c.cmd->SetPipelineState(pso);
-                         c.bindFrameConstants(r.frameConstants);
-                         c.computeConstants(k, 32);
-                         if (groupsX > 0) c.cmd->Dispatch(groupsX, groupsY, 1);
-                         else c.cmd->ExecuteIndirect(sig, 1, c.resource(r.args), argWord * 4, nullptr, 0);
+                         for (size_t i = 0; i < steps.size(); ++i)
+                         {
+                             if (steps[i].after)
+                             {
+                                 D3D12_GLOBAL_BARRIER gb{ D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                                          D3D12_BARRIER_ACCESS_UNORDERED_ACCESS };
+                                 D3D12_BARRIER_GROUP group{ D3D12_BARRIER_TYPE_GLOBAL, 1 };
+                                 group.pGlobalBarriers = &gb;
+                                 c.cmd->Barrier(1, &group);
+                             }
+                             c.cmd->SetPipelineState(pso[i]);
+                             if (i == 0)
+                             {
+                                 c.bindFrameConstants(r.frameConstants);
+                                 c.computeConstants(k, 32);
+                             }
+                             if (direct) c.cmd->Dispatch(steps[i].groupsX, steps[i].groupsY, 1);
+                             else c.cmd->ExecuteIndirect(sig, 1, c.resource(r.args), steps[i].argWord * 4, nullptr, 0);
+                         }
                      });
+}
+
+void cullPass(FramePassContext& fc, State& s, const Run& r, const std::string& name, const std::string& kernel, uint32_t phase, uint32_t groupsX, uint32_t groupsY,
+              uint32_t argWord)
+{
+    cullPass(fc, s, r, name, phase, { CullStep{ kernel, groupsX, groupsY, argWord, false } });
 }
 
 // Coarse summary of a run's tile mask (8 x 8 tiles per bit, 64 cells = two words per group): the cull kernels visit
@@ -922,66 +1007,108 @@ void planarTileMask(FramePassContext& fc, Run& r, const ViewDesc& view)
     const BufferRef bits = r.tileMask;
     const TextureRef mask = view.planarMask;
     const uint32_t width = view.width, height = view.height;
+    PassChain chain(fc.graph, QueueType::Graphics, r.cfg.foldSmall);  // (the clear, then the tiles: one pass)
     for (uint32_t mode = 0; mode < 2; ++mode)
     {
         ID3D12PipelineState* pso = fc.shaders.compute("Passes/Visibility/PlanarMask.MODE" + std::to_string(mode));
-        fc.graph.addPass(r.prefix + (mode == 0 ? "planar.clear" : "planar.tiles"), QueueType::Graphics,
-                         [&](PassBuilder& b) {
-                             if (mode == 1) b.use(mask, Use::SrvCompute);
-                             b.use(bits, Use::UavCompute);
-                         },
-                         [=](PassContext& c) {
-                             const uint32_t k[8] = { mode == 1 ? c.srv(mask) : kNone, c.uav(bits), width, height, tilesX, words, kPlanarTilePx, 0 };
-                             c.cmd->SetPipelineState(pso);
-                             c.computeConstants(k, 8);
-                             if (mode == 0) c.cmd->Dispatch((words + 63) / 64, 1, 1);
-                             else c.cmd->Dispatch(tilesX, tilesY, 1);
-                         });
+        chain.add(r.prefix + (mode == 0 ? "planar.clear" : "planar.tiles"),
+                  [=](PassBuilder& b) {
+                      if (mode == 1) b.use(mask, Use::SrvCompute);
+                      b.use(bits, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      const uint32_t k[8] = { mode == 1 ? c.srv(mask) : kNone, c.uav(bits), width, height, tilesX, words, kPlanarTilePx, 0 };
+                      c.cmd->SetPipelineState(pso);
+                      c.computeConstants(k, 8);
+                      if (mode == 0) c.cmd->Dispatch((words + 63) / 64, 1, 1);
+                      else c.cmd->Dispatch(tilesX, tilesY, 1);
+                  });
     }
+    chain.flush(r.prefix + "planar.tiles");
 }
 
-// One cull phase: instances (phase 1: all x views; phase 2: deferred), the traversal levels, the cluster pass(es) and
-// the draw arguments of the lists for this phase.
+// One cull phase: instances (phase 1: all x views; phase 2: deferred), the traversal (one dispatch over the node work
+// queue, or the levels), the cluster pass(es) and the draw arguments of the lists for this phase.
+// visibility.cull_pass_merge: the kernels that append a pass's items keep its arguments current (raiseDispatch) and
+// phase 1's draw-argument pass leaves phase 2's first arguments, so the argument passes between them go
+// (prepare.chunks.p1, prepare.chunks.p2, prepare.groups with the work queue), and dispatches that do not read each
+// other's results share a pass: the reset with the chunk and flat instance dispatches after it (seed.p1), the indirect
+// instance dispatches (instances.indirect.p1), phase 2's deferred instances and nodes (seed.p2) and its two cluster
+// dispatches (clusters.p2). The kernels and what each tests are those of the separate passes.
 void cullPhase(FramePassContext& fc, State& s, const Run& r, uint32_t phase)
 {
-    const uint32_t instances = (uint32_t)fc.scene.instances().size();
     const std::string p = std::to_string(phase);
-    (void)instances;
+    const bool merge = r.cfg.passMerge;
     if (phase == 1)
     {
-        cullPass(fc, s, r, "reset", "Passes/Visibility/CullReset", phase, 1, 1, 0);
-        if (r.chunkCount > 0)
-            cullPass(fc, s, r, "chunks.p1", "Passes/Visibility/CullChunks.PHASE1", phase, (r.chunkCount + 63) / 64, r.viewCount, 0);
         const uint32_t runtime = (uint32_t)fc.scene.instances().size() - fc.scene.staticInstanceCount();  // C2b
         const uint32_t gpuCapacity = fc.scene.gpuInstanceRange().capacity;  // A3 mesh particles (count on the GPU)
-        cullPass(fc, s, r, "instances.p1", "Passes/Visibility/CullInstances.PHASE1.SOURCE0", phase, std::max((r.flatCount + runtime + 63) / 64, 1u), r.viewCount, 0);
-        // (their live count on the GPU sizes the dispatch: CullReset's VA_GPU_INSTANCES)
-        if (gpuCapacity > 0) cullPass(fc, s, r, "instances.gpu.p1", "Passes/Visibility/CullInstances.PHASE1.SOURCE2", phase, 0, 0, kArgGpuInstances);
-        if (r.chunkCount > 0)
+        const CullStep reset{ "Passes/Visibility/CullReset", 1, 1, 0, false };
+        const CullStep chunks{ "Passes/Visibility/CullChunks.PHASE1", (r.chunkCount + 63) / 64, r.viewCount, 0, false };
+        const CullStep flat{ "Passes/Visibility/CullInstances.PHASE1.SOURCE0", std::max((r.flatCount + runtime + 63) / 64, 1u), r.viewCount, 0, false };
+        // (the GPU-written instances' live count sizes their dispatch: CullReset's VA_GPU_INSTANCES)
+        const CullStep gpu{ "Passes/Visibility/CullInstances.PHASE1.SOURCE2", 0, 0, kArgGpuInstances, false };
+        const CullStep members{ "Passes/Visibility/CullInstances.PHASE1.SOURCE1", 0, 0, kArgChunkItems, false };
+        if (merge)
         {
-            cullPass(fc, s, r, "prepare.chunks.p1", "Passes/Visibility/CullPrepare.MODE4", phase, 1, 1, 0);
-            cullPass(fc, s, r, "instances.chunks.p1", "Passes/Visibility/CullInstances.PHASE1.SOURCE1", phase, 0, 0, kArgChunkItems);
+            std::vector<CullStep> seed{ reset };
+            if (r.chunkCount > 0) seed.push_back(chunks);
+            seed.push_back(flat);
+            seed[1].after = true;  // every dispatch after the reset starts from the cleared state
+            cullPass(fc, s, r, "seed.p1", phase, seed);
+            std::vector<CullStep> indirect;
+            if (gpuCapacity > 0) indirect.push_back(gpu);
+            if (r.chunkCount > 0) indirect.push_back(members);
+            if (!indirect.empty()) cullPass(fc, s, r, "instances.indirect.p1", phase, indirect);
+        }
+        else
+        {
+            cullPass(fc, s, r, "reset", phase, { reset });
+            if (r.chunkCount > 0) cullPass(fc, s, r, "chunks.p1", phase, { chunks });
+            cullPass(fc, s, r, "instances.p1", phase, { flat });
+            if (gpuCapacity > 0) cullPass(fc, s, r, "instances.gpu.p1", phase, { gpu });
+            if (r.chunkCount > 0)
+            {
+                cullPass(fc, s, r, "prepare.chunks.p1", "Passes/Visibility/CullPrepare.MODE4", phase, 1, 1, 0);
+                cullPass(fc, s, r, "instances.chunks.p1", phase, { members });
+            }
         }
     }
     else
     {
         if (r.chunkCount > 0)
         {
-            cullPass(fc, s, r, "prepare.chunks.p2", "Passes/Visibility/CullPrepare.MODE5", phase, 1, 1, 0);
+            if (!merge) cullPass(fc, s, r, "prepare.chunks.p2", "Passes/Visibility/CullPrepare.MODE5", phase, 1, 1, 0);
             cullPass(fc, s, r, "chunks.p2", "Passes/Visibility/CullChunks.PHASE2", phase, 0, 0, kArgDeferredChunks);
         }
         cullPass(fc, s, r, "prepare.p2", "Passes/Visibility/CullPrepare.MODE2", phase, 1, 1, 0);
-        cullPass(fc, s, r, "instances.p2", "Passes/Visibility/CullInstances.PHASE2.SOURCE0", phase, 0, 0, kArgDeferredInstances);
-        cullPass(fc, s, r, "seed.p2", "Passes/Visibility/CullSeed", phase, 0, 0, kArgSeedNodes);
+        const CullStep deferred{ "Passes/Visibility/CullInstances.PHASE2.SOURCE0", 0, 0, kArgDeferredInstances, false };
+        const CullStep nodes{ "Passes/Visibility/CullSeed", 0, 0, kArgSeedNodes, false };
+        if (merge) cullPass(fc, s, r, "seed.p2", phase, { deferred, nodes });
+        else
+        {
+            cullPass(fc, s, r, "instances.p2", phase, { deferred });
+            cullPass(fc, s, r, "seed.p2", phase, { nodes });
+        }
     }
-    for (uint32_t level = 0; level < s.traversalLevels; ++level)
+    if (r.cfg.workQueue)
+        cullPass(fc, s, r, "nodes.p" + p, "Passes/Visibility/CullNodes.PHASE" + p + ".QUEUE1", phase, r.cfg.workerGroups, 1, 0);
+    else
+        for (uint32_t level = 0; level < s.traversalLevels; ++level)
+        {
+            cullPass(fc, s, r, "prepare.nodes.p" + p + "." + std::to_string(level), "Passes/Visibility/CullPrepare.MODE0", phase, 1, 1, 0);
+            cullPass(fc, s, r, "nodes.p" + p + "." + std::to_string(level), "Passes/Visibility/CullNodes.PHASE" + p + ".QUEUE0", phase, 0, 0, kArgNodes);
+        }
+    // (the level passes' dispatch reads the args, so only the work queue's kernel can raise the cluster pass's)
+    if (!(merge && r.cfg.workQueue)) cullPass(fc, s, r, "prepare.groups.p" + p, "Passes/Visibility/CullPrepare.MODE1", phase, 1, 1, 0);
+    const CullStep groups{ "Passes/Visibility/CullClusters.MODE0", 0, 0, kArgGroups, false };
+    const CullStep deferredClusters{ "Passes/Visibility/CullClusters.MODE1", 0, 0, kArgDeferredClusters, false };
+    if (merge && phase == 2) cullPass(fc, s, r, "clusters.p2", phase, { groups, deferredClusters });
+    else
     {
-        cullPass(fc, s, r, "prepare.nodes.p" + p + "." + std::to_string(level), "Passes/Visibility/CullPrepare.MODE0", phase, 1, 1, 0);
-        cullPass(fc, s, r, "nodes.p" + p + "." + std::to_string(level), "Passes/Visibility/CullNodes.PHASE" + p, phase, 0, 0, kArgNodes);
+        cullPass(fc, s, r, "clusters.p" + p, phase, { groups });
+        if (phase == 2) cullPass(fc, s, r, "clusters.deferred.p2", phase, { deferredClusters });
     }
-    cullPass(fc, s, r, "prepare.groups.p" + p, "Passes/Visibility/CullPrepare.MODE1", phase, 1, 1, 0);
-    cullPass(fc, s, r, "clusters.p" + p, "Passes/Visibility/CullClusters.MODE0", phase, 0, 0, kArgGroups);
-    if (phase == 2) cullPass(fc, s, r, "clusters.deferred.p2", "Passes/Visibility/CullClusters.MODE1", phase, 0, 0, kArgDeferredClusters);
     cullPass(fc, s, r, "prepare.draw.p" + p, "Passes/Visibility/CullPrepare.MODE3", phase, 1, 1, 0);
 }
 
@@ -1128,10 +1255,13 @@ void resolveDepthTies(FramePassContext& fc, State& s, const Run& r, const ViewRe
     }
 }
 
-// HiZ from the depth buffer: five levels per pass (HiZ.hlsl), each pass after the previous one's writes.
-void hizPasses(FramePassContext& fc, const Hiz& h, TextureRef hizRef, TextureRef depth, uint32_t width, uint32_t height, const std::string& tag)
+// HiZ from the depth buffer: five levels per dispatch (HiZ.hlsl), each after the previous one's writes.
+// fold (visibility.fold_small_passes): the dispatches are one pass "v.hiz.<tag>" (they write mips of one texture as UAVs,
+// each after a barrier); else a pass each.
+void hizPasses(FramePassContext& fc, const Hiz& h, TextureRef hizRef, TextureRef depth, uint32_t width, uint32_t height, const std::string& tag, bool fold)
 {
     auto mipSize = [](uint32_t m, uint32_t base) { return (base + (1u << m) - 1) >> m; };
+    PassChain chain(fc.graph, QueueType::Graphics, fold);
     for (uint32_t first = 0; first < h.mips; first += 5)
     {
         const bool fromDepth = first == 0;
@@ -1140,30 +1270,31 @@ void hizPasses(FramePassContext& fc, const Hiz& h, TextureRef hizRef, TextureRef
         const uint32_t w0 = mipSize(first, h.width), h0 = mipSize(first, h.height);
         const uint32_t srcW = fromDepth ? width : mipSize(first - 1, h.width), srcH = fromDepth ? height : mipSize(first - 1, h.height);
         const std::vector<uint32_t> uavs = h.uavs;
-        fc.graph.addPass("v.hiz." + tag + "." + std::to_string(first), QueueType::Graphics,
-                         [&](PassBuilder& b) {
-                             if (fromDepth) b.use(depth, Use::SrvCompute);
-                             b.use(hizRef, Use::UavCompute);
-                         },
-                         [=](PassContext& c) {
-                             uint32_t k[12] = {};
-                             k[0] = fromDepth ? c.srv(depth) : uavs[first - 1];
-                             k[1] = srcW;
-                             k[2] = srcH;
-                             k[3] = levels;
-                             for (uint32_t l = 0; l < 5; ++l)
-                             {
-                                 const uint32_t u = l < levels ? uavs[first + l] : uavs[first];
-                                 if (l < 4) k[4 + l] = u;
-                                 else k[8] = u;
-                             }
-                             k[9] = w0;
-                             k[10] = h0;
-                             c.cmd->SetPipelineState(pso);
-                             c.computeConstants(k, 12);
-                             c.cmd->Dispatch((w0 + 15) / 16, (h0 + 15) / 16, 1);
-                         });
+        chain.add("v.hiz." + tag + "." + std::to_string(first),
+                  [=](PassBuilder& b) {
+                      if (fromDepth) b.use(depth, Use::SrvCompute);
+                      b.use(hizRef, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      uint32_t k[12] = {};
+                      k[0] = fromDepth ? c.srv(depth) : uavs[first - 1];
+                      k[1] = srcW;
+                      k[2] = srcH;
+                      k[3] = levels;
+                      for (uint32_t l = 0; l < 5; ++l)
+                      {
+                          const uint32_t u = l < levels ? uavs[first + l] : uavs[first];
+                          if (l < 4) k[4 + l] = u;
+                          else k[8] = u;
+                      }
+                      k[9] = w0;
+                      k[10] = h0;
+                      c.cmd->SetPipelineState(pso);
+                      c.computeConstants(k, 12);
+                      c.cmd->Dispatch((w0 + 15) / 16, (h0 + 15) / 16, 1);
+                  });
     }
+    chain.flush("v.hiz." + tag);
 }
 
 ComPtr<ID3D12Resource> createCoverageBuffer(Device& device, uint64_t bytes, const wchar_t* name)
@@ -1183,13 +1314,25 @@ ComPtr<ID3D12Resource> createCoverageBuffer(Device& device, uint64_t bytes, cons
     return r;
 }
 
-void ensureCoverage(Device& device, Coverage& cv, uint32_t width, uint32_t height)
+void ensureCoverage(Device& device, Coverage& cv, uint32_t width, uint32_t height, bool cover)
 {
-    if (cv.headers && cv.width == width && cv.height == height) return;
-    for (ComPtr<ID3D12Resource>* r : { std::addressof(cv.headers), std::addressof(cv.counters), std::addressof(cv.list), std::addressof(cv.depthRange) })
+    // The depth buckets' cover (8 B per pixel of the tile grid) exists while they are configured; made later than the
+    // rest (the setting changed), every tile is emptied again with it.
+    if (cv.headers && cv.width == width && cv.height == height)
+    {
+        if (cover && !cv.cover)
+        {
+            cv.cover = createCoverageBuffer(device, (uint64_t)cv.tiles * kCovTilePixels * 8, L"V coverage cover (main view)");
+            cv.fresh = true;
+        }
+        return;
+    }
+    for (ComPtr<ID3D12Resource>* r : { std::addressof(cv.headers), std::addressof(cv.counters), std::addressof(cv.list), std::addressof(cv.depthRange), std::addressof(cv.cover) })
         if (*r) device.deferRelease(*r);
+    cv.cover.Reset();
     cv.tilesX = (width + kCovTilePx - 1) / kCovTilePx;
     cv.tiles = cv.tilesX * ((height + kCovTilePx - 1) / kCovTilePx);
+    if (cover) cv.cover = createCoverageBuffer(device, (uint64_t)cv.tiles * kCovTilePixels * 8, L"V coverage cover (main view)");
     cv.headers = createCoverageBuffer(device, (uint64_t)cv.tiles * kCovTileWords * 4, L"V coverage tile headers (main view)");
     cv.counters = createCoverageBuffer(device, (uint64_t)cv.tiles * kCovTilePixels * 4, L"V coverage pixel counters (main view)");
     cv.list = createCoverageBuffer(device, (uint64_t)(kCovListInfo + 4ull * cv.tiles) * 4, L"V coverage tile list (main view)");
@@ -1223,7 +1366,8 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
     ViewState& vs = s.views[view.viewId];
     Coverage& cv = vs.coverage;
     const std::string statsName = view.viewId == 0 ? std::string("main") : "view" + std::to_string(view.viewId);
-    ensureCoverage(fc.device, cv, width, height);
+    const bool bucketsConfigured = r.cfg.coverageDepthBuckets >= 2 && r.cfg.coverageDebugStage == 0;
+    ensureCoverage(fc.device, cv, width, height, bucketsConfigured);
     // Record capacity: 1.5 x the latest measured need (fragments appended in the latest completed frame, read here before
     // the frame's own passes), at least the floor, in
     // steps of 64 K records (1 MB); it grows at once and shrinks only below half, so the graph keeps its placed buffers
@@ -1243,6 +1387,19 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
         special = std::min<uint64_t>((special + kStep - 1) / kStep * kStep, kCovPoolMaxRecords);
         if (special > cv.specialCapacity || special * 2 < cv.specialCapacity) cv.specialCapacity = (uint32_t)special;
     }
+    // Depth buckets (CoverageBuckets.hlsli): the band B list drawn nearer first in buckets, each after the first cut by
+    // the cover of those before. Their passes (bins, cover) are recorded when the latest completed frame's band B list
+    // held at least the configured entries: a frame without thin geometry keeps the one raster pass. Either way the
+    // records of the fragments with weight are the same, so the frames between a change and its statistics only cost what
+    // the other path costs.
+    uint32_t buckets = 1;
+    if (bucketsConfigured)
+    {
+        const auto it = s.stats.find(statsName);
+        if (it != s.stats.end() && it->second.latest.frameIndex != UINT64_MAX && it->second.latest.listEntries[kListB] >= std::max(r.cfg.coverageBucketsMinClusters, 1u))
+            buckets = r.cfg.coverageDepthBuckets;
+    }
+    const bool binned = buckets >= 2, computeRaster = binned && r.cfg.coverageComputeRaster, triangleCull = r.cfg.coverageTriangleCull;
     RenderGraph& g = fc.graph;
     const uint32_t capacity = cv.capacity, tiles = cv.tiles, tilesX = cv.tilesX, slots = coverageScratchSlots(capacity);
     const BufferRef headers = g.importBuffer(cv.headers.Get(), { "v.coverage.tiles", (uint64_t)tiles * kCovTileWords * 4, 0 });
@@ -1257,6 +1414,12 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
     const BufferRef scratch = g.createBuffer({ "v.coverage.scratch", (uint64_t)slots * (kCovScratchWords + 1) * 4, 0 });
     const uint32_t specialCapacity = cv.specialCapacity;
     const BufferRef special = g.createBuffer({ "v.coverage.special", 16 + (uint64_t)specialCapacity * 8, 0 });
+    // Depth buckets: the persistent cover (emptied with the tiles), and the frame's binned list (per list entry its fine
+    // bin and its sorted place; with the compute rasteriser 4 words of taken triangles) and bucket arguments.
+    const BufferRef cover = cv.cover ? g.importBuffer(cv.cover.Get(), { "v.coverage.cover", (uint64_t)tiles * kCovTilePixels * 8, 0 }) : BufferRef{};
+    const BufferRef bins = binned ? g.createBuffer({ "v.coverage.bins", ((uint64_t)kCovBinHeaderWords + (uint64_t)(computeRaster ? kCovBinEntryWords : 2u) * r.cfg.capVisible) * 4, 0 })
+                                  : BufferRef{};
+    const BufferRef binArgs = binned ? g.createBuffer({ "v.coverage.binArgs", kCovArgWords * 4, 0 }) : BufferRef{};
     view.coverageSpecial = special;
     view.coverageTiles = headers;
     view.coverageRecords = records;
@@ -1273,13 +1436,14 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
     enum : uint32_t
     {
         kUseArgs = 1, kUseList = 2, kUseListRead = 4, kUseTiles = 8, kUseCounters = 16, kUseStream = 32, kUseRecords = 64, kUseRecordsRead = 128,
-        kUseStarts = 256, kUseRange = 512, kUseScratch = 1024, kUseDepthA = 2048, kUseSpecial = 4096
+        kUseStarts = 256, kUseRange = 512, kUseScratch = 1024, kUseDepthA = 2048, kUseSpecial = 4096,
+        kUseCover = 8192  // the tile clears: the depth buckets' cover in the records' slot (P[0].z)
     };
     auto constants = [=](const PassContext& c, uint32_t k[28], uint32_t uses, bool raster) {
         std::memset(k, 0, 28 * 4);
         k[0] = c.uav(run.state);
         k[1] = (uses & kUseArgs) ? c.uav(run.args) : kNone;
-        k[2] = (uses & kUseRecords) ? c.uav(records) : ((uses & kUseRecordsRead) ? c.srv(records) : kNone);
+        k[2] = (uses & kUseRecords) ? c.uav(records) : ((uses & kUseRecordsRead) ? c.srv(records) : ((uses & kUseCover) ? c.uav(cover) : kNone));
         k[3] = (uses & kUseStream) ? c.uav(stream) : kNone;
         k[4] = (uses & kUseStream) ? c.uav(keys) : kNone;
         k[5] = (uses & kUseList) ? c.uav(list) : ((uses & kUseListRead) ? c.srv(list) : kNone);
@@ -1333,6 +1497,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       if (uses & kUseScratch) b.use(scratch, Use::UavCompute);
                       if (uses & kUseDepthA) b.use(depthA, Use::SrvCompute);
                       if (uses & kUseSpecial) b.use(special, Use::UavCompute);
+                      if (uses & kUseCover) b.use(cover, Use::UavCompute);
                   },
                   [=](PassContext& c) {
                       uint32_t k[28];
@@ -1343,53 +1508,189 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       else c.cmd->Dispatch(groupsX, groupsY, 1);
                   });
     };
+    const uint32_t coverUse = cover.valid() ? (uint32_t)kUseCover : 0u;
     if (cv.fresh)
     {
-        build("init", 4, tilesX, tiles / tilesX, 0, kUseList | kUseTiles | kUseCounters | kUseRange);
+        build("init", 4, tilesX, tiles / tilesX, 0, kUseList | kUseTiles | kUseCounters | kUseRange | coverUse);
         cv.fresh = false;
     }
     build("prepare", 0, 1, 1, 0, kUseArgs | kUseListRead);
-    build("clear", 1, 0, 0, kArgCovClear, kUseListRead | kUseTiles | kUseCounters | kUseRange);
+    build("clear", 1, 0, 0, kArgCovClear, kUseListRead | kUseTiles | kUseCounters | kUseRange | coverUse);
 
+    // The pixel kernel's variant: the measurement stage, and the fragment counters (visibility.coverage_statistics).
+    const std::string psVariant = ".STAGE" + std::to_string(r.cfg.coverageDebugStage) + (r.cfg.coverageStatistics ? ".STATS1" : ".STATS0");
+    const std::string psoVariant = "stage" + std::to_string(r.cfg.coverageDebugStage) + (r.cfg.coverageStatistics ? ".stats" : "");
     MeshPipelineDesc d;
     d.meshShader = "Passes/Visibility/CoverageRaster.ms";
-    d.pixelShader = "Passes/Visibility/CoverageRaster.ps.STAGE" + std::to_string(r.cfg.coverageDebugStage);
+    d.pixelShader = "Passes/Visibility/CoverageRaster.ps" + psVariant;
     d.depthFormat = DXGI_FORMAT_UNKNOWN;
     d.depthWrite = false;
     d.cull = D3D12_CULL_MODE_NONE;  // one-sided back faces are culled by the mesh kernel (with the near clip)
     d.conservative = true;
-    ID3D12PipelineState* rasterPso = fc.shaders.mesh("v.coverage.stage" + std::to_string(r.cfg.coverageDebugStage), d);
+    ID3D12PipelineState* rasterPso = fc.shaders.mesh("v.coverage." + psoVariant, d);
     const D3D12_GPU_VIRTUAL_ADDRESS frameConstants = view.frameConstants;
     const TextureRef hiz = r.hiz;
-    g.addPass("v.coverage.raster", QueueType::Graphics,
-              [&](PassBuilder& b) {
-                  b.use(run.args, Use::IndirectArgs);
-                  b.use(run.visible, Use::SrvGraphics);
-                  b.use(run.lists, Use::SrvGraphics);
-                  b.use(run.state, Use::UavGraphics);
-                  b.use(stream, Use::UavGraphics);
-                  b.use(keys, Use::UavGraphics);
-                  if (hiz.valid()) b.use(hiz, Use::SrvGraphics);
-              },
-              [=](PassContext& c) {
-                  uint32_t k[32];
-                  constants(c, k, 0, true);
-                  k[3] = c.uav(stream);
-                  k[4] = c.uav(keys);
-                  if (!hiz.valid()) k[8] = kNone;
-                  std::memset(&k[24], 0, 8 * 4);
-                  k[24] = kListB;  // COV_RASTER_LIST; P[6].y 0: band B
-                  k[30] = kNone;
-                  c.cmd->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
-                  const D3D12_VIEWPORT vp{ 0, 0, (float)width, (float)height, 0, 1 };
-                  const D3D12_RECT sc{ 0, 0, (LONG)width, (LONG)height };
-                  c.cmd->RSSetViewports(1, &vp);
-                  c.cmd->RSSetScissorRects(1, &sc);
-                  c.bindFrameConstants(frameConstants);
-                  c.cmd->SetPipelineState(rasterPso);
-                  c.graphicsConstants(k, 32);
-                  c.cmd->ExecuteIndirect(meshSig, 1, c.resource(run.args), kArgCovMesh * 4, nullptr, 0);
-              });
+    // P[1].w of the cluster raster kernels (CoverageBuckets.hlsli COV_RASTER_*): the bucket, the triangle tests, the
+    // compute raster, the drop of fragments without weight. The hair and stream passes take 0: their records as before.
+    const uint32_t rasterFlags = (triangleCull ? 0x100u : 0u) | (computeRaster ? 0x200u : 0u) | (r.cfg.coverageDropWeightless ? 0x400u : 0u);
+    // The band B list's raster: the whole list (bucket < 0), or one depth bucket of the binned list - after the first
+    // with the cover (fragments) and the tile headers (clusters, triangles) the buckets before it left.
+    auto addClusterRaster = [&](int bucket) {
+        const bool fromBins = bucket >= 0, covered = bucket > 0;
+        g.addPass("v.coverage.raster", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(fromBins ? binArgs : run.args, Use::IndirectArgs);
+                      b.use(run.visible, Use::SrvGraphics);
+                      b.use(run.lists, Use::SrvGraphics);
+                      b.use(run.state, Use::UavGraphics);
+                      b.use(stream, Use::UavGraphics);
+                      b.use(keys, Use::UavGraphics);
+                      if (hiz.valid()) b.use(hiz, Use::SrvGraphics);
+                      if (fromBins) b.use(bins, Use::SrvGraphics);
+                      if (covered)
+                      {
+                          b.use(cover, Use::SrvGraphics);
+                          b.use(headers, Use::SrvGraphics);
+                      }
+                  },
+                  [=](PassContext& c) {
+                      uint32_t k[32];
+                      constants(c, k, 0, true);
+                      k[1] = fromBins ? c.srv(bins) : kNone;     // COV_BINS
+                      k[2] = covered ? c.srv(cover) : kNone;     // COV_COVER
+                      k[3] = c.uav(stream);
+                      k[4] = c.uav(keys);
+                      k[5] = covered ? c.srv(headers) : kNone;   // COV_TILE_HIZ
+                      k[7] = (fromBins ? (uint32_t)bucket : 0u) | (fromBins ? rasterFlags : rasterFlags & ~0x200u);
+                      if (!hiz.valid()) k[8] = kNone;
+                      std::memset(&k[24], 0, 8 * 4);
+                      k[24] = kListB;  // COV_RASTER_LIST; P[6].y 0: band B
+                      k[30] = kNone;
+                      c.cmd->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+                      const D3D12_VIEWPORT vp{ 0, 0, (float)width, (float)height, 0, 1 };
+                      const D3D12_RECT sc{ 0, 0, (LONG)width, (LONG)height };
+                      c.cmd->RSSetViewports(1, &vp);
+                      c.cmd->RSSetScissorRects(1, &sc);
+                      c.bindFrameConstants(frameConstants);
+                      c.cmd->SetPipelineState(rasterPso);
+                      c.graphicsConstants(k, 32);
+                      if (fromBins) c.cmd->ExecuteIndirect(meshSig, 1, c.resource(binArgs), (kCovArgDraw + 3 * (uint32_t)bucket) * 4, nullptr, 0);
+                      else c.cmd->ExecuteIndirect(meshSig, 1, c.resource(run.args), kArgCovMesh * 4, nullptr, 0);
+                  });
+    };
+    if (!binned) addClusterRaster(-1);
+    else
+    {
+        // CoverageBins.hlsl: direct (groupsX > 0) or indirect at argWord of the bin arguments.
+        enum : uint32_t { kBinArgs = 1, kBinLists = 2, kBinVisible = 4, kBinHiz = 8, kBinStream = 16, kBinCover = 32, kBinRead = 64 };
+        auto bin = [&](const char* name, uint32_t mode, uint32_t groupsX, uint32_t argWord, uint32_t uses, uint32_t bucket) {
+            ID3D12PipelineState* pso = fc.shaders.compute("Passes/Visibility/CoverageBins.MODE" + std::to_string(mode));
+            const bool indirect = groupsX == 0;
+            g.addPass(std::string("v.coverage.") + name, QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(run.state, Use::UavCompute);
+                          b.use(bins, (uses & kBinRead) ? Use::SrvCompute : Use::UavCompute);
+                          if (indirect) b.use(binArgs, Use::IndirectArgs);
+                          else if (uses & kBinArgs) b.use(binArgs, Use::UavCompute);
+                          if (uses & kBinLists) b.use(run.lists, Use::SrvCompute);
+                          if (uses & kBinVisible) b.use(run.visible, Use::SrvCompute);
+                          if ((uses & kBinHiz) && hiz.valid()) b.use(hiz, Use::SrvCompute);
+                          if (uses & kBinStream)
+                          {
+                              b.use(stream, Use::UavCompute);
+                              b.use(keys, Use::UavCompute);
+                          }
+                          if (uses & kBinCover)
+                          {
+                              b.use(cover, Use::UavCompute);
+                              b.use(headers, Use::UavCompute);
+                          }
+                      },
+                      [=](PassContext& c) {
+                          uint32_t k[28];
+                          std::memset(k, 0, sizeof k);
+                          k[0] = c.uav(run.state);
+                          k[1] = (uses & kBinRead) ? c.srv(bins) : c.uav(bins);                       // COV_BINS
+                          k[2] = (uses & kBinCover) ? c.uav(cover) : kNone;                           // COV_COVER
+                          k[3] = (uses & kBinStream) ? c.uav(stream) : kNone;
+                          k[4] = (uses & kBinStream) ? c.uav(keys) : kNone;
+                          k[5] = (!indirect && (uses & kBinArgs)) ? c.uav(binArgs) : kNone;            // COV_BIN_ARGS
+                          k[6] = capacity;
+                          k[7] = bucket;
+                          k[8] = (uses & kBinHiz) && hiz.valid() ? hizSrv : kNone;
+                          k[9] = width;
+                          k[10] = height;
+                          k[11] = hizSize;
+                          k[12] = (uses & kBinVisible) ? c.srv(run.visible) : kNone;
+                          k[13] = (uses & kBinLists) ? c.srv(run.lists) : kNone;
+                          k[14] = run.cfg.capVisible;
+                          k[15] = run.viewsSrv;
+                          std::memcpy(&k[16], &frontSign, 4);
+                          k[17] = (uses & kBinCover) ? c.uav(headers) : kNone;
+                          k[18] = tilesX;
+                          k[19] = tiles;
+                          k[24] = buckets;                                                            // COV_BUCKETS
+                          c.cmd->SetPipelineState(pso);
+                          c.bindFrameConstants(frameConstants);
+                          c.computeConstants(k, 28);
+                          if (indirect) c.cmd->ExecuteIndirect(dispatchSig, 1, c.resource(binArgs), argWord * 4, nullptr, 0);
+                          else c.cmd->Dispatch(groupsX, 1, 1);
+                      });
+        };
+        bin("bins.begin", 0, (kCovBinHeaderWords + 63) / 64, 0, kBinArgs, 0);
+        bin("bins.classify", 1, 0, kCovArgEntries, kBinLists | kBinVisible | kBinHiz, 0);
+        bin("bins.prefix", 2, 1, 0, kBinArgs, 0);
+        bin("bins.scatter", 3, 0, kCovArgEntries, kBinLists, 0);
+        // The compute rasteriser of a bucket's small triangles, before its mesh raster (which skips what this took).
+        ID3D12PipelineState* swPso = computeRaster ? fc.shaders.compute(std::string("Passes/Visibility/CoverageRasterSw.STATS") + (r.cfg.coverageStatistics ? "1" : "0")) : nullptr;
+        auto addComputeRaster = [&](uint32_t bucket) {
+            const bool covered = bucket > 0;
+            g.addPass("v.coverage.sw", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(binArgs, Use::IndirectArgs);
+                          b.use(run.visible, Use::SrvCompute);
+                          b.use(run.lists, Use::SrvCompute);
+                          b.use(run.state, Use::UavCompute);
+                          b.use(stream, Use::UavCompute);
+                          b.use(keys, Use::UavCompute);
+                          b.use(bins, Use::UavCompute);
+                          if (hiz.valid()) b.use(hiz, Use::SrvCompute);
+                          if (covered)
+                          {
+                              b.use(cover, Use::SrvCompute);
+                              b.use(headers, Use::SrvCompute);
+                          }
+                      },
+                      [=](PassContext& c) {
+                          uint32_t k[32];
+                          constants(c, k, 0, true);
+                          k[1] = c.uav(bins);                        // COV_BINS (the taken triangles are written)
+                          k[2] = covered ? c.srv(cover) : kNone;     // COV_COVER
+                          k[3] = c.uav(stream);
+                          k[4] = c.uav(keys);
+                          k[5] = covered ? c.srv(headers) : kNone;   // COV_TILE_HIZ
+                          k[7] = bucket | rasterFlags;
+                          if (!hiz.valid()) k[8] = kNone;
+                          std::memset(&k[24], 0, 8 * 4);
+                          k[24] = kListB;
+                          k[30] = kNone;
+                          c.cmd->SetPipelineState(swPso);
+                          c.bindFrameConstants(frameConstants);
+                          c.computeConstants(k, 32);
+                          c.cmd->ExecuteIndirect(dispatchSig, 1, c.resource(binArgs), (kCovArgDraw + 3 * bucket) * 4, nullptr, 0);
+                      });
+        };
+        for (uint32_t bucket = 0; bucket < buckets; ++bucket)
+        {
+            if (computeRaster) addComputeRaster(bucket);
+            addClusterRaster((int)bucket);
+            if (bucket + 1 < buckets)  // what the bucket stored enters the cover the next ones read
+            {
+                bin("cover.args", 4, 1, 0, kBinArgs, bucket);
+                bin("cover", 5, 0, kCovArgCover, kBinRead | kBinStream | kBinCover, bucket);
+            }
+        }
+    }
     // A6: the translucent lists' see-through records in the pixels of translucent class 2 (edges, seams, overlaps).
     const TextureRef translucentClass = view.translucentClass;
     if (translucentClass.valid())
@@ -1410,6 +1711,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       k[3] = c.uav(stream);
                       k[4] = c.uav(keys);
                       if (!hiz.valid()) k[8] = kNone;
+                      k[7] = rasterFlags & ~0x200u;  // (no bucket: the translucent lists are drawn whole)
                       std::memset(&k[24], 0, 8 * 4);
                       k[25] = 1;  // COV_RASTER_TRANSLUCENT
                       k[30] = c.srv(translucentClass);
@@ -1436,7 +1738,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
         const uint32_t groups = (segments + 31) / 32;
         MeshPipelineDesc hd = d;
         hd.meshShader = "Passes/Visibility/HairRaster.ms";
-        ID3D12PipelineState* hairPso = fc.shaders.mesh("v.coverage.hair.stage" + std::to_string(r.cfg.coverageDebugStage), hd);
+        ID3D12PipelineState* hairPso = fc.shaders.mesh("v.coverage.hair." + psoVariant, hd);
         g.addPass("v.coverage.hair", QueueType::Graphics,
                   [&](PassBuilder& b) {
                       b.use(hairSegments, Use::SrvGraphics);
@@ -1451,6 +1753,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       constants(c, k, 0, false);  // not the cluster lists: the hair inputs take P[3].xyz
                       k[3] = c.uav(stream);
                       k[4] = c.uav(keys);
+                      k[7] = 0;  // (the pixel kernel's switches, COV_RASTER_*: none)
                       if (!hiz.valid()) k[8] = kNone;
                       k[12] = c.srv(hairSegments);
                       k[13] = c.srv(hairBodies);
@@ -1483,7 +1786,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
         const uint32_t groups = (st.maxTriangles + 31) / 32;
         MeshPipelineDesc sd = d;
         sd.meshShader = "Passes/Visibility/StreamRaster.ms";
-        ID3D12PipelineState* streamPso = fc.shaders.mesh("v.coverage.stream.stage" + std::to_string(r.cfg.coverageDebugStage), sd);
+        ID3D12PipelineState* streamPso = fc.shaders.mesh("v.coverage.stream." + psoVariant, sd);
         g.addPass("v.coverage.stream", QueueType::Graphics,
                   [&](PassBuilder& b) {
                       b.use(st.vertices, Use::SrvGraphics);
@@ -1504,6 +1807,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       constants(c, k, 0, false);  // the stream inputs take P[3].xyz
                       k[3] = c.uav(stream);
                       k[4] = c.uav(keys);
+                      k[7] = 0;  // (the pixel kernel's switches, COV_RASTER_*: none)
                       if (!hiz.valid()) k[8] = kNone;
                       k[12] = c.srv(st.vertices);
                       k[13] = c.srv(st.drawArgs);
@@ -1580,11 +1884,25 @@ void readStats(FramePassContext& fc, State& s, const std::string& name)
         st.oceanEdges = w[kStateOceanEdges];
         st.coverageMeasured = w[kStateCovMeasured];
         st.coverageInvocations = w[kStateCovInvocations];
+        st.coverageClustersBehindBandA = w[kStateCovClustersHiz];
+        st.coverageClustersBehindCover = w[kStateCovClustersTile];
+        st.coverageTriangles = w[kStateCovTriangles];
+        st.coverageTrianglesBehindBandA = w[kStateCovTrianglesHiz];
+        st.coverageTrianglesBehindCover = w[kStateCovTrianglesTile];
+        st.coverageTrianglesCompute = w[kStateCovTrianglesSw];
+        st.coverageFragmentsCompute = w[kStateCovFragmentsSw];
+        st.coverageEvaluated = w[kStateCovEvaluated];
+        st.coverageCutBandA = w[kStateCovCutBandA];
+        st.coverageCutCover = w[kStateCovCutCover];
+        st.coverageCutAlpha = w[kStateCovCutAlpha];
+        st.coverageCutWeight = w[kStateCovCutWeight];
         st.mixedClusters = w[kStateStatMixedClusters];
         st.mixedTriangles = w[kStateStatMixedTriangles];
         st.chunkItems = w[kStateChunkItems];
         st.deferredChunks = w[kStateDeferChunks];
         st.overflow = w[kStateOverflow];
+        run.overflowSeen |= st.overflow;
+        st.overflowSeen = run.overflowSeen;
         if (st.overflow && !run.overflowReported)
         {
             logf("V: capacity exceeded in '%s', frame %llu (bits 0x%x): raise visibility.max_* (Stats::overflow; 0x100: the coverage record pool ran "
@@ -1606,21 +1924,34 @@ void readStats(FramePassContext& fc, State& s, const std::string& name)
     }
 }
 
-// Reads the run's statistics of the frame that last used this frame's slot (if not read yet this frame), then records
-// this frame's copy into the slot.
-void recordStats(FramePassContext& fc, State& s, const Run& r, const std::string& name)
+// Where this frame's copy of a run's cull state goes (the run's readback slot of this frame).
+struct StatsCopy
+{
+    ID3D12Resource* readback = nullptr;
+    uint64_t offset = 0;
+};
+
+// Reads the run's statistics of the frame that last used this frame's slot (if not read yet this frame) and gives the
+// slot to this frame: the caller copies the run's final state there (in a pass that is kept).
+StatsCopy statsCopy(FramePassContext& fc, State& s, const std::string& name)
 {
     readStats(fc, s, name);
     State::StatsRun& run = s.stats[name];
     const uint32_t slot = (uint32_t)(fc.frame.frameIndex % s.slots);
-    ID3D12Resource* readback = run.readback.Get();
+    run.frames[slot] = fc.frame.frameIndex;
+    return { run.readback.Get(), (uint64_t)slot * kReadbackBytes };
+}
+
+// This frame's copy of the run's statistics, in a pass of its own.
+void recordStats(FramePassContext& fc, State& s, const Run& r, const std::string& name)
+{
+    const StatsCopy copy = statsCopy(fc, s, name);
     fc.graph.addPass(r.prefix + "stats", QueueType::Graphics,
                      [&](PassBuilder& b) {
                          b.use(r.state, Use::CopySrc);
                          b.keep();
                      },
-                     [=](PassContext& c) { c.cmd->CopyBufferRegion(readback, (uint64_t)slot * kReadbackBytes, c.resource(r.state), 0, kStateWords * 4); });
-    run.frames[slot] = fc.frame.frameIndex;
+                     [=](PassContext& c) { c.cmd->CopyBufferRegion(copy.readback, copy.offset, c.resource(r.state), 0, kStateWords * 4); });
 }
 } // namespace
 
@@ -1653,7 +1984,7 @@ void visibility(FramePassContext& fc, ViewResources& view)
                 if (it->second.hiz.texture) fc.device.deferRelease(it->second.hiz.texture);
                 if (it->second.hiz.srv != kNone) h.freeResource(it->second.hiz.srv);
                 for (uint32_t i : it->second.hiz.uavs) h.freeResource(i);
-                for (ComPtr<ID3D12Resource>* b : { std::addressof(it->second.coverage.headers), std::addressof(it->second.coverage.counters), std::addressof(it->second.coverage.list), std::addressof(it->second.coverage.depthRange) })
+                for (ComPtr<ID3D12Resource>* b : { std::addressof(it->second.coverage.headers), std::addressof(it->second.coverage.counters), std::addressof(it->second.coverage.list), std::addressof(it->second.coverage.depthRange), std::addressof(it->second.coverage.cover) })
                     if (*b) fc.device.deferRelease(*b);
                 it = s.views.erase(it);
             }
@@ -1717,12 +2048,12 @@ void visibility(FramePassContext& fc, ViewResources& view)
         recordStats(fc, s, r, statsName);  // the frame's last planar reflection view (R's planar reflection costs)
         return;
     }
-    hizPasses(fc, vs->hiz, r.hiz, view.depth, width, height, occlusion ? "p1" : "final");
+    hizPasses(fc, vs->hiz, r.hiz, view.depth, width, height, occlusion ? "p1" : "final", cfg.foldSmall);
     if (occlusion)
     {
         cullPhase(fc, s, r, 2);
         rasterPass(fc, s, r, view, 2);
-        hizPasses(fc, vs->hiz, r.hiz, view.depth, width, height, "final");
+        hizPasses(fc, vs->hiz, r.hiz, view.depth, width, height, "final", cfg.foldSmall);
     }
     resolveDepthTies(fc, s, r, view, view.depth, view.visId, 0, kAListCount);
     waterLayer(fc, s, r, view);
@@ -1757,7 +2088,9 @@ void translucentLayer(FramePassContext& fc, State& s, const Run& r, ViewResource
     const TextureRef vis = g.createTexture({ "v.translucent.vis", width, height, 1, 1, DXGI_FORMAT_R32_UINT });
     const TextureRef linear = g.createTexture({ "v.translucent.depth", width, height, 1, 1, DXGI_FORMAT_R32_FLOAT });
     const TextureRef cls = g.createTexture({ "v.translucent.class", width, height, 1, 1, DXGI_FORMAT_R8_UINT });
-    g.addPass("v.translucent.copy", QueueType::Graphics,
+    // (visibility.fold_small_passes: the depth copy and the count's clear are one pass - they touch different textures)
+    PassChain chain(g, QueueType::Graphics, r.cfg.foldSmall);
+    chain.add("v.translucent.copy",
               [&](PassBuilder& b) {
                   b.use(depthA, Use::CopySrc);
                   b.use(depth, Use::CopyDst);
@@ -1799,13 +2132,14 @@ void translucentLayer(FramePassContext& fc, State& s, const Run& r, ViewResource
         }
     };
     ID3D12PipelineState* clearPso = fc.shaders.compute("Passes/Visibility/TranslucentClass.MODE0");
-    g.addPass("v.translucent.clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(count, Use::UavCompute); },
+    chain.add("v.translucent.clear", [&](PassBuilder& b) { b.use(count, Use::UavCompute); },
               [=](PassContext& c) {
                   const uint32_t k[8] = { kNone, kNone, kNone, c.uav(count), kNone, width, height, 0 };
                   c.cmd->SetPipelineState(clearPso);
                   c.computeConstants(k, 8);
                   c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
               });
+    chain.flush("v.translucent.clear");
     g.addPass("v.translucent.count", QueueType::Graphics,
               [&](PassBuilder& b) {
                   b.use(run.args, Use::IndirectArgs);
@@ -2051,6 +2385,11 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     else if (request.tileLocal) r.tilePairs = fc.graph.createBuffer({ "v.cull.tilePairs", (uint64_t)cfg.capVisible * 12, 12 });  // (A/B)
     r.storedPairs = request.tileLocal && !amplify;
     r.instanceMask = request.instanceMask;
+    if (request.tileOccluders.valid() && request.atlasSlots.valid())
+    {
+        r.tileOccluders = request.tileOccluders;
+        r.occluderSlots = request.atlasSlots;
+    }
     std::vector<CullView> views;
     for (const RasterView& v : request.views) views.push_back(viewOf(v, request, cfg));
     r.viewCount = (uint32_t)views.size();
@@ -2096,12 +2435,20 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     }
     ID3D12CommandSignature* sig = s.meshSignature.Get();
     const DepthRasterRequest req = request;
+    // visibility.cull_pass_merge: the run's statistics copy is the raster pass's last command (the raster only reads the
+    // cull state, so the state is final before it), not a pass of its own.
+    const StatsCopy stats = cfg.passMerge ? statsCopy(fc, s, request.name) : StatsCopy{};
     fc.graph.addPass(request.name + ".raster", QueueType::Graphics,
                      [&](PassBuilder& b) {
                          b.use(r.args, Use::IndirectArgs);
                          b.use(r.visible, Use::SrvGraphics);
                          b.use(r.lists, Use::SrvGraphics);
                          b.use(r.state, Use::SrvGraphics);
+                         if (stats.readback)
+                         {
+                             b.use(r.state, Use::CopySrc);
+                             b.keep();
+                         }
                          if (r.tilePairs.valid()) b.use(r.tilePairs, Use::SrvGraphics);
                          if (amplify) b.use(req.cullMask, Use::SrvGraphics);  // (the amplification stage's pairs)
                          if (req.atlasSlots.valid()) b.use(req.atlasSlots, Use::SrvGraphics);
@@ -2130,8 +2477,9 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                              c.graphicsConstants(k, 32);
                              c.cmd->ExecuteIndirect(sig, 1, c.resource(r.args), (kArgMesh + 3 * l) * 4, nullptr, 0);
                          }
+                         if (stats.readback) c.cmd->CopyBufferRegion(stats.readback, stats.offset, c.resource(r.state), 0, kStateWords * 4);
                      });
-    recordStats(fc, s, r, request.name);
+    if (!stats.readback) recordStats(fc, s, r, request.name);
 }
 } // namespace unx::render::tracks
 
@@ -2142,5 +2490,12 @@ Stats latestStats(render::TrackState& trackState, const std::string& run)
     auto& runs = trackState.get<render::tracks::State>("v.state").stats;
     const auto it = runs.find(run);
     return it == runs.end() ? Stats{} : it->second.latest;
+}
+
+std::vector<std::pair<std::string, Stats>> latestStatsOfRuns(render::TrackState& trackState)
+{
+    std::vector<std::pair<std::string, Stats>> out;
+    for (const auto& [name, run] : trackState.get<render::tracks::State>("v.state").stats) out.push_back({ name, run.latest });
+    return out;
 }
 } // namespace unx::visibility

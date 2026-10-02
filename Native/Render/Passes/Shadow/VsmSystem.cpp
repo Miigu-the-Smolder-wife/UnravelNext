@@ -4,6 +4,7 @@
 #include "SResources.h"
 
 #include "unx/render/GpuScene.h"
+#include "unx/render/PassChain.h"
 #include "unx/render/Tracks.h"
 
 #include <algorithm>
@@ -26,7 +27,8 @@ constexpr uint32_t kStatsSlots = 4, kStatsBytes = 512;  // VSM stats words (128;
 constexpr uint64_t kOverflowMinWords = 1u << 18;  // 1 MB overflow list at least (INTERFACES 7.3)
 constexpr uint32_t kErrRasterOverflow = 0x20;  // VsmCommon.hlsli VSM_ERR_RASTER_OVERFLOW
 constexpr uint32_t kMetaBytes = 48;  // VsmPageMeta
-constexpr uint32_t kBlockBytes = 341 * 32;  // VSM_BLOCK_ENTRIES x VsmBlock
+constexpr uint32_t kBlockEntries = 341;  // VSM_BLOCK_ENTRIES: blocks of 8, 16, 32, 64 and 128 texels of a page
+constexpr uint32_t kBlockBytes = kBlockEntries * 32;  // x VsmBlock
 
 struct State
 {
@@ -39,6 +41,15 @@ struct State
     uint64_t layersBytes = 0;
     ComPtr<ID3D12CommandSignature> dispatchSignature;
     uint32_t atlasSrv = UINT32_MAX;  // the atlas SRV every lookup reads (VsmConstants::atlasSrv)
+    // shadow.vsm.static_separate: the pages' static copies (the casters that are not movable; a page at the same place as
+    // in the sampled atlas) and the kept pages whose movable casters are drawn anew this frame (VsmScan MODE 2).
+    ComPtr<ID3D12Resource> atlasStatic, dynamicList;
+    bool separate = false;  // the state was created with the static atlas
+    // shadow.vsm.static_hzb_cull: the static copies' HZB (VsmStaticHzb.hlsl: kBlockEntries floats per physical page) and
+    // the raw SRVs V's cull kernels read it and the sun's atlas slots through (DepthRasterRequest::tileOccluders).
+    ComPtr<ID3D12Resource> staticHzb;
+    uint32_t staticHzbSrv = UINT32_MAX, atlasSlotsSrv = UINT32_MAX;
+    bool hzbValid = false;  // the kept pages' static copies have their HZB (built in the frames that drew them)
     uint32_t ringCbv[kRingSlots] = {};  // constant buffer view of each ring slot (ConstantBuffer<VsmConstants>)
     uint8_t* ringMapped = nullptr;
     // Stats readback ring: slot i holds the counters of frame statsFrame[i], complete once the graphics queue passes
@@ -128,7 +139,7 @@ void createFixedViews(Device& device, State& s)
 
 // Page-count-dependent resources (atlas, metadata, blocks, page list, layers); the first call also creates the fixed
 // ones. A regrown atlas: the next frame resets the table (VsmInit); every frame draws all its pages anyway.
-void createState(FramePassContext& fc, State& s, uint32_t pages)
+void createState(FramePassContext& fc, State& s, uint32_t pages, bool separate)
 {
     const QualityConfig& q = fc.quality;
     if (q.integer("shadow.vsm.virtual_resolution") != kVirtual || q.integer("shadow.vsm.page_texels") != kPage || q.integer("shadow.vsm.clipmap_levels") != kLevels)
@@ -136,9 +147,15 @@ void createState(FramePassContext& fc, State& s, uint32_t pages)
     if (pages == 0 || pages % kAtlasPagesPerRow || pages / kAtlasPagesPerRow * kPage > 16384)
         fail("VSM atlas: %u pages is not a positive multiple of %u within one 16384^2 atlas", pages, kAtlasPagesPerRow);
     Device& d = fc.device;
-    for (ComPtr<ID3D12Resource>* r : { std::addressof(s.atlas), std::addressof(s.meta), std::addressof(s.blocks), std::addressof(s.pageList), std::addressof(s.layers) })
-        if (*r) d.deferRelease(*r);
+    for (ComPtr<ID3D12Resource>* r : { std::addressof(s.atlas), std::addressof(s.meta), std::addressof(s.blocks), std::addressof(s.pageList), std::addressof(s.layers),
+                                       std::addressof(s.atlasStatic), std::addressof(s.dynamicList), std::addressof(s.staticHzb) })
+        if (*r)
+        {
+            d.deferRelease(*r);
+            r->Reset();
+        }
     s.atlasPages = pages;
+    s.separate = separate;
     {
         D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
         D3D12_RESOURCE_DESC1 rd{};
@@ -156,6 +173,14 @@ void createState(FramePassContext& fc, State& s, uint32_t pages)
                                                 IID_PPV_ARGS(&s.atlas)),
               "S VSM atlas");
         s.atlas->SetName(L"S VSM atlas");
+        if (separate)
+        {
+            // (the same size and format: a page's static copy is at its sampled page's place)
+            check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE, &clear, nullptr, 0, nullptr,
+                                                    IID_PPV_ARGS(&s.atlasStatic)),
+                  "S VSM static atlas");
+            s.atlasStatic->SetName(L"S VSM static atlas");
+        }
         DescriptorHeaps& h = d.descriptors();
         s.atlasSrv = h.allocateResource();
         D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
@@ -168,6 +193,25 @@ void createState(FramePassContext& fc, State& s, uint32_t pages)
     s.meta = createBuffer(d, L"S VSM page metadata", (uint64_t)pages * kMetaBytes);
     s.blocks = createBuffer(d, L"S VSM page blocks", (uint64_t)pages * kBlockBytes);
     s.pageList = createBuffer(d, L"S VSM page list", 8 + (uint64_t)pages * 8);
+    s.dynamicList = createBuffer(d, L"S VSM dynamic page list", 8 + (uint64_t)pages * 8);
+    // A raw SRV of a buffer for readers that take the index from a record, not from their pass (V's cull views).
+    auto rawSrv = [&](ID3D12Resource* buffer, uint64_t bytes) {
+        DescriptorHeaps& h = d.descriptors();
+        const uint32_t index = h.allocateResource();
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = DXGI_FORMAT_R32_TYPELESS;
+        sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Buffer.NumElements = (UINT)(bytes / 4);
+        sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        d.d3d()->CreateShaderResourceView(buffer, &sd, h.resourceCpu(index));
+        return index;
+    };
+    if (separate)
+    {
+        s.staticHzb = createBuffer(d, L"S VSM static HZB", (uint64_t)pages * kBlockEntries * 4);
+        s.staticHzbSrv = rawSrv(s.staticHzb.Get(), (uint64_t)pages * kBlockEntries * 4);
+    }
     // Transmittance layer: the per-page words (0 = no layer) until V's coverage-mode raster fills layer pages (v1.26).
     s.layersBytes = ((uint64_t)pages * 4 + 255) & ~255ull;
     s.layers = createBuffer(d, L"S VSM transmittance layer", s.layersBytes);
@@ -193,10 +237,12 @@ void createState(FramePassContext& fc, State& s, uint32_t pages)
             s.clsTwinUav = h.allocateResource();
             d.d3d()->CreateUnorderedAccessView(s.clsTwin.Get(), nullptr, &ud, h.resourceCpu(s.clsTwinUav));
         }
-        s.cullMask = createBuffer(d, L"S VSM cull mask", (uint64_t)kSlots / 8);
-        s.atlasSlots = createBuffer(d, L"S VSM atlas slots", (uint64_t)kSlots * 4);
+        // (two sets of sun mask words and slots: every caster / the static casters, then the movable casters - VsmCullMask)
+        s.cullMask = createBuffer(d, L"S VSM cull mask", (uint64_t)kSlots / 8 * 2);
+        s.atlasSlots = createBuffer(d, L"S VSM atlas slots", (uint64_t)kSlots * 4 * 2);
+        s.atlasSlotsSrv = rawSrv(s.atlasSlots.Get(), (uint64_t)kSlots * 4 * 2);
         s.groups = createBuffer(d, L"S VSM scan groups", (uint64_t)kScanGroupsMax * 4);
-        s.args = createBuffer(d, L"S VSM indirect args", 16);
+        s.args = createBuffer(d, L"S VSM indirect args", 32);  // the page list's dispatch, then the dynamic page list's
         s.stats = createBuffer(d, L"S VSM stats", kStatsBytes);
         s.ring = createBuffer(d, L"S VSM constants ring", (uint64_t)kRingSlots * kRingStride, D3D12_HEAP_TYPE_UPLOAD);
         s.statsReadback = createBuffer(d, L"S VSM stats readback", (uint64_t)kStatsSlots * kStatsBytes, D3D12_HEAP_TYPE_READBACK);
@@ -282,6 +328,7 @@ struct CasterBounds
     std::vector<uint32_t> mesh;       // per placed caster: its mesh (kNone: no per-view bound, 'clusters' in every view it reaches),
     std::vector<float> errorScale;    // V's instanceScale (the error's object-to-world factor),
     std::vector<float4> lodSpheres;   // and the world sphere holding its LOD spheres (the distances V projects errors at)
+    std::vector<uint8_t> movable;     // per placed caster: gpu::instanceMovable or a run-time instance (V's instance sets)
     uint64_t everywhere = 0;  // casters whose geometry moves past its bind-pose sphere (skinned, morphs, wind) and the
                               // GPU-written instances' capacity (any mesh): counted in every view
     struct Moving
@@ -295,17 +342,22 @@ struct CasterBounds
     const std::vector<render::ClusterData::MeshRange>* ranges = nullptr;
     float thresholdPx = 1;
     bool lod = false;
+    // shadow.vsm.min_caster_texels: V leaves a placed caster out of a view where its sphere is under this many texels in
+    // radius (RasterView::minInstanceTexels), so it adds nothing to that view's bound. The spheres here are not smaller
+    // than V's (the largest axis scale, x 1.001 + 1 mm), so a caster left out of the bound is left out by V too.
+    float minTexels = 0;
 };
 
 // windSpeed: the frame's (m/s). A wind-moved caster stays within its sphere grown by the wind's bound
 // (Deformation.hlsli windOffsetBound, as V's culling takes it): it counts in the views it reaches, not in every view -
 // a forest of 1.1 M such trees stood at 4e8 cluster entries in level 0's 16 m window.
-CasterBounds casterBounds(const GpuScene& scene, bool lod, float thresholdPx, float windSpeed)
+CasterBounds casterBounds(const GpuScene& scene, bool lod, float thresholdPx, float windSpeed, float minTexels)
 {
     CasterBounds b;
     b.ranges = &scene.clusters().meshes;
     b.lod = lod;
     b.thresholdPx = thresholdPx;
+    b.minTexels = minTexels;
     const auto& meshes = scene.meshes();
     const auto& ranges = scene.clusters().meshes;  // the builder's cut bounds (runtime meshes: their whole hierarchies)
     auto cut = [&](uint32_t mesh) { return mesh < ranges.size() && ranges[mesh].cutBound != 0 ? ranges[mesh].cutBound : meshes[mesh].clusterCount; };
@@ -336,6 +388,7 @@ CasterBounds casterBounds(const GpuScene& scene, bool lod, float thresholdPx, fl
         }
         b.spheres.push_back({ w.x, w.y, w.z, radius * scale * 1.001f + 1e-3f });
         b.instance.push_back((uint32_t)(&inst - scene.instances().data()));
+        b.movable.push_back(gpu::instanceMovable(inst) || b.instance.back() >= scene.staticInstanceCount() ? 1 : 0);
         b.clusters.push_back(cut(inst.mesh));
         // per-view bound: not for terrain patches (C5: their replaced rectangles force the source clusters)
         const bool table = lod && inst.patch == gpu::kNone && inst.mesh < ranges.size() && ranges[inst.mesh].cutErrorBase > 0;
@@ -365,9 +418,14 @@ uint32_t casterCut(const CasterBounds& b, size_t i, float lo, float hi)
 
 // The bound of an orthographic sun level view (levelViewProj: a sphere reaches it when its NDC x, y interval meets
 // [-1, 1]; every depth: the level's caster range follows the casters).
-// The casters counted in every view (CasterBounds::everywhere) at a level's texel.
-uint64_t everywhereBound(const CasterBounds& b, float pixelsPerMetre)
+// A placed caster in a view of an instance set (RasterView::instanceSet: 0 every instance, 1 not movable, 2 movable).
+bool inSet(const CasterBounds& b, size_t i, uint32_t set) { return set == 0 || (set == 2) == (b.movable[i] != 0); }
+
+// The casters counted in every view (CasterBounds::everywhere) at a level's texel: skinned and morphed ones and the
+// GPU-written instances, all movable - a view of the instances that are not movable has none of them.
+uint64_t everywhereBound(const CasterBounds& b, float pixelsPerMetre, uint32_t set)
 {
+    if (set == 1) return 0;
     if (!b.lod) return b.everywhere;
     const float threshold = b.thresholdPx / pixelsPerMetre;
     uint64_t n = b.everywhereFixed;
@@ -386,10 +444,10 @@ struct LevelBatch
 {
     uint32_t first, end;
 };
-std::vector<LevelBatch> levelBatches(const CasterBounds& b, const float4x4& vp, float pixelsPerMetre, uint64_t capacity)
+std::vector<LevelBatch> levelBatches(const CasterBounds& b, const float4x4& vp, float pixelsPerMetre, uint64_t capacity, uint32_t set)
 {
     std::vector<LevelBatch> out;
-    const uint64_t every = everywhereBound(b, pixelsPerMetre);
+    const uint64_t every = everywhereBound(b, pixelsPerMetre, set);
     if (every >= capacity) return out;
     const uint64_t room = capacity - every;
     const float threshold = b.thresholdPx / pixelsPerMetre;
@@ -403,6 +461,8 @@ std::vector<LevelBatch> levelBatches(const CasterBounds& b, const float4x4& vp, 
         const float x = vp.m[0][0] * q.x + vp.m[0][1] * q.y + vp.m[0][2] * q.z + vp.m[0][3];
         const float y = vp.m[1][0] * q.x + vp.m[1][1] * q.y + vp.m[1][2] * q.z + vp.m[1][3];
         if (!(std::abs(x) <= 1 + q.w * sx && std::abs(y) <= 1 + q.w * sy)) continue;
+        if (b.minTexels > 0 && q.w * pixelsPerMetre < b.minTexels) continue;  // (under the level's smallest caster: not drawn)
+        if (!inSet(b, i, set)) continue;
         const float t = threshold / std::max(b.errorScale[i], 1e-12f);
         const uint64_t cut = b.lod ? casterCut(b, i, t, t) : b.clusters[i];
         if (cut > room) return {};
@@ -418,20 +478,11 @@ std::vector<LevelBatch> levelBatches(const CasterBounds& b, const float4x4& vp, 
     return out;
 }
 
-uint64_t levelBound(const CasterBounds& b, const float4x4& vp, float pixelsPerMetre)
+uint64_t levelBound(const CasterBounds& b, const float4x4& vp, float pixelsPerMetre, uint32_t set)
 {
-    uint64_t n = b.everywhere;
+    // (the moving casters too: their cut depends on the level's texel, not on where they are)
+    uint64_t n = everywhereBound(b, pixelsPerMetre, set);
     const float threshold = b.thresholdPx / pixelsPerMetre;  // world-space error at the LOD threshold (every distance: orthographic)
-    if (b.lod)
-    {
-        // the moving casters too: their cut depends on the level's texel, not on where they are
-        n = b.everywhereFixed;
-        for (const CasterBounds::Moving& m : b.everywhereMeshes)
-        {
-            const float t = threshold / std::max(m.errorScale, 1e-12f);
-            n += m.mesh == gpu::kNone ? m.whole : std::min((*b.ranges)[m.mesh].cutBoundAt(t * (1 - 1e-4f), t * (1 + 1e-4f)), m.whole);
-        }
-    }
     const float sx = std::sqrt(vp.m[0][0] * vp.m[0][0] + vp.m[0][1] * vp.m[0][1] + vp.m[0][2] * vp.m[0][2]);
     const float sy = std::sqrt(vp.m[1][0] * vp.m[1][0] + vp.m[1][1] * vp.m[1][1] + vp.m[1][2] * vp.m[1][2]);
     for (size_t i = 0; i < b.spheres.size(); ++i)
@@ -440,6 +491,8 @@ uint64_t levelBound(const CasterBounds& b, const float4x4& vp, float pixelsPerMe
         const float x = vp.m[0][0] * q.x + vp.m[0][1] * q.y + vp.m[0][2] * q.z + vp.m[0][3];
         const float y = vp.m[1][0] * q.x + vp.m[1][1] * q.y + vp.m[1][2] * q.z + vp.m[1][3];
         if (!(std::abs(x) <= 1 + q.w * sx && std::abs(y) <= 1 + q.w * sy)) continue;
+        if (b.minTexels > 0 && q.w * pixelsPerMetre < b.minTexels) continue;  // (under the level's smallest caster: not drawn)
+        if (!inSet(b, i, set)) continue;
         const float t = threshold / std::max(b.errorScale[i], 1e-12f);
         n += b.lod ? casterCut(b, i, t, t) : b.clusters[i];
     }
@@ -467,13 +520,19 @@ void localBounds(const CasterBounds& b, const VsmLocalLightCpu& l, uint64_t (&fa
         const float3 d = { q.x - l.position.x, q.y - l.position.y, q.z - l.position.z };
         const float rr = reach + q.w;
         if (dot(d, d) > rr * rr) continue;
+        // (under a mip's smallest caster: not drawn into its views; V takes the radius over the distance to the sphere's
+        // nearest point, at least its near plane 1e-4)
+        bool drawn[kLocalMips];
+        const float nearestPoint = std::max(std::sqrt(dot(d, d)) - q.w, 1e-4f);
+        for (uint32_t mip = 0; mip < kLocalMips; ++mip) drawn[mip] = !(b.minTexels > 0 && q.w * 0.5f * (float)(kPage << mip) / nearestPoint < b.minTexels);
         for (uint32_t f = 0; f < 6; ++f)
         {
             const float a = dot(d, axis[f]), x = dot(d, right[f]), y = dot(d, up[f]);
             if (a < -q.w || (a - x) * h < -q.w || (a + x) * h < -q.w || (a - y) * h < -q.w || (a + y) * h < -q.w) continue;
             if (!b.lod || b.mesh[i] == gpu::kNone)
             {
-                for (uint32_t mip = 0; mip < kLocalMips; ++mip) faces[f][mip] += b.clusters[i];
+                for (uint32_t mip = 0; mip < kLocalMips; ++mip)
+                    if (drawn[mip]) faces[f][mip] += b.clusters[i];
                 continue;
             }
             const float4& ls = b.lodSpheres[i];
@@ -481,6 +540,7 @@ void localBounds(const CasterBounds& b, const VsmLocalLightCpu& l, uint64_t (&fa
             const float centre = std::sqrt(dot(e, e)), nearest = std::max(centre - ls.w, 1e-4f), farthest = centre + ls.w;
             for (uint32_t mip = 0; mip < kLocalMips; ++mip)
             {
+                if (!drawn[mip]) continue;
                 const float perMetre = b.thresholdPx / (0.5f * (float)(kPage << mip) * std::max(b.errorScale[i], 1e-12f));
                 faces[f][mip] += casterCut(b, i, perMetre * nearest, perMetre * farthest);
             }
@@ -638,10 +698,18 @@ void updateLocalLights(FramePassContext& fc, State& s, const ViewResources& main
         const float3 eye = main.view.position;
         const float3 d = { l.position.x - eye.x, l.position.y - eye.y, l.position.z - eye.z };
         const float dist2 = dot(d, d), reach = l.range + emitterRadius(l);
+        // (the view's fade of a light toward its draw distance - scene::Light::maxDrawDistance, Scene.hlsli
+        // lightViewFade: a light faded out lights nothing and waits behind every other)
+        float fade = 1.0f;
+        if (l.maxDrawDistance > 0)
+        {
+            const float dist = std::sqrt(dist2);
+            fade = l.maxDistanceFadeRange > 0 ? std::min(std::max((l.maxDrawDistance - dist) / l.maxDistanceFadeRange, 0.0f), 1.0f) : (dist < l.maxDrawDistance ? 1.0f : 0.0f);
+        }
         Priority p;
-        p.inView = dist2 <= reach * reach || sphereInView(main.view.viewProj, l.position, reach);
+        p.inView = fade > 0 && (dist2 <= reach * reach || sphereInView(main.view.viewProj, l.position, reach));
         const float lum = std::max(0.2126f * l.color.x + 0.7152f * l.color.y + 0.0722f * l.color.z, 1e-6f);
-        p.value = std::max(l.intensity, 0.0f) * lum * reach * reach / std::max(std::max(dist2, reach * reach), 1e-6f);
+        p.value = std::max(l.intensity, 0.0f) * lum * fade * reach * reach / std::max(std::max(dist2, reach * reach), 1e-6f);
         return p;
     };
     std::vector<std::pair<Priority, uint32_t>> waiting;  // lights without a slot, best first
@@ -837,6 +905,8 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         s.latest.airClsLit = w[68];
         s.latest.airOmitted = w[69];
         s.latest.airWalked = w[70];
+        s.latest.staleSpared = w[72];
+        s.latest.dynamicPages = w[71];
         s.latest.errorBits = w[15];
         if (w[15] & ~s.errorBitsSeen)
             logf("S VSM: error bits 0x%x (frame %llu): a shader loop reached its hard cap (INTERFACES 3.6; VsmCommon.hlsli VSM_ERR_*)\n", w[15],
@@ -888,7 +958,10 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     uint32_t pages = std::max((uint32_t)q.integer("shadow.vsm.pool_pages"), (uint32_t)budget);
     pages = (std::max(pages, s.poolTarget) + kAtlasPagesPerRow - 1) / kAtlasPagesPerRow * kAtlasPagesPerRow;
     pages = std::min(pages, 16384u / kPage * kAtlasPagesPerRow);  // one 16384^2 atlas (16,384 pages)
-    if (!s.atlas || s.atlasPages < pages) createState(fc, s, pages);
+    // shadow.vsm.static_separate (with the page cache): a static copy of every sun page beside the sampled atlas; the
+    // switch changing recreates the state (the table is reset: its dynamic flags mean nothing to the other path).
+    const bool separate = q.has("shadow.vsm.cache") && q.boolean("shadow.vsm.cache") && q.has("shadow.vsm.static_separate") && q.boolean("shadow.vsm.static_separate");
+    if (!s.atlas || s.atlasPages < pages || s.separate != separate) createState(fc, s, std::max(pages, s.atlasPages), separate);
 
     // One path (S request 20260926_S_vsm_one_path): every level on the current sun and this frame's caster height range;
     // every requested page is drawn this frame, so there is no basis age, no stale page and no dirty rule.
@@ -992,6 +1065,12 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     s.initialized = true;
 
     RenderGraph& g = fc.graph;
+    // shadow.vsm.fold_small_passes: the page update's bookkeeping dispatches share passes (PassChain.h): the counters'
+    // clear with the cache's reset (s.vsm.begin), and the request propagation, the cache's keep and free list and the
+    // three scan steps (s.vsm.scan) - each a group or a few, all writing the same buffers as UAVs, each reading what the
+    // one before wrote.
+    const bool foldSmall = !q.has("shadow.vsm.fold_small_passes") || q.boolean("shadow.vsm.fold_small_passes");
+    PassChain chain(g, QueueType::Compute, foldSmall);
     const TextureRef atlas = g.importTexture(s.atlas.Get(),
                                              TextureDesc{ "S VSM atlas", kAtlasPagesPerRow * kPage, s.atlasPages / kAtlasPagesPerRow * kPage, 1, 1, DXGI_FORMAT_D32_FLOAT },
                                              D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
@@ -1008,7 +1087,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     const uint32_t localLightsSrv = s.localLightsNow, slotOfSrv = s.slotOfNow, activeSrv = s.activeNow;
     const uint32_t activeLocal = (uint32_t)s.localActive.size();
     // Froxel light lists (with each entry's shadow-slot bit): the local page marks and the visibility slots read them.
-    recordFroxelLists(fc, main, slotOfSrv);
+    recordFroxelLists(fc, main, slotOfSrv, s.localUsed > 0);
     const BufferRef froxelLists = fc.resources.froxelLights;
     const uint32_t pagesNow = s.atlasPages;
     const BufferRef meta = g.importBuffer(s.meta.Get(), BufferDesc{ "S VSM page metadata", (uint64_t)pagesNow * kMetaBytes, kMetaBytes });
@@ -1018,10 +1097,23 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     const BufferRef layers = g.importBuffer(s.layers.Get(), BufferDesc{ "S VSM transmittance layer", s.layersBytes, 0 });
     s.layersRef = layers;
     fc.resources.vsmLayers = layers;  // v1.26: ShadowSrvs.layers (the pad1 word)
-    const BufferRef mask = g.importBuffer(s.cullMask.Get(), BufferDesc{ "S VSM cull mask", (uint64_t)kSlots / 8, 0 });
-    const BufferRef atlasSlots = g.importBuffer(s.atlasSlots.Get(), BufferDesc{ "S VSM atlas slots", (uint64_t)kSlots * 4, 0 });
+    const BufferRef mask = g.importBuffer(s.cullMask.Get(), BufferDesc{ "S VSM cull mask", (uint64_t)kSlots / 8 * 2, 0 });
+    const BufferRef atlasSlots = g.importBuffer(s.atlasSlots.Get(), BufferDesc{ "S VSM atlas slots", (uint64_t)kSlots * 4 * 2, 0 });
+    const TextureRef atlasStatic = separate ? g.importTexture(s.atlasStatic.Get(),
+                                                              TextureDesc{ "S VSM static atlas", kAtlasPagesPerRow * kPage, s.atlasPages / kAtlasPagesPerRow * kPage, 1, 1,
+                                                                           DXGI_FORMAT_D32_FLOAT },
+                                                              D3D12_BARRIER_LAYOUT_SHADER_RESOURCE)
+                                            : TextureRef{};
+    const BufferRef dynamicList = g.importBuffer(s.dynamicList.Get(), BufferDesc{ "S VSM dynamic page list", 8 + (uint64_t)pagesNow * 8, 0 });
+    // shadow.vsm.static_hzb_cull (with static_separate): the movable casters' views are culled against the static copies' HZB
+    const bool hzbCull = separate && (!q.has("shadow.vsm.static_hzb_cull") || q.boolean("shadow.vsm.static_hzb_cull"));
+    const BufferRef staticHzb = hzbCull ? g.importBuffer(s.staticHzb.Get(), BufferDesc{ "S VSM static HZB", (uint64_t)pagesNow * kBlockEntries * 4, 0 }) : BufferRef{};
+    const uint32_t staticHzbSrv = s.staticHzbSrv, atlasSlotsSrv = s.atlasSlotsSrv;
+    // (the cull switched on over kept pages: their static copies were drawn without an HZB - this frame draws every page anew)
+    const bool hzbFresh = hzbCull && !s.hzbValid;
+    s.hzbValid = hzbCull;
     const BufferRef scanGroupsBuf = g.importBuffer(s.groups.Get(), BufferDesc{ "S VSM scan groups", (uint64_t)kScanGroupsMax * 4, 0 });
-    const BufferRef args = g.importBuffer(s.args.Get(), BufferDesc{ "S VSM indirect args", 16, 0 });
+    const BufferRef args = g.importBuffer(s.args.Get(), BufferDesc{ "S VSM indirect args", 32, 0 });
     const BufferRef statsBuf = g.importBuffer(s.stats.Get(), BufferDesc{ "S VSM stats", kStatsBytes, 0 });
     s.statsRef = statsBuf;
     s.useRef = c.useStats ? g.importBuffer(s.use.Get(), BufferDesc{ "S VSM read bits", (uint64_t)kSlots * 4, 0 }) : BufferRef{};
@@ -1060,8 +1152,9 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     const bool originShift = fc.frame.originShift.x != 0 || fc.frame.originShift.y != 0 || fc.frame.originShift.z != 0;
     // (the wind casters' spheres are bounded with this frame's wind: a changed scene wind redraws every page)
     const bool sameWind = s.cacheWind[0] == c.windSpeed && s.cacheWind[1] == c.windDirection.x && s.cacheWind[2] == c.windDirection.y && s.cacheWind[3] == c.windDirection.z;
-    const bool cacheable = cacheOn && rangeKept && sameWind && !stateFresh && !s.needsInit && !s.rasterRedraw && s.cacheFrame != UINT64_MAX && s.cacheFrame + 1 == fc.frame.frameIndex &&
-                           s.cacheRevision == fc.scene.revision() && !originShift && (fc.frame.discontinuity & kDiscontinuityRestore) == 0;
+    const bool cacheable = cacheOn && rangeKept && sameWind && !stateFresh && !s.needsInit && !s.rasterRedraw && !hzbFresh && s.cacheFrame != UINT64_MAX &&
+                           s.cacheFrame + 1 == fc.frame.frameIndex && s.cacheRevision == fc.scene.revision() && !originShift &&
+                           (fc.frame.discontinuity & kDiscontinuityRestore) == 0;
     s.cacheFrame = fc.frame.frameIndex;
     s.cacheRevision = fc.scene.revision();
     s.cacheWind[0] = c.windSpeed;
@@ -1106,7 +1199,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     }
     {
         ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmBegin");
-        g.addPass("s.vsm.begin", QueueType::Compute,
+        chain.add("s.vsm.begin",
                   [&](PassBuilder& b) {
                       b.use(statsBuf, Use::UavCompute);
                       b.keep();
@@ -1143,18 +1236,19 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     std::memcpy(&minChangeBits, &minChange, 4);
     std::memcpy(&windChangeBits, &windChange, 4);
     const uint64_t frameIndex = fc.frame.frameIndex;
+    const uint32_t staticInstances = fc.scene.staticInstanceCount();  // (static_separate: the instances from there on are movable)
     auto cacheWords = [=](PassContext& ctx, uint32_t (&k)[kCacheWords]) {
         const uint32_t w[kCacheWords] = { casterStateRef.valid() ? ctx.uav(casterStateRef) : 0xFFFFFFFFu, ctx.uav(changed), instanceCount, ring,
                                           changedCapacity, ctx.uav(table), ctx.uav(requests), ctx.uav(usedPages),
                                           ctx.uav(freePages), pagesNow, scanSlots, cacheable ? 1u : 0u,
                                           skinCount ? ctx.srv(skinBounds) : 0xFFFFFFFFu, skinInstancesSrv, skinCount, ctx.uav(statsBuf),
-                                          localSlotsUsed ? localLightsSrv : 0xFFFFFFFFu, localSlotsUsed, 0, 0,
-                                          minChangeBits, windChangeBits, (uint32_t)frameIndex, 0 };
+                                          localSlotsUsed ? localLightsSrv : 0xFFFFFFFFu, localSlotsUsed, 0xFFFFFFFFu, separate ? 1u : 0u,
+                                          minChangeBits, windChangeBits, (uint32_t)frameIndex, staticInstances };
         std::memcpy(k, w, sizeof w);
     };
     {
         ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmCache.MODE5");
-        g.addPass("s.vsm.cache.reset", QueueType::Compute,
+        chain.add("s.vsm.cache.reset",
                   [&](PassBuilder& b) {
                       b.use(changed, Use::UavCompute);
                       b.use(usedPages, Use::UavCompute);
@@ -1167,6 +1261,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.cmd->Dispatch(1, 1, 1);
                   });
     }
+    chain.flush("s.vsm.begin");
     if (cacheOn)
     {
         if (skinCount > 0)
@@ -1223,14 +1318,23 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         }
         {
             ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmCache.MODE2");
+            // shadow.vsm.cache_hzb_filter: a changed caster under a page's stored surface leaves the page as it is
+            // (VsmCache.hlsl sphereUnderPage; the blocks are last frame's, of the pages as they were last drawn)
+            const bool hzbFilter = !q.has("shadow.vsm.cache_hzb_filter") || q.boolean("shadow.vsm.cache_hzb_filter");
             g.addPass("s.vsm.cache.stale", QueueType::Compute,
                       [&](PassBuilder& b) {
                           b.use(changed, Use::UavCompute);
                           b.use(table, Use::UavCompute);
+                          if (hzbFilter)
+                          {
+                              b.use(blocks, Use::SrvCompute);
+                              b.use(statsBuf, Use::UavCompute);
+                          }
                       },
                       [=](PassContext& ctx) {
                           uint32_t k[kCacheWords];
                           cacheWords(ctx, k);
+                          if (hzbFilter) k[18] = ctx.srv(blocks);
                           ctx.cmd->SetPipelineState(pso);
                           ctx.computeConstants(k, kCacheWords);
                           ctx.cmd->Dispatch(kLevels, 32, 1);  // VsmCache.hlsl STALE_GROUPS_PER_LEVEL
@@ -1241,6 +1345,11 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     {
         ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmMark");
         const bool subtileStats = q.integer("shadow.vsm.subtile_stats") != 0;  // measurement only
+        // shadow.vsm.page_dilation: pixels near a page border also request the page across it (VsmMark.hlsl)
+        const float dilation = q.has("shadow.vsm.page_dilation") ? (float)q.number("shadow.vsm.page_dilation") : 0.0f;
+        if (!(dilation >= 0 && dilation <= 0.5f)) fail("shadow.vsm.page_dilation = %g: a fraction of a page in [0, 0.5]", dilation);
+        uint32_t dilationBits;
+        std::memcpy(&dilationBits, &dilation, 4);
         const TextureRef depth = main.depth;
         const uint32_t w = main.view.width, h = main.view.height;
         g.addPass("s.vsm.mark", QueueType::Compute,
@@ -1250,10 +1359,10 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[4] = { ctx.srv(depth), ctx.uav(requests), ring, subtileStats ? 1u : 0u };
+                      const uint32_t k[8] = { ctx.srv(depth), ctx.uav(requests), ring, subtileStats ? 1u : 0u, dilationBits, 0, 0, 0 };
                       ctx.cmd->SetPipelineState(pso);
                       ctx.bindFrameConstants(mainConstants);
-                      ctx.computeConstants(k, 4);
+                      ctx.computeConstants(k, 8);
                       ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
                   });
     }
@@ -1282,7 +1391,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                   });
         // The fog's volume (FogVolume.hlsli): the pages its cells' segments cross (VsmMarkFog.hlsl).
         const FogView fog = fogViewFor(q, fc.frame, main.view.width, main.view.height);
-        if (fog.on)
+        if (fog.on && fog.cells)  // (a volume that holds the cloud layer alone has no cells to shadow)
         {
             ID3D12PipelineState* pf = sh.compute("Passes/Shadow/VsmMarkFog");
             const TextureRef hiz = main.hiz, fogDepth = main.depth;
@@ -1374,9 +1483,32 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
                   });
     }
+    // shadow.vsm.coarse_pages: the pages around the camera on the coarse levels are requested every frame (VsmMarkCoarse):
+    // a lookup without a page on its own level finds one of them.
+    const uint32_t coarsePages = q.has("shadow.vsm.coarse_pages") ? (uint32_t)q.integer("shadow.vsm.coarse_pages") : 0u;
+    if (coarsePages > 0)
+    {
+        const int64_t first = q.integer("shadow.vsm.coarse_level_first"), last = q.integer("shadow.vsm.coarse_level_last");
+        if (first < 0 || last < first || last >= kLevels || coarsePages > 8)
+            fail("shadow.vsm coarse pages: levels %lld .. %lld of 0 .. %u, %u pages per axis (at most 8)", (long long)first, (long long)last, kLevels - 1, coarsePages);
+        ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmMarkCoarse");
+        const uint32_t word = (uint32_t)first | (uint32_t)last << 8 | coarsePages << 16;
+        const uint32_t threads = (uint32_t)(last - first + 1) * coarsePages * coarsePages;
+        chain.add("s.vsm.markcoarse",
+                  [&](PassBuilder& b) {
+                      b.use(requests, Use::UavCompute);
+                      b.keep();
+                  },
+                  [=](PassContext& ctx) {
+                      const uint32_t k[4] = { ctx.uav(requests), ring, word, 0 };
+                      ctx.cmd->SetPipelineState(pso);
+                      ctx.computeConstants(k, 4);
+                      ctx.cmd->Dispatch(groups(threads, 64), 1, 1);
+                  });
+    }
     {
         ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmPropagate");
-        g.addPass("s.vsm.propagate", QueueType::Compute,
+        chain.add("s.vsm.propagate",
                   [&](PassBuilder& b) {
                       b.use(requests, Use::UavCompute);
                       b.keep();
@@ -1392,7 +1524,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         // Sun page cache: the requests that keep their page (cacheable frames), then the free physical pages in order.
         ID3D12PipelineState* keep = sh.compute("Passes/Shadow/VsmCache.MODE3");
         ID3D12PipelineState* free = sh.compute("Passes/Shadow/VsmCache.MODE4");
-        g.addPass("s.vsm.cache.keep", QueueType::Compute,
+        chain.add("s.vsm.cache.keep",
                   [&](PassBuilder& b) {
                       b.use(changed, Use::UavCompute);
                       b.use(table, Use::UavCompute);
@@ -1407,7 +1539,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.computeConstants(k, kCacheWords);
                       ctx.cmd->Dispatch(cacheable ? groups(scanSlots, 256) : 1, 1, 1);  // (sun and local slots)
                   });
-        g.addPass("s.vsm.cache.free", QueueType::Compute,
+        chain.add("s.vsm.cache.free",
                   [&](PassBuilder& b) {
                       b.use(usedPages, Use::UavCompute);
                       b.use(freePages, Use::UavCompute);
@@ -1428,10 +1560,11 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         ID3D12PipelineState* p2 = sh.compute("Passes/Shadow/VsmScan.MODE2");
         auto words = [=](PassContext& ctx, uint32_t k[16]) {
             const uint32_t w[16] = { ctx.uav(requests), ctx.uav(table), ctx.uav(scanGroupsBuf), ctx.uav(statsBuf), scanSlots, pagesNow, ring, scanGroups,
-                                     ctx.uav(pageList), ctx.uav(meta), localLightsSrv, ctx.uav(args), ctx.uav(freePages), 0, 0, 0 };
+                                     ctx.uav(pageList), ctx.uav(meta), localLightsSrv, ctx.uav(args), ctx.uav(freePages),
+                                     separate ? ctx.uav(dynamicList) : 0xFFFFFFFFu, 0, 0 };
             std::memcpy(k, w, sizeof w);
         };
-        g.addPass("s.vsm.scan.count", QueueType::Compute,
+        chain.add("s.vsm.scan.count",
                   [&](PassBuilder& b) {
                       b.use(requests, Use::UavCompute);
                       b.use(scanGroupsBuf, Use::UavCompute);
@@ -1445,23 +1578,24 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.computeConstants(k, 16);
                       ctx.cmd->Dispatch(scanGroups, 1, 1);
                   });
-        g.addPass("s.vsm.scan.prefix", QueueType::Compute,
+        chain.add("s.vsm.scan.prefix",
                   [&](PassBuilder& b) {
                       b.use(scanGroupsBuf, Use::UavCompute);
                       b.use(statsBuf, Use::UavCompute);
                       b.use(pageList, Use::UavCompute);
                       b.use(args, Use::UavCompute);
                       b.use(freePages, Use::UavCompute);
+                      if (separate) b.use(dynamicList, Use::UavCompute);
                       b.keep();
                   },
                   [=](PassContext& ctx) {
                       const uint32_t k[16] = { 0, 0, ctx.uav(scanGroupsBuf), ctx.uav(statsBuf), scanSlots, pagesNow, ring, scanGroups, ctx.uav(pageList), 0, 0,
-                                               ctx.uav(args), ctx.uav(freePages), 0, 0, 0 };
+                                               ctx.uav(args), ctx.uav(freePages), separate ? ctx.uav(dynamicList) : 0xFFFFFFFFu, 0, 0 };
                       ctx.cmd->SetPipelineState(p1);
                       ctx.computeConstants(k, 16);
                       ctx.cmd->Dispatch(1, 1, 1);
                   });
-        g.addPass("s.vsm.scan.assign", QueueType::Compute,
+        chain.add("s.vsm.scan.assign",
                   [&](PassBuilder& b) {
                       b.use(requests, Use::UavCompute);
                       b.use(table, Use::UavCompute);
@@ -1470,6 +1604,11 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.use(pageList, Use::UavCompute);
                       b.use(meta, Use::UavCompute);
                       b.use(freePages, Use::UavCompute);
+                      if (separate)
+                      {
+                          b.use(dynamicList, Use::UavCompute);
+                          b.use(args, Use::UavCompute);
+                      }
                       b.keep();
                   },
                   [=](PassContext& ctx) {
@@ -1480,6 +1619,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.cmd->Dispatch(scanGroups, 1, 1);
                   });
     }
+    chain.flush("s.vsm.scan");
     {
         ID3D12PipelineState* pm = sh.compute("Passes/Shadow/VsmCullMask");
         g.addPass("s.vsm.cullmask", QueueType::Compute,
@@ -1490,9 +1630,9 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[4] = { ctx.srv(table), ctx.uav(mask), ring, ctx.uav(atlasSlots) };
+                      const uint32_t k[8] = { ctx.srv(table), ctx.uav(mask), ring, ctx.uav(atlasSlots), separate ? 1u : 0u, 0, 0, 0 };
                       ctx.cmd->SetPipelineState(pm);
-                      ctx.computeConstants(k, 4);
+                      ctx.computeConstants(k, 8);
                       ctx.cmd->Dispatch(groups(kSlots / 32, 64), 1, 1);
                   });
     }
@@ -1526,28 +1666,45 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         ID3D12PipelineState* clearPages = cacheOn ? sh.mesh("s.vsm.clearpages", d) : nullptr;
         const uint32_t atlasW = kAtlasPagesPerRow * kPage, atlasH = pagesNow / kAtlasPagesPerRow * kPage;
         const bool whole = !cacheable;
+        // static_separate: the pages drawn anew are cleared in both atlases (the movable casters' raster starts from an
+        // empty sampled page; the merge brings the static copy in), the kept pages whose movable casters are drawn anew
+        // in the sampled atlas alone.
         g.addPass("s.vsm.clear", QueueType::Graphics,
                   [&](PassBuilder& b) {
                       b.use(atlas, Use::DepthWrite);
                       b.use(pageList, Use::SrvGraphics);
+                      if (separate)
+                      {
+                          b.use(atlasStatic, Use::DepthWrite);
+                          b.use(dynamicList, Use::SrvGraphics);
+                      }
                   },
                   [=](PassContext& ctx) {
                       if (whole || !clearPages)
                       {
                           ctx.cmd->ClearDepthStencilView(ctx.dsv(atlas), D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
+                          if (separate) ctx.cmd->ClearDepthStencilView(ctx.dsv(atlasStatic), D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
                           return;
                       }
-                      const D3D12_CPU_DESCRIPTOR_HANDLE dsv = ctx.dsv(atlas);
-                      ctx.cmd->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
                       D3D12_VIEWPORT vp{ 0, 0, (float)atlasW, (float)atlasH, 0, 1 };
                       D3D12_RECT sc{ 0, 0, (LONG)atlasW, (LONG)atlasH };
                       ctx.cmd->RSSetViewports(1, &vp);
                       ctx.cmd->RSSetScissorRects(1, &sc);
                       ctx.cmd->SetPipelineState(clearPages);
-                      const uint32_t k[4] = { ctx.srv(pageList), atlasW, atlasH, 0 };
-                      ctx.graphicsConstants(k, 4);
                       const uint32_t groupCount = (pagesNow + 31) / 32;  // VsmClearPages.ms: 32 pages per group, the list's count
-                      ctx.cmd->DispatchMesh(groupCount, 1, 1);
+                      auto clearList = [&](TextureRef target, BufferRef list) {
+                          const D3D12_CPU_DESCRIPTOR_HANDLE dsv = ctx.dsv(target);
+                          ctx.cmd->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
+                          const uint32_t k[4] = { ctx.srv(list), atlasW, atlasH, 0 };
+                          ctx.graphicsConstants(k, 4);
+                          ctx.cmd->DispatchMesh(groupCount, 1, 1);
+                      };
+                      clearList(atlas, pageList);
+                      if (separate)
+                      {
+                          clearList(atlasStatic, pageList);
+                          clearList(atlas, dynamicList);
+                      }
                   });
     }
 
@@ -1562,17 +1719,35 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     const uint64_t listCapacity = split ? (uint64_t)q.integer("visibility.max_visible_clusters") : UINT64_MAX;
     // shadow.vsm.raster_lod_bound false (A/B): the leaf count of every caster in every view it reaches
     const bool lodBound = !q.has("shadow.vsm.raster_lod_bound") || q.boolean("shadow.vsm.raster_lod_bound");
-    const CasterBounds bounds =
-        fc.services.rasterizeDepth && split ? casterBounds(fc.scene, lodBound, (float)q.number("visibility.lod_error_px"), fc.scene.source() ? fc.scene.source()->windSpeed : 0.0f) : CasterBounds{};
+    // shadow.vsm.min_caster_texels: the page views leave out the casters under this many of their texels in radius (V's
+    // instance cull, RasterView::minInstanceTexels); the packing bounds leave them out too. The classification pages
+    // (below) keep every caster: a face lit there must be lit on every mip.
+    const float minCasterTexels = q.has("shadow.vsm.min_caster_texels") ? (float)q.number("shadow.vsm.min_caster_texels") : 0.0f;
+    if (!(minCasterTexels >= 0)) fail("shadow.vsm.min_caster_texels = %g: 0 (every caster) or a positive radius in texels", minCasterTexels);
+    const CasterBounds bounds = fc.services.rasterizeDepth && split
+                                    ? casterBounds(fc.scene, lodBound, (float)q.number("visibility.lod_error_px"),
+                                                   fc.scene.source() ? fc.scene.source()->windSpeed : 0.0f, minCasterTexels)
+                                    : CasterBounds{};
     uint32_t sunRequests = 0, localRequests = 0;
-    if (fc.services.rasterizeDepth)
-    {
+    // The sun levels' requests of one instance set into one atlas ('base' names them: base, base1, ..; maskWords: the set's
+    // first word of the tile mask and slots). shadow.vsm.static_separate: the casters that are not movable into the static
+    // atlas where a page is drawn anew, the movable ones into the sampled atlas where a page is drawn anew or its movable
+    // casters changed; without it every caster into the sampled atlas.
+    // occluders: its views are culled against the static copies' HZB (the movable set's views, shadow.vsm.static_hzb_cull).
+    auto sunFamily = [&](const std::string& base, TextureRef target, uint32_t maskWords, uint32_t instanceSet, bool occluders) {
+        uint32_t made = 0;
         auto request = [&](const std::string& name) {
             DepthRasterRequest r;
             r.name = name;
             r.instanceMask = scene::InstanceCastShadow;
-            r.depthTarget = atlas;
+            r.depthTarget = target;
             r.atlasSlots = atlasSlots;
+            if (occluders)
+            {
+                r.tileOccluders = staticHzb;
+                r.tileOccludersSrv = staticHzbSrv;
+                r.atlasSlotsSrv = atlasSlotsSrv;
+            }
             r.atlasTilesPerRow = kAtlasPagesPerRow;
             r.cullMask = mask;
             r.cullTilePx = kPage;
@@ -1580,7 +1755,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             r.cull = D3D12_CULL_MODE_NONE;
             return r;
         };
-        DepthRasterRequest r = request("s.vsm.raster");
+        DepthRasterRequest r = request(base);
         uint64_t sum = 0;
         for (uint32_t k = 0; k < kLevels; ++k)
         {
@@ -1589,9 +1764,12 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             v.viewportX = v.viewportY = 0;
             v.viewportWidth = v.viewportHeight = kVirtual;
             v.lodPixelsPerMetre = 1.0f / std::ldexp(1.0f, (int)k - 10);
+            v.minInstanceTexels = minCasterTexels;
             v.userData = k;
-            v.cullMaskOffset = k * (kTable * kTable / 32);
-            const uint64_t bound = split ? levelBound(bounds, v.viewProj, v.lodPixelsPerMetre) : 0;
+            v.instanceSet = instanceSet;
+            v.tileOccluders = occluders;
+            v.cullMaskOffset = maskWords + k * (kTable * kTable / 32);
+            const uint64_t bound = split ? levelBound(bounds, v.viewProj, v.lodPixelsPerMetre, instanceSet) : 0;
             if (bound > listCapacity)
             {
                 // The level alone is over a run's lists: one request per instance batch of its casters - while a few
@@ -1601,7 +1779,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                 // the level is one request without the guarantee: V's run reports an overflow of its lists
                 // (VSM_ERR_RASTER_OVERFLOW; the casters past the capacity are missing from that level's pages that frame).
                 constexpr size_t kMaxLevelBatches = 4;
-                std::vector<LevelBatch> batches = levelBatches(bounds, v.viewProj, v.lodPixelsPerMetre, listCapacity);
+                std::vector<LevelBatch> batches = levelBatches(bounds, v.viewProj, v.lodPixelsPerMetre, listCapacity, instanceSet);
                 if (batches.empty() || batches.size() > kMaxLevelBatches)
                 {
                     if (fc.frame.frameIndex == 0)
@@ -1612,7 +1790,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                 if (!r.views.empty())
                 {
                     fc.services.rasterizeDepth(fc, r);
-                    r = request("s.vsm.raster" + std::to_string(++sunRequests));
+                    r = request(base + std::to_string(++made));
                     sum = 0;
                 }
                 for (const LevelBatch& batch : batches)
@@ -1622,14 +1800,14 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                     bv.instanceEnd = batch.end;
                     r.views.push_back(bv);
                     fc.services.rasterizeDepth(fc, r);
-                    r = request("s.vsm.raster" + std::to_string(++sunRequests));
+                    r = request(base + std::to_string(++made));
                 }
                 continue;
             }
             if (!r.views.empty() && sum + bound > listCapacity)
             {
                 fc.services.rasterizeDepth(fc, r);
-                r = request("s.vsm.raster" + std::to_string(++sunRequests));
+                r = request(base + std::to_string(++made));
                 sum = 0;
             }
             r.views.push_back(v);
@@ -1638,8 +1816,41 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         if (!r.views.empty())
         {
             fc.services.rasterizeDepth(fc, r);
-            ++sunRequests;
+            ++made;
         }
+        return made;
+    };
+    if (fc.services.rasterizeDepth)
+    {
+        if (separate)
+        {
+            sunRequests = sunFamily("s.vsm.static", atlasStatic, 0, 1, false);
+            if (hzbCull)
+            {
+                // The HZB of the static copies drawn just now (VsmStaticHzb.hlsl: one group per page of the page list);
+                // the kept pages have theirs from the frame their copy was drawn in. Then the movable casters' views
+                // are culled against it: a caster under the static surface of every page it would be drawn into leaves
+                // no texel after the merge.
+                ID3D12PipelineState* ph = sh.compute("Passes/Shadow/VsmStaticHzb");
+                g.addPass("s.vsm.statichzb", QueueType::Compute,
+                          [&](PassBuilder& b) {
+                              b.use(pageList, Use::SrvCompute);
+                              b.use(args, Use::IndirectArgs);
+                              b.use(atlasStatic, Use::SrvCompute);
+                              b.use(staticHzb, Use::UavCompute);
+                              b.keep();
+                          },
+                          [=](PassContext& ctx) {
+                              const uint32_t k[4] = { ctx.srv(pageList), ctx.srv(atlasStatic), ctx.uav(staticHzb), 0 };
+                              ctx.cmd->SetPipelineState(ph);
+                              ctx.computeConstants(k, 4);
+                              ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(args), 0, nullptr, 0);
+                          });
+            }
+            sunRequests += sunFamily("s.vsm.raster", atlas, kLevels * (kTable * kTable / 32), 2, hzbCull);
+        }
+        else
+            sunRequests = sunFamily("s.vsm.raster", atlas, 0, 0, false);
     }
     if (fc.services.rasterizeDepth && activeLocal > 0)
     {
@@ -1688,6 +1899,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                         v.viewportX = v.viewportY = 0;
                         v.viewportWidth = v.viewportHeight = kPage << mip;
                         v.lodPixelsPerMetre = 0.5f * (float)(kPage << mip);  // focal length in texels (90 degree face)
+                        v.minInstanceTexels = minCasterTexels;
                         v.userData = slot | face << 7 | mip << 10;
                         v.cullMaskOffset = a * kLocalLightWords + face * kLocalFaceWords + kLocalViewWordOffset[mip];
                         r.views.push_back(v);
@@ -1822,6 +2034,46 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         s.clsActiveCount = activeLocal;
     }
 
+    if (separate)
+    {
+        // static_separate: the static copy of every page drawn this frame into its sampled page (VsmMergePages.ps: a quad
+        // per page whose depth is the static atlas's texel, under the depth test that keeps the nearer): after it a page
+        // holds what one raster of all its casters would. The pages drawn anew, then the kept ones whose movable casters
+        // were drawn anew. (A local light's page has no static copy: its static page was cleared, the merge leaves it.)
+        MeshPipelineDesc d;
+        d.meshShader = "Passes/Shadow/VsmClearPages.ms";
+        d.pixelShader = "Passes/Shadow/VsmMergePages.ps";
+        d.depthFormat = DXGI_FORMAT_D32_FLOAT;
+        d.depthWrite = true;
+        d.depthFunc = D3D12_COMPARISON_FUNC_GREATER;
+        d.cull = D3D12_CULL_MODE_NONE;
+        ID3D12PipelineState* merge = sh.mesh("s.vsm.mergepages", d);
+        const uint32_t atlasW = kAtlasPagesPerRow * kPage, atlasH = pagesNow / kAtlasPagesPerRow * kPage;
+        g.addPass("s.vsm.merge", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(atlas, Use::DepthWrite);
+                      b.use(atlasStatic, Use::SrvGraphics);
+                      b.use(pageList, Use::SrvGraphics);
+                      b.use(dynamicList, Use::SrvGraphics);
+                      b.keep();
+                  },
+                  [=](PassContext& ctx) {
+                      const D3D12_CPU_DESCRIPTOR_HANDLE dsv = ctx.dsv(atlas);
+                      ctx.cmd->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
+                      D3D12_VIEWPORT vp{ 0, 0, (float)atlasW, (float)atlasH, 0, 1 };
+                      D3D12_RECT sc{ 0, 0, (LONG)atlasW, (LONG)atlasH };
+                      ctx.cmd->RSSetViewports(1, &vp);
+                      ctx.cmd->RSSetScissorRects(1, &sc);
+                      ctx.cmd->SetPipelineState(merge);
+                      const uint32_t groupCount = (pagesNow + 31) / 32;  // VsmClearPages.ms: 32 pages per group, the list's count
+                      for (BufferRef list : { pageList, dynamicList })
+                      {
+                          const uint32_t k[4] = { ctx.srv(list), atlasW, atlasH, ctx.srv(atlasStatic) };
+                          ctx.graphicsConstants(k, 4);
+                          ctx.cmd->DispatchMesh(groupCount, 1, 1);
+                      }
+                  });
+    }
     {
         ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmPageMax");
         g.addPass("s.vsm.pagemax", QueueType::Compute,
@@ -1831,13 +2083,21 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.use(atlas, Use::SrvCompute);
                       b.use(meta, Use::UavCompute);
                       b.use(blocks, Use::UavCompute);
+                      if (separate) b.use(dynamicList, Use::SrvCompute);
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[8] = { ctx.srv(pageList), ctx.srv(atlas), ctx.uav(meta), ring, localLightsSrv, ctx.uav(blocks), 0, 0 };
+                      uint32_t k[8] = { ctx.srv(pageList), ctx.srv(atlas), ctx.uav(meta), ring, localLightsSrv, ctx.uav(blocks), 0, 0 };
                       ctx.cmd->SetPipelineState(pso);
                       ctx.computeConstants(k, 8);
                       ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(args), 0, nullptr, 0);
+                      if (separate)
+                      {
+                          // the kept pages whose movable casters were drawn anew (other pages than the list's: no barrier)
+                          k[0] = ctx.srv(dynamicList);
+                          ctx.computeConstants(k, 8);
+                          ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(args), 12, nullptr, 0);
+                      }
                   });
     }
     {
@@ -1884,6 +2144,10 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
         return;
     }
     RenderGraph& g = fc.graph;
+    // shadow.vsm.fold_small_passes: the list clear is the visibility pass's first dispatch, the overflow scan's two
+    // levels are one pass, and a view without local shadow slots records no overflow passes (below).
+    const bool foldSmall = !fc.quality.has("shadow.vsm.fold_small_passes") || fc.quality.boolean("shadow.vsm.fold_small_passes");
+    PassChain chain(g, QueueType::Compute, foldSmall);
     const uint32_t w = view.view.width, h = view.view.height;
     const TextureRef out = g.createTexture(TextureDesc{ "S shadow visibility", w, h, 1, 1, DXGI_FORMAT_R32_UINT });
     view.shadowVisibility = out;
@@ -1895,6 +2159,9 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     // (recorded here with its air volume from the mirror plane on).
     const bool mainView = view.view.kind == gpu::ViewKind::Main;
     if (view.view.kind == gpu::ViewKind::PlanarReflection && !view.froxelLights.valid()) recordPlanarFroxels(fc, view);
+    // (A14's auxiliary views with the fog - atmosphere.fog.auxiliary_views: their own lists, air and fog volume, as a
+    //  planar view's; without a fog record they stay as they were, without lists and air)
+    else if (!mainView && !view.froxelLights.valid() && fogSecondaryFor(fc, view.frameConstants)) recordPlanarFroxels(fc, view);
     const BufferRef froxelLists = view.froxelLights.valid() ? view.froxelLights : (mainView ? fc.resources.froxelLights : BufferRef{});
     const bool localSlots = froxelLists.valid() && s.localLightsNow != UINT32_MAX && !megaLightsOwnLocalShadows(fc);
     const uint32_t localLightsSrv = s.localLightsNow, slotOfSrv = s.slotOfNow;
@@ -1969,7 +2236,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     // The penumbra's filtered pixels (STAGE=0 -> STAGE=1): count, then 16 B records from byte 16.
     const BufferRef filterList = g.createBuffer(BufferDesc{ "S penumbra filter list", 16 + (uint64_t)w * h * 16, 0 });
     const BufferRef filterArgs = g.createBuffer(BufferDesc{ "S penumbra filter args", 16, 0 });
-    g.addPass("s.shadow.listclear", QueueType::Compute,
+    chain.add("s.shadow.listclear",
               [&](PassBuilder& b) {
                   b.use(list, Use::UavCompute);
                   if (overflowList)
@@ -1985,7 +2252,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   ctx.computeConstants(k, 4);
                   ctx.cmd->Dispatch(1, 1, 1);
               });
-    g.addPass("s.shadow.visibility", QueueType::Compute,
+    chain.add("s.shadow.visibility",
               [&](PassBuilder& b) {
                   b.use(depth, Use::SrvCompute);
                   b.use(gbuffer, Use::SrvCompute);
@@ -2022,6 +2289,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   ctx.computeConstants(k, 24);
                   ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
               });
+    chain.flush("s.shadow.visibility");
     g.addPass("s.shadow.listargs", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(list, Use::SrvCompute);
@@ -2101,8 +2369,10 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     }
     // The hair's shadow on the view's surfaces (shading.hair_shadows; Passes/Hair/HairShadow.hlsl MODE 0): the sun slot
     // times what the frame's grooms let through towards the sun, from E's density volume, after the passes that write
-    // the slot. A frame without a volume records nothing; the hair records are shaded with the hair in front of them by
-    // M (the fragment visibility below stays the opaque casters').
+    // the slot - and, where S fills the local slots (no shading.mega_lights), slots 1..3 times what they let through
+    // towards each slot's light. A frame without a volume records nothing; the hair records are shaded with the hair in
+    // front of them by M (the fragment visibility below stays the opaque casters': M multiplies the cluster fragments'
+    // by HairShadow MODE 2's profile).
     {
         const FrameResources hr = fc.resources;
         const bool hairShadows = !fc.quality.has("shading.hair_shadows") || fc.quality.boolean("shading.hair_shadows");
@@ -2121,15 +2391,17 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                           b.use(hairParams, Use::SrvCompute);
                           b.use(hairFine, Use::SrvCompute);
                           b.use(hairCoarse, Use::SrvCompute);
+                          if (localSlots) b.use(froxelLists, Use::SrvCompute);
                           b.use(out, Use::UavCompute);
                       },
                       [=](PassContext& ctx) {
-                          uint32_t k[8] = { ctx.srv(hairParams), ctx.srv(depth), ctx.uav(out), hairSteps, 0, 0, 0, hairJitter };
+                          uint32_t k[12] = { ctx.srv(hairParams), ctx.srv(depth), ctx.uav(out), hairSteps, 0, 0, 0, hairJitter,
+                                             localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, 0, 0, 0 };
                           const float o[3] = { originOffset.x, originOffset.y, originOffset.z };
                           std::memcpy(&k[4], o, 12);
                           ctx.cmd->SetPipelineState(ph);
                           ctx.bindFrameConstants(constants);
-                          ctx.computeConstants(k, 8);
+                          ctx.computeConstants(k, 12);
                           ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
                       });
         }
@@ -2152,7 +2424,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                                            ctx.srv(table), ctx.srv(atlas), ctx.srv(bound), ctx.srv(blocks),
                                            ring, localLightsSrv, slotOfSrv, (localSlots && !second) ? ctx.srv(froxelLists) : 0xFFFFFFFFu,
                                            second ? ctx.uav(fragmentSun) : 0u, ctx.srv(layers), second ? 0u : ctx.srv(depth), second ? 0u : ctx.srv(gbuffer),
-                                           ctx.uav(statsBuf), second ? ctx.srv(ranges) : 0u, 0, 0 };
+                                           ctx.uav(statsBuf), second ? ctx.srv(ranges) : 0u, tlut.valid() ? ctx.srv(tlut) : 0xFFFFFFFFu, 0 };
             return k;
         };
         g.addPass("s.shadow.fragments", QueueType::Compute,
@@ -2171,6 +2443,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                       b.use(gbuffer, Use::SrvCompute);
                       b.use(statsBuf, Use::UavCompute);
                       if (localSlots) b.use(froxelLists, Use::SrvCompute);
+                      if (tlut.valid()) b.use(tlut, Use::SrvCompute);  // (the cloud layer's shadow on the fragments)
                   },
                   [=](PassContext& ctx) {
                       const auto k = words(ctx, false);
@@ -2193,6 +2466,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                       b.use(bound, Use::SrvCompute);
                       b.use(blocks, Use::SrvCompute);
                       b.use(layers, Use::SrvCompute);
+                      if (tlut.valid()) b.use(tlut, Use::SrvCompute);
                   },
                   [=](PassContext& ctx) {
                       const auto k = words(ctx, true);
@@ -2225,6 +2499,10 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     // Overflow tiles (indirect, one group per listed tile; without local slots the list is empty and the dispatches have
     // no groups): count each tile's need, allocate in tile order (two-level prefix sum), then fill: the lights past the
     // third, one block per tile from the capacity.
+    // shadow.vsm.fold_small_passes: a view without local shadow slots lists no tile - the visibility pass reads no froxel
+    // list then, so no pixel has a light past the third, every tile's head is 0 from that pass and the fallback list is
+    // empty from the clear - and the count, the scan and the fill, which would run over nothing, are not recorded.
+    if (foldSmall && !localSlots) return;
     const uint32_t scanBlocks = (tiles + 2047) / 2048;
     g.addPass("s.shadow.overflow.count", QueueType::Compute,
               [&](PassBuilder& b) {
@@ -2246,7 +2524,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   ctx.computeConstants(k, 20);
                   ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(overflowTiles), 4, nullptr, 0);
               });
-    g.addPass("s.shadow.overflow.scan.blocks", QueueType::Compute,
+    chain.add("s.shadow.overflow.scan.blocks",
               [&](PassBuilder& b) { b.use(needs, Use::UavCompute); b.use(blockSums, Use::UavCompute); },
               [=](PassContext& ctx) {
                   const uint32_t k[4] = { ctx.uav(needs), ctx.uav(blockSums), tiles, 0 };
@@ -2254,7 +2532,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   ctx.computeConstants(k, 4);
                   ctx.cmd->Dispatch(scanBlocks, 1, 1);
               });
-    g.addPass("s.shadow.overflow.scan.top", QueueType::Compute,
+    chain.add("s.shadow.overflow.scan.top",
               [&](PassBuilder& b) { b.use(needs, Use::UavCompute); b.use(blockSums, Use::UavCompute); },
               [=](PassContext& ctx) {
                   const uint32_t k[4] = { ctx.uav(needs), ctx.uav(blockSums), scanBlocks, 0 };
@@ -2262,6 +2540,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   ctx.computeConstants(k, 4);
                   ctx.cmd->Dispatch(1, 1, 1);
               });
+    chain.flush("s.shadow.overflow.scan");
     g.addPass("s.shadow.overflow", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(depth, Use::SrvCompute);

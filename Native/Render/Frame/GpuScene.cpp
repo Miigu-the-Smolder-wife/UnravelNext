@@ -370,18 +370,7 @@ void GpuScene::upload(const scene::Scene& s)
     std::vector<gpu::Light> lights;
     for (const scene::Light& l : s.lights)
     {
-        gpu::Light g{};
-        g.position = l.position;
-        g.forward = l.forward;
-        g.right = l.right;
-        g.range = l.range;
-        g.intensity = l.intensity;
-        g.color = l.color;
-        const float ci = std::cos(l.spotInner), co = std::cos(l.spotOuter);
-        g.spotScale = 1.0f / std::max(ci - co, 1e-4f);
-        g.spotOffset = -co * g.spotScale;
-        g.size = l.size;
-        g.typeFlags = (uint32_t)l.type | ((l.castShadow ? 1u : 0u) << 8) | (0xFFFFu << 16);
+        gpu::Light g = gpuLight(l, float3{});
         g.revision = gpu::lightRevisionWord(m_revision, l.rayEndBias);
         lights.push_back(g);
     }
@@ -1244,25 +1233,60 @@ void GpuScene::rebase(float3 shift)
         (void)h;
         for (const scene::Light& l : m_source->lights)
         {
-            gpu::Light g{};
-            g.position = l.position - m_originOffset;
-            g.forward = l.forward;
-            g.right = l.right;
-            g.range = l.range;
-            g.intensity = l.intensity;
-            g.color = l.color;
-            const float ci = std::cos(l.spotInner), co = std::cos(l.spotOuter);
-            g.spotScale = 1.0f / std::max(ci - co, 1e-4f);
-            g.spotOffset = -co * g.spotScale;
-            g.size = l.size;
-            g.typeFlags = (uint32_t)l.type | ((l.castShadow ? 1u : 0u) << 8) | (0xFFFFu << 16);
+            gpu::Light g = gpuLight(l, m_originOffset);
             g.revision = gpu::lightRevisionWord(m_revision, l.rayEndBias);
+            // (the emitter's image is M's: the record keeps what setLightSourceTextures published)
+            if (lights.size() < m_lights.size()) g.sourceTexture = m_lights[lights.size()].sourceTexture;
             lights.push_back(g);
         }
         release(m_lightBuffer);
         createLightBuffer(lights);
         m_lights = std::move(lights);  // the CPU mirror follows (an FX tail rebuild copies it)
     }
+}
+
+// A scene light's GPU record (GpuSceneLayout.h Light), its position relative to 'origin'; the caller sets the revision
+// word, M's TextureSystem the source texture.
+gpu::Light GpuScene::gpuLight(const scene::Light& l, float3 origin)
+{
+    gpu::Light g{};
+    g.position = l.position - origin;
+    g.forward = l.forward;
+    g.right = l.right;
+    g.range = l.range;
+    g.intensity = l.intensity;
+    g.color = scene::lightColor(l);  // (with its colour temperature)
+    const float ci = std::cos(l.spotInner), co = std::cos(l.spotOuter);
+    g.spotScale = 1.0f / std::max(ci - co, 1e-4f);
+    g.spotOffset = -co * g.spotScale;
+    g.size = l.size;
+    g.typeFlags = (uint32_t)l.type | ((l.castShadow ? 1u : 0u) << 8) | (((l.lightingChannels & 7u) ^ 1u) << 9) | (0xFFFFu << 16);
+    g.scales = gpu::halfFloatBits(l.specularScale - 1.0f) | (gpu::halfFloatBits(l.diffuseScale - 1.0f) << 16);
+    g.scales2 = gpu::halfFloatBits(l.volumetricScattering - 1.0f) | (gpu::halfFloatBits(l.indirectIntensity - 1.0f) << 16);
+    g.drawDistance = l.maxDrawDistance;
+    g.fadeRange = l.maxDistanceFadeRange;
+    const bool punctual = l.type == scene::LightType::Point || l.type == scene::LightType::Spot;
+    g.falloffExponent = punctual ? l.falloffExponent : 0.0f;
+    if (l.type == scene::LightType::Rect && l.barnDoorLength > 0)
+        g.barnDoor = gpu::halfFloatBits(l.barnDoorLength * std::cos(l.barnDoorAngle)) | (gpu::halfFloatBits(l.barnDoorLength * std::sin(l.barnDoorAngle)) << 16);
+    return g;
+}
+
+void GpuScene::setLightSourceTextures(std::span<const uint32_t> srvPerLight)
+{
+    if (srvPerLight.size() != m_lights.size()) fail("GpuScene::setLightSourceTextures: %zu entries for %zu lights", srvPerLight.size(), m_lights.size());
+    bool changed = false;
+    for (size_t i = 0; i < m_lights.size(); ++i)
+    {
+        const uint32_t word = srvPerLight[i] == gpu::kNone ? 0u : srvPerLight[i] + 1;
+        if (m_lights[i].sourceTexture == word) continue;
+        m_lights[i].sourceTexture = word;
+        m_lights[i].revision = (m_lights[i].revision & 0xFFFF0000u) | ((m_lights[i].revision + 1) & 0xFFFFu);
+        changed = true;
+    }
+    if (!changed) return;
+    release(m_lightBuffer);
+    createLightBuffer(m_lights);
 }
 
 void GpuScene::setLights(std::span<const uint32_t> indices)
@@ -1274,26 +1298,18 @@ void GpuScene::setLights(std::span<const uint32_t> indices)
         if (i >= m_lights.size() || i >= m_source->lights.size())
             fail("GpuScene::setLights: light %u (the GPU scene has %zu, the source %zu; lights are not added after upload)", i, m_lights.size(), m_source->lights.size());
         const scene::Light& l = m_source->lights[i];
-        gpu::Light g{};
-        g.position = l.position - m_originOffset;
-        g.forward = l.forward;
-        g.right = l.right;
-        g.range = l.range;
-        g.intensity = l.intensity;
-        g.color = l.color;
-        const float ci = std::cos(l.spotInner), co = std::cos(l.spotOuter);
-        g.spotScale = 1.0f / std::max(ci - co, 1e-4f);
-        g.spotOffset = -co * g.spotScale;
-        g.size = l.size;
-        g.typeFlags = (uint32_t)l.type | ((l.castShadow ? 1u : 0u) << 8) | (0xFFFFu << 16);
+        gpu::Light g = gpuLight(l, m_originOffset);
         const gpu::Light& old = m_lights[i];
+        g.sourceTexture = old.sourceTexture;  // (M's: setLightSourceTextures)
         const bool shape = std::memcmp(&g.position, &old.position, sizeof g.position) != 0 || std::memcmp(&g.forward, &old.forward, sizeof g.forward) != 0 ||
                            std::memcmp(&g.right, &old.right, sizeof g.right) != 0 || g.range != old.range || g.spotScale != old.spotScale ||
-                           g.spotOffset != old.spotOffset || std::memcmp(&g.size, &old.size, sizeof g.size) != 0 || g.typeFlags != old.typeFlags;
+                           g.spotOffset != old.spotOffset || std::memcmp(&g.size, &old.size, sizeof g.size) != 0 || g.typeFlags != old.typeFlags ||
+                           g.barnDoor != old.barnDoor;
         // (the ray end bias rides in the revision word's upper half: a change of it alone is a change of the record, not of
-        // the light's shape)
+        // the light's shape; so are the light components that scale or fade the light)
         const bool radiometric = g.intensity != old.intensity || std::memcmp(&g.color, &old.color, sizeof g.color) != 0 ||
-                                 (gpu::lightRevisionWord(0, l.rayEndBias) >> 16) != (old.revision >> 16);
+                                 (gpu::lightRevisionWord(0, l.rayEndBias) >> 16) != (old.revision >> 16) || g.scales != old.scales || g.scales2 != old.scales2 ||
+                                 g.drawDistance != old.drawDistance || g.fadeRange != old.fadeRange || g.falloffExponent != old.falloffExponent;
         if (!shape && !radiometric) continue;
         g.revision = gpu::lightRevisionWord((old.revision & 0xFFFFu) + 1, l.rayEndBias);
         m_lights[i] = g;

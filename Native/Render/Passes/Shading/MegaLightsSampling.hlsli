@@ -30,6 +30,8 @@ struct MlPoint
     float NoV;
     float3 front, back;  // diffuse f_d on the viewer's side, and across the surface (Foliage)
     bool foliage, specular;
+    bool store;     // a world-space store of light that GI carries on (mlPointLambert): the light's indirect scale applies
+    uint channels;  // the point's lighting channels (Scene.hlsli g_lightChannels; 7: no test)
     float3 f0, compensation;
     float alpha;
 #if ML_AREA
@@ -60,6 +62,8 @@ MlPoint mlPointOf(ModelSurface s, float3 offset, float3 n, float3 v, uint ltcSrv
     p.front = p.foliage ? diffuse * (1 - s.transmission) : diffuse;
     p.back = p.foliage ? diffuse * s.transmission : 0;
     p.specular = true;
+    p.store = false;
+    p.channels = 7u;
     p.f0 = modelF0(s);
     p.alpha = modelAlpha(s.roughness);
     p.compensation = 1 + p.f0 * (1 / modelDirectionalAlbedo(max(p.NoV, 1e-4), s.roughness) - 1);
@@ -118,6 +122,8 @@ MlPoint mlPointLambert(float3 worldPos, float3 n, float3 albedo)
     p.back = 0;
     p.foliage = false;
     p.specular = false;
+    p.store = true;
+    p.channels = 7u;
     p.f0 = 0;
     p.compensation = 1;
     p.alpha = 1;
@@ -132,7 +138,18 @@ MlPoint mlPointLambert(float3 worldPos, float3 n, float3 albedo)
 
 // The light's unshadowed radiance leaving the point toward v (before exposure): punctual lights exactly, area lights by
 // their diffuse and LTC integrals. stableMask: B2's mask of area lights whose specular R's reflections carry (UNX_NONE: none).
+// The light's components are in it (Scene.hlsli): its diffuse and specular scales, its window with the view's fade, 0
+// for a light in none of the point's channels; a store's point (mlPointLambert) takes the light's indirect scale too.
+float3 mlLightUnshadowedDirect(MlPoint p, GpuLight light, uint lightIndex, uint stableMask);
 float3 mlLightUnshadowed(MlPoint p, GpuLight light, uint lightIndex, uint stableMask)
+{
+    g_lightChannels = p.channels;
+    const float3 radiance = mlLightUnshadowedDirect(p, light, lightIndex, stableMask);
+    g_lightChannels = 7u;
+    g_shLightSpecular = 1;  // (the light's specular scale is in 'radiance': not left for the caller's other lobes)
+    return p.store ? radiance * lightIndirectScale(light) : radiance;
+}
+float3 mlLightUnshadowedDirect(MlPoint p, GpuLight light, uint lightIndex, uint stableMask)
 {
     if (lightType(light) > LIGHT_SPOT)
     {
@@ -157,7 +174,7 @@ float3 mlLightUnshadowed(MlPoint p, GpuLight light, uint lightIndex, uint stable
         if (p.subsurface) across = p.thin;
 #endif
         if (any(across > 0)) c += across * (SH_PI * shAreaIntegral(light, toCentre, p.NoV > 0 ? p.frameBack : p.frame, true));
-        return light.color * c * (light.intensity * window);
+        return shAreaColor(light, toCentre) * c * (light.intensity * window);
 #else
         return 0;
 #endif

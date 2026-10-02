@@ -10,6 +10,7 @@
 #include "Passes/Shadow/VsmLocalAirWalk.hlsli"
 #include "Passes/Lights/LightFunction.hlsli"
 #include "Passes/Atmosphere/CloudShadowCommon.hlsli"
+#include "Passes/Hair/HairDensity.hlsli"
 
 float3 froxelSelfAttenuation(float3 x) { return select(x > 1e-4, (1 - exp(-x)) / max(x, 1e-4), 1 - 0.5 * x); }
 
@@ -177,6 +178,13 @@ FroxelAirResult froxelAirSlice(FroxelGrid g, uint2 tile, uint s, bool nearShadow
             f = vsmAirShadowFraction(r, o, o + dir * froxelSampledLength(P[3].z, tile, toRay, t0, len, clipAtSurface), k, walk, (experiment & 32) != 0);
             ++walk.slices;
         }
+    }
+    // E's grooms (P[5].z: the hair density parameters, UNX_NONE none): what they let through towards the sun from the
+    // segment's middle joins the casters' shadow - the lit fraction times it.
+    if (P[5].z != 0xFFFFFFFFu && any(single > 0) && f < 1)
+    {
+        ByteAddressBuffer hair = ResourceDescriptorHeap[P[5].z];
+        f = 1 - (1 - f) * hairTransmittance(P[5].z, o + dir * (0.5 * len) - hairDensityOrigin(hair), sun, 3.0e38f, 32u);
     }
     // The cloud layer's shadow (the sun map at the segment's middle; 1 without clouds): the air a surface is seen through
     // is lit as the surface under the same clouds is. Not in the sky correction: sky pixels show the layer itself.

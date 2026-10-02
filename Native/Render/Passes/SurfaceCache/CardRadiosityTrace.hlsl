@@ -3,25 +3,35 @@
 // r.card.radiosity.trace (CardLighting.hlsli): one ray generation thread per trace texel of the frame's radiosity list -
 // 64 of a listed tile: 2 x 2 probes (CL_PROBE_SPACING texels apart) x 4 x 4 rays over the probe's hemisphere, uniform in
 // solid angle, jittered per probe and update. The probe stands on one texel of its 4 x 4, chosen by the page's temporal
-// index. The ray's radiance: the final lighting atlas at the hit (clReadCards; the back of a one-sided surface: 0), the
-// sky where it escapes; its largest channel held to P[4].y in exposed units (the reference's MaxRayIntensity).
+// index. The ray's radiance: the final lighting atlas at the hit (clReadCardsHiRes: the cards' highest mapped level
+// there, and the hit's feedback - the reference's radiosity samples the high-resolution pages; the back of a one-sided
+// surface: 0), the sky where it escapes; its largest channel held to P[4].y in exposed units (the reference's
+// MaxRayIntensity).
 // A hit without a card (the reference: 0) takes its direct light - the sun by one shadow ray to the disk's centre and one
-// local-light sample with its shadow ray (HitLocalSample.hlsli) - through the material's constants (no texture, no
-// indirect light): a fifth to a third of the rays' hits read no card (lobby, 2026-10-02) and every bounce lost that
-// share. A thread traces at most 3 rays (the ray and those two) and nothing loops around them: dispatches of at most
-// 87,381 threads (CardLighting.cpp). (The reference retraces a ray whose first hit is a back face within 5 cm of its
-// origin - AvoidSelfIntersections; not here.)
+// local-light sample with its shadow ray (HitLocalSample.hlsli) - and the indirect light the card frame names
+// (LumenHitIndirect.hlsli: the previous frame's translucency volume), through the material's constants (no texture):
+// a fifth to a third of the rays' hits read no card (lobby, 2026-10-02) and every bounce lost that share.
+// The re-shoot (the reference's AvoidSelfIntersections in its retrace mode, LumenHardwareRayTracingCommon.ush
+// TraceSurfaceCacheRay): the ray geometry is not the captured surface texel for texel, so a ray can start under it. A
+// first hit on the back of a one-sided surface nearer than P[0].w (SkipBackFaceHitDistance) is shot again from that
+// distance, one on a two-sided surface nearer than P[5].y (SkipTwoSidedHitDistance) again from just past the hit; once
+// (no loop). A hit nearer than P[3].w (MinTraceDistanceToSampleSurfaceCache) still blocks the ray and reads no light: at
+// that distance a card texel would light itself.
+// A thread traces at most 4 rays (the ray, its re-shoot, the sun's and the light sample's shadow rays) and nothing loops
+// around them: dispatches of at most 65,536 threads (CardLighting.cpp).
 // The radiance goes to the trace atlas at the probe's rays' texels: tile origin + probe x 4 + ray.
-// P[0] = { card frame SRV, select SRV, frame index, 0 }
-// P[1], P[2], P[3] = sky and sun (GiSky.hlsli; P[1].w = ray length)
+// P[0] = { card frame SRV, select SRV, frame index, asuint(back-face skip distance, m; 0: no re-shoot) }
+// P[1], P[2], P[3].xyz = sky and sun (GiSky.hlsli; P[1].w = ray length), P[3].w = asuint(the least hit distance that
+// reads light, m)
 // P[4] = { trace atlas UAV, asuint(ray intensity cap, exposed units; 0: none), the dispatch's first thread, page capacity }
-// P[5] = { direct list capacity, 0, radiosity list capacity, page light SRV (raw) }
+// P[5] = { direct list capacity, asuint(two-sided skip distance, m), radiosity list capacity, page light SRV (raw) }
 // P[6], P[7] = RtSceneSrvs
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/SurfaceCache/CardLighting.hlsli"
+#include "Passes/GI/LumenHitIndirect.hlsli"
 #include "RayTracing/HitLocalSample.hlsli"
 
 [shader("raygeneration")]
@@ -57,8 +67,31 @@ void CardRadiosityTraceGen()
     if (!(all(abs(ray.Origin) < 1e9) && dd > 0.98 && dd < 1.02 && ray.TMax > 0 && ray.TMax < 1e30)) return;
     const RtSceneSrvs scene = rtScene();
     float3 radiance = 0;
-    const RtHit hit = rtTraceClosest(scene, ray, RAY_FLAG_NONE, RT_MASK_GI);
+    RtHit hit = rtTraceClosest(scene, ray, RAY_FLAG_NONE, RT_MASK_GI);
+    // the re-shoot: past a near back face, or just past a near two-sided surface
+    const float skipBackFace = asfloat(P[0].w), skipTwoSided = asfloat(P[5].y);
+    if (hit.t >= 0 && hit.instance != RT_INSTANCE_EMITTER && hit.t < max(skipBackFace, skipTwoSided))
+    {
+        GpuInstance hitInstance;
+        GpuMesh hitMesh;
+        RtGeometry hitGeometry;
+        const bool twoSided = (loadMaterial(rtMaterial(scene, hit, hitInstance, hitMesh, hitGeometry)).classFlags & MATERIAL_TWO_SIDED) != 0;
+        float skip = -1;
+        if (twoSided)
+        {
+            if (hit.t < skipTwoSided) skip = hit.t + 1e-4;
+        }
+        else if (hit.frontFace == 0 && hit.t < skipBackFace)
+            skip = skipBackFace;
+        if (skip > 0)
+        {
+            RayDesc again = ray;
+            again.TMin = skip;
+            hit = rtTraceClosest(scene, again, RAY_FLAG_NONE, RT_MASK_GI);
+        }
+    }
     if (hit.t < 0) radiance = giSkyRadiance(ray.Direction);
+    else if (hit.t < asfloat(P[3].w)) radiance = 0;  // (too near to read the cache: the texel's own light)
     else if (hit.instance != RT_INSTANCE_EMITTER)  // (a light's own surface: the direct light carries it)
     {
         const RtSurface s = rtSurface(scene, hit, ray.Origin, ray.Direction);
@@ -66,7 +99,8 @@ void CardRadiosityTraceGen()
         GpuMaterial m = loadMaterial(s.material);
         if (s.frontFace || (m.classFlags & MATERIAL_TWO_SIDED) != 0)
         {
-            const ClSample cards = clReadCards(f, s.sceneInstance, s.position, s.geometricNormal, CL_READ_FINAL);
+            // (the cone of a ray of the 4 x 4 hemisphere map: about 20 degrees half angle)
+            const ClSample cards = clReadCardsHiRes(f, s.sceneInstance, s.position, s.geometricNormal, CL_READ_FINAL, 0.37 * hit.t, traceCoord);
             if (cards.valid) radiance = cards.final;
             else
             {
@@ -75,6 +109,8 @@ void CardRadiosityTraceGen()
                 g_rtHitCone = 0.37;  // (a ray of the 4 x 4 hemisphere map: a cone of about 20 degrees half angle)
                 const float bias = 1e-3 + 2e-4 * distance(s.position, g_cameraPosition);
                 RtHitLighting L = (RtHitLighting)0;
+                L.irradiance = lhiIrradiance(lhiSources(P[0].x), s.position, s.normal, thread * 9781u + P[0].z * 26699u).rgb;
+                L.specularRadiance = L.irradiance / 3.14159265;
                 const float3 l = normalize(g_sunDirection);
                 if (dot(s.normal, l) > 0 || rtHitTransmits(m))
                 {

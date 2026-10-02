@@ -126,6 +126,17 @@ Scene cityNight(const Request& rq)
     for (const auto& c : s.cameras) s.paths.push_back(staticPath(c));
     s.paths.push_back(linearPath("walk", { street + 1.5f, 1.7f, 120 }, { street + 1.5f, 1.7f, 60 }, 1.4f, { 0, 0.05f, 0 }));
     s.paths.push_back(linearPath("drive", { street, 1.5f, 170 }, { street, 1.5f, -170 }, 20.0f));
+    // Ground mist in the street ahead of the street camera: a box 16 x 5 x 60 m, thinning upward (the lamps' cones and the
+    // shop fronts' glow show in it). The scene's fog block (scene::FogVolume; the renderer's local fog volumes).
+    {
+        scene::FogVolume mist;
+        mist.centre = { street + 1.5f, 2.5f, 80.0f };
+        mist.halfSize = { 8.0f, 2.5f, 30.0f };
+        mist.shape = 1;
+        mist.density = 0.06f;
+        mist.heightFalloff = 2.0f;
+        s.fogVolumes.push_back(mist);
+    }
     return s;
 }
 
@@ -528,6 +539,9 @@ Scene ridgeSunset(const Request& rq)
     s.cameras.push_back(camera("side", eye + f3(-2500.0f, 30.0f, 1500.0f), eye + f3(-1000.0f, 400.0f, 3000.0f), ev));
     for (const auto& c : s.cameras) s.paths.push_back(staticPath(c));
     s.paths.push_back(linearPath("drive", eye, eye + flat * 1200.0f, 30.0f, f3(0, 0.14f, 0)));
+    // The cloud layer over the ridge against the low sun (scene::CloudLayer: the renderer's volumetric clouds; the layer's
+    // default altitudes, 1.5 to 4 km - the crest, 0.8 to 0.9 km, stands under it).
+    s.clouds.coverage = 0.5f;
     (void)rq;
     return s;
 }

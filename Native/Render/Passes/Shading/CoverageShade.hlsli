@@ -25,6 +25,8 @@
 // transmittance (waterSunLight, the direct parts only); P[10].x its caustics (UNX_NONE: none). P[8].x = E's light function table (A8; UNX_NONE: none),
 // P[8].y = ViewResources::coverageRecordRadiance (raw SRV, v1.75): special records (vis id top bits != 00: hair, streams,
 // M pre-shaded classes) are read from it (their owners shaded them, CoverageSpecial.hlsli), clusters are shaded here.
+// P[11].z = E's grooms between the fragments and the sun (Passes/Hair/HairShadow.hlsl MODE 2: the hair's transmittance
+// at the 4 depths of S's sun profile, R32_UINT; UNX_NONE: none) - a cluster fragment's sun visibility times its value.
 // COV_PRESHADE_CLASSES (CoverageSpecial.hlsl MODE=1, 2): covFragmentMaterial takes the material of its class as the
 // resolve - 1 Cut, 2 Terrain; COV_PRESHADE_LIGHT (MODE=3): covShadeFragment lights the material those kernels stored.
 #ifndef UNX_M_COVERAGE_SHADE_HLSLI
@@ -73,7 +75,28 @@ static uint g_covListed = 0xFFFFFFFFu;
 #define COVS_RUNS 4u        // runs of all heavy pixels (cursor slots)
 #define COVS_MAX_RUNS 5u    // the most runs of one heavy pixel
 #define COVS_OPEN 6u        // 6..7 open heavy pixels appended to active list 0 / 1 by a round
-#define COVS_WORDS 8u
+#define COVS_ENTRIES 8u     // compact form: entries of the visible fragment list (CoverageWalk)
+#define COVS_WALKED 9u      // statistics: records the light pixels' walks visited (nearer first, until the pixel is complete)
+#define COVS_SHADED 10u     // statistics: of them, the records with weight (shaded)
+#define COVS_LIGHT_PIXELS 11u  // statistics: light pixels
+#define COVS_WORDS 16u
+// Compact form of the light pixels' composite (shading.coverage_compact; CoverageWalk -> CoverageShadeList x 2 ->
+// CoverageGather). The composite kernel shades inside each pixel lane's own front-to-back loop, so a wave runs the
+// shading as many times as its deepest pixel has visible fragments, with the other lanes idle. Here the walk only
+// weights: a tile's fragments with weight become one contiguous run of entries { record element, weight } in pixel
+// order, the shading kernels take one entry per lane (64 at a time, the tile's probes and light field as before) and
+// keep weight x radiance per entry, and the gather sums each pixel's entries with the band A remainder. The same
+// weights and the same covShadeFragment calls as the composite; the sums are in float (the composite keeps part 1's sum
+// in half floats between its two kernels).
+//   m.coverage visible     raw, 8 B per entry: { element, weight (float bits) }
+//   m.coverage radiance    raw, 12 B per entry: weight x exposed radiance (float3), part 1 then part 1 + part 2
+//   m.coverage tile spans  raw, 8 B per listed tile: { first entry, entries }
+//   m.coverage pixel spans raw, 8 B per pixel of a listed tile (listed x 64 + pixel): { the pixel's first entry inside
+//                          the tile's run (bits 0..15) | entries << 16 | kind << 24, weight sum (float bits) }
+#define COVC_TILE_ENTRIES (COV_TILE_PIXELS * COV_LIGHT)  // entries of one tile at most (1,024: the shading rounds' bound)
+#define COVC_NONE 0u   // no record, or outside the view
+#define COVC_LIGHT 1u  // composited from its entries (CoverageGather writes the pixel)
+#define COVC_HEAVY 2u  // a heavy pixel (CoverageHeavy* write it)
 // Dispatch arguments (raw buffer 'm.coverage.args', written by CoverageBegin, read as arguments).
 #define COVA_SORT 4u        // 4..6 (heavy pixels x, y, most runs of one)
 #define COVA_ROUND 8u       // 8..10 the next heavy round (open pixels)
@@ -190,6 +213,15 @@ CovFragmentShadow covFragmentShadow(uint2 pixel, uint element, float linearZ)
         const float x = o.t * 3;
         const uint k = min((uint)x, 2u);
         o.sun = lerp(covByte(w.x, k), covByte(w.x, k + 1u), x - k);
+    }
+    if (P[11].z != UNX_NONE)
+    {
+        // the grooms towards the sun at the fragment's depth (the same 4 points)
+        Texture2D<uint> hairSun = ResourceDescriptorHeap[P[11].z];
+        const uint h = hairSun[pixel];
+        const float x = o.t * 3;
+        const uint k = min((uint)x, 2u);
+        o.sun *= lerp(covByte(h, k), covByte(h, k + 1u), x - k);
     }
     o.nearSlots = w.y;
     o.farSlots = w.z;
@@ -609,7 +641,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
                 const float3 p = (light.position - g_cameraPosition) - offset;
                 const float window = shAreaWindow(light, p);
                 if (window <= 0) continue;
-                const float3 Lw = light.color * (light.intensity * window * visibility);
+                const float3 Lw = shAreaColor(light, p) * (light.intensity * window * visibility);
                 uint first = NoV > 0 ? 0 : 2, last = foliage ? 3 : 2;
                 const bool specularInReflections = shSpecularInReflections(P[7].y, lightIndex);  // P[7].y: B2 mask
                 float scaleBase = 1;
@@ -681,8 +713,9 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
             else if (NoV > 0 && cosL > 0) f = front + shSpecular(f0, alpha, compensation, n, v, l, NoV, cosL);
             else if (foliage && NoV * cosL < 0) f = back;
 #if COV_COAT
-            if (cover > 0) f = keep * f + cover * (modelCoatLobe(coat, n, v, l) + modelCoatUnder(s, coat, n, v, l));
-            if (sheenOn && cosL > 0) f = keepS * (f - (f - front) * sheen.cloth) + sheen.color * modelSheenLobe(sheen.roughness, n, v, l);
+            // (the coat's and the sheen's lobes are specular light: the light's specular scale, ShadingCommon.hlsli)
+            if (cover > 0) f = keep * f + cover * (modelCoatLobe(coat, n, v, l) * shLightSpecular() + modelCoatUnder(s, coat, n, v, l));
+            if (sheenOn && cosL > 0) f = keepS * (f - (f - front) * sheen.cloth) + sheen.color * (modelSheenLobe(sheen.roughness, n, v, l) * shLightSpecular());
 #endif
             radiance += f * El * (abs(cosL) * visibility);
         }

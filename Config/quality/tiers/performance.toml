@@ -6,6 +6,10 @@ render_height_max = 720         # 4K renders 1280 x 720 and is upscaled x 3 (144
                                 # the picture over frames - detail under an internal pixel arrives later after a cut or a
                                 # disocclusion, and thin features move with more shimmer
 upscale_tsr_flickering = false  # no flickering (moire) heuristic: sub-pixel gratings may shimmer where they stand still
+upscale_tsr_history_percent = 100.0   # the history at the output resolution (as the high tier)
+upscale_tsr_reprojection_field = false  # one dilated vector per internal pixel (the reference's field is on from its high
+                                # tier up): the history blurs slightly under turns and zooms, moving edges smear an input pixel
+upscale_tsr_thin_geometry = false  # no thin geometry detection: wires and leaf edges under a pixel wide may flicker
 
 [reflection]
 lumen_downsample = 2            # one reflection ray per 2 x 2 internal pixels (as the high tier)

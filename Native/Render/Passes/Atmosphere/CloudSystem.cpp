@@ -70,6 +70,18 @@ uint32_t textureSrv(Device& device, ID3D12Resource* r, DXGI_FORMAT format)
 }
 
 bool enabled(const CloudState& s) { return s.set && s.layer.coverage > 0; }
+} // namespace
+
+uint32_t cloudSunWord(const QualityConfig& q)
+{
+    const uint32_t steps = q.has("atmosphere.clouds.sun_steps") ? (uint32_t)std::min<int64_t>(std::max<int64_t>(q.integer("atmosphere.clouds.sun_steps"), 0), 64) : 0u;
+    const bool filtered = !q.has("atmosphere.clouds.filtered_steps") || q.boolean("atmosphere.clouds.filtered_steps");
+    const bool ground = !q.has("atmosphere.clouds.ground_light") || q.boolean("atmosphere.clouds.ground_light");
+    return steps | (filtered ? 0x100u : 0u) | (ground ? 0x200u : 0u);
+}
+
+namespace
+{
 
 // This frame's layer: FrameContext::clouds (the host's UnxFrameSetClouds, v1.77) when it has coverage, else the one a gate
 // or test set (setCloudLayer).
@@ -177,7 +189,8 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
     const QualityConfig& q = fc.quality;
     const bool temporal = !q.has("atmosphere.clouds.temporal") || q.boolean("atmosphere.clouds.temporal");
     // the sun path's marched steps per sample (CloudShadowCommon.hlsli cloudSunTauNear; 0: the whole path)
-    const uint32_t sunSteps = q.has("atmosphere.clouds.sun_steps") ? (uint32_t)std::min<int64_t>(std::max<int64_t>(q.integer("atmosphere.clouds.sun_steps"), 0), 64) : 0u;
+    // (| flags << 8: CloudMarch.hlsl P[3].w - the steps' mean density, the ground's light)
+    const uint32_t sunSteps = cloudSunWord(q);
     const bool history = temporal && s.history && fc.frame.discontinuity == 0;
     s.history = true;
     rec.layerSrv = s.radianceSrv[layer], rec.distanceSrv = s.distanceSrv[layer], rec.skySrv = s.domeSrv;

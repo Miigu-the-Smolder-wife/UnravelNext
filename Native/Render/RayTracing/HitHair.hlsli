@@ -10,8 +10,10 @@
 //   light    a matte surface of the hair material's base colour (the colour a reader without the fibre model takes),
 //            facing out of the groom (hairDensityOutward: against the gradient of the cells' means; turned to the ray):
 //            the sun through its shadow ray and one local-light sample through its own (HitLocalLights.hlsli), each
-//            times what the hair between the point and the light lets through (hairTransmittance). No indirect light -
-//            as every hit the surface cache does not light.
+//            times what the hair between the point and the light lets through (hairTransmittance); the indirect
+//            light from the Lumen translucency volume at the hit, as the strands take theirs (CoverageHair.hlsl) - the
+//            volume the previous frame left (word 23 of the local-light header; this frame's is built after the first
+//            of these rays), its irradiance on the proxy's side.
 // Limits: the volume's cells (about 1 cm on a head: no strands in a mirror); the fibre model is not evaluated (no
 // highlights, no light through the hair towards the ray); the bodies with a block (shading.hair_density_bodies).
 // The shading part needs a ray library (RayShaders.hlsli: rtVisible) with HitLocalLights.hlsli and GiSky.hlsli's sun
@@ -19,6 +21,7 @@
 #ifndef UNX_RT_HIT_HAIR_HLSLI
 #define UNX_RT_HIT_HAIR_HLSLI
 #include "Passes/Hair/HairDensity.hlsli"
+#include "Passes/GI/LumenTranslucencyVolume.hlsli"
 
 #define RT_HAIR_STEPS 32u  // coarse cells a march through a body walks at most (HairDensity.hlsli hairDensityAcross)
 
@@ -28,15 +31,16 @@ struct RtHairHit
     uint body, material;
 };
 uint rtHairSeed(uint2 at, uint frame) { return at.x * 0x9E3779B1u + at.y * 0x85EBCA77u + frame * 0xC2B2AE3Du; }
-// params: the density parameters' SRV (UNX_NONE: no volume). origin: world; direction: unit.
-RtHairHit rtHairFirst(uint params, float3 origin, float3 direction, float reach, uint seed)
+// params: the density parameters' SRV (UNX_NONE: no volume). origin: world; direction: unit. outsideOnly: the grooms the
+// ray starts inside are left out (hairFirstFibreAmong).
+RtHairHit rtHairFirst(uint params, float3 origin, float3 direction, float reach, uint seed, bool outsideOnly = false)
 {
     RtHairHit h;
     h.t = -1;
     h.body = h.material = 0;
     if (params == 0xFFFFFFFFu) return h;
     ByteAddressBuffer record = ResourceDescriptorHeap[params];
-    h.t = hairFirstFibreAmong(params, origin - hairDensityOrigin(record), direction, reach, RT_HAIR_STEPS, seed, h.body, h.material);
+    h.t = hairFirstFibreAmong(params, origin - hairDensityOrigin(record), direction, reach, RT_HAIR_STEPS, seed, h.body, h.material, outsideOnly);
     return h;
 }
 
@@ -47,6 +51,13 @@ uint rtHairParams(RtSceneSrvs scene)
     if (scene.pad == 0xFFFFFFFFu) return 0xFFFFFFFFu;
     ByteAddressBuffer header = ResourceDescriptorHeap[scene.pad];
     return header.Load(88);
+}
+// The translucency volume the hits take their indirect light from: word 23 (UNX_NONE: none).
+uint rtHairIndirect(RtSceneSrvs scene)
+{
+    if (scene.pad == 0xFFFFFFFFu) return 0xFFFFFFFFu;
+    ByteAddressBuffer header = ResourceDescriptorHeap[scene.pad];
+    return header.Load(92);
 }
 #endif
 
@@ -89,6 +100,7 @@ float3 rtHairRadiance(RtSceneSrvs scene, uint params, RtHairHit hit, float3 orig
             if (through > 1e-3f && (!ls.castShadow || rtVisible(scene, rtLocalShadowRay(x, n, ls, bias), RT_MASK_GI))) radiance += albedo * ls.weight * (cosL * through);
         }
     }
+    radiance += albedo * ltvIrradiance(rtHairIndirect(scene), x, n);
     return radiance;
 }
 #endif

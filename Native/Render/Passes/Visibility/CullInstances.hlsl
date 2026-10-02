@@ -3,7 +3,8 @@
 // Instance culling. PHASE=1 SOURCE=0: the run's flat instances (CullScene: dynamic and skinned instances, and every
 // instance outside a chunk) x every view (dispatch y = view); PHASE=1 SOURCE=1: one group per visible chunk item
 // (CullChunks PHASE=1), its members (<= CHUNK_INSTANCES: four passes of 64). Frustum + clip plane, raster-service tile
-// mask, and for views with occlusion the previous frame's HiZ with previous transforms: occluded instances are deferred
+// mask, the view's smallest instance (shadow views: instanceBelowView), and for views with occlusion the previous frame's
+// HiZ with previous transforms: occluded instances are deferred
 // to phase 2, visible ones push their per-depth hierarchy roots as node items. PHASE=2 (SOURCE unused): the deferred
 // instances, and the members of chunks that passed CullChunks PHASE=2, against this frame's HiZ.
 // Skinned instances are tested with their palette bounds (SkinBounds.hlsl; the previous palette's in phase 1). A skinned
@@ -23,7 +24,7 @@ void cullInstance(RWByteAddressBuffer state, uint instance, uint view, bool vali
         roots = rootBuffer[inst.mesh];
         const CullView v = loadView(view);
         const bool inBatch = v.instanceEnd == 0 || (instance >= v.instanceFirst && instance < v.instanceEnd);  // (RasterView's instance batch)
-        if (((inst.flags & INSTANCE_MASK) != 0 || INSTANCE_MASK == 0) && (inst.flags & INSTANCE_HIDDEN) == 0 && inBatch)
+        if (((inst.flags & INSTANCE_MASK) != 0 || INSTANCE_MASK == 0) && (inst.flags & INSTANCE_HIDDEN) == 0 && inBatch && instanceInSet(v, inst, instance))
         {
             float4 bounds = worldSphere(inst, inst.objectToWorld, mesh.boundsSphere);
             float4 prevBounds = worldSphere(inst, inst.prevObjectToWorld, mesh.boundsSphere);
@@ -44,7 +45,8 @@ void cullInstance(RWByteAddressBuffer state, uint instance, uint view, bool vali
             // A12 view models: the main view draws them with its projection remapped (ViewModel.hlsli viewModelClip), so the
             // view's planes and HiZ do not bound them; a few clusters, drawn untested.
             if ((inst.flags & INSTANCE_VIEW_MODEL) != 0) bounded = false;
-            visible = roots.rootCount > 0 && (!bounded || (frustumVisible(v, bounds) && tileVisible(v, view, bounds)));
+            visible = roots.rootCount > 0 && (!bounded || (frustumVisible(v, bounds) && !instanceBelowView(v, bounds) && tileVisible(v, view, bounds) &&
+                                                           !tilesOcclude(v, TILE_MASK_SRV, bounds)));
             if (visible && bounded && (v.flags & CULL_VIEW_OCCLUSION) != 0)
             {
 #if PHASE == 1
@@ -59,13 +61,15 @@ void cullInstance(RWByteAddressBuffer state, uint instance, uint view, bool vali
             }
         }
     }
-    const uint base = waveAppend(state, VS_NODE_WRITE, visible ? roots.rootCount : 0, CAP_NODES, OVERFLOW_NODES);
+    uint first, total;
+    const uint base = nodeReserve(state, visible ? roots.rootCount : 0, CAP_NODES, 0, first, total);
     if (visible)
     {
         RWStructuredBuffer<uint2> items = ResourceDescriptorHeap[NODE_ITEMS_UAV];
         for (uint k = 0; k < roots.rootCount; ++k)
             if (base + k < CAP_NODES) items[base + k] = uint2(instance, packItem(roots.nodeOffset + k, view));
     }
+    nodePublish(state, first, total);
     const uint d = waveAppend(state, VS_DEFER_INSTANCES, defer ? 1 : 0, CAP_DEFERRED, OVERFLOW_DEFER_INSTANCES);
     if (defer && d < CAP_DEFERRED)
     {

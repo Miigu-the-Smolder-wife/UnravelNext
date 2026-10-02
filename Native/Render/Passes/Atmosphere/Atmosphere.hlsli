@@ -180,11 +180,14 @@ void airViewLookup(AtmosphereSrvs s, float2 uv, float linearDepth, bool wantSun,
 
 // ---- B5 volumetric clouds (CloudSystem.cpp): the main view's cloud layer, marched at quarter resolution along the whole
 // view ray with the air in front of it folded in (CloudMarch.hlsl: rgb = in(0, d_c)(1 - T_c) + T_air(0, d_c) L_c, a = T_c,
-// d_c the extinction-weighted cloud distance). A pixel whose surface (or the sky) lies beyond d_c: in' = rgb + T_c in,
-// T' = T_c T; a surface nearer than d_c is in front of the cloud and unchanged. Applied to sky pixels
-// (atmosphereSkyRadianceClouded, ShadeSky);
-// surfaces beyond the clouds and the cloud shadow on surfaces come from S passes, not from code inlined into M's shading
-// kernels (their DXIL is at the 200 KB limit). Secondary views: no clouds yet (A14).
+// d_c the extinction-weighted cloud distance). A sky pixel takes it whole: in' = rgb + T_c in, T' = T_c T
+// (atmosphereSkyRadianceClouded, ShadeSky). A surface takes the part of the layer in front of it - a peak inside the
+// layer, the ground seen from inside or above it - with the air and the fog, in the same lookup: the fog's volume holds
+// it (FogIntegrate.hlsl, atmosphere.clouds.veil: the layer marched along the volume's columns up to the farthest
+// surface, ordered against the air), so no kernel of M's grows by it (their DXIL is at the 200 KB limit) and every layer
+// that reads the air - opaque pixels, the coverage layer, glass, water, particles - has the cloud at its own depth. The
+// cloud's shadow on surfaces comes from S's visibility. Other views (planar reflections, A14's auxiliary views): their
+// sky pixels take the layer by direction, from the sky dome the escaping rays use.
 uint airCloudRecordSrv(AtmosphereSrvs s)
 {
     if (g_viewKind != 0) return 0;
@@ -262,6 +265,27 @@ float3 atmosphereSkyRadianceClouded(AtmosphereSrvs s, float3 worldDir, float2 uv
 {
     float3 sky = atmosphereSkyRadianceView(s, worldDir, uv);
     behind = 1;
+    if (g_viewKind != 0)
+    {
+        // Another view than the main one: the layer's image is the main view's, so the layer is taken by direction from
+        // the sky dome (CloudMarch.hlsl mode 3: the layer from the main camera in every direction, the air in front
+        // folded in) - a lake reflects the clouds, a mirror or a render-texture camera shows them. The dome's 1.4 degree
+        // texels, and the main camera's place: right for a layer kilometres away.
+        Texture2D<float4> p = ResourceDescriptorHeap[s.transmittance];
+        uint pw, ph;
+        p.GetDimensions(pw, ph);
+        const uint r = asuint(p.Load(int3(10, ph - 1, 0)).z);
+        if (r == 0) return sky;
+        ByteAddressBuffer b = ResourceDescriptorHeap[r - 1];
+        Texture2D<float4> dome = ResourceDescriptorHeap[b.Load(76)];  // CloudRecord skySrv
+        uint dw, dh;
+        dome.GetDimensions(dw, dh);
+        float2 at = cloudDomeUv(worldDir);
+        at.y = clamp(at.y, 0.5 / dh, 1 - 0.5 / dh);  // wrap in azimuth only
+        const float4 v = dome.SampleLevel(g_linearWrap, at, 0);
+        behind = v.a;
+        return v.rgb + v.a * sky;
+    }
     airApplyClouds(s, uv, 3.0e38, sky, behind);
     return sky;
 }

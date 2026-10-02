@@ -410,8 +410,10 @@ void shTubeCap(inout ShLtcAcc acc, float3x3 T, float3x3 C, bool orthonormal, flo
 
 // ---- lights: I of the light's region under the transform T (world -> transformed space), p = light position relative to
 // the shading point; 'orthonormal': T is a rotation (the diffuse frames), else the LTC transform. Rect and disk: 0 on
-// their back side; inside a sphere or tube: 0.
-float shAreaIntegral(GpuLight l, float3 p, float3x3 T, bool orthonormal)
+// their back side; inside a sphere or tube: 0. A rect with barn doors: the part of it the point sees past them
+// (Scene.hlsli lightBarnDoorRect). shAreaIntegral: the same times the light's scale of that part of the shading - the
+// diffuse scale under the diffuse frames, the specular one under an LTC transform.
+float shAreaIntegralUnscaled(GpuLight l, float3 p, float3x3 T, bool orthonormal)
 {
     const uint type = lightType(l);
     // The region lies where (T x).z > 0: a light whose bounding sphere is entirely on the other side contributes 0.
@@ -423,9 +425,14 @@ float shAreaIntegral(GpuLight l, float3 p, float3x3 T, bool orthonormal)
     const float3x3 C = orthonormal ? T : float3x3(cross(T[1], T[2]), cross(T[2], T[0]), cross(T[0], T[1]));
     if (type == LIGHT_RECT)
     {
-        const float3 ex = l.right * (0.5 * l.size.x), ey = up * (0.5 * l.size.y);
+        float3 centre = p;
+        float2 halfSize = 0.5 * l.size;
+#if UNX_LIGHT_COMPONENTS
+        if (l.barnDoor != 0 && !lightBarnDoorRect(l, p, up, centre, halfSize)) return 0;
+#endif
+        const float3 ex = l.right * halfSize.x, ey = up * halfSize.y;
         ShLtcAcc acc = shLtcBegin();
-        const float3 a = mul(T, p - ex - ey), b = mul(T, p + ex - ey), c = mul(T, p + ex + ey), d = mul(T, p - ex + ey);
+        const float3 a = mul(T, centre - ex - ey), b = mul(T, centre + ex - ey), c = mul(T, centre + ex + ey), d = mul(T, centre - ex + ey);
         shLtcSegment(acc, a, b);
         shLtcSegment(acc, b, c);
         shLtcSegment(acc, c, d);
@@ -471,12 +478,36 @@ float shAreaIntegral(GpuLight l, float3 p, float3x3 T, bool orthonormal)
     return shLtcFinish(acc);
 }
 
-// w(d) of the light's centre (INTERFACES 8.2), d = |p|.
-float shAreaWindow(GpuLight l, float3 p)
+float shAreaIntegral(GpuLight l, float3 p, float3x3 T, bool orthonormal)
 {
-    const float x = length(p) / max(l.range, 1e-6), x2 = x * x;
-    const float w = saturate(1 - x2 * x2);
-    return w * w;
+    return shAreaIntegralUnscaled(l, p, T, orthonormal) * (orthonormal ? lightDiffuseScale(l) : lightSpecularScale(l));
+}
+
+// w(d) of the light's centre (INTERFACES 8.2; Scene.hlsli lightWindow: with the view's draw-distance fade), d = |p|.
+float shAreaWindow(GpuLight l, float3 p) { return lightWindow(l, length(p)); }
+
+// The colour of an area light's radiance toward a shading point (p: the light's centre relative to it): the light's
+// colour, and for a rect that shows an image (scene::Light::sourceTexture; Unreal's rect light source texture) times the
+// image around the point's foot on the emitter (held on the emitter), at the level Unreal's lookup takes:
+// log2(distance to the emitter's plane / sqrt(its area)) + log2(the image's smaller side) - 2 - a texel four across
+// the image one emitter size away, the image itself at the emitter. One lookup tints the diffuse and the specular
+// integral alike (the reference makes one each: along the vector irradiance, along the lobe's mean direction).
+float3 shAreaColor(GpuLight l, float3 p)
+{
+#if UNX_LIGHT_COMPONENTS
+    if (l.sourceTexture != 0 && lightType(l) == LIGHT_RECT)
+    {
+        Texture2D<float4> image = ResourceDescriptorHeap[l.sourceTexture - 1];
+        const float3 up = cross(l.forward, l.right);
+        const float3 s = float3(dot(-p, l.right), dot(-p, up), dot(-p, l.forward));  // the point in the light's frame
+        const float2 uv = float2(clamp(s.x / max(l.size.x, 1e-6), -0.5, 0.5), -clamp(s.y / max(l.size.y, 1e-6), -0.5, 0.5)) + 0.5;
+        float width, height, levels;
+        image.GetDimensions(0, width, height, levels);
+        const float level = clamp(log2(max(s.z, 1e-6) * rsqrt(max(l.size.x * l.size.y, 1e-12))) + log2(min(width, height)) - 2, 0, levels - 1);
+        return l.color * image.SampleLevel(g_linearClamp, uv, level).rgb;
+    }
+#endif
+    return l.color;
 }
 
 #endif
