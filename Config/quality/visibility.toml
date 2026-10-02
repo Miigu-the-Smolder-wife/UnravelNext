@@ -44,8 +44,17 @@ brick_residual_max = 0.05         # largest allowed residual P99 of a mesh's vox
 strands_per_pixel_max = 2         # hair/grass LOD: blades or strands per pixel width before switching to bricks
 # Capacities of one cull run (a view or a raster-service request). Exceeding one drops geometry and is reported in
 # unx::visibility::Stats::overflow (tests and gates fail on it); they are sizes, not quality settings.
-max_visible_clusters = 1048576    # visible-list entries (each draw list has the same capacity)
-raster_amplification = true       # tile-local raster runs (DepthRasterRequest::tileLocal): an amplification stage launches each
+max_visible_clusters = 1048576    # visible-list entries (each draw list has the same capacity); with
+                                  # visible_clusters_follow_need the floor of every run's capacity
+visible_clusters_follow_need = true   # a cull run's visible-list capacity is 1.5 x the need of its latest completed frame (a
+                                  # power of two from the floor up to visible_clusters_limit; shrinks below a quarter), as
+                                  # S's shadow overflow list: the forest's main view needed 7.58 M entries against 1 M. The
+                                  # frame whose need jumps past the capacity still drops geometry and sets the overflow
+                                  # bit; the next completed frame's capacity holds it. false = the fixed capacity (as
+                                  # before). Written 2026-10-03, built, not run
+visible_clusters_limit = 8388608  # the most a run's capacity grows to: 2^23, the vis id's cluster field (40 B an entry:
+                                  # 335 MB of transient buffers for a run at the limit)
+raster_amplification = true      # tile-local raster runs (DepthRasterRequest::tileLocal): an amplification stage launches each
                                   # (cluster, tile run) pair from the visible entry's tile rectangle (no pair is stored: no pair
                                   # capacity); false = the stored pair list of capacity max_visible_clusters (A/B)
 max_node_items = 4194304          # hierarchy traversal work items (instance, node) of both phases

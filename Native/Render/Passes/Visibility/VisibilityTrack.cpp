@@ -49,6 +49,10 @@ static_assert(kReadbackBytes >= kStateWords * 4);
 struct Settings
 {
     uint32_t capVisible = 0, capNodes = 0, capGroups = 0, capDeferred = 0;
+    // visibility.visible_clusters_follow_need: a run's visible-list capacity is 1.5 x the need of its latest completed
+    // frame, between max_visible_clusters (the floor) and visible_clusters_limit (visibleCapacity below).
+    bool capVisibleFollows = false;
+    uint32_t capVisibleLimit = 0;
     uint32_t coverageDebugStage = 0;
     bool coverageHair = false;  // visibility.coverage_hair (B10 strands in the coverage layer)
     bool rasterAmplification = true;  // visibility.raster_amplification (tile-local raster runs: no stored pairs)
@@ -75,6 +79,9 @@ struct Settings
         // Cluster vis ids ((index << 7 | triangle) + 1) must stay below 2^30: the coverage records' top two bits name
         // their kind (CoverageTiles.hlsli COV_PRESHADE_ID, COV_HAIR_ID, COV_STREAM_ID).
         if (s.capVisible > (1u << 23)) fail("visibility.max_visible_clusters = %u: at most 2^23 (coverage record kinds use vis id bits 30, 31)", s.capVisible);
+        s.capVisibleFollows = q.has("visibility.visible_clusters_follow_need") && q.boolean("visibility.visible_clusters_follow_need");
+        s.capVisibleLimit = q.has("visibility.visible_clusters_limit") ? (uint32_t)std::clamp<int64_t>(q.integer("visibility.visible_clusters_limit"), 1, 1 << 23) : (1u << 23);
+        if (s.capVisibleLimit < s.capVisible) s.capVisibleLimit = s.capVisible;
         s.capNodes = (uint32_t)q.integer("visibility.max_node_items");
         s.capGroups = (uint32_t)q.integer("visibility.max_group_items");
         s.capDeferred = (uint32_t)q.integer("visibility.max_deferred_items");
@@ -178,6 +185,7 @@ struct State
         visibility::Stats latest;
         uint32_t overflowSeen = 0;  // every read frame's overflow bits
         bool overflowReported = false;
+        uint32_t capVisible = 0;    // the run's visible-list capacity (visibleCapacity; 0: not set yet)
     };
     std::map<std::string, StatsRun> stats;
     std::map<uint32_t, ViewState> views;  // A14: full views by id (0 = main)
@@ -1924,6 +1932,39 @@ void readStats(FramePassContext& fc, State& s, const std::string& name)
     }
 }
 
+// The visible-list capacity of a named run for this frame (entries; every draw list has the same). The lists' counters
+// count past the capacity, so an overflowing frame reports its whole need: the capacity is 1.5 x the need of the run's
+// latest completed frame, a power of two between visibility.max_visible_clusters (the floor: what every run had before)
+// and visibility.visible_clusters_limit (at most 2^23, the vis id's cluster field); it grows at once and shrinks only
+// below a quarter, as S's shadow overflow list does. The frame whose need jumps past the capacity still drops what does
+// not fit and sets OVERFLOW_VISIBLE (the error bits are kept: a gate sees that frame); the frames after it hold it.
+// visibility.visible_clusters_follow_need false: the fixed capacity max_visible_clusters.
+uint32_t visibleCapacity(FramePassContext& fc, State& s, const std::string& name, const Settings& cfg, bool storedPairs)
+{
+    if (!cfg.capVisibleFollows) return cfg.capVisible;
+    readStats(fc, s, name);
+    State::StatsRun& run = s.stats[name];
+    uint64_t need = 0;
+    if (run.latest.frameIndex != UINT64_MAX)
+    {
+        need = run.latest.visibleClusters;
+        for (uint32_t l = 0; l < kLists; ++l) need = std::max<uint64_t>(need, run.latest.listEntries[l]);
+        if (storedPairs) need = std::max<uint64_t>(need, run.latest.tilePairs);  // (the stored pair list has the lists' capacity)
+    }
+    uint64_t target = cfg.capVisible;
+    while (target < need + need / 2 && target < cfg.capVisibleLimit) target <<= 1;
+    target = std::min<uint64_t>(target, cfg.capVisibleLimit);
+    if (run.capVisible == 0) run.capVisible = cfg.capVisible;
+    if (target > run.capVisible || target * 4 <= run.capVisible)
+    {
+        if (target > run.capVisible)
+            logf("V: '%s' frame %llu needed %llu visible-list entries: its capacity grows from %u to %llu (limit %u)\n", name.c_str(),
+                 (unsigned long long)run.latest.frameIndex, (unsigned long long)need, run.capVisible, (unsigned long long)target, cfg.capVisibleLimit);
+        run.capVisible = (uint32_t)target;
+    }
+    return run.capVisible;
+}
+
 // Where this frame's copy of a run's cull state goes (the run's readback slot of this frame).
 struct StatsCopy
 {
@@ -1962,7 +2003,7 @@ void visibility(FramePassContext& fc, ViewResources& view)
 {
     State& s = state(fc);
     refreshScene(s, fc);
-    const Settings cfg = Settings::load(fc.quality);
+    Settings cfg = Settings::load(fc.quality);
     const bool main = view.view.kind == gpu::ViewKind::Main;
     // A14: every view but a planar reflection is a full view: two-phase occlusion against its own HiZ, the coverage,
     // water and translucent layers, its own histories (ViewState under view.viewId).
@@ -1995,6 +2036,7 @@ void visibility(FramePassContext& fc, ViewResources& view)
     ViewState* vs = full ? &s.views[view.viewId] : nullptr;
     if (vs) vs->lastFrame = fc.frame.frameIndex;
     const std::string statsName = main ? std::string("main") : (full ? "view" + std::to_string(view.viewId) : std::string("secondary"));
+    cfg.capVisible = visibleCapacity(fc, s, statsName, cfg, false);  // (this run's lists: every kernel takes it from the run)
 
     view.depth = g.createTexture({ "v.depth", width, height, 1, 1, DXGI_FORMAT_D32_FLOAT });
     view.visId = g.createTexture({ "v.visId", width, height, 1, 1, DXGI_FORMAT_R32_UINT });
@@ -2333,7 +2375,7 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
 {
     State& s = state(fc);
     refreshScene(s, fc);
-    const Settings cfg = Settings::load(fc.quality);
+    Settings cfg = Settings::load(fc.quality);
     if (request.views.empty()) return;
     if (!request.depthTarget.valid() && request.pixelKernel.empty()) fail("rasterizeDepth '%s': neither a depth target nor a pixel kernel", request.name.c_str());
     if (s.mainFrameConstantsFrame != fc.frame.frameIndex)
@@ -2378,6 +2420,7 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
              (unsigned)D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE);
 
     prepareCullScene(fc, s, s.mainFrameConstants);
+    cfg.capVisible = visibleCapacity(fc, s, request.name, cfg, request.tileLocal && !amplify);
     Run r = createRun(fc, cfg, request.name + ".", s.mainFrameConstants);
     r.tileMask = request.cullMask;
     // tile-local: each visible entry's tile rectangle (CullClusters); the amplification stage expands its pairs
