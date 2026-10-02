@@ -3,8 +3,10 @@
 // r.card.radiosity.trace (CardLighting.hlsli): one ray generation thread per trace texel of the frame's radiosity list -
 // 64 of a listed tile: 2 x 2 probes (CL_PROBE_SPACING texels apart) x 4 x 4 rays over the probe's hemisphere, uniform in
 // solid angle, jittered per probe and update. The probe stands on one texel of its 4 x 4, chosen by the page's temporal
-// index. The ray's radiance: the final lighting atlas at the hit (clReadCards; the back of a one-sided surface: 0), the
-// sky where it escapes; its largest channel held to P[4].y in exposed units (the reference's MaxRayIntensity).
+// index. The ray's radiance: the final lighting atlas at the hit (clReadCardsHiRes: the cards' highest mapped level
+// there, and the hit's feedback - the reference's radiosity samples the high-resolution pages; the back of a one-sided
+// surface: 0), the sky where it escapes; its largest channel held to P[4].y in exposed units (the reference's
+// MaxRayIntensity).
 // A hit without a card (the reference: 0) takes its direct light - the sun by one shadow ray to the disk's centre and one
 // local-light sample with its shadow ray (HitLocalSample.hlsli) - through the material's constants (no texture, no
 // indirect light): a fifth to a third of the rays' hits read no card (lobby, 2026-10-02) and every bounce lost that
@@ -96,7 +98,8 @@ void CardRadiosityTraceGen()
         GpuMaterial m = loadMaterial(s.material);
         if (s.frontFace || (m.classFlags & MATERIAL_TWO_SIDED) != 0)
         {
-            const ClSample cards = clReadCards(f, s.sceneInstance, s.position, s.geometricNormal, CL_READ_FINAL);
+            // (the cone of a ray of the 4 x 4 hemisphere map: about 20 degrees half angle)
+            const ClSample cards = clReadCardsHiRes(f, s.sceneInstance, s.position, s.geometricNormal, CL_READ_FINAL, 0.37 * hit.t, traceCoord);
             if (cards.valid) radiance = cards.final;
             else
             {

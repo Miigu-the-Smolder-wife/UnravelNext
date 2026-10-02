@@ -15,7 +15,8 @@
 // Result per job: lobe radiance, hit distance, hit motion (reflPackResult) - what the resolve passes read.
 // P[0] = { jobs SRV, results UAV (uint3 per job), asuint(exposure ratio of the previous colour), frame (24 bits) | flags
 //          << 24 (bit 0: rays start at their screen traces' ends, bit 1: scene colour at visible hits, bit 2: the previous
-//          colour's alpha is its frame's depth - the history depth test, ScreenTrace.hlsli) }
+//          colour's alpha is its frame's depth - the history depth test, ScreenTrace.hlsli, bit 3: hits read the cards'
+//          high levels and report what they want - reflection.lumen_hi_res_surface, ReflectionLumenHit.hlsli) }
 // P[1], P[2], P[3].xyz = sky and sun (GiSky.hlsli; P[1].w = ray length), P[3].w = RayScene's exact set counts UAV (UNX_NONE: none)
 // P[4] = { depth SRV, gbuffer SRV, card frame SRV (UNX_NONE: none), the dispatch's band (bits 0-7) | cos of the normal
 //          threshold as snorm8 (bits 8-15) | GGX sampling bias unorm16 << 16 }
@@ -33,6 +34,7 @@
 #define RL_FLAG_SCREEN_START 1u
 #define RL_FLAG_SCENE_COLOUR 2u
 #define RL_FLAG_HISTORY_DEPTH 4u
+#define RL_FLAG_HI_RES 8u
 
 [shader("raygeneration")]
 void ReflectionLumenTraceGen()
@@ -106,6 +108,6 @@ void ReflectionLumenTraceGen()
     const float pixelSpread = 2 * g_tanHalfFovY / g_viewHeight;
     const float coneWidth = pixelSpread * s.linearDepth;
     const float coneSpread = pixelSpread + 2 * tan(reflectionLobeHalfAngle(s.roughness, dot(s.normal, s.view)));
-    const RlHit shade = rlShadeHit(scene, hit, r.Origin, direction, coneWidth, coneSpread, P[4].z, P[3].w, true);
+    const RlHit shade = rlShadeHit(scene, hit, r.Origin, direction, coneWidth, coneSpread, P[4].z, P[3].w, true, (flags & RL_FLAG_HI_RES) != 0, pixel);
     results[job] = reflPackResult(reflStorable(fogOverRay(fogUv, s.linearDepth, r.Origin, direction, hit.t, shade.radiance)), hit.t, shade.motion);
 }

@@ -14,6 +14,9 @@
 //              temporal index, indirect temporal index }
 //   uniform    (32 B an atlas tile): bit (light & 255) = the light's visibility was the same over the whole tile at the
 //              tile's last direct update (the next one traces one ray per 2 x 2 texels); bit 255: the sun
+//   last used  (4 B a card page): the update in which a reader of the cards' high levels last read the page (clFeedback);
+//              the selection relights such pages first (surface_cache.lighting_feedback)
+//   feedback   (the readers'; clFeedback): a hash table of (card page of a level, hits) the frame's hits asked for
 //   select     (the frame's; CL_SELECT_*): the priority histograms, the buckets chosen, the tile lists of this frame's
 //              direct and radiosity updates
 #ifndef UNX_CARD_LIGHTING_HLSLI
@@ -35,6 +38,10 @@
 #define CL_TILE_LIGHT_BYTES 64u      // a listed tile's lights: 8 light indices, valid mask (2), uniform slots, pad
 #define CL_TILE_SHADOW_BYTES 72u     // a listed tile's visible bits: CL_SLOTS x 64 texels
 #define CL_TRACE_THREADS 576u        // CL_SLOTS x 64: the direct trace's threads of a listed tile
+#define CL_FEEDBACK_SLOTS 4096u      // the feedback table's hash slots (a power of two; SurfaceCacheCards.cpp)
+#define CL_FEEDBACK_HEAD 16u         // its header, bytes: word 0 = inserts that found no slot (the table overflowed)
+#define CL_FEEDBACK_PROBES 8u        // the structural bound of an insert's linear probe
+#define CL_FEEDBACK_CARDS 0x100000u  // an element holds the card in 20 bits: cards past it report nothing
 
 // ---- the select buffer (raw). Context 0: direct, 1: radiosity.
 #define CL_SELECT_HEAD 64u                                   // 8 words a context: tiles listed, max bucket, tiles allowed
@@ -146,6 +153,9 @@ ClProbe clProbeAt(McFrame f, McCard card, McCardPage from, uint fromIndex, ByteA
         pageIndex = entry.y;
         page = mcLoadCardPage(f, pageIndex);
         if (!(page.sizeInTexels.x > 0)) return o;
+        // (a level above the resident one holds only the pages the feedback asked for: the table sends the others to a
+        // lower level's page, whose probes are not this level's)
+        if (page.resLevelPageTableOffset != from.resLevelPageTableOffset) return o;
     }
     const uint2 lightState = pageLight.Load2(pageIndex * CL_PAGE_LIGHT_BYTES + 4).xy;  // { indirect frame, direct index }
     if (lightState.x == 0) return o;
@@ -177,7 +187,56 @@ struct ClSample
     float3 final;               // nits
     float3 albedo, emission;
 };
-ClSample clReadCards(McFrame f, uint sceneInstance, float3 position, float3 normal, uint what)
+// Feedback (the reference's surface cache feedback, LumenSurfaceCacheSampling.ush + LumenSurfaceCacheFeedback.cpp):
+// a hit that read a card reports which page of which resolution level it wanted - the level whose texel is the hit's
+// footprint: log2(the card's half size / the ray cone's radius at the hit) + the bias, the page under the hit's uv -
+// and the CPU maps and captures that page a frame later (MeshCardScene::setFeedback). One hit in a tile of the dither's
+// side reports per frame (ditherCoord: the reader's pixel or trace texel; the tile's reporting place moves every frame).
+// The report is an insert into a hash table of (element + 1, hits) pairs: element = card | level << 20 | page x << 24 |
+// page y << 28; linear probing of at most CL_FEEDBACK_PROBES slots, the slot claimed by a compare-exchange. An insert
+// that finds no slot counts in the header (the CPU reports it: McStats::feedbackDropped) and is lost for the frame.
+// The page the hit read is also stamped with the update (last used: its lighting is refreshed first).
+void clFeedback(McFrame f, uint cardIndex, McCard card, float2 localXy, uint page, float sampleRadius, uint2 ditherCoord)
+{
+    const uint mask = f.feedbackDither >> 16;
+    if (any((ditherCoord & mask) != uint2(f.feedbackDither & 0xFFu, (f.feedbackDither >> 8) & 0xFFu))) return;
+    if (f.lastUsed != MC_NONE)
+    {
+        RWByteAddressBuffer lastUsed = ResourceDescriptorHeap[f.lastUsed];
+        lastUsed.Store(page * 4, f.frame);
+    }
+    if (f.feedback == MC_NONE || cardIndex >= CL_FEEDBACK_CARDS) return;
+    const float resolution = max(card.extent.x, card.extent.y) / max(sampleRadius, 0.01);
+    const uint level = (uint)clamp(log2(max(resolution, 1.0)) + f.feedbackBias, (float)MC_MIN_RES_LEVEL, (float)MC_MAX_RES_LEVEL);
+    // the level's pages along the card's sides (MeshCardScene::mipMapDesc: the shorter side loses levels; a level of
+    // more than a physical page along either side is whole pages along both)
+    const int2 levelXy = clamp(int2(level, level) - int2((card.packed >> 4) & 0xFu, (card.packed >> 8) & 0xFu), (int)MC_MIN_RES_LEVEL, (int)MC_MAX_RES_LEVEL);
+    uint2 pages = uint2(1, 1);
+    if (any(levelXy > (int)MC_SUB_ALLOC_RES_LEVEL)) pages = 1u << (uint2(max(levelXy, (int)MC_SUB_ALLOC_RES_LEVEL)) - MC_SUB_ALLOC_RES_LEVEL);
+    const float2 uv = saturate(localXy / card.extent.xy * 0.5 + 0.5);
+    const uint2 pageCoord = min(uint2(uv * float2(pages)), pages - 1);
+    const uint element = cardIndex | (level << 20) | (pageCoord.x << 24) | (pageCoord.y << 28);
+    RWByteAddressBuffer table = ResourceDescriptorHeap[f.feedback];
+    const uint first = clHash(element);
+    bool stored = false;
+    for (uint step = 0; step < CL_FEEDBACK_PROBES && !stored; ++step)
+    {
+        const uint at = CL_FEEDBACK_HEAD + ((first + step) & (CL_FEEDBACK_SLOTS - 1u)) * 8u;
+        uint before;
+        table.InterlockedCompareExchange(at, 0u, element + 1u, before);
+        if (before == 0u || before == element + 1u)
+        {
+            table.InterlockedAdd(at + 4u, 1u);
+            stored = true;
+        }
+    }
+    if (!stored) table.InterlockedAdd(0u, 1u);
+}
+
+// hiRes (the reference's HighResPages sampling - its reflections and radiosity; the other readers take the resident
+// level, AlwaysResidentPagesWithoutFeedback): the cards' highest level under the hit, and the hit's feedback.
+// sampleRadius: the ray cone's radius at the hit (m); ditherCoord: clFeedback.
+ClSample clReadCardsAt(McFrame f, uint sceneInstance, float3 position, float3 normal, uint what, bool hiRes, float sampleRadius, uint2 ditherCoord)
 {
     ClSample o;
     o.valid = false;
@@ -194,7 +253,11 @@ ClSample clReadCards(McFrame f, uint sceneInstance, float3 position, float3 norm
     const float bias = f.depthBias + ((mesh.countFlags & 0x20000u) != 0 ? 0.5 : 0.0);  // (mostly two-sided: hits are less reliable)
     Texture2D<float> depthAtlas = ResourceDescriptorHeap[f.depth];
     float weightSum = 0;
-    [loop] while (mask != 0)
+    // the card that weighs most in the read: the one the feedback speaks for
+    float bestWeight = 0;
+    uint bestCard = 0, bestPage = 0;
+    float2 bestLocal = 0;
+    [loop] while (mask != 0)  // (at most 32 cards: the lookup is a 32-bit mask)
     {
         const uint bit = firstbitlow(mask);
         mask ^= 1u << bit;
@@ -202,7 +265,7 @@ ClSample clReadCards(McFrame f, uint sceneInstance, float3 position, float3 norm
         if (!mcVisible(card)) continue;
         const float3 local = mcWorldToCard(card, position);
         if (any(abs(local) > card.extent + 0.5 * bias)) continue;
-        const McCardSample cs = mcCardSample(f, card, local.xy);
+        const McCardSample cs = mcCardSample(f, card, local.xy, hiRes);
         if (!cs.valid) continue;
         const float hitDepth = mcCardDepth(card, local);
         const float threshold = bias / card.extent.z, falloff = 0.25 * threshold;
@@ -213,6 +276,13 @@ ClSample clReadCards(McFrame f, uint sceneInstance, float3 position, float3 norm
         const float sum = w.x + w.y + w.z + w.w;
         if (!(sum > 0)) continue;
         weightSum += sum;
+        if (sum > bestWeight)
+        {
+            bestWeight = sum;
+            bestCard = mesh.cardOffset + bit;
+            bestPage = cs.page;
+            bestLocal = local.xy;
+        }
         if (what & CL_READ_IRRADIANCE)
         {
             Texture2D<float3> direct = ResourceDescriptorHeap[f.directLighting];
@@ -235,6 +305,7 @@ ClSample clReadCards(McFrame f, uint sceneInstance, float3 position, float3 norm
         }
     }
     if (!(weightSum > 0)) return o;
+    if (hiRes && weightSum > 0.1) clFeedback(f, bestCard, mcLoadCard(f, bestCard), bestLocal, bestPage, sampleRadius, ditherCoord);
     const float k = 1 / weightSum;
     o.valid = true;
     o.direct *= k / CL_IRRADIANCE_SCALE;
@@ -243,6 +314,16 @@ ClSample clReadCards(McFrame f, uint sceneInstance, float3 position, float3 norm
     o.albedo *= k;
     o.emission *= k / MC_EMISSIVE_SCALE;
     return o;
+}
+// The resident level, no feedback.
+ClSample clReadCards(McFrame f, uint sceneInstance, float3 position, float3 normal, uint what)
+{
+    return clReadCardsAt(f, sceneInstance, position, normal, what, false, 0, uint2(0, 0));
+}
+// The highest level, with feedback.
+ClSample clReadCardsHiRes(McFrame f, uint sceneInstance, float3 position, float3 normal, uint what, float sampleRadius, uint2 ditherCoord)
+{
+    return clReadCardsAt(f, sceneInstance, position, normal, what, true, sampleRadius, ditherCoord);
 }
 
 #endif

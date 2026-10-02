@@ -149,6 +149,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.lumenScreenContinue = flag("reflection.lumen_screen_trace_continue", true);
     s.lumenScreenPullback = num("reflection.lumen_screen_trace_pullback", 0.08);
     s.lumenSceneColorAtHit = flag("reflection.lumen_sample_scene_color_at_hit", true);
+    s.lumenHiResSurface = flag("reflection.lumen_hi_res_surface", true);
     s.lumenSceneColorThickness = num("reflection.lumen_sample_scene_color_relative_depth_thickness", 0.01);
     s.lumenSceneColorNormalDegrees = num("reflection.lumen_sample_scene_color_normal_threshold", 85.0);
     s.lumenSamplingBias = std::clamp(num("reflection.lumen_ggx_sampling_bias", 0.1), 0.0f, 0.99f);
@@ -743,9 +744,10 @@ void ReflectionSystem::recordRefraction(FramePassContext& fc, BufferRef jobs, Bu
                   k[12] = asU(in.sun.x), k[13] = asU(in.sun.y), k[14] = asU(in.sun.z), k[15] = 0xFFFFFFFFu;
                   if (lumenOnly)
                   {
-                      // RefractionLumenTrace.hlsl: P[4] = { card frame SRV, frame, 0, 0 }
+                      // RefractionLumenTrace.hlsl: P[4] = { card frame SRV, frame, hits read the cards' high levels, 0 }
                       k[16] = in.cards.valid() ? c.srv(in.cards.frame) : 0xFFFFFFFFu;
                       k[17] = in.frame & 0xFFFFFFu;
+                      k[18] = in.hiResSurface ? 1u : 0u;
                       std::memcpy(&k[24], in.scene, sizeof in.scene);
                       c.computeConstants(k, 32);
                       c.bindFrameConstants(in.frameConstants);
@@ -1242,6 +1244,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     m_refract.rays = &rays, m_refract.frameConstants = frameConstants, m_refract.variant = variant;
     if (hitsUseSurfaceCache && s.lumenRefractionSurfaceCache) m_refract.surfaceCache = surfaceCache;  // water's and glass's ray hits
     if (lumenOnly && hitsUseCards && s.lumenRefractionSurfaceCache) m_refract.cards = cardRefs;
+    m_refract.hiResSurface = s.lumenHiResSurface;
     // Root constants shared by the trace, shade, shadow and combine passes (ReflectionRay.hlsli).
     // gi = false (the traversal and the local-light shadow rays): GI's cache and screen probes are not bound (UNX_NONE)
     // nor declared, so those passes do not wait for GI's block (output.async_compute_passes).
@@ -1378,7 +1381,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       k[0] = c.srv(jobs);
                       k[1] = c.uav(results);
                       k[2] = asU(ratio);
-                      k[3] = (frame & 0xFFFFFFu) | ((screenContinue ? 1u : 0u) | (sceneColour ? 2u : 0u) | (historyDepth ? 4u : 0u)) << 24;
+                      k[3] = (frame & 0xFFFFFFu) | ((screenContinue ? 1u : 0u) | (sceneColour ? 2u : 0u) | (historyDepth ? 4u : 0u) | (s.lumenHiResSurface ? 8u : 0u)) << 24;
                       k[4] = asU(sky.x), k[5] = asU(sky.y), k[6] = asU(sky.z), k[7] = asU(rayLength);
                       for (int i = 0; i < 4; ++i) k[8 + i] = atmosphere ? c.srv(luts[i]) : 0xFFFFFFFFu;
                       k[12] = asU(sun.x), k[13] = asU(sun.y), k[14] = asU(sun.z);

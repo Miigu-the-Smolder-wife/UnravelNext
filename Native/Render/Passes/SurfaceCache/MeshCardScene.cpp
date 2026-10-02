@@ -1,8 +1,11 @@
 // The mesh card surface cache's CPU side (unx/refl/MeshCardScene.h). Function by function this follows Unreal's Lumen
 // scene: AddMeshCardsFromBuildData / FLumenCard (LumenMeshCards.cpp), FLumenSurfaceCacheAllocator, MapSurfaceCachePage,
-// ReallocVirtualSurface, FreeVirtualSurface, UpdateCardMipMapHierarchy (LumenScene.cpp), and the per-frame update:
-// FLumenSurfaceCacheUpdateMeshCardsTask and ProcessLumenSurfaceCacheRequests (LumenSceneRendering.cpp). In this stage
-// only the locked (always resident) level of each card exists; the feedback-driven levels above it come with stage 3b.
+// ReallocVirtualSurface, FreeVirtualSurface, UpdateCardMipMapHierarchy, EvictOldestAllocation (LumenScene.cpp), the
+// per-frame update: FLumenSurfaceCacheUpdateMeshCardsTask and ProcessLumenSurfaceCacheRequests (LumenSceneRendering.cpp),
+// and the feedback's requests: UpdateSurfaceCacheFeedback (LumenSurfaceCacheFeedback.cpp). A card keeps its locked
+// (always resident) level, set by its distance; above it, single pages of higher levels are mapped where the frame's
+// ray hits asked for them (setFeedback) and leave again when no hit has asked for them for a while, the one used
+// longest ago first.
 #include "unx/refl/MeshCardScene.h"
 
 #include "unx/core/Log.h"
@@ -207,6 +210,54 @@ void MeshCardScene::clear()
     m_freeCardSpans.clear();
     m_refreshCursor = 0;
     m_refreshQueue.clear();
+    m_feedback.clear();
+    m_feedbackSamples = 1;
+    m_feedbackFrame = 0;
+    m_unlocked.clear();
+}
+
+void MeshCardScene::setFeedback(std::span<const McFeedback> elements, uint32_t samples)
+{
+    ++m_feedbackFrame;
+    m_feedback.assign(elements.begin(), elements.end());
+    m_feedbackSamples = std::max(samples, 1u);
+}
+
+void MeshCardScene::setUnlocked(uint32_t pageIndex, bool unlocked)
+{
+    PageEntry& page = m_pages[pageIndex];
+    if (page.unlocked == unlocked) return;
+    if (unlocked)
+    {
+        page.lastUsed = m_feedbackFrame;
+        m_unlocked.emplace(page.lastUsed, pageIndex);
+    }
+    else
+        m_unlocked.erase({ page.lastUsed, pageIndex });
+    page.unlocked = unlocked;
+}
+
+void MeshCardScene::touchPage(uint32_t pageIndex)
+{
+    PageEntry& page = m_pages[pageIndex];
+    if (!page.unlocked || page.lastUsed == m_feedbackFrame) return;
+    m_unlocked.erase({ page.lastUsed, pageIndex });
+    page.lastUsed = m_feedbackFrame;
+    m_unlocked.emplace(page.lastUsed, pageIndex);
+}
+
+bool MeshCardScene::evictOldest(uint32_t maxFramesSinceLastUsed, std::vector<uint32_t>& dirtyCards)
+{
+    if (m_unlocked.empty()) return false;
+    const std::pair<uint32_t, uint32_t> oldest = *m_unlocked.begin();
+    if ((uint64_t)oldest.first + maxFramesSinceLastUsed > m_feedbackFrame) return false;
+    const int32_t card = m_pages[oldest.second].card;
+    setUnlocked(oldest.second, false);
+    unmapPage(oldest.second);
+    markDirty(m_dirty.pages, oldest.second);
+    if (card >= 0) dirtyCards.push_back((uint32_t)card);
+    ++m_stats.evictedPages;
+    return true;
 }
 
 bool MeshCardScene::spanAvailable(uint32_t size) const
@@ -342,6 +393,7 @@ uint32_t MeshCardScene::addInstance(uint32_t sceneInstance, const scene::MeshCar
     {
         const scene::MeshCard& c = cards.cards[i];
         Card card;
+        card.live = true;
         card.meshCards = index;
         card.direction = (uint8_t)c.direction;
         card.origin = c.origin * scale;
@@ -468,6 +520,13 @@ void MeshCardScene::reallocVirtualSurface(Card& card, uint32_t cardIndex, uint32
     MipMap& m = mip(card, resLevel);
     if (m.pageTableSize > 0)
     {
+        // the level is there: its mapped pages follow the lock (a locked level's pages are not in the eviction order)
+        if (m.locked != lock)
+            for (uint32_t local = 0; local < m.pageTableSize; ++local)
+            {
+                const uint32_t pageIndex = (uint32_t)m.pageTableOffset + local;
+                if (m_pages[pageIndex].mapped()) setUnlocked(pageIndex, !lock);
+            }
         m.locked = lock;
         return;
     }
@@ -505,9 +564,11 @@ void MeshCardScene::reallocVirtualSurface(Card& card, uint32_t cardIndex, uint32
     markDirty(m_dirty.cards, cardIndex);
 }
 
-void MeshCardScene::unmapPage(PageEntry& page)
+void MeshCardScene::unmapPage(uint32_t pageIndex)
 {
+    PageEntry& page = m_pages[pageIndex];
     if (!page.mapped()) return;
+    setUnlocked(pageIndex, false);
     m_allocator.free(page);
     page.pageCoordX = page.pageCoordY = -1;
     page.sampleAtlasBiasX = page.sampleAtlasBiasY = 0;
@@ -525,7 +586,7 @@ void MeshCardScene::freeVirtualSurface(Card& card, uint32_t fromLevel, uint32_t 
         for (uint32_t local = 0; local < m.pageTableSize; ++local)
         {
             const uint32_t pageIndex = (uint32_t)m.pageTableOffset + local;
-            unmapPage(m_pages[pageIndex]);
+            unmapPage(pageIndex);
             m_pages[pageIndex] = PageEntry{};
             markDirty(m_dirty.pages, pageIndex);
         }
@@ -547,6 +608,7 @@ void MeshCardScene::mapPage(const MipMap& mipMap, uint32_t pageIndex)
         page.sampleAtlasBiasY = page.rect[1] / (1u << mc::kMinResLevel);
         page.sampleResLevelX = mipMap.resLevelX;
         page.sampleResLevelY = mipMap.resLevelY;
+        if (!mipMap.locked) setUnlocked(pageIndex, true);
     }
     markDirty(m_dirty.pages, pageIndex);
 }
@@ -627,6 +689,7 @@ void MeshCardScene::update(std::span<const float3> viewOrigins)
     m_requests.clear();
     m_stats.requests = m_stats.captures = m_stats.capturedTexels = m_stats.loweredAllocations = 0;
     m_stats.desiredTexels = 0;
+    m_stats.feedbackElements = m_stats.hiResRequests = m_stats.hiResMapped = m_stats.evictedPages = 0;
     uint32_t histogram[mc::kDistanceBuckets] = {};
     std::vector<uint32_t> hide;
 
@@ -660,6 +723,7 @@ void MeshCardScene::update(std::span<const float3> viewOrigins)
                 }
                 distance = std::min(distance, std::max(std::sqrt(sq), 1.0f));
             }
+            card.distance = distance;
             const float maxExtent = std::max(card.extent.x, card.extent.y);
             const float projected = std::min(m_settings.texelDensityScale * maxExtent / distance, m_settings.maxTexelDensity * maxExtent);
             const uint32_t snapped = roundUpPow2(std::min((uint32_t)std::max(projected, 0.0f), m_settings.maxResolution));
@@ -697,6 +761,37 @@ void MeshCardScene::update(std::span<const float3> viewOrigins)
         removeCardFromAtlas(cardIndex);
     }
 
+    // UpdateSurfaceCacheFeedback: the pages the newest completed frame's hits asked for. A mapped one counts as used in
+    // this feedback frame; one that is not mapped is requested - less urgent than the resident levels (25 m further),
+    // and the more so the smaller its share of the frame's hits (up to 25 m more).
+    for (const McFeedback& f : m_feedback)
+    {
+        if (f.hits <= m_settings.feedbackMinPageHits || f.card >= m_cards.size()) continue;
+        Card& card = m_cards[f.card];
+        if (!card.live || !card.visible || !card.allocated()) continue;
+        ++m_stats.feedbackElements;
+        const uint32_t level = std::clamp<uint32_t>(f.resLevel, mc::kMinResLevel, mc::kMaxResLevel);
+        if (level <= card.minAllocatedResLevel) continue;  // (the resident level holds it)
+        const MipMapDesc want = mipMapDesc(card, level);
+        const uint32_t local = std::min<uint32_t>(f.pageX, want.sizeInPagesX - 1) + std::min<uint32_t>(f.pageY, want.sizeInPagesY - 1) * want.sizeInPagesX;
+        const MipMap& m = mip(card, level);
+        if (m.allocated() && m_pages[(uint32_t)m.pageTableOffset + local].mapped())
+        {
+            if (!m.locked) touchPage((uint32_t)m.pageTableOffset + local);
+            continue;
+        }
+        const float share = std::min((float)f.hits / (float)m_feedbackSamples, 1.0f);
+        Request r;
+        r.card = f.card;
+        r.resLevel = (uint8_t)level;
+        r.localPage = (uint16_t)local;
+        r.distanceBin = (uint8_t)distanceBin(card.distance + 25.0f + 25.0f * (1.0f - share));
+        ++histogram[r.distanceBin];
+        m_requests.push_back(r);
+        ++m_stats.hiResRequests;
+    }
+    m_feedback.clear();
+
     // the frame's requests: the nearest buckets, up to the capture count
     std::vector<Request> chosen;
     {
@@ -726,16 +821,27 @@ void MeshCardScene::update(std::span<const float3> viewOrigins)
         }
     }
 
-    // ProcessLumenSurfaceCacheRequests (locked levels)
+    // ProcessLumenSurfaceCacheRequests: the locked levels first, the feedback's pages after them
     Allocator captureAllocator;
     captureAllocator.init(m_captureAtlasPages);
     std::vector<uint32_t> dirtyCards;
+    std::vector<Request> hiRes;
+    uint32_t lockedDone = 0;
     for (const Request& request : chosen)
     {
         Card& card = m_cards[request.card];
+        if (request.localPage != kLockedMip)
+        {
+            if (card.live && card.visible && card.allocated() && request.resLevel > card.minAllocatedResLevel) hiRes.push_back(request);
+            if (m_captures.size() + hiRes.size() >= m_settings.capturesPerFrame) break;
+            continue;
+        }
         uint32_t level = request.resLevel;
         bool canAlloc = m_allocator.spaceAvailable(mipMapDesc(card, level), false);
-        // the atlas is full: a lower level
+        // the atlas is full: the feedback pages no hit asked for in the last 2 feedback frames make room (one page an
+        // iteration: at most as many as there are unlocked pages)
+        while (!canAlloc && evictOldest(2, dirtyCards)) canAlloc = m_allocator.spaceAvailable(mipMapDesc(card, level), false);
+        // ... and then a lower level
         while (!canAlloc && level > mc::kMinResLevel)
         {
             --level;
@@ -775,10 +881,46 @@ void MeshCardScene::update(std::span<const float3> viewOrigins)
                 captureOf(pageIndex, page, capture, request.card, resample, false);
             }
             dirtyCards.push_back(request.card);
+            ++lockedDone;
         }
+        if (m_captures.size() + hiRes.size() >= m_settings.capturesPerFrame) break;
+    }
+    // (the locked levels' requests: what a level load waits for)
+    const uint32_t lockedRequests = m_stats.requests - m_stats.hiResRequests;
+    m_stats.pending = lockedRequests > lockedDone ? lockedRequests - lockedDone : 0;
+
+    // The feedback's pages: one page of a level above the card's locked one, not locked. Room is made from the pages
+    // used longest ago, but not from one a hit may still report: the feedback's tile jitter comes round in tile^2 frames.
+    for (const Request& request : hiRes)
+    {
+        Card& card = m_cards[request.card];
+        if (!card.allocated() || request.resLevel <= card.minAllocatedResLevel) continue;  // (its locked level rose this frame)
+        const MipMapDesc want = mipMapDesc(card, request.resLevel);
+        if (request.localPage >= want.sizeInPagesX * want.sizeInPagesY) continue;
+        bool canAlloc = m_allocator.spaceAvailable(want, true);
+        const uint32_t keep = m_settings.feedbackTileSize * m_settings.feedbackTileSize;
+        while (!canAlloc && evictOldest(keep, dirtyCards)) canAlloc = m_allocator.spaceAvailable(want, true);
+        if (!captureAllocator.spaceAvailable(want, true)) canAlloc = false;
+        if (!mip(card, request.resLevel).allocated() && !spanAvailable(want.sizeInPagesX * want.sizeInPagesY)) canAlloc = false;
+        if (!canAlloc) continue;
+        reallocVirtualSurface(card, request.card, request.resLevel, false);
+        const MipMap& m = mip(card, request.resLevel);
+        const uint32_t pageIndex = (uint32_t)m.pageTableOffset + request.localPage;
+        PageEntry& page = m_pages[pageIndex];
+        if (page.mapped()) continue;
+        mapPage(m, pageIndex);
+        if (!page.mapped()) throw Error("mesh cards: a feedback page could not be mapped after the space check");
+        PageEntry capture = page;
+        capture.pageCoordX = capture.pageCoordY = -1;
+        capture.unlocked = false;
+        captureAllocator.allocate(capture);
+        if (!capture.mapped()) throw Error("mesh cards: the capture atlas is full after the space check");
+        page.capturedFrame = m_frame;
+        captureOf(pageIndex, page, capture, request.card, true, false);  // (the card's lighting at the new resolution)
+        dirtyCards.push_back(request.card);
+        ++m_stats.hiResMapped;
         if (m_captures.size() >= m_settings.capturesPerFrame) break;
     }
-    m_stats.pending = m_stats.requests > (uint32_t)dirtyCards.size() ? m_stats.requests - (uint32_t)dirtyCards.size() : 0;
 
     // Resident pages captured again (LastCapturedPageHeap, CardCaptureRefreshFraction): what the new cards left of the
     // frame's share, the pages in table order from where the last frame stopped - every resident page comes round.
@@ -832,6 +974,10 @@ void MeshCardScene::update(std::span<const float3> viewOrigins)
         }
     }
     m_stats.captures = (uint32_t)m_captures.size();
+
+    // feedback pages no hit asked for in a long while leave (the levels left without a page go with them, below)
+    while (evictOldest(m_settings.keepUnusedPagesFrames, dirtyCards)) {}
+    m_stats.hiResPages = (uint32_t)m_unlocked.size();
 
     sortUnique(dirtyCards);
     for (uint32_t cardIndex : dirtyCards)
@@ -991,5 +1137,24 @@ void MeshCardScene::validate() const
     for (const McCapture& a : m_captures)
         if (a.captureRect[0] + a.captureRect[2] > captureAtlasSize() || a.captureRect[1] + a.captureRect[3] > captureAtlasSize())
             throw Error("mesh cards: a capture lies outside the capture atlas");
+    // the eviction order holds exactly the mapped pages of unlocked levels
+    size_t unlocked = 0;
+    for (size_t i = 0; i < m_pages.size(); ++i)
+    {
+        const PageEntry& p = m_pages[i];
+        if (!p.mapped())
+        {
+            if (p.unlocked) throw Error("mesh cards: page " + std::to_string(i) + " is in the eviction order without being mapped");
+            continue;
+        }
+        const bool locked = mip(m_cards[(size_t)p.card], p.resLevel).locked;
+        if (p.unlocked == locked) throw Error("mesh cards: page " + std::to_string(i) + " disagrees with its level's lock");
+        if (p.unlocked)
+        {
+            ++unlocked;
+            if (m_unlocked.count({ p.lastUsed, (uint32_t)i }) == 0) throw Error("mesh cards: page " + std::to_string(i) + " is missing from the eviction order");
+        }
+    }
+    if (unlocked != m_unlocked.size()) throw Error("mesh cards: the eviction order holds pages that are not unlocked");
 }
 } // namespace unx::render::refl

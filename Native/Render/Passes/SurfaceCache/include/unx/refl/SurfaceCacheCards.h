@@ -15,6 +15,11 @@
 //   -> CardLighting::recordLighting (selection, direct light, radiosity, final lighting).
 // One round a frame; surface_cache.mesh_cards_load_rounds while a level loads, so the cache is whole within a few frames
 // of a load instead of a hundred.
+// Feedback (surface_cache.feedback; Unreal's LumenSurfaceCacheFeedback): the frame's readers of the cards' high levels
+// (reflections, the radiosity) report the page and level each hit wanted into a table (CardLighting.hlsli clFeedback);
+// at the start of the next frame the table is copied for the CPU and emptied (r.card.feedback.readback / .clear), and
+// the frame that finds the copy complete - framesInFlight later - hands it to MeshCardScene::setFeedback, which maps
+// and captures those pages above the cards' resident levels and lets the ones no hit asks for any more leave.
 #include "unx/refl/CardLighting.h"
 #include "unx/refl/MeshCardCache.h"
 #include "unx/refl/MeshCardScene.h"
@@ -38,6 +43,8 @@ struct SurfaceCacheCardSettings  // Config/quality/surface_cache.toml
     uint32_t loadRounds = 8;          // update rounds a frame while a level loads
     uint32_t loadLightingRounds = 96; // rounds after the last card of a load was captured (direct light of every page,
                                       // then the radiosity's bounces)
+    float feedbackResLevelBias = -0.5f;  // surface_cache.feedback_res_level_bias (cards.feedback: the switch)
+    bool lightingFeedback = true;        // surface_cache.lighting_feedback
     std::string cacheDirectory;       // mesh card files; "" = the default directory, "none" = no disk cache
     static SurfaceCacheCardSettings fromQuality(const QualityConfig& q);
 };

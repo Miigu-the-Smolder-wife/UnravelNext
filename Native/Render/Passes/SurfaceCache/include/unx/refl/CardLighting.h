@@ -38,6 +38,7 @@ struct CardLightingRefs
 {
     TextureRef direct, indirect, final, trace, sh[3], frames;
     BufferRef uniformBits, pageLight, frame;
+    BufferRef lastUsed;    // per card page: the update a reader of the cards' high levels last read it in
     bool created = false;  // the resources were made this frame (they hold nothing: r.card.clear runs)
 };
 

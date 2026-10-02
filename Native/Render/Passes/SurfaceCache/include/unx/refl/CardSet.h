@@ -17,5 +17,15 @@ struct CardSet
     uint32_t cardPageCount = 0;     // pages in use (indices below it)
     uint32_t instances = 0;         // entries of instanceMap
     uint64_t generation = 0;        // changes when the set was rebuilt from nothing (S2's lighting starts over)
+    // The readers' feedback (CardLighting.hlsli clFeedback; surface_cache.feedback): the table the frame's hits write,
+    // the dither word (tile jitter x | y << 8 | tile mask << 16) and the resolution level bias. Invalid: none.
+    BufferRef feedback;
+    uint32_t feedbackDither = 0;
+    float feedbackBias = -0.5f;
+    bool lightingFeedback = true;   // surface_cache.lighting_feedback: pages the high levels' readers read are relit first
+    // The translucency volume hits without cards take their indirect light from while the surface cache's own passes
+    // run: the previous frame's (LumenHitIndirect.hlsli). hitVolumeParams 0xFFFFFFFF: none.
+    uint32_t hitVolumeParams = 0xFFFFFFFFu;
+    TextureRef hitVolumeAmbient, hitVolumeDirectional;
 };
 } // namespace unx::render::refl

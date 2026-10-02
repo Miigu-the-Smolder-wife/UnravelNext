@@ -17,8 +17,9 @@
 // P[0] = { world cache SRV, ray info SRV (R16_UINT), trace radiance UAV, trace word UAV (R32_UINT) },
 // P[1], P[2], P[3] = sky and sun (GiSky.hlsli), ray length; P[3].w = gi.experiment_disable bits (8, 16, 128 as GiTrace),
 // P[4] = { sky band (tests), flags (bit 0: LgScreenTrace ran before - gi.lumen_screen_traces; bit 1: no world-cache
-// read at hits - gi.lumen_hit_fallback = false; bits 16..31: the far field's start in metres, 0: none - GiSky.hlsli
-// giFarSkyIrradiance), normal bias (float, m),
+// read at hits - gi.lumen_hit_fallback = false; bit 2: hits read the cards' high levels and report what they want -
+// surface_cache.feedback_gather, CardLighting.hlsli clReadCardsAt; bits 16..31: the far field's start in metres, 0:
+// none - GiSky.hlsli giFarSkyIrradiance), normal bias (float, m),
 // moving threshold (float) }, P[5].x = card frame SRV (CardLayout.hlsli mcFrame;
 // 0xFFFFFFFF: none - gi.lumen_hit_surface_cache off, surface_cache.mesh_cards off or no card yet),
 // P[5].y / .z / .w = radiance cache params (raw SRV) / indirection SRV / atlas SRV (P[5].y = 0xFFFFFFFF: none -
@@ -181,7 +182,7 @@ void LgTraceGen()
             if (P[5].x != 0xFFFFFFFFu)
             {
                 const float3 face = dot(s.geometricNormal, r.Direction) > 0 ? -s.geometricNormal : s.geometricNormal;
-                const ClSample cards = clReadCards(mcFrame(P[5].x), s.sceneInstance, s.position, face, CL_READ_IRRADIANCE);
+                const ClSample cards = clReadCardsAt(mcFrame(P[5].x), s.sceneInstance, s.position, face, CL_READ_IRRADIANCE, (P[4].y & 4u) != 0, 0.5 * footprint, coord);
                 if (cards.valid)
                 {
                     L.irradiance = cards.direct + cards.indirect;

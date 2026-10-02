@@ -29,6 +29,9 @@ namespace
 constexpr uint32_t kCaptureBytes = 48;        // CardCaptureList.hlsli CC_CAPTURE_BYTES
 constexpr uint32_t kPageGroups = 256;         // 16 x 16 groups of 8 x 8 texels: a page of at most 128 x 128
 constexpr uint32_t kUploadSlots = 4;
+// The readers' feedback table (CardLighting.hlsli CL_FEEDBACK_*): a header and (element + 1, hits) pairs; its copies
+// for the CPU, a ring of slots (the frame recorded framesInFlight later reads the copy).
+constexpr uint32_t kFeedbackHashSlots = 4096, kFeedbackHead = 16, kFeedbackBytes = kFeedbackHead + kFeedbackHashSlots * 8, kFeedbackSlots = 4;
 enum Target : uint32_t { TInstanceMap, TMeshCards, TCards, TPages, TPageTable, TCount };
 constexpr uint32_t kStride[TCount] = { 4, sizeof(McMeshCardsGpu), sizeof(McCardGpu), sizeof(McCardPageGpu), sizeof(McPageTableGpu) };
 const char* const kBufferNames[TCount] = { "R card instance map", "R card mesh cards", "R card cards", "R card pages", "R card page table" };
@@ -92,6 +95,28 @@ uint32_t mix(uint32_t h, uint32_t v)
     h ^= v + 0x9e3779b9u + (h << 6) + (h >> 2);
     return h;
 }
+
+// The place inside a feedback tile that reports this frame (FLumenSurfaceCacheFeedback::GetFeedbackBufferTileJitter):
+// the frame's index in the tile's tile^2 places, bit-reversed and taken apart as a Morton code, so successive frames
+// report from places far apart. tile: a power of two up to 256. Returns x | y << 8.
+uint32_t feedbackTileJitter(uint32_t tile, uint64_t frame)
+{
+    uint32_t log2 = 0;
+    while ((1u << log2) < tile) ++log2;
+    if (log2 == 0) return 0;
+    uint32_t v = (uint32_t)(frame % ((uint64_t)tile * tile)), reversed = 0;
+    for (int i = 0; i < 32; ++i) reversed |= ((v >> i) & 1u) << (31 - i);
+    const uint32_t address = reversed >> (32 - 2 * log2);
+    const auto evenBits = [](uint32_t x) {
+        x &= 0x55555555u;
+        x = (x ^ (x >> 1)) & 0x33333333u;
+        x = (x ^ (x >> 2)) & 0x0F0F0F0Fu;
+        x = (x ^ (x >> 4)) & 0x00FF00FFu;
+        x = (x ^ (x >> 8)) & 0x0000FFFFu;
+        return x;
+    };
+    return (evenBits(address) & 0xFFu) | (evenBits(address >> 1) & 0xFFu) << 8;
+}
 } // namespace
 
 SurfaceCacheCardSettings SurfaceCacheCardSettings::fromQuality(const QualityConfig& q)
@@ -110,6 +135,18 @@ SurfaceCacheCardSettings SurfaceCacheCardSettings::fromQuality(const QualityConf
     s.cards.maxDistance = (float)num("surface_cache.mesh_cards_max_distance_m", 300.0);
     s.cards.minSize = (float)num("surface_cache.mesh_cards_min_size_m", 0.1);
     s.cards.refreshFraction = (float)num("surface_cache.mesh_cards_refresh_fraction", 0.125);
+    s.cards.feedback = flag("surface_cache.feedback", true);
+    s.cards.feedbackMinPageHits = (uint32_t)std::max(num("surface_cache.feedback_min_page_hits", 16), 0.0);
+    {
+        // (a power of two up to 256: the dither's mask and jitter are bytes of the card frame's word)
+        const uint32_t tile = (uint32_t)std::clamp(num("surface_cache.feedback_tile_size", 16), 1.0, 256.0);
+        s.cards.feedbackTileSize = 1;
+        while (s.cards.feedbackTileSize < tile) s.cards.feedbackTileSize <<= 1;
+    }
+    // (at least 1: a page mapped in a frame is not taken back in it)
+    s.cards.keepUnusedPagesFrames = (uint32_t)std::max(num("surface_cache.feedback_keep_unused_frames", 256), 1.0);
+    s.feedbackResLevelBias = (float)num("surface_cache.feedback_res_level_bias", -0.5);
+    s.lightingFeedback = flag("surface_cache.lighting_feedback", true);
     s.direct = flag("surface_cache.direct_lighting", true);
     s.radiosity = flag("surface_cache.radiosity", true);
     s.shadowRaysOpaque = flag("surface_cache.shadow_rays_opaque", false);
@@ -165,13 +202,20 @@ struct SurfaceCacheCards::Impl
     SurfaceCacheCardRefs published;
     McStats lastStats;
     uint64_t logFrame = 0;
+    // the readers' feedback: the table, its copies for the CPU (the frame each slot holds; UINT64_MAX: none)
+    ComPtr<ID3D12Resource> feedback, feedbackReadback;
+    const uint32_t* feedbackMapped = nullptr;
+    uint64_t feedbackSlotFrame[kFeedbackSlots] = { UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX };
+    bool feedbackWritten = false;  // the table has been emptied once (before that its content is undefined: no copy)
+    uint32_t feedbackDropped = 0;
+    uint64_t feedbackLogFrame = 0;
 
     void release(ComPtr<ID3D12Resource>& r)
     {
         if (r && device) device->deferRelease(r);
         r.Reset();
     }
-    ComPtr<ID3D12Resource> makeBuffer(uint64_t bytes, D3D12_HEAP_TYPE heapType, const wchar_t* name)
+    ComPtr<ID3D12Resource> makeBuffer(uint64_t bytes, D3D12_HEAP_TYPE heapType, const wchar_t* name, bool unorderedAccess = false)
     {
         D3D12_HEAP_PROPERTIES heap{ heapType };
         D3D12_RESOURCE_DESC1 d{};
@@ -180,6 +224,7 @@ struct SurfaceCacheCards::Impl
         d.Height = d.DepthOrArraySize = d.MipLevels = 1;
         d.SampleDesc.Count = 1;
         d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (unorderedAccess) d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         ComPtr<ID3D12Resource> r;
         check(device->d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&r)), "mesh card buffer");
         r->SetName(name);
@@ -343,6 +388,57 @@ struct SurfaceCacheCards::Impl
             }
             atlasSize = settings.cards.atlasSize;
         }
+        if (settings.cards.feedback && !feedback)
+        {
+            feedback = makeBuffer(kFeedbackBytes, D3D12_HEAP_TYPE_DEFAULT, L"R card feedback", true);
+            feedbackReadback = makeBuffer((uint64_t)kFeedbackSlots * kFeedbackBytes, D3D12_HEAP_TYPE_READBACK, L"R card feedback readback");
+            void* mapped = nullptr;
+            check(feedbackReadback->Map(0, nullptr, &mapped), "map the mesh card feedback readback");
+            feedbackMapped = static_cast<const uint32_t*>(mapped);
+            feedbackWritten = false;
+            for (uint64_t& f : feedbackSlotFrame) f = UINT64_MAX;
+        }
+    }
+
+    // The page requests of the newest frame whose feedback copy has completed (the frame framesInFlight before this
+    // one: the host waited for its slot before recording this frame), handed to the card scene - also when there are
+    // none: the call is the feedback pages' clock.
+    void takeFeedback(FramePassContext& fc, uint32_t viewWidth, uint32_t viewHeight)
+    {
+        std::vector<McFeedback> elements;
+        feedbackDropped = 0;
+        const uint32_t inFlight = std::max(fc.framesInFlight, 1u);
+        if (fc.frame.frameIndex >= inFlight)
+        {
+            const uint64_t from = fc.frame.frameIndex - inFlight;
+            const uint32_t slot = (uint32_t)(from % kFeedbackSlots);
+            if (feedbackSlotFrame[slot] == from)
+            {
+                const uint32_t* words = feedbackMapped + (size_t)slot * (kFeedbackBytes / 4);
+                feedbackDropped = words[0];
+                for (uint32_t i = 0; i < kFeedbackHashSlots; ++i)
+                {
+                    const uint32_t key = words[kFeedbackHead / 4 + 2 * i], hits = words[kFeedbackHead / 4 + 2 * i + 1];
+                    if (key == 0 || hits == 0) continue;
+                    const uint32_t element = key - 1;
+                    McFeedback f;
+                    f.card = element & 0xFFFFFu;
+                    f.resLevel = (uint8_t)((element >> 20) & 0xFu);
+                    f.pageX = (uint8_t)((element >> 24) & 0xFu);
+                    f.pageY = (uint8_t)(element >> 28);
+                    f.hits = hits;
+                    elements.push_back(f);
+                }
+            }
+        }
+        const uint32_t tile = std::max(settings.cards.feedbackTileSize, 1u);
+        scene->setFeedback(elements, ((viewWidth + tile - 1) / tile) * ((viewHeight + tile - 1) / tile));
+        // (the table overflowed: reports were lost, the pages they asked for wait for a later frame)
+        if (feedbackDropped != 0 && fc.frame.frameIndex >= feedbackLogFrame)
+        {
+            feedbackLogFrame = fc.frame.frameIndex + 300;
+            logf("surface cache: the feedback table overflowed - %u reports found no slot (%zu elements of %u slots)\n", feedbackDropped, elements.size(), kFeedbackHashSlots);
+        }
     }
 
     uint64_t stage(const void* data, uint64_t bytes)
@@ -459,6 +555,9 @@ SurfaceCacheCards::~SurfaceCacheCards()
     s.cache.reset();  // (joins the generation workers)
     for (auto& u : s.upload)
         if (u.buffer) u.buffer->Unmap(0, nullptr);
+    if (s.feedbackReadback) s.feedbackReadback->Unmap(0, nullptr);
+    s.release(s.feedback);
+    s.release(s.feedbackReadback);
 }
 
 SurfaceCacheCards& SurfaceCacheCards::get(FramePassContext& fc) { return fc.state<SurfaceCacheCards>("R.cards"); }
@@ -523,6 +622,15 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
 
     s.sync(fc);
     s.ensureBuffers();
+    // the readers' feedback of the newest completed frame, before the frame's updates (a set that starts from nothing
+    // takes none: the copies in flight speak of the cards before it)
+    const bool feedbackOn = s.settings.cards.feedback && s.feedback;
+    if (feedbackOn)
+    {
+        if (s.restart)
+            for (uint64_t& f : s.feedbackSlotFrame) f = UINT64_MAX;
+        s.takeFeedback(fc, main.view.width, main.view.height);
+    }
 
     uint32_t tableSrv = 0xFFFFFFFFu;
 #if UNX_SC_HAS_MATERIAL
@@ -539,6 +647,7 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
     s.staging.clear();
     for (Round& round : *staged) s.stageRound(fc, round, tableSrv);
     s.lastStats = s.scene->stats();
+    s.lastStats.feedbackDropped = s.feedbackDropped;
     const bool generating = s.waiting > 0 || s.cache->pending() > 0;
     if (s.loadingState)
     {
@@ -599,6 +708,53 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
     set.cardPageCapacity = pageCapacity;
     set.instances = (uint32_t)s.scene->instanceMap().size();
     set.generation = 0;
+
+    // ---- the feedback table: last frame's reports copied for the CPU, then emptied for this frame's hits
+    if (feedbackOn)
+    {
+        const BufferRef table = g.importBuffer(s.feedback.Get(), { "R card feedback", kFeedbackBytes, 0 });
+        const uint32_t copySlot = (uint32_t)(fc.frame.frameIndex % kFeedbackSlots);
+        // (not on the table's first frame - nothing has written it - and not when the set starts from nothing)
+        const bool copy = s.feedbackWritten && !s.restart;
+        if (copy)
+        {
+            ID3D12Resource* readback = s.feedbackReadback.Get();
+            // (on the queue of the passes that write the table - the cache's, GI's and the reflections' ray passes - so
+            // the copy follows the last frame's writes whatever the queues' pace)
+            g.addPass("r.card.feedback.readback", QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          b.use(table, Use::CopySrc);
+                          b.keep();
+                      },
+                      [table, readback, copySlot](PassContext& c) { c.cmd->CopyBufferRegion(readback, (uint64_t)copySlot * kFeedbackBytes, c.resource(table), 0, kFeedbackBytes); });
+        }
+        s.feedbackSlotFrame[copySlot] = copy ? fc.frame.frameIndex : UINT64_MAX;
+        s.feedbackWritten = true;
+        g.addPass("r.card.feedback.clear", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(table, Use::UavCompute);
+                      b.keep();
+                  },
+                  [&shaders, table](PassContext& c) {
+                      const uint32_t k[4] = { c.uav(table), 0, 0, 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardFeedbackClear"));
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch((kFeedbackHashSlots + 63) / 64, 1, 1);
+                  });
+        const uint32_t tile = s.settings.cards.feedbackTileSize;
+        set.feedback = table;
+        set.feedbackDither = feedbackTileJitter(tile, fc.frame.frameIndex) | (tile - 1) << 16;
+        set.feedbackBias = s.settings.feedbackResLevelBias;
+        set.lightingFeedback = s.settings.lightingFeedback;
+    }
+    // hits without cards take their indirect light from the previous frame's translucency volume while the cache's own
+    // passes run (the final gather names this frame's sources afterwards: CardFrameSources.hlsl)
+    if (fc.resources.translucencyGiPrevParams != 0xFFFFFFFFu && fc.resources.translucencyGiPrevAmbient.valid() && fc.resources.translucencyGiPrevDirectional.valid())
+    {
+        set.hitVolumeParams = fc.resources.translucencyGiPrevParams;
+        set.hitVolumeAmbient = fc.resources.translucencyGiPrevAmbient;
+        set.hitVolumeDirectional = fc.resources.translucencyGiPrevDirectional;
+    }
 
     // ---- the lighting's shared inputs: sky and sun (GiSky.hlsli), the ray scene
     uint32_t sceneWords[8];
@@ -777,6 +933,12 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
         out.instanceMap = buffers[TInstanceMap], out.meshCards = buffers[TMeshCards], out.cards = buffers[TCards], out.cardPages = buffers[TPages], out.pageTable = buffers[TPageTable];
         out.depth = atlas[0], out.albedo = atlas[1], out.normal = atlas[2], out.emissive = atlas[3];
         out.direct = light.direct, out.indirect = light.indirect, out.final = light.final;
+        if (set.feedback.valid())
+        {
+            out.feedback = set.feedback;
+            out.lastUsed = light.lastUsed;
+        }
+        out.hitVolumeAmbient = set.hitVolumeAmbient, out.hitVolumeDirectional = set.hitVolumeDirectional;
         s.published = out;
         fc.resources.cards = out;
     }

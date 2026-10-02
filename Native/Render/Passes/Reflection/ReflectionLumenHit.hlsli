@@ -9,6 +9,10 @@
 //                   to the disk's centre and, with localSample, one local-light sample with its shadow ray
 //                   (HitLocalSample.hlsli: a mirror showed such surfaces unlit); no indirect light;
 //   back of a one-sided surface: 0 (inside closed geometry).
+// hiRes (reflection.lumen_hi_res_surface; Unreal's r.Lumen.Reflections.HiResSurface): the hit reads the cards' highest
+// mapped level and reports the page and level its footprint wants (CardLighting.hlsli clFeedback; feedbackCoord: the
+// reader's pixel, of which one in a feedback tile reports a frame) - a mirror then shows the cards at the resolution it
+// sees them at, a frame or two after it first looks. false: the resident level, no report.
 // exactCounts: RayScene's exact set hit counts (UAV; UNX_NONE: none) - a hit on a skinned instance counts there, as the
 // other reflection paths' hits do (RayScene picks the most-hit characters for exact refits).
 // The includer is a ray library (RayShaders.hlsli) with GiSky.hlsli's sky and sun in P[1..3].
@@ -28,7 +32,7 @@ struct RlHit
 };
 
 RlHit rlShadeHit(RtSceneSrvs scene, RtHit hit, float3 origin, float3 direction, float coneWidth, float coneSpread, uint cardFrame, uint exactCounts,
-                 bool localSample = false)
+                 bool localSample = false, bool hiRes = false, uint2 feedbackCoord = uint2(0, 0))
 {
     RlHit o;
     o.radiance = 0;
@@ -86,7 +90,7 @@ RlHit rlShadeHit(RtSceneSrvs scene, RtHit hit, float3 origin, float3 direction, 
     if (cardFrame != UNX_NONE)
     {
         const float3 face = dot(s.geometricNormal, direction) > 0 ? -s.geometricNormal : s.geometricNormal;
-        const ClSample cards = clReadCards(mcFrame(cardFrame), s.sceneInstance, s.position, face, CL_READ_IRRADIANCE);
+        const ClSample cards = clReadCardsAt(mcFrame(cardFrame), s.sceneInstance, s.position, face, CL_READ_IRRADIANCE, hiRes, 0.5 * footprint, feedbackCoord);
         if (cards.valid)
         {
             L.irradiance = cards.direct + cards.indirect;

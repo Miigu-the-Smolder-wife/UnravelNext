@@ -345,6 +345,9 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     const uint32_t farStartMetres = fq.has("lumen.radiance_cache_far_field") && fq.boolean("lumen.radiance_cache_far_field")
                                         ? std::min<uint32_t>((uint32_t)fq.number("surface_cache.mesh_cards_max_distance_m"), 65535u)
                                         : 0u;
+    // surface_cache.feedback_gather: the probes' hits read the cards' high levels and report (the reference's gather
+    // reads the resident level and reports nothing: default false)
+    const bool hiResHits = fq.has("surface_cache.feedback_gather") && fq.boolean("surface_cache.feedback_gather");
     const TextureRef rcIndirection = rc.indirection, rcAtlas = rc.atlas, rcDepth = rc.depth;
     const uint32_t rcParamsSrv = rc.params;
     g.addPass("r.gi.lg.screendata", QueueType::Compute,
@@ -526,7 +529,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   k[14] = bits(sun.z);
                   k[15] = experiment;
                   k[16] = bits(skyBand);
-                  k[17] = (screenTraced ? 1u : 0u) | (!cache.valid() || (!L.hitFallback && cards.valid()) ? 2u : 0u) | farStartMetres << 16;
+                  k[17] = (screenTraced ? 1u : 0u) | (!cache.valid() || (!L.hitFallback && cards.valid()) ? 2u : 0u) | (hiResHits ? 4u : 0u) | farStartMetres << 16;
                   k[18] = bits(L.normalBias);
                   k[19] = bits(L.movingSpeed);
                   k[20] = cards.valid() ? c.srv(cards.frame) : 0xFFFFFFFFu;

@@ -5,13 +5,16 @@
 //   STAGE 0  one thread per card page: its priority bucket per context (0 = most urgent) = 15 - log2(4 x frames since
 //            its last update x update speed); a page never updated counts as 2048 frames. Update speed = 1 / (1 +
 //            distance from the camera to the page's box / P[4].z), doubled when the box is within P[4].w of the view
-//            frustum. The histograms get the page's tiles.
+//            frustum; 4 for a page a reader of the cards' high levels read within the last two updates (P[0].w: the
+//            reference's CardPageHighResLastUsedBuffer rule - what a mirror shows is relit first). The histograms get
+//            the page's tiles.
 //   STAGE 1  one thread: per context the max bucket - the first whose running tile count reaches the budget - and the
 //            tiles the budget leaves for that bucket.
 //   STAGE 2  one thread per card page: pages under the max bucket are listed, pages in it while the budget lasts; a
 //            listed page's tiles go to the context's tile list, its page-light record gets this frame and the next
 //            temporal index.
-// P[0] = { card frame SRV, select UAV, frame index, 0 }
+// P[0] = { card frame SRV, select UAV, frame index, last-used SRV (raw, CardLighting.hlsli; 0xFFFFFFFF: none -
+//          surface_cache.lighting_feedback off) }
 // P[4] = { page light UAV (raw), page capacity, asuint(update distance, m), asuint(frustum margin, m) }
 // P[5] = { direct tile budget, radiosity tile budget, direct list capacity, radiosity list capacity }
 #include "Frame.hlsli"
@@ -59,6 +62,12 @@ void main(uint3 id : SV_DispatchThreadID)
             nearFrustum = nearFrustum && inside >= -(radius + asfloat(P[4].w));
         }
         if (nearFrustum) speed *= 2;
+    }
+    if (P[0].w != 0xFFFFFFFFu)
+    {
+        ByteAddressBuffer lastUsed = ResourceDescriptorHeap[P[0].w];
+        const uint used = lastUsed.Load(index * 4);
+        if (used != 0 && used + 2 >= P[0].z && used <= P[0].z) speed = 4;
     }
     RWByteAddressBuffer light = ResourceDescriptorHeap[P[4].x];
     const ClPageLight pl = clPageLight(light.Load4(index * CL_PAGE_LIGHT_BYTES));

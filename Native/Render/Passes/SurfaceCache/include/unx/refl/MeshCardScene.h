@@ -8,7 +8,9 @@
 
 #include <cstdint>
 #include <map>
+#include <set>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace unx::render::refl
@@ -42,7 +44,23 @@ struct McSettings
                                           // resident pages again (materials that change: animated emission, edits)
     uint32_t maxPages = 262144;           // page table entries (the GPU page buffers' fixed size: atlas texels / the
                                           // smallest allocation's 64)
+    // Feedback (r.LumenScene.SurfaceCache.Feedback; LumenSurfaceCacheFeedback.cpp): pages above a card's resident level,
+    // mapped where the frame's ray hits asked for more texels than the resident level holds (setFeedback).
+    bool feedback = true;
+    uint32_t feedbackMinPageHits = 16;    // Feedback.MinPageHits: a page asked for by no more hits than this is not mapped
+    uint32_t feedbackTileSize = 16;       // Feedback.TileSize: one hit in a tile of this side reports a frame (a page's
+                                          // feedback comes round within its square of frames)
+    uint32_t keepUnusedPagesFrames = 256; // NumFramesToKeepUnusedPages: a feedback page no hit asked for this long leaves
     bool operator==(const McSettings&) const = default;
+};
+
+// One element of the GPU's feedback (CardLighting.hlsli clFeedback): 'hits' of a frame's reporting ray hits asked page
+// (pageX, pageY) of level resLevel of a card.
+struct McFeedback
+{
+    uint32_t card = 0;
+    uint8_t resLevel = 0, pageX = 0, pageY = 0;
+    uint32_t hits = 0;
 };
 
 // GPU records (Passes/SurfaceCache/MeshCards.hlsli).
@@ -97,11 +115,19 @@ struct McStats
     uint32_t meshCards = 0, cards = 0, visibleCards = 0;
     uint32_t mappedPages = 0, freePhysicalPages = 0;
     uint64_t allocatedTexels = 0, desiredTexels = 0;   // locked levels: what is in the atlas, what the cards ask for
-    uint32_t requests = 0;                             // cards whose level differs from what they ask for (before the frame's budget)
+    uint32_t requests = 0;                             // cards whose level differs from what they ask for, and the feedback's
+                                                       // pages that are not mapped (before the frame's budget)
     uint32_t captures = 0, capturedTexels = 0;         // this frame
     uint32_t loweredAllocations = 0;                   // this frame: allocated below the requested level (atlas full)
     uint32_t pending = 0;                              // requests the frame's budget left for later frames
     uint32_t refreshed = 0;                            // this frame: resident pages captured again
+    uint32_t feedbackElements = 0;                     // this frame: feedback elements with enough hits
+    uint32_t hiResRequests = 0;                        // ... of them, pages that are not mapped (before the frame's budget)
+    uint32_t hiResMapped = 0;                          // this frame: feedback pages mapped and captured
+    uint32_t hiResPages = 0;                           // feedback pages in the atlas (the pages of unlocked levels)
+    uint32_t evictedPages = 0;                         // this frame: feedback pages that left (unused, or for room)
+    uint32_t feedbackDropped = 0;                      // the newest completed frame's reports that found no place in the
+                                                       // GPU's table (set by SurfaceCacheCards; not 0: the table overflowed)
 };
 
 class MeshCardScene
@@ -125,6 +151,11 @@ public:
     void refreshInstance(uint32_t sceneInstance);
     uint32_t pageCount() const { return (uint32_t)m_pages.size(); }
 
+    // The page requests of the newest frame whose GPU feedback has come back: once a frame, before the frame's first
+    // update (which takes them; it also is the feedback pages' clock - a page's last use is counted in these calls).
+    // samples: the hits a frame can report (a request's urgency falls with its share of them). Elements of cards that
+    // have left or changed since are harmless: a page mapped for one leaves again unused.
+    void setFeedback(std::span<const McFeedback> elements, uint32_t samples);
     // One frame: resolutions from the view origins, allocation, the frame's captures.
     void update(std::span<const float3> viewOrigins);
     const std::vector<McCapture>& captures() const { return m_captures; }
@@ -170,6 +201,8 @@ private:
         uint8_t direction = 0, biasX = 0, biasY = 0;
         float3 origin, extent;                // mesh cards space: centre, card-axis half sizes (scaled metres)
         float3 boxExtent;                     // the same half sizes along the mesh axes
+        bool live = false;                    // the slot holds a card of an instance
+        float distance = 0;                   // from the nearest view origin, at the last update
         bool visible = false;
         uint8_t desiredLockedResLevel = 0, desiredLockedResLevelOnLastAlloc = 0;
         uint8_t minAllocatedResLevel = 0xFF, maxAllocatedResLevel = 0;
@@ -194,6 +227,8 @@ private:
         uint32_t capturedFrame = 0;               // the frame of its last capture
         uint32_t rect[4] = {};                    // atlas texels: min x, min y, max x, max y
         uint32_t sampleAtlasBiasX = 0, sampleAtlasBiasY = 0, sampleResLevelX = 0, sampleResLevelY = 0, samplePage = 0;
+        bool unlocked = false;                    // mapped in a level that is not locked: in m_unlocked under lastUsed
+        uint32_t lastUsed = 0;                    // the feedback frame a hit last asked for it (or it was mapped in)
         bool mapped() const { return pageCoordX >= 0; }
         bool subAllocation() const { return subAllocX >= 0; }
     };
@@ -225,11 +260,13 @@ private:
         std::vector<uint8_t> m_pages;
         std::map<uint32_t, Bin> m_bins;  // key = elementX | elementY << 16
     };
-    struct Request  // FSurfaceCacheRequest (locked levels)
+    struct Request  // FSurfaceCacheRequest
     {
         uint32_t card;
         uint8_t resLevel, distanceBin;
+        uint16_t localPage = kLockedMip;  // a feedback request's page of the level; kLockedMip: the card's locked level
     };
+    static constexpr uint16_t kLockedMip = 0xFFFFu;
 
     MipMapDesc mipMapDesc(const Card& card, uint32_t resLevel) const;
     MipMap& mip(Card& card, uint32_t resLevel) { return card.mips[resLevel - mc::kMinResLevel]; }
@@ -240,7 +277,12 @@ private:
     void reallocVirtualSurface(Card& card, uint32_t cardIndex, uint32_t resLevel, bool lock);
     void freeVirtualSurface(Card& card, uint32_t fromLevel, uint32_t toLevel);
     void mapPage(const MipMap& mipMap, uint32_t pageIndex);
-    void unmapPage(PageEntry& page);
+    void unmapPage(uint32_t pageIndex);
+    void setUnlocked(uint32_t pageIndex, bool unlocked);  // into / out of m_unlocked
+    void touchPage(uint32_t pageIndex);                   // a hit asked for an unlocked page: used in this feedback frame
+    // FLumenSceneData::EvictOldestAllocation: unmaps the unlocked page used longest ago when that is at least
+    // maxFramesSinceLastUsed feedback frames back; false: none is that old.
+    bool evictOldest(uint32_t maxFramesSinceLastUsed, std::vector<uint32_t>& dirtyCards);
     void updateMipHierarchy(Card& card);
     void removeCardFromAtlas(uint32_t cardIndex);
     void writeMeshCardsGpu(uint32_t index);
@@ -264,6 +306,11 @@ private:
     std::vector<McPageTableGpu> m_pageTableGpu;
     Dirty m_dirty;
     std::vector<Request> m_requests;
+    std::vector<McFeedback> m_feedback;             // setFeedback's elements, taken by the next update
+    uint32_t m_feedbackSamples = 1;
+    uint32_t m_feedbackFrame = 0;                   // setFeedback calls so far: the unlocked pages' clock
+    std::set<std::pair<uint32_t, uint32_t>> m_unlocked;  // (last used, page index) of every unlocked mapped page, the
+                                                    // oldest first (UnlockedAllocationHeap)
     std::vector<uint32_t> m_freeMeshCards;          // removed entries, reused by addInstance
     std::map<uint32_t, uint32_t> m_freeCardSpans;   // offset -> size, coalesced
     uint32_t m_refreshCursor = 0;                   // page index the refresh captures continue from

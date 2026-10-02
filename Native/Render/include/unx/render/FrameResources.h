@@ -198,6 +198,15 @@ struct SurfaceCacheCardRefs
     BufferRef instanceMap, meshCards, cards, cardPages, pageTable;   // records
     TextureRef depth, albedo, normal, emissive;                      // the cards' geometry atlases
     TextureRef direct, indirect, final;                              // their lighting
+    // Written by the readers of the cards' high levels (CardLighting.hlsli clReadCardsHiRes; the card frame names
+    // them): the feedback table and the pages' last-used words. Invalid: surface_cache.feedback off.
+    BufferRef feedback, lastUsed;
+    // The indirect light of hits without cards (Passes/GI/LumenHitIndirect.hlsli; the card frame's words 22..27 name
+    // them): a translucency volume - the previous frame's until the final gather publishes this frame's - and, from the
+    // final gather on, the radiance cache's irradiance probes with the list its hits ask for probes through.
+    TextureRef hitVolumeAmbient, hitVolumeDirectional;
+    TextureRef hitRcIndirection, hitRcIrradiance, hitRcDepth;
+    BufferRef hitRcMarks;
     bool valid() const { return frame.valid(); }
 };
 

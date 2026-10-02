@@ -1,5 +1,9 @@
 # Owner: R. ARCHITECTURE 2.6.
 [reflection]
+lumen_hi_res_surface = true                # (reflection.lumen_only) the rays' hits read the mesh cards' highest mapped level and
+                                           # report the page and level their footprint wants (surface_cache.feedback): what a
+                                           # mirror shows is captured at the resolution the mirror sees it at (reference:
+                                           # r.Lumen.Reflections.HiResSurface 1). false: the cards' resident level, no report
 batch_gi_corners = false # A/B only until register/occupancy and deterministic bit checks pass
 cache_lobe_half_angle_min_deg = 22.0   # K path when the (narrowed) lobe is at least this wide
 g_rays_per_sample = 4
