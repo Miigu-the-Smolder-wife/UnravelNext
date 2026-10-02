@@ -189,7 +189,10 @@ void resolve(FramePassContext& fc, ViewResources& view)
     o.materialWord = fc.graph.createTexture({ "m.material word", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
     view.materialWord = o.materialWord;
     if (textures.anyEmissiveTexture()) o.emissive = fc.graph.createTexture({ "m.emissive", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
-    if (fc.scene.anyAnisotropic()) o.anisoWord = fc.graph.createTexture({ "m.aniso word", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
+    // (the class word: anisotropic pixels' frame word, an eye's pixels' eye word - MaterialEye.hlsli; with
+    // shading.eye_model off the resolve writes an eye's pixels the word 0: no iris, the plain Subsurface model)
+    if (fc.scene.anyAnisotropic() || fc.scene.anyEye()) o.anisoWord = fc.graph.createTexture({ "m.aniso word", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
+    const bool eyeModel = !fc.quality.has("shading.eye_model") || fc.quality.boolean("shading.eye_model");  // (a quality set without M's shading file: on)
     o.tiles = fc.graph.createBuffer({ "m.tiles", (uint64_t)kShadeClassCount * tileCount * 4, 0 });
     o.tileArgs = fc.graph.createBuffer({ "m.tile args", (uint64_t)o.totalsOffset() + kShadeClassCount * 4, 0 });
 
@@ -254,7 +257,7 @@ void resolve(FramePassContext& fc, ViewResources& view)
                          }
                          if (surface.rainShadow.valid()) b.use(surface.rainShadow, Use::SrvCompute);
                      },
-                     [kernel, v, o, cb, tileCount, debugBuffer, experiment, surface](PassContext& c) {
+                     [kernel, v, o, cb, tileCount, debugBuffer, experiment, surface, eyeModel](PassContext& c) {
                          const uint32_t tileMask = v.view.planarTileMask.valid() ? c.srv(v.view.planarTileMask) : gpu::kNone;
                          const uint32_t pixelMask = !v.view.planarTileMask.valid() && v.view.planarMask.valid() ? c.srv(v.view.planarMask) : gpu::kNone;
                          const bool decals = v.decalFrames.valid() && v.decalTiles.valid();
@@ -266,7 +269,7 @@ void resolve(FramePassContext& fc, ViewResources& view)
                                                   decals ? c.srv(v.decalTiles) : gpu::kNone,
                                                   field ? c.srv(surface.surfaceConstants) : gpu::kNone, field ? c.srv(surface.surfaceTable) : gpu::kNone,
                                                   field ? c.srv(surface.surfacePool) : gpu::kNone, surface.weather,
-                                                  o.anisoWord.valid() ? c.uav(o.anisoWord) : gpu::kNone, 0, 0, 0 };
+                                                  o.anisoWord.valid() ? c.uav(o.anisoWord) : gpu::kNone, eyeModel ? 1u : 0u, 0, 0 };
                          c.cmd->SetPipelineState(kernel);
                          c.bindFrameConstants(cb);
                          c.computeConstants(k, 28);

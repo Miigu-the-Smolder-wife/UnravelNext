@@ -70,6 +70,11 @@ subsurface_scatter_samples = 16                   # samples per pixel and frame,
                                                   # the temporal upscale accumulates the frames' patterns
 subsurface_scatter_min_px = 1.0                   # mean scatter radius (2.5 d of the widest channel) in pixels under which a pixel keeps its own
                                                   # diffuse light and takes no sample; full strength from twice this
+# Eyes (Subsurface materials with an iris, scene::Material::eyeIrisRadius; MaterialModel.h "Eye", Passes/Material/
+# MaterialEye.hlsli): the resolve finds the iris point seen through the cornea (refraction onto the iris plane, the
+# pupil's scale, the limbal ring) and the class's kernels light the iris on its own plane with the caustic.
+eye_model = true                                  # false: an eye's pixels are the plain Subsurface model with the base colour at the surface's
+                                                  # own uv - the eye as ray hits and coverage fragments always show it
 # Strand hair records (Passes/Shading/CoverageHair.hlsl, with visibility.coverage_hair): the hair between a strand and a
 # light comes from E's density volume (Passes/Hair/HairDensity.hlsli).
 hair_density_resolution = 64      # cells along the longest side of a body's box (a multiple of 4, at most 128; 0: no volume -

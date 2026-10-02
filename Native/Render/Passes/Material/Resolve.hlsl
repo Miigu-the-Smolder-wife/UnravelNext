@@ -19,8 +19,10 @@
 //        after the normal map and before the band limit (FEATURES_GAME 5.2), on the side the shading normal faces.
 // P[5] = { E's surface state constants, table, pool (raw SRVs; UNX_NONE = no field), S's weather record SRV (UNX_NONE =
 //        none) }: the surface state layers over the decals (SurfaceLayers.hlsli).
-// P[6].x A9 anisotropy frame word UAV (R32_UINT; UNX_NONE = no anisotropic material in the scene): Aniso.hlsli's word
-//        for anisotropic pixels, whose G-buffer roughness is then sqrt(sqrt(alpha_t' alpha_b')) (MATERIAL_LAYERS 1.5)
+// P[6].x A9 anisotropy frame word UAV (R32_UINT; UNX_NONE = no anisotropic and no eye material in the scene): Aniso.hlsli's
+//        word for anisotropic pixels, whose G-buffer roughness is then sqrt(sqrt(alpha_t' alpha_b')) (MATERIAL_LAYERS 1.5);
+//        for an eye's pixels (MATERIAL_EYE, MaterialEye.hlsli) the eye word - the iris plane's normal, the iris mask and
+//        the caustic weight; P[6].y = shading.eye_model (0: an eye's pixels take the word 0 and the surface's own uv)
 // P[3].y experiment mask (material.experiment_disable: cost attribution only, 0 otherwise)
 // PLANAR_MASK=1 (planar reflection views with R's mask; views without one compile none of it):
 // P[3].z R's planar tile mask (R8_UINT per 8 x 8 tile, nonzero = mirror pixels; UNX_NONE = absent), P[3].w R's planar
@@ -39,6 +41,7 @@
 #include "Passes/Decal/Decal.hlsli"
 #include "Passes/Material/SurfaceLayers.hlsli"
 #include "Passes/Material/Aniso.hlsli"
+#include "Passes/Material/MaterialEye.hlsli"
 
 #define M_PI 3.14159265358979
 
@@ -97,6 +100,8 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
 
             float3 baseColor, n;
             float roughness, metallic, variance;
+            bool eye = false;  // an eye's pixel (MaterialEye.hlsli) and its eye word
+            uint eyeWord = 0;
             if (materialClass(m) == MATERIAL_CUT)
             {
                 // A11 cut faces: textures through three object-space projections, the edge damage band (MaterialCut.hlsli)
@@ -113,12 +118,6 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
             }
             else
             {
-                baseColor = m.baseColor;
-                if (ts.baseColor != UNX_NONE && (P[3].y & 1) == 0)
-                {
-                    Texture2D<float4> t = ResourceDescriptorHeap[ts.baseColor];
-                    baseColor *= mSampleGrad(t, (ts.flags & M_TEX_BASE_COLOR) != 0, s.uv, s.duvdx, s.duvdy).rgb;
-                }
                 roughness = m.roughness, metallic = m.metallic;
                 if (ts.roughMetal != UNX_NONE && (P[3].y & 1) == 0)
                 {
@@ -140,6 +139,27 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
                     variance += mm.variance;
                 }
                 else n = normalize(s.normal);
+
+                // The base colour, at the surface's uv; an eye's at the iris point seen through the cornea, under the
+                // limbal ring (the footprint stays the surface's).
+                baseColor = m.baseColor;
+                float2 uvColor = s.uv;
+                if ((m.classFlags & MATERIAL_EYE) != 0)
+                {
+                    eye = true;
+                    if (P[6].y != 0)
+                    {
+                        const MEye e = mEyeEvaluate(visId, P[0].y, s, m, n);
+                        eyeWord = e.word;
+                        uvColor = e.uv;
+                        baseColor *= e.darkening;
+                    }
+                }
+                if (ts.baseColor != UNX_NONE && (P[3].y & 1) == 0)
+                {
+                    Texture2D<float4> t = ResourceDescriptorHeap[ts.baseColor];
+                    baseColor *= mSampleGrad(t, (ts.flags & M_TEX_BASE_COLOR) != 0, uvColor, s.duvdx, s.duvdy).rgb;
+                }
             }
             const bool backSide = !s.front && (m.classFlags & MATERIAL_TWO_SIDED) != 0;
             if (backSide) n = -n;
@@ -204,6 +224,11 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
                 const float rc = (m.classFlags & MATERIAL_SHEEN) != 0 ? layers.sheenRoughness : layers.clearcoatRoughness;
                 const float ac = max(rc * rc, 1e-4);
                 coatRoughness = min(sqrt(sqrt(ac * ac + variance)), 1.0);
+            }
+            if (eye && P[6].x != UNX_NONE)
+            {
+                RWTexture2D<uint> eyeWords = ResourceDescriptorHeap[P[6].x];  // (an eye's pixel: its eye word)
+                eyeWords[pixel] = eyeWord;
             }
             words[pixel] = mPackMaterialWord(s.material, metallic, coatRoughness);
 

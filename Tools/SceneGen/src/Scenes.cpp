@@ -627,6 +627,67 @@ Scene furnaceRoom(const Request& rq, bool day)
     return s;
 }
 
+// An eyeball of radius 1 about the origin for the eye model (MaterialModel.h "Eye"): the optical axis is +Z, the uv the
+// projection along it, (0.5, 0.5) + 0.5 (x, y) - the iris of a human eye (5.9 mm in a 12 mm ball) then ends at the uv
+// radius 0.245. One pole on the axis: the triangles around it are the iris's centre.
+void eyeball(MeshBuilder& b, int segments, int rings)
+{
+    const uint32_t first = (uint32_t)b.mesh.positions.size();
+    for (int ri = 0; ri <= rings; ++ri)
+    {
+        const float th = kPi * ri / rings;  // from +Z
+        for (int si = 0; si <= segments; ++si)
+        {
+            const float ph = 2 * kPi * si / segments;
+            const float3 n{ std::sin(th) * std::cos(ph), std::sin(th) * std::sin(ph), std::cos(th) };
+            b.vertex(n, n, { 0.5f + 0.5f * n.x, 0.5f + 0.5f * n.y });
+        }
+    }
+    const uint32_t stride = (uint32_t)segments + 1;
+    for (int ri = 0; ri < rings; ++ri)
+        for (int si = 0; si < segments; ++si)
+        {
+            // phi turns counter-clockwise seen from +Z: (p00, p01, p11, p10) faces outwards
+            const uint32_t p00 = first + ri * stride + si, p10 = p00 + 1, p01 = p00 + stride, p11 = p01 + 1;
+            if (ri < rings - 1) b.triangle(p00, p01, p11);
+            if (ri > 0) b.triangle(p00, p11, p10);
+        }
+}
+
+// The eye's base colour over that uv: the sclera with veins towards the back, a blue-grey iris of radial fibres with a
+// darker collarette, the pupil at 0.28 of the iris radius, the iris's edge painted soft (the model's limbal ring lies
+// over it).
+Texture eyeTexture(uint32_t size, float irisRadius)
+{
+    Texture t = makeTexture("eye_albedo", size, size, scene::TextureFormat::Rgba8Srgb, false);
+    for (uint32_t y = 0; y < size; ++y)
+        for (uint32_t x = 0; x < size; ++x)
+        {
+            const float u = ((x + 0.5f) / size - 0.5f) / irisRadius, v = ((y + 0.5f) / size - 0.5f) / irisRadius;
+            const float rho = std::sqrt(u * u + v * v), phi = std::atan2(v, u);
+            auto step = [](float a, float b, float x) {
+                const float k = clampf((x - a) / (b - a), 0, 1);
+                return k * k * (3 - 2 * k);
+            };
+            // sclera: off-white, redder and veined away from the iris
+            const float vein = std::pow(std::fmax(std::sin(phi * 23.0f + 4.0f * std::sin(rho * 3.0f + phi * 2.0f)), 0.0f), 40.0f) * step(1.15f, 2.2f, rho);
+            float3 sclera = f3(0.86f, 0.82f, 0.78f) * (1.0f - 0.12f * step(1.0f, 2.0f, rho));
+            sclera = sclera + (f3(0.55f, 0.12f, 0.10f) - sclera) * (0.5f * vein);
+            // iris: fibres along the radius, a collarette at 0.45, darker towards the edge
+            const float fibre = 0.72f + 0.28f * std::sin(phi * 41.0f + 3.0f * std::sin(phi * 7.0f) + 2.0f * rho);
+            float3 iris = f3(0.16f, 0.30f, 0.44f) * fibre * (1.0f - 0.35f * step(0.6f, 1.0f, rho));
+            iris = iris + (f3(0.42f, 0.33f, 0.16f) - iris) * (0.55f * (1.0f - step(0.30f, 0.50f, rho)));
+            iris = iris * step(0.26f, 0.30f, rho) + f3(0.004f, 0.004f, 0.004f);  // the pupil
+            const float3 c = iris + (sclera - iris) * step(0.96f, 1.06f, rho);
+            uint8_t* p = &t.texels[4 * ((size_t)y * size + x)];
+            p[0] = toSrgb8(c.x);
+            p[1] = toSrgb8(c.y);
+            p[2] = toSrgb8(c.z);
+            p[3] = 255;
+        }
+    return t;
+}
+
 // ShadingBall (diagnostic): the shading models side by side on a neutral ground. A row of five spheres of radius 0.25 m
 // at eye height, from -x: Standard; Subsurface with the class's default lobes and transmission 0.5; Subsurface with one
 // lobe (mix 1, scales (1, 1)) and no transmission - by the model the first sphere again -; a sheen (cloth); a clearcoat.
@@ -634,8 +695,12 @@ Scene furnaceRoom(const Request& rq, bool day)
 // reaches only the slab: the light through a thin part. Key: one shadow-casting point light, front-left, 2.1 m from the
 // row's centre. The sun is low and dim (4 degrees up, 100 lux above the atmosphere): it shows the sun's terms without
 // competing with the key.
-// Cameras: "front" (the key's side), "back", and "skin_close" (the Subsurface sphere's terminator from 0.6 m: the scale
-// at which skin's scatter is seen).
+// Above the row: over the sheen sphere the same material with the cloth factor 1 (the cloth blend: no base highlight
+// under the fuzz), and left of the centre two eyes (the eye model) of radius 0.12 m - ten times a human eye, the sclera's
+// mean free path with them - that look at the "front" camera.
+// Cameras: "front" (the key's side), "back", "skin_close" (the Subsurface sphere's terminator from 0.6 m: the scale
+// at which skin's scatter is seen) and "eye_close" (the eyes from 0.9 m, off their axes: the iris's parallax under the
+// cornea).
 Scene shadingBall(const Request& rq)
 {
     Scene s;
@@ -692,6 +757,44 @@ Scene shadingBall(const Request& rq)
         b.sphere({ (i - 2) * spacing, eye, 0.0f }, radius, 96, 48);
         addInstance(s, addMesh(s, b.finish(false)), float3x4{});
     }
+    // the cloth blend, over the sheen sphere
+    Material clothBlend = cloth;
+    clothBlend.name = "ball_cloth";
+    clothBlend.cloth = 1.0f;
+    {
+        MeshBuilder b(clothBlend.name);
+        b.material(addMaterial(s, clothBlend));
+        b.sphere({ spacing, eye + 0.62f, 0.0f }, radius, 96, 48);
+        addInstance(s, addMesh(s, b.finish(false)), float3x4{});
+    }
+    // the eyes: one mesh, an instance each, turned so that the mesh's +Z (the optical axis) points at the front camera
+    const float3 frontCamera = f3(0.55f, eye, 3.5f);
+    {
+        const float irisRadius = 0.245f, eyeRadius = 0.12f, scale = eyeRadius / 0.012f;
+        Material eyeMaterial;
+        eyeMaterial.name = "eye";
+        eyeMaterial.cls = scene::MaterialClass::Subsurface;
+        eyeMaterial.baseColor = f3(1.0f, 1.0f, 1.0f);
+        eyeMaterial.baseColorTexture = addTexture(s, eyeTexture(512, irisRadius));
+        eyeMaterial.roughness = 0.12f;  // the tear film
+        eyeMaterial.specular = 0.31f;   // f0 0.025: the cornea (index 1.376)
+        eyeMaterial.subsurfaceMeanFreePath = eyeMaterial.subsurfaceMeanFreePath * scale;
+        eyeMaterial.eyeIrisRadius = irisRadius;
+        MeshBuilder b("eye");
+        b.material(addMaterial(s, eyeMaterial));
+        eyeball(b, 96, 48);
+        const uint32_t mesh = addMesh(s, b.finish(false));
+        for (int side = -1; side <= 1; side += 2)
+        {
+            const float3 centre = f3(-0.35f + side * 0.17f, eye + 0.62f, 0.0f);
+            const float3 z = normalize(frontCamera - centre), x = normalize(cross(f3(0, 1, 0), z)), y = cross(z, x);
+            float3x4 m;
+            const float3 axes[3] = { x, y, z };
+            for (int c = 0; c < 3; ++c) m.m[0][c] = axes[c].x * eyeRadius, m.m[1][c] = axes[c].y * eyeRadius, m.m[2][c] = axes[c].z * eyeRadius;
+            m.m[0][3] = centre.x, m.m[1][3] = centre.y, m.m[2][3] = centre.z;
+            addInstance(s, mesh, m);
+        }
+    }
     Material thin = skin;
     thin.name = "slab_subsurface";
     thin.transmission = 0.8f;
@@ -716,10 +819,11 @@ Scene shadingBall(const Request& rq)
     behind.range = 1.0f;       // (the nearest sphere, 0.9 m away, takes under 2 lux; the ground none)
     behind.castShadow = false;
     s.lights.push_back(behind);
-    s.cameras.push_back(camera("front", f3(0.55f, eye, 3.5f), f3(0.55f, eye, 0.0f), 6.0f, 45.0f));
+    s.cameras.push_back(camera("front", frontCamera, f3(0.55f, eye, 0.0f), 6.0f, 45.0f));
     s.cameras.push_back(camera("back", f3(0.55f, eye, -3.5f), f3(0.55f, eye, 0.0f), 6.0f, 45.0f));
     // the Subsurface sphere's terminator from 0.6 m (a pixel is about half a millimetre at 1080p: skin's scatter is a few)
     s.cameras.push_back(camera("skin_close", f3(-0.35f, eye, 0.80f), f3(-0.62f, eye, 0.0f), 6.0f, 45.0f));
+    s.cameras.push_back(camera("eye_close", f3(-0.75f, eye + 0.70f, 0.90f), f3(-0.35f, eye + 0.62f, 0.0f), 6.0f, 45.0f));
     for (const auto& c : s.cameras) s.paths.push_back(staticPath(c));
     (void)rq;
     return s;

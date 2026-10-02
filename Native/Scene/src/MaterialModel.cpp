@@ -503,6 +503,124 @@ float3 evaluateSubsurface(const Surface& s, const Subsurface& k, float3 n, float
     return albedo + single * compensation;
 }
 
+// ---- Eye (a Subsurface material with an iris)
+Eye eyeOf(const Material& m)
+{
+    Eye e;
+    e.irisRadius = m.cls == MaterialClass::Subsurface ? m.eyeIrisRadius : 0.0f;
+    e.irisDepth = m.eyeIrisDepth;
+    e.limbusWidth = m.eyeLimbusWidth;
+    e.limbusDarkening = m.eyeLimbusDarkening;
+    e.pupilScale = m.eyePupilScale;
+    e.irisConcavity = m.eyeIrisConcavity;
+    e.eta = m.eyeIor;
+    return e;
+}
+
+float eyeCorneaHeight(float irisDepth, float rho)
+{
+    const float rc = (1 + irisDepth * irisDepth) / (2 * irisDepth);
+    return std::max(std::sqrt(std::max(rc * rc - rho * rho, 0.0f)) - (rc - irisDepth), 0.0f);
+}
+
+float3 eyeRefract(float3 v, float3 n, float eta)
+{
+    // Snell at n for the incident direction -v, from air into the index eta (no total reflection on the way in)
+    const float r = 1 / eta, c = dot(n, v);
+    const float k = 1 - r * r * (1 - c * c);
+    return v * -r + n * (r * c - std::sqrt(std::max(k, 0.0f)));
+}
+
+namespace
+{
+float smoothstep01(float e0, float e1, float x)
+{
+    const float t = saturate((x - e0) / (e1 - e0));
+    return t * t * (3 - 2 * t);
+}
+float2 octWrap(float2 v) { return { (1 - std::fabs(v.y)) * (v.x >= 0 ? 1.0f : -1.0f), (1 - std::fabs(v.x)) * (v.y >= 0 ? 1.0f : -1.0f) }; }
+}  // namespace
+
+EyePoint eyePoint(const Eye& e, float2 uv, float3 tLocal)
+{
+    const float2 q{ (uv.x - 0.5f) / e.irisRadius, (uv.y - 0.5f) / e.irisRadius };
+    const float rho = std::sqrt(q.x * q.x + q.y * q.y);
+    EyePoint o;
+    o.mask = 1 - smoothstep01(1 - e.limbusWidth, 1.0f, rho);
+    const float reach = eyeCorneaHeight(e.irisDepth, std::min(rho, 1.0f)) / std::max(-tLocal.z, 0.2f);
+    const float2 qi{ q.x + tLocal.x * reach, q.y + tLocal.y * reach };
+    const float rhoI = std::sqrt(qi.x * qi.x + qi.y * qi.y), rhoC = std::min(rhoI, 1.0f);
+    const float rhoT = 1 - saturate((1 - rhoC) * e.pupilScale);
+    const float scale = e.irisRadius * rhoT / std::max(rhoI, 1e-6f);
+    o.uv = { uv.x + (0.5f + qi.x * scale - uv.x) * o.mask, uv.y + (0.5f + qi.y * scale - uv.y) * o.mask };
+    const float ringAt = rho + (rhoC - rho) * o.mask;
+    o.darkening = 1 - e.limbusDarkening * (1 - smoothstep01(0.0f, 1.5f * e.limbusWidth, std::fabs(ringAt - (1 - e.limbusWidth))));
+    o.caustic = saturate(e.irisConcavity * o.mask * rhoC);
+    return o;
+}
+
+uint32_t eyePack(float3 a, float mask, float caustic)
+{
+    const float sum = std::fabs(a.x) + std::fabs(a.y) + std::fabs(a.z);
+    float2 o{ a.x / sum, a.y / sum };
+    if (a.z < 0) o = octWrap(o);
+    const int32_t qx = (int32_t)std::lround(std::clamp(o.x, -1.0f, 1.0f) * 511.0f), qy = (int32_t)std::lround(std::clamp(o.y, -1.0f, 1.0f) * 511.0f);
+    return ((uint32_t)qx & 0x3FFu) | (((uint32_t)qy & 0x3FFu) << 10) | ((uint32_t)std::lround(saturate(mask) * 63.0f) << 20) |
+           ((uint32_t)std::lround(saturate(caustic) * 63.0f) << 26);
+}
+
+void eyeUnpack(uint32_t word, float3& axis, float& mask, float& caustic)
+{
+    const float ex = (float)((int32_t)(word << 22) >> 22) / 511.0f, ey = (float)((int32_t)(word << 12) >> 22) / 511.0f;
+    float3 a{ ex, ey, 1 - std::fabs(ex) - std::fabs(ey) };
+    if (a.z < 0)
+    {
+        const float2 w = octWrap({ a.x, a.y });
+        a.x = w.x, a.y = w.y;
+    }
+    axis = normalize(a);
+    mask = (float)((word >> 20) & 0x3Fu) / 63.0f;
+    caustic = (float)(word >> 26) / 63.0f;
+}
+
+float3 eyeCausticNormal(float3 axis, float3 n, float caustic)
+{
+    const float3 r = n - axis * dot(axis, n);
+    return normalize(axis - r * (caustic / std::sqrt(std::max(dot(r, r), 1e-8f))));
+}
+
+float eyeCaustic(float3 axis, float3 causticNormal, float3 l)
+{
+    const float p = 12 + (1 - 12) * saturate(dot(axis, l));
+    return 0.8f + 0.2f * (p + 1) * std::pow(saturate(dot(causticNormal, l)), p);
+}
+
+float eyeCosine(float mask, float3 axis, float3 causticNormal, float NoL, float3 l)
+{
+    const float sclera = std::max(NoL, 0.0f);
+    if (!(mask > 0)) return sclera;
+    return sclera + (saturate(dot(axis, l)) * eyeCaustic(axis, causticNormal, l) - sclera) * mask;
+}
+
+float3 evaluateEyeCos(const Surface& s, float mask, float3 axis, float3 causticNormal, float3 n, float3 v, float3 l)
+{
+    const float NoV = dot(n, v), NoL = dot(n, l);
+    if (NoV <= 0) return {};
+    const float3 albedo = s.baseColor * ((1 - s.metallic) / kPi);
+    float3 f = albedo * eyeCosine(mask, axis, causticNormal, NoL, l);
+    if (NoL > 0)
+    {
+        // the cornea's lobe: the Subsurface model's with one lobe, less its Lambert term
+        Surface lobe = s;
+        lobe.transmission = 0;
+        Subsurface one;
+        one.lobeMix = 1;
+        one.lobeRoughness = { 1, 1 };
+        f = f + (evaluateSubsurface(lobe, one, n, v, l) - albedo) * NoL;
+    }
+    return f;
+}
+
 // ---- Subsurface class (stage B: the diffusion profile)
 float3 subsurfaceScaling(float3 albedo)
 {

@@ -23,6 +23,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -1654,6 +1655,249 @@ UNX_TEST(subsurface_model_and_scene_block)
     }
 }
 
+UNX_TEST(eye_model_and_scene_blocks)
+{
+    // The eye (MaterialModel.h "Eye": a Subsurface material with an iris) and the cloth factor, CPU:
+    //   1  the cornea's cap: its apex, its rim, in between;
+    //   2  the iris point: head-on at the centre it is the surface point; an oblique ray moves it by the cap's height over
+    //      the ray's depth; the sclera keeps its uv; the pupil scale pulls the texture's radius in and leaves the limbus;
+    //   3  the mask and the limbal ring: 1 on the iris, 0 on the sclera, the ring darkest at 1 - width and gone 1.5 widths
+    //      either side;
+    //   4  the eye word: the axis within 0.3 degrees, the mask and the caustic weight within half a step of 6 bits;
+    //   5  the diffuse cosine: the surface's on the sclera, the iris plane's with the caustic on the iris - lit below the
+    //      cornea's horizon, brighter on the side away from a grazing light -, and the whole model against the Subsurface
+    //      model with one lobe where the mask is 0;
+    //   6  the GPU record: one lobe, no transmission, the eye's parameters in a layer record;
+    //   7  the scene file's blocks ("EYES", "CLTH"): none for materials without them, an exact round trip, validation.
+    namespace m = scene::model;
+    scene::Material eyeMaterial;
+    eyeMaterial.name = "eye";
+    eyeMaterial.cls = scene::MaterialClass::Subsurface;
+    eyeMaterial.roughness = 0.1f;
+    eyeMaterial.specular = 0.31f;
+    eyeMaterial.eyeIrisRadius = 0.245f;
+    const m::Eye eye = m::eyeOf(eyeMaterial);
+    CHECK(eye.irisRadius == 0.245f && eye.irisDepth == 0.45f && eye.limbusWidth == 0.12f && eye.eta == 1.336f);
+    CHECK(m::eyeOf(scene::Material{}).irisRadius == 0);
+
+    // 1
+    CHECK(std::fabs(m::eyeCorneaHeight(0.45f, 0) - 0.45f) < 1e-6f && m::eyeCorneaHeight(0.45f, 1) < 1e-6f && m::eyeCorneaHeight(0.45f, 1.5f) == 0);
+    for (float rho = 0.1f; rho < 1.0f; rho += 0.1f) CHECK(m::eyeCorneaHeight(0.45f, rho) < m::eyeCorneaHeight(0.45f, rho - 0.1f) && m::eyeCorneaHeight(0.45f, rho) > 0);
+
+    // 2
+    const float R = eye.irisRadius;
+    {
+        const m::EyePoint centre = m::eyePoint(eye, { 0.5f, 0.5f }, { 0, 0, -1 });
+        CHECK(centre.mask == 1 && std::fabs(centre.uv.x - 0.5f) < 1e-7f && std::fabs(centre.uv.y - 0.5f) < 1e-7f && centre.caustic == 0);
+        // a ray leaning along +u at 45 degrees from a point at rho = 0.3: the iris point lies h(0.3) further along u
+        const float3 t = normalize(float3{ 1, 0, -1 });
+        const float2 uv{ 0.5f + 0.3f * R, 0.5f };
+        const m::EyePoint p = m::eyePoint(eye, uv, t);
+        const float rhoI = 0.3f + m::eyeCorneaHeight(eye.irisDepth, 0.3f);
+        CHECK(p.mask == 1 && std::fabs(p.uv.x - (0.5f + rhoI * R)) < 1e-6f && std::fabs(p.uv.y - 0.5f) < 1e-7f);
+        CHECK(std::fabs(p.caustic - rhoI) < 1e-6f);  // (concavity 1: the weight is the iris point's radius)
+        // the same point with the pupil scale 2: the texture's radius 1 - (1 - rho') x 2
+        m::Eye wide = eye;
+        wide.pupilScale = 2;
+        CHECK(std::fabs(m::eyePoint(wide, uv, t).uv.x - (0.5f + (1 - (1 - rhoI) * 2) * R)) < 1e-6f);
+        // the limbus stays where it is, whatever the scale; the sclera keeps its uv, whatever the ray
+        const m::EyePoint rim = m::eyePoint(wide, { 0.5f + 0.8f * R, 0.5f }, normalize(float3{ 1, 0, -0.3f }));
+        CHECK(std::fabs(rim.uv.x - (0.5f + R)) < 1e-6f);
+        const m::EyePoint sclera = m::eyePoint(eye, { 0.5f, 0.5f + 1.3f * R }, t);
+        CHECK(sclera.mask == 0 && sclera.uv.x == 0.5f && sclera.uv.y == 0.5f + 1.3f * R && sclera.caustic == 0);
+        // a ray almost in the iris plane is held to a depth of 0.2: the point stays finite
+        const m::EyePoint grazing = m::eyePoint(eye, { 0.5f, 0.5f }, normalize(float3{ 1, 0, -0.01f }));
+        CHECK(std::isfinite(grazing.uv.x) && grazing.uv.x <= 0.5f + R + 1e-6f);
+    }
+
+    // 3
+    {
+        const float w = eye.limbusWidth;
+        const float3 down{ 0, 0, -1 };
+        auto at = [&](float rho) { return m::eyePoint(eye, { 0.5f + rho * R, 0.5f }, down); };
+        CHECK(at(1 - w).mask == 1 && at(1).mask < 1e-6f && at(1 - 0.5f * w).mask > 0.49f && at(1 - 0.5f * w).mask < 0.51f);
+        // (head-on at rho <= 1 - w the cap still has height, but the ray does not move sideways: the ring's radius is rho)
+        CHECK(std::fabs(at(1 - w).darkening - (1 - eye.limbusDarkening)) < 1e-6f);
+        CHECK(at(1 - 2.6f * w).darkening == 1 && at(1 + 0.51f * w).darkening == 1);
+        CHECK(at(1 - 1.5f * w).darkening > at(1 - w).darkening && at(1).darkening > at(1 - w).darkening && at(1).darkening < 1);
+        m::Eye none = eye;
+        none.limbusDarkening = 0;
+        CHECK(m::eyePoint(none, { 0.5f + (1 - w) * R, 0.5f }, down).darkening == 1);
+    }
+
+    // 4
+    {
+        double worstAxis = 0, worstMask = 0, worstCaustic = 0;
+        uint32_t seed = 12345;
+        auto unit = [&] {
+            seed = seed * 1664525u + 1013904223u;
+            return (float)(seed >> 8) / 16777216.0f;
+        };
+        for (int k = 0; k < 2000; ++k)
+        {
+            const float mu = 2 * unit() - 1, phi = 6.2831853f * unit(), st = std::sqrt(std::max(0.0f, 1 - mu * mu));
+            const float3 axis{ st * std::cos(phi), st * std::sin(phi), mu };
+            const float mask = unit(), caustic = unit();
+            float3 a;
+            float mk, c;
+            m::eyeUnpack(m::eyePack(axis, mask, caustic), a, mk, c);
+            worstAxis = std::max(worstAxis, (double)std::acos(std::min(dot(a, axis), 1.0f)));
+            worstMask = std::max(worstMask, (double)std::fabs(mk - mask));
+            worstCaustic = std::max(worstCaustic, (double)std::fabs(c - caustic));
+        }
+        logf("    eye word: axis within %.3f degrees, mask %.4f, caustic weight %.4f\n", worstAxis * 57.29578, worstMask, worstCaustic);
+        CHECK(worstAxis < 0.3 * 3.14159265 / 180);
+        CHECK(worstMask <= 0.5 / 63 + 1e-6 && worstCaustic <= 0.5 / 63 + 1e-6);
+        float3 a;
+        float mk, c;
+        m::eyeUnpack(m::eyePack({ 0, 0, 1 }, 0, 0), a, mk, c);
+        CHECK(mk == 0 && c == 0 && a.z == 1);
+        m::eyeUnpack(m::eyePack({ 0, 1, 0 }, 1, 1), a, mk, c);
+        CHECK(mk == 1 && c == 1 && std::fabs(a.y - 1) < 1e-6f);
+    }
+
+    // 5
+    {
+        const float3 n{ 0, 0, 1 };
+        const float3 axis = normalize(float3{ 0.35f, 0, 0.94f });  // the iris plane leans towards +x under this surface point
+        // the caustic normal: the axis tilted by atan(w) away from the surface normal's side (towards the eye's axis from
+        // this point), the axis itself at w = 0 and where the surface normal is the axis
+        const float3 caustic = m::eyeCausticNormal(axis, n, 0.5f);
+        CHECK(std::fabs(length(caustic) - 1) < 1e-6f && dot(caustic, n) < dot(axis, n));
+        CHECK(std::fabs(dot(caustic, axis) - 1 / std::sqrt(1.25f)) < 1e-5f);
+        CHECK(length(m::eyeCausticNormal(axis, n, 0) - axis) < 1e-6f && length(m::eyeCausticNormal(axis, axis, 1) - axis) < 1e-3f);
+        const float3 l = normalize(float3{ 0.3f, 0.2f, 0.9f });
+        CHECK(m::eyeCosine(0, axis, caustic, dot(n, l), l) == dot(n, l));
+        CHECK(m::eyeCosine(0, axis, caustic, -0.2f, l) == 0);
+        // the flat plane (caustic normal = the axis) under a light along the axis: 0.8 + 0.2 x 2 = 1.2 of the cosine
+        CHECK(std::fabs(m::eyeCosine(1, axis, axis, dot(n, axis), axis) - 1.2f) < 1e-6f);
+        // a light below the cornea's horizon at this point still lights the iris plane that faces it
+        const float3 low = normalize(float3{ 1, 0, -0.05f });
+        CHECK(dot(n, low) < 0 && m::eyeCosine(1, axis, axis, dot(n, low), low) > 0.2f);
+        // a grazing light from +x: the caustic normal that faces it (the far side's) takes more than the one turned away
+        const float3 graze = normalize(float3{ 1, 0, 0.15f });
+        const float3 flat{ 0, 0, 1 };
+        const float towards = m::eyeCosine(1, flat, normalize(float3{ 1, 0, 0.3f }), dot(n, graze), graze);
+        const float away = m::eyeCosine(1, flat, normalize(float3{ -1, 0, 0.3f }), dot(n, graze), graze);
+        CHECK(towards > 1.5f * away && away > 0);
+        // the caustic factor's mean over the hemisphere is 1 for a plane with its own normal (light moved, none made)
+        {
+            double mean = 0;
+            const uint32_t nt = 256, np = 64;
+            for (uint32_t i = 0; i < nt; ++i)
+                for (uint32_t j = 0; j < np; ++j)
+                {
+                    const float mu = (i + 0.5f) / nt, st = std::sqrt(1 - mu * mu), ph = 6.2831853f * (j + 0.5f) / np;
+                    mean += m::eyeCaustic(flat, flat, { st * std::cos(ph), st * std::sin(ph), mu });
+                }
+            mean /= nt * np;
+            logf("    eye caustic factor: hemisphere mean %.4f (p from 12 at the horizon to 1 at the axis)\n", mean);
+            CHECK(mean > 0.8 && mean < 1.25);
+        }
+        // mask 0: the Subsurface model with one lobe, times the cosine
+        m::Surface su;
+        su.cls = scene::MaterialClass::Subsurface;
+        su.baseColor = { 0.8f, 0.8f, 0.75f };
+        su.roughness = 0.1f;
+        su.specular = 0.31f;
+        m::Subsurface one;
+        one.lobeMix = 1;
+        one.lobeRoughness = { 1, 1 };
+        const float3 v = normalize(float3{ -0.2f, 0.1f, 0.95f });
+        const float3 got = m::evaluateEyeCos(su, 0, axis, caustic, n, v, l), want = m::evaluateSubsurface(su, one, n, v, l) * dot(n, l);
+        CHECK(std::fabs(got.x - want.x) <= 1e-5f * want.x && std::fabs(got.y - want.y) <= 1e-5f * want.y && std::fabs(got.z - want.z) <= 1e-5f * want.z);
+        // the iris: the specular lobe the same, the diffuse on the plane
+        const float3 iris = m::evaluateEyeCos(su, 1, axis, caustic, n, v, l);
+        const float3 albedo = su.baseColor * (1 / m::kPi);
+        const float3 diffuse = albedo * (m::eyeCosine(1, axis, caustic, dot(n, l), l) - dot(n, l));
+        CHECK(std::fabs(iris.x - (want.x + diffuse.x)) < 1e-5f && std::fabs(iris.z - (want.z + diffuse.z)) < 1e-5f);
+        // no viewer above the surface: nothing; a light below the surface: the iris's diffuse alone
+        CHECK(m::evaluateEyeCos(su, 1, axis, caustic, n, { 0, 0, -1 }, l).x == 0);
+        const float3 below = m::evaluateEyeCos(su, 1, axis, axis, n, v, low);
+        CHECK(std::fabs(below.x - albedo.x * m::eyeCosine(1, axis, axis, dot(n, low), low)) < 1e-6f && below.x > 0);
+    }
+
+    // 6
+    {
+        scene::Material packed = eyeMaterial;
+        packed.subsurfaceLobeMix = 0.5f;  // (not used by an eye)
+        gpu::Material g{};
+        g.transmission = 0.4f;
+        packMaterialClass(packed, g);
+        CHECK(g.hairBetaN == 1 && g.cutScale == 1 && g.cutDamageWidth == 1 && g.transmission == 0);
+        CHECK(g.hairAbsorption.x == 0.00130f && g.hairAbsorption.y == 0.00095f && g.hairAbsorption.z == 0.00067f);
+        static_assert(sizeof(gpu::MaterialEyeRecord) == 64 && offsetof(gpu::MaterialEyeRecord, axis) == 32 && offsetof(gpu::MaterialLayers, cloth) == 52);
+    }
+
+    // 7
+    {
+        auto contains = [](const std::vector<uint8_t>& bytes, const char* tag) {
+            for (size_t i = 0; i + 4 <= bytes.size(); ++i)
+                if (std::memcmp(bytes.data() + i, tag, 4) == 0) return true;
+            return false;
+        };
+        scene::Scene before = tinyScene();
+        scene::Material skin;
+        skin.name = "skin";
+        skin.cls = scene::MaterialClass::Subsurface;
+        scene::Material sheen;
+        sheen.name = "sheen";
+        sheen.sheenColor = { 0.6f, 0.5f, 0.4f };
+        before.materials.push_back(skin);
+        before.materials.push_back(sheen);
+        scene::validate(before);
+        const std::vector<uint8_t> beforeBytes = scene::serialize(before);
+        CHECK(!contains(beforeBytes, "EYES") && !contains(beforeBytes, "CLTH"));
+
+        scene::Scene with = before;
+        scene::Material e2 = eyeMaterial;
+        e2.eyeIrisDepth = 0.5f;
+        e2.eyeLimbusWidth = 0.2f;
+        e2.eyeLimbusDarkening = 0.3f;
+        e2.eyePupilScale = 1.7f;
+        e2.eyeIrisConcavity = 0.4f;
+        e2.eyeIor = 1.4f;
+        e2.eyeAxis = { 0, 1, 0 };
+        scene::Material cloth = sheen;
+        cloth.name = "cloth";
+        cloth.cloth = 0.75f;
+        with.materials.push_back(e2);
+        with.materials.push_back(cloth);
+        scene::validate(with);
+        const std::vector<uint8_t> withBytes = scene::serialize(with);
+        CHECK(contains(withBytes, "EYES") && contains(withBytes, "CLTH"));
+        scene::Scene plain = before;  // the same two materials without their eye and cloth: the difference is the two blocks
+        scene::Material e0 = skin;
+        e0.name = e2.name, e0.roughness = e2.roughness, e0.specular = e2.specular;
+        scene::Material c0 = cloth;
+        c0.cloth = 0;
+        plain.materials.push_back(e0);
+        plain.materials.push_back(c0);
+        CHECK(withBytes.size() == scene::serialize(plain).size() + (4 + 8 + 4 + 4) + (4 + 8 + 4 + 7 * 4 + 12));
+        const scene::Scene back = scene::deserialize(withBytes);
+        const scene::Material& be = back.materials[back.materials.size() - 2];
+        const scene::Material& bc = back.materials.back();
+        CHECK(be.eyeIrisRadius == 0.245f && be.eyeIrisDepth == 0.5f && be.eyeLimbusWidth == 0.2f && be.eyeLimbusDarkening == 0.3f && be.eyePupilScale == 1.7f &&
+              be.eyeIrisConcavity == 0.4f && be.eyeIor == 1.4f && be.eyeAxis.x == 0 && be.eyeAxis.y == 1 && be.eyeAxis.z == 0);
+        CHECK(bc.cloth == 0.75f && back.materials[back.materials.size() - 3].cloth == 0 && back.materials[back.materials.size() - 4].eyeIrisRadius == 0);
+        CHECK(scene::serialize(back) == withBytes);
+        CHECK(scene::contentHash(with) != scene::contentHash(plain));
+        auto invalid = [&](auto&& change) {
+            scene::Scene s = with;
+            change(s.materials[s.materials.size() - 2], s.materials.back());
+            return throws([&] { scene::validate(s); });
+        };
+        CHECK(invalid([](scene::Material& e, scene::Material&) { e.cls = scene::MaterialClass::Standard; }));
+        CHECK(invalid([](scene::Material& e, scene::Material&) { e.eyeIrisRadius = 0.6f; }));
+        CHECK(invalid([](scene::Material& e, scene::Material&) { e.eyeLimbusWidth = 0; }));
+        CHECK(invalid([](scene::Material& e, scene::Material&) { e.eyeAxis = { 0, 2, 0 }; }));
+        CHECK(invalid([](scene::Material& e, scene::Material&) { e.transmission = 0.3f; }));
+        CHECK(invalid([](scene::Material& e, scene::Material&) { e.eyeIor = 0.9f; }));
+        CHECK(invalid([](scene::Material&, scene::Material& c) { c.cloth = 1.5f; }));
+        CHECK(invalid([](scene::Material&, scene::Material& c) { c.sheenColor = { 0, 0, 0 }; }));  // (a cloth factor without a sheen)
+    }
+}
+
 UNX_TEST(subsurface_profile_and_sampling)
 {
     // Subsurface class, stage B (MaterialModel.h: the diffusion profile and the scatter pass's estimate), CPU:
@@ -2440,6 +2684,118 @@ UNX_TEST(subsurface_model_on_the_gpu)
     CHECK(across > 0);
     CHECK(worstLobes < 1e-6);
     CHECK(worst < 1e-4);
+    testDevice().deferRelease(constants);
+    testDevice().deferRelease(rb);
+}
+
+UNX_TEST(eye_model_on_the_gpu)
+{
+    // The eye: MaterialModel.hlsli's modelEyePoint, modelEyePack / modelEyeOf and modelEyeCosine equal scene::model's at
+    // 4096 points - surface points on the iris, across the limbus and on the sclera, refracted rays from head-on to
+    // grazing, lights above and below the surface -, with the eye's parameters read from the scene's record
+    // (loadMaterialEye: GpuScene's packing) (Passes/Test/EyeModel.hlsl).
+    scene::Scene s = tinyScene();
+    const uint32_t material = (uint32_t)s.materials.size();
+    {
+        scene::Material layered;  // a layer record before the eye's: the eye's index is not 0
+        layered.name = "coat";
+        layered.clearcoat = 0.5f;
+        s.materials.push_back(layered);
+        scene::Material eye;
+        eye.name = "eye";
+        eye.cls = scene::MaterialClass::Subsurface;
+        eye.eyeIrisRadius = 0.2f;
+        eye.eyeIrisDepth = 0.5f;
+        eye.eyeLimbusWidth = 0.15f;
+        eye.eyeLimbusDarkening = 0.7f;
+        eye.eyePupilScale = 1.4f;
+        eye.eyeIrisConcavity = 0.8f;
+        eye.eyeIor = 1.35f;
+        s.materials.push_back(eye);
+    }
+    const uint32_t eyeIndex = material + 1;
+    scene::validate(s);
+    GpuScene gs(testDevice());
+    gs.upload(s);
+    CHECK(gs.anyEye());
+    gpu::FrameConstants fc{};
+    gs.fill(fc);
+    ComPtr<ID3D12Resource> constants, rb;
+    const uint32_t n = 4096, bytes = n * 64;
+    {
+        D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD }, rp{ D3D12_HEAP_TYPE_READBACK };
+        D3D12_RESOURCE_DESC1 rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = (sizeof(gpu::FrameConstants) + 255) / 256 * 256;
+        rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        check(testDevice().d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&constants)),
+              "constants");
+        void* mapped = nullptr;
+        check(constants->Map(0, nullptr, &mapped), "map constants");
+        std::memcpy(mapped, &fc, sizeof fc);
+        constants->Unmap(0, nullptr);
+        rd.Width = bytes;
+        check(testDevice().d3d()->CreateCommittedResource3(&rp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&rb)), "readback");
+    }
+    const float3 axis = normalize(float3{ 0.3f, -0.2f, 0.93f });
+    ID3D12PipelineState* pso = shaders().compute("Passes/Test/EyeModel");
+    RenderGraph g(testDevice());
+    const BufferRef out = g.createBuffer({ "eye out", bytes, 0 });
+    const D3D12_GPU_VIRTUAL_ADDRESS address = constants->GetGPUVirtualAddress();
+    g.addPass("eye", QueueType::Graphics, [&](PassBuilder& b) { b.use(out, Use::UavCompute); },
+              [=](PassContext& ctx) {
+                  uint32_t k[8] = { ctx.uav(out), n, eyeIndex, 0, 0, 0, 0, 0 };
+                  std::memcpy(&k[4], &axis, 12);
+                  ctx.cmd->SetPipelineState(pso);
+                  ctx.bindFrameConstants(address);
+                  ctx.computeConstants(k, 8);
+                  ctx.cmd->Dispatch((n + 63) / 64, 1, 1);
+              });
+    ID3D12Resource* dst = rb.Get();
+    g.addPass("eye readback", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(out, Use::CopySrc);
+                  b.keep();
+              },
+              [=](PassContext& ctx) { ctx.cmd->CopyBufferRegion(dst, 0, ctx.resource(out), 0, bytes); });
+    g.execute(nullptr);
+    for (uint32_t q = 0; q < kQueueTypeCount; ++q) testDevice().queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
+    const float* v = nullptr;
+    check(rb->Map(0, nullptr, (void**)&v), "map readback");
+    const scene::model::Eye eye = scene::model::eyeOf(s.materials[eyeIndex]);
+    double worstPoint = 0, worstWord = 0, worstCosine = 0;
+    uint32_t iris = 0, limbus = 0, sclera = 0, below = 0;
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        const float* p = v + 16 * i;
+        const scene::model::EyePoint want = scene::model::eyePoint(eye, { p[0], p[1] }, { p[2], p[3], p[4] });
+        iris += want.mask == 1;
+        sclera += want.mask == 0;
+        limbus += want.mask > 0 && want.mask < 1;
+        worstPoint = std::max({ worstPoint, std::fabs((double)p[8] - want.uv.x), std::fabs((double)p[9] - want.uv.y), std::fabs((double)p[10] - want.mask),
+                                std::fabs((double)p[11] - want.darkening), std::fabs((double)p[12] - want.caustic) });
+        uint32_t word;
+        std::memcpy(&word, &p[13], 4);
+        float3 a;
+        float mask, caustic;
+        scene::model::eyeUnpack(word, a, mask, caustic);
+        // (the word against the GPU's own point: one 6-bit step where the rounding falls on the other side)
+        worstWord = std::max({ worstWord, std::fabs((double)mask - p[10]) - 0.5 / 63, std::fabs((double)caustic - p[12]) - 0.5 / 63,
+                               (double)std::acos(std::min(dot(a, axis), 1.0f)) - 0.3 * 3.14159265 / 180 });
+        const float3 nrm{ 0, 0, 1 }, l{ p[5], p[6], p[7] };
+        below += l.z < 0 && mask > 0;
+        const float cosine = scene::model::eyeCosine(mask, a, scene::model::eyeCausticNormal(a, nrm, caustic), l.z, l);
+        worstCosine = std::max(worstCosine, std::fabs((double)p[14] - cosine) / std::max((double)cosine, 1e-2));
+    }
+    rb->Unmap(0, nullptr);
+    logf("    eye on the GPU vs scene::model over %u points (%u iris, %u limbus, %u sclera, %u lit from below the surface): point %.2e, word over its rounding %.2e, "
+         "cosine (relative) %.2e\n", n, iris, limbus, sclera, below, worstPoint, worstWord, worstCosine);
+    CHECK(iris > 500 && limbus > 100 && sclera > 500 && below > 100);
+    CHECK(worstPoint < 1e-5);
+    CHECK(worstWord < 1e-5);
+    CHECK(worstCosine < 1e-4);
     testDevice().deferRelease(constants);
     testDevice().deferRelease(rb);
 }
