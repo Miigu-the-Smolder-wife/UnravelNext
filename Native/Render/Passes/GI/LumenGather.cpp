@@ -139,6 +139,12 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     bool foliage = false;
     for (const gpu::Material& material : fc.scene.materials()) foliage = foliage || (material.classFlags & 0xFFu) == 1u;  // scene::MaterialClass::Foliage
     foliage = foliage && view.materialWord.valid();
+    // (pixels of a Foliage or Subsurface material - the reference's backface diffuse - weigh their probes as foliage:
+    // LgIntegrate.hlsl, LgAdaptiveMark.hlsl read the class from M's material word)
+    bool backfaceDiffuse = false;
+    for (const gpu::Material& material : fc.scene.materials())
+        backfaceDiffuse = backfaceDiffuse || (material.classFlags & 0xFFu) == 1u || (material.classFlags & 0xFFu) == 5u;  // scene::MaterialClass::Foliage, Subsurface
+    backfaceDiffuse = backfaceDiffuse && view.materialWord.valid();
     TextureRef backface, prevBackface, newBackface;
     bool backfaceHistory = false;
     if (foliage)
@@ -247,11 +253,13 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                       b.use(probeDepth, Use::SrvCompute);
                       b.use(probePosition, Use::SrvCompute);
                       b.use(mask, Use::UavCompute);
+                      if (backfaceDiffuse) b.use(materialWord, Use::SrvCompute);
                   },
                   [=, &shaders](PassContext& c) {
                       uint32_t k[48] = {};
                       surfaceWords(c, k);
                       k[4] = c.uav(mask);
+                      k[5] = backfaceDiffuse ? c.srv(materialWord) : 0xFFFFFFFFu;
                       std::memcpy(&k[32], common.k, sizeof common.k);
                       k[43] = c.srv(probeDepth);
                       k[45] = c.srv(probePosition);
@@ -790,17 +798,14 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   b.use(probeMoving, Use::SrvCompute);
                   b.use(newDiffuse, Use::UavCompute);
                   b.use(newSpecular, Use::UavCompute);
-                  if (foliage)
-                  {
-                      b.use(newBackface, Use::UavCompute);
-                      b.use(materialWord, Use::SrvCompute);
-                  }
+                  if (foliage) b.use(newBackface, Use::UavCompute);
+                  if (backfaceDiffuse) b.use(materialWord, Use::SrvCompute);
               },
               [=, &shaders](PassContext& c) {
                   uint32_t k[48] = {};
                   surfaceWords(c, k);
                   k[14] = foliage ? c.uav(newBackface) : 0xFFFFFFFFu;
-                  k[15] = foliage ? c.srv(materialWord) : 0xFFFFFFFFu;
+                  k[15] = backfaceDiffuse ? c.srv(materialWord) : 0xFFFFFFFFu;
                   k[4] = c.uav(newDiffuse);
                   k[5] = c.uav(newSpecular);
                   k[6] = c.srv(irradiance);
