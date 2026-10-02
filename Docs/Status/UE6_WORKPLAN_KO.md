@@ -166,3 +166,38 @@
 | 함수 | MegaLights 볼륨의 1/d²는 프록셀 반지름으로 바이어스(스파이크 제거, 원본과 같은 식) | 완료 |
 
 high 티어: 같은 커밋에서의 비교가 아직 없다(Batch2 기본 vs Batch4 high는 커밋이 다르다) — Batch5 결과로 다시 본다.
+
+## 9. 국소광 구성요소 (2026-10-03, 브랜치 `w/hair`)
+
+Unreal의 light component에 있고 여기에 없던 여섯 가지를 썼다. **코드 작성·빌드 통과, 실행 안 함**: 전 트랙 빌드만 통과했고 테스트 실행 파일(CPU 테스트 `unx_test_scene_lightcomponents` 포함)·still·게이트를 한 번도 돌리지 않았다. 아래는 코드에 있는 것이고 그림과 수치로 확인된 것은 없다.
+
+레코드 [코드]:
+
+- `scene::Light`의 새 필드. 기본값은 전과 같은 빛이다: `specularScale`·`diffuseScale`·`volumetricScattering`·`indirectIntensity`(1), `sourceTexture`(없음), `barnDoorAngle`(π/2 rad, 방출면 법선에서 잰 각)·`barnDoorLength`(0 = 없음), `lightingChannels`(1 = 채널 0), `maxDrawDistance`(0 = 항상)·`maxDistanceFadeRange`, `temperature`(0 = 안 씀, K), `falloffExponent`(0 = 역제곱).
+- 씬 파일: 선택 블록 `LCMP`(광원 끝 바이어스 블록 뒤). 값을 하나라도 바꾼 광원만 인덱스 + 값 12개로 들어간다. 그런 광원이 없으면 블록이 없고 파일 바이트가 전과 같다.
+- 인스턴스의 채널: `Instance::flags` 비트 4~6(`withLightingChannels`, `instanceLightingChannels`). 마스크 ^ 1로 저장하므로 비트가 0인 기존 인스턴스는 채널 0이다. GPU 인스턴스의 flags에 그대로 간다.
+- `gpu::Light` 80 → 112 B: 스케일 4개(half, 값 − 1), 그리기 거리·페이드 구간, 감쇠 지수, barn door(half 2개), 소스 텍스처 SRV + 1. `typeFlags` 비트 9~11 = 채널 ^ 1. 새 워드가 모두 0이면 평범한 빛이다(FX 광원처럼 0으로 채운 레코드).
+- R의 CPU 광원 레코드(`RtLight`): intensity = 세기 × indirect × diffuse, color = 색온도를 곱한 색, pad 비트 0 = hit이 창을 GPU 레코드로 다시 계산.
+- 한 곳에서 계산한다(`Passes/Common/Scene.hlsli`): `lightWindow`(범위 창 또는 지수 창 × 뷰 페이드 × 채널 검사), `lightViewFade`, 스케일 접근자 4개, `lightBarnDoorRect`. 커널이 `UNX_LIGHT_COMPONENTS 0`을 정의하면 스케일·지수·페이드·barn door·소스 텍스처가 컴파일에서 빠진다(크기 한도에 걸린 커널용).
+
+| 항목 | 코드에 있는 것 | 소비자 |
+|---|---|---|
+| 1. 스케일 | diffuse·specular: `shPunctualIlluminance`가 조도에 diffuse 스케일을 곱하고 specular/diffuse 비를 `g_shLightSpecular`에 둔다. 국소광의 specular 로브(`shSpecular`, `shSpecularSubsurface`)가 그 비를 곱한다. 태양의 로브는 `shSpecularLobe`(스케일 없음). 면광원은 `shAreaIntegral`이 적분마다 곱한다(회전 프레임 = diffuse, LTC = specular). volumetric: `froxelIntensity`. indirect: 빛을 저장하는 점(`mlPointLambert`)의 값과 R의 광원 레코드 | 불투명 음영(함수 안에서; `ShadeOpaque.hlsl` 본문은 한 줄만 바뀜), MegaLights 가중치와 음영(`mlLightUnshadowed`), coverage 프래그먼트(coat·sheen 로브 포함), 머리카락(조도의 diffuse 스케일), FAR 타일 항(diffuse), 공기 슬라이스·안개 셀·국소광 볼륨·물 매질·볼륨(volumetric), surface cache 직접광(diffuse × indirect), 광선 hit의 광원 표본(diffuse × indirect) |
+| 2. rect 소스 텍스처 · barn door | 텍스처: `TextureSystem::lightSourceTextures` → `GpuScene::setLightSourceTextures`가 SRV를 광원 레코드에 넣는다. `shAreaColor`가 음영점의 방출면 위 수선의 발에서 읽는다. 레벨 = log2(평면까지 거리 / √면적) + log2(짧은 변 픽셀) − 2 (원본의 식). 방출면을 맞힌 광선은 hit 위치의 레벨 0. barn door: `lightBarnDoorRect`가 원본 `GetRect`의 식으로 점에서 보이는 사각형을 구하고 `shAreaIntegral`의 rect가 그 사각형을 적분한다 | 불투명·MegaLights·coverage·머리카락·surface cache(모두 `shAreaColor`, `shAreaIntegral` 경유), 반사 광선의 방출면 hit(`rtEmitterRadiance`) |
+| 3. 채널 | 음영점의 인스턴스 채널을 `g_lightChannels`에 두면 `lightWindow`가 채널을 공유하지 않는 광원에 0을 준다. MegaLights 표본 뽑기(`MegaLightsSample.hlsl`)가 픽셀의 vis id → 인스턴스 flags로 정한다: 가중치가 0인 광원은 뽑히지 않으므로 음영 쪽에는 검사가 없다 | 불투명 표면의 MegaLights 경로. 안개·공기·광선 hit은 검사하지 않는다(원본도 같다) |
+| 4. 최대 그리기 거리 | `lightViewFade` = saturate((거리 한계 − 카메라~광원 거리) / 페이드 구간), 구간 0이면 자름. `lightWindow`에 곱한다. 그림자 슬롯 우선순위(`VsmSystem.cpp`)에도 곱한다: 사라진 광원은 슬롯을 맨 뒤에 받는다 | `lightWindow`를 쓰는 모든 곳: 불투명, MegaLights, coverage, 머리카락, FAR 타일 항, 공기·안개·볼륨, surface cache, 광선 hit(pad 비트), 방출면 hit |
+| 5. 색온도 | `colorTemperatureTint`(Krystek의 플랑크 궤적 근사 → Rec.709, 휘도 1), `lightColor` = 색 × 틴트를 원래 색의 휘도로 맞춘 값. GPU 레코드와 R의 레코드에는 곱한 색만 있다 | CPU(`GpuScene.cpp`, `RayScene.cpp`) |
+| 6. 감쇠 지수 | 점·스폿에서 `falloffExponent` > 0이면 창 = (1 − (d/범위)²)^지수 × d². 호출하는 쪽의 1/d²와 상쇄되어 세기 × (1 − (d/범위)²)^지수가 된다(세기 = 광원 위치의 조도). 0이면 전과 같은 역제곱 × 범위 창 | 4와 같다. 광선 hit은 표본 가중치에 (자기 창 / 범위 창)을 곱한다(`rtLocalLightFinish`) |
+
+한계 [코드]:
+
+- `Native/Host` ABI에 새 필드가 없다(다른 작업의 몫으로 남겼다). 지금은 씬 파일과 `scene::Light`·`Instance::flags`로만 넣을 수 있다.
+- `ShadeOpaque.hlsl` 본문에 남은 것: 국소광의 coat·sheen 로브에 specular 스케일(`shLightSpecular()`을 곱하면 된다), 프록셀 리스트 경로(`mega_lights` 끔)의 채널 검사(광원 루프 앞에서 `g_lightChannels`에 인스턴스 채널을 넣으면 된다).
+- 채널 검사가 없는 곳: coverage 프래그먼트와 머리카락(기록에 인스턴스가 없다), surface cache 카드(카드의 인스턴스 채널을 넣지 않았다), FAR 타일 항.
+- barn door가 없는 곳: 그림자 광선의 표본점(가려진 부분으로도 광선이 간다), FAR 타일 항, 공기·안개의 세기, 방출면 프록시.
+- 소스 텍스처: diffuse와 specular가 조회 한 번을 같이 쓴다(원본은 각각). mip은 텍스처 시스템의 것이고 원본의 가우시안 프리필터가 아니다. 입자·공기·FAR 타일 항은 텍스처 없는 색이다. 텍스처를 처음 올린 프레임에 광원 버퍼를 다시 만든다(FX 광원이 그 프레임에 빠질 수 있다).
+- `mega_lights` 켠 상태의 lit 입자는 안개와 같은 국소광 볼륨을 읽으므로 volumetric 스케일을 따른다(원본의 반투명 볼륨은 따르지 않는다). 프록셀 리스트 경로의 입자는 diffuse 스케일이다.
+- `FxLayerSetup.STEP0.ML0.GIV0`은 구성요소 없이 컴파일한다(한도 204,800 B에서 256 B 아래). 머리카락은 specular 스케일을 따로 받지 않는다. 광선 hit의 specular 로브도 같다(레코드에 스케일이 하나다).
+- 큰 커널(B, 한도 204,800): `ReflectionTraceInline.SKY0.JOB2.CORNERS1` 203,648, `CoverageComposite.PART1.*.AREA1` 199,460, `GiTrace.SKY0.SPLIT1` 193,968.
+
+실행해서 확인할 것(순서대로): `unx_test_scene_lightcomponents`(CPU), 광원 레코드 크기가 바뀌었으므로 `unx_test_shading_shadingtests`·`unx_test_fx_fxlighttests`·`unx_test_raytracing_fxlighthits`, 그 뒤 항목마다 still(스케일 0과 2, 텍스처를 붙인 rect, barn door 각도 2개, 채널이 다른 두 물체, 거리 페이드 구간 안팎, 지수 2와 8).
