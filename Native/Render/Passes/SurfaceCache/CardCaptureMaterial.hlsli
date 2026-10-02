@@ -166,23 +166,32 @@ CcMaterial ccMaterial(CcSurface i)
     }
     else
     {
+        // (material inputs, Scene.hlsli: the material's uv transform and its emissive mask; no parallax, detail maps or
+        // vertex colour in a card)
+        float2 uv = i.uv, uvDx = i.uvDx, uvDy = i.uvDy;
+        materialUvFootprint(m, uv, uvDx, uvDy);
         if (m.baseColorTexture != UNX_NONE)
         {
-            const float4 c = ccSample(m.baseColorTexture, (m.textureClamp & M_TEX_BASE_COLOR) != 0, i.uv, i.uvDx, i.uvDy);
+            const float4 c = ccSample(m.baseColorTexture, (m.textureClamp & M_TEX_BASE_COLOR) != 0, uv, uvDx, uvDy);
             baseColor *= c.rgb;
             alpha = c.a;
         }
         if (m.roughMetalTexture != UNX_NONE)
         {
-            const float2 rm = ccSample(m.roughMetalTexture, (m.textureClamp & M_TEX_ROUGH_METAL) != 0, i.uv, i.uvDx, i.uvDy).rg;
+            const float2 rm = ccSample(m.roughMetalTexture, (m.textureClamp & M_TEX_ROUGH_METAL) != 0, uv, uvDx, uvDy).rg;
             roughness *= rm.r;
             metallic *= rm.g;
         }
-        if (m.emissiveTexture != UNX_NONE) emissive *= ccSample(m.emissiveTexture, (m.textureClamp & M_TEX_EMISSIVE) != 0, i.uv, i.uvDx, i.uvDy).rgb;
+        if (m.emissiveTexture != UNX_NONE) emissive *= ccSample(m.emissiveTexture, (m.textureClamp & M_TEX_EMISSIVE) != 0, uv, uvDx, uvDy).rgb;
+        if (m.inputs != UNX_NONE)
+        {
+            const GpuMaterialInputs r = loadMaterialInputs(m.inputs);
+            if (r.emissiveMaskTexture != UNX_NONE) emissive *= ccSample(r.emissiveMaskTexture, (r.textureClamp & 8u) != 0, uv, uvDx, uvDy).x;
+        }
         if (tableSrv != UNX_NONE)
         {
             const MTextureSet ts = mLoadTextureSet(tableSrv, material);
-            if (ts.moments != UNX_NONE) slope = (ccSample(ts.moments, (ts.flags & M_TEX_NORMAL) != 0, i.uv, i.uvDx, i.uvDy).xy * 2 - 1) * ts.slopeRange;
+            if (ts.moments != UNX_NONE) slope = (ccSample(ts.moments, (ts.flags & M_TEX_NORMAL) != 0, uv, uvDx, uvDy).xy * 2 - 1) * ts.slopeRange;
         }
     }
     const bool cutOut = m.alphaCutoff > 0 && alpha < m.alphaCutoff;  // (the kernel discards; the values below stand either way)

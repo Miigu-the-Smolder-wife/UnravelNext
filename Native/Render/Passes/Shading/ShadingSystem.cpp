@@ -425,6 +425,9 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     const bool megaWanted = false;
 #endif
     const bool tileLights = fc.quality.boolean("shading.tile_lights") && froxelLists && view.view.kind == gpu::ViewKind::Main && !megaWanted;
+    // Lighting channels in the kernels' own light loop (the froxel lists without shading.mega_lights, whose sampling tests
+    // them): part 1 reads the pixel's instance through the vis buffer (ShadeOpaque.hlsl P[11].zw).
+    const bool channelVis = froxelLists && !megaWanted && view.visId.valid() && view.visibleClusters.valid();
     const BufferRef tileRecords = tileLights && part != Part::Scatter ? fc.graph.createBuffer({ "M tile lights", (uint64_t)tileCount * 96, 0 }) : BufferRef{};
     if (emissiveLights.valid())
     {
@@ -703,7 +706,9 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         {
             // m.ml.sample, m.ml.trace; then m.ml.shade here (ShadeOpaque.hlsl with MEGA_LIGHTS = 1 on the class tile lists
             // of every band, the LAYERED variant of each class); then m.ml.sets, m.ml.temporal, m.ml.spatial
-            MegaLightsFrame ml = megaLightsSample(fc, view, o.materialWord, areaLights, ltcSrv, signature);
+            MegaLightsOptions mlOptions;
+            mlOptions.classWord = o.anisoWord;  // (an eye's iris pixels are weighed on the iris plane: their eye word)
+            MegaLightsFrame ml = megaLightsSample(fc, view, o.materialWord, areaLights, ltcSrv, signature, nullptr, mlOptions);
             if (!ml.on) fail("M.shading: shading.mega_lights could not start on a view (its inputs were present)");
             const bool mlMainView = view.view.kind == gpu::ViewKind::Main;
             auto mlKernel = [&](uint32_t layered) {
@@ -859,6 +864,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         if (tileLights)
         {
             ID3D12PipelineState* tileKernel = fc.shaders.compute("Passes/Lights/TileLights");
+            const uint32_t channelsShared = fc.scene.lightingChannelsShared();  // (a FAR light lights every instance)
             tilePass.setup = [=](PassBuilder& b) {
                 b.use(v.depth, Use::SrvCompute);
                 b.use(v.gbuffer, Use::SrvCompute);
@@ -871,11 +877,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             tilePass.execute = [=](PassContext& c) {
                 const auto [row0, row1] = passTileRows(c);
                 if (row1 <= row0) return;
-                const uint32_t k[8] = { c.srv(v.depth), c.srv(v.gbuffer), c.srv(v.froxelLights), c.srv(edgeTiles), c.uav(tileRecords), o.tilesX, row0,
-                                        r.vsmTileLit.valid() ? c.srv(r.vsmTileLit) : gpu::kNone };
+                const uint32_t k[12] = { c.srv(v.depth), c.srv(v.gbuffer), c.srv(v.froxelLights), c.srv(edgeTiles), c.uav(tileRecords), o.tilesX, row0,
+                                         r.vsmTileLit.valid() ? c.srv(r.vsmTileLit) : gpu::kNone, channelsShared, 0, 0, 0 };
                 c.cmd->SetPipelineState(tileKernel);
                 c.bindFrameConstants(cb);
-                c.computeConstants(k, 8);
+                c.computeConstants(k, 12);
                 c.cmd->Dispatch(o.tilesX, row1 - row0, 1);
             };
         }
@@ -927,6 +933,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             if (emissiveIrradiance.valid()) b.use(emissiveIrradiance, Use::SrvCompute);  // 14.1b
             if (tileLights) b.use(tileRecords, Use::SrvCompute);  // L2
             if (megaLighting.valid()) b.use(megaLighting, Use::SrvCompute);  // shading.mega_lights (P[10].y)
+            if (channelVis)
+            {
+                b.use(v.visId, Use::SrvCompute);
+                b.use(v.visibleClusters, Use::SrvCompute);
+            }
             if (r.vsmTileLit.valid()) b.use(r.vsmTileLit, Use::SrvCompute);  // L3 (P[10].w)
             if (meter) b.use(histogram.buffer, Use::UavCompute);
             if (scatter)
@@ -1003,6 +1014,13 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 k32[45] = roughSpecular.valid() ? c.srv(roughSpecular) : none;           // P[11].y: gi.lumen_only's rough specular
                 k32[46] = shortRangeAO.valid() ? c.srv(shortRangeAO) : none;             // P[11].z: ... and short-range AO
                 k32[47] = backfaceIrradiance.valid() ? c.srv(backfaceIrradiance) : none;  // P[11].w: ... and Foliage's back side
+                if (part == 1)
+                {
+                    // part 1's own light loop (the froxel lists, without shading.mega_lights): the vis buffer for the pixel's
+                    // lighting channels (ShadeOpaque.hlsl P[11].zw; part 2 reads the gather's textures there)
+                    k32[46] = channelVis ? c.srv(v.visId) : none;
+                    k32[47] = channelVis ? c.srv(v.visibleClusters) : none;
+                }
                 if (scatter && shadeClass == material::ShadeClass::Subsurface)
                 {
                     // shading.subsurface_scatter (SSS_SPLIT kernels): the class's diffuse texture, and the local lights'
@@ -1106,6 +1124,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              if (emissiveIrradiance.valid()) b.use(emissiveIrradiance, Use::SrvCompute);  // 14.1b
                              if (tileLights) b.use(tileRecords, Use::SrvCompute);  // L2
                              if (megaLighting.valid()) b.use(megaLighting, Use::SrvCompute);  // shading.mega_lights (P[10].y)
+                             if (channelVis)
+                             {
+                                 b.use(v.visId, Use::SrvCompute);
+                                 b.use(v.visibleClusters, Use::SrvCompute);
+                             }
                              if (scatter)
                              {
                                  b.use(scatterDiffuse, Use::UavComputeDisjoint);  // shading.subsurface_scatter: the Subsurface run's P[9].z
@@ -1165,6 +1188,10 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                  k32[41] = split ? (scatterMlSpecular.valid() ? c.srv(scatterMlSpecular) : none) : localWord;
                              };
                              // every run's part 1 (with its lobe kernel), one barrier, every run's part 2
+                             // (part 1's P[11].zw: the vis buffer for the pixel's lighting channels; part 2's: the gather's textures)
+                             const uint32_t gatherZ = k32[46], gatherW = k32[47];
+                             k32[46] = channelVis ? c.srv(v.visId) : none;
+                             k32[47] = channelVis ? c.srv(v.visibleClusters) : none;
                              for (size_t run = 0; run < fallbackRuns.size(); ++run)
                              {
                                  const auto& [kernel, classes] = fallbackRuns[run];
@@ -1182,6 +1209,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                  c.cmd->ExecuteIndirect(signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
                              }
                              lobeBarrier(c);
+                             k32[46] = gatherZ, k32[47] = gatherW;
                              for (size_t run = 0; run < fallbackRuns.size(); ++run)
                              {
                                  k32[6] = fallbackRuns[run].second;  // P[1].z
@@ -1296,6 +1324,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             const TextureRef covGbuffer = g.createTexture({ "m.ml.cov gbuffer", W, H, 1, 1, DXGI_FORMAT_R32G32_UINT });
             const TextureRef covWord = g.createTexture({ "m.ml.cov material word", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
             const TextureRef covDepth = g.createTexture({ "m.ml.cov depth", W, H, 1, 1, DXGI_FORMAT_R32_FLOAT });
+            // (the nearest fragment's lighting channels: the instance's samples take no light its instance is not lit by)
+            const TextureRef covChannels = g.createTexture({ "m.ml.cov lighting channels", W, H, 1, 1, DXGI_FORMAT_R8_UINT });
             std::array<ID3D12PipelineState*, 4> covKernel{};
             for (int mode = 0; mode < 4; ++mode) covKernel[mode] = fc.shaders.compute(("Passes/Shading/MegaLightsCoverage.MODE" + std::to_string(mode)).c_str());
             g.addPass("m.ml.cov.nearest", QueueType::Graphics,
@@ -1332,11 +1362,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           b.use(v.visibleClusters, Use::SrvCompute);
                           b.use(nearest, Use::SrvCompute);
                           b.use(element, Use::SrvCompute);
-                          for (TextureRef t : { covGbuffer, covWord, covDepth }) b.use(t, Use::UavCompute);
+                          for (TextureRef t : { covGbuffer, covWord, covDepth, covChannels }) b.use(t, Use::UavCompute);
                       },
                       [=](PassContext& c) {
                           const uint32_t k[12] = { c.srv(v.coverageRecords), gpu::kNone, c.srv(nearest), c.srv(element), gpu::kNone, c.srv(v.visibleClusters), 0, 0,
-                                                   c.uav(covGbuffer), c.uav(covWord), c.uav(covDepth), 0 };
+                                                   c.uav(covGbuffer), c.uav(covWord), c.uav(covDepth), c.uav(covChannels) };
                           c.bindFrameConstants(cb);
                           c.computeConstants(k, 12);
                           c.cmd->SetPipelineState(covKernel[3]);
@@ -1348,7 +1378,9 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             cview.depth = covDepth;
             cview.gbuffer = covGbuffer;
             cview.visId = {};
-            MegaLightsFrame cml = megaLightsSample(fc, cview, covWord, areaLights, ltcSrv, signature, "coverage");
+            MegaLightsOptions covOptions;
+            covOptions.channels = covChannels;
+            MegaLightsFrame cml = megaLightsSample(fc, cview, covWord, areaLights, ltcSrv, signature, "coverage", covOptions);
             if (!cml.on) fail("M.shading: the coverage layer's shading.mega_lights instance could not start");
             ID3D12PipelineState* covShade = fc.shaders.compute((std::string("Passes/Shading/MegaLightsShade.AREA") + (areaLights ? "1" : "0") + ".LAYERED0.FULL1").c_str());
             // Subsurface fragments take that class's variant in a dispatch of its own - its two specular lobes and the light
@@ -1975,6 +2007,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         {
             if (covTlCapacity == 0 || covTlCapacity > 65535) fail("shading.coverage_tile_lights_capacity must be in [1, 65535]");
             ID3D12PipelineState* tlKernel = fc.shaders.compute("Passes/Lights/CoverageTileLights");
+            const uint32_t channelsShared = fc.scene.lightingChannelsShared();  // (a FAR light lights every instance)
             g.addPass("m.coverage.tilelights", QueueType::Graphics,
                       [&](PassBuilder& b) {
                           b.use(v.coverageRecords, Use::SrvCompute);
@@ -1984,7 +2017,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           b.use(covTlField, Use::UavCompute);
                       },
                       [=](PassContext& c) {
-                          const uint32_t k[8] = { c.srv(v.coverageRecords), c.srv(v.coverageTileList), c.srv(v.froxelLights), c.uav(covTlField), covTlCapacity, 0, 0, 0 };
+                          const uint32_t k[8] = { c.srv(v.coverageRecords), c.srv(v.coverageTileList), c.srv(v.froxelLights), c.uav(covTlField), covTlCapacity,
+                                                  channelsShared, 0, 0 };
                           c.cmd->SetPipelineState(tlKernel);
                           c.bindFrameConstants(cb);
                           c.computeConstants(k, 8);

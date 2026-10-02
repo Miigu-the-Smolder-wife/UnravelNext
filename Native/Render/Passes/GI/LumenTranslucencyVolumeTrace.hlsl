@@ -11,7 +11,7 @@
 //          ray (HitLocalSample.hlsli) - and the indirect light the card frame names (LumenHitIndirect.hlsli: the
 //          previous frame's volume, this frame's irradiance probes), through the material's constants, as
 //          r.card.radiosity.trace; the back of a one-sided surface: 0. A thread traces at most 3 rays: bands of a
-//          third of 262,144 threads;
+//          third of 262,144 threads; + the skylight leaking the card frame names (lumen.skylight_leaking; 0 by default);
 //   hair   E's grooms (RayTracing/HitHair.hlsli; raytracing.hair): the ray's first fibre in the hair density volume,
 //          where it lies before the hit - except in a groom the cell's point lies inside: the strands take the cell's
 //          light through their own body's hair themselves (CoverageHair.hlsl hairIndirect);
@@ -26,6 +26,7 @@
 // cache's depth atlas SRV (UNX_NONE: no probe visibility test), asuint(the depth constraint's threshold, slices),
 // asuint(far-field start, m; 0: none - GiSky.hlsli giFarSkyIrradiance) }
 #define GI_SKY_FOG_RETURN  // (GiSky.hlsli: the sky's share of the sun's light the fog scatters - atmosphere.fog.sun_through_fog)
+#define RT_SHADOW_TRANSMITTANCE  // (the hits' shadow rays take what the Glass they cross leaves of the light: RayShaders.hlsli)
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
@@ -36,6 +37,7 @@
 #include "Passes/GI/LumenHitIndirect.hlsli"
 #include "RayTracing/HitLocalSample.hlsli"
 #include "RayTracing/HitHair.hlsli"
+#include "RayTracing/HitFarField.hlsli"
 
 [shader("raygeneration")]
 void LumenTranslucencyVolumeTraceGen()
@@ -86,7 +88,7 @@ void LumenTranslucencyVolumeTraceGen()
     if (!(all(abs(ray.Origin) < 1e9) && dd > 0.98 && dd < 1.02 && ray.TMax > 0 && ray.TMax < 1e30)) return;
     const RtSceneSrvs scene = rtScene();
     float3 radiance = 0;
-    const RtHit hit = rtTraceClosest(scene, ray, RAY_FLAG_NONE, RT_MASK_GI);
+    const RtHit hit = rtTraceClosest(scene, ray, RAY_FLAG_NONE, RT_MASK_GI | RT_MASK_FAR);
     const uint hairParams = rtHairParams(scene);
     const uint hairSeed = seed * 3u + id.z * 7919u + texel.x * 31u + texel.y * 131u;
     RtHairHit hair;
@@ -102,6 +104,7 @@ void LumenTranslucencyVolumeTraceGen()
         if (coverage.valid) radiance = cached.rgb;
         else radiance = giSkyRadiance(ray.Direction);
     }
+    else if (hit.instance == RT_INSTANCE_FAR) radiance = rtFarRadiance(scene, hit, ray.Origin, ray.Direction, true);  // (raytracing.far_field)
     else if (hit.instance != RT_INSTANCE_EMITTER && P[5].x != UNX_NONE)
     {
         const RtSurface s = rtSurface(scene, hit, ray.Origin, ray.Direction);
@@ -109,7 +112,8 @@ void LumenTranslucencyVolumeTraceGen()
         if (s.frontFace || (m.classFlags & MATERIAL_TWO_SIDED) != 0)
         {
             const ClSample cards = clReadCards(mcFrame(P[5].x), s.sceneInstance, s.position, s.geometricNormal, CL_READ_FINAL);
-            if (cards.valid) radiance = cards.final;
+            // (a leaf: (1 - t) of its side's light and t of the other side's - LumenHitIndirect.hlsli lhiFoliageFinal)
+            if (cards.valid) radiance = lhiFoliageFinal(lhiRules(P[5].x), mcFrame(P[5].x), m, s.sceneInstance, s.position, s.geometricNormal, cards.final);
             else
             {
                 if ((m.classFlags & MATERIAL_EMISSIVE_VISIBLE_ONLY) != 0) m.emissive = 0;
@@ -130,14 +134,18 @@ void LumenTranslucencyVolumeTraceGen()
                         sr.Direction = l;
                         sr.TMin = 0;
                         sr.TMax = giRayLength();
-                        L.sunIlluminance = e0;
-                        L.sunVisibility = rtVisible(scene, sr, RT_MASK_GI) ? 1.0 : 0.0;
+                        // (the sun through the Glass on the way: what the panes leave of it - RayShaders.hlsli rtShadowTransmittance)
+                        const float3 through = rtShadowTransmittance(scene, sr, RT_MASK_HIT_SHADOW | RT_MASK_FAR);
+                        L.sunIlluminance = e0 * through;
+                        L.sunVisibility = any(through > 0) ? 1.0 : 0.0;
                     }
                 }
                 L.local = rtHitLocalSample(scene, s, m, -ray.Direction, hit.t * 1.2, bias, seed * 3u + id.z * 7919u + texel.x * 31u + texel.y * 131u);
                 radiance = rtHitRadiance(m, s.normal, -ray.Direction, L, 1.2);
             }
         }
+        // lumen.skylight_leaking (LumenHitIndirect.hlsli; 0 by default: nothing)
+        radiance += lhiSkyLeaking(lhiRules(P[5].x), ray.Direction, hit.t);
     }
     const float cap = asfloat(P[9].x);
     const float brightest = max(radiance.r, max(radiance.g, radiance.b)) * g_exposure;

@@ -26,7 +26,9 @@ enum class SceneId : uint32_t
                          // through the walls reads as light over them (a leak is thousands of times the room's light)
     ShadingBall = 10,    // diagnostic: the shading models side by side - five spheres (Standard, Subsurface, Subsurface
                          // with one lobe, sheen, clearcoat) and a thin Subsurface slab with a light behind it; above
-                         // them a sphere with the cloth blend and two eyes (the eye model) that look at the front camera
+                         // them a sphere with the cloth blend and two eyes (the eye model) that look at the front camera;
+                         // under them four plates for the material inputs (uv transform, detail maps, height, vertex
+                         // colour and emissive mask)
     HairBall = 11,       // diagnostic: strand hair in two colours - two head-sized spheres under a dark and a blond groom
                          // (grooms), a key light, a rim light behind them, a dim sun
     // New scenes are appended (never renumbered) through the interface-change procedure.

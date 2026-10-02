@@ -1,9 +1,10 @@
 // V internal: root-constant layout and helpers shared by the cull kernels. Owner: V.
 //   P[0] views SRV, state UAV (raw), args UAV (raw), phase (1 | 2)
-//   P[1] node items UAV (uint2), group items UAV (uint2), visible UAV (uint2: instance, cluster | view << 24), lists UAV (raw)
-//   P[2] deferred instances UAV (uint), deferred nodes UAV (uint2), deferred clusters UAV (uint2), HiZ SRV
-//   P[3] HiZ mips (bits 0-4) | chunk work UAV << 5 (uint: CullChunks items and deferred chunks), HiZ width, HiZ height,
-//        instance mask
+//   P[1] node items UAV (uint2), group items UAV (uint2), visible UAV (uint2: packItem of instance, cluster, view), lists
+//        UAV (raw)
+//   P[2] deferred instances UAV (uint2: instance, view), deferred nodes UAV (uint2), deferred clusters UAV (uint2), HiZ SRV
+//   P[3] HiZ mips (bits 0-4) | chunk work UAV << 5 (uint2 (chunk, view): CullChunks items and deferred chunks), HiZ width,
+//        HiZ height, instance mask
 //   P[4] cluster nodes SRV, mesh roots SRV, cluster LOD spheres SRV, tile mask SRV (UNX_NONE = none)
 //   P[5] capacity: node items, group items, visible (= each list), deferred items
 //   P[6] view count, instance count, band mode (BAND_MODE_*, bits 0-7) | TILE_STORED_PAIRS << 8 | NODE_WORK_QUEUE << 9,

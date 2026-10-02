@@ -8,7 +8,7 @@
 #include "Passes/Visibility/ClusterHierarchy.hlsli"
 #include "Passes/ViewModel/ViewModel.hlsli"
 
-// One view of a cull run (main view: one; depth raster service: one per RasterView). 384 B.
+// One view of a cull run (main view: one; depth raster service: one per RasterView). 400 B.
 struct CullView
 {
     row_major float4x4 viewProj;
@@ -40,6 +40,9 @@ struct CullView
     uint instanceSet;                  // RasterView::instanceSet: 0 every instance, 1 the ones that are not movable, 2 the movable
                                        // ones (instanceInSet)
     uint occluderSrv, occluderSlotsSrv; // CULL_VIEW_TILE_OCCLUDERS: the request's tile occluders and atlas slots (raw SRVs)
+    uint guessSrv;                     // CULL_VIEW_TILE_TWO_PHASE: the request's tile guesses (raw SRV)
+    uint slotOffset;                   // first word of the view's tile slots in the request's atlas slots (tile i: + i)
+    uint pad1, pad2;
 };
 
 // The view's instance set (RasterView::instanceSet): movable = INSTANCE_MOVABLE_FLAGS, a bone palette, morph or terrain
@@ -78,7 +81,8 @@ struct CullScene
 struct CullChunk
 {
     float4 sphere;  // world; radius < 0 until ChunkBounds ran
-    uint first, count, pad0, pad1;  // pad0: the members' largest wind inflation per (m/s)^2 (float bits, ChunkBounds.hlsl)
+    uint first, count, pad0, pad1;  // pad0: the members' largest wind inflation per (m/s)^2 (float bits, ChunkBounds.hlsl);
+                                    // pad1: their largest world radius without wind (float bits)
 };
 
 #define CHUNK_INSTANCES 256u
@@ -108,6 +112,26 @@ uint skinSlot(CullScene cs, uint instance)
 #define CULL_VIEW_CULL_BACK 2u   // back faces of one-sided materials are culled (cone test allowed)
 #define CULL_VIEW_TILE_SINGLE 4u // tile-local pairs are single tiles (DepthRasterRequest atlas mode: one slot per tile)
 #define CULL_VIEW_TILE_OCCLUDERS 8u  // tested against the request's tile occluders (tilesOcclude)
+#define CULL_VIEW_TILE_TWO_PHASE 16u // tile occluders in two phases: phase 1 against the tiles' guesses (what it rejects is
+                                     // deferred), phase 2 against the occluders rebuilt from what phase 1 drew
+#define CULL_VIEW_PROXIES 32u        // chunk members under the view's smallest instance are drawn as proxies
+                                     // (DepthRasterRequest::proxies, DepthProxy.ms.hlsl)
+#define CULL_VIEW_NO_GLASS 64u       // RasterView::materialFilter 1: clusters of a Glass class material are not drawn
+#define CULL_VIEW_GLASS_ONLY 128u    // RasterView::materialFilter 2: only those are
+
+// A chunk item (CullChunks PHASE=1: uint2 chunk, view) whose members are all under its view's smallest instance: none of
+// them is tested (CullInstances SOURCE=1 skips the item); the proxy kernel draws them from the item.
+#define CHUNK_ITEM_PROXIES 0x80000000u
+
+// An instance a run draws: one of the run's instance mask (0: every instance) that is not hidden - and, for a
+// shadow-only instance (scene::InstanceShadowOnly), a run of the shadow casters (its mask names INSTANCE_CAST_SHADOW):
+// the views, the card captures and every other run leave it out.
+bool instanceInRun(GpuInstance inst, uint mask)
+{
+    if ((inst.flags & INSTANCE_HIDDEN) != 0) return false;
+    if ((inst.flags & INSTANCE_SHADOW_ONLY) != 0 && (mask & INSTANCE_CAST_SHADOW) == 0) return false;
+    return (inst.flags & mask) != 0 || mask == 0;
+}
 
 // Cull state words (RWByteAddressBuffer, 4 B each).
 #define VS_NODE_WRITE 0u
@@ -192,7 +216,8 @@ uint skinSlot(CullScene cs, uint instance)
 #define VA_DEFERRED_INSTANCES 9u
 #define VA_SEED_NODES 12u
 #define VA_GPU_INSTANCES 15u  // phase 1 over the live GPU-written instances (CullReset: ceil(live / 64) x views)
-                              // words 18 .. 32: unused
+#define VA_PROXIES 18u        // DepthProxy.ms.hlsl over the visible chunk items (DispatchMesh: CullPrepare MODE=3, phase 1)
+                              // words 21 .. 32: unused
 #define VA_COV_MESH 33u       // coverage raster: every band B list entry (both phases)
 #define VA_COV_CLEAR 36u      // tile clear over last frame's coverage tiles (one group per tile)
 #define VA_COV_RECORDS 39u    // count and scatter over the stored stream entries (one group per COV_BLOCK)
@@ -265,9 +290,16 @@ void nodePublish(RWByteAddressBuffer state, uint first, uint total)
     if (total > 0 && WaveIsFirstLane()) state.InterlockedMax(4 * VS_NODE_COMMIT, first + total);
 }
 
-uint packItem(uint index, uint view) { return index | (view << 24); }
-uint itemIndex(uint packed) { return packed & 0xFFFFFFu; }
-uint itemView(uint packed) { return packed >> 24; }
+// Work items and visible entries: uint2 (instance, index of a node or cluster) with the view in the two words' top
+// bytes - its low 8 bits over the index, bits 8 .. 15 over the instance (instances, nodes and clusters are below 2^24:
+// refreshScene). A run of at most 256 views has the instance word free of view bits, so the main view's visible list
+// (one view) reads as before: .x the instance, .y the cluster | view << 24. A raster request holds up to 4096 views
+// (kViewsPerSlot); its visible list is read by V's own raster kernels only. Chunk items and deferred instances are
+// plain pairs (chunk or instance, view).
+uint2 packItem(uint instance, uint index, uint view) { return uint2(instance | ((view >> 8) << 24), index | ((view & 0xFFu) << 24)); }
+uint itemInstance(uint2 item) { return item.x & 0xFFFFFFu; }
+uint itemIndex(uint2 item) { return item.y & 0xFFFFFFu; }
+uint itemView(uint2 item) { return (item.y >> 24) | ((item.x >> 24) << 8); }
 
 float instanceScale(GpuInstance inst) { return length(inst.objectToWorld[0].xyz); }
 
@@ -389,6 +421,17 @@ float projectedLength(CullView v, float4 s, float worldLength)
 // An instance too small for the view (RasterView::minInstanceTexels): its bounding sphere's radius projects to under the
 // view's minimum, taken at the sphere's nearest point (the largest it can appear).
 bool instanceBelowView(CullView v, float4 bounds) { return v.minInstancePx > 0 && projectedLength(v, bounds, bounds.w) < v.minInstancePx; }
+
+// Every member of a chunk is too small for a view that draws proxies: the members' largest radius - with their largest
+// wind inflation at this frame's wind - projected at the chunk sphere's nearest point is under the view's minimum. A
+// member's own test (instanceBelowView: its radius at its own sphere's nearest point, which is not nearer than the
+// chunk's) is then true as well.
+bool chunkBelowView(CullView v, CullChunk ch, float4 chunkBounds)
+{
+    if ((v.flags & CULL_VIEW_PROXIES) == 0 || !(v.minInstancePx > 0)) return false;
+    const float largest = asfloat(ch.pad1) + asfloat(ch.pad0) * g_windSpeed * g_windSpeed;
+    return projectedLength(v, chunkBounds, largest) < v.minInstancePx;
+}
 
 // Screen rectangle (pixels, inclusive) and nearest device depth of a world sphere under viewProj; false when the
 // sphere's box reaches the near plane (then it can never be occluded).
@@ -605,15 +648,39 @@ bool tileAnySet(CullView v, uint view, TileMasks masks, uint2 a, uint2 b)
     return false;
 }
 
-// Tile occluders of a raster-service view (DepthRasterRequest::tileOccluders, CULL_VIEW_TILE_OCCLUDERS): true when the
-// sphere is hidden in every set tile under it - in each, its nearest device depth is farther than the farthest depth
-// stored over the blocks its rectangle touches in the tile (341 floats per atlas slot: blocks of tilePx / 16 pixels, then
-// of 2, 4, 8 and 16 times that; read on the block level where the rectangle spans at most 2 x 2 blocks; 0 = a pixel with
-// nothing stored: not hidden). False (not hidden) without occluders, when the sphere reaches the view's near plane, or
-// when it spans more than 2 x 2 tiles. Reversed Z: nearer = larger.
-bool tilesOcclude(CullView v, uint maskSrv, float4 s)
+// The farthest depth an atlas slot's occluder record stores over the pixel rectangle [lo, hi] of the slot: 341 floats
+// per slot - blocks of blockPx pixels (16 x 16 of them), then of 2, 4, 8 and 16 times that - read on the block level
+// where the rectangle spans at most 2 x 2 blocks (0 = a pixel with nothing stored).
+float tileOccluderDepth(ByteAddressBuffer occluders, uint slot, uint2 lo, uint2 hi, uint blockPx)
 {
-    if ((v.flags & CULL_VIEW_TILE_OCCLUDERS) == 0 || v.cullMaskOffset == UNX_NONE || maskSrv == UNX_NONE) return false;
+    const uint2 bl = lo / blockPx, bh = hi / blockPx;
+    uint m = 0;
+    [unroll] for (uint q = 0; q < 4; ++q)
+        if ((bh.x >> m) - (bl.x >> m) > 1 || (bh.y >> m) - (bl.y >> m) > 1) ++m;
+    const uint perTile = 16u >> m;
+    const uint offset = m == 0 ? 0u : m == 1 ? 256u : m == 2 ? 320u : m == 3 ? 336u : 340u;
+    const uint2 b0 = min(bl >> m, perTile - 1), b1 = min(bh >> m, perTile - 1);
+    float farthest = 1;
+    [unroll] for (uint c = 0; c < 4; ++c)
+    {
+        const uint2 blk = uint2((c & 1) ? b1.x : b0.x, (c & 2) ? b1.y : b0.y);
+        farthest = min(farthest, asfloat(occluders.Load(4 * (slot * 341 + offset + blk.y * perTile + blk.x))));
+    }
+    return farthest;
+}
+
+// Tile occluders of a raster-service view (DepthRasterRequest::tileOccluders; CULL_VIEW_TILE_OCCLUDERS, or
+// CULL_VIEW_TILE_TWO_PHASE in its phase 2): true when the sphere is hidden in every set tile under it - in each, its
+// nearest device depth is farther than the farthest depth stored over its rectangle in the tile's slot
+// (tileOccluderDepth; a pixel with nothing stored hides nothing). False (not hidden) without occluders, when the sphere
+// reaches the view's near plane, or when it spans more than 2 x 2 tiles. Reversed Z: nearer = larger.
+// guess (phase 1 of CULL_VIEW_TILE_TWO_PHASE; DepthRasterRequest::tileGuess): each tile is read through its guess - another
+// slot and where the tile lies in it (a coarser page of the same surface) - and a tile without one hides nothing. A
+// guess may be wrong either way: what it rejects is only deferred to phase 2, which tests against the tile's own
+// occluders, rebuilt from what phase 1 drew.
+bool tilesOcclude(CullView v, uint maskSrv, float4 s, bool guess)
+{
+    if ((v.flags & (CULL_VIEW_TILE_OCCLUDERS | CULL_VIEW_TILE_TWO_PHASE)) == 0 || v.cullMaskOffset == UNX_NONE || maskSrv == UNX_NONE) return false;
     float4 rect;
     float nearest;
     if (!projectSphere(v.viewProj, v.viewportSize, s, rect, nearest)) return false;
@@ -634,23 +701,25 @@ bool tilesOcclude(CullView v, uint maskSrv, float4 s)
         const uint i = tile.y * v.tilesX + tile.x;
         if (((mask.Load(4 * (v.cullMaskOffset + (i >> 5))) >> (i & 31u)) & 1u) == 0) continue;  // not drawn: nothing to hide from
         any = true;
-        const uint slot = slots.Load(4 * (v.cullMaskOffset * 32 + i));
-        // the rectangle inside the tile, in blocks; the level where it spans at most 2 x 2 of them
+        // the rectangle inside the tile, and the slot whose record stands for the tile there
         const uint2 origin = tile * v.tilePx;
-        const uint2 lo = (max(p0, origin) - origin) / blockPx, hi = (min(p1, origin + v.tilePx - 1) - origin) / blockPx;
-        uint m = 0;
-        [unroll] for (uint q = 0; q < 4; ++q)
-            if ((hi.x >> m) - (lo.x >> m) > 1 || (hi.y >> m) - (lo.y >> m) > 1) ++m;
-        const uint perTile = 16u >> m;
-        const uint offset = m == 0 ? 0u : m == 1 ? 256u : m == 2 ? 320u : m == 3 ? 336u : 340u;
-        const uint2 b0 = min(lo >> m, perTile - 1), b1 = min(hi >> m, perTile - 1);
-        float farthest = 1;
-        [unroll] for (uint c = 0; c < 4; ++c)
+        uint2 lo = max(p0, origin) - origin, hi = min(p1, origin + v.tilePx - 1) - origin;
+        uint slot;
+        if (guess)
         {
-            const uint2 blk = uint2((c & 1) ? b1.x : b0.x, (c & 2) ? b1.y : b0.y);
-            farthest = min(farthest, asfloat(occluders.Load(4 * (slot * 341 + offset + blk.y * perTile + blk.x))));
+            // { slot (UNX_NONE: none), shift | x << 8 | y << 20 }: the tile's pixel p is pixel (x, y) + (p >> shift) of the slot
+            ByteAddressBuffer guesses = ResourceDescriptorHeap[v.guessSrv];
+            const uint2 g = guesses.Load2(8 * (v.cullMaskOffset * 32 + i));
+            if (g.x == UNX_NONE) return false;
+            slot = g.x;
+            const uint shift = g.y & 0xFFu;
+            const uint2 at = uint2((g.y >> 8) & 0xFFFu, g.y >> 20);
+            lo = at + (lo >> shift);
+            hi = at + (hi >> shift);
         }
-        if (!(nearest < farthest)) return false;  // it can show in this tile
+        else
+            slot = slots.Load(4 * (v.slotOffset + i));
+        if (!(nearest < tileOccluderDepth(occluders, slot, lo, hi, blockPx))) return false;  // it can show in this tile
     }
     return any;
 }

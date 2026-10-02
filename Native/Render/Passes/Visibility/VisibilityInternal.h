@@ -6,7 +6,7 @@
 
 namespace unx::visibility::detail
 {
-struct CullView  // 384 B
+struct CullView  // 400 B
 {
     float4x4 viewProj;
     float4x4 prevViewProj;
@@ -35,6 +35,9 @@ struct CullView  // 384 B
     float minInstancePx;                  // RasterView::minInstanceTexels (0: every instance)
     uint32_t instanceSet;                 // RasterView::instanceSet (0 every instance, 1 not movable, 2 movable)
     uint32_t occluderSrv, occluderSlotsSrv;  // DepthRasterRequest::tileOccludersSrv, atlasSlotsSrv (kViewTileOccluders)
+    uint32_t guessSrv;                       // DepthRasterRequest::tileGuessSrv (kViewTileTwoPhase)
+    uint32_t slotOffset;                     // RasterView::atlasSlotOffset (default: cullMaskOffset * 32)
+    uint32_t pad[2];
 };
 
 // C3 instance hierarchy (VisibilityCommon.hlsli CullScene, CullChunk).
@@ -47,7 +50,7 @@ static_assert(sizeof(CullScene) == 32);
 struct CullChunk
 {
     float4 sphere;  // world; radius < 0 until ChunkBounds ran
-    uint32_t first, count, windBits, pad1;
+    uint32_t first, count, windBits, radiusBits;  // (ChunkBounds.hlsl: the members' largest wind term and radius)
 };
 static_assert(sizeof(CullChunk) == 32);
 struct SkinJointSphere  // SkinBounds.hlsl
@@ -59,12 +62,18 @@ static_assert(sizeof(SkinJointSphere) == 32);
 constexpr uint32_t kChunkInstances = 256;  // CHUNK_INSTANCES
 constexpr float kChunkCell = 64.0f;         // metres (ARCHITECTURE 2.1: 64 m cells)
 constexpr uint32_t kSkinJointOrigin = 0xFFFFFFFFu;
-static_assert(sizeof(CullView) == 384);
+static_assert(sizeof(CullView) == 400);
 
 constexpr uint32_t kViewOcclusion = 1;
 constexpr uint32_t kViewCullBack = 2;
 constexpr uint32_t kViewTileSingle = 4;  // tile-local pairs are single tiles (atlas mode)
 constexpr uint32_t kViewTileOccluders = 8;  // tested against the request's tile occluders (RasterView::tileOccluders)
+constexpr uint32_t kViewTileTwoPhase = 16;  // ... in two phases (RasterView::tileTwoPhase)
+constexpr uint32_t kViewProxies = 32;       // chunk members under minInstancePx are drawn as proxies (DepthRasterRequest::proxies)
+constexpr uint32_t kViewNoGlass = 64, kViewGlassOnly = 128;  // RasterView::materialFilter 1, 2
+// Views of one cull run: the work items' view field is 16 bits (VisibilityCommon.hlsli packItem), a run's views one
+// upload chunk of this many.
+constexpr uint32_t kViewsPerRun = 4096;
 
 // Cull state words.
 constexpr uint32_t kStateNodeWrite = 0, kStateNodeEnd = 2, kStateGroupWrite = 3, kStateVisible = 5, kStateDeferInstances = 6, kStateDeferNodes = 7,
@@ -87,7 +96,7 @@ constexpr uint32_t kListSw = kListTBack;  // LIST_SW: a raster request's cluster
 constexpr uint32_t kAListCount = 4;  // lists drawn by the vis buffer raster
 
 // Indirect argument words.
-constexpr uint32_t kArgNodes = 0, kArgGroups = 3, kArgDeferredClusters = 6, kArgDeferredInstances = 9, kArgSeedNodes = 12, kArgGpuInstances = 15, kArgCovMesh = 33,
+constexpr uint32_t kArgNodes = 0, kArgGroups = 3, kArgDeferredClusters = 6, kArgDeferredInstances = 9, kArgSeedNodes = 12, kArgGpuInstances = 15, kArgProxies = 18, kArgCovMesh = 33,
                    kArgCovClear = 36, kArgCovRecords = 39, kArgChunkItems = 42, kArgDeferredChunks = 45, kArgMesh = 48, kArgCovTMesh = 72, kArgWords = 78;
 
 // Band modes of a cull run (CullShared.hlsli BAND_MODE_*): A = every band in the band A lists (raster service, secondary

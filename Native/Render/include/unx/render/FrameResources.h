@@ -72,6 +72,9 @@ struct ViewResources
     TextureRef materialWord;       // R32_UINT: material 16 | metallic 8 | layer roughness 8 [M]
                                    // (MaterialInternal.hlsli mPackMaterialWord)
     TextureRef shadowVisibility;   // R32_UINT, 4 light slots x 8 bit (7.3)                 [S]
+                                   // (in a frame with glass shadow casters - shadow.vsm.translucent_tint - twice the
+                                   //  view's height: the rows below the view's are what they let through at each
+                                   //  pixel, slot 0 x its luminance; ShadowVisibility.hlsli shadowSunTintChroma)
     TextureRef shadowOverflowTiles;  // R32_UINT ceil(W/8) x ceil(H/8) (main view, 7.3, v1.20): [S]
                                      // 0 = no shadow-casting light past the third in the tile,
                                      // 0xFFFFFFFF = over capacity (fallback list), else 1 + the
@@ -221,6 +224,9 @@ struct FogView
     float farEndM = 0;
     float farM = 0, k = 0, b = 0;  // slice(depth) = log2(depth k + 1) b
     float density = 0, falloff = 0, height = 0, g = 0, start = 0;  // extinction (1/m) at height, its halving per metre, m, HG g, m
+    float density2 = 0, falloff2 = 0, height2 = 0;                 // the second layer (FogDesc::density2, or the rain's veil; 0: none)
+    bool rainVeil = false;         // the second layer is the rain's (atmosphere.fog.rain_veil)
+    bool farSkyLight = false;      // atmosphere.fog.far_sky_light (FogIntegrate.hlsl: the far slices' ambient light is the sky's)
     float albedo[3] = { 1, 1, 1 };
     float skyAmount = 0, historyWeight = 0.9f, shadowTexelsPerCell = 1;
     bool indirect = true;

@@ -31,6 +31,38 @@ proxy_error_model = "measured"         # a cut's error for the choice: "measured
 proxy_posed_factor = 1.5               # posed / bind-pose error margin of skin-aware cuts (measured up to 1.32)
 near_characters_with_proxy = 64
 dynamic_tlas_instances_max = 100000
+see_through_translucent = true   # Glass / Water surfaces are not there for the GI rays and the shadow rays (the reference
+                                 # keeps translucent meshes out of its Lumen scene): sky and sun light enter a room through
+                                 # its windows in the bounce light as they do in the view. An instance made of such materials
+                                 # alone is left out by its mask; a pane that shares a mesh with opaque submeshes (a window
+                                 # in its frame) is non-opaque geometry the any-hit shader ignores for those rays.
+                                 # Reflection and refraction rays still meet them. A shadow ray shot from a ray hit takes
+                                 # what the Glass it crosses leaves of the light (the pane's tint; RayShaders.hlsli
+                                 # rtShadowTransmittance); the cards' direct light stores one bit a texel and light, and
+                                 # takes Glass as clear. false: such meshes stop GI rays as opaque surfaces (the behaviour
+                                 # until 2026-10-03). A ray traced FORCE_OPAQUE (surface_cache.shadow_rays_opaque) runs no
+                                 # any-hit shader: a pane inside a mixed mesh stops it
+# The far field (RayScene.h; the reference's r.RayTracing.Culling and its far-field scene of merged proxies). With a
+# million static instances every ray walks a TLAS of all of them out to gi.ray_length_m. true: the static TLAS holds
+# only what the reference's culling rule keeps near the camera (and every instance too large to stand in a box), and
+# the rest is met as boxes - one per group of instances, with the share of rays the group stops and its main material's
+# colour - by the Lumen rays (final gather, radiance cache, translucency volume, card radiosity, reflections,
+# refraction service). A hit on a box takes the sun through a shadow ray and the open sky, as every hit past the mesh
+# cards. OFF until measured: a first run must look at the near set's size and its rebuild's cost when the camera
+# crosses the rebuild distance (the log's "near set" lines; the pass r.as.tlas.static), the proxies' count and BLAS
+# size (the "far field" line at load), the rays' passes' time against far_field = false, the noise of the boxes'
+# stochastic opacity in probes and mirrors, and the change of light where an instance hands over to its box.
+far_field = false
+far_field_cull_radius_m = 300.0        # r.RayTracing.Culling.Radius (30000 cm): past it an instance is in the far field
+far_field_cull_angle_deg = 1.0         # r.RayTracing.Culling.Angle: so is one whose bounding radius subtends less (radius /
+                                       # distance < tan angle) - by size class, the class's smallest radius
+far_field_rebuild_distance_m = 16.0    # the near set is chosen again when the camera is this far from where it was last chosen
+far_field_near_instances_max = 262144  # the static TLAS's size with the far field: instances past it are left out, smallest
+                                       # classes first (logged)
+far_field_proxy_size_m = 16.0          # the cell of a group of instances (larger for the larger size classes: 4 x their radius)
+far_field_proxy_max_radius_m = 32.0    # an instance with a bounding radius from this on is never a box: it stays in the TLAS
+far_field_proxy_min_opacity = 0.02     # a group that stops less than this share of the rays through its box has no box
+far_field_proxies_max = 1048576        # the proxies' bound (the most opaque are kept; logged)
 exact_set_max = 8                      # reflection exact set: skinned instances traced with their original mesh (ARCHITECTURE 2.6)
 exact_set_min_hits = 64                # M/G reflection hits in a frame for an instance to enter it
 experiment_disable = 0                 # cost attribution only (recorded in the quality hash): 1 = build every deformed BLAS

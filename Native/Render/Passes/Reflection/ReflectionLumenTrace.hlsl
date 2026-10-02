@@ -9,7 +9,10 @@
 //           (results[job].x, less the pull-back; 0 without screen traces). A job the screen trace finished is skipped.
 //   hair    the ray's first fibre in E's density volume, where it lies before the hit (RayTracing/HitHair.hlsli;
 //           raytracing.hair): the groom's proxy, lit by the sun's shadow ray and one local-light sample.
-//   miss    the sky in the ray's direction.
+//   miss    the sky in the ray's direction - unless the view shows a surface past the rays' end on the ray's line
+//           (distant screen traces, ScreenTrace.hlsli sctDistantTrace; reflection.lumen_distant_screen_traces: the card
+//           frame names the stretch, 0 while the rays reach as far as the traces would): the previous frame's colour
+//           there.
 //   hit     where the view sees the hit point (the depth buffer at its pixel within the relative thickness, the surface
 //           there turned to the camera by more than the normal threshold): the previous frame's colour there
 //           (SampleSceneColorAtHit) - the lighting the view shows; else the hit's lighting from the surface cache
@@ -25,6 +28,7 @@
 // P[5] = { previous colour SRV, its width | height << 16, asuint(relative depth thickness), M's material word SRV (the
 //          top layer's roughness, ReflectionInternal.hlsli g_reflWords; UNX_NONE: none) }
 // P[6], P[7] = RtSceneSrvs; P[8..11] = the previous colour's view-projection (rows). b1 = the main view.
+#define RT_SHADOW_TRANSMITTANCE  // (the hits' shadow rays take what the Glass they cross leaves of the light: RayShaders.hlsli)
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/Reflection/ReflectionReuse.hlsli"
@@ -68,7 +72,7 @@ void ReflectionLumenTraceGen()
     r.Direction = direction;
     r.TMin = min(max(start, 0.0), giRayLength());
     r.TMax = giRayLength();
-    const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_REFLECTION | RT_MASK_EMITTER);
+    const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_REFLECTION | RT_MASK_EMITTER | RT_MASK_FAR);
     // the fog along the ray (FogVolume.hlsli fogOverRay): the surface's place in the view
     const float2 fogUv = (float2(pixel) + 0.5) / float2(size);
     // the ray cone of the pixel after the lobe (the hit's texture footprint)
@@ -92,6 +96,26 @@ void ReflectionLumenTraceGen()
     }
     if (hit.t < 0)
     {
+        // distant screen traces: the stretch past the ray's end (needs the previous colour: the scene colour's flag)
+        if ((flags & RL_FLAG_SCENE_COLOUR) != 0 && P[4].z != UNX_NONE)
+        {
+            const LhiRules rules = lhiRules(P[4].z);
+            const float4 noise = blueNoise4(pixel, frame);
+            float3 far, colour;
+            if (rules.distantScreenTrace > 0 &&
+                sctDistantTrace(depth, size, r.Origin + direction * giRayLength(), direction, rules.distantScreenTrace, rules.distantSlopeTolerance,
+                                noise.w + rules.distantStepOffsetBias, far))
+            {
+                Texture2D<float4> previous = ResourceDescriptorHeap[P[5].x];
+                const float4x4 prevViewProj = float4x4(asfloat(P[8]), asfloat(P[9]), asfloat(P[10]), asfloat(P[11]));
+                if (sctPreviousColour(previous, uint2(P[5].y & 0xFFFFu, P[5].y >> 16), prevViewProj, far, asfloat(P[0].z), noise.z, colour, (flags & RL_FLAG_HISTORY_DEPTH) != 0))
+                {
+                    const float reached = distance(far, r.Origin);
+                    results[job] = reflPackResult(reflStorable(fogOverRay(fogUv, s.linearDepth, r.Origin, direction, reached, colour)), reached, 0);
+                    return;
+                }
+            }
+        }
         results[job] = reflPackResult(reflStorable(fogOverRay(fogUv, s.linearDepth, r.Origin, direction, 65536.0, giSkyRadiance(direction))), giRayLength(), 0);
         return;
     }

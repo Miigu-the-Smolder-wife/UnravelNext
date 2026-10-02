@@ -8,7 +8,8 @@
 // deterministic, no atomics), the NEAR mask and each entry's bin id. Tiles past the field's capacity (P[1].x) are not
 // written: their records keep the per-record loop (CoverageShade.hlsli), exact.
 // P[0] = { V's records (StructuredBuffer<uint4>), V's tile list (raw), froxel lights SRV, field UAV (raw) }
-// P[1] = { field capacity (tiles), 0, 0, 0 }
+// P[1] = { field capacity (tiles), the lighting channels every instance is in (GpuScene::lightingChannelsShared: a
+//          light in none of them is NEAR - the fragment's loop tests its instance), 0, 0 }
 #include "Bindless.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
@@ -113,7 +114,7 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
         {
             const GpuLight light = loadLight(froxelLightAt(f, indexBase, range.x + lane));
             float d;
-            const bool near = lightCastsShadow(light) || nfIsNearGeometricNoHorizon(light, region, d);
+            const bool near = lightCastsShadow(light) || nfIsNearGeometricNoHorizon(light, region, d) || !nfLightsEveryInstance(light, P[1].y);
             gs_near[lane] = near ? 1u : 0u;
             if (near) InterlockedOr(gs_mask[lane >> 5], 1u << (lane & 31));
             else gs_bin[lane] = covTlBinOf(normalize(light.position - region.centre));

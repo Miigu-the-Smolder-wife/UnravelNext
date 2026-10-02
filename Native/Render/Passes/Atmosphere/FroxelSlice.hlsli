@@ -67,7 +67,7 @@ float3 airLocalEval(GpuLight l, float3 o, float3 dir, AirLocalMap mp, AirCoeffic
     }
     // Partly lit: the interpolant over the lit set, within [0, the whole segment's] (the integrand is not negative).
     if (partial) sum = clamp(sum, 0.0, full);
-    return sum * (mp.half / mp.h) * l.color;
+    return sum * (mp.half / mp.h) * lightMeanColor(l);  // (a rect's image: its mean colour)
 }
 
 // Air in-scattering of an unshadowed light along o + dir t, t in [0, len] (nits), relative to the segment's start.
@@ -144,7 +144,7 @@ FroxelAirResult froxelAirSlice(FroxelGrid g, uint2 tile, uint s, bool nearShadow
     const float z0 = zs0, z1 = zs1;
     const float t0 = max(z0 * toRay, tStart), len = z1 * toRay - t0;
     const float3 o = g_cameraPosition + dir * t0;
-    const float nearScale = airNearScale(t0, len);  // (AtmosphereCommon.hlsli: no atmosphere before AIR_VIEW_START_M)
+    const float nearScale = airNearScale(a.viewStartM, t0, len);  // (AtmosphereCommon.hlsli: no atmosphere before the view's start)
     // Substeps: the air's density is exponential in altitude; midpoint steps of at most stepAltitude.
     const float h0 = airAltitude(a, o), h1 = airAltitude(a, o + dir * len), hm = airAltitude(a, o + dir * (0.5 * len));
     const float dh = max(max(abs(h1 - h0), abs(hm - h0)), abs(hm - h1));

@@ -29,10 +29,16 @@
 //          transmittance LUT SRV }
 // P[7] = asuint{ jitter x, y, z in [0, 1), history weight }, P[8] = { VSM stats UAV (the walk's error word), depth SRV,
 //          asuint(the density's noise amount), asuint(1 / its scale in m) }, P[9].xyz = asuint(the noise's lattice offset)
-// P[9].w = the local volumes' records SRV (raw, 64 B each: the rows of unit-from-render - the unit sphere or the cube
-//          [-1, 1]^3 -, then { density, height falloff, 1 / edge, albedo r | g << 8 | b << 16 | shape << 24 }), P[10].x =
-//          their count (FrameContext::fogVolumes). A volume adds density x fade toward its boundary x 2^(-falloff x the
-//          height inside it, 0 .. 1) x the density's variation, with its own albedo; the cell's light is the same.
+// P[9].w = the local volumes' records SRV (raw, 96 B each: the rows of unit-from-render - the unit sphere or the cube
+//          [-1, 1]^3 -, then { density, height falloff, 1 / edge, albedo r | g << 8 | b << 16 | shape << 24 }, { the
+//          turbulence's lattice per unit of the volume's axes xyz, its amount }, { its rise (lattice), the source plane's
+//          height in the volume [0, 1), the density grid's first byte (P[10].w's buffer), its size x | y << 8 | z << 16
+//          (0: none) }), P[10].x = their count (FrameContext::fogVolumes). A volume adds density x fade toward its
+//          boundary x 2^(-falloff x the height above its source plane, 0 .. 1; nothing under the plane) x the density's
+//          variation x its own turbulence (FogVolume.hlsli fogSteamScale: rising steam) x its grid's value, with its own
+//          albedo; the cell's light is the same.
+// P[10].w = the frame's density grids (raw SRV; UNX_NONE: no volume has one).
+// P[11] = asuint{ the medium's second layer: density (1/m at its height), height falloff, height (m), 0 } (Fog.hlsli)
 // P[10].y = asuint(this frame's exposure / the history's: the history's light at this frame's exposure; 1 without history)
 // P[10].z = E's hair density parameters (raw SRV; UNX_NONE: none - no hair this frame, or shading.hair_shadows off).
 // Frame constants of the view (the main view, or a planar reflection view: its fog starts at the mirror).
@@ -80,7 +86,7 @@ void main(uint3 id : SV_DispatchThreadID)
     const float zs = max(min(fogDepthOfSlice(g, float(id.z) + jitter.z), sampleDepth - 0.02), 0.0);
     const float3 p = g_cameraPosition + ray * zs;
 
-    const FogMedium fog = fogMedium(uint4(1, 0, 0, 0), P[2], P[3]);
+    const FogMedium fog = fogMedium(uint4(1, 0, 0, 0), P[2], P[3], P[11]);
     const float variation = fogDensityScale(p * float3(1, 2, 1) * asfloat(P[8].w) + asfloat(P[9].xyz), asfloat(P[8].z));
     float sigma = fogExtinctionAt(fog, p.y) * variation;
     if (zs * toRay < fog.start) sigma = 0;
@@ -92,12 +98,20 @@ void main(uint3 id : SV_DispatchThreadID)
         float3 scattering = fog.albedo * sigma;
         [loop] for (uint i = 0; i < P[10].x; ++i)
         {
-            const float4 r0 = asfloat(volumes.Load4(i * 64)), r1 = asfloat(volumes.Load4(i * 64 + 16)), r2 = asfloat(volumes.Load4(i * 64 + 32));
+            const float4 r0 = asfloat(volumes.Load4(i * 96)), r1 = asfloat(volumes.Load4(i * 96 + 16)), r2 = asfloat(volumes.Load4(i * 96 + 32));
             const float3 u = float3(dot(r0.xyz, p) + r0.w, dot(r1.xyz, p) + r1.w, dot(r2.xyz, p) + r2.w);
-            const uint4 c = volumes.Load4(i * 64 + 48);
+            const uint4 c = volumes.Load4(i * 96 + 48);
             const float reach = (c.w >> 24) != 0 ? max(abs(u.x), max(abs(u.y), abs(u.z))) : length(u);
             if (reach >= 1.0) continue;
-            const float s = asfloat(c.x) * saturate((1.0 - reach) * asfloat(c.z)) * exp2(-asfloat(c.y) * (0.5 * u.y + 0.5)) * variation;
+            const float4 turbulence = asfloat(volumes.Load4(i * 96 + 64));
+            const uint4 source = volumes.Load4(i * 96 + 80);
+            // the height above the source plane over the height left above it (plane 0: the height inside the volume)
+            const float plane = asfloat(source.y), above = (0.5 * u.y + 0.5 - plane) / max(1.0 - plane, 1e-3);
+            if (above < 0) continue;
+            float s = asfloat(c.x) * saturate((1.0 - reach) * asfloat(c.z)) * exp2(-asfloat(c.y) * above) * variation;
+            if (turbulence.w > 0)
+                s *= fogSteamScale(u * turbulence.xyz + float3(float(i) * 19.0, -asfloat(source.x), float(i) * 7.0), turbulence.w * saturate(0.25 + 2.25 * above));
+            if (source.w != 0 && P[10].w != 0xFFFFFFFFu) s *= fogVolumeGrid(P[10].w, source.z, source.w, u);
             sigma += s;
             scattering += s * float3(c.w & 0xFFu, (c.w >> 8) & 0xFFu, (c.w >> 16) & 0xFFu) * (1.0 / 255.0);
         }

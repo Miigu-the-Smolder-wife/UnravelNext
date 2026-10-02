@@ -167,6 +167,7 @@ struct HairPoint
     float3 offset, v, tangent, side, up, outgoing;
     float linearZ;
     uint body, material;
+    uint channels;  // the lighting channels of the body's instance (MODE 4, 5: the local lights; Scene.hlsli)
     float eta, betaM, betaN, tilt;
     float3 absorption;
 };
@@ -189,12 +190,23 @@ bool hairBodyOf(uint s, out uint body, out uint material)
     }
     return found;
 }
+// The lighting channels of a body's instance (the bodies' header: word 4 of a body's eight; a body without an
+// instance: every channel).
+uint hairBodyChannels(uint body)
+{
+    ByteAddressBuffer bodies = ResourceDescriptorHeap[P[1].y];
+    const uint instance = bodies.Load(4 + 4 * 8 * body + 16);
+    return instance != UNX_NONE ? instanceLightingChannels(loadInstance(instance).flags) : 7u;
+}
 // The point of segment s at 'offset' (camera-relative) seen along v (unit, to the viewer) at view depth linearZ.
 HairPoint hairPointAt(uint s, float3 offset, float3 v, float linearZ)
 {
     HairPoint p = (HairPoint)0;
     p.valid = hairBodyOf(s, p.body, p.material);
     if (!p.valid) return p;
+#if MODE == 4 || MODE == 5
+    p.channels = hairBodyChannels(p.body);
+#endif
     StructuredBuffer<float4> segments = ResourceDescriptorHeap[P[1].x];
     const float3 a = segments[2 * s].xyz, b = segments[2 * s + 1].xyz;
     const float len = length(b - a);
@@ -265,11 +277,14 @@ float3 hairLit(HairPoint p, HairStrand strand, float3 l, float reach, float jitt
 }
 
 #if MODE == 4 || MODE == 5
-// A local light's radiance from the strand, before the opaque scene's visibility (its light function included).
-float3 hairLocalLight(HairPoint p, HairStrand strand, GpuLight light, uint lightIndex, float jitter)
+// A local light's radiance from the strand, before the opaque scene's visibility (its light function included). The
+// light's components (Scene.hlsli): 0 for a light in none of the channels of the body's instance; the diffuse scale on
+// the illuminance, the specular scale on the fibre's surface reflection (HairScattering.hlsli hairStrandSpecular).
+float3 hairLocalLightOf(HairPoint p, HairStrand strand, GpuLight light, uint lightIndex, float jitter)
 {
     const float3 toLight = (light.position - g_cameraPosition) - p.offset;
     float3 l, E;
+    float specular = 1;
     if (lightType(light) > LIGHT_SPOT)
     {
         // an area light: its illuminance on the plane facing its centre (the exact diffuse integral), from that direction
@@ -277,16 +292,29 @@ float3 hairLocalLight(HairPoint p, HairStrand strand, GpuLight light, uint light
         if (window <= 0) return 0;
         l = normalize(toLight);
         const float3 t = normalize(abs(l.y) < 0.9 ? cross(l, float3(0, 1, 0)) : cross(l, float3(1, 0, 0)));
-        E = shAreaColor(light, toLight) * (light.intensity * window * SH_PI * shAreaIntegral(light, toLight, float3x3(t, cross(l, t), l), true));
+        // (a diffuse scale of 0 counts as 1e-4, as shPunctualIlluminance: the specular scale over it stays exact)
+        const float diffuse = max(lightDiffuseScale(light), 1e-4);
+        specular = lightSpecularScale(light) / diffuse;
+        E = shAreaColor(light, toLight) * (light.intensity * window * diffuse * SH_PI * shAreaIntegralUnscaled(light, toLight, float3x3(t, cross(l, t), l), true));
     }
     else
     {
         E = shPunctualIlluminance(light, toLight, l);
+        specular = shLightSpecular();
         if (P[5].w != UNX_NONE)
             E *= lightFunction(P[5].w, lightIndex, light.forward, light.right, -l, p.linearZ * (2 * g_tanHalfFovY / g_viewHeight) / max(length(toLight), 1e-4), g_time);
     }
     if (all(E == 0)) return 0;
+    if (specular != 1) strand = hairStrandSpecular(strand, specular);
     return E * hairLit(p, strand, l, length(toLight), jitter);
+}
+float3 hairLocalLight(HairPoint p, HairStrand strand, GpuLight light, uint lightIndex, float jitter)
+{
+    g_lightChannels = p.channels;
+    const float3 radiance = hairLocalLightOf(p, strand, light, lightIndex, jitter);
+    g_lightChannels = 7u;
+    g_shLightSpecular = 1;
+    return radiance;
 }
 #endif
 

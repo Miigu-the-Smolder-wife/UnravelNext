@@ -6,6 +6,7 @@
 #include "unx/scene/SceneData.h"
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 #include <utility>
@@ -24,6 +25,9 @@ struct DepthRasterOverflow
 };
 using DepthRasterOverflows = std::map<std::string, DepthRasterOverflow>;
 inline const char* kDepthRasterOverflowKey = "depthRaster.overflows";
+
+// The most views one request holds (the cull work items carry the view in 16 bits; a run's views are one upload chunk).
+constexpr uint32_t kDepthRasterMaxViews = 4096;
 
 // S -> V: rasterise shadow-casting clusters into depth-like targets through V's cluster pipeline (cull, LOD, deform,
 // mesh shader). V owns geometry; the requester owns the output: either hardware depth into 'depthTarget', or its own
@@ -51,8 +55,17 @@ struct RasterView
     // GPU-written instance). A view of set 1 and a view of set 2 with one projection draw every instance exactly once
     // between them (S's static / dynamic shadow pages).
     uint32_t instanceSet = 0;
+    // Which clusters the view draws by their material: 0 every material; 1 all but the Glass class; 2 the Glass class
+    // alone (S: glass casters let light through - they stay out of the pages' depth and go to a tint beside it).
+    uint32_t materialFilter = 0;
+    // First word of the view's tile slots in DepthRasterRequest::atlasSlots (tile i: word atlasSlotOffset + i);
+    // UINT32_MAX = cullMaskOffset * 32, the layout of the mask. Two views with different masks over the same tiles (S's
+    // static and movable casters' views of one face) can then share one set of slots.
+    uint32_t atlasSlotOffset = UINT32_MAX;
     // The view is tested against the request's tile occluders (DepthRasterRequest::tileOccluders).
     bool tileOccluders = false;
+    // ... in two phases (DepthRasterRequest::tileGuess): for a view whose tiles' occluders are what the view itself draws.
+    bool tileTwoPhase = false;
 };
 
 struct DepthRasterRequest
@@ -69,6 +82,31 @@ struct DepthRasterRequest
     std::vector<std::pair<TextureRef, Use>> textureUses;  // resources the pixel kernel touches
     std::vector<std::pair<BufferRef, Use>> bufferUses;
     uint32_t pixelConstants[16] = {};              // root constants 16..31 for the pixel kernel
+    // Graph resources whose bindless view index the pixel kernel needs (v2: the surface cache's cluster capture). When
+    // the raster pass executes, V writes each one's index into pixelConstants[word]: its UAV where the uses above declare
+    // it written (UavGraphics), its SRV otherwise (one not named in the uses is declared SrvGraphics). The indices of
+    // graph resources exist only then: a requester need not keep a buffer of its own to pass them.
+    struct PixelView
+    {
+        uint32_t word = 0;
+        TextureRef texture;  // one of the two
+        BufferRef buffer;
+    };
+    std::vector<PixelView> pixelViews;
+    // The pixel kernel's interpolated surface frame (v2): the mesh kernel also exports each vertex's world normal and
+    // tangent (deformed like its position: skin, wind, morphs), and the kernel - compiled with DEPTH_RASTER_NORMALS 1
+    // before DepthRaster.hlsli - reads DepthRasterPixel::normal and ::tangent (w: the bitangent's sign). Without it a
+    // kernel has only the triangle's normal, from its depth's steps.
+    bool pixelNormals = false;
+    // Render targets of the pixel kernel (v2: SV_Target0 .., at most 4; needs a pixel kernel). With depthTarget the depth
+    // test settles which fragment's outputs a pixel keeps, so one run draws depth and attributes - a kernel that wrote
+    // them through UAVs needed a depth run first. In atlas mode they are atlases laid out like depthTarget. The requester
+    // clears them. colorMultiply: every target's rgb = stored x written, a = max(stored, written) (a transmittance
+    // product with the nearest depth beside it: S's see-through casters). depthWrite false: tested against depthTarget,
+    // nothing written to it.
+    std::vector<TextureRef> colorTargets;
+    bool colorMultiply = false;
+    bool depthWrite = true;
     bool conservative = false;
     D3D12_CULL_MODE cull = D3D12_CULL_MODE_NONE;   // default both faces (shadows); BACK culls back faces of one-sided
                                                    // materials only (two-sided materials are never culled)
@@ -83,7 +121,8 @@ struct DepthRasterRequest
     // set tiles (fragments = sum of triangle area inside set tiles). Pixel positions, depth and DepthRasterPixel are
     // the same as without it. For sparse masks over large viewports (VSM dirty pages in a 16384^2 level).
     bool tileLocal = false;
-    // Tile atlas (v1.32, S request 20260925_S_vsm_depth_atlas.md; needs tileLocal, cullMask and depthTarget): every set
+    // Tile atlas (v1.32, S request 20260925_S_vsm_depth_atlas.md; needs tileLocal, cullMask and depthTarget - or, v2,
+    // colorTargets without one: the atlas is then the first of them): every set
     // tile is drawn on its own into its slot of the atlas 'depthTarget' (hardware depth, D32_FLOAT or D16_UNORM: the
     // requester picks per request, e.g. VSM D16 while the sun's zenith angle is below 76 degrees). The slot of tile i of
     // a view (bit i of its mask) is word cullMaskOffset * 32 + i of 'atlasSlots' (raw buffer, one uint per mask bit);
@@ -104,6 +143,27 @@ struct DepthRasterRequest
     // gives their persistent raw SRVs (bindless indices) beside the graph handles.
     BufferRef tileOccluders;
     uint32_t tileOccludersSrv = UINT32_MAX, atlasSlotsSrv = UINT32_MAX;
+    // Tile occluders in two phases (views with RasterView::tileTwoPhase; the reference's two-pass occlusion of its shadow
+    // views): the tiles' occluders are what the views themselves draw, so they do not exist when the run starts. Phase 1
+    // tests against a guess per tile - 'tileGuess', a raw buffer of two words per mask bit (as atlasSlots: word pair
+    // cullMaskOffset * 32 + i): { the atlas slot whose occluder record stands for the tile, UINT32_MAX = none;
+    // shift | x << 8 | y << 20: the tile's pixel p is pixel (x, y) + (p >> shift) of that slot } (S: a kept coarser page
+    // over the same ground) - and draws what the guess does not hide; V then calls 'buildTileOccluders', in which the
+    // requester records the pass that rebuilds tileOccluders for the slots just drawn; phase 2 tests what phase 1
+    // rejected against them and draws what they do not hide. A guess only decides in which phase something is drawn:
+    // what is left out lies behind the depth phase 1 stored, whatever the guess said.
+    BufferRef tileGuess;
+    uint32_t tileGuessSrv = UINT32_MAX;
+    std::function<void()> buildTileOccluders;
+    // Small casters as proxies (depth-only requests: no pixel kernel; whole viewports or the tile atlas). A view with
+    // RasterView::minInstanceTexels leaves out the instances whose bounds project under it; with proxies each of those
+    // that belongs to V's instance chunks (the static instances) is drawn instead as one square facing the view at its
+    // bounds' centre, of area proxyCoverage x its bounding disc's - the share of that disc its silhouette fills. A square
+    // under a texel covers a texel centre as often as its area is of a texel: a level coarser than its casters keeps
+    // their shadow as a density, at two triangles a caster, and a chunk whose every member is that small is not culled
+    // member by member. Dynamic, skinned and run-time instances under the minimum stay left out.
+    bool proxies = false;
+    float proxyCoverage = 0.5f;
     // Coverage mode (v1.26; S's VSM transmittance layer): conservative raster of band B clusters only, the pixel kernel
     // (compiled with DEPTH_RASTER_COVERAGE 1) gets the exact area, mask and centroid depth per texel
     // (depthRasterCoverage, DepthRaster.hlsli). Needs a pixel kernel and no depth target. Bands are judged in each

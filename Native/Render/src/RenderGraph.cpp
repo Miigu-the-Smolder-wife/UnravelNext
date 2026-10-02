@@ -193,6 +193,10 @@ struct RenderGraph::Impl
         bool fenceAfter = false;                                    // PassBuilder::fenceAfter (part of the plan key)
         std::function<void(Queue&, uint64_t)> onFence;              // this frame's callback (not part of the key)
         PassBand band;
+        // RenderGraph::joinPasses: the first pass of the run this pass is timed with (UINT32_MAX: a scope of its own) and
+        // the run's name (on every pass of it). Recording only: not part of the plan key.
+        uint32_t scope = UINT32_MAX;
+        std::string scopeName;
     };
 
     // Merged use of one resource by one pass.
@@ -1453,6 +1457,20 @@ void RenderGraph::addPass(std::string_view name, QueueType queue, const SetupFn&
     setup(b);
 }
 
+uint32_t RenderGraph::passCount() const { return (uint32_t)m_impl->passes.size(); }
+
+void RenderGraph::joinPasses(uint32_t first, uint32_t count, std::string_view name)
+{
+    Impl& impl = *m_impl;
+    if (count == 0 || (uint64_t)first + count > impl.passes.size())
+        fail("render graph: joinPasses(%u, %u, '%.*s') with %zu passes added", first, count, (int)name.size(), name.data(), impl.passes.size());
+    for (uint32_t p = first; p < first + count; ++p)
+    {
+        impl.passes[p].scope = first;
+        impl.passes[p].scopeName = std::string(name);
+    }
+}
+
 PassBand passBand(uint32_t height, uint32_t count, uint32_t index)
 {
     auto row = [&](uint32_t b) { return b >= count ? height : std::min(height, (uint32_t)((uint64_t)height * b / count) & ~7u); };
@@ -1600,30 +1618,46 @@ void RenderGraph::execute(GpuProfiler* profiler)
     PassContext ctx;
     ctx.m_graph = this;
     const bool passMarkers = dredEnabled();  // (UNX_DRED: each pass in a BeginEvent / EndEvent pair, the breadcrumbs' pass names)
+    uint32_t scopes = 0;
     for (size_t s = 0; s < plan.segments.size(); ++s)
     {
         Impl::Segment& seg = plan.segments[s];
         lists[s] = m_device.acquireCommandList(seg.queue);
         ID3D12GraphicsCommandList7* cmd = lists[s].list.Get();
         if (profiler) profiler->listBegin(cmd, seg.queue);
-        for (Impl::PlanPass& pp : seg.passes)
+        // A joined run (joinPasses) is one scope while its passes follow each other in this command list: the scope opens
+        // at the first of them recorded here and closes after the last (the barriers between them are inside it).
+        uint32_t openScope = UINT32_MAX;
+        for (size_t k = 0; k < seg.passes.size(); ++k)
         {
+            Impl::PlanPass& pp = seg.passes[k];
             impl.emit(cmd, pp.before);
             if (pp.pass != UINT32_MAX)
             {
                 Impl::PassNode& pass = impl.passes[pp.pass];
-                if (profiler) profiler->passBegin(cmd, seg.queue, pass.name);
+                if (pass.scope == UINT32_MAX || pass.scope != openScope)
+                {
+                    const std::string& name = pass.scope == UINT32_MAX ? pass.name : pass.scopeName;
+                    if (profiler) profiler->passBegin(cmd, seg.queue, name);
+                    if (passMarkers)
+                    {
+                        const std::wstring wide(name.begin(), name.end());
+                        cmd->BeginEvent(0, wide.c_str(), (UINT)((wide.size() + 1) * sizeof(wchar_t)));  // (0: a UTF-16 string)
+                    }
+                    openScope = pass.scope;
+                    ++scopes;
+                }
                 ctx.cmd = cmd;
                 ctx.queue = seg.queue;
                 ctx.band = pass.band;
-                if (passMarkers)
-                {
-                    const std::wstring wide(pass.name.begin(), pass.name.end());
-                    cmd->BeginEvent(0, wide.c_str(), (UINT)((wide.size() + 1) * sizeof(wchar_t)));  // (0: a UTF-16 string)
-                }
                 pass.execute(ctx);
-                if (passMarkers) cmd->EndEvent();
-                if (profiler) profiler->passEnd(cmd, seg.queue);
+                const uint32_t next = k + 1 < seg.passes.size() ? seg.passes[k + 1].pass : UINT32_MAX;
+                if (pass.scope == UINT32_MAX || next == UINT32_MAX || impl.passes[next].scope != pass.scope)
+                {
+                    if (passMarkers) cmd->EndEvent();
+                    if (profiler) profiler->passEnd(cmd, seg.queue);
+                    openScope = UINT32_MAX;
+                }
             }
             impl.emit(cmd, pp.after);
         }
@@ -1631,6 +1665,7 @@ void RenderGraph::execute(GpuProfiler* profiler)
         if (profiler && seg.lastOfQueue) profiler->resolve(cmd, seg.queue);
     }
     m_stats.cpuRecordMs = msSince(t0);
+    m_stats.passScopes = scopes;
 
     // Submit in plan order: the first segment of each queue waits for the other queues' previous frame (transient
     // memory and views are reused across frames); later segments wait for their producers.

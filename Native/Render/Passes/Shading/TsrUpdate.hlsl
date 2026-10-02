@@ -22,16 +22,23 @@
 //              its alignment with O x 1 / 16, the history's = the input's x (1 - b) / b for the rejection's blend
 //              factor b, at most the validity, at most 1 - 0.75 x speed in output pixels a frame (not below the
 //              relative luma change: high-contrast edges stay stable in motion).
-// P[0] = { colour SRV (internal, exposed linear), rejection SRV (RGBA8, TsrReject.hlsl), dilated motion SRV (RG32F),
+// P[0] = { colour SRV (internal, exposed linear), rejection SRV (RGBA8, TsrReject.hlsl), dilated motion SRV (RG32F;
+//          with output.upscale_tsr_hole_filling the decimate's copy, a disoccluded pixel's vector its occluder's),
 //          history SRV (output: rgb exposed linear, a = validity) }
 // P[1] = { output UAV (RGBA16F), internal width, height, flags (1: reset; 2: the kernel narrows with the samples
-//          gathered - output.upscale_tsr_kernel_by_samples; 4: the reprojection field's jacobian and boundary apply) }
+//          gathered - output.upscale_tsr_kernel_by_samples; 4: the reprojection field's jacobian and boundary apply;
+//          8: the history is the lens picture - output.lens_panini_d, Lens.hlsli: a history pixel takes its samples and
+//          its vector at its place in the rendered picture, and reads the history at the previous place's place under
+//          that frame's lens) }
 // P[2] = { history width, height, asuint(jitter x), asuint(jitter y) }, P[3] = { asuint(exposure ratio), AA SRV (RG8_UINT),
 //          field SRV (RGBA32_UINT, Tsr.hlsli; 0xFFFFFFFF: none), 0 }
 // P[4] = { kept frame's history SRV (0xFFFFFFFF: no resurrection this frame), asuint(this frame's exposure over the
 //          kept frame's), asuint(history size / output size), 0 }, P[5..8] = rows of this frame's unjittered clip
 //          space to the kept frame's
+// P[9] = asfloat { the lens (Lens.hlsli): tan half field of view x, y, d, s }, P[10] = asfloat { its scale, the previous
+//         frame's tan x, tan y, scale }, P[11] = asfloat { the kept frame's tan x, tan y, scale, 0 }
 #include "Passes/Shading/Tsr.hlsli"
+#include "Passes/Shading/Lens.hlsli"
 
 float previousWeightMultiplier(float blendFactor) { return (1.0 - blendFactor) / max(blendFactor, 1.0 / 1024.0); }
 
@@ -53,7 +60,11 @@ void main(uint2 o : SV_DispatchThreadID)
     const float historyScale = asfloat(P[4].z);
     const float historySamples = TSR_HISTORY_SAMPLES / (historyScale * historyScale), hysteresis = 1.0 / historySamples;
     const float speedAmplitude = saturate(1.0 - 4.0 * hysteresis), invClampingSpeed = TSR_INV_WEIGHT_CLAMPING_PIXEL_SPEED / historyScale;
-    const float2 uv = (float2(o) + 0.5) / float2(outSize);
+    // (uv: the history pixel's place in the rendered picture - under a lens not its place in the history)
+    const bool lensOn = (P[1].w & 8u) != 0;
+    const float4 lens = asfloat(P[9]);
+    const float2 uvOut = (float2(o) + 0.5) / float2(outSize);
+    const float2 uv = lensOn ? lensToRendered(uvOut, lens, asfloat(P[10].x)) : uvOut;
     // O in the input's pixel coordinates (sample k covers [k, k + 1)) and the input pixel K under it
     float2 ppo = uv * float2(inSize) + jitter;
     int2 k = clamp(int2(floor(ppo)), 0, inSize - 1);
@@ -90,6 +101,12 @@ void main(uint2 o : SV_DispatchThreadID)
     const uint rejectionBits = (uint)round(rejection.a * 255.0);
     const bool parallaxRejected = (rejectionBits & 1u) == 0;
     const bool resurrected = (rejectionBits & 2u) != 0 && P[4].x != 0xFFFFFFFFu;
+    if ((rejectionBits & 4u) != 0)
+    {
+        // a hole-filled vector (TsrDecimate.hlsl) is the occluder's: the pixel's own jacobian says nothing about it
+        correction = 0;
+        upscaleCorrection = 1;
+    }
     const uint2 aa = aaTexture.Load(int3(k, 0));
     const float noiseFiltering = (float)aa.y / 255.0;
     float2 vector = motionTexture.Load(int3(kv, 0)) + correction;
@@ -105,7 +122,13 @@ void main(uint2 o : SV_DispatchThreadID)
         historySrv = P[4].x;
         upscaleCorrection = 1;
     }
-    const float2 previousUv = uv - vector;
+    float2 previousUv = uv - vector;
+    if (lensOn)
+    {
+        // (that frame's own lens: the field of view may have changed since)
+        const float3 then = resurrected ? asfloat(P[11].xyz) : asfloat(P[10].yzw);
+        previousUv = renderedToLens(previousUv, float4(then.xy, lens.zw), then.z);
+    }
     const bool offScreen = (P[1].w & 1u) != 0 || any(previousUv <= 0) || any(previousUv >= 1);
     const bool disoccluded = !offScreen && parallaxRejected && !resurrected;
     const bool noHistory = offScreen || disoccluded;

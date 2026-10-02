@@ -91,7 +91,8 @@ float froxelPeakIntensity(GpuLight l)
 // Luminous intensity of the light towards a point in direction 'toPoint' (unit, from the light), in candela, as the air
 // scatters it: times the light's volumetric scattering scale (scene::Light::volumetricScattering - the air's and the
 // fog's in-scattering, and the light volume the fog and the lit particles read).
-// Area lights: luminance x projected area (a point-source intensity; exact far from the emitter).
+// Area lights: luminance x projected area (a point-source intensity; exact far from the emitter); a rect with barn
+// doors: the part of that area the direction sees past them (Scene.hlsli lightBarnDoorFar).
 float froxelIntensity(GpuLight l, float3 toPoint)
 {
     const uint t = lightType(l);
@@ -102,7 +103,7 @@ float froxelIntensity(GpuLight l, float3 toPoint)
         const float s = saturate(dot(toPoint, l.forward) * l.spotScale + l.spotOffset);
         return i * s * s;
     }
-    if (t == LIGHT_RECT) return i * l.size.x * l.size.y * saturate(dot(toPoint, l.forward));
+    if (t == LIGHT_RECT) return i * l.size.x * l.size.y * saturate(dot(toPoint, l.forward)) * lightBarnDoorFar(l, toPoint);
     if (t == LIGHT_DISK) return i * 3.14159265 * l.size.x * l.size.x * saturate(dot(toPoint, l.forward));
     if (t == LIGHT_SPHERE) return i * 3.14159265 * l.size.x * l.size.x;
     return i * (2 * l.size.y * l.size.x + 3.14159265 * l.size.y * l.size.y);  // tube: capsule silhouette

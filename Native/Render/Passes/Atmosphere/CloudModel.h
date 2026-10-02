@@ -17,6 +17,7 @@ namespace unx::render::clouds
 constexpr uint32_t kShapeSize = 128;    // shape noise texels per axis (R8)
 constexpr uint32_t kDetailSize = 32;    // detail noise texels per axis (R8)
 constexpr uint32_t kWeatherSize = 512;  // weather map texels per axis (RG8: coverage, type)
+constexpr uint32_t kCirrusSize = 512;   // cirrus map texels per axis (R8: the sheet's fibres)
 
 struct CloudLayer  // authored (environment); all lengths in metres
 {
@@ -28,6 +29,14 @@ struct CloudLayer  // authored (environment); all lengths in metres
     float g0 = 0.8f, g1 = -0.2f, lobeBlend = 0.2f;  // phase: (1 - b) HG(g0) + b HG(g1)
     float shapePeriod = 4096, detailPeriod = 512, weatherPeriod = 32768;
     double windX = 0, windZ = 0;                    // wind (m/s) in the layer: the field advects with it
+    // The cirrus sheet (CloudCommon.hlsli cloudCirrusAt): a second, thin layer type - ice cloud far above the layer, a
+    // surface at one altitude with its own coverage map (fibres stretched along the map's x), lit by the same sun and
+    // sky by single scattering. Optical depths of real cirrus: 0.03 (subvisible) .. 0.3 (thin) .. 3 (cirrostratus).
+    float cirrusCoverage = 0;                       // share of the map that holds cirrus (0 = none)
+    float cirrusAltitude = 9000;                    // m above the planet's surface
+    float cirrusOpticalDepth = 0.15f;               // vertical optical depth where the map is full
+    float cirrusPeriod = 131072;                    // m: the map's period (256 m texels)
+    double cirrusWindX = 0, cirrusWindZ = 0;        // m/s: the sheet's own drift (the upper wind)
 };
 
 // The noise textures (generated once, deterministic; tileable over their size).
@@ -36,6 +45,7 @@ struct CloudNoise
     std::vector<uint8_t> shape;    // kShapeSize^3, x fastest
     std::vector<uint8_t> detail;   // kDetailSize^3
     std::vector<uint8_t> weather;  // kWeatherSize^2 x 2 (coverage, type)
+    std::vector<uint8_t> cirrus;   // kCirrusSize^2 (the cirrus sheet's map)
 };
 CloudNoise generateNoise(uint32_t seed = 1);
 
@@ -45,6 +55,7 @@ struct CloudOffsets
 {
     float shape[3], detail[3], weather[2];
     float origin[3];  // the world origin offset (world = renderer space + origin): altitude is taken in world space
+    float cirrus[2];  // the cirrus map's (the sheet's own wind)
 };
 CloudOffsets offsetsFor(const CloudLayer& layer, const double originOffset[3], double time);
 
@@ -93,10 +104,14 @@ constexpr double kMsA = 0.70, kMsB = 0.15, kMsC = 0.60, kSkyS0 = 0.152, kSkyS1 =
 constexpr int kMsOctaves = 2;
 // The approximate model along a view ray with the reference's exact transmittances (steps of 'step' metres, as
 // referenceSingleScattering): the CPU twin of CloudMarch.hlsl mode 4 (the tests compare the GPU's march against it).
+// powder (atmosphere.clouds.powder; 0 in the fit): the octaves past the first - the multiple scattering - x
+// (1 - powder exp(-2 tau_sun)): light scattered several times needs cloud around it, and a sample just under the sunlit
+// surface has little toward the sun (Schneider 2015's "powder" term, kept off the single scattering, which is exact).
+// With 0 the model is the fitted one; Tests/CloudMsFit.cpp --sweep fits the strength together with a, b, c.
 RayResult referenceApproximate(const CloudNoise& n, const CloudLayer& layer, const CloudOffsets& o, double bottomRadius, const double origin[3],
                                const double dir[3], const double sunDir[3], double sunIlluminance, double skyRadiance, double maxDistance, double step,
                                double a = kMsA, double b = kMsB, double c = kMsC, int octaves = kMsOctaves, double s0 = kSkyS0,
-                               double s1 = kSkyS1);
+                               double s1 = kSkyS1, double powder = 0);
 
 double phase(const CloudLayer& layer, double cosTheta);                            // the dual-lobe HG phase (1/sr)
 double altitudeOf(const CloudOffsets& o, double bottomRadius, const double x[3]);  // above the planet's surface (m)

@@ -39,7 +39,11 @@ cbuffer FrameConstants : register(b1)
     float g_upscaleRatio;  // internal / output height of an upscaled main view, 0 = native (GpuSceneLayout.h)
     uint g_blueNoise;  // the blue-noise tile's SRV (BlueNoise.hlsli), UNX_NONE: none
     uint g_fog;  // the view's fog parameters' SRV + 1 (FogVolume.hlsli), 0: none
+    uint g_materialInputs;  // StructuredBuffer<GpuMaterialInputs> (Scene.hlsli), UNX_NONE: none
+    uint g_meshAttributes, g_vertexAttributes;  // per mesh 1 + its first GpuVertexAttributes (0: none); UNX_NONE: no mesh has any
     uint g_clusterStream;  // compressed cluster vertices (ClusterStream.hlsli): the raw words' SRV + 1, 0: none
+    // (the C++ record ends with one spare word; it is not declared here: a library kernel at the DXIL limit pays for
+    // every field's annotation)
 };
 
 // Reversed-Z infinite projection: device depth d = near / viewDistance (1 at the near plane, 0 = sky).

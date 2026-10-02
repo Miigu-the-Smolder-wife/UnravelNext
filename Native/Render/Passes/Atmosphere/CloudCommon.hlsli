@@ -1,7 +1,7 @@
 // Volumetric clouds (B5; S_STATUS_KO.md 9): the density field of CloudModel.cpp (same formulas; the CPU reference and the
 // tests use that file) and the cloud record the kernels read. Owner: S.
 //
-// Cloud record (raw buffer, CloudSystem.cpp CloudRecord, 176 B):
+// Cloud record (raw buffer, CloudSystem.cpp CloudRecord, 240 B):
 //   [0]  base altitude, top altitude, coverage, sigma_max (1/m)
 //   [1]  albedo, detail strength, g0, g1
 //   [2]  lobe blend, 1 / shape period, 1 / detail period, 1 / weather period
@@ -14,6 +14,10 @@
 //   [8]  toward the sun xyz (unit), shadow half extent (m)
 //   [9]  shadow centre xyz (renderer space), shadow texels per side
 //   [10] sun illuminance at the layer (lux, rgb), sky radiance over the upper hemisphere (tests, CloudMarch mode 4)
+//   [11] the cirrus sheet: altitude (m), vertical optical depth where its map is full, coverage (0: none), 1 / map period
+//   [12] cirrus map offset xy (periods), cirrus map SRV (Texture2D R8 with mips), powder (atmosphere.clouds.powder)
+//   [13] a lightning flash: position xyz (renderer space), the channel's radius (m)
+//   [14] its luminous intensity x colour (cd, rgb; 0: none), 0
 #ifndef UNX_CLOUD_COMMON_HLSLI
 #define UNX_CLOUD_COMMON_HLSLI
 #include "Bindless.hlsli"
@@ -37,6 +41,13 @@ struct CloudRecord
     float shadowTexels;
     float3 sunIlluminance;
     float skyRadianceTest;
+    float cirrusAltitude, cirrusTau, cirrusCoverage, invCirrus;
+    float2 cirrusOffset;
+    uint cirrus;
+    float powder;
+    float3 flashPosition;
+    float flashRadius;
+    float3 flashIntensity;
 };
 
 CloudRecord cloudLoad(uint rawBuffer)
@@ -60,6 +71,13 @@ CloudRecord cloudLoad(uint rawBuffer)
     c.shadowCentre = q9.xyz, c.shadowTexels = q9.w;
     c.sunIlluminance = q10.xyz;
     c.skyRadianceTest = q10.w;
+    const float4 q11 = asfloat(b.Load4(176)), q12 = asfloat(b.Load4(192)), q13 = asfloat(b.Load4(208));
+    c.cirrusAltitude = q11.x, c.cirrusTau = q11.y, c.cirrusCoverage = q11.z, c.invCirrus = q11.w;
+    c.cirrusOffset = q12.xy;
+    c.cirrus = asuint(q12.z);
+    c.powder = q12.w;
+    c.flashPosition = q13.xyz, c.flashRadius = q13.w;
+    c.flashIntensity = asfloat(b.Load3(224));
     return c;
 }
 
@@ -201,12 +219,17 @@ CloudMsPhases cloudMsPhases(CloudRecord c, float cosTheta)
     }
     return m;
 }
-float cloudMsSun(CloudMsPhases m, float tauSun)
+// powder (atmosphere.clouds.powder; 0: the fitted series): the octaves past the first - the multiple scattering - x
+// (1 - powder exp(-2 tau_sun)): light scattered several times needs cloud around it, and a sample just under the sunlit
+// surface has little toward the sun. The single scattering (k = 0) is exact and stays. CloudModel.h referenceApproximate
+// is the twin; Tests/CloudMsFit.cpp --sweep fits the strength with a, b, c.
+float cloudMsSun(CloudMsPhases m, float tauSun, float powder = 0)
 {
+    const float deep = 1 - powder * exp(-2 * tauSun);
     float sum = 0, bk = 1;
     [unroll] for (uint k = 0; k < CLOUD_MS_OCTAVES; ++k)
     {
-        sum += m.p[k] * exp(-bk * tauSun);
+        sum += m.p[k] * exp(-bk * tauSun) * (k > 0 ? deep : 1.0);
         bk *= CLOUD_MS_B;
     }
     return sum;
@@ -251,5 +274,36 @@ bool cloudShellSpan(CloudRecord c, float3 o, float3 d, float tMax, out float t0,
     t0 = enter;
     t1 = min(leave, tMax);
     return t1 > t0;
+}
+
+// ---- The cirrus sheet (CloudModel.h CloudLayer::cirrus*): a second, thin layer type - ice cloud on the sphere at one
+// altitude, its vertical optical depth from a map of fibres (CloudModel.cpp generateNoise: R8 with mips, period 131 km):
+// tau = cirrusTau x the map's value over the coverage's threshold. Where the ray (o, d unit) meets the sheet: the
+// distance t along it, the sheet's vertical optical depth there and |cosine| of the ray to the sheet's normal (not under
+// 0.05). False: no sheet, the ray never meets it, or the planet is in the way. footprintPerMetre: the ray's footprint
+// per metre of distance (the pixel angle) - the map is read at the mip of the footprint on the sheet.
+#define CLOUD_CIRRUS_TEXELS 512.0  // CloudModel.h kCirrusSize
+bool cloudCirrusAt(CloudRecord c, float3 o, float3 d, float footprintPerMetre, out float t, out float tau, out float mu)
+{
+    t = 0;
+    tau = 0;
+    mu = 1;
+    if (!(c.cirrusCoverage > 0)) return false;
+    const float h = cloudAltitude(c, o), R = c.bottomRadius, a = c.cirrusAltitude;
+    const float3 w = o + c.origin;
+    const float b = dot(w, d) + R * d.y;
+    float tn, tf;
+    if (!cloudSphereRoots(b, (h - a) * (2 * R + h + a), tn, tf)) return false;
+    t = h < a ? tf : tn;  // under the sheet: where the ray leaves its sphere; over it: where it enters
+    if (!(t > 0)) return false;
+    float gn, gf;
+    if (h < a && cloudSphereRoots(b, h * (2 * R + h), gn, gf) && gn > 0) return false;  // (the planet first)
+    const float3 x = o + d * t;
+    mu = max(abs(dot(normalize(x + c.origin + float3(0, R, 0)), d)), 0.05);
+    Texture2D<float> map = ResourceDescriptorHeap[c.cirrus];
+    const float lod = log2(max(footprintPerMetre * t / mu * c.invCirrus * CLOUD_CIRRUS_TEXELS, 1.0));
+    const float n = map.SampleLevel(g_linearWrap, x.xz * c.invCirrus + c.cirrusOffset, lod);
+    tau = c.cirrusTau * saturate((n - (1 - c.cirrusCoverage)) / max(c.cirrusCoverage, 1e-3));
+    return tau > 0;
 }
 #endif

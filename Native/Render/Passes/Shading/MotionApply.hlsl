@@ -22,8 +22,12 @@
 // P[0] = { colour SRV (output resolution, exposed linear), half colour SRV, flat SRV (RGBA16F, internal resolution:
 //          length, angle, linear depth), gathered tiles SRV (RGBA16F: shortest xy, longest xy) }
 // P[1] = { destination UAV, output width, height, tap count limit }, P[2] = { internal width, height, tiles x, tiles y }
-// P[3] = { flags (1: half-resolution gather), 0, 0, 0 }
+// P[3] = { flags (1: half-resolution gather; 2: the colour is the lens picture - output.lens_panini_d, Lens.hlsli: the
+//          flat and tile textures, which are the rendered view's, are read at a pixel's place in the rendered picture;
+//          the taps still run straight along the velocity in the lens picture), 0, 0, 0 }
+// P[4] = asfloat { the lens: tan half field of view x, y, d, s }, P[5].x = asfloat(its scale)
 #include "Bindless.hlsli"
+#include "Passes/Shading/Lens.hlsli"
 
 #define MOTION_FILTER_TILE 16
 #define MOTION_FLATTEN_TILE 16.0
@@ -43,6 +47,9 @@ float gradientNoise(float2 pixel, float index)
 
 // A velocity of 'spread' pixels reaches a tap 'offset' taps away (taps are 1 / toTaps pixels apart).
 float reachWeight(float spread, float offset, float toTaps) { return saturate(toTaps * spread - max(offset - 1.0, 0.0)); }
+
+// A UV of the colour as a UV of the internal view's textures.
+float2 renderedUv(float2 uv) { return (P[3].x & 2u) != 0 ? saturate(lensToRendered(uv, asfloat(P[4]), asfloat(P[5].x))) : uv; }
 
 float3 colourAt(Texture2D<float4> colour, Texture2D<float4> halfColour, float2 uv, float mip)
 {
@@ -70,7 +77,8 @@ void main(uint2 gid : SV_GroupID, uint2 id : SV_DispatchThreadID)
     // the group's class (the same for all its threads)
     uint groupClass = CLASS_GATHER_HALF;
     {
-        const int2 flattenTile = int2((float2(gid) + 0.5) * toInternal);
+        const float2 groupUv = min((float2(gid) + 0.5) * MOTION_FILTER_TILE / float2(size), 1.0);
+        const int2 flattenTile = (P[3].x & 2u) != 0 ? int2(renderedUv(groupUv) * float2(inSize) / MOTION_FLATTEN_TILE) : int2((float2(gid) + 0.5) * toInternal);
         [unroll] for (int k = 0; k < 9; ++k)
         {
             const float4 range = tiles.Load(int3(clamp(flattenTile + int2(k % 3, k / 3) - 1, 0, tileCount - 1), 0));
@@ -95,7 +103,7 @@ void main(uint2 gid : SV_GroupID, uint2 id : SV_DispatchThreadID)
 
     // the neighbourhood's velocities: the tiles under the pixel's internal sample, jittered a quarter tile
     const float random = gradientNoise(float2(id), 0), random2 = gradientNoise(float2(id), 1);
-    const int2 internalPixel = clamp(int2(uv * float2(inSize)), 0, inSize - 1);
+    const int2 internalPixel = clamp(int2(renderedUv(uv) * float2(inSize)), 0, inSize - 1);
     const float2 tileUv = min(((float2(internalPixel) + 0.5) / MOTION_FLATTEN_TILE + (float2(random, random2) - 0.5) * 0.5) / float2(tileCount),
                               1.0 - 0.5 / float2(tileCount));
     const float4 range = tiles.SampleLevel(g_linearClamp, tileUv, 0);
@@ -131,8 +139,8 @@ void main(uint2 gid : SV_GroupID, uint2 id : SV_DispatchThreadID)
                 const float2 offset = tap + 0.5 + float2(random - 0.5, 0.5 - random);
                 const float2 fraction = offset / steps;
                 const float2 uv0 = saturate(uv + fraction.x * search), uv1 = saturate(uv - fraction.y * search);
-                const float3 tap0 = flatTexture.Load(int3(clamp(int2(uv0 * float2(inSize)), 0, inSize - 1), 0)).xyz;
-                const float3 tap1 = flatTexture.Load(int3(clamp(int2(uv1 * float2(inSize)), 0, inSize - 1), 0)).xyz;
+                const float3 tap0 = flatTexture.Load(int3(clamp(int2(renderedUv(uv0) * float2(inSize)), 0, inSize - 1), 0)).xyz;
+                const float3 tap1 = flatTexture.Load(int3(clamp(int2(renderedUv(uv1) * float2(inSize)), 0, inSize - 1), 0)).xyz;
                 // the pixel's own reach where it is the nearer one, else the tap's
                 const float centreReach = reachWeight(centre.x, tap + 0.5, toTaps);
                 float weight0 = saturate(0.5 + MOTION_DEPTH_SCALE * (tap0.z - centre.z)) * centreReach +

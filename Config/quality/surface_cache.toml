@@ -37,6 +37,11 @@ lighting_feedback = true              # cells a reflection or GI hit read since 
                                       # (reference: r.LumenScene.Lighting.Feedback 1); half of the budget left after new cells.
                                       # Mesh cards: a card page a reader of the high levels (a reflection, the radiosity)
                                       # read within the last two updates is relit at 4 x the speed
+foliage_transmission = true           # (mesh cards) a ray hit on a leaf (a Foliage material with transmission) lit from its cards
+                                      # also takes the light on the leaf's other side through it: the card facing the other way
+                                      # (LumenHitIndirect.hlsli lhiFoliageThrough). NOT in the reference - its cards have no
+                                      # transmission (it adds the subsurface colour to the card albedo); false: the t share of a
+                                      # leaf's light is lost at card-lit hits, as before
 direct_analytic = true                # each of the cell's 8 lights: its unshadowed irradiance by the light's integral, one shadow
                                       # ray to the light's centre (the reference's default path: a cell's value is the same at
                                       # every update; area lights cast hard shadows in the cache). false: one random point on
@@ -79,16 +84,17 @@ mesh_cards = true                     # the cache as lighting on mesh cards (the
                                       # range keeps cards captured into atlases whatever the view sees; update selection by
                                       # page priority, direct light per card tile (8 lights + the sun), radiosity per card
                                       # probe, the final lighting atlas; hits read the cards of their instance
-mesh_cards_fold_passes = true         # the page selection's three steps (priority, bucket, list) are one pass (PassChain.h:
-                                      # the same dispatches in order, a barrier between them). false: a pass each (A/B)
+mesh_cards_fold_passes = true         # the card frame and the page selection's three steps (priority, bucket, list), and the
+                                      # feedback table's copy and clear, are timed as one scope each (PassChain.h: the same
+                                      # passes and barriers, one timestamp). false: a scope each (A/B)
 mesh_cards_capture_clusters = false   # the card captures are drawn from the cluster hierarchy's cut at the page's texel
                                       # size through V's raster service (the reference captures its cards through Nanite):
                                       # a dense mesh costs by the page's texels, not by its source triangles. A page is a
-                                      # view of a service request (at most 255 a request, two runs of the service each:
-                                      # the nearest surface, then its material). The texel's normal is then the drawn
-                                      # triangle's (the service gives a pixel no vertex normal: a smooth-shaded
-                                      # low-polygon mesh shows its facets in the card). false: the mesh's source
-                                      # triangles in a mesh shader of the cache's own. NOT run yet: off
+                                      # view of a service request (at most 4096 a request), one run of the service each:
+                                      # the depth and the three material images are its depth and render targets, and
+                                      # the texel's normal and tangent are the vertices' interpolated ones (the service's
+                                      # pixelNormals). false: the mesh's source triangles in a mesh shader of the cache's
+                                      # own. NOT run yet: off (the capture feeds every GI result; one A/B first)
 mesh_cards_atlas_size = 4096          # card atlas side, texels (reference: r.LumenScene.SurfaceCache.AtlasSize 4096)
 mesh_cards_captures_per_frame = 300   # card pages captured a frame at most (reference: CardCapturesPerFrame 300); with
                                       # capture_factor: texels captured a frame = atlas texels / capture_factor
@@ -117,6 +123,10 @@ feedback_gather = false               # the screen probes' hits read the high le
 mesh_cards_max_distance_m = 300.0     # cards exist for instances within this of the camera (reference: the ray tracing
                                       # culling radius, 30000 cm)
 mesh_cards_min_size_m = 0.1           # meshes and cards smaller than this have no cards (reference: MeshCardsMinSize 10 cm)
+mesh_cards_emissive_light_sources = true  # an instance with an emissive material (not the emissive-for-the-view-only kind) keeps
+                                      # cards down to a fifth of that area and to a card resolution of 1, so a small lamp's
+                                      # emission stays in the cache (reference: bEmissiveLightSource - there a mark the artist sets
+                                      # on the primitive, here every such instance). false: the size rules of every other instance
 mesh_cards_refresh_fraction = 0.125   # share of a frame's captures spent on drawing resident pages again, so materials that
                                       # change reach the cache (reference: CardCaptureRefreshFraction 0.125)
 mesh_cards_load_rounds = 8            # NOT in the reference: while a level loads (a new scene, a restore) the cache runs this

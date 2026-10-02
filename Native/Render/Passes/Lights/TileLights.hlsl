@@ -10,6 +10,9 @@
 // P[0] = { depth SRV, G-buffer SRV, froxel lights SRV (this view's lists), edge tile mask SRV (R32G32_UINT) }
 // P[1] = { records UAV (raw), tilesX, first tile row of this dispatch, S's tile lit records SRV (VsmCls.hlsli; UNX_NONE: every
 //          caster NEAR) }
+// P[2] = { the lighting channels every instance is in (GpuScene::lightingChannelsShared), 0, 0, 0 }: a light in none of
+//          them is NEAR (the per-pixel path tests the pixel's instance), so the FAR sum holds no light a pixel of the
+//          tile may not take.
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
@@ -158,7 +161,7 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint lane : SV_G
             // a caster lit over every pixel of the tile (L3 classification) may be FAR like an unshadowed light
             const bool litOver = P[1].w != UNX_NONE && vsmClsTileLit(clsTile, gs_sliceFirst + s, i);
             if (P[1].w != UNX_NONE && vsmClsTileUmbra(clsTile, gs_sliceFirst + s, i)) { InterlockedOr(gs_mask[s * 2 + (i >> 5)], 1u << (i & 31)); continue; }  // umbra: NEAR, 0 per pixel
-            const bool near = nfIsNear(light, region, false, !lightCastsShadow(light) || litOver, d);
+            const bool near = nfIsNear(light, region, false, !lightCastsShadow(light) || litOver, d) || !nfLightsEveryInstance(light, P[2].x);
             if (near)
             {
                 InterlockedOr(gs_mask[s * 2 + (i >> 5)], 1u << (i & 31));

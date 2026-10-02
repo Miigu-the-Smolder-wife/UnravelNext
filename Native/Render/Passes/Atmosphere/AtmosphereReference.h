@@ -63,8 +63,9 @@ using GroundFn = std::function<D3(double mus)>;
 // sun transmittance + (sigma_R + sigma_M) ms + the Lambertian ground lit by the sun and by 'ground'.
 D3 skyRadiance(const Model& m, D3 p, D3 d, D3 sun, const MsFn& ms, const GroundFn& ground, int steps = 2048);
 // Air in-scattering (per unit illuminance) and transmittance over [0, distance] from p along d; points below the
-// model's surface take the surface air (the GPU's airLiftToSurface convention).
-void aerial(const Model& m, D3 p, D3 d, double distance, D3 sun, const MsFn& ms, D3& inscatter, D3& transmittance, int steps = 2048);
+// model's surface take the surface air (the GPU's airLiftToSurface convention). scale: the air's coefficients x this
+// (a froxel slice's share past the view's air start: AtmosphereCommon.hlsli airNearScale, airScaled).
+void aerial(const Model& m, D3 p, D3 d, double distance, D3 sun, const MsFn& ms, D3& inscatter, D3& transmittance, int steps = 2048, double scale = 1.0);
 
 // Order 1 of the multiple-scattering build (MsBuild.hlsl PASS 0): single scattering along the ray from p along d plus
 // the ground's reflection of the direct sun, per unit illuminance.

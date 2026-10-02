@@ -22,7 +22,11 @@
 // P[6].x A9 anisotropy frame word UAV (R32_UINT; UNX_NONE = no anisotropic and no eye material in the scene): Aniso.hlsli's
 //        word for anisotropic pixels, whose G-buffer roughness is then sqrt(sqrt(alpha_t' alpha_b')) (MATERIAL_LAYERS 1.5);
 //        for an eye's pixels (MATERIAL_EYE, MaterialEye.hlsli) the eye word - the iris plane's normal, the iris mask and
-//        the caustic weight; P[6].y = shading.eye_model (0: an eye's pixels take the word 0 and the surface's own uv)
+//        the caustic weight; P[6].y = shading.eye_model (0: an eye's pixels take the word 0 and the surface's own uv);
+//        for the pixels of a material with a height map (and neither of the above) the sun's visibility through the
+//        height field in bits 0..7 (255 without material.parallax_shadow)
+// P[6].z material inputs (MaterialInputs.hlsli): bits 0..7 material.parallax_steps (0: no parallax), bit 8
+//        material.parallax_shadow
 // P[3].y experiment mask (material.experiment_disable: cost attribution only, 0 otherwise)
 // PLANAR_MASK=1 (planar reflection views with R's mask; views without one compile none of it):
 // P[3].z R's planar tile mask (R8_UINT per 8 x 8 tile, nonzero = mirror pixels; UNX_NONE = absent), P[3].w R's planar
@@ -42,6 +46,7 @@
 #include "Passes/Material/SurfaceLayers.hlsli"
 #include "Passes/Material/Aniso.hlsli"
 #include "Passes/Material/MaterialEye.hlsli"
+#include "Passes/Material/MaterialInputs.hlsli"
 
 #define M_PI 3.14159265358979
 
@@ -94,7 +99,9 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
         }
         else
         {
-            const MSurface s = mSurfaceFromVis(visId, P[0].y, float2(pixel) + 0.5);
+            // (the triangle's deformed vertices stay at hand: an eye's frame takes them)
+            const MVertex v0 = mTriangleVertex(visId, P[0].y, 0), v1 = mTriangleVertex(visId, P[0].y, 1), v2 = mTriangleVertex(visId, P[0].y, 2);
+            const MSurface s = mSurfaceFromVertices(mTriangleIdentity(visId, P[0].y), v0, v1, v2, float2(pixel) + 0.5);
             const GpuMaterial m = loadMaterial(s.material);
             const MTextureSet ts = mLoadTextureSet(P[2].x, s.material);
 
@@ -103,6 +110,10 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
             float occlusion = 1;  // the baked occlusion map's value (1: none)
             bool eye = false;  // an eye's pixel (MaterialEye.hlsli) and its eye word
             uint eyeWord = 0;
+            // the material's uv and footprint (MaterialInputs.hlsli; the mesh's without a record), its parallax
+            MInputUv iu = mInputUv(m, s.uv, s.duvdx, s.duvdy);
+            bool parallax = false;
+            float parallaxSun = 1;
             if (materialClass(m) == MATERIAL_CUT)
             {
                 // A11 cut faces: textures through three object-space projections, the edge damage band (MaterialCut.hlsli)
@@ -119,54 +130,89 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
             }
             else
             {
+                // Material inputs (MaterialInputs.hlsli): the streams the material reads - the second uv set, the vertex
+                // colour -, then the parallax through its height field: every texture on uv set 0 moves with it (the
+                // detail maps' set 0 by the same step, taken back through the uv transform).
+                MVertexStreams streams;
+                streams.uv1 = s.uv, streams.duv1dx = s.duvdx, streams.duv1dy = s.duvdy;
+                streams.color = 1;
+                if ((iu.r.flags & (MATERIAL_INPUT_OCCLUSION_UV1 | MATERIAL_INPUT_DETAIL_UV1 | MATERIAL_INPUT_VERTEX_TINT | MATERIAL_INPUT_VERTEX_BLEND)) != 0)
+                    streams = mVertexStreams(visId, P[0].y, s);
+                float2 uvDetail = s.uv;
+                if (iu.r.heightTexture != UNX_NONE && (m.classFlags & MATERIAL_EYE) == 0 && (P[3].y & 1) == 0)
+                {
+                    parallax = true;
+                    const float2 before = iu.uv;
+                    mParallax(iu.r, s, iu.uv, iu.duvdx, iu.duvdy, P[6].z & 0xFFu, (P[6].z & 0x100u) != 0, parallaxSun);
+                    const float2 moved = iu.uv - before;
+                    const float det = iu.r.uvU.x * iu.r.uvV.y - iu.r.uvU.y * iu.r.uvV.x;
+                    uvDetail += float2(iu.r.uvV.y * moved.x - iu.r.uvU.y * moved.y, iu.r.uvU.x * moved.y - iu.r.uvV.x * moved.x) / det;
+                }
+
                 roughness = m.roughness, metallic = m.metallic;
                 if (ts.roughMetal != UNX_NONE && (P[3].y & 1) == 0)
                 {
                     Texture2D<float4> t = ResourceDescriptorHeap[ts.roughMetal];
-                    const float2 rm = mSampleGrad(t, (ts.flags & M_TEX_ROUGH_METAL) != 0, s.uv, s.duvdx, s.duvdy).xy;
+                    const float2 rm = mSampleGrad(t, (ts.flags & M_TEX_ROUGH_METAL) != 0, iu.uv, iu.duvdx, iu.duvdy).xy;
                     roughness *= rm.x;
                     metallic *= rm.y;
                 }
-                // the baked occlusion map (materials without a layer record: the word's top byte is theirs)
+                // the baked occlusion map (materials without a layer record: the word's top byte is theirs), on the
+                // material's uv or on the second set
                 if (ts.occlusion != UNX_NONE && (P[3].y & 1) == 0 && (m.classFlags & MATERIAL_LAYERED) == 0)
                 {
                     Texture2D<float4> t = ResourceDescriptorHeap[ts.occlusion];
-                    occlusion = mSampleGrad(t, (ts.flags & M_TEX_OCCLUSION) != 0, s.uv, s.duvdx, s.duvdy).x;
+                    const bool set1 = (iu.r.flags & MATERIAL_INPUT_OCCLUSION_UV1) != 0;
+                    occlusion = mSampleGrad(t, (ts.flags & M_TEX_OCCLUSION) != 0, set1 ? streams.uv1 : iu.uv, set1 ? streams.duv1dx : iu.duvdx,
+                                            set1 ? streams.duv1dy : iu.duvdy).x;
                 }
 
                 // Shading normal (INTERFACES 8.1: TBN = (tangent, sign cross(n, t), normal) of the interpolants, result
-                // normalised) and the footprint's slope variance trace.
+                // normalised) and the footprint's slope variance trace; the detail normal's slopes add in their own
+                // frame, its variance to the trace.
                 variance = (dot(s.dndx, s.dndx) + dot(s.dndy, s.dndy)) / 12.0;
+                const float3 B = s.tangentSign * cross(s.normal, s.tangent);
+                float3 nSum = s.normal;
                 if (ts.moments != UNX_NONE && (P[3].y & 2) == 0)
                 {
                     Texture2D<float4> t = ResourceDescriptorHeap[ts.moments];
-                    const MSlopeMoments mm = mNormalMoments(t, s.uv, s.duvdx, s.duvdy, ts.slopeRange, (ts.flags & M_TEX_NORMAL) != 0);
-                    const float3 B = s.tangentSign * cross(s.normal, s.tangent);
-                    n = normalize(s.tangent * mm.mean.x + B * mm.mean.y + s.normal);
+                    const MSlopeMoments mm = mNormalMoments(t, iu.uv, iu.duvdx, iu.duvdy, ts.slopeRange, (ts.flags & M_TEX_NORMAL) != 0);
+                    const float2 slope = mInputSlope(iu.r, mm.mean);
+                    nSum = s.tangent * slope.x + B * slope.y + s.normal;
                     variance += mm.variance;
                 }
-                else n = normalize(s.normal);
+                float3 detailColor = 1;
+                if ((iu.r.detailColorTexture != UNX_NONE || iu.r.detailNormalTexture != UNX_NONE) && (P[3].y & 3) == 0)
+                {
+                    const MDetail detail = mDetail(iu.r, s, uvDetail, streams, s.tangent, B);
+                    detailColor = detail.colorFactor;
+                    nSum += detail.normalTerm;
+                    variance += detail.variance;
+                }
+                n = normalize(nSum);
 
-                // The base colour, at the surface's uv; an eye's at the iris point seen through the cornea, under the
-                // limbal ring (the footprint stays the surface's).
+                // The base colour, at the material's uv; an eye's at the iris point seen through the cornea, under the
+                // limbal ring (the footprint stays the surface's); times the detail colour and the vertex colour.
                 baseColor = m.baseColor;
-                float2 uvColor = s.uv;
+                float2 uvColor = iu.uv;
                 if ((m.classFlags & MATERIAL_EYE) != 0)
                 {
                     eye = true;
                     if (P[6].y != 0)
                     {
-                        const MEye e = mEyeEvaluate(visId, P[0].y, s, m, n);
+                        const MEye e = mEyeEvaluate(visId, P[0].y, s, m, n, v0, v1, v2);
                         eyeWord = e.word;
-                        uvColor = e.uv;
+                        uvColor = iu.on ? materialInputsUv(iu.r, e.uv) : e.uv;
                         baseColor *= e.darkening;
                     }
                 }
                 if (ts.baseColor != UNX_NONE && (P[3].y & 1) == 0)
                 {
                     Texture2D<float4> t = ResourceDescriptorHeap[ts.baseColor];
-                    baseColor *= mSampleGrad(t, (ts.flags & M_TEX_BASE_COLOR) != 0, uvColor, s.duvdx, s.duvdy).rgb;
+                    baseColor *= mSampleGrad(t, (ts.flags & M_TEX_BASE_COLOR) != 0, uvColor, iu.duvdx, iu.duvdy).rgb;
                 }
+                baseColor *= detailColor;
+                if ((iu.r.flags & MATERIAL_INPUT_VERTEX_TINT) != 0) baseColor *= streams.color.rgb;
             }
             const bool backSide = !s.front && (m.classFlags & MATERIAL_TWO_SIDED) != 0;
             if (backSide) n = -n;
@@ -237,13 +283,26 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
                 RWTexture2D<uint> eyeWords = ResourceDescriptorHeap[P[6].x];  // (an eye's pixel: its eye word)
                 eyeWords[pixel] = eyeWord;
             }
+            if (parallax && P[6].x != UNX_NONE && (m.classFlags & (MATERIAL_ANISOTROPIC | MATERIAL_EYE)) == 0)
+            {
+                // a height map's pixel: the sun's visibility through the height field (the class word is free there)
+                RWTexture2D<uint> classWords = ResourceDescriptorHeap[P[6].x];
+                classWords[pixel] = uint(round(saturate(parallaxSun) * 255.0));
+            }
             words[pixel] = mPackMaterialWord(s.material, metallic, coatRoughness);
 
-            if (ts.emissive != UNX_NONE && P[1].x != UNX_NONE)
+            if (mEmissivePerPixel(ts) && P[1].x != UNX_NONE)
             {
-                Texture2D<float4> t = ResourceDescriptorHeap[ts.emissive];
+                // the emission (the material's, which holds emissiveScale) x its texture x its mask, at the material's uv
+                float3 e = m.emissive;
+                if (ts.emissive != UNX_NONE)
+                {
+                    Texture2D<float4> t = ResourceDescriptorHeap[ts.emissive];
+                    e *= mSampleGrad(t, (ts.flags & M_TEX_EMISSIVE) != 0, iu.uv, iu.duvdx, iu.duvdy).rgb;
+                }
+                e *= mInputEmissiveMask(iu);
                 RWTexture2D<float4> emissive = ResourceDescriptorHeap[P[1].x];
-                emissive[pixel] = float4(m.emissive * mSampleGrad(t, (ts.flags & M_TEX_EMISSIVE) != 0, s.uv, s.duvdx, s.duvdy).rgb, 1);
+                emissive[pixel] = float4(e, 1);
             }
 
             classBit = 1u << mShadeClassOf(m);

@@ -3,7 +3,11 @@
 // Decal frame setup and tile lists (E, A7; Decal.hlsli).
 //   STEP 0: clear the tile lists (one thread per tile; thread 0 writes the header)
 //   STEP 1: per decal, its frame record: the box in camera-relative world space (through the instance's transform
-//           when attached) and the inverse (unit cube coordinates of a camera-relative point)
+//           when attached) and the inverse (unit cube coordinates of a camera-relative point); the frame's opacity =
+//           the record's x the lifetime fade (the frame's clock g_time against the record's fade-in and fade-out
+//           spans) x the screen-size fade (Unreal's FadeScreenSize: with screen = the box's largest half extent over
+//           its distance and k = fadeScreenSize x 2 tan(half fov x) / view width x 600, saturate((screen - k) / (k / 2)));
+//           a decal faded to 0 enters no tile list (STEP 3)
 //   STEP 2: per 16 x 16 tile (one group), the device depth range of its geometry pixels (sky pixels left out)
 //   STEP 3: per decal (one group of 64), every tile of its screen rectangle whose frustum slice (the tile's side planes
 //           through the camera, its depth range) meets the box: separating-plane tests with the 4 side planes and the
@@ -84,7 +88,19 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : SV_G
     f.axisX = ax; f.instance = r.instance;
     f.axisY = ay; f.priority = r.priority;
     f.axisZ = az; f.order = r.order;
-    f.opacity = det != 0 ? r.opacity : 0.0f; f.cosFadeStart = r.cosFadeStart; f.cosFadeEnd = r.cosFadeEnd; f.edge = r.edge;
+    float opacity = det != 0 ? r.opacity : 0.0f;
+    float life = 1;
+    if (r.fadeInDuration > 0) life = min(life, (g_time - r.fadeInStart) / r.fadeInDuration);
+    if (r.fadeOutDuration > 0) life = min(life, 1 - (g_time - r.fadeOutStart) / r.fadeOutDuration);
+    opacity *= saturate(life);
+    if (r.fadeScreenSize > 0)
+    {
+        const float screen = max(length(ax), max(length(ay), length(az))) / max(length(c), 1e-6f);
+        const float k = r.fadeScreenSize * (2 / g_proj[0][0]) / g_viewWidth * 600;
+        opacity *= saturate((screen - k) / (k * 0.5f));
+    }
+    f.opacity = opacity; f.cosFadeStart = r.cosFadeStart; f.cosFadeEnd = r.cosFadeEnd; f.edge = r.edge;
+    f.color = r.color; f.channels = r.channels;
     frames[id.x] = f;
 #else
     const uint decal = gid.x;

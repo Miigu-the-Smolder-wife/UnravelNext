@@ -7,8 +7,17 @@
 // the movable casters' views - the pages drawn anew and the kept pages whose movable casters are drawn anew
 // (VSM_FLAG_DIRTY_DYNAMIC); the first set is the static casters' (the pages drawn anew). A page has the same slot in
 // both: the two atlases hold a page at the same place.
+// shadow.vsm.static_occlusion_two_phase (P[1].y: the guess UAV, raw; 0xFFFFFFFF: off): for each page drawn anew, the page
+// that stands for its occluders in the first cull phase of the static casters' views (V's DepthRasterRequest::tileGuess,
+// two words per mask bit of the first set) - the nearest coarser level's page over the same ground that is kept this
+// frame (resident, not drawn anew: its static copy and that copy's HZB are those of an earlier frame), up to
+// VSM_GUESS_LEVELS levels up, and where the page lies in it: { its physical page (0xFFFFFFFF: none), levels up |
+// x << 8 | y << 20 (the page's corner in it, texels) }. The levels' grids nest and share the depth mapping (one basis,
+// one caster height range), so a texel block of the coarser page covers the same ground and heights.
 // P[0].x page table SRV (raw), P[0].y mask UAV (raw), P[0].z VSM constants CBV, P[0].w atlas slots UAV (raw)
 #include "Passes/Shadow/VsmCommon.hlsli"
+
+#define VSM_GUESS_LEVELS 4u
 
 [numthreads(64, 1, 1)]
 void main(uint word : SV_DispatchThreadID)
@@ -32,6 +41,25 @@ void main(uint word : SV_DispatchThreadID)
         {
             bits |= 1u << i;
             slots.Store((word * 32 + i) * 4, e & VSM_PHYS_MASK);
+            if (P[1].y != 0xFFFFFFFFu)
+            {
+                uint2 guess = uint2(0xFFFFFFFFu, 0);
+                [unroll] for (uint up = 1; up <= VSM_GUESS_LEVELS; ++up)
+                {
+                    const uint j = min(k + up, VSM_LEVELS - 1);
+                    const int2 ancestor = page >> (int)up;
+                    const uint2 a = table.Load2(vsmSlot(ancestor, j) * 8);
+                    const bool kept = k + up < VSM_LEVELS && vsmSameBasis(c, k, j) && vsmInWindow(c, ancestor, j) && (a.x & VSM_FLAG_RESIDENT) != 0 &&
+                                      (a.x & VSM_FLAG_DIRTY) == 0 && a.y == vsmTag(ancestor);
+                    if (kept && guess.x == 0xFFFFFFFFu)
+                    {
+                        const uint2 corner = uint2(page - (ancestor << (int)up)) * (VSM_PAGE >> up);
+                        guess = uint2(a.x & VSM_PHYS_MASK, up | (corner.x << 8) | (corner.y << 20));
+                    }
+                }
+                RWByteAddressBuffer guesses = ResourceDescriptorHeap[P[1].y];
+                guesses.Store2((word * 32 + i) * 8, guess);
+            }
         }
         if (separate && resident && (e & (VSM_FLAG_DIRTY | VSM_FLAG_DIRTY_DYNAMIC)) != 0)
         {

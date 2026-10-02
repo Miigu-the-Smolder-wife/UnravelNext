@@ -12,6 +12,10 @@
 //                                                 lobe is about a texel wide; narrower lobes see the texel average,
 //                                                 wider ones the bilinear texel instead of the lobe average.
 // Material textures at hits: rtHitMaterial (M's published textures, INTERFACES v1.11, at the ray cone's level of detail).
+// Material inputs at hits (scene::Material; Scene.hlsli GpuMaterialInputs): the uv transform (with the level of detail
+// by its determinant), the emissive mask and the vertex tint (the emission's scale is in the material's emissive); none
+// of them with UNX_MATERIAL_INPUTS 0 (Scene.hlsli: a kernel at the DXIL limit). No parallax, no detail maps, no second
+// uv set: a hit is a cone's footprint.
 //   local lights                                  one next-event sample per hit (HitLocalLights.hlsli, the reference's
 //                                                 estimator), visibility by one shadow ray: unbiased, averaged by the
 //                                                 hit's history.
@@ -30,30 +34,83 @@ float rtTextureLod(Texture2D t, float uvPerWorldArea, float footprintLog2)
     return 0.5 * log2(max((float)w * h * uvPerWorldArea, 1e-20)) + footprintLog2;
 }
 
-GpuMaterial rtHitMaterial(GpuMaterial m, RtSurface s, float coneWidth, float cosTheta)
+// uvColor: where the base colour is read (the surface's uv; an eye's iris point), on the mesh's uv.
+GpuMaterial rtHitMaterialAt(GpuMaterial m, RtSurface s, float2 uvColor, float coneWidth, float cosTheta)
 {
     const float footprint = log2(max(coneWidth, 1e-8) / max(abs(cosTheta), 1e-3));
+    float2 uv = s.uv;
+    float uvPerWorldArea = s.uvPerWorldArea;
+#if UNX_MATERIAL_INPUTS
+    if (m.inputs != UNX_NONE)
+    {
+        // the material's uv transform: its uv, and its texture area per world area by the determinant
+        const GpuMaterialInputs r = loadMaterialInputs(m.inputs);
+        uv = materialInputsUv(r, uv);
+        uvColor = materialInputsUv(r, uvColor);
+        uvPerWorldArea *= abs(r.uvU.x * r.uvV.y - r.uvU.y * r.uvV.x);
+#if RT_SURFACE_EXTRAS
+        if ((r.flags & MATERIAL_INPUT_VERTEX_TINT) != 0) m.baseColor *= s.color.rgb;
+#endif
+        if (r.emissiveMaskTexture != UNX_NONE)
+        {
+            Texture2D t = ResourceDescriptorHeap[r.emissiveMaskTexture];
+            const float lod = rtTextureLod(t, uvPerWorldArea, footprint);
+            m.emissive *= (r.textureClamp & 8u) ? t.SampleLevel(g_anisoClamp, uv, lod).x : t.SampleLevel(g_anisoWrap, uv, lod).x;
+        }
+    }
+#endif
     if (m.baseColorTexture != UNX_NONE)
     {
         Texture2D t = ResourceDescriptorHeap[m.baseColorTexture];
-        m.baseColor *= materialBaseColorLevel(m, s.uv, rtTextureLod(t, s.uvPerWorldArea, footprint)).rgb;
+        m.baseColor *= materialBaseColorLevelAt(m, uvColor, rtTextureLod(t, uvPerWorldArea, footprint)).rgb;
     }
     if (m.roughMetalTexture != UNX_NONE)
     {
         Texture2D<float4> t = ResourceDescriptorHeap[m.roughMetalTexture];
-        const float lod = rtTextureLod(t, s.uvPerWorldArea, footprint);
-        const float2 rm = (m.textureClamp & MATERIAL_TEXTURE_ROUGH_METAL) ? t.SampleLevel(g_anisoClamp, s.uv, lod).rg : t.SampleLevel(g_anisoWrap, s.uv, lod).rg;
+        const float lod = rtTextureLod(t, uvPerWorldArea, footprint);
+        const float2 rm = (m.textureClamp & MATERIAL_TEXTURE_ROUGH_METAL) ? t.SampleLevel(g_anisoClamp, uv, lod).rg : t.SampleLevel(g_anisoWrap, uv, lod).rg;
         m.roughness *= rm.r;
         m.metallic *= rm.g;
     }
     if (m.emissiveTexture != UNX_NONE)
     {
         Texture2D<float4> t = ResourceDescriptorHeap[m.emissiveTexture];
-        const float lod = rtTextureLod(t, s.uvPerWorldArea, footprint);
-        m.emissive *= (m.textureClamp & MATERIAL_TEXTURE_EMISSIVE) ? t.SampleLevel(g_anisoClamp, s.uv, lod).rgb : t.SampleLevel(g_anisoWrap, s.uv, lod).rgb;
+        const float lod = rtTextureLod(t, uvPerWorldArea, footprint);
+        m.emissive *= (m.textureClamp & MATERIAL_TEXTURE_EMISSIVE) ? t.SampleLevel(g_anisoClamp, uv, lod).rgb : t.SampleLevel(g_anisoWrap, uv, lod).rgb;
     }
     return m;
 }
+// (a macro, not a function: a wrapper's copies of the material and the surface cost a kernel at the DXIL limit 176 B)
+#define rtHitMaterial(m, s, coneWidth, cosTheta) rtHitMaterialAt(m, s, (s).uv, coneWidth, cosTheta)
+
+// An eye (MATERIAL_EYE) at a ray hit: the base colour's uv - the iris point seen through the cornea along the ray
+// (modelEyeFrame through the hit triangle, modelEyePoint, as the resolve's MaterialEye.hlsli) - and the limbal ring's
+// factor (returned).
+#ifndef RT_HIT_EYE
+#define RT_HIT_EYE 0
+#endif
+#if RT_HIT_EYE && RT_SURFACE_EXTRAS
+float rtHitEye(GpuMaterial m, RtSurface s, float3 direction, inout float2 uv)
+{
+    const GpuMaterialEye e = loadMaterialEye(m.classFlags >> 16);
+    float3 t = float3(0, 0, -1);  // (the sclera: no frame)
+    if (length(s.uv - 0.5) < e.irisRadius)
+        t = modelEyeRay(modelEyeFrame(e.axis, s.restE1, s.restE2, s.worldE1, s.worldE2, s.uvE1, s.uvE2), direction, s.normal, e.eta);
+    const ModelEyePoint p = modelEyePoint(e, s.uv, t);
+    uv = p.uv;
+    return p.darkening;
+}
+// The material of a hit as a viewer along 'direction' (the ray's, unit) sees it: rtHitMaterial, and with RT_HIT_EYE = 1
+// (the reflection kernels set it; default 0: GI hits take the surface's uv) an eye's base colour at its iris point.
+GpuMaterial rtHitMaterialSeen(GpuMaterial m, RtSurface s, float3 direction, float coneWidth, float cosTheta)
+{
+    float2 uvColor = s.uv;
+    if ((m.classFlags & MATERIAL_EYE) != 0) m.baseColor *= rtHitEye(m, s, direction, uvColor);
+    return rtHitMaterialAt(m, s, uvColor, coneWidth, cosTheta);
+}
+#else
+#define rtHitMaterialSeen(m, s, direction, coneWidth, cosTheta) rtHitMaterialAt(m, s, (s).uv, coneWidth, cosTheta)
+#endif
 
 struct RtHitLighting
 {
@@ -97,7 +154,9 @@ struct RtHitSplit
 // ModelSubsurface), Lambert diffuse light with no scattering pass behind it, and the light through thin parts
 // (modelSubsurfaceThin) from the sun and the light sample on the far side of the shading normal - the hit's one shadow
 // ray decides, as the direct view's visibility does. An eye (MATERIAL_EYE) is such a hit with its base colour at the
-// surface's uv: no refraction onto the iris.
+// surface's uv: no refraction onto the iris - except in the reflection kernels (RT_HIT_EYE, rtHitMaterialSeen), where
+// its base colour is read at the iris point seen through the cornea along the ray, under the limbal ring, so a mirror
+// shows the eye the direct view shows; its shading stays the hit's (no iris plane, no caustic).
 // The cloth blend (a sheen's cloth factor): the base's specular share of the sun term and of the cache's light x (1 - cloth).
 float3 rtHitRadianceSplit(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float pixelAngle, bool wantSun, out float3 sunFull, out RtHitSplit split)
 {

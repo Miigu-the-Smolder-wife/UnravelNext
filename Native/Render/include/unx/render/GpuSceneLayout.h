@@ -5,6 +5,8 @@
 #include "unx/core/Math.h"
 #include "unx/render/ViewKind.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
@@ -148,7 +150,8 @@ struct Material  // 112 B
     uint32_t normalTexture;
     uint32_t roughMetalTexture;
     uint32_t emissiveTexture;
-    uint32_t occlusionTexture;
+    uint32_t inputs;         // the material's MaterialInputs record in FrameConstants::materialInputs, kNone: none (until the
+                             // material inputs this was an occlusion texture slot that M never published: always kNone)
     uint32_t revision;
     uint32_t textureClamp;   // bit per texture (MaterialTextureBit): 1 = clamp addressing (g_anisoClamp), 0 = wrap
     // Hair class (v1.66): sigma_a (scene::model::hairAbsorption), beta_N, cuticle tilt; beta_M = roughness, eta = ior.
@@ -210,12 +213,58 @@ struct MaterialEyeRecord  // 64 B
 };
 static_assert(sizeof(MaterialEyeRecord) == sizeof(MaterialLayers));
 
+// Material inputs (scene::Material's uv transform, second uv set, detail maps, height, emissive mask, vertex colour and
+// dithered opacity; Passes/Common/Scene.hlsli GpuMaterialInputs): the record of a material that has any, at
+// Material::inputs in FrameConstants::materialInputs. Texture fields are M's SRVs (GpuScene::setMaterialTextures).
+struct MaterialInputs  // 80 B
+{
+    float uvU[3];            // the material's uv: u' = uvU.xy . uv + uvU.z,
+    float detailScaleU;      //   the detail maps': uv(set) x detailScale + detailOffset
+    float uvV[3];            //   v' = uvV.xy . uv + uvV.z
+    float detailScaleV;
+    float detailOffset[2];
+    float detailColor;       // strength of the detail colour [0, 1]
+    float detailNormal;      // scale of the detail normal's slopes
+    uint32_t flags;          // MaterialInputFlags
+    uint32_t detailColorTexture, detailNormalTexture;  // RGBA8 sRGB; M's slope moments (RGBA16_UNORM)
+    float detailSlopeRange;  // S of the detail moments' encoding
+    uint32_t heightTexture;  // R8
+    float heightScale;       // m
+    uint32_t emissiveMaskTexture;  // R8
+    uint32_t textureClamp;   // clamp addressing: 1 detail colour, 2 detail normal, 4 height, 8 emissive mask
+};
+static_assert(sizeof(MaterialInputs) == 80);
+
+enum MaterialInputFlags : uint32_t
+{
+    MaterialInputUv = 1u << 0,            // the uv transform is not the identity
+    MaterialInputOcclusionUv1 = 1u << 1,  // the occlusion map is read on the second uv set
+    MaterialInputDetailUv1 = 1u << 2,     // the detail maps are read on the second uv set
+    MaterialInputVertexTint = 1u << 3,    // the vertex colour's rgb multiplies the base colour
+    MaterialInputVertexBlend = 1u << 4,   // the vertex colour's alpha weighs the detail maps
+    MaterialInputDither = 1u << 5,        // dithered opacity (the views' alpha test)
+};
+
+// A mesh's optional vertex streams (scene::Mesh::uv1, colors), one record per vertex of a mesh that has either
+// (FrameConstants::vertexAttributes; the mesh's first record + 1 in FrameConstants::meshAttributes, 0: none).
+struct VertexAttributes  // 16 B
+{
+    float2 uv1;              // the second uv set (a mesh with colours only: its uv0)
+    uint32_t color;          // RGBA8, r in the low byte (a mesh with uv1 only: white)
+    uint32_t pad;
+};
+static_assert(sizeof(VertexAttributes) == 16);
+
 // Textures of one material as M's texture system publishes them (GpuScene::setMaterialTextures, INTERFACES 6.3 v1.10):
-// bindless SRV indices (kNone = none; the SRVs belong to M) and clamp bits (MaterialTextureBit).
+// bindless SRV indices (kNone = none; the SRVs belong to M) and clamp bits (MaterialTextureBit). The material inputs'
+// textures go to the material's MaterialInputs record.
 struct MaterialTextures
 {
-    uint32_t baseColor = kNone, normal = kNone, roughMetal = kNone, emissive = kNone, occlusion = kNone;
+    uint32_t baseColor = kNone, normal = kNone, roughMetal = kNone, emissive = kNone;
     uint32_t clamp = 0;
+    uint32_t detailColor = kNone, detailNormal = kNone, height = kNone, emissiveMask = kNone;
+    float detailSlopeRange = 0;
+    uint32_t inputClamp = 0;  // MaterialInputs::textureClamp
 };
 
 enum MaterialTextureBit : uint32_t
@@ -225,6 +274,7 @@ enum MaterialTextureBit : uint32_t
     MaterialTextureRoughMetal = 1u << 2,
     MaterialTextureEmissive = 1u << 3,
     MaterialTextureOcclusion = 1u << 4,
+    MaterialTextureEmissiveMask = 1u << 5,  // M's table: the material has an emissive mask (its emission is per pixel)
 };
 
 enum MaterialFlags : uint32_t
@@ -247,6 +297,28 @@ inline uint32_t halfFloatBits(float value)
     const uint32_t sign = (u >> 16) & 0x8000u;
     const int32_t e = (int32_t)((u >> 23) & 0xFF) - 127 + 15;
     return sign | (e <= 0 ? 0u : (e >= 31 ? 0x7BFFu : (((uint32_t)e << 10) | ((u >> 13) & 0x3FFu))));
+}
+
+// A linear colour as an RGB9E5 word (three 9-bit mantissas under one 5-bit exponent, DXGI's R9G9B9E5_SHAREDEXP layout:
+// channel = mantissa x 2^(exponent - 24)), and back.
+inline uint32_t rgb9e5(float3 c)
+{
+    const float limit = 65408.0f;  // (511 / 512) x 2^16
+    const float r = std::min(std::max(c.x, 0.0f), limit), g = std::min(std::max(c.y, 0.0f), limit), b = std::min(std::max(c.z, 0.0f), limit);
+    const float top = std::max(r, std::max(g, b));
+    int exponent = std::max(-16, top > 0 ? (int)std::floor(std::log2(top)) : -16) + 1 + 15;
+    float unit = std::exp2((float)(exponent - 24));
+    if ((int)std::floor(top / unit + 0.5f) == 512)
+    {
+        unit *= 2;
+        ++exponent;
+    }
+    return (uint32_t)std::floor(r / unit + 0.5f) | ((uint32_t)std::floor(g / unit + 0.5f) << 9) | ((uint32_t)std::floor(b / unit + 0.5f) << 18) | ((uint32_t)exponent << 27);
+}
+inline float3 rgb9e5ToFloat(uint32_t v)
+{
+    const float unit = std::exp2((float)(int)(v >> 27) - 24.0f);
+    return { (float)(v & 0x1FFu) * unit, (float)((v >> 9) & 0x1FFu) * unit, (float)((v >> 18) & 0x1FFu) * unit };
 }
 
 struct Light  // 112 B
@@ -273,7 +345,8 @@ struct Light  // 112 B
     float falloffExponent;   // point, spot: 0 = inverse square; > 0: (1 - (d / range)^2)^exponent, no inverse square
     uint32_t barnDoor;       // rect: half(flap height = length x cos angle) | half(flap spread = length x sin angle) << 16; 0: none
     uint32_t sourceTexture;  // rect: SRV of the emitter's image + 1 (M's TextureSystem publishes it; 0: uniform)
-    uint32_t pad;
+    uint32_t sourceMean;     // with sourceTexture: the image's mean colour (rgb9e5) - what a consumer that takes the light
+                             // as a point takes for the image (the air and fog, particles, the FAR tile terms, ray hits)
 };
 static_assert(sizeof(Light) == 112);
 // Light::revision from a change count and scene::Light::rayEndBias (negative: none).
@@ -351,9 +424,13 @@ struct FrameConstants
     // BlueNoise.hlsli blueNoise4); kNone = none (the readers fall back to a hash).
     // fog: the main view's fog parameters (Passes/Atmosphere/FogVolume.hlsli FogParams; a raw buffer's SRV + 1), 0 = no
     // fog in this view. The air lookups of every layer (atmosphereAerial / atmosphereAirView) take the fog with it.
+    // materialInputs: StructuredBuffer<MaterialInputs> (kNone: no material has one). meshAttributes: StructuredBuffer<uint>
+    // per mesh, 1 + the mesh's first record in vertexAttributes (StructuredBuffer<VertexAttributes>), 0: the mesh has
+    // neither a second uv set nor vertex colours (kNone: no mesh has).
     // clusterStream: the SRV + 1 of the compressed cluster vertices (ClusterData::named "clusterStream", Tools/
     // ClusterBuilder ClusterStream.h; Passes/Common/ClusterStream.hlsli loadClusterVertex), 0 = the scene has none.
-    uint32_t blueNoise, fog, clusterStream;
+    uint32_t blueNoise, fog, materialInputs;
+    uint32_t meshAttributes, vertexAttributes, clusterStream, pad4;
 };
-static_assert(sizeof(FrameConstants) == 592);
+static_assert(sizeof(FrameConstants) == 608);
 } // namespace unx::render::gpu

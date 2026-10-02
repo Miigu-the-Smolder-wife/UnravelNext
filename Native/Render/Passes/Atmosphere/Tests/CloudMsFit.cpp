@@ -74,15 +74,17 @@ double ramp(const CloudLayer& layer, const Ray& r, double w0, double w1)
     for (const Sample& q : r.s) sum += q.T * layer.albedo * q.rho * q.segment * std::max(0.0, w0 + w1 * q.hn);
     return sum;
 }
-// sum_k a^k p_k E_k(b) with E_k(b) = sum T albedo rho exp(-b^k tau) segment.
-double octaves(const CloudLayer& layer, const Ray& r, double a, double b, double c, int N)
+// sum_k a^k p_k E_k(b) with E_k(b) = sum T albedo rho exp(-b^k tau) segment; powder: the octaves past the first x
+// (1 - powder exp(-2 tau)) per sample (CloudModel.h referenceApproximate; 0: the series alone).
+double octaves(const CloudLayer& layer, const Ray& r, double a, double b, double c, int N, double powder = 0)
 {
     double L = 0, ak = 1, bk = 1, ck = 1;
     for (int k = 0; k < N; ++k)
     {
         const double p = (1 - layer.lobeBlend) * hg(layer.g0 * ck, r.cosTheta) + layer.lobeBlend * hg(layer.g1 * ck, r.cosTheta);
         double e = 0;
-        for (const Sample& q : r.s) e += q.T * layer.albedo * q.rho * std::exp(-bk * q.tauSun) * q.segment;
+        for (const Sample& q : r.s)
+            e += q.T * layer.albedo * q.rho * std::exp(-bk * q.tauSun) * q.segment * (k > 0 ? 1 - powder * std::exp(-2 * q.tauSun) : 1.0);
         L += ak * p * e;
         ak *= a, bk *= b, ck *= c;
     }
@@ -198,6 +200,28 @@ int main(int argc, char** argv)
                             }
                 logf("octaves%s best: N %d, a %.2f, b %.2f, c %.2f, d0 %.4f, d1 %.4f: mean %.3f, worst %.3f\n", diffuse ? " + diffuse" : "", bn, ba, bb, bc,
                      bd0, bd1, best, bw);
+            }
+            {
+                // The powder term's strength fitted with the octaves (atmosphere.clouds.powder: the GPU's value is 0 until
+                // this says otherwise): the best (a, b, c) at each strength, N as the GPU's.
+                for (double powder : { 0.0, 0.25, 0.5, 0.75, 1.0 })
+                {
+                    double best = 1e9, ba = 0, bb = 0, bc = 0, bw = 0;
+                    for (double a = 0.3; a <= 0.951; a += 0.05)
+                        for (double b = 0.05; b <= 0.751; b += 0.05)
+                            for (double c = 0.1; c <= 0.951; c += 0.1)
+                            {
+                                double mean = 0, worst = 0;
+                                for (const Ray& r : rays)
+                                {
+                                    const double e = std::abs(octaves(layer, r, a, b, c, kMsOctaves, powder) - r.sunRef) / r.sunRef;
+                                    mean += e, worst = std::max(worst, e);
+                                }
+                                mean /= rays.size();
+                                if (mean < best) best = mean, ba = a, bb = b, bc = c, bw = worst;
+                            }
+                    logf("octaves with powder %.2f best: N %d, a %.2f, b %.2f, c %.2f: mean %.3f, worst %.3f\n", powder, kMsOctaves, ba, bb, bc, best, bw);
+                }
             }
             double s0 = 0, s1 = 0;
             solve2([](const Ray& r) { return r.S0; }, [](const Ray& r) { return r.S1; }, [](const Ray& r) { return r.skyRef; },

@@ -3,6 +3,7 @@
 #include "unx/render/Tracks.h"
 #include "unx/scene/SceneData.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <map>
@@ -315,11 +316,27 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     // History discontinuity (v1.35): no previous view in this frame; a restore also has no previous transforms or
     // palettes. The tracks reset their own temporal state from frame.discontinuity.
     FrameContext frame = in;
+    // The frame's weather record (FrameContext::weather: the World's one row for the sky, the air and the surfaces): its
+    // cloud cover is the cloud layer's coverage where the frame brings no layer of its own and its producer has not
+    // decided the clouds itself (the layer's other values stay the defaults). The rain's veil in the air and the wet
+    // surfaces read the same record (S's fogViewFor: atmosphere.fog.rain_veil; M's SurfaceLayers.hlsli).
+    if ((frame.sceneWeather & kSceneClouds) != 0 && !(frame.clouds.coverage > 0) && frame.weather.cloudCover > 0)
+        frame.clouds.coverage = std::min(frame.weather.cloudCover, 1.0f);
     // The scene description's weather where the frame brings none of its own (FrameContext::sceneWeather): the scene's
     // coordinates are the world's - the fog's height and the volumes' centres go through the origin offset as the
     // frame's own do (S), the cloud layer's altitudes are above the planet's surface.
     if (const scene::Scene* src = m_scene.source())
     {
+        // (the cirrus sheet comes with the scene's layer record, where the frame brings neither a layer nor a sheet)
+        if ((frame.sceneWeather & kSceneClouds) != 0 && !(frame.clouds.cirrusCoverage > 0) && src->clouds.cirrusCoverage > 0)
+        {
+            const scene::CloudLayer& c = src->clouds;
+            frame.clouds.cirrusCoverage = c.cirrusCoverage;
+            frame.clouds.cirrusAltitude = c.cirrusAltitude;
+            frame.clouds.cirrusOpticalDepth = c.cirrusOpticalDepth;
+            frame.clouds.cirrusWindX = c.cirrusWindX;
+            frame.clouds.cirrusWindZ = c.cirrusWindZ;
+        }
         if ((frame.sceneWeather & kSceneClouds) != 0 && !(frame.clouds.coverage > 0) && src->clouds.coverage > 0)
         {
             const scene::CloudLayer& c = src->clouds;
@@ -346,6 +363,9 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
             frame.fog.skyAmount = f.skyAmount;
             frame.fog.noiseAmount = f.noiseAmount;
             frame.fog.noiseScale = f.noiseScale;
+            frame.fog.density2 = f.density2;
+            frame.fog.heightFalloff2 = f.heightFalloff2;
+            frame.fog.height2 = f.height2;
         }
         if ((frame.sceneWeather & kSceneFogVolumes) != 0 && frame.fogVolumes.empty())
             for (const scene::FogVolume& v : src->fogVolumes)
@@ -359,6 +379,10 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
                 d.heightFalloff = v.heightFalloff;
                 d.edge = v.edge;
                 d.albedo[0] = v.albedo.x, d.albedo[1] = v.albedo.y, d.albedo[2] = v.albedo.z;
+                d.sourcePlane = v.sourcePlane;
+                d.riseSpeed = v.riseSpeed;
+                d.turbulence = v.turbulence;
+                d.turbulenceScale = v.turbulenceScale;
                 frame.fogVolumes.push_back(d);
             }
     }

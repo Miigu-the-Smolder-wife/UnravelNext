@@ -43,7 +43,8 @@ using namespace unx::visibility::detail;
 namespace hier = unx::clusterbuilder::gpu;
 
 constexpr uint32_t kNone = gpu::kNone;
-constexpr uint32_t kViewsPerSlot = 4096;  // cull views of one upload chunk per frame in flight (more chunks as a frame needs)
+constexpr uint32_t kViewsPerSlot = kViewsPerRun;  // cull views of one upload chunk per frame in flight (more chunks as a frame needs)
+static_assert(kViewsPerRun <= kDepthRasterMaxViews && kDepthRasterMaxViews <= 65536);
 constexpr uint32_t kReadbackBytes = 320;  // >= kStateWords x 4 (a slot holds one copy of the cull state)
 static_assert(kReadbackBytes >= kStateWords * 4);
 
@@ -746,6 +747,7 @@ CullView viewOf(const RasterView& r, const DepthRasterRequest& req, const Settin
     v.viewportOffset = { (float)r.viewportX, (float)r.viewportY };
     v.cullMaskOffset = req.cullMask.valid() ? r.cullMaskOffset : kNone;
     if (req.atlasSlots.valid()) v.flags |= kViewTileSingle;
+    v.slotOffset = r.atlasSlotOffset != UINT32_MAX ? r.atlasSlotOffset : (v.cullMaskOffset != kNone ? v.cullMaskOffset * 32 : 0);
     v.userData = r.userData;
     v.tilePx = std::max(req.cullTilePx, 1u);
     v.tilesX = (r.viewportWidth + v.tilePx - 1) / v.tilePx;
@@ -753,13 +755,24 @@ CullView viewOf(const RasterView& r, const DepthRasterRequest& req, const Settin
     v.instanceEnd = r.instanceEnd;
     v.minInstancePx = r.minInstanceTexels;
     v.instanceSet = r.instanceSet;
+    if (req.proxies && r.minInstanceTexels > 0) v.flags |= kViewProxies;
+    if (r.materialFilter > 2) fail("rasterizeDepth '%s': materialFilter %u (0 .. 2)", req.name.c_str(), r.materialFilter);
+    if (r.materialFilter != 0) v.flags |= r.materialFilter == 1 ? kViewNoGlass : kViewGlassOnly;
     if (r.tileOccluders && req.tileOccluders.valid() && req.atlasSlots.valid())
     {
         if (req.cullTilePx != 128 || req.tileOccludersSrv == UINT32_MAX || req.atlasSlotsSrv == UINT32_MAX)
             fail("rasterizeDepth '%s': tile occluders need 128 px tiles and the persistent SRVs of the occluders and the atlas slots", req.name.c_str());
-        v.flags |= kViewTileOccluders;
         v.occluderSrv = req.tileOccludersSrv;
         v.occluderSlotsSrv = req.atlasSlotsSrv;
+        if (r.tileTwoPhase)
+        {
+            if (!req.tileGuess.valid() || req.tileGuessSrv == UINT32_MAX || !req.buildTileOccluders)
+                fail("rasterizeDepth '%s': tile occluders in two phases need the tiles' guesses and the occluders' rebuild", req.name.c_str());
+            v.flags |= kViewTileTwoPhase;
+            v.guessSrv = req.tileGuessSrv;
+        }
+        else
+            v.flags |= kViewTileOccluders;
     }
     return v;
 }
@@ -873,6 +886,7 @@ struct Run
     BufferRef chunkWork;   // C3: visible chunk items [0, capDeferred), deferred chunks [capDeferred, 2 capDeferred)
     BufferRef chunks, skinBounds;  // C3 persistent buffers imported for this frame (read by the cull kernels)
     BufferRef tileOccluders, occluderSlots;  // raster service: the request's tile occluders and atlas slots (tilesOcclude)
+    BufferRef tileGuess;                     // ... and the tiles' guesses of a run with two-phase views
     uint32_t chunkCount = 0, flatCount = 0;
     uint32_t tileCoarseWords = 0;  // per view
     TextureRef hiz;
@@ -903,10 +917,10 @@ Run createRun(FramePassContext& fc, const Settings& cfg, const std::string& pref
     r.groupItems = g.createBuffer({ "v.cull.groups", (uint64_t)cfg.capGroups * 8, 8 });
     r.visible = g.createBuffer({ "v.visibleClusters", (uint64_t)cfg.capVisible * 8, 8 });
     r.lists = g.createBuffer({ "v.lists", (uint64_t)cfg.capVisible * 4 * kLists, 0 });
-    r.deferInstances = g.createBuffer({ "v.cull.deferredInstances", (uint64_t)cfg.capDeferred * 4, 4 });
+    r.deferInstances = g.createBuffer({ "v.cull.deferredInstances", (uint64_t)cfg.capDeferred * 8, 8 });
     r.deferNodes = g.createBuffer({ "v.cull.deferredNodes", (uint64_t)cfg.capDeferred * 8, 8 });
     r.deferClusters = g.createBuffer({ "v.cull.deferredClusters", (uint64_t)cfg.capDeferred * 8, 8 });
-    r.chunkWork = g.createBuffer({ "v.cull.chunkWork", (uint64_t)cfg.capDeferred * 8, 4 });
+    r.chunkWork = g.createBuffer({ "v.cull.chunkWork", (uint64_t)cfg.capDeferred * 16, 8 });
     r.nodesSrv = fc.scene.srv(clusterbuilder::kClusterNodes);
     r.rootsSrv = fc.scene.srv(clusterbuilder::kMeshClusterRoots);
     r.spheresSrv = fc.scene.srv(clusterbuilder::kClusterLodSpheres);
@@ -936,6 +950,7 @@ void declareCull(PassBuilder& b, const Run& r, Use argsUse)
         b.use(r.tileOccluders, Use::SrvCompute);
         b.use(r.occluderSlots, Use::SrvCompute);
     }
+    if (r.tileGuess.valid()) b.use(r.tileGuess, Use::SrvCompute);
     if (r.swPages.valid()) b.use(r.swPages, Use::SrvCompute);
     if (r.pageFeedback.valid()) b.use(r.pageFeedback, Use::UavCompute);
 }
@@ -1893,12 +1908,17 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
     };
     ID3D12CommandSignature* dispatchSig = s.dispatchSignature.Get();
     ID3D12CommandSignature* meshSig = s.meshSignature.Get();
+    // visibility.fold_small_passes: the layer's single-group steps are timed with the pass they prepare (PassChain.h):
+    // prepare with the clear, the bins' header and prefix with the classify and scatter around them, the cover's
+    // arguments with the cover, the count's arguments with the count, the scan with the offsets, the special list's
+    // header with the scatter, and the heavy tiles with the blocks.
+    PassChain chain(g, QueueType::Graphics, r.cfg.foldSmall);
     // Compute pass of CoverageBuild: direct (groupsX > 0), or indirect at argWord of the cull args (fromList: of the tile
     // list, which the pass then reads as an SRV).
     auto build = [&](const char* name, uint32_t mode, uint32_t groupsX, uint32_t groupsY, uint32_t argWord, uint32_t uses, bool fromList = false) {
         ID3D12PipelineState* pso = fc.shaders.compute("Passes/Visibility/CoverageBuild.MODE" + std::to_string(mode));
         const bool indirect = groupsX == 0;
-        g.addPass(std::string("v.coverage.") + name, QueueType::Graphics,
+        chain.add(std::string("v.coverage.") + name,
                   [&](PassBuilder& b) {
                       b.use(run.state, Use::UavCompute);
                       if (indirect && !fromList) b.use(run.args, Use::IndirectArgs);
@@ -1939,6 +1959,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
     }
     build("prepare", 0, 1, 1, 0, kUseArgs | kUseListRead);
     build("clear", 1, 0, 0, kArgCovClear, kUseListRead | kUseTiles | kUseCounters | kUseRange | coverUse);
+    chain.flush("v.coverage.clear");
 
     // The pixel kernel's variant: the measurement stage, and the fragment counters (visibility.coverage_statistics).
     const std::string psVariant = ".STAGE" + std::to_string(r.cfg.coverageDebugStage) + (r.cfg.coverageStatistics ? ".STATS1" : ".STATS0");
@@ -2009,7 +2030,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
         auto bin = [&](const char* name, uint32_t mode, uint32_t groupsX, uint32_t argWord, uint32_t uses, uint32_t bucket) {
             ID3D12PipelineState* pso = fc.shaders.compute("Passes/Visibility/CoverageBins.MODE" + std::to_string(mode));
             const bool indirect = groupsX == 0;
-            g.addPass(std::string("v.coverage.") + name, QueueType::Graphics,
+            chain.add(std::string("v.coverage.") + name,
                       [&](PassBuilder& b) {
                           b.use(run.state, Use::UavCompute);
                           b.use(bins, (uses & kBinRead) ? Use::SrvCompute : Use::UavCompute);
@@ -2064,6 +2085,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
         bin("bins.classify", 1, 0, kCovArgEntries, kBinLists | kBinVisible | kBinHiz, 0);
         bin("bins.prefix", 2, 1, 0, kBinArgs, 0);
         bin("bins.scatter", 3, 0, kCovArgEntries, kBinLists, 0);
+        chain.flush("v.coverage.bins");
         // The compute rasteriser of a bucket's small triangles, before its mesh raster (which skips what this took).
         ID3D12PipelineState* swPso = computeRaster ? fc.shaders.compute(std::string("Passes/Visibility/CoverageRasterSw.STATS") + (r.cfg.coverageStatistics ? "1" : "0")) : nullptr;
         auto addComputeRaster = [&](uint32_t bucket) {
@@ -2111,6 +2133,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
             {
                 bin("cover.args", 4, 1, 0, kBinArgs, bucket);
                 bin("cover", 5, 0, kCovArgCover, kBinRead | kBinStream | kBinCover, bucket);
+                chain.flush("v.coverage.cover");
             }
         }
     }
@@ -2261,12 +2284,16 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
     if (fc.services.coverageAppend) fc.services.coverageAppend(fc, view);
     build("args", 2, 1, 1, 0, kUseArgs);
     build("count", 6, 0, 0, kArgCovRecords, kUseList | kUseTiles | kUseCounters | kUseStream);
+    chain.flush("v.coverage.count");
     build("scan", 7, 1, 1, 0, kUseList | kUseTiles | kUseScratch);
     build("offsets", 9, 0, 0, kCovListArgs, kUseListRead | kUseTiles | kUseCounters | kUseStarts | kUseScratch, true);
+    chain.flush("v.coverage.offsets");
     build("scatter", 8, 0, 0, kArgCovRecords, kUseCounters | kUseStream | kUseRecords | kUseSpecial);
     build("special", 10, 1, 1, 0, kUseSpecial);
+    chain.flush("v.coverage.scatter");
     build("blocks", 3, 0, 0, kCovListBlockArgs, kUseListRead | kUseTiles | kUseRecordsRead | kUseRange | kUseScratch | kUseDepthA, true);
     build("heavy", 5, 0, 0, kCovListHeavyArgs, kUseListRead | kUseTiles | kUseRange | kUseScratch | kUseDepthA, true);
+    chain.flush("v.coverage.blocks");
 }
 
 // Reads the named run's statistics of the frame that last used this frame's slot (complete: the caller waited for
@@ -2832,7 +2859,8 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     if (!request.depthTarget.valid() && request.pixelKernel.empty()) fail("rasterizeDepth '%s': neither a depth target nor a pixel kernel", request.name.c_str());
     if (s.mainFrameConstantsFrame != fc.frame.frameIndex)
         fail("rasterizeDepth '%s': called before V's main view of this frame (it reads the frame's scene indices and time)", request.name.c_str());
-    if (request.views.size() >= 256) fail("rasterizeDepth '%s': %zu views (limit 255, 8-bit view field)", request.name.c_str(), request.views.size());
+    if (request.views.size() > kDepthRasterMaxViews)
+        fail("rasterizeDepth '%s': %zu views (limit %u: DepthRaster.h kDepthRasterMaxViews)", request.name.c_str(), request.views.size(), kDepthRasterMaxViews);
     if (request.coverage || request.bands != 7)
         fail("rasterizeDepth '%s': coverage mode and band selection (v1.26) are not implemented yet (V)", request.name.c_str());
     if (request.tileLocal && (!request.cullMask.valid() || request.cullTilePx == 0))
@@ -2849,14 +2877,25 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     const DXGI_FORMAT depthFormat = request.depthTarget.valid() ? fc.graph.desc(request.depthTarget).format : DXGI_FORMAT_UNKNOWN;
     if (request.depthTarget.valid() && depthFormat != DXGI_FORMAT_D32_FLOAT && depthFormat != DXGI_FORMAT_D16_UNORM)
         fail("rasterizeDepth '%s': depth target format %u (D32_FLOAT or D16_UNORM)", request.name.c_str(), (unsigned)depthFormat);
+    if (request.colorTargets.size() > 4 || (!request.colorTargets.empty() && request.pixelKernel.empty()))
+        fail("rasterizeDepth '%s': %zu render targets (at most 4, written by a pixel kernel)", request.name.c_str(), request.colorTargets.size());
+    if (request.pixelNormals && request.pixelKernel.empty()) fail("rasterizeDepth '%s': pixelNormals without a pixel kernel", request.name.c_str());
+    for (const DepthRasterRequest::PixelView& pv : request.pixelViews)
+        if (pv.word >= 16 || pv.texture.valid() == pv.buffer.valid())
+            fail("rasterizeDepth '%s': a pixel view names one resource and a word of pixelConstants (word %u)", request.name.c_str(), pv.word);
     const bool atlas = request.atlasSlots.valid();
+    if (request.proxies && (!request.pixelKernel.empty() || !request.depthTarget.valid() || (request.tileLocal && !atlas)))
+        fail("rasterizeDepth '%s': proxies are for depth-only requests over whole viewports or the tile atlas", request.name.c_str());
+    if (request.proxies && !(request.proxyCoverage > 0 && request.proxyCoverage <= 1.27324f))
+        fail("rasterizeDepth '%s': proxyCoverage %g (a share of the bounding disc; at most 4 / pi: its square)", request.name.c_str(), request.proxyCoverage);
     uint32_t atlasWidth = 0, atlasHeight = 0;
     if (atlas)
     {
-        if (!request.tileLocal || !request.depthTarget.valid() || request.atlasTilesPerRow == 0)
-            fail("rasterizeDepth '%s': the tile atlas needs tileLocal, a tile mask, a depth target and atlasTilesPerRow", request.name.c_str());
-        atlasWidth = fc.graph.desc(request.depthTarget).width;
-        atlasHeight = fc.graph.desc(request.depthTarget).height;
+        if (!request.tileLocal || (!request.depthTarget.valid() && request.colorTargets.empty()) || request.atlasTilesPerRow == 0)
+            fail("rasterizeDepth '%s': the tile atlas needs tileLocal, a tile mask, a depth target (or render targets) and atlasTilesPerRow", request.name.c_str());
+        const TextureRef atlasTarget = request.depthTarget.valid() ? request.depthTarget : request.colorTargets[0];
+        atlasWidth = fc.graph.desc(atlasTarget).width;
+        atlasHeight = fc.graph.desc(atlasTarget).height;
         if (request.atlasTilesPerRow * request.cullTilePx > atlasWidth || atlasWidth > 0xFFFF || atlasHeight > 0xFFFF)
             fail("rasterizeDepth '%s': atlas %ux%u for %u tiles of %u px per row", request.name.c_str(), atlasWidth, atlasHeight, request.atlasTilesPerRow, request.cullTilePx);
     }
@@ -2888,6 +2927,10 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     }
     std::vector<CullView> views;
     for (const RasterView& v : request.views) views.push_back(viewOf(v, request, cfg));
+    // Tile occluders in two phases (DepthRaster.h): a second cull phase and raster after the requester's rebuild.
+    bool twoPhase = false;
+    for (const CullView& v : views) twoPhase = twoPhase || (v.flags & kViewTileTwoPhase) != 0;
+    if (twoPhase) r.tileGuess = request.tileGuess;
     r.viewCount = (uint32_t)views.size();
     r.viewsSrv = uploadViews(s, fc, views);
     if (r.tileMask.valid()) tileCoarsePass(fc, r, views);
@@ -2899,7 +2942,7 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     // results when the request's passes end: with S's two atlases each request merges into its own. Requests it does not
     // cover (a pixel kernel, back-face culling, conservative raster, D16, tiles outside 64 .. 256 px) keep the mesh raster.
     const bool software = cfg.softwareRaster && atlas && amplify && request.pixelKernel.empty() && !request.conservative && request.cull == D3D12_CULL_MODE_NONE &&
-                          depthFormat == DXGI_FORMAT_D32_FLOAT && request.cullTilePx >= 64 && request.cullTilePx <= 256;
+                          request.depthTarget.valid() && request.depthWrite && depthFormat == DXGI_FORMAT_D32_FLOAT && request.cullTilePx >= 64 && request.cullTilePx <= 256;
     BufferRef swArgs, swPages, swSlots, swDepth;
     uint32_t swCapacity = 0;
     if (software)
@@ -2947,8 +2990,11 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                          });
     }
     cullPhase(fc, s, r, 1);
-    if (software)
-    {
+    // The software rasteriser's pass, after the run's last cull phase (a two-phase run's second phase appends to its
+    // list: the pass draws every entry; the first phase's occluders are then the mesh raster's alone, which hides less
+    // in the second phase and nothing wrongly).
+    auto softwareRaster = [&]() {
+        if (!software) return;
         ID3D12PipelineState* clear = fc.shaders.compute("Passes/Visibility/DepthRasterSw.MODE2");
         ID3D12PipelineState* raster = fc.shaders.compute("Passes/Visibility/DepthRasterSw.MODE3");
         ID3D12CommandSignature* dispatchSig = s.dispatchSignature.Get();
@@ -2979,7 +3025,7 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                              c.cmd->SetPipelineState(raster);
                              c.cmd->ExecuteIndirect(dispatchSig, 1, c.resource(r.args), (kArgMesh + 3 * kListSw) * 4, nullptr, 0);
                          });
-    }
+    };
 
     // Back-face lists exist only when BACK was requested; shadow casters need every band (band mode A puts all visible
     // clusters in band A lists).
@@ -2993,16 +3039,39 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
         // DEPTH1: no pixel kernel reads the attributes (hardware depth only), so the kernel exports none of them
         if (amplify) d.amplificationShader = std::string("Passes/Visibility/DepthRaster.as.TILE") + (atlas ? "2" : "1");
         d.meshShader = std::string("Passes/Visibility/DepthRaster.ms.TILE") + (atlas ? "2" : request.tileLocal ? "1" : "0") +
-                       (request.pixelKernel.empty() ? ".DEPTH1" : ".DEPTH0") + (out64 ? ".OUT64" : ".OUT128") + (amplify ? ".AS1" : ".AS0");
+                       (request.pixelKernel.empty() ? ".DEPTH1" : request.pixelNormals ? ".DEPTH2" : ".DEPTH0") + (out64 ? ".OUT64" : ".OUT128") +
+                       (amplify ? ".AS1" : ".AS0");
         d.pixelShader = request.pixelKernel;
         d.depthFormat = depthOut ? depthFormat : DXGI_FORMAT_UNKNOWN;
-        d.depthWrite = depthOut;
+        d.depthWrite = depthOut && request.depthWrite;
         d.cull = back ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
         d.conservative = request.conservative;
+        d.multiplyBlend = request.colorMultiply && !request.colorTargets.empty();
+        std::string targets;  // (the render targets' formats are part of the pipeline)
+        for (const TextureRef& t : request.colorTargets)
+        {
+            d.renderTargets.push_back(fc.graph.desc(t).format);
+            targets += "|rt" + std::to_string((unsigned)d.renderTargets.back());
+        }
         pso[l] = fc.shaders.mesh("v.depth|" + request.pixelKernel + (back ? "|back" : "|none") +
                                      (depthOut ? (depthFormat == DXGI_FORMAT_D16_UNORM ? "|d16" : "|d32") : "|uav") + (request.conservative ? "|cons" : "") +
-                                     (atlas ? "|atlas" : request.tileLocal ? "|tile" : "") + (amplify ? "|as" : "") + (out64 ? "|out64" : ""), d);
+                                     (atlas ? "|atlas" : request.tileLocal ? "|tile" : "") + (amplify ? "|as" : "") + (out64 ? "|out64" : "") +
+                                     (request.pixelNormals ? "|normals" : "") + (d.depthWrite || !depthOut ? "" : "|test") + (d.multiplyBlend ? "|multiply" : "") + targets,
+                                 d);
     }
+    // The proxies of the views' small chunk members (DepthProxy.ms.hlsl), drawn with the first phase's lists.
+    ID3D12PipelineState* proxyPso = nullptr;
+    if (request.proxies && r.chunkCount > 0)
+    {
+        MeshPipelineDesc d;
+        d.meshShader = std::string("Passes/Visibility/DepthProxy.ms.TILE") + (atlas ? "2" : "0");
+        d.depthFormat = depthFormat;
+        d.depthWrite = request.depthWrite;
+        d.cull = D3D12_CULL_MODE_NONE;
+        proxyPso = fc.shaders.mesh(std::string("v.proxy") + (depthFormat == DXGI_FORMAT_D16_UNORM ? "|d16" : "|d32") + (atlas ? "|atlas" : "") + (request.depthWrite ? "" : "|test"), d);
+    }
+    uint32_t proxyCoverageBits;
+    std::memcpy(&proxyCoverageBits, &request.proxyCoverage, 4);
     std::vector<D3D12_VIEWPORT> viewports;
     std::vector<D3D12_RECT> scissors;
     for (size_t i = 0; i < (sameViewport ? 1 : request.views.size()); ++i)
@@ -3030,10 +3099,15 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
         d.cull = D3D12_CULL_MODE_NONE;
         mergePso = fc.shaders.mesh("v.depth.swmerge", d);
     }
-    // visibility.cull_pass_merge: the run's statistics copy is the raster pass's last command (the raster only reads the
-    // cull state, so the state is final before it), not a pass of its own.
-    const StatsCopy stats = cfg.passMerge ? statsCopy(fc, s, request.name) : StatsCopy{};
-    fc.graph.addPass(request.name + ".raster", QueueType::Graphics,
+    // visibility.cull_pass_merge: the run's statistics copy is the last raster pass's last command (the raster only reads
+    // the cull state, so the state is final before it), not a pass of its own.
+    const StatsCopy statsOfRun = cfg.passMerge ? statsCopy(fc, s, request.name) : StatsCopy{};
+    // The raster of a phase's list entries (phase 1: all of a one-phase run). The run's last one also draws the software
+    // rasteriser's pages into the target.
+    auto raster = [&](uint32_t phase, bool last) {
+    const StatsCopy stats = last ? statsOfRun : StatsCopy{};
+    ID3D12PipelineState* merge = last ? mergePso : nullptr;
+    fc.graph.addPass(request.name + (phase == 1 ? ".raster" : ".raster.p2"), QueueType::Graphics,
                      [&](PassBuilder& b) {
                          b.use(r.args, Use::IndirectArgs);
                          b.use(r.visible, Use::SrvGraphics);
@@ -3046,11 +3120,28 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                          }
                          if (r.tilePairs.valid()) b.use(r.tilePairs, Use::SrvGraphics);
                          if (amplify) b.use(req.cullMask, Use::SrvGraphics);  // (the amplification stage's pairs)
+                         if (proxyPso && phase == 1)
+                         {
+                             b.use(r.chunkWork, Use::SrvGraphics);
+                             if (r.chunks.valid()) b.use(r.chunks, Use::SrvGraphics);
+                             if (req.cullMask.valid()) b.use(req.cullMask, Use::SrvGraphics);
+                         }
                          if (req.atlasSlots.valid()) b.use(req.atlasSlots, Use::SrvGraphics);
-                         if (req.depthTarget.valid()) b.use(req.depthTarget, Use::DepthWrite);
+                         if (req.depthTarget.valid()) b.use(req.depthTarget, req.depthWrite ? Use::DepthWrite : Use::DepthRead);
+                         for (const TextureRef& t : req.colorTargets) b.use(t, Use::RenderTarget);
                          for (const auto& [t, u] : req.textureUses) b.use(t, u);
                          for (const auto& [bu, u] : req.bufferUses) b.use(bu, u);
-                         if (mergePso)
+                         // (a pixel view the uses do not name is read)
+                         for (const DepthRasterRequest::PixelView& pv : req.pixelViews)
+                         {
+                             bool named = false;
+                             for (const auto& [t, u] : req.textureUses) named = named || (pv.texture.valid() && t.id == pv.texture.id);
+                             for (const auto& [bu, u] : req.bufferUses) named = named || (pv.buffer.valid() && bu.id == pv.buffer.id);
+                             if (named) continue;
+                             if (pv.texture.valid()) b.use(pv.texture, Use::SrvGraphics);
+                             else b.use(pv.buffer, Use::SrvGraphics);
+                         }
+                         if (merge)
                          {
                              b.use(swArgs, Use::IndirectArgs);
                              b.use(swSlots, Use::SrvGraphics);
@@ -3058,36 +3149,68 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                          }
                      },
                      [=](PassContext& c) {
+                         D3D12_CPU_DESCRIPTOR_HANDLE rtv[4] = {};
+                         for (size_t i = 0; i < req.colorTargets.size(); ++i) rtv[i] = c.rtv(req.colorTargets[i]);
                          if (req.depthTarget.valid())
                          {
-                             const D3D12_CPU_DESCRIPTOR_HANDLE dsv = c.dsv(req.depthTarget);
-                             c.cmd->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
+                             const D3D12_CPU_DESCRIPTOR_HANDLE dsv = req.depthWrite ? c.dsv(req.depthTarget) : c.dsvReadOnly(req.depthTarget);
+                             c.cmd->OMSetRenderTargets((UINT)req.colorTargets.size(), rtv, FALSE, &dsv);
                          }
                          else
-                             c.cmd->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+                             c.cmd->OMSetRenderTargets((UINT)req.colorTargets.size(), rtv, FALSE, nullptr);
+                         // The pixel kernel's constants with this pass's view indices (DepthRasterRequest::pixelViews).
+                         uint32_t pixelConstants[16];
+                         std::memcpy(pixelConstants, req.pixelConstants, sizeof pixelConstants);
+                         for (const DepthRasterRequest::PixelView& pv : req.pixelViews)
+                         {
+                             bool written = false;
+                             for (const auto& [t, u] : req.textureUses) written = written || (pv.texture.valid() && t.id == pv.texture.id && u == Use::UavGraphics);
+                             for (const auto& [bu, u] : req.bufferUses) written = written || (pv.buffer.valid() && bu.id == pv.buffer.id && u == Use::UavGraphics);
+                             pixelConstants[pv.word] = pv.texture.valid() ? (written ? c.uav(pv.texture) : c.srv(pv.texture)) : (written ? c.uav(pv.buffer) : c.srv(pv.buffer));
+                         }
                          c.cmd->RSSetViewports((UINT)viewports.size(), viewports.data());
                          c.cmd->RSSetScissorRects((UINT)scissors.size(), scissors.data());
                          c.bindFrameConstants(r.frameConstants);
                          for (uint32_t l = 0; l < kBandLists; ++l)
                          {
-                             uint32_t k[32] = { c.srv(r.visible), c.srv(r.lists), c.srv(r.state), l, 1, r.cfg.capVisible, r.viewsSrv, sameViewport ? 0u : 1u,
+                             uint32_t k[32] = { c.srv(r.visible), c.srv(r.lists), c.srv(r.state), l, phase, r.cfg.capVisible, r.viewsSrv, sameViewport ? 0u : 1u,
                                                 r.tilePairs.valid() ? c.srv(r.tilePairs) : kNone, req.atlasSlots.valid() ? c.srv(req.atlasSlots) : kNone,
                                                 req.atlasTilesPerRow, atlasWidth | atlasHeight << 16, amplify ? c.srv(req.cullMask) : kNone, r.pageTable };
-                             std::memcpy(&k[16], req.pixelConstants, sizeof req.pixelConstants);
+                             std::memcpy(&k[16], pixelConstants, sizeof pixelConstants);
                              c.cmd->SetPipelineState(pso[l]);
                              c.graphicsConstants(k, 32);
                              c.cmd->ExecuteIndirect(sig, 1, c.resource(r.args), (kArgMesh + 3 * l) * 4, nullptr, 0);
                          }
-                         if (mergePso)  // the software rasteriser's pages into their tiles' slots, under the depth test
+                         if (proxyPso && phase == 1)
+                         {
+                             const uint32_t k[16] = { c.srv(r.chunkWork), r.instanceMask, c.srv(r.state), r.cfg.capDeferred,
+                                                      proxyCoverageBits, 0, r.viewsSrv, sameViewport ? 0u : 1u,
+                                                      kNone, req.atlasSlots.valid() ? c.srv(req.atlasSlots) : kNone, req.atlasTilesPerRow, atlasWidth | atlasHeight << 16,
+                                                      req.cullMask.valid() ? c.srv(req.cullMask) : kNone, 0, 0, 0 };
+                             c.cmd->SetPipelineState(proxyPso);
+                             c.graphicsConstants(k, 16);
+                             c.cmd->ExecuteIndirect(sig, 1, c.resource(r.args), kArgProxies * 4, nullptr, 0);
+                         }
+                         if (merge)  // the software rasteriser's pages into their tiles' slots, under the depth test
                          {
                              const uint32_t k[8] = { c.srv(swSlots), swCapacity, req.cullTilePx, req.atlasTilesPerRow, atlasWidth | atlasHeight << 16, c.srv(swDepth), 0, 0 };
-                             c.cmd->SetPipelineState(mergePso);
+                             c.cmd->SetPipelineState(merge);
                              c.graphicsConstants(k, 8);
                              c.cmd->ExecuteIndirect(sig, 1, c.resource(swArgs), kDsaMerge * 4, nullptr, 0);
                          }
                          if (stats.readback) c.cmd->CopyBufferRegion(stats.readback, stats.offset, c.resource(r.state), 0, kStateWords * 4);
                      });
-    if (!stats.readback) recordStats(fc, s, r, request.name);
+    };
+    if (!twoPhase) softwareRaster();
+    raster(1, !twoPhase);
+    if (twoPhase)
+    {
+        request.buildTileOccluders();  // (the requester's pass: the occluders of what phase 1 drew)
+        cullPhase(fc, s, r, 2);
+        softwareRaster();
+        raster(2, true);
+    }
+    if (!statsOfRun.readback) recordStats(fc, s, r, request.name);
 }
 } // namespace unx::render::tracks
 

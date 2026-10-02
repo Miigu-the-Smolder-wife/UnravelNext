@@ -28,7 +28,7 @@ void main(uint2 id : SV_DispatchThreadID)
     [unroll] for (uint k = 0; k < CLOUD_SHADOW_LEVELS; ++k) level[k] = c.base;
     float tau = 0;
     uint next = 0;
-    if (tTop < tBase && tBase < 3.0e38)
+    if (c.coverage > 0 && tTop < tBase && tBase < 3.0e38)  // (a frame with the cirrus sheet alone: no layer to march)
     {
         const uint steps = min((uint)ceil((tBase - tTop) / CLOUD_SHADOW_STEP), CLOUD_SHADOW_MAX_STEPS);
         const float dt = (tBase - tTop) / steps;

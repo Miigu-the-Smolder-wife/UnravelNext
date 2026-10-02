@@ -265,7 +265,8 @@ public:
     // The rect lights' source textures (scene::Light::sourceTexture) as M's TextureSystem uploaded them: per scene light
     // the texture's SRV, gpu::kNone for a light without one. The light records' sourceTexture words follow (no scene
     // revision: the lights' shapes are the same).
-    void setLightSourceTextures(std::span<const uint32_t> srvPerLight);
+    // meanPerLight: each image's mean colour (gpu::rgb9e5; read only where the light has a texture).
+    void setLightSourceTextures(std::span<const uint32_t> srvPerLight, std::span<const uint32_t> meanPerLight);
     // Material textures published by M's texture system (INTERFACES_KO.md 6.3, v1.10): one entry per scene material.
     // Rewrites the material buffer (new SRV; the old one is released when the GPU is done) and bumps the revision of the
     // materials whose textures changed and the scene revision. Call before any frame constants of the frame are
@@ -292,9 +293,14 @@ public:
     const scene::Scene* source() const { return m_source; }
     const std::vector<gpu::Instance>& instances() const { return m_instances; }
     const std::vector<gpu::Light>& lights() const { return m_lights; }  // CPU mirror of the light records (revisions)
+    // The lighting channels every instance is in (the AND of the instances' channels, 7 without instances): a light in
+    // one of them lights every instance, which lets the tile kernels put it in a FAR sum (LightNearFar.hlsli). An
+    // instance removed or changed since the upload still counts (the mask only narrows until the next upload).
+    uint32_t lightingChannelsShared() const { return m_channelsShared; }
     // A9: a material of the scene is anisotropic (the anisotropy table is in coatTable; M's resolve writes the frame word)
     bool anyAnisotropic() const { return m_anisotropic; }
     bool anyEye() const { return m_eyes; }  // the scene has an eye material (the resolve's class word texture)
+    bool anyHeight() const { return m_heights; }  // the scene has a material with a height map (parallax; packMaterialInputs)
     const std::vector<gpu::Mesh>& meshes() const { return m_meshes; }
     uint32_t revision() const { return m_revision; }
     ID3D12Resource* buffer(const char* name) const;  // "vertices", "indices", "instances", "bonePalette", "prevBonePalette", ...
@@ -348,6 +354,12 @@ private:
     void buildLayerTables(bool anisotropic);
     bool m_anisotropic = false;
     bool m_eyes = false;  // an eye material in the scene (packMaterialLayers)
+    // Material inputs (gpu::MaterialInputs; a material's record index in gpu::Material::inputs), with the textures M
+    // published last (setMaterialTextures), and the meshes' optional vertex streams (gpu::VertexAttributes).
+    Buffer m_materialInputBuffer, m_meshAttributeTable, m_vertexAttributeBuffer;
+    std::vector<gpu::MaterialTextures> m_publishedTextures;
+    void packMaterialInputs(std::vector<gpu::Material>& materials);
+    bool m_heights = false;
     std::vector<float> m_filmTables;  // A9 thin film tables, appended to the coat table after the anisotropy table
     std::vector<float4> m_morphRows;
     std::vector<uint32_t> m_morphMeshBlock;  // per mesh: word offset of its block in m_morphData, kNone = no morph
@@ -370,6 +382,7 @@ private:
     std::vector<uint64_t> m_transformFrame, m_paletteFrame;
     std::vector<uint32_t> m_movedNow, m_movedBefore, m_posedNow, m_posedBefore;
     uint32_t m_windInstances = 0;  // instances with the wind flag (hasMotion)
+    uint32_t m_channelsShared = 7;  // lightingChannelsShared
     uint32_t m_viewModelInstances = 0;
     uint64_t m_viewModelRevision = 0;  // instances with gpu::kInstanceViewModel
     // Instances flagged gpu::kInstanceMotionBreak in this frame and in the previous flushed one (the flag lasts one frame).

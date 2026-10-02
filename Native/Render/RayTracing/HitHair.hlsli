@@ -86,7 +86,8 @@ float3 rtHairRadiance(RtSceneSrvs scene, uint params, RtHairHit hit, float3 orig
             sr.Direction = l;
             sr.TMin = 0;
             sr.TMax = giRayLength();
-            if (through > 1e-3f && rtVisible(scene, sr, RT_MASK_GI)) radiance += albedo * e0 * (cosSun * through);
+            // (... and what the Glass on the way leaves: RayShaders.hlsli rtShadowTransmittance)
+            if (through > 1e-3f) radiance += albedo * e0 * (cosSun * through) * rtShadowTransmittance(scene, sr, RT_MASK_HIT_SHADOW | RT_MASK_FAR);
         }
     }
     if (local)
@@ -97,7 +98,9 @@ float3 rtHairRadiance(RtSceneSrvs scene, uint params, RtHairHit hit, float3 orig
         if (cosL > 0)
         {
             const float through = hairTransmittance(params, rel, ls.wi, ls.distance, RT_HAIR_STEPS);
-            if (through > 1e-3f && (!ls.castShadow || rtVisible(scene, rtLocalShadowRay(x, n, ls, bias), RT_MASK_GI))) radiance += albedo * ls.weight * (cosL * through);
+            if (through > 1e-3f)
+                radiance += albedo * ls.weight * (cosL * through) *
+                            (ls.castShadow ? rtShadowTransmittance(scene, rtLocalShadowRay(x, n, ls, bias), RT_MASK_HIT_SHADOW) : float3(1, 1, 1));
         }
     }
     radiance += albedo * ltvIrradiance(rtHairIndirect(scene), x, n);

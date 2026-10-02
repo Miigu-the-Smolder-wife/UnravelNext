@@ -15,8 +15,8 @@
 //   -> CardLighting::recordLighting (selection, direct light, radiosity, final lighting).
 // The capture draws a page's instance from its source triangles (CardCapture.ms/.ps.hlsl), or - with
 // surface_cache.mesh_cards_capture_clusters - from the cluster hierarchy's cut at the page's texel size through V's
-// raster service (FrameServices::rasterizeDepth: a page is a view of a request; r.card.vdepth settles the nearest
-// surface, r.card.vmaterial writes its material - CardCaptureCluster.ps.hlsl).
+// raster service (FrameServices::rasterizeDepth: a page is a view of a request; r.card.vcapture draws the depth and the
+// material images in one run - CardCaptureCluster.ps.hlsl).
 // One round a frame; surface_cache.mesh_cards_load_rounds while a level loads, so the cache is whole within a few frames
 // of a load instead of a hundred.
 // Feedback (surface_cache.feedback; Unreal's LumenSurfaceCacheFeedback): the frame's readers of the cards' high levels
@@ -51,6 +51,9 @@ struct SurfaceCacheCardSettings  // Config/quality/surface_cache.toml
                                       // hierarchy's cut through V's raster service (CardCaptureCluster.ps.hlsl)
     float feedbackResLevelBias = -0.5f;  // surface_cache.feedback_res_level_bias (cards.feedback: the switch)
     bool lightingFeedback = true;        // surface_cache.lighting_feedback
+    bool emissiveLightSources = true;    // surface_cache.mesh_cards_emissive_light_sources (MeshCardScene::addInstance)
+    CardHitRules hitRules;               // lumen.skylight_leaking*, lumen.radiance_cache_far_field,
+                                         // reflection.lumen_distant_screen_trace* (the card frame carries them to the hits)
     std::string cacheDirectory;       // mesh card files; "" = the default directory, "none" = no disk cache
     static SurfaceCacheCardSettings fromQuality(const QualityConfig& q);
 };

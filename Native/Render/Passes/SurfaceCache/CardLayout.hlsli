@@ -12,7 +12,13 @@
 //   jitter x | y << 8 | tile mask << 16, 20 asuint(the feedback's resolution level bias), 21 last-used UAV (raw: per
 //   card page the update in which a reader of the high levels last read it; MC_NONE: none),
 //   22..27 the indirect light of hits without cards (Passes/GI/LumenHitIndirect.hlsli lhiSources; written with the
-//   frame and again by the final gather once this frame's volume and radiance cache stand: CardFrameSources.hlsl).
+//   frame and again by the final gather once this frame's volume and radiance cache stand: CardFrameSources.hlsl),
+//   28..39 the rules the frame's ray hits share (LumenHitIndirect.hlsli lhiRules): 28 asuint(the far field's start, m:
+//   the mesh cards' end; 0: none), 29 asuint(1 / the skylight leaking's full distance, 1/m), 30 asuint(the distant
+//   screen traces' length past the rays' end, m; 0: none), 31 asuint(their slope compare tolerance), 32..34
+//   asuint(the skylight leaking's colour; 0: none), 35 asuint(its share at the reflections' hits), 36 asuint(the
+//   distant screen traces' step offset bias), 37 flags (bit 0: a leaf's hit takes the other side's card light through
+//   the leaf - surface_cache.foliage_transmission), 38, 39 unused.
 // The record buffers are raw here (the loaders hide it).
 #ifndef UNX_CARD_LAYOUT_HLSLI
 #define UNX_CARD_LAYOUT_HLSLI
@@ -28,6 +34,7 @@
 #define MC_MAX_RES_LEVEL 11u
 #define MC_SUB_ALLOC_RES_LEVEL 7u  // log2(MC_PAGE): a level up to this is one element inside a shared physical page
 #define MC_FRAME_SOURCES 88u    // byte offset of the frame's words 22..27 (LumenHitIndirect.hlsli)
+#define MC_FRAME_RULES 112u     // byte offset of the frame's words 28..39 (LumenHitIndirect.hlsli lhiRules)
 
 struct McFrame
 {
@@ -64,7 +71,7 @@ struct McMeshCards  // 80 B
 {
     float4 worldToLocal[3];  // xyz: the rows of the unit rotation world -> mesh card space, w: the world origin's component
     uint cardOffset;
-    uint countFlags;         // bits 0-15 cards (<= 32), bit 17 mostly two-sided
+    uint countFlags;         // bits 0-15 cards (<= 32), bit 17 mostly two-sided, bits 20-22 the instance's lighting channels ^ 1
     uint cardLookup[6];      // per direction d (-X, +X, -Y, +Y, -Z, +Z): bit i = card i of this mesh faces it
 };
 struct McCard  // 112 B
@@ -114,6 +121,8 @@ uint mcMeshCardsOf(McFrame f, uint sceneInstance)
     ByteAddressBuffer b = ResourceDescriptorHeap[f.instanceMap];
     return b.Load(sceneInstance * 4);
 }
+// The lighting channels of the mesh cards' instance (Scene.hlsli g_lightChannels).
+uint mcLightingChannels(McMeshCards m) { return ((m.countFlags >> 20) & 7u) ^ 1u; }
 uint mcDirection(McCard c) { return c.packed & 7u; }
 bool mcVisible(McCard c) { return (c.packed & 0x10000u) != 0; }
 uint2 mcResLevelSizeInTiles(McCardPage p) { return uint2(p.resLevelSizeInTiles & 0xFFFFu, p.resLevelSizeInTiles >> 16); }

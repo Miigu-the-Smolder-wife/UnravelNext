@@ -88,6 +88,31 @@ upscale_tsr_thin_geometry_error_multiplier = 200.0  # a line of depth is thin ge
                                         # this many pixel sizes in the world (r.TSR.ThinGeometryDetection.ErrorMultiplier)
 upscale_tsr_thin_geometry_max_relaxation = 0.037    # the relaxation weight inside thin geometry's clusters, where the
                                         # coverage is near a half (r.TSR.ThinGeometryDetection.Coverage.MaxRelaxationWeight)
+upscale_tsr_thin_geometry_line_contrast = 0.30      # a pixel-wide line of luma is thin geometry too where it is brighter than
+                                        # both sides by this much in the guide space (...Coverage.MinKeepLineContrast); such a
+                                        # line is kept in the coverage history and the pixels around it are relaxed. 0: none
+upscale_tsr_thin_geometry_line_fade_rate = 0.1      # the chance a frame that a kept line is not a line drops it
+                                        # (r.TSR.ThinGeometryDetection.HighContrastLineFadeRate; 0 never, 1 at once), and
+upscale_tsr_thin_geometry_line_fade_rate_inside = 0.03  # inside thin geometry's coverage (...FadeRateInsideRegion)
+upscale_tsr_thin_geometry_line_weight = 0.6         # the relaxation weight around a kept line where no cluster weight is
+                                        # (r.TSR.ThinGeometryDetection.HighContrastLineWeight)
+upscale_tsr_thin_geometry_anti_flickering = true    # the flickering heuristic measures with the thin geometry's relaxed
+                                        # clamp and counts its small gradients (r.TSR.ThinGeometryDetection.AntiFlickering)
+upscale_tsr_hole_filling = true         # with upscale_tsr: a pixel that was hidden in the previous frame reads the history
+                                        # by its occluder's vector - what was beside the occluder - instead of its own, which
+                                        # leads to the occluder (the reference's reprojection hole filling; no switch there)
+lens_panini_d = 0.0                     # with upscale_tsr on an upscaled view: the Panini projection of the picture (Lens.hlsli;
+                                        # the reference's r.LensDistortion.Panini.D): a wide field of view without the stretch at
+                                        # the sides - verticals stay straight, the horizon bends. 0: off (default); 1: the
+                                        # cylindrical stereographic projection; between: a blend. Applied in the history update
+                                        # (the history is the lens picture), so the centre it magnifies is reconstructed, not
+                                        # resampled. Off by itself where the field of view is too wide for it (the centre's
+                                        # magnification outside 1 .. 2). A change restarts the history. The world's points are
+                                        # then not where the view's projection puts them: a game's world-anchored UI is its own
+                                        # to map; the previous-colour screen traces (screen_trace_source 1) have no source and
+                                        # the motion blur's rotation stage stays out
+lens_panini_s = 0.0                     # r.LensDistortion.Panini.S: 0 no vertical compression, 1 the hard compression that
+                                        # keeps the horizontals through the centre straight
 upscale_layer_motion = true             # with upscale_tsr: the layers over the opaque surface move by themselves
                                         # (UpscaleMotion.hlsl; the reference's translucent velocity output and has-pixel-animation
                                         # mark): a glass pane, the water surface and the coverage layer's thin fragments (a third of
@@ -103,3 +128,15 @@ upscale_history_frames = 64
 # Moving: 4 (8 before 2026-09-29) with the Lanczos-3 moving history and its min / max clip (Upscale.hlsl): more of the
 # detail stays in the CPU model's slow pans (SSIM 0.73-0.77 -> 0.86-0.87 at 0.2-0.45 px / frame).
 upscale_history_frames_moving = 4
+# HDR display output (a frame with FrameContext::displayPeak >= 1; M's final pass, PostFinal.hlsl): how the picture is
+# written for the display, unless the host sets it per frame (UnxFrameSetDisplayEncoding).
+#   0  linear Rec.709 light with 1 = paper white, R16G16B16A16 FLOAT: the host encodes it for its swap chain (as before);
+#   1  scRGB: linear Rec.709 with 1 = 80 cd/m2 - an R16G16B16A16 FLOAT swap chain in DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709
+#      shows it as it is;
+#   2  HDR10: Rec.2020 primaries under the SMPTE ST 2084 curve - DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020; the output
+#      texture may then be the swap chain's R10G10B10A2 UNORM (dithered) or stay R16G16B16A16 FLOAT.
+# (The reference's r.HDR.Display.OutputDevice / ColorGamut pairs: its scRGB and ST 2084 devices. The tone curve already
+# ends at the display's peak; no ACES output transform is involved here.)
+hdr_encoding = 0
+hdr_paper_white_nits = 203.0           # paper white's luminance for encodings 1 and 2 (ITU-R BT.2408's reference white);
+                                        # the display's peak is displayPeak x this

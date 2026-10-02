@@ -236,6 +236,19 @@ uint32_t asUint(float f)
 }
 
 // The frame's colour grading: the game's (FrameContext::grading) or the quality file's shading.post_grading_*.
+// The chain's parameters of this frame: the quality file's, with the game's run-time settings over them
+// (FrameContext::post: bloom strength, vignette).
+PostParams frameParams(FramePassContext& fc)
+{
+    PostParams p = params(fc.quality);
+    const PostSettingsDesc& s = fc.frame.post;
+    if (std::isfinite(s.bloomStrength)) p.bloom = s.bloomStrength;
+    if (std::isfinite(s.vignette)) p.vignette = s.vignette;
+    if (p.bloom < 0 || p.bloom > 1 || p.vignette < 0 || p.vignette > 1)
+        fail("the frame's post settings: bloom strength %g and vignette %g in [0, 1]", p.bloom, p.vignette);
+    return p;
+}
+
 ColorGradingDesc gradingOf(FramePassContext& fc)
 {
     if (fc.frame.grading.enabled) return fc.frame.grading;
@@ -423,7 +436,7 @@ bool postActive(FramePassContext& fc, const ViewResources& view)
     if (depthOfFieldActive(fc, view)) return true;  // A5: the lens integral's float image is encoded by the chain
     if (motionBlurActive(fc, view) || distortionActive(fc, view)) return true;  // their float image is encoded by the chain
     if (exposureSnapping(fc)) return true;  // a snap frame's exposure correction (Exposure.cpp) is applied by the chain
-    const PostParams p = params(fc.quality);
+    const PostParams p = frameParams(fc);
     // (the shading kernels' own display encoding is the film curve: another curve needs the chain)
     return p.bloom > 0 || p.vignette > 0 || p.grain > 0 || !p.lut.empty() || p.curve != 0 || p.localExposure || p.sharpen > 0 || p.fringe > 0 || p.flare.on ||
            !gradingNeutral(gradingOf(fc));
@@ -608,7 +621,7 @@ TextureRef postBloomTail(FramePassContext& fc, TextureRef hdr, uint32_t levelCou
 
 void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
 {
-    const PostParams p = params(fc.quality);
+    const PostParams p = frameParams(fc);
     const uint32_t w = view.view.width, h = view.view.height;
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
     RenderGraph& g = fc.graph;
@@ -635,6 +648,18 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
     const TextureRef output = view.color;
     const uint32_t lutSrv = lut ? lut->srv : 0xFFFFFFFFu, frame = (uint32_t)fc.frame.frameIndex;
     const float peak = fc.frame.displayPeak;  // 0: SDR
+    // the HDR output's encoding (FrameContext::displayEncoding: 0 linear with 1 = paper white for the host to encode,
+    // 1 scRGB, 2 ST 2084 over Rec.2020) and paper white's luminance: the frame's values, else the quality file's
+    const int64_t encodingKey = fc.quality.has("output.hdr_encoding") ? fc.quality.integer("output.hdr_encoding") : 0;
+    const double paperWhiteKey = fc.quality.has("output.hdr_paper_white_nits") ? fc.quality.number("output.hdr_paper_white_nits") : 203.0;
+    if (encodingKey < 0 || encodingKey > 2 || !(paperWhiteKey >= 40 && paperWhiteKey <= 1000))
+        fail("output.hdr_encoding %lld in [0, 2], output.hdr_paper_white_nits %g in [40, 1000]", (long long)encodingKey, paperWhiteKey);
+    if (fc.frame.displayEncoding > 2) fail("FrameContext::displayEncoding %d: -1 (the quality file's) or 0 .. 2", fc.frame.displayEncoding);
+    const uint32_t encoding = fc.frame.displayEncoding >= 0 ? (uint32_t)fc.frame.displayEncoding : (uint32_t)encodingKey;
+    const float paperWhite = fc.frame.displayPaperWhite > 0 ? fc.frame.displayPaperWhite : (float)paperWhiteKey;
+    const DXGI_FORMAT outputFormat = g.desc(view.color).format;
+    const bool tenBit = outputFormat == DXGI_FORMAT_R10G10B10A2_UNORM || outputFormat == DXGI_FORMAT_R10G10B10A2_TYPELESS;
+    if (peak > 0 && tenBit && encoding != 2) fail("an HDR frame into a 10-bit output needs the ST 2084 encoding (FrameContext::displayEncoding / output.hdr_encoding 2)");
     // scene-referred colour grading: with any value off its default, the combined LUT in place of the curve
     TextureRef grade;
     uint32_t gradeSize = 0;
@@ -662,7 +687,7 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
               [=](PassContext& c) {
                   uint32_t k[48] = { c.srv(hdr), bloom.valid() ? c.srv(bloom) : 0xFFFFFFFFu, c.uav(output), lutSrv,
                                      asUint(p.bloom), asUint(p.vignette), asUint(p.grain), frame, w, h, asUint(peak), p.curve,
-                                     correction.valid() ? c.srv(correction) : 0xFFFFFFFFu, wbOn, 0, 0 };
+                                     correction.valid() ? c.srv(correction) : 0xFFFFFFFFu, wbOn, encoding | (tenBit ? 0x100u : 0u), asUint(paperWhite) };
                   for (uint32_t i = 0; i < 3; ++i)
                       for (uint32_t j = 0; j < 3; ++j) k[16 + i * 4 + j] = asUint(wb[i * 3 + j]);  // P[4..6].xyz: the rows
                   k[28] = le.valid() ? c.srv(le.grid) : 0xFFFFFFFFu;  // P[7..9]: local exposure (LocalExposure.hlsli)

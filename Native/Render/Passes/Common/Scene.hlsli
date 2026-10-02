@@ -76,7 +76,8 @@ struct GpuMaterial
     float metallic;
     float specular, alphaCutoff, transmission, ior;
     uint classFlags, baseColorTexture, normalTexture, roughMetalTexture;
-    uint emissiveTexture, occlusionTexture, revision, textureClamp;  // textureClamp: bit per texture, 1 = g_anisoClamp
+    uint emissiveTexture, inputs, revision, textureClamp;  // inputs: the material's GpuMaterialInputs record (UNX_NONE: none);
+                                                           // textureClamp: bit per texture, 1 = g_anisoClamp
     float3 hairAbsorption;  // Hair class (v1.66): sigma_a, beta_N, cuticle tilt (beta_M = roughness, eta = ior); Glass: the
                             // solid body's sigma_a (1/m, A10 R-2); Water (v1.92): the medium's scattering sigma_s (1/m) and
                             // hairBetaN its Henyey-Greenstein g (turbid baths, defect queue 13 (75)); Subsurface: the mean
@@ -122,6 +123,61 @@ struct GpuMaterialEye
 };
 GpuMaterialEye loadMaterialEye(uint i) { StructuredBuffer<GpuMaterialEye> b = ResourceDescriptorHeap[g_materialLayers]; return b[i]; }
 
+// Material inputs (gpu::MaterialInputs, 80 B; scene::Material's uv transform, second uv set, detail maps, height,
+// emissive mask, vertex colour, dithered opacity): the record of a material that has any, at GpuMaterial::inputs.
+struct GpuMaterialInputs
+{
+    float3 uvU;              // the material's uv: u' = uvU.xy . uv + uvU.z,
+    float detailScaleU;      //   the detail maps': uv(set) x detailScale + detailOffset
+    float3 uvV;              //   v' = uvV.xy . uv + uvV.z
+    float detailScaleV;
+    float2 detailOffset;
+    float detailColor;       // strength of the detail colour
+    float detailNormal;      // scale of the detail normal's slopes
+    uint flags;              // MATERIAL_INPUT_*
+    uint detailColorTexture, detailNormalTexture;  // M's SRVs (UNX_NONE: none): RGBA8 sRGB, slope moments
+    float detailSlopeRange;
+    uint heightTexture;      // R8
+    float heightScale;       // m
+    uint emissiveMaskTexture;  // R8
+    uint textureClamp;       // clamp addressing: 1 detail colour, 2 detail normal, 4 height, 8 emissive mask
+};
+#define MATERIAL_INPUT_UV 1u             // the uv transform is not the identity
+#define MATERIAL_INPUT_OCCLUSION_UV1 2u  // the occlusion map on the second uv set
+#define MATERIAL_INPUT_DETAIL_UV1 4u     // the detail maps on the second uv set
+#define MATERIAL_INPUT_VERTEX_TINT 8u    // the vertex colour's rgb multiplies the base colour
+#define MATERIAL_INPUT_VERTEX_BLEND 16u  // the vertex colour's alpha weighs the detail maps
+#define MATERIAL_INPUT_DITHER 32u        // dithered opacity (the views' alpha test)
+GpuMaterialInputs loadMaterialInputs(uint i) { StructuredBuffer<GpuMaterialInputs> b = ResourceDescriptorHeap[g_materialInputs]; return b[i]; }
+// The uv at which a material's own textures are read (the mesh's uv0 through the material's transform), and a uv
+// difference (a footprint's axis) through its linear part.
+float2 materialInputsUv(GpuMaterialInputs r, float2 uv) { return float2(dot(r.uvU.xy, uv) + r.uvU.z, dot(r.uvV.xy, uv) + r.uvV.z); }
+float2 materialInputsUvStep(GpuMaterialInputs r, float2 duv) { return float2(dot(r.uvU.xy, duv), dot(r.uvV.xy, duv)); }
+
+// A mesh's optional vertex streams (gpu::VertexAttributes, 16 B): the second uv set and the vertex colour.
+struct GpuVertexAttributes
+{
+    float2 uv1;
+    uint color;  // RGBA8, r in the low byte
+    uint pad;
+};
+// 1 + the first record of mesh 'meshIndex' (GpuInstance::mesh), 0: the mesh has neither stream (its second uv set is then
+// its uv0, its colour white).
+uint meshAttributeBase(uint meshIndex)
+{
+    if (g_meshAttributes == UNX_NONE) return 0;
+    StructuredBuffer<uint> first = ResourceDescriptorHeap[g_meshAttributes];
+    return first[meshIndex];
+}
+// The streams of a vertex (meshVertex mesh-relative) of a mesh whose base (meshAttributeBase) is not 0.
+void loadVertexAttributes(uint base, uint meshVertex, out float2 uv1, out float4 color)
+{
+    StructuredBuffer<GpuVertexAttributes> b = ResourceDescriptorHeap[g_vertexAttributes];
+    const GpuVertexAttributes a = b[base - 1 + meshVertex];
+    uv1 = a.uv1;
+    color = float4(a.color & 0xFFu, (a.color >> 8) & 0xFFu, (a.color >> 16) & 0xFFu, a.color >> 24) / 255.0;
+}
+
 struct GpuTerrainLayer  // v1.74: a Standard material read at terrain uv0 x scale + offset
 {
     uint material;
@@ -147,7 +203,7 @@ struct GpuLight
     // the light components (GpuSceneLayout.h Light; every word 0: a plain light) - read through the accessors below
     uint scales, scales2;
     float drawDistance, fadeRange, falloffExponent;
-    uint barnDoor, sourceTexture, lightPad;
+    uint barnDoor, sourceTexture, sourceMean;
 };
 
 struct GpuVisibleCluster
@@ -161,6 +217,9 @@ struct GpuVisibleCluster
 #define INSTANCE_SKINNED (1u << 2)
 #define INSTANCE_WIND (1u << 3)
 // scene::InstanceLightingChannels...: bits 4..6 = the instance's lighting channels ^ 1 (instanceLightingChannels below)
+#define INSTANCE_NO_DECALS (1u << 7)  // takes no projected decals (Passes/Decal/Decal.hlsli)
+#define INSTANCE_SHADOW_ONLY (1u << 9)     // scene::InstanceShadowOnly: drawn by shadow-casting runs alone (V's instanceInRun)
+#define INSTANCE_NO_SELF_SHADOW (1u << 8)  // scene::InstanceNoSelfShadow: its pixels' sun lookups skip its own bounds (S)
 #define INSTANCE_HIDDEN (1u << 31)  // gpu::kInstanceHidden: skipped by every reader (GpuScene::setInstanceVisible)
 // gpu::kInstanceMotionBreak (v1.45): a teleport or restore in this frame; prev* = current (zero motion), breakCentre = where
 // its bounding sphere was in the previous rendered frame (caches keyed by the old place invalidate from it).
@@ -207,6 +266,31 @@ GpuMaterial loadMaterial(uint i) { StructuredBuffer<GpuMaterial> b = ResourceDes
 GpuLight loadLight(uint i) { StructuredBuffer<GpuLight> b = ResourceDescriptorHeap[g_lights]; return b[i]; }
 
 uint materialClass(GpuMaterial m) { return m.classFlags & 0xFFu; }
+// The uv at which a material's own textures are read, from the mesh's uv0 (the material's uv transform; the identity
+// without a record), and the same with a footprint.
+// UNX_MATERIAL_INPUTS 0 before this file compiles the material inputs out of these two (the mesh's uv) and out of the ray
+// hits' material and emission (HitShading.hlsli, HitLocalLights.hlsli): for a kernel at the DXIL size limit; such a
+// kernel says so in its header.
+#ifndef UNX_MATERIAL_INPUTS
+#define UNX_MATERIAL_INPUTS 1
+#endif
+float2 materialUv(GpuMaterial m, float2 uv)
+{
+#if UNX_MATERIAL_INPUTS
+    if (m.inputs != UNX_NONE) uv = materialInputsUv(loadMaterialInputs(m.inputs), uv);
+#endif
+    return uv;
+}
+void materialUvFootprint(GpuMaterial m, inout float2 uv, inout float2 duvdx, inout float2 duvdy)
+{
+#if UNX_MATERIAL_INPUTS
+    if (m.inputs == UNX_NONE) return;
+    const GpuMaterialInputs r = loadMaterialInputs(m.inputs);
+    uv = materialInputsUv(r, uv);
+    duvdx = materialInputsUvStep(r, duvdx);
+    duvdy = materialInputsUvStep(r, duvdy);
+#endif
+}
 uint clusterVertexCount(GpuCluster c) { return c.counts & 0xFFu; }
 uint clusterTriangleCount(GpuCluster c) { return (c.counts >> 8) & 0xFFu; }
 uint clusterSubmesh(GpuCluster c) { return c.counts >> 16; }  // index within the mesh
@@ -220,10 +304,13 @@ float lightRayEndBias(GpuLight l, float fallback) { return (l.revision & 0x80000
 // must agree on: the opaque and coverage shading, the sampled lights, the air and fog, the surface cache, the ray hits.
 //   lighting channels   3 bits on a light and on an instance: a light lights the instances that share one. A kernel
 //                       that shades a point of an instance sets g_lightChannels to the instance's channels before it
-//                       evaluates lights (the light samples' weights of the opaque surface: MegaLightsSample.hlsl);
-//                       lightWindow is then 0 for a light in none of them. Unset (7): no test - the coverage layer's
-//                       fragments and the hair (their records name no instance), the air and the fog, the ray hits,
-//                       the surface cache's cards (Unreal tests neither fog nor hit lighting).
+//                       evaluates lights; lightWindow is then 0 for a light in none of them. Set by: the light
+//                       samples' weights (MegaLightsSample.hlsl: the opaque pixel's instance, the coverage layer's
+//                       nearest fragment's), the coverage fragments' light loop, the hair records (their body's
+//                       instance), the surface cache's cards (their mesh cards' instance). A sum of lights without a
+//                       receiver - the tile kernels' FAR terms - takes only lights that light every instance
+//                       (LightNearFar.hlsli nfLightsEveryInstance). Unset (7): no test - the air and the fog, the ray
+//                       hits, the surface cache's world cells (Unreal tests neither fog nor hit lighting).
 //   scales              specular, diffuse (direct shading), volumetric (the air's and fog's in-scattering), indirect (the
 //                       surface cache's direct light and the ray hits' light samples).
 //   lightWindow         what multiplies intensity / d^2 at distance d from the light: the range's window
@@ -273,6 +360,34 @@ float lightWindow(GpuLight l, float d)
     return w * w;
 }
 #endif
+// The light's colour for a consumer that takes the light as a point (the air and the fog, lit particles and volumes,
+// the tile kernels' FAR terms): a rect that shows an image (sourceTexture) has the image's mean colour times its own -
+// AreaLight.hlsli shAreaColor reads the image itself where the emitter's extent is resolved.
+float3 lightMeanColor(GpuLight l)
+{
+#if UNX_LIGHT_COMPONENTS
+    if (l.sourceTexture != 0)
+        return l.color * (float3(l.sourceMean & 0x1FFu, (l.sourceMean >> 9) & 0x1FFu, (l.sourceMean >> 18) & 0x1FFu) * exp2((float)(l.sourceMean >> 27) - 24.0));
+#endif
+    return l.color;
+}
+// The part of a rect light's area a far point in direction w (unit, from the light) sees past its barn doors:
+// lightBarnDoorRect's limit far from the emitter - along each of the emitter's axes the near side moves in by
+// height x |w_axis| / w_forward - spread. For the consumers that take the light as a point source of its projected
+// intensity (FroxelCommon.hlsli froxelIntensity).
+float lightBarnDoorFar(GpuLight l, float3 w)
+{
+#if UNX_LIGHT_COMPONENTS
+    if (l.barnDoor == 0) return 1;
+    const float height = f16tof32(l.barnDoor & 0xFFFFu), spread = f16tof32(l.barnDoor >> 16);
+    const float3 s = float3(dot(w, l.right), dot(w, cross(l.forward, l.right)), dot(w, l.forward));
+    if (s.z <= 0) return 0;
+    const float2 seen = saturate(1 - max(height * abs(s.xy) / s.z - spread, 0.0) / max(l.size, 1e-6));
+    return seen.x * seen.y;
+#else
+    return 1;
+#endif
+}
 // The part of a rect light a point sees past its barn doors (scene::Light::barnDoorAngle / Length; Unreal's GetRect with
 // bComputeVisibleRect): four flaps along the emitter's edges, 'height' in front of it and spread outwards by 'spread'.
 // From a point outside a flap, the flap's top edge hides the strip of the emitter behind it - the emitter's near side

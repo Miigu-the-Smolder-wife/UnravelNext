@@ -110,9 +110,9 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupThreadID)
 #if MODE == 1
     RWStructuredBuffer<uint2> visible = ResourceDescriptorHeap[VISIBLE_UAV];
     const uint2 item = visible[listEntry & ~LIST_ENTRY_FLAGS];
-    const CullView v = loadView(item.y >> 24);
-    const GpuInstance inst = loadInstance(item.x);
-    const GpuCluster cl = loadCluster(item.y & 0xFFFFFFu);
+    const CullView v = loadView(itemView(item));
+    const GpuInstance inst = loadInstance(itemInstance(item));
+    const GpuCluster cl = loadCluster(itemIndex(item));
     const float4 s = worldSphere(inst, inst.objectToWorld, cl.boundsSphere);
     const float distance = (v.orthographic ? dot(s.xyz - v.position, v.viewDirection.xyz) : length(s.xyz - v.position)) - s.w;
     // 12.8 bins per octave from 1/16 m: nearer = smaller

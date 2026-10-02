@@ -15,6 +15,9 @@
 //              With output.screen_trace_source = 0 the previous colour's alpha holds that frame's device depth
 //              (UpscaleSceneKeep.hlsl) and the hit takes the reference's history depth test: a point that was hidden
 //              in the previous frame (its depth then against the depth buffer's there) has no colour to take.
+//   distant    sctDistantTrace: the reference's distant screen traces (LumenScreenTracing.ush DistantScreenTrace) - a
+//              linear walk of the depth buffer for a world ray that left the ray scene, over the stretch past the rays'
+//              end (there: past the ray tracing culling radius).
 // Not here (a difference from the reference): moving objects' motion at the hit (the hit point is taken as still).
 #ifndef UNX_SCREEN_TRACE_HLSLI
 #define UNX_SCREEN_TRACE_HLSLI
@@ -139,6 +142,53 @@ SctResult sctTrace(Texture2D<float> depth, Texture2D<float> hzb, uint2 size, flo
     }
     o.at = p;
     return o;
+}
+
+// Distant screen traces (reflection.lumen_distant_screen_traces): what the ray scene does not hold - the view's surfaces
+// past the rays' length - can still be on screen. The ray from 'origin' (the world ray's end) is walked across the depth
+// buffer for at most maxDistance in SCT_DISTANT_STEPS equal steps of its screen segment (no pyramid: 16 loads), the
+// samples offset by stepOffset of a step (the pixel's noise + the bias). A sample is a hit when the ray lies behind the
+// depth buffer there by less than twice the tolerance - per step the larger of the ray's own change of device depth and
+// slopeTolerance x the device depth a point as far again along the view would lose (the reference's slope compare
+// tolerance) - and the buffer holds a surface (not the far plane). A start outside the view meets nothing the screen
+// holds. hitWorld: the depth buffer's point at the hit's pixel.
+#define SCT_DISTANT_STEPS 16u
+bool sctDistantTrace(Texture2D<float> depth, uint2 size, float3 origin, float3 direction, float maxDistance, float slopeTolerance, float stepOffset, out float3 hitWorld)
+{
+    hitWorld = 0;
+    const float2 sizeF = float2(size);
+    const float4 startP = sctProject(origin, sizeF);
+    if (!(startP.w > 0) || any(startP.xy < 0) || any(startP.xy >= sizeF) || !(maxDistance > 0)) return false;
+    const float wPerUnit = mul(g_viewProj, float4(direction, 0)).w;
+    float reach = maxDistance;
+    if (wPerUnit < 0) reach = min(reach, -0.95 * startP.w / wPerUnit);  // (kept in front of the camera)
+    const float3 start = startP.xyz;
+    float3 d = sctProject(origin + direction * reach, sizeF).xyz - start;
+    float cut = 1;
+    if (d.x > 0) cut = min(cut, (sizeF.x - start.x) / d.x);
+    else if (d.x < 0) cut = min(cut, -start.x / d.x);
+    if (d.y > 0) cut = min(cut, (sizeF.y - start.y) / d.y);
+    else if (d.y < 0) cut = min(cut, -start.y / d.y);
+    d *= saturate(cut);
+    // (device depth x view depth is constant: the device depth of a point 'reach' deeper along the view from the start)
+    const float deeper = start.z * startP.w / (startP.w + reach);
+    const float tolerance = max(abs(d.z), (start.z - deeper) * slopeTolerance) / SCT_DISTANT_STEPS;
+    const float3 perStep = d / SCT_DISTANT_STEPS;
+    [loop] for (uint i = 0; i < SCT_DISTANT_STEPS; ++i)
+    {
+        const float3 p = start + perStep * (stepOffset + (float)(i + 1));
+        if (any(p.xy < 0) || any(p.xy >= sizeF) || !(p.z > 0)) break;
+        const float seen = depth.Load(int3(int2(p.xy), 0));
+        if (!(seen > 0)) continue;  // (the far plane: the sky, nothing to meet)
+        // reversed Z: the ray behind the surface = its device depth is the smaller one
+        const float behind = seen - p.z;
+        if (behind > 0 && behind < 2 * tolerance)
+        {
+            hitWorld = sctWorld(float3(p.xy, seen));
+            return true;
+        }
+    }
+    return false;
 }
 
 // How much of a hit near the screen's edge is kept (1 inside, 0 at the edge), for a dithered rejection.

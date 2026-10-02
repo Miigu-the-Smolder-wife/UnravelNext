@@ -51,13 +51,13 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID)
     StructuredBuffer<uint2> visible = ResourceDescriptorHeap[P[0].x];
     const uint2 entry = visible[visibleIndex];
     StructuredBuffer<CullView> views = ResourceDescriptorHeap[P[1].z];
-    const CullView v = views[entry.y >> 24];
-    const GpuInstance inst = loadInstance(entry.x);
+    const CullView v = views[itemView(entry)];
+    const GpuInstance inst = loadInstance(itemInstance(entry));
     const GpuMesh mesh = loadMesh(inst.mesh);
-    const GpuCluster cl = loadCluster(entry.y & 0xFFFFFFu);
+    const GpuCluster cl = loadCluster(itemIndex(entry));
     const uint vertexCount = min(clusterVertexCount(cl), 128u), triangleCount = min(clusterTriangleCount(cl), 128u);
     // (visibility.cluster_compression: the cluster's own vertices, in the stream or in its resident page)
-    const ClusterVertexSource vertexSource = clusterVertexSource(entry.y & 0xFFFFFFu, P[3].y);
+    const ClusterVertexSource vertexSource = clusterVertexSource(itemIndex(entry), P[3].y);
     for (uint i = lane; i < vertexCount; i += 64)
     {
         VertexData vertex;

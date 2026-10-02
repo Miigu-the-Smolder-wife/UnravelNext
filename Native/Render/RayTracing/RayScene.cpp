@@ -189,7 +189,7 @@ void RayScene::release(Buffer& b)
 RayScene::~RayScene()
 {
     for (Buffer& b : m_inheritedPools) release(b);
-    for (Buffer* b : { &m_meshBlasPool, &m_emitterAabbs, &m_emitterBlas, &m_deformedPool, &m_deformedBlasPool, &m_deformedScratch, &m_deformJobs, &m_deformGroups, &m_instanceBuffer, &m_geometryBuffer,
+    for (Buffer* b : { &m_farRecords, &m_farBlas, &m_meshBlasPool, &m_emitterAabbs, &m_emitterBlas, &m_deformedPool, &m_deformedBlasPool, &m_deformedScratch, &m_deformJobs, &m_deformGroups, &m_instanceBuffer, &m_geometryBuffer,
                        &m_indexPool, &m_vertexMap, &m_tlasStatic, &m_tlasDynamic, &m_tlasScratch, &m_staticDescBuffer, &m_dynamicDescBuffer, &m_staticScratch,
                        &m_exactCounts, &m_exactZero, &m_runtimePool, &m_runtimeScratch, &m_decalAabbs, &m_decalBlas, &m_decalBlasScratch, &m_decalTlas, &m_decalTlasScratch, &m_decalDesc })
         release(*b);
@@ -232,6 +232,14 @@ RayScene::~RayScene()
         m_descRing->Unmap(0, nullptr);
         m_device.deferRelease(m_descRing);
     }
+    if (m_farRing)
+    {
+        m_farRing->Unmap(0, nullptr);
+        m_device.deferRelease(m_farRing);
+        DescriptorHeaps* fh = &m_device.descriptors();
+        for (uint32_t srv : m_farRingSrv)
+            if (srv != gpu::kNone) m_device.deferCall([fh, srv] { fh->freeResource(srv); });
+    }
     DescriptorHeaps* h = &m_device.descriptors();
     for (uint32_t srv : { m_tlasStaticSrv, m_tlasDynamicSrv, m_deformedPoolUav, m_exactCountsUav })
         if (srv != gpu::kNone) m_device.deferCall([h, srv] { h->freeResource(srv); });
@@ -263,11 +271,23 @@ uint32_t RayScene::alphaMaskOf(uint32_t mesh) const
     const scene::Mesh& sm = src->meshes[mesh];
     uint32_t mask = 0;
     for (uint32_t s = 0; s < (uint32_t)sm.submeshes.size() && s < 32; ++s)
-    {
-        const uint32_t mat = sm.submeshes[s].material;
-        if (mat < src->materials.size() && src->materials[mat].alphaCutoff > 0) mask |= 1u << s;
-    }
+        if (geometryFlags(sm.submeshes[s].material) != D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE) mask |= 1u << s;
     return mask;
+}
+
+bool RayScene::seeThroughMaterial(uint32_t material) const
+{
+    if (!m_seeThroughOn) return false;
+    const scene::Scene* src = m_scene.source();
+    return src && material < src->materials.size() &&
+           (src->materials[material].cls == scene::MaterialClass::Glass || src->materials[material].cls == scene::MaterialClass::Water);
+}
+
+D3D12_RAYTRACING_GEOMETRY_FLAGS RayScene::geometryFlags(uint32_t material) const
+{
+    const scene::Scene* src = m_scene.source();
+    if (src && material < src->materials.size() && src->materials[material].alphaCutoff > 0) return D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+    return seeThroughMaterial(material) ? D3D12_RAYTRACING_GEOMETRY_FLAG_NO_DUPLICATE_ANYHIT_INVOCATION : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
 }
 
 RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, const QualityConfig& quality, RayScene* previous)
@@ -295,6 +315,19 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         m_skinAwareCuts = cuts == "skin_aware";
     }
     m_experiment = (uint32_t)quality.integer("raytracing.experiment_disable");
+    {
+        // the far field (RayScene.h FarSettings; off unless the key is there and true)
+        auto number = [&](const char* key, double fallback) { return quality.has(key) ? quality.number(key) : fallback; };
+        m_far.on = quality.has("raytracing.far_field") && quality.boolean("raytracing.far_field");
+        m_far.cullRadius = (float)std::max(number("raytracing.far_field_cull_radius_m", 300.0), 1.0);
+        m_far.cullAngleDeg = (float)std::clamp(number("raytracing.far_field_cull_angle_deg", 1.0), 0.01, 45.0);
+        m_far.rebuildDistance = (float)std::max(number("raytracing.far_field_rebuild_distance_m", 16.0), 0.5);
+        m_far.proxySize = (float)std::max(number("raytracing.far_field_proxy_size_m", 16.0), 1.0);
+        m_far.proxyMaxRadius = (float)std::max(number("raytracing.far_field_proxy_max_radius_m", 32.0), 0.5);
+        m_far.proxyMinOpacity = (float)std::clamp(number("raytracing.far_field_proxy_min_opacity", 0.02), 0.0, 1.0);
+        m_far.nearMax = (uint32_t)std::clamp(number("raytracing.far_field_near_instances_max", 262144.0), 1.0, 16777215.0);
+        m_far.proxiesMax = (uint32_t)std::clamp(number("raytracing.far_field_proxies_max", 1048576.0), 1.0, 16777215.0);
+    }
     const uint64_t dynamicMax = (uint64_t)quality.integer("raytracing.dynamic_tlas_instances_max");
 
     const auto& instances = scene.instances();
@@ -330,9 +363,30 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     if (dynamicRigid.size() + deformed.size() > dynamicMax)
         fail("RayScene: %zu dynamic instances exceed raytracing.dynamic_tlas_instances_max %llu", dynamicRigid.size() + deformed.size(), (unsigned long long)dynamicMax);
 
-    auto materialAlpha = [&](uint32_t material) { return material < src->materials.size() && src->materials[material].alphaCutoff > 0; };
+    // Instances made of Glass / Water alone (their overrides first): GI and shadow rays pass them (RayScene.h rtInstanceMask).
+    // A pane inside a mesh with opaque submeshes is the any-hit shader's (geometryFlags; RayScene.hlsli).
+    m_seeThroughOn = !quality.has("raytracing.see_through_translucent") || quality.boolean("raytracing.see_through_translucent");
+    if (m_seeThroughOn)
+    {
+        auto translucent = [&](uint32_t material) { return seeThroughMaterial(material); };
+        m_seeThrough.assign(src->instances.size(), 0);
+        for (uint32_t i = 0; i < (uint32_t)src->instances.size(); ++i)
+        {
+            const scene::Instance& si = src->instances[i];
+            if (si.mesh >= src->meshes.size()) continue;
+            const scene::Mesh& sm = src->meshes[si.mesh];
+            bool all = !sm.submeshes.empty();
+            for (uint32_t s = 0; s < (uint32_t)sm.submeshes.size() && all; ++s)
+                all = translucent(s < (uint32_t)si.materialOverrides.size() ? si.materialOverrides[s] : sm.submeshes[s].material);
+            m_seeThrough[i] = all ? 1 : 0;
+        }
+    }
+    // (non-opaque geometry: alpha-tested or see-through)
+    auto materialAlpha = [&](uint32_t material) { return geometryFlags(material) != D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE; };
     // Per-submesh alpha of an instance (overrides first); FORCE_NON_OPAQUE is needed when an override turns a submesh the
-    // mesh BLAS built OPAQUE into an alpha-tested one (the any-hit shader accepts opaque materials, so the reverse is exact).
+    // mesh BLAS built OPAQUE into an alpha-tested or a see-through one (the any-hit shader accepts opaque materials, so the
+    // reverse is exact). Such an instance's geometry lacks NO_DUPLICATE_ANYHIT: a shadow ray that gathers transmittance
+    // may count an overridden pane twice.
     auto instanceFlags = [&](uint32_t i) -> UINT {
         const scene::Instance& in = src->instances[i];
         const scene::Mesh& sm = src->meshes[in.mesh];
@@ -403,7 +457,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         D3D12_RAYTRACING_INSTANCE_DESC d{};
         transformOf(in, d);
         d.InstanceID = (UINT)m_instances.size();
-        d.InstanceMask = rtInstanceMask(in.flags);
+        d.InstanceMask = rtInstanceMask(in.flags, seeThrough(i));
         d.InstanceContributionToHitGroupIndex = 0;
         d.Flags = instanceFlags(i);  // DXR's default winding = CCW front in our right-handed frame (verified by Tests/RayScene)
         d.AccelerationStructure = m_meshBlas[in.mesh].address;
@@ -473,7 +527,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         D3D12_RAYTRACING_INSTANCE_DESC desc{};
         desc.Transform[0][0] = desc.Transform[1][1] = desc.Transform[2][2] = 1;  // world-space vertices
         desc.InstanceID = (UINT)m_instances.size();
-        desc.InstanceMask = rtInstanceMask(instances[d.sceneInstance].flags);
+        desc.InstanceMask = rtInstanceMask(instances[d.sceneInstance].flags, seeThrough(d.sceneInstance));
         desc.Flags = instanceFlags(d.sceneInstance);
         desc.AccelerationStructure = m_deformedBlasPool.address() + d.blasOffset;
         m_dynamicRecord.push_back((uint32_t)m_instances.size());
@@ -487,6 +541,11 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         m_instances.push_back({ 0, 0, e.vertexBase, kRtInstanceDeformed | (0xFFFFFFu << 8) });
     }
     buildEmitters();
+    // (the static set is the previous object's: its static TLAS - and the far field built from it - are inherited)
+    const bool sameStatic = previous && previous->m_staticDescs.size() == m_staticDescs.size() && previous->m_staticKeys == m_staticKeys &&
+                            (m_staticDescs.empty() ||
+                             std::memcmp(previous->m_staticDescs.data(), m_staticDescs.data(), m_staticDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC)) == 0);
+    buildFarField(previous, sameStatic);
     m_stats.staticInstances = (uint32_t)m_staticDescs.size();
     m_stats.dynamicInstances = (uint32_t)m_dynamicDescs.size();
     m_stats.deformedInstances = (uint32_t)m_deformed.size();
@@ -538,9 +597,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     m_geometryBuffer = createStructured(m_geometries.data(), sizeof(RtGeometry), (uint32_t)m_geometries.size(), L"RT geometries");
 
     // The static TLAS: inherited when the static set (descriptors, their BLASes and keys) is the previous one's.
-    if (previous && previous->m_tlasStatic.resource && previous->m_staticDescs.size() == m_staticDescs.size() && previous->m_staticKeys == m_staticKeys &&
-        (m_staticDescs.empty() ||
-         std::memcmp(previous->m_staticDescs.data(), m_staticDescs.data(), m_staticDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC)) == 0))
+    if (sameStatic && previous->m_tlasStatic.resource)
     {
         m_tlasStatic = previous->m_tlasStatic;
         m_staticDescBuffer = previous->m_staticDescBuffer;
@@ -552,7 +609,8 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     else
         buildStaticTlas();
     {
-        m_descSlotBytes = (uint64_t)(m_dynamicDescs.size() + m_runtimeInstanceCap + kMaxTriangleStreams + m_staticDescs.size() + 1) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+        // (the static region: every static descriptor, or the near set's bound with the far field)
+        m_descSlotBytes = (uint64_t)(m_dynamicDescs.size() + m_runtimeInstanceCap + kMaxTriangleStreams + staticCapacity() + 1) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
         m_descSlotBytes = (m_descSlotBytes + 255) / 256 * 256;
         D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_UPLOAD };
         D3D12_RESOURCE_DESC1 d{};
@@ -646,7 +704,7 @@ void RayScene::buildMeshBlas()
             m_meshBlas[m].anyAlpha |= alpha;
             D3D12_RAYTRACING_GEOMETRY_DESC g{};
             g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-            g.Flags = alpha ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+            g.Flags = geometryFlags(sm.submeshes[s].material);
             g.Triangles.VertexBuffer = { vertices + (uint64_t)gm.vertexOffset * sizeof(gpu::Vertex), sizeof(gpu::Vertex) };
             g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
             g.Triangles.VertexCount = gm.vertexCount;
@@ -907,10 +965,9 @@ std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> RayScene::proxyGeometry(uint32_t sce
     {
         const uint32_t s = p.submesh[k];
         const uint32_t material = s < si.materialOverrides.size() ? si.materialOverrides[s] : sm.submeshes[s].material;
-        const bool alpha = material < src->materials.size() && src->materials[material].alphaCutoff > 0;
         D3D12_RAYTRACING_GEOMETRY_DESC g{};
         g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-        g.Flags = alpha ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+        g.Flags = geometryFlags(material);
         g.Triangles.VertexBuffer = { m_deformedPool.address() + (uint64_t)vertexBase * sizeof(RtDeformedVertex), sizeof(RtDeformedVertex) };
         g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
         g.Triangles.VertexCount = p.vertexCount;
@@ -942,10 +999,9 @@ std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> RayScene::originalGeometry(const Def
     {
         if (sm.submeshes[s].indexCount == 0) continue;
         const uint32_t material = s < si.materialOverrides.size() ? si.materialOverrides[s] : sm.submeshes[s].material;
-        const bool alpha = material < src->materials.size() && src->materials[material].alphaCutoff > 0;
         D3D12_RAYTRACING_GEOMETRY_DESC g{};
         g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-        g.Flags = alpha ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+        g.Flags = geometryFlags(material);
         g.Triangles.VertexBuffer = { (m_deformedPool.resource ? m_deformedPool.address() : 0) + (uint64_t)vertexBase * sizeof(RtDeformedVertex), sizeof(RtDeformedVertex) };
         g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
         g.Triangles.VertexCount = gm.vertexCount;
@@ -1132,20 +1188,400 @@ void RayScene::buildEmitters()
     m_dynamicDescs.push_back(desc);
 }
 
+uint32_t RayScene::staticCapacity() const
+{
+    return m_far.on ? (uint32_t)std::min<size_t>(m_staticDescs.size(), m_far.nearMax) : (uint32_t)m_staticDescs.size();
+}
+
+// The far field's groups and proxies from the static instances (RayScene.h). Load time; an incremental rebuild whose
+// static set is the previous object's takes the previous object's (B3: a destruction event must not bin a million
+// instances again).
+void RayScene::buildFarField(RayScene* previous, bool sameStatic)
+{
+    if (!m_far.on) return;
+    const auto t0 = std::chrono::steady_clock::now();
+    constexpr uint32_t kRecordBytes = 48;  // RT_FAR_RECORD_BYTES
+    if (previous && sameStatic && previous->m_far.on && previous->m_farRing)
+    {
+        m_farGroups = std::move(previous->m_farGroups);
+        m_farMembers = std::move(previous->m_farMembers);
+        m_farAlwaysNear = std::move(previous->m_farAlwaysNear);
+        m_farRecords = previous->m_farRecords;
+        m_farBlas = previous->m_farBlas;
+        previous->m_farRecords = previous->m_farBlas = {};
+        m_farRing = std::move(previous->m_farRing);
+        m_farRingMapped = previous->m_farRingMapped;
+        previous->m_farRingMapped = nullptr;
+        for (uint32_t k = 0; k < 4; ++k)
+        {
+            m_farRingSrv[k] = previous->m_farRingSrv[k];
+            previous->m_farRingSrv[k] = gpu::kNone;
+        }
+        m_farProxies = previous->m_farProxies;
+        m_farAnchor = previous->m_farAnchor;
+        m_farAnchorValid = previous->m_farAnchorValid;
+        m_nearCount = previous->m_nearCount;
+        m_stats.farProxies = previous->m_stats.farProxies;
+        m_stats.farGroups = previous->m_stats.farGroups;
+        m_stats.farProxiesDropped = previous->m_stats.farProxiesDropped;
+        m_stats.farBlasBytes = previous->m_stats.farBlasBytes;
+        m_stats.nearInstances = previous->m_stats.nearInstances;
+    }
+    else
+    {
+        const scene::Scene* src = m_scene.source();
+        const auto& instances = m_scene.instances();
+        const auto& meshes = m_scene.meshes();
+        const float3 origin = m_scene.originOffset();
+        // Size classes: class c holds the bounding radii [0.25 x 2^c, 0.25 x 2^(c + 1)) m (class 0 also the smaller
+        // ones), up to far_field_proxy_max_radius_m - a larger instance (terrain, a building) is never a box.
+        constexpr float kRadiusMin = 0.25f;
+        uint32_t classes = 1;
+        while (classes < 16 && kRadiusMin * (float)(1u << classes) < m_far.proxyMaxRadius) ++classes;
+        const float tanAngle = std::tan(m_far.cullAngleDeg * 0.01745329252f);
+        struct SizeClass
+        {
+            float cell, radius;
+        };
+        std::vector<SizeClass> sizeClass(classes);
+        for (uint32_t c = 0; c < classes; ++c)
+        {
+            const float lo = kRadiusMin * (float)(1u << c);
+            sizeClass[c].cell = std::max(m_far.proxySize, 4.0f * lo);
+            sizeClass[c].radius = std::min(m_far.cullRadius, lo / tanAngle) + 0.8660254f * sizeClass[c].cell + m_far.rebuildDistance;
+        }
+        // Per mesh, once: its triangles' area, whether it is thin sheets (a two-sided or Foliage material: a sheet's
+        // mean projected area is half its area, a closed body's a quarter of its surface), and its largest submesh.
+        struct MeshInfo
+        {
+            float area = -1;
+            bool thin = false;
+            uint32_t submesh = 0;
+        };
+        std::vector<MeshInfo> info(meshes.size());
+        auto meshInfo = [&](uint32_t m) -> const MeshInfo& {
+            MeshInfo& mi = info[m];
+            if (mi.area >= 0) return mi;
+            mi.area = 0;
+            if (!src || m >= src->meshes.size()) return mi;
+            const scene::Mesh& sm = src->meshes[m];
+            double area = 0;
+            for (size_t i = 0; i + 2 < sm.indices.size(); i += 3)
+            {
+                const uint32_t ia = sm.indices[i], ib = sm.indices[i + 1], ic = sm.indices[i + 2];
+                if (ia >= sm.positions.size() || ib >= sm.positions.size() || ic >= sm.positions.size()) continue;
+                area += 0.5 * (double)length(cross(sm.positions[ib] - sm.positions[ia], sm.positions[ic] - sm.positions[ia]));
+            }
+            mi.area = (float)area;
+            uint32_t most = 0;
+            for (uint32_t s = 0; s < (uint32_t)sm.submeshes.size(); ++s)
+            {
+                if (sm.submeshes[s].indexCount > most)
+                {
+                    most = sm.submeshes[s].indexCount;
+                    mi.submesh = s;
+                }
+                const uint32_t material = sm.submeshes[s].material;
+                if (material < src->materials.size() && (src->materials[material].twoSided || src->materials[material].cls == scene::MaterialClass::Foliage)) mi.thin = true;
+            }
+            return mi;
+        };
+        struct Build
+        {
+            float lo[3], hi[3];
+            int32_t cell[3];
+            double area = 0;        // the members' mean projected area, summed
+            uint32_t material = 0;  // the weighted majority's (below)
+            double weight = 0;
+            uint32_t cls = 0, count = 0;
+        };
+        std::vector<Build> builds;
+        std::unordered_map<uint64_t, uint32_t> groupOfKey;
+        std::vector<uint32_t> groupOf(m_staticDescs.size(), 0xFFFFFFFFu);
+        for (uint32_t k = 0; k < (uint32_t)m_staticDescs.size(); ++k)
+        {
+            const uint32_t sceneInstance = m_staticScene[k];
+            const gpu::Instance& in = instances[sceneInstance];
+            const gpu::Mesh& gm = meshes[in.mesh];
+            const float4* rows = in.objectToWorld;
+            const float scale = std::sqrt(rows[0].x * rows[0].x + rows[1].x * rows[1].x + rows[2].x * rows[2].x);
+            const float radius = gm.boundsSphere.w * scale;
+            if (!(scale > 0) || !(radius < m_far.proxyMaxRadius) || (in.flags & gpu::kInstanceHidden) != 0)
+            {
+                m_farAlwaysNear.push_back(k);
+                continue;
+            }
+            const uint32_t cls = std::min((uint32_t)std::max(std::floor(std::log2(std::max(radius, kRadiusMin) / kRadiusMin)), 0.0f), classes - 1);
+            // the bounding sphere's centre and the mesh box's centre and half size, in source coordinates
+            float centre[3], boxCentre[3], boxHalf[3];
+            const float3 bc{ 0.5f * (gm.boundsMin.x + gm.boundsMax.x), 0.5f * (gm.boundsMin.y + gm.boundsMax.y), 0.5f * (gm.boundsMin.z + gm.boundsMax.z) };
+            const float3 be{ 0.5f * (gm.boundsMax.x - gm.boundsMin.x), 0.5f * (gm.boundsMax.y - gm.boundsMin.y), 0.5f * (gm.boundsMax.z - gm.boundsMin.z) };
+            const float originAxis[3] = { origin.x, origin.y, origin.z };
+            for (int r = 0; r < 3; ++r)
+            {
+                centre[r] = rows[r].x * gm.boundsSphere.x + rows[r].y * gm.boundsSphere.y + rows[r].z * gm.boundsSphere.z + rows[r].w + originAxis[r];
+                boxCentre[r] = rows[r].x * bc.x + rows[r].y * bc.y + rows[r].z * bc.z + rows[r].w + originAxis[r];
+                boxHalf[r] = std::fabs(rows[r].x) * be.x + std::fabs(rows[r].y) * be.y + std::fabs(rows[r].z) * be.z;
+            }
+            int32_t cell[3];
+            for (int r = 0; r < 3; ++r) cell[r] = (int32_t)std::clamp(std::floor(centre[r] / sizeClass[cls].cell), -524288.0f, 524287.0f);
+            const uint64_t key = ((uint64_t)cls << 60) | ((uint64_t)(uint32_t)(cell[0] + 524288) << 40) | ((uint64_t)(uint32_t)(cell[1] + 524288) << 20) |
+                                 (uint64_t)(uint32_t)(cell[2] + 524288);
+            auto found = groupOfKey.find(key);
+            if (found == groupOfKey.end())
+            {
+                found = groupOfKey.emplace(key, (uint32_t)builds.size()).first;
+                Build b;
+                for (int r = 0; r < 3; ++r)
+                {
+                    b.lo[r] = 3.0e38f;
+                    b.hi[r] = -3.0e38f;
+                    b.cell[r] = cell[r];
+                }
+                b.cls = cls;
+                builds.push_back(b);
+            }
+            Build& b = builds[found->second];
+            groupOf[k] = found->second;
+            ++b.count;
+            if (seeThrough(sceneInstance)) continue;  // (Glass / Water alone: in its group, nothing of a box)
+            for (int r = 0; r < 3; ++r)
+            {
+                b.lo[r] = std::min(b.lo[r], boxCentre[r] - boxHalf[r]);
+                b.hi[r] = std::max(b.hi[r], boxCentre[r] + boxHalf[r]);
+            }
+            const MeshInfo& mi = meshInfo(in.mesh);
+            const double projected = (double)mi.area * scale * scale * (mi.thin ? 0.5 : 0.25);
+            b.area += projected;
+            // the material of the instance's largest submesh (its override first), by a weighted majority vote: the
+            // one that covers more than half of the members' area when there is one
+            uint32_t material = 0;
+            if (src && sceneInstance < src->instances.size() && in.mesh < src->meshes.size() && mi.submesh < src->meshes[in.mesh].submeshes.size())
+            {
+                const scene::Instance& si = src->instances[sceneInstance];
+                material = mi.submesh < si.materialOverrides.size() ? si.materialOverrides[mi.submesh] : src->meshes[in.mesh].submeshes[mi.submesh].material;
+            }
+            if (b.weight <= 0 || b.material == material)
+            {
+                b.material = material;
+                b.weight += projected;
+            }
+            else if ((b.weight -= projected) < 0)
+            {
+                b.material = material;
+                b.weight = -b.weight;
+            }
+        }
+        // The groups, largest class first (the near set's overflow leaves out the smallest things), their members by group.
+        std::vector<uint32_t> order(builds.size());
+        for (uint32_t i = 0; i < (uint32_t)order.size(); ++i) order[i] = i;
+        std::stable_sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) { return builds[a].cls > builds[b].cls; });
+        std::vector<uint32_t> position(builds.size());
+        m_farGroups.resize(builds.size());
+        uint32_t first = 0;
+        for (uint32_t i = 0; i < (uint32_t)order.size(); ++i)
+        {
+            const Build& b = builds[order[i]];
+            position[order[i]] = i;
+            FarGroup& g = m_farGroups[i];
+            const float cell = sizeClass[b.cls].cell;
+            g.centre = { ((float)b.cell[0] + 0.5f) * cell, ((float)b.cell[1] + 0.5f) * cell, ((float)b.cell[2] + 0.5f) * cell };
+            g.radius = sizeClass[b.cls].radius;
+            g.first = first;
+            g.count = 0;
+            first += b.count;
+        }
+        m_farMembers.resize(first);
+        for (uint32_t k = 0; k < (uint32_t)groupOf.size(); ++k)
+        {
+            if (groupOf[k] == 0xFFFFFFFFu) continue;
+            FarGroup& g = m_farGroups[position[groupOf[k]]];
+            m_farMembers[g.first + g.count++] = k;
+        }
+        // The proxies: a group whose members stop at least far_field_proxy_min_opacity of the rays through its box.
+        struct Record
+        {
+            float lo[3], hi[3], centre[3], radius, opacity;
+            uint32_t material;
+        };
+        static_assert(sizeof(Record) == kRecordBytes);
+        std::vector<Record> records;
+        for (uint32_t i = 0; i < (uint32_t)order.size(); ++i)
+        {
+            const Build& b = builds[order[i]];
+            if (!(b.area > 0) || !(b.hi[0] >= b.lo[0])) continue;
+            Record r;
+            float size[3];
+            for (int a = 0; a < 3; ++a)
+            {
+                // (a flat group - a carpet of ground cover - keeps 5 cm of thickness: the box is a volume)
+                const float mid = 0.5f * (b.lo[a] + b.hi[a]), half = std::max(0.5f * (b.hi[a] - b.lo[a]), 0.05f);
+                r.lo[a] = mid - half;
+                r.hi[a] = mid + half;
+                size[a] = 2 * half;
+            }
+            const double boxProjected = 0.5 * ((double)size[0] * size[1] + (double)size[1] * size[2] + (double)size[2] * size[0]);
+            r.opacity = (float)(1.0 - std::exp(-b.area / std::max(boxProjected, 1e-6)));
+            if (!(r.opacity >= m_far.proxyMinOpacity)) continue;
+            const FarGroup& g = m_farGroups[i];
+            r.centre[0] = g.centre.x, r.centre[1] = g.centre.y, r.centre[2] = g.centre.z;
+            r.radius = g.radius;
+            r.material = b.material;
+            records.push_back(r);
+        }
+        if (records.size() > m_far.proxiesMax)
+        {
+            // the bound: the most opaque proxies are kept, the others' instances are simply absent when far (counted)
+            std::nth_element(records.begin(), records.begin() + m_far.proxiesMax, records.end(), [](const Record& a, const Record& b) { return a.opacity > b.opacity; });
+            m_stats.farProxiesDropped = (uint32_t)(records.size() - m_far.proxiesMax);
+            records.resize(m_far.proxiesMax);
+        }
+        m_farProxies = (uint32_t)records.size();
+        m_stats.farProxies = m_farProxies;
+        m_stats.farGroups = (uint32_t)m_farGroups.size();
+        if (m_farProxies != 0)
+        {
+            m_farRecords = createBuffer((uint64_t)records.size() * kRecordBytes, false, false, L"RT far-field proxies");
+            upload(m_farRecords, records.data(), (uint64_t)records.size() * kRecordBytes);
+            DescriptorHeaps& h = m_device.descriptors();
+            m_farRecords.srv = h.allocateResource();
+            D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+            sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sd.Format = DXGI_FORMAT_R32_TYPELESS;
+            sd.Buffer.NumElements = (UINT)(m_farRecords.bytes / 4);
+            sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+            m_device.d3d()->CreateShaderResourceView(m_farRecords.resource.Get(), &sd, h.resourceCpu(m_farRecords.srv));
+            // one BLAS of procedural boxes over the records (the box is each record's first 24 B)
+            D3D12_RAYTRACING_GEOMETRY_DESC g{};
+            g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_PROCEDURAL_PRIMITIVE_AABBS;
+            g.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+            g.AABBs.AABBCount = records.size();
+            g.AABBs.AABBs = { m_farRecords.address(), kRecordBytes };
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+            inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+            inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+            inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+            inputs.NumDescs = 1;
+            inputs.pGeometryDescs = &g;
+            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO sizes{};
+            m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &sizes);
+            m_farBlas = createBuffer(sizes.ResultDataMaxSizeInBytes, false, true, L"RT far-field BLAS");
+            m_stats.farBlasBytes = m_farBlas.bytes;
+            Buffer scratch = createBuffer(sizes.ScratchDataSizeInBytes, true, false, L"RT far-field BLAS scratch");
+            CommandList cl = m_device.acquireCommandList(QueueType::Graphics);
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
+            d.Inputs = inputs;
+            d.DestAccelerationStructureData = m_farBlas.address();
+            d.ScratchAccelerationStructureData = scratch.address();
+            cl.list->BuildRaytracingAccelerationStructure(&d, 0, nullptr);
+            m_device.queue(QueueType::Graphics).waitCpu(m_device.submit(cl));
+            release(scratch);
+            // the frames' headers
+            D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD };
+            D3D12_RESOURCE_DESC1 rd{};
+            rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            rd.Width = kDescSlots * 256;
+            rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+            rd.SampleDesc.Count = 1;
+            rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            check(m_device.d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_farRing)),
+                  "RT far-field header ring");
+            m_farRing->SetName(L"RT far-field header ring");
+            D3D12_RANGE none{ 0, 0 };
+            check(m_farRing->Map(0, &none, reinterpret_cast<void**>(&m_farRingMapped)), "map RT far-field header ring");
+            for (uint32_t k = 0; k < kDescSlots; ++k)
+            {
+                m_farRingSrv[k] = h.allocateResource();
+                D3D12_SHADER_RESOURCE_VIEW_DESC hd{};
+                hd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                hd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                hd.Format = DXGI_FORMAT_R32_TYPELESS;
+                hd.Buffer.FirstElement = k * 64;
+                hd.Buffer.NumElements = 64;
+                hd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+                m_device.d3d()->CreateShaderResourceView(m_farRing.Get(), &hd, h.resourceCpu(m_farRingSrv[k]));
+            }
+        }
+    }
+    if (m_farProxies != 0)
+    {
+        const float3 origin = m_scene.originOffset();
+        D3D12_RAYTRACING_INSTANCE_DESC desc{};
+        desc.Transform[0][0] = desc.Transform[1][1] = desc.Transform[2][2] = 1;  // boxes in source coordinates
+        desc.Transform[0][3] = -origin.x, desc.Transform[1][3] = -origin.y, desc.Transform[2][3] = -origin.z;
+        desc.InstanceID = kRtInstanceFar;
+        desc.InstanceMask = kRtMaskFar;
+        desc.InstanceContributionToHitGroupIndex = 1;  // the emitters' group: RtEmitterIntersect tells the two apart
+        desc.AccelerationStructure = m_farBlas.address();
+        m_dynamicRecord.push_back(0xFFFFFFFEu);
+        m_dynamicDescs.push_back(desc);
+    }
+    m_stats.farBuildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    logf("RayScene far field: %u proxies (%u dropped past raytracing.far_field_proxies_max) for %zu groups of %zu static instances, %zu instances always near, "
+         "BLAS %.1f MB, near set at most %u, %.1f ms%s\n",
+         m_farProxies, m_stats.farProxiesDropped, m_farGroups.size(), m_farMembers.size(), m_farAlwaysNear.size(), m_stats.farBlasBytes / 1048576.0, staticCapacity(),
+         m_stats.farBuildMs, previous && sameStatic ? " (inherited)" : "");
+}
+
+uint32_t RayScene::selectNear(D3D12_RAYTRACING_INSTANCE_DESC* out)
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    const uint32_t capacity = staticCapacity();
+    uint32_t n = 0, dropped = 0;
+    for (uint32_t k : m_farAlwaysNear)
+    {
+        if (n < capacity) out[n++] = m_staticDescs[k];
+        else ++dropped;
+    }
+    for (const FarGroup& g : m_farGroups)
+    {
+        const float dx = g.centre.x - m_farAnchor.x, dy = g.centre.y - m_farAnchor.y, dz = g.centre.z - m_farAnchor.z;
+        if (dx * dx + dy * dy + dz * dz > g.radius * g.radius) continue;
+        for (uint32_t i = 0; i < g.count; ++i)
+        {
+            if (n < capacity) out[n++] = m_staticDescs[m_farMembers[g.first + i]];
+            else ++dropped;
+        }
+    }
+    m_stats.nearInstances = n;
+    m_stats.nearOverflow = dropped;
+    m_stats.nearSelectMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    ++m_stats.nearRebuilds;
+    // (the first choices, then one in 64, and every overflow: an instance that did not fit is absent from the rays)
+    if (m_stats.nearRebuilds <= 4 || m_stats.nearRebuilds % 64 == 0 || dropped != 0)
+        logf("RayScene far field: near set %u of %zu static instances (%u did not fit raytracing.far_field_near_instances_max), chosen in %.2f ms, choice %llu\n", n,
+             m_staticDescs.size(), dropped, m_stats.nearSelectMs, (unsigned long long)m_stats.nearRebuilds);
+    return n;
+}
+
 void RayScene::buildStaticTlas()
 {
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
     inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
     inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
     inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-    inputs.NumDescs = (UINT)m_staticDescs.size();
+    inputs.NumDescs = staticCapacity();  // (the far field: sized for the near set's bound)
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO sizes{};
     m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &sizes);
     m_tlasStatic = createBuffer(sizes.ResultDataMaxSizeInBytes, false, true, L"RT static TLAS");
     m_stats.tlasStaticBytes = m_tlasStatic.bytes;
     Buffer scratch = createBuffer(sizes.ScratchDataSizeInBytes, true, false, L"RT static TLAS scratch");
-    m_staticDescBuffer = createBuffer(m_staticDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), false, false, L"RT static instance descs");
-    upload(m_staticDescBuffer, m_staticDescs.data(), m_staticDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
+    if (m_far.on)
+    {
+        // Which instances are near needs the camera: the first frame's record chooses them and builds the structure
+        // (m_farAnchorValid false). Until then an empty one - a ray scene traced outside a frame (tests) sees no
+        // static instance with the far field on.
+        m_staticDescBuffer = createBuffer(sizeof(D3D12_RAYTRACING_INSTANCE_DESC), false, false, L"RT static instance descs (far field: none)");
+        inputs.NumDescs = 0;
+        m_nearCount = 0;
+        m_farAnchorValid = false;
+    }
+    else
+    {
+        m_staticDescBuffer = createBuffer(m_staticDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), false, false, L"RT static instance descs");
+        upload(m_staticDescBuffer, m_staticDescs.data(), m_staticDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
+    }
     inputs.InstanceDescs = m_staticDescBuffer.address();
     CommandList cl = m_device.acquireCommandList(QueueType::Graphics);
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
@@ -1494,7 +1930,7 @@ void RayScene::updateDynamic(ID3D12GraphicsCommandList7* cmd, bool refit)
     globalBarrier(cmd, kSyncBuild, kAsWrite, kSyncTrace | kSyncBuild, kAsRead);
 }
 
-void RayScene::refreshDesc(D3D12_RAYTRACING_INSTANCE_DESC& d, const gpu::Instance& in, bool worldSpace) const
+void RayScene::refreshDesc(D3D12_RAYTRACING_INSTANCE_DESC& d, const gpu::Instance& in, bool worldSpace, uint32_t sceneInstance) const
 {
     if (!worldSpace)
         for (int r = 0; r < 3; ++r)
@@ -1504,7 +1940,7 @@ void RayScene::refreshDesc(D3D12_RAYTRACING_INSTANCE_DESC& d, const gpu::Instanc
             d.Transform[r][2] = in.objectToWorld[r].z;
             d.Transform[r][3] = in.objectToWorld[r].w;
         }
-    d.InstanceMask = rtInstanceMask(in.flags);
+    d.InstanceMask = rtInstanceMask(in.flags, seeThrough(sceneInstance));
 }
 
 void RayScene::record(FramePassContext& fc)
@@ -1516,6 +1952,32 @@ void RayScene::record(FramePassContext& fc)
     updateLightGrid(fc);
     recordLightFunctions(fc);  // after the grid slot exists (word 20)
     recordFxLights(fc);        // word 21
+    // The far field: the anchor the near set is chosen from (moved to the camera once it is far enough from it), and this
+    // frame's header for the proxies' intersection shader - word 10 of the light-grid header.
+    bool nearRebuild = false;
+    if (m_far.on)
+    {
+        const float3 origin = m_scene.originOffset();
+        const float3 eye{ fc.frame.mainView.position.x + origin.x, fc.frame.mainView.position.y + origin.y, fc.frame.mainView.position.z + origin.z };
+        const float dx = eye.x - m_farAnchor.x, dy = eye.y - m_farAnchor.y, dz = eye.z - m_farAnchor.z;
+        if (!m_farAnchorValid || dx * dx + dy * dy + dz * dz > m_far.rebuildDistance * m_far.rebuildDistance)
+        {
+            m_farAnchor = eye;
+            m_farAnchorValid = true;
+            nearRebuild = true;
+        }
+        uint32_t headerSrv = 0xFFFFFFFFu;
+        if (m_farProxies != 0 && m_farRing)
+        {
+            const uint32_t slot = (uint32_t)(fc.frame.frameIndex % kDescSlots);
+            uint32_t header[4];
+            std::memcpy(header, &m_farAnchor, 12);
+            header[3] = m_farRecords.srv;
+            std::memcpy(m_farRingMapped + slot * 256, header, sizeof header);
+            headerSrv = m_farRingSrv[slot];
+        }
+        std::memcpy(lightSlot(fc) + 40, &headerSrv, 4);
+    }
     m_frame.tlasStatic = g.importBuffer(m_tlasStatic.resource.Get(), { "RT static TLAS", m_tlasStatic.bytes, 0 });
     m_frame.tlasDynamic = g.importBuffer(m_tlasDynamic.resource.Get(), { "RT dynamic TLAS", m_tlasDynamic.bytes, 0 });
     fc.resources.tlasStatic = m_frame.tlasStatic;
@@ -1551,7 +2013,8 @@ void RayScene::record(FramePassContext& fc)
     const auto& sceneInstances = m_scene.instances();
     for (size_t k = 0; k < m_dynamicDescs.size(); ++k)
     {
-        if (m_dynamicRecord[k] == 0xFFFFFFFFu)  // the emitter instance: boxes at the lights' source positions
+        // the emitter instance: boxes at the lights' source positions; the far field's proxies (0xFFFFFFFE): the same
+        if (m_dynamicRecord[k] == 0xFFFFFFFFu || m_dynamicRecord[k] == 0xFFFFFFFEu)
         {
             slotDescs[k] = m_dynamicDescs[k];
             const float3 origin = m_scene.originOffset();  // C9: moved with the frame's origin (its lights are)
@@ -1559,7 +2022,7 @@ void RayScene::record(FramePassContext& fc)
             continue;
         }
         const RtInstance& ri = m_instances[m_dynamicRecord[k]];
-        refreshDesc(m_dynamicDescs[k], sceneInstances[ri.sceneInstance], (ri.flags & kRtInstanceDeformed) != 0);
+        refreshDesc(m_dynamicDescs[k], sceneInstances[ri.sceneInstance], (ri.flags & kRtInstanceDeformed) != 0, ri.sceneInstance);
         slotDescs[k] = m_dynamicDescs[k];
         if ((ri.flags & kRtInstanceDeformed) == 0) continue;
         // A skinned instance in the reflection exact set is traced with its original mesh (its slot's BLAS and record).
@@ -1634,10 +2097,11 @@ void RayScene::record(FramePassContext& fc)
         // its cells (GiShift moves them) and only the TLAS is rebuilt.
         const bool change = !rebase;
         if (change && m_staticDescs[k].InstanceMask != 0) m_changes.push_back(descBounds(m_staticDescs[k], sphere));  // where it was (B3)
-        refreshDesc(m_staticDescs[k], in, false);
+        refreshDesc(m_staticDescs[k], in, false, m_staticScene[k]);
         if (change && m_staticDescs[k].InstanceMask != 0) m_changes.push_back(descBounds(m_staticDescs[k], sphere));  // where it is now
         staticChanged = true;
     }
+    if (nearRebuild) staticChanged = true;  // (the far field: the near set is chosen again)
     if (!m_deformed.empty())
     {
         const BufferRef pool = g.importBuffer(m_deformedPool.resource.Get(), { "RT deformed vertices", m_deformedPool.bytes, 0 });
@@ -1673,7 +2137,11 @@ void RayScene::record(FramePassContext& fc)
     {
         // After the dynamic region (load-time dynamic, runtime and stream instances), which the same slot holds.
         const uint64_t staticOffset = slotOffset + (m_dynamicDescs.size() + m_runtimeInstanceCap + kMaxTriangleStreams) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
-        std::memcpy(m_descRingMapped + staticOffset, m_staticDescs.data(), m_staticDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
+        uint32_t staticCount = (uint32_t)m_staticDescs.size();
+        if (m_far.on)
+            staticCount = m_nearCount = selectNear(reinterpret_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(m_descRingMapped + staticOffset));
+        else
+            std::memcpy(m_descRingMapped + staticOffset, m_staticDescs.data(), m_staticDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
         const D3D12_GPU_VIRTUAL_ADDRESS staticDescs = m_descRing->GetGPUVirtualAddress() + staticOffset;
         const BufferRef staticScratch = g.importBuffer(m_staticScratch.resource.Get(), { "RT static TLAS scratch", m_staticScratch.bytes, 0 });
         g.addPass("r.as.tlas.static", QueueType::Compute,
@@ -1681,7 +2149,7 @@ void RayScene::record(FramePassContext& fc)
                       b.use(frame.tlasStatic, Use::AccelerationStructureWrite);
                       b.use(staticScratch, Use::AccelerationStructureScratch);
                   },
-                  [this, staticDescs](PassContext& c) { recordStaticTlas(c.cmd, staticDescs); });
+                  [this, staticDescs, staticCount](PassContext& c) { recordStaticTlas(c.cmd, staticDescs, staticCount); });
     }
     // The barrier into the build (refit writes -> TLAS reads) is taken by this empty pass, so its time (waiting for the
     // deformed BLAS builds to drain) is not charged to r.as.tlas.dynamic, which then times the build alone.
@@ -1719,13 +2187,13 @@ void RayScene::declareTraversal(PassBuilder& b) const
     if (m_frame.fxLights.valid()) b.use(m_frame.fxLights, Use::SrvGraphics);
 }
 
-void RayScene::recordStaticTlas(ID3D12GraphicsCommandList7* cmd, D3D12_GPU_VIRTUAL_ADDRESS descs)
+void RayScene::recordStaticTlas(ID3D12GraphicsCommandList7* cmd, D3D12_GPU_VIRTUAL_ADDRESS descs, uint32_t count)
 {
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
     d.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
     d.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
     d.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-    d.Inputs.NumDescs = (UINT)m_staticDescs.size();
+    d.Inputs.NumDescs = count;  // (every static descriptor, or the far field's near set: at most staticCapacity())
     d.Inputs.InstanceDescs = descs;
     d.DestAccelerationStructureData = m_tlasStatic.address();
     d.ScratchAccelerationStructureData = m_staticScratch.address();
@@ -1844,7 +2312,7 @@ void RayScene::updateEmissive(FramePassContext& fc)
         {
             const uint32_t mat = in.materialOverrides.empty() ? m.submeshes[k].material : in.materialOverrides[k];
             // (v1.92: a visible-only emissive is no GI emitter - weight 0, never drawn, MIS pdf 0 at a texel ray's hit)
-            const float3 e = src->materials[mat].emissiveVisibleOnly ? float3{ 0, 0, 0 } : src->materials[mat].emissive;
+            const float3 e = src->materials[mat].emissiveVisibleOnly ? float3{ 0, 0, 0 } : src->materials[mat].emissive * src->materials[mat].emissiveScale;
             lum[k] = 0.2126f * e.x + 0.7152f * e.y + 0.0722f * e.z;
             any = any || lum[k] > 0;
         }
@@ -1925,7 +2393,12 @@ void RayScene::updateLightGrid(FramePassContext& fc)
         mix(&l.range, 4); mix(&l.spotInner, 4); mix(&l.spotOuter, 4); mix(&l.size, 8); mix(&shadow, 4);
         // (the light components the records hold: the scales, the temperature's tint, what sets the window)
         mix(&l.diffuseScale, 4); mix(&l.indirectIntensity, 4); mix(&l.temperature, 4); mix(&l.falloffExponent, 4); mix(&l.maxDrawDistance, 4);
+        mix(&l.specularScale, 4); mix(&l.barnDoorLength, 4);
     }
+    // (a rect's image: its mean colour, as M published it into the GPU records)
+    const std::vector<gpu::Light>& published = fc.scene.lights();
+    for (size_t i = 0; i < lights.size() && i < published.size(); ++i)
+        if (published[i].sourceTexture != 0) mix(&published[i].sourceMean, 4);
     const size_t n = lights.size();
     mix(&n, sizeof n);
     const float3 origin = m_scene.originOffset();  // C9: positions relative to the frame's origin
@@ -1952,15 +2425,25 @@ void RayScene::updateLightGrid(FramePassContext& fc)
             r.spotScale = 1.0f / std::max(ci - co, 1e-4f);
             r.spotOffset = -co * r.spotScale;
             // (what a hit's light sample carries on is indirect light: the light's indirect and diffuse scales)
-            r.intensity = l.intensity * l.indirectIntensity * l.diffuseScale;
+            // (a diffuse scale of 0 counts as 1e-4, as ShadingCommon.hlsli: the specular scale over it stays exact)
+            const float diffuseScale = std::max(l.diffuseScale, 1e-4f);
+            r.intensity = l.intensity * l.indirectIntensity * diffuseScale;
             r.range = std::max(l.range, 1e-3f);
             r.color = scene::lightColor(l);  // (with its colour temperature)
+            if (i < published.size() && published[i].sourceTexture != 0)
+            {
+                const float3 mean = gpu::rgb9e5ToFloat(published[i].sourceMean);  // (a rect's image: its mean colour)
+                r.color = { r.color.x * mean.x, r.color.y * mean.y, r.color.z * mean.z };
+            }
             r.size[0] = l.size.x;
             r.size[1] = l.size.y;
             r.castShadow = l.castShadow ? 1u : 0u;
-            // pad bit 0: the hit's weight takes the light's own window (HitLocalLights.hlsli rtLocalLightFinish)
+            // pad (HitLocalLights.hlsli rtLocalLightFinish): bit 0 - the hit's weight takes the light's own window; bit 1 -
+            // a rect with barn doors (the sample's point lies on the part the hit sees); bits 16..31 - the specular scale
+            // over the diffuse one, half(ratio - 1)
             const bool punctual = l.type == scene::LightType::Point || l.type == scene::LightType::Spot;
-            r.pad = (punctual && l.falloffExponent > 0) || l.maxDrawDistance > 0 ? 1u : 0u;
+            r.pad = ((punctual && l.falloffExponent > 0) || l.maxDrawDistance > 0 ? 1u : 0u) |
+                    (l.type == scene::LightType::Rect && l.barnDoorLength > 0 ? 2u : 0u) | (gpu::halfFloatBits(l.specularScale / diffuseScale - 1.0f) << 16);
             lo = { std::min(lo.x, r.position.x - r.range), std::min(lo.y, r.position.y - r.range), std::min(lo.z, r.position.z - r.range) };
             hi = { std::max(hi.x, r.position.x + r.range), std::max(hi.y, r.position.y + r.range), std::max(hi.z, r.position.z + r.range) };
             ranges.push_back(r.range);
@@ -2519,7 +3002,7 @@ void RayScene::recordRuntime(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
                 rb.anyAlpha |= alpha;
                 D3D12_RAYTRACING_GEOMETRY_DESC g{};
                 g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-                g.Flags = alpha ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+                g.Flags = geometryFlags(subs[s].material);
                 g.Triangles.VertexBuffer = { vertices + (uint64_t)gm.vertexOffset * sizeof(gpu::Vertex), sizeof(gpu::Vertex) };
                 g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
                 g.Triangles.VertexCount = gm.vertexCount;
@@ -2564,7 +3047,7 @@ void RayScene::recordRuntime(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
         }
         if (live >= m_runtimeInstanceCap) break;  // GpuScene's own capacity: never reached
         desc.InstanceID = m_runtimeRecordBase + live;
-        desc.InstanceMask = kRtMaskAll;
+        desc.InstanceMask = kRtMaskScene;
         desc.InstanceContributionToHitGroupIndex = 0;
         desc.AccelerationStructure = m_runtimePool.address() + rb.offset;
         slot[m_dynamicDescs.size() + live] = desc;

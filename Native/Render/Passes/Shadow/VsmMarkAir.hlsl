@@ -5,7 +5,8 @@
 // propagation).
 // P[0].x requests UAV (raw), P[0].y VSM constants CBV, P[0].z gridX | gridY << 16, P[0].w slices | tilePx << 16
 // P[1].x nearM (float bits), P[1].y farM (float bits), P[1].z shadow texels per tile (float bits), P[1].w VSM stats UAV
-// (raw; error word, VsmCommon.hlsli VSM_STATS_ERROR_BYTE), P[2].x = 1: the height fog is on (atmosphere.fog).
+// (raw; error word, VsmCommon.hlsli VSM_STATS_ERROR_BYTE), P[2].x = 1: the height fog is on (atmosphere.fog), P[2].y = where the
+// view's air starts (float, m: atmosphere.aerial_start_m).
 // Frame constants of the main view.
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
@@ -29,8 +30,8 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     RWByteAddressBuffer requests = ResourceDescriptorHeap[P[0].x];
     const float3 ray = froxelTileRay(g, gid.xy);
     const float z0 = froxelNodeDepth(g, s), z1 = froxelNodeDepth(g, s + 1);
-    // (the air starts AIR_VIEW_START_M from the camera, AtmosphereCommon.hlsli: nearer slices are not walked, FroxelSlice.hlsli)
-    if (P[2].x == 0 && z1 * length(ray) <= AIR_VIEW_START_M) return;  // (P[2].x: the fog is on - it is there from the camera on)
+    // (the air starts P[2].y metres from the camera, AtmosphereCommon.hlsli: nearer slices are not walked, FroxelSlice.hlsli)
+    if (P[2].x == 0 && z1 * length(ray) <= asfloat(P[2].y)) return;  // (P[2].x: the fog is on - it is there from the camera on)
     uint k;
     if (!vsmAirLevel(c, froxelTileWidth(g, 0.5 * (z0 + z1)), asfloat(P[1].z), k)) return;
     // The pages the segment crosses (the lookup's own page walk).

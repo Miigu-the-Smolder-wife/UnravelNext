@@ -86,7 +86,8 @@ float3 fxLitRadiance(LayerConstants c, float3 albedo, float3 offset, float3 D, f
         if (resident) visibility = v;
     }
     const float3 l = normalize(g_sunDirection);
-    L += E * (visibility * fxPhase(dot(l, D), g));
+    // (added below: the ML variant's volume fetch brings the cloud layer's shadow on the sun)
+    float3 sunLight = E * (visibility * fxPhase(dot(l, D), g));
     // indirect (GiSource.hlsli): the Lumen translucency volume's light through the phase function (band 0, and band 1 x
     // g), or R's GI cache, isotropic (the mean irradiance over the six axes / pi = fluence / 4 pi)
     // (GIV: the source's kind picks the kernel - both reads in one kernel pass the DXIL limit; ParticleLayer.cpp)
@@ -122,10 +123,13 @@ float3 fxLitRadiance(LayerConstants c, float3 albedo, float3 offset, float3 D, f
         const float3 uvw = float3((float2(pixel) + 0.5) / (float2(grid.gridX, grid.gridY) * grid.tilePx), max(froxelSliceCoord(grid, linearZ), 0.5) / grid.slices);
         Texture3D<float4> fluenceVolume = ResourceDescriptorHeap[P[1].x];
         Texture3D<float4> momentVolume = ResourceDescriptorHeap[P[1].y];
-        const float3 F = fluenceVolume.SampleLevel(g_linearClamp, uvw, 0).rgb / g_exposure;
+        // (alpha: the cloud layer's sun transmittance at the froxel - MegaLightsVolume.hlsl; B5 cloud shadow on lit particles)
+        const float4 fluence = fluenceVolume.SampleLevel(g_linearClamp, uvw, 0);
+        const float3 F = fluence.rgb / g_exposure;
         const float3 M = momentVolume.SampleLevel(g_linearClamp, uvw, 0).rgb / g_exposure;
         const float lumF = dot(F, float3(0.2126, 0.7152, 0.0722));
         if (lumF > 0) L += F * (max(0.0f, 1.0f + 3.0f * g * dot(M, D) / lumF) / (4.0f * SH_PI));
+        sunLight *= fluence.a;
     }
 #else
     // local lights of the froxel list at the particle (punctual exactly; area lights as their centre's point, exact
@@ -157,7 +161,7 @@ float3 fxLitRadiance(LayerConstants c, float3 albedo, float3 offset, float3 D, f
                                  : type == LIGHT_DISK ? SH_PI * light.size.x * light.size.x * facing
                                  : type == LIGHT_SPHERE ? SH_PI * light.size.x * light.size.x
                                                         : 2.0f * light.size.y * light.size.x + SH_PI * light.size.y * light.size.y;
-                El = light.color * (light.intensity * lightDiffuseScale(light) * area * shAreaWindow(light, p) / d2);
+                El = lightMeanColor(light) * (light.intensity * lightDiffuseScale(light) * area * lightBarnDoorFar(light, -toLight) * shAreaWindow(light, p) / d2);
             }
             float v = 1;
             if (lightCastsShadow(light) && c.shadowPageTable != UNX_NONE && c.shadowLights != UNX_NONE) v = shadowVisibilityDirect(sh, index, worldPos, -D);
@@ -165,7 +169,7 @@ float3 fxLitRadiance(LayerConstants c, float3 albedo, float3 offset, float3 D, f
         }
     }
 #endif
-    return albedo * L;
+    return albedo * (L + sunLight);
 }
 float3 curve3(uint first, uint count, float u) { return count >= 2u ? nv_curve(first, count, u).yzw : float3(1, 1, 1); }
 

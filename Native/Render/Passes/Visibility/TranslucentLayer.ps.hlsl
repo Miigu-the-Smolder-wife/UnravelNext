@@ -13,7 +13,7 @@
 [earlydepthstencil]
 void main(float4 position : SV_Position, float2 uv : TEXCOORD0, nointerpolation uint visId : VISID, nointerpolation uint material : MATERIAL)
 {
-    if (!alphaTestCovered(material, uv)) discard;
+    if (!alphaTestCoveredAt(material, uv, position.xy)) discard;
     RWTexture2D<uint> count = ResourceDescriptorHeap[P[2].x];
     InterlockedAdd(count[uint2(position.xy)], 1u);
 }
@@ -26,7 +26,7 @@ struct Out
 
 Out main(float4 position : SV_Position, float2 uv : TEXCOORD0, nointerpolation uint visId : VISID, nointerpolation uint material : MATERIAL)
 {
-    if (!alphaTestCovered(material, uv)) discard;
+    if (!alphaTestCoveredAt(material, uv, position.xy)) discard;
     Out o;
     o.visId = visId;
     o.depth = linearDepth(position.z);

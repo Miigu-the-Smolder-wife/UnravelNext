@@ -11,7 +11,19 @@
 #define REFL_OVERFLOW 1  // use the same stored attributes/values as the split passes
 #define REFL_NO_CARDS 1  // (at the DXIL limit: the overflow jobs' hits read no mesh cards - ReflectionShade.hlsli g_reflCardFrame)
 #define REFL_NO_ACCUMULATOR (JOB == 2)  // (the G library is at the DXIL limit: ReflectionShade.hlsli g_reflAccPool)
+#define RT_HIT_EYE 0  // (at the DXIL limit: an overflow job's hit on an eye reads its colour at the surface's uv - HitShading.hlsli)
+#define RT_SURFACE_EXTRAS 0  // (... and its surface carries no triangle edges and no vertex colour: RayScene.hlsli)
+#define UNX_MATERIAL_INPUTS 0  // (... and no material inputs: an overflow job's hit and its alpha test read the mesh's uv, without
+                               // the material's transform, emissive mask or vertex tint - Scene.hlsli)
 #define GI_BATCH_CORNERS CORNERS
+#if SKY == 0
+// (these libraries are at the DXIL limit: the overflow jobs' light samples at hits take the lights without the
+// components of the record's pad word - falloff exponent, draw-distance fade, barn doors, specular scale;
+// HitLocalLights.hlsli)
+#define UNX_RT_LIGHT_COMPONENTS 0
+#endif
+#define RT_NO_SEE_THROUGH  // (at the DXIL limit, and every ray of this library asks for RT_MASK_REFLECTION: RayShaders.hlsli)
+#define RT_NO_FAR_FIELD    // (... and none asks for RT_MASK_FAR)
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/Reflection/ReflectionRay.hlsli"
 #include "Passes/Reflection/ReflectionHit.hlsli"

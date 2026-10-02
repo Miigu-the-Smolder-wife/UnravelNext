@@ -33,6 +33,7 @@ bool depthOfFieldActive(FramePassContext& fc, const ViewResources& view)
 
 BufferRef depthOfField(FramePassContext& fc, const ViewResources& view, TextureRef src, TextureRef dst, DepthOfFieldProducts* products)
 {
+    if (!products && diaphragmDepthOfFieldOn(fc)) return diaphragmDepthOfField(fc, view, src, dst);  // (shading.dof_diaphragm)
     RenderGraph& g = fc.graph;
     const uint32_t w = view.view.width, h = view.view.height, tilesX = (w + kTile - 1) / kTile, tilesY = (h + kTile - 1) / kTile;
     const uint64_t tiles = (uint64_t)tilesX * tilesY;

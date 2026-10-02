@@ -14,7 +14,8 @@
 //   MODE=3: DispatchMesh arguments of every list for phase CULL_PHASE (phase 1 snapshots its counts; phase 2 draws
 //           the entries appended after them; the translucent lists: every entry so far) and the traversal completeness
 //           check. Phase 1 also leaves what phase 2 starts from: VS_GROUP_BEGIN = phase 1's group items, VA_GROUPS
-//           empty again, VA_DEFERRED_CHUNKS over the chunks phase 1 deferred (all final by now).
+//           empty again, VA_DEFERRED_CHUNKS over the chunks phase 1 deferred (all final by now); and VA_PROXIES, the
+//           proxy kernel's groups over the visible chunk items (DepthProxy.ms.hlsl: 4 groups of 64 members an item).
 #include "Passes/Visibility/CullShared.hlsli"
 
 void storeDispatch(RWByteAddressBuffer args, uint word, uint groups)
@@ -59,6 +60,7 @@ void main()
         state.Store(4 * VS_GROUP_BEGIN, min(state.Load(4 * VS_GROUP_WRITE), CAP_GROUPS));
         args.Store3(4 * VA_GROUPS, uint3(0, 0, 1));
         args.Store3(4 * VA_DEFERRED_CHUNKS, uint3((min(state.Load(4 * VS_DEFER_CHUNKS), CAP_DEFERRED) + 63) / 64, 1, 1));
+        storeDispatch(args, VA_PROXIES, min(state.Load(4 * VS_CHUNK_ITEMS), CAP_DEFERRED) * (CHUNK_INSTANCES / 64u));
     }
     // (work queue: items still pending after its workers left; level passes: items appended by the last level)
     const bool complete = NODE_WORK_QUEUE != 0 ? state.Load(4 * VS_NODE_PENDING) == 0 : min(state.Load(4 * VS_NODE_WRITE), CAP_NODES) == state.Load(4 * VS_NODE_END);

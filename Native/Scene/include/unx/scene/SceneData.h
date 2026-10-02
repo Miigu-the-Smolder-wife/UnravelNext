@@ -158,7 +158,59 @@ struct Material
     // Glass solid bodies (one-sided; A10 R-2): baseColor is the body's transmittance over attenuationDistance metres, so
     // sigma_a = -ln(baseColor) / attenuationDistance (1/m). A pane (two-sided) takes baseColor per pass as before.
     float attenuationDistance = 0.01f;
+    // ---- Material inputs (Passes/Material/MaterialInputs.hlsli states how the resolve reads them; every value at its
+    // default: none). They belong to the classes whose textures are read at the mesh's uv - every class but Cut and
+    // Terrain (validation).
+    // (1) The uv transform of the material's own textures (base colour, normal, roughness / metallic, emissive and its
+    // mask, occlusion on uv set 0, height): uv' = R(uvRotation) (uv x uvScale) + uvOffset (KHR_texture_transform's
+    // order; Unity's tiling and offset are uvScale and uvOffset). The alpha test reads the base colour through it in
+    // every view, in the shadows and at ray hits.
+    float2 uvScale{ 1, 1 };                  // finite, != 0
+    float2 uvOffset{ 0, 0 };
+    float uvRotation = 0.0f;                 // radians, counter-clockwise in uv
+    // (2) The second uv set (Mesh::uv1; a mesh without one: its uv0) for the occlusion map and the detail maps, read
+    // without the transform above.
+    uint32_t occlusionUvSet = 0;             // 0 or 1
+    // (3) Detail maps over the base (the reference's detail texturing; Unity's secondary maps), tiled at
+    // uv(detailUvSet) x detailScale + detailOffset. The detail colour multiplies the base colour by
+    // lerp(1, detail x 2^2.2, w detailColorStrength) (neutral at sRGB 0.5); the detail normal's slopes x w
+    // detailNormalScale add to the base normal's, its slope variance x the square to the footprint's (the specular
+    // band limit). w = 1, or the vertex colour's alpha with vertexAlphaBlend.
+    uint32_t detailColorTexture = kNone;     // Rgba8Srgb
+    uint32_t detailNormalTexture = kNone;    // Rg8Normal
+    float2 detailScale{ 1, 1 };              // finite, != 0
+    float2 detailOffset{ 0, 0 };
+    uint32_t detailUvSet = 0;                // 0 or 1
+    float detailColorStrength = 1.0f;        // [0, 1]
+    float detailNormalScale = 1.0f;          // [0, 4]
+    // (4) Height (parallax occlusion mapping in the resolve; the pixel's depth and position stay the surface's): the
+    // height field lies heightScale metres deep under the surface (texture 1 = the surface, 0 = the floor); the view ray
+    // is marched through it in the texture's uv (material.parallax_steps linear steps and one secant step) and every
+    // texture on uv set 0 is read where it meets the field. No texture or heightScale 0: none.
+    uint32_t heightTexture = kNone;          // R8Linear
+    float heightScale = 0.0f;                // m, [0, 1]
+    // (5) Emission: emissive x emissiveScale (the intensity apart from the colour) x the emissive texture x the mask
+    // (on the material's uv).
+    float emissiveScale = 1.0f;              // >= 0, finite
+    uint32_t emissiveMaskTexture = kNone;    // R8Linear
+    // (6) Vertex colour (Mesh::colors; a mesh without them: white, alpha 1): its rgb multiplies the base colour
+    // (vertexColorTint), its alpha weighs the detail maps (vertexAlphaBlend).
+    bool vertexColorTint = false;
+    bool vertexAlphaBlend = false;
+    // (7) Dithered opacity of an alpha-tested material (the reference's dithered opacity mask): in the views' rasters the
+    // cut is alpha >= alphaCutoff + noise - 0.5, the noise per pixel in [0, 1) and new every frame under the temporal
+    // upscale, so the accumulated picture shows the alpha's fraction (soft edges, hair cards). Shadows, ray hits and the
+    // coverage layer keep the cut at alphaCutoff. (At a distance the cut shape keeps its coverage without this: M's
+    // coverage-preserving alpha mips.)
+    bool alphaDither = false;
 };
+// Whether a material has a material input other than emissiveScale (the renderer keeps a record for those that do).
+bool hasMaterialInputs(const Material& m);
+// The uv at which a material's own textures are read, from the mesh's uv0 (the material's uv transform).
+float2 materialUv(const Material& m, float2 uv);
+// A tangent-space normal's x, y (or a slope) from the axes of the material's uv to the mesh's tangent frame: the
+// transform's transpose with each axis's scale taken out (a rotated texture's bumps turn with it, a mirrored one's flip).
+float2 materialUvToTangent(const Material& m, float2 xy);
 
 struct Submesh
 {
@@ -207,6 +259,9 @@ struct Mesh
                                    // mesh has a normal texture (the generator/importer computes them once, so the
                                    // reference and the renderer use the same tangent frame)
     std::vector<float2> uv0;
+    std::vector<float2> uv1;       // optional second uv set (Material::occlusionUvSet, detailUvSet)
+    std::vector<uint32_t> colors;  // optional vertex colours, RGBA8 with r in the low byte (linear values;
+                                   // Material::vertexColorTint, vertexAlphaBlend)
     std::vector<uint32_t> indices; // triangle list, counter-clockwise front faces
     std::vector<Submesh> submeshes;
     SkinStream skin;               // empty = rigid
@@ -234,6 +289,17 @@ enum InstanceFlags : uint32_t
     // they share a channel (Light::lightingChannels); the sun lights every instance.
     InstanceLightingChannelsShift = 4,
     InstanceLightingChannelsMask = 7u << 4,
+    InstanceNoDecals = 1u << 7,  // the instance takes no projected decals (Unreal's bReceivesDecals off)
+    // Shadow casting per object (Unreal's primitive flags).
+    // ShadowOnly: with InstanceCastShadow, the instance is drawn into shadow maps and blocks the lights' shadow rays but
+    // is in no view, no reflection or GI ray and no card of the surface cache (a hidden primitive with bCastHiddenShadow;
+    // Unity's ShadowCastingMode.ShadowsOnly). Without InstanceCastShadow it is nowhere.
+    InstanceShadowOnly = 1u << 9,
+    // NoSelfShadow: the sun's shadow on the instance's own pixels leaves out the casters within the instance's bounds -
+    // itself - along the sun's direction; it still shades everything else and takes the shadows of casters beyond its
+    // bounds. The opaque view's sun slot only (S: ShadowSelfSlack.hlsl): not the coverage layer's fragments, the local
+    // lights' pages or their shadow rays.
+    InstanceNoSelfShadow = 1u << 8,
 };
 // The instance's lighting channels (3 bits) from its flags, and flags with them set.
 constexpr uint32_t instanceLightingChannels(uint32_t flags) { return ((flags >> InstanceLightingChannelsShift) & 7u) ^ 1u; }
@@ -358,6 +424,12 @@ struct CloudLayer
     float sigmaMax = 0.04f;                         // peak extinction (1/m)
     float albedo = 0.99f;                           // single-scattering albedo
     float windX = 0, windZ = 0;                     // m/s: the layer's drift
+    // the cirrus sheet (CloudLayerDesc::cirrus*; file block "CIRR", written only with a coverage): thin ice cloud at one
+    // altitude far above the layer, with or without the layer
+    float cirrusCoverage = 0;                       // [0, 1]; 0: none
+    float cirrusAltitude = 9000;                    // m
+    float cirrusOpticalDepth = 0.15f;               // vertical, where its map is full
+    float cirrusWindX = 0, cirrusWindZ = 0;         // m/s
 };
 struct Fog
 {
@@ -371,6 +443,10 @@ struct Fog
     float skyAmount = 1;           // [0, 1]: how much of the fog sky pixels take
     float noiseAmount = 0.3f;      // [0, 1]: the density's variation about its mean
     float noiseScale = 20;         // m: the variation's largest features
+    // a second layer of the same medium (FogDesc::density2; file block "FGL2", written only with a density)
+    float density2 = 0;            // extinction (1/m) at 'height2'; 0: none
+    float heightFalloff2 = 0.02f;
+    float height2 = 0;             // m (scene y)
 };
 // Extra fog inside an ellipsoid or a box (mist in a hollow, steam): seen within the fog's near volume.
 struct FogVolume
@@ -383,6 +459,12 @@ struct FogVolume
     float heightFalloff = 0;       // the density halves this many times from the volume's bottom to its top
     float edge = 0.3f;             // (0, 1]: the outer share of the volume over which the density fades to 0
     float3 albedo{ 1, 1, 1 };
+    // rising steam (unx/render/FrameContext.h FogVolumeDesc: the same fields; file block "FVST", written only for
+    // volumes that set any of them)
+    float sourcePlane = 0;         // [0, 0.95]: the height inside the volume the medium rises from
+    float riseSpeed = 0;           // m/s
+    float turbulence = 0;          // [0, 1]
+    float turbulenceScale = 0.5f;  // m
 };
 
 struct Camera

@@ -16,6 +16,9 @@
 #ifndef UNX_REFLECTION_SHADE_HLSLI
 #define UNX_REFLECTION_SHADE_HLSLI
 #include "RayTracing/RayScene.hlsli"
+#ifndef RT_HIT_EYE
+#define RT_HIT_EYE 1  // a reflected eye shows its iris through the cornea (HitShading.hlsli rtHitMaterialSeen)
+#endif
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitDecals.hlsli"
 #include "Passes/GI/GiInternal.hlsli"
@@ -197,7 +200,7 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     GpuMaterial m = loadMaterial(s.material);
     if ((experiment & 8) == 0)
     {
-        m = rtHitMaterial(m, s, footprint, dot(s.normal, direction));
+        m = rtHitMaterialSeen(m, s, direction, footprint, dot(s.normal, direction));
         rtHitDecals(scene, s, footprint, m);  // the direct view's decals (A7)
     }
     if (!s.frontFace && (m.classFlags & MATERIAL_TWO_SIDED) == 0) return o;  // inside closed geometry

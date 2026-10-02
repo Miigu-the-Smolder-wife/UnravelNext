@@ -1,5 +1,5 @@
-// Projected decals (FEATURES_GAME 5; A7). Owner: E. Readers: M's material resolve (and its coverage fragments), R's hit
-// shading, through decalApply.
+// Projected decals (FEATURES_GAME 5; A7). Owner: E. Readers: M's material resolve and R's hit shading, through
+// decalApply (the coverage layer's fragments take none: CoverageShade.hlsli covFragmentMaterial).
 //
 // A decal is an oriented box and an ordinary scene material (its textures go through M's pipeline: footprint-filtered
 // base colour with alpha = opacity, rough/metal, LEAN slope moments for the normal). The box is world space, or the
@@ -7,6 +7,10 @@
 // box whose geometric normal faces its +Z axis get the material as an upper layer: every parameter blends towards
 // the decal's by a = texture alpha x opacity x angle fade x edge fade (FEATURES_GAME 5.2: the pixel material is
 // modified in material resolve, before the G-buffer; the band-limited roughness then filters the result).
+// As Unreal's decals: a decal changes only the parts of the material its channels name (base colour, normal,
+// roughness and metallic: a normal-only or roughness-only decal), its base colour is tinted by its colour, its opacity
+// fades with its size on screen and over its lifetime (DecalSetup.hlsl STEP 1 folds both into the frame record's
+// opacity), and an instance flagged INSTANCE_NO_DECALS takes none.
 // Composition order: priority, then creation order (older first, a newer decal on top) - independent of list order.
 //
 // Per frame (Passes/Decal/Decals.cpp): DecalFrame records (camera-relative) and the 16 x 16 px tile lists, at most
@@ -24,8 +28,12 @@
 #define DECAL_TILE_WORDS 9u            // count + 16 x uint16
 #define DECAL_TILES_HEADER_BYTES 16u   // tilesX, tilesY, status, overflowing tiles
 #define DECAL_STATUS_TILE_FULL 1u
+// DecalRecord / DecalFrame::channels (decal::DecalChannels)
+#define DECAL_CHANNEL_BASE_COLOR 1u
+#define DECAL_CHANNEL_NORMAL 2u       // the normal and its slope variance
+#define DECAL_CHANNEL_ROUGH_METAL 4u  // roughness and metallic
 
-// CPU record (80 B): the box maps the unit cube [-1, 1]^3 to its space: p = box * (u, 1) (columns: the half-extent axes
+// CPU record (128 B): the box maps the unit cube [-1, 1]^3 to its space: p = box * (u, 1) (columns: the half-extent axes
 // X, Y, Z, then the centre).
 struct DecalRecord
 {
@@ -35,8 +43,14 @@ struct DecalRecord
     uint order;                // creation order (age)
     float opacity, cosFadeStart, cosFadeEnd, edge;  // angle fade from cosFadeStart (full) to cosFadeEnd (none); edge: soft
                                                      // fraction of the box depth at +-Z
+    float3 color; uint channels;                     // tint of the base colour; DECAL_CHANNEL_* the decal changes
+    // Fades (DecalSetup.hlsl STEP 1). fadeScreenSize: Unreal's FadeScreenSize (0: none). Lifetime, on the frame's clock
+    // (g_time, s): in over [fadeInStart, fadeInStart + fadeInDuration], out over [fadeOutStart, + fadeOutDuration]; a
+    // duration of 0: no such fade.
+    float fadeScreenSize, fadeInStart, fadeInDuration, fadeOutStart;
+    float fadeOutDuration; float3 pad;
 };
-// Per-frame record (128 B): camera-relative box and its inverse.
+// Per-frame record (144 B): camera-relative box and its inverse.
 struct DecalFrame
 {
     float4 toDecal[3];         // camera-relative position -> unit cube coordinates
@@ -44,7 +58,8 @@ struct DecalFrame
     float3 axisX; uint instance;
     float3 axisY; int priority;
     float3 axisZ; uint order;
-    float opacity, cosFadeStart, cosFadeEnd, edge;
+    float opacity, cosFadeStart, cosFadeEnd, edge;  // opacity: the record's x its screen-size and lifetime fades
+    float3 color; uint channels;
 };
 
 // What decalApply reads: the frame records and tile lists (DECAL_NONE: no decals) and M's material texture table
@@ -96,7 +111,7 @@ float decalLayer(DecalContext c, DecalFrame d, DecalSurface s, out DecalMaterial
     const float3 ux = decalToUnitVector(d, s.dpdx), uy = decalToUnitVector(d, s.dpdy);
     const float2 duvdx = float2(0.5f * ux.x, -0.5f * ux.y), duvdy = float2(0.5f * uy.x, -0.5f * uy.y);
     const GpuMaterial m = loadMaterial(d.material);
-    float3 base = m.baseColor;
+    float3 base = m.baseColor * d.color;
     float roughness = m.roughness, metallic = m.metallic;
     float3 n = s.geometricNormal;
     float variance = s.geometricVariance;
@@ -145,6 +160,8 @@ float decalLayer(DecalContext c, DecalFrame d, DecalSurface s, out DecalMaterial
 // inout lets the sort use that storage instead of an HLSL by-value array copy.
 void decalApplyList(DecalContext c, inout uint ids[DECAL_PER_TILE], uint count, DecalSurface s, inout DecalMaterial m)
 {
+    // an instance that takes no decals (scene::InstanceNoDecals)
+    if (s.instance != DECAL_NONE && (loadInstance(s.instance).flags & INSTANCE_NO_DECALS) != 0) return;
     StructuredBuffer<DecalFrame> frames = ResourceDescriptorHeap[c.frames];
     // insertion sort by (priority, order)
     for (uint i = 1; i < count; ++i)
@@ -163,13 +180,21 @@ void decalApplyList(DecalContext c, inout uint ids[DECAL_PER_TILE], uint count, 
     for (uint i = 0; i < count; ++i)
     {
         DecalMaterial layer;
-        const float a = decalLayer(c, frames[ids[i]], s, layer);
+        const DecalFrame d = frames[ids[i]];
+        const float a = decalLayer(c, d, s, layer);
         if (!(a > 0)) continue;
-        m.baseColor = lerp(m.baseColor, layer.baseColor, a);
-        m.roughness = lerp(m.roughness, layer.roughness, a);
-        m.metallic = lerp(m.metallic, layer.metallic, a);
-        m.normal = normalize(lerp(m.normal, layer.normal, a));
-        m.variance = lerp(m.variance, layer.variance, a);
+        // (the decal's channels: the parts of the material it changes)
+        if ((d.channels & DECAL_CHANNEL_BASE_COLOR) != 0) m.baseColor = lerp(m.baseColor, layer.baseColor, a);
+        if ((d.channels & DECAL_CHANNEL_ROUGH_METAL) != 0)
+        {
+            m.roughness = lerp(m.roughness, layer.roughness, a);
+            m.metallic = lerp(m.metallic, layer.metallic, a);
+        }
+        if ((d.channels & DECAL_CHANNEL_NORMAL) != 0)
+        {
+            m.normal = normalize(lerp(m.normal, layer.normal, a));
+            m.variance = lerp(m.variance, layer.variance, a);
+        }
     }
 }
 // Every decal of the pixel's tile over the material (M's resolve).

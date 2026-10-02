@@ -46,6 +46,9 @@
 // midpoint steps: sun single scattering through the transmittance LUT + the J_ms multiple scattering; the casters'
 // shadows in that air are not included), rgb = in(0, d_c) (1 - T_c) + T_air(0, d_c) L_c and a = T_c, so a pixel beyond
 // the cloud - a sky pixel - has in' = rgb + T_c in(0, d_s) and T' = T_c T_air(0, d_s) (Atmosphere.hlsli airApplyClouds).
+// The cirrus sheet (modes 0 and 3; CloudCommon.hlsli cloudCirrusAt, CloudLight.hlsli cloudCirrusLight): where the ray
+// meets it, behind the layer - with T_s, L_s the sheet's and d_s its distance the texel holds
+// rgb + T_c (in(0, d_s) (1 - T_s) + T_air(0, d_s) L_s) and a = T_c T_s (the air's march goes on from the cloud to the sheet).
 // b1 = the view.
 #include "Passes/Atmosphere/CloudLight.hlsli"
 
@@ -94,17 +97,22 @@ void main(uint2 id : SV_DispatchThreadID)
     uint capped = 0, sunCapped = 0;
     float T = 1;
     float t0, t1;
-    if (cloudShellSpan(c, g_cameraPosition, dir, tMax, t0, t1))
+    // The pixel angle from the projection (the view's vertical field of view over its height), times the scale.
+    const float pixelAngle = dome ? 6.2831853 / P[1].x : length(worldFromDepth(pixel + float2(0, 1), 1e-6) - far) / length(far - g_cameraPosition) * scale;
+    CloudFrameLight light = (CloudFrameLight)0;
+    bool haveLight = false;
+    if ((test || c.coverage > 0) && cloudShellSpan(c, g_cameraPosition, dir, tMax, t0, t1))
     {
-        // The pixel angle from the projection (the view's vertical field of view over its height), times the scale.
-        const float pixelAngle = dome ? 6.2831853 / P[1].x : length(worldFromDepth(pixel + float2(0, 1), 1e-6) - far) / length(far - g_cameraPosition) * scale;
         const float stepLength = clamp(0.5 * (t0 + t1) * pixelAngle, CLOUD_STEP_MIN, 400.0);
         const uint wanted = (uint)ceil((t1 - t0) / stepLength), steps = clamp(wanted, 1u, CLOUD_MARCH_STEPS);
         capped = wanted > CLOUD_MARCH_STEPS ? 1u : 0u;
         // The frame's light (the tests' modes: the record's): the sun at the cloud through the air to the span's middle,
         // the sky's and the ground's radiance there.
-        CloudFrameLight light = (CloudFrameLight)0;
-        if (!test) light = cloudFrameLight(c, P[2].x, g_cameraPosition + dir * (0.5 * (t0 + t1)), dir, (P[3].w & 0x200u) != 0);
+        if (!test)
+        {
+            light = cloudFrameLight(c, P[2].x, g_cameraPosition + dir * (0.5 * (t0 + t1)), dir, (P[3].w & 0x200u) != 0);
+            haveLight = true;
+        }
         const float dt = (t1 - t0) / steps;
         const float phase = cloudPhase(c, dot(dir, c.sunDir));
         const CloudMsPhases ms = cloudMsPhases(c, dot(dir, c.sunDir));
@@ -157,28 +165,56 @@ void main(uint2 id : SV_DispatchThreadID)
     else
     {
         const float dc = distanceWeight > 0 ? distanceSum / distanceWeight : 65000.0;
-        float3 folded = L;
-        if (T < 0.9999)
+        // The cirrus sheet behind the layer (where the layer still lets the ray through).
+        float3 cirrusL = 0;
+        float cirrusT = 1, cirrusAt = 0, cirrusTau, cirrusMu;
+        if (T > 1e-3 && cloudCirrusAt(c, g_cameraPosition, dir, pixelAngle, cirrusAt, cirrusTau, cirrusMu))
         {
-            // The air between the camera and the cloud.
+            const float3 xs = g_cameraPosition + dir * cirrusAt;
+            if (!haveLight) light = cloudFrameLight(c, P[2].x, xs, dir, (P[3].w & 0x200u) != 0);
+            cloudCirrusLight(c, light, P[2].x, xs, dir, cirrusTau, cirrusMu, cirrusL, cirrusT);
+        }
+        const bool sheet = cirrusT < 0.9999;
+        float3 folded = L;
+        float alpha = T;
+        if (T < 0.9999 || sheet)
+        {
+            // The air between the camera and the cloud, and on to the sheet: two stretches of CLOUD_AIR_STEPS and half as
+            // many midpoint steps (the second from the cloud's distance, or from the camera without a cloud on the ray).
             const AtmosphereParams ap = airParamsFromTexels(P[2].x);
             const float3 sunDir = normalize(g_sunDirection), E = g_sunIlluminance * g_sunColor;
             const float nu = dot(dir, sunDir);
             float3 inC = 0, TaC = 1;
-            const float ds = dc / CLOUD_AIR_STEPS;
-            [loop] for (uint k = 0; k < CLOUD_AIR_STEPS; ++k)
+            const float first = T < 0.9999 ? dc : 0.0;
+            [loop] for (uint stretch = 0; stretch < 2; ++stretch)
             {
-                const float3 x = g_cameraPosition + dir * ((k + 0.5) * ds);
-                const AirCoefficients ac = airCoefficients(ap, airAltitude(ap, x));
-                const float3 source = (ac.rayleigh * airRayleighPhase(nu) + ac.mie * airMiePhase(nu, ap.mieG)) * airSunTransmittance(ap, P[2].x, x, sunDir) +
-                                      (ac.rayleigh + ac.mie) * airMultipleScattering(ap, P[2].w, x, dir, sunDir);
-                inC += TaC * source * E * airIntegral(ac.extinction, ds);
-                TaC *= exp(-ac.extinction * ds);
+                const float from = stretch == 0 ? 0.0 : first, to = stretch == 0 ? first : cirrusAt;
+                const uint count = stretch == 0 ? CLOUD_AIR_STEPS : CLOUD_AIR_STEPS / 2;
+                if (stretch == 1)
+                {
+                    if (T < 0.9999) folded = inC * (1 - T) + TaC * L;
+                    if (!sheet) break;
+                }
+                if (!(to > from)) continue;
+                const float ds = (to - from) / count;
+                [loop] for (uint k = 0; k < count; ++k)
+                {
+                    const float3 x = g_cameraPosition + dir * (from + (k + 0.5) * ds);
+                    const AirCoefficients ac = airCoefficients(ap, airAltitude(ap, x));
+                    const float3 source = (ac.rayleigh * airRayleighPhase(nu) + ac.mie * airMiePhase(nu, ap.mieG)) * airSunTransmittance(ap, P[2].x, x, sunDir) +
+                                          (ac.rayleigh + ac.mie) * airMultipleScattering(ap, P[2].w, x, dir, sunDir);
+                    inC += TaC * source * E * airIntegral(ac.extinction, ds);
+                    TaC *= exp(-ac.extinction * ds);
+                }
             }
-            folded = inC * (1 - T) + TaC * L;
+            if (sheet)
+            {
+                folded += T * (inC * (1 - cirrusT) + TaC * cirrusL);
+                alpha = T * cirrusT;
+            }
         }
         RWTexture2D<float4> dst = ResourceDescriptorHeap[P[0].y];
-        dst[id] = float4(folded, T);
+        dst[id] = float4(folded, alpha);
         if (dome) return;
         RWTexture2D<float> dist = ResourceDescriptorHeap[P[2].z];
         dist[id] = dc * 1e-3;  // km

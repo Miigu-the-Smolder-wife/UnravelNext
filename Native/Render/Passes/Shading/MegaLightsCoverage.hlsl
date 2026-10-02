@@ -19,7 +19,8 @@
 // P[0] = { records (StructuredBuffer<uint4>), tile list (raw), nearest depth (R32_UINT: MODE 0..2 UAV, MODE 3 SRV),
 //          element (R32_UINT: MODE 0, 2 UAV, MODE 3 SRV) }
 // P[1] = { band A depth SRV (MODE 1), visible clusters SRV (MODE 3), 0, 0 }
-// P[2] = { G-buffer UAV (R32G32_UINT), material word UAV (R32_UINT), depth UAV (R32_FLOAT), 0 } (MODE 3)
+// P[2] = { G-buffer UAV (R32G32_UINT), material word UAV (R32_UINT), depth UAV (R32_FLOAT), lighting channels UAV
+//          (R8_UINT: the channels of the fragment's instance, Scene.hlsli - the instance's sample pass reads them) } (MODE 3)
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
 #include "GBuffer.hlsli"
@@ -78,12 +79,14 @@ void main(uint3 id : SV_DispatchThreadID)
     RWTexture2D<uint2> gbuffer = ResourceDescriptorHeap[P[2].x];
     RWTexture2D<uint> words = ResourceDescriptorHeap[P[2].y];
     RWTexture2D<float> depth = ResourceDescriptorHeap[P[2].z];
+    RWTexture2D<uint> channels = ResourceDescriptorHeap[P[2].w];
     const uint e = element[pixel];
     if (e == 0xFFFFFFFFu)
     {
         gbuffer[pixel] = uint2(0, 0);
         words[pixel] = M_MATERIAL_SKY;
         depth[pixel] = 0;
+        channels[pixel] = 7u;
         return;
     }
     StructuredBuffer<uint4> records = ResourceDescriptorHeap[P[0].x];
@@ -97,5 +100,6 @@ void main(uint3 id : SV_DispatchThreadID)
     gbuffer[pixel] = encodeGBuffer(g);
     words[pixel] = (tid.material & 0xFFFFu) | (uint(round(saturate(m.metallic) * 255.0)) << 16);
     depth[pixel] = coverageFragmentDepth(f);
+    channels[pixel] = instanceLightingChannels(loadInstance(tid.instance).flags);
 }
 #endif

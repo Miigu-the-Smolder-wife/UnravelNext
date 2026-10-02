@@ -7,6 +7,7 @@
 #include "unx/render/RenderGraph.h"
 #include "unx/render/Shaders.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -34,6 +35,7 @@ struct CloudState
     uint32_t radianceSrv[2] = {}, distanceSrv[2] = {}, mapSrv = 0, recordSrv = 0, domeSrv = 0;
     uint32_t parity = 0;
     bool history = false, domeFilled = false;  // last frame's layer is this view's; the dome has been filled once
+    bool flashBefore = false;                  // last frame had a lightning flash (its light must leave every texel)
     uint8_t* ringMapped = nullptr;
     uint32_t width = 0, height = 0;
     uint64_t frames = 0;
@@ -69,7 +71,7 @@ uint32_t textureSrv(Device& device, ID3D12Resource* r, DXGI_FORMAT format)
     return index;
 }
 
-bool enabled(const CloudState& s) { return s.set && s.layer.coverage > 0; }
+bool enabled(const CloudState& s) { return s.set && (s.layer.coverage > 0 || s.layer.cirrusCoverage > 0); }
 } // namespace
 
 uint32_t cloudSunWord(const QualityConfig& q)
@@ -88,10 +90,14 @@ namespace
 void takeFrameLayer(FramePassContext& fc, CloudState& s)
 {
     const CloudLayerDesc& d = fc.frame.clouds;
-    if (d.coverage <= 0 && s.setByTest) return;
+    if (d.coverage <= 0 && d.cirrusCoverage <= 0 && s.setByTest) return;
     s.layer.coverage = d.coverage, s.layer.baseAltitude = d.baseAltitude, s.layer.topAltitude = d.topAltitude;
     s.layer.sigmaMax = d.sigmaMax, s.layer.albedo = d.albedo, s.layer.windX = d.windX, s.layer.windZ = d.windZ;
-    s.set = d.coverage > 0;
+    s.layer.cirrusCoverage = d.cirrusCoverage, s.layer.cirrusAltitude = d.cirrusAltitude, s.layer.cirrusOpticalDepth = d.cirrusOpticalDepth;
+    s.layer.cirrusWindX = d.cirrusWindX, s.layer.cirrusWindZ = d.cirrusWindZ;
+    if (d.cirrusCoverage > 0 && !(d.cirrusAltitude > 0 && d.cirrusOpticalDepth > 0 && d.cirrusCoverage <= 1))
+        fail("FrameContext::clouds: the cirrus sheet's coverage in [0, 1], altitude and optical depth > 0");
+    s.set = d.coverage > 0 || d.cirrusCoverage > 0;
     s.setByTest = false;
 }
 } // namespace
@@ -104,11 +110,11 @@ void setCloudLayer(TrackState& state, const clouds::CloudLayer& layer)
     s.setByTest = true;
 }
 
-void cloudsPrepare(FramePassContext& fc, uint32_t srvs[2])
+void cloudsPrepare(FramePassContext& fc, uint32_t& recordSrv)
 {
     CloudState& s = fc.state<CloudState>(kCloudKey);
     takeFrameLayer(fc, s);
-    srvs[0] = srvs[1] = 0;
+    recordSrv = 0;
     if (!enabled(s)) return;
     Device& device = fc.device;
     s.device = &device;
@@ -164,7 +170,7 @@ void cloudsPrepare(FramePassContext& fc, uint32_t srvs[2])
         std::memset(m, 0, 256);
         s.zeros->Unmap(0, nullptr);
     }
-    srvs[0] = s.recordSrv + 1;
+    recordSrv = s.recordSrv + 1;
 }
 
 void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
@@ -183,6 +189,22 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
     const float centre[3] = { mv.position.x, 0.5f * (s.layer.baseAltitude + s.layer.topAltitude), mv.position.z };
     clouds::CloudRecord rec = clouds::makeRecord(s.layer, offsets, s.noise, bottomRadius, sd, one, centre, kMapHalfExtent, kMapTexels);
     rec.shadow = s.mapSrv;
+    // atmosphere.clouds.powder (CloudCommon.hlsli cloudMsSun; 0: the fitted octaves alone)
+    rec.powder = fc.quality.has("atmosphere.clouds.powder") ? (float)std::clamp(fc.quality.number("atmosphere.clouds.powder"), 0.0, 1.0) : 0.0f;
+    // The frame's lightning flash, in the renderer's space.
+    const LightningDesc& flash = fc.frame.lightning;
+    const bool flashNow = flash.intensity > 0;
+    if (flashNow)
+    {
+        rec.flashPosition[0] = (float)(flash.position[0] - o[0]), rec.flashPosition[1] = (float)(flash.position[1] - o[1]);
+        rec.flashPosition[2] = (float)(flash.position[2] - o[2]);
+        rec.flashRadius = std::max(flash.radius, 1.0f);
+        for (int k = 0; k < 3; ++k) rec.flashIntensity[k] = flash.intensity * std::max(flash.color[k], 0.0f);
+    }
+    // (a flash lights every texel now and leaves every texel the frame after: neither frame takes last frame's texels,
+    //  and both refresh the whole dome - the escaping rays' sky shows the flash in its frame)
+    const bool flashFrame = flashNow || s.flashBefore;
+    s.flashBefore = flashNow;
     // this frame's layer (by parity); last frame's is the march's history when the view went on from it
     const uint32_t previousLayer = s.parity, layer = previousLayer ^ 1u;
     s.parity = layer;
@@ -191,7 +213,7 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
     // the sun path's marched steps per sample (CloudShadowCommon.hlsli cloudSunTauNear; 0: the whole path)
     // (| flags << 8: CloudMarch.hlsl P[3].w - the steps' mean density, the ground's light)
     const uint32_t sunSteps = cloudSunWord(q);
-    const bool history = temporal && s.history && fc.frame.discontinuity == 0;
+    const bool history = temporal && s.history && fc.frame.discontinuity == 0 && !flashFrame;
     s.history = true;
     rec.layerSrv = s.radianceSrv[layer], rec.distanceSrv = s.distanceSrv[layer], rec.skySrv = s.domeSrv;
     const uint32_t slot = (uint32_t)(s.frames++ % kRingSlots);
@@ -215,7 +237,7 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
     const uint32_t blockTexel = kBlockOrder[s.frames % 4];
     // the dome: 16 rows a frame once it has been filled
     constexpr uint32_t kDomeBand = 16;
-    const bool domeWhole = !temporal || !s.domeFilled || fc.frame.discontinuity != 0;
+    const bool domeWhole = !temporal || !s.domeFilled || fc.frame.discontinuity != 0 || flashFrame;
     s.domeFilled = true;
     const uint32_t domeRow = domeWhole ? 0u : (uint32_t)(s.frames % (kDomeHeight / kDomeBand)) * kDomeBand, domeRows = domeWhole ? kDomeHeight : kDomeBand;
     const TextureRef dome = g.importTexture(s.dome.Get(), textureDesc("S cloud sky dome", kDomeWidth, kDomeHeight, DXGI_FORMAT_R16G16B16A16_FLOAT), L);

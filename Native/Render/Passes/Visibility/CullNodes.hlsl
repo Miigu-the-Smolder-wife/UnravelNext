@@ -30,25 +30,38 @@
 struct NodeResult
 {
     bool pushChildren, pushGroup, defer, waiting;
-    uint instance, packed;
+    uint2 item;  // the tested item (packItem: instance, node, view)
     ClusterNode node;
 };
 
 NodeResult testNode(uint2 it)
 {
     NodeResult r = (NodeResult)0;
-    r.instance = it.x;
-    r.packed = it.y;
+    r.item = it;
     StructuredBuffer<ClusterNode> nodes = ResourceDescriptorHeap[NODES_SRV];
-    r.node = nodes[itemIndex(r.packed)];
-    const GpuInstance inst = loadInstance(r.instance);
-    const CullView v = loadView(itemView(r.packed));
+    r.node = nodes[itemIndex(it)];
+    const GpuInstance inst = loadInstance(itemInstance(it));
+    const CullView v = loadView(itemView(it));
     const bool skinned = (inst.flags & (INSTANCE_SKINNED | INSTANCE_VIEW_MODEL)) != 0;  // untested bounds (A12 view models: remapped projection)
     const float4 s = worldSphere(inst, inst.objectToWorld, r.node.lodSphere);
     bool keep = skinned || frustumVisible(v, s);
     // C5: a node reaching a terrain patch's replaced rectangle is traversed down to the source clusters.
     keep = keep && (patchForcesSource(inst, r.node.lodSphere) || projectedError(v, s, r.node.lodError * instanceScale(inst)) > v.lodThreshold);
-    keep = keep && (skinned || (tileVisible(v, itemView(r.packed), s) && !tilesOcclude(v, TILE_MASK_SRV, s)));
+    const bool twoPhase = (v.flags & CULL_VIEW_TILE_TWO_PHASE) != 0;
+    keep = keep && (skinned || (tileVisible(v, itemView(it), s) && (twoPhase || !tilesOcclude(v, TILE_MASK_SRV, s, false))));
+    if (keep && !skinned && twoPhase)
+    {
+        // tile occluders in two phases (VisibilityCommon.hlsli tilesOcclude): as the HiZ's two phases below
+#if PHASE == 1
+        if (tilesOcclude(v, TILE_MASK_SRV, s, true))
+        {
+            keep = false;
+            r.defer = true;
+        }
+#else
+        keep = !tilesOcclude(v, TILE_MASK_SRV, s, false);
+#endif
+    }
     if (keep && !skinned && (v.flags & CULL_VIEW_OCCLUSION) != 0)
     {
 #if PHASE == 1
@@ -82,7 +95,7 @@ void emitNodes(RWByteAddressBuffer state, NodeResult r, uint processed, uint gro
     if (r.pushGroup && g < CAP_GROUPS)
     {
         RWStructuredBuffer<uint2> groups = ResourceDescriptorHeap[GROUP_ITEMS_UAV];
-        groups[g] = uint2(r.instance, r.packed);
+        groups[g] = r.item;
     }
 #if QUEUE == 1
     const uint pushed = WaveActiveCountBits(r.pushGroup);
@@ -96,7 +109,7 @@ void emitNodes(RWByteAddressBuffer state, NodeResult r, uint processed, uint gro
     if (r.defer && d < CAP_DEFERRED)
     {
         RWStructuredBuffer<uint2> deferred = ResourceDescriptorHeap[DEFER_NODES_UAV];
-        deferred[d] = uint2(r.instance, r.packed);
+        deferred[d] = r.item;
     }
     if (WaveIsFirstLane() && processed > 0) state.InterlockedAdd(4 * VS_STAT_NODES, processed);
     const uint waiting = WaveActiveCountBits(r.waiting);
@@ -121,7 +134,7 @@ void main(uint i : SV_DispatchThreadID)
     {
         RWStructuredBuffer<uint2> items = ResourceDescriptorHeap[NODE_ITEMS_UAV];
         for (uint k = 0; k < r.node.count; ++k)
-            if (childBase + k < CAP_NODES) items[childBase + k] = uint2(r.instance, packItem(r.node.first + k, itemView(r.packed)));
+            if (childBase + k < CAP_NODES) items[childBase + k] = packItem(itemInstance(r.item), r.node.first + k, itemView(r.item));
     }
     emitNodes(state, r, WaveActiveCountBits(item < end), 0);
 }
@@ -190,7 +203,7 @@ void main()
         if (r.pushChildren)
         {
             for (uint k = 0; k < r.node.count; ++k)
-                if (childBase + k < CAP_NODES) items[childBase + k] = uint2(r.instance, packItem(r.node.first + k, itemView(r.packed)));
+                if (childBase + k < CAP_NODES) items[childBase + k] = packItem(itemInstance(r.item), r.node.first + k, itemView(r.item));
         }
         if (total > 0)
         {

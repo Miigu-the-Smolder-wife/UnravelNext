@@ -35,6 +35,8 @@ void particles(FramePassContext& fc, ViewResources& view)
     frame.camera[2] = view.view.position.z + fc.frame.worldOrigin[2];
     for (int a = 0; a < 3; ++a) frame.streamAxes[a] = fc.frame.streamAxes[a];
     frame.time = fc.frame.time;
+    frame.soft = fc.quality.has("fx.particles.soft") && fc.quality.boolean("fx.particles.soft");
+    frame.nearFade = fc.quality.has("fx.particles.near_fade") && fc.quality.boolean("fx.particles.near_fade");
     const FrameResources& r = fc.resources;
     frame.lighting.vsmPageTable = r.vsmPageTable;
     frame.lighting.vsmPool = r.vsmPool;

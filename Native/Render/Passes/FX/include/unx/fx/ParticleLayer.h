@@ -35,6 +35,8 @@ struct ParticleLayerFrame
                                                    // the anchor offset is a difference)
     float streamAxes[3] = { 1, 1, 1 };             // stream space -> renderer world axis signs (FrameContext::streamAxes)
     double time = 0;                               // the particle stream's context time of this frame (s)
+    bool soft = false, nearFade = false;           // fx.particles.soft / near_fade (FxLayerTile.hlsl): a sprite as a ball
+                                                   // that surfaces cut softly, and that fades out at the near plane
     ParticleLighting lighting;
 };
 

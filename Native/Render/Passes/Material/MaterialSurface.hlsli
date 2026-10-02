@@ -90,6 +90,17 @@ MVertex mTriangleVertex(uint visId, uint visibleClustersSrv, uint corner)
     return o;
 }
 
+// Rest-pose positions (object space) of the triangle a vis id names.
+void mTriangleRest(uint visId, uint visibleClustersSrv, out float3 r0, out float3 r1, out float3 r2)
+{
+    const GpuVisibleCluster vc = loadVisibleCluster(visibleClustersSrv, visVisibleCluster(visId));
+    const GpuMesh mesh = loadMesh(loadInstance(vc.instance).mesh);
+    const uint3 tri = loadClusterTriangle(loadCluster(vc.cluster), visTriangle(visId));
+    r0 = loadVertex(mesh, tri.x).position;
+    r1 = loadVertex(mesh, tri.y).position;
+    r2 = loadVertex(mesh, tri.z).position;
+}
+
 // The triangle a vis id names as coverage needs it (records loaded once): deformed world positions, material, and the
 // vertex uv (loaded only where the caller reads it).
 struct MTriangleCorners

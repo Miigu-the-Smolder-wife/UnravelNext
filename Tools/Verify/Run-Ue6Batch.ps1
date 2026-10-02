@@ -5,23 +5,42 @@
 #   2  the four game scenes: cut pictures at 1080p with the gi and direct layers (which stage a cut frame's blotch is in),
 #      timings at 1080p, 1440p and 4K;
 #   3  scenegen's scenes (outdoors, night, forest, water, interior): cut pictures and timings at 1080p, timings at 4K;
-#   4  variants, in groups (-Variants high,fog,fogab,fogvol,far,clouds,thin,bandb,specks,nopass,grids; default all): the high tier's timings; the
+#   4  variants, in groups (-Variants high,fog,fogab,fogvol,far,clouds,thin,bandb,specks,nopass,grids,ab; default all): the high tier's timings; the
 #      height fog on (pictures, timings) and each of its parts off in turn; the far field off; the cloud layer with and
-#      without its temporal accumulation; the frame without per-pass timestamps; the view-angle grids against pixel-sized.
-# The summary (<out>\summary.txt): the furnace sheets, every timing run's GPU frame and largest pass groups, the gates
-# that failed. A device removal stops the batch.
+#      without its temporal accumulation; the frame without per-pass timestamps; the view-angle grids against pixel-sized;
+#   5  ab (a variant group): every switch written since 2026-10-03 without a run, one at a time against the defaults, on
+#      the scenes that exercise it ($abGroups below; -Ab picks groups, default all). Per scene of a group: the base run,
+#      then one run per switch - ONE captured frame each (the camera still, or turning for the upscaler's switches) and,
+#      where the group asks for it, a turning timing run. A variant's frame is compared with the base's at once
+#      (ab_compare.py -> <out>\ab\pictures.txt) and deleted; the base's frame goes when its scene is done, so at most two
+#      captures of the group are on disk at a time (the disk filled up once). The summary lists the differences and each
+#      variant's GPU frame against its base's.
+# The summary (<out>\summary.txt): the furnace sheets, every timing run's GPU frame and largest pass groups, the A/B
+# sheet, the gates that failed. A device removal stops the batch.
+# Disk: the batch stops before it starts when the drive has under -MinFreeGB free; after the summary the captures' raw
+# frames (*.pfm, 25 MB each at 1080p, 100 MB at 4K) under <out> and the furnace runs' are deleted unless -KeepRaw (the
+# PNGs of the cut pictures stay).
 #   powershell -File Tools\Verify\Run-Ue6Batch.ps1 [-Out Cache\Ue6Batch] [-Skip furnace,game,generated,variants] [-Variants high,fog,...]
+#                                                  [-Ab cull,vsm,...] [-AbFrames 300] [-KeepRaw] [-MinFreeGB 30]
 param(
     [string]$Out = "Cache\Ue6Batch",
     [string[]]$Skip = @(),
     [string]$GeneratedScenes = "city_block,forest_thin,waterside,interior,city_night,ridge_sunset,forest_combat",
-    [string[]]$Variants = @("high", "fog", "fogab", "fogvol", "far", "clouds", "thin", "bandb", "specks", "nopass", "grids")
+    [string[]]$Variants = @("high", "fog", "fogab", "fogvol", "far", "clouds", "thin", "bandb", "specks", "nopass", "grids", "ab"),
+    [string[]]$Ab = @(),          # the ab group's sub-groups by name (empty: all)
+    [int]$AbFrames = 300,         # frames of an A/B run (the capture is its last frame; the timing run's length)
+    [string]$Scenes = "C:\Users\USER\UnravelNext-refl\Cache\ReflJudge\scenes",  # the saved game scenes (as Run-Ue6Final.ps1)
+    [switch]$KeepRaw,
+    [int]$MinFreeGB = 30
 )
 $ErrorActionPreference = "Stop"
 $Skip = @($Skip | ForEach-Object { $_ -split "," } | Where-Object { $_ })
 $Variants = @($Variants | ForEach-Object { $_ -split "," } | Where-Object { $_ })
+$Ab = @($Ab | ForEach-Object { $_ -split "," } | Where-Object { $_ })
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Set-Location $root
+$freeGB = [math]::Floor((Get-PSDrive -Name $root.Substring(0, 1)).Free / 1GB)
+if ($freeGB -lt $MinFreeGB) { throw "only $freeGB GB free on $($root.Substring(0, 2)) (-MinFreeGB $MinFreeGB): make room before the batch" }
 $outDir = Join-Path $root $Out
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $batchLog = Join-Path $outDir "batch.log"
@@ -156,7 +175,151 @@ if ($Skip -notcontains "variants") {
             "-Set", "atmosphere.froxels.tile_reference_height=0,lumen.translucency_volume_grid_reference_height=0")
         Final "angular grids (lobby 4K pictures)" "grids_angle" @("-Only", "bt_lobby", "-Resolutions", "4K", "-SkipTimings")
     }
+    if ($Variants -contains "ab") {
+        # Every switch written since 2026-10-03 without a run (UE6_WORKPLAN_KO.md 8.1, 8.3; 2 (c); UE6_PORT_STATUS_KO.md 1.2,
+        # 2.3.1), one at a time against the defaults. A group: the scenes that exercise its switches, what every run of
+        # it sets besides (Base) and passes to the gate (Gate), whether the captured frame is taken while turning (Turn:
+        # the temporal upscale's and the blur's switches) and whether a timing run is made (Time), the layers captured
+        # beside the final picture, and its rows - N the variant's name, S what it sets (the other path of the switch),
+        # E what the picture should do: "same" (the switch changes structure, not the picture: a difference is a defect or
+        # noise) or "differs" (the switch is the feature: the number says how much).
+        $abGroups = @(
+            @{ Name = "cull"; Scenes = "city_block,forest_thin"; Time = $true; Rows = @(
+                    @{ N = "queue_off"; S = "visibility.traversal_work_queue=false"; E = "same" },
+                    @{ N = "merge_off"; S = "visibility.cull_pass_merge=false"; E = "same" },
+                    @{ N = "fold_off"; S = "visibility.fold_small_passes=false,shadow.vsm.fold_small_passes=false,atmosphere.froxels.fold_small_passes=false,lumen.radiance_cache_fold_passes=false,surface_cache.mesh_cards_fold_passes=false"; E = "same" }) },
+            # the sun's pages with moving casters (--moving) and the wind's trees: the cache's parts and the occlusion
+            @{ Name = "vsm"; Scenes = "city_block,city_night,forest_thin"; Gate = "--moving"; Time = $true; Layers = "shadow"; Rows = @(
+                    @{ N = "separate_off"; S = "shadow.vsm.static_separate=false"; E = "same" },
+                    @{ N = "hzbcull_off"; S = "shadow.vsm.static_hzb_cull=false"; E = "same" },
+                    @{ N = "twophase_off"; S = "shadow.vsm.static_occlusion_two_phase=false"; E = "same" },
+                    @{ N = "hzbfilter_off"; S = "shadow.vsm.cache_hzb_filter=false"; E = "same" },
+                    @{ N = "coarse_off"; S = "shadow.vsm.coarse_pages=0,shadow.vsm.page_dilation=0"; E = "differs" },
+                    @{ N = "contact_off"; S = "shadow.vsm.screen_ray_length=0"; E = "differs" }) },
+            # the levels coarser than their casters: every caster drawn (the reference), left out, or as proxies (default)
+            @{ Name = "forest"; Scenes = "forest_thin,forest_combat,waterside"; Time = $true; Layers = "shadow"; Rows = @(
+                    @{ N = "every_caster"; S = "shadow.vsm.min_caster_texels=0"; E = "differs" },
+                    @{ N = "small_left_out"; S = "shadow.vsm.aggregate_small_casters=false"; E = "differs" }) },
+            @{ Name = "lights"; Scenes = "city_night,te_lounge"; Time = $true; Rows = @(
+                    @{ N = "candidates_twice"; S = "atmosphere.froxels.candidates_once=false"; E = "same" },
+                    @{ N = "head_sorted"; S = "atmosphere.froxels.sort_head_for_slots_only=false"; E = "differs" }) },
+            # the local lights' pages: only without the sampled lights (S draws no local page with them)
+            @{ Name = "local"; Scenes = "city_night,te_lounge"; Base = "shading.mega_lights=false"; Gate = "--moving"; Time = $true; Layers = "shadow"; Rows = @(
+                    @{ N = "six_lights_a_request"; S = "shadow.vsm.local_request_views=252"; E = "same" },
+                    @{ N = "local_separate_off"; S = "shadow.vsm.local_static_separate=false"; E = "same" }) },
+            # glass casters (the generated scenes have none): the game scenes
+            @{ Name = "tint"; Scenes = "bt_lobby,te_lounge"; Time = $true; Layers = "shadow"; Rows = @(
+                    @{ N = "glass_opaque"; S = "shadow.vsm.translucent_tint=false"; E = "differs" }) },
+            @{ Name = "cards"; Scenes = "bt_lobby,interior"; Time = $true; Layers = "gi,cardalbedo,cardfinal"; Rows = @(
+                    @{ N = "capture_clusters"; S = "surface_cache.mesh_cards_capture_clusters=true"; E = "same" },
+                    @{ N = "feedback_off"; S = "surface_cache.feedback=false"; E = "differs" },
+                    @{ N = "feedback_gather"; S = "surface_cache.feedback_gather=true"; E = "differs" },
+                    @{ N = "hit_indirect_off"; S = "lumen.hit_indirect=false"; E = "differs" }) },
+            @{ Name = "coverage"; Scenes = "waterside,forest_thin"; Time = $true; Rows = @(
+                    @{ N = "one_bucket"; S = "visibility.coverage_depth_buckets=1"; E = "same" },
+                    @{ N = "triangle_cull_off"; S = "visibility.coverage_triangle_cull=false"; E = "same" },
+                    @{ N = "keep_weightless"; S = "visibility.coverage_drop_weightless=false"; E = "same" },
+                    @{ N = "compute_raster"; S = "visibility.coverage_compute_raster=true"; E = "same" },
+                    @{ N = "composite_in_place"; S = "shading.coverage_compact=false"; E = "same" },
+                    @{ N = "counters"; S = "visibility.coverage_statistics=true"; E = "same" }) },
+            # the upscaler and the blur after it: a frame while the camera turns
+            @{ Name = "tsr"; Scenes = "bt_lobby,waterside"; Turn = $true; Time = $true; Rows = @(
+                    @{ N = "kernel_reference"; S = "output.upscale_tsr_kernel_by_samples=false"; E = "differs" },
+                    @{ N = "flickering_off"; S = "output.upscale_tsr_flickering=false"; E = "differs" },
+                    @{ N = "reprojection_field_off"; S = "output.upscale_tsr_reprojection_field=false"; E = "differs" },
+                    @{ N = "thin_geometry_off"; S = "output.upscale_tsr_thin_geometry=false"; E = "differs" },
+                    @{ N = "resurrection"; S = "output.upscale_tsr_resurrection=true"; E = "differs" },
+                    @{ N = "history_200"; S = "output.upscale_tsr_history_percent=200"; E = "differs" },
+                    @{ N = "blur_before_upscale"; S = "shading.motion_blur_after_upscale=false"; E = "differs" }) },
+            @{ Name = "clouds"; Scenes = "ridge_sunset,city_block"; Gate = "--clouds 0.5"; Time = $true; Rows = @(
+                    @{ N = "veil_off"; S = "atmosphere.clouds.veil=false"; E = "differs" },
+                    @{ N = "steps_unfiltered"; S = "atmosphere.clouds.filtered_steps=false"; E = "differs" }) },
+            @{ Name = "fog"; Scenes = "ridge_sunset,city_night"; Base = "atmosphere.fog.enabled=true"; Rows = @(
+                    @{ N = "air_order_off"; S = "atmosphere.fog.air_order=false"; E = "differs" }) },
+            @{ Name = "hair"; Scenes = "hair_ball"; Layers = "gi,refl"; Rows = @(
+                    @{ N = "hair_off_rays"; S = "raytracing.hair=false"; E = "differs" }) },
+            @{ Name = "eye"; Scenes = "shading_ball"; Gate = "--camera eye_close"; Rows = @(
+                    @{ N = "eye_plain"; S = "shading.eye_model=false"; E = "differs" }) }
+        )
+        if (Test-Path "C:\Users\USER\UnravelNext\.gpulock\HOLD") { throw "the GPU lock is on HOLD (C:\Users\USER\UnravelNext\.gpulock\HOLD): no hardware runs until it is removed" }
+        $exe = Join-Path $root "build\all\bin\unx_gate_shadow_renderergate.exe"
+        if (-not (Test-Path $exe)) { throw "build first: Tools\CI\Build.ps1 -Track all" }
+        $abDir = Join-Path $outDir "ab"
+        New-Item -ItemType Directory -Force -Path $abDir | Out-Null
+        $abSheet = Join-Path $abDir "pictures.txt"
+        "A/B pictures: a variant's frame against its base's (ab_compare.py); expected = what the switch should do to the picture" | Out-File -Encoding utf8 $abSheet
+        $manifest = @()
+        # One gate run through the GPU lock, its log kept; a device removal stops the batch.
+        function Invoke-AbGate([string]$kind, [string]$log, [string[]]$gateArgs) {
+            $env:UNX_DRED = if ($kind -eq "timing") { "0" } else { "1" }
+            $ErrorActionPreference = "Continue"
+            & powershell -NoProfile -File Tools\CI\GpuLock.ps1 -Track R -Kind $kind -- $exe @gateArgs 2>&1 | ForEach-Object { "$_" } | Out-File -Encoding utf8 $log
+            $code = $LASTEXITCODE
+            $ErrorActionPreference = "Stop"
+            if ((Get-Content $log -Raw) -match "DEVICE_REMOVED|DEVICE_HUNG|DEVICE_RESET|device removed|device hung") { throw "device removal: $log" }
+            if ($code -ne 0) { "   GATE FAILED ($code): $log" | Out-File -Encoding utf8 -Append $batchLog }
+        }
+        foreach ($group in $abGroups) {
+            if ($Ab.Count -gt 0 -and $Ab -notcontains $group.Name) { continue }
+            $res = if ($group.Res) { $group.Res } else { "1080p" }
+            $layers = @(); if ($group.Layers) { $layers = @($group.Layers -split ",") }
+            foreach ($scene in ($group.Scenes -split ",")) {
+                # a saved game scene by its name's start, else a generated scene by name (as Run-Ue6Still.ps1)
+                $file = Get-ChildItem -Path $Scenes -Filter "$scene*.unxscene" -ErrorAction SilentlyContinue | Select-Object -First 1
+                $sceneArg = if ($file) { $file.FullName } else { $scene }
+                $capture = $AbFrames - 1
+                $rows = @(@{ N = "base"; S = ""; E = "" }) + $group.Rows
+                $basePicture = ""
+                foreach ($row in $rows) {
+                    $title = "ab $($group.Name) / $scene / $($row.N)"
+                    "== $title" | Out-File -Encoding utf8 -Append $batchLog
+                    Write-Host "== $title"
+                    $dir = Join-Path $abDir (Join-Path $group.Name (Join-Path $scene $row.N))
+                    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+                    $sets = @("gi.deterministic=true")
+                    if ($group.Base) { $sets += @($group.Base -split ",") }
+                    if ($row.S) { $sets += @($row.S -split ",") }
+                    $common = @("--scene", $sceneArg, "--resolution", $res, "--auto-exposure")
+                    foreach ($s in $sets) { $common += @("--set", $s) }
+                    if ($group.Gate) { $common += @($group.Gate -split " " | Where-Object { $_ }) }
+                    # the picture: one frame (the last), the camera still unless the group turns it
+                    $pictureArgs = $common + @("--frames", "$AbFrames", "--warmup-frames", "0", "--capture-output", (Join-Path $dir "frame.pfm"), "--capture-frames", "$capture")
+                    if ($group.Turn) { $pictureArgs += @("--path-rotate", "20") }
+                    if ($layers.Count -gt 0) { $pictureArgs += @("--capture-layers", ((@("final") + $layers) -join ",")) }
+                    Invoke-AbGate "correctness" (Join-Path $dir "picture.log") $pictureArgs
+                    if ($group.Time) {
+                        Invoke-AbGate "timing" (Join-Path $dir "timing_turning.log") ($common + @("--frames", "$AbFrames", "--path-rotate", "20", "--out", (Join-Path $dir "timing_turning")))
+                    }
+                    $picture = Join-Path $dir "frame_f$capture.pfm"
+                    if ($row.N -eq "base") { $basePicture = $picture }
+                    else {
+                        $label = "$($group.Name) / $scene / $($row.N) [expected: $($row.E)]"
+                        & python Tools\Verify\ab_compare.py $basePicture $picture $label | Out-File -Encoding utf8 -Append $abSheet
+                        # (the layers: each against the base's of the same name)
+                        foreach ($layer in $layers) {
+                            $a = Get-ChildItem -Path (Split-Path -Parent $basePicture) -Filter "frame_${layer}_f$capture.pfm" -ErrorAction SilentlyContinue | Select-Object -First 1
+                            $b = Get-ChildItem -Path $dir -Filter "frame_${layer}_f$capture.pfm" -ErrorAction SilentlyContinue | Select-Object -First 1
+                            if ($a -and $b) { & python Tools\Verify\ab_compare.py $a.FullName $b.FullName "$label ($layer)" | Out-File -Encoding utf8 -Append $abSheet }
+                        }
+                        if (-not $KeepRaw) { Get-ChildItem -Path $dir -Filter *.pfm -ErrorAction SilentlyContinue | Remove-Item -Force }
+                    }
+                    $manifest += @(@{ group = $group.Name; scene = $scene; row = $row.N; set = $row.S; base = $group.Base; expected = $row.E;
+                            dir = (Join-Path "ab" (Join-Path $group.Name (Join-Path $scene $row.N))) })
+                }
+                if (-not $KeepRaw -and $basePicture) { Get-ChildItem -Path (Split-Path -Parent $basePicture) -Filter *.pfm -ErrorAction SilentlyContinue | Remove-Item -Force }
+            }
+        }
+        $manifest | ConvertTo-Json -Depth 4 | Out-File -Encoding utf8 (Join-Path $abDir "manifest.json")
+    }
 }
 & python Tools\Verify\batch_summary.py $outDir (Join-Path $root "Cache\Ue6Diag") | Out-File -Encoding utf8 (Join-Path $outDir "summary.txt")
+if (-not $KeepRaw) {
+    # the raw frames go once the summary is written (the cut pictures' PNGs stay): the batch's own, and its furnace and
+    # speck stills under Cache\Ue6Diag
+    Get-ChildItem -Path $outDir -Recurse -Filter *.pfm -ErrorAction SilentlyContinue | Remove-Item -Force
+    foreach ($d in (Get-ChildItem -Path (Join-Path $root "Cache\Ue6Diag") -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "batch_*" -or $_.Name -like "specks_*" })) {
+        Get-ChildItem -Path $d.FullName -Filter *.pfm -ErrorAction SilentlyContinue | Remove-Item -Force
+    }
+}
 "batch finished $(Get-Date -Format s)" | Out-File -Encoding utf8 -Append $batchLog
 Write-Host "done: $outDir\summary.txt"

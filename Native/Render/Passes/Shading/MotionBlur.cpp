@@ -12,9 +12,13 @@
 // vectors flattened to a velocity per internal sample and a range per 16 x 16 tile, the tiles' ranges spread to the
 // tiles their velocities reach, then the gather along the neighbourhood's longest velocity - up to
 // shading.motion_blur_max_percent of the output's width, both ways from the pixel, shading.motion_blur_samples taps, at
-// half resolution where the blur is longer than the taps. The stages above stay for views at their own resolution.
+// half resolution where the blur is longer than the taps. The rotation stage (2a) follows it there too
+// (shading.motion_blur_after_upscale_rotation): the upscale's vectors lose the camera's rotation in the flatten, the
+// gather takes the rest, and the rotation's arc - centred on the frame's time as the gather is - is read from the map
+// of the gathered image at the output resolution. The stages above stay for views at their own resolution.
 // And the heat haze composite of E's fields (Distortion.hlsl).
 #include "unx/shading/MotionBlur.h"
+#include "unx/shading/Upscale.h"
 #include "unx/core/Config.h"
 #include "unx/render/GpuScene.h"
 #include "unx/render/RenderGraph.h"
@@ -35,6 +39,14 @@ float shutterOf(const QualityConfig& q)
     if (!(s >= 0 && s <= 1)) fail("shading.motion_blur_shutter %g: the shutter as a fraction of the frame interval in [0, 1]", s);
     return s;
 }
+// (the frame's shutter: a game's run-time setting - FrameContext::post - over the quality file's)
+float shutterOf(FramePassContext& fc)
+{
+    const float s = fc.frame.post.motionBlurShutter;
+    if (!std::isfinite(s)) return shutterOf(fc.quality);
+    if (!(s >= 0 && s <= 1)) fail("the frame's motion blur shutter %g: a fraction of the frame interval in [0, 1]", s);
+    return s;
+}
 uint32_t asUint(float f)
 {
     uint32_t u;
@@ -49,6 +61,8 @@ struct RotationStage
     float3 qt[3] = {};         // rows of Q^T (view space): the previous direction of what a pixel sees now
     float3 a, e1, e2;          // axis and the basis of its latitude circles (e1 = the forward projected off the axis)
     float arc = 0;             // s phi (radians)
+    float start = 0;           // where a pixel's arc starts from its own lambda: 0 (the exposure ends at the frame's
+                               // time), -arc / 2 (centred on it)
     float lambda0 = 0, beta0 = 0, texel = 0;
     uint32_t mapWidth = 0, mapHeight = 0;
 };
@@ -56,7 +70,8 @@ struct RotationStage
 float3 row3(const float4x4& m, int r) { return float3{ m.m[r][0], m.m[r][1], m.m[r][2] }; }
 
 // q: the rows of Q = R_cur R_prev^T (view space: the current direction of what the previous view saw along a direction).
-RotationStage rotationStage(const ViewDesc& v, float shutter, const float3 q[3])
+// centred: the exposure is centred on the frame's time (the after-upscale path) instead of ending at it.
+RotationStage rotationStage(const ViewDesc& v, float shutter, const float3 q[3], bool centred = false)
 {
     RotationStage r;
     const float trace = q[0].x + q[1].y + q[2].z;
@@ -67,6 +82,7 @@ RotationStage rotationStage(const ViewDesc& v, float shutter, const float3 q[3])
     if (!(len > 1e-9f)) return r;  // phi near pi: not a frame's turn
     r.a = axis * (1.0f / len);
     r.arc = shutter * phi;
+    r.start = centred ? -0.5f * r.arc : 0.0f;
     const float pxPerRad = 0.5f * (float)v.height * v.proj.m[1][1];  // at the image centre
     if (r.arc * pxPerRad <= 16.0f) return r;                          // the gather covers it
     // the axis outside the view, with a margin beyond the half-diagonal field of view
@@ -94,9 +110,9 @@ RotationStage rotationStage(const ViewDesc& v, float shutter, const float3 q[3])
         }
     r.texel = 2.0f / (v.proj.m[1][1] * (float)v.height);  // the centre pixel's angle
     const float margin = 2 * r.texel;
-    r.lambda0 = lmin - margin;
+    r.lambda0 = lmin + r.start - margin;
     r.beta0 = bmin - margin;
-    r.mapWidth = (uint32_t)std::ceil((lmax + r.arc + margin - r.lambda0) / r.texel) + 1;
+    r.mapWidth = (uint32_t)std::ceil((lmax + r.start + r.arc + margin - r.lambda0) / r.texel) + 1;
     r.mapHeight = (uint32_t)std::ceil((bmax + margin - r.beta0) / r.texel) + 1;
     if ((uint64_t)r.mapWidth * r.mapHeight > 6ull * v.width * v.height) return RotationStage{};  // a turn beyond a frame's reach
     r.active = true;
@@ -105,7 +121,7 @@ RotationStage rotationStage(const ViewDesc& v, float shutter, const float3 q[3])
 
 // The frame's camera rotation from its view and the previous view-projection (the same projection; a changed field of
 // view is not a rotation: no rotation stage).
-RotationStage frameRotation(const ViewDesc& v, float shutter)
+RotationStage frameRotation(const ViewDesc& v, float shutter, bool centred = false)
 {
     const float4x4 prevView = mul(inverse(v.proj), v.prevViewProj);
     float3 rp[3], rc[3], q[3];
@@ -118,7 +134,7 @@ RotationStage frameRotation(const ViewDesc& v, float shutter)
         for (int j = 0; j < 3; ++j)
             if (std::abs(dot(rp[i], rp[j]) - (i == j ? 1.0f : 0.0f)) > 1e-3f) return RotationStage{};
     for (int i = 0; i < 3; ++i) q[i] = float3{ dot(rc[i], rp[0]), dot(rc[i], rp[1]), dot(rc[i], rp[2]) };  // (R_cur R_prev^T)_ij
-    return rotationStage(v, shutter, q);
+    return rotationStage(v, shutter, q, centred);
 }
 
 // Temporal upscale (FrameContext::Upscale): the main view's matrices carry a sub-pixel jitter that changes every frame.
@@ -176,7 +192,7 @@ void gatherPasses(FramePassContext& fc, const ViewResources& view, TextureRef sr
     RenderGraph& g = fc.graph;
     const uint32_t w = view.view.width, h = view.view.height;
     const uint32_t tw = (w + kTile - 1) / kTile, th = (h + kTile - 1) / kTile;
-    const float shutter = shutterOf(fc.quality);
+    const float shutter = shutterOf(fc);
     const TextureRef tiles = g.createTexture(TextureDesc{ "m.motion.tiles", tw, th, 1, 1, DXGI_FORMAT_R16G16_FLOAT });
     const TextureRef neighbour = g.createTexture(TextureDesc{ "m.motion.neighbour", tw, th, 1, 1, DXGI_FORMAT_R16G16_FLOAT });
     ID3D12PipelineState* tileMax = fc.shaders.compute("Passes/Shading/MotionTiles.STEP0");
@@ -224,7 +240,9 @@ void gatherPasses(FramePassContext& fc, const ViewResources& view, TextureRef sr
               });
 }
 
-void rotationPasses(FramePassContext& fc, const ViewResources& view, TextureRef src, TextureRef dst, const RotationStage& r)
+// view: the image's view (its size and frame constants: the projection the pixels' directions come from). visScale:
+// vis buffer pixels per image pixel (1; internal / output size when the image is the upscaled one).
+void rotationPasses(FramePassContext& fc, const ViewResources& view, TextureRef src, TextureRef dst, const RotationStage& r, float visScale = 1.0f)
 {
     RenderGraph& g = fc.graph;
     const uint32_t w = view.view.width, h = view.view.height;
@@ -243,8 +261,8 @@ void rotationPasses(FramePassContext& fc, const ViewResources& view, TextureRef 
     const BufferRef clusters = view.visibleClusters;
     auto constants = [=](uint32_t (&k)[24], uint32_t image, uint32_t mapIndex, uint32_t out, uint32_t vis, uint32_t visible) {
         const uint32_t v[24] = { image, mapIndex, out, vis, r.mapWidth, r.mapHeight, w, h, asUint(r.lambda0), asUint(r.beta0), asUint(r.texel), asUint(r.arc),
-                                 asUint(r.a.x), asUint(r.a.y), asUint(r.a.z), visible, asUint(r.e1.x), asUint(r.e1.y), asUint(r.e1.z), 0,
-                                 asUint(r.e2.x), asUint(r.e2.y), asUint(r.e2.z), 0 };
+                                 asUint(r.a.x), asUint(r.a.y), asUint(r.a.z), visible, asUint(r.e1.x), asUint(r.e1.y), asUint(r.e1.z), asUint(r.start),
+                                 asUint(r.e2.x), asUint(r.e2.y), asUint(r.e2.z), asUint(visScale) };
         std::memcpy(k, v, sizeof v);
     };
     g.addPass("m.motion.rotation.map", QueueType::Graphics,
@@ -297,7 +315,7 @@ void rotationPasses(FramePassContext& fc, const ViewResources& view, TextureRef 
 
 bool motionBlurActive(FramePassContext& fc, const ViewResources& view)
 {
-    if (view.view.kind != gpu::ViewKind::Main || !(shutterOf(fc.quality) > 0)) return false;
+    if (view.view.kind != gpu::ViewKind::Main || !(shutterOf(fc) > 0)) return false;
     if (!view.visId.valid() || !view.visibleClusters.valid() || !view.depth.valid()) return false;
     const ViewDesc v = shutterView(fc, view.view);
     const bool cameraMoved = std::memcmp(&v.viewProj, &v.prevViewProj, sizeof(float4x4)) != 0;
@@ -308,7 +326,7 @@ TextureRef motionVelocity(FramePassContext& fc, const ViewResources& view) { ret
 
 void motionBlur(FramePassContext& fc, const ViewResources& view, TextureRef src, TextureRef dst)
 {
-    const RotationStage rotation = frameRotation(shutterView(fc, view.view), shutterOf(fc.quality));
+    const RotationStage rotation = frameRotation(shutterView(fc, view.view), shutterOf(fc));
     const TextureRef velocity = velocityPass(fc, view, rotation.active ? &rotation : nullptr);
     if (!rotation.active)
     {
@@ -328,7 +346,7 @@ void motionBlurWithVelocity(FramePassContext& fc, const ViewResources& view, Tex
 
 bool motionRotationBlur(FramePassContext& fc, const ViewResources& view, TextureRef src, TextureRef dst, const float3 (&q)[3])
 {
-    const RotationStage rotation = rotationStage(view.view, shutterOf(fc.quality), q);
+    const RotationStage rotation = rotationStage(view.view, shutterOf(fc), q);
     if (rotation.active) rotationPasses(fc, view, src, dst, rotation);
     return rotation.active;
 }
@@ -343,12 +361,24 @@ void motionBlurUpscaled(FramePassContext& fc, const ViewResources& view, Texture
     RenderGraph& g = fc.graph;
     const TextureDesc sd = g.desc(src);
     const uint32_t W = sd.width, H = sd.height, w = view.view.width, h = view.view.height;
-    const float shutter = shutterOf(fc.quality);
+    const float shutter = shutterOf(fc);
     // the reference's MotionBlurMax (percent of the screen's width a blur may span, 5), its quality's tap count (16 at
     // r.MotionBlurQuality 4) and r.MotionBlur.HalfResGather
     const double maxPercent = fc.quality.has("shading.motion_blur_max_percent") ? fc.quality.number("shading.motion_blur_max_percent") : 5.0;
     const int64_t samples = fc.quality.has("shading.motion_blur_samples") ? fc.quality.integer("shading.motion_blur_samples") : 16;
     const bool halfGather = !fc.quality.has("shading.motion_blur_half_res_gather") || fc.quality.boolean("shading.motion_blur_half_res_gather");
+    // the rotation stage on the upscaled image: the output view's unjittered matrices, the exposure centred as the gather's
+    const bool rotationOn = !fc.quality.has("shading.motion_blur_after_upscale_rotation") || fc.quality.boolean("shading.motion_blur_after_upscale_rotation");
+    // (under a lens projection the upscaled picture is not the output view's rectilinear one: the gather reads the
+    // vectors through the lens, MotionApply.hlsl, and the rotation stage - whose map is of that view - stays out)
+    const LensProjection lens = upscaleLens(fc, view);
+    ViewResources outView = upscaleOutputView(fc, view);
+    const RotationStage rotation = rotationOn && !lens.active ? frameRotation(outView.view, shutter, true) : RotationStage{};
+    const bool viewModels = rotation.active && fc.scene.viewModelInstances() > 0;
+    const TextureRef visId = view.visId;
+    const BufferRef clusters = view.visibleClusters;
+    const float4x4 outProj = outView.view.proj;
+    const TextureRef gatherTarget = rotation.active ? g.createTexture(TextureDesc{ "m.motion.residual", sd.width, sd.height, 1, 1, g.desc(dst).format }) : dst;
     if (!(maxPercent > 0 && maxPercent <= 100)) fail("shading.motion_blur_max_percent %g: percent of the output's width in (0, 100]", maxPercent);
     if (samples < 4 || samples > 64 || samples % 4 != 0) fail("shading.motion_blur_samples %lld: a multiple of 4 in [4, 64]", (long long)samples);
     constexpr uint32_t kFlattenTile = 16, kFilterTile = 16;  // MOTION_FLATTEN_TILE, MOTION_FILTER_TILE
@@ -375,12 +405,30 @@ void motionBlurUpscaled(FramePassContext& fc, const ViewResources& view, Texture
                   b.use(depth, Use::SrvCompute);
                   b.use(flat, Use::UavCompute);
                   b.use(tiles, Use::UavCompute);
+                  if (viewModels)
+                  {
+                      b.use(visId, Use::SrvCompute);
+                      b.use(clusters, Use::SrvCompute);
+                  }
               },
               [=](PassContext& c) {
-                  const uint32_t k[12] = { c.srv(motion), c.srv(depth), c.uav(flat), c.uav(tiles), w, h, asUint(scaleX), asUint(scaleY), asUint(maxVelocity), 0, 0, 0 };
+                  // (with the rotation stage the vectors lose the rotation's part: Q^T and the unjittered projection's terms)
+                  uint32_t k[28] = { c.srv(motion), c.srv(depth), c.uav(flat), c.uav(tiles), w, h, asUint(scaleX), asUint(scaleY),
+                                     asUint(maxVelocity), rotation.active ? 1u : 0u, viewModels ? c.srv(visId) : gpu::kNone, viewModels ? c.srv(clusters) : gpu::kNone };
+                  for (int i = 0; i < 3; ++i)
+                  {
+                      k[12 + 4 * i] = asUint(rotation.qt[i].x);
+                      k[13 + 4 * i] = asUint(rotation.qt[i].y);
+                      k[14 + 4 * i] = asUint(rotation.qt[i].z);
+                      k[15 + 4 * i] = 0;
+                  }
+                  k[24] = asUint(outProj.m[0][0]);
+                  k[25] = asUint(outProj.m[1][1]);
+                  k[26] = asUint(outProj.m[0][2] - outProj.m[0][3]);
+                  k[27] = asUint(outProj.m[1][2] - outProj.m[1][3]);
                   c.cmd->SetPipelineState(flattenPso);
                   c.bindFrameConstants(cb);
-                  c.computeConstants(k, 12);
+                  c.computeConstants(k, 28);
                   c.cmd->Dispatch(tw, th, 1);
               });
     g.addPass("m.motion.tile gather", QueueType::Graphics,
@@ -418,15 +466,22 @@ void motionBlurUpscaled(FramePassContext& fc, const ViewResources& view, Texture
                       b.use(halfColour, Use::SrvCompute);
                       b.use(flat, Use::SrvCompute);
                       b.use(gathered, Use::SrvCompute);
-                      b.use(dst, Use::UavCompute);
+                      b.use(gatherTarget, Use::UavCompute);
                   },
                   [=](PassContext& c) {
-                      const uint32_t k[16] = { c.srv(src), c.srv(halfColour), c.srv(flat), c.srv(gathered), c.uav(dst), W, H, (uint32_t)samples,
-                                               w, h, tw, th, halfGather ? 1u : 0u, 0, 0, 0 };
+                      const uint32_t k[24] = { c.srv(src), c.srv(halfColour), c.srv(flat), c.srv(gathered), c.uav(gatherTarget), W, H, (uint32_t)samples,
+                                               w, h, tw, th, (halfGather ? 1u : 0u) | (lens.active ? 2u : 0u), 0, 0, 0,
+                                               asUint(lens.tanX), asUint(lens.tanY), asUint(lens.d), asUint(lens.s), asUint(lens.scale), 0, 0, 0 };
                       c.cmd->SetPipelineState(pso);
-                      c.computeConstants(k, 16);
+                      c.computeConstants(k, 24);
                       c.cmd->Dispatch(gx, gy, 1);
                   });
+    }
+    if (rotation.active)
+    {
+        // the gathered residual, then the rotation's arc (the map's directions are the output view's)
+        outView.frameConstants = fc.frameConstantsFor(outView.view);
+        rotationPasses(fc, outView, gatherTarget, dst, rotation, (float)w / (float)W);
     }
 }
 

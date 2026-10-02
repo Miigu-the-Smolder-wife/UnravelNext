@@ -40,7 +40,7 @@ struct VsmConstantsCpu
     uint32_t useStats;  // 1 + UAV index of the read bits (shadow.vsm.use_stats), 0 = off
     uint32_t atlasSrv;  // SRV of the page atlas (every lookup reads it here)
     uint32_t fragmentCheck;  // shadow.vsm.fragment_check (verification only)
-    uint32_t usePad;
+    uint32_t tint;  // 1 + SRV index of the glass casters' tint atlas (VsmTint.hlsli), 0 = none
     VsmLevelCpu level[20];
 };
 constexpr uint32_t kLevels = 20, kPage = 128, kTable = 128, kVirtual = 16384;

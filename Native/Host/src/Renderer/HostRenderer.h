@@ -94,6 +94,24 @@ struct CharacterShading
     float3 eyeAxis{ 0, 0, 1 };
 };
 
+// Material inputs of a material (UnxSceneSetMaterialInputs): scene::Material's fields of that name, which the material
+// description of the ABI does not carry. Defaults are scene::Material's.
+struct MaterialInputs
+{
+    float2 uvScale{ 1, 1 }, uvOffset{ 0, 0 };
+    float uvRotation = 0;
+    uint32_t occlusionUvSet = 0;
+    uint32_t detailColorTexture = scene::kNone, detailNormalTexture = scene::kNone;
+    float2 detailScale{ 1, 1 }, detailOffset{ 0, 0 };
+    uint32_t detailUvSet = 0;
+    float detailColorStrength = 1, detailNormalScale = 1;
+    uint32_t heightTexture = scene::kNone;
+    float heightScale = 0;
+    float emissiveScale = 1;
+    uint32_t emissiveMaskTexture = scene::kNone;
+    bool vertexColorTint = false, vertexAlphaBlend = false, alphaDither = false;
+};
+
 // Everything one frame needs, copied on the main thread.
 struct FramePacket
 {
@@ -108,6 +126,11 @@ struct FramePacket
     float displayPeak = 0;                         // FrameContext::displayPeak: 0 SDR, else HDR peak / paper white
     float lensAperture = 0, lensFocus = 0;         // FrameContext::lensAperture / lensFocus (the host's current lens)
     float whiteBalanceKelvin = 0, whiteBalanceTint = 0;  // FrameContext::whiteBalance* (v1.91; 0 = D65)
+    render::ColorGradingDesc grading;              // FrameContext::grading (the host's current grading)
+    render::PostSettingsDesc post;                 // FrameContext::post (the host's current post settings)
+    float exposureCompensation = 0;                // FrameContext::exposureCompensation
+    int32_t displayEncoding = -1;                  // FrameContext::displayEncoding / displayPaperWhite (HDR frames)
+    float displayPaperWhite = 0;
     // A3 mesh particles (render C): the host's asset -> mesh table when it changed (mesh = committed mesh index, a runtime
     // mesh id with bit 31, or 0xFFFFFFFF = unmapped); resolved on the render thread (fx::meshAssets)
     std::optional<std::vector<std::pair<uint64_t, uint32_t>>> meshAssets;
@@ -153,6 +176,8 @@ struct FramePacket
     std::vector<std::pair<uint32_t, scene::Material>> materialEdits;
     // Character shading set after commit (setCharacterShading), applied after this packet's material edits.
     std::vector<std::pair<uint32_t, CharacterShading>> characterEdits;
+    // Material inputs set after commit (setMaterialInputs), applied after this packet's material edits.
+    std::vector<std::pair<uint32_t, MaterialInputs>> inputEdits;
     // A7 surface state field (E's surface::SurfaceField, fed from NativeVfx nv_surface_delta): delta batches in the host's
     // order (each: removed keys, then changed bricks), changed half-lives, and the frame's VFX context time.
     struct SurfaceDelta
@@ -299,6 +324,17 @@ public:
     // material takes it; after commit it is an edit of the next queued frame. The groups that are not defined on the
     // material's class are ignored (applyCharacter); a later editMaterials of the material keeps it (keepCharacter).
     void setCharacterShading(uint32_t material, const CharacterShading& c);
+    // Material inputs of a material of the scene (main thread; the values and the textures' indices and formats are
+    // checked here). Before commit the scene material takes them; after commit they are an edit of the next queued frame.
+    // Ignored on the Cut and Terrain classes; the dither without an alpha cutoff (applyInputs). A later editMaterials of
+    // the material keeps them (keepInputs).
+    void setMaterialInputs(uint32_t material, const MaterialInputs& in);
+    // A mesh's second uv set and vertex colours (before commit; either may be empty, each as long as the mesh's vertices).
+    void setMeshAttributes(uint32_t mesh, std::vector<float2> uv1, std::vector<uint32_t> colors);
+    // A light's components (before commit; 'components' carries them in a scene::Light - its other fields are not read)
+    // and an instance's lighting channels (before commit; a 3-bit mask). scene::validate checks the values at commit.
+    void setLightComponents(uint32_t light, const scene::Light& components);
+    void setInstanceLightingChannels(uint32_t instance, uint32_t channels);
     SceneCommitInfo commit();
     // Quality override before commit ("section.key=value", QualityConfig::applyOverride): a game's post terms, for example.
     void overrideQuality(const std::string& assignment);
@@ -346,6 +382,13 @@ public:
     // The camera's white balance for the following frames (v1.91): the illuminant the camera is set to as a correlated
     // colour temperature (K; 0 = D65, no adaptation; else 1000..40000) and a tint (Duv, |tint| <= 0.1).
     void setWhiteBalance(float kelvin, float tint);
+    // The picture's settings for the following frames, each held until changed (UnxFrameSetColorGrading, UnxFrameSetPost,
+    // UnxFrameSetDisplayEncoding): the grading before the tone curve (enabled false: the quality file's), the post
+    // settings with the exposure compensation in stops, the HDR output's encoding (-1: the quality file's; 0 linear,
+    // 1 scRGB, 2 ST 2084) and paper white in cd/m2 (0: the quality file's).
+    void setColorGrading(const render::ColorGradingDesc& grading);
+    void setPost(const render::PostSettingsDesc& post, float exposureCompensation);
+    void setDisplayEncoding(int32_t encoding, float paperWhiteNits);
     // A3 mesh particles (render C): the scene mesh a program's mesh_asset draws (committed mesh index or runtime mesh id;
     // 0xFFFFFFFF removes the mapping: its particles are not drawn and counted unmapped)
     void mapMeshAsset(uint64_t asset, uint32_t mesh);
@@ -528,6 +571,8 @@ private:
     static void applyEdits(const FramePacket& p, scene::Scene& s);
     static void applyCharacter(const CharacterShading& c, scene::Material& m);
     static void keepCharacter(const scene::Material& old, scene::Material& next);
+    static void applyInputs(const MaterialInputs& in, scene::Material& m);
+    static void keepInputs(const scene::Material& old, scene::Material& next);
     void ensureStandaloneOutput(uint32_t width, uint32_t height, DXGI_FORMAT format);
     // Paces the frame slot, applies the packet's scene updates, declares the frame; returns the frame slot.
     uint32_t beginFrame(const FramePacket& packet);
@@ -626,6 +671,11 @@ private:
     uint64_t m_fxRecorded = 0;  // (m_fxMutex held) packets written under UNX_FX_RECORD
     float m_lensAperture = 0, m_lensFocus = 0;  // (m_mutex) the lens every queued frame takes
     float m_whiteBalanceKelvin = 0, m_whiteBalanceTint = 0;  // (m_mutex) the white balance every queued frame takes (v1.91)
+    render::ColorGradingDesc m_grading;         // (m_mutex) the grading every queued frame takes
+    render::PostSettingsDesc m_post;            // (m_mutex) the post settings every queued frame takes
+    float m_exposureCompensation = 0;           // (m_mutex)
+    int32_t m_displayEncoding = -1;             // (m_mutex) the HDR output's encoding every queued frame takes
+    float m_displayPaperWhite = 0;              // (m_mutex)
     std::map<uint64_t, uint32_t> m_meshAssetMap;  // (m_mutex) A3 mesh particles: asset -> mesh
     bool m_meshAssetsChanged = false;             // (m_mutex)
     std::vector<std::pair<uint64_t, uint32_t>> m_meshAssetsRender;  // render thread: the latest table received

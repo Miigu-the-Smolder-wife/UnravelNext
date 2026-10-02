@@ -44,7 +44,13 @@ enum UnxResult
                             //    UnxSceneSetTerrainLayers (C5 terrain material, v1.74), UnxFrameSetClouds (B5, v1.77),
                             //    UnxFrameSetPools, UnxFrameAddPoolSources (W2, v1.78), UnxPoolStatsLatest (W2, v1.90),
                             //    UnxFrameSetWhiteBalance (v1.91), UnxFrameSetFog, UnxFrameSetFogVolumes (the height fog, local fog volumes),
-                            //    UnxSceneSetCharacterShading (skin, eye and cloth parameters of a material)
+                            //    UnxSceneSetCharacterShading (skin, eye and cloth parameters of a material),
+                            //    UnxMaterialInputsDefaults, UnxSceneSetMaterialInputs (uv transform, second uv set, detail
+                            //    maps, height, emissive scale and mask, vertex colour, dithered opacity),
+                            //    UnxSceneSetMeshAttributes (a mesh's second uv set and vertex colours),
+                            //    UnxLightComponentsDefaults, UnxSceneSetLightComponents (a light's scales, source texture,
+                            //    barn doors, lighting channels, draw distance, colour temperature, falloff exponent),
+                            //    UnxSceneSetInstanceLightingChannels
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -227,7 +233,13 @@ enum UnxInstanceFlags  // scene::InstanceFlags
     UNX_INSTANCE_DYNAMIC = 1u << 1,
     UNX_INSTANCE_SKINNED = 1u << 2,
     UNX_INSTANCE_WIND = 1u << 3,
+    // bits 4..6: the instance's lighting channels (UNX_INSTANCE_LIGHTING_CHANNELS below); 0 = channel 0 alone
 };
+// The lighting channels of an instance as its flags' bits: channels = a mask of the three channels (bit 0, 1, 2) the
+// instance is in - a light lights the instances that share a channel with it (UnxLightComponentsDesc::lightingChannels).
+// Or it into UnxInstanceDesc::flags (UnxSceneAddInstance, UnxSceneEditInstances); a description without it is in
+// channel 0, as every light is by default.
+#define UNX_INSTANCE_LIGHTING_CHANNELS(channels) (((((uint32_t)(channels)) & 7u) ^ 1u) << 4)
 
 typedef struct UnxInstanceDesc
 {
@@ -702,6 +714,105 @@ static_assert(sizeof(UnxCharacterShadingDesc) == 80, "UnxCharacterShadingDesc is
 #endif
 UNX_API int32_t UNX_CALL UnxSceneSetCharacterShading(UnxRenderer r, uint32_t material, const UnxCharacterShadingDesc* desc);
 
+// Material inputs (optional exports within ABI 6): what a game's materials carry beyond UnxMaterialDesc, for a material
+// already in the scene - every class but UNX_MATERIAL_CUT and UNX_MATERIAL_TERRAIN (ignored there).
+//   uv        the transform of the material's own textures (base colour, normal, roughness / metallic, emissive and its
+//             mask, occlusion on uv set 0, height): uv' = R(uvRotation) (uv x uvScale) + uvOffset - Unity's tiling and
+//             offset are uvScale and uvOffset. The alpha test cuts through it in every view, in the shadows and at ray hits.
+//   uv sets   occlusionUvSet / detailUvSet 1: that map is read on the mesh's second uv set (UnxSceneSetMeshAttributes; a
+//             mesh without one: its uv0), without the transform.
+//   detail    a tiled colour (UNX_TEXTURE_RGBA8_SRGB; multiplies the base colour, neutral at sRGB 0.5 - Unity's detail
+//             albedo x2) and normal (UNX_TEXTURE_RG8_NORMAL; its slopes add to the base normal's) at uv(detailUvSet) x
+//             detailScale + detailOffset, weighted by their strengths and, with UNX_MATERIAL_INPUT_VERTEX_BLEND, by the
+//             vertex colour's alpha.
+//   height    UNX_TEXTURE_R8_LINEAR, 1 = the surface, 0 = heightScale metres under it: parallax occlusion mapping in the
+//             main and planar views (the quality file's material.parallax_steps; the pixel's depth stays the surface's).
+//   emission  emissiveScale multiplies the material's emissive (the intensity apart from the colour); the mask
+//             (UNX_TEXTURE_R8_LINEAR, on the material's uv) multiplies it per texel.
+//   flags     UNX_MATERIAL_INPUT_VERTEX_TINT: the vertex colour's rgb multiplies the base colour;
+//             UNX_MATERIAL_INPUT_ALPHA_DITHER: an alpha-tested material's cut is dithered around its cutoff in the views
+//             (soft edges under the temporal upscale; ignored without an alpha cutoff).
+// Fill the description with UnxMaterialInputsDefaults first (a zeroed one names texture 0 four times and has no scale).
+// Before commit the material is changed in place; after commit the change reaches the GPU scene with the next queued
+// frame (textures must already be in the scene). UnxSceneEditMaterials describes a material anew without these fields:
+// the material keeps them.
+#define UNX_MATERIAL_INPUT_VERTEX_TINT 1u
+#define UNX_MATERIAL_INPUT_VERTEX_BLEND 2u
+#define UNX_MATERIAL_INPUT_ALPHA_DITHER 4u
+typedef struct UnxMaterialInputsDesc
+{
+    uint32_t size, version;             // sizeof (96), 1
+    float uvScale[2];                   // finite, != 0 (default 1, 1)
+    float uvOffset[2];
+    float uvRotation;                   // radians, counter-clockwise in uv
+    uint32_t occlusionUvSet;            // 0 or 1
+    uint32_t detailColorTexture;        // a scene texture or UNX_NONE
+    uint32_t detailNormalTexture;       // a scene texture or UNX_NONE
+    float detailScale[2];               // finite, != 0 (default 1, 1)
+    float detailOffset[2];
+    uint32_t detailUvSet;               // 0 or 1
+    float detailColorStrength;          // [0, 1] (default 1)
+    float detailNormalScale;            // [0, 4] (default 1)
+    uint32_t heightTexture;             // a scene texture or UNX_NONE
+    float heightScale;                  // m, [0, 1] (0: no parallax)
+    float emissiveScale;                // >= 0 (default 1)
+    uint32_t emissiveMaskTexture;       // a scene texture or UNX_NONE
+    uint32_t flags;                     // UNX_MATERIAL_INPUT_*
+    uint32_t reserved[2];               // 0
+} UnxMaterialInputsDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxMaterialInputsDesc) == 96, "UnxMaterialInputsDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxMaterialInputsDefaults(UnxMaterialInputsDesc* desc);
+UNX_API int32_t UNX_CALL UnxSceneSetMaterialInputs(UnxRenderer r, uint32_t material, const UnxMaterialInputsDesc* desc);
+// A mesh's optional vertex streams (before UnxSceneCommit; a mesh added with UnxSceneAddMesh): uv1 = 2 floats per vertex
+// (the second uv set) or null, colors = one RGBA8 per vertex with r in the low byte (linear values; Unity's Color32) or
+// null; vertexCount must be the mesh's.
+UNX_API int32_t UNX_CALL UnxSceneSetMeshAttributes(UnxRenderer r, uint32_t mesh, const float* uv1, const uint32_t* colors, uint32_t vertexCount);
+
+// Light components (optional exports within ABI 6; before UnxSceneCommit: lights are fixed at commit): what a light
+// carries beyond UnxLightDesc (scene::Light's light components; the engine's local light and rect light components).
+//   scales       the light's specular lobes and its diffuse light on the surfaces it lights directly, its in-scattering in
+//                the air and fog, and its share in the indirect light (what GI and reflections carry on); >= 0.
+//   source       rect lights: the image the emitter shows and emits (a scene texture, UNX_TEXTURE_RGBA8_SRGB or
+//                UNX_TEXTURE_RGBA16_FLOAT; UNX_NONE: uniform); the light's colour multiplies it.
+//   barn doors   rect lights: four flaps of barnDoorLength metres along the emitter's edges, opened by barnDoorAngle
+//                radians from the emitter's normal (0: straight walls, pi / 2: flat - no effect). Length 0: none.
+//   channels     a mask of the three lighting channels the light is in (default 1: channel 0): it lights the instances
+//                that share one (UNX_INSTANCE_LIGHTING_CHANNELS, UnxSceneSetInstanceLightingChannels).
+//   distance     the light is not drawn past maxDrawDistance metres from the camera (0: always) and fades out over the
+//                last maxDistanceFadeRange metres before it (0: a cut).
+//   temperature  kelvin (1,000..15,000; 0: not used): the light's colour is UnxLightDesc::color times the black body's
+//                chromaticity at it, at the colour's own luminance (6,500 K: about white).
+//   falloff      point and spot lights: 0 = the inverse-square falloff with the range's window (intensity in candela);
+//                > 0: (1 - (d / range)^2)^exponent without the inverse square, the intensity then the illuminance (lux)
+//                at the light.
+// Fill the description with UnxLightComponentsDefaults first (a zeroed one has no scales and names texture 0). The
+// values are checked at UnxSceneCommit with the rest of the scene.
+typedef struct UnxLightComponentsDesc
+{
+    uint32_t size, version;             // sizeof (64), 1
+    float specularScale, diffuseScale, volumetricScattering, indirectIntensity;  // >= 0 (default 1)
+    uint32_t sourceTexture;             // a scene texture or UNX_NONE
+    float barnDoorAngle;                // radians, [0, pi / 2] (default pi / 2)
+    float barnDoorLength;               // m, >= 0 (default 0: none)
+    uint32_t lightingChannels;          // 3 bits (default 1)
+    float maxDrawDistance;              // m, >= 0 (default 0: always drawn)
+    float maxDistanceFadeRange;         // m, >= 0
+    float temperature;                  // K (default 0: not used)
+    float falloffExponent;              // >= 0 (default 0: inverse square)
+    uint32_t reserved[2];               // 0
+} UnxLightComponentsDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxLightComponentsDesc) == 64, "UnxLightComponentsDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxLightComponentsDefaults(UnxLightComponentsDesc* desc);
+UNX_API int32_t UNX_CALL UnxSceneSetLightComponents(UnxRenderer r, uint32_t light, const UnxLightComponentsDesc* desc);
+// The lighting channels of an instance already added (before UnxSceneCommit; channels: a mask of the three channels, as
+// UNX_INSTANCE_LIGHTING_CHANNELS takes it). After commit, describe the instance anew with the flag bits
+// (UnxSceneEditInstances).
+UNX_API int32_t UNX_CALL UnxSceneSetInstanceLightingChannels(UnxRenderer r, uint32_t instance, uint32_t channels);
+
 // Loads a .unxscene file (INTERFACES 6.2) as the renderer's content: textures, materials, meshes, skeletons, instances
 // (their flags included), lights, sun, atmosphere and wind, with the file's indices. Only before any content was added and
 // before UnxSceneCommit; content added afterwards appends. 'camera0' (nullable) receives the file's camera 0 (fails when
@@ -881,6 +992,73 @@ typedef struct UnxPassTiming
 } UnxPassTiming;
 // Writes min(capacity, passes) entries; *count receives the frame's pass count.
 UNX_API int32_t UNX_CALL UnxFramePassTimingsLatest(UnxRenderer r, UnxPassTiming* passes, uint32_t capacity, uint32_t* count);
+
+// ---- The picture's settings a game changes while it runs (optional exports within ABI 6; after commit, any time). Each
+// is held until changed: every frame queued afterwards takes the current values. What a run keeps fixed stays in the
+// quality file (UnxRendererQualityOverride before commit); these are for what changes with the scene or the moment.
+
+// The colour grading before the tone curve (render::ColorGradingDesc; the quality file's shading.post_grading_* hold
+// the same values for a whole run). Null: the quality file's. Each of a range's five values is r, g, b and a master
+// that multiplies them (offset: adds to them); the shadows', midtones' and highlights' values combine with the global
+// ones by their share of the pixel's luma range. All 1 (offset 0, temperature 6500, tint 0): the picture is unchanged
+// and the chain does not build its grading table.
+typedef struct UnxColorGradingRange
+{
+    float saturation[4];        // about the luma (0: grey)
+    float contrast[4];          // about scene grey 0.18
+    float gamma[4];             // the value to the power 1 / gamma
+    float gain[4];
+    float offset[4];
+} UnxColorGradingRange;
+typedef struct UnxColorGradingDesc
+{
+    uint32_t size, version;     // sizeof, 1
+    float temperature;          // K, 1667 .. 25000: the scene's white the picture is balanced from (6500: none)
+    float tint;                 // across the temperature's line (+ green, - magenta)
+    UnxColorGradingRange global, shadows, midtones, highlights;
+    float shadowsMax;           // the luma below which the shadows' values weigh in (> 0; the default 0.09)
+    float highlightsMin;        // ... from which the highlights' weigh in (the default 0.5), fully from
+    float highlightsMax;        // highlightsMax (> highlightsMin; the default 1)
+    float reserved;             // 0
+} UnxColorGradingDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxColorGradingDesc) == 352, "UnxColorGradingDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetColorGrading(UnxRenderer r, const UnxColorGradingDesc* grading);
+
+// The post settings (render::PostSettingsDesc and FrameContext::exposureCompensation). Null: all of them the quality
+// file's, no exposure compensation. A NaN (diaphragmBlades: -1) leaves that one value to the quality file's key named
+// beside it. The depth of field's aperture and focus distance are UnxFrameSetLens's.
+typedef struct UnxPostSettingsDesc
+{
+    uint32_t size, version;     // sizeof, 1
+    float exposureCompensation; // stops over the automatic exposure, + brighter (0: none; finite)
+    float exposureMinEv100;     // the automatic exposure's metering range: the EV100 it settles at stays inside
+    float exposureMaxEv100;     // (min < max); shading.exposure_min_ev / exposure_max_ev
+    float bloomIntensity;       // the share of the light the bloom spreads, 0 .. 1; shading.post_bloom_strength
+    float vignette;             // the natural vignetting's strength, 0 .. 1; shading.post_vignette
+    float motionBlurAmount;     // the shutter as a fraction of the frame interval, 0 .. 1 (0: none, 0.5: 180 degrees);
+                                // shading.motion_blur_shutter
+    int32_t diaphragmBlades;    // depth of field: the diaphragm's blades, 0 (a disc) or 4 .. 16; shading.dof_diaphragm_blades
+    float lensFullAperture;     // ... and the lens's widest aperture (diameter, m; 0: straight blades);
+                                // shading.dof_diaphragm_full_aperture
+    float reserved[2];          // 0
+} UnxPostSettingsDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxPostSettingsDesc) == 48, "UnxPostSettingsDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetPost(UnxRenderer r, const UnxPostSettingsDesc* post);
+
+// How an HDR frame (UnxFrameDesc::displayPeak >= 1) is written for the display (FrameContext::displayEncoding):
+//   -1  the quality file's output.hdr_encoding (the default);
+//    0  linear Rec.709 light with 1 = paper white into R16G16B16A16 FLOAT: the host encodes it for its swap chain;
+//    1  scRGB: linear Rec.709 with 1 = 80 cd/m2 into R16G16B16A16 FLOAT - what a swap chain of that format in
+//       DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 shows;
+//    2  HDR10: Rec.2020 primaries under the SMPTE ST 2084 curve (DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020); the frame's
+//       output texture may then be R10G10B10A2 UNORM (the HDR10 swap chain's format; dithered) or R16G16B16A16 FLOAT.
+// paperWhiteNits: paper white's luminance in cd/m2 for encodings 1 and 2 (40 .. 1000; 0: the quality file's
+// output.hdr_paper_white_nits). The display's peak is displayPeak x paper white.
+UNX_API int32_t UNX_CALL UnxFrameSetDisplayEncoding(UnxRenderer r, int32_t encoding, float paperWhiteNits);
 
 #ifdef __cplusplus
 }

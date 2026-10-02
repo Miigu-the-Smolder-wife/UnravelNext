@@ -392,6 +392,7 @@ void TextureSystem::clear()
     for (Resource& r : m_coverage) release(r);
     m_textures.clear();
     m_coverage.clear();
+    m_meanOf.clear();
     release(m_table);
     m_gpuBytes = 0;
 }
@@ -409,6 +410,60 @@ std::vector<uint32_t> TextureSystem::lightSourceTextures() const
             if (f == scene::TextureFormat::Rgba8Srgb || f == scene::TextureFormat::Rgba16Float) srv = m_textures[l.sourceTexture].srv;
         }
         out.push_back(srv);
+    }
+    return out;
+}
+
+namespace
+{
+// The mean linear colour of a texture's level 0 as gpu::rgb9e5 (Rgba8Srgb or Rgba16Float; another format: white).
+uint32_t meanColorWord(const scene::Texture& t)
+{
+    const size_t n = (size_t)t.width * t.height;
+    double sum[3] = { 0, 0, 0 };
+    if (n > 0 && t.format == scene::TextureFormat::Rgba8Srgb && t.texels.size() >= n * 4)
+    {
+        float linear[256];
+        for (int i = 0; i < 256; ++i)
+        {
+            const float c = (float)i / 255.0f;
+            linear[i] = c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+        }
+        for (size_t i = 0; i < n; ++i)
+            for (int c = 0; c < 3; ++c) sum[c] += linear[t.texels[i * 4 + c]];
+    }
+    else if (n > 0 && t.format == scene::TextureFormat::Rgba16Float && t.texels.size() >= n * 8)
+    {
+        for (size_t i = 0; i < n; ++i)
+            for (int c = 0; c < 3; ++c)
+            {
+                uint16_t h;
+                std::memcpy(&h, t.texels.data() + i * 8 + c * 2, 2);
+                const int e = (h >> 10) & 31, m = h & 1023;
+                const float v = e == 0 ? std::ldexp((float)m, -24) : (e == 31 ? 0.0f : std::ldexp((float)(m + 1024), e - 25));  // (infinity, NaN: 0)
+                sum[c] += (h & 0x8000) ? 0.0f : v;
+            }
+    }
+    else return gpu::rgb9e5({ 1.0f, 1.0f, 1.0f });
+    return gpu::rgb9e5({ (float)(sum[0] / (double)n), (float)(sum[1] / (double)n), (float)(sum[2] / (double)n) });
+}
+} // namespace
+
+std::vector<uint32_t> TextureSystem::lightSourceMeans() const
+{
+    std::vector<uint32_t> out;
+    if (!m_source) return out;
+    if (m_meanOf.size() != m_source->textures.size()) m_meanOf.assign(m_source->textures.size(), 0);
+    for (const scene::Light& l : m_source->lights)
+    {
+        uint32_t mean = 0;
+        if (l.type == scene::LightType::Rect && l.sourceTexture != scene::kNone && l.sourceTexture < m_textures.size())
+        {
+            uint64_t& known = m_meanOf[l.sourceTexture];
+            if ((known >> 32) == 0) known = (1ull << 32) | meanColorWord(m_source->textures[l.sourceTexture]);
+            mean = (uint32_t)known;
+        }
+        out.push_back(mean);
     }
     return out;
 }
@@ -618,14 +673,22 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
             std::memcpy(&e.slopeRange, &splat1, 4);
             e.flags = clampBit(m.terrainSplat[0], gpu::MaterialTextureBaseColor) | clampBit(m.terrainSplat[1], gpu::MaterialTextureEmissive);
         }
-        if (e.emissive != gpu::kNone) m_anyEmissive = true;
-        table.push_back(e);
+        // the material inputs' textures (scene::Material detail maps, height, emissive mask): to the material's record in
+        // the GPU scene; a masked emission is per pixel like a textured one (the resolve's emissive texture)
         gpu::MaterialTextures pub;
+        pub.detailColor = srvOf(m.detailColorTexture, scene::TextureFormat::Rgba8Srgb, scene::TextureFormat::Rgba8Srgb, m, "detail colour");
+        pub.detailNormal = srvOf(m.detailNormalTexture, scene::TextureFormat::Rg8Normal, scene::TextureFormat::Rg8Normal, m, "detail normal");
+        pub.detailSlopeRange = m.detailNormalTexture != scene::kNone ? m_slopeRange[m.detailNormalTexture] : 0.0f;
+        pub.height = srvOf(m.heightTexture, scene::TextureFormat::R8Linear, scene::TextureFormat::R8Linear, m, "height");
+        pub.emissiveMask = srvOf(m.emissiveMaskTexture, scene::TextureFormat::R8Linear, scene::TextureFormat::R8Linear, m, "emissive mask");
+        pub.inputClamp = clampBit(m.detailColorTexture, 1u) | clampBit(m.detailNormalTexture, 2u) | clampBit(m.heightTexture, 4u) | clampBit(m.emissiveMaskTexture, 8u);
+        if (pub.emissiveMask != gpu::kNone) e.flags |= gpu::MaterialTextureEmissiveMask;
+        if (e.emissive != gpu::kNone || pub.emissiveMask != gpu::kNone) m_anyEmissive = true;
+        table.push_back(e);
         pub.baseColor = e.baseColor;
         pub.normal = e.moments;
         pub.roughMetal = e.roughMetal;
         pub.emissive = e.emissive;
-        pub.occlusion = gpu::kNone;
         pub.clamp = e.flags;
         m_published.push_back(pub);
     }

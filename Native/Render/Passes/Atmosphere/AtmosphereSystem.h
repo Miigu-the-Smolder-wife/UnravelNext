@@ -30,9 +30,13 @@ struct AtmosphereParams
     float froxelNearM;
     uint32_t multiScatterSize[4];  // J_ms table (nu, mu_s, mu, r)
     uint32_t multiScatterShGrid[2];  // density projection grid: elevation nodes per half, azimuth nodes over [0, pi]
-    uint32_t clouds[2];  // B5: [0] SRV + 1 of the cloud record (0 = no clouds), [1] 0 (CloudSystem.cpp)
+    uint32_t clouds;     // B5: SRV + 1 of the cloud record (0 = no clouds; CloudSystem.cpp)
+    float viewStartM;    // atmosphere.aerial_start_m: where a view's air starts along its rays (AtmosphereCommon.hlsli airNearScale)
 };
 static_assert(sizeof(AtmosphereParams) == 176);
+
+// atmosphere.aerial_start_m (the reference's AerialPespectiveStartDepth, 0.1 km): >= 0.
+float aerialStartM(const QualityConfig& quality);
 
 // Model parameters from the scene, LUT sizes and quadrature counts from Config/quality/atmosphere.toml; the froxel grid
 // of the air volume (built by S's froxels(), FroxelSystem) so its lookups need no other input.
