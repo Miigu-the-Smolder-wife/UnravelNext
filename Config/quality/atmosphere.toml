@@ -35,6 +35,14 @@ extinction_scale = 1.0
 phase_g = 0.2                        # Henyey-Greenstein asymmetry (VolumetricFogScatteringDistribution)
 start_distance_m = 0.0               # no fog nearer than this
 indirect_light = true                # the Lumen translucency volume (the previous frame's) lights the fog
+# The fog's volume (FogVolume.hlsli; the reference's volumetric fog grid: 8 px x 128 slices at Epic, 16 x 64 at High, to 60 m)
+cell_px = 16                         # (Q) pixels per cell (4 .. 64, a power of two)
+depth_slices = 96                    # (Q) slices to volumetric_distance_m: slice = log2(depth x 32 / distance + 1) x slices / log2(33)
+volumetric_distance_m = 80.0         # the volume's end; farther fog is the height fog's closed form, lit by the sun without casters
+history_weight = 0.9                 # the history's share of a cell each frame (the reference's 0.9), the sample point jittered per frame
+shadow_texels_per_cell = 1.0         # the sun's shadow in a cell is read at the page level whose texel is the cell's width / this
+sky_amount = 0.0                     # how much of the fog sky pixels take (0: none - the reference fogs opaque pixels only under a
+                                     # sky atmosphere; 1: the sky through the fog to the horizon)
 
 [atmosphere.froxels]
 integration_queue = true             # same air-slice estimator in dense waves; false is the tile-scheduled A/B path

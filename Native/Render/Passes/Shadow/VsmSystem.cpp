@@ -1262,8 +1262,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         std::memcpy(&nearBits, &grid.nearM, 4);
         std::memcpy(&farBits, &grid.farM, 4);
         std::memcpy(&texelBits, &grid.shadowTexelsPerTile, 4);
-        // (atmosphere.fog: FroxelSystem.cpp fogSettings - on with a positive density)
-        const bool fogOn = q.has("atmosphere.fog.enabled") && q.boolean("atmosphere.fog.enabled") && q.number("atmosphere.fog.density_per_m") > 0;
+        const bool fogOn = false;  // (the fog has its own volume and page requests: s.vsm.markfog below)
         g.addPass("s.vsm.markair", QueueType::Compute,
                   [&](PassBuilder& b) {
                       b.use(requests, Use::UavCompute);
@@ -1278,6 +1277,33 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.computeConstants(k, 12);
                       ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
                   });
+        // The fog's volume (FogVolume.hlsli): the pages its cells' segments cross (VsmMarkFog.hlsl).
+        const FogView fog = fogViewFor(q, main.view.width, main.view.height);
+        if (fog.on)
+        {
+            ID3D12PipelineState* pf = sh.compute("Passes/Shadow/VsmMarkFog");
+            const TextureRef hiz = main.hiz;
+            uint32_t fb[4];
+            std::memcpy(&fb[0], &fog.farM, 4);
+            std::memcpy(&fb[1], &fog.k, 4);
+            std::memcpy(&fb[2], &fog.b, 4);
+            std::memcpy(&fb[3], &fog.shadowTexelsPerCell, 4);
+            g.addPass("s.vsm.markfog", QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          if (hiz.valid()) b.use(hiz, Use::SrvCompute);
+                          b.use(requests, Use::UavCompute);
+                          b.use(statsBuf, Use::UavCompute);
+                          b.keep();
+                      },
+                      [=](PassContext& ctx) {
+                          const uint32_t k[12] = { ctx.uav(requests), ring, fog.gridX | fog.gridY << 16, fog.gridZ | fog.cellPx << 16, fb[0], fb[1], fb[2], fb[3],
+                                                   hiz.valid() ? ctx.srv(hiz) : 0xFFFFFFFFu, ctx.uav(statsBuf), 0, 0 };
+                          ctx.cmd->SetPipelineState(pf);
+                          ctx.bindFrameConstants(mainConstants);
+                          ctx.computeConstants(k, 12);
+                          ctx.cmd->Dispatch((fog.gridX + 3) / 4, (fog.gridY + 3) / 4, (fog.gridZ + 3) / 4);
+                      });
+        }
     }
     if (main.coverageDepthRange.valid())
     {

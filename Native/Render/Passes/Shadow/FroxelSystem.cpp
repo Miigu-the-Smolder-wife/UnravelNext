@@ -191,6 +191,39 @@ FroxelGridCpu froxelGridFor(const QualityConfig& q, uint32_t width, uint32_t hei
     return g;
 }
 
+FogView fogViewFor(const QualityConfig& q, uint32_t width, uint32_t height)
+{
+    FogView f;
+    if (!q.has("atmosphere.fog.enabled") || !q.boolean("atmosphere.fog.enabled")) return f;
+    const float scale = (float)q.number("atmosphere.fog.extinction_scale");
+    f.density = (float)q.number("atmosphere.fog.density_per_m") * scale;
+    f.falloff = (float)q.number("atmosphere.fog.height_falloff_per_m");
+    f.height = (float)q.number("atmosphere.fog.height_m");
+    f.g = (float)q.number("atmosphere.fog.phase_g");
+    f.start = (float)q.number("atmosphere.fog.start_distance_m");
+    f.indirect = q.boolean("atmosphere.fog.indirect_light");
+    f.skyAmount = (float)q.number("atmosphere.fog.sky_amount");
+    f.historyWeight = (float)q.number("atmosphere.fog.history_weight");
+    f.shadowTexelsPerCell = (float)q.number("atmosphere.fog.shadow_texels_per_cell");
+    const std::vector<double> albedo = q.numbers("atmosphere.fog.albedo");
+    if (albedo.size() != 3 || !(scale > 0) || !(f.density >= 0) || !(f.falloff >= 0) || !(f.g > -1 && f.g < 1) || !(f.start >= 0))
+        fail("atmosphere.fog: albedo of 3 numbers, extinction_scale > 0, density and falloff >= 0, phase_g in (-1, 1), start distance >= 0");
+    for (int k = 0; k < 3; ++k) f.albedo[k] = (float)albedo[k] / scale;
+    f.cellPx = (uint32_t)q.integer("atmosphere.fog.cell_px");
+    f.gridZ = (uint32_t)q.integer("atmosphere.fog.depth_slices");
+    f.farM = (float)q.number("atmosphere.fog.volumetric_distance_m");
+    if (f.cellPx < 4 || f.cellPx > 64 || (f.cellPx & (f.cellPx - 1)) != 0) fail("atmosphere.fog.cell_px must be 4, 8, 16, 32 or 64");
+    if (f.gridZ < 8 || f.gridZ > 256 || !(f.farM > 1)) fail("atmosphere.fog: depth_slices in [8, 256], volumetric_distance_m > 1");
+    if (!(f.skyAmount >= 0 && f.skyAmount <= 1) || !(f.historyWeight >= 0 && f.historyWeight < 1) || !(f.shadowTexelsPerCell >= 0.25f))
+        fail("atmosphere.fog: sky_amount in [0, 1], history_weight in [0, 1), shadow_texels_per_cell >= 0.25");
+    f.gridX = (width + f.cellPx - 1) / f.cellPx;
+    f.gridY = (height + f.cellPx - 1) / f.cellPx;
+    f.k = 32.0f / f.farM;                                // (the reference's depth distribution scale)
+    f.b = (float)f.gridZ / std::log2(33.0f);             // slice(farM) = gridZ
+    f.on = f.density > 0;
+    return f;
+}
+
 const FroxelStats& froxelStats(TrackState& state) { return state.get<State>(kStateKey).latest; }
 
 namespace
@@ -455,32 +488,15 @@ TextureRef recordReaders(FramePassContext& fc, const ViewResources& view, bool f
     return readers;
 }
 
-// atmosphere.fog (Passes/Atmosphere/Fog.hlsli): the height fog's medium. density: extinction per metre at the fog's
-// height (the configured density x extinction scale); albedo: scattering / extinction.
+// The air volume's own fog medium (Fog.hlsli fogMedium in FroxelIntegrate.hlsl): the first fog. The fog has its own
+// volume now (recordFogVolume, FogVolume.hlsli) and this stays off - the kernels' medium path is kept for the particle
+// media it shares its code with.
 struct FogSettings
 {
     bool on = false, ambient = true;
     float density = 0, falloff = 0, height = 0, g = 0, start = 0;
     float albedo[3] = { 1, 1, 1 };
 };
-FogSettings fogSettings(const QualityConfig& q)
-{
-    FogSettings f;
-    if (!q.has("atmosphere.fog.enabled") || !q.boolean("atmosphere.fog.enabled")) return f;
-    const float scale = (float)q.number("atmosphere.fog.extinction_scale");
-    f.density = (float)q.number("atmosphere.fog.density_per_m") * scale;
-    f.falloff = (float)q.number("atmosphere.fog.height_falloff_per_m");
-    f.height = (float)q.number("atmosphere.fog.height_m");
-    f.g = (float)q.number("atmosphere.fog.phase_g");
-    f.start = (float)q.number("atmosphere.fog.start_distance_m");
-    f.ambient = q.boolean("atmosphere.fog.indirect_light");
-    const std::vector<double> albedo = q.numbers("atmosphere.fog.albedo");
-    if (albedo.size() != 3 || !(scale > 0) || !(f.density >= 0) || !(f.falloff >= 0) || !(f.g > -1 && f.g < 1) || !(f.start >= 0))
-        fail("atmosphere.fog: albedo of 3 numbers, extinction_scale > 0, density and falloff >= 0, phase_g in (-1, 1), start distance >= 0");
-    for (int k = 0; k < 3; ++k) f.albedo[k] = (float)albedo[k] / scale;
-    f.on = f.density > 0;
-    return f;
-}
 
 // Air volume of one view from its lists (FroxelIntegrate.hlsl; a view with a clip plane integrates from the plane on).
 // fluence, moment: the view's sampled local light (shading.mega_lights_volume; invalid: none) - the fog's local lights.
@@ -516,7 +532,7 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
     const BufferRef functions = fc.resources.lightFunctions;  // E's light functions (A8; invalid: none)
     // the height fog (Fog.hlsli): its local light from the sampled fluence and moment, its indirect light from the
     // previous frame's translucency volume (this frame's is built after the air)
-    const FogSettings fog = fogSettings(q);
+    const FogSettings fog{};
     const bool clipAtSurface = q.boolean("atmosphere.froxels.clip_at_surface");
     const bool fogLocal = fog.on && fluence.valid() && moment.valid();
     const bool fogAmbient = fog.on && fog.ambient && fc.resources.translucencyGiPrevParams != 0xFFFFFFFFu && fc.resources.translucencyGiPrevAmbient.valid() &&
@@ -699,6 +715,37 @@ struct SampledLocal
 SampledLocal recordSampledLocal(FramePassContext& fc, const ViewResources& view, BufferRef lights, TextureRef readers, bool persistent);
 } // namespace
 
+namespace
+{
+// The fog's volume of the main view (FogVolume.hlsli): s.fog.scatter and s.fog.integrate; publishes
+// FrameResources::fog / fogVolume / fogFarSource for M's m.fog. lights: the view's froxel lists (the air grid the sampled
+// local light lives on).
+struct FogState
+{
+    Device* device = nullptr;
+    ComPtr<ID3D12Resource> scatter[2];
+    uint32_t x = 0, y = 0, z = 0, parity = 0, revision = 0xFFFFFFFFu;
+    bool fresh = true;
+    ~FogState()
+    {
+        if (!device) return;
+        for (auto& t : scatter)
+            if (t) device->deferRelease(t);
+    }
+};
+float fogHalton(uint32_t index, uint32_t base)
+{
+    float f = 1, r = 0;
+    for (uint32_t i = index; i > 0; i /= base)
+    {
+        f /= (float)base;
+        r += f * (float)(i % base);
+    }
+    return r;
+}
+void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef lights, const SampledLocal& sampled);
+} // namespace
+
 void recordPlanarFroxels(FramePassContext& fc, ViewResources& view)
 {
     if (!fc.resources.transmittanceLut.valid() || !fc.resources.multiScatterLut.valid())
@@ -866,6 +913,142 @@ SampledLocal recordSampledLocal(FramePassContext& fc, const ViewResources& view,
 #endif
     return out;
 }
+
+void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef lights, const SampledLocal& sampled)
+{
+    fc.resources.fog = FogView{};
+    fc.resources.fogVolume = {};
+    fc.resources.fogFarSource = {};
+    const FogView f = fogViewFor(fc.quality, main.view.width, main.view.height);
+    const FrameResources r = fc.resources;
+    if (!f.on || !fc.trackState || !main.hiz.valid() || !r.transmittanceLut.valid()) return;
+    RenderGraph& g = fc.graph;
+    FogState& st = fc.state<FogState>("S.fog.volume");
+    const TextureDesc desc{ "S fog scatter", f.gridX, f.gridY, (uint16_t)f.gridZ, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D };
+    if (!st.scatter[0] || st.x != f.gridX || st.y != f.gridY || st.z != f.gridZ)
+    {
+        st.device = &fc.device;
+        D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+        D3D12_RESOURCE_DESC1 rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+        rd.Width = f.gridX;
+        rd.Height = f.gridY;
+        rd.DepthOrArraySize = (UINT16)f.gridZ;
+        rd.MipLevels = 1;
+        rd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        rd.SampleDesc.Count = 1;
+        rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        for (auto& t : st.scatter)
+        {
+            if (t) fc.device.deferRelease(t);
+            t.Reset();
+            check(fc.device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&t)),
+                  "S fog scatter volume");
+            t->SetName(L"S fog scatter");
+        }
+        st.x = f.gridX; st.y = f.gridY; st.z = f.gridZ;
+        st.fresh = true;
+    }
+    const float3 shift = fc.frame.originShift;
+    const bool valid = !st.fresh && st.revision == fc.scene.revision() && fc.frame.discontinuity == 0 && shift.x == 0 && shift.y == 0 && shift.z == 0;
+    st.fresh = false;
+    st.revision = fc.scene.revision();
+    const uint32_t prev = st.parity, next = prev ^ 1u;
+    st.parity = next;
+    TextureRef history;
+    if (valid && f.historyWeight > 0) history = g.importTexture(st.scatter[prev].Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    const TextureRef scatter = g.importTexture(st.scatter[next].Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    const TextureRef integrated =
+        g.createTexture({ "S fog volume", f.gridX, f.gridY, (uint16_t)f.gridZ, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D });
+    const TextureRef farSource = g.createTexture({ "S fog far source", f.gridX, f.gridY, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+
+    VsmFrameRefs vsm;
+    const bool shadows = frameRefs(fc, vsm);
+    const TextureRef hiz = main.hiz, tlut = r.transmittanceLut, fluence = sampled.fluence, moment = sampled.moment;
+    const bool local = fluence.valid() && moment.valid();
+    const bool ambient = f.indirect && r.translucencyGiPrevParams != 0xFFFFFFFFu && r.translucencyGiPrevAmbient.valid() && r.translucencyGiPrevDirectional.valid();
+    const TextureRef ambientA = r.translucencyGiPrevAmbient, ambientD = r.translucencyGiPrevDirectional;
+    const uint32_t ambientParams = r.translucencyGiPrevParams;
+    const bool clip = fc.quality.boolean("atmosphere.froxels.clip_at_surface");
+    // the frame's jitter of the cells' sample points (16 frames of the Halton points 2, 3, 5)
+    const uint32_t index = (uint32_t)(fc.frame.frameIndex % 16u) + 1u;
+    const float jitter[3] = { fogHalton(index, 2), fogHalton(index, 3), fogHalton(index, 5) };
+    auto bits = [](float v) { uint32_t u; std::memcpy(&u, &v, 4); return u; };
+    const uint32_t grid0 = f.gridX | f.gridY << 16, grid1 = f.gridZ | f.cellPx << 16;
+    const D3D12_GPU_VIRTUAL_ADDRESS constants = main.frameConstants;
+    ID3D12PipelineState* ps = fc.shaders.compute("Passes/Atmosphere/FogScatter");
+    ID3D12PipelineState* pi = fc.shaders.compute("Passes/Atmosphere/FogIntegrate");
+    g.addPass("s.fog.scatter", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(hiz, Use::SrvCompute);
+                  b.use(tlut, Use::SrvCompute);
+                  if (local)
+                  {
+                      b.use(lights, Use::SrvCompute);
+                      b.use(fluence, Use::SrvCompute);
+                      b.use(moment, Use::SrvCompute);
+                  }
+                  if (ambient)
+                  {
+                      b.use(ambientA, Use::SrvCompute);
+                      b.use(ambientD, Use::SrvCompute);
+                  }
+                  if (shadows)
+                  {
+                      b.use(vsm.table, Use::SrvCompute); b.use(vsm.atlas, Use::SrvCompute);
+                      b.use(vsm.blocks, Use::SrvCompute); b.use(vsm.bound, Use::SrvCompute);
+                      b.use(vsm.stats, Use::UavCompute);
+                  }
+                  if (history.valid()) b.use(history, Use::SrvCompute);
+                  b.use(scatter, Use::UavCompute);
+                  b.keep();  // (the next frame's history)
+              },
+              [=](PassContext& ctx) {
+                  const uint32_t none = 0xFFFFFFFFu;
+                  uint32_t k[36] = { grid0, grid1, bits(f.farM), bits(f.k),
+                                     bits(f.b), ctx.uav(scatter), history.valid() ? ctx.srv(history) : none, clip ? 1u : 0u,
+                                     bits(f.density), bits(f.falloff), bits(f.height), bits(f.g),
+                                     bits(f.albedo[0]), bits(f.albedo[1]), bits(f.albedo[2]), bits(f.start),
+                                     shadows ? ctx.srv(vsm.table) : none, shadows ? ctx.srv(vsm.atlas) : none, shadows ? ctx.srv(vsm.blocks) : none,
+                                     shadows ? vsm.constantsCbv : none,
+                                     shadows ? ctx.srv(vsm.bound) : none, bits(f.shadowTexelsPerCell), local ? ctx.srv(lights) : none, ctx.srv(hiz),
+                                     local ? ctx.srv(fluence) : none, local ? ctx.srv(moment) : none, ambient ? ambientParams : none, ctx.srv(tlut),
+                                     bits(jitter[0]), bits(jitter[1]), bits(jitter[2]), bits(f.historyWeight),
+                                     shadows ? ctx.uav(vsm.stats) : none, 0, 0, 0 };
+                  ctx.cmd->SetPipelineState(ps);
+                  ctx.bindFrameConstants(constants);
+                  ctx.computeConstants(k, 36);
+                  ctx.cmd->Dispatch((f.gridX + 3) / 4, (f.gridY + 3) / 4, (f.gridZ + 3) / 4);
+              });
+    g.addPass("s.fog.integrate", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(scatter, Use::SrvCompute);
+                  b.use(tlut, Use::SrvCompute);
+                  if (ambient)
+                  {
+                      b.use(ambientA, Use::SrvCompute);
+                      b.use(ambientD, Use::SrvCompute);
+                  }
+                  b.use(integrated, Use::UavCompute);
+                  b.use(farSource, Use::UavCompute);
+              },
+              [=](PassContext& ctx) {
+                  const uint32_t none = 0xFFFFFFFFu;
+                  uint32_t k[28] = { grid0, grid1, bits(f.farM), bits(f.k),
+                                     bits(f.b), ctx.srv(scatter), ctx.uav(integrated), ctx.uav(farSource),
+                                     bits(f.density), bits(f.falloff), bits(f.height), bits(f.g),
+                                     bits(f.albedo[0]), bits(f.albedo[1]), bits(f.albedo[2]), bits(f.start),
+                                     0, 0, 0, 0, 0, 0, 0, 0,
+                                     none, none, ambient ? ambientParams : none, ctx.srv(tlut) };
+                  ctx.cmd->SetPipelineState(pi);
+                  ctx.bindFrameConstants(constants);
+                  ctx.computeConstants(k, 28);
+                  ctx.cmd->Dispatch((f.gridX + 7) / 8, (f.gridY + 7) / 8, 1);
+              });
+    fc.resources.fog = f;
+    fc.resources.fogVolume = integrated;
+    fc.resources.fogFarSource = farSource;
+}
 } // namespace
 
 void recordFroxels(FramePassContext& fc, const ViewResources& main)
@@ -888,6 +1071,7 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
     // Turbid basins (defect queue 13 (75), shading.water_turbid): added to the media slices (or their own) - WaterMedia.hlsl.
     const TextureRef media = recordWaterMedia(fc, main, lights, particleMedia, froxelGridFor(fc.quality, main.view.width, main.view.height));
     const TextureRef volume = recordIntegration(fc, main, lights, s.keep, readers, "", media, sampledLocal, sampled.fluence, sampled.moment);
+    recordFogVolume(fc, main, lights, sampled);
     fc.resources.froxels = volume;
     fc.resources.aerialPerspective = volume;  // atmosphereAerial / atmosphereAirView read it (Atmosphere.hlsli)
 
