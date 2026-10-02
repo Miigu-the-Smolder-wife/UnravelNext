@@ -207,13 +207,14 @@ ViewGridLayout ViewGrid::layout(const ViewGridCamera& c, const ViewGridWater& w,
     const float row1[4] = { c.right[0], c.right[1], c.right[2], c.tanX };
     const float row2[4] = { c.up[0], c.up[1], c.up[2], c.tanY };
     const float row3[4] = { c.forward[0], c.forward[1], c.forward[2], w.extent };
-    const float row4[4] = { float(phi0), 0, float(theta), w.nearRadius };
+    const float row4[4] = { float(phi0), c.offset[0], float(theta), w.nearRadius };
     const uint32_t row5[4] = { out.columns, out.rows, c.width, c.height };
     const float row6[4] = { lengths[0], lengths[1], lengths[2], c.nearPlane };
     const float lake[3] = { w.lakeCentre[0], w.lakeCentre[1], w.lakeRadius };
     const uint32_t lakeOn = w.lake ? 1 : 0;
     std::memcpy(p, row0, 16); std::memcpy(p + 4, row1, 16); std::memcpy(p + 8, row2, 16); std::memcpy(p + 12, row3, 16);
     std::memcpy(p + 16, row4, 16); std::memcpy(p + 20, row5, 16); std::memcpy(p + 24, row6, 16); std::memcpy(p + 28, lake, 12); std::memcpy(p + 31, &lakeOn, 4);
+    p[35] = c.offset[1];  // (byte 140: row 8's last word)
     if (uint64_t(out.columns) * out.rows * 2 >= (1ull << 31)) fail("view grid: %u x %u far-field quads exceed the triangle ids", out.columns, out.rows);
     // Near field (FEATURES_GAME 1.8 B.2, adaptive): world lattices with spacing s_0 2^l; each 8 x 8-quad block takes the
     // coarsest level whose spacing fits s(t) = coefficient sqrt(t) at the block's nearest possible distance t to the

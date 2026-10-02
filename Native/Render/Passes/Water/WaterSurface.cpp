@@ -18,7 +18,9 @@ namespace
 constexpr uint32_t kStatCount = 16, kStatBytes = 64, kRing = 4, kSlots = 64, kRayJobs = 1u << 20;
 // After the slot rows: the refraction source's pyramid, count + SRV per level (WaterSurface.hlsli WATER_LEVELS_OFFSET).
 // Then the calm-water block (WATER_PLANAR_OFFSET): 48 B per candidate plane.
-constexpr uint32_t kMaxLevels = 15, kPlanarMax = 4, kTableBytes = kSlots * 16 + 4 * (1 + kMaxLevels) + 48 * kPlanarMax;
+// Then the sea's block (OceanShading.hlsli, WATER_OCEAN_OFFSET): 96 B.
+constexpr uint32_t kMaxLevels = 15, kPlanarMax = 4, kOceanOffset = kSlots * 16 + 4 * (1 + kMaxLevels) + 48 * kPlanarMax, kOceanBytes = 96;
+constexpr uint32_t kTableBytes = kOceanOffset + kOceanBytes;
 // The cost rule's terms [measured, RTX 4080, 4K W gate (interior scene, basin 3 m / 12 m: 506,640 / 892,079 water
 // samples), sums of pass medians over 300 frames, camera on vs off, 2026-09-27]:
 //   saved per sample served by the camera (its reflection job in R's ray passes + its share of the surface passes):
@@ -120,7 +122,12 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
         if (r.triangleStreams[i].vertices.valid()) slots.push_back(i);
     const bool interiorPass = view.waterVis.valid() && view.waterDepth.valid();
     const bool recordPass = view.coverageSpecial.valid() && view.coverageRecordRadiance.valid() && view.coverageRecords.valid() && view.coverageTileList.valid();
-    if (slots.empty() || (!interiorPass && !recordPass)) return;
+    // B7: the sea of this frame (W's waterGeometry: the view grid's surface, V's water layer holds its pixels as
+    // COV_OCEAN_ID) is shaded by its own kernel in the interior pass's bands (WaterOcean.hlsl).
+    const OceanSurfaceFrame sea = fc.trackState ? fc.state<OceanSurfaceFrame>("W.oceanFrame") : OceanSurfaceFrame{};
+    const bool ocean = interiorPass && sea.frame == fc.frame.frameIndex && sea.surface.valid() && r.oceanDepth.valid();
+    const bool anyStreams = !slots.empty();
+    if ((!anyStreams && !ocean) || (!interiorPass && !recordPass)) return;
     if (!fc.trackState) fail("W: water surface shading needs the renderer's track state");
     SurfaceState& st = fc.state<SurfaceState>("W.surface");
     st.ensure(fc.device);
@@ -351,6 +358,9 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
         for (const PlanarUse& u : planar)
             if (u.colour.valid())
                 for (const TextureRef& t : { u.colour, u.depth, u.mask }) b.use(t, Use::SrvCompute);
+        if (ocean)
+            for (const TextureRef& t : { sea.surface, sea.displacement, sea.slopes, sea.foam, r.skyViewLut })
+                if (t.valid()) b.use(t, Use::SrvCompute);
     };
     struct Frame
     {
@@ -360,6 +370,14 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
         uint32_t vsmConstants;
     };
     const Frame fr{ giSource(r), r.vsmPageTable, r.vsmBlocks, r.vsmSearchBound, r.vsmLayers, r.transmittanceLut, r.multiScatterLut, view.airVolume, r.vsmConstants };
+    // the sea's block: its mirror rays' reach and the shore's foam from the quality file
+    const QualityConfig& q = fc.quality;
+    const float seaRayReach = q.has("shading.water_ocean_ray_distance_m") ? (float)q.number("shading.water_ocean_ray_distance_m") : 400.0f;
+    const float shoreFoam = q.has("shading.water_shore_foam") ? (float)q.number("shading.water_shore_foam") : 0.8f;
+    const float shoreFoamDepth = q.has("shading.water_shore_foam_depth_m") ? (float)q.number("shading.water_shore_foam_depth_m") : 0.3f;
+    if (!(seaRayReach >= 0) || !(shoreFoam >= 0 && shoreFoam <= 1) || !(shoreFoamDepth > 0))
+        fail("shading: water_ocean_ray_distance_m >= 0, water_shore_foam in [0, 1], water_shore_foam_depth_m > 0");
+    const TextureRef skyView = r.skyViewLut;
     // P[0..4] of both kernels (WaterInterior.hlsl, WaterRecords.hlsl); the first execute also fills the slot table.
     auto shadingConstants = [=](PassContext& c, uint32_t k[24], uint32_t first) {
         if (first)
@@ -386,6 +404,18 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                 std::memcpy(row + 16, u.rect, 16);
                 std::memcpy(row + 32, srv, 16);
             }
+            // The sea's block (OceanShading.hlsli); zero: no sea this frame.
+            uint32_t block[kOceanBytes / 4] = {};
+            if (ocean)
+            {
+                block[0] = c.srv(sea.surface), block[1] = c.srv(sea.displacement), block[2] = c.srv(sea.slopes);
+                block[3] = sea.foam.valid() ? c.srv(sea.foam) : gpu::kNone;
+                block[4] = sea.foamParams, block[5] = sea.material, block[6] = 1;
+                const float numbers[14] = { sea.lengths[0], sea.lengths[1], sea.lengths[2], 0, 0, 0, sea.alpha, sea.peakWavenumber,
+                                            sea.finestWavenumber, sea.windSpeed, seaRayReach, shoreFoamDepth, shoreFoam, 0.85f };
+                std::memcpy(&block[8], numbers, sizeof numbers);
+            }
+            std::memcpy(tableMapped + kOceanOffset, block, sizeof block);
         }
         const bool shadows = fr.pageTable.valid() && fr.vsmConstants != UINT32_MAX;
         const uint32_t values[20] = { first, c.srv(source), c.srv(depth), c.uav(stats),
@@ -477,47 +507,82 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
     if (interiorPass)
     {
         ID3D12PipelineState* kernel = fc.shaders.compute("Passes/Water/WaterInterior");
+        ID3D12PipelineState* seaKernel = ocean ? fc.shaders.compute("Passes/Water/WaterOcean") : nullptr;
         uint32_t bands = 0;
         for (uint32_t row0 = 0; row0 < H; row0 += bandRows, ++bands)
         {
             const uint32_t rows = std::min(bandRows, H - row0), first = row0 == 0 ? 1 : 0;
             if (rays) clearLists();
-            g.addPass("w.surface.interior", QueueType::Graphics,
-                      [&](PassBuilder& b) {
-                          shadingUses(b);
-                          b.use(colour, Use::UavCompute);
-                          if (bandARadiance.valid()) b.use(bandARadiance, Use::UavCompute);
-                          if (status.valid()) b.use(status, Use::UavCompute);
-                          if (marchImage.valid()) b.use(marchImage, Use::UavCompute);
-                          if (particleLayer.valid()) b.use(particleLayer, Use::SrvCompute);
-                          if (particleEdges.valid()) b.use(particleEdges, Use::SrvCompute);
-                          if (rays)
-                              for (const BufferRef& x : { jobList, results, samples }) b.use(x, Use::UavCompute);
-                      },
-                      [=](PassContext& c) {
-                          uint32_t k[32];
-                          shadingConstants(c, k, first);
-                          k[0] = c.uav(colour);
-                          k[11] = status.valid() ? c.uav(status) : none;
-                          k[17] = marchImage.valid() ? c.uav(marchImage) : none;
-                          k[20] = bandARadiance.valid() ? c.uav(bandARadiance) : none;
-                          k[21] = particleLayer.valid() ? c.srv(particleLayer) : none;
-                          k[22] = particleLayer.valid() && particleEdges.valid() ? c.srv(particleEdges) : none;
-                          k[24] = rays ? c.uav(jobList) : none;
-                          k[25] = rays ? c.uav(results) : none;
-                          k[26] = rays ? c.uav(samples) : none;
-                          k[27] = jobs;
-                          k[28] = row0, k[29] = rows, k[30] = sampleCapacity, k[31] = 0;
-                          c.cmd->SetPipelineState(kernel);
-                          c.bindFrameConstants(cb);
-                          c.computeConstants(k, 32);
-                          c.cmd->Dispatch((W + 7) / 8, (rows + 7) / 8, 1);
-                      });
+            // the sea's pixels of the band (every one: the sea has no edge records), into the band's lists with the
+            // streams' (a pixel is a stream's or the sea's: the band's capacities hold both)
+            if (ocean)
+                g.addPass("w.surface.ocean", QueueType::Graphics,
+                          [&](PassBuilder& b) {
+                              shadingUses(b);
+                              b.use(colour, Use::UavCompute);
+                              if (bandARadiance.valid()) b.use(bandARadiance, Use::UavCompute);
+                              if (status.valid()) b.use(status, Use::UavCompute);
+                              if (particleLayer.valid()) b.use(particleLayer, Use::SrvCompute);
+                              if (particleEdges.valid()) b.use(particleEdges, Use::SrvCompute);
+                              if (rays)
+                                  for (const BufferRef& x : { jobList, results, samples }) b.use(x, Use::UavCompute);
+                          },
+                          [=](PassContext& c) {
+                              uint32_t k[32];
+                              shadingConstants(c, k, first);  // (the band's first pass: it fills the slot table)
+                              k[0] = c.uav(colour);
+                              k[11] = status.valid() ? c.uav(status) : none;
+                              k[20] = bandARadiance.valid() ? c.uav(bandARadiance) : none;
+                              k[21] = particleLayer.valid() ? c.srv(particleLayer) : none;
+                              k[22] = particleLayer.valid() && particleEdges.valid() ? c.srv(particleEdges) : none;
+                              k[23] = skyView.valid() ? c.srv(skyView) : none;
+                              k[24] = rays ? c.uav(jobList) : none;
+                              k[25] = rays ? c.uav(results) : none;
+                              k[26] = rays ? c.uav(samples) : none;
+                              k[27] = jobs;
+                              k[28] = row0, k[29] = rows, k[30] = sampleCapacity, k[31] = 0;
+                              c.cmd->SetPipelineState(seaKernel);
+                              c.bindFrameConstants(cb);
+                              c.computeConstants(k, 32);
+                              c.cmd->Dispatch((W + 7) / 8, (rows + 7) / 8, 1);
+                          });
+            if (anyStreams)
+                g.addPass("w.surface.interior", QueueType::Graphics,
+                          [&](PassBuilder& b) {
+                              shadingUses(b);
+                              b.use(colour, Use::UavCompute);
+                              if (bandARadiance.valid()) b.use(bandARadiance, Use::UavCompute);
+                              if (status.valid()) b.use(status, Use::UavCompute);
+                              if (marchImage.valid()) b.use(marchImage, Use::UavCompute);
+                              if (particleLayer.valid()) b.use(particleLayer, Use::SrvCompute);
+                              if (particleEdges.valid()) b.use(particleEdges, Use::SrvCompute);
+                              if (rays)
+                                  for (const BufferRef& x : { jobList, results, samples }) b.use(x, Use::UavCompute);
+                          },
+                          [=](PassContext& c) {
+                              uint32_t k[32];
+                              shadingConstants(c, k, ocean ? 0u : first);  // (with a sea its pass came first and filled the table)
+                              k[0] = c.uav(colour);
+                              k[11] = status.valid() ? c.uav(status) : none;
+                              k[17] = marchImage.valid() ? c.uav(marchImage) : none;
+                              k[20] = bandARadiance.valid() ? c.uav(bandARadiance) : none;
+                              k[21] = particleLayer.valid() ? c.srv(particleLayer) : none;
+                              k[22] = particleLayer.valid() && particleEdges.valid() ? c.srv(particleEdges) : none;
+                              k[24] = rays ? c.uav(jobList) : none;
+                              k[25] = rays ? c.uav(results) : none;
+                              k[26] = rays ? c.uav(samples) : none;
+                              k[27] = jobs;
+                              k[28] = row0, k[29] = rows, k[30] = sampleCapacity, k[31] = 0;
+                              c.cmd->SetPipelineState(kernel);
+                              c.bindFrameConstants(cb);
+                              c.computeConstants(k, 32);
+                              c.cmd->Dispatch((W + 7) / 8, (rows + 7) / 8, 1);
+                          });
             if (rays) traceAndApply(BufferRef{});
         }
         debug.rayBands = rays ? bands : 0;
     }
-    if (recordPass)
+    if (recordPass && anyStreams)
     {
         ID3D12PipelineState* kernel = fc.shaders.compute("Passes/Water/WaterRecords");
         const BufferRef special = view.coverageSpecial, records = view.coverageRecords, tileList = view.coverageTileList, radiance = view.coverageRecordRadiance;

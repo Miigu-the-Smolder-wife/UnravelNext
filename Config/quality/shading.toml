@@ -275,6 +275,13 @@ water_underwater = true              # the basin the camera is in is a medium of
 water_multiple_scattering = true     # with water_turbid: the light scattered many times in a turbid water, as the diffusion limit's
                                      # isotropic source (WaterMedia.hlsl: a milky bath is bright from every side instead of the dark
                                      # grey single scattering leaves). false: single scattering and the ambient term alone
+water_ocean = true                   # the frame's sea (FrameContext::ocean, the host's UnxFrameSetOcean) is drawn: the FFT cascades, the
+                                     # camera's surface (the view grid) and its shading (WaterOcean.hlsl). false: a frame's sea is ignored
+water_ocean_foam = true              # the sea's foam clipmap (Foam.h: where crests break, decaying) is kept and shaded
+water_ocean_ray_distance_m = 400.0   # a sea pixel within this distance mirrors what a reflection ray finds (ships, the shore); farther
+                                     # ones mirror the sky alone. 0: the sky everywhere
+water_shore_foam = 0.8               # foam where the sea thins out over the bed, at most this much of the surface (0: none) ...
+water_shore_foam_depth_m = 0.3       # ... from this depth of water down to none
 
 # Motion blur (A5; COVERAGE 14.12 (2); MotionBlur.cpp): the shutter's open time as a fraction of the frame interval,
 # the exposure [t - s dt, t]; 0.5 = 180 degrees (the user's gate camera, 2026-09-26), 0 = instantaneous. Frames without

@@ -1,11 +1,14 @@
 // Track entry points of W (INTERFACES_KO.md 5.2, Tracks.h): waterGeometry() after the simulation and before V (the GPU
-// fluids' reconstructed surfaces into V's triangle streams; the ocean's camera surface follows with the view grid,
+// fluids' reconstructed surfaces into V's triangle streams; the sea's camera surface from the view grid,
 // FEATURES_GAME 1.8 B), water() in M's shading() after the opaque kernel (the water layer's refraction, absorption and
 // reflection: WaterSurface.h, stage 1).
 #include "unx/render/GpuScene.h"
 #include "unx/render/Tracks.h"
 #include "unx/water/FluidSurface.h"
+#include "unx/water/Foam.h"
+#include "unx/water/Ocean.h"
 #include "unx/water/Pool.h"
+#include "unx/water/ViewGrid.h"
 #include "unx/water/WaterSurface.h"
 #include "unx/water/WaterSunMap.h"
 
@@ -33,7 +36,109 @@ struct FluidState
     std::vector<FluidSlot> slots;
 };
 uint32_t roundUp(uint32_t v, uint32_t m) { return (v + m - 1) / m * m; }
+
+// The sea's modules (one sea a frame: FrameContext::ocean), kept across frames.
+struct OceanState
+{
+    std::unique_ptr<water::Ocean> ocean;
+    std::unique_ptr<water::ViewGrid> grid;
+    std::unique_ptr<water::Foam> foam;
+    water::OceanDesc desc;
+};
 } // namespace
+
+// B7 (FEATURES_GAME 1.8 B): the frame's sea. FrameContext::ocean -> the FFT cascades at the frame's time, the camera's
+// surface on the main view's pixels (the view grid, with the view's own sub-pixel jitter; FrameResources::oceanDepth /
+// waterSurface: V merges the depth into the water layer as COV_OCEAN_ID) and the foam clipmap. What the surface pass
+// shades the sea's pixels with stays in the track state for this frame (WaterSurface.h OceanSurfaceFrame).
+// The view grid draws the sea from above: a camera under the still level gets no sea (the sea seen from inside and the
+// medium of a camera in it are not there yet). The sea is in no other view, no ray scene and not in the sun's water map
+// (the bed under it is lit as in air).
+static void waterOcean(FramePassContext& fc)
+{
+    water::OceanSurfaceFrame& published = fc.state<water::OceanSurfaceFrame>("W.oceanFrame");
+    published = {};
+    const OceanFrame* in = fc.frame.ocean;
+    const QualityConfig& q = fc.quality;
+    OceanState& st = fc.state<OceanState>("W.ocean");
+    // (the foam's windows follow the frame's coordinates: an origin shift is a whole number of every level's texels)
+    const float3 shift = fc.frame.originShift;
+    if (st.foam && (shift.x != 0 || shift.z != 0)) st.foam->rebase(shift.x, shift.z);
+    if (!in || (q.has("shading.water_ocean") && !q.boolean("shading.water_ocean"))) return;
+    const ViewDesc& view = fc.frame.mainView;
+    if (!(view.position.y > in->level) || !view.width || !view.height) return;
+    water::OceanDesc desc;
+    desc.windSpeed = std::max(in->windSpeed, 0.5f);  // (a sea without wind: the spectrum's peak is at infinity - a light air's ripples instead)
+    desc.windDirection = in->windDirection;
+    desc.fetch = in->fetch;
+    desc.spread = in->spread;
+    desc.seed = in->seed;
+    if (!st.ocean)
+    {
+        st.ocean = std::make_unique<water::Ocean>(fc.device, fc.shaders, desc);
+        st.grid = std::make_unique<water::ViewGrid>(fc.device, fc.shaders, fc.framesInFlight);
+    }
+    else if (st.desc.windSpeed != desc.windSpeed || st.desc.windDirection != desc.windDirection || st.desc.fetch != desc.fetch || st.desc.spread != desc.spread ||
+             st.desc.seed != desc.seed)
+        st.ocean->setDesc(desc);
+    st.desc = desc;
+    RenderGraph& g = fc.graph;
+    const water::OceanOutput fields = st.ocean->record(g, fc.frame.time);
+    // the main view's camera: its basis from the view matrix's rows, the projection's tangents and its centre offset
+    // (FroxelCommon.hlsli froxelRayAt reads the same terms: a view direction's tangents are (ndc + offset) / proj)
+    water::ViewGridCamera camera;
+    auto row = [&](int r) { return normalize(float3{ view.view.m[r][0], view.view.m[r][1], view.view.m[r][2] }); };
+    const float3 right = row(0), up = row(1), back = row(2);
+    camera.position[0] = view.position.x, camera.position[1] = view.position.y, camera.position[2] = view.position.z;
+    camera.right[0] = right.x, camera.right[1] = right.y, camera.right[2] = right.z;
+    camera.up[0] = up.x, camera.up[1] = up.y, camera.up[2] = up.z;
+    camera.forward[0] = -back.x, camera.forward[1] = -back.y, camera.forward[2] = -back.z;
+    camera.tanX = 1.0f / view.proj.m[0][0];
+    camera.tanY = 1.0f / view.proj.m[1][1];
+    camera.offset[0] = view.proj.m[0][2] - view.proj.m[0][3];
+    camera.offset[1] = view.proj.m[1][2] - view.proj.m[1][3];
+    camera.width = view.width;
+    camera.height = view.height;
+    camera.nearPlane = view.nearPlane;
+    water::ViewGridWater body;
+    body.level = in->level;
+    if (in->horizontalBound > 0) body.horizontalBound = in->horizontalBound;
+    if (in->verticalBound > 0) body.verticalBound = in->verticalBound;
+    body.lake = in->lake != 0;
+    if (body.lake)
+    {
+        body.lakeCentre[0] = in->lakeCentre[0], body.lakeCentre[1] = in->lakeCentre[1];
+        body.lakeRadius = in->lakeRadius;
+        // (the rows end where the water does: its far side from the camera)
+        const float away = std::hypot(view.position.x - in->lakeCentre[0], view.position.z - in->lakeCentre[1]);
+        body.extent = std::max(away + in->lakeRadius + body.bound(), 2 * body.nearRadius);
+    }
+    const water::ViewGridOutput grid = st.grid->record(g, fc.frame.frameIndex, fields, desc.lengths, camera, body);
+    fc.resources.oceanDepth = grid.depth;
+    fc.resources.waterSurface = grid.surface;
+    water::FoamOutput foam;
+    const bool foamOn = !q.has("shading.water_ocean_foam") || q.boolean("shading.water_ocean_foam");
+    if (foamOn)
+    {
+        if (!st.foam) st.foam = std::make_unique<water::Foam>(fc.device, fc.shaders, water::FoamDesc{}, fc.framesInFlight);
+        foam = st.foam->record(g, fc.frame.frameIndex, fc.frame.time, fields, desc, view.position.x, view.position.z);
+    }
+    published.frame = fc.frame.frameIndex;
+    published.surface = grid.surface;
+    published.displacement = fields.displacement;
+    published.slopes = fields.slopes;
+    published.foam = foam.foam;
+    published.foamParams = foamOn ? foam.paramSrv : 0xFFFFFFFFu;
+    published.material = in->material;
+    for (int a = 0; a < 3; ++a) published.lengths[a] = desc.lengths[a];
+    // the JONSWAP sea state's tail (Ocean.hlsli oceanVariance: alpha, the peak frequency) for the unresolved slopes
+    const double gravity = 9.81, U = desc.windSpeed, F = desc.fetch;
+    const double omegaPeak = 22.0 * std::cbrt(gravity * gravity / (U * F));
+    published.alpha = (float)(0.076 * std::pow(U * U / (F * gravity), 0.22));
+    published.peakWavenumber = (float)(omegaPeak * omegaPeak / gravity);
+    published.finestWavenumber = 3.14159265f * (float)water::Ocean::kN / desc.lengths[2];
+    published.windSpeed = desc.windSpeed;
+}
 
 // Stage 2 (FEATURES_GAME 1.9): the sun-space map of W's streams, for band A under water (WaterLight.hlsli).
 static void waterSunMap(FramePassContext& fc)
@@ -165,6 +270,7 @@ void waterGeometry(FramePassContext& fc)
     water::poolGeometry(fc);  // W2 closed basins (FEATURES_GAME 1.10): before the sun map, which takes every layer-1 stream
     waterFluids(fc);
     waterSunMap(fc);
+    waterOcean(fc);  // B7: the sea's surface on the main view's pixels (no stream: the water layer's ocean slot)
 }
 void water(FramePassContext& fc, ViewResources& view) { water::waterSurface(fc, view); }
 } // namespace unx::render::tracks
