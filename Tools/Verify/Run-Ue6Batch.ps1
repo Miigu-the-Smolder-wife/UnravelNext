@@ -5,7 +5,7 @@
 #   2  the four game scenes: cut pictures at 1080p with the gi and direct layers (which stage a cut frame's blotch is in),
 #      timings at 1080p, 1440p and 4K;
 #   3  scenegen's scenes (outdoors, night, forest, water, interior): cut pictures and timings at 1080p, timings at 4K;
-#   4  variants, in groups (-Variants high,fog,fogab,fogvol,far,clouds,thin,bandb,nopass,grids; default all): the high tier's timings; the
+#   4  variants, in groups (-Variants high,fog,fogab,fogvol,far,clouds,thin,bandb,specks,nopass,grids; default all): the high tier's timings; the
 #      height fog on (pictures, timings) and each of its parts off in turn; the far field off; the cloud layer with and
 #      without its temporal accumulation; the frame without per-pass timestamps; the view-angle grids against pixel-sized.
 # The summary (<out>\summary.txt): the furnace sheets, every timing run's GPU frame and largest pass groups, the gates
@@ -15,7 +15,7 @@ param(
     [string]$Out = "Cache\Ue6Batch",
     [string[]]$Skip = @(),
     [string]$GeneratedScenes = "city_block,forest_thin,waterside,interior,city_night,ridge_sunset,forest_combat",
-    [string[]]$Variants = @("high", "fog", "fogab", "fogvol", "far", "clouds", "thin", "bandb", "nopass", "grids")
+    [string[]]$Variants = @("high", "fog", "fogab", "fogvol", "far", "clouds", "thin", "bandb", "specks", "nopass", "grids")
 )
 $ErrorActionPreference = "Stop"
 $Skip = @($Skip | ForEach-Object { $_ -split "," } | Where-Object { $_ })
@@ -131,6 +131,17 @@ if ($Skip -notcontains "variants") {
         Final "band A down to 0.75 px (train lounge)" "band_a_075" @("-Only", "te_lounge", "-Resolutions", "1080p", "-Set", "visibility.band_a_min_width_px=0.75,visibility.band_a_hysteresis_px=1.0")
         Final "band A down to 0.4 px (lake)" "band_a_040" @("-NoGame", "-Generated", "waterside", "-Resolutions", "1080p", "-Set", "visibility.band_a_min_width_px=0.4,visibility.band_a_hysteresis_px=0.6")
         Final "band A down to 0.4 px (train lounge)" "band_a_040" @("-Only", "te_lounge", "-Resolutions", "1080p", "-Set", "visibility.band_a_min_width_px=0.4,visibility.band_a_hysteresis_px=0.6")
+    }
+    if ($Variants -contains "specks") {
+        # shading_ball: dark facet-sized specks on the spheres (seen 2026-10-02). One switch at a time says which light
+        # path makes them: the sampled local lights' shadow rays (their bias, or the path off), the visible LOD (a finer
+        # cut lies nearer the traced surface), the sun's shadow map (its receiver bias).
+        $ball = @("-File", "Tools\Verify\Run-Ue6Still.ps1", "-Scene", "shading_ball", "-Frames", "300", "-Capture", "299")
+        Invoke-Step "specks: as it is" ($ball + @("-Name", "specks_base"))
+        Invoke-Step "specks: local lights without sampling" ($ball + @("-Name", "specks_noml", "-Set", "shading.mega_lights=false"))
+        Invoke-Step "specks: shadow rays' normal bias 5 mm" ($ball + @("-Name", "specks_raybias", "-Set", "shading.mega_lights_ray_normal_bias_m=0.005"))
+        Invoke-Step "specks: visible LOD error 0.25 px" ($ball + @("-Name", "specks_lod", "-Set", "visibility.lod_error_px=0.25"))
+        Invoke-Step "specks: sun receiver bias 3 texels" ($ball + @("-Name", "specks_sunbias", "-Set", "shadow.vsm.receiver_bias_texels=3"))
     }
     if ($Variants -contains "nopass") {
         Final "the frame without per-pass timestamps (lobby 1080p, 4K)" "nopass" @("-Only", "bt_lobby", "-Resolutions", "1080p,4K", "-SkipPictures", "-GateArgs", "--no-pass-timestamps")
