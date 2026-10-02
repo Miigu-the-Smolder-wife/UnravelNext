@@ -6,6 +6,8 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace unx::visibility
 {
@@ -39,10 +41,16 @@ struct Stats
     uint32_t overflow = 0;             // capacity bits (0 = every list fit); nonzero means geometry was dropped
                                        // (0x100: the coverage record pool ran out; it grows from the next
                                        // completed frame)
+    uint32_t overflowSeen = 0;         // 'overflow' of every frame of the run read back so far, OR-ed (gates)
 };
+// Stats::overflow bits of the pools that grow from the measured need (a frame over one is expected after a cut: the
+// coverage records, the special record list, the ocean edge list); every other bit is a capacity or a shader loop bound.
+constexpr uint32_t kOverflowGrowingPools = 0x100u | 0x2000u | 0x4000u;
 
 // Statistics of the latest frame whose readback has completed (frameIndex = UINT64_MAX before the first): "main" for
 // the main view, "view<id>" for an auxiliary full view (A14, ViewResources::viewId), "secondary" for the last planar
 // reflection view of the frame, or a depth-raster request's name (DepthRasterRequest::name) for that request's cull run.
 Stats latestStats(render::TrackState& state, const std::string& run = "main");
+// The latest statistics of every run recorded so far, by name (gates: the raster requests' runs beside the main view's).
+std::vector<std::pair<std::string, Stats>> latestStatsOfRuns(render::TrackState& state);
 } // namespace unx::visibility

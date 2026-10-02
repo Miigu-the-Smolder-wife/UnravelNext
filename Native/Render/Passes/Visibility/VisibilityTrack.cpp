@@ -152,6 +152,7 @@ struct State
         uint8_t* mapped = nullptr;
         std::vector<uint64_t> frames;
         visibility::Stats latest;
+        uint32_t overflowSeen = 0;  // every read frame's overflow bits
         bool overflowReported = false;
     };
     std::map<std::string, StatsRun> stats;
@@ -1670,6 +1671,8 @@ void readStats(FramePassContext& fc, State& s, const std::string& name)
         st.chunkItems = w[kStateChunkItems];
         st.deferredChunks = w[kStateDeferChunks];
         st.overflow = w[kStateOverflow];
+        run.overflowSeen |= st.overflow;
+        st.overflowSeen = run.overflowSeen;
         if (st.overflow && !run.overflowReported)
         {
             logf("V: capacity exceeded in '%s', frame %llu (bits 0x%x): raise visibility.max_* (Stats::overflow; 0x100: the coverage record pool ran "
@@ -2249,5 +2252,12 @@ Stats latestStats(render::TrackState& trackState, const std::string& run)
     auto& runs = trackState.get<render::tracks::State>("v.state").stats;
     const auto it = runs.find(run);
     return it == runs.end() ? Stats{} : it->second.latest;
+}
+
+std::vector<std::pair<std::string, Stats>> latestStatsOfRuns(render::TrackState& trackState)
+{
+    std::vector<std::pair<std::string, Stats>> out;
+    for (const auto& [name, run] : trackState.get<render::tracks::State>("v.state").stats) out.push_back({ name, run.latest });
+    return out;
 }
 } // namespace unx::visibility

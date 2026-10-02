@@ -1462,6 +1462,35 @@ int main(int argc, char** argv)
                 const visibility::Stats vs = visibility::latestStats(renderer.trackState());
                 logf("  coverage layer: %u records in %u tiles (%u blocks, %u heavy tiles), %u special, pool %u\n", vs.coverageFragments, vs.coverageTiles,
                      vs.coverageBlocks, vs.coverageHeavyTiles, vs.coverageSpecial, vs.coveragePoolRecords);
+                // The main view's cull of the last frame by band: where the layer's records come from (band B and the
+                // mixed sheet clusters are the coverage raster's input; band C with coverage_band_c_visbuffer is the vis
+                // buffer's).
+                logf("  V main view: %u instances, %u nodes and %u clusters tested, %u visible clusters; phase 2 took %u instances, %u nodes, %u clusters; "
+                     "chunk items %u (+ %u deferred)\n",
+                     vs.instancesVisible, vs.nodesTested, vs.clustersTested, vs.visibleClusters, vs.deferredInstances, vs.deferredNodes, vs.deferredClusters,
+                     vs.chunkItems, vs.deferredChunks);
+                logf("  V bands (clusters / triangles): A %u / %u, B %u / %u, C %u / %u; mixed sheet clusters %u (%u triangles, split per triangle between A and B)\n",
+                     vs.bandClusters[0], vs.triangles[0], vs.bandClusters[1], vs.triangles[1], vs.bandClusters[2], vs.triangles[2], vs.mixedClusters,
+                     vs.mixedTriangles);
+                logf("  V lists (entries): A back %u, A two-sided %u, A alpha back %u, A alpha two-sided %u, B (coverage) %u, C %u, translucent back %u, "
+                     "translucent two-sided %u\n",
+                     vs.listEntries[0], vs.listEntries[1], vs.listEntries[2], vs.listEntries[3], vs.listEntries[4], vs.listEntries[5], vs.listEntries[6],
+                     vs.listEntries[7]);
+                // Every cull run's last frame (the raster requests: shadow pages, cards) and the error bits of all its frames.
+                uint32_t vBits = 0;
+                for (const auto& [name, run] : visibility::latestStatsOfRuns(renderer.trackState()))
+                {
+                    vBits |= run.overflowSeen;
+                    if (name == "main" || run.frameIndex == UINT64_MAX) continue;
+                    logf("  V run %-24s %u instances, %u nodes, %u clusters tested, %u visible (%u tile pairs), %.3f M triangles, error bits 0x%x\n", name.c_str(),
+                         run.instancesVisible, run.nodesTested, run.clustersTested, run.visibleClusters, run.tilePairs,
+                         ((double)run.triangles[0] + run.triangles[1] + run.triangles[2]) / 1e6, run.overflowSeen);
+                }
+                // (0x100, 0x2000, 0x4000: pools that grow from the measured need - a frame over one after a cut is expected)
+                const bool vOk = (vBits & ~visibility::kOverflowGrowingPools) == 0;
+                logf("  V error bits (Stats::overflow of every run and frame: capacities, shader loop bounds 0x40 0x400; growing pools 0x100 0x2000 0x4000 not judged) 0x%x %s\n",
+                     vBits, vOk ? "ok" : "FAIL");
+                if (!vOk) ++gateFailures;
             }
             if (quality.integer("shadow.vsm.fragment_check") != 0)
             {
