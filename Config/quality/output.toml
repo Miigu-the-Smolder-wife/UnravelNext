@@ -101,6 +101,18 @@ upscale_tsr_thin_geometry_anti_flickering = true    # the flickering heuristic m
 upscale_tsr_hole_filling = true         # with upscale_tsr: a pixel that was hidden in the previous frame reads the history
                                         # by its occluder's vector - what was beside the occluder - instead of its own, which
                                         # leads to the occluder (the reference's reprojection hole filling; no switch there)
+lens_panini_d = 0.0                     # with upscale_tsr on an upscaled view: the Panini projection of the picture (Lens.hlsli;
+                                        # the reference's r.LensDistortion.Panini.D): a wide field of view without the stretch at
+                                        # the sides - verticals stay straight, the horizon bends. 0: off (default); 1: the
+                                        # cylindrical stereographic projection; between: a blend. Applied in the history update
+                                        # (the history is the lens picture), so the centre it magnifies is reconstructed, not
+                                        # resampled. Off by itself where the field of view is too wide for it (the centre's
+                                        # magnification outside 1 .. 2). A change restarts the history. The world's points are
+                                        # then not where the view's projection puts them: a game's world-anchored UI is its own
+                                        # to map; the previous-colour screen traces (screen_trace_source 1) have no source and
+                                        # the motion blur's rotation stage stays out
+lens_panini_s = 0.0                     # r.LensDistortion.Panini.S: 0 no vertical compression, 1 the hard compression that
+                                        # keeps the horizontals through the centre straight
 upscale_layer_motion = true             # with upscale_tsr: the layers over the opaque surface move by themselves
                                         # (UpscaleMotion.hlsl; the reference's translucent velocity output and has-pixel-animation
                                         # mark): a glass pane, the water surface and the coverage layer's thin fragments (a third of

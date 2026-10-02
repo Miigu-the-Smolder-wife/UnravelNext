@@ -361,8 +361,11 @@ void motionBlurUpscaled(FramePassContext& fc, const ViewResources& view, Texture
     const bool halfGather = !fc.quality.has("shading.motion_blur_half_res_gather") || fc.quality.boolean("shading.motion_blur_half_res_gather");
     // the rotation stage on the upscaled image: the output view's unjittered matrices, the exposure centred as the gather's
     const bool rotationOn = !fc.quality.has("shading.motion_blur_after_upscale_rotation") || fc.quality.boolean("shading.motion_blur_after_upscale_rotation");
+    // (under a lens projection the upscaled picture is not the output view's rectilinear one: the gather reads the
+    // vectors through the lens, MotionApply.hlsl, and the rotation stage - whose map is of that view - stays out)
+    const LensProjection lens = upscaleLens(fc, view);
     ViewResources outView = upscaleOutputView(fc, view);
-    const RotationStage rotation = rotationOn ? frameRotation(outView.view, shutter, true) : RotationStage{};
+    const RotationStage rotation = rotationOn && !lens.active ? frameRotation(outView.view, shutter, true) : RotationStage{};
     const bool viewModels = rotation.active && fc.scene.viewModelInstances() > 0;
     const TextureRef visId = view.visId;
     const BufferRef clusters = view.visibleClusters;
@@ -458,10 +461,11 @@ void motionBlurUpscaled(FramePassContext& fc, const ViewResources& view, Texture
                       b.use(gatherTarget, Use::UavCompute);
                   },
                   [=](PassContext& c) {
-                      const uint32_t k[16] = { c.srv(src), c.srv(halfColour), c.srv(flat), c.srv(gathered), c.uav(gatherTarget), W, H, (uint32_t)samples,
-                                               w, h, tw, th, halfGather ? 1u : 0u, 0, 0, 0 };
+                      const uint32_t k[24] = { c.srv(src), c.srv(halfColour), c.srv(flat), c.srv(gathered), c.uav(gatherTarget), W, H, (uint32_t)samples,
+                                               w, h, tw, th, (halfGather ? 1u : 0u) | (lens.active ? 2u : 0u), 0, 0, 0,
+                                               asUint(lens.tanX), asUint(lens.tanY), asUint(lens.d), asUint(lens.s), asUint(lens.scale), 0, 0, 0 };
                       c.cmd->SetPipelineState(pso);
-                      c.computeConstants(k, 16);
+                      c.computeConstants(k, 24);
                       c.cmd->Dispatch(gx, gy, 1);
                   });
     }

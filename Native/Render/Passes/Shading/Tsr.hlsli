@@ -44,8 +44,10 @@
 // The history update reads the field per output pixel: on a boundary the vector of the side the output pixel lies on,
 // and that vector carried to the output pixel's own position by the jacobian (a turn or a zoom reprojects every output
 // pixel to its own place instead of all of an input pixel's to one offset).
-// Not here: lens distortion inside the update (the lens pass after it does it: PostLens.hlsl), the reference's
-// translucency bit of the thin geometry's coverage. The flickering heuristic and the luma lines follow the final scene
+// With output.lens_panini_d the history is the picture under the lens projection (Lens.hlsli): the update takes each
+// history pixel's samples and vector at its place in the rendered picture and reads the history through the previous
+// frame's lens - the reference's lens distortion in TSR, evaluated instead of read from displacement tables.
+// Not here: the reference's translucency bit of the thin geometry's coverage. The flickering heuristic and the luma lines follow the final scene
 // colour (the reference: the colour before translucency, and less by what translucency changed).
 #ifndef UNX_TSR_HLSLI
 #define UNX_TSR_HLSLI

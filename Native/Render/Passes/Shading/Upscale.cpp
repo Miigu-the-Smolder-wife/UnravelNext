@@ -62,7 +62,9 @@ struct UpscaleState
         float4x4 viewProj{};
         float exposure = 1;
         bool valid = false;
+        float lensTanX = 0, lensTanY = 0, lensScale = 0;  // the frame's lens projection (upscaleLens; scale 0: none)
     } kept[kRingSlots];
+    float lensD = 0, lensS = 0;  // the lens the history is under (a change restarts the history)
     TextureRef previous;           // history[last] in the graph of frame 'previousFrame' (upscalePreviousColor)
     uint64_t previousFrame = ~0ull;
     // output.screen_trace_source = 0: the lit opaque scene colour (the view's resolution; before translucency, the air,
@@ -221,6 +223,33 @@ bool upscaleActive(FramePassContext& fc, const ViewResources& view)
     return view.view.kind == gpu::ViewKind::Main && fc.frame.upscale.outputWidth != 0 && !fc.frame.outputLinearHdr;
 }
 
+LensProjection upscaleLens(FramePassContext& fc, const ViewResources& view)
+{
+    LensProjection lens;
+    if (!upscaleActive(fc, view) || !tsrOn(fc)) return lens;
+    const double d = fc.quality.has("output.lens_panini_d") ? fc.quality.number("output.lens_panini_d") : 0.0;
+    const double s = fc.quality.has("output.lens_panini_s") ? fc.quality.number("output.lens_panini_s") : 0.0;
+    if (!(d >= 0 && d <= 4) || !(s >= -1 && s <= 1)) fail("output.lens_panini_d %g in [0, 4], output.lens_panini_s %g in [-1, 1]", d, s);
+    if (!(d > 0.01)) return lens;  // (the reference: on above 0.01)
+    const float4x4& proj = fc.frame.upscale.proj;
+    const float tanX = 1.0f / proj.m[0][0], tanY = 1.0f / proj.m[1][1];
+    if (!std::isfinite(tanX) || !std::isfinite(tanY) || !(tanX > 0) || !(tanY > 0)) return lens;
+    // the rendered view's width fills the picture: the scale that brings the side's place on the lens plane to the side
+    const float D = (float)d;
+    const float invLength = 1.0f / std::sqrt(1.0f + tanX * tanX);
+    const float sinPhi = tanX * invLength, cosPhi = std::sqrt(std::max(1.0f - sinPhi * sinPhi, 0.0f));
+    const float scale = tanX / ((D + 1.0f) / (D + cosPhi) * sinPhi);
+    // (the centre's magnification; the reference gives up outside (1, 2): a field of view the projection cannot hold)
+    if (!std::isfinite(scale) || !(scale > 1.0f) || !(scale < 2.0f)) return lens;
+    lens.active = true;
+    lens.tanX = tanX;
+    lens.tanY = tanY;
+    lens.d = D;
+    lens.s = (float)s;
+    lens.scale = scale;
+    return lens;
+}
+
 ViewResources upscaleOutputView(FramePassContext& fc, const ViewResources& view)
 {
     ViewResources out = view;
@@ -258,6 +287,8 @@ TextureRef upscalePreviousColor(FramePassContext& fc, const ViewResources& view)
         }
         return s.previousScene;
     }
+    // (the history under a lens projection is not the rendered view's picture: no previous colour for the traces)
+    if (upscaleLens(fc, view).active) return TextureRef{};
     // (the history's own size: above the output's with output.upscale_tsr_history_percent - readers take the size from
     // RenderGraph::desc and sample by UV)
     uint32_t hw, hh;
@@ -329,7 +360,13 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
     UpscaleState& s = fc.state<UpscaleState>("M.upscale");
     s.ensure(fc.device, HW, HH, resurrection);
     if (tsr) s.ensureGuide(fc.device, w, h, resurrection);
-    const bool reset = u.reset || s.fresh;
+    // output.lens_panini_d: the history is the lens picture (Lens.hlsli); another lens, another history
+    const LensProjection lens = upscaleLens(fc, view);
+    const float lensD = lens.active ? lens.d : 0.0f, lensS = lens.active ? lens.s : 0.0f;
+    const bool lensChanged = s.lensD != lensD || s.lensS != lensS;
+    s.lensD = lensD;
+    s.lensS = lensS;
+    const bool reset = u.reset || s.fresh || lensChanged;
     // (an earlier pass of this frame may hold the previous history already: upscalePreviousColor - one import per frame)
     const bool imported = !reset && s.previousFrame == fc.frame.frameIndex && s.previous.valid();
     s.fresh = false;
@@ -379,9 +416,14 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
     s.rolling = rolling;
     s.accumulated = std::min(s.accumulated + 1u, cycle);
     s.last = slot;
+    // (the lens the previous and the kept frame's histories were written under: the field of view may have changed)
+    const UpscaleState::Kept lensPrevious = s.kept[prevSlot], lensKept = s.kept[keptSlot];
     s.kept[slot].viewProj = u.viewProj;
     s.kept[slot].exposure = exposure;
     s.kept[slot].valid = true;
+    s.kept[slot].lensTanX = lens.tanX;
+    s.kept[slot].lensTanY = lens.tanY;
+    s.kept[slot].lensScale = lens.active ? lens.scale : 0.0f;
     const TextureRef history = imported ? s.previous
                                         : g.importTexture(s.history[prevSlot].Get(), { "m.upscale.history (previous)", HW, HH, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
                                                           D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
@@ -568,7 +610,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
         ID3D12PipelineState* aaPso = shaders.compute("Passes/Shading/TsrAntiAlias");
         ID3D12PipelineState* updatePso = shaders.compute("Passes/Shading/TsrUpdate");
         const uint32_t updateFlags = (fc.quality.has("output.upscale_tsr_kernel_by_samples") && fc.quality.boolean("output.upscale_tsr_kernel_by_samples") ? 2u : 0u) |
-                                     (reprojectionField ? 4u : 0u);
+                                     (reprojectionField ? 4u : 0u) | (lens.active ? 8u : 0u);
         const float historyScale = (float)HW / (float)W;
         const float exposureRatio = u.exposureRatio;
         // the guide's blend of a held history: 1 / (1 + 16 / (input / output size)^2) (the reference's TheoricBlendFactor)
@@ -750,13 +792,17 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                   },
                   [=](PassContext& c) {
                       const uint32_t none = 0xFFFFFFFFu;
-                      uint32_t k[36] = { c.srv(src), c.srv(rejection), c.srv(updateMotion), c.srv(history), c.uav(output), w, h, (reset ? 1u : 0u) | updateFlags,
+                      uint32_t k[48] = { c.srv(src), c.srv(rejection), c.srv(updateMotion), c.srv(history), c.uav(output), w, h, (reset ? 1u : 0u) | updateFlags,
                                          HW, HH, asUint(jx), asUint(jy), asUint(exposureRatio), c.srv(aa), hasField ? c.srv(field) : none, 0,
                                          canResurrect ? c.srv(keptHistory) : none, asUint(keptExposureRatio), asUint(historyScale), 0 };
                       for (int r = 0; r < 4; ++r)
                           for (int col = 0; col < 4; ++col) k[20 + 4 * r + col] = asUint(toKept.m[r][col]);
+                      const float lensConstants[12] = { lens.tanX, lens.tanY, lens.d, lens.s,
+                                                        lens.scale, lensPrevious.lensTanX, lensPrevious.lensTanY, lensPrevious.lensScale,
+                                                        lensKept.lensTanX, lensKept.lensTanY, lensKept.lensScale, 0 };
+                      std::memcpy(&k[36], lensConstants, sizeof lensConstants);
                       c.cmd->SetPipelineState(updatePso);
-                      c.computeConstants(k, 36);
+                      c.computeConstants(k, 48);
                       c.cmd->Dispatch((HW + 7) / 8, (HH + 7) / 8, 1);
                   });
         if (!resolvePso) return output;
