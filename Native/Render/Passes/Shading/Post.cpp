@@ -1,7 +1,9 @@
 // Post chain of M in HDR (FEATURES_GAME 4 "order" and 6; render A item A4). When a post term is on, the main view is
 // shaded into an exposed-linear RGBA16F target (the shading writers' linear variant) and this chain writes the display
-// output: lens PSF (bloom: a shift-invariant, energy-conserving pyramid kernel, the PSF's tail holding the fraction
-// shading.post_bloom_strength of the energy) -> natural vignetting (cos^4 of the field angle) -> tone curve (PBR Neutral,
+// output: scene colour fringe and sharpen (shading.post_fringe, post_sharpen: the reference's tonemapper terms) -> lens
+// PSF (bloom: a shift-invariant, energy-conserving pyramid kernel, the PSF's tail holding the fraction
+// shading.post_bloom_strength of the energy) -> image-based lens flares (shading.post_lens_flare: PostFlare.hlsl, from
+// the bloom chain's 1/8 level) -> natural vignetting (cos^4 of the field angle) -> tone curve (PBR Neutral,
 // INTERFACES 8.4) -> grading LUT (33^3 .cube, after the curve) -> film grain (deterministic hash, after the curve) ->
 // triangular dither of the 10-bit output -> sRGB. With every term off the chain is not recorded and the writers encode
 // directly (gates and reference comparisons are unchanged: the quality keys default to off). An HDR display
@@ -40,7 +42,20 @@ struct PostParams
     // Local exposure (LocalExposure.hlsli; the reference's bilateral method)
     bool localExposure = false;
     float leHighlight = 0.8f, leShadow = 0.8f, leDetail = 1.0f, leBlend = 0.6f, leMiddleGreyBias = 0.0f, leKernelPercent = 50.0f;
+    // The tonemapper's sharpen (the reference's r.Tonemapper.Sharpen: 0 off, 1 full) and scene colour fringe (its
+    // SceneFringeIntensity in percent and ChromaticAberrationStartOffset)
+    float sharpen = 0, fringe = 0, fringeStart = 0;
+    PostLensFlare flare;
 };
+
+// A [r, g, b, w] (or [r, g, b]) quality value.
+void readVector(const QualityConfig& q, const char* key, float* out, size_t count)
+{
+    if (!q.has(key)) return;
+    const std::vector<double> v = q.numbers(key);
+    if (v.size() != count) fail("%s must have %zu numbers", key, count);
+    for (size_t i = 0; i < count; ++i) out[i] = (float)v[i];
+}
 
 PostParams params(const QualityConfig& q)
 {
@@ -70,6 +85,27 @@ PostParams params(const QualityConfig& q)
     else fail("shading.post_tone_curve = \"%s\": film or neutral", curve.c_str());
     if (p.bloom < 0 || p.bloom > 1 || p.vignette < 0 || p.vignette > 1 || p.grain < 0 || p.grain >= 0.4f || p.levels < 1 || p.levels > 10)
         fail("shading.post_*: bloom strength and vignette in [0, 1], 0 <= grain < 0.4, 1 <= bloom levels <= 10");
+    p.sharpen = num("shading.post_sharpen", 0);
+    p.fringe = num("shading.post_fringe", 0);
+    p.fringeStart = num("shading.post_fringe_start", 0);
+    if (p.sharpen < 0 || p.sharpen > 10 || p.fringe < 0 || p.fringe > 100 || p.fringeStart < 0 || p.fringeStart >= 1)
+        fail("shading.post_sharpen in [0, 10], post_fringe in [0, 100] percent, post_fringe_start in [0, 1)");
+    PostLensFlare& f = p.flare;
+    f.on = q.has("shading.post_lens_flare") && q.boolean("shading.post_lens_flare");
+    f.intensity = num("shading.post_lens_flare_intensity", 1.0f);
+    f.bokehSize = num("shading.post_lens_flare_bokeh_size", 3.0f);
+    f.threshold = num("shading.post_lens_flare_threshold", 8.0f);
+    f.halo = num("shading.post_lens_flare_halo", 0.0f);
+    f.blades = q.has("shading.post_lens_flare_blades") ? (uint32_t)q.integer("shading.post_lens_flare_blades") : 0u;
+    readVector(q, "shading.post_lens_flare_tint", f.tint, 3);
+    static const char* const tintKeys[8] = { "shading.post_lens_flare_tint_1", "shading.post_lens_flare_tint_2", "shading.post_lens_flare_tint_3",
+                                             "shading.post_lens_flare_tint_4", "shading.post_lens_flare_tint_5", "shading.post_lens_flare_tint_6",
+                                             "shading.post_lens_flare_tint_7", "shading.post_lens_flare_tint_8" };
+    for (int i = 0; i < 8; ++i) readVector(q, tintKeys[i], f.tints[i], 4);
+    if (f.intensity < 0 || f.bokehSize < 0 || f.bokehSize > 32 || f.threshold < 0 || f.halo < 0 || f.blades > 16 || f.blades == 1 || f.blades == 2)
+        fail("shading.post_lens_flare_*: intensity, threshold and halo >= 0, bokeh size in [0, 32] percent, blades 0 or 3 .. 16");
+    // (as the reference: no flares without intensity, a tint or a bokeh size)
+    if (!(f.intensity > 0) || !(f.bokehSize > 0) || (f.tint[0] <= 0 && f.tint[1] <= 0 && f.tint[2] <= 0)) f.on = false;
     return p;
 }
 
@@ -225,7 +261,7 @@ bool postActive(FramePassContext& fc, const ViewResources& view)
     if (exposureSnapping(fc)) return true;  // a snap frame's exposure correction (Exposure.cpp) is applied by the chain
     const PostParams p = params(fc.quality);
     // (the shading kernels' own display encoding is the film curve: another curve needs the chain)
-    return p.bloom > 0 || p.vignette > 0 || p.grain > 0 || !p.lut.empty() || p.curve != 0 || p.localExposure;
+    return p.bloom > 0 || p.vignette > 0 || p.grain > 0 || !p.lut.empty() || p.curve != 0 || p.localExposure || p.sharpen > 0 || p.fringe > 0 || p.flare.on;
 }
 
 TextureRef postTarget(FramePassContext& fc, const ViewResources& view)
@@ -285,7 +321,8 @@ PostLocalExposure localExposureInputs(FramePassContext& fc, TextureRef hdr, cons
 }
 } // namespace
 
-TextureRef postBloomTail(FramePassContext& fc, TextureRef hdr, uint32_t levelCount, const PostLocalExposure& localExposure)
+TextureRef postBloomTail(FramePassContext& fc, TextureRef hdr, uint32_t levelCount, const PostLocalExposure& localExposure, const PostLensFlare* flare,
+                         TextureRef* flareOut)
 {
     RenderGraph& g = fc.graph;
     const TextureDesc hd = g.desc(hdr);
@@ -332,6 +369,55 @@ TextureRef postBloomTail(FramePassContext& fc, TextureRef hdr, uint32_t levelCou
                           c.cmd->Dispatch((dd.width + 7) / 8, (dd.height + 7) / 8, 1);
                       });
         }
+        // Image-based lens flares (PostFlare.hlsl), from the 1/8 level as the down chain left it (before the levels are
+        // merged below): the bright parts spread to the aperture's shape, then the ghosts at quarter resolution.
+        if (flare && flare->on && flareOut && levels.size() >= 3)
+        {
+            const TextureRef source = levels[2];
+            const TextureDesc sourceDesc = g.desc(source), flareDesc = g.desc(levels[1]);
+            const TextureRef spread = g.createTexture(TextureDesc{ "m.post.flare spread", sourceDesc.width, sourceDesc.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+            const TextureRef ghosts = g.createTexture(TextureDesc{ "m.post.flare", flareDesc.width, flareDesc.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+            ID3D12PipelineState* spreadPso = fc.shaders.compute("Passes/Shading/PostFlare.STEP0");
+            ID3D12PipelineState* ghostPso = fc.shaders.compute("Passes/Shading/PostFlare.STEP1");
+            const PostLensFlare lf = *flare;
+            // the shape's radius: the reference's bokeh size is a diameter in percent of the flare view's width, drawn
+            // over an image at half scale (its guard band) - twice that against the image
+            const float radius = lf.bokehSize * 0.01f * (float)sourceDesc.width;
+            g.addPass("m.post.flare.spread", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(source, Use::SrvCompute);
+                          b.use(spread, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          const uint32_t k[8] = { c.srv(source), c.uav(spread), sourceDesc.width, sourceDesc.height, asUint(lf.threshold), asUint(radius), lf.blades, 0 };
+                          c.cmd->SetPipelineState(spreadPso);
+                          c.computeConstants(k, 8);
+                          c.cmd->Dispatch((sourceDesc.width + 7) / 8, (sourceDesc.height + 7) / 8, 1);
+                      });
+            g.addPass("m.post.flare.ghosts", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(spread, Use::SrvCompute);
+                          b.use(ghosts, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          // (the reference: the flare's colour x its bloom intensity 0.675; a flare's scale from its tint's
+                          // alpha, (alpha - 0.5) x (the flares' count - 1))
+                          const float amount = lf.intensity * 0.675f;
+                          uint32_t k[40] = { c.srv(spread), c.uav(ghosts), flareDesc.width, flareDesc.height,
+                                             asUint(amount * lf.tint[0]), asUint(amount * lf.tint[1]), asUint(amount * lf.tint[2]), asUint(lf.halo) };
+                          for (int i = 0; i < 8; ++i)
+                          {
+                              k[8 + 4 * i] = asUint(lf.tints[i][0]);
+                              k[9 + 4 * i] = asUint(lf.tints[i][1]);
+                              k[10 + 4 * i] = asUint(lf.tints[i][2]);
+                              k[11 + 4 * i] = asUint((lf.tints[i][3] - 0.5f) * 7.0f);
+                          }
+                          c.cmd->SetPipelineState(ghostPso);
+                          c.computeConstants(k, 40);
+                          c.cmd->Dispatch((flareDesc.width + 7) / 8, (flareDesc.height + 7) / 8, 1);
+                      });
+            *flareOut = ghosts;
+        }
         // Up the pyramid: level l += tent(level l + 1), equal weights per level (each level a Gaussian-like octave).
         for (size_t l = levels.size() - 1; l > 0; --l)
         {
@@ -363,8 +449,17 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
     RenderGraph& g = fc.graph;
     PostLocalExposure le;
     if (p.localExposure) le = localExposureInputs(fc, hdr, p);
-    TextureRef bloom;
-    if (p.bloom > 0) bloom = postBloomTail(fc, hdr, p.levels, le);
+    TextureRef bloom, flare;
+    if (p.bloom > 0 || p.flare.on)
+    {
+        // (the flares read the bloom chain's 1/8 level: without bloom the chain's first three levels are made for them)
+        if (p.flare.on && p.bloom > 0 && p.levels < 3) fail("shading.post_lens_flare needs shading.post_bloom_levels >= 3");
+        const TextureRef tail = postBloomTail(fc, hdr, p.bloom > 0 ? p.levels : 3u, le, &p.flare, &flare);
+        if (p.bloom > 0) bloom = tail;
+    }
+    // the fringe's scales: red and green against blue by their wavelengths (611.3, 549.1, 464.3 nm), beyond the start
+    const float fringeScale = p.fringe * 0.01f / (1.0f - p.fringeStart);
+    const float fringeR = fringeScale * 0.007f * (611.3f - 464.3f), fringeG = fringeScale * 0.007f * (549.1f - 464.3f);
     LutState* lut = nullptr;
     if (!p.lut.empty())
     {
@@ -389,9 +484,10 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
                       b.use(le.grid, Use::SrvCompute);
                       b.use(le.blurred, Use::SrvCompute);
                   }
+                  if (flare.valid()) b.use(flare, Use::SrvCompute);
               },
               [=](PassContext& c) {
-                  uint32_t k[40] = { c.srv(hdr), bloom.valid() ? c.srv(bloom) : 0xFFFFFFFFu, c.uav(output), lutSrv,
+                  uint32_t k[48] = { c.srv(hdr), bloom.valid() ? c.srv(bloom) : 0xFFFFFFFFu, c.uav(output), lutSrv,
                                      asUint(p.bloom), asUint(p.vignette), asUint(p.grain), frame, w, h, asUint(peak), p.curve,
                                      correction.valid() ? c.srv(correction) : 0xFFFFFFFFu, wbOn, 0, 0 };
                   for (uint32_t i = 0; i < 3; ++i)
@@ -405,9 +501,16 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
                   k[34] = asUint(le.detail);
                   k[35] = asUint(le.blend);
                   k[36] = asUint(le.logMiddleGrey);
+                  k[40] = asUint(p.sharpen / 6.0f);  // P[10]: sharpen, fringe
+                  k[41] = asUint(fringeR);
+                  k[42] = asUint(fringeG);
+                  k[43] = asUint(p.fringeStart);
+                  k[44] = flare.valid() ? c.srv(flare) : 0xFFFFFFFFu;  // P[11]: lens flares, the combined grading LUT
+                  k[45] = 0xFFFFFFFFu;
+                  k[46] = k[47] = 0;
                   c.cmd->SetPipelineState(final);
                   c.bindFrameConstants(cb);
-                  c.computeConstants(k, 40);
+                  c.computeConstants(k, 48);
                   c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
               });
 }

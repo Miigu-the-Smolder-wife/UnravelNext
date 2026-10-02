@@ -21,7 +21,23 @@ struct PostLocalExposure
     float highlight = 1, shadow = 1, detail = 1, blend = 0.6f, logMiddleGrey = -2.4739312f;
     bool valid() const { return grid.valid(); }
 };
-TextureRef postBloomTail(FramePassContext& fc, TextureRef hdr, uint32_t levels, const PostLocalExposure& localExposure = {});
+// Image-based lens flares (shading.post_lens_flare*; PostFlare.hlsl): the reference's lens flare settings with their
+// defaults - the eight flares' tints, whose alpha gives each flare's scale about the centre ((alpha - 0.5) x 7).
+struct PostLensFlare
+{
+    bool on = false;
+    float intensity = 1, tint[3] = { 1, 1, 1 };
+    float bokehSize = 3;   // percent of the view's width
+    float threshold = 8;   // r + g + b of the exposed scene colour from which a pixel flares
+    float halo = 0;        // (ours: a ring of the mirrored image; 0 = none, as the reference)
+    uint32_t blades = 0;   // the aperture's shape: 0 a disc, else a polygon
+    float tints[8][4] = { { 1.0f, 0.8f, 0.4f, 0.6f },  { 1.0f, 1.0f, 0.6f, 0.53f }, { 0.8f, 0.8f, 1.0f, 0.46f }, { 0.5f, 1.0f, 0.4f, 0.39f },
+                          { 0.5f, 0.8f, 1.0f, 0.31f }, { 0.9f, 1.0f, 0.8f, 0.27f }, { 1.0f, 0.8f, 0.4f, 0.22f }, { 0.9f, 0.7f, 0.7f, 0.15f } };
+};
+// flare, flareOut: with flares on and at least three levels, *flareOut is the flares' image at quarter resolution
+// (RGBA16F, what the final pass adds).
+TextureRef postBloomTail(FramePassContext& fc, TextureRef hdr, uint32_t levels, const PostLocalExposure& localExposure = {}, const PostLensFlare* flare = nullptr,
+                         TextureRef* flareOut = nullptr);
 // Bloom, vignetting, tone curve, grading, grain, dither and encoding from 'hdr' into view.color.
 void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr);
 // v1.91 camera white balance (defect queue 6): the 3 x 3 matrix (row-major, linear Rec.709 -> linear Rec.709) that

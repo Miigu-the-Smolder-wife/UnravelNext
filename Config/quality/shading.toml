@@ -131,6 +131,35 @@ post_local_exposure_blurred_kernel_percent = 50.0  # LocalExposureBlurredLuminan
 post_local_exposure_middle_grey_bias = 0.0         # LocalExposureMiddleGreyBias (stops)
 post_grain = 0.0
 post_lut = ""
+# The tonemapper's sharpen (PostFinal.hlsl; the reference's r.Tonemapper.Sharpen, off in its defaults): 0 = off, 0.5 half,
+# 1 full strength - the pixel less the mean of its four neighbours added back, less next to very bright content.
+post_sharpen = 0.0
+# Scene colour fringe (the reference's chromatic aberration in the tonemapper, SceneFringeIntensity 0 = off): percent by
+# which the image's edge is displaced between the wavelengths - red and green are read nearer the centre than blue;
+# post_fringe_start (ChromaticAberrationStartOffset 0): the distance from the centre, 0 .. 1 of the half-size, beyond
+# which the fringe grows.
+post_fringe = 0.0
+post_fringe_start = 0.0
+# Image-based lens flares (PostFlare.hlsl; the reference's lens flares, off in its project defaults -
+# r.DefaultFeature.LensFlare false): ghosts of the picture's bright parts, each spread to the aperture's shape, added
+# to the picture after the bloom. The values are the reference's post process defaults (its Engine module is not in the
+# reference checkout: these are the documented ones).
+post_lens_flare = false
+post_lens_flare_intensity = 1.0                 # LensFlareIntensity (x the reference's bloom intensity 0.675)
+post_lens_flare_tint = [1.0, 1.0, 1.0]          # LensFlareTint
+post_lens_flare_bokeh_size = 3.0                # LensFlareBokehSize: the aperture shape's size, percent of the view's width
+post_lens_flare_threshold = 8.0                 # LensFlareThreshold: r + g + b of the exposed scene colour from which a pixel flares
+post_lens_flare_blades = 0                      # the shape: 0 a disc, 3 .. 16 a polygon of that many aperture blades (the reference: a
+                                                # bokeh texture, a disc by default)
+post_lens_flare_halo = 0.0                      # ours (the reference has none): a ring of the mirrored bright parts; 0 = none
+post_lens_flare_tint_1 = [1.0, 0.8, 0.4, 0.6]   # LensFlareTints 1 .. 8: each ghost's colour, and in the 4th number its scale about
+post_lens_flare_tint_2 = [1.0, 1.0, 0.6, 0.53]  # the picture's centre, (value - 0.5) x 7: 0.7, 0.21, -0.28, -0.77, -1.33, -1.61,
+post_lens_flare_tint_3 = [0.8, 0.8, 1.0, 0.46]  # -1.96, -2.45 (negative: mirrored through the centre)
+post_lens_flare_tint_4 = [0.5, 1.0, 0.4, 0.39]
+post_lens_flare_tint_5 = [0.5, 0.8, 1.0, 0.31]
+post_lens_flare_tint_6 = [0.9, 1.0, 0.8, 0.27]
+post_lens_flare_tint_7 = [1.0, 0.8, 0.4, 0.22]
+post_lens_flare_tint_8 = [0.9, 0.7, 0.7, 0.15]
 # Display rendering (U2): "film" (default; ShadingCommon.hlsli shFilm: filmic toe and shoulder, highlights roll off to
 # white, scene grey 0.18 stays 0.18) or "neutral" (Khronos PBR Neutral: base colours kept, flatter).
 post_tone_curve = "film"
