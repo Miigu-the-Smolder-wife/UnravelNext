@@ -44,6 +44,16 @@
 //                   spot lights on the far side of the shading normal - the light's one visibility decides, so a part
 //                   thicker than the shadow bias shadows itself -; not from area lights, the emissive irradiance or the
 //                   indirect light.
+// SSS_SPLIT = 1 (shading.subsurface_scatter, SubsurfaceScatter.hlsli states the passes): the Subsurface class's kernels
+//        with the diffuse light apart. Parts 1 and 2 (SubsurfaceDirect.hlsl, SubsurfaceIndirect.hlsl) sum the specular
+//        light and the emission as before and add every diffuse term per unit f_d - the sun's cosine, the local lights',
+//        the tile term, the emissive irradiance, the light through thin parts, the indirect irradiance - x exposure to
+//        the class's diffuse texture P[9].z (RGBA16F UAV); part 2 writes the first sum back to P[10].x and the pixel's
+//        view depth to P[9].z's alpha, and no output. P[10].y is then the local lights' specular alone
+//        (MegaLightsSpatialSubsurface.hlsl). Part 3 (SubsurfaceScatter.hlsl, SHADE_PART 3) is the same setup, then
+//        colour = P[10].x (an SRV there) + f_d x the scattered diffuse light (P[9].z as an SRV; P[11].y samples per
+//        pixel, P[11].z the footprint in pixels under which a pixel keeps its own: SubsurfaceScatter.hlsli sssScatter)
+//        and this file's air and output; it reads P[0], P[1].xyz, P[3], P[4].zw, P[5].zw, P[6].xyz, P[7].xw.
 // P[1] = { tile lists (raw), list offset (entries), shade class (bit 31 set: a mask of classes, 0xFFFFFFFF every non-sky
 //        class - the fallback kernel runs once per LAYERED variant over its classes), emissive or
 //        UNX_NONE }
@@ -99,6 +109,9 @@
 #ifndef OUTPUT
 #define OUTPUT 0      // (part 1 writes no output)
 #endif
+#ifndef SSS_SPLIT
+#define SSS_SPLIT 0   // SubsurfaceDirect.hlsl, SubsurfaceIndirect.hlsl and SubsurfaceScatter.hlsl compile this file with 1 (see the header)
+#endif
 #if LAYERED == 3
 #define SUBSURFACE 1  // the Subsurface class's variant (see the header)
 #undef LAYERED
@@ -143,10 +156,16 @@
 #if MEGA_LIGHTS
 #include "Passes/Shading/MegaLightsUpsample.hlsli"
 #endif
+#if SHADE_PART == 3
+#include "Passes/Shading/SubsurfaceScatter.hlsli"
+#endif
 
 struct ShadedPixel
 {
     float3 radiance;  // linear, before exposure
+#if SSS_SPLIT && SHADE_PART == 1
+    float3 scatter;   // SSS_SPLIT part 1: the diffuse light per unit f_d (linear, before exposure)
+#endif
 };
 
 ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial m, Texture2D<uint> words, uint2 gbPacked, float depthValue,
@@ -227,8 +246,17 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     {
         RWTexture2D<float4> direct = ResourceDescriptorHeap[P[10].x];
         direct[pixel] = float4(sp.radiance, 1);
+#if SSS_SPLIT
+        // the class's diffuse light per unit f_d, exposed (f16 range), onto what m.ml.spatial.sss left there (a stays 0
+        // until part 2 has added its share)
+        RWTexture2D<float4> scatterDiffuse = ResourceDescriptorHeap[P[9].z];
+        scatterDiffuse[pixel] = float4(min(scatterDiffuse[pixel].rgb + sp.scatter * g_exposure, 60000.0), 0);
+#endif
     }
     return;
+#endif
+#if SSS_SPLIT && SHADE_PART == 2
+    return;  // (the scatter kernel writes the output and keeps the edge / coverage radiance)
 #endif
 
     // ---- edge (E) pixels (EdgeDetect.hlsl marked them in the tile's mask) and the pixels of coverage tiles keep their
@@ -341,13 +369,24 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #endif
     const float alpha = modelAlpha(s.roughness);
     const bool foliage = s.cls == MATERIAL_FOLIAGE;
+#if SSS_SPLIT
+    // The diffuse light apart: every diffuse term below adds nothing to 'radiance' (its f_d is 0 here) and its light per
+    // unit f_d to scatterE - the scatter pass's E_d.
+    const float3 front = 0;
+    float3 scatterE = 0;
+#else
     const float3 front = foliage ? diffuse * (1 - s.transmission) : diffuse;
+#endif
     const float3 back = foliage ? diffuse * s.transmission : 0;
 #if SUBSURFACE
     // The Subsurface class's two specular lobes at the pixel's roughness, and f_d x transmission for the light through
     // thin parts (0: none).
     const ModelSubsurface skin = modelSubsurfaceOf(m, s.roughness);
+#if SSS_SPLIT
+    const float3 thin = 0;
+#else
     const float3 thin = diffuse * s.transmission;
+#endif
 #endif
 #if LAYERED == 1
     // A9 clearcoat (MATERIAL_LAYERS 1.1, MaterialModel.hlsli): f = (1 - c) f_base + c (f_c + f_under); the coat's roughness
@@ -377,7 +416,13 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     const bool haveAtmosphere = atm.transmittance != UNX_NONE;
     const uint experiment = P[4].z;
 
-#if SHADE_PART == 2
+#if SHADE_PART == 3
+    float3 radiance;
+    {
+        Texture2D<float4> direct = ResourceDescriptorHeap[P[10].x];  // SSS_SPLIT part 2's sum: the specular light and the emission
+        radiance = direct[pixel].rgb;
+    }
+#elif SHADE_PART == 2
     float3 radiance;
     {
         RWTexture2D<float4> direct = ResourceDescriptorHeap[P[10].x];  // part 1's direct radiance (ShadeOpaque.hlsl)
@@ -514,6 +559,11 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
             // the sheen lobe over the disk by the 4-point rule (MATERIAL_LAYERS 1.4: 1.5e-3 against the disk average)
             sun = keepS * sun + sheen.color * (modelSheenSun(sheen.roughness, n, v, l0, g_sunAngularRadius) * cap);
         }
+#endif
+#if SSS_SPLIT
+        // the sun's diffuse light per unit f_d: the disk's cosine on the viewer's side and its light through a thin part
+        // (W is 0 where the disk does not reach the far side)
+        scatterE += cap * ((NoV > 0 ? above + s.transmission * modelSubsurfaceThin(below, v, l0) : s.transmission * modelSubsurfaceThin(above, v, l0)) * sunVisibility);
 #endif
         radiance += sun * sunVisibility;
     }
@@ -797,6 +847,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #else
                     radiance += scaleBase * Lw * (j == 0 ? frontL * (SH_PI * I) : (j == 1 ? specularAlbedo * I : back * (SH_PI * I)));
 #endif
+#if SSS_SPLIT
+                    if (j == 0 && !isFar) scatterE += Lw * (SH_PI * I);  // (the light's diffuse per unit f_d; a FAR light's: the tile term)
+#endif
                 }
 #if LAYERED == 1
                 if (last == 5)
@@ -864,6 +917,14 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #else
             radiance += f * E * (abs(cosL) * visibility);
 #endif
+#if SSS_SPLIT
+            // the light's diffuse per unit f_d (a FAR light's: the tile term), or its light through a thin part
+            if (NoV > 0 && cosL > 0)
+            {
+                if (!isFar) scatterE += E * (cosL * visibility);
+            }
+            else if (NoV * cosL < 0) scatterE += E * (s.transmission * modelSubsurfaceThin(abs(cosL), v, l) * visibility);
+#endif
         }
     }
 #if MEGA_LIGHTS
@@ -879,7 +940,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 
     // L2 (14.2): the FAR lights' diffuse, once: the tile corners' vector irradiance (every FAR light above the tile's
     // normal cone with margin, so n . E is their exact sum up to the 1e-3 interpolation rule), bilinear in the tile.
-#if !AREA_LOBES && !FALLBACK
+#if SSS_SPLIT && !FALLBACK
+    if (tileFar && NoV > 0) scatterE += max(0.0, dot(n, tileLightsIrradiance(tileRec, pixel & (M_TILE - 1))));
+#elif !AREA_LOBES && !FALLBACK
     if (tileFar && NoV > 0) radiance += front * max(0.0, dot(n, tileLightsIrradiance(tileRec, pixel & (M_TILE - 1))));
 #endif
 
@@ -890,7 +953,11 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     if (P[10].z != UNX_NONE && NoV > 0)
     {
         Texture2D<float4> emissiveE = ResourceDescriptorHeap[P[10].z];
+#if SSS_SPLIT
+        scatterE += emissiveE[pixel].rgb / g_exposure;
+#else
         radiance += front * (emissiveE[pixel].rgb / g_exposure);
+#endif
     }
 #endif
 #endif  // SHADE_PART == 1 (the sun, the local lights, the tile term, the emissive irradiance)
@@ -1070,6 +1137,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #endif
     if (NoV > 0) radiance += front * irradiance + incident * baseAlbedo;
     radiance += back * irradianceBack;
+#if SSS_SPLIT
+    if (NoV > 0) scatterE += irradiance;  // (the indirect diffuse light per unit f_d)
+#endif
 
 #if LAYERED
     // A9: the area-light lobes no LTC represents (AreaLobes.hlsl, dispatched before this kernel on the same tiles;
@@ -1080,6 +1150,26 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         radiance += lobes[pixel].rgb / g_exposure;
     }
 #endif
+#endif  // AREA_LOBES, SHADE_PART == 2 (the indirect light)
+#if SHADE_PART == 3
+    // ---- the class's diffuse light after scattering (SubsurfaceScatter.hlsli), with the pixel's f_d back
+    {
+        Texture2D<float4> scatterDiffuse = ResourceDescriptorHeap[P[9].z];
+        Texture2D<float> sceneDepth = ResourceDescriptorHeap[P[0].y];
+        radiance += diffuse * (sssScatter(scatterDiffuse, sceneDepth, pixel, D, Dx, Dy, linearZ, n, s.baseColor * (1 - s.metallic), m.hairAbsorption, P[11].y,
+                                          asfloat(P[11].z)) / g_exposure);
+    }
+#endif
+#if SSS_SPLIT && SHADE_PART == 2
+    // the specular light and the emission back to the direct radiance texture, this part's diffuse light per unit f_d onto
+    // part 1's with the pixel's view depth (the scatter pass's sample test and plane distance): no output here
+    {
+        RWTexture2D<float4> direct = ResourceDescriptorHeap[P[10].x];
+        RWTexture2D<float4> scatterDiffuse = ResourceDescriptorHeap[P[9].z];
+        direct[pixel] = float4(radiance, 1);
+        scatterDiffuse[pixel] = float4(min(scatterDiffuse[pixel].rgb + scatterE * g_exposure, 60000.0), linearZ);
+    }
+#elif SHADE_PART >= 2
     // ---- air between the camera and the surface (S's air volume: atmosphere, shadowed air, local lights' air)
     radiance = radiance * airTransmittance + airInscatter;
 
@@ -1091,5 +1181,8 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #endif
     ShadedPixel o;
     o.radiance = radiance;
+#if SSS_SPLIT && SHADE_PART == 1
+    o.scatter = scatterE;
+#endif
     return o;
 }

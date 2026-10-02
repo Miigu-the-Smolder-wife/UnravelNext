@@ -61,6 +61,15 @@ mega_lights_volume = true                         # Volume
 mega_lights_volume_samples = 2                    # Volume.NumSamplesPerVoxel
 mega_lights_volume_min_sample_weight = 0.1        # Volume.MinSampleWeight
 mega_lights_volume_max_frames = 10                # the air's history length (Unreal: the fog's r.VolumetricFog.HistoryWeight 0.9)
+# Subsurface class, stage B: screen-space subsurface scattering (Passes/Shading/SubsurfaceScatter.hlsli; the structure of
+# Unreal's Burley subsurface pass). In scenes with Subsurface materials the class's diffuse light is kept apart per unit
+# albedo, scattered along the surface with Burley's normalized diffusion profile at the material's mean free path per
+# colour channel, and multiplied by the albedo after it. Scenes without such materials record no pass.
+subsurface_scatter = true                         # false: stage A's picture (the class's diffuse light stays at its pixel)
+subsurface_scatter_samples = 16                   # samples per pixel and frame, even, 2..64 (pairs across the pixel; Unreal: 8 to 64 by variance);
+                                                  # the temporal upscale accumulates the frames' patterns
+subsurface_scatter_min_px = 1.0                   # mean scatter radius (2.5 d of the widest channel) in pixels under which a pixel keeps its own
+                                                  # diffuse light and takes no sample; full strength from twice this
 # Edge (E) pixels and surface groups (Passes/Shading/Edge.hlsli): two pixels are one surface when the material matches,
 # the shading normals differ by less than the angle, and each lies within max(footprint x ft, distance x dt) of the
 # other's tangent plane. ARCHITECTURE 2.10: up to three surfaces per edge pixel.

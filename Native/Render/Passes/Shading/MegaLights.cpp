@@ -412,6 +412,11 @@ void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureR
     const bool persistent = st != nullptr;
     const TextureRef confidence = g.createTexture({ "m.ml history confidence", W, H, 1, 1, DXGI_FORMAT_R8G8_UNORM });
     const TextureRef resolvedDiffuse = ml.resolvedDiffuse, resolvedSpecular = ml.resolvedSpecular;
+    ml.temporalDiffuse = outDiffuse;
+    ml.temporalSpecular = outSpecular;
+    ml.temporalMoments = outMoments;
+    ml.temporalFrames = outFrames;
+    ml.historyConfidence = confidence;
     const float ratio = ml.exposureRatio;
     ID3D12PipelineState* temporalPso = fc.shaders.compute("Passes/Shading/MegaLightsTemporal");
     g.addPass("m.ml.temporal", QueueType::Compute,
@@ -463,5 +468,46 @@ void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureR
                   c.computeConstants(k, 24);
                   c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
               });
+}
+
+void megaLightsSubsurface(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, const MegaLightsFrame& ml, BufferRef tiles, BufferRef tileArgs,
+                          const std::vector<MegaLightsClassBand>& bands, uint32_t shadeClass, ID3D12CommandSignature* dispatchSignature, TextureRef diffusePerAlbedo,
+                          TextureRef specular)
+{
+    if (!ml.on || !ml.temporalDiffuse.valid()) fail("M.megaLights: the Subsurface class's spatial step without m.ml.temporal's outputs");
+    const Settings s = settings(fc.quality);
+    const uint32_t W = view.view.width, H = view.view.height;
+    const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
+    const TextureRef inDiffuse = ml.temporalDiffuse, inSpecular = ml.temporalSpecular, moments = ml.temporalMoments, frames = ml.temporalFrames,
+                     confidence = ml.historyConfidence, depth = view.depth, gbuffer = view.gbuffer;
+    ID3D12PipelineState* pso = fc.shaders.compute("Passes/Shading/MegaLightsSpatialSubsurface");
+    // (the graphics queue: between the clear of 'diffusePerAlbedo' and the shading group, which run there)
+    fc.graph.addPass("m.ml.spatial.sss", QueueType::Graphics,
+                     [&](PassBuilder& b) {
+                         for (TextureRef t : { inDiffuse, inSpecular, moments, frames, confidence, depth, gbuffer, materialWord }) b.use(t, Use::SrvCompute);
+                         b.use(tiles, Use::SrvCompute);
+                         b.use(tileArgs, Use::IndirectArgs);
+                         b.use(diffusePerAlbedo, Use::UavCompute);
+                         b.use(specular, Use::UavCompute);
+                     },
+                     [=](PassContext& c) {
+                         // (m.ml.spatial's constants; flag 4: two outputs)
+                         uint32_t k[28] = { c.srv(inDiffuse), c.srv(inSpecular), c.srv(moments), c.srv(frames),
+                                            c.srv(confidence), c.srv(depth), c.srv(gbuffer), c.srv(materialWord),
+                                            c.uav(diffusePerAlbedo), W, H, (s.spatial ? 1u : 0u) | (s.historyVariance ? 2u : 0u) | 4u,
+                                            asUint(s.radius), s.spatialSamples, asUint(s.depthWeight), asUint(s.maxDisocclusionFrames),
+                                            asUint(s.disocclusionDiffuse), asUint(s.disocclusionSpecular), asUint(s.historyStdDev), asUint(s.temporal ? s.maxFrames : 1.0f),
+                                            c.uav(specular), 0, 0, 0,
+                                            c.srv(tiles), 0, shadeClass, 0 };
+                         c.cmd->SetPipelineState(pso);
+                         c.bindFrameConstants(cb);
+                         ID3D12Resource* args = c.resource(tileArgs);
+                         for (const MegaLightsClassBand& band : bands)
+                         {
+                             k[25] = band.firstTile;  // P[6].y
+                             c.computeConstants(k, 28);
+                             c.cmd->ExecuteIndirect(dispatchSignature, 1, args, band.argsOffset, nullptr, 0);
+                         }
+                     });
 }
 } // namespace unx::render::shading

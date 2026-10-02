@@ -23,6 +23,8 @@
 //      class 1 pixel against R_p x (single-scatter GGX sun specular with F = 1) x exposure + T_p x (the same pixel
 //      shaded without the layer), with the exact dielectric Fresnel in double; every other pixel unchanged; the
 //      statistics count the pane's pixels.
+//  13. the Subsurface class's scatter pass (shading.subsurface_scatter): the switch off, on without a pixel scattering,
+//      and on, against each other and against the estimate's limit on the CPU (testSubsurfaceScatter; --subsurface: alone).
 //   unx_test_shading_shadingtests [--no-debug-layer] [--gbv] [--glass] [--set key=value ...]   (--gbv: GPU-based validation;
 //   --set output.band_pixels=65536 runs the banded passes with 8 bands at the tests' 960 x 540)
 #include "FilmCurve.h"
@@ -4166,11 +4168,331 @@ void testTileLights(TestFrame& tf, Report& report)
     report(worst <= 1e-2, "tile lights: tile FAR term vs per-pixel, worst pixel", worst, 1e-2);
 }
 
+// Subsurface class, stage B in a frame (shading.subsurface_scatter; SubsurfaceScatter.hlsli): a Subsurface sphere and a
+// Subsurface plate over a Standard ground under the sun (this build: no shadows and no indirect light, so a pixel's
+// diffuse light is the sun's cosine - known on the CPU from its G-buffer normal - and the sphere's far side is black
+// without the pass). Four frames of one view:
+//   off     the switch off: stage A's picture;
+//   kept    the switch on with a footprint limit no pixel reaches: every pixel keeps its own diffuse light, so the
+//           class's pixels equal 'off' up to the diffuse texture's f16 rounding (the separation into the diffuse texture
+//           and f_d back after it), and every other pixel bit for bit;
+//   on      the defaults: the other classes' pixels bit for bit; the plate (uniformly lit) keeps its radiance; the
+//           sphere's pixels just behind the terminator are lit, red most; pixels far behind it stay black;
+//   on 64   against the estimate's limit on the CPU - for sampled pixels of the sphere the same plane from the depth,
+//           sample test, weights and footprint share (SubsurfaceScatter.hlsli sssScatter, replicated here in double) with
+//           a dense polar grid in place of the kernel's 64 samples: the mean difference (a wrong projection, plane or
+//           weight shows here) and its spread (the 64 samples' noise).
+float halfRoundTrip(float f)  // an R16_FLOAT store and load of a positive value in the format's normal range (nearest, ties to even)
+{
+    uint32_t u;
+    std::memcpy(&u, &f, 4);
+    const uint32_t rest = u & 0x1FFFu;
+    u &= ~0x1FFFu;
+    if (rest > 0x1000u || (rest == 0x1000u && (u & 0x2000u) != 0)) u += 0x2000u;
+    std::memcpy(&f, &u, 4);
+    return f;
+}
+
+void testSubsurfaceScatter(TestFrame& tf, Report& report)
+{
+    scene::Scene s;
+    s.name = "subsurface scatter test";
+    scene::Material ground;
+    ground.name = "ground";
+    ground.baseColor = { 0.5f, 0.45f, 0.4f };
+    ground.roughness = 0.5f;
+    scene::Material skin;
+    skin.name = "skin";
+    skin.cls = scene::MaterialClass::Subsurface;
+    skin.baseColor = { 0.80f, 0.56f, 0.45f };
+    skin.roughness = 0.45f;
+    skin.specular = 0.35f;
+    skin.transmission = 0.0f;  // (no light through thin parts: the far side is black without the pass)
+    s.materials = { ground, skin };
+    scene::Instance a;
+    a.mesh = addPlane(s, 40, 0);
+    s.instances.push_back(a);
+    scene::Instance b;
+    b.mesh = addSphere(s, 0.25f, 64, 128, 1);
+    b.transform = float3x4::translation({ 0, 0.6f, 0 });
+    s.instances.push_back(b);
+    scene::Instance c;
+    c.mesh = addPlane(s, 0.4f, 1);  // the plate: 0.4 m, facing up
+    c.transform = float3x4::translation({ 0.62f, 0.38f, 0.1f });
+    s.instances.push_back(c);
+    s.sun.direction = normalize(float3{ -0.85f, 0.45f, 0.3f });  // from the left: the terminator runs down the sphere's visible side
+    scene::Camera cam;
+    cam.name = "skin";
+    cam.position = { 0.3f, 0.78f, 1.35f };
+    cam.forward = normalize(float3{ -0.06f, -0.17f, -1 });
+    cam.verticalFov = 0.6f;
+    cam.ev100 = 13;
+    s.cameras.push_back(cam);
+    tf.setScene(s);
+
+    const uint32_t W = 960, H = 540;
+    struct Shot
+    {
+        std::shared_ptr<std::vector<uint8_t>> gb, words, lin, depth;
+    };
+    ViewDesc desc;
+    // (the configuration's own values come back after each shot)
+    const std::vector<std::string> restore = { std::string("shading.subsurface_scatter=") + (tf.quality.boolean("shading.subsurface_scatter") ? "true" : "false"),
+                                               "shading.subsurface_scatter_samples=" + std::to_string(tf.quality.integer("shading.subsurface_scatter_samples")),
+                                               "shading.subsurface_scatter_min_px=" + std::to_string(tf.quality.number("shading.subsurface_scatter_min_px")) };
+    auto shoot = [&](std::initializer_list<const char*> settings) {
+        for (const char* o : settings) tf.quality.applyOverride(o);
+        Shot shot;
+        tf.frame.outputLinearHdr = true;
+        tf.run([&](FramePassContext& fc) {
+            ViewResources v = tf.mainView(fc, W, H, 0);
+            desc = v.view;
+            v.color = fc.graph.createTexture({ "m.test.color", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+            tf.vis.record(fc, v);
+            tracks::materialResolve(fc, v);
+            tracks::shading(fc, v);
+            shot.gb = tf.readback(fc, v.gbuffer);
+            shot.words = tf.readback(fc, material::resolveOutputs(fc, v).materialWord);
+            shot.lin = tf.readback(fc, v.color);
+            shot.depth = tf.readback(fc, v.depth);
+        });
+        tf.frame.outputLinearHdr = false;
+        for (const std::string& o : restore) tf.quality.applyOverride(o);
+        return shot;
+    };
+    const Shot off = shoot({ "shading.subsurface_scatter=false" });
+    const Shot kept = shoot({ "shading.subsurface_scatter=true", "shading.subsurface_scatter_min_px=1000000000.0" });
+    const Shot on = shoot({ "shading.subsurface_scatter=true" });
+    const Shot on64 = shoot({ "shading.subsurface_scatter=true", "shading.subsurface_scatter_samples=64" });
+
+    // ---- the view's pixels on the CPU: class, position, the sun's diffuse light E_d (lux, per unit f_d), f_d
+    const double exposure = 1.0 / (1.2 * std::exp2(13.0)), thetaS = s.sun.angularRadius;
+    const float3 l0f = normalize(s.sun.direction);
+    const AlVec l0 = alVec(l0f);
+    // E_d of a surface facing the sun, per channel: the unit of the comparisons below (a pixel's E_d is its cap cosine x this)
+    const double lit[3] = { (double)s.sun.illuminance * s.sun.color.x * 2 / (1 + std::cos(thetaS)), (double)s.sun.illuminance * s.sun.color.y * 2 / (1 + std::cos(thetaS)),
+                            (double)s.sun.illuminance * s.sun.color.z * 2 / (1 + std::cos(thetaS)) };
+    auto capCosine = [&](double NoL) {  // ShadingCommon.hlsli shCapCosine
+        const double kR = std::sqrt(std::max(1 - NoL * NoL, 0.0)) * thetaS;
+        if (NoL >= kR) return NoL;
+        if (NoL <= -kR) return 0.0;
+        const double u = -NoL / kR, w = std::sqrt(std::max(1 - u * u, 0.0));
+        return (2 * kR / kPi) * (w * w * w / 3 - 0.5 * u * (std::acos(u) - u * w));
+    };
+    struct Px
+    {
+        bool skin = false;
+        double z = 0, zHalf = 0;  // view depth; as the diffuse texture's alpha holds it
+        AlVec n, fd;              // shading normal towards the viewer; f_d
+        double Ed = 0;            // the sun's diffuse light per unit f_d, in units of 'lit' (the disk's clipped cosine)
+    };
+    std::vector<Px> px((size_t)W * H);
+    AlVec Dx, Dy, back;  // the ray's change per pixel, the camera's back axis (MaterialSurface.hlsli mPixelRay)
+    {
+        const auto& P = desc.proj.m;
+        Dx = AlVec{ desc.view.m[0][0], desc.view.m[0][1], desc.view.m[0][2] } * (2.0 / (W * P[0][0]));
+        Dy = AlVec{ desc.view.m[1][0], desc.view.m[1][1], desc.view.m[1][2] } * (-2.0 / (H * P[1][1]));
+        back = AlVec{ desc.view.m[2][0], desc.view.m[2][1], desc.view.m[2][2] };
+    }
+    auto rayOf = [&](double x, double y) {
+        double D[3], unused[3];
+        pixelRay(desc, x, y, D, unused);
+        return AlVec{ D[0], D[1], D[2] };
+    };
+    uint32_t skinPixels = 0;
+    for (uint32_t y = 0; y < H; ++y)
+        for (uint32_t x = 0; x < W; ++x)
+        {
+            Px& p = px[(size_t)y * W + x];
+            const uint32_t word = texelOf<uint32_t>(*off.words, W, x, y);
+            p.z = desc.nearPlane / std::max((double)texelOf<float>(*off.depth, W, x, y), 1e-30);
+            if ((word & 0xFFFF) != 1) continue;
+            p.skin = true;
+            ++skinPixels;
+            p.zHalf = halfRoundTrip((float)p.z);
+            const uint2 pk = texelOf<uint2>(*off.gb, W, x, y);
+            const AlVec v = alNorm(rayOf(x + 0.5, y + 0.5) * -1.0);
+            AlVec n = alVec(octDecode(pk.x));
+            if (alDot(n, v) < 1e-4) n = alNorm(n + v * (1e-4 - alDot(n, v)));  // MaterialInternal.hlsli mNormalTowardsViewer
+            p.n = n;
+            const double albedoScale = (1 - ((word >> 16) & 0xFF) / 255.0) / kPi;
+            p.fd = AlVec{ srgbToLinear((pk.y & 0xFF) / 255.0), srgbToLinear(((pk.y >> 8) & 0xFF) / 255.0), srgbToLinear(((pk.y >> 16) & 0xFF) / 255.0) } * albedoScale;
+            p.Ed = capCosine(alDot(n, l0));
+        }
+    auto colour = [&](const Shot& shot, uint32_t x, uint32_t y) {
+        const float4 v = texelOf<float4>(*shot.lin, W, x, y);
+        return AlVec{ v.x, v.y, v.z };
+    };
+
+    // ---- the pictures against 'off'
+    uint32_t otherBits = 0, otherPixels = 0, sameWords = 0;
+    double worstKept = 0, worstPlate = 0;
+    uint32_t platePixels = 0;
+    for (uint32_t y = 0; y < H; ++y)
+        for (uint32_t x = 0; x < W; ++x)
+        {
+            sameWords += texelOf<uint32_t>(*off.words, W, x, y) != texelOf<uint32_t>(*on.words, W, x, y);
+            const Px& p = px[(size_t)y * W + x];
+            const float4 o = texelOf<float4>(*off.lin, W, x, y);
+            if (cpuIsEdge(desc, *off.words, *off.gb, *off.depth, W, H, x, y, tf.quality)) continue;  // (the edge composite mixes classes)
+            if (!p.skin)
+            {
+                ++otherPixels;
+                for (const Shot* shot : { &kept, &on, &on64 })
+                    otherBits += std::memcmp(&o, shot->lin->data() + (size_t)y * TestFrame::rowPitch(W, 16) + (size_t)x * 16, 12) != 0;
+                continue;
+            }
+            const AlVec k = colour(kept, x, y), n = colour(on, x, y), base = { o.x, o.y, o.z };
+            const double scale = std::max({ (double)o.x, (double)o.y, (double)o.z, 1e-3 });
+            worstKept = std::max({ worstKept, std::fabs(k.x - base.x) / scale, std::fabs(k.y - base.y) / scale, std::fabs(k.z - base.z) / scale });
+            // the plate: every pixel of it lies in one plane under one light
+            if (std::fabs(p.n.y - 1) < 1e-3 && x > W / 2)
+            {
+                ++platePixels;
+                worstPlate = std::max({ worstPlate, std::fabs(n.x - base.x) / scale, std::fabs(n.y - base.y) / scale, std::fabs(n.z - base.z) / scale });
+            }
+        }
+    logf("subsurface scatter: %u pixels of the class (%u of the plate), %u of other classes\n", skinPixels, platePixels, otherPixels);
+    report(sameWords == 0 && skinPixels > 40000 && platePixels > 2000, "subsurface scatter: the view holds the sphere and the plate (material words differing)", sameWords, 0);
+    report(otherBits == 0, "subsurface scatter: other classes' pixels differ from the switch off (kept, on, on 64)", otherBits, 0);
+    // [measured: 9.6e-4 and 5.9e-4 - one f16 step of the diffuse texture is 9.8e-4 of the value]
+    report(worstKept < 1.5e-3, "subsurface scatter: no pixel scattering = the switch off (rel., f16 diffuse texture)", worstKept, 1.5e-3);
+    report(worstPlate < 1.5e-3, "subsurface scatter: a uniformly lit plate keeps its radiance (rel.)", worstPlate, 1.5e-3);
+
+    // ---- the estimate's limit on the CPU (SubsurfaceScatter.hlsli sssScatter with a dense polar grid)
+    auto surfaceNormal = [&](uint32_t x, uint32_t y, AlVec D, const Px& p) {
+        const double beyond = 1e30;
+        const double zl = x > 0 ? px[(size_t)y * W + x - 1].z : beyond, zr = x + 1 < W ? px[(size_t)y * W + x + 1].z : beyond;
+        const double zu = y > 0 ? px[(size_t)(y - 1) * W + x].z : beyond, zd = y + 1 < H ? px[(size_t)(y + 1) * W + x].z : beyond;
+        const AlVec P0 = D * p.z;
+        const AlVec dx = std::fabs(zl - p.z) < std::fabs(zr - p.z) ? P0 - (D - Dx) * zl : (D + Dx) * zr - P0;
+        const AlVec dy = std::fabs(zu - p.z) < std::fabs(zd - p.z) ? P0 - (D - Dy) * zu : (D + Dy) * zd - P0;
+        AlVec g = alCross(dx, dy);
+        const double len = std::sqrt(alDot(g, g));
+        if (!(len > 0) || !(len < beyond)) return p.n;
+        g = g * (1 / len);
+        if (alDot(g, D) > 0) g = g * -1.0;
+        return alDot(g, D) < -0.05 * std::sqrt(alDot(D, D)) ? g : p.n;
+    };
+    const float minPixels = (float)tf.quality.number("shading.subsurface_scatter_min_px");
+    auto scatteredLimit = [&](uint32_t x, uint32_t y, double out[3]) {
+        const Px& p = px[(size_t)y * W + x];
+        const AlVec D = rayOf(x + 0.5, y + 0.5);
+        const float3 d = model::subsurfaceDistance(skin.subsurfaceMeanFreePath, alF(p.fd * kPi));
+        const double dc[3] = { d.x, d.y, d.z }, dS = std::max({ d.x, d.y, d.z });
+        const double footprint = p.z * std::sqrt(alDot(Dx, Dx));
+        const double strength = std::clamp(model::kSubsurfaceMeanRadius * dS / (footprint * minPixels) - 1, 0.0, 1.0);
+        const AlVec plane = surfaceNormal(x, y, D, p);
+        const AlVec t = alNorm(std::fabs(plane.z) < 0.9 ? alCross(AlVec{ 0, 0, 1 }, plane) : alCross(AlVec{ 1, 0, 0 }, plane)), bt = alCross(plane, t);
+        const AlVec P0 = D * p.z;
+        const double rc = footprint * 0.5642 / std::sqrt(std::max(-alDot(plane, D) / std::sqrt(alDot(D, D)), 0.25));
+        auto cdf = [](double dd, double r) {
+            const double yy = std::exp(-r / (3 * dd));
+            return 1 - 0.25 * yy * yy * yy - 0.75 * yy;
+        };
+        auto pdf = [](double dd, double r) {
+            const double yy = std::exp(-r / (3 * dd));
+            return (yy * yy * yy + yy) / (4 * dd);
+        };
+        const double centreS = cdf(dS, rc), reach = 2.0 * dS + 2 * footprint + p.z / 512.0;
+        const int K = 96, A = 96;
+        double sum[3] = {}, weight[3] = {};
+        for (int i = 0; i < K; ++i)
+        {
+            const double r = model::subsurfaceRadius((float)dS, (float)(centreS + (1 - centreS) * (i + 0.5) / K)), density = pdf(dS, r);
+            for (int j = 0; j < A; ++j)
+            {
+                const double angle = 2 * kPi * (j + 0.5) / A;
+                const AlVec Q = P0 + (t * std::cos(angle) + bt * std::sin(angle)) * r;
+                const double depthQ = -alDot(Q, back);
+                if (!(depthQ > desc.nearPlane)) continue;
+                const AlVec u = Q * (1 / depthQ) - D;
+                const int sx = (int)std::floor(x + 0.5 + alDot(u, Dx) / alDot(Dx, Dx)), sy = (int)std::floor(y + 0.5 + alDot(u, Dy) / alDot(Dy, Dy));
+                if (sx < 0 || sy < 0 || sx >= (int)W || sy >= (int)H) continue;
+                const Px& q = px[(size_t)sy * W + sx];
+                if (!q.skin) continue;
+                const double h = alDot((D + Dx * (double)(sx - (int)x) + Dy * (double)(sy - (int)y)) * q.zHalf - P0, plane);
+                if (std::fabs(h) > reach) continue;
+                const double rr = std::sqrt(r * r + h * h);
+                for (int ch = 0; ch < 3; ++ch)
+                {
+                    const double w = pdf(dc[ch], rr) / density;
+                    sum[ch] += q.Ed * w;
+                    weight[ch] += w;
+                }
+            }
+        }
+        for (int ch = 0; ch < 3; ++ch)
+        {
+            const double tail = weight[ch] > 0 ? sum[ch] / weight[ch] : p.Ed, centre = cdf(dc[ch], rc);
+            out[ch] = p.Ed + ((tail + (p.Ed - tail) * centre) - p.Ed) * strength;
+        }
+    };
+    // sampled pixels of the sphere (the plate is uniform): the kernel's scattered light from the two pictures,
+    // E_d + (on - off) / (f_d x exposure), against the limit; all in units of the lit level
+    double mean[3] = {}, square[3] = {}, worst = 0, behindRed = 0, behindBlue = 0, farBehind = 0, defaultSpread = 0;
+    uint32_t compared = 0, behind = 0, farPixels = 0;
+    for (uint32_t y = 2; y + 2 < H; y += 5)
+        for (uint32_t x = 2; x + 2 < W / 2 + 60; x += 5)
+        {
+            const Px& p = px[(size_t)y * W + x];
+            if (!p.skin || std::fabs(p.n.y - 1) < 1e-3) continue;
+            if (cpuIsEdge(desc, *off.words, *off.gb, *off.depth, W, H, x, y, tf.quality)) continue;
+            double limit[3];
+            scatteredLimit(x, y, limit);
+            const AlVec o = colour(off, x, y), n64 = colour(on64, x, y), n16 = colour(on, x, y);
+            const double fd[3] = { p.fd.x, p.fd.y, p.fd.z }, d64[3] = { n64.x - o.x, n64.y - o.y, n64.z - o.z }, d16[3] = { n16.x - o.x, n16.y - o.y, n16.z - o.z };
+            for (int ch = 0; ch < 3; ++ch)
+            {
+                const double unit = fd[ch] * exposure * lit[ch], e = p.Ed + d64[ch] / unit - limit[ch];
+                mean[ch] += e;
+                square[ch] += e * e;
+                worst = std::max(worst, std::fabs(e));
+                defaultSpread += std::pow(p.Ed + d16[ch] / unit - limit[ch], 2) / 3;
+            }
+            ++compared;
+            // behind the terminator (no sun on the pixel): lit by the pass within reach of it, black far from it
+            const double NoL = alDot(p.n, l0);
+            if (NoL < -0.02 && NoL > -0.12)
+            {
+                ++behind;
+                behindRed += d16[0] / (fd[0] * exposure * lit[0]);
+                behindBlue += d16[2] / (fd[2] * exposure * lit[2]);
+            }
+            if (NoL < -0.75)
+            {
+                ++farPixels;
+                farBehind = std::max({ farBehind, std::fabs(d16[0]) / (fd[0] * exposure * lit[0]), std::fabs(d16[2]) / (fd[2] * exposure * lit[2]) });
+            }
+        }
+    double bias = 0, spread = 0;
+    for (int ch = 0; ch < 3; ++ch)
+    {
+        mean[ch] /= std::max(compared, 1u);
+        bias = std::max(bias, std::fabs(mean[ch]));
+        spread = std::max(spread, std::sqrt(std::max(square[ch] / std::max(compared, 1u) - mean[ch] * mean[ch], 0.0)));
+    }
+    defaultSpread = std::sqrt(defaultSpread / std::max(compared, 1u));
+    behindRed /= std::max(behind, 1u);
+    behindBlue /= std::max(behind, 1u);
+    logf("subsurface scatter: %u pixels of the sphere against the dense grid: mean (%.5f %.5f %.5f), spread %.5f, worst %.5f of the lit level (64 samples); the defaults' "
+         "spread %.5f; %u pixels just behind the terminator gain red %.5f, blue %.5f; %u far behind it at most %.2e\n",
+         compared, mean[0], mean[1], mean[2], spread, worst, defaultSpread, behind, behindRed, behindBlue, farPixels, farBehind);
+    // [measured, 3258 pixels: mean -1.1e-4 in every channel, spread 2.3e-3 (worst pixel 8.9e-3) at 64 samples, 3.3e-3 at the
+    // default 16; 222 pixels behind the terminator gain 1.2e-2 in red and 6e-4 in blue]
+    report(compared > 1500 && bias < 5e-4, "subsurface scatter: the kernel's mean vs the dense grid (of the lit level)", bias, 5e-4);
+    report(spread < 4e-3 && worst < 0.02, "subsurface scatter: 64 samples' spread around the dense grid (of the lit level)", spread, 4e-3);
+    report(defaultSpread < 6e-3, "subsurface scatter: the default sample count's spread around the dense grid (of the lit level)", defaultSpread, 6e-3);
+    report(behind > 30 && behindRed > 5e-3 && behindRed > 4 * behindBlue, "subsurface scatter: light behind the terminator, red most (mean red, of the lit level)", behindRed, 5e-3);
+    report(farPixels > 30 && farBehind < 1e-4, "subsurface scatter: no light far behind the terminator (of the lit level)", farBehind, 1e-4);
+}
+
 int main(int argc, char** argv)
 {
     try
     {
         bool debugLayer = true, gpuValidation = false, growth = false, glassOnly = false, glassJobsOnly = false, preshadeOnly = false, coatOnly = false, sheenOnly = false, anisoOnly = false, filmOnly = false, areaQuadOnly = false, warp = false;
+        bool subsurfaceOnly = false;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
@@ -4188,6 +4510,7 @@ int main(int argc, char** argv)
             if (std::string(argv[i]) == "--film") filmOnly = true;
             if (std::string(argv[i]) == "--film-image" && i + 1 < argc) g_filmImage = argv[i + 1];
             if (std::string(argv[i]) == "--area-quad") areaQuadOnly = true;
+            if (std::string(argv[i]) == "--subsurface") subsurfaceOnly = true;
             if (std::string(argv[i]) == "--warp") warp = true;  // compute probes only (full frames render black on WARP)
         }
         ComPtr<ID3D12Device> warpDevice;
@@ -4206,6 +4529,12 @@ int main(int argc, char** argv)
         Report report;
         testTable(report);
         TestFrame tf(debugLayer, gpuValidation, warpDevice.Get());
+        if (subsurfaceOnly)  // --subsurface: the Subsurface class's scatter frames alone
+        {
+            testSubsurfaceScatter(tf, report);
+            logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
+            return report.failures ? 1 : 0;
+        }
         if (areaQuadOnly)  // --area-quad: the sheen / anisotropic area-light probe alone
         {
             testAreaQuadrature(tf, report);
@@ -4288,6 +4617,7 @@ int main(int argc, char** argv)
         testAreaLobesFrame(tf, report);
         testEmissivePanel(tf, report);  // 14.1b (L2b)
         testTileLights(tf, report);  // 14.1/14.2 (L2)
+        testSubsurfaceScatter(tf, report);  // the Subsurface class's scatter pass
         logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
         return report.failures ? 1 : 0;
     }

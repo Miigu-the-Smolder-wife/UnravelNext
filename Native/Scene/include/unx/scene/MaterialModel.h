@@ -76,7 +76,7 @@ float3 evaluate(const Surface& s, float3 n, float3 v, float3 l);
 // so the light through the part is t f_d E W for an illuminance E facing the light: Lambert transmission (W = c, as
 // Foliage's), raised towards sqrt(c) where the viewer looks through the part towards the light (the in-scatter lobe of
 // the reference's SubsurfaceBxDF). W is 0 at the terminator, so the term starts there without a step. The mean free
-// path of scene::Material is not part of this stage.
+// path of scene::Material is stage B's (below).
 struct Subsurface
 {
     float lobeMix = 0.85f;                 // m: the weight of lobe 0
@@ -86,6 +86,50 @@ Subsurface subsurfaceOf(const Material& m);
 float3 subsurfaceRoughness(const Subsurface& k, float roughness);  // (r_0, r_1, r_a)
 float subsurfaceThin(float c, float3 v, float3 l);                 // W
 float3 evaluateSubsurface(const Surface& s, const Subsurface& k, float3 n, float3 v, float3 l);
+
+// Subsurface class, stage B: the diffusion profile of the screen-space scattering pass (Passes/Common/
+// SubsurfaceProfile.hlsli is the mirror, Passes/Shading/SubsurfaceScatter.hlsli the pass; ue6-main
+// SubsurfaceBurleyNormalized.ush and BurleyNormalizedSSSCommon.ush read as a reference; the code is ours). The diffuse
+// light that enters the surface at a point leaves it around that point with Burley's normalized diffusion profile
+// (Christensen and Burley 2015, "Approximate Reflectance Profiles for Efficient Subsurface Scattering"), per colour
+// channel, r = the distance along the surface:
+//   R(r) = (e^(-r / d) + e^(-r / (3 d))) / (8 pi d r)        1 / m^2; its integral over the plane is 1
+//   d    = l / s(A),  s(A) = 1.9 - A + 3.5 (A - 0.8)^2       l = scene::Material::subsurfaceMeanFreePath: the medium's
+//                                                            mean free path 1 / sigma_t (m); A = the surface albedo
+//                                                            (1 - metallic) baseColor of the pixel
+// s(A) is the paper's fit for light that enters the surface diffusely (ideal diffuse transmission: mean error 3.9 %
+// against its Monte Carlo reference) - what the pass scatters is the cosine-weighted irradiance. The paper's other two
+// fits are for a perpendicular beam: 1.85 - A + 7 |A - 0.8|^3 on l, and 3.5 + 100 (A - 0.33)^4 on the diffuse mean free
+// path, which the material does not carry. The reference turns a mean free path into the latter through a factor it
+// documents as unexplained (d = l / (0.6 (1.85 - A + 7 |A - 0.8|^3)): 1.7 to 1.9 times this d for A between 0.3 and 1);
+// we keep the paper's definition, so a path-traced medium of mean free path l is what the profile fits.
+// The radius of a sample is drawn from the radial distribution of the widest channel:
+//   p(r) = 2 pi r R(r) = (e^(-r / d) + e^(-r / (3 d))) / (4 d),   P(r) = 1 - e^(-r / d) / 4 - 3 e^(-r / (3 d)) / 4.
+// With y = e^(-r / (3 d)) and u = 1 - P: y^3 + 3 y = 4 u, whose real root is y = c - 1 / c = 4 u / (c^2 + 1 + c^-2),
+// c = (2 u + sqrt(1 + 4 u^2))^(1/3) (the second form does not cancel), so r = -3 d ln y exactly (no fitted inverse).
+// The mean radius is 2.5 d.
+// A pixel's estimate (the pass): the part of each channel's profile inside the pixel's own footprint (radius r_c in the
+// surface's plane), T = P(r_c), keeps the pixel's own diffuse light; the rest is the mean of the light at sample points
+// drawn from p beyond r_c - sample k of K at xi = T_s + (1 - T_s) (k + u_k) / K of the widest channel s (u_k = u in even
+// strata, 1 - u in odd ones: neighbouring strata move against each other), at the angle 2 pi (u' + k / phi) (phi the
+// golden ratio) and again across the pixel (the pair cancels a linear gradient exactly), u and u' the frame's blue
+// noise - weighed per channel by p_c(sqrt(r^2 + h^2)) / p_s(r), h = the sample point's distance from the plane, and
+// divided by the weights' sum (samples on other surfaces or other classes drop out of both sums).
+// [measured, unx_unit_tests subsurface_profile_and_sampling and a numpy study of the patterns on the default skin: against
+// a golden-angle spiral of the same count the pairs remove a linear gradient's noise (the spiral's at 16 samples: 0.07 for
+// light that changes by 0.22 over d) and equal it beside a shadow edge (luminance noise 3 to 6 % of the lit level at 16
+// samples, 1.5 to 3.5 % at 32, worst in the narrow channels); drawing the radii from every channel's distribution in turn
+// lowers the noise right at the edge by a quarter and raises it up to twofold everywhere else.]
+constexpr float kSubsurfaceMeanRadius = 2.5f;                   // of p, in units of d
+float3 subsurfaceScaling(float3 albedo);                        // s(A)
+float3 subsurfaceDistance(float3 meanFreePath, float3 albedo);  // d (m), at least 1e-6
+float subsurfaceProfile(float d, float r);                      // R(r)
+float subsurfaceRadialPdf(float d, float r);                    // p(r)
+float subsurfaceRadialCdf(float d, float r);                    // P(r)
+float subsurfaceRadius(float d, float xi);                      // P^-1(xi), xi in [0, 1)
+float subsurfaceSampleRadius(float d, float centreCdf, uint32_t k, uint32_t pairs, float u);
+float subsurfaceSampleAngle(uint32_t k, float u);               // radians
+float3 subsurfaceSampleWeight(float3 d, float r, float h, float pdf);  // pdf = p_s(r)
 
 // Clearcoat layer (A9; MATERIAL_LAYERS_KO.md 1.1 as measured by C: R1 with candidates A2 and S, Results/C/MaterialLayers/
 // clearcoat_r1e.md - within the section 3 criteria on dielectric bases; metal bases under a coat fail on lobe shape and

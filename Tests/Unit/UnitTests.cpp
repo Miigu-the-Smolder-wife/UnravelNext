@@ -1653,6 +1653,220 @@ UNX_TEST(subsurface_model_and_scene_block)
     }
 }
 
+UNX_TEST(subsurface_profile_and_sampling)
+{
+    // Subsurface class, stage B (MaterialModel.h: the diffusion profile and the scatter pass's estimate), CPU:
+    //   1  the profile integrates to 1 over the plane, P is its running integral, P^-1 inverts it, the mean radius is 2.5 d;
+    //   2  d = l / s(A) at the fit's values, a channel without a mean free path;
+    //   3  radii drawn as the pass draws them (strata beyond the pixel's own footprint) reproduce the profile: the share of
+    //      samples in rings against P's differences;
+    //   4  energy: a uniformly lit plane keeps its radiance after scattering - with any part of the samples rejected, on a
+    //      surface off the plane -, and the weights' mean is each channel's mass beyond the footprint;
+    //   5  a half-lit plane after scattering against the profile's own integral over the lit half (dense quadrature): the
+    //      estimate's mean and its noise at the pass's sample counts.
+    namespace m = scene::model;
+    const double pi = 3.14159265358979323846;
+
+    // 1. normalisation, P, P^-1, mean radius (midpoint rule in r / d over [0, 80]: the tail beyond is under 1e-11)
+    double worstNorm = 0, worstCdf = 0, worstInverse = 0, worstMean = 0;
+    for (float d : { 1e-4f, 2.3e-3f, 0.011f, 0.4f })
+    {
+        const int N = 400000;
+        const double step = 80.0 * d / N;
+        double mass = 0, mean = 0;
+        int next = 1;
+        for (int i = 0; i < N; ++i)
+        {
+            const double r = (i + 0.5) * step;
+            const double ring = 2 * pi * r * m::subsurfaceProfile(d, (float)r) * step;
+            mass += ring;
+            mean += ring * r;
+            if (i + 1 == next * (N / 64))  // P at 64 radii against the running integral
+            {
+                worstCdf = std::max(worstCdf, std::fabs(mass - m::subsurfaceRadialCdf(d, (float)((i + 1) * step))));
+                ++next;
+            }
+        }
+        worstNorm = std::max(worstNorm, std::fabs(mass - 1));
+        worstMean = std::max(worstMean, std::fabs(mean / d - m::kSubsurfaceMeanRadius));
+        for (int i = 0; i < 4096; ++i)
+        {
+            const float xi = (i + 0.5f) / 4096;
+            const float r = m::subsurfaceRadius(d, xi);
+            CHECK(std::isfinite(r) && r >= 0);
+            worstInverse = std::max(worstInverse, std::fabs((double)m::subsurfaceRadialCdf(d, r) - xi));
+        }
+        CHECK(m::subsurfaceRadius(d, 0.0f) == 0.0f);
+        CHECK(std::isfinite(m::subsurfaceRadius(d, 1.0f)));
+        CHECK(std::fabs(m::subsurfaceRadialPdf(d, 0.0f) * d - 0.5f) < 1e-6f);
+    }
+    CHECK(worstNorm < 2e-5 && worstCdf < 2e-5 && worstInverse < 2e-6 && worstMean < 1e-4);
+
+    // 2. the mapping
+    {
+        const float3 s = m::subsurfaceScaling({ 0.8f, 0.2f, 1.5f });  // (albedo above 1: as 1)
+        CHECK(std::fabs(s.x - 1.1f) < 1e-6f && std::fabs(s.y - 2.96f) < 1e-6f && std::fabs(s.z - 1.04f) < 1e-6f);
+        const float3 d = m::subsurfaceDistance({ 0.011f, 0.0074f, 0.0f }, { 0.8f, 0.2f, 0.5f });
+        CHECK(std::fabs(d.x - 0.01f) < 1e-8f && std::fabs(d.y - 0.0025f) < 1e-8f && d.z == 1e-6f);
+        const float3 w = m::subsurfaceSampleWeight(d, 0.004f, 0.003f, 2.0f);  // p_c(5 mm) / 2
+        CHECK(std::fabs(w.x - 0.5f * m::subsurfaceRadialPdf(0.01f, 0.005f)) < 1e-4f * w.x && w.z == 0.0f);
+    }
+
+    // 3. the pass's radii against the profile
+    double worstRing = 0;
+    for (float centre : { 0.0f, 0.3f, 0.85f })
+        for (uint32_t pairs : { 1u, 4u, 8u, 32u })
+        {
+            const float d = 0.01f;
+            const float rc = m::subsurfaceRadius(d, centre);
+            const int rings = 24, pixels = 4096;
+            std::vector<double> count(rings + 1, 0.0);
+            for (int p = 0; p < pixels; ++p)
+                for (uint32_t k = 0; k < pairs; ++k)
+                {
+                    const float r = m::subsurfaceSampleRadius(d, centre, k, pairs, (p + 0.5f) / pixels);
+                    CHECK(r >= rc * (1 - 1e-4f) - 1e-9f);
+                    count[std::min(rings, (int)(r / (0.5f * d)))] += 1.0 / ((double)pixels * pairs);  // rings of d / 2, the last one open
+                }
+            for (int ring = 0; ring <= rings; ++ring)
+            {
+                const double a = std::max<double>(m::subsurfaceRadialCdf(d, ring * 0.5f * d), centre);
+                const double b = ring == rings ? 1.0 : std::max<double>(m::subsurfaceRadialCdf(d, (ring + 1) * 0.5f * d), centre);
+                worstRing = std::max(worstRing, std::fabs(count[ring] - (b - a) / (1 - centre)));
+            }
+        }
+    CHECK(worstRing < 1e-3);  // [measured: 2.3e-4, the 4096 pixels' strata against the rings' edges]
+
+    // The pass's estimate (SubsurfaceScatter.hlsli sssScatter) at a point of a surface whose diffuse light and height off
+    // the plane are functions of the plane position; 'keep' says which sample points count. footprint: the radius r_c.
+    struct Estimate
+    {
+        float3 value;
+        float3 weightMean;  // mean of the weights x (1 - T_s): each channel's mass beyond the footprint
+    };
+    auto estimate = [&](float3 d, float rc, uint32_t samples, float u, float u2, float3 own, const std::function<float3(float, float)>& light,
+                        const std::function<float(float, float)>& height, const std::function<bool(float, float)>& keep) {
+        const float dS = std::max({ d.x, d.y, d.z });
+        const float3 centre{ m::subsurfaceRadialCdf(d.x, rc), m::subsurfaceRadialCdf(d.y, rc), m::subsurfaceRadialCdf(d.z, rc) };
+        const float centreS = m::subsurfaceRadialCdf(dS, rc);
+        const uint32_t pairs = samples / 2;
+        double sum[3] = {}, weight[3] = {}, all[3] = {};
+        for (uint32_t k = 0; k < pairs; ++k)
+        {
+            const float r = m::subsurfaceSampleRadius(dS, centreS, k, pairs, u);
+            const float pdf = m::subsurfaceRadialPdf(dS, r), angle = m::subsurfaceSampleAngle(k, u2);
+            for (int side = 0; side < 2; ++side)
+            {
+                const float x = (side ? -r : r) * std::cos(angle), y = (side ? -r : r) * std::sin(angle);
+                const float3 w = m::subsurfaceSampleWeight(d, r, height(x, y), pdf);
+                const float wc[3] = { w.x, w.y, w.z };
+                for (int c = 0; c < 3; ++c) all[c] += wc[c] * (1 - centreS) / samples;
+                if (!keep(x, y)) continue;
+                const float3 e = light(x, y);
+                const float ec[3] = { e.x, e.y, e.z };
+                for (int c = 0; c < 3; ++c) sum[c] += ec[c] * wc[c], weight[c] += wc[c];
+            }
+        }
+        const float o[3] = { own.x, own.y, own.z }, t[3] = { centre.x, centre.y, centre.z };
+        float v[3];
+        for (int c = 0; c < 3; ++c)
+        {
+            const float tail = weight[c] > 0 ? (float)(sum[c] / weight[c]) : o[c];
+            v[c] = tail + (o[c] - tail) * t[c];
+        }
+        return Estimate{ { v[0], v[1], v[2] }, { (float)all[0], (float)all[1], (float)all[2] } };
+    };
+    const float3 skinD = m::subsurfaceDistance(scene::Material{}.subsurfaceMeanFreePath, { 0.80f, 0.56f, 0.45f });  // the class's default on shading_ball's tone
+    const auto flat = [](float, float) { return 0.0f; };
+    const auto everywhere = [](float, float) { return true; };
+
+    // 4. energy
+    double worstEnergy = 0, worstMass = 0;
+    {
+        const float3 lit{ 3.0f, 0.5f, 0.125f };
+        const auto uniform = [&](float, float) { return lit; };
+        uint32_t cases = 0;
+        for (float rc : { 0.0005f, 0.004f, 0.02f })
+            for (uint32_t samples : { 2u, 8u, 16u, 64u })
+                for (int p = 0; p < 64; ++p)
+                {
+                    const float u = (p + 0.5f) / 64, u2 = std::fmod(p * 0.754877666f, 1.0f);
+                    // every sample; half of them rejected (a silhouette through the pixel); none; a curved surface
+                    const std::function<bool(float, float)> keeps[] = { everywhere, [](float x, float) { return x > 0; }, [](float, float) { return false; } };
+                    for (const auto& keep : keeps)
+                        for (int curved = 0; curved < 2; ++curved)
+                        {
+                            const auto bowl = [](float x, float y) { return (x * x + y * y) / (2 * 0.02f); };
+                            const Estimate e = estimate(skinD, rc, samples, u, u2, lit, uniform, curved ? std::function<float(float, float)>(bowl) : flat, keep);
+                            worstEnergy = std::max({ worstEnergy, std::fabs((double)e.value.x / lit.x - 1), std::fabs((double)e.value.y / lit.y - 1), std::fabs((double)e.value.z / lit.z - 1) });
+                            ++cases;
+                        }
+                }
+        CHECK(cases > 0);
+        // the weights' mean over the pixels' patterns: 1 - T_c per channel (the widest channel's weights are 1 each)
+        for (float rc : { 0.0005f, 0.004f })
+        {
+            double mass[3] = {};
+            const int pixels = 1024;
+            for (int p = 0; p < pixels; ++p)
+            {
+                const Estimate e = estimate(skinD, rc, 16, (p + 0.5f) / pixels, std::fmod(p * 0.754877666f, 1.0f), lit, uniform, flat, everywhere);
+                mass[0] += e.weightMean.x / pixels, mass[1] += e.weightMean.y / pixels, mass[2] += e.weightMean.z / pixels;
+            }
+            const float dc[3] = { skinD.x, skinD.y, skinD.z };
+            for (int c = 0; c < 3; ++c) worstMass = std::max(worstMass, std::fabs(mass[c] - (1 - (double)m::subsurfaceRadialCdf(dc[c], rc))));
+        }
+    }
+    CHECK(worstEnergy < 1e-5);
+    CHECK(worstMass < 1e-4);  // [measured: 1e-7]
+
+    // 5. a half-lit plane (light 1 where x > 0, the pixel at x0 from the edge): the exact value is the profile's mass on the
+    // lit side, the integral over xi of the lit share of the circle of radius P^-1(xi) around the pixel.
+    auto exactHalfPlane = [&](float d, float x0) {
+        const int N = 200000;
+        double sum = 0;
+        for (int i = 0; i < N; ++i)
+        {
+            const double r = m::subsurfaceRadius(d, (float)((i + 0.5) / N));
+            const double share = r <= std::fabs(x0) ? (x0 > 0 ? 1.0 : 0.0) : (x0 > 0 ? 1 - std::acos(x0 / r) / pi : std::acos(-x0 / r) / pi);
+            sum += share / N;
+        }
+        return sum;
+    };
+    double worstBias[2] = {}, worstNoise[2] = {};
+    const uint32_t counts[2] = { 16, 64 };
+    for (int n = 0; n < 2; ++n)
+        for (float x0 : { -0.03f, -0.012f, -0.004f, 0.002f, 0.008f, 0.02f })
+        {
+            const float rc = 0.0015f;  // (a pixel of 2.7 mm: shading_ball's distance at 1080p)
+            const auto halfLit = [&](float x, float) { return x + x0 > 0 ? float3{ 1, 1, 1 } : float3{ 0, 0, 0 }; };
+            const float own = x0 > 0 ? 1.0f : 0.0f;
+            double mean[3] = {}, square[3] = {};
+            const int grid = 48;
+            for (int a = 0; a < grid; ++a)
+                for (int b = 0; b < grid; ++b)
+                {
+                    const Estimate e = estimate(skinD, rc, counts[n], (a + 0.5f) / grid, (b + 0.5f) / grid, { own, own, own }, halfLit, flat, everywhere);
+                    const float v[3] = { e.value.x, e.value.y, e.value.z };
+                    for (int c = 0; c < 3; ++c) mean[c] += v[c], square[c] += (double)v[c] * v[c];
+                }
+            const float dc[3] = { skinD.x, skinD.y, skinD.z };
+            for (int c = 0; c < 3; ++c)
+            {
+                mean[c] /= grid * grid;
+                // (|x0| > r_c: the footprint's mass, which the estimate gives to the pixel's own light, lies on one side)
+                worstBias[n] = std::max(worstBias[n], std::fabs(mean[c] - exactHalfPlane(dc[c], x0)));
+                worstNoise[n] = std::max(worstNoise[n], std::sqrt(std::max(square[c] / (grid * grid) - mean[c] * mean[c], 0.0)));
+            }
+        }
+    logf("    subsurface profile: integral off 1 by %.1e, P off the running integral by %.1e, P(P^-1) off by %.1e; the pass's radii in rings off P by %.1e; a uniformly lit "
+         "plane off by %.1e, the weights' mean off the tail mass by %.1e; a half-lit plane against the exact integral: mean off by %.4f (16 samples), %.4f (64), noise %.4f, "
+         "%.4f of the lit level\n",
+         worstNorm, worstCdf, worstInverse, worstRing, worstEnergy, worstMass, worstBias[0], worstBias[1], worstNoise[0], worstNoise[1]);
+    CHECK(worstBias[0] < 0.01 && worstBias[1] < 0.003);    // [measured: 0.0026 and 0.0015 - the narrow channels' ratio of sums]
+    CHECK(worstNoise[0] < 0.10 && worstNoise[1] < 0.035);  // [measured: 0.081 and 0.023, the blue channel 2 mm inside the lit half]
+}
+
 UNX_TEST(reflection_view_geometry)
 {
     scene::Camera cam;
@@ -2226,6 +2440,81 @@ UNX_TEST(subsurface_model_on_the_gpu)
     CHECK(worstLobes < 1e-6);
     CHECK(worst < 1e-4);
     testDevice().deferRelease(constants);
+    testDevice().deferRelease(rb);
+}
+
+UNX_TEST(subsurface_profile_on_the_gpu)
+{
+    // Subsurface class, stage B: Passes/Common/SubsurfaceProfile.hlsli equals scene::model's profile, inverse distribution,
+    // sample radius, angle and weight to float rounding at 4096 points - mean free paths from 0.1 mm to 10 cm, a channel
+    // without one, points in and off the surface's plane (Passes/Test/SubsurfaceProfile.hlsl).
+    namespace m = scene::model;
+    const uint32_t n = 4096, bytes = n * 96;
+    ComPtr<ID3D12Resource> rb;
+    {
+        D3D12_HEAP_PROPERTIES rp{ D3D12_HEAP_TYPE_READBACK };
+        D3D12_RESOURCE_DESC1 rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = bytes;
+        rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        check(testDevice().d3d()->CreateCommittedResource3(&rp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&rb)), "readback");
+    }
+    ID3D12PipelineState* pso = shaders().compute("Passes/Test/SubsurfaceProfile");
+    RenderGraph g(testDevice());
+    const BufferRef out = g.createBuffer({ "subsurface profile out", bytes, 0 });
+    g.addPass("subsurface profile", QueueType::Graphics, [&](PassBuilder& b) { b.use(out, Use::UavCompute); },
+              [=](PassContext& ctx) {
+                  const uint32_t k[4] = { ctx.uav(out), n, 0, 0 };
+                  ctx.cmd->SetPipelineState(pso);
+                  ctx.computeConstants(k, 4);
+                  ctx.cmd->Dispatch((n + 63) / 64, 1, 1);
+              });
+    ID3D12Resource* dst = rb.Get();
+    g.addPass("subsurface profile readback", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(out, Use::CopySrc);
+                  b.keep();
+              },
+              [=](PassContext& ctx) { ctx.cmd->CopyBufferRegion(dst, 0, ctx.resource(out), 0, bytes); });
+    g.execute(nullptr);
+    for (uint32_t q = 0; q < kQueueTypeCount; ++q) testDevice().queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
+    const float* v = nullptr;
+    check(rb->Map(0, nullptr, (void**)&v), "map readback");
+    // relative to the value, with a floor at 1e-3 of the quantity's scale (weights and densities fall to 0 in the tail)
+    auto off = [](double got, double want, double scale) { return std::fabs(got - want) / std::max(std::fabs(want), 1e-3 * scale); };
+    double worstDistance = 0, worstDensity = 0, worstIntegral = 0, worstRadius = 0, worstAngle = 0, worstWeight = 0;
+    uint32_t offPlane = 0, noPath = 0;
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        const float* p = v + 24 * i;
+        const float3 albedo{ p[0], p[1], p[2] }, path{ p[3], p[4], p[5] };
+        const float r = p[6], h = p[7], xi = p[8], u = p[9], centre = p[23];
+        const uint32_t k = (uint32_t)p[10], pairs = (uint32_t)p[11];
+        const float3 d = m::subsurfaceDistance(path, albedo);
+        const float dS = std::max({ d.x, d.y, d.z });
+        offPlane += h > 0;
+        noPath += path.z == 0;
+        worstDistance = std::max({ worstDistance, off(p[12], d.x, d.x), off(p[13], d.y, d.y), off(p[14], d.z, d.z) });
+        worstDensity = std::max(worstDensity, off(p[15], m::subsurfaceRadialPdf(d.x, r), 1 / d.x));
+        worstIntegral = std::max(worstIntegral, std::fabs((double)p[16] - m::subsurfaceRadialCdf(d.x, r)));  // (absolute: 1 minus terms near 1)
+        // radii as quantiles (in the tail a radius moves by more than 1e-4 of itself per float step of xi)
+        worstRadius = std::max({ worstRadius, std::fabs((double)m::subsurfaceRadialCdf(dS, p[17]) - m::subsurfaceRadialCdf(dS, m::subsurfaceRadius(dS, xi))),
+                                 std::fabs((double)m::subsurfaceRadialCdf(dS, p[18]) - m::subsurfaceRadialCdf(dS, m::subsurfaceSampleRadius(dS, centre, k, pairs, u))) });
+        const double turn = std::fabs((double)p[19] - m::subsurfaceSampleAngle(k, u));
+        worstAngle = std::max(worstAngle, std::min(turn, 6.28318530718 - turn));  // (on the circle: 0 and 2 pi are one angle)
+        const float pdf = m::subsurfaceRadialPdf(dS, r);
+        const float3 w = m::subsurfaceSampleWeight(d, r, h, pdf);
+        worstWeight = std::max({ worstWeight, off(p[20], w.x, 1), off(p[21], w.y, 1), off(p[22], w.z, 1) });
+    }
+    rb->Unmap(0, nullptr);
+    logf("    subsurface profile on the GPU vs scene::model over %u points (%u off the plane, %u without a blue mean free path): worst relative d %.2e, p %.2e, "
+         "weights %.2e; P %.2e, radii as quantiles %.2e; angle %.2e rad\n",
+         n, offPlane, noPath, worstDistance, worstDensity, worstWeight, worstIntegral, worstRadius, worstAngle);
+    CHECK(offPlane > 0 && noPath > 0);
+    CHECK(worstDistance < 1e-5 && worstDensity < 1e-4 && worstWeight < 1e-4);
+    CHECK(worstIntegral < 1e-6 && worstRadius < 1e-5 && worstAngle < 1e-4);
     testDevice().deferRelease(rb);
 }
 

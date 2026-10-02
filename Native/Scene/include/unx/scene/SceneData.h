@@ -101,7 +101,8 @@ struct Material
     // Subsurface class (skin and similar; MaterialModel.h Subsurface, Passes/Common/MaterialModel.hlsli): the specular is
     // two GGX lobes at the roughnesses saturate(roughness x subsurfaceLobeRoughness[i]), lobe 0 weighing subsurfaceLobeMix
     // and lobe 1 the rest; transmission is the light through thin parts. subsurfaceMeanFreePath (per colour channel) is the
-    // screen-space scattering pass's (not read by any pass yet: the file and the GPU record carry it).
+    // medium's mean free path 1 / sigma_t: the screen-space scattering pass spreads the diffuse light with Burley's profile
+    // at d = l / s(albedo) (MaterialModel.h "Subsurface class, stage B"; 0 in a channel: no scattering there).
     float3 subsurfaceMeanFreePath{ 0.0120f, 0.0064f, 0.0045f };  // m, >= 0
     float subsurfaceLobeMix = 0.85f;                               // [0, 1]
     float2 subsurfaceLobeRoughness{ 0.75f, 1.30f };                // >= 0

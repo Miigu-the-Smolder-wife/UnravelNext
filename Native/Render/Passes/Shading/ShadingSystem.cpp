@@ -255,6 +255,11 @@ struct ShadingResources
     TextureRef areaLobes;  // A9 (AreaLobes.hlsl): area-light lobe radiance of the layered classes (area-lit scenes only)
     TextureRef direct;     // ShadeOpaque part 1 -> ShadeIndirect (part 2): the direct radiance (RGBA32F, linear before exposure)
     TextureRef megaLighting;  // shading.mega_lights: the local lights' direct light (m.ml.spatial; invalid = off)
+    // shading.subsurface_scatter (SubsurfaceScatter.hlsli): the Subsurface class's diffuse light per unit f_d (RGBA16F:
+    // rgb x exposure, a = view depth; invalid = off), and with shading.mega_lights the local lights' specular of the
+    // class's pixels (m.ml.spatial.sss; their diffuse is in the first)
+    TextureRef scatterDiffuse, scatterMlSpecular;
+    bool scattered = false;  // m.sss.scatter is recorded for this view (shadingScatter, or the composite part itself)
     BufferRef edgePixels, edgeArgs, fallbackArgs;
 };
 struct ShadingTable
@@ -266,6 +271,7 @@ struct ShadingTable
 enum class Part
 {
     Banded,     // ShadeBegin (before the group) and the banded passes: edge detection, shading
+    Scatter,    // after the group, before anything reads the lit image: the Subsurface class's scatter pass
     Composite,  // after the group: overflow fallback tiles, statistics, edge composite
 };
 
@@ -318,11 +324,28 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                  ".PLANAR" + (view.view.kind != gpu::ViewKind::Main ? "1" : "0") + ".LAYERED" + std::to_string(layered);
         return fc.shaders.compute(name.c_str());
     };
+    // Subsurface class, stage B (shading.subsurface_scatter; SubsurfaceScatter.hlsli states the passes): the class's
+    // kernels keep its diffuse light apart, per unit f_d, in a texture of its own (SubsurfaceDirect, SubsurfaceIndirect:
+    // ShadeOpaque.hlsl with SSS_SPLIT), and m.sss.scatter scatters it, puts f_d back and writes the output. Scenes without
+    // Subsurface materials, and the switch off, run the kernels and passes of stage A.
+    const bool scatter = subsurfaceMaterials && fc.quality.boolean("shading.subsurface_scatter");
+    const uint32_t scatterSamples = scatter ? (uint32_t)fc.quality.integer("shading.subsurface_scatter_samples") : 0u;
+    const float scatterMinPixels = scatter ? (float)fc.quality.number("shading.subsurface_scatter_min_px") : 1.0f;
+    if (scatter && (scatterSamples < 2 || scatterSamples > 64 || (scatterSamples & 1u) != 0))
+        fail("shading.subsurface_scatter_samples must be even and in [2, 64] (pairs across the pixel)");
+    if (scatter && !(scatterMinPixels > 0)) fail("shading.subsurface_scatter_min_px must be positive");
+    auto subsurfaceKernel = [&](uint32_t shadePart, bool fallbackVariant) {
+        const std::string planarTag = view.view.kind != gpu::ViewKind::Main ? "1" : "0", fallbackTag = fallbackVariant ? "1" : "0";
+        const std::string name = shadePart == 1 ? "Passes/Shading/SubsurfaceDirect.FALLBACK" + fallbackTag + ".AREA" + (areaLights ? "1" : "0") + ".PLANAR" + planarTag
+                                                : "Passes/Shading/SubsurfaceIndirect.FALLBACK" + fallbackTag + ".PLANAR" + planarTag;
+        return fc.shaders.compute(name.c_str());
+    };
     ID3D12PipelineState* opaque = opaqueKernel(false, 0);
     ID3D12PipelineState* opaqueLayered = layeredMaterials ? opaqueKernel(false, 1) : nullptr;
     ID3D12PipelineState* opaqueSheen = sheenMaterials ? opaqueKernel(false, 2) : nullptr;
-    ID3D12PipelineState* opaqueSubsurface = subsurfaceMaterials ? opaqueKernel(false, 3) : opaque;  // (part 2: the plain kernel's)
+    ID3D12PipelineState* opaqueSubsurface = subsurfaceMaterials ? (scatter ? subsurfaceKernel(1, false) : opaqueKernel(false, 3)) : opaque;  // (part 2: the plain kernel's)
     ID3D12PipelineState* indirect = indirectKernel(false, 0);
+    ID3D12PipelineState* indirectSubsurface = scatter ? subsurfaceKernel(2, false) : indirect;
     ID3D12PipelineState* indirectLayered = layeredMaterials ? indirectKernel(false, 1) : nullptr;
     ID3D12PipelineState* indirectSheen = sheenMaterials ? indirectKernel(false, 2) : nullptr;
     // A9 area-light lobes (AreaLobes.hlsl: ShadeOpaque's light loop with the sheen and anisotropic lobes over each area
@@ -386,7 +409,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     };
     const uint32_t tileCount = o.tilesX * o.tilesY, ltcSrv = ltc.srv, experiment = experimentMask(fc.quality);
     // 14.1b (L2b): the converted emissive surfaces as quadtree area lights (shading.emissive_area_lights; invalid = off).
-    const BufferRef emissiveLights = lights::emissiveLights(fc);
+    // (the scatter part reads neither them nor the tile records)
+    const BufferRef emissiveLights = part == Part::Scatter ? BufferRef{} : lights::emissiveLights(fc);
     TextureRef emissiveIrradiance;  // per-pixel diffuse irradiance from them (EmissiveDirect.hlsl, exposed RGBA16F)
     // 14.1/14.2 (L2): the tile lights' records (TileLights.hlsl; shading.tile_lights, main view with S's lists).
     // shading.mega_lights (MegaLights.cpp; main view with S's lists and R's ray scene): the local lights' direct light comes
@@ -399,7 +423,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     const bool megaWanted = false;
 #endif
     const bool tileLights = fc.quality.boolean("shading.tile_lights") && froxelLists && view.view.kind == gpu::ViewKind::Main && !megaWanted;
-    const BufferRef tileRecords = tileLights ? fc.graph.createBuffer({ "M tile lights", (uint64_t)tileCount * 96, 0 }) : BufferRef{};
+    const BufferRef tileRecords = tileLights && part != Part::Scatter ? fc.graph.createBuffer({ "M tile lights", (uint64_t)tileCount * 96, 0 }) : BufferRef{};
     if (emissiveLights.valid())
     {
         RenderGraph& g = fc.graph;
@@ -470,6 +494,12 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         // (shading.mega_lights: the lobes are in its kernel, on the light samples - no lobe texture, no lobe pass)
         if (lobesOn && !megaWanted) res.areaLobes = fc.graph.createTexture({ "m.area lobes", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
         res.direct = fc.graph.createTexture({ "m.direct radiance", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+        if (scatter)
+        {
+            res.scatterDiffuse = fc.graph.createTexture({ "m.sss diffuse", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+            if (megaWanted)
+                res.scatterMlSpecular = fc.graph.createTexture({ "m.sss ml specular", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+        }
         res.edgePixels = fc.graph.createBuffer({ "m.edge pixels", ((uint64_t)v.view.width * v.view.height + 1) * 4, 0 });
         res.edgeArgs = fc.graph.createBuffer({ "m.edge args", 24, 0 });  // dispatch args + pixel count (Edge.hlsli)
         res.edgeTiles = fc.graph.createTexture({ "m.edge tile mask", o.tilesX, o.tilesY, 1, 1, DXGI_FORMAT_R32G32_UINT });  // 64 bits per tile
@@ -512,11 +542,112 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     }
     const BufferRef fallbackArgs = res.fallbackArgs, edgePixels = res.edgePixels, edgeArgs = res.edgeArgs;
     const TextureRef edgeRadiance = res.edgeRadiance, edgeTiles = res.edgeTiles, areaLobes = res.areaLobes, directRadiance = res.direct;
+    const TextureRef scatterDiffuse = res.scatterDiffuse, scatterMlSpecular = res.scatterMlSpecular;
     TextureRef megaLighting = res.megaLighting;  // (the banded part sets it below)
     // Planar views: tiles without mirror pixels are never shaded; edge detection and the composite treat their pixels as
     // outside the view (R always gives the tile mask with the pixel mask, v1.22).
     const TextureRef planarTiles = v.view.planarTileMask;
     if (v.view.planarMask.valid() && !planarTiles.valid()) fail("M.shading: a planar view has a pixel mask without its tile mask");
+    // m.sss.scatter (SubsurfaceScatter.hlsl; shading.subsurface_scatter): the Subsurface class's tiles - every list band
+    // of the resolve, or (fallbackTiles) the tiles over S's overflow capacity with the class as a mask, which the first run
+    // leaves out - scattered, f_d put back, and written as part 2 of the plain classes writes its pixels (air, exposure
+    // histogram, particles, output, edge / coverage radiance). It reads the class's diffuse texture around each pixel, so
+    // it follows the whole group (and the fallback kernels for their tiles).
+    const uint32_t subsurfaceBit = 1u << (uint32_t)material::ShadeClass::Subsurface;
+    auto addScatter = [&](bool fallbackTiles) {
+        ID3D12PipelineState* kernel = fc.shaders.compute(linear ? "Passes/Shading/SubsurfaceScatter.OUTPUT1" : "Passes/Shading/SubsurfaceScatter.OUTPUT0");
+        const uint32_t listBandCount = o.bands;
+        const char* name = fallbackTiles ? (planar ? "m.sss.scatter.fallback.planar" : "m.sss.scatter.fallback") : (planar ? "m.sss.scatter.planar" : "m.sss.scatter");
+        fc.graph.addPass(name, QueueType::Graphics,
+                         [&](PassBuilder& b) {
+                             b.use(v.gbuffer, Use::SrvCompute);
+                             b.use(v.depth, Use::SrvCompute);
+                             b.use(o.materialWord, Use::SrvCompute);
+                             b.use(scatterDiffuse, Use::SrvCompute);
+                             b.use(directRadiance, Use::SrvCompute);
+                             if (fallbackTiles)
+                             {
+                                 b.use(v.shadowOverflowFallbackTiles, Use::SrvCompute);
+                                 b.use(fallbackArgs, Use::IndirectArgs);
+                             }
+                             else
+                             {
+                                 b.use(o.tiles, Use::SrvCompute);
+                                 b.use(o.tileArgs, Use::IndirectArgs);
+                                 if (overflow) b.use(v.shadowOverflowTiles, Use::SrvCompute);
+                             }
+                             b.use(v.color, Use::UavCompute);
+                             if (atmosphere)
+                                 for (TextureRef t : { r.transmittanceLut, r.multiScatterLut }) b.use(t, Use::SrvCompute);
+                             if (air) b.use(v.airVolume, Use::SrvCompute);
+                             declareFog(b, r, Use::SrvCompute);
+                             b.use(edgeRadiance, Use::UavCompute);
+                             b.use(edgeTiles, Use::SrvCompute);
+                             if (coverage) b.use(v.coverageTiles, Use::SrvCompute);
+                             if (keepWater) b.use(v.waterVis, Use::SrvCompute);
+                             useParticles(b);
+                             if (histogram.buffer.valid()) b.use(histogram.buffer, Use::UavCompute);
+                         },
+                         [=](PassContext& c) {
+                             const uint32_t none = gpu::kNone;
+                             uint32_t k32[48];
+                             for (uint32_t& w : k32) w = none;
+                             k32[0] = c.srv(v.gbuffer);
+                             k32[1] = c.srv(v.depth);
+                             k32[2] = c.srv(o.materialWord);
+                             k32[3] = c.uav(v.color);
+                             k32[12] = atmosphere ? c.srv(r.transmittanceLut) : none;
+                             k32[13] = atmosphere ? c.srv(r.multiScatterLut) : none;
+                             k32[14] = !fallbackTiles && overflow ? c.srv(v.shadowOverflowTiles) : none;  // P[3].z: tiles the fallback run takes
+                             k32[15] = air ? c.srv(v.airVolume) : none;
+                             k32[18] = experiment;                                                 // P[4].z
+                             k32[19] = histogram.buffer.valid() ? c.uav(histogram.buffer) : none;  // P[4].w (the main view's histogram)
+                             particleConstants(c, k32 + 22);                                       // P[5].zw
+                             k32[24] = c.srv(edgeTiles);                                           // P[6].x
+                             k32[25] = coverage ? c.srv(v.coverageTiles) : none;                   // P[6].y
+                             k32[26] = asUint(histogram.centreSigma);                              // P[6].z
+                             k32[28] = c.uav(edgeRadiance);                                        // P[7].x
+                             k32[31] = keepWater ? c.srv(v.waterVis) : none;                       // P[7].w
+                             k32[38] = c.srv(scatterDiffuse);                                      // P[9].z: the class's diffuse light per unit f_d
+                             k32[40] = c.srv(directRadiance);                                      // P[10].x: its specular light and emission
+                             k32[45] = scatterSamples;                                             // P[11].y
+                             k32[46] = asUint(scatterMinPixels);                                   // P[11].z
+                             c.cmd->SetPipelineState(kernel);
+                             c.bindFrameConstants(cb);
+                             if (fallbackTiles)
+                             {
+                                 k32[4] = c.srv(v.shadowOverflowFallbackTiles);
+                                 k32[5] = 4;
+                                 k32[6] = 0x80000000u | subsurfaceBit;  // P[1].z: the class as a mask
+                                 c.computeConstants(k32, 48);
+                                 c.cmd->ExecuteIndirect(signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
+                                 return;
+                             }
+                             const uint32_t cls = (uint32_t)material::ShadeClass::Subsurface;
+                             ID3D12Resource* args = c.resource(o.tileArgs);
+                             k32[4] = c.srv(o.tiles);
+                             k32[6] = cls;
+                             for (uint32_t band = 0; band < listBandCount; ++band)
+                             {
+                                 k32[5] = o.firstTile(cls, band);
+                                 c.computeConstants(k32, 48);
+                                 c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
+                             }
+                         });
+    };
+    auto markScattered = [&] {
+        for (auto& [key, rs] : table.views)
+            if (key == view.frameConstants) rs.scattered = true;
+    };
+    if (part == Part::Scatter)
+    {
+        if (scatter)
+        {
+            addScatter(false);
+            markScattered();
+        }
+        return {};
+    }
     if (part == Part::Banded)
     {
         ID3D12PipelineState* begin = fc.shaders.compute("Passes/Shading/ShadeBegin");
@@ -538,6 +669,19 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              c.computeConstants(k, 8);
                              c.cmd->Dispatch(1, 1, 1);
                          });
+
+        if (scatter)
+        {
+            // m.sss.clear: the class's diffuse texture to 0 before its kernels add to it (alpha 0: not the class's pixel)
+            ID3D12PipelineState* clear = fc.shaders.compute("Passes/Shading/SubsurfaceClear");
+            fc.graph.addPass(planar ? "m.sss.clear.planar" : "m.sss.clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(scatterDiffuse, Use::UavCompute); },
+                             [clear, scatterDiffuse, w = v.view.width, h = v.view.height](PassContext& c) {
+                                 const uint32_t k[4] = { c.uav(scatterDiffuse), w, h, 0 };
+                                 c.cmd->SetPipelineState(clear);
+                                 c.computeConstants(k, 4);
+                                 c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                             });
+        }
 
         if (megaWanted)
         {
@@ -627,6 +771,16 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             megaLighting = ml.lighting;
             view.localDirect = megaLighting;
             table.views.back().second.megaLighting = megaLighting;
+            if (scatter)
+            {
+                // m.ml.spatial.sss: the Subsurface class's pixels with the lights' diffuse and specular apart - the diffuse
+                // into the class's diffuse texture, the specular for the class's part 2 in place of m.ml.spatial's sum
+                std::vector<MegaLightsClassBand> classBands;
+                for (uint32_t band = 0; band < o.bands; ++band)
+                    classBands.push_back({ o.firstTile((uint32_t)material::ShadeClass::Subsurface, band), o.argsOffset((uint32_t)material::ShadeClass::Subsurface, band) });
+                megaLightsSubsurface(fc, view, o.materialWord, ml, o.tiles, o.tileArgs, classBands, (uint32_t)material::ShadeClass::Subsurface, signature, scatterDiffuse,
+                                     scatterMlSpecular);
+            }
         }
 
         // Edge detection and shading are banded passes (INTERFACES v1.29, design revision 1 4.8): in a band the detection
@@ -759,6 +913,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             if (megaLighting.valid()) b.use(megaLighting, Use::SrvCompute);  // shading.mega_lights (P[10].y)
             if (r.vsmTileLit.valid()) b.use(r.vsmTileLit, Use::SrvCompute);  // L3 (P[10].w)
             if (meter) b.use(histogram.buffer, Use::UavCompute);
+            if (scatter)
+            {
+                b.use(scatterDiffuse, Use::UavComputeDisjoint);  // shading.subsurface_scatter: the Subsurface class's P[9].z
+                if (scatterMlSpecular.valid()) b.use(scatterMlSpecular, Use::SrvCompute);  // ... and its P[10].y
+            }
         };
         shadePass.execute = [=](PassContext& c) {
             const auto [firstBand, lastBand] = listBands(c);
@@ -798,7 +957,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 if (part == 2 && shadeClass == material::ShadeClass::Opaque && band == firstBand) lobeBarrier(c);  // part 1's writes before part 2's reads
                 c.cmd->SetPipelineState(part == 1 ? (shadeClass == material::ShadeClass::Layered ? opaqueLayered : (shadeClass == material::ShadeClass::Sheen ? opaqueSheen : opaque))
                                                   : (shadeClass == material::ShadeClass::Layered ? indirectLayered : (shadeClass == material::ShadeClass::Sheen ? indirectSheen : indirect)));
-                if (part == 1 && shadeClass == material::ShadeClass::Subsurface) c.cmd->SetPipelineState(opaqueSubsurface);
+                if (shadeClass == material::ShadeClass::Subsurface) c.cmd->SetPipelineState(part == 1 ? opaqueSubsurface : indirectSubsurface);
                 const uint32_t cls = (uint32_t)shadeClass;
                 const uint32_t k[22] = { c.srv(v.gbuffer), c.srv(v.depth), c.srv(o.materialWord), c.uav(v.color),
                                          c.srv(o.tiles), o.firstTile(cls, band), cls, o.emissive.valid() ? c.srv(o.emissive) : none,
@@ -828,6 +987,13 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 k32[45] = roughSpecular.valid() ? c.srv(roughSpecular) : none;           // P[11].y: gi.lumen_only's rough specular
                 k32[46] = shortRangeAO.valid() ? c.srv(shortRangeAO) : none;             // P[11].z: ... and short-range AO
                 k32[47] = backfaceIrradiance.valid() ? c.srv(backfaceIrradiance) : none;  // P[11].w: ... and Foliage's back side
+                if (scatter && shadeClass == material::ShadeClass::Subsurface)
+                {
+                    // shading.subsurface_scatter (SSS_SPLIT kernels): the class's diffuse texture, and the local lights'
+                    // specular alone in place of m.ml.spatial's sum (their diffuse is in the diffuse texture)
+                    k32[38] = c.uav(scatterDiffuse);                                        // P[9].z
+                    k32[41] = scatterMlSpecular.valid() ? c.srv(scatterMlSpecular) : none;  // P[10].y
+                }
                 ID3D12PipelineState* lobes = shadeClass == material::ShadeClass::Layered ? lobesLayered : (shadeClass == material::ShadeClass::Sheen ? lobesSheen : nullptr);
                 if (part == 1 && lobes && areaLobes.valid())
                 {
@@ -847,18 +1013,27 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
 
     // Tiles over S's overflow capacity (INTERFACES 7.3): every non-sky class of the tile, lights past the third from S's
     // VSM directly (FALLBACK=1; its extra registers stay out of the main kernel). An empty list costs one argument read.
+    // (a caller that records the two parts without shadingScatter: the scatter pass here, before the composites read the
+    // edge / coverage radiance it keeps)
+    if (scatter && !res.scattered)
+    {
+        addScatter(false);
+        markScattered();
+    }
     if (fallback)
     {
         // one run per LAYERED variant over its classes (P[1].z mask, bit 31): the clearcoat or plain variant over every
         // class but Sheen and Subsurface, then the sheen variant over Sheen and the Subsurface variant over Subsurface
-        const uint32_t sheenBit = 1u << (uint32_t)material::ShadeClass::Sheen, subsurfaceBit = 1u << (uint32_t)material::ShadeClass::Subsurface;
+        // (shading.subsurface_scatter: its SSS_SPLIT kernels; m.sss.scatter.fallback follows the pass)
+        const uint32_t sheenBit = 1u << (uint32_t)material::ShadeClass::Sheen;
         std::vector<std::pair<ID3D12PipelineState*, uint32_t>> fallbackRuns = {
             { opaqueKernel(true, layeredMaterials ? 1 : 0), 0xFFFFFFFFu & ~(sheenMaterials ? sheenBit : 0u) & ~(subsurfaceMaterials ? subsurfaceBit : 0u) } };
         if (sheenMaterials) fallbackRuns.push_back({ opaqueKernel(true, 2), 0x80000000u | sheenBit });
-        if (subsurfaceMaterials) fallbackRuns.push_back({ opaqueKernel(true, 3), 0x80000000u | subsurfaceBit });
+        const size_t subsurfaceRun = scatter ? fallbackRuns.size() : SIZE_MAX;  // the run whose kernels take the class's diffuse texture
+        if (subsurfaceMaterials) fallbackRuns.push_back({ scatter ? subsurfaceKernel(1, true) : opaqueKernel(true, 3), 0x80000000u | subsurfaceBit });
         std::vector<ID3D12PipelineState*> fallbackIndirect = { indirectKernel(true, layeredMaterials ? 1 : 0) };
         if (sheenMaterials) fallbackIndirect.push_back(indirectKernel(true, 2));
-        if (subsurfaceMaterials) fallbackIndirect.push_back(indirectKernel(true, 0));
+        if (subsurfaceMaterials) fallbackIndirect.push_back(scatter ? subsurfaceKernel(2, true) : indirectKernel(true, 0));
         std::vector<ID3D12PipelineState*> fallbackLobes = { lobesOn && anisoMaterials ? lobeKernel(true, 1) : nullptr };
         if (sheenMaterials) fallbackLobes.push_back(lobesOn ? lobeKernel(true, 2) : nullptr);
         if (subsurfaceMaterials) fallbackLobes.push_back(nullptr);
@@ -915,6 +1090,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              if (emissiveIrradiance.valid()) b.use(emissiveIrradiance, Use::SrvCompute);  // 14.1b
                              if (tileLights) b.use(tileRecords, Use::SrvCompute);  // L2
                              if (megaLighting.valid()) b.use(megaLighting, Use::SrvCompute);  // shading.mega_lights (P[10].y)
+                             if (scatter)
+                             {
+                                 b.use(scatterDiffuse, Use::UavComputeDisjoint);  // shading.subsurface_scatter: the Subsurface run's P[9].z
+                                 if (scatterMlSpecular.valid()) b.use(scatterMlSpecular, Use::SrvCompute);  // ... and its P[10].y
+                             }
                          },
                          [=](PassContext& c) {
                              const uint32_t none = gpu::kNone;
@@ -960,11 +1140,20 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              k32[27] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : none;  // P[6].w (A8)
                              k32[38] = areaLobes.valid() ? c.uav(areaLobes) : none;  // P[9].z (A9 area-light lobes)
                              k32[39] = v.giIrradiance.valid() ? c.srv(v.giIrradiance) : none;  // P[9].w
+                             // (the Subsurface run with shading.subsurface_scatter: the class's diffuse texture in P[9].z and the
+                             // local lights' specular alone in P[10].y, as in the banded pass)
+                             const uint32_t lobeWord = k32[38], localWord = k32[41];
+                             auto runWords = [&](size_t run) {
+                                 const bool split = run == subsurfaceRun;
+                                 k32[38] = split ? c.uav(scatterDiffuse) : lobeWord;
+                                 k32[41] = split ? (scatterMlSpecular.valid() ? c.srv(scatterMlSpecular) : none) : localWord;
+                             };
                              // every run's part 1 (with its lobe kernel), one barrier, every run's part 2
                              for (size_t run = 0; run < fallbackRuns.size(); ++run)
                              {
                                  const auto& [kernel, classes] = fallbackRuns[run];
                                  k32[6] = classes;  // P[1].z
+                                 runWords(run);
                                  c.bindFrameConstants(cb);
                                  if (fallbackLobes[run] && areaLobes.valid())
                                  {
@@ -980,11 +1169,13 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              for (size_t run = 0; run < fallbackRuns.size(); ++run)
                              {
                                  k32[6] = fallbackRuns[run].second;  // P[1].z
+                                 runWords(run);
                                  c.cmd->SetPipelineState(fallbackIndirect[run]);
                                  c.computeConstants(k32, 48);
                                  c.cmd->ExecuteIndirect(signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
                              }
                          });
+        if (scatter) addScatter(true);
     }
 
     // Tile counts of the main view into the readback ring (statistics for gates).
@@ -1545,6 +1736,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
 
 std::vector<RenderGraph::BandedPass> shadingPasses(FramePassContext& fc, ViewResources& view) { return record(fc, view, Part::Banded); }
 
+void shadingScatter(FramePassContext& fc, ViewResources& view) { record(fc, view, Part::Scatter); }
+
 void shadingComposite(FramePassContext& fc, ViewResources& view)
 {
     record(fc, view, Part::Composite);
@@ -1717,6 +1910,7 @@ void shade(FramePassContext& fc, ViewResources& view)
     const std::vector<RenderGraph::BandedPass> passes = shadingPasses(fc, target);
     const material::ResolveOutputs& o = material::resolveOutputs(fc, target);
     fc.graph.addBandedGroup(view.view.kind != gpu::ViewKind::Main ? "m.lit.planar" : "m.lit", o.height, o.bands, passes);
+    shadingScatter(fc, target);  // (shading.subsurface_scatter: the Subsurface class's pixels, before the lit image is read)
     keepSceneColor(fc, target, target.color);  // (main view with the upscale: the next frame's screen-trace source)
     tracks::water(fc, target);  // W (engine 1): the water surfaces' refraction targets are the shaded opaque scene and its depth
     shadingComposite(fc, target);
