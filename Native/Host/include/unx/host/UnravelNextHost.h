@@ -50,7 +50,9 @@ enum UnxResult
                             //    UnxSceneSetMeshAttributes (a mesh's second uv set and vertex colours),
                             //    UnxLightComponentsDefaults, UnxSceneSetLightComponents (a light's scales, source texture,
                             //    barn doors, lighting channels, draw distance, colour temperature, falloff exponent),
-                            //    UnxSceneSetInstanceLightingChannels
+                            //    UnxSceneSetInstanceLightingChannels,
+                            //    UnxDecalComponentsDefaults, UnxDecalSetComponents (a decal's tint, channels, screen-size
+                            //    and lifetime fades), UnxSceneSetInstanceReceivesDecals
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -234,6 +236,7 @@ enum UnxInstanceFlags  // scene::InstanceFlags
     UNX_INSTANCE_SKINNED = 1u << 2,
     UNX_INSTANCE_WIND = 1u << 3,
     // bits 4..6: the instance's lighting channels (UNX_INSTANCE_LIGHTING_CHANNELS below); 0 = channel 0 alone
+    UNX_INSTANCE_NO_DECALS = 1u << 7,  // the instance takes no projected decals (the engine's "receives decals" off)
 };
 // The lighting channels of an instance as its flags' bits: channels = a mask of the three channels (bit 0, 1, 2) the
 // instance is in - a light lights the instances that share a channel with it (UnxLightComponentsDesc::lightingChannels).
@@ -371,6 +374,41 @@ static_assert(sizeof(UnxDecalDesc) == 80, "UnxDecalDesc is part of the ABI (Asse
 UNX_API int32_t UNX_CALL UnxDecalAdd(UnxRenderer r, const UnxDecalDesc* desc, uint32_t* id);
 UNX_API int32_t UNX_CALL UnxDecalUpdate(UnxRenderer r, uint32_t id, const UnxDecalDesc* desc);
 UNX_API int32_t UNX_CALL UnxDecalRemove(UnxRenderer r, uint32_t id);
+// Decal components (optional exports within ABI 6): what a decal carries beyond UnxDecalDesc (decal::Decal; the engine's
+// decal component). A decal added with UnxDecalAdd has the defaults; UnxDecalSetComponents gives a live decal its own,
+// and UnxDecalUpdate keeps them (it describes the box, the material and the angle fade anew). Changes reach the frames
+// queued after the call.
+//   colour      tint of the decal's base colour (linear, >= 0; default 1, 1, 1).
+//   channels    the parts of the receiver's material the decal changes (UnxDecalChannels; default all three): a
+//               normal-only or a roughness-only decal.
+//   screen size the decal fades out as it gets small on screen (the engine's FadeScreenSize; 0: no such fade): with
+//               screen = the box's largest half extent / its distance and k = fadeScreenSize x 2 tan(half fov x) / view
+//               width x 600, the opacity is times saturate((screen - k) / (k / 2)).
+//   lifetime    on the frames' clock (UnxFrameDesc::time, seconds): the opacity rises over [fadeInStart, fadeInStart +
+//               fadeInDuration] and falls over [fadeOutStart, fadeOutStart + fadeOutDuration]; a duration of 0: no such
+//               fade. A decal that has faded out stays (remove it with UnxDecalRemove).
+// Fill the description with UnxDecalComponentsDefaults first (a zeroed one has no channels and a black tint).
+enum UnxDecalChannels  // decal::DecalChannels
+{
+    UNX_DECAL_BASE_COLOR = 1,
+    UNX_DECAL_NORMAL = 2,       // the normal and its slope variance
+    UNX_DECAL_ROUGH_METAL = 4,  // roughness and metallic
+};
+typedef struct UnxDecalComponentsDesc
+{
+    uint32_t size, version;     // sizeof (48), 1
+    float color[3];             // linear, >= 0 (default 1, 1, 1)
+    uint32_t channels;          // UnxDecalChannels, 1..7 (default 7)
+    float fadeScreenSize;       // >= 0 (default 0: none)
+    float fadeInStart, fadeInDuration;    // s; duration >= 0 (default 0: none)
+    float fadeOutStart, fadeOutDuration;  // s; duration >= 0 (default 0: none)
+    uint32_t reserved;          // 0
+} UnxDecalComponentsDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxDecalComponentsDesc) == 48, "UnxDecalComponentsDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxDecalComponentsDefaults(UnxDecalComponentsDesc* desc);
+UNX_API int32_t UNX_CALL UnxDecalSetComponents(UnxRenderer r, uint32_t id, const UnxDecalComponentsDesc* desc);
 // First-person view models (A12, E's Passes/ViewModel; optional exports within ABI 6, INTERFACES v1.54): a scene instance
 // posed in the camera's frame - cameraLocal12 is its object -> view space transform (rows of a 3 x 4 matrix; view space:
 // x right, y up, looking down -z; the renderer's axes, i.e. Unity camera space with z negated) - composed with the camera
@@ -812,6 +850,11 @@ UNX_API int32_t UNX_CALL UnxSceneSetLightComponents(UnxRenderer r, uint32_t ligh
 // UNX_INSTANCE_LIGHTING_CHANNELS takes it). After commit, describe the instance anew with the flag bits
 // (UnxSceneEditInstances).
 UNX_API int32_t UNX_CALL UnxSceneSetInstanceLightingChannels(UnxRenderer r, uint32_t instance, uint32_t channels);
+// Whether an instance already added takes projected decals (before UnxSceneCommit; receives = 0: none - the flag
+// UNX_INSTANCE_NO_DECALS, which a description may carry in UnxInstanceDesc::flags as well; every instance receives them
+// by default). After commit, describe the instance anew with or without the flag (UnxSceneEditInstances). A decal
+// attached to such an instance paints nothing.
+UNX_API int32_t UNX_CALL UnxSceneSetInstanceReceivesDecals(UnxRenderer r, uint32_t instance, uint32_t receives);
 
 // Loads a .unxscene file (INTERFACES 6.2) as the renderer's content: textures, materials, meshes, skeletons, instances
 // (their flags included), lights, sun, atmosphere and wind, with the file's indices. Only before any content was added and

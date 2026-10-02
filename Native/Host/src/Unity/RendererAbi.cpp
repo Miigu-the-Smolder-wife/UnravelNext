@@ -517,7 +517,45 @@ UNX_API int32_t UNX_CALL UnxDecalAdd(UnxRenderer r, const UnxDecalDesc* desc, ui
 
 UNX_API int32_t UNX_CALL UnxDecalUpdate(UnxRenderer r, uint32_t id, const UnxDecalDesc* desc)
 {
-    return call([&] { find(r)->decalUpdate(id, decalOf(desc)); });
+    // (the description has no components: the decal keeps the ones UnxDecalSetComponents gave it)
+    return call([&] { find(r)->decalUpdate(id, decalOf(desc), true); });
+}
+
+static_assert((uint32_t)UNX_DECAL_BASE_COLOR == (uint32_t)decal::DecalBaseColor && (uint32_t)UNX_DECAL_NORMAL == (uint32_t)decal::DecalNormal &&
+              (uint32_t)UNX_DECAL_ROUGH_METAL == (uint32_t)decal::DecalRoughMetal);
+static_assert((uint32_t)UNX_INSTANCE_NO_DECALS == (uint32_t)scene::InstanceNoDecals);
+
+UNX_API int32_t UNX_CALL UnxDecalComponentsDefaults(UnxDecalComponentsDesc* d)
+{
+    return call([&] {
+        if (!d) fail("UnxDecalComponentsDesc output is null");
+        const decal::Decal c;
+        std::memset(d, 0, sizeof *d);
+        d->size = sizeof *d;
+        d->version = 1;
+        d->color[0] = c.color.x, d->color[1] = c.color.y, d->color[2] = c.color.z;
+        d->channels = c.channels;
+        d->fadeScreenSize = c.fadeScreenSize;
+        d->fadeInStart = c.fadeInStart, d->fadeInDuration = c.fadeInDuration;
+        d->fadeOutStart = c.fadeOutStart, d->fadeOutDuration = c.fadeOutDuration;
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxDecalSetComponents(UnxRenderer r, uint32_t id, const UnxDecalComponentsDesc* d)
+{
+    return call([&] {
+        if (!d) fail("UnxDecalSetComponents: no description");
+        if (d->size != sizeof(UnxDecalComponentsDesc) || d->version != 1)
+            fail("UnxDecalSetComponents: UnxDecalComponentsDesc size %u version %u", d->size, d->version);
+        if (d->reserved != 0) fail("UnxDecalSetComponents: reserved is not 0");
+        decal::Decal c;
+        c.color = f3(d->color);
+        c.channels = d->channels;
+        c.fadeScreenSize = d->fadeScreenSize;
+        c.fadeInStart = d->fadeInStart, c.fadeInDuration = d->fadeInDuration;
+        c.fadeOutStart = d->fadeOutStart, c.fadeOutDuration = d->fadeOutDuration;
+        find(r)->decalSetComponents(id, c);
+    });
 }
 
 UNX_API int32_t UNX_CALL UnxDecalRemove(UnxRenderer r, uint32_t id)
@@ -733,6 +771,11 @@ UNX_API int32_t UNX_CALL UnxSceneSetLightComponents(UnxRenderer r, uint32_t ligh
 UNX_API int32_t UNX_CALL UnxSceneSetInstanceLightingChannels(UnxRenderer r, uint32_t instance, uint32_t channels)
 {
     return call([&] { find(r)->setInstanceLightingChannels(instance, channels); });
+}
+
+UNX_API int32_t UNX_CALL UnxSceneSetInstanceReceivesDecals(UnxRenderer r, uint32_t instance, uint32_t receives)
+{
+    return call([&] { find(r)->setInstanceReceivesDecals(instance, receives != 0); });
 }
 
 UNX_API int32_t UNX_CALL UnxFrameSetClouds(UnxRenderer r, const UnxCloudDesc* clouds)

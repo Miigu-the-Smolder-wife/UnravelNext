@@ -487,6 +487,14 @@ void HostRenderer::setInstanceLightingChannels(uint32_t instance, uint32_t chann
     m_scene.instances[instance].flags = scene::withLightingChannels(m_scene.instances[instance].flags, channels);
 }
 
+void HostRenderer::setInstanceReceivesDecals(uint32_t instance, bool receives)
+{
+    requireOpen();
+    if (instance >= m_scene.instances.size()) fail("receives decals: instance %u of %zu", instance, m_scene.instances.size());
+    uint32_t& flags = m_scene.instances[instance].flags;
+    flags = receives ? flags & ~(uint32_t)scene::InstanceNoDecals : flags | (uint32_t)scene::InstanceNoDecals;
+}
+
 void HostRenderer::applyEdits(const FramePacket& p, scene::Scene& s)
 {
     for (const auto& [i, m] : p.materialEdits)
@@ -1102,6 +1110,23 @@ void checkDecal(const decal::Decal& d, uint32_t materials, uint32_t instances)
     if (!(d.opacity >= 0 && d.opacity <= 1) || !(d.fadeStartDegrees >= 0 && d.fadeStartDegrees <= d.fadeEndDegrees && d.fadeEndDegrees <= 180) ||
         !(d.edge >= 0 && d.edge <= 1))
         fail("decal: opacity %g (0..1), fade %g..%g degrees, edge %g (0..1)", d.opacity, d.fadeStartDegrees, d.fadeEndDegrees, d.edge);
+    // the components (the decal set checks the same when it builds the frame's records - on the render thread: here the
+    // caller gets the message)
+    for (float v : { d.color.x, d.color.y, d.color.z, d.fadeScreenSize, d.fadeInDuration, d.fadeOutDuration })
+        if (!std::isfinite(v) || v < 0) fail("decal: colour, screen-size fade and fade durations are finite and not negative");
+    if (!std::isfinite(d.fadeInStart) || !std::isfinite(d.fadeOutStart)) fail("decal: fade start times are finite");
+    if (d.channels == 0 || d.channels > decal::DecalAllChannels) fail("decal: channels %u (1..7: decal::DecalChannels)", d.channels);
+}
+// The components of 'from' in 'to' (HostRenderer.h decalUpdate).
+void copyDecalComponents(const decal::Decal& from, decal::Decal& to)
+{
+    to.color = from.color;
+    to.channels = from.channels;
+    to.fadeScreenSize = from.fadeScreenSize;
+    to.fadeInStart = from.fadeInStart;
+    to.fadeInDuration = from.fadeInDuration;
+    to.fadeOutStart = from.fadeOutStart;
+    to.fadeOutDuration = from.fadeOutDuration;
 }
 } // namespace
 
@@ -1112,18 +1137,36 @@ uint32_t HostRenderer::decalAdd(const decal::Decal& d)
     checkDecal(d, m_hostMaterials, m_hostInstances);
     const uint32_t id = m_decals.add(d);
     if (id >= m_decalLive.size()) m_decalLive.resize(id + 1, 0);
+    if (id >= m_decalValues.size()) m_decalValues.resize(id + 1);
     m_decalLive[id] = 1;
+    m_decalValues[id] = d;
     m_decalsChanged = true;
     return id;
 }
 
-void HostRenderer::decalUpdate(uint32_t id, const decal::Decal& d)
+void HostRenderer::decalUpdate(uint32_t id, const decal::Decal& d, bool keepComponents)
 {
     requireCommitted();
     std::lock_guard lock(m_mutex);
     if (id >= m_decalLive.size() || !m_decalLive[id]) fail("decal %u is not live", id);
-    checkDecal(d, m_hostMaterials, m_hostInstances);
-    m_decals.update(id, d);
+    decal::Decal next = d;
+    if (keepComponents) copyDecalComponents(m_decalValues[id], next);
+    checkDecal(next, m_hostMaterials, m_hostInstances);
+    m_decals.update(id, next);
+    m_decalValues[id] = next;
+    m_decalsChanged = true;
+}
+
+void HostRenderer::decalSetComponents(uint32_t id, const decal::Decal& components)
+{
+    requireCommitted();
+    std::lock_guard lock(m_mutex);
+    if (id >= m_decalLive.size() || !m_decalLive[id]) fail("decal %u is not live", id);
+    decal::Decal next = m_decalValues[id];
+    copyDecalComponents(components, next);
+    checkDecal(next, m_hostMaterials, m_hostInstances);
+    m_decals.update(id, next);
+    m_decalValues[id] = next;
     m_decalsChanged = true;
 }
 

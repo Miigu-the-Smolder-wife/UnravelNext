@@ -330,6 +330,8 @@ public:
     // and an instance's lighting channels (before commit; a 3-bit mask). scene::validate checks the values at commit.
     void setLightComponents(uint32_t light, const scene::Light& components);
     void setInstanceLightingChannels(uint32_t instance, uint32_t channels);
+    // Whether an instance takes projected decals (before commit; scene::InstanceNoDecals).
+    void setInstanceReceivesDecals(uint32_t instance, bool receives);
     SceneCommitInfo commit();
     // Quality override before commit ("section.key=value", QualityConfig::applyOverride): a game's post terms, for example.
     void overrideQuality(const std::string& assignment);
@@ -393,8 +395,12 @@ public:
     void debugText(float3 anchor, std::string_view text, uint32_t color, float sizePx, uint32_t flags, float2 offsetPx);
     // A7 projected decals (E's decal::DecalSet, mirrored here: ids are the set's, the render thread gets a snapshot with
     // the next queued frame after a change). Materials and instances are the host's current counts.
+    // A decal's components are its tint, channels and fades (decal::Decal's fields after 'edge'): decalUpdate with
+    // keepComponents leaves the live decal's own in place (the ABI's description has none), decalSetComponents replaces
+    // them alone ('components' carries them in a decal::Decal - its other fields are not read).
     uint32_t decalAdd(const decal::Decal& d);
-    void decalUpdate(uint32_t id, const decal::Decal& d);
+    void decalUpdate(uint32_t id, const decal::Decal& d, bool keepComponents = false);
+    void decalSetComponents(uint32_t id, const decal::Decal& components);
     void decalRemove(uint32_t id);
     // A12 first-person view models (E's viewmodel::ViewModels, mirrored here): a scene instance posed in the camera's
     // frame (object -> view space: x right, y up, looking down -z), composed with each rendered frame's camera.
@@ -665,6 +671,7 @@ private:
     double m_surfaceTime = 0;                   // (m_mutex) the VFX time every queued frame takes
     decal::DecalSet m_decals;                   // (m_mutex) the host's decal set
     std::vector<uint8_t> m_decalLive;           // (m_mutex) per decal id: live
+    std::vector<decal::Decal> m_decalValues;    // (m_mutex) per decal id: the live decal as last described
     bool m_decalsChanged = false;               // (m_mutex) a snapshot goes with the next queued frame
     viewmodel::ViewModels m_viewModels;         // (m_mutex) the host's mirror (ids, live entries)
     std::vector<uint32_t> m_hairJoints;         // (m_mutex) per hair body id: its joint count (0 = free)

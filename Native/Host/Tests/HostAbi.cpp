@@ -76,6 +76,12 @@ struct Api
     UNX_FN(UnxLightComponentsDefaults)
     UNX_FN(UnxSceneSetLightComponents)
     UNX_FN(UnxSceneSetInstanceLightingChannels)
+    UNX_FN(UnxSceneSetInstanceReceivesDecals)
+    UNX_FN(UnxDecalAdd)
+    UNX_FN(UnxDecalUpdate)
+    UNX_FN(UnxDecalRemove)
+    UNX_FN(UnxDecalComponentsDefaults)
+    UNX_FN(UnxDecalSetComponents)
 #undef UNX_FN
     void load(const std::filesystem::path& path)
     {
@@ -116,6 +122,12 @@ struct Api
         UNX_FN(UnxLightComponentsDefaults)
         UNX_FN(UnxSceneSetLightComponents)
         UNX_FN(UnxSceneSetInstanceLightingChannels)
+        UNX_FN(UnxSceneSetInstanceReceivesDecals)
+        UNX_FN(UnxDecalAdd)
+        UNX_FN(UnxDecalUpdate)
+        UNX_FN(UnxDecalRemove)
+        UNX_FN(UnxDecalComponentsDefaults)
+        UNX_FN(UnxDecalSetComponents)
 #undef UNX_FN
     }
     void ok(int32_t r, const char* what) const
@@ -192,6 +204,7 @@ void addLayerMaterials(scene::Scene& s)
         }
     }
     if (!s.instances.empty()) s.instances.back().flags = scene::withLightingChannels(s.instances.back().flags, 5);
+    if (!s.instances.empty()) s.instances.front().flags |= scene::InstanceNoDecals;  // (UnxSceneSetInstanceReceivesDecals)
     if (!s.lights.empty())
     {
         scene::Light& l = s.lights.front();
@@ -441,14 +454,18 @@ void pushScene(const Api& api, UnxRenderer r, const scene::Scene& s)
         for (size_t i = 0; i < sk.jointToModel.size(); ++i) putAffine(j.data() + 12 * i, sk.jointToModel[i]);
         api.ok(api.UnxSceneAddSkeleton(r, j.data(), (uint32_t)sk.jointToModel.size(), nullptr), "UnxSceneAddSkeleton");
     }
+    static_assert((uint32_t)UNX_INSTANCE_NO_DECALS == (uint32_t)scene::InstanceNoDecals);
+    uint32_t instanceIndex = 0;
     for (const scene::Instance& inst : s.instances)
     {
         UnxInstanceDesc d{};
         d.size = sizeof d;
         d.version = 1;
         d.mesh = inst.mesh;
-        // (the lighting channels as the header's macro gives them: the same bits the scene keeps)
-        d.flags = (inst.flags & ~(uint32_t)scene::InstanceLightingChannelsMask) | UNX_INSTANCE_LIGHTING_CHANNELS(scene::instanceLightingChannels(inst.flags));
+        // (the lighting channels as the header's macro gives them: the same bits the scene keeps; the no-decals flag
+        // through its own export below)
+        d.flags = (inst.flags & ~(uint32_t)(scene::InstanceLightingChannelsMask | scene::InstanceNoDecals)) |
+                  UNX_INSTANCE_LIGHTING_CHANNELS(scene::instanceLightingChannels(inst.flags));
         d.skeleton = inst.skeleton;
         d.materialOverrideCount = (uint32_t)inst.materialOverrides.size();
         d.materialOverrides = inst.materialOverrides.empty() ? nullptr : inst.materialOverrides.data();
@@ -457,6 +474,9 @@ void pushScene(const Api& api, UnxRenderer r, const scene::Scene& s)
         d.windPhase = inst.wind.phase;
         d.windAnchorHeight = inst.wind.anchorHeight;
         api.ok(api.UnxSceneAddInstance(r, &d, nullptr), "UnxSceneAddInstance");
+        if ((inst.flags & scene::InstanceNoDecals) != 0)
+            api.ok(api.UnxSceneSetInstanceReceivesDecals(r, instanceIndex, 0), "UnxSceneSetInstanceReceivesDecals");
+        ++instanceIndex;
     }
     uint32_t lightIndex = 0;
     for (const scene::Light& l : s.lights)
@@ -867,6 +887,47 @@ int main(int argc, char** argv)
         v1.version = 1;
         api.ok(api.UnxFrameGraphStatsLatest(r, &v1), "UnxFrameGraphStatsLatest v1");
         if (v1.commandLists != graph.commandLists || v1.queues[0].lists != 0) fail("UnxFrameGraphStatsLatest v1 wrote past its 64 bytes or lost fields");
+        {
+            // Decal components (UnxDecalComponentsDefaults, UnxDecalSetComponents): the defaults are the decal set's, a
+            // live decal takes its components and keeps them across UnxDecalUpdate, and bad values are refused at the
+            // call. No frame is queued after this: the parity comparison above is not touched.
+            UnxDecalComponentsDesc dc;
+            api.ok(api.UnxDecalComponentsDefaults(&dc), "UnxDecalComponentsDefaults");
+            // (decal::Decal's defaults: every channel, a white tint, no fades)
+            if (dc.size != sizeof dc || dc.version != 1 || dc.channels != (UNX_DECAL_BASE_COLOR | UNX_DECAL_NORMAL | UNX_DECAL_ROUGH_METAL) || dc.color[0] != 1 ||
+                dc.color[1] != 1 || dc.color[2] != 1 || dc.fadeScreenSize != 0 || dc.fadeInDuration != 0 || dc.fadeOutDuration != 0 || dc.reserved != 0)
+                fail("UnxDecalComponentsDefaults: not the decal set's defaults");
+            UnxDecalDesc dd{};
+            dd.box[0] = dd.box[5] = dd.box[10] = 1;  // the unit cube at the origin
+            dd.material = 0;
+            dd.instance = UNX_NONE;
+            dd.opacity = 1;
+            dd.fadeStartDegrees = 60;
+            dd.fadeEndDegrees = 80;
+            dd.edge = 0.25f;
+            uint32_t decalId = UNX_NONE;
+            api.ok(api.UnxDecalAdd(r, &dd, &decalId), "UnxDecalAdd");
+            dc.color[0] = 0.5f, dc.color[1] = 0.25f, dc.color[2] = 2.0f;
+            dc.channels = UNX_DECAL_NORMAL | UNX_DECAL_ROUGH_METAL;
+            dc.fadeScreenSize = 0.01f;
+            dc.fadeInStart = 1.0f, dc.fadeInDuration = 0.5f;
+            dc.fadeOutStart = 10.0f, dc.fadeOutDuration = 2.0f;
+            api.ok(api.UnxDecalSetComponents(r, decalId, &dc), "UnxDecalSetComponents");
+            dd.opacity = 0.5f;
+            api.ok(api.UnxDecalUpdate(r, decalId, &dd), "UnxDecalUpdate");
+            UnxDecalComponentsDesc bad = dc;
+            bad.channels = 8;
+            if (api.UnxDecalSetComponents(r, decalId, &bad) == UNX_OK) fail("UnxDecalSetComponents took channels 8");
+            bad = dc;
+            bad.fadeOutDuration = -1;
+            if (api.UnxDecalSetComponents(r, decalId, &bad) == UNX_OK) fail("UnxDecalSetComponents took a negative fade duration");
+            bad = dc;
+            bad.size = 44;
+            if (api.UnxDecalSetComponents(r, decalId, &bad) == UNX_OK) fail("UnxDecalSetComponents took a description of another size");
+            if (api.UnxDecalSetComponents(r, decalId + 1000, &dc) == UNX_OK) fail("UnxDecalSetComponents took a decal that is not live");
+            api.ok(api.UnxDecalRemove(r, decalId), "UnxDecalRemove");
+            logf("ABI decal components: defaults, a decal's components kept across an update, four refusals\n");
+        }
         api.ok(api.UnxRendererDestroy(r), "UnxRendererDestroy");
 
         const QualityConfig q = QualityConfig::loadDirectory(testQuality);
