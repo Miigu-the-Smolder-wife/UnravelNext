@@ -11,6 +11,15 @@
 //   3. per edge block (16 threads each): every full-resolution pixel composites the whole sorted list at its centre,
 //      against its own opaque depth -> the 128 B edge block; the layer pixel's index goes into the edge index table.
 // Loops are bounded by the entry count (<= FX_LAYER_TILE_ENTRIES) and the 64 blocks of the tile.
+// Soft particles (fx.particles.soft; P[0].y != 0): a sprite is a ball of its radius R around its centre, not a plane at
+// the centre's depth. Where a surface cuts the ball, the sprite's optical depth at the pixel is the part of the ball's
+// chord in front of the surface - with h = R sqrt(1 - q) the half chord at the pixel (q = d^2 / r^2 of the profile),
+// f = saturate((z_surface - (z_centre - h)) / (2 h)) and the opacity 1 - (1 - a)^f - so the sprite meets the surface
+// without an edge (Unreal: the DepthFade node, and this ball form in its spherical particle opacity). The layer takes
+// a sprite whose ball is in front of every opaque pixel of the block; one whose ball reaches the block's depth range is
+// an edge block's. Near fade (fx.particles.near_fade; P[0].z != 0): opacity x saturate((z_centre - R - near) / R), the
+// same reference function's fade of a ball that reaches the near plane (a sprite the camera is inside of fades out
+// instead of covering the view). Strips keep the test at their hit.
 #include "Passes/FX/ParticleLayerPass.hlsli"
 
 groupshared uint2 gs_entries[FX_LAYER_TILE_ENTRIES];
@@ -31,22 +40,47 @@ float4 composite(uint count, float2 p, float opaqueFar, float opaqueNear, bool l
     edge = false;
     depthRange = float2(0, 0);
     const float blockReach = layer ? 2.0f * 1.41421356f : 0.0f;  // centre to corner of a 4 x 4 block
+    const bool soft = P[0].y != 0u, nearFade = P[0].z != 0u;
+    const float pixelWorld = 2.0f / (g_proj[1][1] * g_viewHeight);  // a pixel's world size per unit of view depth
+    // view depths of the opaque range (device depth 0: nothing there)
+    const float zFar = opaqueFar > 0 ? g_nearPlane / opaqueFar : 3.0e38f, zNear = opaqueNear > 0 ? g_nearPlane / opaqueNear : 3.0e38f;
     for (uint i = 0u; i < count; ++i)
     {
         const LayerRecord r = records[gs_entries[i].y];
         const float2 d = p - r.centre;
         const float reach = r.radius + blockReach;
         if (dot(d, d) >= reach * reach) continue;          // the square test binned it; the disc misses this block/pixel
-        if (!(r.depth > opaqueFar)) continue;              // behind every opaque pixel of the block (or this pixel's surface)
-                                                           // (a strip's record depth is its nearest vertex)
         const bool strip = (r.flags & FX_LAYER_RECORD_STRIP) != 0u;
+        // a sprite as a ball: its centre's view depth and world radius (soft particles, near fade)
+        const bool ball = !strip && (soft || nearFade);
+        const float zc = ball ? g_nearPlane / max(r.depth, 1e-30f) : 0.0f, R = ball ? r.radius * pixelWorld * zc : 0.0f;
+        if (ball && soft)
+        {
+            if (zc - R >= zFar) continue;                  // the ball is behind every opaque pixel of the block (this pixel's surface)
+        }
+        else if (!(r.depth > opaqueFar)) continue;         // behind every opaque pixel of the block (or this pixel's surface)
+                                                           // (a strip's record depth is its nearest vertex)
         if (layer)
         {
-            if ((r.flags & FX_LAYER_RECORD_SMALL) != 0u || (!strip && r.depth < opaqueNear)) { edge = true; continue; }
+            const bool cut = ball && soft ? zc + R > zNear : r.depth < opaqueNear;  // (a surface of the block cuts the sprite)
+            if ((r.flags & FX_LAYER_RECORD_SMALL) != 0u || (!strip && cut)) { edge = true; continue; }
         }
         float a, sampleDepth;
         float3 colour;
         if (!fxLayerSample(c, r, p, a, colour, sampleDepth)) continue;
+        if (ball)
+        {
+            if (soft && !layer)
+            {
+                // (zFar: this pixel's surface) the part of the ball's chord in front of it
+                const float h = R * sqrt(saturate(1.0f - dot(d, d) / (r.radius * r.radius)));
+                const float f = saturate((zFar - (zc - h)) / max(2.0f * h, 1e-12f));
+                if (!(f > 0)) continue;
+                if (f < 1) a = 1.0f - pow(saturate(1.0f - a), f);
+            }
+            if (nearFade) a *= saturate((zc - R - g_nearPlane) / max(R, 1e-12f));
+            if (!(a > 0)) continue;
+        }
         if (strip)
         {
             // a strip's depth varies over it: the test at this sample (its hit)
