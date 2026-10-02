@@ -63,7 +63,7 @@ float4 composite(uint count, float2 p, float opaqueFar, float opaqueNear, bool l
         // a sprite as a ball: its centre's view depth and world radius (soft particles, near fade); a look's quad: its
         // shorter half axis
         const bool ball = !strip && (soft || nearFade);
-        const bool looked = fxRecordLook(r) != 0u;
+        const bool looked = !strip && fxRecordLook(r) != 0u;
         float radiusPx = r.radius;
         if (looked)
         {
@@ -95,6 +95,10 @@ float4 composite(uint count, float2 p, float opaqueFar, float opaqueNear, bool l
             blend = hit.blend;
             q = hit.q;
             sampleDepth = r.depth;
+        }
+        else if (strip)
+        {
+            if (!fxStripSampleOf(c, x, r, p, layer ? (float)FX_LAYER_SCALE : 1.0f, a, colour, sampleDepth, blend)) continue;
         }
         else if (!fxLayerSample(c, r, p, a, colour, sampleDepth)) continue;
         if (ball)

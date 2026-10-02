@@ -72,7 +72,8 @@ struct LayerExtra  // 96 B
                                                     // tangents (UAV, FxRibbon); the layer's motion target (UAV, RG16F)
     float4 prevViewProj[4];                         // rows of the previous frame's unjittered view-projection (world ->
                                                     // clip); all 0: the frame has none (the records' motion is 0)
-    uint4 reserved;
+    uint shadowParams, ribbonSegments, pad1, pad2;  // the sun's particle transmittance map (ParticleShadow.hlsli; UNX_NONE:
+                                                    // none); pieces a strip segment is drawn in at most (0, 1: straight)
 };
 LayerExtra fxLayerExtra()
 {
@@ -135,7 +136,9 @@ uint fxRecordLook(LayerRecord r) { return (r.flags >> 8) & 0xFFFu; }  // look + 
 
 // Ribbon points of this frame (FxLayerSetup: the particle at the frame time, camera-relative; the layout of the stream's
 // ribbon points) and the strip vertices FxRibbon builds from them (two per point, the side frame parallel-transported).
-struct FxRibbonPoint { float3 position; float width; float age; uint valid; uint pad0, pad1; };  // 32 B (Particles.hlsli RibbonPoint)
+// (the render pass's points: program = the point's program, look = its look + 1 (0: none) - FxLayerStrips gives them to
+// the segment's record)
+struct FxRibbonPoint { float3 position; float width; float age; uint valid; uint program, look; };  // 32 B (Particles.hlsli RibbonPoint)
 struct FxRibbonVertex { float3 position; float3 normal; float2 uv; };                          // 32 B (FxRibbon.hlsl)
 
 LayerConstants fxLayerConstants()
@@ -200,31 +203,102 @@ bool fxRayTriangle(float3 D, float3 a, float3 b, float3 c, out float t, out floa
 // (0 at edge 0). Opacity: the points' alphas interpolated along, times the profile (1 - x^2)^2 across (x = 2 e - 1; the
 // sprite profile's section); radiance: the points' interpolated along, then the air between the camera and the hit (S's air
 // volume at the pixel and the hit's view depth). Device depth = near / view depth of the hit.
-bool fxStripSample(LayerConstants c, LayerRecord r, float2 p, out float a, out float3 colour, out float depth)
+// Tessellation (x.ribbonSegments > 1; fx.particles.ribbon_segments - Niagara's ribbon tessellation with its curve
+// through the points): the segment's centreline is the cubic through its two points with the strip's tangents there
+// (FxRibbon's: the mean of the neighbouring segments' directions, x the segment's length), drawn in pieces - one per
+// FX_RIBBON_PIECE_ANGLE of turn between the two tangents, x.ribbonSegments at most; the side vector and the width run
+// linearly between the ends. A straight segment is one piece: the quad above.
+// A look (the record's; unx/fx/SpriteLooks.h): its texture over the strip - across by e; along by the strip's distance
+// over the program's ribbon_uv (the texture repeats) or by the points' age over the lifetime (once over the ribbon:
+// Niagara's tiled and scaled UV modes) - its alpha in place of the profile, and its blend.
+#define FX_RIBBON_PIECE_ANGLE 0.13089969f  // pi / 24
+float3 fxHermite(float3 p0, float3 m0, float3 p1, float3 m1, float s)
+{
+    const float s2 = s * s, s3 = s2 * s;
+    return (2 * s3 - 3 * s2 + 1) * p0 + (s3 - 2 * s2 + s) * m0 + (3 * s2 - 2 * s3) * p1 + (s3 - s2) * m1;
+}
+float4 fxLookTexel(uint srv, uint frame, float2 uv, float2 cells, float2 border, float lod);
+bool fxStripSampleOf(LayerConstants c, LayerExtra x, LayerRecord r, float2 p, float footprint, out float a, out float3 colour, out float depth, out uint blend)
 {
     a = 0;
     colour = 0;
     depth = 0;
+    blend = FX_BLEND_ALPHA;
     const uint k = r.radianceAlpha.x, j = r.radianceAlpha.y;
     RWStructuredBuffer<FxRibbonVertex> vertices = ResourceDescriptorHeap[c.ribbonVertices];  // (UAVs: written earlier in the pass)
-    const float3 a0 = vertices[2u * j].position, a1 = vertices[2u * j + 1u].position;
-    const float3 b0 = vertices[2u * k].position, b1 = vertices[2u * k + 1u].position;
+    const FxRibbonVertex va0 = vertices[2u * j], vb0 = vertices[2u * k];
+    const float3 a0 = va0.position, a1 = vertices[2u * j + 1u].position;
+    const float3 b0 = vb0.position, b1 = vertices[2u * k + 1u].position;
     // the pixel-centre ray (view space at z = -1, then world axes; every projection here has no shear: mPixelRay)
     const float2 ndc = float2(p.x / g_viewWidth * 2 - 1, 1 - p.y / g_viewHeight * 2);
     const float vx = (ndc.x + g_proj[0][2] - g_proj[0][3]) / g_proj[0][0];
     const float vy = (ndc.y + g_proj[1][2] - g_proj[1][3]) / g_proj[1][1];
     const float3 D = g_view[0].xyz * vx + g_view[1].xyz * vy - g_view[2].xyz;  // view depth of D is 1
-    float t, u, v, s, e;
-    if (fxRayTriangle(D, a0, a1, b0, t, u, v)) { s = v; e = u; }
-    else if (fxRayTriangle(D, b0, a1, b1, t, u, v)) { s = 1 - u; e = u + v; }
-    else return false;
-    if (!(t > g_nearPlane)) return false;
+    float t, u, v, s = 0, e = 0;
+    uint pieces = 1u;
+    float3 ta = 0, tb = 0;
+    const float3 pa = 0.5f * (a0 + a1), pb = 0.5f * (b0 + b1), sa = 0.5f * (a1 - a0), sb = 0.5f * (b1 - b0);
+    const float len = length(pb - pa);
+    if (x.ribbonSegments > 1u)
+    {
+        RWStructuredBuffer<float4> tangents = ResourceDescriptorHeap[x.ribbonTangents];
+        ta = tangents[j].xyz * c.streamAxes;
+        tb = tangents[k].xyz * c.streamAxes;
+        pieces = clamp((uint)ceil(acos(clamp(dot(ta, tb), -1.0f, 1.0f)) / FX_RIBBON_PIECE_ANGLE), 1u, x.ribbonSegments);
+    }
+    bool hit = false;
+    if (pieces == 1u)
+    {
+        if (fxRayTriangle(D, a0, a1, b0, t, u, v)) { s = v; e = u; hit = true; }
+        else if (fxRayTriangle(D, b0, a1, b1, t, u, v)) { s = 1 - u; e = u + v; hit = true; }
+    }
+    else
+    {
+        [loop] for (uint i = 0u; i < pieces && !hit; ++i)
+        {
+            const float s0 = (float)i / pieces, s1 = (float)(i + 1u) / pieces;
+            const float3 c0 = fxHermite(pa, ta * len, pb, tb * len, s0), c1 = fxHermite(pa, ta * len, pb, tb * len, s1);
+            const float3 h0 = lerp(sa, sb, s0), h1 = lerp(sa, sb, s1);
+            if (fxRayTriangle(D, c0 - h0, c0 + h0, c1 - h1, t, u, v)) { s = lerp(s0, s1, v); e = u; hit = true; }
+            else if (fxRayTriangle(D, c1 - h1, c0 + h0, c1 + h1, t, u, v)) { s = lerp(s0, s1, 1 - u); e = u + v; hit = true; }
+        }
+    }
+    if (!hit || !(t > g_nearPlane)) return false;
     RWStructuredBuffer<uint2> appearance = ResourceDescriptorHeap[c.ribbonAppearance];
-    const float4 pa = fxUnpackHalf4(appearance[j]), pb = fxUnpackHalf4(appearance[k]);
-    const float4 ca = lerp(pa, pb, saturate(s));
-    const float x = 2 * saturate(e) - 1;
-    a = ca.w * (1 - x * x) * (1 - x * x);
-    colour = ca.rgb;
+    const float4 pa4 = fxUnpackHalf4(appearance[j]), pb4 = fxUnpackHalf4(appearance[k]);
+    const float4 ca = lerp(pa4, pb4, saturate(s));
+    const float across = 2 * saturate(e) - 1;
+    float4 tex = float4(1, 1, 1, (1 - across * across) * (1 - across * across));
+    const uint lookId = fxRecordLook(r);
+    if (lookId != 0u)
+    {
+        StructuredBuffer<FxSpriteLook> looks = ResourceDescriptorHeap[x.looks];
+        const FxSpriteLook look = looks[lookId - 1u];
+        blend = fxLookBlend(look);
+        if (look.texture != UNX_NONE)
+        {
+            StructuredBuffer<StreamProgram> programs = ResourceDescriptorHeap[c.programs];
+            const StreamProgram pr = programs[r.program];
+            float ua = va0.uv.x, ub = vb0.uv.x;
+            if (fxLookRibbonUv(look) == 1u)
+            {
+                RWStructuredBuffer<FxRibbonPoint> points = ResourceDescriptorHeap[c.ribbonPoints];
+                ua = points[j].age / max(pr.lifetime, 1e-6f);
+                ub = points[k].age / max(pr.lifetime, 1e-6f);
+            }
+            const float2 cells = float2(max(pr.columns, 1u), max(pr.rows, 1u));
+            const float2 scale = float2(pr.uv.x != 0 ? pr.uv.x : 1.0f, pr.uv.y != 0 ? pr.uv.y : 1.0f);
+            const float2 uv = float2(lerp(ua, ub, saturate(s)), saturate(e)) * scale + pr.uv.zw;
+            // the level whose texel covers the footprint: the texture's texels per pixel along and across the strip
+            const float pixelWorld = 2.0f * t / (g_proj[1][1] * g_viewHeight);
+            const float2 perPixel = look.textureSize / cells * abs(scale) * float2(abs(ub - ua), 1.0f) * pixelWorld / max(float2(len, 2.0f * length(lerp(sa, sb, saturate(s)))), 1e-6f);
+            const float lod = max(log2(max(perPixel.x, perPixel.y) * footprint), 0.0f);
+            tex = fxLookTexel(look.texture, min(pr.firstFrame, (uint)(cells.x * cells.y) - 1u), uv, cells, 0.5f * exp2(lod) * cells / max(look.textureSize, 1.0f), lod);
+        }
+    }
+    a = saturate(ca.w * tex.a);
+    colour = ca.rgb * tex.rgb;
+    if (blend == FX_BLEND_PREMULTIPLIED) colour *= ca.w;
     depth = g_nearPlane / t;
     if (c.airVolume != UNX_NONE && c.transmittance != UNX_NONE)
     {
@@ -235,9 +309,17 @@ bool fxStripSample(LayerConstants c, LayerRecord r, float2 p, out float a, out f
         atm.aerial = c.airVolume;
         float3 inscatter, transmittance, sunAtDepth;
         atmosphereAirView(atm, p / float2(g_viewWidth, g_viewHeight), t, inscatter, transmittance, sunAtDepth);
-        colour = colour * transmittance + inscatter * g_exposure;
+        // (the air in front with the strip's coverage; an additive strip hides nothing and carries none)
+        if (blend == FX_BLEND_ALPHA) colour = colour * transmittance + inscatter * g_exposure;
+        else colour = colour * transmittance + (blend == FX_BLEND_PREMULTIPLIED ? inscatter * (g_exposure * a) : 0.0f);
     }
-    return a > 0;
+    return a > 0 || (blend == FX_BLEND_PREMULTIPLIED && any(colour > 0));
+}
+// (a straight strip without a look: the records the test reference draws)
+bool fxStripSample(LayerConstants c, LayerRecord r, float2 p, out float a, out float3 colour, out float depth)
+{
+    uint blend;
+    return fxStripSampleOf(c, (LayerExtra)0, r, p, 1.0f, a, colour, depth, blend);
 }
 
 // ---- a look's sprite at a point

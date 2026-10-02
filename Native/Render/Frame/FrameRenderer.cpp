@@ -434,6 +434,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     tracks::simulation(fc);  // C0
     tracks::particleMeshes(fc);  // A3 (render C): mesh particle instances, before V's culling
     tracks::particleLights(fc, main);  // A3: FX particle lights into the scene light tail, before S's lists
+    tracks::particleShadows(fc, main);  // the sprites' shadow under the sun (S's screen visibility and the particles read it)
     tracks::waterGeometry(fc);  // W (B7/B8): ocean FFT and fluid surface into V's triangle streams
     tracks::atmosphere(fc);
     tracks::accelerationStructures(fc);

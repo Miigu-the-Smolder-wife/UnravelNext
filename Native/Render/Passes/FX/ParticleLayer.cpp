@@ -44,7 +44,7 @@ struct LayerExtra
 {
     uint32_t looks, lookCount, ribbonTangents, motion;
     float prevViewProj[4][4];
-    uint32_t reserved[4];
+    uint32_t shadowParams, ribbonSegments, pad[2];
 };
 static_assert(sizeof(LayerExtra) == 96);
 // A ring slot: the constants, the extra record, the sprite looks' records.
@@ -173,6 +173,7 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
     const ParticleLayerOutput o = out;
     LayerExtra lx{};
     lx.lookCount = lookCount;
+    lx.ribbonSegments = std::clamp(f.ribbonSegments, 1u, 16u);
     if (f.motion)
         for (int r = 0; r < 4; ++r)
             for (int col = 0; col < 4; ++col) lx.prevViewProj[r][col] = f.prevViewProj.m[r][col];
@@ -187,6 +188,7 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
                   if (looks.valid()) c.cmd->CopyBufferRegion(c.resource(looks), 0, upload, uploadOffset + kLooksOffset, (uint64_t)lookCount * kSpriteLookBytes);
                   lx.looks = looks.valid() ? c.srv(looks) : 0xFFFFFFFFu;
                   lx.ribbonTangents = c.uav(ribbonTangents);
+                  lx.shadowParams = f.lighting.particleShadowParams.valid() && f.lighting.particleShadowMap.valid() ? c.srv(f.lighting.particleShadowParams) : 0xFFFFFFFFu;
                   lx.motion = c.uav(o.motion);
                   std::memcpy(mapped + kExtraOffset, &lx, sizeof lx);
                   c.cmd->CopyBufferRegion(c.resource(extra), 0, upload, uploadOffset + kExtraOffset, sizeof lx);
@@ -282,7 +284,8 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
              groups(threads, 256), [=](PassBuilder& b) {
         for (const BufferRef& x : inputBuffers)
             if (x.valid()) b.use(x, Use::SrvCompute);
-        for (const BufferRef& x : { lighting.vsmPageTable, lighting.vsmPool, lighting.vsmBlocks, lighting.vsmSearchBound, lighting.vsmLayers, lighting.froxelLights, lighting.fxLights })
+        for (const BufferRef& x : { lighting.vsmPageTable, lighting.vsmPool, lighting.vsmBlocks, lighting.vsmSearchBound, lighting.vsmLayers, lighting.froxelLights, lighting.fxLights,
+                                    lighting.particleShadowParams, lighting.particleShadowMap })
             if (x.valid()) b.use(x, Use::SrvCompute);
         declareGiSource(b, lighting.gi, Use::SrvCompute);
         for (const TextureRef& x : { lighting.vsmAtlas, lighting.airVolume, lighting.transmittanceLut, lighting.multiScatterLut, lighting.fogVolume })
@@ -319,6 +322,8 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
                   });
         dispatch("fx.layer.strips", "Passes/FX/FxLayerStrips.STEP1", groups(ribbons, 256), [=](PassBuilder& b) {
             b.use(ribbonLinks, Use::UavCompute);
+            b.use(ribbonPoints, Use::UavCompute);
+            b.use(ribbonTangents, Use::UavCompute);
             b.use(o.ribbonVertices, Use::UavCompute);
             b.use(o.records, Use::UavCompute);
             b.use(o.tileCounts, Use::UavCompute);
@@ -351,6 +356,8 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
         b.use(o.edges, Use::UavCompute);
         b.use(o.ribbonVertices, Use::UavCompute);
         b.use(o.ribbonAppearance, Use::UavCompute);
+        b.use(ribbonPoints, Use::UavCompute);
+        b.use(ribbonTangents, Use::UavCompute);
         for (const TextureRef& x : { lighting.airVolume, lighting.transmittanceLut, lighting.multiScatterLut, lighting.fogVolume })
             if (x.valid()) b.use(x, Use::SrvCompute);
     });

@@ -304,6 +304,9 @@ struct FrameResources
     // relative to (the main view's camera) - a reader in another view adds its camera's offset from it.  [E]
     TextureRef hairDensity, hairDensityCoarse;
     BufferRef hairDensityParams;
+    // The sun's particle transmittance map (FX; Passes/FX/ParticleShadow.hlsli fxParticleShadow; invalid: none): its
+    // parameters (raw, 64 B: the reader's handle) and its texels (raw; a reader declares both).
+    BufferRef particleShadowParams, particleShadowMap;
     float3 hairOrigin{};
     // A3 FX particle lights (v1.81, render B's request): the whole scene light buffer (gpu::Light, stride 80; the FX tail at
     // [lightCount, lightCount + F)) and the count word (StructuredBuffer<uint>, element 0 = F), imported once per frame by

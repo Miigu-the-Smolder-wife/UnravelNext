@@ -24,6 +24,8 @@ struct ParticleLighting
     // shading.mega_lights: the froxel grid's sampled local light (FrameResources::localFluence / localMoment; invalid: the
     // setup loops over the froxel list's lights with S's shadow maps)
     render::TextureRef localFluence, localMoment;
+    // the sun's particle transmittance map (FrameResources::particleShadowParams / particleShadowMap; invalid: none)
+    render::BufferRef particleShadowParams, particleShadowMap;
     uint32_t vsmConstants = 0xFFFFFFFFu, vsmLocalLights = 0xFFFFFFFFu, vsmSlotOfLight = 0xFFFFFFFFu;
 };
 
@@ -36,6 +38,8 @@ struct ParticleLayerFrame
                                                    // the anchor offset is a difference)
     float streamAxes[3] = { 1, 1, 1 };             // stream space -> renderer world axis signs (FrameContext::streamAxes)
     double time = 0;                               // the particle stream's context time of this frame (s)
+    uint32_t ribbonSegments = 1;                   // fx.particles.ribbon_segments: pieces a strip segment's curve is drawn in
+                                                   // at most (1: straight segments)
     bool soft = false, nearFade = false;           // fx.particles.soft / near_fade (FxLayerTile.hlsl): a sprite as a ball
                                                    // that surfaces cut softly, and that fades out at the near plane
     ParticleLighting lighting;

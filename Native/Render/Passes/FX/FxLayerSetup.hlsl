@@ -25,6 +25,7 @@
 // put the variant with the lists' lights and the world cache over the kernel size limit.
 #include "Passes/FX/ParticleLayerPass.hlsli"
 #include "Passes/FX/FxParticleAt.hlsli"
+#include "Passes/FX/ParticleShadow.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Shading/AreaLight.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
@@ -95,6 +96,8 @@ FxLight fxLight(LayerConstants c, float3 offset, float3 D, float g, float footpr
         const float v = shadowSunVisibilityInAir(sh, worldPos, footprint, resident);
         if (resident) visibility = v;
     }
+    // (the shadow-casting sprites between the particle and the sun, its own puff's upper part included)
+    visibility *= fxParticleShadow(fxLayerExtra().shadowParams, worldPos);
     const float3 l = normalize(g_sunDirection);
     L += E * (visibility * fxPhase(dot(l, D), g));
     fluence += E * visibility;
@@ -217,7 +220,8 @@ float3 curve3(uint first, uint count, float u) { return count >= 2u ? nv_curve(f
 // is written invalid: born after it (the newest births, the range's tail) or already dead (the oldest dying ones, its head);
 // the valid points are one window. A killed emitter or a refused material writes invalid points (nothing drawn).
 // alive: the particle at the frame time (setup); radiance, size, alpha, age: its appearance there.
-void ribbonPoint(LayerConstants c, uint birth, uint row, bool alive, float3 pos, float age, float size, float3 radiance, float alpha)
+// program, look: the point's program and its look + 1 (0: none), for the segment's record.
+void ribbonPoint(LayerConstants c, uint birth, uint row, bool alive, float3 pos, float age, float size, float3 radiance, float alpha, uint program, uint look)
 {
     if (c.ribbonRows == UNX_NONE) return;
     StructuredBuffer<uint2> rows = ResourceDescriptorHeap[c.ribbonRows];
@@ -247,6 +251,8 @@ void ribbonPoint(LayerConstants c, uint birth, uint row, bool alive, float3 pos,
     rp.width = width;
     rp.age = age;
     rp.valid = 1u;
+    rp.program = program;
+    rp.look = look;
     points[index] = rp;
     appearance[index] = fxPackHalf4(float4(radiance * g_exposure, alpha));
 }
@@ -289,7 +295,7 @@ LayerRecord setup(LayerConstants c, uint t, uint group)
     if (sprite && (!(size > 0) || !(alpha > 0))) alive = false;
     if (!alive)
     {
-        if (ribbon) ribbonPoint(c, birth, row, false, 0, 0, 0, 0, 0);
+        if (ribbon) ribbonPoint(c, birth, row, false, 0, 0, 0, 0, 0, 0u, 0u);
         return rec;
     }
 
@@ -376,7 +382,7 @@ LayerRecord setup(LayerConstants c, uint t, uint group)
     }
     if (ribbon)
     {
-        ribbonPoint(c, birth, row, true, pos, age, size, radiance, alpha);
+        ribbonPoint(c, birth, row, true, pos, age, size, radiance, alpha, e.program, looked ? p.material - 1u : 0u);
         return rec;
     }
 

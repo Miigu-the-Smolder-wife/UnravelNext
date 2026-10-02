@@ -37,6 +37,7 @@ void particles(FramePassContext& fc, ViewResources& view)
     frame.camera[2] = view.view.position.z + fc.frame.worldOrigin[2];
     for (int a = 0; a < 3; ++a) frame.streamAxes[a] = fc.frame.streamAxes[a];
     frame.time = fc.frame.time;
+    frame.ribbonSegments = fc.quality.has("fx.particles.ribbon_segments") ? (uint32_t)std::max<int64_t>(fc.quality.integer("fx.particles.ribbon_segments"), 1) : 1u;
     frame.soft = fc.quality.has("fx.particles.soft") && fc.quality.boolean("fx.particles.soft");
     frame.nearFade = fc.quality.has("fx.particles.near_fade") && fc.quality.boolean("fx.particles.near_fade");
     const FrameResources& r = fc.resources;
@@ -52,6 +53,8 @@ void particles(FramePassContext& fc, ViewResources& view)
     frame.lighting.gi = giSource(r);
     frame.lighting.froxelLights = view.froxelLights;
     frame.lighting.fxLights = r.fxLights;
+    frame.lighting.particleShadowParams = r.particleShadowParams;
+    frame.lighting.particleShadowMap = r.particleShadowMap;
     frame.lighting.airVolume = view.airVolume;
     frame.lighting.fogVolume = view.view.kind == gpu::ViewKind::Main ? r.fogVolume : view.fogVolume;
     frame.lighting.transmittanceLut = r.transmittanceLut;
