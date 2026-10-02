@@ -96,6 +96,17 @@
 | 구름 | 1/4 해상도, 시간 재구성 없음, 3.27 ms | 사실상 못 씀 |
 | 모션 블러 | 업스케일 전 내부 해상도, 32 px 제한 | 짧고 거친 줄무늬 |
 
+### 2.3.1 2026-10-02에 채운 것 (코드 작성·빌드 통과, GPU 미실행)
+
+| 항목 | 내용 | 위치 |
+|---|---|---|
+| 시간 업스케일 = TSR 구조 | 벡터 팽창(3×3 최근접 깊이) + 최근접 가림체 scatter로 시차 disocclusion, 저해상도 guide 이력과 그에 대한 셰이딩 거부(3×3 연산 사슬을 그룹 메모리에서 한 패스로), 거부·이력 없음 화소의 공간 AA(가장자리 8화소 탐색), 유효도 가중 이력 갱신(16표본, 1 px/프레임 이동 시 4, 거부 시 2), 이력 clamp는 거부가 말하는 만큼만 | `Passes/Shading/Tsr*.hlsl`, `Tsr.hlsli`, `Upscale.cpp` (`output.upscale_tsr`, 기본 켬) |
+| 톤 파이프라인 | 필름 곡선 앞뒤로 gamut 확장(1.0), blue correction(0.6), ACES glow, red modifier | `ShadingCommon.hlsli` `shFilm` |
+| 블룸·비네트 기본값 | 블룸 0.082(언리얼 기본 세기 0.675 × 6단 틴트 / 6의 몫), 비네트 0.4(모서리 원 기준 cos⁴) | `Config/quality/shading.toml`, `PostFinal.hlsl` |
+
+TSR에서 아직 없는 것: 깜빡임(moire) 휴리스틱, history resurrection, reprojection field(자코비안·경계), thin geometry 검출, 출력보다 큰 이력 해상도.
+국소 노출·샤픈·렌즈 플레어는 언리얼에서도 기본 꺼짐이라 뒤로 둔다.
+
 ### 2.4 작업 순서
 
 1. Lumen 마무리(1.1 표, 옛 GI 캐시 제거, 반사 정리, 기본값).
