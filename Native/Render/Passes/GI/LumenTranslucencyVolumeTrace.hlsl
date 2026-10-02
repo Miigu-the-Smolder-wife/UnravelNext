@@ -100,7 +100,7 @@ void LumenTranslucencyVolumeTraceGen()
                 RtHitLighting L = (RtHitLighting)0;
                 L.irradiance = giFarSkyIrradiance(s.position, s.normal, asfloat(P[9].w));
                 const float3 l = normalize(g_sunDirection);
-                if (dot(s.normal, l) > 0 || (m.classFlags & 0xFFu) == MATERIAL_FOLIAGE)
+                if (dot(s.normal, l) > 0 || rtHitTransmits(m))
                 {
                     const float3 e0 = giSunIlluminance(s.position);
                     if (any(e0 > 0))

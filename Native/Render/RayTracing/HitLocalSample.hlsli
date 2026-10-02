@@ -22,7 +22,7 @@ float rtHitUnit(inout uint state)
 float3 rtHitLocalSample(RtSceneSrvs scene, RtSurface s, GpuMaterial m, float3 v, float footprint, float bias, uint seed)
 {
     const float u0 = rtHitUnit(seed), u1 = rtHitUnit(seed), u2 = rtHitUnit(seed);
-    const bool oriented = (m.classFlags & 0xFFu) != MATERIAL_FOLIAGE;
+    const bool oriented = !rtHitTransmits(m);
     const RtLocalSample ls = rtLocalLightFinish(scene, rtLocalLightChooseOriented(scene, s.position, s.normal, !oriented, u0), s.position, u1, u2, footprint);
     if (!ls.valid) return 0;
     // the specular lobe toward the light widened by the ray's cone (the texel holds the cone's mean)

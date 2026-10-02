@@ -93,8 +93,12 @@ struct RtHitSplit
     float3 stochastic;
     float3 albedo;
 };
-// A Subsurface-class hit is shaded as Standard here: one specular lobe at the material's roughness (not the class's two
-// lobes, MaterialModel.hlsli ModelSubsurface) and no light through thin parts.
+// A Subsurface-class hit: one specular lobe at the material's roughness (not the class's two lobes, MaterialModel.hlsli
+// ModelSubsurface), Lambert diffuse light with no scattering pass behind it, and the light through thin parts
+// (modelSubsurfaceThin) from the sun and the light sample on the far side of the shading normal - the hit's one shadow
+// ray decides, as the direct view's visibility does. An eye (MATERIAL_EYE) is such a hit with its base colour at the
+// surface's uv: no refraction onto the iris.
+// The cloth blend (a sheen's cloth factor): the base's specular share of the sun term and of the cache's light x (1 - cloth).
 float3 rtHitRadianceSplit(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float pixelAngle, bool wantSun, out float3 sunFull, out RtHitSplit split)
 {
     ModelSurface s;
@@ -114,14 +118,20 @@ float3 rtHitRadianceSplit(GpuMaterial m, float3 n, float3 v, RtHitLighting L, fl
     const float3 f0 = modelF0(s);
     const float3 compensation = 1 + f0 * (1 / modelDirectionalAlbedo(NoV, s.roughness) - 1);
     sunFull = 0;
+    float3 sunSpecular = 0;  // the base lobe's share of sunFull (the cloth blend scales it, and its share of the cache's light)
     if ((wantSun || L.sunVisibility > 0) && any(L.sunIlluminance > 0))
     {
         if (NoL > 0)
-            sunFull = diffuseAlbedo * L.sunIlluminance * NoL + shSunSpecular(f0, s.roughness, alpha, compensation, n, v, NoV, l0, L.sunIlluminance, pixelAngle);
-        else if (foliage)
-            sunFull = albedo * s.transmission * L.sunIlluminance * -NoL;  // transmitted through the leaf (model v1)
+        {
+            sunSpecular = shSunSpecular(f0, s.roughness, alpha, compensation, n, v, NoV, l0, L.sunIlluminance, pixelAngle);
+            sunFull = diffuseAlbedo * L.sunIlluminance * NoL + sunSpecular;
+        }
+        else if (foliage || s.cls == MATERIAL_SUBSURFACE)
+            // across the surface: through the leaf (model v1), or through a Subsurface hit's thin part (W)
+            sunFull = albedo * s.transmission * L.sunIlluminance * (foliage ? -NoL : modelSubsurfaceThin(-NoL, v, l0));
     }
-    float3 cached = diffuseAlbedo * L.irradiance + shSpecularAlbedo(f0, NoV, s.roughness) * L.specularRadiance;
+    const float3 cachedSpecular = shSpecularAlbedo(f0, NoV, s.roughness) * L.specularRadiance;
+    float3 cached = diffuseAlbedo * L.irradiance + cachedSpecular;
     if ((m.classFlags & MATERIAL_LAYERED) != 0 && !foliage)
     {
         const ModelCoat coat = rtHitCoat(m);
@@ -139,8 +149,9 @@ float3 rtHitRadianceSplit(GpuMaterial m, float3 n, float3 v, RtHitLighting L, fl
         else if (any(sheen.color > 0))
         {
             const float keepS = modelSheenKeep(sheen, NoV);
-            if (NoL > 0 && any(sunFull > 0)) sunFull = keepS * sunFull + sheen.color * modelSheenLobe(sheen.roughness, n, v, l0) * L.sunIlluminance * NoL;
-            cached = keepS * cached + sheen.color * (modelSheenAlbedo(NoV, sheen.roughness) / MODEL_PI) * L.irradiance;
+            if (NoL > 0 && any(sunFull > 0))
+                sunFull = keepS * (sunFull - sunSpecular * sheen.cloth) + sheen.color * modelSheenLobe(sheen.roughness, n, v, l0) * L.sunIlluminance * NoL;
+            cached = keepS * (cached - cachedSpecular * sheen.cloth) + sheen.color * (modelSheenAlbedo(NoV, sheen.roughness) / MODEL_PI) * L.irradiance;
         }
     }
     const float3 sun = sunFull * L.sunVisibility;  // fractional in penumbrae (the VSM estimate); was only tested > 0, giving full sun there

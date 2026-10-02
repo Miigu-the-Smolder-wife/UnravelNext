@@ -554,6 +554,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     // histogram, particles, output, edge / coverage radiance). It reads the class's diffuse texture around each pixel, so
     // it follows the whole group (and the fallback kernels for their tiles).
     const uint32_t subsurfaceBit = 1u << (uint32_t)material::ShadeClass::Subsurface;
+    // A first-person view model drawn through viewmodel.fov_override_degrees (the main view's clip.xy remap) covers more
+    // pixels than its geometry at the pixel's ray would: the scatter kernel then reads the vis buffer and takes a
+    // view-model pixel's true ray, so its scatter radius in pixels is the drawn size's (ShadeOpaque.hlsl SHADE_PART 3).
+    const bool scatterViewModels = scatter && view.view.kind == gpu::ViewKind::Main && fc.scene.viewModelInstances() > 0 &&
+                                   fc.quality.number("viewmodel.fov_override_degrees") > 0 && v.visId.valid() && v.visibleClusters.valid();
     auto addScatter = [&](bool fallbackTiles) {
         ID3D12PipelineState* kernel = fc.shaders.compute(linear ? "Passes/Shading/SubsurfaceScatter.OUTPUT1" : "Passes/Shading/SubsurfaceScatter.OUTPUT0");
         const uint32_t listBandCount = o.bands;
@@ -565,6 +570,12 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              b.use(o.materialWord, Use::SrvCompute);
                              b.use(scatterDiffuse, Use::SrvCompute);
                              b.use(directRadiance, Use::SrvCompute);
+                             if (scatterViewModels)
+                             {
+                                 b.use(v.visId, Use::SrvCompute);
+                                 b.use(v.visibleClusters, Use::SrvCompute);
+                             }
+                             if (o.anisoWord.valid()) b.use(o.anisoWord, Use::SrvCompute);  // (an eye's pixels: the iris mask)
                              if (fallbackTiles)
                              {
                                  b.use(v.shadowOverflowFallbackTiles, Use::SrvCompute);
@@ -608,6 +619,9 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              k32[26] = asUint(histogram.centreSigma);                              // P[6].z
                              k32[28] = c.uav(edgeRadiance);                                        // P[7].x
                              k32[31] = keepWater ? c.srv(v.waterVis) : none;                       // P[7].w
+                             k32[32] = scatterViewModels ? c.srv(v.visId) : none;                  // P[8].x: view models under the projection remap
+                             k32[33] = scatterViewModels ? c.srv(v.visibleClusters) : none;        // P[8].y
+                             k32[37] = o.anisoWord.valid() ? c.srv(o.anisoWord) : none;            // P[9].y: the class word (an eye's mask)
                              k32[38] = c.srv(scatterDiffuse);                                      // P[9].z: the class's diffuse light per unit f_d
                              k32[40] = c.srv(directRadiance);                                      // P[10].x: its specular light and emission
                              k32[45] = scatterSamples;                                             // P[11].y
@@ -1335,6 +1349,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             MegaLightsFrame cml = megaLightsSample(fc, cview, covWord, areaLights, ltcSrv, signature, "coverage");
             if (!cml.on) fail("M.shading: the coverage layer's shading.mega_lights instance could not start");
             ID3D12PipelineState* covShade = fc.shaders.compute((std::string("Passes/Shading/MegaLightsShade.AREA") + (areaLights ? "1" : "0") + ".LAYERED0.FULL1").c_str());
+            // Subsurface fragments take that class's variant in a dispatch of its own - its two specular lobes and the light
+            // through thin parts, as the fragment kernels' own light loop shades them (CoverageShade.hlsli) - and the plain
+            // kernel leaves them out. Scenes without such materials run the one dispatch as before.
+            ID3D12PipelineState* covShadeSubsurface =
+                subsurfaceMaterials ? fc.shaders.compute((std::string("Passes/Shading/MegaLightsShade.AREA") + (areaLights ? "1" : "0") + ".LAYERED3.FULL1").c_str()) : nullptr;
             auto half = [](float f) {  // positive, in the half range (the weight caps)
                 uint32_t u;
                 std::memcpy(&u, &f, 4);
@@ -1363,7 +1382,9 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           k32[1] = c.srv(covDepth);
                           k32[2] = c.srv(covWord);
                           k32[5] = 0;
-                          k32[6] = 0xFFFFFFFEu;  // P[1].z: every shade class but the sky (the plain kernel: a layered material's base)
+                          // P[1].z: every shade class but the sky (the plain kernel: a layered material's base), less the
+                          // Subsurface class when its own dispatch follows
+                          k32[6] = covShadeSubsurface ? 0xFFFFFFFEu & ~subsurfaceBit : 0xFFFFFFFEu;
                           k32[16] = covMainView ? r.areaLightStable : gpu::kNone;  // P[4].x (B2)
                           k32[17] = o.textureTableSrv;
                           k32[18] = experiment;
@@ -1381,6 +1402,13 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           c.cmd->SetPipelineState(covShade);
                           c.computeConstants(k32, 48);
                           c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                          if (covShadeSubsurface)
+                          {
+                              k32[6] = 0x80000000u | subsurfaceBit;  // (the class as a mask; its pixels are the first dispatch's gaps)
+                              c.cmd->SetPipelineState(covShadeSubsurface);
+                              c.computeConstants(k32, 48);
+                              c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                          }
                       });
             megaLightsDenoise(fc, cview, covWord, cml, true);
             covMlDiffuse = cml.lighting;
