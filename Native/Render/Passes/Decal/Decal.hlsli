@@ -1,5 +1,5 @@
-// Projected decals (FEATURES_GAME 5; A7). Owner: E. Readers: M's material resolve and R's hit shading, through
-// decalApply (the coverage layer's fragments take none: CoverageShade.hlsli covFragmentMaterial).
+// Projected decals (FEATURES_GAME 5; A7). Owner: E. Readers: M's material resolve, the coverage layer's fragments
+// (CoverageShade.hlsli covShadeFragment) and R's hit shading, through decalApply / decalApplyHit.
 //
 // A decal is an oriented box and an ordinary scene material (its textures go through M's pipeline: footprint-filtered
 // base colour with alpha = opacity, rough/metal, LEAN slope moments for the normal). The box is world space, or the

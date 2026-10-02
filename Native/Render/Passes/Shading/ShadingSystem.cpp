@@ -1540,6 +1540,9 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           c.cmd->Dispatch((hairW + 7) / 8, (hairH + 7) / 8, 1);
                       });
         }
+        // E's decals of the view (A7; both invalid when none is live): the fragments' material takes them as the resolve's
+        // pixels do (CoverageShade.hlsli covShadeFragment)
+        const bool fragmentDecals = v.decalFrames.valid() && v.decalTiles.valid();
         // The fragment shading kernels' resources (CoverageShade.hlsli: P[1], P[3], P[4], P[5].x).
         auto useShading = [=](PassBuilder& b) {
             b.use(v.coverageRecords, Use::SrvCompute);
@@ -1556,6 +1559,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             if (v.screenProbeMaps.valid()) b.use(v.screenProbeMaps, Use::SrvCompute);
             declareGiSource(b, giSrc, Use::SrvCompute);
             if (r.surfaceConstants.valid()) b.use(r.surfaceConstants, Use::SrvCompute);  // A7 surface layers (one buffer)
+            if (fragmentDecals)
+            {
+                b.use(v.decalFrames, Use::SrvCompute);  // A7 decals on the fragments (P[10].zw)
+                b.use(v.decalTiles, Use::SrvCompute);
+            }
             if (r.lightFunctions.valid()) b.use(r.lightFunctions, Use::SrvCompute);    // A8 light functions
             if (r.rainShadow.valid()) b.use(r.rainShadow, Use::SrvCompute);
             if (covMlDiffuse.valid())
@@ -1587,6 +1595,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             k[32] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : gpu::kNone;  // P[8].x (A8; the arrays hold 48)
             k[33] = v.coverageRecordRadiance.valid() ? c.srv(v.coverageRecordRadiance) : gpu::kNone;  // P[8].y (v1.75)
             waterSunConstants(c, k + 36, 4);  // P[9], P[10].x (v1.77)
+            k[42] = fragmentDecals ? c.srv(v.decalFrames) : gpu::kNone;  // P[10].z: A7 decals
+            k[43] = fragmentDecals ? c.srv(v.decalTiles) : gpu::kNone;   // P[10].w
             k[44] = covMlDiffuse.valid() ? c.srv(covMlDiffuse) : gpu::kNone;   // P[11].x: shading.mega_lights' coverage instance
             k[45] = covMlSpecular.valid() ? c.srv(covMlSpecular) : gpu::kNone;  // P[11].y
             k[46] = hairSun.valid() ? c.srv(hairSun) : gpu::kNone;              // P[11].z: the grooms towards the sun

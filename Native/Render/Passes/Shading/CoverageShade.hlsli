@@ -27,6 +27,8 @@
 // M pre-shaded classes) are read from it (their owners shaded them, CoverageSpecial.hlsli), clusters are shaded here.
 // P[11].z = E's grooms between the fragments and the sun (Passes/Hair/HairShadow.hlsl MODE 2: the hair's transmittance
 // at the 4 depths of S's sun profile, R32_UINT; UNX_NONE: none) - a cluster fragment's sun visibility times its value.
+// P[10].zw = E's decals of the view (ViewResources::decalFrames, decalTiles; UNX_NONE: none live): a fragment's material
+// takes them as the resolve's pixels do (Passes/Decal/Decal.hlsli decalApply), before the surface layers.
 // COV_PRESHADE_CLASSES (CoverageSpecial.hlsl MODE=1, 2): covFragmentMaterial takes the material of its class as the
 // resolve - 1 Cut, 2 Terrain; COV_PRESHADE_LIGHT (MODE=3): covShadeFragment lights the material those kernels stored.
 #ifndef UNX_M_COVERAGE_SHADE_HLSLI
@@ -40,6 +42,7 @@ static uint g_covListed = 0xFFFFFFFFu;
 #include "Passes/Material/MaterialSurface.hlsli"
 #include "Passes/Material/MaterialEye.hlsli"
 #include "Passes/Material/MaterialInputs.hlsli"
+#include "Passes/Decal/Decal.hlsli"
 #include "Passes/Material/SurfaceLayers.hlsli"
 #include "Passes/Lights/LightFunction.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
@@ -166,6 +169,27 @@ bool covBefore(uint2 a, uint2 b, StructuredBuffer<uint4> records, uint visibleSr
     return a.y < b.y;
 }
 uint2 covKey(StructuredBuffer<uint4> records, uint element) { return uint2(records[element].y & ~COV_DEPTH_SEE_THROUGH, element); }
+// covBefore in two steps, for a kernel that sorts in registers with an unrolled network (CoverageComposite): the network
+// compares by covNearer - the depth, then the element: a total order, but not yet the stable one among equal depths -
+// and COV_SETTLE_TIES then puts each run of equal depth into covBefore's order by insertion, on the lane's stored keys
+// (sorted[0 .. count)). The result is covBefore's order (the order is total, so it is the only one), and covBefore
+// stands once in the kernel: in each of the network's 80 comparators it was 9,000 instructions, 40 KB of a kernel at the
+// size limit. Equal depths are rare, so the insertion costs one comparison of depths per key.
+bool covNearer(uint2 a, uint2 b) { return a.x != b.x ? a.x > b.x : a.y < b.y; }
+#define COV_SETTLE_TIES(sorted, count, records, visibleSrv)                                         \
+    [loop] for (uint tieI = 1; tieI < (count); ++tieI)                                              \
+    {                                                                                               \
+        const uint2 tieKey = sorted[tieI];                                                          \
+        uint tieJ = tieI;                                                                           \
+        [loop] while (tieJ > 0)                                                                     \
+        {                                                                                           \
+            const uint2 tiePrev = sorted[tieJ - 1];                                                 \
+            if (tiePrev.x != tieKey.x || !covBefore(tieKey, tiePrev, records, visibleSrv)) break;   \
+            sorted[tieJ] = tiePrev;                                                                 \
+            --tieJ;                                                                                 \
+        }                                                                                           \
+        if (tieJ != tieI) sorted[tieJ] = tieKey;                                                    \
+    }
 static const uint2 COV_KEY_AFTER_ALL = uint2(0, 0xFFFFFFFFu);  // after every key (a record's element is below it)
 
 
@@ -384,6 +408,23 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
     float roughness = cmat.roughness, metallic = cmat.metallic, variance = cmat.variance;
     const bool backSide = !sf.front && (m.classFlags & MATERIAL_TWO_SIDED) != 0;
     if (backSide) n = -n;
+    if (P[10].z != UNX_NONE)
+    {
+        // E's decals of the view as upper layers of the fragment's material, as in the resolve and before the surface
+        // layers (P[10].zw: the view's decal frames and tile lists; the tile is the fragment's pixel's, the footprint
+        // the pixel's on the fragment's plane, the geometric normal the side this fragment shades)
+        DecalMaterial dm;
+        dm.baseColor = baseColor; dm.roughness = roughness; dm.metallic = metallic; dm.normal = n; dm.variance = variance;
+        DecalSurface ds;
+        ds.position = sf.offset; ds.dpdx = sf.dpdx; ds.dpdy = sf.dpdy;
+        ds.geometricNormal = backSide ? -sf.geometricNormal : sf.geometricNormal;
+        ds.instance = sf.instance;
+        ds.geometricVariance = (dot(sf.dndx, sf.dndx) + dot(sf.dndy, sf.dndy)) / 12.0;
+        DecalContext dc;
+        dc.frames = P[10].z; dc.tiles = P[10].w; dc.materialTable = P[1].y;
+        decalApply(dc, pixel, ds, dm);
+        baseColor = dm.baseColor; roughness = dm.roughness; metallic = dm.metallic; n = dm.normal; variance = dm.variance;
+    }
     if (P[7].z != UNX_NONE || P[7].w != UNX_NONE)
     {
         // the surface state layers, as in the resolve (a grass blade or leaf gets wet, frost, snow like any surface)
