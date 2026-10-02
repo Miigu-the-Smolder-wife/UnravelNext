@@ -21,10 +21,14 @@
 // P[1] = { reprojected guide UAV (R10G10B10A2), mask UAV (RG8: r = bits / 255 - 1 off screen or cut, 2 parallax
 //          disocclusion, 8 hole-filled vector, 16 off the kept frame's screen; g = reprojection edge), width, height }
 // P[2] = { asuint(jitter x), asuint(jitter y), asuint(exposure ratio), flags (1: reset - first frame, cut, restore) }
-// P[3] = { previous flickering history SRV (RGBA8; UNX_NONE: none), reprojected flickering history UAV (RGBA8), frame, 0 }
+// P[3] = { previous flickering history SRV (RGBA8; UNX_NONE: none), reprojected flickering history UAV (RGBA8), frame,
+//          the previous guide's width | height << 16 (0: this frame's) }
+// (Dynamic resolution: the previous frame's histories are that frame's internal size, which need not be this frame's.
+// They are read where the pixel was, by UV, on their own texel grids: P[3].w for the guide, P[4].w for the flickering
+// and the thin-coverage histories. The reference's TSR does the same with its previous view rectangle.)
 // P[4] = { previous thin coverage history SRV (R8; UNX_NONE: none), reprojected thin coverage UAV (R8; UNX_NONE: no
 //          thin geometry detection), hole-filled motion UAV (RG32F: the vectors m.upscale reads; UNX_NONE: no hole
-//          filling), 0 }
+//          filling), the previous flickering and thin-coverage histories' width | height << 16 (0: this frame's) }
 // P[5] = { kept frame's guide SRV (R10G10B10A2; UNX_NONE: no resurrection this frame), resurrected guide UAV
 //          (R10G10B10A2; UNX_NONE: none), asuint(this frame's exposure over the kept frame's), field SRV (RGBA32_UINT,
 //          Tsr.hlsli: z = the closest device depth) }, P[6..9] = rows of this frame's unjittered clip space to the
@@ -44,6 +48,8 @@ void main(uint2 id : SV_DispatchThreadID)
     RWTexture2D<float4> guideOut = ResourceDescriptorHeap[P[1].x];
     RWTexture2D<float2> maskOut = ResourceDescriptorHeap[P[1].y];
     const float2 jitter = asfloat(P[2].xy);
+    const int2 previousGuideSize = P[3].w != 0 ? int2(P[3].w & 0xFFFFu, P[3].w >> 16) : size;
+    const int2 previousPairSize = P[4].w != 0 ? int2(P[4].w & 0xFFFFu, P[4].w >> 16) : size;
     const float4 info = infoTexture.Load(int3(id, 0));
     const float previousZ = info.x, zError = info.y;
     const bool hasOffset = info.w > 0.75;
@@ -120,7 +126,7 @@ void main(uint2 id : SV_DispatchThreadID)
     if (!offScreen && P[0].w != UNX_NONE)
     {
         Texture2D<float4> previousGuide = ResourceDescriptorHeap[P[0].w];
-        guide = saturate(tsrCatmullRom(previousGuide, previousUv, float2(size)));
+        guide = saturate(tsrCatmullRom(previousGuide, previousUv, float2(previousGuideSize)));
         guide.rgb = saturate(tsrLinearToGuide(tsrGuideToLinear(guide.rgb) * asfloat(P[2].z)));
     }
     guideOut[id] = guide;
@@ -136,7 +142,7 @@ void main(uint2 id : SV_DispatchThreadID)
             h.y += h.z * h.x;
             h ^= h >> 16;
             const float2 e = float2(h.xy & 0xFFFFu) / 65536.0;
-            const int2 at = clamp(int2(floor(previousUv * float2(size) + e - 0.5)), 0, size - 1);
+            const int2 at = clamp(int2(floor(previousUv * float2(previousPairSize) + e - 0.5)), 0, previousPairSize - 1);
             flicker = previousFlicker.Load(int3(at, 0));
             // the luma's exposure (the guide space, as a grey)
             const float linearLuma = flicker.r * min(0.17 / max(1.0 - flicker.r, 1e-6), 65504.0) * asfloat(P[2].z);
@@ -152,7 +158,7 @@ void main(uint2 id : SV_DispatchThreadID)
         if (!offScreen && !disoccluded && P[4].x != UNX_NONE)
         {
             Texture2D<float> previousCoverage = ResourceDescriptorHeap[P[4].x];
-            coverage = previousCoverage.Load(int3(clamp(int2(floor(previousUv * float2(size))), 0, size - 1), 0));
+            coverage = previousCoverage.Load(int3(clamp(int2(floor(previousUv * float2(previousPairSize))), 0, previousPairSize - 1), 0));
         }
         RWTexture2D<float> coverageOut = ResourceDescriptorHeap[P[4].y];
         coverageOut[id] = coverage;

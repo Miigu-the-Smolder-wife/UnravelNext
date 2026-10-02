@@ -140,3 +140,31 @@ upscale_history_frames_moving = 4
 hdr_encoding = 0
 hdr_paper_white_nits = 203.0           # paper white's luminance for encodings 1 and 2 (ITU-R BT.2408's reference white);
                                         # the display's peak is displayPeak x this
+# Dynamic resolution (Passes/Shading/DynamicResolution.cpp; the reference's dynamic resolution, r.DynamicRes.*): the
+# upscaled main view's internal height follows the GPU's frame time. The heights above (render_scale,
+# render_height_max) are then the most a frame renders; the controller takes fewer lines while the measured GPU time is
+# over the budget and gives them back when it is under. The output and the upscale's history keep their size. Applies
+# to a view the settings above already upscale (a natively rendered view is not scaled). 0 = off.
+# (At a 4K output the static height, 1080 lines, is 50 % of the output: min_percent must go below that for the controller
+# to have any room there.)
+# The reference's controller is in its Engine module, which the reference checkout does not have: the rule and the
+# defaults are written from its console variables as remembered (named beside each key), not from its source.
+dynamic_resolution_target_ms = 0.0                  # r.DynamicRes.FrameTimeBudget: the GPU frame time to hold (the reference's default is 33.3); 0: off
+dynamic_resolution_headroom_percent = 10.0          # r.DynamicRes.TargetedGPUHeadRoomPercentage: the controller aims this far under the budget
+dynamic_resolution_min_percent = 50.0               # r.DynamicRes.MinScreenPercentage: the least internal height, percent of the output's
+dynamic_resolution_max_percent = 100.0              # r.DynamicRes.MaxScreenPercentage: the most (and never above the static height)
+dynamic_resolution_history_frames = 16              # r.DynamicRes.HistorySize: measured frames a decision looks back over
+dynamic_resolution_frame_weight = 0.9               # r.DynamicRes.FrameWeightExponent: each older frame's weight against the one after it
+dynamic_resolution_change_period_frames = 8         # r.DynamicRes.MinResolutionChangePeriod: frames between two changes (not a panic's)
+dynamic_resolution_change_threshold_percent = 2.0   # r.DynamicRes.ChangePercentageThreshold: smaller changes of the fraction are not made
+dynamic_resolution_increase_blend = 0.9             # r.DynamicRes.IncreaseAmortizationBlendFactor: how much of a suggested increase is taken
+dynamic_resolution_over_budget_frames = 2           # r.DynamicRes.MaxConsecutiveOverBudgetGPUFrameCount: this many newest frames in a row over
+                                                    # the budget drop the resolution at once
+dynamic_resolution_step_lines = 72                  # ours: the internal height moves in whole steps of this many lines, rounded down. A step
+                                                    # re-keys the frame's graph plan and restarts every screen-space history that is keyed on
+                                                    # the view's size (GI, reflections, MegaLights, short-range AO, clouds, the fog and
+                                                    # translucency volumes, the HZB - the upscaler's own histories carry on): few, coarse
+                                                    # steps until those carry on too. 72 lines of 1080 are about 13 % of the pixels
+dynamic_resolution_fixed_ms = 0.0                   # ours: the part of a frame's GPU time that does not scale with the pixels, taken off
+                                                    # before the proportional rule (0: the reference's rule, time ~ pixels; the lobby's
+                                                    # measured model is 3.3 ms + 4.1 ms per million internal pixels)

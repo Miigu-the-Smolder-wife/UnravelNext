@@ -51,7 +51,9 @@ struct DiaphragmState
 {
     Device* device = nullptr;
     ComPtr<ID3D12Resource> history[2];
-    uint32_t width = 0, height = 0, parity = 0;
+    uint32_t width[2] = {}, height[2] = {};  // per slot: the size of the frame that wrote it (dynamic resolution: the
+                                             // internal size is each frame's own; the kernel reads the history by UV)
+    uint32_t parity = 0;
     uint64_t written = ~0ull;  // the frame history[parity] is of
     ~DiaphragmState()
     {
@@ -59,9 +61,11 @@ struct DiaphragmState
         for (ComPtr<ID3D12Resource>& h : history)
             if (h) device->deferRelease(h);
     }
-    void ensure(Device& d, uint32_t w, uint32_t h)
+    // 'slot': the one this frame writes - recreated when its size is not this frame's; the other keeps its own.
+    void ensure(Device& d, uint32_t w, uint32_t h, uint32_t slot)
     {
-        if (history[0] && width == w && height == h) return;
+        const bool all = !history[0];
+        if (!all && width[slot] == w && height[slot] == h) return;
         device = &d;
         D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
         D3D12_RESOURCE_DESC1 desc{};
@@ -72,17 +76,18 @@ struct DiaphragmState
         desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
         desc.SampleDesc.Count = 1;
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        for (int k = 0; k < 2; ++k)
+        for (uint32_t k = 0; k < 2; ++k)
         {
+            if (!all && k != slot) continue;
             if (history[k]) d.deferRelease(history[k]);
             check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
                                                     IID_PPV_ARGS(history[k].ReleaseAndGetAddressOf())),
                   "M depth of field prefilter history");
             history[k]->SetName(k ? L"M depth of field prefilter history 1" : L"M depth of field prefilter history 0");
+            width[k] = w;
+            height[k] = h;
         }
-        width = w;
-        height = h;
-        written = ~0ull;
+        if (all) written = ~0ull;
     }
 };
 
@@ -200,9 +205,10 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
     if (prefilter)
     {
         DiaphragmState& s = fc.state<DiaphragmState>("M.dof.diaphragm");
-        s.ensure(fc.device, hw, hh);
+        s.ensure(fc.device, hw, hh, s.parity ^ 1u);
         const bool valid = !fc.frame.upscale.reset && s.written != ~0ull && s.written + 1 == fc.frame.frameIndex;
-        const TextureRef previous = g.importTexture(s.history[s.parity].Get(), { "m.dof.d.stable (previous)", hw, hh, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
+        const TextureRef previous = g.importTexture(s.history[s.parity].Get(),
+                                                    { "m.dof.d.stable (previous)", s.width[s.parity], s.height[s.parity], 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
                                                     D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
         s.parity ^= 1u;
         s.written = fc.frame.frameIndex;

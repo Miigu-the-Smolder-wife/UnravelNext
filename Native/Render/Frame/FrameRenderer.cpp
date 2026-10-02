@@ -265,6 +265,10 @@ void FrameRenderer::setupUpscale(FrameContext& frame)
         m_upscaleValid = false;
         return;
     }
+    // Dynamic resolution (output.dynamic_resolution_target_ms, M's DynamicResolution.cpp): the height above is the
+    // most the frame renders; the controller may take fewer lines to hold its GPU time budget. The output's size and
+    // the upscale's history stay; the internal size is this frame's alone.
+    h = std::clamp(tracks::dynamicResolutionHeight(m_trackState, m_quality, frame, v.height, h), 8u, h);
     const uint32_t W = v.width, H = v.height;
     const uint32_t w = std::max(8u, (uint32_t)std::lround((double)W * h / H));
     // 64 positions per internal pixel whatever the ratio: the upscale's narrow output-pixel kernel (output.upscale_kernel)
@@ -286,8 +290,9 @@ void FrameRenderer::setupUpscale(FrameContext& frame)
     const float exposure = 1.0f / (1.2f * std::exp2(v.ev100));
     u.exposureRatio = m_upscaleValid && m_upscalePrevExposure > 0 ? exposure / m_upscalePrevExposure : 1.0f;
     u.reset = !m_upscaleValid || !sameSize || frame.discontinuity != 0;
-    u.prevJitterX = u.reset ? jx : m_upscalePrevJitterX;
-    u.prevJitterY = u.reset ? jy : m_upscalePrevJitterY;
+    // (the previous frame's jitter in this frame's internal pixels: the internal size may have changed since)
+    u.prevJitterX = u.reset ? jx : m_upscalePrevJitterX * (m_upscalePrevInternalWidth ? (float)w / (float)m_upscalePrevInternalWidth : 1.0f);
+    u.prevJitterY = u.reset ? jy : m_upscalePrevJitterY * (m_upscalePrevInternalHeight ? (float)h / (float)m_upscalePrevInternalHeight : 1.0f);
     // The jittered projection: clip' = T clip with T translating NDC by (2 jx / w, -2 jy / h) (pixel +y is NDC -y), so
     // the content moves by (jx, jy) internal pixels: rows 0 and 1 of P gain the translation times row 3.
     const float tx = 2.0f * jx / (float)w, ty = -2.0f * jy / (float)h;
@@ -308,6 +313,8 @@ void FrameRenderer::setupUpscale(FrameContext& frame)
     m_upscalePrevJitterY = jy;
     m_upscalePrevWidth = W;
     m_upscalePrevHeight = H;
+    m_upscalePrevInternalWidth = w;
+    m_upscalePrevInternalHeight = h;
     m_upscaleValid = true;
 }
 
