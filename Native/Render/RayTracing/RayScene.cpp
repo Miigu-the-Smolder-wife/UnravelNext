@@ -1923,6 +1923,8 @@ void RayScene::updateLightGrid(FramePassContext& fc)
         const uint32_t type = (uint32_t)l.type, shadow = l.castShadow ? 1u : 0u;
         mix(&type, 4); mix(&l.position, 12); mix(&l.forward, 12); mix(&l.right, 12); mix(&l.color, 12); mix(&l.intensity, 4);
         mix(&l.range, 4); mix(&l.spotInner, 4); mix(&l.spotOuter, 4); mix(&l.size, 8); mix(&shadow, 4);
+        // (the light components the records hold: the scales, the temperature's tint, what sets the window)
+        mix(&l.diffuseScale, 4); mix(&l.indirectIntensity, 4); mix(&l.temperature, 4); mix(&l.falloffExponent, 4); mix(&l.maxDrawDistance, 4);
     }
     const size_t n = lights.size();
     mix(&n, sizeof n);
@@ -1949,12 +1951,16 @@ void RayScene::updateLightGrid(FramePassContext& fc)
             const float ci = std::cos(l.spotInner), co = std::cos(l.spotOuter);
             r.spotScale = 1.0f / std::max(ci - co, 1e-4f);
             r.spotOffset = -co * r.spotScale;
-            r.intensity = l.intensity;
+            // (what a hit's light sample carries on is indirect light: the light's indirect and diffuse scales)
+            r.intensity = l.intensity * l.indirectIntensity * l.diffuseScale;
             r.range = std::max(l.range, 1e-3f);
-            r.color = l.color;
+            r.color = scene::lightColor(l);  // (with its colour temperature)
             r.size[0] = l.size.x;
             r.size[1] = l.size.y;
             r.castShadow = l.castShadow ? 1u : 0u;
+            // pad bit 0: the hit's weight takes the light's own window (HitLocalLights.hlsli rtLocalLightFinish)
+            const bool punctual = l.type == scene::LightType::Point || l.type == scene::LightType::Spot;
+            r.pad = (punctual && l.falloffExponent > 0) || l.maxDrawDistance > 0 ? 1u : 0u;
             lo = { std::min(lo.x, r.position.x - r.range), std::min(lo.y, r.position.y - r.range), std::min(lo.z, r.position.z - r.range) };
             hi = { std::max(hi.x, r.position.x + r.range), std::max(hi.y, r.position.y + r.range), std::max(hi.z, r.position.z + r.range) };
             ranges.push_back(r.range);
