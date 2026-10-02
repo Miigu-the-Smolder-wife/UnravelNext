@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: STEP=0,1 ML=0,1
+// unx-variants: STEP=0,1 ML=0,1 GIV=0,1
 // Particle render pass, per particle of the latest tick's render ranges (ParticleLayerPass.hlsli RenderRange):
 //   STEP=0: the particle at the frame time (render rules request 2: a particle of both ticks by cubic Hermite of the two
 //           ends' positions and velocities, one born in the latest tick by p_n - v_n (1 - w) dt from age_n - (1 - w) dt >= 0,
@@ -20,6 +20,7 @@
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 #include "Passes/GI/GiCache.hlsli"
+#include "Passes/GI/GiSource.hlsli"
 #include "Passes/Atmosphere/Froxel.hlsli"
 
 static uint s_curveKeys;
@@ -79,8 +80,13 @@ float3 fxLitRadiance(LayerConstants c, float3 albedo, float3 offset, float3 D, f
     }
     const float3 l = normalize(g_sunDirection);
     L += E * (visibility * fxPhase(dot(l, D), g));
-    // indirect: R's GI cache, isotropic (the mean irradiance over the six axes / pi = fluence / 4 pi)
-    if (c.giCache != UNX_NONE)
+    // indirect (GiSource.hlsli): the Lumen translucency volume's light through the phase function (band 0, and band 1 x
+    // g), or R's GI cache, isotropic (the mean irradiance over the six axes / pi = fluence / 4 pi)
+    // (GIV: the source's kind picks the kernel - both reads in one kernel pass the DXIL limit; ParticleLayer.cpp)
+#if GIV
+    if (giSourceIsVolume(c.giCache)) L += ltvInscatter(giSourceVolume(c.giCache), worldPos, D, g);
+#else
+    if (giSourceIsCache(c.giCache))
     {
         ByteAddressBuffer cache = ResourceDescriptorHeap[c.giCache];
         const GiHeader h = giHeader(cache);
@@ -95,6 +101,7 @@ float3 fxLitRadiance(LayerConstants c, float3 albedo, float3 offset, float3 D, f
         }
         if (n > 0) L += sum / (n * SH_PI);
     }
+#endif
     // ML = 1 (its own variant: both paths in one kernel pass the DXIL limit; ParticleLayer.cpp picks it when the volumes exist):
     // shading.mega_lights (render A; P[1].xy = the froxel grid's sampled local light, MegaLightsVolume.hlsl - as Unreal's
     // MegaLights lights translucency through its lit volume): the local lights' visible fluence F and luminance-weighted

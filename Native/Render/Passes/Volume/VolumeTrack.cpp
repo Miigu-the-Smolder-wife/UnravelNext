@@ -35,7 +35,7 @@ volume::VolumeFrame frameOf(FramePassContext& fc, const ViewResources& view)
     l.vsmLocalLights = r.vsmLocalLights;
     l.vsmSlotOfLight = r.vsmSlotOfLight;
     l.vsmLayers = r.vsmLayers;
-    l.giCache = r.giCache;
+    l.gi = giSource(r);
     l.transmittanceLut = r.transmittanceLut;
     l.multiScatterLut = r.multiScatterLut;
     return f;

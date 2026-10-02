@@ -351,6 +351,15 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     // The froxel grid is the main view's: planar reflection views read neither its lists nor its air volume.
     const bool froxelLists = view.froxelLights.valid();
     const ViewResources v = view;
+    // The indirect light's source beside R's screen probes (unx/render/Frame.h GiSource, Passes/GI/GiSource.hlsli): with
+    // the probes, the world cache they fall back to; without them (gi.lumen_only, planar views) the translucency volume
+    // when the frame has published one, else the cache.
+    GiSource giSrc;
+    if (view.screenProbes.valid()) giSrc.cache = r.giCache;
+    else giSrc = giSource(r);
+    // gi.lumen_only's composite (ShadeOpaque.hlsl part 2): the gather's rough specular and the short-range AO
+    const bool lumenComposite = !view.screenProbes.valid() && view.giIrradiance.valid();
+    const TextureRef roughSpecular = lumenComposite ? view.giRoughSpecular : TextureRef{}, shortRangeAO = lumenComposite ? view.shortRangeAO : TextureRef{};
     // S's coverage fragment visibility (INTERFACES 7.3 v1.41): with it the fragment kernels shade fragments with S's sun
     // profile and local slots (CoverageShade.hlsli covFragmentShadow); without it they stay unshadowed.
     const bool fragmentShadows = v.shadowFragmentVisibility.valid() && v.coverageDepthRange.valid();
@@ -710,8 +719,10 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             if (v.screenProbes.valid()) b.use(v.screenProbes, Use::SrvCompute);
             if (v.screenProbeMaps.valid()) b.use(v.screenProbeMaps, Use::SrvCompute);
             if (v.reflection.valid()) b.use(v.reflection, Use::SrvCompute);
-            if (r.giCache.valid()) b.use(r.giCache, Use::SrvCompute);  // planar: direct lookups; main: ProbeSrvs.pad1
+            declareGiSource(b, giSrc, Use::SrvCompute);  // planar: direct lookups; main: ProbeSrvs.pad1, or the translucency volume
             if (v.giIrradiance.valid()) b.use(v.giIrradiance, Use::SrvCompute);  // R's per-pixel front irradiance (P[9].w)
+            if (roughSpecular.valid()) b.use(roughSpecular, Use::SrvCompute);  // P[11].y
+            if (shortRangeAO.valid()) b.use(shortRangeAO, Use::SrvCompute);    // P[11].z
             if (atmosphere)
                 for (TextureRef t : { r.transmittanceLut, r.multiScatterLut, r.skyViewLut }) b.use(t, Use::SrvCompute);
             if (air) b.use(v.airVolume, Use::SrvCompute);
@@ -782,7 +793,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                          c.srv(o.tiles), o.firstTile(cls, band), cls, o.emissive.valid() ? c.srv(o.emissive) : none,
                                          v.shadowVisibility.valid() ? c.srv(v.shadowVisibility) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
                                          v.reflection.valid() ? c.srv(v.reflection) : none,
-                                         r.giCache.valid() ? c.srv(r.giCache) : none,
+                                         giSourceWord(c, giSrc),
                                          atm[0], atm[1], overflow ? c.srv(v.shadowOverflowTiles) : none, atm[3], none, o.textureTableSrv, experiment,
                                          none, fx[0], fx[1] };
                 uint32_t k32[48] = {};
@@ -803,6 +814,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 k32[42] = emissiveIrradiance.valid() ? c.srv(emissiveIrradiance) : none;  // P[10].z: 14.1b (P[4].x is B2's mask)
                 k32[43] = r.vsmTileLit.valid() ? c.srv(r.vsmTileLit) : none;             // P[10].w: L3 (P[6].z is the histogram's centre weight)
                 k32[44] = tileLights ? c.srv(tileRecords) : none;                        // P[11].x: L2 (P[4].w is the histogram)
+                k32[45] = roughSpecular.valid() ? c.srv(roughSpecular) : none;           // P[11].y: gi.lumen_only's rough specular
+                k32[46] = shortRangeAO.valid() ? c.srv(shortRangeAO) : none;             // P[11].z: ... and short-range AO
                 ID3D12PipelineState* lobes = shadeClass == material::ShadeClass::Layered ? lobesLayered : (shadeClass == material::ShadeClass::Sheen ? lobesSheen : nullptr);
                 if (part == 1 && lobes && areaLobes.valid())
                 {
@@ -856,6 +869,9 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              if (v.screenProbeMaps.valid()) b.use(v.screenProbeMaps, Use::SrvCompute);
                              if (v.reflection.valid()) b.use(v.reflection, Use::SrvCompute);
                              if (v.giIrradiance.valid()) b.use(v.giIrradiance, Use::SrvCompute);  // P[9].w
+                             declareGiSource(b, giSrc, Use::SrvCompute);
+                             if (roughSpecular.valid()) b.use(roughSpecular, Use::SrvCompute);  // P[11].y
+                             if (shortRangeAO.valid()) b.use(shortRangeAO, Use::SrvCompute);    // P[11].z
                              if (atmosphere)
                                  for (TextureRef t : { r.transmittanceLut, r.multiScatterLut }) b.use(t, Use::SrvCompute);
                              if (air) b.use(v.airVolume, Use::SrvCompute);
@@ -895,7 +911,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              const uint32_t k[22] = { c.srv(v.gbuffer), c.srv(v.depth), c.srv(o.materialWord), c.uav(v.color),
                                                       c.srv(v.shadowOverflowFallbackTiles), 4, 0xFFFFFFFFu, o.emissive.valid() ? c.srv(o.emissive) : none,
                                                       v.shadowVisibility.valid() ? c.srv(v.shadowVisibility) : none, v.screenProbes.valid() ? c.srv(v.screenProbes) : none,
-                                                      v.reflection.valid() ? c.srv(v.reflection) : none, r.giCache.valid() ? c.srv(r.giCache) : none,
+                                                      v.reflection.valid() ? c.srv(v.reflection) : none, giSourceWord(c, giSrc),
                                                       atmosphere ? c.srv(r.transmittanceLut) : none, atmosphere ? c.srv(r.multiScatterLut) : none, none,
                                                       air ? c.srv(v.airVolume) : none, none, o.textureTableSrv, experiment,
                                                       none,
@@ -912,6 +928,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              k32[42] = emissiveIrradiance.valid() ? c.srv(emissiveIrradiance) : none;  // P[10].z: 14.1b
                              k32[43] = none;                            // P[10].w (the fallback kernel reads no classification)
                              k32[44] = none;                            // P[11].x (the fallback kernel keeps every light per pixel)
+                             k32[45] = roughSpecular.valid() ? c.srv(roughSpecular) : none;  // P[11].y
+                             k32[46] = shortRangeAO.valid() ? c.srv(shortRangeAO) : none;    // P[11].z
                              k32[37] = o.anisoWord.valid() ? c.srv(o.anisoWord) : gpu::kNone;  // P[9].y (A9 anisotropy word)
                              particleConstants(c, k32 + 22);  // P[5].zw
                              k32[16] = r.areaLightStable;     // P[4].x (B2)
@@ -1206,7 +1224,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             if (air) b.use(v.airVolume, Use::SrvCompute);
             if (v.screenProbes.valid()) b.use(v.screenProbes, Use::SrvCompute);
             if (v.screenProbeMaps.valid()) b.use(v.screenProbeMaps, Use::SrvCompute);
-            if (r.giCache.valid()) b.use(r.giCache, Use::SrvCompute);
+            declareGiSource(b, giSrc, Use::SrvCompute);
             if (r.surfaceConstants.valid()) b.use(r.surfaceConstants, Use::SrvCompute);  // A7 surface layers (one buffer)
             if (r.lightFunctions.valid()) b.use(r.lightFunctions, Use::SrvCompute);    // A8 light functions
             if (r.rainShadow.valid()) b.use(r.rainShadow, Use::SrvCompute);
@@ -1230,7 +1248,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         };
         // P[6].zw, P[7].x of the fragment kernels (CoverageShade.hlsli): R's GI cache, S's per-record sun, V's depth range.
         auto fragmentConstants = [=](PassContext& c, uint32_t* k) {
-            k[26] = r.giCache.valid() ? c.srv(r.giCache) : gpu::kNone;
+            k[26] = giSourceWord(c, giSrc);
             k[27] = fragmentShadows && v.shadowFragmentSun.valid() ? c.srv(v.shadowFragmentSun) : gpu::kNone;
             k[28] = fragmentShadows ? c.srv(v.coverageDepthRange) : gpu::kNone;
             k[29] = r.areaLightStable;  // P[7].y (B2)
@@ -1587,7 +1605,7 @@ void translucentComposite(FramePassContext& fc, const ViewResources& view, Textu
                       b.use(glassResults, Use::UavCompute);
                   }
                   if (view.visibleClusters.valid()) b.use(view.visibleClusters, Use::SrvCompute);
-                  if (r.giCache.valid()) b.use(r.giCache, Use::SrvCompute);
+                  declareGiSource(b, giSource(r), Use::SrvCompute);
                   for (const TextureRef& t : { r.transmittanceLut, r.multiScatterLut, view.airVolume })
                       if (t.valid()) b.use(t, Use::SrvCompute);
                   for (const BufferRef& x : { r.vsmPageTable, r.vsmBlocks, r.vsmSearchBound, r.vsmLayers })
@@ -1596,12 +1614,12 @@ void translucentComposite(FramePassContext& fc, const ViewResources& view, Textu
               },
               // (by value: the frame context and its resources do not outlive the graph's build; a reference read at
               // execute time handed the pass other graphs' handles - render C's coverage_layer_is_exact crash)
-              [=, giCache = r.giCache, transmittance = r.transmittanceLut, multiScatter = r.multiScatterLut, pageTable = r.vsmPageTable,
+              [=, gi = giSource(r), transmittance = r.transmittanceLut, multiScatter = r.multiScatterLut, pageTable = r.vsmPageTable,
                blocks = r.vsmBlocks, searchBound = r.vsmSearchBound, layers = r.vsmLayers, vsmConstants = r.vsmConstants,
                visibleClusters = view.visibleClusters, airVolume = view.airVolume](PassContext& c) {
                   const bool shadows = pageTable.valid() && vsmConstants != UINT32_MAX;
                   const uint32_t k[24] = { c.srv(vis), c.srv(classes), c.uav(colour), c.uav(stats),
-                                           c.srv(visibleClusters), textureTable, giCache.valid() ? c.srv(giCache) : none,
+                                           c.srv(visibleClusters), textureTable, giSourceWord(c, gi),
                                            jobs ? c.uav(glassResults) : 0,
                                            transmittance.valid() ? c.srv(transmittance) : none, multiScatter.valid() ? c.srv(multiScatter) : none,
                                            airVolume.valid() ? c.srv(airVolume) : none, 0,

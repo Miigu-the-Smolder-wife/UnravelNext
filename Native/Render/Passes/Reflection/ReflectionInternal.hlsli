@@ -3,6 +3,7 @@
 #define UNX_REFLECTION_INTERNAL_HLSLI
 #include "Passes/Reflection/Reflection.hlsli"
 #include "GBuffer.hlsli"
+#include "Scene.hlsli"
 
 // Per-pixel reflection mode texture (R32_UINT, written by ReflectionClassify in tiles that need rays):
 //   bits 0-1 mode (REFL_K, REFL_M, REFL_G), bits 2-4 log2 of the G sample spacing, bit 5 REFL_SELF (a G pixel with its
@@ -195,6 +196,23 @@ struct ReflSurface
     bool valid;
 };
 
+// The top layer's roughness (reflection.lumen_only; the reference's TopLayerRoughness, LumenMaterial.ush): a clearcoat
+// pixel's reflection is its coat's - classified, drawn, resolved and filtered at the coat's roughness. M composes it as
+// the top layer and gives the base lobe the final gather's rough specular (ShadeOpaque.hlsl).
+// g_reflWords: M's material word (R32_UINT, MaterialInternal.hlsli: bits 24-31 = the layer's footprint-filtered
+// roughness, 0 without a layer), set by a kernel before its first reflSurface; UNX_NONE: every pixel's G-buffer roughness.
+static uint g_reflWords = UNX_NONE;
+float reflTopLayerRoughness(uint2 pixel, float roughness)
+{
+    if (g_reflWords == UNX_NONE) return roughness;
+    Texture2D<uint> words = ResourceDescriptorHeap[g_reflWords];
+    const uint word = words.Load(int3(pixel, 0));
+    if ((word >> 24) == 0) return roughness;
+    const GpuMaterial m = loadMaterial(word & 0xFFFFu);
+    if ((m.classFlags & MATERIAL_LAYERED) == 0 || (m.classFlags & MATERIAL_SHEEN) != 0) return roughness;  // (a sheen's roughness)
+    return loadMaterialLayers(m.classFlags >> 16).clearcoat > 0 ? (word >> 24) / 255.0 : roughness;
+}
+
 ReflSurface reflSurface(Texture2D<float> depth, Texture2D<uint2> gbuffer, uint2 pixel)
 {
     ReflSurface s;
@@ -204,7 +222,7 @@ ReflSurface reflSurface(Texture2D<float> depth, Texture2D<uint2> gbuffer, uint2 
     s.position = worldFromDepth(float2(pixel), d);
     const GBufferSample g = decodeGBuffer(gbuffer.Load(int3(pixel, 0)));
     s.normal = g.normal;
-    s.roughness = g.roughness;
+    s.roughness = reflTopLayerRoughness(pixel, g.roughness);
     s.view = normalize(g_cameraPosition - s.position);
     return s;
 }

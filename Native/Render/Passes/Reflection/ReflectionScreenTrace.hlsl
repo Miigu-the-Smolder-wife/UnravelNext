@@ -11,6 +11,7 @@
 // P[3] = { asuint(max trace distance), max iterations | GGX sampling bias unorm16 << 16, asuint(relative depth thickness),
 //          asuint(exposure ratio) }
 // P[4..7] = the previous view-projection of the previous colour (rows). Frame constants b1 = main view.
+// P[8].x = M's material word (the top layer's roughness, ReflectionInternal.hlsli g_reflWords; UNX_NONE: none).
 #include "Passes/Reflection/ReflectionReuse.hlsli"
 #include "Passes/Reflection/ScreenTrace.hlsli"
 
@@ -19,6 +20,7 @@ void main(uint2 pixel : SV_DispatchThreadID)
 {
     const uint2 size = P[2].xy;
     if (any(pixel >= size)) return;
+    g_reflWords = P[8].x;
     Texture2D<uint> modes = ResourceDescriptorHeap[P[0].x];
     const uint m = modes.Load(int3(pixel, 0));
     if (reflMode(m) != REFL_M) return;

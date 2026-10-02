@@ -187,6 +187,7 @@ void resolve(FramePassContext& fc, ViewResources& view)
     view.gbuffer = fc.graph.createTexture({ "m.gbuffer", W, H, 1, 1, DXGI_FORMAT_R32G32_UINT });
     view.reflectionLobeTiles = fc.graph.createTexture({ "m.reflection lobe tiles", o.tilesX, o.tilesY, 1, 1, DXGI_FORMAT_R8_UNORM });
     o.materialWord = fc.graph.createTexture({ "m.material word", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
+    view.materialWord = o.materialWord;
     if (textures.anyEmissiveTexture()) o.emissive = fc.graph.createTexture({ "m.emissive", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
     if (fc.scene.anyAnisotropic()) o.anisoWord = fc.graph.createTexture({ "m.aniso word", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
     o.tiles = fc.graph.createBuffer({ "m.tiles", (uint64_t)kShadeClassCount * tileCount * 4, 0 });

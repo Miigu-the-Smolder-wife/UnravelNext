@@ -4,6 +4,7 @@
 // -> records -> tile lists -> per tile a depth sort, the 1/4-resolution composite and the full-resolution edge blocks
 // (ParticleLayer.hlsli: what M's shading composite reads). Sprites, emission only for now (M0 stage 1).
 #include "unx/fx/Particles.h"
+#include "unx/render/Frame.h"
 
 #include <cstdint>
 #include <wrl/client.h>
@@ -14,7 +15,8 @@ namespace unx::fx
 // read, from the frame's and the view's resources (invalid = absent).
 struct ParticleLighting
 {
-    render::BufferRef vsmPageTable, vsmPool, vsmBlocks, vsmSearchBound, vsmLayers, giCache, froxelLights;
+    render::BufferRef vsmPageTable, vsmPool, vsmBlocks, vsmSearchBound, vsmLayers, froxelLights;
+    render::GiSource gi;  // the indirect light (unx/render/Frame.h: the translucency volume or the world GI cache)
     render::BufferRef fxLights;  // v1.81: the scene light buffer with the FX tail (declared so the FX writer comes first)
     render::TextureRef vsmAtlas, airVolume, transmittanceLut, multiScatterLut;
     // shading.mega_lights: the froxel grid's sampled local light (FrameResources::localFluence / localMoment; invalid: the

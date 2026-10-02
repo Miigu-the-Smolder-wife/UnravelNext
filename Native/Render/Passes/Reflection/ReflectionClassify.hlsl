@@ -32,6 +32,8 @@
 // UNX_NONE past the views): every pixel of a view's rectangle gets 1 exactly when it is REFL_PLANAR of that view, so the
 // view draws the pixels the resolve reads and no others. The rectangles start on the 8 x 8 grid (ReflectionSystem): a
 // tile of this dispatch is one tile of each view's tile mask. The classification pass runs before the views record.
+// P[7].x = M's material word (reflection.lumen_only: the top layer's roughness, ReflectionInternal.hlsli g_reflWords;
+// UNX_NONE: every pixel's G-buffer roughness).
 #include "Passes/Reflection/ReflectionInternal.hlsli"
 
 groupshared uint g_any;
@@ -103,6 +105,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : S
     bool job = false;
     if (all(pixel < size))
     {
+        g_reflWords = P[7].x;
         const ReflSurface s = reflSurface(depth, gbuffer, pixel);
         const uint smooth = s.valid && s.roughness <= asfloat(P[2].y) ? planar.x : 0;
         [loop] for (uint k = 0; k < smooth; ++k)

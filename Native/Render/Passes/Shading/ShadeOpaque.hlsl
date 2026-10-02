@@ -35,7 +35,12 @@
 // P[1] = { tile lists (raw), list offset (entries), shade class (bit 31 set: a mask of classes, 0xFFFFFFFF every non-sky
 //        class - the fallback kernel runs once per LAYERED variant over its classes), emissive or
 //        UNX_NONE }
-// P[2] = { shadow visibility, screen probes, reflection, GI cache (planar views) } (UNX_NONE = absent)
+// P[2] = { shadow visibility, screen probes, reflection, GI cache (planar views; with the screen probes their fallback)
+//        or, without screen probes, the indirect light's source word (GiSource.hlsli: the Lumen translucency volume) }
+//        (UNX_NONE = absent)
+// gi.lumen_only (no screen probes; part 2): P[9].w = the final gather's diffuse irradiance, P[11].y = its rough specular
+//        (view.giRoughSpecular: RGBA16F radiance x exposure; UNX_NONE: none), P[11].z = the short-range AO
+//        (view.shortRangeAO, LumenShortRangeAO.hlsli; UNX_NONE: none)
 // P[3] = { atmosphere transmittance, multi-scatter, S's shadow overflow tile heads (main kernel; UNX_NONE = absent), this
 //        view's air volume } (this kernel reads no sky view)
 // P[4] = { B2 stable area lights' mask (raw, 1 bit per scene light; UNX_NONE = none), texture table, experiment mask (0;
@@ -111,6 +116,10 @@
 #include "Passes/GI/ScreenProbes.hlsli"
 #include "Passes/GI/GiCache.hlsli"
 #include "Passes/Reflection/Reflection.hlsli"
+#if SHADE_PART == 2 && !AREA_LOBES
+#include "Passes/GI/GiSource.hlsli"
+#include "Passes/GI/LumenShortRangeAO.hlsli"
+#endif
 #if MEGA_LIGHTS
 #include "Passes/Shading/MegaLightsUpsample.hlsli"
 #endif
@@ -872,8 +881,58 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         }
         if (specular && refl.a > 0) incident = refl.a >= 1 ? refl.rgb : lerp(incident, refl.rgb, refl.a);
     }
+    else if (P[9].w != UNX_NONE && (experiment & 6) != 6)
+    {
+        // gi.lumen_only: the final gather's outputs, composed as the reference composes them (ue6-main
+        // DiffuseIndirectComposite.usf, ClearCoatCommon.ush read; the code is ours):
+        //   diffuse    view.giIrradiance x the short-range AO with its multi-bounce rescale (albedo held to 0.5);
+        //   specular   the gather's rough specular x the specular occlusion, and R's reflection over it by the
+        //              reflection's share (1 where traced or planar, the roughness fade between) - the occlusion is on
+        //              the rough part alone;
+        //   clearcoat  the reflection is the coat's (R traces a coated pixel at its coat's roughness: the top layer);
+        //              the base lobe takes the rough specular (the bottom layer);
+        //   Foliage    the back side from the translucency volume (P[2].w; the reference integrates the screen probes
+        //              over the back hemisphere).
+        Texture2D<float4> diffuseIndirect = ResourceDescriptorHeap[P[9].w];
+        const float4 bent = lumenShortRangeAO(P[11].z, pixel, nv);
+        if ((experiment & 2) == 0)
+        {
+            irradiance = max(diffuseIndirect[pixel].rgb, 0.0) / g_exposure * lumenAoMultibounce(s.baseColor * (1 - s.metallic), bent.w, 0.5);
+            if (foliage && giSourceIsVolume(P[2].w)) irradianceBack = ltvIrradiance(giSourceVolume(P[2].w), worldPos, -nv);
+        }
+        if (NoV > 0 && (experiment & 4) == 0)
+        {
+            float3 rough = 0;
+            if (P[11].y != UNX_NONE)
+            {
+                Texture2D<float4> roughSpecular = ResourceDescriptorHeap[P[11].y];
+                rough = max(roughSpecular[pixel].rgb, 0.0) / g_exposure * lumenAoSpecular(n, s.roughness, bent.w, v, bent.xyz * bent.w);
+            }
+            const float4 refl = P[2].z != UNX_NONE ? reflectionRadiance(P[2].z, pixel) : float4(0, 0, 0, 0);
+            incident = lerp(rough, refl.rgb, saturate(refl.a));
+#if LAYERED == 1
+            if (cover > 0)
+            {
+                coatIncident = incident;
+                incident = rough;
+            }
+#endif
+        }
+    }
 #else
-    if (P[2].w != UNX_NONE)
+    if (giSourceIsVolume(P[2].w))
+    {
+        // gi.lumen_only: the main view's translucency volume at the surface point (a point the main view does not see
+        // takes its nearest cell): irradiance on each side, the lobes' radiance from the mirror direction (two SH bands)
+        const LtvSh sh = ltvSample(ltvParams(giSourceVolume(P[2].w)), worldPos);
+        irradiance = ltvIrradianceOf(sh, nv);
+        if (foliage) irradianceBack = ltvIrradianceOf(sh, -nv);
+        if (NoV > 0) incident = ltvRadianceOf(sh, r);
+#if LAYERED == 1
+        if (NoV > 0 && cover > 0) coatIncident = incident;
+#endif
+    }
+    else if (P[2].w != UNX_NONE)
     {
         GiSrvs gi;
         gi.cache = P[2].w;

@@ -86,6 +86,14 @@ float3 ltvRadianceOf(LtvSh s, float3 d)
     return max(0.282095 * s.ambient + 0.488603 * dot(s.directional, float3(d.y, d.z, d.x)) * hue, 0.0);
 }
 float3 ltvRadianceMeanOf(LtvSh s) { return 0.282095 * s.ambient; }
+// The incident radiance integrated with a normalised phase function of asymmetry g (Henyey-Greenstein: its SH band l
+// is g^l, so band 0 x 1 and band 1 x g) - what a medium scatters per unit of scattering coefficient and length; for an
+// isotropic phase function the mean radiance. d: the direction paired with a light's direction in phase(dot(toLight, d), g).
+float3 ltvInscatterOf(LtvSh s, float3 d, float g)
+{
+    const float3 hue = s.ambient / max(ltvLuminance(s.ambient), 1e-12);
+    return max(0.282095 * s.ambient + g * 0.488603 * dot(s.directional, float3(d.y, d.z, d.x)) * hue, 0.0);
+}
 
 // ltvSrv: FrameResources::translucencyGiParams (UNX_NONE: no volume - 0).
 float3 ltvIrradiance(uint ltvSrv, float3 worldPosition, float3 n)
@@ -102,6 +110,11 @@ float3 ltvRadianceMean(uint ltvSrv, float3 worldPosition)
 {
     if (ltvSrv == 0xFFFFFFFFu) return 0;
     return ltvRadianceMeanOf(ltvSample(ltvParams(ltvSrv), worldPosition));
+}
+float3 ltvInscatter(uint ltvSrv, float3 worldPosition, float3 d, float g)
+{
+    if (ltvSrv == 0xFFFFFFFFu) return 0;
+    return ltvInscatterOf(ltvSample(ltvParams(ltvSrv), worldPosition), d, g);
 }
 
 #endif

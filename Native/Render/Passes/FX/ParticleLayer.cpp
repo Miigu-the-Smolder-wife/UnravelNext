@@ -193,7 +193,7 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
                   lc.shadow[5] = L.vsmLocalLights;
                   lc.shadow[6] = L.vsmSlotOfLight;
                   lc.shadow[7] = L.vsmLayers.valid() ? c.srv(L.vsmLayers) : none;
-                  lc.giCache = L.giCache.valid() ? c.srv(L.giCache) : none;
+                  lc.giCache = giSourceWord(c, L.gi);
                   lc.froxelLights = L.froxelLights.valid() ? c.srv(L.froxelLights) : none;
                   lc.airVolume = L.airVolume.valid() ? c.srv(L.airVolume) : none;
                   lc.transmittance = L.transmittanceLut.valid() ? c.srv(L.transmittanceLut) : none;
@@ -234,11 +234,17 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
     const ParticleLighting lighting = f.lighting;
     // (ML1: the local lights from shading.mega_lights' sampled volumes, P[1].xy; ML0: the loop over the froxel list)
     const bool sampledLocal = lighting.localFluence.valid() && lighting.localMoment.valid();
-    dispatch("fx.layer.setup", sampledLocal ? "Passes/FX/FxLayerSetup.STEP0.ML1" : "Passes/FX/FxLayerSetup.STEP0.ML0", groups(threads, 256), [=](PassBuilder& b) {
+    // (GIV: the indirect light's source is the translucency volume - FxLayerSetup.hlsl compiles one read per kernel)
+    const bool giVolume = lighting.gi.params != 0xFFFFFFFFu;
+    dispatch("fx.layer.setup",
+             sampledLocal ? (giVolume ? "Passes/FX/FxLayerSetup.STEP0.ML1.GIV1" : "Passes/FX/FxLayerSetup.STEP0.ML1.GIV0")
+                          : (giVolume ? "Passes/FX/FxLayerSetup.STEP0.ML0.GIV1" : "Passes/FX/FxLayerSetup.STEP0.ML0.GIV0"),
+             groups(threads, 256), [=](PassBuilder& b) {
         for (const BufferRef& x : inputBuffers)
             if (x.valid()) b.use(x, Use::SrvCompute);
-        for (const BufferRef& x : { lighting.vsmPageTable, lighting.vsmPool, lighting.vsmBlocks, lighting.vsmSearchBound, lighting.vsmLayers, lighting.giCache, lighting.froxelLights, lighting.fxLights })
+        for (const BufferRef& x : { lighting.vsmPageTable, lighting.vsmPool, lighting.vsmBlocks, lighting.vsmSearchBound, lighting.vsmLayers, lighting.froxelLights, lighting.fxLights })
             if (x.valid()) b.use(x, Use::SrvCompute);
+        declareGiSource(b, lighting.gi, Use::SrvCompute);
         for (const TextureRef& x : { lighting.vsmAtlas, lighting.airVolume, lighting.transmittanceLut, lighting.multiScatterLut })
             if (x.valid()) b.use(x, Use::SrvCompute);
         b.use(o.records, Use::UavCompute);
@@ -284,7 +290,7 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
         b.use(o.tileStarts, Use::UavCompute);
         b.use(o.counters, Use::UavCompute);
     });
-    dispatch("fx.layer.scatter", "Passes/FX/FxLayerSetup.STEP1.ML0", groups(recordCount, 256), [=](PassBuilder& b) {
+    dispatch("fx.layer.scatter", "Passes/FX/FxLayerSetup.STEP1.ML0.GIV0", groups(recordCount, 256), [=](PassBuilder& b) {
         b.use(o.records, Use::UavCompute);
         b.use(tileFill, Use::UavCompute);
         b.use(o.tileStarts, Use::UavCompute);

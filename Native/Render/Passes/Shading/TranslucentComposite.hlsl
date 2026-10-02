@@ -32,6 +32,7 @@
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 #include "Passes/GI/GiCache.hlsli"
+#include "Passes/GI/GiSource.hlsli"
 #include "Passes/Reflection/Reflection.hlsli"
 
 #define TRANSLUCENT_STAT_PANE 0u    // pane pixels composited
@@ -153,7 +154,8 @@ void main(uint3 id : SV_DispatchThreadID)
     if (sunVisibility > 0 && dot(n, l0) > 0)
         radiance += shSunSpecular(1.0.xxx, r, max(r * r, 1e-4), 1.0.xxx, n, v, max(NoV, 1e-4), l0, E, shPixelAngle(D, Dx)) * Rs * sunVisibility;
     float3 lobe = 0;
-    if (P[1].z != UNX_NONE)
+    if (giSourceIsVolume(P[1].z)) lobe = Rs * ltvRadiance(giSourceVolume(P[1].z), worldPos, reflect(-v, n));  // (GiSource.hlsli)
+    else if (P[1].z != UNX_NONE)
     {
         GiSrvs gi;
         gi.cache = P[1].z;

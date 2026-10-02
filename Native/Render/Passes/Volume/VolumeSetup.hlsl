@@ -17,6 +17,7 @@
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 #include "Passes/GI/GiCache.hlsli"
+#include "Passes/GI/GiSource.hlsli"
 #include "Passes/Atmosphere/Froxel.hlsli"
 
 static uint s_curveKeys;
@@ -76,7 +77,9 @@ float3 volumeLit(VolumeConstants c, float3 offset, float3 D, float g, float foot
         if (resident) visibility = v;
     }
     L += E * (visibility * volumePhase(dot(normalize(g_sunDirection), D), g));
-    if (c.giCache != UNX_NONE)
+    // indirect (GiSource.hlsli): the Lumen translucency volume's light through the phase function, or R's GI cache
+    if (giSourceIsVolume(c.giCache)) L += ltvInscatter(giSourceVolume(c.giCache), worldPos, D, g);
+    else if (c.giCache != UNX_NONE)
     {
         ByteAddressBuffer cache = ResourceDescriptorHeap[c.giCache];
         const GiHeader h = giHeader(cache);

@@ -212,7 +212,7 @@ VolumeOutput VolumePass::recordImpl(const fx::ParticleRenderInputs* particlesIn,
                   vc.shadow[5] = L.vsmLocalLights;
                   vc.shadow[6] = L.vsmSlotOfLight;
                   vc.shadow[7] = L.vsmLayers.valid() ? c.srv(L.vsmLayers) : none;
-                  vc.giCache = L.giCache.valid() ? c.srv(L.giCache) : none;
+                  vc.giCache = giSourceWord(c, L.gi);
                   vc.airVolume = L.airVolume.valid() ? c.srv(L.airVolume) : none;
                   vc.transmittance = L.transmittanceLut.valid() ? c.srv(L.transmittanceLut) : none;
                   vc.multiScatter = L.multiScatterLut.valid() ? c.srv(L.multiScatterLut) : none;
@@ -250,8 +250,9 @@ VolumeOutput VolumePass::recordImpl(const fx::ParticleRenderInputs* particlesIn,
     dispatch("volume.setup", "Passes/Volume/VolumeSetup.STEP1", groups(threads, 256), 1, 0, [=](PassBuilder& b) {
         for (const BufferRef& x : inputBuffers)
             if (x.valid()) b.use(x, Use::SrvCompute);
-        for (const BufferRef& x : { L.vsmPageTable, L.vsmPool, L.vsmBlocks, L.vsmSearchBound, L.vsmLayers, L.giCache, froxelLights })
+        for (const BufferRef& x : { L.vsmPageTable, L.vsmPool, L.vsmBlocks, L.vsmSearchBound, L.vsmLayers, froxelLights })
             if (x.valid()) b.use(x, Use::SrvCompute);
+        declareGiSource(b, L.gi, Use::SrvCompute);
         for (const TextureRef& x : { L.vsmAtlas, L.airVolume, L.transmittanceLut, L.multiScatterLut })
             if (x.valid()) b.use(x, Use::SrvCompute);
         b.use(o.records, Use::UavCompute);

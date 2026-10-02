@@ -52,6 +52,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
     Texture2D<float> depth = ResourceDescriptorHeap[P[0].z];
     Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[0].w];
     const float range = asfloat(P[4].z);
+    g_reflWords = P[5].x;  // (M's material word: the top layer's roughness, ReflectionInternal.hlsli; UNX_NONE: none)
     const ReflSurface s = reflSurface(depth, gbuffer, pixel);
     const float4 own = accumulated.Load(int3(pixel, 0));
     const float3 centre = reuseToFilter(own.rgb, range);

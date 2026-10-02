@@ -45,7 +45,7 @@ void particles(FramePassContext& fc, ViewResources& view)
     frame.lighting.vsmLocalLights = r.vsmLocalLights;
     frame.lighting.vsmSlotOfLight = r.vsmSlotOfLight;
     frame.lighting.vsmLayers = r.vsmLayers;
-    frame.lighting.giCache = r.giCache;
+    frame.lighting.gi = giSource(r);
     frame.lighting.froxelLights = view.froxelLights;
     frame.lighting.fxLights = r.fxLights;
     frame.lighting.airVolume = view.airVolume;

@@ -37,6 +37,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
     Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[0].w];
     const float cap = asfloat(P[3].y), range = asfloat(P[3].z);
     const uint frame = P[1].w;
+    g_reflWords = P[4].x;  // (M's material word: the top layer's roughness, ReflectionInternal.hlsli; UNX_NONE: none)
     const ReflSurface s = reflSurface(depth, gbuffer, pixel);
     const uint3 own = results[reflJob(m)];
     const float ownDistance = reflResultDistance(own);

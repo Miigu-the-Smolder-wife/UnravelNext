@@ -17,7 +17,8 @@
 // Kernels that shade fragments share the constants P[1] = { visible clusters, M texture table, band A depth, colour UAV },
 // P[3] = { froxel lights or UNX_NONE, LTC table, experiment mask, S fragment visibility or UNX_NONE }, P[4] = { atmosphere
 // transmittance, multi-scatter, air volume, R's screen probes }, P[5].x = R's screen probe maps (UNX_NONE = absent),
-// P[6].zw = { R's GI cache, S's per-record sun bytes (shadowFragmentSun) }, P[7].x = V's coverageDepthRange,
+// P[6].zw = { R's GI cache - or, without screen probes (gi.lumen_only), the indirect light's source word (GiSource.hlsli:
+// the Lumen translucency volume, read at the fragment) -, S's per-record sun bytes (shadowFragmentSun) }, P[7].x = V's coverageDepthRange,
 // P[7].zw = { E's surface state field (one raw SRV), S's weather record } (UNX_NONE: none): the surface layers
 // (Passes/Material/SurfaceLayers.hlsli), as in the resolve. P[9] = W's sun-space water map (v1.77: depth, normal, medium,
 // constants; UNX_NONE: no water) - a fragment under water from the sun takes the refracted sun and the water's
@@ -57,6 +58,7 @@ static uint g_covListed = 0xFFFFFFFFu;
 #include "Passes/Reflection/Reflection.hlsli"
 #define GI_PROBE_TILE_CACHE
 #include "Passes/GI/ScreenProbes.hlsli"
+#include "Passes/GI/GiSource.hlsli"
 
 #define COV_LIGHT 16u     // fragments of a light pixel (sorted in registers)
 #define COV_ROUND 32u     // fragments a heavy pixel's round takes
@@ -687,6 +689,32 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
                 radiance += back * (g.irradianceBack * g.occlusion);
             }
             if (wantRadiance) radiance += g.radiance * shSpecularAlbedo(f0, NoV, s.roughness);
+        }
+    }
+    else if (giSourceIsVolume(P[6].z) && (experiment & 6) != 6)
+    {
+        // gi.lumen_only: a fragment is not the pixel's opaque surface, so the final gather has nothing for it - the
+        // translucency volume at the fragment: irradiance on each side, the lobe's radiance from the mirror direction
+        const LtvSh sh = ltvSample(ltvParams(giSourceVolume(P[6].z)), worldPos);
+        const float3 nv = NoV > 0 ? n : -n;
+        const float3 irr = (experiment & 2) == 0 ? ltvIrradianceOf(sh, nv) : 0;
+        const float3 inc = NoV > 0 && (experiment & 4) == 0 ? ltvRadianceOf(sh, reflect(-v, n)) : 0;
+#if COV_COAT
+        if (cover > 0 && NoV > 0)
+        {
+            const float tv = 1 - modelCoatEms(coat, NoV), tBar = 1 - modelCoatLookup1(coat.coat * MODEL_COAT_STRIDE + 4096, coat.roughness);
+            const float3 under = tv * tBar * ((front + modelCoatReturned(s, coat, modelCoatRefractedCos(2.0 / 3.0, coat.eta)) / SH_PI) * irr +
+                                              inc * shSpecularAlbedo(f0, modelCoatRefractedCos(NoV, coat.eta), modelCoatBaseRoughness(s, coat, NoV)));
+            radiance += keep * (front * irr + inc * shSpecularAlbedo(f0, NoV, s.roughness)) + cover * (under + inc * modelCoatEms(coat, NoV));
+        }
+        else if (sheenOn)
+            radiance += keepS * (front * irr + inc * shSpecularAlbedo(f0, NoV, s.roughness)) + sheen.color * (modelSheenAlbedo(NoV, sheen.roughness) / SH_PI) * irr;
+        else
+#endif
+        {
+            if (NoV > 0) radiance += front * irr;
+            if ((experiment & 2) == 0) radiance += back * ltvIrradianceOf(sh, -nv);
+            radiance += inc * shSpecularAlbedo(f0, NoV, s.roughness);
         }
     }
     return (radiance * airTransmittance + airInscatter) * g_exposure;

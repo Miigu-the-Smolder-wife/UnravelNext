@@ -330,7 +330,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
         if (waterDepth.valid()) b.use(waterDepth, Use::SrvCompute);
         b.use(stats, Use::UavCompute);
         for (const BufferRef& v : vertices) b.use(v, Use::SrvCompute);
-        if (r.giCache.valid()) b.use(r.giCache, Use::SrvCompute);
+        declareGiSource(b, giSource(r), Use::SrvCompute);
         for (const TextureRef& t : { r.transmittanceLut, r.multiScatterLut, view.airVolume })
             if (t.valid()) b.use(t, Use::SrvCompute);
         for (const BufferRef& x : { r.vsmPageTable, r.vsmBlocks, r.vsmSearchBound, r.vsmLayers })
@@ -342,11 +342,12 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
     };
     struct Frame
     {
-        BufferRef giCache, pageTable, blocks, searchBound, layers;
+        GiSource gi;
+        BufferRef pageTable, blocks, searchBound, layers;
         TextureRef transmittance, multiScatter, airVolume;
         uint32_t vsmConstants;
     };
-    const Frame fr{ r.giCache, r.vsmPageTable, r.vsmBlocks, r.vsmSearchBound, r.vsmLayers, r.transmittanceLut, r.multiScatterLut, view.airVolume, r.vsmConstants };
+    const Frame fr{ giSource(r), r.vsmPageTable, r.vsmBlocks, r.vsmSearchBound, r.vsmLayers, r.transmittanceLut, r.multiScatterLut, view.airVolume, r.vsmConstants };
     // P[0..4] of both kernels (WaterInterior.hlsl, WaterRecords.hlsl); the first execute also fills the slot table.
     auto shadingConstants = [=](PassContext& c, uint32_t k[24], uint32_t first) {
         if (first)
@@ -375,7 +376,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
         const bool shadows = fr.pageTable.valid() && fr.vsmConstants != UINT32_MAX;
         const uint32_t values[20] = { first, c.srv(source), c.srv(depth), c.uav(stats),
                                       vis.valid() ? c.srv(vis) : none, waterDepth.valid() ? c.srv(waterDepth) : none, tableSrv,
-                                      fr.giCache.valid() ? c.srv(fr.giCache) : none,
+                                      giSourceWord(c, fr.gi),
                                       fr.transmittance.valid() ? c.srv(fr.transmittance) : none, fr.multiScatter.valid() ? c.srv(fr.multiScatter) : none,
                                       fr.airVolume.valid() ? c.srv(fr.airVolume) : none, none,
                                       shadows ? c.srv(fr.pageTable) : none, shadows ? c.srv(fr.blocks) : none, shadows && fr.searchBound.valid() ? c.srv(fr.searchBound) : none,

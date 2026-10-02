@@ -69,6 +69,8 @@ struct ViewResources
     TextureRef waterVis, waterDepth;  // A14: this view's water layer (v1.63 formats); the main view's are also  [V]
                                       // FrameResources::waterVis / waterDepth
     TextureRef gbuffer;            // RG32_UINT (GBuffer.hlsli)                              [M]
+    TextureRef materialWord;       // R32_UINT: material 16 | metallic 8 | layer roughness 8 [M]
+                                   // (MaterialInternal.hlsli mPackMaterialWord)
     TextureRef shadowVisibility;   // R32_UINT, 4 light slots x 8 bit (7.3)                 [S]
     TextureRef shadowOverflowTiles;  // R32_UINT ceil(W/8) x ceil(H/8) (main view, 7.3, v1.20): [S]
                                      // 0 = no shadow-casting light past the third in the tile,

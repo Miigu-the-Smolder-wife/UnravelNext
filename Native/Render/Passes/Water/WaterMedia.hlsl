@@ -28,6 +28,7 @@
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 #include "Passes/Water/WaterLight.hlsli"
 #include "Passes/GI/GiCache.hlsli"
+#include "Passes/GI/GiSource.hlsli"
 
 // Clips [za, zb] (ray parameters) to the slab lo <= o + d t <= hi.
 void waterSlab(float o, float d, float lo, float hi, inout float za, inout float zb)
@@ -136,8 +137,9 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             if (airLocalMap(l, a, dir, len).h >= l.range) continue;
             src += airLocalLight(l, a, dir, len, c, gw, P[2].z, li, froxelTileWidth(g, zm));
         }
-        // ambient from the GI cache
-        if (P[2].y != UNX_NONE)
+        // ambient (GiSource.hlsli): the translucency volume's mean radiance, or the GI cache's
+        if (giSourceIsVolume(P[2].y)) src += sigmaS * len * ltvRadianceMean(giSourceVolume(P[2].y), pm);
+        else if (P[2].y != UNX_NONE)
         {
             GiSrvs gi;
             gi.cache = P[2].y;

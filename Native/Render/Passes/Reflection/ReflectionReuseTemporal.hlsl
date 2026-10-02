@@ -19,7 +19,8 @@
 // P[2] = { history out UAV (rgb nits, a = second moment), frames out UAV, keys out UAV (x: 1 = a value, y: linear depth bits), flags
 //          (bit 0: no history this frame) }
 // P[3] = { width, height, asuint(max frames), asuint(clamp scale) }
-// P[4] = { asuint(tone-map range), asuint(distance threshold), frame, 0 }; frame constants b1 = main view.
+// P[4] = { asuint(tone-map range), asuint(distance threshold), frame, M's material word SRV (the top layer's roughness,
+// ReflectionInternal.hlsli g_reflWords; UNX_NONE: none) }; frame constants b1 = main view.
 #include "Passes/Reflection/ReflectionReuse.hlsli"
 #include "Passes/GI/GiScreenHistory.hlsli"
 
@@ -91,6 +92,7 @@ void main(uint2 pixel : SV_DispatchThreadID)
     Texture2D<float> depth = ResourceDescriptorHeap[P[0].y];
     Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[0].z];
     const float range = asfloat(P[4].x);
+    g_reflWords = P[4].w;
     const ReflSurface s = reflSurface(depth, gbuffer, pixel);
     float3 value = reuseToFilter(centre.rgb, range);
     float moment = reuseLuminance(value) * reuseLuminance(value);

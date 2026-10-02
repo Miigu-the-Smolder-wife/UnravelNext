@@ -1036,10 +1036,14 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
               });
     uint32_t spacingLog2 = 0;  // reflection.g_sample_spacing_px bound (1, 2, 4 or 8)
     while ((2u << spacingLog2) <= s.maxSpacing && spacingLog2 < 3) ++spacingLog2;
+    // reflection.lumen_only: M's material word - a clearcoat pixel's reflection is traced, resolved and filtered at its
+    // coat's roughness (ReflectionInternal.hlsli reflTopLayerRoughness; M composes it as the top layer)
+    const TextureRef words = lumenOnly ? main.materialWord : TextureRef{};
     g.addPass("r.refl.classify", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(depth, Use::SrvCompute);
                   b.use(gbuffer, Use::SrvCompute);
+                  if (words.valid()) b.use(words, Use::SrvCompute);
                   if (lobes.valid() && !lumen) b.use(lobes, Use::SrvCompute);
                   b.use(history, Use::SrvCompute);
                   b.use(modes, Use::UavCompute);
@@ -1054,8 +1058,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   }
               },
               [&shaders, depth, gbuffer, lobes, history, modes, jobs, args, reflection, s, focal, width, height, tilesX, tilesY, frameConstants, planarSrv,
-               planarOffset, planarCounts, planarViews, viewCount = planar.views, spacingLog2, lumen, roughSpecularValid = main.giRoughSpecular.valid()](PassContext& c) {
-                  uint32_t k[28] = { c.srv(depth), c.srv(gbuffer), lobes.valid() && !lumen ? c.srv(lobes) : 0xFFFFFFFFu, c.srv(history),
+               planarOffset, planarCounts, planarViews, viewCount = planar.views, spacingLog2, lumen, words, roughSpecularValid = main.giRoughSpecular.valid()](PassContext& c) {
+                  uint32_t k[32] = { c.srv(depth), c.srv(gbuffer), lobes.valid() && !lumen ? c.srv(lobes) : 0xFFFFFFFFu, c.srv(history),
                                      c.uav(modes), c.uav(jobs), c.uav(args), c.uav(reflection),
                                      asU(s.kHalfAngle), asU(s.mirrorRoughness), asU(focal), height,
                                      width, height, planarSrv, planarOffset, c.uav(planarCounts), spacingLog2,
@@ -1065,8 +1069,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       k[20 + v] = v < viewCount ? c.uav(planarViews[v].mask) : 0xFFFFFFFFu;
                       k[24 + v] = v < viewCount ? c.uav(planarViews[v].tileMask) : 0xFFFFFFFFu;
                   }
+                  k[28] = words.valid() ? c.srv(words) : 0xFFFFFFFFu;
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionClassify"));
-                  c.computeConstants(k, 28);
+                  c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
                   c.cmd->Dispatch(tilesX, tilesY, 1);
               });
@@ -1300,17 +1305,19 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           b.use(jobs, Use::UavCompute);
                           b.use(screen.hzb, Use::SrvCompute);
                           b.use(screen.prevColor, Use::SrvCompute);
+                          if (words.valid()) b.use(words, Use::SrvCompute);
                       },
-                      [&shaders, modes, results, depth, gbuffer, jobs, screen, frame, width, height, rayLength, frameConstants, s, samplingBias16, screenContinue,
+                      [&shaders, modes, results, depth, gbuffer, jobs, screen, frame, width, height, rayLength, frameConstants, s, samplingBias16, screenContinue, words,
                        outW = g.desc(screen.prevColor).width, outH = g.desc(screen.prevColor).height, ratio = up.exposureRatio,
                        prevViewProj = up.prevViewProj](PassContext& c) {
-                          uint32_t k[32] = { c.srv(modes), c.uav(results), c.srv(depth), c.srv(gbuffer), c.uav(jobs), c.srv(screen.hzb), c.srv(screen.prevColor), frame,
+                          uint32_t k[36] = { c.srv(modes), c.uav(results), c.srv(depth), c.srv(gbuffer), c.uav(jobs), c.srv(screen.hzb), c.srv(screen.prevColor), frame,
                                              width, height, (outW & 0xFFFFu) | (outH << 16), asU(screenContinue ? std::max(s.lumenScreenPullback, 0.0f) : -1.0f), asU(rayLength), (s.lumenScreenIterations & 0xFFFFu) | (samplingBias16 << 16), asU(s.lumenScreenThickness),
                                              asU(ratio) };
                           for (int r = 0; r < 4; ++r)
                               for (int col = 0; col < 4; ++col) k[16 + 4 * r + col] = asU(prevViewProj.m[r][col]);
+                          k[32] = words.valid() ? c.srv(words) : 0xFFFFFFFFu;
                           c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionScreenTrace"));
-                          c.computeConstants(k, 32);
+                          c.computeConstants(k, 36);
                           c.bindFrameConstants(frameConstants);
                           c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
                       });
@@ -1342,6 +1349,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       b.use(gbuffer, Use::SrvGraphics);
                       if (hitsUseCards) declareSurfaceCacheCards(b, cardRefs, Use::SrvGraphics);
                       if (sceneColour) b.use(prevColor, Use::SrvGraphics);
+                      if (words.valid()) b.use(words, Use::SrvGraphics);
                       if (exactCounts.valid()) b.use(exactCounts, Use::UavGraphics);
                       rays.declareTraversal(b);
                       rays.declareDecals(b);
@@ -1349,7 +1357,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
                   },
                   [&pipeline, jobs, results, depth, gbuffer, cardFrame, hitsUseCards, prevColor, prevW, prevH, sceneColour, screenContinue, exactCounts, luts, atmosphere, sky, sun,
-                   rayLength, frame, scene, samplingBias16, s, frameConstants, argumentResource, variant, timestamps, firstTick, lumenBands, ratio = up.exposureRatio,
+                   rayLength, frame, scene, samplingBias16, s, frameConstants, argumentResource, variant, timestamps, firstTick, lumenBands, words, ratio = up.exposureRatio,
                    prevViewProj = up.prevViewProj](PassContext& c) {
                       c.bindFrameConstants(frameConstants);
                       c.cmd->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, firstTick);
@@ -1368,13 +1376,16 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       k[20] = sceneColour ? c.srv(prevColor) : 0xFFFFFFFFu;
                       k[21] = (prevW & 0xFFFFu) | (prevH << 16);
                       k[22] = asU(s.lumenSceneColorThickness);
-                      k[23] = asU(std::cos(std::clamp(s.lumenSceneColorNormalDegrees, 0.0f, 180.0f) * 0.01745329252f));
+                      k[23] = words.valid() ? c.srv(words) : 0xFFFFFFFFu;
+                      // (the scene colour's normal threshold: its cosine as snorm8 beside the band)
+                      const uint32_t cosThreshold =
+                          (uint32_t)(int32_t)std::lround(std::cos(std::clamp(s.lumenSceneColorNormalDegrees, 0.0f, 180.0f) * 0.01745329252f) * 127.0f) & 0xFFu;
                       std::memcpy(&k[24], scene, sizeof scene);
                       for (int r = 0; r < 4; ++r)
                           for (int col = 0; col < 4; ++col) k[32 + 4 * r + col] = asU(prevViewProj.m[r][col]);
                       for (uint32_t band = 0; band < lumenBands; ++band)
                       {
-                          k[19] = band | (samplingBias16 << 16);
+                          k[19] = (band & 0xFFu) | (cosThreshold << 8) | (samplingBias16 << 16);
                           c.computeConstants(k, 48);
                           pipeline.dispatchIndirect(c.cmd, argumentResource, (uint64_t)band * kArgumentsBytes + kLumenDescOffset + variant * kDescStride);
                       }
@@ -1818,7 +1829,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         const uint32_t reuseFrame = (uint32_t)fc.frame.frameIndex;
         // GI's rough specular (gi.lumen's final gather, view.giRoughSpecular): the value of the pixels above the roughness
         // limit and the other side of the fade (ReflectionReuseFilter). Absent: those pixels stay on the K path.
-        const TextureRef roughSpecular = s.lumenRoughFromGather ? main.giRoughSpecular : TextureRef{};
+        // (reflection.lumen_only: M mixes the rough specular itself, with its specular occlusion - ShadeOpaque.hlsl - so
+        // the filter leaves the untraced pixels and the fade's share to it)
+        const TextureRef roughSpecular = s.lumenRoughFromGather && !lumenOnly ? main.giRoughSpecular : TextureRef{};
         g.addPass("r.refl.reuse.resolve", QueueType::Compute,
                   [&](PassBuilder& b) {
                       b.use(modes, Use::SrvCompute);
@@ -1827,14 +1840,15 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       b.use(gbuffer, Use::SrvCompute);
                       b.use(reflection, Use::SrvCompute);
                       b.use(resolved, Use::UavCompute);
+                      if (words.valid()) b.use(words, Use::SrvCompute);
                   },
-                  [&shaders, modes, results, depth, gbuffer, reflection, resolved, width, height, tilesX, tilesY, frameConstants, reuseFrame, s, samplingBias16](PassContext& c) {
-                      const uint32_t k[16] = { c.srv(modes), c.srv(results), c.srv(depth), c.srv(gbuffer), c.srv(reflection), c.uav(resolved), height, reuseFrame,
+                  [&shaders, modes, results, depth, gbuffer, reflection, resolved, width, height, tilesX, tilesY, frameConstants, reuseFrame, s, samplingBias16, words](PassContext& c) {
+                      const uint32_t k[20] = { c.srv(modes), c.srv(results), c.srv(depth), c.srv(gbuffer), c.srv(reflection), c.uav(resolved), height, reuseFrame,
                                                width, height, s.lumenReconstructionSamples, s.lumenReconstruction ? 0u : 1u,
                                                asU(s.lumenReconstructionRadius), asU(s.lumenMaxRayIntensity), asU(s.lumenTonemapRange),
-                                               asU(samplingBias16 / 65535.0f) };
+                                               asU(samplingBias16 / 65535.0f), words.valid() ? c.srv(words) : 0xFFFFFFFFu, 0, 0, 0 };
                       c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionReuseResolve"));
-                      c.computeConstants(k, 16);
+                      c.computeConstants(k, 20);
                       c.bindFrameConstants(frameConstants);
                       c.cmd->Dispatch(tilesX, tilesY, 1);
                   });
@@ -1854,14 +1868,15 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       b.use(nextValue, Use::UavCompute);
                       b.use(nextFrames, Use::UavCompute);
                       b.use(nextKeys, Use::UavCompute);
+                      if (words.valid()) b.use(words, Use::SrvCompute);
                   },
                   [&shaders, resolved, depth, gbuffer, visId, visibleClusters, motion, prevValue, prevFrames, prevKeys, nextValue, nextFrames, nextKeys, width, height,
-                   noHistory, frameConstants, reuseFrame, s](PassContext& c) {
+                   noHistory, frameConstants, reuseFrame, s, words](PassContext& c) {
                       const uint32_t k[20] = { c.srv(resolved), c.srv(depth), c.srv(gbuffer), motion ? c.srv(visId) : 0xFFFFFFFFu,
                                                motion ? c.srv(visibleClusters) : 0xFFFFFFFFu, c.srv(prevValue), c.srv(prevFrames), c.srv(prevKeys),
                                                c.uav(nextValue), c.uav(nextFrames), c.uav(nextKeys), noHistory,
                                                width, height, asU(s.lumenTemporalMaxFrames), asU(s.lumenClampScale),
-                                               asU(s.lumenTonemapRange), asU(s.lumenDistanceThreshold), reuseFrame, 0 };
+                                               asU(s.lumenTonemapRange), asU(s.lumenDistanceThreshold), reuseFrame, words.valid() ? c.srv(words) : 0xFFFFFFFFu };
                       c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionReuseTemporal"));
                       c.computeConstants(k, 20);
                       c.bindFrameConstants(frameConstants);
@@ -1876,15 +1891,16 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       b.use(reflection, Use::UavCompute);
                       b.use(modes, Use::SrvCompute);
                       if (roughSpecular.valid()) b.use(roughSpecular, Use::SrvCompute);
+                      if (words.valid()) b.use(words, Use::SrvCompute);
                   },
-                  [&shaders, nextValue, nextFrames, depth, gbuffer, reflection, modes, width, height, tilesX, tilesY, frameConstants, reuseFrame, s, roughSpecular](PassContext& c) {
-                      const uint32_t k[20] = { c.srv(nextValue), c.srv(nextFrames), c.srv(depth), c.srv(gbuffer), c.uav(reflection), c.srv(modes), height, reuseFrame,
+                  [&shaders, nextValue, nextFrames, depth, gbuffer, reflection, modes, width, height, tilesX, tilesY, frameConstants, reuseFrame, s, roughSpecular, words](PassContext& c) {
+                      const uint32_t k[24] = { c.srv(nextValue), c.srv(nextFrames), c.srv(depth), c.srv(gbuffer), c.uav(reflection), c.srv(modes), height, reuseFrame,
                                                width, height, s.lumenBilateralSamples, (s.lumenBilateral ? 0u : 1u) | (s.lumenDisocclusionTonemap ? 0u : 2u),
                                                asU(s.lumenBilateralRadius), asU(s.lumenBilateralDepthWeight), asU(s.lumenDisocclusionFrames), asU(s.lumenTemporalMaxFrames),
                                                asU(s.lumenMaxRoughness), asU(s.lumenFadeLength), asU(s.lumenTonemapRange),
-                                               roughSpecular.valid() ? c.srv(roughSpecular) : 0xFFFFFFFFu };
+                                               roughSpecular.valid() ? c.srv(roughSpecular) : 0xFFFFFFFFu, words.valid() ? c.srv(words) : 0xFFFFFFFFu, 0, 0, 0 };
                       c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionReuseFilter"));
-                      c.computeConstants(k, 20);
+                      c.computeConstants(k, 24);
                       c.bindFrameConstants(frameConstants);
                       c.cmd->Dispatch(tilesX, tilesY, 1);
                   });

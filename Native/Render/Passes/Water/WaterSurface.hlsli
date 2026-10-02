@@ -32,6 +32,7 @@
 #include "Passes/Atmosphere/Atmosphere.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 #include "Passes/GI/GiCache.hlsli"
+#include "Passes/GI/GiSource.hlsli"
 #include "Passes/Reflection/Reflection.hlsli"
 #include "WaterShading.hlsli"
 #include "WaterFootprint.hlsli"
@@ -475,6 +476,13 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
             RWByteAddressBuffer st = ResourceDescriptorHeap[s.statistics];
             st.InterlockedAdd(4 * WATER_STAT_PLANAR, 1);
         }
+    }
+    else if (giSourceIsVolume(s.giCache))
+    {
+        // (GiSource.hlsli: the translucency volume's radiance from the mirror direction - two SH bands)
+        const float3 mirror = ltvRadiance(giSourceVolume(s.giCache), P, waterReflect(v, nv));
+        reflected += mirror;
+        rays.reflectFallback = F * mirror * g_exposure;
     }
     else if (s.giCache != UNX_NONE)
     {

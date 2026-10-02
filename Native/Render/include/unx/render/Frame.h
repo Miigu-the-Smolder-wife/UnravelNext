@@ -51,6 +51,45 @@ inline void declareSurfaceCacheCards(PassBuilder& b, const SurfaceCacheCardRefs&
     b.use(r.final, use);
 }
 
+// The indirect-light source of the passes that light air, particles, water and glass (Passes/GI/GiSource.hlsli): the
+// Lumen translucency volume when this frame has published one (tracks::globalIllumination), else the world GI cache,
+// else none. Taken where the pass is recorded - a pass recorded before GI gets none.
+struct GiSource
+{
+    BufferRef cache;
+    TextureRef ambient, directional;
+    uint32_t params = 0xFFFFFFFFu;
+    bool valid() const { return params != 0xFFFFFFFFu || cache.valid(); }
+};
+inline GiSource giSource(const FrameResources& r)
+{
+    GiSource s;
+    if (r.translucencyGiParams != 0xFFFFFFFFu && r.translucencyGiAmbient.valid() && r.translucencyGiDirectional.valid())
+    {
+        s.ambient = r.translucencyGiAmbient;
+        s.directional = r.translucencyGiDirectional;
+        s.params = r.translucencyGiParams;
+    }
+    else
+        s.cache = r.giCache;
+    return s;
+}
+inline void declareGiSource(PassBuilder& b, const GiSource& s, Use use)
+{
+    if (s.params != 0xFFFFFFFFu)
+    {
+        b.use(s.ambient, use);
+        b.use(s.directional, use);
+    }
+    else if (s.cache.valid())
+        b.use(s.cache, use);
+}
+// The word the pass hands its kernel (GiSource.hlsli).
+inline uint32_t giSourceWord(PassContext& c, const GiSource& s)
+{
+    return s.params != 0xFFFFFFFFu ? (s.params | 0x80000000u) : s.cache.valid() ? c.srv(s.cache) : 0xFFFFFFFFu;
+}
+
 // Bands of a banded pass group for a view of width x height (RenderGraph::addBandedGroup): the view's pixels over
 // output.band_pixels (quality key, core; 4K / 8 = L2-sized intermediates), at least 1; band_pixels = 0 is one band (the
 // default since v1.31: M measured a net loss with bands while shading is latency-bound).

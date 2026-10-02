@@ -16,8 +16,10 @@
 // P[0] = { jobs SRV, results UAV (uint3 per job), asuint(exposure ratio of the previous colour), frame (24 bits) | flags
 //          << 24 (bit 0: rays start at their screen traces' ends, bit 1: scene colour at visible hits) }
 // P[1], P[2], P[3].xyz = sky and sun (GiSky.hlsli; P[1].w = ray length), P[3].w = RayScene's exact set counts UAV (UNX_NONE: none)
-// P[4] = { depth SRV, gbuffer SRV, card frame SRV (UNX_NONE: none), the dispatch's band | GGX sampling bias unorm16 << 16 }
-// P[5] = { previous colour SRV, its width | height << 16, asuint(relative depth thickness), asuint(cos of the normal threshold) }
+// P[4] = { depth SRV, gbuffer SRV, card frame SRV (UNX_NONE: none), the dispatch's band (bits 0-7) | cos of the normal
+//          threshold as snorm8 (bits 8-15) | GGX sampling bias unorm16 << 16 }
+// P[5] = { previous colour SRV, its width | height << 16, asuint(relative depth thickness), M's material word SRV (the
+//          top layer's roughness, ReflectionInternal.hlsli g_reflWords; UNX_NONE: none) }
 // P[6], P[7] = RtSceneSrvs; P[8..11] = the previous colour's view-projection (rows). b1 = the main view.
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/GI/GiSky.hlsli"
@@ -32,7 +34,8 @@
 [shader("raygeneration")]
 void ReflectionLumenTraceGen()
 {
-    const uint job = DispatchRaysIndex().x + (P[4].w & 0xFFFFu) * RL_BAND;
+    const uint job = DispatchRaysIndex().x + (P[4].w & 0xFFu) * RL_BAND;
+    g_reflWords = P[5].w;
     StructuredBuffer<uint> jobs = ResourceDescriptorHeap[P[0].x];
     const uint entry = jobs[job];
     if (entry & REFL_JOB_DONE) return;  // its value came from the screen trace
@@ -78,7 +81,7 @@ void ReflectionLumenTraceGen()
                 if (abs(at.w - seen) < asfloat(P[5].z) * max(seen, 1e-5))
                 {
                     const ReflSurface t = reflSurface(depth, gbuffer, hitPixel);
-                    if (t.valid && dot(t.view, t.normal) >= asfloat(P[5].w))
+                    if (t.valid && dot(t.view, t.normal) >= (float)((int)(P[4].w << 16) >> 24) / 127.0)
                     {
                         Texture2D<float4> previous = ResourceDescriptorHeap[P[5].x];
                         const float4x4 prevViewProj = float4x4(asfloat(P[8]), asfloat(P[9]), asfloat(P[10]), asfloat(P[11]));
