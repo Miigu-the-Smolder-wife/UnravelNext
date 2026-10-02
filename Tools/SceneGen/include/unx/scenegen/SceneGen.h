@@ -31,6 +31,19 @@ enum class SceneId : uint32_t
                          // colour and emissive mask)
     HairBall = 11,       // diagnostic: strand hair in two colours - two head-sized spheres under a dark and a blond groom
                          // (grooms), a key light, a rim light behind them, a dim sun
+    // The showcase scenes (Showcase.cpp; in diagnosticScenes, so the gates know their names): places to look at that hold
+    // the features with no other scene. What each camera shows is in Docs/Status/UE6_WORKPLAN_KO.md. Light functions,
+    // decals and rain are not in the scene file: extras().
+    ShowcaseBathhouse = 12,  // a tiled bath room in the evening sun: panes in frames (one mesh), stained glass, a shadow-only
+                             // shutter, bath water under steam, lamps under glass shades, emissive lanterns, a rect light
+                             // with an image and barn doors, a figure (skin, eyes, strand hair, cloth) in its own
+                             // lighting channel; cameras room, panes, bath, figure, lamp, tiles, bench
+    ShowcaseAtrium = 13,     // a courtyard under a roof of tinted panes in a steel grid: coloured sun on the floor, trees in
+                             // planters, lacquer, cloth banners, solid glass, a gallery behind a glass railing; cameras
+                             // floor, roof, banners, sculpture, gallery, planter
+    ShowcaseShore = 14,      // a lake shore under a low sun: reeds, a wet jetty with a lantern, mist, a forest from the far
+                             // shore up to a ridge whose crest stands in the cloud layer, cirrus; cameras shore, rain,
+                             // forest_edge, ridge, reeds
     // New scenes are appended (never renumbered) through the interface-change procedure.
 };
 
@@ -77,7 +90,7 @@ std::string dynamicContentJson(const Request& request, const DynamicContent& con
 // generate() and the scene's dynamic content with instance indices filled in.
 scene::Scene generateWithContent(const Request& request, DynamicContent& content);
 
-// Strand grooms of a scene (hair_ball; empty for the others). The scene file holds no strands: whoever renders the
+// Strand grooms of a scene (hair_ball: two; showcase_bathhouse: the figure's; empty for the others). The scene file holds no strands: whoever renders the
 // scene makes a hair body of each groom (unx/hair/Hair.h BodyDesc: one joint at 'head', the rest positions relative
 // to it, the head's sphere as the collision capsule), as the gates do for their characters' hair.
 struct Groom
@@ -98,10 +111,61 @@ struct Groom
 };
 std::vector<Groom> grooms(const Request& request);
 
+// What a scene needs beside its scene file (the showcase scenes; empty for the others): the scene format holds no light
+// functions, no decals and no rain, the renderer takes them through its own interfaces. Plain data here (this library
+// does not know the renderer); whoever renders the scene hands each one over, as it makes hair bodies of the grooms:
+//   lightFunctions -> lights::lightFunctions(trackState).set(light, f)   (unx/lights/LightFunctions.h LightFunction)
+//   decals         -> decal::decals(trackState).add(d)                   (unx/decal/Decals.h Decal: the same fields)
+//   weather        -> FrameContext's WeatherFrame when the named camera is the frame's (rainRate, wetness)
+struct ExtraLightFunction
+{
+    uint32_t light = 0;               // index into the scene's lights
+    uint32_t profile = 0;             // lights::Profile: 1 IES, 2 cookie, 3 gobo
+    // IES: candela over the angle from the light's forward axis, divided by its peak; the same at every angle about
+    // the axis (one horizontal angle, 0)
+    std::vector<float> iesVertical;   // degrees, ascending
+    std::vector<float> iesValues;     // one per vertical angle
+    // cookie (projected along the forward axis over the half-angle tangents) or gobo (equirectangular around the light:
+    // u about the forward axis, v from it)
+    uint32_t imageWidth = 0, imageHeight = 0;
+    std::vector<float> imageRgb;      // width x height x 3, linear, rows from the top
+    float tanX = 0.5f, tanY = 0.5f;
+    float rotationSpeed = 0;          // rad/s about the forward axis
+    float flickerDepth = 0, flickerFrequency = 8;  // 1 + depth x noise(t), Hz
+};
+struct ExtraDecal
+{
+    float3x4 box;                     // unit cube [-1, 1]^3 -> scene: columns = half-extent axes X, Y, Z (Z out of the
+                                      // surface it is laid on), then the centre
+    uint32_t material = 0;            // scene material (one no mesh uses: base colour x alpha = opacity, roughness, normal)
+    int32_t priority = 0;
+    float opacity = 1.0f;
+    float fadeStartDegrees = 60, fadeEndDegrees = 80;  // between the surface's normal and the box's +Z
+    float edge = 0.25f;               // soft share of the box's depth
+    float3 color{ 1, 1, 1 };
+    uint32_t channels = 7;            // decal::DecalChannels: 1 base colour, 2 normal, 4 roughness and metallic
+    float fadeScreenSize = 0;         // 0: none
+    float fadeInStart = 0, fadeInDuration = 0;  // s on the frame's clock; duration 0: none
+};
+struct ExtraWeather
+{
+    std::string camera;               // the scene camera this weather belongs to
+    float rainRate = 0;               // mm/h
+    float wetness = 0;                // [0, 1]
+};
+struct SceneExtras
+{
+    std::vector<ExtraLightFunction> lightFunctions;
+    std::vector<ExtraDecal> decals;
+    std::vector<ExtraWeather> weather;
+};
+SceneExtras extras(const Request& request);
+
 // Ground height of a scene's terrain at scene-local (x, z) (RPP-1 world assembly): the analytic function its terrain
 // mesh samples (the mesh vertices lie on it exactly; between them the mesh is linear over its grid: city 2 m, forest
-// 1.95 m, waterside 2 m, ridge 20 m). City scenes: 0 over the city square, which the street plane covers. Interior:
-// the outside ground at -0.2 m. NaN outside the terrain's extent. Independent of the seed and scale.
+// 1.95 m, waterside 2 m, ridge 20 m, showcase_shore 5 m). City scenes: 0 over the city square, which the street plane
+// covers. Interior: the outside ground at -0.2 m. NaN outside the terrain's extent and for scenes without a terrain.
+// Independent of the seed and scale.
 float terrainHeight(SceneId id, float x, float z);
 
 // Throws unx::Error for unknown ids. The returned scene passes scene::validate() and contains at least one camera and
@@ -109,9 +173,11 @@ float terrainHeight(SceneId id, float x, float z);
 scene::Scene generate(const Request& request);
 
 std::vector<SceneId> allScenes();
-// Scenes that measure the renderer instead of showing something (not in allScenes: the gates' scene sweeps and the
-// scene tests keep their set). generate() and sceneName() know them.
+// Scenes that measure the renderer instead of showing something, and the showcase scenes (not in allScenes: the gates'
+// scene sweeps and the scene tests keep their set). generate() and sceneName() know them.
 std::vector<SceneId> diagnosticScenes();
+// The showcase scenes alone (a subset of diagnosticScenes).
+std::vector<SceneId> showcaseScenes();
 // FurnaceRoom: the room's inner size (m, centred on x and z, floor at y = 0), its walls' albedo and the light's
 // intensity (cd, at the room's centre). A closed room of uniform Lambert albedo rho holding a flux Phi keeps, in the
 // steady state, a mean irradiance Phi / (A (1 - rho)) over its inner surface A: the direct light's mean is Phi / A, the
