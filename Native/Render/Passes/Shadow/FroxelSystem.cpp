@@ -1021,6 +1021,9 @@ uint32_t fogPrepareSecondary(FramePassContext& fc, const ViewDesc& view, uint64_
     if (!fc.trackState || !fc.quality.has(enabled) || !fc.quality.boolean(enabled)) return 0;
     FogView f = fogViewFor(fc.quality, fc.frame, view.width, view.height);
     if (!f.on) return 0;
+    // (an auxiliary view takes its own lists and air with the volume: for the fog, not for the cloud layer alone - a
+    //  frame with clouds and no fog leaves those views as they were)
+    if (view.kind != gpu::ViewKind::PlanarReflection && !f.cells) return 0;
     FogSecondary& sec = fc.state<FogSecondary>("S.fog.secondary");
     if (sec.frame != fc.frame.frameIndex)
     {
