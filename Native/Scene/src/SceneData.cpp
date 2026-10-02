@@ -469,7 +469,7 @@ void writeLightEnd(Writer& w, const Scene& s)
 // Subsurface extension block, written only when a Subsurface-class material's parameters are not the defaults (scenes
 // written before the parameters existed, and scenes that keep the defaults, have the same bytes and content hashes as
 // before): u32 tag "SUBS", u64 count, then per material its index, subsurfaceMeanFreePath, subsurfaceLobeMix,
-// subsurfaceLobeRoughness. The last block of the file.
+// subsurfaceLobeRoughness.
 constexpr uint32_t kSubsurfaceTag = 0x53425553u;  // "SUBS"
 
 bool hasSubsurface(const Material& m)
@@ -505,6 +505,67 @@ void writeSubsurface(Writer& w, const Scene& s)
     }
 }
 
+// Cloth extension block, written only when a material has a cloth factor: u32 tag "CLTH", u64 count, then per material
+// its index and cloth.
+constexpr uint32_t kClothTag = 0x48544C43u;  // "CLTH"
+
+bool anyCloth(const Scene& s)
+{
+    for (const Material& m : s.materials)
+        if (m.cloth != 0.0f) return true;
+    return false;
+}
+
+void writeCloth(Writer& w, const Scene& s)
+{
+    w.pod(kClothTag);
+    uint64_t count = 0;
+    for (const Material& m : s.materials) count += m.cloth != 0.0f;
+    w.pod(count);
+    for (uint32_t i = 0; i < s.materials.size(); ++i)
+        if (s.materials[i].cloth != 0.0f)
+        {
+            w.pod(i);
+            w.pod(s.materials[i].cloth);
+        }
+}
+
+// Eye extension block, written only when a material is an eye (eyeIrisRadius != 0): u32 tag "EYES", u64 count, then per
+// material its index, eyeIrisRadius, eyeIrisDepth, eyeLimbusWidth, eyeLimbusDarkening, eyePupilScale, eyeIrisConcavity,
+// eyeIor, eyeAxis. The last block of the file.
+constexpr uint32_t kEyeTag = 0x53455945u;  // "EYES"
+
+bool hasEye(const Material& m) { return m.eyeIrisRadius != 0.0f; }
+
+bool anyEye(const Scene& s)
+{
+    for (const Material& m : s.materials)
+        if (hasEye(m)) return true;
+    return false;
+}
+
+void writeEye(Writer& w, const Scene& s)
+{
+    w.pod(kEyeTag);
+    uint64_t count = 0;
+    for (const Material& m : s.materials) count += hasEye(m);
+    w.pod(count);
+    for (uint32_t i = 0; i < s.materials.size(); ++i)
+    {
+        const Material& m = s.materials[i];
+        if (!hasEye(m)) continue;
+        w.pod(i);
+        w.pod(m.eyeIrisRadius);
+        w.pod(m.eyeIrisDepth);
+        w.pod(m.eyeLimbusWidth);
+        w.pod(m.eyeLimbusDarkening);
+        w.pod(m.eyePupilScale);
+        w.pod(m.eyeIrisConcavity);
+        w.pod(m.eyeIor);
+        w.pod(m.eyeAxis);
+    }
+}
+
 std::vector<uint8_t> serialize(const Scene& s)
 {
     Writer w;
@@ -535,6 +596,8 @@ std::vector<uint8_t> serialize(const Scene& s)
     if (anyFilm(s)) writeFilm(w, s);
     if (anyLightEnd(s)) writeLightEnd(w, s);
     if (anySubsurface(s)) writeSubsurface(w, s);
+    if (anyCloth(s)) writeCloth(w, s);
+    if (anyEye(s)) writeEye(w, s);
     return std::move(w.out);
 }
 
@@ -727,6 +790,36 @@ Scene deserialize(const std::vector<uint8_t>& bytes)
         }
         tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
     }
+    if (tag == kClothTag)
+    {
+        const uint64_t count = r.pod<uint64_t>();
+        for (uint64_t k = 0; k < count; ++k)
+        {
+            const uint32_t i = r.pod<uint32_t>();
+            if (i >= s.materials.size()) fail("unxscene: cloth factor of material %u of %zu", i, s.materials.size());
+            s.materials[i].cloth = r.pod<float>();
+        }
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
+    if (tag == kEyeTag)
+    {
+        const uint64_t count = r.pod<uint64_t>();
+        for (uint64_t k = 0; k < count; ++k)
+        {
+            const uint32_t i = r.pod<uint32_t>();
+            if (i >= s.materials.size()) fail("unxscene: eye parameters of material %u of %zu", i, s.materials.size());
+            Material& m = s.materials[i];
+            m.eyeIrisRadius = r.pod<float>();
+            m.eyeIrisDepth = r.pod<float>();
+            m.eyeLimbusWidth = r.pod<float>();
+            m.eyeLimbusDarkening = r.pod<float>();
+            m.eyePupilScale = r.pod<float>();
+            m.eyeIrisConcavity = r.pod<float>();
+            m.eyeIor = r.pod<float>();
+            m.eyeAxis = r.pod<float3>();
+        }
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
     if (tag != 0) fail("unxscene: unknown extension block 0x%08x", tag);
     if (r.at != bytes.size()) fail("unxscene: %zu trailing bytes", bytes.size() - r.at);
     return s;
@@ -779,6 +872,20 @@ void validate(const Scene& s)
               std::isfinite(m.subsurfaceMeanFreePath.y) && std::isfinite(m.subsurfaceMeanFreePath.z)))
             fail("material %zu '%s': a subsurface material needs subsurfaceLobeMix in [0, 1], lobe roughness scales >= 0 and a mean free path >= 0 (finite)",
                  i, m.name.c_str());
+        if (hasEye(m))
+        {
+            if (m.cls != MaterialClass::Subsurface) fail("material %zu '%s': an eye (eyeIrisRadius) is defined on Subsurface materials", i, m.name.c_str());
+            if (!(m.eyeIrisRadius > 0 && m.eyeIrisRadius <= 0.5f)) fail("material %zu '%s': eyeIrisRadius in (0, 0.5] (uv units around the uv centre)", i, m.name.c_str());
+            if (!(m.eyeIrisDepth > 0 && m.eyeIrisDepth <= 2)) fail("material %zu '%s': eyeIrisDepth in (0, 2] (iris radii)", i, m.name.c_str());
+            if (!(m.eyeLimbusWidth >= 0.01f && m.eyeLimbusWidth <= 1)) fail("material %zu '%s': eyeLimbusWidth in [0.01, 1] (iris radii)", i, m.name.c_str());
+            if (!(m.eyeLimbusDarkening >= 0 && m.eyeLimbusDarkening <= 1 && m.eyeIrisConcavity >= 0 && m.eyeIrisConcavity <= 1))
+                fail("material %zu '%s': eyeLimbusDarkening and eyeIrisConcavity in [0, 1]", i, m.name.c_str());
+            if (!(m.eyePupilScale > 0 && m.eyePupilScale <= 8)) fail("material %zu '%s': eyePupilScale in (0, 8]", i, m.name.c_str());
+            if (!(m.eyeIor >= 1 && m.eyeIor <= 2)) fail("material %zu '%s': eyeIor in [1, 2]", i, m.name.c_str());
+            const float axis2 = m.eyeAxis.x * m.eyeAxis.x + m.eyeAxis.y * m.eyeAxis.y + m.eyeAxis.z * m.eyeAxis.z;
+            if (!(std::fabs(axis2 - 1) <= 1e-3f)) fail("material %zu '%s': eyeAxis must be a unit vector (the optical axis in the mesh's object space)", i, m.name.c_str());
+            if (m.transmission != 0) fail("material %zu '%s': an eye has no light through thin parts (transmission 0)", i, m.name.c_str());
+        }
         if (m.clearcoat != 0)
         {
             if (!(m.clearcoat > 0 && m.clearcoat <= 1 && m.clearcoatRoughness >= 0 && m.clearcoatRoughness <= 1))
@@ -798,6 +905,11 @@ void validate(const Scene& s)
                 fail("material %zu '%s': sheenRoughness in [0.1, 1] (the lobe stays much wider than the sun's disk)", i, m.name.c_str());
             if (m.cls != MaterialClass::Standard) fail("material %zu '%s': a sheen is defined on Standard materials", i, m.name.c_str());
             if (m.clearcoat > 0) fail("material %zu '%s': one layer kind per material (sheen or clearcoat)", i, m.name.c_str());
+        }
+        if (m.cloth != 0)
+        {
+            if (!(m.cloth > 0 && m.cloth <= 1)) fail("material %zu '%s': cloth in [0, 1]", i, m.name.c_str());
+            if (!hasSheen(m)) fail("material %zu '%s': the cloth blend needs a sheen (sheenColor: the fuzz)", i, m.name.c_str());
         }
         if (hasAnisotropy(m))
         {
