@@ -18,7 +18,7 @@ using namespace unx::render;
 
 namespace
 {
-constexpr uint32_t kRecordBytes = 128, kFrameBytes = 144, kTilePx = 16, kTileWords = 9, kTilesHeader = 16;
+constexpr uint32_t kRecordBytes = 128, kFrameBytes = 160, kTilePx = 16, kTileWords = 9, kTilesHeader = 16;
 
 struct Record  // Decal.hlsli DecalRecord
 {
@@ -30,7 +30,7 @@ struct Record  // Decal.hlsli DecalRecord
     float color[3];
     uint32_t channels;
     float fadeScreenSize, fadeInStart, fadeInDuration, fadeOutStart;
-    float fadeOutDuration, pad[3];
+    float fadeOutDuration, emissive, pad[2];
 };
 static_assert(sizeof(Record) == kRecordBytes);
 
@@ -131,6 +131,7 @@ public:
         dispatch("decal.cull", 3, count, 1, all(Use::SrvCompute, Use::SrvCompute, Use::UavCompute, Use::SrvCompute));
         view.decalFrames = frames;
         view.decalTiles = tiles;
+        view.decalEmissive = set.anyEmissive();
 
         slot.readbackFrame = frame;
         slot.readbackDecals = count;
@@ -244,6 +245,22 @@ void DecalSet::clear()
     m_live = 0;
     ++m_revision;
 }
+uint32_t DecalSet::channelWord(const Decal& d)
+{
+    switch (d.blend)
+    {
+    case DecalBlend::Stain: return d.channels | 0x100u;  // Decal.hlsli DECAL_STAIN
+    case DecalBlend::Normal: return DecalNormal;
+    case DecalBlend::Emissive: return DecalEmissive;
+    default: return d.channels;
+    }
+}
+bool DecalSet::anyEmissive() const
+{
+    for (const Slot& s : m_slots)
+        if (s.live && (channelWord(s.decal) & DecalEmissive) != 0) return true;
+    return false;
+}
 std::vector<uint8_t> DecalSet::records() const
 {
     std::vector<uint8_t> out;
@@ -258,7 +275,8 @@ std::vector<uint8_t> DecalSet::records() const
         for (float v : { d.color.x, d.color.y, d.color.z, d.fadeScreenSize, d.fadeInDuration, d.fadeOutDuration })
             if (!std::isfinite(v) || v < 0) fail("decal: colour, screen-size fade and fade durations are finite and not negative");
         if (!std::isfinite(d.fadeInStart) || !std::isfinite(d.fadeOutStart)) fail("decal: fade start times are finite");
-        if (d.channels == 0 || d.channels > DecalAllChannels) fail("decal: channels %u (1..7: DecalChannels)", d.channels);
+        if (d.channels == 0 || d.channels > (DecalAllChannels | DecalEmissive)) fail("decal: channels %u (1..15: DecalChannels)", d.channels);
+        if (!std::isfinite(d.emissive) || d.emissive < 0 || (uint32_t)d.blend > 3) fail("decal: emissive scale >= 0, blend a DecalBlend");
         Record r{};
         std::memcpy(r.box, d.box.m, sizeof r.box);
         r.material = d.material;
@@ -270,7 +288,8 @@ std::vector<uint8_t> DecalSet::records() const
         r.cosFadeEnd = std::cos(d.fadeEndDegrees * 3.14159265358979f / 180.0f);
         r.edge = d.edge;
         r.color[0] = d.color.x, r.color[1] = d.color.y, r.color[2] = d.color.z;
-        r.channels = d.channels;
+        r.channels = channelWord(d);
+        r.emissive = d.emissive;
         r.fadeScreenSize = d.fadeScreenSize;
         r.fadeInStart = d.fadeInStart, r.fadeInDuration = d.fadeInDuration;
         r.fadeOutStart = d.fadeOutStart, r.fadeOutDuration = d.fadeOutDuration;

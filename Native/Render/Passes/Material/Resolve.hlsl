@@ -3,7 +3,8 @@
 // Material resolve (ARCHITECTURE 2.2), one 8 x 8 tile per group:
 //   vis id -> surface (MaterialSurface.hlsli: exact pixel-centre barycentrics and their screen derivatives)
 //   -> footprint-filtered textures (SampleGrad, anisotropic 16x) -> shading normal and band-limited roughness
-//   -> G-buffer (GBuffer.hlsli), material word (MaterialInternal.hlsli), emissive (textured materials only),
+//   -> G-buffer (GBuffer.hlsli), material word (MaterialInternal.hlsli), emissive (in frames with an emissive texture or
+//      an emissive decal: every surface pixel's emission - the material's x its texture and mask, + the decals'),
 //      tile class lists for the shading kernels, reflection lobe tiles for R (INTERFACES 5.1, v1.3).
 // Specular band limit: the lobe is widened by the slope variance of the pixel footprint (Beckmann-equivalent
 // alpha'^2 = alpha^2 + trace of the slope covariance):
@@ -94,6 +95,11 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
         {
             gbuffer[pixel] = uint2(0x7FFF0000u, 0x80808080u);
             words[pixel] = 0;
+            if (P[1].x != UNX_NONE)
+            {
+                RWTexture2D<float4> emissive = ResourceDescriptorHeap[P[1].x];
+                emissive[pixel] = float4(loadMaterial(0).emissive, 1);
+            }
             classBit = 1u << M_CLASS_OPAQUE;
             lobe = 0.5;
         }
@@ -217,11 +223,13 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
             const bool backSide = !s.front && (m.classFlags & MATERIAL_TWO_SIDED) != 0;
             if (backSide) n = -n;
 
+            float3 decalEmission = 0;  // E's emissive decals (Decal.hlsli)
             if (P[4].z != UNX_NONE)
             {
                 // decals as upper layers of the material (their geometric normal: the side this pixel shades)
                 DecalMaterial dm;
                 dm.baseColor = baseColor; dm.roughness = roughness; dm.metallic = metallic; dm.normal = n; dm.variance = variance;
+                dm.emissive = 0;
                 DecalSurface ds;
                 ds.position = s.offset; ds.dpdx = s.dpdx; ds.dpdy = s.dpdy;
                 ds.geometricNormal = backSide ? -s.geometricNormal : s.geometricNormal;
@@ -231,6 +239,7 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
                 dc.frames = P[4].z; dc.tiles = P[4].w; dc.materialTable = P[2].x;
                 decalApply(dc, pixel, ds, dm);
                 baseColor = dm.baseColor; roughness = dm.roughness; metallic = dm.metallic; n = dm.normal; variance = dm.variance;
+                decalEmission = dm.emissive;
             }
             if (P[5].x != UNX_NONE || P[5].w != UNX_NONE)
             {
@@ -291,18 +300,23 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
             }
             words[pixel] = mPackMaterialWord(s.material, metallic, coatRoughness);
 
-            if (mEmissivePerPixel(ts) && P[1].x != UNX_NONE)
+            if (P[1].x != UNX_NONE)
             {
-                // the emission (the material's, which holds emissiveScale) x its texture x its mask, at the material's uv
+                // the pixel's emission: the material's (which holds emissiveScale), x its texture x its mask at the
+                // material's uv where it has them, + the emissive decals'. Every surface pixel: the shading kernels
+                // read the texture in place of the material's constant.
                 float3 e = m.emissive;
-                if (ts.emissive != UNX_NONE)
+                if (mEmissivePerPixel(ts))
                 {
-                    Texture2D<float4> t = ResourceDescriptorHeap[ts.emissive];
-                    e *= mSampleGrad(t, (ts.flags & M_TEX_EMISSIVE) != 0, iu.uv, iu.duvdx, iu.duvdy).rgb;
+                    if (ts.emissive != UNX_NONE)
+                    {
+                        Texture2D<float4> t = ResourceDescriptorHeap[ts.emissive];
+                        e *= mSampleGrad(t, (ts.flags & M_TEX_EMISSIVE) != 0, iu.uv, iu.duvdx, iu.duvdy).rgb;
+                    }
+                    e *= mInputEmissiveMask(iu);
                 }
-                e *= mInputEmissiveMask(iu);
                 RWTexture2D<float4> emissive = ResourceDescriptorHeap[P[1].x];
-                emissive[pixel] = float4(e, 1);
+                emissive[pixel] = float4(e + decalEmission, 1);
             }
 
             classBit = 1u << mShadeClassOf(m);

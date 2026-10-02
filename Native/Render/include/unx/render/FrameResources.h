@@ -165,6 +165,7 @@ struct ViewResources
     // pass both to decalApply (Decal.hlsli).
     BufferRef decalFrames;         // StructuredBuffer<DecalFrame>: the frame's decals, camera-relative               [E]
     BufferRef decalTiles;          // raw: 16 x 16 px tile lists (<= 16 decals per tile, header + status)             [E]
+    bool decalEmissive = false;    // a live decal adds emission: M's resolve writes the emissive texture             [E]
     TextureRef color;              // final colour target of this view                      [M]
     // The temporal upscale's output (output resolution, RGBA16F: rgb = linear radiance x exposure before the post chain's
     // encoding, a = history weight; Upscale.cpp), for captures of the upscaled image; invalid when the frame renders at
