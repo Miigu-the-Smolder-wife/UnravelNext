@@ -701,9 +701,17 @@ CullView viewOf(const RasterView& r, const DepthRasterRequest& req, const Settin
     {
         if (req.cullTilePx != 128 || req.tileOccludersSrv == UINT32_MAX || req.atlasSlotsSrv == UINT32_MAX)
             fail("rasterizeDepth '%s': tile occluders need 128 px tiles and the persistent SRVs of the occluders and the atlas slots", req.name.c_str());
-        v.flags |= kViewTileOccluders;
         v.occluderSrv = req.tileOccludersSrv;
         v.occluderSlotsSrv = req.atlasSlotsSrv;
+        if (r.tileTwoPhase)
+        {
+            if (!req.tileGuess.valid() || req.tileGuessSrv == UINT32_MAX || !req.buildTileOccluders)
+                fail("rasterizeDepth '%s': tile occluders in two phases need the tiles' guesses and the occluders' rebuild", req.name.c_str());
+            v.flags |= kViewTileTwoPhase;
+            v.guessSrv = req.tileGuessSrv;
+        }
+        else
+            v.flags |= kViewTileOccluders;
     }
     return v;
 }
@@ -817,6 +825,7 @@ struct Run
     BufferRef chunkWork;   // C3: visible chunk items [0, capDeferred), deferred chunks [capDeferred, 2 capDeferred)
     BufferRef chunks, skinBounds;  // C3 persistent buffers imported for this frame (read by the cull kernels)
     BufferRef tileOccluders, occluderSlots;  // raster service: the request's tile occluders and atlas slots (tilesOcclude)
+    BufferRef tileGuess;                     // ... and the tiles' guesses of a run with two-phase views
     uint32_t chunkCount = 0, flatCount = 0;
     uint32_t tileCoarseWords = 0;  // per view
     TextureRef hiz;
@@ -874,6 +883,7 @@ void declareCull(PassBuilder& b, const Run& r, Use argsUse)
         b.use(r.tileOccluders, Use::SrvCompute);
         b.use(r.occluderSlots, Use::SrvCompute);
     }
+    if (r.tileGuess.valid()) b.use(r.tileGuess, Use::SrvCompute);
 }
 
 void cullConstants(const PassContext& c, const Run& r, uint32_t phase, uint32_t k[32], uint32_t instanceCount)
@@ -2412,6 +2422,10 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     }
     std::vector<CullView> views;
     for (const RasterView& v : request.views) views.push_back(viewOf(v, request, cfg));
+    // Tile occluders in two phases (DepthRaster.h): a second cull phase and raster after the requester's rebuild.
+    bool twoPhase = false;
+    for (const CullView& v : views) twoPhase = twoPhase || (v.flags & kViewTileTwoPhase) != 0;
+    if (twoPhase) r.tileGuess = request.tileGuess;
     r.viewCount = (uint32_t)views.size();
     r.viewsSrv = uploadViews(s, fc, views);
     if (r.tileMask.valid()) tileCoarsePass(fc, r, views);
@@ -2465,10 +2479,13 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     }
     ID3D12CommandSignature* sig = s.meshSignature.Get();
     const DepthRasterRequest req = request;
-    // visibility.cull_pass_merge: the run's statistics copy is the raster pass's last command (the raster only reads the
-    // cull state, so the state is final before it), not a pass of its own.
-    const StatsCopy stats = cfg.passMerge ? statsCopy(fc, s, request.name) : StatsCopy{};
-    fc.graph.addPass(request.name + ".raster", QueueType::Graphics,
+    // visibility.cull_pass_merge: the run's statistics copy is the last raster pass's last command (the raster only reads
+    // the cull state, so the state is final before it), not a pass of its own.
+    const StatsCopy statsOfRun = cfg.passMerge ? statsCopy(fc, s, request.name) : StatsCopy{};
+    // The raster of a phase's list entries (phase 1: all of a one-phase run).
+    auto raster = [&](uint32_t phase, bool last) {
+    const StatsCopy stats = last ? statsOfRun : StatsCopy{};
+    fc.graph.addPass(request.name + (phase == 1 ? ".raster" : ".raster.p2"), QueueType::Graphics,
                      [&](PassBuilder& b) {
                          b.use(r.args, Use::IndirectArgs);
                          b.use(r.visible, Use::SrvGraphics);
@@ -2522,7 +2539,7 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                          c.bindFrameConstants(r.frameConstants);
                          for (uint32_t l = 0; l < kBandLists; ++l)
                          {
-                             uint32_t k[32] = { c.srv(r.visible), c.srv(r.lists), c.srv(r.state), l, 1, r.cfg.capVisible, r.viewsSrv, sameViewport ? 0u : 1u,
+                             uint32_t k[32] = { c.srv(r.visible), c.srv(r.lists), c.srv(r.state), l, phase, r.cfg.capVisible, r.viewsSrv, sameViewport ? 0u : 1u,
                                                 r.tilePairs.valid() ? c.srv(r.tilePairs) : kNone, req.atlasSlots.valid() ? c.srv(req.atlasSlots) : kNone,
                                                 req.atlasTilesPerRow, atlasWidth | atlasHeight << 16, amplify ? c.srv(req.cullMask) : kNone };
                              std::memcpy(&k[16], pixelConstants, sizeof pixelConstants);
@@ -2532,7 +2549,15 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                          }
                          if (stats.readback) c.cmd->CopyBufferRegion(stats.readback, stats.offset, c.resource(r.state), 0, kStateWords * 4);
                      });
-    if (!stats.readback) recordStats(fc, s, r, request.name);
+    };
+    raster(1, !twoPhase);
+    if (twoPhase)
+    {
+        request.buildTileOccluders();  // (the requester's pass: the occluders of what phase 1 drew)
+        cullPhase(fc, s, r, 2);
+        raster(2, true);
+    }
+    if (!statsOfRun.readback) recordStats(fc, s, r, request.name);
 }
 } // namespace unx::render::tracks
 

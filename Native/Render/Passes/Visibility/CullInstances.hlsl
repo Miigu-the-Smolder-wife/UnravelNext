@@ -45,8 +45,22 @@ void cullInstance(RWByteAddressBuffer state, uint instance, uint view, bool vali
             // A12 view models: the main view draws them with its projection remapped (ViewModel.hlsli viewModelClip), so the
             // view's planes and HiZ do not bound them; a few clusters, drawn untested.
             if ((inst.flags & INSTANCE_VIEW_MODEL) != 0) bounded = false;
+            const bool twoPhase = (v.flags & CULL_VIEW_TILE_TWO_PHASE) != 0;
             visible = roots.rootCount > 0 && (!bounded || (frustumVisible(v, bounds) && !instanceBelowView(v, bounds) && tileVisible(v, view, bounds) &&
-                                                           !tilesOcclude(v, TILE_MASK_SRV, bounds)));
+                                                           (twoPhase || !tilesOcclude(v, TILE_MASK_SRV, bounds, false))));
+            if (visible && bounded && twoPhase)
+            {
+                // tile occluders in two phases (VisibilityCommon.hlsli tilesOcclude): as the HiZ's two phases below
+#if PHASE == 1
+                if (tilesOcclude(v, TILE_MASK_SRV, bounds, true))
+                {
+                    visible = false;
+                    defer = true;
+                }
+#else
+                visible = !tilesOcclude(v, TILE_MASK_SRV, bounds, false);
+#endif
+            }
             if (visible && bounded && (v.flags & CULL_VIEW_OCCLUSION) != 0)
             {
 #if PHASE == 1

@@ -16,7 +16,8 @@
 // DEPTH=2 (DepthRasterRequest::pixelNormals): the pixel kernel's attributes and each vertex's world normal and tangent
 // (deformVertex's: the surface frame the main view shades with).
 //   P[0] visible SRV (uint2), lists SRV (raw), state SRV (raw), list
-//   P[1] phase (always 1: the service culls in one phase), list capacity, views SRV, viewport per view (0 = one viewport)
+//   P[1] phase (1: the list's entries of phase 1, or all of a one-phase run; 2: the entries phase 2 appended - a run
+//        with tile occluders in two phases), list capacity, views SRV, viewport per view (0 = one viewport)
 //   P[2] tile rectangles SRV (TILE=1,2: read by the amplification stage), atlas slots SRV (raw, TILE=2), atlas tiles per
 //        row, atlas size (w | h << 16)
 //   P[3] tile mask SRV (raw, TILE=1,2)
@@ -83,7 +84,8 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     ByteAddressBuffer lists = ResourceDescriptorHeap[P[0].y];
     const uint list = P[0].w, capacity = P[1].y;
     const uint count = min(state.Load(4 * (VS_LIST_COUNT + list)), capacity);
-    const uint index = group.x + group.y * 65535;
+    const uint base = P[1].x == 2 ? state.Load(4 * (VS_LIST_PHASE1 + list)) : 0;
+    const uint index = base + group.x + group.y * 65535;
     const bool valid = index < count;  // uniform over the group
     const uint entryIndex = valid ? lists.Load(4 * (list * capacity + index)) : 0;
 #if TILE

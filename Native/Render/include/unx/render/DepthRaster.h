@@ -6,6 +6,7 @@
 #include "unx/scene/SceneData.h"
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 #include <utility>
@@ -56,6 +57,8 @@ struct RasterView
     uint32_t instanceSet = 0;
     // The view is tested against the request's tile occluders (DepthRasterRequest::tileOccluders).
     bool tileOccluders = false;
+    // ... in two phases (DepthRasterRequest::tileGuess): for a view whose tiles' occluders are what the view itself draws.
+    bool tileTwoPhase = false;
 };
 
 struct DepthRasterRequest
@@ -132,6 +135,18 @@ struct DepthRasterRequest
     // gives their persistent raw SRVs (bindless indices) beside the graph handles.
     BufferRef tileOccluders;
     uint32_t tileOccludersSrv = UINT32_MAX, atlasSlotsSrv = UINT32_MAX;
+    // Tile occluders in two phases (views with RasterView::tileTwoPhase; the reference's two-pass occlusion of its shadow
+    // views): the tiles' occluders are what the views themselves draw, so they do not exist when the run starts. Phase 1
+    // tests against a guess per tile - 'tileGuess', a raw buffer of two words per mask bit (as atlasSlots: word pair
+    // cullMaskOffset * 32 + i): { the atlas slot whose occluder record stands for the tile, UINT32_MAX = none;
+    // shift | x << 8 | y << 20: the tile's pixel p is pixel (x, y) + (p >> shift) of that slot } (S: a kept coarser page
+    // over the same ground) - and draws what the guess does not hide; V then calls 'buildTileOccluders', in which the
+    // requester records the pass that rebuilds tileOccluders for the slots just drawn; phase 2 tests what phase 1
+    // rejected against them and draws what they do not hide. A guess only decides in which phase something is drawn:
+    // what is left out lies behind the depth phase 1 stored, whatever the guess said.
+    BufferRef tileGuess;
+    uint32_t tileGuessSrv = UINT32_MAX;
+    std::function<void()> buildTileOccluders;
     // Coverage mode (v1.26; S's VSM transmittance layer): conservative raster of band B clusters only, the pixel kernel
     // (compiled with DEPTH_RASTER_COVERAGE 1) gets the exact area, mask and centroid depth per texel
     // (depthRasterCoverage, DepthRaster.hlsli). Needs a pixel kernel and no depth target. Bands are judged in each

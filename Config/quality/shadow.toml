@@ -58,6 +58,14 @@ static_hzb_cull = true          # with static_separate: the movable casters' vie
                                 # merge it would have no texel (cars under bridges and roofs, actors indoors). The pages hold the
                                 # same depth. Costs 1.4 KB per page and one pass that reads the static copies drawn in the frame.
                                 # false: every movable caster in the frustum of a drawn page is rastered (A/B)
+static_occlusion_two_phase = true  # with static_hzb_cull: the static casters' views (the pages drawn anew) are culled
+                                # against occluders too, in two phases as the main view's (the reference's two-pass occlusion
+                                # of its shadow views). Phase 1 tests an instance, hierarchy node or cluster against the HZB of
+                                # a kept coarser page over the same ground (up to 4 levels up) and draws what that does not
+                                # hide; the pages' own HZB is then built from what was drawn, and phase 2 tests the rest
+                                # against it. Only what lies behind the depth phase 1 stored is left out: the pages hold the
+                                # same depth. Costs a second cull chain, raster pass and HZB pass per static request, every
+                                # frame. false: every static caster in the frustum of a page drawn anew is rastered (A/B)
 cache_hzb_filter = true         # a changed caster makes a cached sun page stale only where it can show in it: a caster whose
                                 # bounding sphere lies under the page's stored surface over its whole footprint there (the page's
                                 # block hierarchy, its HZB) has no texel in the page before or after the change, so the page stays

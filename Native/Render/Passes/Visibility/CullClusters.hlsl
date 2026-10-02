@@ -76,7 +76,22 @@ ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
         if (!tileRange(v, s, r.tileA, r.tileB)) return r;
         r.pairs = tileVisit(TILE_VISIT_COUNT, v, view, tileMasks(), r.tileA, r.tileB, r.wholeRange, 0, 0, 0, 0, 0, UNX_NONE, UNX_NONE);
         if (r.pairs == 0) return r;
-        if (!unbounded && tilesOcclude(v, TILE_MASK_SRV, s)) return r;  // (hidden under the tiles' stored surface: DepthRaster.h)
+        // hidden under the tiles' stored surface (DepthRaster.h tile occluders): at once, or in two phases as the HiZ's
+        if (!unbounded && (v.flags & CULL_VIEW_TILE_TWO_PHASE) != 0)
+        {
+            if (CULL_PHASE == 1)
+            {
+                if (tilesOcclude(v, TILE_MASK_SRV, s, true))
+                {
+                    r.defer = true;
+                    return r;
+                }
+            }
+            else if (tilesOcclude(v, TILE_MASK_SRV, s, false))
+                return r;
+        }
+        else if (!unbounded && tilesOcclude(v, TILE_MASK_SRV, s, false))
+            return r;
     }
     else if (!tileVisible(v, view, s))
         return r;

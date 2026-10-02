@@ -6,7 +6,7 @@
 
 namespace unx::visibility::detail
 {
-struct CullView  // 384 B
+struct CullView  // 400 B
 {
     float4x4 viewProj;
     float4x4 prevViewProj;
@@ -35,6 +35,8 @@ struct CullView  // 384 B
     float minInstancePx;                  // RasterView::minInstanceTexels (0: every instance)
     uint32_t instanceSet;                 // RasterView::instanceSet (0 every instance, 1 not movable, 2 movable)
     uint32_t occluderSrv, occluderSlotsSrv;  // DepthRasterRequest::tileOccludersSrv, atlasSlotsSrv (kViewTileOccluders)
+    uint32_t guessSrv;                       // DepthRasterRequest::tileGuessSrv (kViewTileTwoPhase)
+    uint32_t pad[3];
 };
 
 // C3 instance hierarchy (VisibilityCommon.hlsli CullScene, CullChunk).
@@ -59,12 +61,13 @@ static_assert(sizeof(SkinJointSphere) == 32);
 constexpr uint32_t kChunkInstances = 256;  // CHUNK_INSTANCES
 constexpr float kChunkCell = 64.0f;         // metres (ARCHITECTURE 2.1: 64 m cells)
 constexpr uint32_t kSkinJointOrigin = 0xFFFFFFFFu;
-static_assert(sizeof(CullView) == 384);
+static_assert(sizeof(CullView) == 400);
 
 constexpr uint32_t kViewOcclusion = 1;
 constexpr uint32_t kViewCullBack = 2;
 constexpr uint32_t kViewTileSingle = 4;  // tile-local pairs are single tiles (atlas mode)
 constexpr uint32_t kViewTileOccluders = 8;  // tested against the request's tile occluders (RasterView::tileOccluders)
+constexpr uint32_t kViewTileTwoPhase = 16;  // ... in two phases (RasterView::tileTwoPhase)
 // Views of one cull run: the work items' view field is 16 bits (VisibilityCommon.hlsli packItem), a run's views one
 // upload chunk of this many.
 constexpr uint32_t kViewsPerRun = 4096;

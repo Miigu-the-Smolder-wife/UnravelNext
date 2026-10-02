@@ -8,7 +8,7 @@
 #include "Passes/Visibility/ClusterHierarchy.hlsli"
 #include "Passes/ViewModel/ViewModel.hlsli"
 
-// One view of a cull run (main view: one; depth raster service: one per RasterView). 384 B.
+// One view of a cull run (main view: one; depth raster service: one per RasterView). 400 B.
 struct CullView
 {
     row_major float4x4 viewProj;
@@ -40,6 +40,8 @@ struct CullView
     uint instanceSet;                  // RasterView::instanceSet: 0 every instance, 1 the ones that are not movable, 2 the movable
                                        // ones (instanceInSet)
     uint occluderSrv, occluderSlotsSrv; // CULL_VIEW_TILE_OCCLUDERS: the request's tile occluders and atlas slots (raw SRVs)
+    uint guessSrv;                     // CULL_VIEW_TILE_TWO_PHASE: the request's tile guesses (raw SRV)
+    uint pad0, pad1, pad2;
 };
 
 // The view's instance set (RasterView::instanceSet): movable = INSTANCE_MOVABLE_FLAGS, a bone palette, morph or terrain
@@ -108,6 +110,8 @@ uint skinSlot(CullScene cs, uint instance)
 #define CULL_VIEW_CULL_BACK 2u   // back faces of one-sided materials are culled (cone test allowed)
 #define CULL_VIEW_TILE_SINGLE 4u // tile-local pairs are single tiles (DepthRasterRequest atlas mode: one slot per tile)
 #define CULL_VIEW_TILE_OCCLUDERS 8u  // tested against the request's tile occluders (tilesOcclude)
+#define CULL_VIEW_TILE_TWO_PHASE 16u // tile occluders in two phases: phase 1 against the tiles' guesses (what it rejects is
+                                     // deferred), phase 2 against the occluders rebuilt from what phase 1 drew
 
 // Cull state words (RWByteAddressBuffer, 4 B each).
 #define VS_NODE_WRITE 0u
@@ -596,15 +600,39 @@ bool tileAnySet(CullView v, uint view, TileMasks masks, uint2 a, uint2 b)
     return false;
 }
 
-// Tile occluders of a raster-service view (DepthRasterRequest::tileOccluders, CULL_VIEW_TILE_OCCLUDERS): true when the
-// sphere is hidden in every set tile under it - in each, its nearest device depth is farther than the farthest depth
-// stored over the blocks its rectangle touches in the tile (341 floats per atlas slot: blocks of tilePx / 16 pixels, then
-// of 2, 4, 8 and 16 times that; read on the block level where the rectangle spans at most 2 x 2 blocks; 0 = a pixel with
-// nothing stored: not hidden). False (not hidden) without occluders, when the sphere reaches the view's near plane, or
-// when it spans more than 2 x 2 tiles. Reversed Z: nearer = larger.
-bool tilesOcclude(CullView v, uint maskSrv, float4 s)
+// The farthest depth an atlas slot's occluder record stores over the pixel rectangle [lo, hi] of the slot: 341 floats
+// per slot - blocks of blockPx pixels (16 x 16 of them), then of 2, 4, 8 and 16 times that - read on the block level
+// where the rectangle spans at most 2 x 2 blocks (0 = a pixel with nothing stored).
+float tileOccluderDepth(ByteAddressBuffer occluders, uint slot, uint2 lo, uint2 hi, uint blockPx)
 {
-    if ((v.flags & CULL_VIEW_TILE_OCCLUDERS) == 0 || v.cullMaskOffset == UNX_NONE || maskSrv == UNX_NONE) return false;
+    const uint2 bl = lo / blockPx, bh = hi / blockPx;
+    uint m = 0;
+    [unroll] for (uint q = 0; q < 4; ++q)
+        if ((bh.x >> m) - (bl.x >> m) > 1 || (bh.y >> m) - (bl.y >> m) > 1) ++m;
+    const uint perTile = 16u >> m;
+    const uint offset = m == 0 ? 0u : m == 1 ? 256u : m == 2 ? 320u : m == 3 ? 336u : 340u;
+    const uint2 b0 = min(bl >> m, perTile - 1), b1 = min(bh >> m, perTile - 1);
+    float farthest = 1;
+    [unroll] for (uint c = 0; c < 4; ++c)
+    {
+        const uint2 blk = uint2((c & 1) ? b1.x : b0.x, (c & 2) ? b1.y : b0.y);
+        farthest = min(farthest, asfloat(occluders.Load(4 * (slot * 341 + offset + blk.y * perTile + blk.x))));
+    }
+    return farthest;
+}
+
+// Tile occluders of a raster-service view (DepthRasterRequest::tileOccluders; CULL_VIEW_TILE_OCCLUDERS, or
+// CULL_VIEW_TILE_TWO_PHASE in its phase 2): true when the sphere is hidden in every set tile under it - in each, its
+// nearest device depth is farther than the farthest depth stored over its rectangle in the tile's slot
+// (tileOccluderDepth; a pixel with nothing stored hides nothing). False (not hidden) without occluders, when the sphere
+// reaches the view's near plane, or when it spans more than 2 x 2 tiles. Reversed Z: nearer = larger.
+// guess (phase 1 of CULL_VIEW_TILE_TWO_PHASE; DepthRasterRequest::tileGuess): each tile is read through its guess - another
+// slot and where the tile lies in it (a coarser page of the same surface) - and a tile without one hides nothing. A
+// guess may be wrong either way: what it rejects is only deferred to phase 2, which tests against the tile's own
+// occluders, rebuilt from what phase 1 drew.
+bool tilesOcclude(CullView v, uint maskSrv, float4 s, bool guess)
+{
+    if ((v.flags & (CULL_VIEW_TILE_OCCLUDERS | CULL_VIEW_TILE_TWO_PHASE)) == 0 || v.cullMaskOffset == UNX_NONE || maskSrv == UNX_NONE) return false;
     float4 rect;
     float nearest;
     if (!projectSphere(v.viewProj, v.viewportSize, s, rect, nearest)) return false;
@@ -625,23 +653,25 @@ bool tilesOcclude(CullView v, uint maskSrv, float4 s)
         const uint i = tile.y * v.tilesX + tile.x;
         if (((mask.Load(4 * (v.cullMaskOffset + (i >> 5))) >> (i & 31u)) & 1u) == 0) continue;  // not drawn: nothing to hide from
         any = true;
-        const uint slot = slots.Load(4 * (v.cullMaskOffset * 32 + i));
-        // the rectangle inside the tile, in blocks; the level where it spans at most 2 x 2 of them
+        // the rectangle inside the tile, and the slot whose record stands for the tile there
         const uint2 origin = tile * v.tilePx;
-        const uint2 lo = (max(p0, origin) - origin) / blockPx, hi = (min(p1, origin + v.tilePx - 1) - origin) / blockPx;
-        uint m = 0;
-        [unroll] for (uint q = 0; q < 4; ++q)
-            if ((hi.x >> m) - (lo.x >> m) > 1 || (hi.y >> m) - (lo.y >> m) > 1) ++m;
-        const uint perTile = 16u >> m;
-        const uint offset = m == 0 ? 0u : m == 1 ? 256u : m == 2 ? 320u : m == 3 ? 336u : 340u;
-        const uint2 b0 = min(lo >> m, perTile - 1), b1 = min(hi >> m, perTile - 1);
-        float farthest = 1;
-        [unroll] for (uint c = 0; c < 4; ++c)
+        uint2 lo = max(p0, origin) - origin, hi = min(p1, origin + v.tilePx - 1) - origin;
+        uint slot;
+        if (guess)
         {
-            const uint2 blk = uint2((c & 1) ? b1.x : b0.x, (c & 2) ? b1.y : b0.y);
-            farthest = min(farthest, asfloat(occluders.Load(4 * (slot * 341 + offset + blk.y * perTile + blk.x))));
+            // { slot (UNX_NONE: none), shift | x << 8 | y << 20 }: the tile's pixel p is pixel (x, y) + (p >> shift) of the slot
+            ByteAddressBuffer guesses = ResourceDescriptorHeap[v.guessSrv];
+            const uint2 g = guesses.Load2(8 * (v.cullMaskOffset * 32 + i));
+            if (g.x == UNX_NONE) return false;
+            slot = g.x;
+            const uint shift = g.y & 0xFFu;
+            const uint2 at = uint2((g.y >> 8) & 0xFFFu, g.y >> 20);
+            lo = at + (lo >> shift);
+            hi = at + (hi >> shift);
         }
-        if (!(nearest < farthest)) return false;  // it can show in this tile
+        else
+            slot = slots.Load(4 * (v.cullMaskOffset * 32 + i));
+        if (!(nearest < tileOccluderDepth(occluders, slot, lo, hi, blockPx))) return false;  // it can show in this tile
     }
     return any;
 }

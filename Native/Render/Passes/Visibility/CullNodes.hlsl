@@ -45,7 +45,21 @@ NodeResult testNode(uint2 it)
     bool keep = skinned || frustumVisible(v, s);
     // C5: a node reaching a terrain patch's replaced rectangle is traversed down to the source clusters.
     keep = keep && (patchForcesSource(inst, r.node.lodSphere) || projectedError(v, s, r.node.lodError * instanceScale(inst)) > v.lodThreshold);
-    keep = keep && (skinned || (tileVisible(v, itemView(it), s) && !tilesOcclude(v, TILE_MASK_SRV, s)));
+    const bool twoPhase = (v.flags & CULL_VIEW_TILE_TWO_PHASE) != 0;
+    keep = keep && (skinned || (tileVisible(v, itemView(it), s) && (twoPhase || !tilesOcclude(v, TILE_MASK_SRV, s, false))));
+    if (keep && !skinned && twoPhase)
+    {
+        // tile occluders in two phases (VisibilityCommon.hlsli tilesOcclude): as the HiZ's two phases below
+#if PHASE == 1
+        if (tilesOcclude(v, TILE_MASK_SRV, s, true))
+        {
+            keep = false;
+            r.defer = true;
+        }
+#else
+        keep = !tilesOcclude(v, TILE_MASK_SRV, s, false);
+#endif
+    }
     if (keep && !skinned && (v.flags & CULL_VIEW_OCCLUSION) != 0)
     {
 #if PHASE == 1
