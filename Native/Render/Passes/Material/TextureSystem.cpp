@@ -396,6 +396,23 @@ void TextureSystem::clear()
     m_gpuBytes = 0;
 }
 
+std::vector<uint32_t> TextureSystem::lightSourceTextures() const
+{
+    std::vector<uint32_t> out;
+    if (!m_source) return out;
+    for (const scene::Light& l : m_source->lights)
+    {
+        uint32_t srv = gpu::kNone;
+        if (l.type == scene::LightType::Rect && l.sourceTexture != scene::kNone && l.sourceTexture < m_textures.size())
+        {
+            const scene::TextureFormat f = m_source->textures[l.sourceTexture].format;
+            if (f == scene::TextureFormat::Rgba8Srgb || f == scene::TextureFormat::Rgba16Float) srv = m_textures[l.sourceTexture].srv;
+        }
+        out.push_back(srv);
+    }
+    return out;
+}
+
 void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
 {
     const scene::Scene* s = gpuScene.source();
