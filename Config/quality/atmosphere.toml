@@ -41,11 +41,11 @@ temporal = true                      # of each 2 x 2 block of the layer's texels
 dome_adaptive = true                 # the dome's bands of 8 rows are marched when their picture has moved: by the cloud's drift with
                                      # its wind and the camera's own motion over the distance to the cloud in the band's directions
                                      # (overhead cloud turns fastest, the horizon's slowest), by the sun's turn and by a change of
-                                     # its light - a still sky costs a band now and then, a time lapse the whole dome every frame.
+                                     # its light - a still sky costs a band now and then, a fast one its upper bands every frame.
                                      # false: 16 rows a frame in turn (the whole dome every 6 frames, whatever moves: moving
                                      # clouds lag by up to 6 frames, a still sky costs the same)
-dome_drift_texels = 0.5              # a band is marched when its picture has drifted this many of its texels (1.4 deg of azimuth, its
-                                     # rows' step of elevation) since its last march (0.05 .. 4)
+dome_drift_texels = 0.5              # a band is marched when its picture has turned this many steps (1.4 deg across, the band's rows'
+                                     # step in elevation) since its last march (0.05 .. 4)
 dome_max_age_s = 4.0                 # ... or this long after it (what the count above does not follow - the air's medium - reaches the
                                      # dome within it). 0: by drift alone
 filtered_steps = true                # a march step's density is its mean over the step (the noise at the mip of the step's length, the

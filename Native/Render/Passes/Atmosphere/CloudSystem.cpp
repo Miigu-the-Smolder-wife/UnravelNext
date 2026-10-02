@@ -110,11 +110,12 @@ double domeShellDistance(double R, double from, double to, double sinE)
 // atmosphere.clouds.dome_adaptive: which bands of the dome this frame marches. The dome is the cloud seen from the camera
 // in every direction; its picture moves when the cloud drifts with the wind, when the camera moves, and when the sun's
 // direction or light changes. A band's picture has drifted by the relative motion over the distance to the nearest cloud
-// in its directions (the layer's nearer boundary and the cirrus sheet, whichever turns faster), across azimuth and
-// across elevation, each in that band's texels; the sun's turn counts in azimuth texels, a change of its light as a
-// share of maxLight. A band is marched when its drift reaches 'allowed' texels, or maxAge seconds after its last march
+// in its directions (the layer's nearer boundary and the cirrus sheet, whichever turns faster): the turn square to the
+// line of sight in the dome's azimuth steps (1.4 deg), the turn in elevation in the band's rows; the sun's turn counts
+// in azimuth steps, a change of its light as a share of maxLight. A band is marched when its drift reaches 'allowed' texels, or maxAge seconds after its last march
 // (what nothing here follows - the air's medium - still reaches the dome). A still sky under a slow sun then costs a band
-// every few seconds; a time lapse marches the whole dome every frame, as before the bands existed.
+// every few seconds; under a fast one the bands overhead are marched every frame and the horizon's as their slower
+// turn asks.
 // Returns the bands due as bits; 'whole' marches all of them and starts the count anew.
 uint32_t domeDue(CloudState& s, const FramePassContext& fc, const ViewDesc& view, float3 sunDir, float sunLight, double bottomRadius, float allowed, float maxAge, bool whole)
 {
@@ -160,11 +161,13 @@ uint32_t domeDue(CloudState& s, const FramePassContext& fc, const ViewDesc& view
         double drift = 0;
         for (double e : { e0, e1 })
         {
-            const double sinE = std::sin(e), cosE = std::max(std::cos(e), 0.1);
+            const double sinE = std::sin(e), cosE = std::cos(e);
             auto turned = [&](double distance, double across, double up) {
                 const double d = std::max(distance, kNearest);
-                // across azimuth (the motion square to the line of sight) and across elevation, in the band's texels
-                return std::max(across / (d * cosE) / azimuthTexel, (across * std::abs(sinE) + up * cosE) / d / elevationTexel);
+                // The picture's turn square to the line of sight against the dome's azimuth step (a true angle: the
+                // azimuth texels narrow toward the zenith, the lag that shows does not), and its turn in elevation in
+                // the band's own rows (fine toward the horizon, where the cloud's features are).
+                return std::max(across / d / azimuthTexel, (across * std::abs(sinE) + up * std::abs(cosE)) / d / elevationTexel);
             };
             if (s.layer.coverage > 0)
             {
