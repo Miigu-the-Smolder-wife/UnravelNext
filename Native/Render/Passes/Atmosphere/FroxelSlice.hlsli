@@ -9,6 +9,7 @@
 #include "Passes/Shadow/VsmAir.hlsli"
 #include "Passes/Shadow/VsmLocalAirWalk.hlsli"
 #include "Passes/Lights/LightFunction.hlsli"
+#include "Passes/Atmosphere/CloudShadowCommon.hlsli"
 
 float3 froxelSelfAttenuation(float3 x) { return select(x > 1e-4, (1 - exp(-x)) / max(x, 1e-4), 1 - 0.5 * x); }
 
@@ -177,7 +178,11 @@ FroxelAirResult froxelAirSlice(FroxelGrid g, uint2 tile, uint s, bool nearShadow
             ++walk.slices;
         }
     }
-    source = E * (single * (1 - f) + multi);
+    // The cloud layer's shadow (the sun map at the segment's middle; 1 without clouds): the air a surface is seen through
+    // is lit as the surface under the same clouds is. Not in the sky correction: sky pixels show the layer itself.
+    float cloud = 1;
+    if (any(single > 0)) cloud = cloudSunTransmittanceFromLut(tlut, airLiftToSurface(a, o + dir * (0.5 * len)));
+    source = E * (single * ((1 - f) * cloud) + multi);
     skyTerm = -E * single * f;  // what the sky LUT has and the shadows remove
     FroxelAirResult result;
     result.tau = tau; result.source = source; result.sky = skyTerm; result.walk = walk;
