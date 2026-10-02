@@ -65,10 +65,10 @@ cull_pass_merge = true            # a cull run takes fewer passes: the kernel th
                                   # pass). The same kernels on the same items. With both switches a raster request is 7
                                   # passes where it was 21 (depth 5), the main view's cull 11 where it was 37.
                                   # false: one pass per dispatch and the argument passes (A/B)
-fold_small_passes = true          # dispatches that were small passes of their own share one (PassChain.h): a HiZ build's levels
-                                  # (five per dispatch, each after the one before), a planar view's mask clear with its tiles, the
-                                  # translucent layer's depth copy with its count clear. The same commands in order. false: a
-                                  # pass each (A/B)
+fold_small_passes = true          # small passes that follow each other are timed as one scope (PassChain.h: the same passes and
+                                  # barriers, one timestamp): a HiZ build's levels, a planar view's mask clear with its tiles, the
+                                  # translucent layer's depth copy with its count clear, the coverage layer's single-group steps
+                                  # with the passes they prepare. false: a scope each (A/B)
 max_group_items = 1048576         # hierarchy leaves reached (instance, group)
 max_deferred_items = 1048576      # phase-1 occluded instances / nodes / clusters retested in phase 2
 coverage_table_slots = 32         # unused since INTERFACES v1.41 (tile ranges replace the chunk tables); kept so binaries

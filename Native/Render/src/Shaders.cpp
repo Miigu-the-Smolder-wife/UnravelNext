@@ -139,6 +139,17 @@ ID3D12PipelineState* ShaderLibrary::mesh(const std::string& name, const MeshPipe
         rt.DestBlend = rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
         rt.BlendOp = rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
     }
+    if (desc.multiplyBlend)
+    {
+        // (IndependentBlendEnable is off: target 0's blend is every target's)
+        D3D12_RENDER_TARGET_BLEND_DESC& rt = s.blend.value.RenderTarget[0];
+        rt.BlendEnable = TRUE;
+        rt.SrcBlend = D3D12_BLEND_ZERO;
+        rt.DestBlend = D3D12_BLEND_SRC_COLOR;
+        rt.BlendOp = D3D12_BLEND_OP_ADD;
+        rt.SrcBlendAlpha = rt.DestBlendAlpha = D3D12_BLEND_ONE;
+        rt.BlendOpAlpha = D3D12_BLEND_OP_MAX;
+    }
     s.sample.value = { 1, 0 };
     s.mask.value = UINT_MAX;
     D3D12_PIPELINE_STATE_STREAM_DESC sd{ sizeof s, &s };

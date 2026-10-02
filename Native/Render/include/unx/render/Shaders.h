@@ -22,6 +22,7 @@ struct MeshPipelineDesc
     bool frontCounterClockwise = true;  // false for mirrored (planar reflection) views
     bool conservative = false;
     bool premultipliedBlend = false;  // render target 0: rgb = src.rgb + dst.rgb (1 - src.a), a = src.a + dst.a (1 - src.a)
+    bool multiplyBlend = false;       // every render target: rgb = dst.rgb x src.rgb, a = max(dst.a, src.a)
 };
 
 struct PipelineStats

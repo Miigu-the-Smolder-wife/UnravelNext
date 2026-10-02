@@ -47,12 +47,54 @@ static_separate = true          # sun pages keep a static copy (the reference's 
                                 # all its casters gives - a depth buffer keeps the nearest fragment in any order. Costs a second
                                 # atlas (64 KB per page: 256 MB at 4096 pages) and a second family of sun raster requests
                                 # (s.vsm.static*). Needs cache. false: one atlas, a changed caster redraws its pages whole (A/B)
+translucent_tint = true         # the sun's glass casters let light through: in a scene with a Glass class material they are
+                                # left out of the pages' depth and drawn into a tint atlas beside it (tint_page_texels^2 texels
+                                # a page; V's raster service with a render target: VsmTintPixel.ps.hlsl) - per texel the
+                                # product of what the glass surfaces over it let through (a pane's (1 - F)^2 t / (1 - F^2 t^2)
+                                # with t its base colour, a solid's (1 - F) sqrt(t) a face) and the depth of the nearest one.
+                                # A receiver behind that one takes the product: the views' sun slot and the coverage
+                                # fragments' sun are multiplied by its luminance, and the opaque shading takes its colour (the
+                                # views' visibility texture is then twice as high: FrameResources.h). One layer: a point
+                                # between two glass surfaces takes both. Costs 8 KB a page (32 MB at 4096 pages) and one more
+                                # raster request a frame while the scene has glass. Ray hits, water and the translucent layer
+                                # look the sun up without it: past glass they are lit whole. false: glass casts an opaque
+                                # shadow (A/B).
+                                # The local lights' pages keep glass opaque either way
+tint_page_texels = 32           # compiled into the kernels (VsmTint.hlsli VSM_TINT_PAGE)
+aggregate_small_casters = true  # with min_caster_texels: a sun level draws each static caster under that radius as a proxy - one
+                                # square facing the sun at its bounds' centre, aggregate_coverage of its bounding disc in area
+                                # (V's raster service: DepthProxy.ms.hlsl) - where min_caster_texels alone leaves it out. A
+                                # square under a texel covers a texel centre as often as its area is of a texel, so a forest
+                                # or a meadow keeps its shadow on the levels coarser than its plants as the share of the
+                                # ground they cover, at two triangles a plant; an instance chunk whose every member is that
+                                # small is not culled member by member. Dynamic, skinned and run-time instances under the
+                                # radius stay left out. false: min_caster_texels' behaviour - no shadow from them (A/B)
+aggregate_coverage = 0.5        # the share of its bounding disc a small caster's silhouette fills (a tree crown, a grass tuft)
+local_static_separate = true    # with static_separate: the local lights' pages have static copies too. A light whose range meets
+                                # only changes of movable casters keeps its pages and their static copies; the movable casters
+                                # of its pages are drawn anew (culled against the static copies' HZB with static_hzb_cull) and
+                                # merged. A change of a caster that is not movable, or of the light, draws its pages anew.
+                                # false: any changed caster in a light's range draws all of the light's casters anew (A/B).
+                                # Only without shading.mega_lights: with it S draws no local page
+local_request_views = 4032      # local lights' page views (42 per light: 6 faces x 7 mips) in one of V's raster requests - one
+                                # cull chain per request, so 96 lights share one where the list capacity allows it
+                                # (visibility.max_visible_clusters still splits them). 252: six lights per request, the limit
+                                # of V's 8-bit view field before the 16-bit one (A/B). Only without shading.mega_lights: with
+                                # it S draws no local page
 static_hzb_cull = true          # with static_separate: the movable casters' views are culled against the HZB of the pages' static
                                 # copies (VsmStaticHzb.hlsl; the reference's per-page HZB): an instance, hierarchy node or cluster
                                 # that lies under the static surface in every page it would be drawn into is not drawn - after the
                                 # merge it would have no texel (cars under bridges and roofs, actors indoors). The pages hold the
                                 # same depth. Costs 1.4 KB per page and one pass that reads the static copies drawn in the frame.
                                 # false: every movable caster in the frustum of a drawn page is rastered (A/B)
+static_occlusion_two_phase = true  # with static_hzb_cull: the static casters' views (the pages drawn anew) are culled
+                                # against occluders too, in two phases as the main view's (the reference's two-pass occlusion
+                                # of its shadow views). Phase 1 tests an instance, hierarchy node or cluster against the HZB of
+                                # a kept coarser page over the same ground (up to 4 levels up) and draws what that does not
+                                # hide; the pages' own HZB is then built from what was drawn, and phase 2 tests the rest
+                                # against it. Only what lies behind the depth phase 1 stored is left out: the pages hold the
+                                # same depth. Costs a second cull chain, raster pass and HZB pass per static request, every
+                                # frame. false: every static caster in the frustum of a page drawn anew is rastered (A/B)
 cache_hzb_filter = true         # a changed caster makes a cached sun page stale only where it can show in it: a caster whose
                                 # bounding sphere lies under the page's stored surface over its whole footprint there (the page's
                                 # block hierarchy, its HZB) has no texel in the page before or after the change, so the page stays
@@ -73,10 +115,10 @@ page_dilation = 0.05            # a pixel within this fraction of a page of its 
                                 # reference's PageDilationBorderSizeDirectional 0.05): its search and penumbra taps find that
                                 # neighbour on the pixel's own level where they fell back to a coarser ancestor. More requested
                                 # pages near borders; the shadow there is read at the finer texel. 0: the pixel's page alone (A/B)
-fold_small_passes = true        # the page update's and the visibility's small dispatches share passes (PassChain.h): the
+fold_small_passes = true        # the page update's and the visibility's small passes are timed as scopes (PassChain.h): the
                                 # counters' clear with the cache's reset; the request propagation, the cache's keep and free
                                 # list and the scan's three steps; the pixel list's clear with the visibility pass; the
-                                # overflow scan's two levels. The same dispatches in the same order, a barrier between them.
+                                # overflow scan's two levels. The same passes and barriers, one timestamp a scope.
                                 # And a view without local shadow slots (shading.mega_lights shadows the local lights) records
                                 # no overflow count, scan and fill: they ran over an empty tile list. false: a pass each (A/B)
 use_stats = 0                     # 1: count which sun pages lookups read, by request kind (measurement only; RendererGate)

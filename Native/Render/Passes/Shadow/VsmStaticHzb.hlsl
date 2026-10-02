@@ -6,8 +6,10 @@
 // 0, 256, 320, 336, 340; VSM_BLOCK_ENTRIES floats per physical page). V's cull of the movable casters' views reads it
 // (VisibilityCommon.hlsli tilesOcclude): a movable caster under the static surface of every page it would be drawn into
 // leaves no texel after the merge. A kept page's HZB is the one built when its static copy was drawn. Local lights'
-// pages have no static copy and no reader: skipped.
-// P[0].x page list SRV (raw: count, pad, (slot, page) pairs), P[0].y static atlas SRV (Texture2D<float>), P[0].z HZB UAV (raw)
+// pages: with shadow.vsm.local_static_separate (P[0].w = 1) they have static copies and their movable casters' views
+// read the HZB; without it they have neither and are skipped.
+// P[0].x page list SRV (raw: count, pad, (slot, page) pairs), P[0].y static atlas SRV (Texture2D<float>), P[0].z HZB UAV
+// (raw), P[0].w 1: the local lights' pages too
 #include "Passes/Shadow/VsmCommon.hlsli"
 
 groupshared float g_farthest[256];
@@ -17,7 +19,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 {
     ByteAddressBuffer list = ResourceDescriptorHeap[P[0].x];
     const uint2 entry = list.Load2(8 + group.x * 8);
-    if (entry.x >= VSM_SUN_SLOTS) return;  // (uniform over the group)
+    if (entry.x >= VSM_SUN_SLOTS && P[0].w == 0) return;  // (uniform over the group)
     const uint phys = entry.y;
     Texture2D<float> atlas = ResourceDescriptorHeap[P[0].y];
     RWByteAddressBuffer hzb = ResourceDescriptorHeap[P[0].z];

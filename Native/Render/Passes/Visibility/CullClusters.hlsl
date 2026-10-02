@@ -49,6 +49,9 @@ ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
     if (!unbounded && !frustumVisible(v, s)) return r;
     const GpuMaterial m = loadMaterial(clusterMaterial(inst, cl));
     const bool twoSided = (m.classFlags & MATERIAL_TWO_SIDED) != 0, alpha = (m.classFlags & MATERIAL_ALPHA_TESTED) != 0;
+    // (RasterView::materialFilter: a view without the glass casters, or of them alone)
+    const bool glass = (m.classFlags & 0xFFu) == MATERIAL_GLASS;
+    if ((v.flags & (glass ? CULL_VIEW_NO_GLASS : CULL_VIEW_GLASS_ONLY)) != 0) return r;
     const bool cullBack = (v.flags & CULL_VIEW_CULL_BACK) != 0 && !twoSided;
     const float3 axis = normalize(transformVector(inst.objectToWorld, cl.normalCone.xyz));
     const float3 toCluster = s.xyz - v.position;
@@ -76,7 +79,22 @@ ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
         if (!tileRange(v, s, r.tileA, r.tileB)) return r;
         r.pairs = tileVisit(TILE_VISIT_COUNT, v, view, tileMasks(), r.tileA, r.tileB, r.wholeRange, 0, 0, 0, 0, 0, UNX_NONE, UNX_NONE);
         if (r.pairs == 0) return r;
-        if (!unbounded && tilesOcclude(v, TILE_MASK_SRV, s)) return r;  // (hidden under the tiles' stored surface: DepthRaster.h)
+        // hidden under the tiles' stored surface (DepthRaster.h tile occluders): at once, or in two phases as the HiZ's
+        if (!unbounded && (v.flags & CULL_VIEW_TILE_TWO_PHASE) != 0)
+        {
+            if (CULL_PHASE == 1)
+            {
+                if (tilesOcclude(v, TILE_MASK_SRV, s, true))
+                {
+                    r.defer = true;
+                    return r;
+                }
+            }
+            else if (tilesOcclude(v, TILE_MASK_SRV, s, false))
+                return r;
+        }
+        else if (!unbounded && tilesOcclude(v, TILE_MASK_SRV, s, false))
+            return r;
     }
     else if (!tileVisible(v, view, s))
         return r;
@@ -167,7 +185,7 @@ void emit(RWByteAddressBuffer state, bool active, uint instance, uint clusterInd
     if (visible && idx < CAP_VISIBLE)
     {
         RWStructuredBuffer<uint2> visibleList = ResourceDescriptorHeap[VISIBLE_UAV];
-        visibleList[idx] = uint2(instance, packItem(clusterIndex, view));
+        visibleList[idx] = packItem(instance, clusterIndex, view);
         RWByteAddressBuffer lists = ResourceDescriptorHeap[LISTS_UAV];
         uint s = 0, s2 = 0;
         [unroll] for (uint k = 0; k < VS_LISTS; ++k)
@@ -196,7 +214,7 @@ void emit(RWByteAddressBuffer state, bool active, uint instance, uint clusterInd
     if (defer && d < CAP_DEFERRED)
     {
         RWStructuredBuffer<uint2> deferred = ResourceDescriptorHeap[DEFER_CLUSTERS_UAV];
-        deferred[d] = uint2(instance, packItem(clusterIndex, view));
+        deferred[d] = packItem(instance, clusterIndex, view);
     }
     [unroll] for (uint b = 0; b < 3; ++b)
     {
@@ -225,14 +243,14 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupThreadID)
     RWStructuredBuffer<uint2> groups = ResourceDescriptorHeap[GROUP_ITEMS_UAV];
     const uint2 g = groups[item];
     StructuredBuffer<ClusterNode> nodes = ResourceDescriptorHeap[NODES_SRV];
-    const ClusterNode leaf = nodes[itemIndex(g.y)];
-    const uint view = itemView(g.y);
+    const ClusterNode leaf = nodes[itemIndex(g)];
+    const uint view = itemView(g), instance = itemInstance(g);
     for (uint base = 0; base < leaf.count; base += 32)  // uniform over the group: one leaf per group
     {
         const bool active = base + lane < leaf.count;
         ClusterResult r = (ClusterResult)0;
-        if (active) r = testCluster(g.x, leaf.first + base + lane, view);
-        emit(state, active, g.x, leaf.first + base + lane, view, r);
+        if (active) r = testCluster(instance, leaf.first + base + lane, view);
+        emit(state, active, instance, leaf.first + base + lane, view, r);
     }
 }
 #else
@@ -247,9 +265,9 @@ void main(uint i : SV_DispatchThreadID)
     {
         RWStructuredBuffer<uint2> deferred = ResourceDescriptorHeap[DEFER_CLUSTERS_UAV];
         d = deferred[i];
-        r = testCluster(d.x, itemIndex(d.y), itemView(d.y));
+        r = testCluster(itemInstance(d), itemIndex(d), itemView(d));
         r.defer = false;
     }
-    emit(state, active, d.x, itemIndex(d.y), itemView(d.y), r);
+    emit(state, active, itemInstance(d), itemIndex(d), itemView(d), r);
 }
 #endif

@@ -476,7 +476,7 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
     const uint64_t bytes = froxelListBytes(grid, capacity);
     const uint32_t fallbackForced = (uint32_t)q.integer("atmosphere.froxels.list_fallback_forced");  // tests: scene lights only this frame
     RenderGraph& g = fc.graph;
-    // atmosphere.froxels.fold_small_passes: the header, the count and the two scan levels are one pass (PassChain.h: each
+    // atmosphere.froxels.fold_small_passes: the header, the count and the two scan levels are one scope (PassChain.h: each
     // dispatch after a barrier; all write the lists buffer as a UAV), the fill is the other.
     const bool foldSmall = !q.has("atmosphere.froxels.fold_small_passes") || q.boolean("atmosphere.froxels.fold_small_passes");
     PassChain chain(g, QueueType::Compute, foldSmall);

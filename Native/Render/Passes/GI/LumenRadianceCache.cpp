@@ -295,8 +295,8 @@ LumenRcFrame lumenRadianceCacheBegin(FramePassContext& fc, const ViewResources& 
     const TextureRef indirection = f.indirection, depth = main.depth;
     const D3D12_GPU_VIRTUAL_ADDRESS cb = main.frameConstants;
     ShaderLibrary& shaders = fc.shaders;
-    // lumen.radiance_cache_fold_passes: the reset, the cells' clear and the mark are one pass (PassChain.h: the same
-    // dispatches in order, a barrier between them; they write the indirection, the slots and the counters as UAVs).
+    // lumen.radiance_cache_fold_passes: the reset, the cells' clear, the mark and the hit marks are one scope
+    // (PassChain.h: the same passes in order, timed together).
     PassChain chain(g, QueueType::Compute, !fc.quality.has("lumen.radiance_cache_fold_passes") || fc.quality.boolean("lumen.radiance_cache_fold_passes"));
     if (reset)
         chain.add("r.gi.rc.reset",
@@ -339,7 +339,6 @@ LumenRcFrame lumenRadianceCacheBegin(FramePassContext& fc, const ViewResources& 
                   c.computeConstants(k, 8);
                   c.cmd->Dispatch(((W + tile - 1) / tile + 7) / 8, ((H + tile - 1) / tile + 7) / 8, 1);
               });
-    chain.flush("r.gi.rc.mark");
     if (f.hitMarks.valid())
     {
         // The positions last frame's ray hits asked for probes at (lrcHitMark), marked like the screen's, then the list
@@ -348,7 +347,7 @@ LumenRcFrame lumenRadianceCacheBegin(FramePassContext& fc, const ViewResources& 
         const BufferRef hitMarks = f.hitMarks;
         const uint32_t bias = s.hitMarkBias;
         for (uint32_t clear = reset ? 1u : 0u; clear < 2; ++clear)
-            g.addPass(clear ? "r.gi.rc.hitmark.clear" : "r.gi.rc.hitmark", QueueType::Compute,
+            chain.add(clear ? "r.gi.rc.hitmark.clear" : "r.gi.rc.hitmark",
                       [&](PassBuilder& b) {
                           if (!clear) b.use(indirection, Use::UavCompute);
                           b.use(hitMarks, Use::UavCompute);
@@ -363,6 +362,7 @@ LumenRcFrame lumenRadianceCacheBegin(FramePassContext& fc, const ViewResources& 
                           c.cmd->Dispatch(clear ? 1u : (kHitMarks + 63) / 64, 1, 1);
                       });
     }
+    chain.flush("r.gi.rc.mark");
     return f;
 }
 
@@ -393,8 +393,8 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
     const TextureRef traced = g.createTexture({ "r.gi.rc traced", tempSize, tempSize, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
     const TextureRef filtered = g.createTexture({ "r.gi.rc filtered", tempSize, tempSize, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
 
-    // lumen.radiance_cache_fold_passes: the four bookkeeping steps are one pass (each reads what the one before wrote in
-    // the same buffers, all UAVs: PassChain.h).
+    // lumen.radiance_cache_fold_passes: the four bookkeeping steps, the copy of the ray dispatch descriptions and the
+    // step that writes their sizes are one scope (PassChain.h).
     PassChain chain(g, QueueType::Compute, !fc.quality.has("lumen.radiance_cache_fold_passes") || fc.quality.boolean("lumen.radiance_cache_fold_passes"));
     auto bookkeeping = [&](const char* name, const char* kernel, uint32_t x, uint32_t y, uint32_t z, bool cells, bool list, bool queue) {
         ID3D12PipelineState* pso = shaders.compute(kernel);
@@ -421,7 +421,6 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
     bookkeeping("r.gi.rc.allocate", "Passes/GI/LumenRadianceCacheUpdate.MODE3", cellsX, cellsYZ, cellsYZ, true, true, false);
     bookkeeping("r.gi.rc.select", "Passes/GI/LumenRadianceCacheUpdate.MODE4", 1, 1, 1, false, false, false);
     bookkeeping("r.gi.rc.traces", "Passes/GI/LumenRadianceCacheUpdate.MODE5", slotGroups, 1, 1, false, false, true);
-    chain.flush("r.gi.rc.bookkeeping");
 
     // ---- the probe rays: the dispatch description's size is the queued trace count (written on the GPU)
     const FrameResources& fr = fc.resources;
@@ -439,12 +438,12 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
         st.descTemplate->Unmap(0, nullptr);
     }
     ID3D12Resource* descTemplate = st.descTemplate.Get();
-    g.addPass("r.gi.rc.args", QueueType::Compute, [&](PassBuilder& b) { b.use(rayArgs, Use::CopyDst); },
+    chain.add("r.gi.rc.args", [&](PassBuilder& b) { b.use(rayArgs, Use::CopyDst); },
               [=](PassContext& c) {
                   for (uint32_t chunk = 0; chunk < chunks; ++chunk)
                       c.cmd->CopyBufferRegion(c.resource(rayArgs), (uint64_t)chunk * kDescStride, descTemplate, variant * kDescStride, kDescStride);
               });
-    g.addPass("r.gi.rc.finish", QueueType::Compute,
+    chain.add("r.gi.rc.finish",
               [&](PassBuilder& b) {
                   b.use(counters, Use::UavCompute);
                   b.use(rayArgs, Use::UavCompute);
@@ -460,6 +459,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   c.computeConstants(k, 16);
                   c.cmd->Dispatch(1, 1, 1);
               });
+    chain.flush("r.gi.rc.bookkeeping");
     const BufferRef worldCache = in.worldCache;
     const SurfaceCacheCardRefs cards = in.cards;
     const float3 sky = in.skyRadiance, sun = in.sunIlluminance;

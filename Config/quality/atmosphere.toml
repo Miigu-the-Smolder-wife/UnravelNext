@@ -131,8 +131,8 @@ depth_slices = 64                    # exponential in view depth between near_m 
 lights_max = 32                      # ordered head of each froxel list (even, <= 96, FROXEL_SORTED_MAX): the strongest lights by
                                      # importance come first; every other light reaching the froxel follows (nothing is dropped
                                      # or merged, RENDERER_REDESIGN_V2 14.1)
-fold_small_passes = true             # the lists' header, count and two scan levels are one pass (the same dispatches in order, a
-                                     # barrier between them); the fill is the other. false: five passes (A/B)
+fold_small_passes = true             # the lists' header, count and two scan levels are timed as one scope (the same passes and
+                                     # barriers, one timestamp); the fill is the other. false: five scopes (A/B)
 candidates_once = true               # the lights x tiles frustum test runs once a frame: the count pass keeps each tile's candidates
                                      # (up to 254) and the fill pass takes them; a tile with more is culled again by the fill pass.
                                      # The same lists. false: both passes cull (A/B)

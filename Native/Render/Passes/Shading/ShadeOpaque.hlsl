@@ -500,6 +500,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     {
         Texture2D<uint> shadow = ResourceDescriptorHeap[P[2].x];
         sunVisibility = shadowSlot(shadow[pixel], 0);
+        // S's glass casters (shadow.vsm.translucent_tint): slot 0 has the luminance of what they let through, the
+        // texture's second half its colour
+        E *= shadowSunTintChroma(shadow, pixel);
     }
     // material.parallax_shadow (MaterialInputs.hlsli mParallax): the pixel's height field hides the sun - the resolve left
     // the visibility in the class word of a height-mapped material's pixels (not an anisotropic material's or an eye's:

@@ -15,16 +15,19 @@
 // P[2].w filter list UAV (raw: count at 0, records of 16 B from 16: pixel y << 16 | x, radius, k | kf << 8, reach)
 // P[3].w the transmittance LUT (0xFFFFFFFF: none): the sun slot also x the cloud layer's sun transmittance (B5).
 // P[3].x blocker search taps, P[3].y penumbra filter taps, P[3].z transmittance layer SRV (raw; 0xFFFFFFFF: none):
-// the result is multiplied by the thin casters' T over the penumbra's reach (v1.26). Frame constants of the view.
+// the result is multiplied by the thin casters' T over the penumbra's reach (v1.26). P[4].x the self-shadow slack SRV
+// (ShadowSelfSlack.hlsl; 0xFFFFFFFF: none), as pass 1 takes it. P[4].y 1: the output has the glass casters' half (pass 1
+// wrote each pixel's transmittance there; the slot takes its luminance: VsmTint.hlsli). Frame constants of the view.
 #include "Frame.hlsli"
 #include "Passes/Shadow/ShadowReceiver.hlsli"
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 #include "Passes/Atmosphere/CloudShadowCommon.hlsli"
 
-// The sun slot of a pixel: visibility x the thin casters' and the cloud layer's transmittance.
-void storeSun(uint2 px, float3 world, float3 normal, float footprint, float reach, float sun)
+// The sun slot of a pixel: visibility x the thin casters' and the cloud layer's transmittance. world: where the sun's
+// lookups start (the surface, or past its instance's bounds: shadowSelfSlack - then without the contact ray).
+void storeSun(uint2 px, float3 world, float3 normal, float footprint, float reach, float sun, bool contact)
 {
-    if (sun > 0)
+    if (sun > 0 && contact)
     {
         Texture2D<float> depthTex = ResourceDescriptorHeap[P[0].x];
         sun *= shadowSunContact(depthTex, px, world, normal, P[1].x);
@@ -42,6 +45,7 @@ void storeSun(uint2 px, float3 world, float3 normal, float footprint, float reac
     }
     if (P[3].w != 0xFFFFFFFFu && sun > 0) sun *= cloudSunTransmittanceFromLut(P[3].w, world);  // B5 cloud shadow
     RWTexture2D<uint> output = ResourceDescriptorHeap[P[0].z];
+    if (P[4].y != 0 && sun > 0) sun *= vsmTintLuminance(vsmTintUnpack(output[px + uint2(0, g_viewHeight)]));  // the glass casters
     output[px] = (output[px] & 0xFFFFFF00u) | (uint)round(saturate(sun) * 255.0);  // local slots from pass 1
 }
 
@@ -72,7 +76,8 @@ void main(uint i : SV_DispatchThreadID)
         ConstantBuffer<VsmConstants> vc = ResourceDescriptorHeap[P[0].w];
         const float depth = depthTex.Load(int3(px, 0));
         float3 normal;
-        const float3 world = shadowReceiver(depthTex, P[0].y, px, depth, normal);
+        const float selfSlack = shadowSelfSlack(P[4].x, px);
+        const float3 world = shadowReceiver(depthTex, P[0].y, px, depth, normal) + g_sunDirection * selfSlack;
         const float footprint = 2 * linearDepth(depth) * g_tanHalfFovY / g_viewHeight;
 #if STAGE == 0
         const float tanSun = tan(g_sunAngularRadius);
@@ -86,7 +91,7 @@ void main(uint i : SV_DispatchThreadID)
         RWTexture2D<uint> output = ResourceDescriptorHeap[P[0].z];
         output[px] = path;
 #else
-        if (sun >= 0) storeSun(px, world, normal, footprint, reach, sun);
+        if (sun >= 0) storeSun(px, world, normal, footprint, reach, sun, selfSlack == 0);
         else
         {
             filter = true;
@@ -96,7 +101,7 @@ void main(uint i : SV_DispatchThreadID)
 #else
         const uint k = record.z & 0xFFu, kf = record.z >> 8;
         const VsmReceiver rc = vsmReceiverAt(vc, vsmMakeReceiver(vc, world, normal, k), k);
-        storeSun(px, world, normal, footprint, asfloat(record.w), vsmSunPenumbraFilter(r, rc, asfloat(record.y), kf, P[3].y));
+        storeSun(px, world, normal, footprint, asfloat(record.w), vsmSunPenumbraFilter(r, rc, asfloat(record.y), kf, P[3].y), selfSlack == 0);
 #endif
     }
 #if STAGE == 0

@@ -102,7 +102,7 @@ struct VsmConstants
     uint useStats;           // shadow.vsm.use_stats (measurement only): 1 + UAV index of the per-slot read bits, 0 = off
     uint atlasSrv;           // SRV of the page atlas (Texture2D<float>, FrameResources::vsmAtlas): every lookup reads it here
     uint fragmentCheck;      // shadow.vsm.fragment_check (verification only): ShadowFragments evaluates every record
-    uint usePad;
+    uint tint;               // shadow.vsm.translucent_tint: 1 + SRV index of the glass casters' tint atlas (VsmTint.hlsli), 0 = none
     VsmLevel level[VSM_LEVELS];  // CPU copy of the windows (raster views); kernels use vsmTexel / vsmOrigin
 };
 

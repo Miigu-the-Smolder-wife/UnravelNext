@@ -24,7 +24,7 @@ void cullInstance(RWByteAddressBuffer state, uint instance, uint view, bool vali
         roots = rootBuffer[inst.mesh];
         const CullView v = loadView(view);
         const bool inBatch = v.instanceEnd == 0 || (instance >= v.instanceFirst && instance < v.instanceEnd);  // (RasterView's instance batch)
-        if (((inst.flags & INSTANCE_MASK) != 0 || INSTANCE_MASK == 0) && (inst.flags & INSTANCE_HIDDEN) == 0 && inBatch && instanceInSet(v, inst, instance))
+        if (instanceInRun(inst, INSTANCE_MASK) && inBatch && instanceInSet(v, inst, instance))
         {
             float4 bounds = worldSphere(inst, inst.objectToWorld, mesh.boundsSphere);
             float4 prevBounds = worldSphere(inst, inst.prevObjectToWorld, mesh.boundsSphere);
@@ -45,8 +45,22 @@ void cullInstance(RWByteAddressBuffer state, uint instance, uint view, bool vali
             // A12 view models: the main view draws them with its projection remapped (ViewModel.hlsli viewModelClip), so the
             // view's planes and HiZ do not bound them; a few clusters, drawn untested.
             if ((inst.flags & INSTANCE_VIEW_MODEL) != 0) bounded = false;
+            const bool twoPhase = (v.flags & CULL_VIEW_TILE_TWO_PHASE) != 0;
             visible = roots.rootCount > 0 && (!bounded || (frustumVisible(v, bounds) && !instanceBelowView(v, bounds) && tileVisible(v, view, bounds) &&
-                                                           !tilesOcclude(v, TILE_MASK_SRV, bounds)));
+                                                           (twoPhase || !tilesOcclude(v, TILE_MASK_SRV, bounds, false))));
+            if (visible && bounded && twoPhase)
+            {
+                // tile occluders in two phases (VisibilityCommon.hlsli tilesOcclude): as the HiZ's two phases below
+#if PHASE == 1
+                if (tilesOcclude(v, TILE_MASK_SRV, bounds, true))
+                {
+                    visible = false;
+                    defer = true;
+                }
+#else
+                visible = !tilesOcclude(v, TILE_MASK_SRV, bounds, false);
+#endif
+            }
             if (visible && bounded && (v.flags & CULL_VIEW_OCCLUSION) != 0)
             {
 #if PHASE == 1
@@ -67,14 +81,14 @@ void cullInstance(RWByteAddressBuffer state, uint instance, uint view, bool vali
     {
         RWStructuredBuffer<uint2> items = ResourceDescriptorHeap[NODE_ITEMS_UAV];
         for (uint k = 0; k < roots.rootCount; ++k)
-            if (base + k < CAP_NODES) items[base + k] = uint2(instance, packItem(roots.nodeOffset + k, view));
+            if (base + k < CAP_NODES) items[base + k] = packItem(instance, roots.nodeOffset + k, view);
     }
     nodePublish(state, first, total);
     const uint d = waveAppend(state, VS_DEFER_INSTANCES, defer ? 1 : 0, CAP_DEFERRED, OVERFLOW_DEFER_INSTANCES);
     if (defer && d < CAP_DEFERRED)
     {
-        RWStructuredBuffer<uint> deferred = ResourceDescriptorHeap[DEFER_INSTANCES_UAV];
-        deferred[d] = packItem(instance, view);
+        RWStructuredBuffer<uint2> deferred = ResourceDescriptorHeap[DEFER_INSTANCES_UAV];
+        deferred[d] = uint2(instance, view);
     }
     const uint s = WaveActiveCountBits(visible);
     if (WaveIsFirstLane() && s > 0) state.InterlockedAdd(4 * VS_STAT_INSTANCES, s);
@@ -106,20 +120,21 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint lane : SV
     const bool valid = id.y < VIEW_COUNT && id.x < gpuInstanceCount(v0) && !cullViewTilesEmpty(v0, id.y);
     cullInstance(state, valid ? v0.gpuFirst + id.x : 0, id.y, valid);
 #elif PHASE == 1
-    // One group per chunk item: the item and the chunk are uniform over the group.
+    // One group per chunk item: the item and the chunk are uniform over the group. An item whose members are all drawn
+    // as proxies (CHUNK_ITEM_PROXIES) has none to test.
     const uint item = gid.x + gid.y * 65535u;
     const bool any = item < min(state.Load(4 * VS_CHUNK_ITEMS), CAP_DEFERRED);
     uint view = 0, first = 0, count = 0, membersSrv = 0;
     if (any)
     {
-        RWStructuredBuffer<uint> work = ResourceDescriptorHeap[CHUNK_WORK_UAV];
-        const uint packed = work[item];
-        view = itemView(packed);
+        RWStructuredBuffer<uint2> work = ResourceDescriptorHeap[CHUNK_WORK_UAV];
+        const uint2 chunkItem = work[item];
+        view = chunkItem.y & ~CHUNK_ITEM_PROXIES;
         const CullScene cs = loadCullScene(loadView(view).cullSceneSrv);
         StructuredBuffer<CullChunk> chunks = ResourceDescriptorHeap[cs.chunkSrv];
-        const CullChunk ch = chunks[itemIndex(packed)];
+        const CullChunk ch = chunks[chunkItem.x];
         first = ch.first;
-        count = min(ch.count, CHUNK_INSTANCES);
+        count = (chunkItem.y & CHUNK_ITEM_PROXIES) != 0 ? 0u : min(ch.count, CHUNK_INSTANCES);
         membersSrv = cs.chunkInstancesSrv;
     }
     [unroll] for (uint base = 0; base < CHUNK_INSTANCES; base += 64)
@@ -139,10 +154,10 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint lane : SV
     uint instance = 0, view = 0;
     if (valid)
     {
-        RWStructuredBuffer<uint> deferred = ResourceDescriptorHeap[DEFER_INSTANCES_UAV];
-        const uint packed = deferred[id.x];
-        instance = itemIndex(packed);
-        view = itemView(packed);
+        RWStructuredBuffer<uint2> deferred = ResourceDescriptorHeap[DEFER_INSTANCES_UAV];
+        const uint2 item = deferred[id.x];
+        instance = item.x;
+        view = item.y;
     }
     cullInstance(state, instance, view, valid);
 #endif

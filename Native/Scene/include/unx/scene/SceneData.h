@@ -290,6 +290,16 @@ enum InstanceFlags : uint32_t
     InstanceLightingChannelsShift = 4,
     InstanceLightingChannelsMask = 7u << 4,
     InstanceNoDecals = 1u << 7,  // the instance takes no projected decals (Unreal's bReceivesDecals off)
+    // Shadow casting per object (Unreal's primitive flags).
+    // ShadowOnly: with InstanceCastShadow, the instance is drawn into shadow maps and blocks the lights' shadow rays but
+    // is in no view, no reflection or GI ray and no card of the surface cache (a hidden primitive with bCastHiddenShadow;
+    // Unity's ShadowCastingMode.ShadowsOnly). Without InstanceCastShadow it is nowhere.
+    InstanceShadowOnly = 1u << 9,
+    // NoSelfShadow: the sun's shadow on the instance's own pixels leaves out the casters within the instance's bounds -
+    // itself - along the sun's direction; it still shades everything else and takes the shadows of casters beyond its
+    // bounds. The opaque view's sun slot only (S: ShadowSelfSlack.hlsl): not the coverage layer's fragments, the local
+    // lights' pages or their shadow rays.
+    InstanceNoSelfShadow = 1u << 8,
 };
 // The instance's lighting channels (3 bits) from its flags, and flags with them set.
 constexpr uint32_t instanceLightingChannels(uint32_t flags) { return ((flags >> InstanceLightingChannelsShift) & 7u) ^ 1u; }

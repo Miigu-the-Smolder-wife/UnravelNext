@@ -48,8 +48,14 @@ constexpr uint32_t kRtMaskGi = 1u, kRtMaskReflection = 2u, kRtMaskEmitter = 4u, 
 // Instances that cast shadows (scene::InstanceCastShadow) carry this bit; shadow rays of lights (shading.mega_lights) use it
 // alone, so a mesh that casts no shadow in S's shadow maps blocks no light here either. No other ray's mask has it.
 constexpr uint32_t kRtMaskShadow = 16u;
-// The mask of a scene instance from its gpu::Instance flags (hidden: none).
-constexpr uint32_t rtInstanceMask(uint32_t flags) { return (flags & 0x80000000u) ? 0u : ((flags & 1u) ? kRtMaskAll : (kRtMaskAll & ~kRtMaskShadow)); }
+// The mask of a scene instance from its gpu::Instance flags (hidden: none; scene::InstanceShadowOnly, bit 9: the shadow
+// rays alone when it casts, no ray otherwise).
+constexpr uint32_t rtInstanceMask(uint32_t flags)
+{
+    if (flags & 0x80000000u) return 0u;
+    if (flags & 0x200u) return (flags & 1u) ? kRtMaskShadow : 0u;
+    return (flags & 1u) ? kRtMaskAll : (kRtMaskAll & ~kRtMaskShadow);
+}
 // An instance whose every submesh is Glass or Water (raytracing.see_through_translucent): GI rays and shadow rays pass it
 // (the reference leaves translucent meshes out of its Lumen scene; the view's shadow maps give such casters a
 // transmittance, not a depth). Reflection and refraction rays still meet it.

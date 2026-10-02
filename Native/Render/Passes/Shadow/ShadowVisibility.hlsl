@@ -28,7 +28,10 @@
 // P[5].x overflow need UAV (raw, 4 B per tile; with P[1].x): every tile's need starts at 0 (ShadowOverflow MODE0 writes
 // the listed tiles', ShadowOverflowScan allocates in tile order); P[5].y tiles per row. P[5].z the sun's screen-space
 // contact ray (shadowSunContact's packed word; 0: none): pixels the shadow map leaves lit ask the depth buffer for the
-// last centimetres.
+// last centimetres. P[5].w the self-shadow slack SRV (R16_FLOAT, ShadowSelfSlack.hlsl; 0xFFFFFFFF: none): the sun's
+// lookup of a pixel of a scene::InstanceNoSelfShadow instance starts past the instance's bounds, without a contact ray.
+// P[6].x 1: the output is twice the view's height and its lower half takes what the glass casters let through at each
+// pixel (shadow.vsm.translucent_tint, VsmTint.hlsli vsmTintPack; slot 0 x its luminance); 0: no glass caster this frame.
 // Frame constants of the view. Mixed pixels get their local slots here and their sun slot in pass 2.
 #include "Frame.hlsli"
 #include "Scene.hlsli"
@@ -37,9 +40,10 @@
 #include "Passes/Atmosphere/CloudShadowCommon.hlsli"
 
 // One pixel's classification: sky, settled (packed visibility), or mixed (goes to pass 2).
-void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out uint overflow, out uint facing)
+void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out uint overflow, out uint facing, out uint tint)
 {
     packed = 0xFFFFFFFFu;
+    tint = 0xFFFFFFFFu;  // (white)
     path = 0xFFu;  // sky
     mixed = false;
     overflow = 0;
@@ -64,7 +68,9 @@ void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out
     const float3 world = shadowReceiver(depthTex, P[0].y, px, depth, normal);
     facing = dot(normal, g_sunDirection) > 0 ? 1u : 2u;
     const float footprint = 2 * linearDepth(depth) * g_tanHalfFovY / g_viewHeight;
-    const VsmReceiver rc = vsmMakeReceiver(vc, world, normal, vsmLevelForFootprint(vc, footprint));
+    const float selfSlack = shadowSelfSlack(P[5].w, px);
+    const float3 worldSun = world + g_sunDirection * selfSlack;  // (the sun's lookups; the local slots stay at the surface)
+    const VsmReceiver rc = vsmMakeReceiver(vc, worldSun, normal, vsmLevelForFootprint(vc, footprint));
     uint k;
     float reach;
     const uint cls = vsmSunClassify(r, rc, footprint, tan(g_sunAngularRadius), k, reach, path);
@@ -127,12 +133,20 @@ void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out
         ts.lights = P[3].y;
         ts.pad0 = P[3].z;
         ts.layers = P[4].z;
-        sunT = shadowSunTransmittanceAt(ts, world, footprint, max(reach, footprint));
+        sunT = shadowSunTransmittanceAt(ts, worldSun, footprint, max(reach, footprint));
     }
     // B5 cloud shadow: the sun through the cloud layer at the receiver (P[4].w = transmittance LUT, UNX_NONE: none).
     if (cls != VSM_REGION_UMBRA && P[4].w != 0xFFFFFFFFu) sunT *= cloudSunTransmittanceFromLut(P[4].w, world);
+    // The glass casters (VsmTint.hlsli): their transmittance to the output's lower half, its luminance into the slot
+    // (a mixed pixel's slot is pass 2's, which reads the half written here).
+    if (cls != VSM_REGION_UMBRA && P[6].x != 0)
+    {
+        const float3 through = vsmSunTint(r, worldSun, footprint);
+        tint = vsmTintPack(through);
+        sunT *= vsmTintLuminance(through);
+    }
     // The contact ray (settled lit pixels; the mixed ones take it in pass 2 with their filtered visibility).
-    if (cls != VSM_REGION_UMBRA && !mixed && sunT > 0) sunT *= shadowSunContact(depthTex, px, world, normal, P[5].z);
+    if (cls != VSM_REGION_UMBRA && !mixed && sunT > 0 && selfSlack == 0) sunT *= shadowSunContact(depthTex, px, world, normal, P[5].z);
     packed = (cls == VSM_REGION_UMBRA ? 0u : (uint)round(saturate(sunT) * 255.0)) | local;
 }
 
@@ -144,7 +158,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : SV_G
     RWTexture2D<uint> output = ResourceDescriptorHeap[P[0].z];
     RWByteAddressBuffer list = ResourceDescriptorHeap[P[2].x];
     RWByteAddressBuffer stats = ResourceDescriptorHeap[P[2].z];
-    uint packed[1], path[1], overflow[1], facing[1];
+    uint packed[1], path[1], overflow[1], facing[1], tint[1];
     bool mixed[1];
     if (P[4].y != 0xFFFFFFFFu)
     {
@@ -162,7 +176,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : SV_G
         }
     }
     if (gi == 0) gs_overflow = 0;
-    classifyPixel(id.xy, packed[0], path[0], mixed[0], overflow[0], facing[0]);
+    classifyPixel(id.xy, packed[0], path[0], mixed[0], overflow[0], facing[0], tint[0]);
     if (P[1].x != 0xFFFFFFFFu)
     {
         // The tile's overflow: head 0 now, or the tile to the overflow list (its head is ShadowOverflow.hlsl's).
@@ -205,6 +219,9 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : SV_G
             output[px] = packed[j2];  // mixed: the local slots now, the sun slot in pass 2
 #endif
         }
+#if !PATHS
+        if (P[6].x != 0 && px.x < g_viewWidth && px.y < g_viewHeight) output[px + uint2(0, g_viewHeight)] = tint[j2];
+#endif
         [unroll] for (uint i = 0; i < 3; ++i)
         {
             const uint c = WaveActiveCountBits(path[j2] == i);

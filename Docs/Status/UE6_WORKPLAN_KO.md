@@ -284,6 +284,12 @@ high 티어: 같은 커밋에서의 비교가 아직 없다(Batch2 기본 vs Bat
 | `shadow.vsm.min_caster_texels` | 1.0 | 0: 모든 캐스터를 모든 레벨에 | (3) |
 | `shadow.vsm.coarse_pages`, `shadow.vsm.page_dilation` | 2, 0.05 | 0: 굵은 페이지·팽창 없음 | (8) |
 | `atmosphere.froxels.candidates_once`, `atmosphere.froxels.sort_head_for_slots_only` | true | 두 패스가 각자 컬, 머리 항상 정렬 | (4) |
+| `shadow.vsm.static_occlusion_two_phase` | true | 새로 그리는 페이지의 정적 캐스터를 가림 검사 없이 래스터 | 8.3 (c) |
+| `shadow.vsm.translucent_tint` | true | 유리 캐스터가 불투명 그림자 | 8.3 (f) |
+| `shadow.vsm.aggregate_small_casters` | true | 레벨 텍셀보다 작은 캐스터는 그 레벨에 그림자 없음 | 8.3 (f) |
+| `shadow.vsm.local_static_separate` | true | 변한 캐스터가 닿은 국소광의 페이지 전체를 다시 그림 | 8.3 (f) |
+| `shadow.vsm.local_request_views` | 4032 | 252: 광원 6개마다 래스터 요청 하나 | 8.3 (b) |
+| `surface_cache.mesh_cards_capture_clusters` | **false** | (켜면) 카드 캡처가 V의 래스터 서비스 한 번 | 8.3 (e) |
 
 **(1) 계층 컬을 한 커널의 작업 큐로** — `visibility.traversal_work_queue`(기본 true), `visibility.traversal_worker_groups`(1024).
 V의 컬 한 번(메인 뷰, 그리고 `rasterizeDepth` 요청마다: VSM 태양 레벨·국소광·분류 페이지가 모두 이 경로다 — VSM에 따로 된 계층 컬은 없다)이 노드 순회를 레벨마다 `prepare.nodes` + `nodes` 두 패스로 돌던 것을(깊이 5에서 단계당 10패스), 노드 항목을 작업 큐로 쓰는 디스패치 하나(`nodes.p1` / `nodes.p2`, `CullNodes.hlsl` QUEUE=1)로 바꿨다. 원본의 persistent cull(`NaniteHierarchyTraversal.ush`)과 같은 구조다: 고정된 수의 그룹을 띄우고, 웨이브 하나가 작업자 하나로 큐가 빌 때까지 돈다.
@@ -303,10 +309,10 @@ V의 컬 한 번(메인 뷰, 그리고 `rasterizeDepth` 요청마다: VSM 태양
 - 그림: 커널과 판정은 그대로이고 인자 값도 `CullPrepare`가 쓰던 값과 같다(스위치를 끄면 `CullPrepare` 패스가 같은 값을 덮어쓴다). 달라지는 것은 리스트 안의 항목 순서뿐이다.
 - 패스 수(코드에서 센 값, 깊이 5): 래스터 요청 하나 21 → 13((1)만) → 7(타일 마스크, seed, instances.indirect, nodes, clusters, prepare.draw, raster). 메인 뷰의 컬 37 → 19 → 11. 4K 로비 프레임 전체로는 메인 뷰 −26, 태양 요청당 −14.
 - **잴 것**: 빈 요청 하나의 시간(0.2 ms였다), 패스당 타임스탬프가 합쳐지므로 `seed.p1` 안의 몫은 따로 볼 수 없다.
-- **안 한 것**: 국소광 요청(MegaLights를 끈 설정)은 요청당 252뷰 제한(작업 항목의 뷰 필드 8비트) 때문에 광원 6개마다 요청 하나다. 뷰 필드를 16비트로 넓히면(인스턴스 쪽 워드의 남는 8비트) 한 요청으로 합칠 수 있으나 vis 버퍼·청크 항목·지연 항목의 패킹이 모두 바뀌어 실행 검증 없이 넣지 않았다.
+- 국소광 요청(MegaLights를 끈 설정)의 요청당 252뷰 제한(작업 항목의 뷰 필드 8비트)은 8.3 (b)에서 없앴다.
 
 **(3) 그림자 뷰가 텍셀보다 작은 인스턴스를 뺀다** — `shadow.vsm.min_caster_texels`(기본 1.0, 0 = 끔). **그림이 달라지는 항목이다.**
-`RasterView::minInstanceTexels` → 컬 뷰 레코드의 `minInstancePx`(CullView 372 B). V의 인스턴스 컬(`CullInstances`, `instanceBelowView`)이 경계 구의 반지름이 그 뷰의 텍셀로 이 값보다 작게 투영되는 인스턴스를 그 뷰에서 뺀다(직교 뷰: 반지름 × 텍셀/m, 원근 면: 구의 가장 가까운 점까지의 거리로 나눔 — 가장 크게 보일 때 기준). S는 태양 레벨 뷰와 국소광 면의 밉 뷰에 이 값을 준다. 분류 페이지(`cls`)는 모든 캐스터를 유지한다(거기서 "밝음"이면 모든 밉에서 밝아야 하므로).
+`RasterView::minInstanceTexels` → 컬 뷰 레코드의 `minInstancePx`(CullView의 한 필드; 레코드는 지금 400 B). V의 인스턴스 컬(`CullInstances`, `instanceBelowView`)이 경계 구의 반지름이 그 뷰의 텍셀로 이 값보다 작게 투영되는 인스턴스를 그 뷰에서 뺀다(직교 뷰: 반지름 × 텍셀/m, 원근 면: 구의 가장 가까운 점까지의 거리로 나눔 — 가장 크게 보일 때 기준). S는 태양 레벨 뷰와 국소광 면의 밉 뷰에 이 값을 준다. 분류 페이지(`cls`)는 모든 캐스터를 유지한다(거기서 "밝음"이면 모든 밉에서 밝아야 하므로).
 - 요청을 나누는 CPU 상한(`levelBound`, `levelBatches`, `localBounds`)도 같은 캐스터를 뺀다. CPU의 구는 V의 구보다 작지 않으므로(가장 큰 축 배율 × 1.001 + 1 mm) 상한에서 뺀 캐스터는 V도 뺀다 — 상한은 계속 상한이다.
 - 캐시와의 관계: 직교 레벨에서 빠지는지는 인스턴스 반지름(바람 항 포함 — 씬 바람이 바뀌면 모든 페이지를 다시 그린다)과 레벨 텍셀만의 함수라 프레임 사이에 뒤집히지 않는다. 스킨 인스턴스는 경계가 프레임마다 변하지만 그 밑의 페이지는 어차피 매 프레임 stale이다.
 - 보이는 결과(설정 주석에도 적었다): 레벨의 텍셀보다 작은 캐스터는 그 레벨부터 그림자를 드리우지 않는다 — 반지름 0.3 m 풀 포기는 0.5 m 레벨부터(1080줄에서 약 500 m 밖의 수신면), 4 m 나무는 8 m 레벨부터. 그런 캐스터 여럿이 합쳐 만들던 어둠(먼 풀밭·먼 숲 바닥)도 같이 없어진다. 수신면보다 굵은 레벨을 읽는 차단체 탐색·넓은 반그림자도 같은 캐스터를 못 본다.
@@ -323,6 +329,7 @@ V의 컬 한 번(메인 뷰, 그리고 `rasterizeDepth` 요청마다: VSM 태양
 
 **(6) 그 밖의 작은 패스 접기** — `shadow.vsm.fold_small_passes`, `atmosphere.froxels.fold_small_passes`, `visibility.fold_small_passes`, `lumen.radiance_cache_fold_passes`, `surface_cache.mesh_cards_fold_passes`(모두 기본 true).
 `PassChain`(`Native/Render/include/unx/render/PassChain.h`): 이어지는 작은 디스패치들을 그래프 패스 하나로 만든다. 선언한 사용을 합치고(한 패스가 같이 선언할 수 있는 조합만: 쓰는 쪽은 전부 UAV), 두 번째부터는 전역 UAV 장벽 뒤에서 같은 순서로 실행한다 — 뒤 디스패치가 앞 디스패치의 결과를 보는 것은 별도 패스일 때와 같다. 스위치를 끄면 각자 제 이름의 패스다.
+※ 8.3 (a)에서 구현이 바뀌었다: 단계는 각자 그래프 패스로 남고 프로파일러 범위(타임스탬프)만 합친다. 아래의 "패스 수"는 범위 수로 읽는다.
 - VSM: `s.vsm.begin` + `cache.reset` → 1, `propagate` + `cache.keep` + `cache.free` + `scan.count` + `scan.prefix` + `scan.assign` → `s.vsm.scan` 1, `s.shadow.listclear` + `s.shadow.visibility` → 1, `overflow.scan.blocks` + `scan.top` → 1.
 - **CPU가 아는 빈 패스**: 국소 그림자 슬롯이 없는 뷰(MegaLights 기본 설정에서는 항상)는 가시성 패스가 프록셀 리스트를 읽지 않으므로 넘침 타일이 생기지 않는다. 그 뷰에서는 `s.shadow.overflow.count / scan.blocks / scan.top / overflow` 네 패스를 기록하지 않는다(머리 텍스처는 가시성 패스가 0으로 채우고, fallback 리스트는 clear가 비운다 — 소비자가 읽는 값은 같다).
 - 프록셀 리스트: `begin` + `count` + `scan.blocks` + `scan.top` → `s.froxel.count` 1(fill은 따로: 스캔 결과를 SRV로 읽는다).
@@ -359,7 +366,7 @@ V의 컬 한 번(메인 뷰, 그리고 `rasterizeDepth` 요청마다: VSM 태양
 **(9) 그림자 뷰의 HZB 가림** — `shadow.vsm.static_hzb_cull`(기본 true; `static_separate`가 켜져 있을 때만).
 - HZB: 정적 사본을 그린 프레임에 `s.vsm.statichzb`(`VsmStaticHzb.hlsl`)가 페이지마다 8텍셀 블록의 "가장 먼 저장 깊이"(빈 텍셀이 있으면 0)와 16·32·64·128텍셀 블록의 값을 만든다(물리 페이지당 float 341개, 1.4 KB). 유지되는 페이지는 사본을 그릴 때 만든 것을 그대로 쓴다.
 - 검사(`VisibilityCommon.hlsli` `tilesOcclude`; `DepthRasterRequest::tileOccluders`): **움직이는 캐스터의 뷰**에서 V의 인스턴스·노드·클러스터 컬이, 경계 구가 걸치는(2 × 2 타일 이하) 그릴 타일마다 구의 가장 가까운 깊이가 그 타일 정적 사본의 가장 먼 깊이보다 멀면 그리지 않는다. 구가 근평면에 닿거나 타일 2 × 2를 넘으면 검사하지 않는다(보임).
-- 왜 정확한가: 움직이는 캐스터는 지워진 표본 페이지에 그려진 뒤 정적 사본과 병합된다. 발자국 전체에서 정적 깊이보다 먼 캐스터의 프래그먼트는 병합 뒤 하나도 남지 않으므로 빼도 페이지가 같다. 가림체는 정적 사본뿐이다 — 언리얼은 동적 인스턴스를 이전 프레임의 병합 HZB로 가리는데(가림체가 움직이면 한 프레임 틀릴 수 있다), 여기서는 그 프레임에 유효한 정적 깊이만 쓴다. 대신 **정적 캐스터끼리의 가림은 거르지 않는다**(새로 그리는 정적 페이지에는 아직 유효한 깊이가 없다 — 메인 뷰 같은 2단계 가림을 그림자 뷰에 넣는 것이 남은 일이다).
+- 왜 정확한가: 움직이는 캐스터는 지워진 표본 페이지에 그려진 뒤 정적 사본과 병합된다. 발자국 전체에서 정적 깊이보다 먼 캐스터의 프래그먼트는 병합 뒤 하나도 남지 않으므로 빼도 페이지가 같다. 가림체는 정적 사본뿐이다 — 언리얼은 동적 인스턴스를 이전 프레임의 병합 HZB로 가리는데(가림체가 움직이면 한 프레임 틀릴 수 있다), 여기서는 그 프레임에 유효한 정적 깊이만 쓴다. 정적 캐스터끼리의 가림은 8.3 (c)의 2단계 가림이 맡는다(새로 그리는 정적 페이지에는 아직 유효한 깊이가 없어 이 검사로는 거를 수 없다).
 - 스위치를 유지 페이지 위에서 켜면(사본에 HZB가 없다) 그 프레임은 모든 페이지를 다시 그린다.
 - **잴 것**: 움직이는 캐스터가 지붕·다리 아래에 많은 씬에서 `s.vsm.raster*`의 보이는 클러스터 수(게이트의 `V run` 줄)와 시간, `s.vsm.statichzb` 패스 시간.
 
@@ -369,6 +376,64 @@ V의 컬 한 번(메인 뷰, 그리고 `rasterizeDepth` 요청마다: VSM 태양
 - 얻는 것: 지붕·다리·수관 아래에서 움직이는 물체가 그 위 레벨의 페이지를 다시 그리게 하지 않는다. 언리얼의 HZB-filtered invalidation과 같은 규칙이다.
 - 게이트 요약에 `page cache` 줄(유지·그림·HZB가 남긴 (캐스터, 페이지) 쌍 수)을 더했다.
 - **잴 것**: city_night·city_block에서 `dirty` 페이지 수와 `s.vsm` 시간(스위치 A/B).
+### 8.3 두 번째 묶음 (2026-10-03, 브랜치 `w/opt`)
+
+**모두 코드 작성·빌드 통과, 실행 안 함.** GPU에서는 테스트·게이트·캡처를 하나도 돌리지 않았다. 스위치는 8.1의 표에 더했다. 측정은 (g)의 배치 한 번으로 한다.
+
+**(a) 작은 패스 접기의 구현과 값** — `RenderGraph::joinPasses`, `PassChain.h`.
+- 값부터: 설계서의 실측(`ARCHITECTURE_KO.md` 1.2 항목 7)으로 앞 디스패치에 의존하는 패스 하나의 고정비는 0.85 µs(디스패치 + 배리어, 배리어 종류와 무관)이고 패스 타임스탬프가 0.11 µs를 더한다. 접어서 없어지는 것은 타임스탬프 쪽뿐이다. "작은 패스 211개 1.77 ms"에서 패스 경계의 몫은 0.2 ms 안쪽이고 나머지는 그 커널들이 하는 일이다. 8.1 (6)이 적은 "패스 수" 감소는 이 크기의 이득이다 — ms 단위 이득은 디스패치 자체를 없앤 (1)·(2)에서 온다.
+- 구현을 바꿨다. 전: 단계들의 사용 선언을 한 그래프 패스로 합치고 단계 사이에 전역 UAV 배리어를 넣었다(쓰는 리소스가 전부 UAV일 때만 가능). 지금: 단계는 각자 그래프 패스로 남고(제 사용 선언, 배리어는 계획이 필요한 곳에만 넣는다) 기록할 때 프로파일러 범위와 마커만 하나로 묶는다. 그래서 앞 단계가 UAV로 쓴 것을 SRV·간접 인자·복사 원본으로 읽는 단계도 묶이고, 서로 다른 리소스를 쓰는 단계 사이에는 배리어가 없다. 스위치를 끈 경로와 GPU 명령이 타임스탬프 말고는 같다.
+- 묶인 단계가 컬링되거나 다른 큐·명령 목록으로 가면 그 자리에서 범위가 나뉜다. 하니스 JSON의 `graph.pass_scopes`가 범위 수다(`live_passes`는 그래프 패스 수 그대로).
+- 새로 묶은 것: radiance cache의 hit mark 두 패스(→ `r.gi.rc.mark`), 광선 디스패치 기술의 복사와 크기 기록(`args`, `finish` → `r.gi.rc.bookkeeping`); 카드의 `r.card.frame`(→ `r.card.select`), 피드백 표의 복사와 지우기(→ `r.card.feedback.clear`); coverage 층의 한 그룹짜리 단계들 — `prepare` + `clear`, bins 네 패스, `cover.args` + `cover`, `args` + `count`, `scan` + `offsets`, `scatter` + `special`, `blocks` + `heavy`.
+- 범위 수(코드에서 센 값): radiance cache 8.1 대비 −3 ~ −4, 카드 −2, coverage 층 −5(버킷 4개가 도는 프레임은 −11).
+- 묶지 않은 것: GI 수집(`r.gi.lg.*`)·추적·필터, 카드 직접광·radiosity, coverage 래스터 — 화면·광선 크기의 일을 하는 패스라 시간을 따로 봐야 한다.
+
+**(b) 뷰 필드 16비트** — V에 스위치 없음(뷰 256개 이하에서는 패킹이 전과 비트 단위로 같다), `shadow.vsm.local_request_views`(4032; 252 = 옛 묶음).
+- 작업 항목과 visible 항목(uint2: 인스턴스, 노드/클러스터)의 뷰 번호를 두 워드의 윗바이트에 나눠 담는다: 아래 8비트는 전처럼 인덱스 워드 위에, 위 8비트는 인스턴스 워드의 남는 윗바이트에(`packItem` / `itemInstance` / `itemIndex` / `itemView`). 인스턴스·노드·클러스터가 2^24 미만이라는 기존 한계는 그대로다. 뷰가 256개 이하인 실행(메인 뷰의 visible 리스트 — 다른 트랙이 읽는다 — 포함)은 인스턴스 워드에 뷰 비트가 없어 읽는 쪽이 그대로다. 그 이상인 실행의 visible 리스트는 V의 래스터 커널만 읽는다.
+- 한 워드짜리였던 청크 항목과 지연 인스턴스는 (청크 또는 인스턴스, 뷰) 쌍이 됐다(`v.cull.chunkWork`, `v.cull.deferredInstances`가 2배: `max_deferred_items` 100만에서 실행당 +12 MB, 그래프 임시 버퍼).
+- 요청당 뷰 상한: 255 → 4096(`kDepthRasterMaxViews`, 뷰 업로드 청크 하나). S는 국소광 페이지 뷰(광원당 42)를 요청 하나에 96광원까지 담는다 — 리스트 용량(`max_visible_clusters`)이 허락하는 한. 카드의 클러스터 캡처도 묶음당 4096페이지다.
+- **잴 것**: MegaLights를 끈 city_night·te_lounge에서 국소 래스터 요청 수(로그의 "N sun and M local raster requests")와 `s.vsm` 시간.
+
+**(c) 그림자 뷰: 정적 캐스터의 2단계 가림** — `shadow.vsm.static_occlusion_two_phase`(기본 true; `static_hzb_cull`이 켜져 있을 때만).
+- 8.2 (9)는 움직이는 캐스터만 걸렀다: 새로 그리는 페이지에는 가림체가 될 정적 깊이가 아직 없어서다. 언리얼은 그림자 뷰도 메인 뷰처럼 2단계로 컬한다(`CullingConfig.bTwoPassOcclusion`): 1단계는 이전 프레임 HZB로, 2단계는 방금 그린 것의 HZB로. 여기서는 새 페이지에 이전 프레임 HZB가 없으므로 1단계의 **추측**을 다른 데서 가져온다.
+- 추측(`VsmCullMask.hlsl`): 새로 그리는 페이지마다, 같은 땅을 덮는 더 굵은 레벨(4단계 위까지)의 **유지된** 페이지 — 정적 사본과 그 HZB가 이전 프레임 것으로 남아 있는 페이지 — 와 그 안에서 이 페이지가 차지하는 자리. 레벨들은 격자가 겹치고 깊이 사상(캐스터 높이 범위)을 함께 쓰므로 굵은 페이지의 블록 깊이를 그대로 비교한다. 굵은 상주 페이지(8.2 (8))가 있어 추측이 대개 있다. 없으면 그 타일은 1단계에서 아무것도 가리지 않는다.
+- V(`RasterView::tileTwoPhase`, `DepthRasterRequest::tileGuess` / `buildTileOccluders`; `tilesOcclude`의 guess 경로): 1단계에서 추측이 가린다고 한 인스턴스·노드·클러스터는 버리지 않고 지연 목록에 넣는다. 1단계 래스터 뒤 요청자가 그린 페이지의 HZB를 만들고(`s.vsm.statichzb.p1`), 2단계 컬이 지연된 것을 그 HZB로 검사해 가려지지 않은 것만 그린다(`<요청>.raster.p2`).
+- 왜 정확한가: 2단계가 빼는 것은 1단계가 실제로 저장한 깊이보다 발자국 전체에서 먼 것뿐이다 — 깊이 테스트에서 프래그먼트가 모두 진다. 추측이 틀려도(굵은 레벨의 표본이 놓친 틈, 그 사이 변한 형상) 달라지는 것은 어느 단계에서 그려지느냐뿐이다.
+- 비용: 정적 요청마다 컬 체인·래스터·HZB 패스가 하나씩 더(매 프레임; 페이지를 새로 그리지 않는 프레임에는 빈 디스패치). 추측 버퍼 2.6 MB.
+- 하지 않은 것: 국소광 페이지의 정적 계열(가림 없음). 제자리에서 다시 그리는 페이지의 옛 HZB는 쓰지 않는다(스캔이 새 물리 페이지를 주므로 옛 자리를 모른다).
+- **잴 것**: 카메라가 움직이는 city_block·city_night·interior에서 `s.vsm.static*` 실행의 보이는 클러스터 수와 지연 수(게이트의 `V run` 줄)와 `s.vsm` 시간, 정지 프레임에서 더 든 고정비.
+
+**(d)** 8.1 (3)의 `CullView` 크기 표기를 고쳤다 — 레코드는 지금 400 B다(가림체 SRV, 추측 SRV, 슬롯 오프셋이 더해졌다).
+
+**(e) V 래스터 서비스: 표면 캐시의 클러스터 캡처가 요청한 인터페이스** (`UE6_PORT_STATUS_KO.md` 1.2의 2번).
+- `DepthRasterRequest::pixelNormals`: 메시 커널(`DepthRaster.ms` DEPTH=2)이 꼭짓점의 월드 법선·접선(위치와 같은 변형: `deformVertex`)을 내보내고 화소 커널이 `DepthRasterPixel::normal` / `tangent`(w = bitangent 부호)로 받는다(`DEPTH_RASTER_NORMALS 1`).
+- `DepthRasterRequest::colorTargets`(4개까지; `colorMultiply`, `depthWrite`): 화소 커널이 렌더 타깃에 쓴다. 깊이 타깃이 같이 있으면 깊이 테스트가 화소마다 남길 프래그먼트를 정하므로 깊이와 속성을 한 번에 그린다. 타일 아틀라스는 깊이 타깃 없이 렌더 타깃만으로도 된다.
+- `DepthRasterRequest::pixelViews`: 그래프 리소스의 뷰 번호를 래스터 패스가 실행될 때 `pixelConstants[word]`에 써 준다(요청의 사용 선언이 UAV면 UAV, 아니면 SRV).
+- `CardCaptureCluster.ps.hlsl`: 한 번의 실행으로 바꿨다(요청 `r.card.vcapture<라운드>.<묶음>`: 깊이 = 캡처 깊이, 렌더 타깃 = 알베도·법선·방출). 법선·접선은 보간된 월드 값을 인스턴스 변환의 전치로 메시 축에, 거기서 카드 축에 놓는다 — 원본 삼각형 캡처(`CardCapture.ms`)가 꼭짓점 값을 놓는 방식과 같다. 깊이 차분으로 만든 삼각형 법선, 자체 업로드 버퍼(캡처 컨텍스트), 깊이만 그리던 선행 실행(`r.card.vdepth`)은 없앴다.
+- **스위치를 켤 수 있는가**: 캐시 쪽이 든 세 가지 이유는 코드에서 없어졌다. `surface_cache.mesh_cards_capture_clusters`는 **끈 채로 뒀다** — 캡처는 모든 GI 결과의 입력이고 이 경로는 한 번도 돌지 않았으므로, 배치의 A/B(`cards / capture_clusters`: `cardalbedo`·`cardfinal`·`gi` 층 비교) 한 번 뒤에 켠다. 남는 차이(의도된 것): 원본 삼각형 대신 페이지 텍셀 크기의 LOD 컷, 단면 재질의 뒷면 판정이 프래그먼트 단위.
+
+**(f) 그림자: 언리얼에 있고 없던 것** (`UE6_PORT_STATUS_KO.md` 2.2).
+- **국소광 페이지의 정적 사본** — `shadow.vsm.local_static_separate`(기본 true; `static_separate`가 켜져 있을 때만). MegaLights가 국소광 그림자를 맡는 기본 설정에서는 S가 국소 페이지를 그리지 않으므로 이 경로는 돌지 않는다. 태양의 8.2 (7)·(9)를 국소광 큐브 면 페이지에 그대로 옮겼다: 광원 범위에 닿은 변화가 움직이는 캐스터의 것뿐이면(`VsmCache` MODE 6: 광원 비트 두 벌) 그 광원의 페이지와 정적 사본을 유지하고 움직이는 캐스터만 다시 그려 병합한다(`VSM_REQ_DYNAMIC`; 스캔·지우기·병합은 태양과 같은 경로). 움직이는 캐스터의 뷰는 정적 사본의 HZB로 거른다. 마스크는 두 벌, 슬롯은 한 벌(`RasterView::atlasSlotOffset`). 스위치가 바뀌는 프레임은 국소 페이지를 모두 다시 그린다. 태양과 다른 점: 변화 판정이 페이지가 아니라 광원 단위다(범위에 닿으면 그 광원의 유지 페이지 전부가 동적 재그림).
+- **유리 캐스터의 투과색** — `shadow.vsm.translucent_tint`(기본 true), `tint_page_texels`(32, 커널에 컴파일).
+  - 조사: `VsmLayer.hlsli`의 투과 층은 스칼라(T(h) 매듭 4개)이고 **채워진 적이 없다** — 층을 채울 V의 coverage 모드 래스터(`DepthRasterRequest::coverage`)가 구현돼 있지 않아 모든 조회가 1을 받는다. 유리는 불투명 캐스터로 그려졌다(검은 그림자). 언리얼의 VSM에도 반투명 캐스터의 색 투과는 없다(광선 추적 그림자의 `bTranslucentShadow`에만 있다). 넣은 것은 그 층과 별개의 얕은 구조다.
+  - 구조(`VsmTint.hlsli`): Glass 클래스 재질이 있는 씬에서 태양 페이지의 불투명 계열은 유리 클러스터를 그리지 않고(`RasterView::materialFilter`), 유리만 그리는 요청 `s.vsm.tint`가 **틴트 아틀라스**(RGBA16, 페이지당 32 × 32 텍셀, 페이지 아틀라스와 같은 배치)에 쓴다: rgb = 텍셀 위 유리 면들이 통과시키는 비율의 곱(블렌드 곱), a = 태양에 가장 가까운 유리의 깊이(블렌드 최대). 화소 커널(`VsmTintPixel.ps`): 판유리(양면 재질)는 (1 − F)² t / (1 − F² t²), 속이 찬 유리는 면마다 (1 − F)√t — t는 base colour(× 텍스처), F는 보간 법선에 대한 태양 입사각의 프레넬. 반투명 합성(`TranslucentComposite.hlsl`)의 판유리 식과 같다.
+  - 받는 쪽: 가장 가까운 유리보다 뒤(틴트 텍셀 2개 높이 + 16비트 한 단계 이상)에 있는 점이 그 텍셀의 rgb를 받는다. 뷰의 태양 슬롯(슬롯 0)과 coverage 조각의 태양에는 그 휘도가 곱해지고, 불투명 음영(`ShadeOpaque.hlsl` 파트 1)은 색을 받는다 — 뷰의 그림자 가시성 텍스처가 유리가 있는 프레임에는 세로 2배이고 아래 절반이 화소별 투과색이다(`shadowSunTintChroma`: 음영 커널에 남는 루트 상수가 없어 같은 텍스처에 실었다. 게이트의 `shadow` 층 캡처도 그런 프레임에는 세로 2배다).
+  - 한계: 층이 하나다 — 두 유리 사이의 점은 둘 다의 색을 받는다. 태양에 가파른 유리 면은 제 색을 조금 받는다. 틴트 텍셀이 레벨 텍셀의 4배라 색 그림자 가장자리가 그만큼 무르다. 광선 hit·물·반투명 층의 태양 조회(`shadowSunVisibilityAt`)는 색도 휘도도 받지 않는다(유리 뒤가 온전히 밝다): R의 인라인 추적 커널이 DXIL 한도에 924 B 남아 있어 조회를 넣으면 빌드가 실패한다 — `SHADOW_SUN_TINT_AT 1`로 컴파일하는 커널만 받는다. 국소광 페이지에서는 유리가 여전히 불투명하다. 요청은 하나로 낸다(리스트 상한 계산이 유리만 따로 세지 않는다).
+  - 비용: 페이지당 8 KB(4096페이지에 32 MB), 유리가 있는 씬에서 프레임당 래스터 요청 하나와 지우기 패스 하나.
+- **작은 캐스터 프록시** — `shadow.vsm.aggregate_small_casters`(기본 true), `aggregate_coverage`(0.5). 8.1 (3)은 레벨 텍셀보다 작은 캐스터를 그 레벨에서 뺐다(먼 숲·풀밭의 그림자가 없어진다). 이제 그런 캐스터 가운데 인스턴스 청크의 구성원(정적 인스턴스)은 **프록시**로 그린다(`DepthProxy.ms.hlsl`, `DepthRasterRequest::proxies`): 경계 구 중심에 태양을 향한 정사각형 하나, 넓이 = 경계 원 넓이 × `aggregate_coverage`. 텍셀보다 작은 사각형은 넓이 비율만큼의 확률로 텍셀 중심을 덮으므로 굵은 레벨의 그림자가 "덮인 땅의 비율"로 남는다. 구성원이 모두 그만큼 작은 청크는 구성원별 컬을 하지 않는다(`chunkBelowView`: `ChunkBounds`가 청크의 최대 구성원 반지름을 남긴다) — 청크 항목 하나가 메시 그룹 4개(구성원 64개씩)로 그려진다.
+  - 각 구성원은 한 번만 그려진다: 인스턴스 컬이 빼는 조건(`instanceBelowView`)과 프록시가 그리는 조건이 같은 함수다. 집합(정적/동적)·마스크·배치 범위도 같은 검사를 거친다.
+  - 한계: 동적·스킨·런타임 인스턴스(평면 목록)는 프록시가 없다(전처럼 빠진다). 타일 아틀라스에서 프록시는 중심이 놓인 타일에만 그려진다(경계를 넘는 1텍셀 미만 부분은 빠진다). `aggregate_coverage`는 재질·메시와 무관한 상수다. 태양 레벨에만 넣었다(국소광 면에는 없다).
+- **인스턴스별 그림자 플래그** — `scene::InstanceShadowOnly`(비트 7), `scene::InstanceNoSelfShadow`(비트 8). 스위치 없음(플래그를 준 인스턴스에만 작용한다).
+  - ShadowOnly(언리얼의 hidden + `bCastHiddenShadow`, Unity의 ShadowsOnly): 그림자 맵과 광원 그림자 광선에는 있고 뷰·GI/반사 광선·표면 캐시 카드에는 없다. V의 `instanceInRun`(실행의 인스턴스 마스크가 CastShadow를 포함할 때만 그린다), 광선 씬의 `rtInstanceMask`(그림자 마스크만), 카드의 제외 플래그.
+  - NoSelfShadow: 그 인스턴스의 화소에서 태양 조회가 경계 구 지름만큼 태양 쪽에서 시작한다(`s.shadow.selfslack` → `ShadowVisibility`·`ShadowPenumbra`; 접촉 광선 없음). 씬에 그런 인스턴스가 있을 때만 패스가 기록된다. 한계: 불투명 뷰의 태양 슬롯만 — coverage 조각, 국소광 페이지·그림자 광선은 아니다. 경계 구 안에 있는 다른 캐스터의 그림자도 같이 빠진다.
+
+**(g) 측정 계획** — `Tools\Verify\Run-Ue6Batch.ps1 -Variants ab`(기본 변형 목록에 들어 있다), `Tools\Verify\ab_compare.py`, `batch_summary.py`의 A/B 장. **돌리지 않았다**(스크립트는 구문 분석만 했다).
+- 2026-10-03 이후 실행 없이 쓴 스위치를 하나씩 기본값과 견준다: 13개 묶음(cull, vsm, forest, lights, local, tint, cards, coverage, tsr, clouds, fog, hair, eye), 묶음마다 그 스위치가 일하는 씬. 씬마다 기준 실행 한 번 + 스위치당 한 번.
+- 그림은 변형당 **한 프레임**이고(정지 카메라; 업스케일러·모션 블러 묶음은 회전 중), 기준과 바로 비교해(`ab\pictures.txt`: 기준 평균 대비 평균 차, 2 % 넘는 화소 비율, 최대 차) 지운다 — 한 번에 디스크에 있는 A/B 캡처는 기준 한 벌과 변형 한 벌(최종 그림 + 묶음이 정한 층)이다. 요약을 쓴 뒤에는 배치의 나머지 원본 프레임(`*.pfm`)도 지운다(`-KeepRaw`로 남김; 컷 그림의 PNG는 남는다). 시작할 때 여유 공간이 `-MinFreeGB`(30) 아래면 멈춘다.
+- 시간은 묶음이 요구할 때 회전 실행 한 번(`-AbFrames` 300프레임): 요약에 변형 − 기준의 GPU 프레임 중앙값, 범위 수, 가장 많이 움직인 패스 묶음.
+- 표의 `expected`: `same`(구조만 바꾸는 스위치 — 그림 차이는 결함이거나 잡음), `differs`(스위치가 곧 기능 — 숫자는 얼마나 달라지는지).
+- 배치가 못 재는 것: 인스턴스 플래그 두 가지(플래그를 쓰는 씬이 없다). 국소광 묶음은 MegaLights를 끈 기준 위에서만 잰다. 유리 캐스터는 게임 씬(bt_lobby, te_lounge)에만 있다 — scenegen 씬에는 Glass 재질이 없다.
+
 ## 9. 국소광 구성요소 (2026-10-03, 브랜치 `w/hair`)
 
 Unreal의 light component에 있고 여기에 없던 여섯 가지를 썼다. **코드 작성·빌드 통과, 실행 안 함**: 전 트랙 빌드만 통과했고 테스트 실행 파일(CPU 테스트 `unx_test_scene_lightcomponents` 포함)·still·게이트를 한 번도 돌리지 않았다. 아래는 코드에 있는 것이고 그림과 수치로 확인된 것은 없다.

@@ -47,6 +47,10 @@
 // and the merge. A change of a caster that is not movable - or of one that changed set, which stands in the other set's
 // content - makes the page stale as before (VSM_FLAG_STALE: everything is drawn anew). The set is part of the caster's
 // state word (VSM_CASTER_MOVABLE), so a change of set is a change.
+// The local lights' pages have the same two parts (shadow.vsm.local_static_separate, P[4].w bit 1): a light whose range
+// meets only changes of the movable casters' part (MODE 6: its bit in a second set of light bits) keeps its pages and
+// their static copies, and MODE 3 marks its kept requests VSM_REQ_DYNAMIC - the movable casters of every kept page of
+// the light are drawn anew; a change of a caster that is not movable draws the light's pages anew as before.
 // Error handling: the changed-caster list has a fixed capacity; past it the frame is uncacheable (flag), never partial.
 // P[0] = { caster state UAV (uint4 per instance), changed list UAV (raw: count, flags, 0, 0, then float4 spheres), instance
 //          count, VSM constants CBV }
@@ -54,7 +58,7 @@
 // P[2] = { free list UAV (raw: count, 0, 0, 0, then pages), atlas pages, scanned slots, cacheable (1) }
 // P[3] = { skin bounds SRV, skin instances SRV, skin count, stats UAV (raw; word 6: kept pages) }
 // P[4] = { local lights SRV (VsmLocalLight per shadow slot), local shadow slots in use, page blocks SRV (raw, VsmPageMax:
-//          MODE 2's HZB filter; 0xFFFFFFFF: off), bit 0: static_separate }
+//          MODE 2's HZB filter; 0xFFFFFFFF: off), bit 0: static_separate, bit 1: local_static_separate }
 // P[5] = { asuint(e: the least change that makes a page stale, texels of its level), asuint(windChangeFactor(dt)), frame index,
 //          the scene's uploaded instances (GpuScene::staticInstanceCount: the instances from there on are movable) }
 // Frame constants of the main view (scene buffers, wind).
@@ -65,6 +69,8 @@
 #define VSM_CACHE_UNCACHEABLE 1u
 // The local lights' changed bits: VSM_LOCAL_LIGHTS / 32 words after the used-page bitmap (whose words cover the pages).
 uint localChangedOffset() { return (P[2].y + 31) / 32 * 4; }
+// ... and after them the bits of the lights met only by changes of the movable casters' part (local_static_separate).
+uint localDynamicOffset() { return localChangedOffset() + VSM_LOCAL_LIGHTS / 32 * 4; }
 
 #define VSM_CASTER_MOVABLE (1u << 8)  // caster state word z, beside the cast / hidden flags: the caster's set (static_separate)
 #define VSM_CHANGE_RIGID 63u
@@ -88,7 +94,7 @@ float stretch(float4 rows[3]) { return sqrt(dot(rows[0].xyz, rows[0].xyz) + dot(
 void main(uint i : SV_DispatchThreadID)
 {
     RWByteAddressBuffer used = ResourceDescriptorHeap[P[1].w];
-    const uint words = (P[2].y + 31) / 32 + VSM_LOCAL_LIGHTS / 32;  // (and the local lights' changed bits)
+    const uint words = (P[2].y + 31) / 32 + 2 * (VSM_LOCAL_LIGHTS / 32);  // (and the local lights' two sets of changed bits)
     [loop] for (uint w = i; w < words; w += 256) used.Store(w * 4, 0);
     if (i == 0)
     {
@@ -288,7 +294,7 @@ void main(uint slot : SV_DispatchThreadID)
         const uint2 e = table.Load2(slot * 8);
         const uint phys = e.x & VSM_PHYS_MASK;
         uint tag;
-        bool unchanged = true;
+        bool unchanged = true, localDynamic = false;
         if (slot < VSM_SUN_SLOTS)
         {
             ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[P[0].w];
@@ -308,6 +314,7 @@ void main(uint slot : SV_DispatchThreadID)
                 const VsmLocalLight l = lights[light];
                 tag = l.generation;
                 unchanged = l.active != 0 && ((used.Load(localChangedOffset() + (light >> 5) * 4) >> (light & 31u)) & 1u) == 0;
+                localDynamic = ((used.Load(localDynamicOffset() + (light >> 5) * 4) >> (light & 31u)) & 1u) != 0;
             }
         }
         kept = unchanged && (e.x & VSM_FLAG_RESIDENT) != 0 && (e.x & VSM_FLAG_STALE) == 0 && e.y == tag && phys < P[2].y;
@@ -315,7 +322,7 @@ void main(uint slot : SV_DispatchThreadID)
         {
             // (static_separate: a movable caster changed under it - the page and its static copy are kept, the movable
             // casters are drawn anew)
-            requests.Store(slot * 4, req | VSM_REQ_KEPT | ((e.x & VSM_FLAG_STALE_DYNAMIC) != 0 ? VSM_REQ_DYNAMIC : 0u));
+            requests.Store(slot * 4, req | VSM_REQ_KEPT | (((e.x & VSM_FLAG_STALE_DYNAMIC) != 0 || localDynamic) ? VSM_REQ_DYNAMIC : 0u));
             used.InterlockedOr((phys >> 5) * 4, 1u << (phys & 31u));
         }
     }
@@ -372,17 +379,21 @@ void main(uint light : SV_DispatchThreadID)
     const VsmLocalLight l = lights[light];
     if (l.active == 0) return;
     const uint count = min(header.x, P[1].x);
-    bool changed = false;
+    const bool localSeparate = (P[4].w & 2u) != 0;
+    bool changed = false, changedDynamic = false;
     [loop] for (uint i = 0; i < count && !changed; ++i)
     {
         const uint4 sw = list.Load4(16 + i * 16);
         const float4 s = asfloat(uint4(sw.xyz, sw.w | 127u));  // (the radius with its code bits set: never under the caster's)
-        changed = distance(s.xyz, l.position) <= s.w + l.farM;
+        if (distance(s.xyz, l.position) <= s.w + l.farM)
+        {
+            // (bit 6: a change of the movable casters' part alone - the light's static copies hold)
+            if (localSeparate && (sw.w & 64u) != 0) changedDynamic = true;
+            else changed = true;
+        }
     }
-    if (changed)
-    {
-        RWByteAddressBuffer used = ResourceDescriptorHeap[P[1].w];
-        used.InterlockedOr(localChangedOffset() + (light >> 5) * 4, 1u << (light & 31u));
-    }
+    RWByteAddressBuffer used = ResourceDescriptorHeap[P[1].w];
+    if (changed) used.InterlockedOr(localChangedOffset() + (light >> 5) * 4, 1u << (light & 31u));
+    else if (changedDynamic) used.InterlockedOr(localDynamicOffset() + (light >> 5) * 4, 1u << (light & 31u));
 }
 #endif
