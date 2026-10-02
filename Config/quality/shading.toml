@@ -92,6 +92,8 @@ hair_fibres_behind = 2.0          # fibres taken to lie behind a strand whose bo
 hair_shadows = true               # the hair's shadow on what is not hair (Passes/Hair/HairShadow.hlsl): the sun slot of S's
                                   # screen visibility and, with mega_lights, the local lights' samples are multiplied by what
                                   # the grooms on the path to the light let through (exp(-fibres) from the density volume).
+                                  # And a body's shadow on another body's strands: a strand counts the other bodies' fibres
+                                  # between it and a light with its own (a beard under the head's hair, the next head).
                                   # The shadow is as fine as the volume's cells (about 1 cm on a head), of the bodies with a
                                   # block (hair_density_bodies; the nearest 64 at most). Not shadowed: the coverage layer's
                                   # cluster fragments under the sun, the local lights without mega_lights, the air.
@@ -106,7 +108,9 @@ hair_lights_ray_depths = true     # with mega_lights: the shadow rays of the hai
                                   # falls at the same place on every strand, however few and wide the LOD draws them
 hair_segment_shading = true       # the strand's part of the sun's and the indirect light once per segment that has a record
                                   # (three points along it, a record takes the two around it) instead of once per record
-                                  # (48 B of transient memory per segment of the frame)
+                                  # (48 B of transient memory per segment of the frame, 8 B per record of V's pool for the
+                                  # list of the records in front of the opaque surface: each with its tile, found once per
+                                  # block of 1,024 records instead of by a search per record)
 # Edge (E) pixels and surface groups (Passes/Shading/Edge.hlsli): two pixels are one surface when the material matches,
 # the shading normals differ by less than the angle, and each lies within max(footprint x ft, distance x dt) of the
 # other's tangent plane. ARCHITECTURE 2.10: up to three surfaces per edge pixel.

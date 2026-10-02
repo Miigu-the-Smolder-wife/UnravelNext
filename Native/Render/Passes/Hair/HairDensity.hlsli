@@ -17,6 +17,8 @@
 //       on, in both between. (One texture chosen by the whole path's step put every path longer than 1.5 x steps cells
 //       - 29 cm of a head's 1.2 cm cells at 16 steps: nearly every path through a groom - into the 4.7 cm means: the
 //       shadow's edge on the hair was as coarse as those, with a line where the choice changed.)
+//   hairFibreCountOthers   the fibres of the other bodies with a block on a strand's path to a light (a beard under the
+//       head's hair, the next head), by hairTransmittance's march.
 //   hairTransmittance   a surface's that is not hair (HairShadow.hlsl): exp(-n) of every body with a block along the
 //       path to a light. Per body in steps of one coarse cell; a step whose mean (trilinear at its middle: 0 means the
 //       8 coarse cells around are empty, and the step lies inside them) holds no hair is skipped, the others are read
@@ -160,16 +162,20 @@ float hairFibreCount(uint paramsSrv, uint body, float3 p, float3 d, uint steps, 
 }
 
 // hairTransmittance's march through one body: the fibres on p + t d (d unit) from tStart to 'reach', or - with target
-// > 0 - the distance at which their count reaches 'target' (-1: it does not; the count grows linearly inside a sample).
+// > 0 - the distance at which their count reaches 'target' (-1: not within 'reach'; the count grows linearly inside a
+// sample). The steps are laid from the ray's entry to its exit of the body's box whatever 'reach' is: two readers of one
+// ray with different reaches (a screen trace's hit and the world ray's, RayTracing/HitHair.hlsli) take the same samples
+// and find the same place.
 float hairDensityAcross(ByteAddressBuffer params, uint4 header, uint body, float3 p, float3 d, float tStart, float reach, uint steps, float jitter, float target)
 {
     const bool find = target > 0;
     const HairDensityBody b = hairDensityBody(params, body);
-    float t0, t1;
-    if (b.cells.x == 0 || !hairDensityRange(b, p, d, tStart, reach, t0, t1)) return find ? -1 : 0;
+    float t0, tExit;
+    if (b.cells.x == 0 || !hairDensityRange(b, p, d, tStart, 3.0e38f, t0, tExit) || !(reach > t0)) return find ? -1 : 0;
+    const float t1 = min(tExit, reach);
     const float coarseCell = HAIR_DENSITY_COARSE * b.cell;
-    const uint count = clamp((uint)ceil((t1 - t0) / coarseCell), 1u, max(steps, 1u));
-    const float dt = (t1 - t0) / count;
+    const uint count = clamp((uint)ceil((tExit - t0) / coarseCell), 1u, max(steps, 1u));
+    const float dt = (tExit - t0) / count;
     const bool refine = dt <= 1.001f * coarseCell;  // (a longer step does not lie inside the cells its middle reads: the means alone)
     const HairDensityVolume fine = hairDensityLevel(header, b, false), low = hairDensityLevel(header, b, true);
     Texture3D<float> cells = ResourceDescriptorHeap[fine.srv];
@@ -180,14 +186,21 @@ float hairDensityAcross(ByteAddressBuffer params, uint4 header, uint body, float
     [loop] for (uint i = 0; i < count; ++i)
     {
         const float ta = t0 + i * dt;
+        if (ta >= t1) break;
         const float mean = hairDensityAt(coarse, low, p + d * (ta + (refine ? 0.5f : jitter) * dt));
         if (!(mean > 0)) continue;
         [loop] for (uint k = 0; k < parts; ++k)
         {
-            const float rho = refine ? hairDensityAt(cells, fine, p + d * (ta + (k + jitter) * part)) : mean;
-            const float add = HAIR_FIBRES_PER_DENSITY * rho * part;
-            if (find && fibres + add >= target) return ta + (k + (add > 0 ? (target - fibres) / add : 0.5f)) * part;
-            fibres += add;
+            const float tp = ta + k * part;
+            if (tp >= t1) break;
+            const float rho = refine ? hairDensityAt(cells, fine, p + d * (tp + jitter * part)) : mean;
+            const float add = HAIR_FIBRES_PER_DENSITY * rho * part;  // (the whole part's)
+            if (find && fibres + add >= target)
+            {
+                const float t = tp + (add > 0 ? (target - fibres) / add : 0.5f) * part;
+                return t <= t1 ? t : -1;
+            }
+            fibres += add * min((t1 - tp) / part, 1.0f);
         }
     }
     return find ? -1 : fibres;
@@ -211,6 +224,24 @@ float hairTransmittance(uint paramsSrv, float3 p, float3 d, float reach, uint st
         fibres += hairDensityAcross(params, header, body, p, d, 0.5f * cell, reach, steps, jitter, 0);
     }
     return exp(-fibres);
+}
+
+// The fibres of the bodies with a block other than 'body' on p + t d (d unit) over 'reach' metres. No volume: 0.
+float hairFibreCountOthers(uint paramsSrv, uint body, float3 p, float3 d, float reach, uint steps, float jitter = 0.5f)
+{
+    if (paramsSrv == 0xFFFFFFFFu) return 0;
+    ByteAddressBuffer params = ResourceDescriptorHeap[paramsSrv];
+    const uint4 header = params.Load4(0);
+    const uint list = hairDensityList(params);
+    const uint count = min(params.Load(list), HAIR_SHADOW_BODIES);
+    float fibres = 0;
+    [loop] for (uint i = 0; i < count; ++i)
+    {
+        const uint other = params.Load(list + 4 + 4 * HAIR_DENSITY_LIST_WORDS * i);
+        if (other == body || other >= header.x) continue;
+        fibres += hairDensityAcross(params, header, other, p, d, 0, reach, steps, jitter, 0);
+    }
+    return fibres;
 }
 
 // One unit number per (seed, k) (PCG's output function on the pair).

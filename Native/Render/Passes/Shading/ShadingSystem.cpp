@@ -1576,6 +1576,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 const bool segmentShading = !fc.quality.has("shading.hair_segment_shading") || fc.quality.boolean("shading.hair_segment_shading");
                 const bool rayDepths = density && (!fc.quality.has("shading.hair_lights_ray_depths") || fc.quality.boolean("shading.hair_lights_ray_depths"));
                 const bool marchJitter = !fc.quality.has("shading.hair_march_jitter") || fc.quality.boolean("shading.hair_march_jitter");
+                // (shading.hair_shadows: a strand also counts the other bodies' hair between it and a light)
+                const bool otherBodies = density && (!fc.quality.has("shading.hair_shadows") || fc.quality.boolean("shading.hair_shadows"));
                 auto useHair = [=](PassBuilder& b) {
                     b.use(v.coverageRecords, Use::SrvCompute);
                     b.use(hairSegments, Use::SrvCompute);
@@ -1595,7 +1597,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                     k[4] = c.srv(hairSegments);
                     k[5] = c.srv(hairBodies);
                     k[6] = density ? c.srv(densityParams) : gpu::kNone;
-                    k[20] = steps | (marchJitter ? 0x80000000u : 0u);  // (CoverageHair.hlsl HAIR_STEPS, hairJitter)
+                    // (CoverageHair.hlsl HAIR_STEPS, hairCounts' other bodies, hairJitter)
+                    k[20] = steps | (otherBodies ? 0x40000000u : 0u) | (marchJitter ? 0x80000000u : 0u);
                     std::memcpy(&k[21], &fibresBehind, 4);
                     k[22] = experiment;
                     k[23] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : gpu::kNone;
@@ -1742,14 +1745,14 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 // segments (a bit each, then a list), and the strand's part of the sun's and the indirect light at
                 // kHairSegmentPoints points along each of those segments; m.hair shades the listed records with their
                 // segment's values (CoverageHair.hlsl MODE 7..11). The segment buffers are sized for every segment of the
-                // frame (48 B each for the values), the record list for V's pool (4 B a record).
+                // frame (48 B each for the values), the record list for V's pool (8 B a record: its element and its tile).
                 constexpr uint64_t kHairSegmentPoints = 3;  // CoverageHair.hlsl HAIR_SEGMENT_POINTS
                 const uint32_t segmentCount = (uint32_t)(fc.graph.desc(hairSegments).size / 32);
                 BufferRef segmentLight, visibleRecords;
                 if (segmentShading)
                 {
                     const uint64_t recordCapacity = fc.graph.desc(v.coverageRecords).size / 16;
-                    visibleRecords = g.createBuffer({ "m.hair visible records", (4 + recordCapacity) * 4, 0 });
+                    visibleRecords = g.createBuffer({ "m.hair visible records", (4 + 2 * recordCapacity) * 4, 0 });
                     const uint32_t bitWords = (segmentCount + 31) / 32;
                     const BufferRef segmentBits = g.createBuffer({ "m.hair segment bits", ((uint64_t)bitWords + 3) / 4 * 16, 0 });
                     const BufferRef segmentList = g.createBuffer({ "m.hair segment list", (4 + (uint64_t)segmentCount) * 4, 0 });
