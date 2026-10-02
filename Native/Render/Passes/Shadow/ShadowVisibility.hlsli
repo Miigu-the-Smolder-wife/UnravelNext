@@ -168,11 +168,19 @@ float shadowSunTransmittanceAt(ShadowSrvs s, float3 worldPos, float footprint, f
 
 // The 3 x 3 pages around 'centre' on level L are all resident: the nine table words read together (a short-circuit loop
 // waited for each read before the next; the answer is the same - shadow.vsm.use_stats counts all nine as read).
+// SHADOW_RESIDENCY_LOOP 1 before this file: the short-circuit loop - the same answer in 4 KB less code, for a path where
+// the reads' latency does not matter (the reflections' overflow library, ReflectionTraceInline).
 bool shadowPagesResident3x3(VsmResources r, int2 centre, uint L)
 {
+#if SHADOW_RESIDENCY_LOOP
+    bool covered = true;
+    [loop] for (uint q = 0; q < 9 && covered; ++q) covered = vsmEntry(r, centre + int2((int)(q % 3) - 1, (int)(q / 3) - 1), L) != 0;
+    return covered;
+#else
     uint all = 1;
     [unroll] for (uint q = 0; q < 9; ++q) all &= vsmEntry(r, centre + int2((int)(q % 3) - 1, (int)(q / 3) - 1), L) != 0 ? 1u : 0u;
     return all != 0;
+#endif
 }
 
 // Load all candidate centre pages before the dependent coverage walk. This

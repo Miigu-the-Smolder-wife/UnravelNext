@@ -7,6 +7,7 @@
 // the job count; other jobs return at once). JOB = the job mode this library handles (1 REFL_M, 2 REFL_G; a compile
 // constant, so each library holds one mode's code and stays under the kernel size limit); both run every frame. The same value as the split passes (ReflectionHit.hlsli), only slower.
 // Root constants: ReflectionRay.hlsli.
+#define SHADOW_RESIDENCY_LOOP 1  // (ShadowVisibility.hlsli's loop form: the same answer, less code - this path is the slow one)
 #define REFL_OVERFLOW 1  // use the same stored attributes/values as the split passes
 #define GI_BATCH_CORNERS CORNERS
 #include "RayTracing/RayShaders.hlsli"
@@ -84,8 +85,10 @@ void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer
             }
         }
     }
-    const float3 gbar = j.mode == REFL_G ? sumC / nC  // (reflLobeControl's mean)
-                                         : valid == 0 ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, reflect(-j.s.view, j.s.normal), j.lobe, P[3].w) : 0;
+    // (branches, not selects: the library's mode is a compile constant, and the other mode's lookup then leaves the kernel)
+    float3 gbar = 0;
+    if (j.mode == REFL_G) gbar = sumC / nC;  // (reflLobeControl's mean)
+    else if (valid == 0) gbar = giProbeFootprintRadiance(probeTexture, footprint, probeCount, reflect(-j.s.view, j.s.normal), j.lobe, P[3].w);
     const float3 total = reflLobeEstimate(sumL, sumG, valid, gbar);
     results[job] = reflPackResult(total, valid > 0 ? nearest : 0, motion);
     if (jobLayersUav != UNX_NONE)
