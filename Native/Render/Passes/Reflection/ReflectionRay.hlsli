@@ -26,6 +26,7 @@
 // its result written there; results[job] = { first slot, REFL_JOB_SPLIT } marks the split jobs for the combine pass.
 #ifndef UNX_REFLECTION_RAY_HLSLI
 #define UNX_REFLECTION_RAY_HLSLI
+#include "Passes/Common/BlueNoise.hlsli"
 #include "Passes/Reflection/ReflectionInternal.hlsli"
 #include "Passes/Reflection/ReflectionValue.hlsli"
 #include "Passes/GI/ScreenProbes.hlsli"
@@ -120,7 +121,9 @@ bool reflNextDirection(ReflJob j, inout uint seed, out float3 dir)
     dir = 0;
     [loop] for (uint attempt = 0; attempt < REFL_SAMPLE_ATTEMPTS; ++attempt)
     {
-        float2 u = float2(giUnit(seed), giUnit(seed + 1));
+        // (the job's first draw is the pixel's blue noise - BlueNoise.hlsli, as the reference draws its reflection rays;
+        // ReflectionReuse.hlsli's reuseRay replays the same draw. Redraws and a G job's further rays: the hash sequence)
+        float2 u = attempt == 0 && seed == j.seed ? blueNoise2(j.pixel, P[5].x & 0xFFFFFFu) : float2(giUnit(seed), giUnit(seed + 1));
         // reflection.lumen_ggx_sampling_bias (P[4].w's high half, unorm16; 0 outside the ray-reuse pipeline): the outer
         // share of the sample disk - the lobe's tail, its rare far-off directions - is not drawn (the reference's
         // GGXSamplingBias: quieter, and the lobe a little narrower than the material's).

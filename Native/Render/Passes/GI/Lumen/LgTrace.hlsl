@@ -22,8 +22,9 @@
 // 0xFFFFFFFF: none - gi.lumen_hit_surface_cache off, surface_cache.mesh_cards off or no card yet),
 // P[5].y / .z / .w = radiance cache params (raw SRV) / indirection SRV / atlas SRV (P[5].y = 0xFFFFFFFF: none -
 // lumen.radiance_cache off): where all 8 cache probes around the screen probe exist the ray stops at the cache's
-// coverage distance, and a ray that reached it without a hit takes the cache's radiance in its direction (x exposure;
-// the sky is in the cache's own misses) - the trace word's bit 31,
+// coverage distance, and a ray that reached it without a hit takes the cache's radiance in its direction - all 8 probes,
+// trilinear (x exposure; the sky is in the cache's own misses) - and the cache's own hit distance there (P[11].z = the
+// cache's depth atlas SRV) - the trace word's bit 31,
 // P[6], P[7] = RtSceneSrvs,
 // P[8..11] = the common block (P[10].z adaptive SRV, P[10].w / P[11].x / P[11].y probe depth / normal / position SRVs),
 // P[11].w = first trace row of this dispatch (the pass splits the atlas into bands of at most gi.lumen_rays_per_dispatch
@@ -110,9 +111,10 @@ void LgTraceGen()
     bool reachedCache = false;
     if (hit.t < 0 && coverage.valid)
     {
-        radiance = lrcSample(lrcParams(P[5].y), P[5].z, P[5].w, coverage, positionSpeed.xyz, r.Direction, giUnit(seed + 31));
+        const LrcParams rc = lrcParams(P[5].y);
+        radiance = lrcSample(rc, P[5].z, P[5].w, coverage, positionSpeed.xyz, r.Direction, -1.0);
         reachedCache = true;
-        distanceToHit = r.TMax;
+        distanceToHit = P[11].z != 0xFFFFFFFFu ? lrcSampleDistance(rc, P[5].z, P[11].z, coverage, positionSpeed.xyz, r.Direction) : r.TMax;
     }
     else if (hit.t < 0)
     {
@@ -202,29 +204,17 @@ void LgTraceGen()
                 {
                     RayDesc sr;
                     sr.Origin = s.position + (dot(s.geometricNormal, l) > 0 ? 1.0 : -1.0) * s.geometricNormal * lgBias(s.position);
-                    sr.Direction = giSunDirection(seed + 7);
+                    // (toward the disk's centre: the same ray every frame - a hit without cards is a deforming surface,
+                    // and a random point of the disk would put one-sample noise into the probe)
+                    sr.Direction = l;
                     sr.TMin = 0;
                     sr.TMax = giRayLength();
                     L.sunIlluminance = e0;
                     L.sunVisibility = rtVisible(scene, sr, RT_MASK_GI) ? 1.0 : 0.0;
                 }
             }
-            if ((P[3].w & 128) == 0 && !fromCards)
-            {
-                const bool oriented = (m.classFlags & 0xFFu) != MATERIAL_FOLIAGE;
-                const RtLocalSample ls = rtLocalLightFinish(scene, rtLocalLightChooseOriented(scene, s.position, s.normal, !oriented, giUnit(seed + 11)), s.position,
-                                                            giUnit(seed + 12), giUnit(seed + 13), footprint);
-                if (ls.valid)
-                {
-                    // the specular lobe toward the light widened by the ray's cone (the texel holds the cone's mean)
-                    GpuMaterial mc = m;
-                    const float alpha = modelAlpha(m.roughness);
-                    mc.roughness = sqrt(sqrt(alpha * alpha + g_rtHitCone * g_rtHitCone));
-                    const float3 f = rtLocalLightBrdfCos(mc, s.normal, -r.Direction, ls.wi, false);
-                    if (any(f > 0) && (!ls.castShadow || rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, lgBias(s.position)), RT_MASK_GI)))
-                        L.local = f * ls.weight;
-                }
-            }
+            // (no local-light sample at a hit without cards: one random light per ray is the noise the cards remove; the
+            // reference lights such a hit with nothing at all)
             radiance = rtHitRadiance(m, s.normal, -r.Direction, L, footprintPerMetre);
         }
     }

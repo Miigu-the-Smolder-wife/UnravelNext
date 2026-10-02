@@ -163,6 +163,20 @@ float3 lrcProbeRadiance(LrcParams p, Texture3D<uint> indirection, Texture2D<floa
     return atlas.SampleLevel(g_linearClamp, uv, 0).rgb * (correction / LRC_RADIANCE_SCALE);
 }
 
+// The distance (m) at which the cache saw something from a covered position toward 'direction': the depth texel of the
+// probe whose cell holds the position, at least the coverage distance. What a ray that ended in the cache reports as
+// its hit distance (the screen probes' filter compares neighbours' hit distances).
+float lrcSampleDistance(LrcParams p, uint indirectionSrv, uint depthSrv, LrcCoverage coverage, float3 worldPosition, float3 direction)
+{
+    Texture3D<uint> indirection = ResourceDescriptorHeap[indirectionSrv];
+    const int3 coord = int3(floor(lrcCoordFloat(p, worldPosition, coverage.clipmap)));
+    const uint probe = lrcIndirection(indirection, p, coord, coverage.clipmap);
+    if (probe >= LRC_USED) return coverage.minTraceDistance;
+    Texture2D<uint> depth = ResourceDescriptorHeap[depthSrv];
+    const uint2 texel = min(uint2(lrcDirectionToUv(direction) * float(p.probeResolution)), p.probeResolution - 1);
+    return max(lrcDepthDistance(depth.Load(int3(lrcAtlasCoord(p, probe) * p.probeResolution + texel, 0))), coverage.minTraceDistance);
+}
+
 // The cache's incident radiance (nits) at a covered position toward 'direction'. random in [0, 1): one of the 8 probes is
 // drawn by its trilinear weight (the default, as the screen probes' many rays average it); random < 0: all 8, weighted.
 float3 lrcSample(LrcParams p, uint indirectionSrv, uint atlasSrv, LrcCoverage coverage, float3 worldPosition, float3 direction, float random)

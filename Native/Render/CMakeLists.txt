@@ -1,5 +1,6 @@
 # Core-owned. Render modules (Passes/<Name>, RayTracing) register themselves by folder (cmake/Modules.cmake).
 add_library(unx_render STATIC
+  src/BlueNoise.cpp
   src/Descriptors.cpp
   src/Device.cpp
   src/GpuProfiler.cpp

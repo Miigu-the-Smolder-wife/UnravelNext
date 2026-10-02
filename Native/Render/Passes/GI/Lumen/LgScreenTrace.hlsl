@@ -7,11 +7,14 @@
 // Moving: as LgTrace's hits - the hit pixel's own speed (its surface one frame ago) against the probe's.
 // Output: trace radiance (x exposure; 0 without a hit) and the trace word of every live probe texel.
 // P[0] = LgSurface inputs (P[0].x = depth), P[1] = { ray info SRV, trace radiance UAV, trace word UAV, depth pyramid SRV },
-// P[2] = { previous colour SRV, its width, its height, exposure ratio (float; FrameContext::upscale) },
-// P[3] = { iterations, relative thickness (float), thickness steps, max distance (float, m) },
+// P[2] = { previous colour SRV, its width | height << 16, radiance cache params SRV (0xFFFFFFFF: none), exposure ratio
+// (float; FrameContext::upscale) }, P[3] = { iterations | thickness steps << 16, relative thickness (float), radiance
+// cache indirection SRV, max distance (float, m) }: with the cache the walk ends at the probe's coverage distance, as
+// its world ray does (LgTrace.hlsl) - past it the cache answers,
 // P[4..7] = the previous frame's view-projection (rows; upscale.prevViewProj), P[11].w = moving threshold (float),
 // P[10].z adaptive SRV, P[10].w / P[11].x / P[11].y probe depth / normal / position SRVs. b1 = the main view.
 #include "Passes/GI/Lumen/LgSurface.hlsli"
+#include "Passes/GI/Lumen/LgRadianceCache.hlsli"
 #include "Passes/Reflection/ScreenTrace.hlsli"
 
 [numthreads(8, 8, 1)]
@@ -50,8 +53,13 @@ void main(uint3 id : SV_DispatchThreadID)
     const float pixelWorld = depthAtProbe * 2 * g_tanHalfFovY / g_viewHeight;
     const float3 view = normalize(g_cameraPosition - positionSpeed.xyz);
     const float3 origin = positionSpeed.xyz + normal * (2 * pixelWorld * sqrt(max(1 - pow(dot(normal, view), 2), 0.0)) + 1e-3);
-    const float maxDistance = asfloat(P[3].w);
-    const SctResult r = sctTrace(depth, pyramid, lgViewSize(), origin, direction, maxDistance, P[3].x, asfloat(P[3].y), P[3].z);
+    float maxDistance = asfloat(P[3].w);
+    if (P[2].z != 0xFFFFFFFFu)
+    {
+        const LrcCoverage coverage = lrcCoverageChecked(lrcParams(P[2].z), P[3].z, positionSpeed.xyz, lgRcDither(atlas));
+        if (coverage.valid) maxDistance = min(maxDistance, coverage.minTraceDistance);
+    }
+    const SctResult r = sctTrace(depth, pyramid, lgViewSize(), origin, direction, maxDistance, P[3].x & 0xFFFFu, asfloat(P[3].y), P[3].x >> 16);
     const float3 end = sctWorld(r.at);
     bool hit = r.hit && !r.uncertain;
     float3 radiance = 0;
@@ -61,7 +69,7 @@ void main(uint3 id : SV_DispatchThreadID)
         Texture2D<float4> previous = ResourceDescriptorHeap[P[2].x];
         const float4x4 prevViewProj = float4x4(asfloat(P[4]), asfloat(P[5]), asfloat(P[6]), asfloat(P[7]));
         const float noise = lgNoise1(coord + 4513u, lgFrame());
-        hit = sctPreviousColour(previous, P[2].yz, prevViewProj, end, asfloat(P[2].w), noise, radiance);
+        hit = sctPreviousColour(previous, uint2(P[2].y & 0xFFFFu, P[2].y >> 16), prevViewProj, end, asfloat(P[2].w), noise, radiance);
         if (hit)
         {
             const uint2 hitPixel = (uint2)clamp(r.at.xy, 0.0, (float2)lgViewSize() - 1.0);

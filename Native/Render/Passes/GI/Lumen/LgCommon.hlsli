@@ -18,13 +18,14 @@
 #define UNX_GI_LUMEN_COMMON_HLSLI
 #include "Passes/Common/Bindless.hlsli"
 #include "Passes/Common/Frame.hlsli"
+#include "Passes/Common/BlueNoise.hlsli"
 
 #define LG_PI 3.14159265358979
 #define LG_TRACE_RES 8u            // traces per probe: 8 x 8
 #define LG_GATHER_RES 8u           // probe radiance texels after the traces are gathered
 #define LG_IRRADIANCE_RES 6u       // irradiance map per probe (+ 1 texel border: 8 x 8)
 #define LG_TILE_ADAPTIVE 8u        // adaptive candidates per tile (4 x 2 samples)
-#define LG_MIN_INTERPOLATION_WEIGHT 0.03
+#define LG_MIN_INTERPOLATION_WEIGHT 0.01  // (MIN_PROBE_INTERPOLATION_WEIGHT)
 #define LG_MAX_HIT_DISTANCE 65000.0
 
 uint2 lgViewSize() { return P[8].xy; }
@@ -48,13 +49,10 @@ uint lgHash(uint x)
     return x;
 }
 float lgUnit(uint x) { return (lgHash(x) >> 8) * (1.0 / 16777216.0); }
-// Two numbers in [0, 1) for a 2D coordinate and an index: a per-coordinate rotation of the R2 sequence over the index
-// (well spread over successive indices at one coordinate, uncorrelated between coordinates).
-float2 lgNoise2(uint2 coord, uint index)
-{
-    const uint s = lgHash(coord.x * 0x9E3779B1u + coord.y * 0x85EBCA77u + 0xC2B2AE3Du);
-    return frac(float2(lgUnit(s), lgUnit(s + 1)) + (float)(index & 0xFFFFu) * float2(0.7548776662, 0.5698402910));
-}
+// Two numbers in [0, 1) for a 2D coordinate and an index: the blue-noise tile (BlueNoise.hlsli) - blue over the
+// coordinates at every index, low-discrepancy over successive indices at one coordinate (the reference reads its
+// blue-noise table for the same draws: ray texel centres, pixel jitter, probe choice, dithers).
+float2 lgNoise2(uint2 coord, uint index) { return blueNoise2(coord, index); }
 float lgNoise1(uint2 coord, uint index) { return lgNoise2(coord, index).x; }
 
 uint lgReverseBits(uint v)

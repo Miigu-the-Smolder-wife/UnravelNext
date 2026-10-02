@@ -1,6 +1,7 @@
 #pragma once
 // Frame orchestration (INTERFACES_KO.md 5.2). Owner: core. Calls the track entry points (Tracks.h) in the order of
 // ARCHITECTURE 4.1 on one graphics queue, provides FrameServices, and allocates per-view frame constants.
+#include "unx/render/BlueNoise.h"
 #include "unx/render/Frame.h"
 #include "unx/render/GpuScene.h"
 
@@ -51,6 +52,7 @@ private:
     uint32_t m_upscalePrevWidth = 0, m_upscalePrevHeight = 0;
     bool m_upscaleValid = false;
     void setupUpscale(FrameContext& frame);
+    BlueNoiseTexture m_blueNoise;        // FrameConstants::blueNoise of every view
     uint32_t m_debugDraw = 0xFFFFFFFFu;  // this frame's FrameConstants::debugDraw (tracks::debugBegin)
     float m_viewModelScale = 1.0f;       // this frame's FrameConstants::viewModelScale (tracks::viewModelPrepare)
 };

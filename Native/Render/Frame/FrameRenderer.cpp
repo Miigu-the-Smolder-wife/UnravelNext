@@ -93,6 +93,7 @@ FrameRenderer::FrameRenderer(Device& device, ShaderLibrary& shaders, const Quali
           "frame constants ring");
     D3D12_RANGE none{ 0, 0 };
     check(m_constants->Map(0, &none, reinterpret_cast<void**>(&m_mapped)), "map frame constants");
+    m_blueNoise = createBlueNoise(device);
 }
 
 FrameRenderer::~FrameRenderer()
@@ -101,6 +102,8 @@ FrameRenderer::~FrameRenderer()
     m_trackState.clear();
     if (m_constants) m_constants->Unmap(0, nullptr);
     m_device.deferRelease(m_constants);
+    m_device.deferRelease(m_blueNoise.texture);
+    if (m_blueNoise.srv != 0xFFFFFFFFu) m_device.descriptors().freeResource(m_blueNoise.srv);
 }
 
 D3D12_GPU_VIRTUAL_ADDRESS FrameRenderer::allocateFrameConstants(const FrameContext& frame, const ViewDesc& view)
@@ -114,6 +117,7 @@ D3D12_GPU_VIRTUAL_ADDRESS FrameRenderer::allocateFrameConstants(const FrameConte
     const uint64_t offset = ((frame.frameIndex % m_framesInFlight) * kMaxViewsPerFrame + m_slotViews++) * 1024;
     gpu::FrameConstants c = frameConstants(m_scene, frame, view);
     c.debugDraw = m_debugDraw;
+    c.blueNoise = m_blueNoise.srv;
     c.viewModelScale = view.kind == gpu::ViewKind::Main ? m_viewModelScale : 1.0f;  // other views see the true geometry
     // (the main view renders below the output: its texture footprints over the output pixel, GpuSceneLayout.h)
     const bool upscaled = frame.upscale.outputHeight > view.height && view.kind == gpu::ViewKind::Main && view.width == frame.mainView.width &&
@@ -152,6 +156,7 @@ gpu::FrameConstants FrameRenderer::frameConstants(const GpuScene& scene, const F
         c.windSpeed = s->windSpeed;
     }
     scene.fill(c);
+    c.blueNoise = gpu::kNone;  // (the renderer's own tile: allocateFrameConstants)
     return c;
 }
 

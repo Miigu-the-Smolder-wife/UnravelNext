@@ -103,27 +103,14 @@ void LumenRadianceCacheTraceGen()
                 {
                     RayDesc sr;
                     sr.Origin = s.position + (dot(s.geometricNormal, l) > 0 ? 1.0 : -1.0) * s.geometricNormal * lrcBias(s.position);
-                    sr.Direction = giSunDirection(seed + 7);
+                    sr.Direction = l;  // (the disk's centre: deterministic, as Lumen/LgTrace.hlsl)
                     sr.TMin = 0;
                     sr.TMax = giRayLength();
                     L.sunIlluminance = e0;
                     L.sunVisibility = rtVisible(scene, sr, RT_MASK_GI) ? 1.0 : 0.0;
                 }
             }
-            if ((P[3].w & 128) == 0 && !fromSurfaceCache)
-            {
-                const RtLocalSample ls = rtLocalLightFinish(scene, rtLocalLightChooseOriented(scene, s.position, s.normal, foliage, giUnit(seed + 11)), s.position,
-                                                            giUnit(seed + 12), giUnit(seed + 13), footprint);
-                if (ls.valid)
-                {
-                    GpuMaterial mc = m;  // the lobe toward the light widened by the ray's cone (the texel holds the cone's mean)
-                    const float alpha = modelAlpha(m.roughness);
-                    mc.roughness = sqrt(sqrt(alpha * alpha + g_rtHitCone * g_rtHitCone));
-                    const float3 f = rtLocalLightBrdfCos(mc, s.normal, -r.Direction, ls.wi, false);
-                    if (any(f > 0) && (!ls.castShadow || rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, lrcBias(s.position)), RT_MASK_GI)))
-                        L.local = f * ls.weight;
-                }
-            }
+            // (no local-light sample at a hit without cards, as Lumen/LgTrace.hlsl)
             radiance = rtHitRadiance(m, s.normal, -r.Direction, L, footprintPerMetre);
         }
     }

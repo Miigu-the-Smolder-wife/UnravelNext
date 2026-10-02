@@ -4,10 +4,14 @@
 // probe's pixel + ((x, y) + 0.5) / 8 x 2 - 1) x tile (the centre thread the probe's own pixel); a pixel counts when the
 // probe lies on its plane (plane weight > 0.01; the centre always). Its diffuse transfer function (the clamped cosine
 // lobe of its normal, SH) is averaged over the counted pixels: 9 floats. Disocclusion: a counted pixel is new when its
-// history in the pixel filter holds fewer than P[2].y frames (or there is no history); the probe is flagged when at
-// least P[2].z of its counted pixels are new (the probe filter then drops its angle test: LgFilter.hlsl).
+// history in the pixel filter holds fewer than P[2].y frames, or there is no history of its own surface there (the
+// history pixel's stored point lies off the pixel's previous plane by more than P[3].x x depth - LgTemporal's test: a
+// pixel uncovered from behind an occluder does not inherit the occluder's frames); the probe is flagged when at least
+// P[2].z of its counted pixels are new (the probe filter then drops its angle test: LgFilter.hlsl).
 // P[0] = LgSurface inputs, P[1] = { output UAV (raw, 40 B per probe: 9 SH floats, the flag as float), 0, 0, 0 },
-// P[2] = { pixel history SRV (RGBA16F, a = frames; 0xFFFFFFFF: none), max frames (float), fraction (float), 0 },
+// P[2] = { pixel history SRV (RGBA16F, a = frames; 0xFFFFFFFF: none), max frames (float), fraction (float), history
+// keys SRV (R32G32_UINT: device depth bits, normal) }, P[3].x = distance threshold (float), P[4..7] = the previous
+// frame's inverse view-projection (rows),
 // P[10].z = adaptive buffer SRV, P[10].w / P[11].y = probe depth / position SRVs. b1 = the view.
 #include "Passes/GI/Lumen/LgInterpolate.hlsli"
 
@@ -59,11 +63,25 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
                     // the pixel's own point one frame ago, in the previous view (the nearest history pixel)
                     float2 prevPixel;
                     float prevDepth;
-                    if (giPreviousPixel(lgPreviousPosition(pixel, s), (float2)lgViewSize(), prevPixel, prevDepth))
+                    const float3 prevPosition = lgPreviousPosition(pixel, s);
+                    if (giPreviousPixel(prevPosition, (float2)lgViewSize(), prevPixel, prevDepth))
                     {
                         Texture2D<float4> history = ResourceDescriptorHeap[P[2].x];
+                        Texture2D<uint2> historyKeys = ResourceDescriptorHeap[P[2].w];
                         const int2 q = (int2)floor(prevPixel);
-                        if (all(q >= 0) && all(q < (int2)lgViewSize())) isNew = history[q].a < asfloat(P[2].y);  // a = frames + 1 (LgTemporal.hlsl)
+                        if (all(q >= 0) && all(q < (int2)lgViewSize()))
+                        {
+                            const uint2 key = historyKeys[q];
+                            bool sameSurface = false;
+                            if (key.x != 0)
+                            {
+                                const float4x4 invPrev = float4x4(asfloat(P[4]), asfloat(P[5]), asfloat(P[6]), asfloat(P[7]));
+                                const float2 ndc = float2((q.x + 0.5) / lgViewSize().x * 2 - 1, 1 - (q.y + 0.5) / lgViewSize().y * 2);
+                                const float4 hp = mul(invPrev, float4(ndc, asfloat(key.x), 1));
+                                sameSurface = abs(dot(hp.xyz / hp.w - prevPosition, s.normal)) <= asfloat(P[3].x) * max(prevDepth, 1e-3);
+                            }
+                            isNew = !sameSurface || history[q].a < asfloat(P[2].y);  // a = frames + 1 (LgTemporal.hlsl)
+                        }
                     }
                 }
                 gs_new[index] = isNew ? 1u : 0u;

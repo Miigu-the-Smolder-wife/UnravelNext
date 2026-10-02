@@ -309,7 +309,9 @@ struct FrameConstants
     // the output pixel (x upscaleRatio, the temporal upsamplers' mip bias log2 ratio): the upscale accumulates the
     // jittered internal samples into output pixels, which then show the native resolution's texture detail.
     float upscaleRatio;
-    uint32_t pad0, pad1, pad2;
+    // blueNoise: SRV of the blue-noise tile (unx/render/BlueNoise.h: 64 x 64 RGBA16_UNORM, four patterns; Passes/Common/
+    // BlueNoise.hlsli blueNoise4); kNone = none (the readers fall back to a hash).
+    uint32_t blueNoise, pad1, pad2;
 };
 static_assert(sizeof(FrameConstants) == 592);
 } // namespace unx::render::gpu

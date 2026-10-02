@@ -75,10 +75,12 @@ void main(uint3 id : SV_DispatchThreadID)
     const float2 pixel = (float2)id.xy;
     float2 noiseOffset = 0;
     const float width = asfloat(P[2].x);
+    // the pixel's draws: xy the jitter, z the probe choice (one blue-noise texel, three patterns)
+    const float4 noise = blueNoise4(id.xy, lgFrame());
     if (width > 0)
     {
         const float effective = width * lerp(1.0, 0.5, saturate((s.depth - 5.0) / 5.0));
-        const float2 offset = (lgNoise2(id.xy, lgFrame()) * 2 - 1) * (float)lgTile() * effective;
+        const float2 offset = (noise.xy * 2 - 1) * (float)lgTile() * effective;
         const uint2 moved = (uint2)clamp(pixel + offset, 0.0, (float2)lgViewSize() - 1.0);
         const LgSurface sm = lgSurface(moved);
         if (sm.valid)
@@ -99,7 +101,7 @@ void main(uint3 id : SV_DispatchThreadID)
     else ps.weights = 0;
     if (P[2].y != 0)
     {
-        const float u = min(lgNoise1(id.xy + 7919u, lgFrame()), 0.99) * dot(ps.weights, 1);
+        const float u = min(noise.z, 0.99) * dot(ps.weights, 1);
         uint2 picked = ps.atlas[0];
         if (u >= ps.weights[0] + ps.weights[1] + ps.weights[2]) picked = ps.atlas[3];
         else if (u >= ps.weights[0] + ps.weights[1]) picked = ps.atlas[2];
@@ -133,10 +135,16 @@ void main(uint3 id : SV_DispatchThreadID)
         const float roughness = max(s.roughness, 0.2);
         const float alpha = roughness * roughness;
         float3 sum = 0;
+        // the lobe's 4 directions: one Hammersley set per pixel, scrambled by the pixel's blue noise (the reference:
+        // Hammersley16 with the pixel's random)
+        const float4 scrambleNoise = blueNoise4(id.xy + uint2(29u, 47u), lgFrame());
+        const uint2 scramble = uint2(scrambleNoise.xy * 65535.0);
         [unroll] for (uint k = 0; k < 4; ++k)
         {
-            float2 u = lgNoise2(id.xy + uint2(131u * (k + 1), 977u * (k + 1)), lgFrame());
-            u.y = (u.y - 0.5) * 0.9 + 0.5;
+            float2 u = lgHammersley(k, 4, scramble);
+            // (the reference's BiasBSDFImportantSample: the polar coordinate - here the sample disk's radius^2 - kept
+            // off its ends, so the lobe's far tail is not drawn)
+            u.x = (u.x - 0.5) * 0.9 + 0.5;
             const float3 l = lgSampleLobe(s.normal, v, alpha, u);
             float3 value = 0;
             [unroll] for (uint c2 = 0; c2 < 4; ++c2)

@@ -18,6 +18,7 @@
 // stronger tone map on frames without history (lumen_disocclusion_tonemap).
 #ifndef UNX_REFLECTION_REUSE_HLSLI
 #define UNX_REFLECTION_REUSE_HLSLI
+#include "Passes/Common/BlueNoise.hlsli"
 #include "Passes/Reflection/ReflectionInternal.hlsli"
 
 float reuseLuminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
@@ -102,7 +103,7 @@ bool reuseRay(ReflSurface s, uint2 pixel, uint frame, float samplingBias, out fl
     bool found = false;
     [loop] for (uint attempt = 0; attempt < 8 && !found; ++attempt)
     {
-        float2 u = float2(reuseUnit(seed), reuseUnit(seed + 1));
+        float2 u = attempt == 0 ? blueNoise2(pixel, frame & 0xFFFFFFu) : float2(reuseUnit(seed), reuseUnit(seed + 1));  // (reflNextDirection's draws)
         u.x *= 1 - samplingBias;  // (reflNextDirection's tail cut: the same value, or the replay is another ray)
         seed = reuseHash(seed + 2);
         dir = reflSampleGgx(s.normal, s.view, alpha, u);
