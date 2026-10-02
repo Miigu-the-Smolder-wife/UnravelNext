@@ -32,6 +32,13 @@ sun_steps = 24                       # (Q) a sample's path toward the sun is mar
 temporal = true                      # of each 2 x 2 block of the layer's texels one is marched a frame, the others take last
                                      # frame's value where the previous view saw their direction; the rays' sky dome is refreshed
                                      # 16 rows a frame. false: every texel and the whole dome every frame
+filtered_steps = true                # a march step's density is its mean over the step (the noise at the mip of the step's length, the
+                                     # clamps averaged in closed form: CloudCommon.hlsli cloudDensityFiltered) - the view's steps and the
+                                     # sun path's long ones, whose last step is cut at the layer's top. false: a point sample at each
+                                     # step's middle (40 .. 320 m sun steps then give a noisy optical depth: structure under thick
+                                     # cloud, and a brighter underside than the whole-path march, sun_steps = 0)
+ground_light = true                  # the ground's light on the cloud's underside (the atmosphere's ground albedo x the sun and sky on
+                                     # the ground under the layer; a height ramp as the sky's, not fitted to the path tracer)
 
 [atmosphere.fog]
 enabled = false                      # off unless the game asks for it (as the reference: a level has fog when a fog actor is placed).

@@ -5,8 +5,9 @@
 
 namespace unx::render::clouds
 {
-// The three noise textures, uploaded once (shape Texture3D R8 128^3, detail Texture3D R8 32^3, weather Texture2D RG8
-// 512^2) with their SRVs.
+// The three noise textures, uploaded once (shape Texture3D RG8 128^3 and detail Texture3D RG8 32^3 with every mip: the
+// noise, and the deviation of the level-0 texels under a mip's texel x 2 - CloudCommon.hlsli cloudDensityFiltered;
+// weather Texture2D RG8 512^2) with their SRVs.
 struct CloudTextures
 {
     ComPtr<ID3D12Resource> shape, detail, weather;
