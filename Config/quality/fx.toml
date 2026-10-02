@@ -14,6 +14,8 @@ soft = true                  # sprites as balls of their radius (FxLayerTile.hls
                              # is the part of the ball in front of the surface, so it meets the surface without an edge
                              # (Unreal's depth fade / spherical particle opacity). false: a plane at the centre's depth
 near_fade = true             # a sprite whose ball reaches the near plane fades out instead of covering the view
+particle_lights_max = 64     # the light rows' most important particles (intensity over squared distance from the camera) that are
+                             # lights of their own, after the rows' lights; the others stay in their row's light (0: rows only)
 ribbon_segments = 8          # ribbon tessellation: pieces a strip segment is drawn in at most - the cubic through its two points
                              # with the strip's tangents, one piece per 7.5 degrees of turn (1: straight segments; 16 at most)
 shadows = true               # the sun's particle transmittance map (FxShadow.hlsl): the sprites of the looks that cast a shadow
