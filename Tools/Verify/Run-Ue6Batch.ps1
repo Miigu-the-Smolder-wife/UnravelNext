@@ -114,6 +114,8 @@ if ($Skip -notcontains "variants") {
         Final "clouds without temporal accumulation (ridge, city block)" "clouds_notemporal" @("-NoGame", "-Generated", "ridge_sunset,city_block", "-Resolutions", "1080p",
             "-GateArgs", "--clouds 0.5", "-Set", "atmosphere.clouds.temporal=false")
         Final "clouds 4K (ridge timings)" "clouds" @("-NoGame", "-Generated", "ridge_sunset", "-Resolutions", "4K", "-SkipPictures", "-GateArgs", "--clouds 0.5")
+        Final "clouds with the whole sun path marched (ridge, city block)" "clouds_sunexact" @("-NoGame", "-Generated", "ridge_sunset,city_block", "-Resolutions", "1080p",
+            "-GateArgs", "--clouds 0.5", "-Set", "atmosphere.clouds.sun_steps=0")
     }
     if ($Variants -contains "thin") {
         # thin geometry: the LOD that keeps the area off (the clusters as they were), and the fuller clustering of

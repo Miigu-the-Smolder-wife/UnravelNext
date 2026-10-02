@@ -24,6 +24,7 @@
 // modes 1-2) or first row (mode 0) };
 // P[2] = { transmittance LUT SRV (mode 0), stats UAV (mode 0), distance UAV (mode 0: R16F, km, extinction-weighted mean),
 // multiple-scattering table SRV (mode 0) }.
+// P[3].w (modes 0 and 3) = the sun path's marched steps (cloudSunTauNear; 0: the whole path, cloudSunTauMarch).
 // P[3] (mode 0) = { last frame's layer SRV (UNX_NONE: every texel is marched), last frame's distance SRV, this frame's
 // texel of each 2 x 2 block (0..3: x | y << 1), 0 }: a texel that is not this frame's takes last frame's value at the
 // place the previous view (g_prevViewProj) saw its direction - a cloud's direction places it, kilometres away - and is
@@ -100,7 +101,8 @@ void main(uint2 id : SV_DispatchThreadID)
             if (rho <= 0) continue;
             const float segment = (1 - exp(-rho * dt)) / rho;
             // Mode 2 (attribution): the map alone.
-            const float tauSun = P[1].z == 2 ? cloudSunTau(c, x) : cloudSunTauMarch(c, x);
+            // (modes 0 and 3 with P[3].w steps: the near field marched, the sun map beyond - atmosphere.clouds.sun_steps)
+            const float tauSun = P[1].z == 2 ? cloudSunTau(c, x) : (approximate && P[1].z != 4 && P[3].w != 0 ? cloudSunTauNear(c, x, P[3].w) : cloudSunTauMarch(c, x));
             if (tauSun < 0) sunCapped = 1;
             const float w = T * (1 - exp(-rho * dt));
             const float sun = approximate ? cloudMsSun(ms, abs(tauSun)) : phase * exp(-abs(tauSun));

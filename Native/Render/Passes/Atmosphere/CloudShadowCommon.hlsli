@@ -130,4 +130,44 @@ float cloudSunTauMarch(CloudRecord c, float3 x)
     // Past the structural bound: the map gives the rest; the result is returned negative so the caller counts it.
     return -(tau + cloudSunTau(c, x + c.sunDir * t));
 }
+
+// Whether the sun map holds x (cloudSunTau returns 0 outside it).
+bool cloudSunMapCovers(CloudRecord c, float3 x)
+{
+    float3 U, V;
+    cloudShadowBasis(c.sunDir, U, V);
+    const float3 r = x - c.shadowCentre;
+    return all(abs(float2(dot(r, U), dot(r, V))) < c.shadowHalfExtent);
+}
+
+// The sun's optical depth at a sample for the frame's picture (atmosphere.clouds.sun_steps): 'steps' midpoint steps
+// toward the sun - CLOUD_SUN_NEAR_STEPS of CLOUD_SUN_STEP, then doubling every second step (12 steps: 1,280 m) - and
+// the sun map from where they end. The march is exact where the cloud's own shape decides the light (the sample's
+// surroundings); the map, whose texel rays blend across cloud edges, gives the far part, where that blending is the
+// scale of the answer anyway. A sample the map does not reach (clouds toward the horizon, past its extent) marches on
+// in its last, longest steps for as many steps again.
+float cloudSunTauNear(CloudRecord c, float3 x, uint steps)
+{
+    float tau = 0, t = 0, dt = CLOUD_SUN_STEP;
+    [loop] for (uint k = 0; k < steps && tau < CLOUD_SUN_TAU_MAX; ++k)
+    {
+        if (k >= CLOUD_SUN_NEAR_STEPS && ((k - CLOUD_SUN_NEAR_STEPS) & 1) == 0) dt *= 2;
+        const float3 y = x + c.sunDir * (t + 0.5 * dt);
+        const float a = cloudAltitude(c, y);
+        if (a > c.top || a < c.base - 1) return tau;
+        tau += cloudDensity(c, y) * dt;
+        t += dt;
+    }
+    if (tau >= CLOUD_SUN_TAU_MAX) return tau;
+    if (cloudSunMapCovers(c, x + c.sunDir * t)) return tau + cloudSunTau(c, x + c.sunDir * t);
+    [loop] for (uint j = 0; j < steps && tau < CLOUD_SUN_TAU_MAX; ++j)
+    {
+        const float3 y = x + c.sunDir * (t + 0.5 * dt);
+        const float a = cloudAltitude(c, y);
+        if (a > c.top || a < c.base - 1) return tau;
+        tau += cloudDensity(c, y) * dt;
+        t += dt;
+    }
+    return tau;
+}
 #endif

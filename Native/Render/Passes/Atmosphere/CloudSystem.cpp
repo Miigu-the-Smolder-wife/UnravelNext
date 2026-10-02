@@ -176,6 +176,8 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
     s.parity = layer;
     const QualityConfig& q = fc.quality;
     const bool temporal = !q.has("atmosphere.clouds.temporal") || q.boolean("atmosphere.clouds.temporal");
+    // the sun path's marched steps per sample (CloudShadowCommon.hlsli cloudSunTauNear; 0: the whole path)
+    const uint32_t sunSteps = q.has("atmosphere.clouds.sun_steps") ? (uint32_t)std::min<int64_t>(std::max<int64_t>(q.integer("atmosphere.clouds.sun_steps"), 0), 64) : 0u;
     const bool history = temporal && s.history && fc.frame.discontinuity == 0;
     s.history = true;
     rec.layerSrv = s.radianceSrv[layer], rec.distanceSrv = s.distanceSrv[layer], rec.skySrv = s.domeSrv;
@@ -258,7 +260,7 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
                   for (uint32_t row = 0; row < h; row += kBandRows)
                   {
                       const uint32_t k[16] = { recordSrv, c.uav(radiance), 0xFFFFFFFFu, 4, w, h, 0, row, c.srv(transmittanceLut), c.uav(stats), c.uav(distance), c.srv(msTable),
-                                               history ? c.srv(previousRadiance) : 0xFFFFFFFFu, history ? c.srv(previousDistance) : 0xFFFFFFFFu, blockTexel, 0 };
+                                               history ? c.srv(previousRadiance) : 0xFFFFFFFFu, history ? c.srv(previousDistance) : 0xFFFFFFFFu, blockTexel, sunSteps };
                       c.computeConstants(k, 16);
                       c.cmd->Dispatch(groups(w, 8), groups(std::min(kBandRows, h - row), 8), 1);
                   }
@@ -276,7 +278,7 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
                   c.cmd->SetPipelineState(pc);
                   c.bindFrameConstants(cb);
                   const uint32_t k[16] = { recordSrv, c.uav(dome), 0xFFFFFFFFu, 1, kDomeWidth, kDomeHeight, 3, domeRow, c.srv(transmittanceLut), 0xFFFFFFFFu, 0xFFFFFFFFu,
-                                           c.srv(msTable), 0xFFFFFFFFu, 0xFFFFFFFFu, 0, 0 };
+                                           c.srv(msTable), 0xFFFFFFFFu, 0xFFFFFFFFu, 0, sunSteps };
                   c.computeConstants(k, 16);
                   c.cmd->Dispatch(groups(kDomeWidth, 8), groups(domeRows, 8), 1);
               });
