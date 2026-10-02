@@ -102,21 +102,36 @@ CelestialState celestial(const CelestialTime& t)
     return s;
 }
 
+double twilightIlluminance(double depressionDeg)
+{
+    // log10 lux at 0, 6, 12 and 18 degrees (sunset about 700, the ends of civil, nautical and astronomical twilight 3.4,
+    // 8e-3 and 6.5e-4), linear between; past 18 degrees the last value
+    static const double node[4] = { 2.845, 0.531, -2.097, -3.187 };
+    const double x = std::clamp(depressionDeg, 0.0, 18.0) / 6.0;
+    const int i = std::min((int)x, 2);
+    return std::pow(10.0, node[i] + (node[i + 1] - node[i]) * (x - i));
+}
+
 DirectionalLight directionalLight(const CelestialState& s, const scene::Sun& sunAtTop, float moonAlbedo)
 {
     DirectionalLight out;
     out.sun = sunAtTop;
-    if (s.sunAltitudeDeg >= -6.0)
+    const double alpha = s.moonPhaseAngleDeg * kDeg;
+    const double phase = (std::sin(alpha) + (kPi - alpha) * std::cos(alpha)) / kPi;  // Lambert sphere
+    const double ratio = kMoonRadiusKm / s.moonDistanceKm;
+    const double moonLux = moonAlbedo * sunAtTop.illuminance * ratio * ratio * (2.0 / 3.0) * phase;
+    // The slot goes to the moon when what it gives level ground directly passes what the sun's twilight still gives it:
+    // the light that leaves with the sun's sky is then no more than the light that arrives. With the moon down the sun
+    // keeps the slot through the night (its twilight is in the atmosphere's tables down to 23.6 degrees).
+    const double moonOnGround = moonLux * std::max(std::sin(s.moonAltitudeDeg * kDeg), 0.0);
+    if (s.sunAltitudeDeg >= 0 || twilightIlluminance(-s.sunAltitudeDeg) * (sunAtTop.illuminance / 128000.0) >= moonOnGround)
     {
         out.sun.direction = s.sun;
         return out;
     }
-    const double alpha = s.moonPhaseAngleDeg * kDeg;
-    const double phase = (std::sin(alpha) + (kPi - alpha) * std::cos(alpha)) / kPi;  // Lambert sphere
-    const double ratio = kMoonRadiusKm / s.moonDistanceKm;
     out.moon = true;
     out.sun.direction = s.moon;
-    out.sun.illuminance = (float)(moonAlbedo * sunAtTop.illuminance * ratio * ratio * (2.0 / 3.0) * phase);
+    out.sun.illuminance = (float)moonLux;
     out.sun.angularRadius = (float)std::asin(ratio);
     out.sun.color = sunAtTop.color * float3{ 1.0f, 0.96f, 0.90f };  // the lunar surface reflects red more (authored tint)
     return out;

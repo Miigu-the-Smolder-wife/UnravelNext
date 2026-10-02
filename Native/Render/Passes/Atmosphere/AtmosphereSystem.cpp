@@ -33,6 +33,7 @@ struct State
     // Inputs of the last sky view build.
     float3 skySun{};
     float skyAltitude = -1;
+    float skyAirglow = 0;  // the airglow radiance the sky view was built with (atmosphere.night_sky_in_lut; 0: none)
     bool skyValid = false;
     AtmosphereStats stats;
     // Celestial objects (B4, Celestial.h): the star buffer (static, built at the first frame that draws stars) and the
@@ -276,6 +277,7 @@ void publishCelestial(FramePassContext& fc, State& s)
     const uint32_t slot = (uint32_t)(fc.frame.frameIndex % State::kRingSlots);
     uint32_t words[32];
     sky::packCelestialFrame(f, s.stars ? s.starCount : 0, s.stars ? s.starsSrv : UINT32_MAX, words);
+    if (s.skyValid && s.skyAirglow > 0) words[25] |= 8u;  // (the sky view holds the airglow: Celestial.hlsli leaves it out)
     std::memcpy(s.ringMapped + slot * 128ull, words, 128);
     fc.resources.celestial = s.ringSrv[slot];
 }
@@ -640,7 +642,12 @@ void record(FramePassContext& fc)
     // by more than max(0.25 m, 1e-4 altitude) since its build: below 1e-4 of the radiance and 0.1 px of horizon at
     // 960 px (the readers already take it for points tens of metres from the camera).
     const float altitudeTolerance = std::max(0.25f, 1e-4f * std::fabs(altitude));
-    if (!s.skyValid || std::memcmp(&sun, &s.skySun, sizeof sun) != 0 || !(std::fabs(altitude - s.skyAltitude) <= altitudeTolerance))
+    // atmosphere.night_sky_in_lut: the frame's airglow (FrameContext::celestial) goes into the sky view (SkyView.hlsl), so
+    // the rays that escape to the sky - GI, reflections, the cloud dome's background - have the night's floor of light,
+    // not only the sky pixels; the view is rebuilt when the value changes.
+    const bool nightInLut = !fc.quality.has("atmosphere.night_sky_in_lut") || fc.quality.boolean("atmosphere.night_sky_in_lut");
+    const float airglow = nightInLut ? std::max(fc.frame.celestial.airglowRadiance, 0.0f) : 0.0f;
+    if (!s.skyValid || std::memcmp(&sun, &s.skySun, sizeof sun) != 0 || !(std::fabs(altitude - s.skyAltitude) <= altitudeTolerance) || airglow != s.skyAirglow)
     {
         ID3D12PipelineState* ps = sh.compute("Passes/Atmosphere/SkyView");
         const D3D12_GPU_VIRTUAL_ADDRESS cb = constants();
@@ -653,14 +660,16 @@ void record(FramePassContext& fc)
                       b.keep();
                   },
                   [=](PassContext& c) {
-                      const uint32_t k[4] = { c.srv(params), c.srv(tlut), c.srv(mlut), c.uav(sky) };
+                      uint32_t k[8] = { c.srv(params), c.srv(tlut), c.srv(mlut), c.uav(sky), 0, 0, 0, 0 };
+                      std::memcpy(&k[4], &airglow, 4);  // P[1].x: the night sky's own light (nits at the zenith)
                       c.cmd->SetPipelineState(ps);
                       c.bindFrameConstants(cb);
-                      c.computeConstants(k, 4);
+                      c.computeConstants(k, 8);
                       c.cmd->Dispatch(p.skyViewSize[0], p.skyViewSize[1], 1);  // one group per texel (SkyView.hlsl)
                   });
         s.skySun = sun;
         s.skyAltitude = altitude;
+        s.skyAirglow = airglow;
         s.skyValid = true;
         ++s.stats.skyViewBuilds;
     }

@@ -41,16 +41,17 @@ float3 atmosphereSkyRadiance(AtmosphereSrvs s, float3 worldDir)
     const uint2 lo = min(uint2(coord), uint2(a.skyViewSize.x - 1, half - 1));
     const uint2 hi = min(lo + 1, uint2(a.skyViewSize.x - 1, half - 1));
     const float2 f = saturate(coord - float2(lo));
-    float3 part[3];
+    // (the first part's alpha: the night sky's own light in nits - the airglow through the air, SkyView.hlsl)
+    float4 part[3];
     [unroll] for (uint k = 0; k < 3; ++k)
     {
         const uint row = side * half + k * a.skyViewSize.y;
-        const float3 v00 = t.Load(int3(lo.x, row + lo.y, 0)).rgb, v10 = t.Load(int3(hi.x, row + lo.y, 0)).rgb;
-        const float3 v01 = t.Load(int3(lo.x, row + hi.y, 0)).rgb, v11 = t.Load(int3(hi.x, row + hi.y, 0)).rgb;
+        const float4 v00 = t.Load(int3(lo.x, row + lo.y, 0)), v10 = t.Load(int3(hi.x, row + lo.y, 0));
+        const float4 v01 = t.Load(int3(lo.x, row + hi.y, 0)), v11 = t.Load(int3(hi.x, row + hi.y, 0));
         part[k] = lerp(lerp(v00, v10, f.x), lerp(v01, v11, f.x), f.y);
     }
     const float nu = dot(normalize(worldDir), normalize(g_sunDirection));
-    return (part[0] + part[1] * airRayleighPhase(nu) + part[2] * airMiePhase(nu, a.mieG)) * (g_sunIlluminance * g_sunColor);
+    return (part[0].rgb + part[1].rgb * airRayleighPhase(nu) + part[2].rgb * airMiePhase(nu, a.mieG)) * (g_sunIlluminance * g_sunColor) + part[0].a;
 }
 
 // Radiance of the solar disk seen from worldPos (uniform disk, INTERFACES 8.3): E_TOA * T(p -> sun) * colour /

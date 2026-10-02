@@ -8,7 +8,8 @@
 //   stars    each star's illuminance E spread by a Gaussian of 0.7 pixel (in the pixel grid of D, Dx, Dy): the sum over
 //            the pixels is E within 4e-4 at any sub-pixel position [measured, NightSkyTests] (the grid samples a Gaussian
 //            of that width closely), so a moving sky does not flicker; cells of a cube grid in equatorial coordinates;
-//   airglow  an emission layer at 90 km: the zenith radiance x van Rhijn's slant factor;
+//   airglow  an emission layer at 90 km: the zenith radiance x van Rhijn's slant factor - here unless the record's flags
+//            bit 3 says the far-field sky has it (SkyView.hlsl: every sky reader then takes it, the escaping rays too);
 // each times the atmosphere's transmittance to space along the pixel direction (none without the LUT).
 #ifndef UNX_ATMOSPHERE_CELESTIAL_HLSLI
 #define UNX_ATMOSPHERE_CELESTIAL_HLSLI
@@ -83,7 +84,7 @@ float3 atmosphereCelestial(AtmosphereSrvs atm, uint celestialSrv, float3 D, floa
     const float3 ex = normalize(D + Dx) - d, ey = normalize(D + Dy) - d;  // one pixel along each axis, in angle
     const float omega = max(length(cross(ex, ey)), 1e-20);                 // the pixel's solid angle
     float3 L = 0;
-    if (c.airglow > 0)
+    if (c.airglow > 0 && (c.flags & 8u) == 0)  // (flags bit 3: the sky view LUT holds the airglow - atmosphere.night_sky_in_lut)
     {
         const float k = 6360.0 / 6450.0;  // emission layer at 90 km over the planet's surface
         L += c.airglow / sqrt(max(1 - k * k * (1 - d.y * d.y), 1e-4));
