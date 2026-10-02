@@ -55,7 +55,8 @@ enum UnxResult
                             //    and lifetime fades), UnxSceneSetInstanceReceivesDecals,
                             //    UnxFrameSetColorGrading, UnxFrameSetPost, UnxFrameSetDisplayEncoding (the picture's settings a game
                             //    changes while it runs), UnxFrameSetFog2, UnxFrameSetFogVolumes2, UnxFrameSetClouds2,
-                            //    UnxFrameSetWeather, UnxFrameSetLightning, UnxFrameSetPoolWeather (the weather)
+                            //    UnxFrameSetWeather, UnxFrameSetLightning, UnxFrameSetPoolWeather (the weather),
+                            //    UnxFrameGetStatistics (frame pacing data: GPU time, resolution, the dynamic resolution's state)
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -1259,6 +1260,50 @@ typedef struct UnxPoolWeatherDesc
 static_assert(sizeof(UnxPoolWeatherDesc) == 32, "UnxPoolWeatherDesc is part of the ABI");
 #endif
 UNX_API int32_t UNX_CALL UnxFrameSetPoolWeather(UnxRenderer r, const UnxPoolWeatherDesc* pools, uint32_t count);
+
+// ---- Frame pacing data (read-only; an optional export within ABI 6, a bridge probes for it; after commit, any time):
+// what a game paces its frames, scales its own load or draws a readout by - the renderer's GPU frame time, the main
+// view's resolution with the dynamic resolution's state (output.dynamic_resolution_target_ms), and the GPU time by pass
+// group. One call, one consistent snapshot; UnxFrameStatsLatest and UnxFramePassTimingsLatest hold the same frame's
+// times pass by pass.
+// The GPU times are of the last frame the GPU completed ('frameIndex': a few frames behind the newest one queued); the
+// view's sizes and the controller's state are of the newest frame recorded, and 'gpuRenderWidth/Height' is the
+// internal resolution the timed frame was rendered at, so a time can be set against the pixels it paid for.
+// A pass group is the pass names' part before the first '.' ("v" visibility, "m" material and shading with the upscale
+// and the post chain, "r" reflections and GI, "s" shadows, "w" water, "fx", "hair", ...): at most
+// UNX_FRAME_STATISTICS_GROUPS, the largest GPU time first; with more groups than that the last entry is "other", the
+// rest summed. The groups' times add up to the passes' time; the frame's time ('gpuMs') also has the time between
+// passes in it and counts the two queues' overlap once (UnxFrameGraphStats::queues).
+#define UNX_FRAME_STATISTICS_GROUPS 16
+typedef struct UnxFrameStatisticsGroup
+{
+    char name[16];              // UTF-8, zero-terminated, truncated to 15 bytes
+    float gpuMs;                // the group's passes, summed
+    uint32_t passes;
+} UnxFrameStatisticsGroup;
+typedef struct UnxFrameStatistics
+{
+    uint32_t size, version;     // sizeof, 1
+    uint64_t frameIndex;        // the frame the GPU times belong to (UnxFrameStats::frameIndex); UINT64_MAX: none yet
+    double gpuMs;               // that frame on the GPU, first to last timestamp over the queues
+    double cpuRecordMs, cpuSubmitMs;  // the newest frame's recording and submission on the CPU
+    uint32_t gpuRenderWidth, gpuRenderHeight;  // the main view's internal resolution in the timed frame (0: none yet)
+    uint32_t outputWidth, outputHeight;        // the main view of the newest frame recorded (0: none yet)
+    uint32_t renderWidth, renderHeight;        // ... and its internal resolution (the output's when it is not upscaled)
+    uint32_t dynamicResolution; // 1: the dynamic resolution's controller is running (a budget is set, the view upscaled)
+    float resolutionScale;      // renderHeight / outputHeight
+    float dynamicTargetMs;      // the controller's GPU time budget (0: off)
+    float dynamicMeasuredMs;    // the weighted GPU frame time its last decision was made from (0: none measured yet)
+    uint32_t minRenderHeight, maxRenderHeight;  // the range the controller moves the internal height in (off: renderHeight)
+    uint32_t passes;            // the timed frame's passes
+    uint32_t groupCount;        // entries of 'groups' filled
+    UnxFrameStatisticsGroup groups[UNX_FRAME_STATISTICS_GROUPS];
+} UnxFrameStatistics;
+#ifdef __cplusplus
+static_assert(sizeof(UnxFrameStatisticsGroup) == 24, "UnxFrameStatisticsGroup is part of the ABI");
+static_assert(sizeof(UnxFrameStatistics) == 480, "UnxFrameStatistics is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameGetStatistics(UnxRenderer r, UnxFrameStatistics* statistics);
 
 #ifdef __cplusplus
 }

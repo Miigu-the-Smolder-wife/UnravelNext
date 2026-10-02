@@ -19,7 +19,10 @@
 // P[1] = { foreground SRV, hole filling SRV, slight SRV, background SRV } (half resolution, RGBA16F)
 // P[2] = { width, height, half width, half height }, P[3] = the lens (4 floats, DdofCommon.hlsli)
 // P[4] = { asuint(jitter x), asuint(jitter y) (full-resolution pixels), frame index, sample pairs (16; the reference's
-//          lower quality 12) }, P[5] = { asuint(the stable range's widening near focus), 0, 0, 0 }
+//          lower quality 12) }, P[5] = { asuint(the stable range's widening near focus), asuint(depth blur radius),
+//          asuint(depth blur exponent x near plane) (DdofCommon.hlsli ddofCoc), asuint(the lens's squeeze) }
+// An anamorphic lens (P[5].w): the disc's samples are taken x / squeeze apart (the nearest pixel) and measured on the
+// lens, x * squeeze of the pixel taken.
 #include "Bindless.hlsli"
 #include "Passes/Shading/DdofCommon.hlsli"
 
@@ -75,7 +78,7 @@ Tap tapAt(int2 pixel, float away, float2 direction)
     pixel = clamp(pixel, 0, int2(P[2].xy) - 1);
     Tap t;
     t.colour = colour.Load(int3(pixel, 0)).rgb;
-    t.coc = ddofCoc(depth.Load(int3(pixel, 0)), asfloat(P[3]));
+    t.coc = ddofCoc(depth.Load(int3(pixel, 0)), asfloat(P[3]), asfloat(P[5].yz));
     t.hit = reachOf(t.coc, away / ddofEdgeFactor(P[0].w, direction));
     t.weight = sampleWeight(t.coc);
     t.opacity = backgroundOpacity(t.coc);
@@ -107,7 +110,7 @@ void main(uint2 id : SV_DispatchThreadID, uint index : SV_GroupIndex)
         [unroll] for (uint j = 0; j < 4; ++j)
         {
             const int2 at = clamp(pixel + kDdofCross[j] * (int)(2.0 * DDOF_RECOMBINE_COC), 0, int2(size) - 1);
-            const float other = abs(ddofCoc(depth.Load(int3(at, 0)), asfloat(P[3])));
+            const float other = abs(ddofCoc(depth.Load(int3(at, 0)), asfloat(P[3]), asfloat(P[5].yz)));
             if (other < DDOF_RECOMBINE_COC) widest = max(widest, other);
         }
         InterlockedMax(gWidest, asuint(widest));  // (not negative: floats order as their bits)
@@ -123,7 +126,8 @@ void main(uint2 id : SV_DispatchThreadID, uint index : SV_GroupIndex)
     {
         const float fullRadius = 2.0 * widestInGroup;
         const float kernelRadius = ceil(fullRadius) + 0.5;  // (half a pixel more: the samples are whole pixels)
-        const uint pairs = min(pairsMax, (uint)(DDOF_PI * fullRadius * fullRadius * 0.5));
+        const float squeeze = asfloat(P[5].w);
+        const uint pairs = min(pairsMax, (uint)(DDOF_PI * fullRadius * fullRadius * 0.5 / squeeze));  // (the pixels the bokeh covers)
         const uint2 seed = pcg3d16(uint3(id, P[4].z % 8u)).xy;
         // the pixel itself always counts
         float3 colour = centre.colour * centre.weight;
@@ -131,9 +135,11 @@ void main(uint2 id : SV_DispatchThreadID, uint index : SV_GroupIndex)
         for (uint i = 0; i < pairs; ++i)
         {
             float2 offset = kernelRadius * concentricDisk(hammersley16(i, pairsMax, seed));
-            offset = sign(offset) * floor(abs(offset) + 0.5);
-            const float away = 0.5 * length(offset);  // (in half-resolution pixels, as the radii)
-            Tap s = tapAt(pixel + int2(offset), away, offset), m = tapAt(pixel - int2(offset), away, -offset);
+            offset.x /= squeeze;
+            const int2 pixels = int2(sign(offset) * floor(abs(offset) + 0.5));
+            const float2 onLens = float2(pixels) * float2(squeeze, 1.0);
+            const float away = 0.5 * length(onLens);  // (in half-resolution pixels, as the radii)
+            Tap s = tapAt(pixel + pixels, away, onLens), m = tapAt(pixel - pixels, away, -onLens);
             if (m.coc > s.coc)
             {
                 m.hit = s.hit;

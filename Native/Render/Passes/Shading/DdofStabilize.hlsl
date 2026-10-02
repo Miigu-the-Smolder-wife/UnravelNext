@@ -7,9 +7,12 @@
 // Per pixel:
 //   filtered   the plus-shaped neighbourhood under a Gaussian about the unjittered centre (exp(-2.29 d^2)), a
 //              neighbour weighted down by how far behind the centre's radius it is; the radius is the centre's;
-//   history    the previous output at the point the nearest surface of the pixel's surroundings was (the camera's
-//              motion only - ours: the reference reads its velocity buffer, which this renderer makes after this pass;
-//              a moving object's history is held by the box below), bilinear (the reference: bicubic);
+//   history    the previous output at the point the nearest surface of the pixel's surroundings was, bilinear (the
+//              reference: bicubic). That surface's vector is the upscale's (shading.dof_diaphragm_prefilter_velocity;
+//              m.upscale.motion, made before this pass: a moving object, a deforming one and the layers over the opaque
+//              surface move as themselves, and the nearest surface is found in the depth those vectors are of - the
+//              reference reads its velocity buffer the same way). Without it: the camera's motion at the view's
+//              depth, a moving object's history held by the box below;
 //   box        the 3 x 3 neighbourhood's minimum and maximum in YCoCg and of the radius: the history is clamped to it;
 //   blend      the current frame's weight (P[2].z; the reference's r.TemporalAACurrentFrameWeight 0.04), towards 0.2
 //              over 40 pixels of motion, at least 0.01 luma(history) / |luma(filtered) - luma(history)|; weighted by
@@ -17,7 +20,11 @@
 // P[0] = { setup SRV (RGBA16F: rgb, a = radius), history SRV, depth SRV (full resolution), output UAV }
 // P[1] = { half width, half height, full width, full height }
 // P[2] = { asuint(jitter x), asuint(jitter y) (full-resolution pixels), asuint(current frame weight), flags (1: the
-//          history holds the previous frame) }, P[3..6] = rows of the previous unjittered view-projection
+//          history holds the previous frame, 2: P[7] has the vectors) }, P[3..6] = rows of the previous unjittered
+//          view-projection
+// P[7] = { motion SRV (RG32F per full-resolution pixel: the unjittered UV now - the UV in the previous frame; beyond
+//          1: no previous point - UpscaleMotion.hlsl), the depth of the surface each vector is of SRV (device depth), 0, 0 }
+// The history is read by UV: its size need not be this frame's (dynamic resolution).
 // Frame constants of the (jittered) main view.
 #include "Bindless.hlsli"
 #include "Passes/Common/Frame.hlsli"
@@ -38,7 +45,6 @@ void main(uint2 id : SV_DispatchThreadID)
     if (any(id >= size)) return;
     Texture2D<float4> setup = ResourceDescriptorHeap[P[0].x];
     Texture2D<float4> previous = ResourceDescriptorHeap[P[0].y];
-    Texture2D<float> depth = ResourceDescriptorHeap[P[0].z];
     RWTexture2D<float4> output = ResourceDescriptorHeap[P[0].w];
     const float2 jitter = asfloat(P[2].xy);
     const int2 last = int2(size) - 1, lastFull = int2(P[1].zw) - 1;
@@ -71,24 +77,48 @@ void main(uint2 id : SV_DispatchThreadID)
     {
         // the nearest surface of the pixel's four and of the cross two pixels out (reversed depth: the largest)
         const int2 base = int2(2 * id);
-        float nearest = 0;
-        [unroll] for (uint i = 0; i < 4; ++i)
+        const bool vectors = (P[2].w & 2u) != 0;
+        Texture2D<float> surface = ResourceDescriptorHeap[vectors ? P[7].y : P[0].z];
+        float nearest = -1;
+        int2 nearestAt = min(base, lastFull);
+        [unroll] for (uint i = 0; i < 8; ++i)
         {
-            nearest = max(nearest, depth.Load(int3(min(base + kDdofSquare[i], lastFull), 0)));
-            nearest = max(nearest, depth.Load(int3(clamp(base + 2 * kDdofCross[i], 0, lastFull), 0)));
+            const int2 at = clamp(base + (i < 4 ? kDdofSquare[i] : 2 * kDdofCross[i - 4]), 0, lastFull);
+            const float d = surface.Load(int3(at, 0));
+            if (d > nearest)
+            {
+                nearest = d;
+                nearestAt = at;
+            }
         }
-        // where the point at the pixel's centre and that depth was: its motion in full-resolution pixels
-        const float2 here = float2(base) + 1.0;  // (the half-resolution pixel's centre in the jittered view)
-        const float3 world = worldFromDepth(here - 0.5, max(nearest, 1e-6));
-        const float4x4 prevViewProj = float4x4(asfloat(P[3]), asfloat(P[4]), asfloat(P[5]), asfloat(P[6]));
-        const float4 clip = mul(prevViewProj, float4(world, 1));
+        // where that surface's point at the pixel's centre was: its motion in full-resolution pixels
         const float2 full = float2(P[1].zw);
+        float2 motion = 0;
+        bool known = false;
+        if (vectors)
+        {
+            Texture2D<float2> motions = ResourceDescriptorHeap[P[7].x];
+            const float2 m = motions.Load(int3(nearestAt, 0));
+            known = all(abs(m) < 1.0);
+            motion = m * full;
+        }
+        else
+        {
+            const float2 here = float2(base) + 1.0;  // (the half-resolution pixel's centre in the jittered view)
+            const float3 world = worldFromDepth(here - 0.5, max(nearest, 1e-6));
+            const float4x4 prevViewProj = float4x4(asfloat(P[3]), asfloat(P[4]), asfloat(P[5]), asfloat(P[6]));
+            const float4 clip = mul(prevViewProj, float4(world, 1));
+            if (clip.w > 0)
+            {
+                const float2 was = float2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5) * full;
+                motion = (here - jitter) - was;
+                known = true;
+            }
+        }
         float2 historyUv = -1;
         float speed = 0;
-        if (clip.w > 0)
+        if (known)
         {
-            const float2 was = float2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5) * full;
-            const float2 motion = (here - jitter) - was;
             speed = length(motion);
             historyUv = (float2(id) + 0.5 - 0.5 * motion) / float2(size);
         }

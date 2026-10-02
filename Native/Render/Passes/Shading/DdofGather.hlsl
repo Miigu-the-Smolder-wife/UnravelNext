@@ -36,6 +36,14 @@
 // P[1] = { foreground tiles SRV, background tiles SRV, output UAV (RGBA16F), radius statistics UAV (RG16F, LAYER=2) | none }
 // P[2] = { half width, half height, level 0's width, height (padded) }
 // P[3] = { ring count (3 .. 5), level count, gather table SRV | none (a disc), edge table SRV | none }
+// P[4] = { asuint(the lens's squeeze), asuint(1 / squeeze), asuint(the Petzval box's corner radius), asuint(the
+//          picture's width / height) }, P[5] = { asuint(Petzval amount) (0: none), asuint(falloff power), asuint(box half
+//          extents x), asuint(y) } (DdofCommon.hlsli ddofPetzval)
+// The lens's shape of the kernel (the reference's CocInvSqueeze and ApplyApproxPetzval): the wide layers' sample
+// positions are x / squeeze, then squashed by the Petzval matrix of the pixel (one matrix for the kernel: its samples'
+// own bokehs are taken as centred where the kernel is); a sample's distance stays its ring's. The slight layer's
+// samples stay on the pixel grid and are measured on the lens (x * squeeze), without the Petzval matrix, as the
+// full-resolution gather they bound.
 #include "Bindless.hlsli"
 #include "Passes/Shading/DdofCommon.hlsli"
 
@@ -58,6 +66,7 @@ struct Kernel
     float sharpness;  // of a sample's reach: 1 / the level's texel
     uint rings, level;
     bool bilinear;
+    float4 petzval;   // lens offsets to the picture (DdofCommon.hlsli ddofPetzval)
 };
 struct Tap
 {
@@ -150,6 +159,10 @@ void pairOf(Kernel k, uint ring, uint batch, uint quarter, out float2 a, out flo
         a = direction * ((float)ring * k.spacing);
         b = -a;
     }
+    a.x *= asfloat(P[4].y);
+    b.x *= asfloat(P[4].y);
+    a = ddofTransform(k.petzval, a);
+    b = ddofTransform(k.petzval, b);
 #endif
 }
 
@@ -321,15 +334,16 @@ void gatherRing(inout Accumulator a, Kernel k, uint ring)
             float2 oa, ob;
             pairOf(k, ring, batch, quarter, oa, ob);
 #if LAYER == DDOF_SLIGHT
-            if (dot(oa, oa) > ((float)k.rings + 0.5) * ((float)k.rings + 0.5)) continue;  // (outside the disc)
-            const float away = length(oa);
+            const float2 onLens = oa * float2(asfloat(P[4].x), 1.0);
+            if (dot(onLens, onLens) > ((float)k.rings + 0.5) * ((float)k.rings + 0.5)) continue;  // (outside the disc)
+            const float away = length(onLens);
 #else
             const float away = (float)ring * k.spacing;
 #endif
             Tap s = fetch(k, k.centre + oa), m = fetch(k, k.centre + ob);
 #if LAYER == DDOF_SLIGHT
-            s.coc *= ddofEdgeFactor(P[3].w, oa);
-            m.coc *= ddofEdgeFactor(P[3].w, ob);
+            s.coc *= ddofEdgeFactor(P[3].w, onLens);
+            m.coc *= ddofEdgeFactor(P[3].w, -onLens);
 #endif
             s.away = m.away = away;
             s.hit = reachOf(k, s.coc, away);
@@ -399,6 +413,7 @@ void main(uint2 gid : SV_GroupID, uint2 id : SV_DispatchThreadID)
     k.sharpness = 1;
     k.centre = 0;
     const float2 pixel = float2(id) + 0.5;
+    k.petzval = ddofPetzval(pixel / float2(P[2].xy) * 2.0 - 1.0, asfloat(P[5]), asfloat(P[4].zw), true);
     const float2 random = float2(gradientNoise(float2(id), 0), gradientNoise(float2(id), 1));
     const uint levels = max(P[3].y, 1u);
 
