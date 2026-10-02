@@ -460,6 +460,33 @@ void HostRenderer::setMeshAttributes(uint32_t mesh, std::vector<float2> uv1, std
     m.colors = std::move(colors);
 }
 
+void HostRenderer::setLightComponents(uint32_t light, const scene::Light& c)
+{
+    requireOpen();
+    if (light >= m_scene.lights.size()) fail("light components: light %u of %zu", light, m_scene.lights.size());
+    scene::Light& l = m_scene.lights[light];
+    l.specularScale = c.specularScale;
+    l.diffuseScale = c.diffuseScale;
+    l.volumetricScattering = c.volumetricScattering;
+    l.indirectIntensity = c.indirectIntensity;
+    l.sourceTexture = c.sourceTexture;
+    l.barnDoorAngle = c.barnDoorAngle;
+    l.barnDoorLength = c.barnDoorLength;
+    l.lightingChannels = c.lightingChannels;
+    l.maxDrawDistance = c.maxDrawDistance;
+    l.maxDistanceFadeRange = c.maxDistanceFadeRange;
+    l.temperature = c.temperature;
+    l.falloffExponent = c.falloffExponent;
+}
+
+void HostRenderer::setInstanceLightingChannels(uint32_t instance, uint32_t channels)
+{
+    requireOpen();
+    if (instance >= m_scene.instances.size()) fail("lighting channels: instance %u of %zu", instance, m_scene.instances.size());
+    if (channels > 7) fail("lighting channels: 0x%x (three bits)", channels);
+    m_scene.instances[instance].flags = scene::withLightingChannels(m_scene.instances[instance].flags, channels);
+}
+
 void HostRenderer::applyEdits(const FramePacket& p, scene::Scene& s)
 {
     for (const auto& [i, m] : p.materialEdits)

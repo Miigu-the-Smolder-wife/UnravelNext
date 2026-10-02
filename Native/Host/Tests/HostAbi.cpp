@@ -73,6 +73,9 @@ struct Api
     UNX_FN(UnxMaterialInputsDefaults)
     UNX_FN(UnxSceneSetMaterialInputs)
     UNX_FN(UnxSceneSetMeshAttributes)
+    UNX_FN(UnxLightComponentsDefaults)
+    UNX_FN(UnxSceneSetLightComponents)
+    UNX_FN(UnxSceneSetInstanceLightingChannels)
 #undef UNX_FN
     void load(const std::filesystem::path& path)
     {
@@ -110,6 +113,9 @@ struct Api
         UNX_FN(UnxMaterialInputsDefaults)
         UNX_FN(UnxSceneSetMaterialInputs)
         UNX_FN(UnxSceneSetMeshAttributes)
+        UNX_FN(UnxLightComponentsDefaults)
+        UNX_FN(UnxSceneSetLightComponents)
+        UNX_FN(UnxSceneSetInstanceLightingChannels)
 #undef UNX_FN
     }
     void ok(int32_t r, const char* what) const
@@ -174,6 +180,32 @@ void addLayerMaterials(scene::Scene& s)
     tiled.detailColorStrength = 0.5f;
     tiled.vertexColorTint = true;
     s.materials.push_back(tiled);
+    // a mesh's second uv set and colours (UnxSceneSetMeshAttributes), an instance's lighting channels (the flags' bits:
+    // UNX_INSTANCE_LIGHTING_CHANNELS), a light's components (UnxSceneSetLightComponents)
+    if (!s.meshes.empty())
+    {
+        scene::Mesh& m = s.meshes.back();
+        for (size_t v = 0; v < m.positions.size(); ++v)
+        {
+            m.uv1.push_back({ 0.25f * (float)(v % 4), 0.125f * (float)(v / 4) });
+            m.colors.push_back(0xFF000000u | (uint32_t)(v * 37 % 256) | ((uint32_t)(v * 91 % 256) << 8));
+        }
+    }
+    if (!s.instances.empty()) s.instances.back().flags = scene::withLightingChannels(s.instances.back().flags, 5);
+    if (!s.lights.empty())
+    {
+        scene::Light& l = s.lights.front();
+        l.specularScale = 0.5f;
+        l.diffuseScale = 1.5f;
+        l.volumetricScattering = 2.0f;
+        l.indirectIntensity = 0.25f;
+        l.lightingChannels = 5;
+        l.maxDrawDistance = 80.0f;
+        l.maxDistanceFadeRange = 10.0f;
+        l.temperature = 3200.0f;
+        if (l.type == scene::LightType::Point || l.type == scene::LightType::Spot) l.falloffExponent = 2.0f;
+        if (l.type == scene::LightType::Rect) l.barnDoorLength = 0.2f, l.barnDoorAngle = 0.6f;
+    }
     scene::Material eye;
     eye.name = "abi eye";
     eye.cls = scene::MaterialClass::Subsurface;
@@ -371,6 +403,7 @@ void pushScene(const Api& api, UnxRenderer r, const scene::Scene& s)
         }
         ++materialIndex;
     }
+    uint32_t meshIndex = 0;
     for (const scene::Mesh& m : s.meshes)
     {
         std::vector<UnxSubmesh> subs;
@@ -397,6 +430,10 @@ void pushScene(const Api& api, UnxRenderer r, const scene::Scene& s)
         d.inverseBind = ib.empty() ? nullptr : ib.data();
         copyName(d.name, m.name);
         api.ok(api.UnxSceneAddMesh(r, &d, nullptr), "UnxSceneAddMesh");
+        if (!m.uv1.empty() || !m.colors.empty())
+            api.ok(api.UnxSceneSetMeshAttributes(r, meshIndex, m.uv1.empty() ? nullptr : &m.uv1[0].x, m.colors.empty() ? nullptr : m.colors.data(), d.vertexCount),
+                   "UnxSceneSetMeshAttributes");
+        ++meshIndex;
     }
     for (const scene::Skeleton& sk : s.skeletons)
     {
@@ -410,7 +447,8 @@ void pushScene(const Api& api, UnxRenderer r, const scene::Scene& s)
         d.size = sizeof d;
         d.version = 1;
         d.mesh = inst.mesh;
-        d.flags = inst.flags;
+        // (the lighting channels as the header's macro gives them: the same bits the scene keeps)
+        d.flags = (inst.flags & ~(uint32_t)scene::InstanceLightingChannelsMask) | UNX_INSTANCE_LIGHTING_CHANNELS(scene::instanceLightingChannels(inst.flags));
         d.skeleton = inst.skeleton;
         d.materialOverrideCount = (uint32_t)inst.materialOverrides.size();
         d.materialOverrides = inst.materialOverrides.empty() ? nullptr : inst.materialOverrides.data();
@@ -420,6 +458,7 @@ void pushScene(const Api& api, UnxRenderer r, const scene::Scene& s)
         d.windAnchorHeight = inst.wind.anchorHeight;
         api.ok(api.UnxSceneAddInstance(r, &d, nullptr), "UnxSceneAddInstance");
     }
+    uint32_t lightIndex = 0;
     for (const scene::Light& l : s.lights)
     {
         UnxLightDesc d{};
@@ -438,6 +477,25 @@ void pushScene(const Api& api, UnxRenderer r, const scene::Scene& s)
         d.areaSize[0] = l.size.x;
         d.areaSize[1] = l.size.y;
         api.ok(api.UnxSceneAddLight(r, &d, nullptr), "UnxSceneAddLight");
+        if (scene::hasLightComponents(l))
+        {
+            UnxLightComponentsDesc c;
+            api.ok(api.UnxLightComponentsDefaults(&c), "UnxLightComponentsDefaults");
+            c.specularScale = l.specularScale;
+            c.diffuseScale = l.diffuseScale;
+            c.volumetricScattering = l.volumetricScattering;
+            c.indirectIntensity = l.indirectIntensity;
+            c.sourceTexture = l.sourceTexture;
+            c.barnDoorAngle = l.barnDoorAngle;
+            c.barnDoorLength = l.barnDoorLength;
+            c.lightingChannels = l.lightingChannels;
+            c.maxDrawDistance = l.maxDrawDistance;
+            c.maxDistanceFadeRange = l.maxDistanceFadeRange;
+            c.temperature = l.temperature;
+            c.falloffExponent = l.falloffExponent;
+            api.ok(api.UnxSceneSetLightComponents(r, lightIndex, &c), "UnxSceneSetLightComponents");
+        }
+        ++lightIndex;
     }
     UnxEnvironmentDesc e{};
     api.ok(api.UnxEnvironmentDefaults(&e), "UnxEnvironmentDefaults");

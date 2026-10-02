@@ -47,7 +47,10 @@ enum UnxResult
                             //    UnxSceneSetCharacterShading (skin, eye and cloth parameters of a material),
                             //    UnxMaterialInputsDefaults, UnxSceneSetMaterialInputs (uv transform, second uv set, detail
                             //    maps, height, emissive scale and mask, vertex colour, dithered opacity),
-                            //    UnxSceneSetMeshAttributes (a mesh's second uv set and vertex colours)
+                            //    UnxSceneSetMeshAttributes (a mesh's second uv set and vertex colours),
+                            //    UnxLightComponentsDefaults, UnxSceneSetLightComponents (a light's scales, source texture,
+                            //    barn doors, lighting channels, draw distance, colour temperature, falloff exponent),
+                            //    UnxSceneSetInstanceLightingChannels
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -230,7 +233,13 @@ enum UnxInstanceFlags  // scene::InstanceFlags
     UNX_INSTANCE_DYNAMIC = 1u << 1,
     UNX_INSTANCE_SKINNED = 1u << 2,
     UNX_INSTANCE_WIND = 1u << 3,
+    // bits 4..6: the instance's lighting channels (UNX_INSTANCE_LIGHTING_CHANNELS below); 0 = channel 0 alone
 };
+// The lighting channels of an instance as its flags' bits: channels = a mask of the three channels (bit 0, 1, 2) the
+// instance is in - a light lights the instances that share a channel with it (UnxLightComponentsDesc::lightingChannels).
+// Or it into UnxInstanceDesc::flags (UnxSceneAddInstance, UnxSceneEditInstances); a description without it is in
+// channel 0, as every light is by default.
+#define UNX_INSTANCE_LIGHTING_CHANNELS(channels) (((((uint32_t)(channels)) & 7u) ^ 1u) << 4)
 
 typedef struct UnxInstanceDesc
 {
@@ -760,6 +769,49 @@ UNX_API int32_t UNX_CALL UnxSceneSetMaterialInputs(UnxRenderer r, uint32_t mater
 // (the second uv set) or null, colors = one RGBA8 per vertex with r in the low byte (linear values; Unity's Color32) or
 // null; vertexCount must be the mesh's.
 UNX_API int32_t UNX_CALL UnxSceneSetMeshAttributes(UnxRenderer r, uint32_t mesh, const float* uv1, const uint32_t* colors, uint32_t vertexCount);
+
+// Light components (optional exports within ABI 6; before UnxSceneCommit: lights are fixed at commit): what a light
+// carries beyond UnxLightDesc (scene::Light's light components; the engine's local light and rect light components).
+//   scales       the light's specular lobes and its diffuse light on the surfaces it lights directly, its in-scattering in
+//                the air and fog, and its share in the indirect light (what GI and reflections carry on); >= 0.
+//   source       rect lights: the image the emitter shows and emits (a scene texture, UNX_TEXTURE_RGBA8_SRGB or
+//                UNX_TEXTURE_RGBA16_FLOAT; UNX_NONE: uniform); the light's colour multiplies it.
+//   barn doors   rect lights: four flaps of barnDoorLength metres along the emitter's edges, opened by barnDoorAngle
+//                radians from the emitter's normal (0: straight walls, pi / 2: flat - no effect). Length 0: none.
+//   channels     a mask of the three lighting channels the light is in (default 1: channel 0): it lights the instances
+//                that share one (UNX_INSTANCE_LIGHTING_CHANNELS, UnxSceneSetInstanceLightingChannels).
+//   distance     the light is not drawn past maxDrawDistance metres from the camera (0: always) and fades out over the
+//                last maxDistanceFadeRange metres before it (0: a cut).
+//   temperature  kelvin (1,000..15,000; 0: not used): the light's colour is UnxLightDesc::color times the black body's
+//                chromaticity at it, at the colour's own luminance (6,500 K: about white).
+//   falloff      point and spot lights: 0 = the inverse-square falloff with the range's window (intensity in candela);
+//                > 0: (1 - (d / range)^2)^exponent without the inverse square, the intensity then the illuminance (lux)
+//                at the light.
+// Fill the description with UnxLightComponentsDefaults first (a zeroed one has no scales and names texture 0). The
+// values are checked at UnxSceneCommit with the rest of the scene.
+typedef struct UnxLightComponentsDesc
+{
+    uint32_t size, version;             // sizeof (64), 1
+    float specularScale, diffuseScale, volumetricScattering, indirectIntensity;  // >= 0 (default 1)
+    uint32_t sourceTexture;             // a scene texture or UNX_NONE
+    float barnDoorAngle;                // radians, [0, pi / 2] (default pi / 2)
+    float barnDoorLength;               // m, >= 0 (default 0: none)
+    uint32_t lightingChannels;          // 3 bits (default 1)
+    float maxDrawDistance;              // m, >= 0 (default 0: always drawn)
+    float maxDistanceFadeRange;         // m, >= 0
+    float temperature;                  // K (default 0: not used)
+    float falloffExponent;              // >= 0 (default 0: inverse square)
+    uint32_t reserved[2];               // 0
+} UnxLightComponentsDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxLightComponentsDesc) == 64, "UnxLightComponentsDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxLightComponentsDefaults(UnxLightComponentsDesc* desc);
+UNX_API int32_t UNX_CALL UnxSceneSetLightComponents(UnxRenderer r, uint32_t light, const UnxLightComponentsDesc* desc);
+// The lighting channels of an instance already added (before UnxSceneCommit; channels: a mask of the three channels, as
+// UNX_INSTANCE_LIGHTING_CHANNELS takes it). After commit, describe the instance anew with the flag bits
+// (UnxSceneEditInstances).
+UNX_API int32_t UNX_CALL UnxSceneSetInstanceLightingChannels(UnxRenderer r, uint32_t instance, uint32_t channels);
 
 // Loads a .unxscene file (INTERFACES 6.2) as the renderer's content: textures, materials, meshes, skeletons, instances
 // (their flags included), lights, sun, atmosphere and wind, with the file's indices. Only before any content was added and

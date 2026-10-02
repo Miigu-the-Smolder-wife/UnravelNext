@@ -684,6 +684,57 @@ UNX_API int32_t UNX_CALL UnxSceneSetMeshAttributes(UnxRenderer r, uint32_t mesh,
     });
 }
 
+UNX_API int32_t UNX_CALL UnxLightComponentsDefaults(UnxLightComponentsDesc* d)
+{
+    return call([&] {
+        if (!d) fail("UnxLightComponentsDesc output is null");
+        const scene::Light l;
+        std::memset(d, 0, sizeof *d);
+        d->size = sizeof *d;
+        d->version = 1;
+        d->specularScale = l.specularScale;
+        d->diffuseScale = l.diffuseScale;
+        d->volumetricScattering = l.volumetricScattering;
+        d->indirectIntensity = l.indirectIntensity;
+        d->sourceTexture = UNX_NONE;
+        d->barnDoorAngle = l.barnDoorAngle;
+        d->barnDoorLength = l.barnDoorLength;
+        d->lightingChannels = l.lightingChannels;
+        d->maxDrawDistance = l.maxDrawDistance;
+        d->maxDistanceFadeRange = l.maxDistanceFadeRange;
+        d->temperature = l.temperature;
+        d->falloffExponent = l.falloffExponent;
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxSceneSetLightComponents(UnxRenderer r, uint32_t light, const UnxLightComponentsDesc* d)
+{
+    return call([&] {
+        if (!d) fail("UnxSceneSetLightComponents: no description");
+        if (d->size != sizeof(UnxLightComponentsDesc) || d->version != 1)
+            fail("UnxSceneSetLightComponents: UnxLightComponentsDesc size %u version %u", d->size, d->version);
+        scene::Light c;
+        c.specularScale = d->specularScale;
+        c.diffuseScale = d->diffuseScale;
+        c.volumetricScattering = d->volumetricScattering;
+        c.indirectIntensity = d->indirectIntensity;
+        c.sourceTexture = d->sourceTexture;
+        c.barnDoorAngle = d->barnDoorAngle;
+        c.barnDoorLength = d->barnDoorLength;
+        c.lightingChannels = d->lightingChannels;
+        c.maxDrawDistance = d->maxDrawDistance;
+        c.maxDistanceFadeRange = d->maxDistanceFadeRange;
+        c.temperature = d->temperature;
+        c.falloffExponent = d->falloffExponent;
+        find(r)->setLightComponents(light, c);
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxSceneSetInstanceLightingChannels(UnxRenderer r, uint32_t instance, uint32_t channels)
+{
+    return call([&] { find(r)->setInstanceLightingChannels(instance, channels); });
+}
+
 UNX_API int32_t UNX_CALL UnxFrameSetClouds(UnxRenderer r, const UnxCloudDesc* clouds)
 {
     return call([&] {

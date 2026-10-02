@@ -326,6 +326,10 @@ public:
     void setMaterialInputs(uint32_t material, const MaterialInputs& in);
     // A mesh's second uv set and vertex colours (before commit; either may be empty, each as long as the mesh's vertices).
     void setMeshAttributes(uint32_t mesh, std::vector<float2> uv1, std::vector<uint32_t> colors);
+    // A light's components (before commit; 'components' carries them in a scene::Light - its other fields are not read)
+    // and an instance's lighting channels (before commit; a 3-bit mask). scene::validate checks the values at commit.
+    void setLightComponents(uint32_t light, const scene::Light& components);
+    void setInstanceLightingChannels(uint32_t instance, uint32_t channels);
     SceneCommitInfo commit();
     // Quality override before commit ("section.key=value", QualityConfig::applyOverride): a game's post terms, for example.
     void overrideQuality(const std::string& assignment);
