@@ -26,7 +26,7 @@ struct Constants  // HairSimulate.hlsl HairConstants
     uint32_t guideJoint, inputs, jointsPrev, jointsCur;
     uint32_t capsuleOffset, frameNodes, frameRotations, followBuffer;
     uint32_t segments, localIterations, substeps, lodKeep;
-    uint32_t segmentBase, pad0, pad1, pad2;
+    uint32_t segmentBase, kept, pad1, pad2;
     float gravity[3], damping;
     float wind[3], dt;
     float globalStiffness, globalRange, localStiffness, dftlDamping;
@@ -71,6 +71,9 @@ struct HairSystem::Body
     BodyDesc desc;
     uint32_t guides = 0, nodes = 0, follows = 0;
     std::vector<float4> rest, follow, initial;
+    // The follow strands' LOD hashes in rising order: the strands a keep threshold leaves are the first
+    // lower_bound(threshold) of that order (the order itself rides in the follow records, HairSimulate.hlsl STEP 2).
+    std::vector<uint32_t> lodHashes;
     std::vector<uint32_t> guideJoint;
     float extent = 0;  // max distance of a rest node from its root (LOD bound)
     // The density volume's bounds (HairDensity.hlsli): per joint the box of its guides' rest nodes (joint space; lo > hi:
@@ -150,6 +153,20 @@ uint32_t HairSystem::addBody(const BodyDesc& d)
         std::memcpy(&hf, &h, 4);
         b->follow.push_back({ x.offset.x, x.offset.y, x.offset.z, g });
         b->follow.push_back({ x.tipSpread, hf, 0, 0 });
+    }
+    // LOD order: the follows by rising hash (ties by index). Record k's third word holds the k-th of them, so a frame
+    // that keeps K strands writes the segments of those K alone, side by side (as Unreal reorders a groom's curves so
+    // that a LOD is the first N of them).
+    {
+        std::vector<uint32_t> order(b->follows);
+        for (uint32_t f = 0; f < b->follows; ++f) order[f] = f;
+        std::stable_sort(order.begin(), order.end(), [](uint32_t x, uint32_t y) { return pcg(x * 2654435761u + 12345u) < pcg(y * 2654435761u + 12345u); });
+        b->lodHashes.resize(b->follows);
+        for (uint32_t k = 0; k < b->follows; ++k)
+        {
+            b->lodHashes[k] = pcg(order[k] * 2654435761u + 12345u);
+            std::memcpy(&b->follow[2 * (size_t)k + 1].z, &order[k], 4);
+        }
     }
     uint32_t id;
     if (!m_free.empty())
@@ -361,7 +378,10 @@ public:
             }
             b.pending.clear();
             // LOD: strands crossing a pixel of the hair's cross-section ~ total projected strand length / projected area;
-            // above 2, a deterministic subset with widths scaled by 1 / fraction (projected coverage kept)
+            // above 2, a deterministic subset with widths scaled by 1 / fraction (projected coverage kept). The subset is
+            // the strands whose hash lies under the threshold - the first 'kept' of the body's LOD order - and only their
+            // segments are written: the frame's segment buffer, V's mesh groups over it and every per-segment pass are as
+            // large as what is drawn, not as the groom.
             const float4* root = &b.jointsCur[0];
             const float3 centre{ root[0].w, root[1].w, root[2].w };
             const float distance = std::max(length(centre - v.position), v.nearPlane);
@@ -378,13 +398,16 @@ public:
             inputs.insert(inputs.end(), b.jointsCur.begin(), b.jointsCur.end());
             cf.frameFraction = system.fraction();
             cf.lodKeep = fraction >= 1 ? 0xFFFFFFFFu : (uint32_t)std::min(4294967295.0, (double)fraction * 4294967296.0);
+            const uint32_t kept =
+                cf.lodKeep == 0xFFFFFFFFu ? b.follows : (uint32_t)(std::lower_bound(b.lodHashes.begin(), b.lodHashes.end(), cf.lodKeep) - b.lodHashes.begin());
+            cf.kept = kept;
             cf.radiusScale = 1 / fraction;
             cf.segmentBase = segmentsTotal;
             dispatches.push_back({ &b, 1, (uint32_t)constants.size(), (b.guides + 63) / 64 });
             constants.push_back(cf);
-            if (b.follows)
+            if (kept)
             {
-                dispatches.push_back({ &b, 2, (uint32_t)constants.size(), (b.follows + 63) / 64 });
+                dispatches.push_back({ &b, 2, (uint32_t)constants.size(), (kept + 63) / 64 });
                 constants.push_back(cf);
             }
             // the body's box under the tick's two joint sets (the frame's joints lie between them), camera-relative
@@ -407,13 +430,13 @@ public:
             }
             uint32_t* h = &header[1 + kBodyHeaderWords * bi];
             h[0] = segmentsTotal;
-            h[1] = b.follows * (b.nodes - 1);
+            h[1] = kept * (b.nodes - 1);
             h[2] = b.nodes - 1;
             h[3] = b.desc.material;
             h[4] = b.desc.instance;
             std::memcpy(&h[5], &fraction, 4);
             std::memcpy(&h[6], &cf.radiusScale, 4);
-            segmentsTotal += b.follows * (b.nodes - 1);
+            segmentsTotal += kept * (b.nodes - 1);
         }
 
         // The density volume (HairDensity.hlsli; shading.hair_density_resolution cells per side, 0: none): made when the
@@ -429,7 +452,11 @@ public:
         const uint32_t densityColumns = densityBodies ? std::min(densityBodies, 2048u / densityRes) : 0u;
         const uint32_t densityRows = densityBodies ? (densityBodies + densityColumns - 1) / densityColumns : 0u;
         if (densityRows * densityRes > 2048u) fail("shading.hair_density_bodies: %u blocks of %u cells exceed a 3D texture", densityBodies, densityRes);
-        std::vector<uint32_t> densityParams(4 + 8 * bodies.size(), 0);
+        // (parameters, HairDensity.hlsli: header, the bodies' words, then the bodies with a block - their count and per body
+        // its index and material, nearest first)
+        constexpr size_t kDensityHeader = 8, kDensityBody = 8, kDensityEntry = 2;  // HAIR_DENSITY_HEADER, _BODY_WORDS, _LIST_WORDS
+        const size_t densityListAt = kDensityHeader + kDensityBody * bodies.size();
+        std::vector<uint32_t> densityParams(densityListAt + 1 + kDensityEntry * densityBodies, 0);
         struct DensityBody
         {
             uint32_t body, block;
@@ -442,6 +469,8 @@ public:
             std::stable_sort(order.begin(), order.end(), [&](uint32_t x, uint32_t y) { return boxes[x].distance < boxes[y].distance; });
             densityParams[0] = (uint32_t)bodies.size();
             densityParams[1] = densityRes;
+            const float origin[3] = { v.position.x, v.position.y, v.position.z };  // (what the boxes are relative to)
+            std::memcpy(&densityParams[4], origin, 12);
             for (uint32_t k = 0; k < densityBodies; ++k)
             {
                 const Box& box = boxes[order[k]];
@@ -450,13 +479,16 @@ public:
                 if (!(longest > 0)) continue;
                 const float cell = longest / (float)densityRes;
                 const float f[4] = { box.lo.x, box.lo.y, box.lo.z, cell };
-                uint32_t* w = &densityParams[4 + 8 * order[k]];
+                uint32_t* w = &densityParams[kDensityHeader + kDensityBody * order[k]];
                 std::memcpy(w, f, 16);
                 const float extent[3] = { size.x, size.y, size.z };
                 for (int axis = 0; axis < 3; ++axis) w[4 + axis] = std::clamp((uint32_t)std::ceil(extent[axis] / cell), 1u, densityRes);
                 w[7] = (k % densityColumns) | ((k / densityColumns) << 16);
+                densityParams[densityListAt + 1 + kDensityEntry * densityList.size()] = order[k];
+                densityParams[densityListAt + 2 + kDensityEntry * densityList.size()] = bodies[order[k]]->desc.material;
                 densityList.push_back({ order[k], k });
             }
+            densityParams[densityListAt] = (uint32_t)densityList.size();
         }
         const uint64_t constantsBytes = constants.size() * kConstantSlot, inputsBytes = std::max<size_t>(inputs.size(), 1) * 16,
                        headerBytes = (header.size() * 4 + 15) / 16 * 16, densityBytes = densityBodies ? (densityParams.size() * 4 + 15) / 16 * 16 : 0;
@@ -679,6 +711,7 @@ public:
             fc.resources.hairDensity = fine;
             fc.resources.hairDensityCoarse = low;
             fc.resources.hairDensityParams = params;
+            fc.resources.hairOrigin = v.position;
         }
     }
 

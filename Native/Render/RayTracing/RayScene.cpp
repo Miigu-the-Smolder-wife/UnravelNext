@@ -283,6 +283,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     m_proxySkinWeight = (float)quality.number("raytracing.proxy_skin_weight");
     m_proxyPosedFactor = (float)quality.number("raytracing.proxy_posed_factor");
     m_emittersEnabled = quality.boolean("raytracing.emitters");
+    m_hairEnabled = !quality.has("raytracing.hair") || quality.boolean("raytracing.hair");
     {
         const std::string model = quality.string("raytracing.proxy_error_model");
         if (model != "measured" && model != "bound") fail("raytracing.proxy_error_model must be \"measured\" or \"bound\" (got \"%s\")", model.c_str());
@@ -1802,10 +1803,11 @@ struct RtLightHeader
     uint32_t lightsOffset, cellStartOffset, cellLightsOffset, pad2;
     uint32_t decal[4];  // words 16..19, per frame (RayScene::recordDecals; HitDecals.hlsli): TLAS, frames, texture table, count
     uint32_t functions[4];  // word 20, per frame: E's light functions (FrameResources::lightFunctions, A8), 0xFFFFFFFF none;
-                            // word 21, per frame: the FX lights' groups (recordFxLights, A3), 0xFFFFFFFF none
+                            // word 21, per frame: the FX lights' groups (recordFxLights, A3), 0xFFFFFFFF none;
+                            // word 22, per frame: E's hair density parameters (recordHair; HitHair.hlsli), 0xFFFFFFFF none
 };
 static_assert(sizeof(RtLightHeader) == 96);
-constexpr uint32_t kLightDecalOffset = 64, kLightFunctionOffset = 80;
+constexpr uint32_t kLightDecalOffset = 64, kLightFunctionOffset = 80, kLightHairOffset = 88;
 constexpr uint32_t kLightCellsMax = 1u << 18;  // the grid's cell size grows past this many cells (262,144 x 4 B starts)
 } // namespace
 
@@ -2100,7 +2102,7 @@ void RayScene::publishLightSlot(FramePassContext& fc)
     // Words 16..19, every frame: no decals unless recordDecals writes them after this (a slot keeps an earlier frame's).
     const uint32_t noDecals[4] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0 };
     std::memcpy(m_lightRingMapped + slot * m_lightSlotBytes + kLightDecalOffset, noDecals, sizeof noDecals);
-    const uint32_t noFunctions[2] = { 0xFFFFFFFFu, 0xFFFFFFFFu };  // word 20 (light functions), word 21 (FX lights, recordFxLights)
+    const uint32_t noFunctions[3] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };  // word 20 (light functions), word 21 (FX lights, recordFxLights), word 22 (hair, recordHair)
     std::memcpy(m_lightRingMapped + slot * m_lightSlotBytes + kLightFunctionOffset, noFunctions, sizeof noFunctions);
     m_lightSrvNow = m_lightRingSrv[slot];
 }
@@ -2667,5 +2669,39 @@ void RayScene::declareDecals(PassBuilder& b) const
     if (!m_decalTlasRef.valid()) return;
     b.use(m_decalTlasRef, Use::AccelerationStructureRead);
     b.use(m_decalFrames, Use::SrvGraphics);  // as declareTraversal: ray and compute passes of R
+}
+
+// E's hair density volume for the rays (HitHair.hlsli): the parameters' SRV exists when a pass executes, so a pass of
+// its own writes it into the frame's header slot (word 22) before the ray passes run, as the light functions' (word 20).
+void RayScene::recordHair(FramePassContext& fc)
+{
+    if (m_hairFrame == fc.frame.frameIndex) return;
+    m_hairFrame = fc.frame.frameIndex;
+    m_frame.hairParams = {};
+    m_frame.hairFine = m_frame.hairCoarse = {};
+    const FrameResources& r = fc.resources;
+    if (!m_hairEnabled || !r.hairDensityParams.valid() || !r.hairDensity.valid() || !r.hairDensityCoarse.valid()) return;
+    m_frame.hairParams = r.hairDensityParams;
+    m_frame.hairFine = r.hairDensity;
+    m_frame.hairCoarse = r.hairDensityCoarse;
+    uint8_t* word = lightSlot(fc) + kLightHairOffset;
+    const BufferRef params = r.hairDensityParams;
+    fc.graph.addPass("r.hair.params", QueueType::Compute,
+                     [&](PassBuilder& b) {
+                         b.use(params, Use::SrvGraphics);
+                         b.keep();
+                     },
+                     [word, params](PassContext& c) {
+                         const uint32_t srv = c.srv(params);
+                         std::memcpy(word, &srv, 4);
+                     });
+}
+
+void RayScene::declareHair(PassBuilder& b) const
+{
+    if (!m_frame.hairParams.valid()) return;
+    b.use(m_frame.hairParams, Use::SrvGraphics);  // as declareTraversal: ray and compute passes of R
+    b.use(m_frame.hairFine, Use::SrvGraphics);
+    b.use(m_frame.hairCoarse, Use::SrvGraphics);
 }
 } // namespace unx::render::rt

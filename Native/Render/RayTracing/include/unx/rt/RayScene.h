@@ -124,6 +124,15 @@ public:
     // header. declareDecals adds its reads to a pass that shades hits.
     void recordDecals(FramePassContext& fc, const ViewResources& main);
     void declareDecals(PassBuilder& b) const;
+    // Hair at ray hits (RayTracing/HitHair.hlsli; raytracing.hair): the rays' proxy of E's strands is E's density volume
+    // (Passes/Hair/HairDensity.hlsli; FrameResources::hairDensityParams, recorded by tracks::hair after this scene's
+    // record) - a ray's first fibre in it is a hit the ray pass shades. Once per frame, before the first pass whose rays
+    // read it takes rootConstants (GI's gather, the reflections): word 22 of this frame's light-grid header = the
+    // parameters' SRV (0xFFFFFFFF: no volume this frame, or the switch off). declareHair adds the volume's reads to such
+    // a pass; hairParams is the buffer for a compute pass that follows the same rays (the screen traces).
+    void recordHair(FramePassContext& fc);
+    void declareHair(PassBuilder& b) const;
+    BufferRef hairParams() const { return m_frame.hairParams; }
     const RaySceneStats& stats() const { return m_stats; }
     // B3: whether this object was rebuilt from the previous one for an instance edit (meshes and materials kept), and the
     // world AABBs of the geometry that changed (instances added, removed, re-meshed, hidden or moved while static) at
@@ -256,8 +265,12 @@ private:
     {
         BufferRef tlasStatic, tlasDynamic, deformedBlas, deformedVertices, exactCounts, instances, jobs, lightFunctions, runtimePool, geometries, streamPool;
         BufferRef fxCdf, fxLights;  // A3: the FX lights' groups (FxLightGroups.hlsl) and the scene light buffer they index
+        BufferRef hairParams;       // E's hair density volume (recordHair): parameters and the two textures
+        TextureRef hairFine, hairCoarse;
     };
     Frame m_frame;
+    uint64_t m_hairFrame = ~0ull;    // the frame recordHair ran for
+    bool m_hairEnabled = true;       // raytracing.hair
 
     Device& m_device;
     ShaderLibrary& m_shaders;

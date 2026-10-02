@@ -426,7 +426,9 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
 
     // Trace: the GI cache rays' sky and sun (record()), the ray scene, hit lighting from the world cache.
     uint32_t scene[8];
+    rays.recordHair(fc);  // E's grooms on the rays (HitHair.hlsli): the header's word 22, before rootConstants
     rays.rootConstants(scene);
+    const BufferRef hairParams = rays.hairParams();  // (invalid: no density volume this frame, or raytracing.hair off)
     const FrameResources& fr = fc.resources;
     const bool atmosphere = fr.transmittanceLut.valid() && fr.multiScatterLut.valid() && fr.skyViewLut.valid() && fr.aerialPerspective.valid();
     const TextureRef luts[4] = { fr.transmittanceLut, fr.multiScatterLut, fr.skyViewLut, fr.aerialPerspective };
@@ -462,6 +464,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                       b.use(traceRadiance, Use::UavCompute);
                       b.use(traceWord, Use::UavCompute);
                       if (farField) b.use(rcIndirection, Use::SrvCompute);
+                      rays.declareHair(b);  // (a ray that meets a groom first is the world trace's)
                   },
                   [=, &shaders](PassContext& c) {
                       uint32_t k[48] = {};
@@ -481,6 +484,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                       for (int row = 0; row < 4; ++row)
                           for (int col = 0; col < 4; ++col) k[16 + 4 * row + col] = bits(up.prevViewProj.m[row][col]);
                       probeWords(c, k);
+                      k[46] = hairParams.valid() ? c.srv(hairParams) : 0xFFFFFFFFu;  // P[11].z
                       k[47] = bits(L.movingSpeed);
                       c.cmd->SetPipelineState(shaders.compute("Passes/GI/Lumen/LgScreenTrace"));
                       c.computeConstants(k, 48);
@@ -507,6 +511,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   }
                   rays.declareTraversal(b);
                   rays.declareDecals(b);
+                  rays.declareHair(b);
                   if (atmosphere)
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
               },

@@ -13,7 +13,17 @@
 //      - a capsule under the strands: after 2 s no node is inside radius + margin (1e-5 m);
 //      - wind along +z deflects the tips to +z;
 //      - follow strands at rest: segment ends = guide node + offset (camera-relative, 1e-5 m), consecutive segments
-//        share their end points, radii taper from root to tip; LOD far away keeps a subset with widths x 1 / fraction.
+//        share their end points, radii taper from root to tip; LOD far away keeps a subset with widths x 1 / fraction,
+//        whose segments alone are in the frame's buffer (header segments = kept strands x segments per strand).
+//   3. density volume (HairDensity.hlsl / .hlsli), two slabs of parallel strands (2 mm apart both ways, diameter 0.1 mm:
+//      rho = 25 / m; 6.4 cm thick: (pi / 4) rho L = 1.2566 fibres across one), rays across them, means over 64 rays
+//      (8 x 8 places over 12 x 6 cm: the strands' lattice and the segments' deposits beat with the cells):
+//      - hairFibreCount across a slab within 5 %, to its middle (hairFibreCountWithin) half of it within 10 %;
+//      - hairTransmittance across both slabs = exp(-the two bodies' counts) (the exponent within 5 %), and across the
+//        first alone when the ray ends between them;
+//      - hairFirstFibre: the probability of meeting a fibre in a slab = 1 - exp(-count) (within 5 %), the median of the
+//        first fibre's place at the uniform slab's ln(1 - met / 2) / (-(pi / 4) rho) past its face (within 7 mm), the
+//        quantiles in order and inside the slab.
 //   unx_test_hair_hairtests [--no-debug-layer]
 #include "../../Atmosphere/Tests/TestFrame.h"
 
@@ -271,7 +281,8 @@ int main(int argc, char** argv)
                     ViewResources v;
                     v.view = tf.frame.mainView;
                     tracks::hair(fc, v);
-                    seg = tf.readbackBuffer(fc, fc.resources.hairSegments, (uint64_t)G * 2 * (N - 1) * 32);
+                    // (the buffer holds the kept strands' segments: every strand's from near, a subset's from far)
+                    seg = tf.readbackBuffer(fc, fc.resources.hairSegments, fc.graph.desc(fc.resources.hairSegments).size);
                     head = tf.readbackBuffer(fc, fc.resources.hairBodies, 16 + hair::kBodyHeaderWords * 4);
                 });
                 return std::make_pair(seg, head);
@@ -306,20 +317,122 @@ int main(int argc, char** argv)
             std::memcpy(&frac1, h1 + 1 + 5, 4);
             std::memcpy(&scale1, h1 + 1 + 6, 4);
             const float* sf = reinterpret_cast<const float*>(segFar->data());
-            uint32_t kept = 0;
-            for (uint32_t f = 0; f < G * 2; ++f)
+            // the kept strands' segments side by side: the header's count, the buffer's size
+            const uint32_t kept = h1[1 + 1] / (N - 1);
+            S_CHECK(h1[1 + 1] == kept * (N - 1) && segFar->size() >= (size_t)kept * (N - 1) * 32, "far header: %u segments, buffer %zu B", h1[1 + 1], segFar->size());
+            for (uint32_t f = 0; f < kept; ++f)
             {
                 const float r0 = sf[8 * (f * (N - 1)) + 3];
-                if (r0 > 0)
-                {
-                    ++kept;
-                    S_CHECK(std::abs(r0 - 40e-6f * scale1) <= 1e-9f, "kept strand root radius %.4g, expected %.4g", r0, 40e-6f * scale1);
-                }
+                S_CHECK(std::abs(r0 - 40e-6f * scale1) <= 1e-9f, "kept strand %u root radius %.4g, expected %.4g", f, r0, 40e-6f * scale1);
             }
             S_CHECK(frac1 < 1 && std::abs(scale1 * frac1 - 1) < 1e-5 && kept > 0 && kept < G * 2, "far LOD: fraction %.4f, scale %.2f, kept %u of %u", frac1, scale1, kept, G * 2);
             std::printf("hair follows: nodes within %.1e m of guide + offset, continuous tapered segments; far LOD keeps %u of %u (fraction %.3f), widths x %.1f\n",
                         worstPlace, kept, G * 2, frac1, scale1);
             hs.removeBody(f0);
+        }
+        // ---- 3. density volume
+        {
+            hair::HairSystem& hs = hair::hairSystem(tf.trackState);
+            scene::Camera cam3 = cam;
+            cam3.position = { 0.11f, 1.1f, 0.4f };  // (near: the LOD keeps every strand)
+            cam3.forward = normalize(float3{ 0.11f, 1.1f, 0 } - cam3.position);
+            tf.frame.mainView = ViewDesc::fromCamera(cam3, 1280, 720, float4x4{});
+            const uint32_t N = 12, GY = 32, GZ = 64;
+            const float spacing = 0.002f, radius = 0.05e-3f;
+            auto makeSlab = [&](float y0) {
+                hair::BodyDesc d;
+                d.nodesPerStrand = N;
+                d.joints = 1;
+                d.rootRadius = d.tipRadius = radius;
+                d.params.gravity = { 0, 0, 0 };
+                for (uint32_t gy = 0; gy < GY; ++gy)
+                    for (uint32_t gz = 0; gz < GZ; ++gz)
+                    {
+                        for (uint32_t i = 0; i < N; ++i) d.restPositions.push_back({ 0.02f * i, y0 + spacing * (gy + 0.5f), spacing * (gz + 0.5f) - 0.064f });
+                        d.guideJoint.push_back(0);
+                        d.follows.push_back({ gy * GZ + gz, float3{ 0, 0, 0 }, 1.0f });
+                    }
+                return hs.addBody(d);
+            };
+            float3x4 joint;  // at (0, 1, 0): slab A fills y in [1, 1.064], slab B y in [1.2, 1.264]
+            joint.m[1][3] = 1;
+            const uint32_t slabA = makeSlab(0.0f), slabB = makeSlab(0.2f);
+            for (uint32_t b : { slabA, slabB }) hs.tick(b, &joint, 1, nullptr, 0, { 0, 0, 0 }, 1.0f / 60);
+            // probes: rays along +y from y = 0.85, 8 x 8 places in x and z (steps that share no period with the cells); per place
+            //   0 body A to the box's end, reach = far; 1 body A, reach to the slab's middle (y = 1.032); 2 reach between the slabs
+            //   (y = 1.13); 3..5 body A's first fibre at u = 0.001, 0.5, 0.999
+            const uint32_t side = 8, places = side * side, kinds = 6;
+            std::vector<float> probes;
+            const float3 camera = cam3.position;
+            for (uint32_t z = 0; z < places; ++z)
+                for (uint32_t kind = 0; kind < kinds; ++kind)
+                {
+                    const float3 p = float3{ 0.05f + 0.017f * (z % side), 0.85f, -0.03f + 0.0085f * (z / side) } - camera;
+                    const float reach = kind == 1 ? 1.032f - 0.85f : (kind == 2 ? 1.13f - 0.85f : 10.0f);
+                    const float u = kind == 3 ? 0.001f : (kind == 5 ? 0.999f : 0.5f);
+                    const float c[12] = { p.x, p.y, p.z, reach, 0, 1, 0, u, slabA < slabB ? 0.0f : 1.0f, 0, 0, 0 };  // (slab A's place in the frame's bodies)
+                    probes.insert(probes.end(), c, c + 12);
+                }
+            const uint32_t count = places * kinds;
+            std::shared_ptr<std::vector<uint8_t>> results, header;
+            bool volume = false;
+            tf.run([&](FramePassContext& fc) {
+                ViewResources v;
+                v.view = tf.frame.mainView;
+                tracks::hair(fc, v);
+                const FrameResources r = fc.resources;
+                volume = r.hairDensityParams.valid() && r.hairDensity.valid() && r.hairDensityCoarse.valid();
+                if (!volume) return;
+                const BufferRef cfg = tf.uploadBuffer(fc, probes.data(), probes.size() * 4, 16, "hair.test.probes");
+                const BufferRef out = fc.graph.createBuffer(BufferDesc{ "hair.test.density", (uint64_t)count * 32, 16 });
+                ID3D12PipelineState* pso = fc.shaders.compute("Passes/Hair/Tests/HairDensityProbe");
+                const uint32_t steps = (uint32_t)fc.quality.integer("shading.hair_shadow_steps");
+                fc.graph.addPass("hair.test.density", QueueType::Graphics,
+                                 [&](PassBuilder& b) {
+                                     b.use(cfg, Use::SrvCompute);
+                                     b.use(r.hairDensityParams, Use::SrvCompute);
+                                     b.use(r.hairDensity, Use::SrvCompute);
+                                     b.use(r.hairDensityCoarse, Use::SrvCompute);
+                                     b.use(out, Use::UavCompute);
+                                 },
+                                 [=](PassContext& c) {
+                                     const uint32_t k[8] = { c.srv(cfg), c.uav(out), c.srv(r.hairDensityParams), count, steps, 0, 0, 0 };
+                                     c.cmd->SetPipelineState(pso);
+                                     c.computeConstants(k, 8);
+                                     c.cmd->Dispatch((count + 63) / 64, 1, 1);
+                                 });
+                results = tf.readbackBuffer(fc, out, (uint64_t)count * 32);
+                header = tf.readbackBuffer(fc, r.hairBodies, 4 + 2 * hair::kBodyHeaderWords * 4);
+            });
+            S_CHECK(volume, "the frame made no density volume (visibility.coverage_hair, shading.hair_density_resolution)");
+            const uint32_t* hw = reinterpret_cast<const uint32_t*>(header->data());
+            float kept[2];
+            std::memcpy(&kept[0], hw + 1 + 5, 4);
+            std::memcpy(&kept[1], hw + 1 + hair::kBodyHeaderWords + 5, 4);
+            S_CHECK(hw[0] == 2 && kept[0] == 1.0f && kept[1] == 1.0f, "bodies %u, LOD fractions %.3f, %.3f (every strand expected)", hw[0], kept[0], kept[1]);
+            const float* rs = reinterpret_cast<const float*>(results->data());
+            const double kPi = 3.14159265358979, rho = 2 * radius / (spacing * spacing), mu = 0.25 * kPi * rho, across = mu * GY * spacing;
+            double mean[kinds][5] = {};
+            for (uint32_t z = 0; z < places; ++z)
+                for (uint32_t kind = 0; kind < kinds; ++kind)
+                    for (int i = 0; i < 5; ++i) mean[kind][i] += rs[8 * (z * kinds + kind) + i] / places;
+            const double full = mean[0][0], half = mean[1][1], both = mean[0][2], firstOnly = mean[2][2], met = mean[4][4];
+            const double median = (1.0 - 0.85) - std::log(1 - 0.5 * (1 - std::exp(-across))) / mu;
+            std::printf("hair density: fibres across a slab %.4f (expected %.4f), to its middle %.4f; transmittance of two slabs %.5f, of one %.5f; first fibre met with "
+                        "probability %.4f, at %.4f / %.4f / %.4f m (quantiles 0.001, 0.5, 0.999; median expected %.4f)\n",
+                        full, across, half, both, firstOnly, met, mean[3][3], mean[4][3], mean[5][3], median);
+            S_CHECK(std::abs(full - across) <= 0.05 * across, "fibres across a slab: %.4f, expected %.4f", full, across);
+            S_CHECK(std::abs(half - 0.5 * across) <= 0.1 * across, "fibres to the slab's middle: %.4f, expected %.4f", half, 0.5 * across);
+            S_CHECK(both > 0 && std::abs(-std::log(both) - 2 * full) <= 0.05 * 2 * full, "transmittance across both slabs: %.5f = exp(-%.4f), the two counts %.4f", both,
+                    -std::log(both), 2 * full);
+            S_CHECK(firstOnly > 0 && std::abs(-std::log(firstOnly) - full) <= 0.05 * full, "transmittance of a ray that ends between the slabs: %.5f = exp(-%.4f), the count %.4f",
+                    firstOnly, -std::log(firstOnly), full);
+            S_CHECK(std::abs(met - (1 - std::exp(-full))) <= 0.05 * (1 - std::exp(-full)), "a ray meets a fibre with probability %.4f, expected %.4f", met, 1 - std::exp(-full));
+            S_CHECK(std::abs(mean[4][3] - median) <= 0.007, "median place of the first fibre: %.4f m along the ray, expected %.4f", mean[4][3], median);
+            S_CHECK(mean[3][3] < mean[4][3] && mean[4][3] < mean[5][3] && mean[3][3] >= 0.15 - 0.011 && mean[5][3] <= 0.214 + 0.011,
+                    "first fibre quantiles %.4f < %.4f < %.4f m, inside the slab [0.150, 0.214] m", mean[3][3], mean[4][3], mean[5][3]);
+            hs.removeBody(slabA);
+            hs.removeBody(slabB);
         }
         const uint32_t errors = tf.device.drainDebugMessages();
         S_CHECK(errors == 0, "%u debug-layer errors", errors);

@@ -1,6 +1,7 @@
 // unx-kernel: ms_6_6 main
 // Strand hair in the coverage layer (band B; E's request 20260926_E_hair_strands, B10; INTERFACES v1.59): one mesh-shader
-// group per 32 segments of FrameResources::hairSegments (camera-relative (p0, r0), (p1, r1); r = 0: left out by E's LOD).
+// group per 32 segments of FrameResources::hairSegments (camera-relative (p0, r0), (p1, r1); E writes the segments of
+// the strands its LOD keeps, so the groups are as many as what is drawn; r = 0: not drawn).
 // Each lane turns its segment into the ribbon of width 2r facing the camera (the capsule's silhouette without its caps:
 // consecutive segments share their end points bit for bit), two triangles through the band B pixel kernel
 // (CoverageRaster.ps): per pixel the exact area of the ribbon triangle inside it, the 32-subsample mask, the depth at the
