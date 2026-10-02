@@ -1215,7 +1215,7 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
         if (valid && f.historyWeight > 0 && st.exposure > 0)
         {
             history = g.importTexture(st.scatter[prev].Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-            exposureRatio = 1.0f;  // MUTATION (temporary): the check must fail
+            exposureRatio = exposure / st.exposure;
         }
         st.exposure = exposure;
         scatter = g.importTexture(st.scatter[next].Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
