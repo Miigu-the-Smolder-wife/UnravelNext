@@ -5,8 +5,9 @@
 #   2  the four game scenes: cut pictures at 1080p with the gi and direct layers (which stage a cut frame's blotch is in),
 #      timings at 1080p, 1440p and 4K;
 #   3  scenegen's scenes (outdoors, night, forest, water, interior): cut pictures and timings at 1080p, timings at 4K;
-#   4  the high tier's timings (lobby, 1080p and 4K), the pictures with the height fog on (lobby, city block), and the
-#      lake's and the night city's timings with every changed caster making its pages stale (the cache as it was).
+#   4  the high tier's timings (lobby, 1080p and 4K); the height fog on (lobby, city block, night city, ridge: pictures
+#      and timings); the far field off (ridge, city block, lake: what the far rays add and cost); the cloud layer at
+#      coverage 0.5 with and without its temporal accumulation (ridge, city block).
 # The summary (<out>\summary.txt): the furnace sheets, every timing run's GPU frame and largest pass groups, the gates
 # that failed. A device removal stops the batch.
 #   powershell -File Tools\Verify\Run-Ue6Batch.ps1 [-Out Cache\Ue6Batch] [-Skip furnace,game,generated,variants]
@@ -64,16 +65,20 @@ if ($Skip -notcontains "generated") {
 if ($Skip -notcontains "variants") {
     Invoke-Step "high tier (lobby timings)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\tier_high", "-Only", "bt_lobby", "-Resolutions", "1080p,4K", "-SkipPictures",
         "-Set", "output.tier=high")
-    Invoke-Step "fog on (lobby pictures)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\fog", "-Only", "bt_lobby", "-Resolutions", "1080p", "-SkipTimings",
+    Invoke-Step "fog on (lobby)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\fog", "-Only", "bt_lobby", "-Resolutions", "1080p",
         "-Set", "atmosphere.fog.enabled=true")
-    Invoke-Step "fog on (city block pictures, timings)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\fog", "-NoGame", "-Generated", "city_block", "-Resolutions", "1080p",
-        "-Set", "atmosphere.fog.enabled=true")
-    Invoke-Step "band C in the visibility buffer (lake)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\band_c_vis", "-NoGame", "-Generated", "waterside",
-        "-Resolutions", "1080p", "-Set", "visibility.coverage_band_c_visbuffer=true")
-    Invoke-Step "band C in the visibility buffer (train lounge)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\band_c_vis", "-Only", "te_lounge",
-        "-Resolutions", "1080p", "-Set", "visibility.coverage_band_c_visbuffer=true")
-    Invoke-Step "shadow cache as before (lake, city night timings)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\cache_all", "-NoGame", "-Generated", "waterside,city_night",
-        "-Resolutions", "1080p", "-SkipPictures", "-Set", "shadow.vsm.cache_min_change_texels=0")
+    Invoke-Step "fog on (city block, night city, ridge)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\fog", "-NoGame", "-Generated", "city_block,city_night,ridge_sunset",
+        "-Resolutions", "1080p", "-Set", "atmosphere.fog.enabled=true")
+    Invoke-Step "far field off (ridge, city block, lake)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\far_off", "-NoGame", "-Generated", "ridge_sunset,city_block,waterside",
+        "-Resolutions", "1080p", "-Layers", "gi", "-Set", "lumen.radiance_cache_far_field=false")
+    Invoke-Step "far field on, the gi layer (ridge, city block)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\far_on", "-NoGame", "-Generated", "ridge_sunset,city_block",
+        "-Resolutions", "1080p", "-Layers", "gi", "-SkipTimings")
+    Invoke-Step "clouds (ridge, city block)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\clouds", "-NoGame", "-Generated", "ridge_sunset,city_block",
+        "-Resolutions", "1080p", "-GateArgs", "--clouds 0.5")
+    Invoke-Step "clouds without temporal accumulation (ridge, city block)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\clouds_notemporal", "-NoGame",
+        "-Generated", "ridge_sunset,city_block", "-Resolutions", "1080p", "-GateArgs", "--clouds 0.5", "-Set", "atmosphere.clouds.temporal=false")
+    Invoke-Step "clouds 4K (ridge timings)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\clouds", "-NoGame", "-Generated", "ridge_sunset",
+        "-Resolutions", "4K", "-SkipPictures", "-GateArgs", "--clouds 0.5")
 }
 & python Tools\Verify\batch_summary.py $outDir (Join-Path $root "Cache\Ue6Diag") | Out-File -Encoding utf8 (Join-Path $outDir "summary.txt")
 "batch finished $(Get-Date -Format s)" | Out-File -Encoding utf8 -Append $batchLog
