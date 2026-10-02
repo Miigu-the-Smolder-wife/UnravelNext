@@ -16,13 +16,14 @@
 //               x 2 - 1                                          (the faint ones are not worth a sprite)
 //             Sprites are per 2 x 2 pixels (one quad covers four discs: less overdraw): a 2 x 2 block with a pixel
 //             above 0.01 is appended to its layer's list (foreground: radius < 0), each pixel's colour x factor x
-//             min(1, 1 / (pi radius^2)) (a disc's energy over its area). A full list: the pixel is gathered.
+//             min(1, squeeze / (pi radius^2)) (a disc's energy over its area; an anamorphic lens's bokeh is
+//             narrower by its squeeze). A full list: the pixel is gathered.
 // P[0] = { gather input SRV (rgb, a = radius), quarter resolution SRV, level 0 UAV, level 1 UAV | none }
 // P[1] = { level 2 UAV | none, level 3 UAV | none, foreground list UAV | none, background list UAV | none } (raw:
 //          DdofCommon.hlsli DDOF_SCATTER_*)
 // P[2] = { half width, half height, level count, list capacity (records) }
 // P[3] = { asuint(least |radius| scattered), asuint(neighbour comparison's colour limit), asuint(exposure scale),
-//          0 }, P[4] = { quarter width, quarter height, 0, 0 }
+//          asuint(the lens's squeeze) }, P[4] = { quarter width, quarter height, 0, 0 }
 #include "Bindless.hlsli"
 #include "Passes/Shading/DdofCommon.hlsli"
 
@@ -128,7 +129,7 @@ void main(uint2 tid : SV_GroupThreadID, uint2 id : SV_DispatchThreadID, uint ind
     GroupMemoryBarrierWithGroupSync();
 
     // (a block listed for the other layer still takes the pixel's entry there, with no colour)
-    const float loss = coc != 0 ? min(1.0, rcp(DDOF_PI * coc * coc)) : 1.0;
+    const float loss = coc != 0 ? min(1.0, asfloat(P[3].w) * rcp(DDOF_PI * coc * coc)) : 1.0;
     const bool inForeground = (foregroundMask & groupBit) != 0, inBackground = (backgroundMask & groupBit) != 0;
     if (!(foreground ? inForeground : inBackground)) factor = 0;
     const float3 scattered = colour * (factor * loss);

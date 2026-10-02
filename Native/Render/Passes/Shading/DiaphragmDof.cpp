@@ -15,9 +15,11 @@
 //   m.dof.d.postfilter.* the foreground's and the background's 3 x 3 median (DdofPostfilter.hlsl);
 //   m.dof.d.scatter.*    the lists' sprites added to those two layers (DdofScatter.ms/.ps.hlsl);
 //   m.dof.d.recombine    the full-resolution gather of the slight radii and the layers composed (DdofRecombine.hlsl).
-// Not ported: the anamorphic squeeze, the Petzval stretch, the barrel's and the matte box's vignetting of the sprites,
-// the depth blur term, the dynamic radius offset, the alpha channel; the prefilter reprojects by the camera's motion
-// only (DdofStabilize.hlsl).
+// The lens's shape (the reference's FPhysicalCocModel; DdofCommon.hlsli, DdofScatter.hlsli): the anamorphic squeeze
+// (the bokeh narrower by it: every kernel and sprite), the Petzval stretch (the wide gathers and the sprites), the
+// barrel's and the matte box's cut of the sprites, the depth blur term of the radius. The reference's defaults for
+// these are in its Engine module, which the reference checkout does not have: the quality file's are as remembered.
+// Not ported: the dynamic radius offset, the alpha channel.
 #include "unx/shading/DepthOfField.h"
 
 #include "unx/render/Device.h"
@@ -28,6 +30,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <string>
 
 namespace unx::render::shading
 {
@@ -153,7 +156,47 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
     const float maxForeground = (float)numberOr(fc, "shading.dof_diaphragm_max_foreground_radius", 0.025) * (float)hw;
     const float maxBackground = (float)numberOr(fc, "shading.dof_diaphragm_max_background_radius", 0.025) * (float)hw;
     const float lens[4] = { infinity, infinity * fc.frame.lensFocus / view.view.nearPlane, -maxForeground, maxBackground };
-    const float maxBlur = std::max(std::min(infinity, maxBackground), maxForeground);  // (a surface at the lens is as blurred as the limit lets it)
+    // the depth blur (the reference's DepthOfFieldDepthBlurRadius - half-resolution pixels of a 1920-wide view - and
+    // DepthOfFieldDepthBlurAmount, the distance in km at which it is half): { radius, exponent x near plane }
+    const float depthBlurKm = (float)numberOr(fc, "shading.dof_diaphragm_depth_blur_km", 1.0);
+    const float depthBlurRadius =
+        depthBlurKm > 0 ? std::max((float)numberOr(fc, "shading.dof_diaphragm_depth_blur_radius", 0.0), 0.0f) * 2.0f * (float)hw / 1920.0f : 0.0f;
+    const float depthBlur[2] = { depthBlurRadius, depthBlurRadius > 0 ? view.view.nearPlane / (depthBlurKm * 1000.0f) : 0.0f };
+    // (a surface at the lens is as blurred as the limit lets it)
+    const float maxBlur = std::max(std::min(std::max(infinity, depthBlurRadius), maxBackground), maxForeground);
+
+    // the lens's shape (DdofCommon.hlsli, DdofScatter.hlsli)
+    const float squeeze = (float)std::clamp(numberOr(fc, "shading.dof_diaphragm_squeeze", 1.0), 0.1, 10.0);
+    const float aspect = (float)w / (float)h;
+    const float petzval[4] = { (float)numberOr(fc, "shading.dof_diaphragm_petzval", 0.0),
+                               (float)std::clamp(numberOr(fc, "shading.dof_diaphragm_petzval_falloff", 1.0), 0.0, 100.0),
+                               std::max((float)numberOr(fc, "shading.dof_diaphragm_petzval_box_x", 0.0), 0.0f),
+                               std::max((float)numberOr(fc, "shading.dof_diaphragm_petzval_box_y", 0.0), 0.0f) };
+    const float petzvalCorner = std::max((float)numberOr(fc, "shading.dof_diaphragm_petzval_box_radius", 0.0), 0.0f);
+    // the barrel (a tube in front of the aperture, never narrower than the aperture and 5 mm) and the matte box's flags
+    // on its rim: a flag at 'roll' around the axis (0: the picture's right, 90: its top), 'length' long, tilted by
+    // 'pitch' from the axis (0: straight ahead, the barrel's wall carried on; below: closing over the opening)
+    const float apertureRadius = 0.5f * fc.frame.lensAperture;
+    const float barrelRadius = std::max((float)numberOr(fc, "shading.dof_diaphragm_barrel_radius", 0.05), apertureRadius + 0.005f);
+    const float barrelLengthSet = std::max((float)numberOr(fc, "shading.dof_diaphragm_barrel_length", 0.0), 0.0f);
+    float flags[3][4] = {};  // (DdofScatter.hlsli P[6..8])
+    bool matteBox = false;
+    for (int i = 0; i < 3; ++i)
+    {
+        const std::string key = "shading.dof_diaphragm_matte_box_" + std::to_string(i);
+        const float length = (float)numberOr(fc, (key + "_length").c_str(), 0.0);
+        if (!(length > 0)) continue;
+        const float pitch = ((float)std::clamp(numberOr(fc, (key + "_pitch").c_str(), 0.0), -89.0, 89.0) + 90.0f) * kPi / 180.0f;
+        const float roll = (float)numberOr(fc, (key + "_roll").c_str(), 0.0) * kPi / 180.0f;
+        flags[i][0] = std::cos(roll);
+        flags[i][1] = std::sin(roll);
+        flags[i][2] = barrelRadius - std::cos(pitch) * length;
+        flags[i][3] = std::sin(pitch) * length;
+        matteBox = true;
+    }
+    const float barrelLength = barrelLengthSet > 0 || matteBox ? barrelLengthSet : -1.0f;  // (< 0: no vignetting)
+    const float tanHalf[2] = { 1.0f / (view.view.proj.m[0][0] * squeeze), 1.0f / view.view.proj.m[1][1] };
+    const float focus = fc.frame.lensFocus;
 
     const uint32_t rings = (uint32_t)std::clamp<int64_t>(integerOr(fc, "shading.dof_diaphragm_rings", 5), 3, 5);
     const int64_t levelLimit = std::clamp<int64_t>(integerOr(fc, "shading.dof_diaphragm_max_levels", 4), 1, kMaxLevels);
@@ -192,10 +235,13 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
                   b.use(half, Use::UavCompute);
               },
               [=](PassContext& c) {
-                  uint32_t k[12] = { c.srv(src), c.srv(depth), c.uav(half), 0, w, h, hw, hh };
+                  uint32_t k[16] = { c.srv(src), c.srv(depth), c.uav(half), 0, w, h, hw, hh };
                   std::memcpy(&k[8], lens, 16);
+                  k[12] = asUint(depthBlur[0]);
+                  k[13] = asUint(depthBlur[1]);
+                  k[14] = k[15] = 0;
                   c.cmd->SetPipelineState(setupPso);
-                  c.computeConstants(k, 12);
+                  c.computeConstants(k, 16);
                   c.cmd->Dispatch((hw + 7) / 8, (hh + 7) / 8, 1);
               });
 
@@ -217,21 +263,31 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
         const float jx = fc.frame.upscale.jitterX, jy = fc.frame.upscale.jitterY;
         const float weight = (float)numberOr(fc, "shading.dof_diaphragm_prefilter_weight", 0.04);
         const float4x4 prevViewProj = fc.frame.upscale.prevViewProj;
+        // shading.dof_diaphragm_prefilter_velocity: the history is read where each pixel's own surface was - the
+        // upscale's vectors, recorded here ahead of the upscale (upscaleMotion); false: by the camera's motion only
+        const UpscaleMotion vectors = booleanOr(fc, "shading.dof_diaphragm_prefilter_velocity", true) ? upscaleMotion(fc, view) : UpscaleMotion{};
+        const bool hasVectors = vectors.motion.valid() && vectors.depth.valid();
+        const TextureRef motion = vectors.motion, surface = hasVectors ? vectors.depth : depth;  // (the depth the motion is taken at)
         ID3D12PipelineState* stabilizePso = fc.shaders.compute("Passes/Shading/DdofStabilize");
         g.addPass("m.dof.d.stabilize", QueueType::Graphics,
                   [&](PassBuilder& b) {
                       b.use(half, Use::SrvCompute);
                       b.use(previous, Use::SrvCompute);
-                      b.use(depth, Use::SrvCompute);
+                      b.use(surface, Use::SrvCompute);
+                      if (hasVectors) b.use(motion, Use::SrvCompute);
                       b.use(stable, Use::UavCompute);
                   },
                   [=](PassContext& c) {
-                      uint32_t k[28] = { c.srv(half), c.srv(previous), c.srv(depth), c.uav(stable), hw, hh, w, h, asUint(jx), asUint(jy), asUint(weight), valid ? 1u : 0u };
+                      uint32_t k[32] = { c.srv(half), c.srv(previous), c.srv(surface), c.uav(stable), hw, hh, w, h, asUint(jx), asUint(jy), asUint(weight),
+                                         (valid ? 1u : 0u) | (hasVectors ? 2u : 0u) };
                       for (int r = 0; r < 4; ++r)
                           for (int col = 0; col < 4; ++col) k[12 + 4 * r + col] = asUint(prevViewProj.m[r][col]);
+                      k[28] = hasVectors ? c.srv(motion) : kNone;
+                      k[29] = c.srv(surface);
+                      k[30] = k[31] = 0;
                       c.cmd->SetPipelineState(stabilizePso);
                       c.bindFrameConstants(cb);
-                      c.computeConstants(k, 28);
+                      c.computeConstants(k, 32);
                       c.cmd->Dispatch((hw + 7) / 8, (hh + 7) / 8, 1);
                   });
         input = stable;
@@ -263,7 +319,8 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
                   c.computeConstants(k, 8);
                   c.cmd->Dispatch(tilesX, tilesY, 1);
               });
-    const float reach = 1.0f + 1.0f / ((float)rings + 0.5f);  // (the gather kernel's centre is shifted by up to a ring spacing)
+    // (the gather kernel's centre is shifted by up to a ring spacing; a squeeze under 1 widens the bokeh across)
+    const float reach = (1.0f + 1.0f / ((float)rings + 0.5f)) * std::max(1.0f, 1.0f / squeeze);
     uint32_t dilates = 1, ringCount[3] = {}, ringStep[3] = {};
     {
         const uint32_t widest = (uint32_t)std::ceil(maxBlur * reach / (float)kTile);
@@ -373,7 +430,7 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
                                            scatter ? c.uav(listForeground) : kNone, scatter ? c.uav(listBackground) : kNone,
                                            hw, hh, levels, capacity,
                                            asUint(minScatterRadius), asUint(neighbourMaxColour),
-                                           asUint(1.0f), 0,  // (the picture is exposed already: the exposure scale is 1)
+                                           asUint(1.0f), asUint(squeeze),  // (the picture is exposed already: the exposure scale is 1)
                                            qw, qh, 0, 0 };
                   c.cmd->SetPipelineState(reducePso);
                   c.computeConstants(k, 20);
@@ -422,12 +479,14 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
                       if (withStatistics) b.use(statistics, Use::UavCompute);
                   },
                   [=](PassContext& c) {
-                      const uint32_t k[16] = { c.srv(level[0]), c.srv(level[1]), c.srv(level[2]), c.srv(level[3]),
+                      const uint32_t k[24] = { c.srv(level[0]), c.srv(level[1]), c.srv(level[2]), c.srv(level[3]),
                                                c.srv(tiles.foreground), c.srv(tiles.background), c.uav(out), withStatistics ? c.uav(statistics) : kNone,
                                                hw, hh, pw, ph,
-                                               rings, levels, shaped ? c.srv(gatherTable) : kNone, shaped ? c.srv(edgeTable) : kNone };
+                                               rings, levels, shaped ? c.srv(gatherTable) : kNone, shaped ? c.srv(edgeTable) : kNone,
+                                               asUint(squeeze), asUint(1.0f / squeeze), asUint(petzvalCorner), asUint(aspect),
+                                               asUint(petzval[0]), asUint(petzval[1]), asUint(petzval[2]), asUint(petzval[3]) };
                       c.cmd->SetPipelineState(pso);
-                      c.computeConstants(k, 16);
+                      c.computeConstants(k, 24);
                       c.cmd->Dispatch(groupsX, groupsY, 1);
                   });
         return out;
@@ -493,9 +552,14 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
                           c.cmd->RSSetScissorRects(1, &sc);
                           c.cmd->SetPipelineState(scatterPso);
                           // (the background's bokeh is the foreground's turned half a turn)
-                          const uint32_t k[8] = { c.srv(list), capacity, shaped ? c.srv(edgeTable) : kNone, occluded ? c.srv(statistics) : kNone,
-                                                  hw, hh, asUint(diaphragm.circumscribed), isBackground ? 1u : (uint32_t)-1 };
-                          c.graphicsConstants(k, 8);
+                          uint32_t k[36] = { c.srv(list), capacity, shaped ? c.srv(edgeTable) : kNone, occluded ? c.srv(statistics) : kNone,
+                                             hw, hh, asUint(diaphragm.circumscribed), isBackground ? 1u : (uint32_t)-1,
+                                             asUint(squeeze), asUint(barrelRadius), asUint(barrelLength), asUint(apertureRadius),
+                                             asUint(tanHalf[0]), asUint(tanHalf[1]), asUint(focus), asUint(infinity),
+                                             asUint(petzval[0]), asUint(petzval[1]), asUint(petzval[2]), asUint(petzval[3]),
+                                             asUint(petzvalCorner), asUint(aspect), 0, 0 };
+                          std::memcpy(&k[24], flags, 48);
+                          c.graphicsConstants(k, 36);
                           c.cmd->DispatchMesh(std::min(65535u, groups), (groups + 65534) / 65535, 1);
                       });
         };
@@ -526,7 +590,9 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
                   k[18] = frame;
                   k[19] = pairs;
                   k[20] = asUint(widen);
-                  k[21] = k[22] = k[23] = 0;
+                  k[21] = asUint(depthBlur[0]);
+                  k[22] = asUint(depthBlur[1]);
+                  k[23] = asUint(squeeze);
                   c.cmd->SetPipelineState(recombinePso);
                   c.computeConstants(k, 24);
                   c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
