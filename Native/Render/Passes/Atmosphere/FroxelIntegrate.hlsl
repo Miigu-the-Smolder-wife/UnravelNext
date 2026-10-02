@@ -64,7 +64,8 @@
 // the sky correction, which then holds per slice source' - A_lut e^-(tau_p,total - tau_p,before) (A_lut: the slice's air
 // in-scattering the sky LUT has), so the sum is exact given the LUT's air: the LUT's air behind the media is attenuated
 // by them, the air in front is not.
-// Height fog (atmosphere.fog; Fog.hlsli): one more medium, in every slice. P[6] = { on, the previous frame's Lumen
+// Height fog (atmosphere.fog; Fog.hlsli): one more medium, in every slice. P[6] = { bit 0: on; bit 1: the slice's samples
+// end at the tile's farthest surface (FroxelSlice.hlsli froxelSampledLength; the air's shadows too), the previous frame's Lumen
 // translucency volume (its parameters' SRV; UNX_NONE: no indirect light in the fog), the froxels' sampled local fluence
 // SRV, their direction moment SRV (MegaLightsVolume.hlsl; UNX_NONE: no local light in the fog) }, P[7] = { density (1/m at
 // the fog's height), height falloff, height (m), phase g }, P[8] = { albedo r, g, b, start distance (m) } (floats).
@@ -218,7 +219,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         ByteAddressBuffer air = ResourceDescriptorHeap[P[4].w];
         const FroxelAirResult integrated = froxelLoadAir(air, froxelIndex(g, tile, s));
 #else
-        const FroxelAirResult integrated = froxelAirSlice(g, tile, s, fog.on);
+        const FroxelAirResult integrated = froxelAirSlice(g, tile, s, fog.on, (P[6].x & FROXEL_CLIP_AT_SURFACE) != 0);
 #endif
         tau = integrated.tau; source = integrated.source; skyTerm = integrated.sky; walk = integrated.walk;
         airShadowed = integrated.shadowed;
@@ -413,7 +414,9 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         // What the fog scatters toward the camera per unit of scattering (radiance), at the segment's middle: the sun
         // outside the casters' shadow, the local lights (the froxel's sampled fluence and direction moment through the
         // phase function's first two SH bands, as the lit particles), the indirect light (the translucency volume).
-        const float ft0 = max(max(zs0 * toRay, tStart), fog.start), ft1 = zs1 * toRay;
+        // (the light is taken in front of the tile's farthest surface: froxelSampledLength)
+        const float ft0 = max(max(zs0 * toRay, tStart), fog.start);
+        const float ft1 = ft0 + froxelSampledLength(P[3].z, tile, toRay, ft0, max(zs1 * toRay - ft0, 0.0), (P[6].x & FROXEL_CLIP_AT_SURFACE) != 0);
         const float3 middle = g_cameraPosition + dir * (0.5 * (ft0 + ft1));
         float3 inScattered = E * airSunTransmittance(a, tlut, airLiftToSurface(a, middle), sun) * ((1 - airShadowed) * airMiePhase(nu, fog.g));
         if (P[6].z != 0xFFFFFFFFu)

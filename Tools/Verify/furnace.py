@@ -61,7 +61,7 @@ def main(argv):
         direct, indirect = layer('_carddirect'), layer('_cardindirect')
         if direct is not None:
             d = luminance(direct) * 64.0
-            lit = (d > 1e-4) & (d < 200.0)  # (the room's inner faces: a sunlit outer face would be thousands of lux)
+            lit = (d > 0.05) & (d < 200.0)  # (the room's inner faces hold 0.9 lux and more: a sunlit outer face is thousands of lux, one under the night's sun a thousandth)
             print('  cards direct     %7.3f lux   x %.2f   (%d lit texels)' % (d[lit].mean(), d[lit].mean() / DIRECT, int(lit.sum())))
             if indirect is not None:
                 i = luminance(indirect) * 64.0

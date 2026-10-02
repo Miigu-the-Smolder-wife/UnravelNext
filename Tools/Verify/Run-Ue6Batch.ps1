@@ -38,6 +38,14 @@ if ($Skip -notcontains "furnace") {
     Invoke-Step "furnace room (day outside)" @("-File", "Tools\Verify\Run-Ue6Still.ps1", "-Name", "batch_furnace_day", "-Scene", "furnace_room_day", "-Layers", $layers)
     Invoke-Step "furnace room (day outside, no probe occlusion)" @("-File", "Tools\Verify\Run-Ue6Still.ps1", "-Name", "batch_furnace_day_noocc", "-Scene", "furnace_room_day",
         "-Layers", $layers, "-Set", "lumen.radiance_cache_probe_occlusion=false")
+    # what the fog adds to the day room, and which of its terms: no fog; the fog without its indirect light; the fog
+    # sampled along the whole slice (the part past the wall too)
+    Invoke-Step "furnace room (day outside, no fog)" @("-File", "Tools\Verify\Run-Ue6Still.ps1", "-Name", "batch_furnace_day_nofog", "-Scene", "furnace_room_day",
+        "-Layers", $layers, "-Set", "atmosphere.fog.enabled=false")
+    Invoke-Step "furnace room (day outside, fog without indirect light)" @("-File", "Tools\Verify\Run-Ue6Still.ps1", "-Name", "batch_furnace_day_fognoamb", "-Scene", "furnace_room_day",
+        "-Layers", $layers, "-Set", "atmosphere.fog.indirect_light=false")
+    Invoke-Step "furnace room (day outside, slices not clipped at the surface)" @("-File", "Tools\Verify\Run-Ue6Still.ps1", "-Name", "batch_furnace_day_noclip", "-Scene", "furnace_room_day",
+        "-Layers", $layers, "-Set", "atmosphere.froxels.clip_at_surface=false")
 }
 if ($Skip -notcontains "game") {
     Invoke-Step "game scenes 1080p (pictures with layers, timings)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", $Out, "-Resolutions", "1080p", "-Layers", "gi,direct")

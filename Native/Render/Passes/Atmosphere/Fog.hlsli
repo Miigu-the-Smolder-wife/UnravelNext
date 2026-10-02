@@ -24,11 +24,12 @@ struct FogMedium
     float3 albedo;   // scattering / extinction
     float start;     // m from the camera along the ray: no fog before
 };
-// a = { on, ... }, b = { density, falloff, height, g } (floats), c = { albedo r, g, b, start distance } (floats)
+// a = { bit 0: on (bit 1: FROXEL_CLIP_AT_SURFACE, FroxelSlice.hlsli), ... }, b = { density, falloff, height, g } (floats),
+// c = { albedo r, g, b, start distance } (floats)
 FogMedium fogMedium(uint4 a, uint4 b, uint4 c)
 {
     FogMedium f;
-    f.on = a.x != 0;
+    f.on = (a.x & 1u) != 0;
     f.density = asfloat(b.x);
     f.falloff = asfloat(b.y);
     f.height = asfloat(b.z);

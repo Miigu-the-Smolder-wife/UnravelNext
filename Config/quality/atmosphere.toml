@@ -46,6 +46,8 @@ list_capacity_forced = 0             # tests only (0: off): entry capacity of th
                                      # particle lights grown from the measured need; a frame needing more lists the scene lights alone
                                      # (their own allocation, inside the bound) and leaves the FX lights out, counted (gates require 0)
 list_fallback_forced = 0             # tests only (0: off): 1 makes the fill pass list the scene lights alone, as a frame over the capacity does
+clip_at_surface = true               # a slice that holds the tile's farthest surface samples its light (the casters' shadow, the fog's
+                                     # lights) in front of that surface only: past it the tile's ray is behind the wall (FroxelSlice.hlsli)
 near_m = 0.5                         # slice 0 spans the camera .. near_m (far / near)^(1/64)
 far_m = 65536                        # last node of the air volume (air perspective to 64 km; depths beyond clamp)
 experiment_disable = 0               # cost attribution only (never in a verdict): 1 air shadows, 2 local lights, 4 air integration,

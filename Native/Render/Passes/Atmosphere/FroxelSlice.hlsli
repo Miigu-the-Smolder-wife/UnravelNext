@@ -103,8 +103,26 @@ struct FroxelAirResult
     VsmAirWalkCount walk;
     float shadowed;  // the fraction of the slice's segment in the casters' shadow (the fog's sun term takes it: Fog.hlsli)
 };
+// The end of a slice's segment for what is sampled along the tile's ray (the casters' shadow, the fog's light): the
+// tile's farthest surface when it lies inside the slice (atmosphere.froxels.clip_at_surface). Past that surface the
+// tile's ray is behind it - beyond a wall, outside - and what is there is not the light of the air in front, which is
+// all the tile's pixels read of this slice: a closed room's fog took the sun of the slice's part outside the wall
+// (furnace_room_day). A slice wholly past the surface keeps its whole segment (the neighbour tiles' farther pixels
+// read it: what is there along this ray is the best there is). readersSrv: FroxelTileDepth.hlsl (UNX_NONE: no clip);
+// a tile with a sky pixel has no farthest surface.
+#define FROXEL_CLIP_AT_SURFACE 2u
+float froxelSampledLength(uint readersSrv, uint2 tile, float toRay, float t0, float len, bool clip)
+{
+    if (!clip || readersSrv == 0xFFFFFFFFu) return len;
+    Texture2D<float2> readers = ResourceDescriptorHeap[readersSrv];
+    const float2 r = readers[tile];
+    if (r.y > 0 || !(r.x > 0)) return len;
+    const float toSurface = r.x * toRay - t0;
+    return toSurface > 1e-3 ? min(len, toSurface) : len;
+}
 // nearShadows: the shadowed fraction is wanted in the slices before the air's start too (the fog is there).
-FroxelAirResult froxelAirSlice(FroxelGrid g, uint2 tile, uint s, bool nearShadows = false)
+// clipAtSurface: froxelSampledLength (the readers at P[3].z).
+FroxelAirResult froxelAirSlice(FroxelGrid g, uint2 tile, uint s, bool nearShadows = false, bool clipAtSurface = false)
 {
     const AtmosphereParams a = airParamsFromTexels(P[0].z);
     const uint tlut = P[0].z, mlut = P[0].w;
@@ -155,7 +173,7 @@ FroxelAirResult froxelAirSlice(FroxelGrid g, uint2 tile, uint s, bool nearShadow
         uint k;
         if (vsmAirLevel(vc, froxelTileWidth(g, 0.5 * (z0 + z1)), asfloat(P[2].y), k))
         {
-            f = vsmAirShadowFraction(r, o, o + dir * len, k, walk, (experiment & 32) != 0);
+            f = vsmAirShadowFraction(r, o, o + dir * froxelSampledLength(P[3].z, tile, toRay, t0, len, clipAtSurface), k, walk, (experiment & 32) != 0);
             ++walk.slices;
         }
     }

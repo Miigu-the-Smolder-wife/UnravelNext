@@ -517,6 +517,7 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
     // the height fog (Fog.hlsli): its local light from the sampled fluence and moment, its indirect light from the
     // previous frame's translucency volume (this frame's is built after the air)
     const FogSettings fog = fogSettings(q);
+    const bool clipAtSurface = q.boolean("atmosphere.froxels.clip_at_surface");
     const bool fogLocal = fog.on && fluence.valid() && moment.valid();
     const bool fogAmbient = fog.on && fog.ambient && fc.resources.translucencyGiPrevParams != 0xFFFFFFFFu && fc.resources.translucencyGiPrevAmbient.valid() &&
                             fc.resources.translucencyGiPrevDirectional.valid();
@@ -584,7 +585,7 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
         k[21] = sampledLocal.valid() ? ctx.srv(sampledLocal) : 0xFFFFFFFFu;  // P[5].y: the local lights' sampled in-scattering
         k[22] = k[23] = 0;
         // P[6..8]: the height fog (Fog.hlsli)
-        k[24] = fog.on ? 1u : 0u;
+        k[24] = (fog.on ? 1u : 0u) | (clipAtSurface ? 2u : 0u);  // (bit 1: FroxelSlice.hlsli FROXEL_CLIP_AT_SURFACE)
         k[25] = fogAmbient ? fogAmbientParams : 0xFFFFFFFFu;
         k[26] = fogLocal ? ctx.srv(fluence) : 0xFFFFFFFFu;
         k[27] = fogLocal ? ctx.srv(moment) : 0xFFFFFFFFu;
