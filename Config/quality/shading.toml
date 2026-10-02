@@ -82,6 +82,21 @@ hair_lights_spatial = false       # with mega_lights: the spatial filter on the 
                                   # input without one: "no proper reconstruction filter"); the temporal filter always runs
 hair_fibres_behind = 2.0          # fibres taken to lie behind a strand whose body has no block (the neighbourhood's backward
                                   # lobe counts with 1 - exp(-this))
+hair_shadows = true               # the hair's shadow on what is not hair (Passes/Hair/HairShadow.hlsl): the sun slot of S's
+                                  # screen visibility and, with mega_lights, the local lights' samples are multiplied by what
+                                  # the grooms on the path to the light let through (exp(-fibres) from the density volume).
+                                  # The shadow is as fine as the volume's cells (about 1 cm on a head), of the bodies with a
+                                  # block (hair_density_bodies; the nearest 64 at most). Not shadowed: the coverage layer's
+                                  # cluster fragments under the sun, the local lights without mega_lights, the air.
+                                  # Frames without a density volume record no pass.
+hair_shadow_steps = 32            # samples of that march from a surface towards a light (2..128)
+hair_lights_ray_depths = true     # with mega_lights: the shadow rays of the hair records' light samples start where the pixel's
+                                  # ray first meets the groom in the density volume (a quantile per frame; the temporal filter
+                                  # keeps the mean), not at the pixel's nearest record - an opaque caster's shadow edge then
+                                  # falls at the same place on every strand, however few and wide the LOD draws them
+hair_segment_shading = true       # the strand's part of the sun's and the indirect light once per segment that has a record
+                                  # (three points along it, a record takes the two around it) instead of once per record
+                                  # (48 B of transient memory per segment of the frame)
 # Edge (E) pixels and surface groups (Passes/Shading/Edge.hlsli): two pixels are one surface when the material matches,
 # the shading normals differ by less than the angle, and each lies within max(footprint x ft, distance x dt) of the
 # other's tangent plane. ARCHITECTURE 2.10: up to three surfaces per edge pixel.
