@@ -147,6 +147,15 @@ struct DepthRasterRequest
     BufferRef tileGuess;
     uint32_t tileGuessSrv = UINT32_MAX;
     std::function<void()> buildTileOccluders;
+    // Small casters as proxies (depth-only requests: no pixel kernel; whole viewports or the tile atlas). A view with
+    // RasterView::minInstanceTexels leaves out the instances whose bounds project under it; with proxies each of those
+    // that belongs to V's instance chunks (the static instances) is drawn instead as one square facing the view at its
+    // bounds' centre, of area proxyCoverage x its bounding disc's - the share of that disc its silhouette fills. A square
+    // under a texel covers a texel centre as often as its area is of a texel: a level coarser than its casters keeps
+    // their shadow as a density, at two triangles a caster, and a chunk whose every member is that small is not culled
+    // member by member. Dynamic, skinned and run-time instances under the minimum stay left out.
+    bool proxies = false;
+    float proxyCoverage = 0.5f;
     // Coverage mode (v1.26; S's VSM transmittance layer): conservative raster of band B clusters only, the pixel kernel
     // (compiled with DEPTH_RASTER_COVERAGE 1) gets the exact area, mask and centroid depth per texel
     // (depthRasterCoverage, DepthRaster.hlsli). Needs a pixel kernel and no depth target. Bands are judged in each

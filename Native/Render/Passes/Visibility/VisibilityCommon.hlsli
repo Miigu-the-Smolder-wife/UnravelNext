@@ -80,7 +80,8 @@ struct CullScene
 struct CullChunk
 {
     float4 sphere;  // world; radius < 0 until ChunkBounds ran
-    uint first, count, pad0, pad1;  // pad0: the members' largest wind inflation per (m/s)^2 (float bits, ChunkBounds.hlsl)
+    uint first, count, pad0, pad1;  // pad0: the members' largest wind inflation per (m/s)^2 (float bits, ChunkBounds.hlsl);
+                                    // pad1: their largest world radius without wind (float bits)
 };
 
 #define CHUNK_INSTANCES 256u
@@ -112,6 +113,15 @@ uint skinSlot(CullScene cs, uint instance)
 #define CULL_VIEW_TILE_OCCLUDERS 8u  // tested against the request's tile occluders (tilesOcclude)
 #define CULL_VIEW_TILE_TWO_PHASE 16u // tile occluders in two phases: phase 1 against the tiles' guesses (what it rejects is
                                      // deferred), phase 2 against the occluders rebuilt from what phase 1 drew
+#define CULL_VIEW_PROXIES 32u        // chunk members under the view's smallest instance are drawn as proxies
+                                     // (DepthRasterRequest::proxies, DepthProxy.ms.hlsl)
+
+// A chunk item (CullChunks PHASE=1: uint2 chunk, view) whose members are all under its view's smallest instance: none of
+// them is tested (CullInstances SOURCE=1 skips the item); the proxy kernel draws them from the item.
+#define CHUNK_ITEM_PROXIES 0x80000000u
+
+// An instance a run draws: one of the run's instance mask (0: every instance) that is not hidden.
+bool instanceInRun(GpuInstance inst, uint mask) { return ((inst.flags & mask) != 0 || mask == 0) && (inst.flags & INSTANCE_HIDDEN) == 0; }
 
 // Cull state words (RWByteAddressBuffer, 4 B each).
 #define VS_NODE_WRITE 0u
@@ -187,7 +197,8 @@ uint skinSlot(CullScene cs, uint instance)
 #define VA_DEFERRED_INSTANCES 9u
 #define VA_SEED_NODES 12u
 #define VA_GPU_INSTANCES 15u  // phase 1 over the live GPU-written instances (CullReset: ceil(live / 64) x views)
-                              // words 18 .. 32: unused
+#define VA_PROXIES 18u        // DepthProxy.ms.hlsl over the visible chunk items (DispatchMesh: CullPrepare MODE=3, phase 1)
+                              // words 21 .. 32: unused
 #define VA_COV_MESH 33u       // coverage raster: every band B list entry (both phases)
 #define VA_COV_CLEAR 36u      // tile clear over last frame's coverage tiles (one group per tile)
 #define VA_COV_RECORDS 39u    // count and scatter over the stored stream entries (one group per COV_BLOCK)
@@ -384,6 +395,17 @@ float projectedLength(CullView v, float4 s, float worldLength)
 // An instance too small for the view (RasterView::minInstanceTexels): its bounding sphere's radius projects to under the
 // view's minimum, taken at the sphere's nearest point (the largest it can appear).
 bool instanceBelowView(CullView v, float4 bounds) { return v.minInstancePx > 0 && projectedLength(v, bounds, bounds.w) < v.minInstancePx; }
+
+// Every member of a chunk is too small for a view that draws proxies: the members' largest radius - with their largest
+// wind inflation at this frame's wind - projected at the chunk sphere's nearest point is under the view's minimum. A
+// member's own test (instanceBelowView: its radius at its own sphere's nearest point, which is not nearer than the
+// chunk's) is then true as well.
+bool chunkBelowView(CullView v, CullChunk ch, float4 chunkBounds)
+{
+    if ((v.flags & CULL_VIEW_PROXIES) == 0 || !(v.minInstancePx > 0)) return false;
+    const float largest = asfloat(ch.pad1) + asfloat(ch.pad0) * g_windSpeed * g_windSpeed;
+    return projectedLength(v, chunkBounds, largest) < v.minInstancePx;
+}
 
 // Screen rectangle (pixels, inclusive) and nearest device depth of a world sphere under viewProj; false when the
 // sphere's box reaches the near plane (then it can never be occluded).

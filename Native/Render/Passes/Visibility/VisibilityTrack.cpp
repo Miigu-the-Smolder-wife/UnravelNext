@@ -697,6 +697,7 @@ CullView viewOf(const RasterView& r, const DepthRasterRequest& req, const Settin
     v.instanceEnd = r.instanceEnd;
     v.minInstancePx = r.minInstanceTexels;
     v.instanceSet = r.instanceSet;
+    if (req.proxies && r.minInstanceTexels > 0) v.flags |= kViewProxies;
     if (r.tileOccluders && req.tileOccluders.valid() && req.atlasSlots.valid())
     {
         if (req.cullTilePx != 128 || req.tileOccludersSrv == UINT32_MAX || req.atlasSlotsSrv == UINT32_MAX)
@@ -2386,6 +2387,10 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
         if (pv.word >= 16 || pv.texture.valid() == pv.buffer.valid())
             fail("rasterizeDepth '%s': a pixel view names one resource and a word of pixelConstants (word %u)", request.name.c_str(), pv.word);
     const bool atlas = request.atlasSlots.valid();
+    if (request.proxies && (!request.pixelKernel.empty() || !request.depthTarget.valid() || (request.tileLocal && !atlas)))
+        fail("rasterizeDepth '%s': proxies are for depth-only requests over whole viewports or the tile atlas", request.name.c_str());
+    if (request.proxies && !(request.proxyCoverage > 0 && request.proxyCoverage <= 1.27324f))
+        fail("rasterizeDepth '%s': proxyCoverage %g (a share of the bounding disc; at most 4 / pi: its square)", request.name.c_str(), request.proxyCoverage);
     uint32_t atlasWidth = 0, atlasHeight = 0;
     if (atlas)
     {
@@ -2463,6 +2468,19 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                                      (request.pixelNormals ? "|normals" : "") + (d.depthWrite || !depthOut ? "" : "|test") + (d.multiplyBlend ? "|multiply" : "") + targets,
                                  d);
     }
+    // The proxies of the views' small chunk members (DepthProxy.ms.hlsl), drawn with the first phase's lists.
+    ID3D12PipelineState* proxyPso = nullptr;
+    if (request.proxies && r.chunkCount > 0)
+    {
+        MeshPipelineDesc d;
+        d.meshShader = std::string("Passes/Visibility/DepthProxy.ms.TILE") + (atlas ? "2" : "0");
+        d.depthFormat = depthFormat;
+        d.depthWrite = request.depthWrite;
+        d.cull = D3D12_CULL_MODE_NONE;
+        proxyPso = fc.shaders.mesh(std::string("v.proxy") + (depthFormat == DXGI_FORMAT_D16_UNORM ? "|d16" : "|d32") + (atlas ? "|atlas" : "") + (request.depthWrite ? "" : "|test"), d);
+    }
+    uint32_t proxyCoverageBits;
+    std::memcpy(&proxyCoverageBits, &request.proxyCoverage, 4);
     std::vector<D3D12_VIEWPORT> viewports;
     std::vector<D3D12_RECT> scissors;
     for (size_t i = 0; i < (sameViewport ? 1 : request.views.size()); ++i)
@@ -2498,6 +2516,12 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                          }
                          if (r.tilePairs.valid()) b.use(r.tilePairs, Use::SrvGraphics);
                          if (amplify) b.use(req.cullMask, Use::SrvGraphics);  // (the amplification stage's pairs)
+                         if (proxyPso && phase == 1)
+                         {
+                             b.use(r.chunkWork, Use::SrvGraphics);
+                             if (r.chunks.valid()) b.use(r.chunks, Use::SrvGraphics);
+                             if (req.cullMask.valid()) b.use(req.cullMask, Use::SrvGraphics);
+                         }
                          if (req.atlasSlots.valid()) b.use(req.atlasSlots, Use::SrvGraphics);
                          if (req.depthTarget.valid()) b.use(req.depthTarget, req.depthWrite ? Use::DepthWrite : Use::DepthRead);
                          for (const TextureRef& t : req.colorTargets) b.use(t, Use::RenderTarget);
@@ -2546,6 +2570,16 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                              c.cmd->SetPipelineState(pso[l]);
                              c.graphicsConstants(k, 32);
                              c.cmd->ExecuteIndirect(sig, 1, c.resource(r.args), (kArgMesh + 3 * l) * 4, nullptr, 0);
+                         }
+                         if (proxyPso && phase == 1)
+                         {
+                             const uint32_t k[16] = { c.srv(r.chunkWork), r.instanceMask, c.srv(r.state), r.cfg.capDeferred,
+                                                      proxyCoverageBits, 0, r.viewsSrv, sameViewport ? 0u : 1u,
+                                                      kNone, req.atlasSlots.valid() ? c.srv(req.atlasSlots) : kNone, req.atlasTilesPerRow, atlasWidth | atlasHeight << 16,
+                                                      req.cullMask.valid() ? c.srv(req.cullMask) : kNone, 0, 0, 0 };
+                             c.cmd->SetPipelineState(proxyPso);
+                             c.graphicsConstants(k, 16);
+                             c.cmd->ExecuteIndirect(sig, 1, c.resource(r.args), kArgProxies * 4, nullptr, 0);
                          }
                          if (stats.readback) c.cmd->CopyBufferRegion(stats.readback, stats.offset, c.resource(r.state), 0, kStateWords * 4);
                      });

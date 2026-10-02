@@ -39,7 +39,7 @@ void main(uint3 id : SV_DispatchThreadID)
     }
     const CullScene cs = loadCullScene(loadView(view).cullSceneSrv);
 #endif
-    bool visible = false, defer = false;
+    bool visible = false, defer = false, proxies = false;
     CullChunk ch = (CullChunk)0;
     if (valid)
     {
@@ -61,10 +61,12 @@ void main(uint3 id : SV_DispatchThreadID)
             visible = !hizOccluded(HIZ_SRV, HIZ_MIPS, HIZ_SIZE, v.viewProj, v.viewportSize, s);
 #endif
         }
+        // (a view that draws proxies: a chunk whose every member is under its smallest instance is not expanded)
+        proxies = visible && bounded && chunkBelowView(v, ch, s);
     }
 #if PHASE == 1
     const uint a = waveAppend(state, VS_CHUNK_ITEMS, visible ? 1 : 0, CAP_DEFERRED, OVERFLOW_CHUNK_ITEMS);
-    if (visible && a < CAP_DEFERRED) work[a] = uint2(chunk, view);
+    if (visible && a < CAP_DEFERRED) work[a] = uint2(chunk, view | (proxies ? CHUNK_ITEM_PROXIES : 0u));
     // the chunk instance pass's arguments (one group per item; CullPrepare MODE=4 stores the same)
     const uint added = WaveActiveCountBits(visible);
     if (added > 0 && WaveIsFirstLane())  // (the first lane's 'a' is the wave's first item)

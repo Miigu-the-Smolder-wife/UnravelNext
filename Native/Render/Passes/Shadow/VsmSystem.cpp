@@ -1736,6 +1736,11 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     // (below) keep every caster: a face lit there must be lit on every mip.
     const float minCasterTexels = q.has("shadow.vsm.min_caster_texels") ? (float)q.number("shadow.vsm.min_caster_texels") : 0.0f;
     if (!(minCasterTexels >= 0)) fail("shadow.vsm.min_caster_texels = %g: 0 (every caster) or a positive radius in texels", minCasterTexels);
+    // shadow.vsm.aggregate_small_casters (with min_caster_texels): a sun level draws the static casters under its
+    // smallest caster as proxies (V's DepthRasterRequest::proxies) - their shadow as a density, not their clusters.
+    const bool aggregate = minCasterTexels > 0 && q.has("shadow.vsm.aggregate_small_casters") && q.boolean("shadow.vsm.aggregate_small_casters");
+    const float aggregateCoverage = q.has("shadow.vsm.aggregate_coverage") ? (float)q.number("shadow.vsm.aggregate_coverage") : 0.5f;
+    if (aggregate && !(aggregateCoverage > 0 && aggregateCoverage <= 1)) fail("shadow.vsm.aggregate_coverage = %g: a share in (0, 1]", aggregateCoverage);
     const CasterBounds bounds = fc.services.rasterizeDepth && split
                                     ? casterBounds(fc.scene, lodBound, (float)q.number("visibility.lod_error_px"),
                                                    fc.scene.source() ? fc.scene.source()->windSpeed : 0.0f, minCasterTexels)
@@ -1793,6 +1798,8 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             r.cullTilePx = kPage;
             r.tileLocal = true;
             r.cull = D3D12_CULL_MODE_NONE;
+            r.proxies = aggregate;
+            r.proxyCoverage = aggregateCoverage;
             return r;
         };
         DepthRasterRequest r = request(base);

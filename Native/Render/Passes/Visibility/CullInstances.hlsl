@@ -24,7 +24,7 @@ void cullInstance(RWByteAddressBuffer state, uint instance, uint view, bool vali
         roots = rootBuffer[inst.mesh];
         const CullView v = loadView(view);
         const bool inBatch = v.instanceEnd == 0 || (instance >= v.instanceFirst && instance < v.instanceEnd);  // (RasterView's instance batch)
-        if (((inst.flags & INSTANCE_MASK) != 0 || INSTANCE_MASK == 0) && (inst.flags & INSTANCE_HIDDEN) == 0 && inBatch && instanceInSet(v, inst, instance))
+        if (instanceInRun(inst, INSTANCE_MASK) && inBatch && instanceInSet(v, inst, instance))
         {
             float4 bounds = worldSphere(inst, inst.objectToWorld, mesh.boundsSphere);
             float4 prevBounds = worldSphere(inst, inst.prevObjectToWorld, mesh.boundsSphere);
@@ -120,7 +120,8 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint lane : SV
     const bool valid = id.y < VIEW_COUNT && id.x < gpuInstanceCount(v0) && !cullViewTilesEmpty(v0, id.y);
     cullInstance(state, valid ? v0.gpuFirst + id.x : 0, id.y, valid);
 #elif PHASE == 1
-    // One group per chunk item: the item and the chunk are uniform over the group.
+    // One group per chunk item: the item and the chunk are uniform over the group. An item whose members are all drawn
+    // as proxies (CHUNK_ITEM_PROXIES) has none to test.
     const uint item = gid.x + gid.y * 65535u;
     const bool any = item < min(state.Load(4 * VS_CHUNK_ITEMS), CAP_DEFERRED);
     uint view = 0, first = 0, count = 0, membersSrv = 0;
@@ -128,12 +129,12 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint lane : SV
     {
         RWStructuredBuffer<uint2> work = ResourceDescriptorHeap[CHUNK_WORK_UAV];
         const uint2 chunkItem = work[item];
-        view = chunkItem.y;
+        view = chunkItem.y & ~CHUNK_ITEM_PROXIES;
         const CullScene cs = loadCullScene(loadView(view).cullSceneSrv);
         StructuredBuffer<CullChunk> chunks = ResourceDescriptorHeap[cs.chunkSrv];
         const CullChunk ch = chunks[chunkItem.x];
         first = ch.first;
-        count = min(ch.count, CHUNK_INSTANCES);
+        count = (chunkItem.y & CHUNK_ITEM_PROXIES) != 0 ? 0u : min(ch.count, CHUNK_INSTANCES);
         membersSrv = cs.chunkInstancesSrv;
     }
     [unroll] for (uint base = 0; base < CHUNK_INSTANCES; base += 64)
