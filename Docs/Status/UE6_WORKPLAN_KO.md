@@ -361,11 +361,75 @@ Unreal의 light component에 있고 여기에 없던 여섯 가지를 썼다. **
 
 - `Native/Host` ABI에 새 필드가 없다(다른 작업의 몫으로 남겼다). 지금은 씬 파일과 `scene::Light`·`Instance::flags`로만 넣을 수 있다.
 - `ShadeOpaque.hlsl` 본문에 남은 것: 국소광의 coat·sheen 로브에 specular 스케일(`shLightSpecular()`을 곱하면 된다), 프록셀 리스트 경로(`mega_lights` 끔)의 채널 검사(광원 루프 앞에서 `g_lightChannels`에 인스턴스 채널을 넣으면 된다).
-- 채널 검사가 없는 곳: coverage 프래그먼트와 머리카락(기록에 인스턴스가 없다), surface cache 카드(카드의 인스턴스 채널을 넣지 않았다), FAR 타일 항.
-- barn door가 없는 곳: 그림자 광선의 표본점(가려진 부분으로도 광선이 간다), FAR 타일 항, 공기·안개의 세기, 방출면 프록시.
-- 소스 텍스처: diffuse와 specular가 조회 한 번을 같이 쓴다(원본은 각각). mip은 텍스처 시스템의 것이고 원본의 가우시안 프리필터가 아니다. 입자·공기·FAR 타일 항은 텍스처 없는 색이다. 텍스처를 처음 올린 프레임에 광원 버퍼를 다시 만든다(FX 광원이 그 프레임에 빠질 수 있다).
+- 채널 검사가 없는 곳(9.1 뒤): surface cache의 월드 셀, 광선 hit, 안개·공기(원본도 검사하지 않는다). `mega_lights`에서 한 픽셀의 coverage 프래그먼트들은 가장 가까운 프래그먼트의 채널을 같이 쓴다. 머리카락의 `mega_lights` 인스턴스는 표본을 뽑을 때 채널을 보지 않는다(음영에서 0이 되므로 표본만 낭비한다).
+- barn door가 없는 곳(9.1 뒤): 방출면 프록시(광선이 맞히는 방출면은 자르지 않은 사각형), surface cache의 중심 광선, S의 국소 그림자 맵.
+- 소스 텍스처: diffuse와 specular가 조회 한 번을 같이 쓴다(원본은 각각). mip은 텍스처 시스템의 것이고 원본의 가우시안 프리필터가 아니다. 텍스처를 처음 올린 프레임에 광원 버퍼를 다시 만든다(FX 광원이 그 프레임에 빠질 수 있다).
 - `mega_lights` 켠 상태의 lit 입자는 안개와 같은 국소광 볼륨을 읽으므로 volumetric 스케일을 따른다(원본의 반투명 볼륨은 따르지 않는다). 프록셀 리스트 경로의 입자는 diffuse 스케일이다.
-- `FxLayerSetup.STEP0.ML0.GIV0`은 구성요소 없이 컴파일한다(한도 204,800 B에서 256 B 아래). 머리카락은 specular 스케일을 따로 받지 않는다. 광선 hit의 specular 로브도 같다(레코드에 스케일이 하나다).
-- 큰 커널(B, 한도 204,800): `ReflectionTraceInline.SKY0.JOB2.CORNERS1` 203,648, `CoverageComposite.PART1.*.AREA1` 199,460, `GiTrace.SKY0.SPLIT1` 193,968.
+- `FxLayerSetup.STEP0.ML0.GIV0`은 구성요소 없이 컴파일한다(한도 204,800 B에서 256 B 아래). `ReflectionTraceInline`의 SKY0 라이브러리(광선 버퍼가 넘친 job의 경로)는 hit의 광원 표본에서 레코드 pad의 구성요소(감쇠 지수, 거리 페이드, barn door 자르기, specular 스케일)를 빼고 컴파일한다(`UNX_RT_LIGHT_COMPONENTS 0`; 넣으면 JOB2가 한도를 넘는다).
+- 큰 커널(B, 한도 204,800; 9.1 뒤): `FxLayerSetup.STEP0.ML0.GIV0` 204,544, `ReflectionTraceInline.SKY0.JOB2.CORNERS1` 203,796, `ReflectionTraceInline.SKY0.JOB1.CORNERS1` 201,888, `ReflectionTraceInline.SKY1.JOB2.CORNERS1` 199,940, `CoverageComposite.PART1.*.AREA1` 199,480, `GiTrace.SKY0.SPLIT1` 196,512.
+
+### 9.1 한계 보완 (3차, 2026-10-03)
+
+**코드 작성·빌드 통과, 실행 안 함.**
+
+| 항목 | 코드에 있는 것 | 파일 |
+|---|---|---|
+| 채널: coverage 프래그먼트 | 프록셀 리스트 경로의 광원 루프가 프래그먼트의 인스턴스 채널을 `g_lightChannels`에 둔다. `mega_lights`의 coverage 인스턴스는 표면 패스(MODE 3)가 가장 가까운 프래그먼트의 채널을 R8_UINT 텍스처에 쓰고 표본 패스가 읽는다(`MegaLightsOptions::channels`, P[5].z) | `CoverageShade.hlsli`, `MegaLightsCoverage.hlsl`, `MegaLightsSample.hlsl`, `MegaLights.cpp`, `ShadingSystem.cpp` |
+| 채널: 머리카락 | 몸 헤더의 인스턴스(워드 4) → 채널. `hairLocalLight`가 광원마다 검사한다 | `CoverageHair.hlsl` |
+| 채널: 카드 | `McMeshCards::countFlags` 비트 20~22 = 인스턴스 채널 ^ 1(`MeshCardScene::addInstance`의 새 인자). 카드 직접광 저장이 Lambert 점의 채널로 쓴다 | `MeshCardScene.cpp`, `SurfaceCacheCards.cpp`, `CardLayout.hlsli`, `CardDirectStore.hlsl` |
+| 채널: FAR 타일 항 | FAR 합에는 받는 쪽이 없다. 장면의 모든 인스턴스가 공유하는 채널(`GpuScene::lightingChannelsShared`: 채널의 AND, 업로드 뒤에는 좁아지기만 한다)에 든 광원만 FAR가 되고 나머지는 NEAR(픽셀 경로가 채널을 검사)다. 채널을 쓰지 않는 장면은 전과 같다 | `LightNearFar.hlsli`, `TileLights.hlsl`, `CoverageTileLights.hlsl`, `GpuScene.cpp` |
+| barn door: 그림자 광선의 표본점 | 표본을 뽑기 전에 광원의 사각형을 점에서 보이는 사각형으로 바꾼다(`rtLightBarnDoors`): MegaLights 추적(`mlSampleVisible`), 머리카락 그림자, 광선 hit(`rtLocalLightFinish`, 레코드 pad 비트 1). 창은 광원 중심의 것을 유지한다 | `HitLocalLights.hlsli`, `MegaLightsWorld.hlsli`, `HairShadow.hlsl`, `RayScene.cpp` |
+| barn door: FAR 항 · 공기 · 안개 · 입자 | FAR: 네 모서리 점마다 자른 사각형의 벡터 조도. 점광원으로 보는 소비자: 방향만으로 정해지는 원거리 극한의 보이는 면적 비 `lightBarnDoorFar`(축마다 높이 × \|w_축\| / w_전방 − 벌어짐만큼 줄어든다) | `LightNearFar.hlsli`, `Scene.hlsli`, `FroxelCommon.hlsli`, `FxLayerSetup.hlsl`, `VolumeSetup.hlsl` |
+| 소스 텍스처의 평균색 | `gpu::Light::sourceMean`(RGB9E5; 전의 pad 워드). `TextureSystem::lightSourceMeans`가 레벨 0의 선형 평균을 텍스처 업로드마다 한 번 계산한다. 공기 슬라이스, 국소광 볼륨, 입자·볼륨의 리스트 경로, FAR 항, R의 광원 레코드가 `lightMeanColor`(또는 레코드의 색)로 쓴다 | `GpuSceneLayout.h`, `TextureSystem.cpp`, `GpuScene.cpp`, `Scene.hlsli`, `FroxelSlice.hlsli`, `MegaLightsVolume.hlsl`, `RayScene.cpp` |
+| specular 스케일: 머리카락 | 섬유 표면 반사(R 로브)에 specular/diffuse 비를 곱한다(`hairStrandSpecular`). 섬유를 지난 빛(TT, TRT)과 다중 산란은 diffuse 스케일. 원본은 머리카락 응답 전체를 diffuse 스케일에 둔다(`HairBxDF`가 Transmission으로 돌려준다) — 여기가 다르다 | `HairScattering.hlsli`, `CoverageHair.hlsl` |
+| specular 스케일: 광선 hit | R의 광원 레코드 pad 비트 16~31 = half(specular/diffuse − 1). `rtLocalLightFinish`가 `g_rtLightSpecular`에 두고 `rtLocalLightBrdfCos`의 specular·coat·sheen 로브가 곱한다 | `HitLocalLights.hlsli`, `RayScene.cpp` |
 
 실행해서 확인할 것(순서대로): `unx_test_scene_lightcomponents`(CPU), 광원 레코드 크기가 바뀌었으므로 `unx_test_shading_shadingtests`·`unx_test_fx_fxlighttests`·`unx_test_raytracing_fxlighthits`, 그 뒤 항목마다 still(스케일 0과 2, 텍스처를 붙인 rect, barn door 각도 2개, 채널이 다른 두 물체, 거리 페이드 구간 안팎, 지수 2와 8).
+
+## 10. 입자와 데칼: 원본과의 비교 (2026-10-03, 브랜치 `w/hair`)
+
+읽은 것: 여기는 `Native/Render/Passes/FX/*`, `Passes/Volume/*`, `Passes/Decal/*`, `Material/Resolve.hlsl`, `RayTracing/HitDecals.hlsli`. 원본은 `Engine/Shaders`와 `Source/Runtime/Renderer`. **참조 트리에 Niagara 플러그인과 Engine 모듈이 없다**: sprite·ribbon·mesh vertex factory, Niagara renderer 속성, `DecalComponent`, DepthFade 같은 재질 함수는 확인하지 못했다. 그 부분은 [기억]으로 표시했고 식은 트리에 있는 것만 적었다.
+
+이번에 구현한 것은 **코드 작성·빌드 통과, 실행 안 함**이다.
+
+### 10.1 입자
+
+| 항목 | 원본 | 여기 | 상태 |
+|---|---|---|---|
+| 소프트 파티클(깊이 페이드) | DepthFade 노드는 트리에 없다 [기억: 불투명도 × saturate((장면 깊이 − 픽셀 깊이) / FadeDistance)]. 트리에 있는 것: `GetSphericalParticleOpacity`(`MaterialTemplate.ush`) — 반지름 R의 공, 반현 h = √(R² − d²), 앞 = 픽셀 깊이 − h, 뒤 = min(장면 깊이, 픽셀 깊이 + h), 불투명도 = 1 − 2^(−밀도/R × (1 − d/R) × (뒤 − 앞)), 여기에 saturate((픽셀 깊이 − R − near) / R) | 스프라이트는 프로파일 α(1 − q)²의 원. 전에는 중심 깊이의 평면으로 불투명 깊이와 비교했다(표면과 만나는 곳에서 잘림) | **구현**: 스프라이트를 반지름 R의 공으로 보고 픽셀의 현 중 표면 앞에 있는 비율 f로 광학 두께를 줄인다(1 − (1 − a)^f). 공이 블록의 불투명 깊이 범위에 걸리면 edge 블록(전 해상도). near plane 페이드도 같은 함수의 식. `fx.particles.soft`, `fx.particles.near_fade`(기본 켬; `FxLayerTile.hlsl`). 리본은 그대로(hit 깊이에서 자름) |
+| sub-UV 플립북 | 인터페이스만 트리에 있다(`SubUVCoords[2]`, `SubUVLerp`) [기억: 프레임 = floor(index), 섞는 비 = frac]. 모션 벡터 블렌딩은 트리의 셰이더에 없다 | 스프라이트에 텍스처가 없다(재질 0 = 방출색, 1 = lit 알베도). 스트림의 `uv`, `uv_scroll`, `columns`, `rows`, `first_frame`, `frames_per_second`를 렌더러가 읽지 않는다 | 없음. 프로그램 → 텍스처 바인딩 계약이 먼저 있어야 한다 |
+| 방향·정렬 | 트리에 없다 [기억: FaceCamera, FaceCameraPlane, CustomFacingVector, FaceCameraPosition, FaceCameraDistanceBlend / Unaligned, VelocityAligned, CustomAlignment] | 원형 프로파일이라 방향이 없다. 속도 방향으로 늘이기, 회전(`rotation_keys`를 읽지 않는다) 없음 | 없음 |
+| lit 입자 | 반투명 조명 볼륨(cascade 2개 × 64³, ambient + 방향 SH)을 픽셀 또는 버텍스에서 읽는 모드들, 방향 모드는 법선을 쓴다. Surface 모드는 forward 조명. 자기 그림자는 Fourier opacity map(방향광). MegaLights가 볼륨을 채운다 | 입자 중심에서 한 번: 태양(VSM의 공기 중 가시성), 국소광(`mega_lights`: 프록셀 국소광 볼륨의 fluence와 방향 모멘트; 아니면 리스트 + 그림자 맵), 간접(반투명 볼륨 또는 GI 캐시), HG 위상함수(`medium_phase`) | 다름: 입자당 한 번이고 법선이 없다. 픽셀 단위 조명, 입자의 자기 그림자 없음 |
+| 입자가 드리우는 그림자 | 반투명 캐스터는 일반·가상 그림자 맵에 불투명도 clip으로만 들어간다(이진). VSM에 투과율 층이 없다. 객체별 Fourier opacity map이 따로 있다 | 스프라이트·리본·매질은 그림자를 드리우지 않는다. 메시 입자는 일반 인스턴스로 드리운다. S의 VSM 투과율 층은 V의 얇은 캐스터 래스터만 채운다 | 없음. 투과율 층의 knot 압축(`VsmLayer.hlsli`)에 입자의 소광을 넣는 일은 S 안쪽이라 하지 않았다 |
+| 리본 | 트리에 없다 [기억: 테셀레이션 Automatic/Custom/Disabled와 곡선 장력, UV 분포 4종, facing Screen/Custom/CustomSideVector, 모양 Plane/MultiPlane/Tube] | 점 사이 직선 세그먼트(사각형 = 삼각형 2개), 측면 프레임 병렬 이동, 폭 프로파일 (1 − x²)², 끊김 거리(`ribbon_break`), 법선은 `ribbon_normal` 고정. uv.x = 누적 길이 / `ribbon_uv`를 쓰지만 텍스처가 없어 읽는 곳이 없다 | 없음: 곡선 분할(테셀레이션), 카메라를 향하는 facing, 텍스처와 UV 모드, 튜브·다중 평면 |
+| 광원 렌더러 | `FSimpleLightEntry`: 입자마다 점광원 하나(색, 반지름, 지수, specular·diffuse 스케일, volumetric 세기, 반투명 영향, MegaLights 허용과 그림자). 렌더러 쪽 상한 없음 | 에미터 행마다 광원 하나(입자 세기의 합, 휘도 가중 중심, 퍼짐을 크기로). 그림자 없음. 재질 0(방출)만. 장면 광원 한도 32,768을 넘는 행은 빛을 내지 않는다(로그) | 다름: 입자당 광원이 아니다. 반지름·지수·스케일 필드 없음(범위는 노출에서 계산) |
+| 왜곡 | 재질의 굴절 오프셋(법선 차 또는 IOR)을 distortion 버퍼에 더하고 장면색을 다시 읽는다. 앞에 있는 표본은 깊이로 거부. BGRA8에서는 부호당 0.25 UV에서 포화 | distortion 출력 입자 = 열 아지랑이: 1/4 해상도에서 입자들의 굴절 기울기 합으로 광선이 꺾인 픽셀 변위, 아지랑이 뒤의 픽셀만 (1 − z_p / z_b)만큼 변위. 8 px 이상은 상태 비트 | 있음(모델이 다르다). 스프라이트·메시 재질의 굴절 왜곡은 없음 |
+| 메시 입자 | 트리에 없다 | 살아 있는 입자마다 장면 인스턴스(회전, 스케일, 이전 프레임 변환). R의 TLAS에 없다 | 다름: 반사·GI 광선에 보이지 않는다. facing 모드 없음 |
+| 정렬·합성 | draw 단위 정렬(거리, 축, 투영 Z), 선택 OIT(AVBOIT) | 32 px 타일마다 모든 기록을 깊이로 정렬해 앞에서 뒤로 합성. 타일당 2,048개(넘으면 상태 비트) | 있음 |
+| 모션 벡터 | 반투명 velocity 출력 | 입자에 벡터가 없다. TSR은 입자 픽셀에서 히스토리 clamp를 불투명도만큼 줄인다(`upscale_layer_motion`) | 다름 |
+
+### 10.2 데칼
+
+| 항목 | 원본 | 여기 | 상태 |
+|---|---|---|---|
+| 화면 크기 페이드 | `CalculateDecalFadeAlpha`: 화면 크기 = 반지름 / 거리, k = FadeScreenSize × (2 / proj00) / 뷰 폭 × 600, α = saturate((화면 크기 − k) / (k / 2)). α ≤ 0이면 그리지 않는다 | 없었다 | **구현**: `Decal::fadeScreenSize`, 같은 식(`DecalSetup.hlsl` STEP 1). 0이 된 데칼은 타일 목록에 들어가지 않는다 |
+| 수명 페이드 | FadeStartDelay/FadeDuration, FadeInStartDelay/FadeInDuration → saturate(min(들어옴, 나감)). 재질이 `DecalLifetimeOpacity` 노드를 써야 적용된다 | 없었다 | **구현**: `fadeInStart/Duration`, `fadeOutStart/Duration`(프레임 시계 `FrameContext::time`의 초), 같은 min 식을 불투명도에 자동으로 곱한다. 사라진 데칼의 제거는 게임 몫이다 |
+| 각도 페이드 | 트리에 없다. 투영 깊이 방향의 saturate(4 − 4\|2z − 1\|)만 있고, 법선 페이드는 재질에서 장면 법선을 읽어 만든다 | 기하 법선과 상자 +Z의 각으로 페이드(시작·끝 각), 깊이 가장자리 `edge`(기본 0.25: 원본과 같은 바깥 12.5 %) | 있음 |
+| 정렬 순서 | SortOrder → 법선을 쓰는 것 먼저 → 블렌드 → 재질 | priority → 생성 순서(목록 순서와 무관) | 있음 |
+| 채널 | 재질에 연결된 출력이 정한다(`FDecalBlendDesc`: base colour, normal, roughness·specular·metallic, emissive, AO). DBuffer A/B/C에 같은 α로 블렌드 | 전에는 항상 base colour + roughness + metallic + normal | **구현**: `Decal::channels`(`DecalBaseColor`, `DecalNormal`, `DecalRoughMetal`): 법선만, roughness만 바꾸는 데칼. specular·AO 채널은 없다 |
+| 색 | `DecalColor` 노드 | 없었다 | **구현**: `Decal::color`(base colour에 곱한다) |
+| receive decals | 프리미티브 플래그(DBuffer 데칼은 base pass가 검사)와 stencil 비트 | 없었다(인스턴스에 붙인 데칼이 그 인스턴스만 칠하는 것뿐) | **구현**: `scene::InstanceNoDecals`(flags 비트 7). 직접 뷰와 광선 hit 모두(`decalApplyList`) |
+| 재질의 decal response | 재질이 받는 채널 마스크(colour / normal / roughness 조합) | 없음 | 없음 |
+| 블렌드 모드 | Translucent, AlphaComposite, (DBuffer가 아닌 경로의) Modulate | lerp 하나(Translucent) | 없음 |
+| 방출 데칼 | base pass 뒤에 SceneColor로 더하는 별도 패스. Lumen 카드에는 없다 | 데칼 재질의 emissive를 읽지 않는다 | 없음: resolve가 emissive 타깃에 더하고, `ShadeOpaque`가 데칼이 덮은 픽셀에서 그 타깃을 읽어야 한다(재질 워드의 비트 하나). `ShadeOpaque.hlsl` 본문이라 남겼다 |
+| 반투명·물 | DBuffer를 읽지 않는다(수동 lookup 노드만) | 유리·물이 읽지 않는다 | 같다 |
+| coverage 프래그먼트 | (Nanite는 base pass에서 DBuffer를 받는다) | 프래그먼트 재질(`covFragmentMaterial`)에 데칼이 없다. `Decal.hlsli` 머리말에는 있다고 적혀 있었다(고쳤다) | 없음: 합성 커널이 199 KB / 204.8 KB라 `decalApply`(목록 정렬 + 텍스처 3장)가 들어가지 않는다. 커널을 나눠야 한다 |
+| 광선 hit · GI | Lumen의 hit과 카드에 데칼이 없다(path tracer만) | R의 hit에 적용한다(`HitDecals.hlsli`: 데칼 AABB의 TLAS, base colour·roughness·metallic). surface cache 카드 캡처에는 없다 | 원본보다 많다 |
+| 메시 데칼 | 데칼 도메인 재질의 메시를 DBuffer에 그린다(깊이 바이어스, 정렬 우선순위) | 없음 | 없음 |
+| 타일당 수 | 제한 없음(데칼마다 draw) | 16 px 타일당 16개(넘으면 상태 비트와 개수) | 다름 |
+| 텍스처 미분 | 기본은 하드웨어 미분(깊이 경계에서 2×2 아티팩트), 선택 노드로 보정 | 보이는 삼각형의 해석적 미분 | 있음 |
+| 입자의 데칼 출력(`FX_OUTPUT_DECAL`) | — | 스트림에 출력 종류는 있고 렌더러 코드가 없다 | 없음 |
+
+레코드: `DecalRecord` 80 → 128 B, `DecalFrame` 128 → 144 B. `Native/Host`의 `UnxDecalDesc`에는 새 필드가 없다(기본값으로 들어간다) — 호스트 ABI는 후속이다.
+
+실행해서 확인할 것(순서대로): `unx_test_decal_decaltests`(레코드 크기가 바뀌었다), `unx_test_host_hostdecal`, 입자 레이어 테스트(`fx.particles.soft`가 꺼진 기본 `ParticleLayerFrame`은 전과 같은 값이어야 한다), 그 뒤 still: 바닥에 걸친 연기 스프라이트(소프트 켬/끔), 카메라가 스프라이트 안에 있을 때, 멀어지는 데칼(화면 크기 페이드), 수명 페이드 구간, 법선만·roughness만 데칼, `InstanceNoDecals` 인스턴스.
