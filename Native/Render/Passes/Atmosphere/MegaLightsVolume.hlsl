@@ -121,9 +121,13 @@ void MegaLightsVolumeGen()
         const float weight = min(r.sum / r.weight[i], asfloat(P[3].x)) / count;
         now += airLocalLight(light, o, dir, len, cm, a.mieG, P[0].w, li, lateral) * weight;
         {
+            // (a point value standing for the froxel: the light's distance is taken no shorter than the froxel's own
+            // radius - without it a froxel within its size of a light holds a spike of 1 / d^2 that the readers between
+            // froxels show as a block; the reference's volumetric fog biases the squared distance the same way)
             const float3 vm = mid - light.position;
             const float dm = max(length(vm), 0.01);
-            const float3 Em = light.color * (froxelIntensity(light, vm / dm) * froxelWindow(light, dm) / (dm * dm) * weight);
+            const float cellRadiusSq = 0.25 * (len * len + 2.0 * lateral * lateral);
+            const float3 Em = light.color * (froxelIntensity(light, vm / dm) * froxelWindow(light, dm) / (dm * dm + cellRadiusSq) * weight);
             fluenceNow += Em;
             momentNow += (-vm / dm) * mlLuminance(Em);
         }

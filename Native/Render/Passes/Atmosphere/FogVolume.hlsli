@@ -57,6 +57,16 @@ uint fogHizMip(FogGrid g) { return (uint)max(firstbithigh(g.cellPx), 1) - 1u; }
 // A cell's lateral width at a view depth (m).
 float fogCellWidth(FogGrid g, float depth) { return g.cellPx * 2.0 * depth * g_tanHalfFovY / g_viewHeight; }
 
+// A cell's segment of its centre ray (view depths za < zb) kept in front of a surface at 'limit' on that ray: what
+// would lie behind moves the whole segment toward the camera (FogScatter.hlsl walks it, VsmMarkFog.hlsl asks for its
+// pages: both through this).
+void fogSegment(inout float za, inout float zb, float limit)
+{
+    const float behind = max(zb - limit, 0.0);
+    zb -= behind;
+    za = max(za - behind, 0.0);
+}
+
 // The fog's extinction (1/m) at a height (the medium's density under its height held to 64 x, as fogOpticalDepth).
 float fogExtinctionAt(FogMedium f, float y)
 {

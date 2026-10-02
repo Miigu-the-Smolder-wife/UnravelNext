@@ -1,12 +1,12 @@
 // unx-kernel: cs_6_6 main
 // Page requests of the fog's volume (FogVolume.hlsli, FogScatter.hlsl): every cell the view sees into requests, at the
 // air level of its width, the pages its centre ray crosses from half a slice before the cell to half a slice past it
-// (the scatter's segment is the cell's slab moved by the frame's jitter: within that range, at this level), no farther
-// than the farthest surface of the cell's pixels. One thread per cell. Written with InterlockedOr of
+// (the scatter's segment is the cell's slab moved by the frame's jitter: within that range, at this level), kept in front
+// of the surface on that ray as the scatter keeps it (fogSegment with the centre pixel's depth). One thread per cell. Written with InterlockedOr of
 // VSM_REQ_PROPAGATED | VSM_REQ_AIR, as the air's (VsmMarkAir.hlsl).
 // P[0] = { requests UAV (raw), VSM constants CBV, grid x | y << 16, z | cell px << 16 }
 // P[1] = { asuint(far m), asuint(k), asuint(b), asuint(shadow texels per cell) }
-// P[2] = { depth pyramid SRV (UNX_NONE: every cell), VSM stats UAV (raw; error word), 0, 0 }
+// P[2] = { depth pyramid SRV (UNX_NONE: every cell), VSM stats UAV (raw; error word), depth SRV (UNX_NONE: no surface), 0 }
 // Frame constants of the main view.
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
@@ -31,9 +31,19 @@ void main(uint3 id : SV_DispatchThreadID)
     ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[P[0].y];
     uint k;
     if (!vsmAirLevel(c, fogCellWidth(g, 0.5 * (z0 + z1)), asfloat(P[1].w), k)) return;
-    const float za = max(fogDepthOfSlice(g, float(id.z) - 0.5), 0.0), zb = min(fogDepthOfSlice(g, float(id.z) + 1.5), farthest);
+    // every jitter's segment: the slab from half a slice before the cell to half a slice past it, in front of the centre
+    // ray's surface (both ends of the range moved as the farthest jitter's segment is)
+    const float2 centrePixel = (float2(id.xy) + 0.5) * float(g.cellPx);
+    float limit = g.farM;
+    if (P[2].z != 0xFFFFFFFFu)
+    {
+        Texture2D<float> depthTexture = ResourceDescriptorHeap[P[2].z];
+        limit = min(limit, linearDepth(depthTexture.Load(int3(min(int2(centrePixel), int2(g_viewWidth, g_viewHeight) - 1), 0))));
+    }
+    float za = max(fogDepthOfSlice(g, float(id.z) - 0.5), 0.0), zb = fogDepthOfSlice(g, float(id.z) + 1.5);
+    fogSegment(za, zb, limit);
     if (!(zb > za)) return;
-    const float3 ray = froxelRayAt((float2(id.xy) + 0.5) * float(g.cellPx));
+    const float3 ray = froxelRayAt(centrePixel);
     const float3 p0 = vsmLightSpaceAt(c, g_cameraPosition + ray * za, k), p1 = vsmLightSpaceAt(c, g_cameraPosition + ray * zb, k);
     const float texel = vsmTexel(k);
     const float2 A = p0.xy / texel, D = (p1.xy - p0.xy) / texel;

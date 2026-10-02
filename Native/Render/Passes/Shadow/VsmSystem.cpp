@@ -1282,7 +1282,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         if (fog.on)
         {
             ID3D12PipelineState* pf = sh.compute("Passes/Shadow/VsmMarkFog");
-            const TextureRef hiz = main.hiz;
+            const TextureRef hiz = main.hiz, fogDepth = main.depth;
             uint32_t fb[4];
             std::memcpy(&fb[0], &fog.farM, 4);
             std::memcpy(&fb[1], &fog.k, 4);
@@ -1291,13 +1291,14 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             g.addPass("s.vsm.markfog", QueueType::Compute,
                       [&](PassBuilder& b) {
                           if (hiz.valid()) b.use(hiz, Use::SrvCompute);
+                          if (fogDepth.valid()) b.use(fogDepth, Use::SrvCompute);
                           b.use(requests, Use::UavCompute);
                           b.use(statsBuf, Use::UavCompute);
                           b.keep();
                       },
                       [=](PassContext& ctx) {
                           const uint32_t k[12] = { ctx.uav(requests), ring, fog.gridX | fog.gridY << 16, fog.gridZ | fog.cellPx << 16, fb[0], fb[1], fb[2], fb[3],
-                                                   hiz.valid() ? ctx.srv(hiz) : 0xFFFFFFFFu, ctx.uav(statsBuf), 0, 0 };
+                                                   hiz.valid() ? ctx.srv(hiz) : 0xFFFFFFFFu, ctx.uav(statsBuf), fogDepth.valid() ? ctx.srv(fogDepth) : 0xFFFFFFFFu, 0 };
                           ctx.cmd->SetPipelineState(pf);
                           ctx.bindFrameConstants(mainConstants);
                           ctx.computeConstants(k, 12);

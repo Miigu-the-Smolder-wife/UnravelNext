@@ -5,8 +5,9 @@
 //   sun        E x the air's transmittance to the sun x HG(view . sun, g) x (1 - the shadowed fraction of the cell's
 //              segment of its centre ray): the casters' shadow from the sun's shadow pages at the air level of the
 //              cell's width (VsmMarkFog.hlsl asked for exactly these pages, at the level of the unjittered cell). The
-//              segment ends at the farthest surface of the cell's pixels (past it the ray is behind that surface:
-//              FroxelSlice.hlsli froxelSampledLength, the same rule);
+//              segment stays in front of the surface on the centre ray (the centre pixel's depth): a segment that
+//              would cross it is moved toward the camera by what lies behind (fogSegment; past the surface the ray is
+//              in another space - beyond a wall, outside);
 //   local      the air grid's sampled local light (MegaLightsVolume.hlsl: visible fluence and its direction moment per
 //              froxel, shadow rays for every caster), read between its froxels, through the phase function's first two
 //              SH bands;
@@ -22,7 +23,7 @@
 //          light), depth pyramid SRV }
 // P[6] = { local fluence SRV, direction moment SRV, previous translucency volume params SRV (UNX_NONE: none),
 //          transmittance LUT SRV }
-// P[7] = asuint{ jitter x, y, z in [0, 1), history weight }, P[8].x = VSM stats UAV (the walk's error word)
+// P[7] = asuint{ jitter x, y, z in [0, 1), history weight }, P[8] = { VSM stats UAV (the walk's error word), depth SRV }
 // Frame constants of the main view.
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
@@ -48,12 +49,18 @@ void main(uint3 id : SV_DispatchThreadID)
         return;
     }
     const float3 jitter = asfloat(P[7].xyz);
-    const float3 centreRay = froxelRayAt((float2(id.xy) + 0.5) * float(g.cellPx));
-    const float3 ray = froxelRayAt((float2(id.xy) + jitter.xy) * float(g.cellPx));
+    const float2 centrePixel = (float2(id.xy) + 0.5) * float(g.cellPx), samplePixel = (float2(id.xy) + jitter.xy) * float(g.cellPx);
+    const float3 centreRay = froxelRayAt(centrePixel);
+    const float3 ray = froxelRayAt(samplePixel);
     const float toRay = length(ray);
     const float3 dir = ray / toRay;
-    // the sample point: inside the cell, in front of the surface
-    const float zs = min(fogDepthOfSlice(g, float(id.z) + jitter.z), max(farthest - 0.02, 0.5 * (z0 + min(z1, farthest))));
+    // the surfaces on the two rays the cell walks (a pixel outside the view: the view's edge pixel)
+    Texture2D<float> depthTexture = ResourceDescriptorHeap[P[8].y];
+    const int2 last = int2(g_viewWidth, g_viewHeight) - 1;
+    const float centreDepth = linearDepth(depthTexture.Load(int3(min(int2(centrePixel), last), 0)));
+    const float sampleDepth = linearDepth(depthTexture.Load(int3(min(int2(samplePixel), last), 0)));
+    // the sample point: at the frame's place in the cell, in front of the surface on its own ray
+    const float zs = max(min(fogDepthOfSlice(g, float(id.z) + jitter.z), sampleDepth - 0.02), 0.0);
     const float3 p = g_cameraPosition + ray * zs;
 
     const FogMedium fog = fogMedium(uint4(1, 0, 0, 0), P[2], P[3]);
@@ -82,9 +89,8 @@ void main(uint3 id : SV_DispatchThreadID)
                 // (the level of the unjittered cell: the pages VsmMarkFog.hlsl asked for)
                 if (vsmAirLevel(vc, fogCellWidth(g, 0.5 * (z0 + z1)), asfloat(P[5].y), k))
                 {
-                    const float limit = (P[1].w & 1u) != 0 ? min(g.farM, farthest) : g.farM;
-                    const float za = min(max(fogDepthOfSlice(g, float(id.z) + jitter.z - 0.5), 0.0), limit);
-                    const float zb = min(fogDepthOfSlice(g, float(id.z) + jitter.z + 0.5), limit);
+                    float za = max(fogDepthOfSlice(g, float(id.z) + jitter.z - 0.5), 0.0), zb = fogDepthOfSlice(g, float(id.z) + jitter.z + 0.5);
+                    fogSegment(za, zb, (P[1].w & 1u) != 0 ? min(g.farM, centreDepth) : g.farM);
                     if (zb > za + 1e-4)
                     {
                         VsmAirWalkCount walk = (VsmAirWalkCount)0;

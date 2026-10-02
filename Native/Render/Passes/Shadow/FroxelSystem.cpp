@@ -1051,7 +1051,7 @@ void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef 
     fc.resources.fogVolume = {};
     fc.resources.fogDebug = {};
     const FrameResources r = fc.resources;
-    if (!fc.trackState || !main.hiz.valid() || !r.transmittanceLut.valid()) return;
+    if (!fc.trackState || !main.hiz.valid() || !main.depth.valid() || !r.transmittanceLut.valid()) return;
     FogState& st = fc.state<FogState>("S.fog.volume");
     if (st.preparedFrame != fc.frame.frameIndex) return;  // (fogPrepare: the fog is on and this frame's record exists)
     const FogView f = st.view;
@@ -1075,7 +1075,7 @@ void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef 
 
     VsmFrameRefs vsm;
     const bool shadows = frameRefs(fc, vsm);
-    const TextureRef hiz = main.hiz, tlut = r.transmittanceLut, fluence = sampled.fluence, moment = sampled.moment;
+    const TextureRef hiz = main.hiz, fogDepth = main.depth, tlut = r.transmittanceLut, fluence = sampled.fluence, moment = sampled.moment;
     const bool local = fluence.valid() && moment.valid();
     const bool ambient = f.indirect && r.translucencyGiPrevParams != 0xFFFFFFFFu && r.translucencyGiPrevAmbient.valid() && r.translucencyGiPrevDirectional.valid();
     const TextureRef ambientA = r.translucencyGiPrevAmbient, ambientD = r.translucencyGiPrevDirectional;
@@ -1092,6 +1092,7 @@ void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef 
     g.addPass("s.fog.scatter", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(hiz, Use::SrvCompute);
+                  b.use(fogDepth, Use::SrvCompute);
                   b.use(tlut, Use::SrvCompute);
                   if (local)
                   {
@@ -1125,7 +1126,7 @@ void recordFogVolume(FramePassContext& fc, const ViewResources& main, BufferRef 
                                      shadows ? ctx.srv(vsm.bound) : none, bits(f.shadowTexelsPerCell), local ? ctx.srv(lights) : none, ctx.srv(hiz),
                                      local ? ctx.srv(fluence) : none, local ? ctx.srv(moment) : none, ambient ? ambientParams : none, ctx.srv(tlut),
                                      bits(jitter[0]), bits(jitter[1]), bits(jitter[2]), bits(f.historyWeight),
-                                     shadows ? ctx.uav(vsm.stats) : none, 0, 0, 0 };
+                                     shadows ? ctx.uav(vsm.stats) : none, ctx.srv(fogDepth), 0, 0 };
                   ctx.cmd->SetPipelineState(ps);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 36);
