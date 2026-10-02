@@ -11,7 +11,8 @@
 //   frames     R8_UINT     atlas / 8: radiosity frames accumulated in the tile (<= radiosity_max_frames_accumulated)
 // Buffers:
 //   page light (16 B a card page): { last direct update frame + 1 (0: never), last indirect update frame + 1, direct
-//              temporal index, indirect temporal index }
+//              temporal index (bit 31, CL_PAGE_ANIMATED: at the page's last direct update one of its lights had a
+//              function that changes with time), indirect temporal index }
 //   uniform    (32 B an atlas tile): bit (light & 255) = the light's visibility was the same over the whole tile at the
 //              tile's last direct update (the next one traces one ray per 2 x 2 texels); bit 255: the sun
 //   last used  (4 B a card page): the update in which a reader of the cards' high levels last read the page (clFeedback);
@@ -34,6 +35,7 @@
 #define CL_BUCKETS 16u               // priority histogram size
 #define CL_NEVER_FRAMES 2048.0       // a page never lit counts as this many frames old
 #define CL_PAGE_LIGHT_BYTES 16u
+#define CL_PAGE_ANIMATED 0x80000000u // in a page light's direct index: lit by a light whose function changes with time
 #define CL_UNIFORM_BYTES 32u
 #define CL_TILE_LIGHT_BYTES 64u      // a listed tile's lights: 8 light indices, valid mask (2), uniform slots, pad
 #define CL_TILE_SHADOW_BYTES 72u     // a listed tile's visible bits: CL_SLOTS x 64 texels

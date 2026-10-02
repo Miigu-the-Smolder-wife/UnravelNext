@@ -332,13 +332,15 @@ void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs
                       b.use(uniformBits, Use::SrvGraphics);
                       b.use(tileLights, Use::UavGraphics);
                       b.use(tileShadow, Use::UavGraphics);
+                      b.use(pageLight, Use::UavGraphics);  // (CL_PAGE_ANIMATED: a light whose function changes with time)
                   },
-                  [&shaders, cb, sharedConstants, frameBuffer, select, uniformBits, tileLights, tileShadow, frame, lightFlags, capacity, directCapacity](PassContext& c) {
+                  [&shaders, cb, sharedConstants, frameBuffer, select, uniformBits, tileLights, tileShadow, pageLight, frame, lightFlags, capacity,
+                   directCapacity](PassContext& c) {
                       uint32_t k[32] = {};
                       sharedConstants(c, k);
                       k[0] = c.srv(frameBuffer), k[1] = c.srv(select), k[2] = frame, k[3] = lightFlags;
                       k[16] = c.uav(tileLights), k[17] = c.uav(tileShadow), k[18] = c.srv(uniformBits), k[19] = capacity;
-                      k[20] = directCapacity, k[21] = 0, k[22] = 0, k[23] = 0;
+                      k[20] = directCapacity, k[21] = c.uav(pageLight), k[22] = 0, k[23] = 0;
                       c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardDirectCull"));
                       c.bindFrameConstants(cb);
                       c.computeConstants(k, 32);

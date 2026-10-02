@@ -6,8 +6,9 @@
 //            its last update x update speed); a page never updated counts as 2048 frames. Update speed = 1 / (1 +
 //            distance from the camera to the page's box / P[4].z), doubled when the box is within P[4].w of the view
 //            frustum; 4 for a page a reader of the cards' high levels read within the last two updates (P[0].w: the
-//            reference's CardPageHighResLastUsedBuffer rule - what a mirror shows is relit first). The histograms get
-//            the page's tiles.
+//            reference's CardPageHighResLastUsedBuffer rule - what a mirror shows is relit first), and for the direct
+//            light of a page lit by a light whose function changes with time (CL_PAGE_ANIMATED: the stored value is
+//            a sample of the moment it was stored at). The histograms get the page's tiles.
 //   STAGE 1  one thread: per context the max bucket - the first whose running tile count reaches the budget - and the
 //            tiles the budget leaves for that bucket.
 //   STAGE 2  one thread per card page: pages under the max bucket are listed, pages in it while the budget lasts; a
@@ -74,11 +75,13 @@ void main(uint3 id : SV_DispatchThreadID)
     const uint2 tiles2 = pageTiles(page);
     const uint tiles = tiles2.x * tiles2.y;
     uint buckets = 0;
+    const bool animated = (pl.directIndex & CL_PAGE_ANIMATED) != 0;
     for (uint context = 0; context < 2; ++context)
     {
         const uint last = context ? pl.indirectFrame : pl.directFrame;
         const float frames = last == 0 ? CL_NEVER_FRAMES : (float)(P[0].z + 1 - last);
-        const uint bucket = CL_BUCKETS - 1 - (uint)clamp(log2(max(4.0 * frames * speed, 1.0)), 0.0, CL_BUCKETS - 1.0);
+        const float contextSpeed = context == 0 && animated ? max(speed, 4.0) : speed;
+        const uint bucket = CL_BUCKETS - 1 - (uint)clamp(log2(max(4.0 * frames * contextSpeed, 1.0)), 0.0, CL_BUCKETS - 1.0);
         select.InterlockedAdd(clHistogramOffset(context, bucket), tiles);
         buckets |= bucket << (8 * context);
     }
@@ -140,7 +143,8 @@ void main(uint3 id : SV_DispatchThreadID)
         select.InterlockedAdd(head + CL_SELECT_PAGES, 1u, before);
         const uint at = index * CL_PAGE_LIGHT_BYTES + context * 4u;
         light.Store(at, P[0].z + 1);
-        light.Store(at + 8, light.Load(at + 8) + 1);
+        // (the direct index: CL_PAGE_ANIMATED starts clear - this update's cull sets it again where it holds)
+        light.Store(at + 8, context == 0 ? (light.Load(at + 8) + 1) & ~CL_PAGE_ANIMATED : light.Load(at + 8) + 1);
     }
 }
 #endif

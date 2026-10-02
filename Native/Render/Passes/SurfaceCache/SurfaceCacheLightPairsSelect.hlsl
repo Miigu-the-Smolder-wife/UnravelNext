@@ -10,6 +10,7 @@
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/Shading/MegaLightsSampling.hlsli"
 #include "Passes/SurfaceCache/SurfaceCacheLightPairs.hlsli"
+#include "Passes/SurfaceCache/SurfaceCacheLightFunction.hlsli"
 
 void scpStore(RWByteAddressBuffer pairs, uint cell, uint k, ScpPair p)
 {
@@ -85,10 +86,17 @@ void main(uint3 id : SV_DispatchThreadID)
         }
         const MlPoint lambert = mlPointLambert(position, normal, float3(1, 1, 1));  // (its radiance is irradiance / pi)
         const float defaultEndBias = asfloat(P[4].w);
+        // the lights' functions toward the cell (SurfaceCacheLightFunction.hlsli); a cell lit by one that changes with
+        // time is listed with the cells consumers read, which are relit first (the head's feedback bit)
+        const uint functions = scLightFunctionTable(scene.pad);
+        const float cellSize = scCellSize(l, position);
+        bool animated = false;
         [loop] for (k = 0; k < held; ++k)
         {
             const GpuLight g = loadLight(chosen[k]);
             float3 e = 3.14159265 * mlLightUnshadowed(lambert, g, chosen[k], UNX_NONE);
+            if (any(e > 0)) e *= scLightFunction(functions, g, chosen[k], position, cellSize);
+            animated = animated || scLightFunctionAnimated(functions, chosen[k]);
             if (!all(e >= 0) || !all(e < 1e30)) e = 0;  // (NaN, infinite: no light)
             if (!any(e > 0)) continue;
             ScpPair p = none;
@@ -115,6 +123,7 @@ void main(uint3 id : SV_DispatchThreadID)
             }
             scpStore(pairs, cell, k, p);
         }
+        if (animated) b.InterlockedOr(scHeadsOffset(n, slot), SC_HEAD_FEEDBACK);
     }
 
     // ---- the sun: one ray into its disk
