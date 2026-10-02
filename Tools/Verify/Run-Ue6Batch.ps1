@@ -127,10 +127,10 @@ if ($Skip -notcontains "variants") {
         # the coverage layer's share of thin geometry: band B starts under 1.5 px by default; with the temporal upscale's
         # jitter the visibility buffer can take more of it (what the coverage layer then costs, and what the picture loses
         # in motion: the turning frames)
-        Final "band A down to 0.75 px (lake, train lounge)" "band_a_075" @("-NoGame", "-Generated", "waterside", "-Resolutions", "1080p", "-Set", "visibility.band_a_min_width_px=0.75")
-        Final "band A down to 0.75 px (train lounge)" "band_a_075" @("-Only", "te_lounge", "-Resolutions", "1080p", "-Set", "visibility.band_a_min_width_px=0.75")
-        Final "band A down to 0.4 px (lake)" "band_a_040" @("-NoGame", "-Generated", "waterside", "-Resolutions", "1080p", "-Set", "visibility.band_a_min_width_px=0.4")
-        Final "band A down to 0.4 px (train lounge)" "band_a_040" @("-Only", "te_lounge", "-Resolutions", "1080p", "-Set", "visibility.band_a_min_width_px=0.4")
+        Final "band A down to 0.75 px (lake, train lounge)" "band_a_075" @("-NoGame", "-Generated", "waterside", "-Resolutions", "1080p", "-Set", "visibility.band_a_min_width_px=0.75,visibility.band_a_hysteresis_px=1.0")
+        Final "band A down to 0.75 px (train lounge)" "band_a_075" @("-Only", "te_lounge", "-Resolutions", "1080p", "-Set", "visibility.band_a_min_width_px=0.75,visibility.band_a_hysteresis_px=1.0")
+        Final "band A down to 0.4 px (lake)" "band_a_040" @("-NoGame", "-Generated", "waterside", "-Resolutions", "1080p", "-Set", "visibility.band_a_min_width_px=0.4,visibility.band_a_hysteresis_px=0.6")
+        Final "band A down to 0.4 px (train lounge)" "band_a_040" @("-Only", "te_lounge", "-Resolutions", "1080p", "-Set", "visibility.band_a_min_width_px=0.4,visibility.band_a_hysteresis_px=0.6")
     }
     if ($Variants -contains "nopass") {
         Final "the frame without per-pass timestamps (lobby 1080p, 4K)" "nopass" @("-Only", "bt_lobby", "-Resolutions", "1080p,4K", "-SkipPictures", "-GateArgs", "--no-pass-timestamps")
