@@ -108,6 +108,11 @@ struct FramePacket
     float displayPeak = 0;                         // FrameContext::displayPeak: 0 SDR, else HDR peak / paper white
     float lensAperture = 0, lensFocus = 0;         // FrameContext::lensAperture / lensFocus (the host's current lens)
     float whiteBalanceKelvin = 0, whiteBalanceTint = 0;  // FrameContext::whiteBalance* (v1.91; 0 = D65)
+    render::ColorGradingDesc grading;              // FrameContext::grading (the host's current grading)
+    render::PostSettingsDesc post;                 // FrameContext::post (the host's current post settings)
+    float exposureCompensation = 0;                // FrameContext::exposureCompensation
+    int32_t displayEncoding = -1;                  // FrameContext::displayEncoding / displayPaperWhite (HDR frames)
+    float displayPaperWhite = 0;
     // A3 mesh particles (render C): the host's asset -> mesh table when it changed (mesh = committed mesh index, a runtime
     // mesh id with bit 31, or 0xFFFFFFFF = unmapped); resolved on the render thread (fx::meshAssets)
     std::optional<std::vector<std::pair<uint64_t, uint32_t>>> meshAssets;
@@ -346,6 +351,13 @@ public:
     // The camera's white balance for the following frames (v1.91): the illuminant the camera is set to as a correlated
     // colour temperature (K; 0 = D65, no adaptation; else 1000..40000) and a tint (Duv, |tint| <= 0.1).
     void setWhiteBalance(float kelvin, float tint);
+    // The picture's settings for the following frames, each held until changed (UnxFrameSetColorGrading, UnxFrameSetPost,
+    // UnxFrameSetDisplayEncoding): the grading before the tone curve (enabled false: the quality file's), the post
+    // settings with the exposure compensation in stops, the HDR output's encoding (-1: the quality file's; 0 linear,
+    // 1 scRGB, 2 ST 2084) and paper white in cd/m2 (0: the quality file's).
+    void setColorGrading(const render::ColorGradingDesc& grading);
+    void setPost(const render::PostSettingsDesc& post, float exposureCompensation);
+    void setDisplayEncoding(int32_t encoding, float paperWhiteNits);
     // A3 mesh particles (render C): the scene mesh a program's mesh_asset draws (committed mesh index or runtime mesh id;
     // 0xFFFFFFFF removes the mapping: its particles are not drawn and counted unmapped)
     void mapMeshAsset(uint64_t asset, uint32_t mesh);
@@ -626,6 +638,11 @@ private:
     uint64_t m_fxRecorded = 0;  // (m_fxMutex held) packets written under UNX_FX_RECORD
     float m_lensAperture = 0, m_lensFocus = 0;  // (m_mutex) the lens every queued frame takes
     float m_whiteBalanceKelvin = 0, m_whiteBalanceTint = 0;  // (m_mutex) the white balance every queued frame takes (v1.91)
+    render::ColorGradingDesc m_grading;         // (m_mutex) the grading every queued frame takes
+    render::PostSettingsDesc m_post;            // (m_mutex) the post settings every queued frame takes
+    float m_exposureCompensation = 0;           // (m_mutex)
+    int32_t m_displayEncoding = -1;             // (m_mutex) the HDR output's encoding every queued frame takes
+    float m_displayPaperWhite = 0;              // (m_mutex)
     std::map<uint64_t, uint32_t> m_meshAssetMap;  // (m_mutex) A3 mesh particles: asset -> mesh
     bool m_meshAssetsChanged = false;             // (m_mutex)
     std::vector<std::pair<uint64_t, uint32_t>> m_meshAssetsRender;  // render thread: the latest table received

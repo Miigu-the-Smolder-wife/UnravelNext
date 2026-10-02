@@ -275,7 +275,7 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     if ((bits & CELL_ANIMATED) != 0 || disoccluded) weight = 0;
     RWTexture2D<float> relaxation = ResourceDescriptorHeap[P[1].x];
     relaxation[pixel] = weight;
-    // the coverage rounded to its 8 bits at random (no drift of the mean under the blend)
+    // the coverage rounded to its 7 bits at random (no drift of the mean under the blend), the kept line beside it
     uint3 h = uint3(pixel, P[2].z) * uint3(1664525u, 22695477u, 2891336453u) + 1013904223u;
     h.x += h.y * h.z;
     h ^= h >> 16;

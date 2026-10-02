@@ -1506,3 +1506,61 @@ UNX_API int32_t UNX_CALL UnxFrameStatsLatest(UnxRenderer r, UnxFrameStats* stats
         stats->passes = s.passes;
     });
 }
+
+// ---- The picture's settings a game changes while it runs: colour grading, post settings, the HDR output's encoding.
+UNX_API int32_t UNX_CALL UnxFrameSetColorGrading(UnxRenderer r, const UnxColorGradingDesc* grading)
+{
+    return call([&] {
+        render::ColorGradingDesc g;  // null: the quality file's grading
+        if (grading)
+        {
+            if (grading->size != sizeof(UnxColorGradingDesc) || grading->version != 1)
+                fail("UnxFrameSetColorGrading: UnxColorGradingDesc size %u version %u", grading->size, grading->version);
+            g.enabled = true;
+            g.temperature = grading->temperature;
+            g.tint = grading->tint;
+            const UnxColorGradingRange* from[4] = { &grading->global, &grading->shadows, &grading->midtones, &grading->highlights };
+            render::ColorGradingRange* to[4] = { &g.global, &g.shadows, &g.midtones, &g.highlights };
+            for (int i = 0; i < 4; ++i)
+                for (int c = 0; c < 4; ++c)
+                {
+                    to[i]->saturation[c] = from[i]->saturation[c];
+                    to[i]->contrast[c] = from[i]->contrast[c];
+                    to[i]->gamma[c] = from[i]->gamma[c];
+                    to[i]->gain[c] = from[i]->gain[c];
+                    to[i]->offset[c] = from[i]->offset[c];
+                }
+            g.shadowsMax = grading->shadowsMax;
+            g.highlightsMin = grading->highlightsMin;
+            g.highlightsMax = grading->highlightsMax;
+        }
+        find(r)->setColorGrading(g);
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxFrameSetPost(UnxRenderer r, const UnxPostSettingsDesc* post)
+{
+    return call([&] {
+        render::PostSettingsDesc p;  // null: every value the quality file's
+        float compensation = 0;
+        if (post)
+        {
+            if (post->size != sizeof(UnxPostSettingsDesc) || post->version != 1)
+                fail("UnxFrameSetPost: UnxPostSettingsDesc size %u version %u", post->size, post->version);
+            compensation = post->exposureCompensation;
+            p.exposureMinEv = post->exposureMinEv100;
+            p.exposureMaxEv = post->exposureMaxEv100;
+            p.bloomStrength = post->bloomIntensity;
+            p.vignette = post->vignette;
+            p.motionBlurShutter = post->motionBlurAmount;
+            p.diaphragmBlades = post->diaphragmBlades;
+            p.lensFullAperture = post->lensFullAperture;
+        }
+        find(r)->setPost(p, compensation);
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxFrameSetDisplayEncoding(UnxRenderer r, int32_t encoding, float paperWhiteNits)
+{
+    return call([&] { find(r)->setDisplayEncoding(encoding, paperWhiteNits); });
+}

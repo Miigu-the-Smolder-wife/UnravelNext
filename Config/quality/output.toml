@@ -128,3 +128,15 @@ upscale_history_frames = 64
 # Moving: 4 (8 before 2026-09-29) with the Lanczos-3 moving history and its min / max clip (Upscale.hlsl): more of the
 # detail stays in the CPU model's slow pans (SSIM 0.73-0.77 -> 0.86-0.87 at 0.2-0.45 px / frame).
 upscale_history_frames_moving = 4
+# HDR display output (a frame with FrameContext::displayPeak >= 1; M's final pass, PostFinal.hlsl): how the picture is
+# written for the display, unless the host sets it per frame (UnxFrameSetDisplayEncoding).
+#   0  linear Rec.709 light with 1 = paper white, R16G16B16A16 FLOAT: the host encodes it for its swap chain (as before);
+#   1  scRGB: linear Rec.709 with 1 = 80 cd/m2 - an R16G16B16A16 FLOAT swap chain in DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709
+#      shows it as it is;
+#   2  HDR10: Rec.2020 primaries under the SMPTE ST 2084 curve - DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020; the output
+#      texture may then be the swap chain's R10G10B10A2 UNORM (dithered) or stay R16G16B16A16 FLOAT.
+# (The reference's r.HDR.Display.OutputDevice / ColorGamut pairs: its scRGB and ST 2084 devices. The tone curve already
+# ends at the display's peak; no ACES output transform is involved here.)
+hdr_encoding = 0
+hdr_paper_white_nits = 203.0           # paper white's luminance for encodings 1 and 2 (ITU-R BT.2408's reference white);
+                                        # the display's peak is displayPeak x this

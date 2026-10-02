@@ -196,8 +196,13 @@ post_fringe = 0.0
 post_fringe_start = 0.0
 # Image-based lens flares (PostFlare.hlsl; the reference's lens flares, off in its project defaults -
 # r.DefaultFeature.LensFlare false): ghosts of the picture's bright parts, each spread to the aperture's shape, added
-# to the picture after the bloom. The values are the reference's post process defaults (its Engine module is not in the
-# reference checkout: these are the documented ones).
+# to the picture after the bloom. Checked against the reference checkout (PostProcessLensFlares.cpp / .usf): eight
+# flares, a flare's scale (its tint's 4th number - 0.5) x 7, the intensity x the bloom's intensity, the threshold on
+# r + g + b of the source faded by the disc mask at half scale, the bokeh size in percent of the flare view's width, the
+# composite's two disc masks, r.LensFlareQuality 2. From memory - they are FPostProcessSettings' defaults, in the Engine
+# module that is not in the checkout: LensFlareIntensity 1, LensFlareTint white, LensFlareBokehSize 3,
+# LensFlareThreshold 8, the eight LensFlareTints below, the bloom intensity 0.675, and the default bokeh texture being a
+# disc.
 post_lens_flare = false
 post_lens_flare_intensity = 1.0                 # LensFlareIntensity (x the reference's bloom intensity 0.675)
 post_lens_flare_tint = [1.0, 1.0, 1.0]          # LensFlareTint

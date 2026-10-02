@@ -159,8 +159,12 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
     const float minScatterRadius = std::max((float)numberOr(fc, "shading.dof_diaphragm_scatter_min_radius", 3.0), kMinScatterRadius);
     const bool scatter = booleanOr(fc, "shading.dof_diaphragm_scatter", true) && spriteRatio > 0 && maxBlur > minScatterRadius;
     const bool occlusion = scatter && booleanOr(fc, "shading.dof_diaphragm_scatter_occlusion", true);
-    const Diaphragm diaphragm = diaphragmOf(integerOr(fc, "shading.dof_diaphragm_blades", 0), fc.frame.lensAperture,
-                                            (float)numberOr(fc, "shading.dof_diaphragm_full_aperture", 0.0));
+    // (the diaphragm: the frame's - a game's run-time setting, FrameContext::post - over the quality file's)
+    const PostSettingsDesc& frameSettings = fc.frame.post;
+    const int64_t blades = frameSettings.diaphragmBlades >= 0 ? frameSettings.diaphragmBlades : integerOr(fc, "shading.dof_diaphragm_blades", 0);
+    const float fullAperture = std::isfinite(frameSettings.lensFullAperture) ? frameSettings.lensFullAperture
+                                                                             : (float)numberOr(fc, "shading.dof_diaphragm_full_aperture", 0.0);
+    const Diaphragm diaphragm = diaphragmOf(blades, fc.frame.lensAperture, fullAperture);
     const bool shaped = diaphragm.blades != 0;
 
     ID3D12PipelineState* clear = fc.shaders.compute("Passes/Shading/ExposureClear");  // (zeroes a raw buffer's words)

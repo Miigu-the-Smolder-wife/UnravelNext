@@ -39,6 +39,14 @@ float shutterOf(const QualityConfig& q)
     if (!(s >= 0 && s <= 1)) fail("shading.motion_blur_shutter %g: the shutter as a fraction of the frame interval in [0, 1]", s);
     return s;
 }
+// (the frame's shutter: a game's run-time setting - FrameContext::post - over the quality file's)
+float shutterOf(FramePassContext& fc)
+{
+    const float s = fc.frame.post.motionBlurShutter;
+    if (!std::isfinite(s)) return shutterOf(fc.quality);
+    if (!(s >= 0 && s <= 1)) fail("the frame's motion blur shutter %g: a fraction of the frame interval in [0, 1]", s);
+    return s;
+}
 uint32_t asUint(float f)
 {
     uint32_t u;
@@ -184,7 +192,7 @@ void gatherPasses(FramePassContext& fc, const ViewResources& view, TextureRef sr
     RenderGraph& g = fc.graph;
     const uint32_t w = view.view.width, h = view.view.height;
     const uint32_t tw = (w + kTile - 1) / kTile, th = (h + kTile - 1) / kTile;
-    const float shutter = shutterOf(fc.quality);
+    const float shutter = shutterOf(fc);
     const TextureRef tiles = g.createTexture(TextureDesc{ "m.motion.tiles", tw, th, 1, 1, DXGI_FORMAT_R16G16_FLOAT });
     const TextureRef neighbour = g.createTexture(TextureDesc{ "m.motion.neighbour", tw, th, 1, 1, DXGI_FORMAT_R16G16_FLOAT });
     ID3D12PipelineState* tileMax = fc.shaders.compute("Passes/Shading/MotionTiles.STEP0");
@@ -307,7 +315,7 @@ void rotationPasses(FramePassContext& fc, const ViewResources& view, TextureRef 
 
 bool motionBlurActive(FramePassContext& fc, const ViewResources& view)
 {
-    if (view.view.kind != gpu::ViewKind::Main || !(shutterOf(fc.quality) > 0)) return false;
+    if (view.view.kind != gpu::ViewKind::Main || !(shutterOf(fc) > 0)) return false;
     if (!view.visId.valid() || !view.visibleClusters.valid() || !view.depth.valid()) return false;
     const ViewDesc v = shutterView(fc, view.view);
     const bool cameraMoved = std::memcmp(&v.viewProj, &v.prevViewProj, sizeof(float4x4)) != 0;
@@ -318,7 +326,7 @@ TextureRef motionVelocity(FramePassContext& fc, const ViewResources& view) { ret
 
 void motionBlur(FramePassContext& fc, const ViewResources& view, TextureRef src, TextureRef dst)
 {
-    const RotationStage rotation = frameRotation(shutterView(fc, view.view), shutterOf(fc.quality));
+    const RotationStage rotation = frameRotation(shutterView(fc, view.view), shutterOf(fc));
     const TextureRef velocity = velocityPass(fc, view, rotation.active ? &rotation : nullptr);
     if (!rotation.active)
     {
@@ -338,7 +346,7 @@ void motionBlurWithVelocity(FramePassContext& fc, const ViewResources& view, Tex
 
 bool motionRotationBlur(FramePassContext& fc, const ViewResources& view, TextureRef src, TextureRef dst, const float3 (&q)[3])
 {
-    const RotationStage rotation = rotationStage(view.view, shutterOf(fc.quality), q);
+    const RotationStage rotation = rotationStage(view.view, shutterOf(fc), q);
     if (rotation.active) rotationPasses(fc, view, src, dst, rotation);
     return rotation.active;
 }
@@ -353,7 +361,7 @@ void motionBlurUpscaled(FramePassContext& fc, const ViewResources& view, Texture
     RenderGraph& g = fc.graph;
     const TextureDesc sd = g.desc(src);
     const uint32_t W = sd.width, H = sd.height, w = view.view.width, h = view.view.height;
-    const float shutter = shutterOf(fc.quality);
+    const float shutter = shutterOf(fc);
     // the reference's MotionBlurMax (percent of the screen's width a blur may span, 5), its quality's tap count (16 at
     // r.MotionBlurQuality 4) and r.MotionBlur.HalfResGather
     const double maxPercent = fc.quality.has("shading.motion_blur_max_percent") ? fc.quality.number("shading.motion_blur_max_percent") : 5.0;
