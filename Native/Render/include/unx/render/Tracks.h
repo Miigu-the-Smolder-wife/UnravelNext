@@ -70,6 +70,8 @@ void surfaceCache(FramePassContext& fc, ViewResources& main);
 // (refl::ReflectionSystem::screenTraceInputs records them once per frame, whoever asks first).
 void screenTraceInputs(FramePassContext& fc, ViewResources& main);
 void globalIllumination(FramePassContext& fc, ViewResources& main);  // cache update rays, screen probes, near occlusion
+// The previous frame's Lumen translucency volume into fc.resources.translucencyGiPrev* (before tracks::froxels).
+void translucencyVolumePrevious(FramePassContext& fc, const ViewResources& main);
 void reflections(FramePassContext& fc, ViewResources& main);      // K/G/M rays, planar mirrors (via renderView)
 // A secondary view's per-pixel GI cache irradiance (view.giIrradiance: r.gi.screen and its filter, as the main view's),
 // between its material resolve and its shading (FrameServices::renderView); nothing before GI's first frame.

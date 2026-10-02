@@ -4,6 +4,7 @@
 # for judging cuts or motion.
 #   powershell -File Tools\Verify\Run-Ue6Still.ps1 -Name cap_off [-Scene bt_lobby] [-Set k=v,k=v] [-Frames 600]
 #                                                  [-Capture 599] [-Layers gi] [-Resolution 1080p]
+# -Scene furnace_room -Layers gi,carddirect,cardindirect: the closed room's energy balance, stage by stage (furnace.py).
 param(
     [Parameter(Mandatory = $true)][string]$Name,
     [string]$Scene = "bt_lobby",
@@ -22,11 +23,12 @@ $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Set-Location $root
 $exe = Join-Path $root "build\all\bin\unx_gate_shadow_renderergate.exe"
 if (Test-Path "C:\Users\USER\UnravelNext\.gpulock\HOLD") { throw "the GPU lock is on HOLD" }
+# a saved game scene by its name's start, else a generated scene by name (city_block, forest_thin, ..., furnace_room)
 $file = Get-ChildItem -Path $Scenes -Filter "$Scene*.unxscene" | Select-Object -First 1
-if (-not $file) { throw "no scene $Scene in $Scenes" }
+$sceneArg = if ($file) { $file.FullName } else { $Scene }
 $dir = Join-Path $root "Cache\Ue6Diag\$Name"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
-$gateArgs = @("--scene", $file.FullName, "--resolution", $Resolution, "--frames", "$Frames", "--warmup-frames", "0", "--auto-exposure",
+$gateArgs = @("--scene", $sceneArg, "--resolution", $Resolution, "--frames", "$Frames", "--warmup-frames", "0", "--auto-exposure",
     "--capture-output", (Join-Path $dir "still.pfm"), "--capture-frames", $Capture, "--set", "gi.deterministic=true")
 if ($Layers.Count -gt 0) { $gateArgs += @("--capture-layers", ((@("final") + $Layers) -join ",")) }
 foreach ($s in $Set) { $gateArgs += @("--set", $s) }
@@ -39,7 +41,8 @@ $ErrorActionPreference = "Stop"
 $text = Get-Content $log -Raw
 if ($text -match "DEVICE_REMOVED|DEVICE_HUNG|DEVICE_RESET|device removed|device hung") { throw "device removal: $log" }
 Write-Host "== $Name ($($Set -join ' ')): exit $code"
-& python Tools\Verify\pfm_to_png.py $dir --all | Out-Null
+& python Tools\Verify\pfm_to_png.py $dir | Out-Null
+if ($Scene -eq "furnace_room") { & python Tools\Verify\furnace.py $dir }
 if ($Scene -eq "bt_lobby" -and $Resolution -eq "1080p") {
     foreach ($line in (Select-String -Path $log -Pattern "captured final .*frame (\d+), ev100 ([-0-9.]+)")) {
         $f = $line.Matches[0].Groups[1].Value

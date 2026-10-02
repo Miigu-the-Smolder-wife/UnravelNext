@@ -17,5 +17,14 @@ struct LumenTvInputs
     float3 skyRadiance{}, sunIlluminance{};  // constants of the SKY1 variant (no atmosphere tables in the frame)
 };
 void lumenTranslucencyVolumeMark(FramePassContext& fc, const ViewResources& main, const LumenRcFrame& rc);
+// The volume the previous frame published, in this frame's graph, for a pass recorded before this frame's update (the
+// textures are imported once: the update's history read uses the same references). params 0xFFFFFFFF: none - the module
+// is off, nothing was published last frame, or this frame cuts.
+struct LumenTvPrevious
+{
+    uint32_t params = 0xFFFFFFFFu;
+    TextureRef ambient, directional;
+};
+LumenTvPrevious lumenTranslucencyVolumePrevious(FramePassContext& fc, const ViewResources& main);
 void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt::RayScene& rays, const LumenTvInputs& inputs, const LumenRcFrame& rc);
 } // namespace unx::render::gi

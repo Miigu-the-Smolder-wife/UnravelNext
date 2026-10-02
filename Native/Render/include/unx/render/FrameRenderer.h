@@ -29,6 +29,9 @@ public:
     TrackState& trackState() { return m_trackState; }
     // The main view's EV100 of the last recorded frame (automatic exposure's choice when on; tests, statistics).
     float lastEv100() const { return m_lastEv100; }
+    // The frame-level products of the last record() (references of that call's graph: valid until the graph is executed;
+    // the gates' layer captures read the mesh cards' atlases through it).
+    const FrameResources& lastResources() const { return m_lastResources; }
     // The b1 constants of a view (what every view's frameConstants slot holds); for tests that build their own context.
     static gpu::FrameConstants frameConstants(const GpuScene& scene, const FrameContext& frame, const ViewDesc& view);
 
@@ -45,6 +48,7 @@ private:
     uint64_t m_slotFrame = UINT64_MAX;
     TrackState m_trackState;
     float m_lastEv100 = 0;
+    FrameResources m_lastResources;
     // Temporal upscale (FrameContext::Upscale): the previous frame's jittered and unjittered view-projections, exposure
     // and output size; valid after the first upscaled frame.
     float4x4 m_upscalePrevJittered{}, m_upscalePrevViewProj{};

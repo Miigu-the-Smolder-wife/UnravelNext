@@ -20,6 +20,8 @@ enum class SceneId : uint32_t
     CityNight = 5,    // P2: 512 local lights (128 shadowed), wet road
     RidgeSunset = 6,  // S: distant ridge and tower shadows in the air (god rays) against a low sun, 20 x 20 km
     ForestCombat = 7, // gate: RPP-1 forest/combat section, closed canopy at eye level (eye, up, edge cameras)
+    FurnaceRoom = 8,  // diagnostic (diagnosticScenes): a closed Lambert room with one point light - the light every stage
+                      // of the indirect lighting must hold is known in closed form (kFurnace*, Tools/Verify/furnace.py)
     // New scenes are appended (never renumbered) through the interface-change procedure.
 };
 
@@ -77,5 +79,14 @@ float terrainHeight(SceneId id, float x, float z);
 scene::Scene generate(const Request& request);
 
 std::vector<SceneId> allScenes();
+// Scenes that measure the renderer instead of showing something (not in allScenes: the gates' scene sweeps and the
+// scene tests keep their set). generate() and sceneName() know them.
+std::vector<SceneId> diagnosticScenes();
+// FurnaceRoom: the room's inner size (m, centred on x and z, floor at y = 0), its walls' albedo and the light's
+// intensity (cd, at the room's centre). A closed room of uniform Lambert albedo rho holding a flux Phi keeps, in the
+// steady state, a mean irradiance Phi / (A (1 - rho)) over its inner surface A: the direct light's mean is Phi / A, the
+// first bounce's rho Phi / A, all bounces' rho / (1 - rho) x Phi / A. With these numbers: Phi = 4 pi x 100 = 1256.6 lm,
+// A = 256 m2, direct 4.909 lux, first bounce 2.454 lux, all bounces 4.909 lux.
+constexpr float kFurnaceWidth = 8.0f, kFurnaceHeight = 4.0f, kFurnaceDepth = 8.0f, kFurnaceAlbedo = 0.5f, kFurnaceCandela = 100.0f;
 const char* sceneName(SceneId id);  // stable file-name-safe name, e.g. "city_block"
 } // namespace unx::scenegen

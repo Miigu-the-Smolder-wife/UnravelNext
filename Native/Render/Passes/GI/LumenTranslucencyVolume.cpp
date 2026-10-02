@@ -94,6 +94,11 @@ struct TvState
     bool created = false, history = false;
     uint32_t parity = 0, frame = 0, revision = 0xFFFFFFFFu;
     uint64_t recordedFrame = UINT64_MAX, markedFrame = UINT64_MAX;
+    // lumenTranslucencyVolumePrevious: the last volume's textures as imported into frame previousImportFrame's graph, and
+    // the ring slot whose parameters describe it
+    uint64_t previousImportFrame = UINT64_MAX, publishedFrame = UINT64_MAX;
+    TextureRef previousAmbient, previousDirectional;
+    uint32_t publishedSlot = 0;
     float jitter[3] = { 0.5f, 0.5f, 0.5f };
     ~TvState() { release(); }
     void release()
@@ -209,6 +214,32 @@ bool usable(FramePassContext& fc, const ViewResources& main)
 }
 } // namespace
 
+LumenTvPrevious lumenTranslucencyVolumePrevious(FramePassContext& fc, const ViewResources& main)
+{
+    LumenTvPrevious out;
+    const Settings s = settingsOf(fc.quality);
+    if (!s.enabled || !fc.trackState || main.view.kind != gpu::ViewKind::Main) return out;
+    TvState& st = fc.state<TvState>("R.lumenTranslucencyVolume");
+    // the last frame's volume: published then, the same grid and scene, no cut now
+    if (!st.created || !st.history || st.publishedFrame + 1 != fc.frame.frameIndex || fc.frame.discontinuity != 0 || fc.scene.revision() != st.revision) return out;
+    uint32_t x, y, z;
+    gridOf(main, s, x, y, z);
+    if (x != st.gridX || y != st.gridY || z != st.gridZ) return out;
+    if (st.previousImportFrame != fc.frame.frameIndex)
+    {
+        const TextureDesc d{ "R translucency GI ambient (previous)", st.gridX, st.gridY, (uint16_t)st.gridZ, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D };
+        TextureDesc dd = d;
+        dd.name = "R translucency GI directional (previous)";
+        st.previousAmbient = fc.graph.importTexture(st.ambient[st.parity].Get(), d, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        st.previousDirectional = fc.graph.importTexture(st.directional[st.parity].Get(), dd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        st.previousImportFrame = fc.frame.frameIndex;
+    }
+    out.params = st.ringSrv[st.publishedSlot];
+    out.ambient = st.previousAmbient;
+    out.directional = st.previousDirectional;
+    return out;
+}
+
 void lumenTranslucencyVolumeMark(FramePassContext& fc, const ViewResources& main, const LumenRcFrame& rc)
 {
     const Settings s = settingsOf(fc.quality);
@@ -262,8 +293,10 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
         d.name = name;
         return g.importTexture(r.Get(), d, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     };
-    const TextureRef prevAmbient = import(st.ambient[previous], "R translucency GI ambient (previous)");
-    const TextureRef prevDirectional = import(st.directional[previous], "R translucency GI directional (previous)");
+    // (lumenTranslucencyVolumePrevious may have imported the last volume into this frame's graph already)
+    const bool imported = st.previousImportFrame == fc.frame.frameIndex && st.previousAmbient.valid();
+    const TextureRef prevAmbient = imported ? st.previousAmbient : import(st.ambient[previous], "R translucency GI ambient (previous)");
+    const TextureRef prevDirectional = imported ? st.previousDirectional : import(st.directional[previous], "R translucency GI directional (previous)");
     const TextureRef ambient = import(st.ambient[current], "R translucency GI ambient");
     const TextureRef directional = import(st.directional[current], "R translucency GI directional");
     const TextureDesc traceDesc{ "r.gi.ltv trace", gridX * kTraceRes, gridY * kTraceRes, (uint16_t)gridZ, 1, DXGI_FORMAT_R11G11B10_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D };
@@ -392,5 +425,7 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
     fc.resources.translucencyGiAmbient = ambient;
     fc.resources.translucencyGiDirectional = directional;
     fc.resources.translucencyGiParams = st.ringSrv[slot];
+    st.publishedFrame = fc.frame.frameIndex;
+    st.publishedSlot = slot;
 }
 } // namespace unx::render::gi

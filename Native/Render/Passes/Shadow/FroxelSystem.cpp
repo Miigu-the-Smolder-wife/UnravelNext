@@ -455,9 +455,37 @@ TextureRef recordReaders(FramePassContext& fc, const ViewResources& view, bool f
     return readers;
 }
 
+// atmosphere.fog (Passes/Atmosphere/Fog.hlsli): the height fog's medium. density: extinction per metre at the fog's
+// height (the configured density x extinction scale); albedo: scattering / extinction.
+struct FogSettings
+{
+    bool on = false, ambient = true;
+    float density = 0, falloff = 0, height = 0, g = 0, start = 0;
+    float albedo[3] = { 1, 1, 1 };
+};
+FogSettings fogSettings(const QualityConfig& q)
+{
+    FogSettings f;
+    if (!q.has("atmosphere.fog.enabled") || !q.boolean("atmosphere.fog.enabled")) return f;
+    const float scale = (float)q.number("atmosphere.fog.extinction_scale");
+    f.density = (float)q.number("atmosphere.fog.density_per_m") * scale;
+    f.falloff = (float)q.number("atmosphere.fog.height_falloff_per_m");
+    f.height = (float)q.number("atmosphere.fog.height_m");
+    f.g = (float)q.number("atmosphere.fog.phase_g");
+    f.start = (float)q.number("atmosphere.fog.start_distance_m");
+    f.ambient = q.boolean("atmosphere.fog.indirect_light");
+    const std::vector<double> albedo = q.numbers("atmosphere.fog.albedo");
+    if (albedo.size() != 3 || !(scale > 0) || !(f.density >= 0) || !(f.falloff >= 0) || !(f.g > -1 && f.g < 1) || !(f.start >= 0))
+        fail("atmosphere.fog: albedo of 3 numbers, extinction_scale > 0, density and falloff >= 0, phase_g in (-1, 1), start distance >= 0");
+    for (int k = 0; k < 3; ++k) f.albedo[k] = (float)albedo[k] / scale;
+    f.on = f.density > 0;
+    return f;
+}
+
 // Air volume of one view from its lists (FroxelIntegrate.hlsl; a view with a clip plane integrates from the plane on).
+// fluence, moment: the view's sampled local light (shading.mega_lights_volume; invalid: none) - the fog's local lights.
 TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, BufferRef lights, bool keepVolume, TextureRef readers, const std::string& suffix,
-                              TextureRef media = {}, TextureRef sampledLocal = {})
+                              TextureRef media = {}, TextureRef sampledLocal = {}, TextureRef fluence = {}, TextureRef moment = {})
 {
     const QualityConfig& q = fc.quality;
     const FroxelGridCpu grid = froxelGridFor(q, view.view.width, view.view.height);
@@ -486,6 +514,14 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
     // Readers per tile: the integration stops where no reader reaches (FroxelIntegrate.hlsl).
     const bool bounded = readers.valid();
     const BufferRef functions = fc.resources.lightFunctions;  // E's light functions (A8; invalid: none)
+    // the height fog (Fog.hlsli): its local light from the sampled fluence and moment, its indirect light from the
+    // previous frame's translucency volume (this frame's is built after the air)
+    const FogSettings fog = fogSettings(q);
+    const bool fogLocal = fog.on && fluence.valid() && moment.valid();
+    const bool fogAmbient = fog.on && fog.ambient && fc.resources.translucencyGiPrevParams != 0xFFFFFFFFu && fc.resources.translucencyGiPrevAmbient.valid() &&
+                            fc.resources.translucencyGiPrevDirectional.valid();
+    const TextureRef fogAmbientA = fc.resources.translucencyGiPrevAmbient, fogAmbientD = fc.resources.translucencyGiPrevDirectional;
+    const uint32_t fogAmbientParams = fc.resources.translucencyGiPrevParams;
     BufferRef work, workArgs, air;
     ID3D12CommandSignature* signature = nullptr;
     if (queued)
@@ -511,6 +547,16 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
         if (bounded) b.use(readers, Use::SrvCompute);
         if (media.valid()) b.use(media, Use::SrvCompute);
         if (sampledLocal.valid()) b.use(sampledLocal, Use::SrvCompute);  // shading.mega_lights_volume (P[5].y)
+        if (fogLocal)
+        {
+            b.use(fluence, Use::SrvCompute);
+            b.use(moment, Use::SrvCompute);
+        }
+        if (fogAmbient)
+        {
+            b.use(fogAmbientA, Use::SrvCompute);
+            b.use(fogAmbientD, Use::SrvCompute);
+        }
         if (functions.valid()) b.use(functions, Use::SrvCompute);
         b.use(tlut, Use::SrvCompute); b.use(mlut, Use::SrvCompute);
         if (shadows)
@@ -523,7 +569,7 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
         }
     };
     auto bind = [=](PassContext& ctx, uint32_t workDescriptor, uint32_t airDescriptor) {
-        uint32_t k[24] = { ctx.srv(lights), workDescriptor == 0xFFFFFFFFu ? ctx.uav(volume) : 0xFFFFFFFFu, ctx.srv(tlut), ctx.srv(mlut), 0, 0, 0, 0xFFFFFFFFu, 0, 0, 0, 0, localLights, slotOfLight,
+        uint32_t k[36] = { ctx.srv(lights), workDescriptor == 0xFFFFFFFFu ? ctx.uav(volume) : 0xFFFFFFFFu, ctx.srv(tlut), ctx.srv(mlut), 0, 0, 0, 0xFFFFFFFFu, 0, 0, 0, 0, localLights, slotOfLight,
                            bounded ? ctx.srv(readers) : 0xFFFFFFFFu, 0xFFFFFFFFu, media.valid() ? ctx.srv(media) : 0xFFFFFFFFu,
                            functions.valid() ? ctx.srv(functions) : 0xFFFFFFFFu, workDescriptor, airDescriptor };
         if (shadows)
@@ -537,7 +583,18 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
         k[20] = shadows && vsm.clsBlocks.valid() ? ctx.srv(vsm.clsBlocks) : 0xFFFFFFFFu;  // P[5].x: L3 classification blocks (14.4 lit segments)
         k[21] = sampledLocal.valid() ? ctx.srv(sampledLocal) : 0xFFFFFFFFu;  // P[5].y: the local lights' sampled in-scattering
         k[22] = k[23] = 0;
-        ctx.bindFrameConstants(constants); ctx.computeConstants(k, 24);
+        // P[6..8]: the height fog (Fog.hlsli)
+        k[24] = fog.on ? 1u : 0u;
+        k[25] = fogAmbient ? fogAmbientParams : 0xFFFFFFFFu;
+        k[26] = fogLocal ? ctx.srv(fluence) : 0xFFFFFFFFu;
+        k[27] = fogLocal ? ctx.srv(moment) : 0xFFFFFFFFu;
+        std::memcpy(&k[28], &fog.density, 4);
+        std::memcpy(&k[29], &fog.falloff, 4);
+        std::memcpy(&k[30], &fog.height, 4);
+        std::memcpy(&k[31], &fog.g, 4);
+        std::memcpy(&k[32], fog.albedo, 12);
+        std::memcpy(&k[35], &fog.start, 4);
+        ctx.bindFrameConstants(constants); ctx.computeConstants(k, 36);
     };
     if (queued)
     {
@@ -659,7 +716,7 @@ void recordPlanarFroxels(FramePassContext& fc, ViewResources& view)
     const SampledLocal sampled = recordSampledLocal(fc, view, lists, readers, false);
     view.localFluence = sampled.fluence;
     view.localMoment = sampled.moment;
-    view.airVolume = recordIntegration(fc, view, lists, false, readers, ".planar", TextureRef{}, sampled.inScattering);
+    view.airVolume = recordIntegration(fc, view, lists, false, readers, ".planar", TextureRef{}, sampled.inScattering, sampled.fluence, sampled.moment);
 }
 
 namespace
@@ -829,7 +886,7 @@ void recordFroxels(FramePassContext& fc, const ViewResources& main)
     const TextureRef particleMedia = main.volumeSlices.valid() ? main.volumeSlices : tracks::volumeMedia(fc, mediaView, lights);
     // Turbid basins (defect queue 13 (75), shading.water_turbid): added to the media slices (or their own) - WaterMedia.hlsl.
     const TextureRef media = recordWaterMedia(fc, main, lights, particleMedia, froxelGridFor(fc.quality, main.view.width, main.view.height));
-    const TextureRef volume = recordIntegration(fc, main, lights, s.keep, readers, "", media, sampledLocal);
+    const TextureRef volume = recordIntegration(fc, main, lights, s.keep, readers, "", media, sampledLocal, sampled.fluence, sampled.moment);
     fc.resources.froxels = volume;
     fc.resources.aerialPerspective = volume;  // atmosphereAerial / atmosphereAirView read it (Atmosphere.hlsli)
 

@@ -580,6 +580,52 @@ Scene forestCombat(const Request& rq)
 }
 } // namespace
 
+// FurnaceRoom (diagnostic; SceneGen.h kFurnace*): six wall slabs of one Lambert material (no specular, roughness 1)
+// closing a room, one shadow-casting point light at its centre, nothing else inside. Each slab is its own mesh and
+// instance (its own mesh cards). The sun cannot enter.
+Scene furnaceRoom(const Request& rq)
+{
+    Scene s;
+    s.name = "furnace_room";
+    commonSky(s, 45.0f, 30.0f);
+    // night outside: whatever a stage lets in through the walls adds nothing, so a leak reads as missing light (with the
+    // sun up the first run's gather stood at 2.27 x: the radiance cache's probes outside the room saw the sky)
+    s.sun.illuminance = 1e-3f;
+    s.windSpeed = 0.0f;
+    Material wall;
+    wall.name = "furnace_wall";
+    wall.baseColor = f3(kFurnaceAlbedo, kFurnaceAlbedo, kFurnaceAlbedo);
+    wall.roughness = 1.0f;
+    wall.specular = 0.0f;
+    const uint32_t mat = addMaterial(s, wall);
+    const float W = 0.5f * kFurnaceWidth, H = kFurnaceHeight, D = 0.5f * kFurnaceDepth, T = 0.3f;
+    auto slab = [&](std::string name, float3 lo, float3 hi) {
+        MeshBuilder b(std::move(name));
+        b.material(mat);
+        b.box(lo, hi, 0.5f);
+        addInstance(s, addMesh(s, b.finish(false)), float3x4{});
+    };
+    slab("furnace_floor", { -W - T, -T, -D - T }, { W + T, 0.0f, D + T });
+    slab("furnace_ceiling", { -W - T, H, -D - T }, { W + T, H + T, D + T });
+    slab("furnace_nx", { -W - T, 0.0f, -D - T }, { -W, H, D + T });
+    slab("furnace_px", { W, 0.0f, -D - T }, { W + T, H, D + T });
+    slab("furnace_nz", { -W, 0.0f, -D - T }, { W, H, -D });
+    slab("furnace_pz", { -W, 0.0f, D }, { W, H, D + T });
+    scene::Light light;
+    light.type = scene::LightType::Point;
+    light.position = f3(0.0f, 0.5f * H, 0.0f);
+    light.intensity = kFurnaceCandela;
+    light.range = 1000.0f;  // (the range window is 1 over the room to 1e-9)
+    light.castShadow = true;
+    s.lights.push_back(light);
+    // from a corner at eye height toward the opposite corner: three walls, the floor and the ceiling in view
+    s.cameras.push_back(camera("corner", f3(-W + 0.4f, 1.6f, -D + 0.4f), f3(W, 1.8f, D), 6.0f, 75.0f));
+    s.cameras.push_back(camera("wall", f3(0.0f, 2.0f, -D + 0.4f), f3(0.0f, 2.0f, D), 6.0f, 75.0f));
+    for (const auto& c : s.cameras) s.paths.push_back(staticPath(c));
+    (void)rq;
+    return s;
+}
+
 scene::Scene generate(const Request& rq)
 {
     Scene s;
@@ -593,6 +639,7 @@ scene::Scene generate(const Request& rq)
     case SceneId::CityNight: s = cityNight(rq); break;
     case SceneId::RidgeSunset: s = ridgeSunset(rq); break;
     case SceneId::ForestCombat: s = forestCombat(rq); break;
+    case SceneId::FurnaceRoom: s = furnaceRoom(rq); break;
     default: fail("scenegen: unknown scene id %u", (uint32_t)rq.id);
     }
     DynamicContent content = dynamicContent(rq);
@@ -625,6 +672,7 @@ float terrainHeight(SceneId id, float x, float z)
     case SceneId::Waterside: return inside(600.0f) ? lakeFloor(x, z) : NAN;
     case SceneId::Interior: return inside(100.0f) ? -0.2f : NAN;
     case SceneId::RidgeSunset: return inside(10000.0f) ? ridgeTerrain(x, z) : NAN;
+    case SceneId::FurnaceRoom: return NAN;
     }
     fail("scenegen: unknown scene id %u", (uint32_t)id);
 }
@@ -633,6 +681,8 @@ std::vector<SceneId> allScenes()
 {
     return { SceneId::CityBlock, SceneId::ForestThin, SceneId::ForestCard, SceneId::Waterside, SceneId::Interior, SceneId::CityNight, SceneId::RidgeSunset, SceneId::ForestCombat };
 }
+
+std::vector<SceneId> diagnosticScenes() { return { SceneId::FurnaceRoom }; }
 
 const char* sceneName(SceneId id)
 {
@@ -646,6 +696,7 @@ const char* sceneName(SceneId id)
     case SceneId::CityNight: return "city_night";
     case SceneId::RidgeSunset: return "ridge_sunset";
     case SceneId::ForestCombat: return "forest_combat";
+    case SceneId::FurnaceRoom: return "furnace_room";
     }
     fail("scenegen: unknown scene id %u", (uint32_t)id);
 }

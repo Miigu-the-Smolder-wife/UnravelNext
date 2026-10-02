@@ -9,6 +9,7 @@ void accelerationStructures(FramePassContext&) { pending("R.accelerationStructur
 void surfaceCache(FramePassContext&, ViewResources&) {}
 void screenTraceInputs(FramePassContext&, ViewResources&) {}
 void globalIllumination(FramePassContext&, ViewResources&) { pending("R.globalIllumination (track disabled in this build)"); }
+void translucencyVolumePrevious(FramePassContext&, const ViewResources&) {}
 void reflections(FramePassContext&, ViewResources&) { pending("R.reflections (track disabled in this build)"); }
 void giScreenIrradiance(FramePassContext&, ViewResources&) {}
 void refraction(FramePassContext&, BufferRef, BufferRef, uint32_t) { pending("R.refraction (track disabled in this build)"); }

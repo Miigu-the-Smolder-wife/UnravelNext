@@ -178,7 +178,33 @@ QualityConfig QualityConfig::loadDirectory(const std::filesystem::path& director
             merged.m_values[key] = std::move(value);
         }
     }
+    merged.applyTier();
     return merged;
+}
+
+void QualityConfig::applyTier()
+{
+    const auto it = m_values.find("output.tier");
+    if (it == m_values.end()) return;
+    if (it->second.kind != Value::Kind::String) fail("output.tier must be a string (a file name under %s/tiers)", m_origin.c_str());
+    const std::string tier = it->second.text;
+    {
+        std::lock_guard lock(m_read->mutex);
+        m_read->keys.insert(it->first);  // (read here, not through get: not an unread key)
+    }
+    const std::filesystem::path file = std::filesystem::path(m_origin) / "tiers" / (tier + ".toml");
+    if (!std::filesystem::is_regular_file(file))
+    {
+        if (tier == "epic") return;  // (the files as they are)
+        fail("output.tier = \"%s\": %s does not exist", tier.c_str(), file.string().c_str());
+    }
+    QualityConfig part = load(file);
+    for (auto& [key, value] : part.m_values)
+    {
+        if (key == "output.tier") fail("%s: a tier file does not name a tier", file.string().c_str());
+        if (!m_values.count(key)) fail("%s: key '%s' is not a quality key of %s", file.string().c_str(), key.c_str(), m_origin.c_str());
+        m_values[key] = std::move(value);
+    }
 }
 
 QualityConfig QualityConfig::parse(std::string_view text, const std::string& origin)
@@ -233,6 +259,7 @@ void QualityConfig::applyOverride(std::string_view assignment)
     Value v = parseValue(c);
     if (!c.atLineEnd()) c.error("trailing text");
     m_values[key] = std::move(v);
+    if (key == "output.tier") applyTier();
 }
 
 const QualityConfig::Value& QualityConfig::get(std::string_view key, Value::Kind kind) const

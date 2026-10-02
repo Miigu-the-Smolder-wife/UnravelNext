@@ -2,6 +2,7 @@
 // One tile group; append every required slice once, never truncate. Queue
 // capacity equals gridX*gridY*slices. P4.z = queue UAV, P4.w = air scratch UAV.
 #include "Passes/Atmosphere/FroxelSlice.hlsli"
+#include "Passes/Atmosphere/Fog.hlsli"
 groupshared float3 gs_tau[64];
 groupshared uint gs_lastSky;
 [numthreads(64, 1, 1)]
@@ -45,14 +46,16 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     if (s == 0) gs_lastSky = 0;
     // Particle media of this slice (P[4].x) and their optical depth before it and to far_m (inclusive scan in gs_tau,
     // reused below).
-    const bool media = P[4].x != 0xFFFFFFFFu;
+    const FogMedium fog = fogMedium(P[6], P[7], P[8]);  // (as FroxelIntegrate.hlsl: the fog is a medium of every slice)
+    const bool particleMedia = P[4].x != 0xFFFFFFFFu, media = particleMedia || fog.on;
     float3 mediaTau = 0, mediaSource = 0;
-    if (media && s < g.slices)
+    if (particleMedia && s < g.slices)
     {
         Texture3D<float4> slices = ResourceDescriptorHeap[P[4].x];
         mediaTau = slices.Load(int4(tile, s, 0)).rgb;
         mediaSource = slices.Load(int4(tile, g.slices + s, 0)).rgb;
     }
+    if (fog.on && hasAir) mediaTau += fogOpticalDepth(fog, g_cameraPosition, dir, max(zs0 * toRay, tStart), zs1 * toRay);
     float3 mediaBefore = 0, mediaTotal = 0;
     if (media)
     {

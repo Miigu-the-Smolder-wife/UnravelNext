@@ -1,0 +1,8 @@
+# The frame-rate tier (output.tier = "high"): the files' values with these differences. What it gives up is named per key.
+[reflection]
+lumen_downsample = 2        # one reflection ray per 2 x 2 pixels, resolved from the neighbouring blocks' rays (the
+                            # reference's Reflections.DownsampleFactor 2): mirror detail under the block size is rebuilt
+                            # over frames instead of traced each frame
+
+[output]
+upscale_tsr_flickering = false  # no flickering (moire) heuristic: sub-pixel gratings may shimmer where they stand still

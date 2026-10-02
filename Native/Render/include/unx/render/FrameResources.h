@@ -326,5 +326,10 @@ struct FrameResources
     // textures as shader resources. Published by the final gather (tracks::globalIllumination).                      [R]
     TextureRef translucencyGiAmbient, translucencyGiDirectional;
     uint32_t translucencyGiParams = 0xFFFFFFFFu;
+    // The same volume as the PREVIOUS frame left it, for passes recorded before this frame's final gather (S's fog:
+    // the air volume is built before GI). Published by tracks::translucencyVolumePrevious at the frame's start;
+    // 0xFFFFFFFF / invalid: no volume last frame (the first frame, a cut, the module off).                        [R]
+    TextureRef translucencyGiPrevAmbient, translucencyGiPrevDirectional;
+    uint32_t translucencyGiPrevParams = 0xFFFFFFFFu;
 };
 } // namespace unx::render

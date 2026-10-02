@@ -64,9 +64,15 @@
 // the sky correction, which then holds per slice source' - A_lut e^-(tau_p,total - tau_p,before) (A_lut: the slice's air
 // in-scattering the sky LUT has), so the sum is exact given the LUT's air: the LUT's air behind the media is attenuated
 // by them, the air in front is not.
+// Height fog (atmosphere.fog; Fog.hlsli): one more medium, in every slice. P[6] = { on, the previous frame's Lumen
+// translucency volume (its parameters' SRV; UNX_NONE: no indirect light in the fog), the froxels' sampled local fluence
+// SRV, their direction moment SRV (MegaLightsVolume.hlsl; UNX_NONE: no local light in the fog) }, P[7] = { density (1/m at
+// the fog's height), height falloff, height (m), phase g }, P[8] = { albedo r, g, b, start distance (m) } (floats).
 // Frame constants of the view (main, or a planar reflection view).
 #include "Passes/Atmosphere/FroxelSlice.hlsli"
 #include "Passes/Shadow/VsmCls.hlsli"
+#include "Passes/Atmosphere/Fog.hlsli"
+#include "Passes/GI/LumenTranslucencyVolume.hlsli"
 groupshared float3 gs_tau[64];
 groupshared float3 gs_source[64];
 groupshared float4 gs_hat[64];  // L / (1 - T) of node s + 1, .w = 1 where the node has air
@@ -144,13 +150,22 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     if (s == 0) gs_lastSky = 0;
     // Particle media of this slice (P[4].x) and their optical depth before it and to far_m (inclusive scan in gs_tau,
     // reused below).
-    const bool media = P[4].x != 0xFFFFFFFFu;
+    const FogMedium fog = fogMedium(P[6], P[7], P[8]);
+    const bool particleMedia = P[4].x != 0xFFFFFFFFu, media = particleMedia || fog.on;
     float3 mediaTau = 0, mediaSource = 0;
-    if (media && s < g.slices)
+    if (particleMedia && s < g.slices)
     {
         Texture3D<float4> slices = ResourceDescriptorHeap[P[4].x];
         mediaTau = slices.Load(int4(tile, s, 0)).rgb;
         mediaSource = slices.Load(int4(tile, g.slices + s, 0)).rgb;
+    }
+    // the fog's optical depth over the slice; its source follows below, where the slice's light is known
+    const float3 particleTau = mediaTau;
+    float fogTau = 0, airShadowed = 0;
+    if (fog.on && hasAir)
+    {
+        fogTau = fogOpticalDepth(fog, g_cameraPosition, dir, max(zs0 * toRay, tStart), zs1 * toRay);
+        mediaTau += fogTau;
     }
     float3 mediaBefore = 0, mediaTotal = 0;
     if (media)
@@ -203,9 +218,10 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         ByteAddressBuffer air = ResourceDescriptorHeap[P[4].w];
         const FroxelAirResult integrated = froxelLoadAir(air, froxelIndex(g, tile, s));
 #else
-        const FroxelAirResult integrated = froxelAirSlice(g, tile, s);
+        const FroxelAirResult integrated = froxelAirSlice(g, tile, s, fog.on);
 #endif
         tau = integrated.tau; source = integrated.source; skyTerm = integrated.sky; walk = integrated.walk;
+        airShadowed = integrated.shadowed;
         const float z0 = zs0, z1 = zs1;
         const float t0 = max(z0 * toRay, tStart), len = z1 * toRay - t0;
         const float3 o = g_cameraPosition + dir * t0;
@@ -391,6 +407,29 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
                 skyTerm += gs_source[k2 - b];
             }
         GroupMemoryBarrierWithGroupSync();
+    }
+    if (fogTau > 0)
+    {
+        // What the fog scatters toward the camera per unit of scattering (radiance), at the segment's middle: the sun
+        // outside the casters' shadow, the local lights (the froxel's sampled fluence and direction moment through the
+        // phase function's first two SH bands, as the lit particles), the indirect light (the translucency volume).
+        const float ft0 = max(max(zs0 * toRay, tStart), fog.start), ft1 = zs1 * toRay;
+        const float3 middle = g_cameraPosition + dir * (0.5 * (ft0 + ft1));
+        float3 inScattered = E * airSunTransmittance(a, tlut, airLiftToSurface(a, middle), sun) * ((1 - airShadowed) * airMiePhase(nu, fog.g));
+        if (P[6].z != 0xFFFFFFFFu)
+        {
+            Texture3D<float4> fluenceVolume = ResourceDescriptorHeap[P[6].z];
+            Texture3D<float4> momentVolume = ResourceDescriptorHeap[P[6].w];
+            const float3 F = fluenceVolume.Load(int4(tile, s, 0)).rgb / g_exposure;
+            const float3 M = momentVolume.Load(int4(tile, s, 0)).rgb / g_exposure;
+            const float lumF = dot(F, float3(0.2126, 0.7152, 0.0722));
+            if (lumF > 0) inScattered += F * (max(0.0, 1.0 + 3.0 * fog.g * dot(M, dir) / lumF) / (4.0 * 3.14159265358979));
+        }
+        if (P[6].y != 0xFFFFFFFFu) inScattered += ltvInscatter(P[6].y, middle, dir, fog.g);
+        // The particles and the fog as one medium: their sources per unit optical depth weighed by their depths (the
+        // layout's S = J tau g(tau), g(x) = (1 - e^-x) / x).
+        const float3 particles = any(particleTau > 0) ? mediaSource / froxelSelfAttenuation(particleTau) : float3(0, 0, 0);
+        mediaSource = (particles + fog.albedo * inScattered * fogTau) * froxelSelfAttenuation(particleTau + fogTau);
     }
     if (media)
     {

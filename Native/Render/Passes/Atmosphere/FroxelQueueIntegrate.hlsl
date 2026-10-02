@@ -14,5 +14,5 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     const uint tileCount = g.gridX * g.gridY, s = index / tileCount, t = index % tileCount;
     const uint2 tile = uint2(t % g.gridX, t / g.gridX);
     RWByteAddressBuffer air = ResourceDescriptorHeap[P[4].w];
-    froxelStoreAir(air, index, froxelAirSlice(g, tile, s));
+    froxelStoreAir(air, index, froxelAirSlice(g, tile, s, P[6].x != 0));  // (P[6].x: the fog is on - Fog.hlsli)
 }

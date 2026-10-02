@@ -101,8 +101,10 @@ struct FroxelAirResult
 {
     float3 tau, source, sky;
     VsmAirWalkCount walk;
+    float shadowed;  // the fraction of the slice's segment in the casters' shadow (the fog's sun term takes it: Fog.hlsli)
 };
-FroxelAirResult froxelAirSlice(FroxelGrid g, uint2 tile, uint s)
+// nearShadows: the shadowed fraction is wanted in the slices before the air's start too (the fog is there).
+FroxelAirResult froxelAirSlice(FroxelGrid g, uint2 tile, uint s, bool nearShadows = false)
 {
     const AtmosphereParams a = airParamsFromTexels(P[0].z);
     const uint tlut = P[0].z, mlut = P[0].w;
@@ -141,7 +143,7 @@ FroxelAirResult froxelAirSlice(FroxelGrid g, uint2 tile, uint s)
     // Casters' shadows in the air: the shadowed fraction of the segment removes that part of the single scattering.
     float f = 0;
     // (a slice wholly before the air's start has no single scattering to shadow: no walk)
-    if (P[1].w != 0xFFFFFFFFu && any(single > 0) && (experiment & 1) == 0 && nearScale > 1e-5)
+    if (P[1].w != 0xFFFFFFFFu && any(single > 0) && (experiment & 1) == 0 && (nearScale > 1e-5 || nearShadows))
     {
         VsmResources r;
         r.table = ResourceDescriptorHeap[P[1].x];
@@ -161,6 +163,7 @@ FroxelAirResult froxelAirSlice(FroxelGrid g, uint2 tile, uint s)
     skyTerm = -E * single * f;  // what the sky LUT has and the shadows remove
     FroxelAirResult result;
     result.tau = tau; result.source = source; result.sky = skyTerm; result.walk = walk;
+    result.shadowed = f;
     return result;
 }
 // Exactly 64 bytes per original froxel index, no reduced precision or atomics.
@@ -170,7 +173,7 @@ void froxelStoreAir(RWByteAddressBuffer b, uint index, FroxelAirResult v)
     b.Store4(at, uint4(asuint(v.tau), v.walk.slices));
     b.Store4(at + 16, uint4(asuint(v.source), v.walk.mixedPages));
     b.Store4(at + 32, uint4(asuint(v.sky), v.walk.blocks32));
-    b.Store4(at + 48, uint4(v.walk.blocks8, v.walk.texels, v.walk.capped, 0));
+    b.Store4(at + 48, uint4(v.walk.blocks8, v.walk.texels, v.walk.capped, asuint(v.shadowed)));
 }
 FroxelAirResult froxelLoadAir(ByteAddressBuffer b, uint index)
 {
@@ -180,6 +183,7 @@ FroxelAirResult froxelLoadAir(ByteAddressBuffer b, uint index)
     v.tau = asfloat(a.xyz); v.source = asfloat(c.xyz); v.sky = asfloat(d.xyz);
     v.walk.slices = a.w; v.walk.mixedPages = c.w; v.walk.blocks32 = d.w;
     v.walk.blocks8 = e.x; v.walk.texels = e.y; v.walk.capped = e.z;
+    v.shadowed = asfloat(e.w);
     return v;
 }
 #endif

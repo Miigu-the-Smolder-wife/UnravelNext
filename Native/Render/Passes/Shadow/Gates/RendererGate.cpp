@@ -29,7 +29,9 @@
 // --light-toggle-at F,i: at frame F light i goes off (on again when it was off; GpuScene::setLights). --sun-step-at F,deg:
 // the sun turns by deg at frame F (about the same axis as --sun-deg-per-s).
 // --capture-frames a,b,c: captures of these frame indices (the files get _f<frame> before .pfm) instead of the last
-// frame; --capture-layers final,gi,refl,shadow,reflmode,depth: besides the capture (final), the main view's internal
+// frame; --capture-layers final,gi,refl,shadow,reflmode,depth,ao,roughspec,carddirect,cardindirect,cardfinal,cardalbedo:
+// (ao = the short-range AO, roughspec = the gather's rough specular, card* = the mesh cards' atlases)
+// besides the capture (final), the main view's internal
 // layers of the same frames as PFM (_<layer>): gi = view.giIrradiance (E x near occlusion x exposure; an _alpha file with
 // its data flag), refl = view.reflection (radiance, weight in _alpha), shadow = the first three light slots of
 // view.shadowVisibility (0..1), reflmode = R's per-pixel mode texture (r = mode 0 K 1 M 2 G 3 planar, g = log2 of the G
@@ -259,6 +261,51 @@ void convertCaptureRows(const CaptureSlot& c, const uint8_t* mapped, std::vector
                 std::memcpy(o, row + (size_t)x * 4, 4);
                 o[1] = o[2] = o[0];
                 break;
+            case DXGI_FORMAT_R11G11B10_FLOAT:
+            {
+                // unsigned small floats: 5-bit exponent, 6-bit (r, g) or 5-bit (b) mantissa
+                uint32_t v;
+                std::memcpy(&v, row + (size_t)x * 4, 4);
+                auto smallFloat = [](uint32_t bits, int mantissaBits) {
+                    const uint32_t e = bits >> mantissaBits, m = bits & ((1u << mantissaBits) - 1u);
+                    const float scale = 1.0f / (float)(1u << mantissaBits);
+                    if (e == 0) return std::ldexp((float)m * scale, -14);
+                    if (e == 31) return m ? 0.0f : 65024.0f;  // (NaN: 0; infinity: the largest value)
+                    return std::ldexp(1.0f + (float)m * scale, (int)e - 15);
+                };
+                o[0] = smallFloat(v & 0x7FFu, 6);
+                o[1] = smallFloat((v >> 11) & 0x7FFu, 6);
+                o[2] = smallFloat(v >> 22, 5);
+                break;
+            }
+            case DXGI_FORMAT_R16_FLOAT:
+            {
+                uint16_t hv;
+                std::memcpy(&hv, row + (size_t)x * 2, 2);
+                o[0] = o[1] = o[2] = halfToFloat(hv);
+                break;
+            }
+            case DXGI_FORMAT_R16G16_FLOAT:
+            {
+                uint16_t hv[2];
+                std::memcpy(hv, row + (size_t)x * 4, 4);
+                o[0] = halfToFloat(hv[0]);
+                o[1] = halfToFloat(hv[1]);
+                o[2] = 0;
+                break;
+            }
+            case DXGI_FORMAT_R8_UNORM:
+                o[0] = o[1] = o[2] = (float)row[x] / 255.0f;
+                break;
+            case DXGI_FORMAT_R8G8_UNORM:
+                o[0] = (float)row[(size_t)x * 2] / 255.0f;
+                o[1] = (float)row[(size_t)x * 2 + 1] / 255.0f;
+                o[2] = 0;
+                break;
+            case DXGI_FORMAT_R8G8B8A8_UNORM:
+            case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+                for (int k = 0; k < 3; ++k) o[k] = (float)row[(size_t)x * 4 + k] / 255.0f;
+                break;
             default:
                 fail("capture of layer %s: format %d is not handled", c.layer.c_str(), (int)c.format);
             }
@@ -432,8 +479,13 @@ int main(int argc, char** argv)
                 {
                     const size_t comma = v.find(',', at);
                     const std::string l = v.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
-                    if (l != "final" && l != "gi" && l != "refl" && l != "shadow" && l != "reflmode" && l != "depth")
-                        fail("--capture-layers: unknown layer '%s' (final, gi, refl, shadow, reflmode, depth)", l.c_str());
+                    static const char* const kLayers[] = { "final", "gi", "refl", "shadow", "reflmode", "depth", "ao", "roughspec", "carddirect", "cardindirect",
+                                                           "cardfinal", "cardalbedo" };
+                    bool known = false;
+                    for (const char* name : kLayers) known = known || l == name;
+                    if (!known)
+                        fail("--capture-layers: unknown layer '%s' (final, gi, refl, shadow, reflmode, depth, ao, roughspec, carddirect, cardindirect, cardfinal, cardalbedo)",
+                             l.c_str());
                     captureLayers.push_back(l);
                     if (comma == std::string::npos) break;
                     at = comma + 1;
@@ -540,7 +592,9 @@ int main(int argc, char** argv)
         const bool sceneFile = sceneName.size() > 9 && sceneName.compare(sceneName.size() - 9, 9, ".unxscene") == 0;
         scenegen::Request request;
         bool found = sceneFile;
-        for (scenegen::SceneId id : scenegen::allScenes())
+        std::vector<scenegen::SceneId> known = scenegen::allScenes();
+        for (scenegen::SceneId id : scenegen::diagnosticScenes()) known.push_back(id);  // (furnace_room: SceneGen.h)
+        for (scenegen::SceneId id : known)
             if (sceneName == scenegen::sceneName(id))
             {
                 request.id = id;
@@ -922,6 +976,14 @@ int main(int argc, char** argv)
                         else if (layer == "refl") source = rendered.reflection;
                         else if (layer == "shadow") source = rendered.shadowVisibility;
                         else if (layer == "depth") source = rendered.depth;
+                        else if (layer == "ao") source = rendered.shortRangeAO;
+                        else if (layer == "roughspec") source = rendered.giRoughSpecular;
+                        // the mesh cards' atlases after the frame's update (CardLighting.hlsli: direct and indirect in
+                        // lux x 1/64, final in nits x 1/16; a texel without a surface holds 0)
+                        else if (layer == "carddirect") source = renderer.lastResources().cards.direct;
+                        else if (layer == "cardindirect") source = renderer.lastResources().cards.indirect;
+                        else if (layer == "cardfinal") source = renderer.lastResources().cards.final;
+                        else if (layer == "cardalbedo") source = renderer.lastResources().cards.albedo;
 #if __has_include("unx/refl/ReflectionSystem.h")
                         else if (layer == "reflmode")
                         {

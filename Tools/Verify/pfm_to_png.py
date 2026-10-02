@@ -162,7 +162,7 @@ def write_png(path, rgb8):
 def convert(path, crop=None, scale=1, local=True):
     img = np.nan_to_num(read_pfm(path).astype(np.float64), nan=0.0, posinf=65504.0, neginf=0.0)
     name = os.path.basename(path)
-    layer = any(tag in name for tag in ('_alpha', '_gi_', '_refl_', '_shadow_', '_reflmode_', '_depth_'))
+    layer = any(tag in name for tag in ('_alpha', '_gi_', '_refl_', '_shadow_', '_reflmode_', '_depth_', '_ao_', '_roughspec_', '_card'))
     if local and not layer and img.shape[0] >= 256 and img.shape[1] >= 256:
         img = img * local_exposure(img)[..., None]  # (the whole image's, before any crop)
     if crop:
@@ -203,7 +203,7 @@ def main(argv):
     for p in paths:
         if os.path.isdir(p):
             for name in sorted(os.listdir(p)):
-                if name.endswith('.pfm') and (every or not any(tag in name for tag in ('_alpha', '_gi_', '_refl_', '_shadow_', '_reflmode_', '_depth_'))):
+                if name.endswith('.pfm') and (every or not any(tag in name for tag in ('_alpha', '_gi_', '_refl_', '_shadow_', '_reflmode_', '_depth_', '_ao_', '_roughspec_', '_card'))):
                     files.append(os.path.join(p, name))
         else:
             files.append(p)

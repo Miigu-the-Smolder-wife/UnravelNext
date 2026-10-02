@@ -39,7 +39,13 @@ public:
     static QualityConfig parse(std::string_view text, const std::string& origin);
 
     // "section.key=value" with the value in TOML syntax; recorded in the hash like any file value.
+    // An override of output.tier applies that tier's file (applyTier): give it before the keys it should not undo.
     void applyOverride(std::string_view assignment);
+    // Quality tiers (the reference's scalability groups): <directory>/tiers/<output.tier>.toml is a set of values laid
+    // over the directory's files - a tier is the files' values with these differences. loadDirectory applies the tier
+    // the files name (output.tier; "epic" needs no file: it is the files as they are). Every key of a tier file must
+    // exist in the directory's files.
+    void applyTier();
 
     int64_t integer(std::string_view key) const;
     double number(std::string_view key) const;  // accepts integers too

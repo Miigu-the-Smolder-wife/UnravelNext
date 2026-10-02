@@ -1188,6 +1188,8 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         std::memcpy(&nearBits, &grid.nearM, 4);
         std::memcpy(&farBits, &grid.farM, 4);
         std::memcpy(&texelBits, &grid.shadowTexelsPerTile, 4);
+        // (atmosphere.fog: FroxelSystem.cpp fogSettings - on with a positive density)
+        const bool fogOn = q.has("atmosphere.fog.enabled") && q.boolean("atmosphere.fog.enabled") && q.number("atmosphere.fog.density_per_m") > 0;
         g.addPass("s.vsm.markair", QueueType::Compute,
                   [&](PassBuilder& b) {
                       b.use(requests, Use::UavCompute);
@@ -1195,11 +1197,11 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[8] = { ctx.uav(requests), ring, grid.gridX | grid.gridY << 16, grid.slices | grid.tilePx << 16, nearBits, farBits, texelBits,
-                                              ctx.uav(statsBuf) };
+                      const uint32_t k[12] = { ctx.uav(requests), ring, grid.gridX | grid.gridY << 16, grid.slices | grid.tilePx << 16, nearBits, farBits, texelBits,
+                                               ctx.uav(statsBuf), fogOn ? 1u : 0u, 0, 0, 0 };  // P[2].x: the fog needs the near slices' pages
                       ctx.cmd->SetPipelineState(pso);
                       ctx.bindFrameConstants(mainConstants);
-                      ctx.computeConstants(k, 8);
+                      ctx.computeConstants(k, 12);
                       ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
                   });
     }

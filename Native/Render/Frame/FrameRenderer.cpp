@@ -400,6 +400,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     tracks::decals(fc, main);  // E (A7): decal records and tile lists for the resolve
     tracks::surfaceState(fc);  // E (A7): the surface state field's changes
     tracks::materialResolve(fc, main);
+    tracks::translucencyVolumePrevious(fc, main);  // R: last frame's translucency volume, for the fog's indirect light
     tracks::froxels(fc, main);
     main.froxelLights = resources.froxelLights;  // the main view's per-view S products (v1.22)
     main.airVolume = resources.aerialPerspective;
@@ -424,6 +425,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     }
     else
         tracks::debugOverlay(fc, main);  // E (A15): buffer visualization, debug primitives, HUD over the final colour
+    m_lastResources = resources;
     return main;
 }
 

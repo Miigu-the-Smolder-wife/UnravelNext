@@ -19,6 +19,21 @@ rebuild_every_frame = 0              # 1: rebuild the transmittance LUT and J_ms
 sky_view_lut = [192, 128]
 sky_view_segments = 128              # quadratic segments x Gauss-Legendre 4 along each sky ray
 
+# Height fog (Passes/Atmosphere/Fog.hlsli): the reference's exponential height fog with volumetric fog, as one more medium
+# of the air volume - lit by the sun through the casters' shadow (shafts of light), by the local lights and by the indirect
+# light. The numbers are the reference's placed-fog defaults turned to metres (FogDensity 0.02 -> 0.002 / m,
+# FogHeightFalloff 0.2 -> 0.02 / m, volumetric scattering distribution 0.2, albedo white, extinction scale 1).
+[atmosphere.fog]
+enabled = true
+density_per_m = 0.002                # extinction per metre at height_m (x extinction_scale)
+height_falloff_per_m = 0.02          # the density halves every 1 / this metres of height
+height_m = 0.0                       # the height (scene y) the density is given at
+albedo = [1.0, 1.0, 1.0]             # scattering colour (scattering = density x albedo)
+extinction_scale = 1.0
+phase_g = 0.2                        # Henyey-Greenstein asymmetry (VolumetricFogScatteringDistribution)
+start_distance_m = 0.0               # no fog nearer than this
+indirect_light = true                # the Lumen translucency volume (the previous frame's) lights the fog
+
 [atmosphere.froxels]
 integration_queue = true             # same air-slice estimator in dense waves; false is the tile-scheduled A/B path
 tile_px = 24

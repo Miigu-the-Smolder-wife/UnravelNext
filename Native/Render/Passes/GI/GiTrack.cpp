@@ -2,10 +2,19 @@
 #include "unx/gi/GiSystem.h"
 #include "unx/gi/LumenRadianceCache.h"
 #include "unx/gi/LumenShortRangeAO.h"
+#include "unx/gi/LumenTranslucencyVolume.h"
 #include "unx/render/Tracks.h"
 
 namespace unx::render::tracks
 {
+void translucencyVolumePrevious(FramePassContext& fc, const ViewResources& main)
+{
+    const gi::LumenTvPrevious previous = gi::lumenTranslucencyVolumePrevious(fc, main);
+    fc.resources.translucencyGiPrevAmbient = previous.ambient;
+    fc.resources.translucencyGiPrevDirectional = previous.directional;
+    fc.resources.translucencyGiPrevParams = previous.params;
+}
+
 void globalIllumination(FramePassContext& fc, ViewResources& main)
 {
     // Inputs: V's depth, M's G-buffer, R's TLASes (accelerationStructures ran first).
