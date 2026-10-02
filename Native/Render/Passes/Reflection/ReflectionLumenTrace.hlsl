@@ -28,6 +28,7 @@
 // P[5] = { previous colour SRV, its width | height << 16, asuint(relative depth thickness), M's material word SRV (the
 //          top layer's roughness, ReflectionInternal.hlsli g_reflWords; UNX_NONE: none) }
 // P[6], P[7] = RtSceneSrvs; P[8..11] = the previous colour's view-projection (rows). b1 = the main view.
+#define RT_SHADOW_TRANSMITTANCE  // (the hits' shadow rays take what the Glass they cross leaves of the light: RayShaders.hlsli)
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/Reflection/ReflectionReuse.hlsli"

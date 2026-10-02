@@ -127,8 +127,10 @@ RlHit rlShadeHit(RtSceneSrvs scene, RtHit hit, float3 origin, float3 direction, 
                 sr.Direction = l;
                 sr.TMin = 0;
                 sr.TMax = giRayLength();
-                L.sunIlluminance = e0;
-                L.sunVisibility = rtVisible(scene, sr, RT_MASK_HIT_SHADOW) ? 1.0 : 0.0;
+                // (the sun through the Glass on the way: what the panes leave of it - RayShaders.hlsli rtShadowTransmittance)
+                const float3 through = rtShadowTransmittance(scene, sr, RT_MASK_HIT_SHADOW);
+                L.sunIlluminance = e0 * through;
+                L.sunVisibility = any(through > 0) ? 1.0 : 0.0;
             }
         }
         if (localSample) L.local = rtHitLocalSample(scene, s, m, -direction, footprint, 1e-3 + 2e-4 * distance(s.position, g_cameraPosition), hitSeed);

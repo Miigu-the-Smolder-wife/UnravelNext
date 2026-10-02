@@ -26,6 +26,7 @@
 // cache's depth atlas SRV (UNX_NONE: no probe visibility test), asuint(the depth constraint's threshold, slices),
 // asuint(far-field start, m; 0: none - GiSky.hlsli giFarSkyIrradiance) }
 #define GI_SKY_FOG_RETURN  // (GiSky.hlsli: the sky's share of the sun's light the fog scatters - atmosphere.fog.sun_through_fog)
+#define RT_SHADOW_TRANSMITTANCE  // (the hits' shadow rays take what the Glass they cross leaves of the light: RayShaders.hlsli)
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
@@ -131,8 +132,10 @@ void LumenTranslucencyVolumeTraceGen()
                         sr.Direction = l;
                         sr.TMin = 0;
                         sr.TMax = giRayLength();
-                        L.sunIlluminance = e0;
-                        L.sunVisibility = rtVisible(scene, sr, RT_MASK_HIT_SHADOW) ? 1.0 : 0.0;
+                        // (the sun through the Glass on the way: what the panes leave of it - RayShaders.hlsli rtShadowTransmittance)
+                        const float3 through = rtShadowTransmittance(scene, sr, RT_MASK_HIT_SHADOW);
+                        L.sunIlluminance = e0 * through;
+                        L.sunVisibility = any(through > 0) ? 1.0 : 0.0;
                     }
                 }
                 L.local = rtHitLocalSample(scene, s, m, -ray.Direction, hit.t * 1.2, bias, seed * 3u + id.z * 7919u + texel.x * 31u + texel.y * 131u);

@@ -31,6 +31,7 @@
 // P[4] = { trace atlas UAV, asuint(ray intensity cap, exposed units; 0: none), the dispatch's first thread, page capacity }
 // P[5] = { direct list capacity, asuint(two-sided skip distance, m), radiosity list capacity, page light SRV (raw) }
 // P[6], P[7] = RtSceneSrvs
+#define RT_SHADOW_TRANSMITTANCE  // (the hits' shadow rays take what the Glass they cross leaves of the light: RayShaders.hlsli)
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
@@ -143,8 +144,10 @@ void CardRadiosityTraceGen()
                         sr.Direction = l;
                         sr.TMin = 0;
                         sr.TMax = giRayLength();
-                        L.sunIlluminance = e0;
-                        L.sunVisibility = rtVisible(scene, sr, RT_MASK_HIT_SHADOW) ? 1.0 : 0.0;
+                        // (the sun through the Glass on the way: what the panes leave of it - RayShaders.hlsli rtShadowTransmittance)
+                        const float3 through = rtShadowTransmittance(scene, sr, RT_MASK_HIT_SHADOW);
+                        L.sunIlluminance = e0 * through;
+                        L.sunVisibility = any(through > 0) ? 1.0 : 0.0;
                     }
                 }
                 L.local = rtHitLocalSample(scene, s, m, -ray.Direction, hit.t * 0.74, bias, thread * 9781u + P[0].z * 26699u);

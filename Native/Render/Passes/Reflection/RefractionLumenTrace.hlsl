@@ -33,6 +33,7 @@
 //          << 16, asuint(the result's cap, exposed units; 0: none) }
 // P[5] = { previous colour SRV, its width | height << 16, asuint(relative depth thickness), depth SRV }
 // P[6], P[7] = RtSceneSrvs; P[8..11] = the previous colour's view-projection (rows). b1 = the main view.
+#define RT_SHADOW_TRANSMITTANCE  // (the hits' shadow rays take what the Glass they cross leaves of the light: RayShaders.hlsli)
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/Reflection/ScreenTrace.hlsli"
