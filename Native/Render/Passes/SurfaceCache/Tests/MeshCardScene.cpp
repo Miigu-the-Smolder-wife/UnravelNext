@@ -120,8 +120,11 @@ int main(int argc, char** argv)
         const scene::MeshCards cube = scene::buildMeshCards(boxMesh({ -0.5f, -0.5f, -0.5f }, { 0.5f, 0.5f, 0.5f }), std::vector<uint8_t>{});
         CHECK(cube.cards.size() == 6);
         {
-            // one cube: levels by distance, sub-allocation, reallocation, hiding
-            MeshCardScene s;
+            // one cube: levels by distance, sub-allocation, reallocation, hiding (no refresh captures: the counts below
+            // are those of new pages)
+            McSettings quiet;
+            quiet.refreshFraction = 0;
+            MeshCardScene s(quiet);
             CHECK(s.captureAtlasSize() == 512);
             CHECK(s.addInstance(3, cube, translation({ 0, 0, 0 })) == 0);
             CHECK(s.instanceMap().size() == 4 && s.instanceMap()[3] == 0 && s.instanceMap()[0] == mc::kNone);
@@ -179,7 +182,9 @@ int main(int argc, char** argv)
             // a 40 m wall next to the camera: each large face is 512 x 512 = 4 x 4 pages, the whole capture atlas, so the
             // faces come one per frame; interior page edges carry the half-texel border
             const scene::MeshCards wall = scene::buildMeshCards(boxMesh({ -20, -20, -0.1f }, { 20, 20, 0.1f }), std::vector<uint8_t>{});
-            MeshCardScene s;
+            McSettings quiet;
+            quiet.refreshFraction = 0;
+            MeshCardScene s(quiet);
             s.addInstance(0, wall, translation({ 0, 0, 0 }));
             const float3 eye{ 0, 0, 1.5f };
             uint32_t full = 0, frames = 0;
@@ -204,7 +209,9 @@ int main(int argc, char** argv)
         }
         {
             // the frame budget: 3,600 cubes on a 1.2 m grid (21,600 cards; those within about 12.7 m are large enough to show)
-            MeshCardScene s;
+            McSettings quiet;
+            quiet.refreshFraction = 0;
+            MeshCardScene s(quiet);
             uint32_t n = 0;
             for (int z = 0; z < 60; ++z)
                 for (int x = 0; x < 60; ++x) s.addInstance(n++, cube, translation({ (float)x * 1.2f - 36.0f, 0, (float)z * 1.2f - 36.0f }));
@@ -225,6 +232,56 @@ int main(int argc, char** argv)
             CHECK(worst == s.settings().capturesPerFrame);
             std::printf("grid: %u cards, %u visible, %u captures in %u frames, texels in the atlas %llu\n", s.stats().cards, s.stats().visibleCards, captures, frames,
                         (unsigned long long)s.stats().allocatedTexels);
+        }
+        {
+            // refresh captures, removal and re-use of the freed entries
+            MeshCardScene s;  // (refreshFraction 0.125: 37 pages a frame)
+            for (uint32_t i = 0; i < 20; ++i) s.addInstance(i, cube, translation({ (float)i * 1.5f, 0, 0 }));
+            const float3 eye{ 14, 0, 3 };
+            s.update(std::span<const float3>(&eye, 1));
+            s.validate();
+            const uint32_t pages = s.stats().mappedPages;
+            CHECK(pages == 120 && s.stats().refreshed == 0);  // (every page was captured in this frame)
+            // the resident pages come round: 37 a frame, each once before any twice
+            std::vector<uint32_t> seen(s.pageCount(), 0);
+            uint32_t refreshed = 0;
+            for (uint32_t frame = 0; frame < 4; ++frame)
+            {
+                s.update(std::span<const float3>(&eye, 1));
+                s.validate();
+                CHECK(s.stats().refreshed == s.captures().size() && s.stats().refreshed <= 37);
+                for (const McCapture& c : s.captures())
+                {
+                    CHECK(c.refresh && !c.resample && c.page < seen.size());
+                    if (c.page < seen.size()) ++seen[c.page];
+                    ++refreshed;
+                }
+            }
+            CHECK(refreshed > pages);
+            uint32_t most = 0, least = 0xFFFFFFFFu;
+            for (uint32_t n : seen)
+                if (n) most = std::max(most, n), least = std::min(least, n);
+            CHECK(most <= 2 && least >= 1);
+            // an instance asked for by name goes first
+            s.refreshInstance(7);
+            s.update(std::span<const float3>(&eye, 1));
+            uint32_t ofSeven = 0;
+            for (const McCapture& c : s.captures()) ofSeven += c.sceneInstance == 7 ? 1u : 0u;
+            CHECK(ofSeven == 6);
+            // removal frees the pages and the records; a new instance takes the freed slots
+            const uint32_t cards = s.stats().cards, sets = s.stats().meshCards;
+            s.removeInstance(7);
+            CHECK(!s.hasInstance(7) && s.instanceMap()[7] == mc::kNone);
+            s.update(std::span<const float3>(&eye, 1));
+            s.validate();
+            CHECK(s.stats().mappedPages == pages - 6);
+            CHECK(s.addInstance(40, cube, translation({ 7 * 1.5f, 0, 0 })) != mc::kNone);
+            s.update(std::span<const float3>(&eye, 1));
+            s.validate();
+            CHECK(s.stats().mappedPages == pages && s.stats().cards == cards && s.stats().meshCards == sets);
+            uint32_t ofForty = 0;
+            for (const McCapture& c : s.captures()) ofForty += c.sceneInstance == 40 && !c.refresh ? 1u : 0u;
+            CHECK(ofForty == 6);
         }
         {
             // an instance too small for cards, and one shown at a scale

@@ -818,9 +818,10 @@ void MeshCardScene::update(std::span<const float3> viewOrigins)
             if (refresh(m_refreshQueue.back()) == 2) room = false;
             else m_refreshQueue.pop_back();
         }
+        const uint32_t start = m_refreshCursor;
         for (uint32_t step = 0; room && step < count && m_stats.refreshed < refreshPages && m_captures.size() < m_settings.capturesPerFrame; ++step)
         {
-            const uint32_t pageIndex = (m_refreshCursor + step) % count;
+            const uint32_t pageIndex = (start + step) % count;
             const int result = refresh(pageIndex);
             if (result == 2)
             {
