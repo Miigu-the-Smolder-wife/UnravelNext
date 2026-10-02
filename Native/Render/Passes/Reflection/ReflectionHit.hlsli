@@ -17,7 +17,7 @@ float reflSunVisibility(RtSceneSrvs scene, float3 origin, uint seed)
     sr.Direction = giSunDirection(seed);
     sr.TMin = 0;
     sr.TMax = giRayLength();
-    return rtVisible(scene, sr, RT_MASK_REFLECTION, ((P[5].x >> 24) & 1) ? RAY_FLAG_FORCE_OPAQUE : RAY_FLAG_NONE) ? 1.0 : 0.0;
+    return rtVisible(scene, sr, RT_MASK_HIT_SHADOW, ((P[5].x >> 24) & 1) ? RAY_FLAG_FORCE_OPAQUE : RAY_FLAG_NONE) ? 1.0 : 0.0;
 }
 
 // localSeed: the local-light sample's seed, sunSeed: the sun shadow ray's (reflLocalSeed, reflSunSeed of the job and ray:

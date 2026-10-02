@@ -73,6 +73,7 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     float lumenSceneColorNormalDegrees = 85.0f;
     float lumenSamplingBias = 0.1f;    // reflection.lumen_ggx_sampling_bias: the lobe tail's share that is not sampled
     bool lumenScreenTraces = true;     // reflection.lumen_screen_traces: screen traces before the world rays (ScreenTrace.hlsli)
+    bool lumenCompactTraces = true;    // reflection.lumen_compact_traces: the world rays over a list of the jobs the screen traces left
     uint32_t lumenScreenIterations = 50;
     float lumenScreenThickness = 0.005f;
     uint32_t lumenDownsample = 1;      // reflection.lumen_downsample: 1, or 2 = one ray per 2 x 2 pixels (the reference's DownsampleFactor)

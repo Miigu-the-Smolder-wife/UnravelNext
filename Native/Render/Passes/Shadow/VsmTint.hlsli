@@ -14,7 +14,6 @@
 #include "Passes/Shadow/VsmSample.hlsli"
 
 #define VSM_TINT_PAGE 32u
-#define VSM_TINT_LEVELS 4u  // levels tried from the point's own towards coarser ones
 
 float vsmTintLuminance(float3 t) { return dot(t, float3(0.2126, 0.7152, 0.0722)); }
 // 11 : 11 : 10 bits (white = 0xFFFFFFFF): the tint as the views' visibility texture carries it (ShadowVisibility.hlsl).
@@ -35,7 +34,9 @@ float3 vsmSunTint(VsmResources r, float3 worldPos, float footprint)
     uint entry = 0;
     int2 page = 0, texelAbs = 0;
     float3 ls = 0;
-    [loop] for (uint up = 0; up < VSM_TINT_LEVELS && entry == 0 && k < VSM_LEVELS; ++up)
+    // (every coarser level, as the depth lookups' walk - vsmHeightAt: the page the depth comes from is the one whose
+    // tint is read)
+    [loop] for (uint up = 0; up < VSM_LEVELS && entry == 0 && k < VSM_LEVELS; ++up)
     {
         ls = vsmLightSpaceAt(c, worldPos, k);
         texelAbs = vsmAbsTexel(c, ls.xy, k);

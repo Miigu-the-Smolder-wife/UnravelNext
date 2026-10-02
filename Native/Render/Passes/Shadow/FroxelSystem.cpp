@@ -684,6 +684,9 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
     const bool hairShadow = (!q.has("shading.hair_shadows") || q.boolean("shading.hair_shadows")) && fc.resources.hairDensityParams.valid() &&
                             fc.resources.hairDensity.valid() && fc.resources.hairDensityCoarse.valid();
     const BufferRef hairParams = fc.resources.hairDensityParams;
+    // FX's particle shadow under the sun (Passes/FX/ParticleShadow.hlsli): the air's single scattering reads it
+    const BufferRef particleParams = fc.resources.particleShadowParams, particleMap = fc.resources.particleShadowMap;
+    const bool particleShadow = particleParams.valid() && particleMap.valid();
     const TextureRef hairFine = fc.resources.hairDensity, hairCoarse = fc.resources.hairDensityCoarse;
     BufferRef work, workArgs, air;
     ID3D12CommandSignature* signature = nullptr;
@@ -727,6 +730,11 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
             b.use(hairFine, Use::SrvCompute);
             b.use(hairCoarse, Use::SrvCompute);
         }
+        if (particleShadow)
+        {
+            b.use(particleParams, Use::SrvCompute);
+            b.use(particleMap, Use::SrvCompute);
+        }
         b.use(tlut, Use::SrvCompute); b.use(mlut, Use::SrvCompute);
         if (shadows)
         {
@@ -765,7 +773,7 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
         std::memcpy(&k[32], fog.albedo, 12);
         std::memcpy(&k[35], &fog.start, 4);
         std::memcpy(&k[36], sunFog2, 12);
-        k[39] = 0;
+        k[39] = particleShadow ? ctx.srv(particleParams) : 0xFFFFFFFFu;  // P[9].w: FX's particle shadow map
         ctx.bindFrameConstants(constants); ctx.computeConstants(k, 40);
     };
     if (queued)
@@ -1511,10 +1519,13 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
             noise[i] = (float)(lattice < 0 ? lattice + 256.0 : lattice);
         }
     }
-    // E's grooms shadow the fog under the sun (shading.hair_shadows; FogScatter.hlsl, P[10].y)
+    // E's grooms shadow the fog under the sun (shading.hair_shadows; FogScatter.hlsl, P[10].z)
     const bool hairShadow = (!fc.quality.has("shading.hair_shadows") || fc.quality.boolean("shading.hair_shadows")) && fc.resources.hairDensityParams.valid() &&
                             fc.resources.hairDensity.valid() && fc.resources.hairDensityCoarse.valid();
     const BufferRef hairParams = fc.resources.hairDensityParams;
+    // (and the fog cells' sun light: FogScatter.hlsl P[11].w)
+    const BufferRef fogParticleParams = fc.resources.particleShadowParams, fogParticleMap = fc.resources.particleShadowMap;
+    const bool fogParticleShadow = fogParticleParams.valid() && fogParticleMap.valid();
     const TextureRef hairFine = fc.resources.hairDensity, hairCoarse = fc.resources.hairDensityCoarse;
     const D3D12_GPU_VIRTUAL_ADDRESS constants = main.frameConstants;
     ID3D12PipelineState* ps = fc.shaders.compute("Passes/Atmosphere/FogScatter");
@@ -1549,6 +1560,11 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
                           b.use(hairFine, Use::SrvCompute);
                           b.use(hairCoarse, Use::SrvCompute);
                       }
+                      if (fogParticleShadow)
+                      {
+                          b.use(fogParticleParams, Use::SrvCompute);
+                          b.use(fogParticleMap, Use::SrvCompute);
+                      }
                       b.use(scatter, Use::UavCompute);
                       if (primary) b.keep();  // (the next frame's history)
                   },
@@ -1566,7 +1582,7 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
                                          shadows ? ctx.uav(vsm.stats) : none, ctx.srv(fogDepth), bits(f.noiseAmount), bits(1.0f / f.noiseScale),
                                          bits(noise[0]), bits(noise[1]), bits(noise[2]), volumeSrv,
                                          volumeCount, bits(exposureRatio), hairShadow ? ctx.srv(hairParams) : none, gridSrv,
-                                         bits(f.density2), bits(f.falloff2), bits(f.height2), 0 };
+                                         bits(f.density2), bits(f.falloff2), bits(f.height2), fogParticleShadow ? ctx.srv(fogParticleParams) : none };
                       ctx.cmd->SetPipelineState(ps);
                       ctx.bindFrameConstants(constants);
                       ctx.computeConstants(k, 48);

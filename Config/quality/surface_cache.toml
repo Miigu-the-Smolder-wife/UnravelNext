@@ -56,6 +56,15 @@ shadow_rays_opaque = false            # QUALITY TRADE (user decision; the refere
                                       # hardware rays): true = the cells' shadow rays (lights, sun) take alpha-tested casters as
                                       # solid - no any-hit work per ray. Off here: it changes the cached shadows and did not
                                       # cure the lounge hang it was tried for (2026-10-02)
+direct_tint = true                    # (mesh cards) the sun's light on a card texel is what the Glass on its shadow ray leaves of
+                                      # it - the pane's tint (base colour x texture) and Fresnel loss, gathered by the any-hit
+                                      # shader on the same one ray - as the view's shadow maps tint the sun
+                                      # (shadow.vsm.translucent_tint; off there: off here). The store: 64 words more a listed
+                                      # tile (256 B beside its 72 B of visible bits: 2.2 MB an update at the default atlas and
+                                      # update factor). false: the cards take Glass as clear. Not with shadow_rays_opaque
+direct_tint_lights = false            # ... and the local lights' too: 2,304 B a listed tile (19.5 MB an update). Off while the
+                                      # view's sampled light shadow rays pass Glass as clear (the bounce must not be tinted where
+                                      # the direct light is not)
 direct_pairs = true                   # (A, 2026-10-02) the cells direct light as (cell, light) pairs in three passes: select
                                       # (compute, no ray: the 8 strongest lights, their integrals, the sun), trace (one shadow
                                       # ray per pair record, dispatches of at most 262,144), store. The same lighting as

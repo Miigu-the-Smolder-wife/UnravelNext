@@ -56,6 +56,7 @@ struct Tracked  // a scene instance as the card scene last saw it
     uint32_t mesh = 0xFFFFFFFFu;
     uint32_t scaleBits = 0, transformRevision = 0, materialKey = 0;
     uint8_t state = 0;  // 0 not in the card scene, 1 waiting for its mesh's cards, 2 added
+    uint8_t channels = 0;  // its lighting channels when it was taken (the mesh cards' record holds them)
     bool emissive = false;  // an emissive light source (emissiveSourceOf) when it was added
 };
 
@@ -215,6 +216,9 @@ SurfaceCacheCardSettings SurfaceCacheCardSettings::fromQuality(const QualityConf
     s.direct = flag("surface_cache.direct_lighting", true);
     s.radiosity = flag("surface_cache.radiosity", true);
     s.shadowRaysOpaque = flag("surface_cache.shadow_rays_opaque", false);
+    // (the sun through Glass on the cards as the view's shadow maps tint it: only while they do)
+    s.directTintSlots = !flag("surface_cache.direct_tint", true) || !flag("shadow.vsm.translucent_tint", true) ? 0u
+                        : flag("surface_cache.direct_tint_lights", false) ? 9u : 1u;
     s.radiosityCap = (float)num("surface_cache.radiosity_max_ray_intensity", 40.0);
     s.radiosityFrames = (float)num("surface_cache.radiosity_max_frames_accumulated", 4.0);
     const bool reshoot = flag("surface_cache.radiosity_avoid_self_intersections", true);
@@ -402,7 +406,8 @@ struct SurfaceCacheCards::Impl
                 continue;
             }
             const uint32_t scaleBits = bits(scale);
-            if (t.state != 0 && (t.mesh != g.mesh || t.scaleBits != scaleBits))
+            const uint8_t channels = (uint8_t)scene::instanceLightingChannels(g.flags);
+            if (t.state != 0 && (t.mesh != g.mesh || t.scaleBits != scaleBits || t.channels != channels))
             {
                 if (t.state == 2) scene->removeInstance(i);
                 t.state = 0;
@@ -411,6 +416,7 @@ struct SurfaceCacheCards::Impl
             {
                 t.mesh = g.mesh;
                 t.scaleBits = scaleBits;
+                t.channels = channels;
                 t.materialKey = materialKeyOf(gs, *src, i);
                 t.emissive = emissiveSourceOf(gs, *src, i);
                 t.state = 1;
@@ -1137,6 +1143,7 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
         in.direct = s.settings.direct;
         in.radiosity = s.settings.radiosity;
         in.shadowRaysOpaque = s.settings.shadowRaysOpaque;
+        in.directTintSlots = s.settings.directTintSlots;
         in.radiosityCap = s.settings.radiosityCap;
         in.radiosityFrames = s.settings.radiosityFrames;
         in.radiositySkipBackFace = s.settings.radiositySkipBackFace;

@@ -308,6 +308,12 @@ struct GradeState
     ComPtr<ID3D12Resource> lut;
     uint32_t size = 0;
     std::vector<float> key;  // the inputs of the table as it is
+    // The table's import into this recording's graph: one node however many chains the recording holds (a photo frame
+    // runs the chain twice, FrameRenderer::recordImage - a second import of the same resource would start from the
+    // import layout again while the first node had left it a shader resource).
+    TextureRef imported;
+    ID3D12Resource* importedResource = nullptr;
+    uint64_t importFrame = UINT64_MAX, importSerial = UINT64_MAX;
     ~GradeState()
     {
         if (device && lut) device->deferRelease(lut);
@@ -348,7 +354,15 @@ TextureRef gradeLut(FramePassContext& fc, const ColorGradingDesc& grade, uint32_
     GradeState& s = fc.state<GradeState>("M.post.grade");
     s.ensure(fc.device, n);
     const TextureDesc desc{ "m.post.grade lut", n, n, (uint16_t)n, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D };
-    const TextureRef lut = g.importTexture(s.lut.Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    const uint64_t serial = fc.trackState ? fc.trackState->recordSerial() : 0;
+    if (!s.imported.valid() || s.importedResource != s.lut.Get() || s.importFrame != fc.frame.frameIndex || s.importSerial != serial)
+    {
+        s.imported = g.importTexture(s.lut.Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        s.importedResource = s.lut.Get();
+        s.importFrame = fc.frame.frameIndex;
+        s.importSerial = serial;
+    }
+    const TextureRef lut = s.imported;
     std::vector<float> key = { grade.temperature, grade.tint, grade.shadowsMax, grade.highlightsMin, grade.highlightsMax, (float)curve, peak };
     const ColorGradingRange* ranges[4] = { &grade.global, &grade.shadows, &grade.midtones, &grade.highlights };
     for (const ColorGradingRange* r : ranges)

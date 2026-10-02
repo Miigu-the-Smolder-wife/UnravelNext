@@ -276,6 +276,7 @@ void MeshParticlePass::record(ParticleSystem& particles, FramePassContext& fc, c
                   c.cmd->Barrier(1, &group);
               });
 
+    fc.resources.particleMeshCounters = counters;  // (R's descriptors of the mesh particles run after the instances: RayScene)
     ID3D12Resource* readback = m.readback.Get();
     g.addPass("fx.mesh.readback", QueueType::Graphics,
               [=](PassBuilder& b) {

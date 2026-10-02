@@ -230,6 +230,11 @@ void DecalSet::update(uint32_t id, const Decal& d)
     m_slots[id].decal = d;
     ++m_revision;
 }
+const Decal& DecalSet::get(uint32_t id) const
+{
+    if (id >= m_slots.size() || !m_slots[id].live) fail("DecalSet::get: no decal %u", id);
+    return m_slots[id].decal;
+}
 void DecalSet::remove(uint32_t id)
 {
     if (id >= m_slots.size() || !m_slots[id].live) fail("DecalSet::remove: no decal %u", id);

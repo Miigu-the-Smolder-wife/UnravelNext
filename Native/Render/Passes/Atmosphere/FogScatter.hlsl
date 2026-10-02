@@ -41,6 +41,8 @@
 // P[11] = asuint{ the medium's second layer: density (1/m at its height), height falloff, height (m), 0 } (Fog.hlsli)
 // P[10].y = asuint(this frame's exposure / the history's: the history's light at this frame's exposure; 1 without history)
 // P[10].z = E's hair density parameters (raw SRV; UNX_NONE: none - no hair this frame, or shading.hair_shadows off).
+// P[11].w = FX's particle shadow map parameters (raw SRV; UNX_NONE: none; Passes/FX/ParticleShadow.hlsli): the sun's
+//           light in a cell times what the shadow-casting sprites above it let through.
 // Frame constants of the view (the main view, or a planar reflection view: its fog starts at the mirror).
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
@@ -51,6 +53,7 @@
 #include "Passes/Atmosphere/CloudShadowCommon.hlsli"
 #include "Passes/GI/LumenTranslucencyVolume.hlsli"
 #include "Passes/Hair/HairDensity.hlsli"
+#include "Passes/FX/ParticleShadow.hlsli"
 
 [numthreads(4, 4, 4)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -161,6 +164,7 @@ void main(uint3 id : SV_DispatchThreadID)
                 ByteAddressBuffer hair = ResourceDescriptorHeap[P[10].z];
                 lit *= hairTransmittance(P[10].z, p - hairDensityOrigin(hair), sun, 3.0e38f, 32u, jitter.z);
             }
+            if (lit > 0) lit *= fxParticleShadow(P[11].w, p);
             inScattered += E * airSunTransmittance(a, P[6].w, airLiftToSurface(a, p), sun) * (lit * airMiePhase(dot(dir, sun), fog.g));
         }
         // the local lights

@@ -12,6 +12,10 @@
 // instance tests keep it (mask, hidden, batch, set, frustum) and instanceBelowView leaves it out of the cull - the test
 // that keeps it from CullInstances, so every member is drawn once: by its clusters or by its proxy. Instances of the
 // flat list (dynamic, skinned, run-time) have no proxy.
+// RasterView::materialFilter: a proxy stands for its member's whole silhouette, so the member is a glass caster when every
+// submesh's material is of the Glass class (the first PROXY_SUBMESHES of them) - a view without glass casters draws no
+// proxy of it, a view of them alone no other (CullClusters' test, which is per cluster: a member of glass and something
+// else is drawn as the something else).
 // TILE=2 (the tile atlas): the square goes to the atlas slot of the tile its centre is in, clipped to that tile (what
 // of it crosses into a neighbouring tile - under a texel wide - is left out); a tile that is not set draws nothing.
 // TILE=0: the view's viewport.
@@ -23,6 +27,16 @@
 
 #define PROXY_MEMBERS 64u
 #define PROXY_GROUPS (CHUNK_INSTANCES / PROXY_MEMBERS)  // groups per chunk item
+#define PROXY_SUBMESHES 8u  // submeshes read for the material filter
+
+bool proxyIsGlass(GpuInstance inst, GpuMesh mesh)
+{
+    const uint n = min(mesh.submeshCount, PROXY_SUBMESHES);
+    bool glass = n > 0;
+    [loop] for (uint k = 0; k < n; ++k)
+        glass = glass && (loadMaterial(instanceMaterial(inst, loadSubmesh(mesh.submeshOffset + k), k)).classFlags & 0xFFu) == MATERIAL_GLASS;
+    return glass;
+}
 
 struct VertexOut
 {
@@ -46,7 +60,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
           out indices uint3 tris[2 * PROXY_MEMBERS])
 {
     ByteAddressBuffer state = ResourceDescriptorHeap[P[0].z];
-    const uint g = group.x + group.y * 65535;
+    const uint g = group.x + group.y * PROXY_DISPATCH_ROW;
     const uint item = g / PROXY_GROUPS, part = g % PROXY_GROUPS;
     const bool valid = item < min(state.Load(4 * VS_CHUNK_ITEMS), P[0].w);  // uniform over the group
     StructuredBuffer<uint2> work = ResourceDescriptorHeap[P[0].x];
@@ -69,6 +83,8 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     const bool inBatch = v.instanceEnd == 0 || (instance >= v.instanceFirst && instance < v.instanceEnd);
     const float4 bounds = worldSphere(inst, inst.objectToWorld, mesh.boundsSphere);
     bool draw = instanceInRun(inst, P[0].y) && inBatch && instanceInSet(v, inst, instance) && frustumVisible(v, bounds) && instanceBelowView(v, bounds);
+    if (draw && (v.flags & (CULL_VIEW_NO_GLASS | CULL_VIEW_GLASS_ONLY)) != 0)
+        draw = (v.flags & (proxyIsGlass(inst, mesh) ? CULL_VIEW_NO_GLASS : CULL_VIEW_GLASS_ONLY)) == 0;
     const float4 centre = mul(v.viewProj, float4(bounds.xyz, 1));
     draw = draw && centre.w > 0;
 #if TILE

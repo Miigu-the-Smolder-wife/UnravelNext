@@ -58,7 +58,13 @@ void RtAnyHit(inout RtHit p, in BuiltInTriangleIntersectionAttributes a)
         if ((p.pad & RT_RAY_TRANSMITTANCE) != 0 && (m.classFlags & 0xFFu) == MATERIAL_GLASS)
         {
             const float cosI = rtCandidateCos(s, rtLoadInstance(s, h.instance), g, mesh, h.primitive, ObjectRayDirection());
-            const float3 depth = rtGlassOpticalDepth(m, cosI, HitKind() == HIT_KIND_TRIANGLE_BACK_FACE, RayTCurrent());
+            float3 tint = m.baseColor;
+            if (m.baseColorTexture != UNX_NONE)
+            {
+                const RtTriangle tri = rtTriangle(s, g, h.primitive);
+                tint *= materialBaseColorLevel(m, rtUv(mesh, tri.meshVertex, h.barycentrics), 0).rgb;
+            }
+            const float3 depth = rtGlassOpticalDepth(m, saturate(tint), cosI, HitKind() == HIT_KIND_TRIANGLE_BACK_FACE, RayTCurrent());
             p.instance = asuint(asfloat(p.instance) + depth.r);
             p.geometry = asuint(asfloat(p.geometry) + depth.g);
             p.primitive = asuint(asfloat(p.primitive) + depth.b);
@@ -267,8 +273,8 @@ bool rtVisible(RtSceneSrvs s, RayDesc ray, uint mask, uint extraFlags = RAY_FLAG
 }
 
 // What a shadow segment lets through to its origin, per channel: 0 when a caster blocks it, else what the Glass it
-// crosses leaves of the light - the panes' transmittance and the solid bodies' absorption (RayScene.hlsli
-// rtGlassOpticalDepth), gathered by the any-hit shader in the payload as the candidates are met (no closest-hit shading,
+// crosses leaves of the light - the panes' transmittance (their base colour x its texture) and the solid bodies'
+// absorption (RayScene.hlsli rtGlassOpticalDepth), gathered by the any-hit shader in the payload as the candidates are met (no closest-hit shading,
 // no second ray; the geometry is built NO_DUPLICATE_ANYHIT, so a pane counts once). mask: a shadow mask (RT_MASK_SHADOW,
 // RT_MASK_HIT_SHADOW); the ray also takes RT_MASK_SHADOW_TINT - the shadow casters made of Glass alone, which plain shadow
 // rays never enter.

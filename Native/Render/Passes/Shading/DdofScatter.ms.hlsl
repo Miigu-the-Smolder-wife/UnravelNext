@@ -14,7 +14,7 @@ void main(uint tid : SV_GroupThreadID, uint3 gid : SV_GroupID, out vertices Ddof
 {
     ByteAddressBuffer list = ResourceDescriptorHeap[P[0].x];
     const uint count = min(list.Load(0), P[0].y);
-    const uint first = gid.x * DDOF_SPRITES_PER_GROUP;
+    const uint first = (gid.x + gid.y * 65535u) * DDOF_SPRITES_PER_GROUP;  // (DiaphragmDof.cpp: rows of 65535 groups)
     const uint n = first < count ? min(DDOF_SPRITES_PER_GROUP, count - first) : 0u;
     SetMeshOutputCounts(n * 4, n * 2);
     if (tid >= n) return;

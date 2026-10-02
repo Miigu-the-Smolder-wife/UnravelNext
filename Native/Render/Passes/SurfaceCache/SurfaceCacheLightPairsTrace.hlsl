@@ -3,8 +3,8 @@
 // nothing alive across it but the pair's address - the structure of MegaLights' m.ml.trace. The dispatch is a band of at
 // most 262,144 threads (ReflectionSystem / SurfaceCacheLightPairs.cpp). A pair that needs no ray returns at once.
 // A light's ray: from the cell's point moved by the bias to the light's side of its surface, TMin = the bias, shadow
-// casters only (RT_MASK_SHADOW), as mlSampleVisible. The sun's: from the normal's side, TMin 0, the GI mask (as
-// SurfaceCacheCellsGen's sun ray).
+// casters only (RT_MASK_SHADOW), as mlSampleVisible. The sun's: from the normal's side, TMin 0, the casters too
+// (RT_MASK_HIT_SHADOW, as SurfaceCacheCellsGen's sun ray).
 // P[0] = { cache UAV, budget, frame, flags (bit 11: alpha-tested casters taken as opaque) }
 // P[4] = { cells SRV (raw), pairs UAV (raw), the dispatch's first pair, 0 }
 // P[6], P[7] = RtSceneSrvs
@@ -39,5 +39,5 @@ void SurfaceCachePairsTraceGen()
     // (the select pass checked the ray; the cell's point may have been rewritten by a mark since - checked again)
     if (!scpRayOk(ray.Origin, ray.Direction) || !scpIntervalOk(ray.TMin, ray.TMax)) return;
     const uint rayFlags = (P[0].w & 2048u) != 0 ? RAY_FLAG_FORCE_OPAQUE : RAY_FLAG_NONE;
-    if (rtVisible(rtScene(), ray, sun ? RT_MASK_GI : RT_MASK_SHADOW, rayFlags)) pairs.Store(at + 28, flags | SCP_VISIBLE);
+    if (rtVisible(rtScene(), ray, sun ? RT_MASK_HIT_SHADOW : RT_MASK_SHADOW, rayFlags)) pairs.Store(at + 28, flags | SCP_VISIBLE);
 }

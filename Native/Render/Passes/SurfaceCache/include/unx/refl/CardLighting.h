@@ -19,6 +19,9 @@ struct CardLightingInputs
     D3D12_GPU_VIRTUAL_ADDRESS frameConstants = 0;
     bool direct = true, radiosity = true;
     bool shadowRaysOpaque = false;      // surface_cache.shadow_rays_opaque
+    // surface_cache.direct_tint: the slots of a listed tile whose shadow rays carry what the Glass they cross leaves of
+    // the light - 0: none, 1: the sun's, 9: every slot's (direct_tint_lights). CardLighting.hlsli.
+    uint32_t directTintSlots = 1;
     float radiosityCap = 40.0f;         // surface_cache.radiosity_max_ray_intensity (exposed units; 0: none)
     float radiosityFrames = 4.0f;       // surface_cache.radiosity_max_frames_accumulated
     // The radiosity rays' re-shoot past a near back face (surface_cache.radiosity_avoid_self_intersections; metres,

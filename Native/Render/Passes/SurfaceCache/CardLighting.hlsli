@@ -40,10 +40,26 @@
 #define CL_TILE_LIGHT_BYTES 64u      // a listed tile's lights: 8 light indices, valid mask (2), uniform slots, pad
 #define CL_TILE_SHADOW_BYTES 72u     // a listed tile's visible bits: CL_SLOTS x 64 texels
 #define CL_TRACE_THREADS 576u        // CL_SLOTS x 64: the direct trace's threads of a listed tile
+// The direct light through Glass (surface_cache.direct_tint): beside a listed tile's visible bits, per tinted slot 64
+// words - what the Glass on each texel's shadow ray left of the light (RayShaders.hlsli rtShadowTransmittance), 11 : 11 :
+// 10 bits as the view's sun tint (VsmTint.hlsli vsmTintPack; white = 0xFFFFFFFF). The tinted slots of a tile: the sun
+// alone (1: 256 B a tile), or every slot (CL_SLOTS: 2,304 B a tile - surface_cache.direct_tint_lights). A word is
+// written by the texel's trace thread before its visible bit and read only where that bit is set: nothing is cleared.
+#define CL_TILE_TINT_WORDS 64u
 #define CL_FEEDBACK_SLOTS 4096u      // the feedback table's hash slots (a power of two; SurfaceCacheCards.cpp)
 #define CL_FEEDBACK_HEAD 16u         // its header, bytes: word 0 = inserts that found no slot (the table overflowed)
 #define CL_FEEDBACK_PROBES 8u        // the structural bound of an insert's linear probe
 #define CL_FEEDBACK_CARDS 0x100000u  // an element holds the card in 20 bits: cards past it report nothing
+
+uint clTintPack(float3 t)
+{
+    const uint3 q = uint3(round(saturate(t) * float3(2047.0, 2047.0, 1023.0)));
+    return q.x | (q.y << 11) | (q.z << 22);
+}
+float3 clTintUnpack(uint w) { return float3(w & 0x7FFu, (w >> 11) & 0x7FFu, w >> 22) / float3(2047.0, 2047.0, 1023.0); }
+// Byte offset of a texel's tint word: index = the listed tile, tintSlots = the tile's tinted slots (1: the sun's, slot
+// ignored; CL_SLOTS: every slot's).
+uint clTintOffset(uint index, uint tintSlots, uint slot, uint t) { return ((index * tintSlots + (tintSlots > 1u ? slot : 0u)) * CL_TILE_TINT_WORDS + t) * 4u; }
 
 // ---- the select buffer (raw). Context 0: direct, 1: radiosity.
 #define CL_SELECT_HEAD 64u                                   // 8 words a context: tiles listed, max bucket, tiles allowed

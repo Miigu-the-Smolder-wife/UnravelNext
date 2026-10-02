@@ -1509,15 +1509,18 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         // per pixel with records the hair's transmittance at the 4 depths of S's sun profile. The cluster fragments
         // multiply their sun visibility by it (CoverageShade.hlsli covFragmentShadow, P[11].z); the hair records count
         // the hair themselves. Frames without a density volume record nothing.
+        // The same profile carries FX's particle shadow (the sun's particle transmittance map): either makes the pass.
         TextureRef hairSun;
-        if (fragmentShadows && (!fc.quality.has("shading.hair_shadows") || fc.quality.boolean("shading.hair_shadows")) && r.hairDensityParams.valid() &&
-            r.hairDensity.valid() && r.hairDensityCoarse.valid())
+        const bool hairProfileOn = (!fc.quality.has("shading.hair_shadows") || fc.quality.boolean("shading.hair_shadows")) && r.hairDensityParams.valid() &&
+                                   r.hairDensity.valid() && r.hairDensityCoarse.valid();
+        const bool particleProfileOn = r.particleShadowParams.valid() && r.particleShadowMap.valid();
+        if (fragmentShadows && (hairProfileOn || particleProfileOn))
         {
             const uint32_t hairSteps = fc.quality.has("shading.hair_shadow_steps") ? (uint32_t)fc.quality.integer("shading.hair_shadow_steps") : 32u;
             if (hairSteps < 2 || hairSteps > 128) fail("shading.hair_shadow_steps must be in [2, 128]");
             const uint32_t hairJitter = !fc.quality.has("shading.hair_march_jitter") || fc.quality.boolean("shading.hair_march_jitter") ? 1u : 0u;
             const float3 originOffset = v.view.position - r.hairOrigin;
-            const BufferRef hairParams = r.hairDensityParams;
+            const BufferRef hairParams = r.hairDensityParams, particleParams = r.particleShadowParams, particleMap = r.particleShadowMap;
             const TextureRef hairFine = r.hairDensity, hairCoarse = r.hairDensityCoarse, ranges = v.coverageDepthRange;
             const uint32_t hairW = v.view.width, hairH = v.view.height;
             hairSun = g.createTexture({ "m.coverage hair sun", hairW, hairH, 1, 1, DXGI_FORMAT_R32_UINT });
@@ -1525,18 +1528,27 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             g.addPass("m.coverage.hairsun", QueueType::Graphics,
                       [&](PassBuilder& b) {
                           b.use(ranges, Use::SrvCompute);
-                          b.use(hairParams, Use::SrvCompute);
-                          b.use(hairFine, Use::SrvCompute);
-                          b.use(hairCoarse, Use::SrvCompute);
+                          if (hairProfileOn)
+                          {
+                              b.use(hairParams, Use::SrvCompute);
+                              b.use(hairFine, Use::SrvCompute);
+                              b.use(hairCoarse, Use::SrvCompute);
+                          }
+                          if (particleProfileOn)
+                          {
+                              b.use(particleParams, Use::SrvCompute);
+                              b.use(particleMap, Use::SrvCompute);
+                          }
                           b.use(hairSun, Use::UavCompute);
                       },
                       [=](PassContext& c) {
-                          uint32_t k[8] = { c.srv(hairParams), c.srv(ranges), c.uav(hairSun), hairSteps, 0, 0, 0, hairJitter };
+                          uint32_t k[12] = { hairProfileOn ? c.srv(hairParams) : gpu::kNone, c.srv(ranges), c.uav(hairSun), hairSteps, 0, 0, 0, hairJitter,
+                                             0, particleProfileOn ? c.srv(particleParams) : gpu::kNone, 0, 0 };
                           const float o3[3] = { originOffset.x, originOffset.y, originOffset.z };
                           std::memcpy(&k[4], o3, 12);
                           c.cmd->SetPipelineState(hairProfile);
                           c.bindFrameConstants(cb);
-                          c.computeConstants(k, 8);
+                          c.computeConstants(k, 12);
                           c.cmd->Dispatch((hairW + 7) / 8, (hairH + 7) / 8, 1);
                       });
         }
@@ -2545,6 +2557,7 @@ void shade(FramePassContext& fc, ViewResources& view)
             motionBlurUpscaled(fc, view, image, blurred, products.motion, products.depth);
             image = blurred;
         }
+        view.chainInput = image;  // (captures of what the chain encodes: renderergate --capture-layers chain)
         postChain(fc, upscaleOutputView(fc, view), image);
         return;
     }

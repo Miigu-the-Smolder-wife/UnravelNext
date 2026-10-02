@@ -11,6 +11,7 @@
 // host's ExecuteCommandList, which declares the output texture's state to Unity. Standalone (tests, tools): own device.
 #include "unx/fx/MeshParticles.h"
 #include "unx/fx/Particles.h"
+#include "unx/fx/SpriteLooks.h"
 #include "unx/core/Config.h"
 #include "unx/debug/DebugDraw.h"
 #include "unx/decal/Decals.h"
@@ -194,6 +195,8 @@ struct FramePacket
     std::vector<debug::Glyph> debugGlyphs;
     // A7 projected decals: the host's decal set when it changed (a later snapshot replaces an earlier one).
     std::shared_ptr<const decal::DecalSet> decals;
+    // FX sprite looks: the host's table when it changed (a later snapshot replaces an earlier one).
+    std::shared_ptr<const fx::SpriteLooks> spriteLooks;
     // A12 view models (E's viewmodel::ViewModels): the host's operations in call order, replayed on the render thread
     // (the same id allocation as the host's mirror).
     struct ViewModelOp
@@ -425,13 +428,16 @@ public:
     void debugText(float3 anchor, std::string_view text, uint32_t color, float sizePx, uint32_t flags, float2 offsetPx);
     // A7 projected decals (E's decal::DecalSet, mirrored here: ids are the set's, the render thread gets a snapshot with
     // the next queued frame after a change). Materials and instances are the host's current counts.
-    // A decal's components are its tint, channels and fades (decal::Decal's fields after 'edge'): decalUpdate with
-    // keepComponents leaves the live decal's own in place (the ABI's description has none), decalSetComponents replaces
-    // them alone ('components' carries them in a decal::Decal - its other fields are not read).
     uint32_t decalAdd(const decal::Decal& d);
-    void decalUpdate(uint32_t id, const decal::Decal& d, bool keepComponents = false);
-    void decalSetComponents(uint32_t id, const decal::Decal& components);
+    void decalUpdate(uint32_t id, const decal::Decal& d);  // keeps the decal's extra fields (decalSetExtra)
     void decalRemove(uint32_t id);
+    // What a decal carries beyond the frozen description - tint, channels, blend, emissive scale, the screen-size and
+    // lifetime fades: 'extra' carries them in a decal::Decal (its box, material, instance, priority, opacity, angle fade
+    // and edge are not read).
+    void decalSetExtra(uint32_t id, const decal::Decal& extra);
+    // Sprite looks (fx::SpriteLooks, mirrored here: the render thread gets a snapshot with the next queued frame after a
+    // change). look null: look 'index' is removed. Textures are committed scene textures.
+    void setSpriteLook(uint32_t index, const fx::SpriteLook* look);
     // A12 first-person view models (E's viewmodel::ViewModels, mirrored here): a scene instance posed in the camera's
     // frame (object -> view space: x right, y up, looking down -z), composed with each rendered frame's camera.
     uint32_t viewModelAdd(uint32_t instance, const float3x4& cameraLocal);
@@ -720,8 +726,9 @@ private:
     double m_surfaceTime = 0;                   // (m_mutex) the VFX time every queued frame takes
     decal::DecalSet m_decals;                   // (m_mutex) the host's decal set
     std::vector<uint8_t> m_decalLive;           // (m_mutex) per decal id: live
-    std::vector<decal::Decal> m_decalValues;    // (m_mutex) per decal id: the live decal as last described
     bool m_decalsChanged = false;               // (m_mutex) a snapshot goes with the next queued frame
+    fx::SpriteLooks m_spriteLooks;              // (m_mutex) the host's sprite look table
+    bool m_spriteLooksChanged = false;          // (m_mutex) a snapshot goes with the next queued frame
     viewmodel::ViewModels m_viewModels;         // (m_mutex) the host's mirror (ids, live entries)
     std::vector<uint32_t> m_hairJoints;         // (m_mutex) per hair body id: its joint count (0 = free)
     std::vector<uint32_t> m_hairFree;           // (m_mutex) free ids, reused last-freed first (HairSystem's rule)

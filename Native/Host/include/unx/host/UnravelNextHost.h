@@ -51,12 +51,13 @@ enum UnxResult
                             //    UnxLightComponentsDefaults, UnxSceneSetLightComponents (a light's scales, source texture,
                             //    barn doors, lighting channels, draw distance, colour temperature, falloff exponent),
                             //    UnxSceneSetInstanceLightingChannels,
-                            //    UnxDecalComponentsDefaults, UnxDecalSetComponents (a decal's tint, channels, screen-size
-                            //    and lifetime fades), UnxSceneSetInstanceReceivesDecals,
                             //    UnxFrameSetColorGrading, UnxFrameSetPost, UnxFrameSetDisplayEncoding (the picture's settings a game
                             //    changes while it runs), UnxFrameSetFog2, UnxFrameSetFogVolumes2, UnxFrameSetClouds2,
                             //    UnxFrameSetWeather, UnxFrameSetLightning, UnxFrameSetPoolWeather (the weather),
-                            //    UnxFrameGetStatistics (frame pacing data: GPU time, resolution, the dynamic resolution's state)
+                            //    UnxFrameGetStatistics (frame pacing data: GPU time, resolution, the dynamic resolution's state),
+                            //    UnxSpriteLookDefaults, UnxVfxSetSpriteLook (sprite and ribbon looks: texture, flipbook
+                            //    blending, blend, facing, per-pixel light, shadow), UnxDecalExtraDefaults, UnxDecalSetExtra
+                            //    (a decal's tint, channels, blend, emission and fades), UnxSceneSetInstanceReceivesDecals
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -240,7 +241,6 @@ enum UnxInstanceFlags  // scene::InstanceFlags
     UNX_INSTANCE_SKINNED = 1u << 2,
     UNX_INSTANCE_WIND = 1u << 3,
     // bits 4..6: the instance's lighting channels (UNX_INSTANCE_LIGHTING_CHANNELS below); 0 = channel 0 alone
-    UNX_INSTANCE_NO_DECALS = 1u << 7,  // the instance takes no projected decals (the engine's "receives decals" off)
 };
 // The lighting channels of an instance as its flags' bits: channels = a mask of the three channels (bit 0, 1, 2) the
 // instance is in - a light lights the instances that share a channel with it (UnxLightComponentsDesc::lightingChannels).
@@ -378,41 +378,6 @@ static_assert(sizeof(UnxDecalDesc) == 80, "UnxDecalDesc is part of the ABI (Asse
 UNX_API int32_t UNX_CALL UnxDecalAdd(UnxRenderer r, const UnxDecalDesc* desc, uint32_t* id);
 UNX_API int32_t UNX_CALL UnxDecalUpdate(UnxRenderer r, uint32_t id, const UnxDecalDesc* desc);
 UNX_API int32_t UNX_CALL UnxDecalRemove(UnxRenderer r, uint32_t id);
-// Decal components (optional exports within ABI 6): what a decal carries beyond UnxDecalDesc (decal::Decal; the engine's
-// decal component). A decal added with UnxDecalAdd has the defaults; UnxDecalSetComponents gives a live decal its own,
-// and UnxDecalUpdate keeps them (it describes the box, the material and the angle fade anew). Changes reach the frames
-// queued after the call.
-//   colour      tint of the decal's base colour (linear, >= 0; default 1, 1, 1).
-//   channels    the parts of the receiver's material the decal changes (UnxDecalChannels; default all three): a
-//               normal-only or a roughness-only decal.
-//   screen size the decal fades out as it gets small on screen (the engine's FadeScreenSize; 0: no such fade): with
-//               screen = the box's largest half extent / its distance and k = fadeScreenSize x 2 tan(half fov x) / view
-//               width x 600, the opacity is times saturate((screen - k) / (k / 2)).
-//   lifetime    on the frames' clock (UnxFrameDesc::time, seconds): the opacity rises over [fadeInStart, fadeInStart +
-//               fadeInDuration] and falls over [fadeOutStart, fadeOutStart + fadeOutDuration]; a duration of 0: no such
-//               fade. A decal that has faded out stays (remove it with UnxDecalRemove).
-// Fill the description with UnxDecalComponentsDefaults first (a zeroed one has no channels and a black tint).
-enum UnxDecalChannels  // decal::DecalChannels
-{
-    UNX_DECAL_BASE_COLOR = 1,
-    UNX_DECAL_NORMAL = 2,       // the normal and its slope variance
-    UNX_DECAL_ROUGH_METAL = 4,  // roughness and metallic
-};
-typedef struct UnxDecalComponentsDesc
-{
-    uint32_t size, version;     // sizeof (48), 1
-    float color[3];             // linear, >= 0 (default 1, 1, 1)
-    uint32_t channels;          // UnxDecalChannels, 1..7 (default 7)
-    float fadeScreenSize;       // >= 0 (default 0: none)
-    float fadeInStart, fadeInDuration;    // s; duration >= 0 (default 0: none)
-    float fadeOutStart, fadeOutDuration;  // s; duration >= 0 (default 0: none)
-    uint32_t reserved;          // 0
-} UnxDecalComponentsDesc;
-#ifdef __cplusplus
-static_assert(sizeof(UnxDecalComponentsDesc) == 48, "UnxDecalComponentsDesc is part of the ABI");
-#endif
-UNX_API int32_t UNX_CALL UnxDecalComponentsDefaults(UnxDecalComponentsDesc* desc);
-UNX_API int32_t UNX_CALL UnxDecalSetComponents(UnxRenderer r, uint32_t id, const UnxDecalComponentsDesc* desc);
 // First-person view models (A12, E's Passes/ViewModel; optional exports within ABI 6, INTERFACES v1.54): a scene instance
 // posed in the camera's frame - cameraLocal12 is its object -> view space transform (rows of a 3 x 4 matrix; view space:
 // x right, y up, looking down -z; the renderer's axes, i.e. Unity camera space with z negated) - composed with the camera
@@ -854,11 +819,6 @@ UNX_API int32_t UNX_CALL UnxSceneSetLightComponents(UnxRenderer r, uint32_t ligh
 // UNX_INSTANCE_LIGHTING_CHANNELS takes it). After commit, describe the instance anew with the flag bits
 // (UnxSceneEditInstances).
 UNX_API int32_t UNX_CALL UnxSceneSetInstanceLightingChannels(UnxRenderer r, uint32_t instance, uint32_t channels);
-// Whether an instance already added takes projected decals (before UnxSceneCommit; receives = 0: none - the flag
-// UNX_INSTANCE_NO_DECALS, which a description may carry in UnxInstanceDesc::flags as well; every instance receives them
-// by default). After commit, describe the instance anew with or without the flag (UnxSceneEditInstances). A decal
-// attached to such an instance paints nothing.
-UNX_API int32_t UNX_CALL UnxSceneSetInstanceReceivesDecals(UnxRenderer r, uint32_t instance, uint32_t receives);
 
 // Loads a .unxscene file (INTERFACES 6.2) as the renderer's content: textures, materials, meshes, skeletons, instances
 // (their flags included), lights, sun, atmosphere and wind, with the file's indices. Only before any content was added and
@@ -1304,6 +1264,101 @@ static_assert(sizeof(UnxFrameStatisticsGroup) == 24, "UnxFrameStatisticsGroup is
 static_assert(sizeof(UnxFrameStatistics) == 480, "UnxFrameStatistics is part of the ABI");
 #endif
 UNX_API int32_t UNX_CALL UnxFrameGetStatistics(UnxRenderer r, UnxFrameStatistics* statistics);
+
+// ---- Sprite looks, a decal's extra fields, instances that take no decals (optional exports within ABI 6) --------------
+// Sprite looks (fx::SpriteLooks; Passes/FX): how the particles of a sprite or ribbon program are drawn. The VFX stream
+// names a program's material - 0 emissive, 1 lit as a medium - and its flipbook layout (columns, rows, first frame,
+// frames per second, uv, rotation curve); a program whose material is 2 + i is drawn with look i of this table, which
+// gives the image and the way the sprite is drawn. A program whose material has no look is not drawn (and counted).
+// Set after UnxSceneCommit (the textures are committed scene textures); a change reaches the frames queued after the
+// call. Fill the description with UnxSpriteLookDefaults first.
+enum UnxSpriteBlend { UNX_SPRITE_BLEND_ALPHA = 0, UNX_SPRITE_BLEND_ADDITIVE = 1, UNX_SPRITE_BLEND_PREMULTIPLIED = 2 };
+enum UnxSpriteFacing
+{
+    UNX_SPRITE_FACING_CAMERA_PLANE = 0,     // parallel to the view plane
+    UNX_SPRITE_FACING_CAMERA_POSITION = 1,  // its normal points at the camera's position
+    UNX_SPRITE_FACING_VELOCITY = 2,         // its up axis along the particle's velocity, turned about it toward the camera
+    UNX_SPRITE_FACING_AXIS = 3,             // its up axis along 'axis', turned about it toward the camera
+};
+enum UnxSpriteNormal
+{
+    UNX_SPRITE_NORMAL_NONE = 0,       // lit once at the particle's centre (a medium, the program's phase function)
+    UNX_SPRITE_NORMAL_SPHERICAL = 1,  // lit per pixel with the normal of a sphere over the sprite (a ribbon: of a tube)
+    UNX_SPRITE_NORMAL_MAP = 2,        // lit per pixel with normalTexture
+};
+enum UnxSpriteLookFlags
+{
+    UNX_SPRITE_LOOK_FRAME_BLEND = 1u << 0,       // blend the two flipbook frames around the fractional frame
+    UNX_SPRITE_LOOK_FRAMES_OVER_LIFE = 1u << 1,  // the frames once over the particle's life (else at frames per second, looping)
+    UNX_SPRITE_LOOK_LIT = 1u << 2,               // the particle's colour is an albedo (else radiance, nit)
+    UNX_SPRITE_LOOK_SMOOTH = 1u << 3,            // the image has no detail below 8 px where the sprite is 80 px or more in
+                                                 // radius: such sprites may be drawn in the 1/4-resolution layer
+    UNX_SPRITE_LOOK_CAST_SHADOW = 1u << 4,       // its opacity enters the sun's particle shadow
+    UNX_SPRITE_LOOK_RIBBON_UV_AGE = 1u << 5,     // ribbons: the texture once over the ribbon by the points' age (else by
+                                                 // distance over the program's ribbon_uv, repeating)
+};
+typedef struct UnxSpriteLookDesc
+{
+    uint32_t size, version;             // sizeof (88), 1
+    uint32_t texture;                   // colour x alpha: UNX_TEXTURE_RGBA8_SRGB, RGBA8_LINEAR or RGBA16_FLOAT (UNX_NONE: the
+                                        // round profile)
+    uint32_t normalTexture;             // UNX_SPRITE_NORMAL_MAP: UNX_TEXTURE_RGBA8_LINEAR, rg = the normal's xy in [0, 1]
+    uint32_t motionTexture;             // flipbook motion vectors: UNX_TEXTURE_RGBA8_LINEAR, rg = (v + 1) / 2 (UNX_NONE: none)
+    float motionScale;                  // uv of a frame per unit of the motion texture's value (0: no motion vectors)
+    uint32_t blend, facing, normal;     // UnxSpriteBlend, UnxSpriteFacing, UnxSpriteNormal
+    uint32_t flags;                     // UnxSpriteLookFlags
+    float axis[3];                      // UNX_SPRITE_FACING_AXIS: the up axis (world), not zero
+    float aspect;                       // width / height, > 0 (1)
+    float rotationRate;                 // rad / s about the facing direction, added to the program's rotation curve
+    float stretch, stretchMax;          // UNX_SPRITE_FACING_VELOCITY: length x (1 + stretch x speed / size), its limit (0: none)
+    float pivot[2];                     // the particle's position in the sprite, in half sizes from its centre (0, 0)
+    float shadowDensity;                // optical depth per unit of the sprite's own, >= 0 (1)
+    uint32_t reserved[2];               // 0
+} UnxSpriteLookDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxSpriteLookDesc) == 88, "UnxSpriteLookDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxSpriteLookDefaults(UnxSpriteLookDesc* desc);
+// index: the look's place in the table (< 256; the program's material - 2). desc null: the look is removed.
+UNX_API int32_t UNX_CALL UnxVfxSetSpriteLook(UnxRenderer r, uint32_t index, const UnxSpriteLookDesc* desc);
+
+// What a decal carries beyond UnxDecalDesc (which keeps its size): set on a live decal; UnxDecalUpdate keeps it.
+//   color     tint of the decal's base colour.
+//   channels  the parts of the receiver's material the decal changes (UnxDecalChannels; all three by default).
+//   blend     UnxDecalBlend: translucent (the channels blend toward the decal's by its opacity), stain (the base colour is
+//             multiplied by lerp(1, the decal's, opacity)), normal (the normal alone), emissive (the emission alone).
+//   emissive  with UNX_DECAL_EMISSIVE or the emissive blend: scale of the decal material's emission, added x opacity to
+//             the receiver's emission in the direct view.
+//   fades     fadeScreenSize: the opacity fades with the decal's size on screen (0: none; with screen = the box's largest
+//             half extent / its distance and k = fadeScreenSize x 2 tan(half fov x) / view width x 600: gone below k,
+//             full from 1.5 k). Lifetime: in over [fadeInStart, + fadeInDuration], out over [fadeOutStart, +
+//             fadeOutDuration], on the clock of UnxFrameDesc::time (s); a duration of 0: no such fade. A decal that
+//             has faded out stays until UnxDecalRemove.
+// Fill the description with UnxDecalExtraDefaults first.
+enum UnxDecalChannels { UNX_DECAL_BASE_COLOR = 1, UNX_DECAL_NORMAL = 2, UNX_DECAL_ROUGH_METAL = 4, UNX_DECAL_EMISSIVE = 8 };
+enum UnxDecalBlend { UNX_DECAL_BLEND_TRANSLUCENT = 0, UNX_DECAL_BLEND_STAIN = 1, UNX_DECAL_BLEND_NORMAL = 2, UNX_DECAL_BLEND_EMISSIVE = 3 };
+typedef struct UnxDecalExtraDesc
+{
+    uint32_t size, version;             // sizeof (56), 1
+    float color[3];                     // linear, >= 0 (1, 1, 1)
+    uint32_t channels;                  // UnxDecalChannels, 1..15 (7)
+    uint32_t blend;                     // UnxDecalBlend (0)
+    float emissive;                     // >= 0 (1)
+    float fadeScreenSize;               // >= 0 (0: none)
+    float fadeInStart, fadeInDuration;  // s
+    float fadeOutStart, fadeOutDuration;
+    uint32_t reserved;                  // 0
+} UnxDecalExtraDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxDecalExtraDesc) == 56, "UnxDecalExtraDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxDecalExtraDefaults(UnxDecalExtraDesc* desc);
+UNX_API int32_t UNX_CALL UnxDecalSetExtra(UnxRenderer r, uint32_t id, const UnxDecalExtraDesc* desc);
+
+// An instance that takes no projected decals (scene::InstanceNoDecals): the flag bit for UnxInstanceDesc::flags
+// (UnxSceneAddInstance, UnxSceneEditInstances), or for an instance already added, before UnxSceneCommit, the call.
+#define UNX_INSTANCE_NO_DECALS (1u << 7)
+UNX_API int32_t UNX_CALL UnxSceneSetInstanceReceivesDecals(UnxRenderer r, uint32_t instance, int32_t receives);
 
 #ifdef __cplusplus
 }

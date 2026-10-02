@@ -174,6 +174,9 @@ struct ViewResources
     // encoding, a = history weight; Upscale.cpp), for captures of the upscaled image; invalid when the frame renders at
     // its output resolution.                                                                  [M]
     TextureRef upscaled;
+    // What the post chain encodes of an upscaled view: 'upscaled' after the time integral that follows the upscale
+    // (shading.motion_blur_after_upscale; the same texture without it), for captures (renderergate's chain layer). [M]
+    TextureRef chainInput;
 };
 
 // A triangle stream the GPU makes in the frame (INTERFACES v1.60; W's water surface and fluid surface, request
@@ -314,6 +317,10 @@ struct FrameResources
     // The sun's particle transmittance map (FX; Passes/FX/ParticleShadow.hlsli fxParticleShadow; invalid: none): its
     // parameters (raw, 64 B: the reader's handle) and its texels (raw; a reader declares both).
     BufferRef particleShadowParams, particleShadowMap;
+    // FX's mesh particle counters (uint x 4), written by the pass that writes the frame's GPU instances (the scene's
+    // instance range, outside the graph): a reader of those instances declares it to run after that pass (invalid: no
+    // mesh particles this frame).
+    BufferRef particleMeshCounters;
     float3 hairOrigin{};
     // A3 FX particle lights (v1.81, render B's request): the whole scene light buffer (gpu::Light, stride 80; the FX tail at
     // [lightCount, lightCount + F)) and the count word (StructuredBuffer<uint>, element 0 = F), imported once per frame by
