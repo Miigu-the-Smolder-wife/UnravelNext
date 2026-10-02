@@ -20,6 +20,7 @@ using namespace s_detail;
 const char* const kCloudKey = "s.clouds";
 constexpr uint32_t kRingSlots = 4, kRecordBytes = 256, kMapTexels = 256, kBandRows = 64;
 constexpr uint32_t kDomeWidth = 256, kDomeHeight = 96;  // the sky dome (CloudCommon.hlsli cloudDomeUv): 1.4 deg azimuth
+constexpr uint32_t kDomeBandRows = 8, kDomeBands = kDomeHeight / kDomeBandRows;  // the dome is refreshed in bands of rows
 constexpr float kMapHalfExtent = 16000;
 
 struct CloudState
@@ -36,6 +37,14 @@ struct CloudState
     uint32_t parity = 0;
     bool history = false, domeFilled = false;  // last frame's layer is this view's; the dome has been filled once
     bool flashBefore = false;                  // last frame had a lightning flash (its light must leave every texel)
+    // The dome's refresh by what moves in it (atmosphere.clouds.dome_adaptive; domeDue): per band, how far its picture has
+    // drifted since the band was last marched, in texels' shares of the allowed drift (>= 1: the band is due); the
+    // camera, the time, the sun and the layer the drift is counted from.
+    float domeDrift[kDomeBands] = {};
+    double domeCamera[3] = { 0, 0, 0 }, domeTime = 0;
+    float3 domeSun{};
+    float domeSunLight = 0;
+    uint64_t domeLayer = 0;
     uint8_t* ringMapped = nullptr;
     uint32_t width = 0, height = 0;
     uint64_t frames = 0;
@@ -72,6 +81,111 @@ uint32_t textureSrv(Device& device, ID3D12Resource* r, DXGI_FORMAT format)
 }
 
 bool enabled(const CloudState& s) { return s.set && (s.layer.coverage > 0 || s.layer.cirrusCoverage > 0); }
+
+// What the dome's picture is made from besides the wind's drift, the camera and the sun: a change of any of it shows in
+// every texel at once (the whole dome is marched again).
+uint64_t domeLayerKey(const clouds::CloudLayer& l, uint32_t sunWord, float powder)
+{
+    const double v[] = { l.baseAltitude, l.topAltitude, l.coverage, l.sigmaMax, l.albedo, l.detailStrength, l.g0, l.g1, l.lobeBlend, l.shapePeriod, l.detailPeriod,
+                         l.weatherPeriod, l.windX, l.windZ, l.cirrusCoverage, l.cirrusAltitude, l.cirrusOpticalDepth, l.cirrusPeriod, l.cirrusWindX, l.cirrusWindZ,
+                         (double)sunWord, powder };
+    uint64_t h = 1469598103934665603ull;  // (FNV-1a over the values' bytes)
+    const unsigned char* bytes = reinterpret_cast<const unsigned char*>(v);
+    for (size_t i = 0; i < sizeof v; ++i) h = (h ^ bytes[i]) * 1099511628211ull;
+    return h;
+}
+
+// Distance (m) from a point at altitude 'from' along a direction of elevation e (its sine) to the sphere of altitude 'to'
+// above the planet (radius R); a large value when the direction never meets it.
+double domeShellDistance(double R, double from, double to, double sinE)
+{
+    const double r = R + from, rs = R + to, b = r * sinE, c = r * r - rs * rs;
+    const double disc = b * b - c;
+    if (disc < 0) return 1e12;
+    const double root = std::sqrt(disc);
+    const double first = -b - root, second = -b + root;  // (the nearer root where the point is outside the sphere)
+    return first > 0 ? first : (second > 0 ? second : 1e12);
+}
+
+// atmosphere.clouds.dome_adaptive: which bands of the dome this frame marches. The dome is the cloud seen from the camera
+// in every direction; its picture moves when the cloud drifts with the wind, when the camera moves, and when the sun's
+// direction or light changes. A band's picture has drifted by the relative motion over the distance to the nearest cloud
+// in its directions (the layer's nearer boundary and the cirrus sheet, whichever turns faster), across azimuth and
+// across elevation, each in that band's texels; the sun's turn counts in azimuth texels, a change of its light as a
+// share of maxLight. A band is marched when its drift reaches 'allowed' texels, or maxAge seconds after its last march
+// (what nothing here follows - the air's medium - still reaches the dome). A still sky under a slow sun then costs a band
+// every few seconds; a time lapse marches the whole dome every frame, as before the bands existed.
+// Returns the bands due as bits; 'whole' marches all of them and starts the count anew.
+uint32_t domeDue(CloudState& s, const FramePassContext& fc, const ViewDesc& view, float3 sunDir, float sunLight, double bottomRadius, float allowed, float maxAge, bool whole)
+{
+    const float3 origin = fc.scene.originOffset();
+    const double camera[3] = { (double)view.position.x + origin.x, (double)view.position.y + origin.y, (double)view.position.z + origin.z };
+    const double elapsed = std::abs(fc.frame.time - s.domeTime);
+    // the cloud's motion relative to the camera since the last frame: the wind over the World's time (the field's
+    // advection, CloudModel.cpp offsetsFor) less the camera's own step
+    const double step[3] = { camera[0] - s.domeCamera[0], camera[1] - s.domeCamera[1], camera[2] - s.domeCamera[2] };
+    auto relative = [&](double windX, double windZ, double& across, double& up) {
+        const double dx = windX * elapsed - step[0], dz = windZ * elapsed - step[2];
+        across = std::sqrt(dx * dx + dz * dz);
+        up = std::abs(step[1]);
+    };
+    double layerAcross = 0, layerUp = 0, cirrusAcross = 0, cirrusUp = 0;
+    relative(s.layer.windX, s.layer.windZ, layerAcross, layerUp);
+    relative(s.layer.cirrusWindX, s.layer.cirrusWindZ, cirrusAcross, cirrusUp);
+    const double sunTurn = std::acos(std::clamp((double)dot(sunDir, s.domeSun), -1.0, 1.0));
+    constexpr double kMaxLight = 0.03;  // a band is due when the sun's light has changed by this share
+    const double lightChange = s.domeSunLight > 0 ? std::abs((double)sunLight - s.domeSunLight) / s.domeSunLight : (sunLight > 0 ? 1.0 : 0.0);
+    // (the camera's altitude above the planet: the world's origin offset set to the camera, the point at 0)
+    const double here[3] = { 0, 0, 0 };
+    const double altitude = clouds::altitudeOf(clouds::offsetsFor(s.layer, camera, 0.0), bottomRadius, here);
+    s.domeCamera[0] = camera[0], s.domeCamera[1] = camera[1], s.domeCamera[2] = camera[2];
+    s.domeTime = fc.frame.time;
+    s.domeSun = sunDir;
+    s.domeSunLight = sunLight;
+    if (whole)
+    {
+        for (float& d : s.domeDrift) d = 0;
+        return (1u << kDomeBands) - 1u;
+    }
+    constexpr double kPi = 3.14159265358979, kE0 = -0.17453293;  // (CloudCommon.hlsli CLOUD_DOME_E0)
+    constexpr double kNearest = 200.0;                           // m: the camera inside the cloud turns it no faster than this
+    const double azimuthTexel = 2 * kPi / kDomeWidth;
+    uint32_t due = 0;
+    for (uint32_t band = 0; band < kDomeBands; ++band)
+    {
+        // the band's elevations (v = row / height, e = e0 + v^2 (pi / 2 - e0)) and its rows' step in elevation
+        const double v0 = (double)(band * kDomeBandRows) / kDomeHeight, v1 = (double)((band + 1) * kDomeBandRows) / kDomeHeight;
+        const double e0 = kE0 + v0 * v0 * (kPi / 2 - kE0), e1 = kE0 + v1 * v1 * (kPi / 2 - kE0);
+        const double elevationTexel = (e1 - e0) / kDomeBandRows;
+        double drift = 0;
+        for (double e : { e0, e1 })
+        {
+            const double sinE = std::sin(e), cosE = std::max(std::cos(e), 0.1);
+            auto turned = [&](double distance, double across, double up) {
+                const double d = std::max(distance, kNearest);
+                // across azimuth (the motion square to the line of sight) and across elevation, in the band's texels
+                return std::max(across / (d * cosE) / azimuthTexel, (across * std::abs(sinE) + up * cosE) / d / elevationTexel);
+            };
+            if (s.layer.coverage > 0)
+            {
+                // the layer's nearer boundary along this elevation (inside the layer: the cloud is at the camera)
+                const bool inside = altitude >= s.layer.baseAltitude && altitude <= s.layer.topAltitude;
+                const double d = inside ? 0.0 : domeShellDistance(bottomRadius, altitude, altitude < s.layer.baseAltitude ? s.layer.baseAltitude : s.layer.topAltitude, sinE);
+                drift = std::max(drift, turned(d, layerAcross, layerUp));
+            }
+            if (s.layer.cirrusCoverage > 0) drift = std::max(drift, turned(domeShellDistance(bottomRadius, altitude, s.layer.cirrusAltitude, sinE), cirrusAcross, cirrusUp));
+        }
+        drift = drift / std::max((double)allowed, 1e-3) + sunTurn / azimuthTexel / std::max((double)allowed, 1e-3) + lightChange / kMaxLight;
+        if (maxAge > 0) drift += std::abs((double)fc.frame.deltaTime) / maxAge;
+        s.domeDrift[band] = (float)std::min((double)s.domeDrift[band] + drift, 1e6);
+        if (s.domeDrift[band] >= 1.0f)
+        {
+            due |= 1u << band;
+            s.domeDrift[band] = 0;
+        }
+    }
+    return due;
+}
 } // namespace
 
 uint32_t cloudSunWord(const QualityConfig& q)
@@ -235,11 +349,25 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
     // this frame's texel of each 2 x 2 block (the order 0, 3, 1, 2: opposite corners in turn)
     static const uint32_t kBlockOrder[4] = { 0, 3, 1, 2 };
     const uint32_t blockTexel = kBlockOrder[s.frames % 4];
-    // the dome: 16 rows a frame once it has been filled
-    constexpr uint32_t kDomeBand = 16;
-    const bool domeWhole = !temporal || !s.domeFilled || fc.frame.discontinuity != 0 || flashFrame;
+    // The dome, once it has been filled: the bands whose picture has moved (atmosphere.clouds.dome_adaptive), or 16 rows a
+    // frame in turn (6 frames for the whole dome, whatever moves).
+    const bool domeAdaptive = q.has("atmosphere.clouds.dome_adaptive") && q.boolean("atmosphere.clouds.dome_adaptive");
+    const float domeAllowed = domeAdaptive ? (float)q.number("atmosphere.clouds.dome_drift_texels") : 0.5f;
+    const float domeMaxAge = domeAdaptive ? (float)q.number("atmosphere.clouds.dome_max_age_s") : 0.0f;
+    if (domeAdaptive && (!(domeAllowed >= 0.05f && domeAllowed <= 4) || !(domeMaxAge >= 0))) fail("atmosphere.clouds: dome_drift_texels in [0.05, 4], dome_max_age_s >= 0");
+    const uint64_t domeLayer = domeLayerKey(s.layer, sunSteps, rec.powder);
+    const bool domeWhole = !temporal || !s.domeFilled || fc.frame.discontinuity != 0 || flashFrame || (domeAdaptive && domeLayer != s.domeLayer);
     s.domeFilled = true;
-    const uint32_t domeRow = domeWhole ? 0u : (uint32_t)(s.frames % (kDomeHeight / kDomeBand)) * kDomeBand, domeRows = domeWhole ? kDomeHeight : kDomeBand;
+    s.domeLayer = domeLayer;
+    uint32_t domeBands = 0;  // bit b: rows [8 b, 8 b + 8) are marched this frame
+    if (domeAdaptive)
+    {
+        const scene::Sun sun = src ? src->sun : scene::Sun{};
+        const float sunLight = sun.illuminance * (0.2126f * sun.color.x + 0.7152f * sun.color.y + 0.0722f * sun.color.z);
+        domeBands = domeDue(s, fc, mv, sunDir, sunLight, bottomRadius, domeAllowed, domeMaxAge, domeWhole);
+    }
+    else if (domeWhole) domeBands = (1u << kDomeBands) - 1u;
+    else domeBands = 3u << (2u * (uint32_t)(s.frames % (kDomeBands / 2)));
     const TextureRef dome = g.importTexture(s.dome.Get(), textureDesc("S cloud sky dome", kDomeWidth, kDomeHeight, DXGI_FORMAT_R16G16B16A16_FLOAT), L);
     const BufferRef stats = g.importBuffer(s.stats.Get(), BufferDesc{ "S cloud stats", 256, 0 });
     ShaderLibrary& sh = fc.shaders;
@@ -312,23 +440,36 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
                       c.cmd->Dispatch(groups(w, 8), groups(rows, 8), 1);
                   }
               });
-    // The sky dome for R's escaping rays (GiSky.hlsli: atmosphereSkyRadianceCloudy): mode 3, one dispatch (24,576 texels).
-    g.addPass("s.cloud.sky", QueueType::Graphics,
-              [&](PassBuilder& b) {
-                  b.use(record, Use::SrvCompute);
-                  b.use(map, Use::SrvCompute);
-                  b.use(transmittanceLut, Use::SrvCompute);
-                  b.use(msTable, Use::SrvCompute);
-                  b.use(dome, Use::UavCompute);
-              },
-              [=](PassContext& c) {
-                  c.cmd->SetPipelineState(pc);
-                  c.bindFrameConstants(cb);
-                  const uint32_t k[16] = { recordSrv, c.uav(dome), 0xFFFFFFFFu, 1, kDomeWidth, kDomeHeight, 3, domeRow, c.srv(transmittanceLut), 0xFFFFFFFFu, 0xFFFFFFFFu,
-                                           c.srv(msTable), 0xFFFFFFFFu, 0xFFFFFFFFu, 0, sunSteps };
-                  c.computeConstants(k, 16);
-                  c.cmd->Dispatch(groups(kDomeWidth, 8), groups(domeRows, 8), 1);
-              });
+    // The sky dome for R's escaping rays (GiSky.hlsli: atmosphereSkyRadianceCloudy): mode 3, a dispatch per run of bands
+    // that are marched this frame (the whole dome: one dispatch, 24,576 texels; no band due: no pass).
+    if (domeBands != 0)
+        g.addPass("s.cloud.sky", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(record, Use::SrvCompute);
+                      b.use(map, Use::SrvCompute);
+                      b.use(transmittanceLut, Use::SrvCompute);
+                      b.use(msTable, Use::SrvCompute);
+                      b.use(dome, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      c.cmd->SetPipelineState(pc);
+                      c.bindFrameConstants(cb);
+                      for (uint32_t band = 0; band < kDomeBands;)
+                      {
+                          if ((domeBands >> band & 1u) == 0)
+                          {
+                              ++band;
+                              continue;
+                          }
+                          uint32_t run = 1;
+                          while (band + run < kDomeBands && (domeBands >> (band + run) & 1u) != 0) ++run;
+                          const uint32_t k[16] = { recordSrv, c.uav(dome), 0xFFFFFFFFu, 1, kDomeWidth, kDomeHeight, 3, band * kDomeBandRows, c.srv(transmittanceLut),
+                                                   0xFFFFFFFFu, 0xFFFFFFFFu, c.srv(msTable), 0xFFFFFFFFu, 0xFFFFFFFFu, 0, sunSteps };
+                          c.computeConstants(k, 16);
+                          c.cmd->Dispatch(groups(kDomeWidth, 8), run, 1);  // (a band is one row of 8 x 8 groups: kDomeBandRows)
+                          band += run;
+                      }
+                  });
     // The readers (S's atmosphere functions in M's passes, R's sky) sample the layer through the record's SRVs: this pass
     // puts the textures in the shader-resource layout for them.
     g.addPass("s.cloud.publish", QueueType::Graphics,
