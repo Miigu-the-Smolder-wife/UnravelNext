@@ -110,6 +110,11 @@ exposure_adapt_darker_seconds = 2.5
 exposure_cut_dark = 0.10
 exposure_cut_bright = 0.02
 exposure_centre_sigma = 0.8
+exposure_linear_distance_ev = 0.0      # 0: the EV approaches its target exponentially all the way (the time constants above).
+                                       # > 0: farther than this many stops from the target it moves at a constant rate - the
+                                       # exponential's rate at that distance - so a large change (a door to daylight) takes its
+                                       # time instead of jumping most of the way in the first frames (the reference's linear /
+                                       # exponential adaptation, r.EyeAdaptation.ExponentialTransitionDistance 1.5)
 # HDR post chain (FEATURES_GAME 4, 6; A4; Post.cpp). bloom: the energy fraction the lens PSF scatters into its tail
 # (0 = off; the kernel sums to 1) over bloom_levels octaves - 0.082 is the share Unreal's default bloom adds (intensity
 # 0.675 x its six stage tints / 6 = 0.089 of the scene, here taken out of the core instead of added); vignette: cos^4
