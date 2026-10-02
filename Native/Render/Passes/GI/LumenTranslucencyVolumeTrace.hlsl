@@ -11,7 +11,7 @@
 //          ray (HitLocalSample.hlsli) - and the indirect light the card frame names (LumenHitIndirect.hlsli: the
 //          previous frame's volume, this frame's irradiance probes), through the material's constants, as
 //          r.card.radiosity.trace; the back of a one-sided surface: 0. A thread traces at most 3 rays: bands of a
-//          third of 262,144 threads;
+//          third of 262,144 threads; + the skylight leaking the card frame names (lumen.skylight_leaking; 0 by default);
 //   hair   E's grooms (RayTracing/HitHair.hlsli; raytracing.hair): the ray's first fibre in the hair density volume,
 //          where it lies before the hit - except in a groom the cell's point lies inside: the strands take the cell's
 //          light through their own body's hair themselves (CoverageHair.hlsl hairIndirect);
@@ -138,6 +138,8 @@ void LumenTranslucencyVolumeTraceGen()
                 radiance = rtHitRadiance(m, s.normal, -ray.Direction, L, 1.2);
             }
         }
+        // lumen.skylight_leaking (LumenHitIndirect.hlsli; 0 by default: nothing)
+        radiance += lhiSkyLeaking(lhiRules(P[5].x), ray.Direction, hit.t);
     }
     const float cap = asfloat(P[9].x);
     const float brightest = max(radiance.r, max(radiance.g, radiance.b)) * g_exposure;

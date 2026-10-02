@@ -42,6 +42,56 @@ LhiSources lhiSources(uint cardFrameSrv)
     return s;
 }
 
+// The rules the frame's ray hits share (the card frame's words 28..39, CardLayout.hlsli; CardSet.h CardHitRules).
+struct LhiRules
+{
+    float farStart;              // the far field's start, m (GiSky.hlsli giFarSkyIrradiance; 0: none)
+    float3 skyLeaking;           // lumen.skylight_leaking x its tint (0: none)
+    float skyLeakingInvDistance; // 1 / the distance at which a hit takes the whole of it
+    float skyLeakingReflection;  // its share at the reflections' hits
+    float distantScreenTrace, distantSlopeTolerance, distantStepOffsetBias;  // ScreenTrace.hlsli sctDistantTrace
+};
+// cardFrameSrv 0xFFFFFFFF (no cards): no rule.
+LhiRules lhiRules(uint cardFrameSrv)
+{
+    LhiRules r = (LhiRules)0;
+    if (cardFrameSrv == 0xFFFFFFFFu) return r;
+    ByteAddressBuffer frame = ResourceDescriptorHeap[cardFrameSrv];
+    const uint4 a = frame.Load4(MC_FRAME_RULES), b = frame.Load4(MC_FRAME_RULES + 16);
+    r.farStart = asfloat(a.x);
+    r.skyLeakingInvDistance = asfloat(a.y);
+    r.distantScreenTrace = asfloat(a.z);
+    r.distantSlopeTolerance = asfloat(a.w);
+    r.skyLeaking = asfloat(b.xyz);
+    r.skyLeakingReflection = asfloat(b.w);
+    r.distantStepOffsetBias = asfloat(frame.Load(MC_FRAME_RULES + 32));
+    return r;
+}
+
+#ifdef UNX_GI_SKY_HLSLI
+// Skylight leaking (lumen.skylight_leaking; the reference's GetSkylightLeaking, LumenTracingCommon.ush): an artist's
+// control that lets a share of the sky's light through whatever a ray met - light for interiors the bounces leave too
+// dark. NOT occluded: by construction it is a leak, and with it a closed room is brighter by day than by night; the
+// default is 0 (the reference's too), and the furnace room's rule holds only at 0.
+//   a probe's or a cell's ray   + the sky's radiance in the ray's direction x the colour x min(hit distance / the full
+//                               distance, 1) (the reference reads its sky cube at roughness 0.3: here the sky's
+//                               radiance itself - the rays' hemisphere averages it);
+//   a reflection's ray          + the light a surface of the reflections' average albedo would return under the open
+//                               sky: the sky's radiance along the hit's normal (a uniform sky's E / pi) x the colour x
+//                               that albedo (GetSkylightLeakingForReflections) - a mirror shows the leaked light the
+//                               view's own surfaces have.
+float3 lhiSkyLeaking(LhiRules r, float3 direction, float hitDistance)
+{
+    if (!any(r.skyLeaking > 0)) return 0;
+    return giSkyRadiance(direction) * r.skyLeaking * saturate(hitDistance * r.skyLeakingInvDistance);
+}
+float3 lhiSkyLeakingReflection(LhiRules r, float3 normal)
+{
+    if (!any(r.skyLeaking > 0)) return 0;
+    return giSkyRadiance(normal) * r.skyLeaking * r.skyLeakingReflection;
+}
+#endif
+
 uint lhiHash(uint x)
 {
     x ^= x >> 16;

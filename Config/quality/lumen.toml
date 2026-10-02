@@ -50,6 +50,17 @@ radiance_cache_mark_tile_px = 16                  # the module's own screen mark
 radiance_cache_trace_capacity = 1024              # structural bound of probes traced in one frame (new probes are always
                                                   # traced, past the budget at 1/4 of the rays; past this bound they wait a frame)
 
+# Skylight leaking (the reference's post-process settings LumenSkylightLeaking, its tint and LumenFullSkylightLeakingDistance;
+# LumenHitIndirect.hlsli lhiSkyLeaking): a share of the sky's light added at the hits of the screen probes', the
+# translucency volume's and the reflections' rays whatever stands between the hit and the sky - an artist's control for
+# interiors the bounces leave too dark. It is a leak by construction: with a value above 0 a closed room is brighter by
+# day than by night. 0 (the reference's default too) = none.
+skylight_leaking = 0.0
+skylight_leaking_tint = [1.0, 1.0, 1.0]
+skylight_leaking_full_distance_m = 10.0           # a hit this far along its ray takes the whole share, nearer hits in proportion (1000 cm)
+skylight_leaking_reflection_average_albedo = 0.25 # r.Lumen.SkylightLeaking.ReflectionAverageAlbedo: the reflections' hits take the
+                                                  # share as light returned by a surface of this albedo
+
 # Indirect light at ray hits that have no mesh card (Passes/GI/LumenHitIndirect.hlsli) - deforming instances (skin, wind)
 # and faces no card of their mesh sees. NOT in the reference: its hit without a valid surface-cache sample is black
 # (a skinned character in a mirror shows only what the lights reach directly). true: such a hit takes the irradiance of

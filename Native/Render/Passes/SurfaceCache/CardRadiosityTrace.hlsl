@@ -127,8 +127,10 @@ void CardRadiosityTraceGen()
                 g_rtHitCone = 0.37;  // (a ray of the 4 x 4 hemisphere map: a cone of about 20 degrees half angle)
                 const float bias = 1e-3 + 2e-4 * distance(s.position, g_cameraPosition);
                 RtHitLighting L = (RtHitLighting)0;
-                L.irradiance = lhiIrradiance(lhiSources(P[0].x), s.position, s.normal, thread * 9781u + P[0].z * 26699u).rgb;
-                L.specularRadiance = L.irradiance / 3.14159265;
+                const float4 e = lhiIrradiance(lhiSources(P[0].x), s.position, s.normal, thread * 9781u + P[0].z * 26699u);
+                // (past the mesh cards' end, where no source answers: the sky's light on the hit - the far field)
+                L.irradiance = e.a > 0 ? e.rgb : giFarSkyIrradiance(s.position, s.normal, lhiRules(P[0].x).farStart);
+                L.specularRadiance = e.rgb / 3.14159265;
                 const float3 l = normalize(g_sunDirection);
                 if (dot(s.normal, l) > 0 || rtHitTransmits(m))
                 {

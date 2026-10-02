@@ -193,6 +193,22 @@ SurfaceCacheCardSettings SurfaceCacheCardSettings::fromQuality(const QualityConf
     s.cards.keepUnusedPagesFrames = (uint32_t)std::max(num("surface_cache.feedback_keep_unused_frames", 256), 1.0);
     s.feedbackResLevelBias = (float)num("surface_cache.feedback_res_level_bias", -0.5);
     s.lightingFeedback = flag("surface_cache.lighting_feedback", true);
+    {
+        // the rules the frame's ray hits share (CardSet.h CardHitRules)
+        CardHitRules& h = s.hitRules;
+        h.farStart = flag("lumen.radiance_cache_far_field", false) ? (float)num("surface_cache.mesh_cards_max_distance_m", 300.0) : 0.0f;
+        const float leaking = (float)std::max(num("lumen.skylight_leaking", 0.0), 0.0);
+        const std::vector<double> tint = q.has("lumen.skylight_leaking_tint") ? q.numbers("lumen.skylight_leaking_tint") : std::vector<double>{};
+        for (int c = 0; c < 3; ++c) h.skyLeaking[c] = leaking * (tint.size() == 3 ? (float)std::max(tint[c], 0.0) : 1.0f);
+        // (the reference clamps the distance to 10 cm .. its trace distance)
+        h.skyLeakingInvDistance = 1.0f / (float)std::max(num("lumen.skylight_leaking_full_distance_m", 10.0), 0.1);
+        h.skyLeakingReflection = (float)std::max(num("lumen.skylight_leaking_reflection_average_albedo", 0.25), 0.0);
+        // distant screen traces: the stretch past the rays' end the view may still show (none when the rays reach as far)
+        const float rayLength = (float)num("gi.ray_length_m", 1000.0), distant = (float)num("reflection.lumen_distant_screen_trace_max_distance_m", 2000.0);
+        h.distantScreenTrace = flag("reflection.lumen_distant_screen_traces", true) && distant > rayLength ? distant - rayLength : 0.0f;
+        h.distantSlopeTolerance = (float)std::max(num("reflection.lumen_distant_screen_trace_depth_threshold", 2.0), 0.0);
+        h.distantStepOffsetBias = (float)num("reflection.lumen_distant_screen_trace_step_offset_bias", 0.0);
+    }
     s.direct = flag("surface_cache.direct_lighting", true);
     s.radiosity = flag("surface_cache.radiosity", true);
     s.shadowRaysOpaque = flag("surface_cache.shadow_rays_opaque", false);
@@ -885,6 +901,7 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
         set.feedbackBias = s.settings.feedbackResLevelBias;
         set.lightingFeedback = s.settings.lightingFeedback;
     }
+    set.hitRules = s.settings.hitRules;
     // lumen.hit_indirect: hits without cards take their indirect light from the previous frame's translucency volume
     // while the cache's own passes run (the final gather names this frame's sources afterwards: CardFrameSources.hlsl)
     const bool hitIndirect = !fc.quality.has("lumen.hit_indirect") || fc.quality.boolean("lumen.hit_indirect");
