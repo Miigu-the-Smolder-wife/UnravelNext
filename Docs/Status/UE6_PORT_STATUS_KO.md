@@ -16,7 +16,7 @@
 | 세 브랜치 병합, 전체 빌드 | ✔ | 50af9e4 |
 | 메시 카드 생성: 프레임 밖 작업 스레드 + 디스크 캐시(메시 내용 해시), 배율 1/4옥타브 묶음 | ✔ | `Passes/SurfaceCache/MeshCardCache.cpp` |
 | 카드 씬: 인스턴스 추가·이동·숨김·제거·재질 변경(재캡처), 상주 해상도, 페이지 표 고정 크기 | ✔ | `MeshCardScene.cpp`, `SurfaceCacheCards.cpp` |
-| 카드 캡처: 페이지마다 그 인스턴스의 원본 삼각형을 메시 셰이더로 정사영 → 알베도·법선·방출·깊이 | ✔ | `CardCapture.ms/.ps.hlsl` |
+| 카드 캡처: 페이지마다 그 인스턴스의 원본 삼각형을 메시 셰이더로 정사영 → 알베도·법선·방출·깊이 | ✔ | `CardCapture.ms/.ps.hlsl`, 재질은 `CardCaptureMaterial.hlsli` |
 | 재할당 카드의 조명 이어받기(resample), 캡처 → 아틀라스 복사, 새 페이지 조명 상태 | ✔ | `CardResample.hlsl`, `CardCopy.hlsl` |
 | 오래된 페이지 재캡처(예산의 1/8, 재질 변경은 먼저) | ✔ | `MeshCardScene::update` |
 | 카드 조명: 갱신 선택, 직접광(타일당 8광원 + 태양, 스레드당 광선 1개), radiosity, FinalLighting | ✔ | `CardLighting.cpp`, `Card*.hlsl` |
@@ -24,7 +24,7 @@
 | 화면 프로브 광선·radiance cache 광선의 hit이 카드를 읽음(해시 셀 읽기 제거) | ✔ | `LgTrace.hlsl`, `LumenRadianceCacheTrace.hlsl` |
 | 반사 hit이 카드를 읽음(프레임의 카드 사용) | ✔ | `ReflectionSystem.cpp`, `ReflectionShade.hlsli` |
 | 레벨 로드 때 여러 갱신을 한 프레임에(로드 직후 몇 프레임 안에 캐시가 참) | ✔ | `mesh_cards_load_rounds` |
-| 표면 캐시 피드백(고해상도 페이지 요청·퇴출) | ☐ | |
+| 표면 캐시 피드백(고해상도 페이지 요청·퇴출) | ✔ (실행 안 함) | 1.2 표 1번 |
 | 반사 경로를 Lumen 반사 단독 구현으로(스레드당 광선 1개, 옛 K/G/M 경로와 분리) | ✔ | `reflection.lumen_only`: `ReflectionLumenTrace.hlsl`, `ReflectionLumenHit.hlsli`, 굴절 서비스 `RefractionLumenTrace.hlsl` |
 | 최종 수집만 도는 GI(옛 월드 캐시·그 화면 프로브 없음, 캐시 메모리도 잡지 않음) | ✔ | `gi.lumen_only`: `GiSystem.cpp`, `LumenGather.cpp` |
 | 최종 수집의 컷 프레임·이동 중 처리 대조 반영 | ✔ | 1.1 표 |
@@ -34,6 +34,44 @@
 | 설정 묶음과 기본값(`Config/quality`): 아래 스위치가 전부 기본 켬 | ✔ | `surface_cache.enabled`·`mesh_cards`, `gi.lumen`·`lumen_only`, `reflection.lumen`·`lumen_only`, `lumen.radiance_cache`·`short_range_ao`·`translucency_volume`, `output.screen_trace_source = 0` |
 
 옛 경로(월드 GI 해시 캐시, 그 화면 프로브, 반사의 K/G/M·rays buffer·inline·shade·combine 패스, 해시 셀 표면 캐시)는 스위치를 끄면 그대로 돈다. GPU 실행으로 새 경로를 확인한 뒤 코드에서 지운다.
+
+### 1.2 2026-10-03 추가분 (브랜치 `w/cache`) — 전부 코드 작성·빌드 통과, 실행 안 함
+
+GPU에서 돌린 것은 없다(시험 실행 파일·캡처·게이트·furnace 포함). 확인은 `Tools\CI\Build.ps1 -Track all`의 `build ok`뿐이다.
+
+| # | 항목 | 내용 | 스위치(기본) | 위치 |
+|---|---|---|---|---|
+| 1 | 표면 캐시 피드백(해상도) | 카드의 높은 단계를 읽는 hit(반사·굴절 광선, 카드 radiosity 광선)이 "어느 카드의 어느 단계·어느 페이지를 원했는지"를 GPU 해시 표(4096칸, 원소 = 카드 20비트·단계·페이지 좌표, 값 = hit 수)에 넣는다. 원한 단계 = log2(카드 반크기 / hit에서의 광선 원뿔 반지름) − 0.5. 화면 16×16 타일마다 프레임당 한 hit만 보고한다(자리는 프레임마다 옮겨 간다). 다음 프레임 첫머리에 표를 readback으로 복사하고 비우며, framesInFlight 프레임 뒤에 CPU가 읽어 hit 수 16 초과인 페이지를 요청으로 만든다. 요청은 상주 단계 요청보다 25~50 m 뒤 순위다. 페이지는 잠기지 않은 단계에 한 장씩 매핑·캡처하고(조명은 기존 단계에서 resample), 256프레임 동안 아무 hit도 원하지 않으면 나간다. 자리가 없으면 가장 오래 안 쓴 것부터 내보낸다. 높은 단계의 매핑 안 된 페이지는 페이지 표가 아래 단계의 매핑된 페이지로 보낸다. 최근 2회 갱신 안에 읽힌 페이지는 조명 갱신 속도 4(언리얼의 CardPageHighResLastUsedBuffer). | `surface_cache.feedback`(켬), `feedback_tile_size` 16, `feedback_res_level_bias` −0.5, `feedback_min_page_hits` 16, `feedback_keep_unused_frames` 256, `reflection.lumen_hi_res_surface`(켬), `surface_cache.feedback_gather`(끔) | `MeshCardScene.cpp`(setFeedback, evictOldest), `SurfaceCacheCards.cpp`(readback·clear), `CardLighting.hlsli`(clFeedback, clReadCardsAt), `CardLayout.hlsli`(mcCardSample hiRes, 카드 프레임 28워드), `CardFeedbackClear.hlsl`, `CardSelect.hlsl` |
+| 2 | 클러스터 LOD로 카드 캡처 | V의 래스터 서비스(`FrameServices::rasterizeDepth`)를 있는 그대로 쓴다. 캡처 페이지 하나가 요청의 뷰 하나다(정사영, `lodPixelsPerMetre` = 페이지의 미터당 텍셀, 그 인스턴스만, 8텍셀 타일을 캡처 아틀라스의 제자리로 보내는 tile atlas 모드). 요청 하나에 255뷰, 묶음마다 서비스를 두 번 돈다: `r.card.vdepth`(가장 앞 표면의 깊이), `r.card.vmaterial`(그 깊이와 같은 조각만 재질을 UAV로 기록). 텍셀 법선은 깊이의 화소 간 차이로 만든 삼각형 법선이고, 법선 맵 기울기는 uv 차이로 만든 접선 틀에 얹는다. `Passes/Visibility`는 고치지 않았다. | `surface_cache.mesh_cards_capture_clusters`(**끔**) | `CardCaptureCluster.ps.hlsl`, `SurfaceCacheCards.cpp`(captureView, r.card.vcapture.begin), `CardCopy.hlsl`(뒤집힌 깊이) |
+| 3 | 카드 캡처의 재질 층 | 층 있는 재질의 카드 알베도를 법선 방향에서 본 반사율로 캡처한다(언리얼 Substrate 캡처와 같은 규칙: V = N). 클리어코트: 코트 로브 알베도 + 코트를 두 번 지난 아랫층(코트 거칠기가 투과율을 정함), 시트(sheen): 틴트 × 시트 알베도 + 남은 아랫층, 박막: f0를 박막의 수직 입사 값으로. hit이 제 재질로 셰이딩하는 경로(수집·반사)는 원래 층을 계산했고, 카드의 final 조명을 읽는 경로(radiosity, translucency volume)가 이제 같은 양을 튕긴다. | 없음(항상) | `CardCaptureMaterial.hlsli` `ccLayered` |
+| 4 | radiosity 다시 쏘기 | 첫 hit이 5 cm 안의 한 면 재질 뒷면이면 5 cm부터, 1 cm 안의 양면 재질이면 그 hit 바로 뒤부터 한 번 더 쏜다(루프 없음). 10 cm보다 가까운 hit은 광선을 막되 빛은 0이다. 스레드당 광선 상한 3 → 4, 디스패치당 스레드 87,381 → 65,536. | `surface_cache.radiosity_avoid_self_intersections`(켬), `radiosity_skip_back_face_m` 0.05, `radiosity_skip_two_sided_m` 0.01, `radiosity_min_trace_distance_m` 0.10 | `CardRadiosityTrace.hlsl`, `CardLighting.cpp` |
+| 5 | 카드 없는 hit의 간접광 | 태양·국소광 표본에 더해 간접 irradiance를 준다. ① translucency volume: hit이 주 뷰 격자 안이고 그 칸이 추적된 빛을 가졌을 때(ambient의 알파 = 칸이 가진 추적 빛의 몫, 새로 넣음). ② 아니면 radiance cache의 irradiance 프로브: 추적된 프로브마다 6×6(+테두리) irradiance 맵을 만들고, hit 둘레 8개 프로브 중 hit을 보는 것(기존 깊이 검사)만 쓴다. 그런 hit은 16개 중 하나가 위치를 목록에 적고, 다음 프레임 캐시 표시 단계가 그 자리에 프로브를 요청한다(clipmap 2단계 거칠게). ③ 둘 다 없으면 전과 같이 0. 소스는 카드 프레임 워드 22~27로 전달한다: 표면 캐시·radiance cache·volume 자신의 광선은 이전 프레임 volume, 수집·반사는 이번 프레임 것. | `lumen.hit_indirect`(켬), `hit_indirect_radiance_cache`(켬), `hit_indirect_mark_clipmap_bias` 2 | `Passes/GI/LumenHitIndirect.hlsli`, `LumenRadianceCacheIrradiance.hlsl`, `LumenRadianceCache.hlsli`(lrcIrradiance, lrcHitMark), `LumenTranslucencyVolume.hlsli`(ltvSampleLit), `CardFrameSources.hlsl`, `LumenGather.cpp` |
+| 6 | 대조에서 구현한 것 | 잎 화소(Foliage·Subsurface 재질 = 언리얼의 backface diffuse 화소): 수집 이력의 거리 임계 0.03(일반 0.01), 전용 반사 광선은 거칠기 0.2 미만에서만. 수집 이력의 법선 거부(45°)는 스위치만 넣고 끔(언리얼 기본 0). | `lumen.gather_temporal_distance_threshold_foliage` 0.03, `lumen.gather_temporal_reject_normal`(끔), `reflection.lumen_max_roughness_to_trace_foliage` 0.2 | `LgTemporal.hlsl`, `ReflectionClassify.hlsl`, `ReflectionReuseFilter.hlsl`, `ReflectionInternal.hlsli` |
+| 7 | 표면 캐시 직접광의 광원 함수 | 점·스폿 광원의 함수(IES, 쿠키, 고보, 세기·색 키, 깜빡임)를 카드 텍셀/셀 방향으로 곱한다(footprint = 텍셀 크기 / 광원까지 거리). 표는 광선 씬의 광원 데이터 머리(바이트 80)가 가리키는 그 프레임의 표이고, 패스는 원래 `declareTraversal`로 선언하고 있었다. 시간에 따라 변하는 함수(회전, 키 2개 이상, 깜빡임)의 광원이 비추는 곳: 카드는 페이지 조명 상태에 표시해 직접광 갱신 속도 4, 셀은 피드백 목록에 넣어 먼저 다시 비춘다. 표면 캐시에는 광원별 개정 번호가 없다 — 저장값은 갱신 예산이 돌아올 때 새로 계산된다. | 없음(항상) | `SurfaceCacheLightFunction.hlsli`, `CardDirectStore.hlsl`, `CardDirectCull.hlsl`, `CardSelect.hlsl`, `SurfaceCacheLight.hlsl`, `SurfaceCacheLightPairsSelect.hlsl` |
+
+2번을 켜려면 V에 필요한 것(인터페이스 요청, V 코드는 손대지 않음):
+
+- `DepthRasterPixel`에 보간된 꼭짓점 법선(과 접선). 지금은 화소 커널이 uv·재질·인스턴스만 받는다. 없으면 매끈하게 셰이딩되는 저폴리곤 메시의 카드 법선에 면이 드러난다.
+- 요청의 화소 커널이 그래프 리소스의 뷰 번호를 받을 길. 지금은 `pixelConstants`가 기록 시점 값 그대로 전달돼서, 캡처 쪽이 자체 업로드 버퍼(고정 SRV)에 패스 실행 때 번호를 적어 넘긴다.
+- (성능) 깊이와 재질을 한 번에: 서비스의 화소 커널이 렌더 타깃에 쓸 수 있으면 컬 체인이 묶음당 2회 → 1회가 된다.
+
+**6번 대조 — 옮기지 않은 것** (`Engine/Shaders/Private/Lumen/*`, `LumenScreenProbeGather.cpp`, `LumenReflections.cpp`, `LumenReflectionTracing.cpp`의 cvar 기준):
+
+| 언리얼 | 상태 | 이유 |
+|---|---|---|
+| 수집: InterpolationDepthWeight.Foliage, TwoSidedFoliageBackfaceDiffuse, ScreenTraces SkipFoliageHits, TemporalFilterProbes, 중요도 표본 2단계, ShortRangeAO | 이미 있음 | |
+| 수집: MaxRoughnessToEvaluateRoughSpecularForFoliage 0.8 | 따로 두지 않음 | 일반 화소 값(0.8)과 같다 |
+| 수집: ShortRangeGI | 안 옮김 | 언리얼에서 실험 기능, 기본 끔 |
+| 수집: IntegrateDownsampleFactor, GatherNumMips, SpatialFilterHalfKernelSize, FastUpdateModeUseNeighborhoodClamp, RadianceCache.SkyVisibility, ExtraAmbientOcclusion | 안 옮김 | 언리얼 기본값에서 꺼져 있거나 1 |
+| 수집: ScreenTraces SkipHairHits·SkipUnlitHits, MinimumOccupancy, ThicknessScaleWhenNoFallback | 안 옮김 | 기본 false이거나 거리장 대체 경로용 |
+| 수집·반사: HairStrands.ScreenTrace / VoxelTrace | 안 옮김 | 머리카락 트랙의 복셀·깊이 인터페이스가 필요 |
+| 반사: ScreenSpaceReconstruction, BilateralFilter(표본 수·반경·깊이 가중·disocclusion 프레임), Temporal, DenoiserTonemapRange, GGXSamplingBias, RoughnessFadeLength, SampleSceneColorAtHit, DownsampleFactor, 수집의 rough specular 재사용 | 이미 있음 | |
+| 반사: HiResSurface, SurfaceCacheFeedback | 1번에서 구현 | |
+| 반사: DistantScreenTraces | 안 옮김 | 언리얼에서는 광선 씬이 컬링 반경에서 끝나는 곳부터 화면을 따라가는 장치이고, far field가 켜지면 돌리지 않는다. 여기는 컬링 반경으로 끊기는 근거리 씬이 따로 없다: 반사 광선이 광선 씬 전체를 `gi.ray_length_m`까지 추적한다 |
+| 반사: RadianceCache(거친 반사 광선을 줄이고 캐시에서 읽기) | 안 옮김 | 언리얼 기본 0 |
+| 반사: DownsampleCheckerboard, MaxRoughnessToTraceClamp, SmoothBias, SpecularScale, Contrast | 안 옮김 | 기본값에서 동작 없음 |
+| 반사: 반투명 앞면 층 반사(front layer), HitLighting 모드·MaxBounces | 안 옮김 | 반투명 합성(M)과 재질 hit 셰이더가 필요. 기본은 표면 캐시 조명 |
+| 반사: HierarchicalScreenTraces.IncludeTranslucencyDepth, MinimumOccupancy | 안 옮김 | 기본값에서 동작 같음 |
 
 ### 1.1 최종 수집·반사 대조 결과 (2026-10-02, 코드 대조)
 
@@ -136,16 +174,16 @@ GPU에서 한 번도 돌리지 않았다. 아래는 코드에 적힌 내용이�
 4. 남은 것(순서는 6.4의 시간표와 6.3의 그림에서):
    - **간접광 에너지**: 로비에서 경로 추적 기준 대비 벽 0.26~0.33, 바닥 0.16(6.3). 원인 미확정. 추측으로 고치지 않는다(6.5).
    - **성능**: 4K 17.7~18.7 ms, 목표 6.06 ms(6.4). 같은 표본 수로는 닿지 않는다 — 내부 해상도와 표본 수는 사용자 결정(4절).
-   - 반사 2×2 다운샘플 채택 여부, 표면 캐시 피드백, TSR 나머지(resurrection, reprojection field), 서브서피스(재질 파라미터가 먼저 필요), 그림자 페이지 구조(정적/동적 분리, 굵은 페이지, HZB), 지오메트리(소프트웨어 래스터, 압축, 스트리밍 연결), 모션 블러를 TSR 뒤로, 옛 경로 코드 삭제.
+   - 반사 2×2 다운샘플 채택 여부, 표면 캐시 피드백(코드는 1.2에 있음, 실행 안 함), TSR 나머지(resurrection, reprojection field), 서브서피스(재질 파라미터가 먼저 필요), 그림자 페이지 구조(정적/동적 분리, 굵은 페이지, HZB), 지오메트리(소프트웨어 래스터, 압축, 스트리밍 연결), 모션 블러를 TSR 뒤로, 옛 경로 코드 삭제.
 
 ## 3. 언리얼과 다르게 둔 점
 
-1. 카드 캡처는 클러스터 래스터가 아니라 메시의 원본 삼각형을 그린다(카드 해상도에 맞는 LOD 컷으로 바꿀 수 있음).
+1. 카드 캡처는 클러스터 래스터가 아니라 메시의 원본 삼각형을 그린다. 클러스터 컷으로 그리는 경로를 썼다(`surface_cache.mesh_cards_capture_clusters`, 기본 끔; 코드 작성·빌드 통과, 실행 안 함): V의 래스터 서비스를 그대로 쓰며, 서비스가 화소에 법선을 주지 않아 카드 법선이 삼각형 법선이 된다(1.2의 인터페이스 요청).
 2. 카드 아틀라스 무압축(언리얼은 BC 압축): 기하 201 MB + 조명 약 290 MB.
-3. 표면 캐시 피드백(고해상도 페이지) 없음 → 카드 해상도는 거리 규칙의 상주 단계뿐.
-4. 카드 법선: 법선 맵의 평균 기울기까지 반영(언리얼과 같음). 재질 층(코트·시트)은 캡처에 없음.
-5. radiosity 광선의 가까운 뒷면 다시 쏘기 없음(스레드당 광선 1개 규칙).
-6. 카드가 없는 hit(스킨·바람 인스턴스, 메시의 카드가 못 보는 면): 언리얼은 0. 여기서는 태양(그림자 광선 1개)과 국소광 표본 1개(그림자 광선 1개, `HitLocalSample.hlsli`)를 준다 — 수집·radiance cache·반사·카드 radiosity·translucency volume 전부. 간접광은 없다. 로비에서 수집 광선의 표면 hit 중 20~35 %가 카드를 못 읽었다 [실측].
+3. 표면 캐시 피드백(코드 작성·빌드 통과, 실행 안 함): 구조는 언리얼과 같다(hit이 원한 페이지와 단계, 한 프레임 넘게 늦게 CPU가 읽음, 잠기지 않은 페이지의 LRU 퇴출). 다른 점: ① GPU 쪽이 "목록 → 해시 표 → 압축" 3패스가 아니라 hit이 해시 표에 바로 넣는다(원소 32비트: 카드 20비트 — 카드 번호 1,048,576 이상은 보고하지 않음). 표가 넘치면(8칸 탐사 실패) 그 보고는 버려지고 머리의 카운터가 올라가며 CPU가 로그로 알린다(`McStats::feedbackDropped`). ② 읽기 지연은 framesInFlight 프레임. ③ 수집 광선은 언리얼처럼 상주 단계만 읽고 보고하지 않는다(`surface_cache.feedback_gather`로 켤 수 있음).
+4. 카드 법선: 법선 맵의 평균 기울기까지 반영(언리얼과 같음). 재질 층(코트·시트·박막)은 캡처의 알베도에 들어간다(코드 작성·빌드 통과, 실행 안 함). 층의 거칠기·틴트를 따로 저장하는 아틀라스는 없다: 카드의 final 조명은 언리얼처럼 완전 확산으로 튕기고, 제 재질로 셰이딩하는 hit은 재질 기록에서 층을 읽는다.
+5. radiosity 광선의 가까운 뒷면 다시 쏘기(코드 작성·빌드 통과, 실행 안 함): 언리얼의 retrace 모드와 같은 규칙·수치. 스레드당 광선 상한이 4가 됐다(광선, 다시 쏜 광선, 카드 없는 hit의 태양·국소광 그림자 광선).
+6. 카드가 없는 hit(스킨·바람 인스턴스, 메시의 카드가 못 보는 면): 언리얼은 0. 여기서는 태양(그림자 광선 1개)과 국소광 표본 1개(그림자 광선 1개, `HitLocalSample.hlsli`)를 준다 — 수집·radiance cache·반사·카드 radiosity·translucency volume 전부. 간접광도 준다(코드 작성·빌드 통과, 실행 안 함): translucency volume의 irradiance, 없으면 radiance cache의 irradiance 프로브(1.2 표 5번). 둘 다 기존 독자와 같은 가림을 거친다(volume 칸의 표본점은 깊이 버퍼 앞, 프로브는 hit을 보는 것만). 로비에서 수집 광선의 표면 hit 중 20~35 %가 카드를 못 읽었다 [실측].
 7. 레벨 로드 때 갱신을 프레임당 8회 돌린다(언리얼은 프레임당 1회로 약 100프레임에 걸쳐 채운다).
 8. 메시 카드 생성 결과를 디스크에 캐시한다(언리얼은 쿡 때 만든다).
 9. 잎 뒷면 확산광: 언리얼처럼 화면 프로브의 irradiance를 뒤집은 법선으로 읽어 확산 이력과 같은 가중으로 누적한다(`view.giBackfaceIrradiance`, 잎 재질이 있는 씬에서만). 평면 반사 뷰와 coverage 조각의 잎은 translucency volume에서 읽는다.
@@ -156,6 +194,9 @@ GPU에서 한 번도 돌리지 않았다. 아래는 코드에 적힌 내용이�
 13. 대기는 카메라에서 100 m 밖부터 그린다(`AIR_VIEW_START_M`). 언리얼의 AerialPerspectiveStartDepth(0.1 km)와 같은 규칙이다. 그 안쪽의 국소광 공기 산란도 같이 빠진다(입자 매질은 그대로).
 14. MegaLights 화면 추적은 별도 패스가 아니라 `m.ml.trace`의 스레드 안에서 월드 광선 앞에 돈다. 화면 추적이 못 맞히면 월드 광선은 표면에서 다시 시작한다(언리얼은 화면 추적이 끝난 거리에서 이어 쏜다).
 15. 화면 추적이 읽는 이전 색은 음영 그룹 직후의 불투명 색에서 공기를 되돌려 뺀 것이다(`UpscaleSceneKeep.hlsl`). 언리얼은 안개 전에 추출한다. 입자가 덮인 화소는 입자 색이 섞여 있다.
+16. radiance cache에 irradiance 프로브를 둔다(코드 작성·빌드 통과, 실행 안 함). 언리얼의 radiance cache는 같은 맵(`CalculateIrradiance`, 6×6)을 irradiance field gather에서만 만들고 화면 프로브 수집의 캐시에서는 끈다. 여기서는 수집의 캐시에 카드 없는 hit의 간접광용으로 만든다. 그런 hit이 프로브를 요청하는 목록(프레임당 2,048개까지, 넘으면 버리고 다음 프레임에 다시 요청)은 언리얼에 없다.
+17. 표면 캐시 직접광에 광원 함수를 곱한다(코드 작성·빌드 통과, 실행 안 함). 시간에 따라 변하는 함수의 광원이 비추는 카드 페이지는 직접광 갱신 속도를 4로 올린다(매 갱신 보장은 아니다: 예산 안에서 다른 페이지와 겨룬다). 언리얼은 light function atlas를 갱신 때 읽고 따로 우선순위를 올리지 않는다.
+18. 잎 화소 규칙의 대상: 언리얼은 "two-sided foliage 또는 subsurface 셰이딩 모델", 여기서는 Foliage·Subsurface 재질 클래스.
 
 ## 4. 품질을 내주는 값(언리얼 기본값에서 시작, 사용자 결정 대상)
 
@@ -163,6 +204,8 @@ GPU에서 한 번도 돌리지 않았다. 아래는 코드에 적힌 내용이�
 - `surface_cache.radiosity_max_frames_accumulated = 4`
 - `surface_cache.shadow_rays_opaque = false`(언리얼 기본은 true: 알파 마스크 무시)
 - `gi.lumen_max_ray_intensity`, `reflection.lumen_max_ray_intensity = 40`, `reflection.lumen_max_roughness = 0.4`, `reflection.lumen_ggx_sampling_bias = 0.1`
+- `reflection.lumen_max_roughness_to_trace_foliage = 0.2`(언리얼 기본: 잎·피부 화소는 거칠기 0.2 이상에서 전용 반사 광선 없음. 2026-10-03 추가, 실행 안 함)
+- `surface_cache.radiosity_min_trace_distance_m = 0.10`(언리얼 기본: 10 cm 안의 radiosity hit은 빛 0 — 구석이 조금 어두워진다. 2026-10-03 추가, 실행 안 함)
 
 ## 5. 실행 방법
 

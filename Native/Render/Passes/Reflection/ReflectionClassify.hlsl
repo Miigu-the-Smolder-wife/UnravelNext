@@ -34,6 +34,8 @@
 // tile of this dispatch is one tile of each view's tile mask. The classification pass runs before the views record.
 // P[7].x = M's material word (reflection.lumen_only: the top layer's roughness, ReflectionInternal.hlsli g_reflWords;
 // UNX_NONE: every pixel's G-buffer roughness).
+// P[7].z = asuint(reflection.lumen_max_roughness_to_trace_foliage): the limit of a foliage pixel (reflFoliagePixel) in
+// place of P[4].w (the reference's MaxRoughnessToTraceForFoliage 0.2).
 // P[7].y = reflection.lumen_downsample: factor (1 or 2) | this frame's offset x << 8 | y << 16. Factor 2 (the
 // reference's Reflections.DownsampleFactor): one traced pixel per 2 x 2 block - the block's pixel at the frame's
 // offset where that one traces, else the block's first traced-mode pixel - and the others keep mode M with no job
@@ -128,7 +130,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : S
         }
         if (s.valid && mode == REFL_K && P[4].z != 0)
         {
-            if (s.roughness < asfloat(P[4].w))
+            if (s.roughness < (reflFoliagePixel(pixel) ? asfloat(P[7].z) : asfloat(P[4].w)))
             {
                 mode = REFL_M;
                 job = true;

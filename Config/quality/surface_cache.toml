@@ -13,6 +13,18 @@ direct_update_factor = 32             # cells relit per frame = slots / this (re
 radiosity_update_factor = 64          # probes updated per frame = slots / this / 16 (reference: texels / 64, a probe per 4 x 4)
 radiosity_max_ray_intensity = 40.0    # QUALITY TRADE (user decision): a radiosity ray's exposed radiance is capped here; 0 = no cap
 radiosity_max_frames_accumulated = 4.0
+radiosity_avoid_self_intersections = true  # (mesh cards) a radiosity ray whose first hit is a near back face is shot once
+                                      # more past it (reference: r.Lumen.HardwareRayTracing.AvoidSelfIntersections, the
+                                      # retrace mode): the ray geometry is not the captured surface texel for texel, and a
+                                      # ray that starts under it would bring the surface's own inside. false: the first
+                                      # hit stands
+radiosity_skip_back_face_m = 0.05     # ... the back of a one-sided surface nearer than this: again from this distance
+                                      # (reference: SkipBackFaceHitDistance 5 cm)
+radiosity_skip_two_sided_m = 0.01     # ... a two-sided surface nearer than this: again from just past the hit (reference:
+                                      # SkipTwoSidedHitDistance 1 cm)
+radiosity_min_trace_distance_m = 0.10 # (mesh cards) a radiosity ray's hit nearer than this blocks the ray and reads no
+                                      # light: a card texel would light itself (reference:
+                                      # MinTraceDistanceToSampleSurfaceCache 10 cm). 0: every hit reads the cache
 direct_lighting = true
 radiosity = true
 remainder_light = false               # QUALITY TRADE (user decision) when false, as the reference: a cell's direct light is its 8
@@ -22,7 +34,9 @@ direct_stochastic = false             # the reference's stochastic direct lighti
 direct_stochastic_max_frames = 12.0   # (reference: Stochastic.Temporal.MaxFramesAccumulated 12)
 direct_stochastic_min_sample_weight = 0.001
 lighting_feedback = true              # cells a reflection or GI hit read since the last frame are relit ahead of the others
-                                      # (reference: r.LumenScene.Lighting.Feedback 1); half of the budget left after new cells
+                                      # (reference: r.LumenScene.Lighting.Feedback 1); half of the budget left after new cells.
+                                      # Mesh cards: a card page a reader of the high levels (a reflection, the radiosity)
+                                      # read within the last two updates is relit at 4 x the speed
 direct_analytic = true                # each of the cell's 8 lights: its unshadowed irradiance by the light's integral, one shadow
                                       # ray to the light's centre (the reference's default path: a cell's value is the same at
                                       # every update; area lights cast hard shadows in the cache). false: one random point on
@@ -67,6 +81,14 @@ mesh_cards = true                     # the cache as lighting on mesh cards (the
                                       # probe, the final lighting atlas; hits read the cards of their instance
 mesh_cards_fold_passes = true         # the page selection's three steps (priority, bucket, list) are one pass (PassChain.h:
                                       # the same dispatches in order, a barrier between them). false: a pass each (A/B)
+mesh_cards_capture_clusters = false   # the card captures are drawn from the cluster hierarchy's cut at the page's texel
+                                      # size through V's raster service (the reference captures its cards through Nanite):
+                                      # a dense mesh costs by the page's texels, not by its source triangles. A page is a
+                                      # view of a service request (at most 255 a request, two runs of the service each:
+                                      # the nearest surface, then its material). The texel's normal is then the drawn
+                                      # triangle's (the service gives a pixel no vertex normal: a smooth-shaded
+                                      # low-polygon mesh shows its facets in the card). false: the mesh's source
+                                      # triangles in a mesh shader of the cache's own. NOT run yet: off
 mesh_cards_atlas_size = 4096          # card atlas side, texels (reference: r.LumenScene.SurfaceCache.AtlasSize 4096)
 mesh_cards_captures_per_frame = 300   # card pages captured a frame at most (reference: CardCapturesPerFrame 300); with
                                       # capture_factor: texels captured a frame = atlas texels / capture_factor
@@ -75,6 +97,23 @@ mesh_cards_texel_density_scale = 100.0  # a card's texels along its longer side 
 mesh_cards_max_texels_per_m = 20.0    # ... at most this many per metre of half size (reference: CardMaxTexelDensity 0.2 / cm)
 mesh_cards_max_resolution = 512       # ... and at most this many (reference: CardMaxResolution 512)
 mesh_cards_min_resolution = 4         # a card under this many texels is not kept (reference: CardMinResolution 4)
+feedback = true                       # (mesh cards) pages above a card's resident level where the screen reads the card
+                                      # closer than that level holds (reference: r.LumenScene.SurfaceCache.Feedback 1):
+                                      # the hits of the reflections and of the radiosity report the page and the level
+                                      # their footprint wants, the CPU reads the reports a frame later, maps and captures
+                                      # those pages, and lets the ones no hit asks for any more leave, the one used
+                                      # longest ago first. false: every card has its distance's level only
+feedback_tile_size = 16               # one hit in a tile of this many pixels (trace texels) a side reports a frame, from a
+                                      # place that moves every frame (reference: Feedback.TileSize 16; a power of two)
+feedback_res_level_bias = -0.5        # added to the level a hit asks for, log2(the card's half size / the ray cone's
+                                      # radius at the hit) (reference: Feedback.ResLevelBias -0.5); +1 = twice the texels
+feedback_min_page_hits = 16           # a page asked for by no more hits than this in a frame is not mapped (reference:
+                                      # Feedback.MinPageHits 16)
+feedback_keep_unused_frames = 256     # a feedback page no hit asked for this many frames leaves the atlas (reference:
+                                      # NumFramesToKeepUnusedPages 256)
+feedback_gather = false               # the screen probes' hits read the high levels and report too. false, as the
+                                      # reference: its gather reads the resident level and reports nothing (its cones are
+                                      # wide: a probe ray's footprint is seldom finer than the resident level)
 mesh_cards_max_distance_m = 300.0     # cards exist for instances within this of the camera (reference: the ray tracing
                                       # culling radius, 30000 cm)
 mesh_cards_min_size_m = 0.1           # meshes and cards smaller than this have no cards (reference: MeshCardsMinSize 10 cm)

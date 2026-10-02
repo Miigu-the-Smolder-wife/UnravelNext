@@ -5,13 +5,17 @@
 //   STAGE 0  one thread per card page: its priority bucket per context (0 = most urgent) = 15 - log2(4 x frames since
 //            its last update x update speed); a page never updated counts as 2048 frames. Update speed = 1 / (1 +
 //            distance from the camera to the page's box / P[4].z), doubled when the box is within P[4].w of the view
-//            frustum. The histograms get the page's tiles.
+//            frustum; 4 for a page a reader of the cards' high levels read within the last two updates (P[0].w: the
+//            reference's CardPageHighResLastUsedBuffer rule - what a mirror shows is relit first), and for the direct
+//            light of a page lit by a light whose function changes with time (CL_PAGE_ANIMATED: the stored value is
+//            a sample of the moment it was stored at). The histograms get the page's tiles.
 //   STAGE 1  one thread: per context the max bucket - the first whose running tile count reaches the budget - and the
 //            tiles the budget leaves for that bucket.
 //   STAGE 2  one thread per card page: pages under the max bucket are listed, pages in it while the budget lasts; a
 //            listed page's tiles go to the context's tile list, its page-light record gets this frame and the next
 //            temporal index.
-// P[0] = { card frame SRV, select UAV, frame index, 0 }
+// P[0] = { card frame SRV, select UAV, frame index, last-used SRV (raw, CardLighting.hlsli; 0xFFFFFFFF: none -
+//          surface_cache.lighting_feedback off) }
 // P[4] = { page light UAV (raw), page capacity, asuint(update distance, m), asuint(frustum margin, m) }
 // P[5] = { direct tile budget, radiosity tile budget, direct list capacity, radiosity list capacity }
 #include "Frame.hlsli"
@@ -60,16 +64,24 @@ void main(uint3 id : SV_DispatchThreadID)
         }
         if (nearFrustum) speed *= 2;
     }
+    if (P[0].w != 0xFFFFFFFFu)
+    {
+        ByteAddressBuffer lastUsed = ResourceDescriptorHeap[P[0].w];
+        const uint used = lastUsed.Load(index * 4);
+        if (used != 0 && used + 2 >= P[0].z && used <= P[0].z) speed = 4;
+    }
     RWByteAddressBuffer light = ResourceDescriptorHeap[P[4].x];
     const ClPageLight pl = clPageLight(light.Load4(index * CL_PAGE_LIGHT_BYTES));
     const uint2 tiles2 = pageTiles(page);
     const uint tiles = tiles2.x * tiles2.y;
     uint buckets = 0;
+    const bool animated = (pl.directIndex & CL_PAGE_ANIMATED) != 0;
     for (uint context = 0; context < 2; ++context)
     {
         const uint last = context ? pl.indirectFrame : pl.directFrame;
         const float frames = last == 0 ? CL_NEVER_FRAMES : (float)(P[0].z + 1 - last);
-        const uint bucket = CL_BUCKETS - 1 - (uint)clamp(log2(max(4.0 * frames * speed, 1.0)), 0.0, CL_BUCKETS - 1.0);
+        const float contextSpeed = context == 0 && animated ? max(speed, 4.0) : speed;
+        const uint bucket = CL_BUCKETS - 1 - (uint)clamp(log2(max(4.0 * frames * contextSpeed, 1.0)), 0.0, CL_BUCKETS - 1.0);
         select.InterlockedAdd(clHistogramOffset(context, bucket), tiles);
         buckets |= bucket << (8 * context);
     }
@@ -131,7 +143,8 @@ void main(uint3 id : SV_DispatchThreadID)
         select.InterlockedAdd(head + CL_SELECT_PAGES, 1u, before);
         const uint at = index * CL_PAGE_LIGHT_BYTES + context * 4u;
         light.Store(at, P[0].z + 1);
-        light.Store(at + 8, light.Load(at + 8) + 1);
+        // (the direct index: CL_PAGE_ANIMATED starts clear - this update's cull sets it again where it holds)
+        light.Store(at + 8, context == 0 ? (light.Load(at + 8) + 1) & ~CL_PAGE_ANIMATED : light.Load(at + 8) + 1);
     }
 }
 #endif

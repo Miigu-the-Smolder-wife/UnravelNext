@@ -8,8 +8,10 @@
 // where the 8 probes around the sample exist (at the volume's clipmap bias), else to the trace distance.
 //   hit    the mesh cards' final lighting at the hit (clReadCards CL_READ_FINAL: the cards' own albedo and emission);
 //          a hit without cards: its direct light - the sun by one shadow ray, one local-light sample with its shadow
-//          ray (HitLocalSample.hlsli) - through the material's constants, as r.card.radiosity.trace; the back of a
-//          one-sided surface: 0. A thread traces at most 3 rays: bands of a third of 262,144 threads;
+//          ray (HitLocalSample.hlsli) - and the indirect light the card frame names (LumenHitIndirect.hlsli: the
+//          previous frame's volume, this frame's irradiance probes), through the material's constants, as
+//          r.card.radiosity.trace; the back of a one-sided surface: 0. A thread traces at most 3 rays: bands of a
+//          third of 262,144 threads;
 //   miss   inside the cache's coverage: the cache's radiance in the ray's direction (all 8 probes, weighted); else the sky.
 // The radiance is held to P[9].x exposed units (MaxRayIntensity 20) and stored as nits x LTV_SCALE.
 // P[0] = { trace UAV (Texture3D R11G11B10F, grid xy * 3), depth SRV, depth pyramid SRV, clipmap bias }
@@ -28,6 +30,7 @@
 #include "Passes/SurfaceCache/CardLighting.hlsli"
 #include "Passes/GI/LumenRadianceCache.hlsli"
 #include "Passes/GI/LumenTranslucencyVolumeGrid.hlsli"
+#include "Passes/GI/LumenHitIndirect.hlsli"
 #include "RayTracing/HitLocalSample.hlsli"
 
 [shader("raygeneration")]
@@ -99,7 +102,9 @@ void LumenTranslucencyVolumeTraceGen()
                 g_rtHitCone = 0.6;  // (a ray of the 3 x 3 sphere map: a cone of about 39 degrees half angle)
                 const float bias = 1e-3 + 2e-4 * distance(s.position, g_cameraPosition);
                 RtHitLighting L = (RtHitLighting)0;
-                L.irradiance = giFarSkyIrradiance(s.position, s.normal, asfloat(P[9].w));
+                const float4 e = lhiIrradiance(lhiSources(P[5].x), s.position, s.normal, seed + id.z * 7919u + texel.x * 31u + texel.y * 131u);
+                L.irradiance = e.a > 0 ? e.rgb : giFarSkyIrradiance(s.position, s.normal, asfloat(P[9].w));
+                L.specularRadiance = e.rgb / LTV_PI;
                 const float3 l = normalize(g_sunDirection);
                 if (dot(s.normal, l) > 0 || rtHitTransmits(m))
                 {

@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: MODE=0,1,2,3,4,5,6,7,8
+// unx-variants: MODE=0,1,2,3,4,5,6,7,8,9
 // r.gi.rc.* (LumenRadianceCache.hlsli): the radiance cache's bookkeeping passes.
 //   MODE 0 clear     per cell: indirection = invalid; thread 0 zeroes the frame's counters and histogram.
 //   MODE 1 mark      per 16 x 16 px screen tile: the surface under one jittered pixel marks its 8 probe cells (the
@@ -18,13 +18,18 @@
 //   MODE 7 reset     per probe slot: empties the cache (a new scene, a size change, an origin shift).
 //   MODE 8 validate  per cell: a probe that has never been traced is not offered to readers (indirection = invalid;
 //                    it keeps its slot).
+//   MODE 9 hit marks per position of the list the last frame's ray hits wrote (lrcHitMark; at most LRC_HIT_MARKS): its
+//                    8 probe cells are marked, at a clipmap P[1].w levels coarser than the position's own (such hits
+//                    fall anywhere a ray reaches: at the surfaces' probe density they would take the cache's budget).
+//                    P[2].x != 0: instead, one thread empties the list for this frame's hits.
 // Probe slot (raw, 16 B): coord x | y << 8 | z << 16 | clipmap << 24 | valid << 31; last used frame; last traced frame
 // (0: never); bucket | trace cost << 8.
 // State (raw): 0 slots allocated, 4 free list count, 8 traces queued, 12 selected bucket, 16 cost allowed from it,
 // 20 cost taken from it, 24 new probes' cost (at the downsampled cost, then growing), 32.. histogram (16 words).
 // Trace record (raw, 16 B): probe centre (world), clipmap << 24 | slot | force downsample << 31.
 // P[0] = { parameters SRV (LrcParams), indirection UAV, probe slots UAV, state UAV }
-// P[1] = { free list UAV, traces UAV, depth SRV (MODE 1), tile px (MODE 1) }
+// P[1] = { free list UAV, traces UAV, depth SRV (MODE 1) / the hit-mark list UAV (MODE 9), tile px (MODE 1) / clipmap
+//          bias (MODE 9) }
 // P[2] = { ray dispatch descriptions UAV, offset of a description's Width, filter dispatch arguments UAV, probes per
 //          dispatch } (MODE 6), P[3] = { chunks, stride of a ray dispatch description (bytes), 0, 0 }: chunk c's
 //          description at c x stride; its filter arguments at 32 c (filter) and 32 c + 16 (store).
@@ -236,6 +241,32 @@ void main()
         rayDesc.Store3(c * P[3].y + P[2].y, n > 0 ? uint3(p.probeResolution * p.probeResolution, n, 1) : uint3(0, 0, 0));  // Width, Height, Depth
         filterArgs.Store3(32 * c, n > 0 ? uint3((p.probeResolution + 7) / 8, (p.probeResolution + 7) / 8, n) : uint3(0, 0, 0));
         filterArgs.Store3(32 * c + 16, n > 0 ? uint3((p.finalResolution + 7) / 8, (p.finalResolution + 7) / 8, n) : uint3(0, 0, 0));
+    }
+}
+#elif MODE == 9
+[numthreads(64, 1, 1)]
+void main(uint3 id : SV_DispatchThreadID)
+{
+    RWByteAddressBuffer marks = ResourceDescriptorHeap[P[1].z];
+    if (P[2].x != 0)
+    {
+        if (id.x == 0) marks.Store(0, 0);
+        return;
+    }
+    if (id.x >= min(marks.Load(0), LRC_HIT_MARKS)) return;
+    const LrcParams p = lrcParams(P[0].x);
+    const float3 position = asfloat(marks.Load3(16 + id.x * 16));
+    if (!all(abs(position) < 1e9)) return;
+    const uint own = lrcClipmap(p, position, 0.5);
+    if (own >= p.clipmaps) return;
+    const uint clipmap = min(own + P[1].w, p.clipmaps - 1);
+    RWTexture3D<uint> indirection = ResourceDescriptorHeap[P[0].y];
+    const int3 corner = int3(floor(lrcCoordFloat(p, position, clipmap) - 0.5));
+    for (uint i = 0; i < 8; ++i)
+    {
+        const int3 c = corner + int3(i & 1, (i >> 1) & 1, i >> 2);
+        if (any(c < 0) || any(c >= int(p.grid))) continue;
+        indirection[uint3(c.x + int(clipmap * p.grid), c.y, c.z)] = LRC_USED;
     }
 }
 #elif MODE == 7

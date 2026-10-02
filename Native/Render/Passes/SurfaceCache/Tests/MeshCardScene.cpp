@@ -1,5 +1,6 @@
 // refl::MeshCardScene (MESH_CARDS_INTERFACE_KO.md 5), CPU: the level a card asks for at a distance, sub-allocation and
-// whole pages, the per-frame capture budget, reallocation and hiding when the camera moves, and the atlas state's
+// whole pages, the per-frame capture budget, reallocation and hiding when the camera moves, the feedback's pages above
+// the resident level (mapped where hits ask, kept while they ask, gone when they stop), and the atlas state's
 // consistency after every frame. With a .unxscene argument: the scene's cards filled from its first camera - frames
 // until every card has its level, the atlas use, the time of an update.
 #include "unx/core/Jobs.h"
@@ -282,6 +283,87 @@ int main(int argc, char** argv)
             uint32_t ofForty = 0;
             for (const McCapture& c : s.captures()) ofForty += c.sceneInstance == 40 && !c.refresh ? 1u : 0u;
             CHECK(ofForty == 6);
+        }
+        {
+            // feedback: 40 m from a 40 m wall its large faces are resident at 64 texels (level 6, one element). A page of
+            // level 9 (4 x 4 pages) the hits ask for is mapped and captured with the card's lighting carried over; the
+            // level's other pages are sent to the resident page; the page stays while hits ask and leaves 4 feedback
+            // frames after they stop.
+            const scene::MeshCards wall = scene::buildMeshCards(boxMesh({ -20, -20, -0.1f }, { 20, 20, 0.1f }), std::vector<uint8_t>{});
+            McSettings quiet;
+            quiet.refreshFraction = 0;
+            quiet.keepUnusedPagesFrames = 4;
+            MeshCardScene s(quiet);
+            s.addInstance(0, wall, translation({ 0, 0, 0 }));
+            const float3 eye{ 0, 0, 40 };
+            uint32_t frames = 0;
+            do
+            {
+                s.update(std::span<const float3>(&eye, 1));
+            } while (!s.captures().empty() && ++frames < 20);
+            s.validate();
+            uint32_t face = mc::kNone;
+            for (uint32_t i = 0; i < s.cardsGpu().size() && face == mc::kNone; ++i)
+                if (s.cardsGpu()[i].extent[0] > 19 && s.cardsGpu()[i].extent[1] > 19 && (s.cardsGpu()[i].packed & (1u << 16)) != 0) face = i;
+            CHECK(face != mc::kNone);
+            if (face != mc::kNone)
+            {
+                const uint32_t residentPages = s.stats().mappedPages, resident = s.cardsGpu()[face].pageTableOffset;
+                CHECK(s.cardsGpu()[face].sizeInPages == (1u | 1u << 16) && s.cardsGpu()[face].hiResPageTableOffset == resident);
+                McFeedback f;
+                f.card = face;
+                f.resLevel = 9;
+                f.pageX = 1;
+                f.pageY = 2;
+                // no more hits than the minimum: nothing is mapped
+                f.hits = quiet.feedbackMinPageHits;
+                s.setFeedback(std::span<const McFeedback>(&f, 1), 8100);
+                s.update(std::span<const float3>(&eye, 1));
+                CHECK(s.captures().empty() && s.stats().hiResPages == 0);
+                f.hits = 100;
+                s.setFeedback(std::span<const McFeedback>(&f, 1), 8100);
+                s.update(std::span<const float3>(&eye, 1));
+                s.validate();
+                CHECK(s.stats().hiResRequests == 1 && s.stats().hiResMapped == 1 && s.stats().hiResPages == 1 && s.captures().size() == 1);
+                if (!s.captures().empty())
+                    CHECK(s.captures()[0].resample && !s.captures()[0].refresh && s.captures()[0].atlasRect[2] == 128 && s.captures()[0].card == face);
+                CHECK(s.stats().mappedPages == residentPages + 1 && s.stats().pending == 0);
+                CHECK(s.cardsGpu()[face].hiResSizeInPages == (4u | 4u << 16) && s.cardsGpu()[face].pageTableOffset == resident);
+                const uint32_t high = s.cardsGpu()[face].hiResPageTableOffset;
+                CHECK(high != resident);
+                CHECK(s.pageTableGpu()[high + 1 + 2 * 4].cardPage == high + 1 + 2 * 4);  // the page itself
+                CHECK(s.pageTableGpu()[high].cardPage == resident);                      // another page of the level
+                CHECK(((s.pageTableGpu()[high].packed >> 24) & 0xF) == 6);
+                // while the hits keep asking the page stays, and nothing is captured again
+                for (int i = 0; i < 8; ++i)
+                {
+                    s.setFeedback(std::span<const McFeedback>(&f, 1), 8100);
+                    s.update(std::span<const float3>(&eye, 1));
+                    CHECK(s.captures().empty() && s.stats().hiResPages == 1 && s.stats().hiResRequests == 0);
+                }
+                // no hit asks any more
+                for (int i = 0; i < 5; ++i)
+                {
+                    s.setFeedback(std::span<const McFeedback>(), 8100);
+                    s.update(std::span<const float3>(&eye, 1));
+                    s.validate();
+                }
+                CHECK(s.stats().hiResPages == 0 && s.stats().mappedPages == residentPages);
+                CHECK(s.cardsGpu()[face].hiResPageTableOffset == s.cardsGpu()[face].pageTableOffset);
+                // the resident level rising past the feedback's level takes the feedback pages with it
+                s.setFeedback(std::span<const McFeedback>(&f, 1), 8100);
+                s.update(std::span<const float3>(&eye, 1));
+                CHECK(s.stats().hiResPages == 1);
+                const float3 near{ 0, 0, 1.5f };
+                for (int i = 0; i < 20; ++i)
+                {
+                    s.setFeedback(std::span<const McFeedback>(), 8100);
+                    s.update(std::span<const float3>(&near, 1));
+                    s.validate();
+                    if (s.captures().empty()) break;
+                }
+                CHECK(s.stats().hiResPages == 0 && s.stats().requests == 0);
+            }
         }
         {
             // an instance too small for cards, and one shown at a scale

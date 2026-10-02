@@ -7,7 +7,12 @@
 //   2 cards SRV (McCard), 3 card pages SRV (McCardPage), 4 page table SRV (uint2), 5 depth atlas SRV, 6 albedo atlas SRV,
 //   7 normal atlas SRV, 8 emissive atlas SRV, 9 atlas size (texels, square), 10 card pages in use, 11 frame index,
 //   12 final lighting atlas SRV, 13 direct lighting atlas SRV, 14 indirect lighting atlas SRV, 15 page light state SRV
-//   (CardLighting.hlsli), 16 scene instances in the map, 17 asuint(the hit read's depth bias, m).
+//   (CardLighting.hlsli), 16 scene instances in the map, 17 asuint(the hit read's depth bias, m),
+//   18 feedback table UAV (raw; MC_NONE: no feedback - CardLighting.hlsli clFeedback), 19 the feedback's dither: tile
+//   jitter x | y << 8 | tile mask << 16, 20 asuint(the feedback's resolution level bias), 21 last-used UAV (raw: per
+//   card page the update in which a reader of the high levels last read it; MC_NONE: none),
+//   22..27 the indirect light of hits without cards (Passes/GI/LumenHitIndirect.hlsli lhiSources; written with the
+//   frame and again by the final gather once this frame's volume and radiance cache stand: CardFrameSources.hlsl).
 // The record buffers are raw here (the loaders hide it).
 #ifndef UNX_CARD_LAYOUT_HLSLI
 #define UNX_CARD_LAYOUT_HLSLI
@@ -19,6 +24,10 @@
 #define MC_VIRTUAL_PAGE 127u    // the card texels a page holds (half a texel of border between pages)
 #define MC_EMISSIVE_SCALE (1.0 / 16.0)
 #define MC_DEPTH_NONE 1.0       // no surface in the texel
+#define MC_MIN_RES_LEVEL 3u     // a card's resolution levels: log2 of the texels along its longer side (mc::kMinResLevel)
+#define MC_MAX_RES_LEVEL 11u
+#define MC_SUB_ALLOC_RES_LEVEL 7u  // log2(MC_PAGE): a level up to this is one element inside a shared physical page
+#define MC_FRAME_SOURCES 88u    // byte offset of the frame's words 22..27 (LumenHitIndirect.hlsli)
 
 struct McFrame
 {
@@ -28,6 +37,9 @@ struct McFrame
     uint finalLighting, directLighting, indirectLighting, pageLight;
     uint instances;
     float depthBias;
+    uint feedback, feedbackDither;
+    float feedbackBias;
+    uint lastUsed;
 };
 McFrame mcFrame(uint frameSrv)
 {
@@ -38,9 +50,13 @@ McFrame mcFrame(uint frameSrv)
     f.pageTable = c.x, f.depth = c.y, f.albedo = c.z, f.normal = c.w;
     f.emissive = d.x, f.atlasSize = d.y, f.pageCount = d.z, f.frame = d.w;
     f.finalLighting = e.x, f.directLighting = e.y, f.indirectLighting = e.z, f.pageLight = e.w;
-    const uint2 g = b.Load2(64);
+    const uint4 g = b.Load4(64);
     f.instances = g.x;
     f.depthBias = asfloat(g.y);
+    f.feedback = g.z, f.feedbackDither = g.w;
+    const uint2 h = b.Load2(80);
+    f.feedbackBias = asfloat(h.x);
+    f.lastUsed = h.y;
     return f;
 }
 
@@ -168,8 +184,11 @@ McTexel mcPageTexel(McFrame f, McCardPage page, McCard card, uint2 coordInPage)
     return t;
 }
 
-// Where a card-space point of a card lands in the atlas (the resident level; the reference's ComputeSurfaceCacheSample):
-// the four texels around it and their bilinear weights. valid = false when the page is not mapped.
+// Where a card-space point of a card lands in the atlas (the reference's ComputeSurfaceCacheSample): the four texels
+// around it and their bilinear weights. valid = false when the page is not mapped. hiRes false: the card's resident
+// (locked) level, every page of which is mapped. hiRes true: its highest level - there only the pages the feedback
+// asked for are mapped, and the page table sends every other page to the nearest lower level's page that is; the
+// sample is laid out in whichever page that is (its own rectangle of the card).
 struct McCardSample
 {
     bool valid;
@@ -178,7 +197,7 @@ struct McCardSample
     float4 weights;     // (0,0) (1,0) (0,1) (1,1)
     uint2 tile;         // atlas coordinate / MC_TILE of the sample
 };
-McCardSample mcCardSample(McFrame f, McCard card, float2 localXy)
+McCardSample mcCardSample(McFrame f, McCard card, float2 localXy, bool hiRes = false)
 {
     McCardSample s;
     s.valid = false;
@@ -186,12 +205,13 @@ McCardSample mcCardSample(McFrame f, McCard card, float2 localXy)
     s.texel00 = 0;
     s.weights = 0;
     s.tile = 0;
-    const uint2 sizeInPages = uint2(card.sizeInPages & 0xFFFFu, card.sizeInPages >> 16);
+    const uint packedSize = hiRes ? card.hiResSizeInPages : card.sizeInPages;
+    const uint2 sizeInPages = uint2(packedSize & 0xFFFFu, packedSize >> 16);
     if (any(sizeInPages == 0)) return s;
     float2 uv = saturate(localXy / card.extent.xy * 0.5 + 0.5);
     const uint2 pageCoord = min(uint2(uv * float2(sizeInPages)), sizeInPages - 1);
     ByteAddressBuffer table = ResourceDescriptorHeap[f.pageTable];
-    const uint2 entry = table.Load2((card.pageTableOffset + pageCoord.x + pageCoord.y * sizeInPages.x) * 8);
+    const uint2 entry = table.Load2(((hiRes ? card.hiResPageTableOffset : card.pageTableOffset) + pageCoord.x + pageCoord.y * sizeInPages.x) * 8);
     const uint2 resLevel = uint2((entry.x >> 24) & 0xFu, entry.x >> 28);
     if (resLevel.x == 0) return s;
     s.page = entry.y;

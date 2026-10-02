@@ -44,6 +44,7 @@
 #include "RayTracing/HitLocalLights.hlsli"
 #include "Passes/Shading/MegaLightsWorld.hlsli"
 #include "Passes/SurfaceCache/SurfaceCache.hlsli"
+#include "Passes/SurfaceCache/SurfaceCacheLightFunction.hlsli"
 
 #define SC_LIGHTS_PER_CELL 8u
 
@@ -259,6 +260,11 @@ void SurfaceCacheCellsGen()
         const float3 directBefore = direct;
         direct = 0;
         sun = 0;
+        // the lights' functions toward the cell (SurfaceCacheLightFunction.hlsli; the sampled lights' weights below hold
+        // theirs already: rtLocalLightFinish). A cell lit by one that changes with time is listed with the cells
+        // consumers read, which are relit first (the head's feedback bit).
+        const uint functions = scLightFunctionTable(scene.pad);
+        bool animated = false;
         if (P[0].w & 16u)
         {
             const MlPoint p = mlPointLambert(position, normal, float3(1, 1, 1));  // (its radiance is irradiance / pi)
@@ -267,7 +273,11 @@ void SurfaceCacheCellsGen()
             {
                 const bool visible = !samples.castShadow[i] ||
                                      mlSampleVisible(scene, position, normal, samples.light[i], float2(giUnit(seed + 1), giUnit(seed + 2)), bias, bias, 0.05);
-                if (visible) direct += 3.14159265 * mlLightUnshadowed(p, loadLight(samples.light[i]), samples.light[i], UNX_NONE) * samples.weight[i];
+                const GpuLight sampled = loadLight(samples.light[i]);
+                if (visible)
+                    direct += 3.14159265 * mlLightUnshadowed(p, sampled, samples.light[i], UNX_NONE) * samples.weight[i] *
+                              scLightFunction(functions, sampled, samples.light[i], position, size);
+                animated = animated || scLightFunctionAnimated(functions, samples.light[i]);
             }
             // the running mean (frames in the head's bits 24-31)
             const uint headOffsetS = scHeadsOffset(n, slot);
@@ -331,7 +341,9 @@ void SurfaceCacheCellsGen()
                     lightOf[a] = a < held ? chosen[a] : 0u;
                     if (a >= held) continue;
                     kept += weight[a];
-                    lightE[a] = 3.14159265 * mlLightUnshadowed(lambert, loadLight(chosen[a]), chosen[a], UNX_NONE);
+                    const GpuLight evaluatedLight = loadLight(chosen[a]);
+                    lightE[a] = 3.14159265 * mlLightUnshadowed(lambert, evaluatedLight, chosen[a], UNX_NONE);
+                    if (any(lightE[a] > 0)) lightE[a] *= scLightFunction(functions, evaluatedLight, chosen[a], position, size);
                     if (!all(lightE[a] >= 0) || !all(lightE[a] < 1e30)) lightE[a] = 0;  // (NaN, infinite: no light)
                 }
                 [loop] for (uint r = 0; r < SC_LIGHTS_PER_CELL; ++r)
@@ -349,6 +361,7 @@ void SurfaceCacheCellsGen()
                 }
                 evaluated = held;  // (done: the loop below has nothing left; the kept lights stay known to the remainder draw)
             }
+            [loop] for (uint f = 0; f < held; ++f) animated = animated || scLightFunctionAnimated(functions, chosen[f]);
             [loop] for (uint i = evaluated; i < held; ++i)
             {
                 kept += weight[i];
@@ -356,7 +369,8 @@ void SurfaceCacheCellsGen()
                 if (analytic)
                 {
                     const GpuLight g = loadLight(chosen[i]);
-                    const float3 e = 3.14159265 * mlLightUnshadowed(lambert, g, chosen[i], UNX_NONE);
+                    float3 e = 3.14159265 * mlLightUnshadowed(lambert, g, chosen[i], UNX_NONE);
+                    if (any(e > 0)) e *= scLightFunction(functions, g, chosen[i], position, size);
                     if (any(e > 0) && ((P[0].w & 1024u) != 0 || !lightCastsShadow(g) || scCentreVisible(scene, position, normal, g, bias, lightRayFlags))) direct += e;
                     continue;
                 }
@@ -401,6 +415,7 @@ void SurfaceCacheCellsGen()
                 }
             }
         }
+        if (animated) b.InterlockedOr(scHeadsOffset(n, slot), SC_HEAD_FEEDBACK);
         const float3 toSun = giSunDirection(seed + 3);
         const float muS = dot(normal, toSun);
         if (muS > 0 && (P[0].w & 256u) == 0)

@@ -13,8 +13,17 @@
 //   r.card.frame -> r.card.capture (raster, the frame's new and refreshed pages into the capture atlas)
 //   -> r.card.resample (re-allocated cards keep their lighting) -> r.card.upload (records) -> r.card.copy (atlases)
 //   -> CardLighting::recordLighting (selection, direct light, radiosity, final lighting).
+// The capture draws a page's instance from its source triangles (CardCapture.ms/.ps.hlsl), or - with
+// surface_cache.mesh_cards_capture_clusters - from the cluster hierarchy's cut at the page's texel size through V's
+// raster service (FrameServices::rasterizeDepth: a page is a view of a request; r.card.vdepth settles the nearest
+// surface, r.card.vmaterial writes its material - CardCaptureCluster.ps.hlsl).
 // One round a frame; surface_cache.mesh_cards_load_rounds while a level loads, so the cache is whole within a few frames
 // of a load instead of a hundred.
+// Feedback (surface_cache.feedback; Unreal's LumenSurfaceCacheFeedback): the frame's readers of the cards' high levels
+// (reflections, the radiosity) report the page and level each hit wanted into a table (CardLighting.hlsli clFeedback);
+// at the start of the next frame the table is copied for the CPU and emptied (r.card.feedback.readback / .clear), and
+// the frame that finds the copy complete - framesInFlight later - hands it to MeshCardScene::setFeedback, which maps
+// and captures those pages above the cards' resident levels and lets the ones no hit asks for any more leave.
 #include "unx/refl/CardLighting.h"
 #include "unx/refl/MeshCardCache.h"
 #include "unx/refl/MeshCardScene.h"
@@ -31,11 +40,17 @@ struct SurfaceCacheCardSettings  // Config/quality/surface_cache.toml
     McSettings cards;
     bool direct = true, radiosity = true, shadowRaysOpaque = false;
     float radiosityCap = 40.0f, radiosityFrames = 4.0f;
+    float radiositySkipBackFace = 0.05f, radiositySkipTwoSided = 0.01f;  // metres; 0: the radiosity rays are not re-shot
+    float radiosityMinTraceDistance = 0.10f;
     uint32_t directFactor = 32, radiosityFactor = 64;
     float depthBias = 0.10f;
     uint32_t loadRounds = 8;          // update rounds a frame while a level loads
     uint32_t loadLightingRounds = 96; // rounds after the last card of a load was captured (direct light of every page,
                                       // then the radiosity's bounces)
+    bool captureClusters = false;     // surface_cache.mesh_cards_capture_clusters: the captures are drawn from the cluster
+                                      // hierarchy's cut through V's raster service (CardCaptureCluster.ps.hlsl)
+    float feedbackResLevelBias = -0.5f;  // surface_cache.feedback_res_level_bias (cards.feedback: the switch)
+    bool lightingFeedback = true;        // surface_cache.lighting_feedback
     std::string cacheDirectory;       // mesh card files; "" = the default directory, "none" = no disk cache
     static SurfaceCacheCardSettings fromQuality(const QualityConfig& q);
 };

@@ -17,6 +17,8 @@
 // P[3] = { asuint(radius px), asuint(depth weight), asuint(young frames), asuint(max frames) }
 // P[4] = { asuint(max roughness to trace), asuint(roughness fade length), asuint(tone-map range), GI's rough specular SRV
 //          (view.giRoughSpecular: the rough lobe's mean incident radiance x exposure, per pixel; UNX_NONE: none) }
+// P[5] = { M's material word SRV, the snap frame's exposure reference SRV, asuint(max roughness to trace of a foliage
+//          pixel: ReflectionInternal.hlsli reflFoliagePixel), 0 }
 // With GI's rough specular (gi.lumen's final gather) the pixels above the roughness limit take it as their value (a = 1:
 // ShadeOpaque then reads no probe lobe for them), and the pixels in the fade take the mix of it and the traced value -
 // the reference's rough reflections above MaxRoughnessToTrace. Without it those pixels keep the K path (a = the share).
@@ -92,7 +94,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         }
     }
     float3 value = max(reuseFromFilter(youngExpand(sum / weight, compress), range), 0.0);
-    float share = reuseTraceShare(s.roughness, asfloat(P[4].x), asfloat(P[4].y));
+    float share = reuseTraceShare(s.roughness, reflFoliagePixel(pixel) ? asfloat(P[5].z) : asfloat(P[4].x), asfloat(P[4].y));
     if (P[4].w != UNX_NONE)
     {
         if (share < 1)

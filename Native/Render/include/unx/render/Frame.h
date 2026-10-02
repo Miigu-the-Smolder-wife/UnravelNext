@@ -70,6 +70,12 @@ inline void declareSurfaceCacheCards(PassBuilder& b, const SurfaceCacheCardRefs&
     b.use(r.direct, use);
     b.use(r.indirect, use);
     b.use(r.final, use);
+    // (what the readers write and what hits without cards read: FrameResources.h)
+    const Use write = use == Use::SrvCompute ? Use::UavCompute : Use::UavGraphics;
+    for (const BufferRef& buffer : { r.feedback, r.lastUsed, r.hitRcMarks })
+        if (buffer.valid()) b.use(buffer, write);
+    for (const TextureRef& texture : { r.hitVolumeAmbient, r.hitVolumeDirectional, r.hitRcIndirection, r.hitRcIrradiance, r.hitRcDepth })
+        if (texture.valid()) b.use(texture, use);
 }
 
 // The indirect-light source of the passes that light air, particles, water and glass (Passes/GI/GiSource.hlsli): the

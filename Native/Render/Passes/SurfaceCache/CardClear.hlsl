@@ -4,6 +4,7 @@
 // P[0] = { direct atlas UAV, indirect atlas UAV, final atlas UAV, trace atlas UAV }
 // P[1] = { SH atlas UAV red, green, blue, frames atlas UAV }
 // P[2] = { page light UAV (raw), uniform bits UAV (raw), atlas size, page capacity }
+// P[3] = { last-used UAV (raw: a word per card page), 0, 0, 0 }
 #include "Passes/SurfaceCache/CardLighting.hlsli"
 
 [numthreads(8, 8, 1)]
@@ -36,5 +37,7 @@ void main(uint3 id : SV_DispatchThreadID)
     {
         RWByteAddressBuffer pageLight = ResourceDescriptorHeap[P[2].x];
         pageLight.Store4(page * CL_PAGE_LIGHT_BYTES, uint4(0, 0, 0, 0));
+        RWByteAddressBuffer lastUsed = ResourceDescriptorHeap[P[3].x];
+        lastUsed.Store(page * 4, 0);
     }
 }

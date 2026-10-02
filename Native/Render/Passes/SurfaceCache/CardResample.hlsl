@@ -2,7 +2,9 @@
 // r.card.resample (SurfaceCacheCards.cpp): a card that changes its resolution keeps its lighting - Unreal's
 // ResampleLightingHistory (LumenSceneLighting.usf). It runs between the frame's capture and the upload of the frame's
 // card records: the record buffers and the lighting atlases still hold the state of the frame before, so a texel of a
-// re-allocated page reads the card's old pages through the old page table (mcCardSample), bilinear over the old texels
+// re-allocated page reads the card's old pages through the old page table (mcCardSample: the highest level the card
+// had there - a feedback page starts with the resident level's lighting, a resident level that changes keeps what
+// its feedback pages held), bilinear over the old texels
 // that had a surface. The result goes to two images laid out like the capture atlas; r.card.copy moves it into the
 // page's new place after the records are uploaded.
 // One group row per capture of the frame (group.y), 16 x 16 groups of 8 x 8 texels over a page of at most 128 x 128.
@@ -28,7 +30,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     const McFrame f = mcFrame(P[0].z);
     const McCard card = mcLoadCard(f, cap.card);
     const float2 uv = cap.cardUvRect.xy + (float2(p) + 0.5) / float2(cap.captureSize) * (cap.cardUvRect.zw - cap.cardUvRect.xy);
-    const McCardSample s = mcCardSample(f, card, (uv * 2 - 1) * card.extent.xy);
+    const McCardSample s = mcCardSample(f, card, (uv * 2 - 1) * card.extent.xy, true);
     if (!s.valid) return;
     Texture2D<float> depth = ResourceDescriptorHeap[f.depth];
     Texture2D<float3> direct = ResourceDescriptorHeap[f.directLighting];

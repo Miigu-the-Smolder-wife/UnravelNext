@@ -27,6 +27,11 @@
 //        the other side of a wall does not.
 // A probe that passes both has its centre and its ray's start in the asking point's own space. Where no probe answers
 // the lookup's weight is 0 and the caller traces its ray to the full length instead.
+// Irradiance (lumen.hit_indirect_radiance_cache; the reference's CalculateIrradiance, IrradianceProbeResolution 6): every
+// traced probe also keeps the irradiance of its radiance on a 6 x 6 equal-area map of normals (+ 1 border), the texels
+// that hold nothing left out and the rest scaled up for them; lrcIrradiance reads it at a point - the indirect light
+// of a ray hit that has no card (LumenHitIndirect.hlsli). Such hits also ask for probes where they fall (lrcHitMark: a
+// list of positions the next frame's marking takes), so that a surface only a mirror shows has probes around it.
 #ifndef UNX_LUMEN_RADIANCE_CACHE_HLSLI
 #define UNX_LUMEN_RADIANCE_CACHE_HLSLI
 #include "Bindless.hlsli"
@@ -39,6 +44,10 @@
 #define LRC_HISTOGRAM 16u
 #define LRC_RADIANCE_SCALE (1.0 / 64.0)
 #define LRC_PI 3.14159265358979
+#define LRC_IRRADIANCE_RES 6u          // a probe's irradiance map, texels a side (stored with a 1-texel border: 8)
+#define LRC_IRRADIANCE_BORDERED 8u
+#define LRC_IRRADIANCE_SCALE (1.0 / 64.0)  // stored: lux x this
+#define LRC_HIT_MARKS 2048u            // positions the hits' mark list holds a frame (16 B each after a 16 B header)
 
 // The frame's parameters (a raw buffer; FrameResources::lumenRcParams).
 struct LrcParams
@@ -232,4 +241,54 @@ float4 lrcSample(LrcParams p, uint indirectionSrv, uint atlasSrv, uint depthSrv,
 }
 // The point of a ray the probes must see (lrcSample seenFrom): a quarter cell along it (off the surface it starts on).
 float3 lrcSeenFrom(LrcParams p, LrcCoverage coverage, float3 origin, float3 direction) { return origin + direction * (0.25 * lrcCellSize(p, coverage.clipmap)); }
+
+// The cache's irradiance (rgb lux, a = the weight that answered; 0: none) on a surface of 'normal' at a position that
+// need not have been marked: the 8 probes around it in the finest clipmap where enough of them exist, have been traced
+// and see the point (lrcProbeSees: the point lifted a tenth of a cell off its surface) - the point's own level first,
+// then coarser ones, at most LRC_MAX_CLIPMAPS levels of 8 probes. Each probe's irradiance map bilinear at the normal,
+// weighted by how much of that hemisphere the probe holds.
+float4 lrcIrradiance(LrcParams p, uint indirectionSrv, uint irradianceSrv, uint depthSrv, float3 worldPosition, float3 normal)
+{
+    Texture3D<uint> indirection = ResourceDescriptorHeap[indirectionSrv];
+    Texture2D<float4> atlas = ResourceDescriptorHeap[irradianceSrv];
+    const float2 octa = lrcDirectionToUv(normal) * float(LRC_IRRADIANCE_RES) + 1.0;
+    const float side = float(p.atlasProbes * LRC_IRRADIANCE_BORDERED);
+    for (uint clipmap = lrcClipmap(p, worldPosition, 0.5); clipmap < p.clipmaps; ++clipmap)
+    {
+        const float3 f = lrcCoordFloat(p, worldPosition, clipmap) - 0.5;
+        const int3 corner = int3(floor(f));
+        const float3 a = f - floor(f);
+        const float3 seenFrom = worldPosition + normal * (0.1 * lrcCellSize(p, clipmap));
+        float4 sum = 0;
+        for (uint i = 0; i < 8; ++i)
+        {
+            const int3 o = int3(i & 1, (i >> 1) & 1, i >> 2);
+            const float w = (o.x ? a.x : 1 - a.x) * (o.y ? a.y : 1 - a.y) * (o.z ? a.z : 1 - a.z);
+            if (!(w > 0)) continue;
+            const uint probe = lrcIndirection(indirection, p, corner + o, clipmap);
+            if (probe >= LRC_USED) continue;
+            const float3 centre = lrcProbePosition(p, uint3(corner + o), clipmap);
+            if (depthSrv != 0xFFFFFFFFu)
+            {
+                Texture2D<uint> depth = ResourceDescriptorHeap[depthSrv];
+                if (!lrcProbeSees(p, depth, probe, centre, clipmap, seenFrom)) continue;
+            }
+            const float4 v = atlas.SampleLevel(g_linearClamp, (float2(lrcAtlasCoord(p, probe)) * float(LRC_IRRADIANCE_BORDERED) + octa) / side, 0);
+            sum += float4(v.rgb * v.a, v.a) * w;
+        }
+        if (sum.a >= LRC_MIN_ANSWER) return float4(sum.rgb / (sum.a * LRC_IRRADIANCE_SCALE), sum.a);
+    }
+    return float4(0, 0, 0, 0);
+}
+
+// A hit asks for probes around its position (the list: word 0 = positions asked for this frame - those past
+// LRC_HIT_MARKS are not stored, a later frame's hits ask again - then 16 B a position from byte 16). The next frame's
+// r.gi.rc.hitmark marks them between the cache's clear and its update.
+void lrcHitMark(uint marksUav, float3 worldPosition)
+{
+    RWByteAddressBuffer marks = ResourceDescriptorHeap[marksUav];
+    uint index;
+    marks.InterlockedAdd(0, 1u, index);
+    if (index < LRC_HIT_MARKS) marks.Store3(16 + index * 16, asuint(worldPosition));
+}
 #endif

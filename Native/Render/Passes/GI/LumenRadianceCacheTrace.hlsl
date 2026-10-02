@@ -7,7 +7,9 @@
 // distance. Hit lighting is the screen-probe rays' (Lumen/LgTrace.hlsl): the hit reads the mesh cards of its instance
 // (direct light with the sun, radiosity) and shades its own material; a hit without cards takes the sun (one shadow ray
 // into the disk), one local-light sample with its shadow ray and - when a world cache is bound - that cache's
-// irradiance; the hit's own emission. An analytic area light's proxy returns 0 and occludes. A miss returns the sky.
+// irradiance, else the indirect light the card frame names (LumenHitIndirect.hlsli: while the cache updates, the
+// previous frame's translucency volume); the hit's own emission. An analytic area light's proxy returns 0 and
+// occludes. A miss returns the sky.
 // Probe occlusion (P[4].w != 0; LumenRadianceCache.hlsli): before its ray the thread walks the probe's straight line to
 // the ray's start; anything in the way that is not a two-sided sheet and the texel holds nothing (alpha 0, the depth =
 // the blocker's distance).
@@ -29,6 +31,7 @@
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/SurfaceCache/CardLighting.hlsli"
 #include "Passes/GI/LumenRadianceCache.hlsli"
+#include "Passes/GI/LumenHitIndirect.hlsli"
 #include "RayTracing/HitLocalSample.hlsli"
 
 float lrcBias(float3 p) { return 1e-3 + 2e-4 * distance(p, g_cameraPosition); }
@@ -118,7 +121,15 @@ void LumenRadianceCacheTraceGen()
                 const GiHeader h = giHeader(cache);
                 giCacheLightingAt(cache, h, s.position, s.normal, reflect(r.Direction, s.normal), giLevelForSize(h, footprint), L.irradiance, L.specularRadiance);
             }
-            if (!fromSurfaceCache) L.irradiance += giFarSkyIrradiance(s.position, s.normal, asfloat(P[5].y));
+            bool indirectFound = false;
+            if (!fromSurfaceCache && P[0].x == UNX_NONE)
+            {
+                const float4 e = lhiIrradiance(lhiSources(P[5].x), s.position, s.normal, seed);
+                L.irradiance += e.rgb;
+                L.specularRadiance += e.rgb / LRC_PI;
+                indirectFound = e.a > 0;
+            }
+            if (!fromSurfaceCache && !indirectFound) L.irradiance += giFarSkyIrradiance(s.position, s.normal, asfloat(P[5].y));
             const float3 l = normalize(g_sunDirection);
             if (!fromSurfaceCache && (dot(s.normal, l) > 0 || rtHitTransmits(m)) && (P[3].w & 16) == 0)
             {

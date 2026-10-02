@@ -34,6 +34,10 @@ struct LumenRcFrame
     TextureRef depth;          // R16_UINT, (atlas probes x probe resolution)^2: lrcEncodeDepth
     uint32_t params = 0xFFFFFFFFu;  // raw SRV of this frame's LrcParams
     bool updated = false;
+    // lumen.hit_indirect_radiance_cache (invalid: off): the probes' irradiance maps (RGBA16F, (atlas probes x 8)^2:
+    // lrcIrradiance) and the list ray hits ask for probes through (raw UAV: lrcHitMark; taken by the next frame's Begin).
+    TextureRef irradiance;
+    BufferRef hitMarks;
 };
 LumenRcFrame lumenRadianceCacheBegin(FramePassContext& fc, const ViewResources& main);
 void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, rt::RayScene& rays, const LumenRcInputs& inputs, LumenRcFrame& frame);

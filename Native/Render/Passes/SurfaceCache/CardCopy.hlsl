@@ -14,6 +14,8 @@
 // P[2] = { normal atlas UAV, emissive atlas UAV, direct atlas UAV, indirect atlas UAV }
 // P[3] = { final atlas UAV, radiosity frames atlas UAV (R8_UINT, atlas / 8), uniform bits UAV (raw), page light UAV (raw) }
 // P[4] = { resampled direct SRV, resampled indirect SRV, atlas size, asuint(max radiosity frames kept by a resample) }
+// P[5] = { 1: the capture depth is V's (the clusters' capture, CardCaptureCluster.ps.hlsl: reversed - 1 the card's
+//          front, 0 its back and where nothing was drawn), 0, 0, 0 }
 #include "Passes/SurfaceCache/CardLighting.hlsli"
 #include "Passes/SurfaceCache/CardCaptureList.hlsli"
 
@@ -37,7 +39,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     Texture2D<float4> captureAlbedo = ResourceDescriptorHeap[P[0].w];
     Texture2D<float2> captureNormal = ResourceDescriptorHeap[P[1].x];
     Texture2D<float4> captureEmissive = ResourceDescriptorHeap[P[1].y];
-    const float d = captureDepth.Load(from);
+    const float d = P[5].x != 0 ? 1.0 - captureDepth.Load(from) : captureDepth.Load(from);
     const bool surface = d < 1.0;
     const float4 albedo = surface ? captureAlbedo.Load(from) : float4(0, 0, 0, 0);
     const float3 emissive = surface ? captureEmissive.Load(from).rgb : float3(0, 0, 0);

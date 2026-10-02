@@ -73,6 +73,28 @@ LtvSh ltvSample(LtvParams p, float3 worldPosition)
     return s;
 }
 
+// The same for a reader that must tell an empty cell from a dark one (LumenHitIndirect.hlsli): the light of the lit
+// cells under the sample alone - the values over the ambient's alpha, which the volume blends exactly as it blends the
+// light. lit = that alpha: the share of the sample that is traced light; 0 (and no light) outside the view's grid,
+// behind the camera, past the last slice and where no cell under the sample was ever seen into.
+LtvSh ltvSampleLit(LtvParams p, float3 worldPosition, out float lit)
+{
+    LtvSh s;
+    s.ambient = s.directional = 0;
+    lit = 0;
+    const float4 g = ltvGridPosition(p.worldToClip, worldPosition);
+    if (!(g.w > 1e-5) || any(g.xy < 0) || any(g.xy > 1) || g.z >= float(p.gridZ)) return s;
+    const float3 uvw = float3(g.xy * p.uvScale, clamp(g.z / float(p.gridZ), 0.5 / float(p.gridZ), 1.0 - 0.5 / float(p.gridZ)));
+    Texture3D<float4> ambient = ResourceDescriptorHeap[p.ambientSrv];
+    Texture3D<float4> directional = ResourceDescriptorHeap[p.directionalSrv];
+    const float4 a = ambient.SampleLevel(g_linearClamp, uvw, 0);
+    if (!(a.a > 1e-3)) return s;
+    lit = saturate(a.a);
+    s.ambient = a.rgb / (LTV_SCALE * a.a);
+    s.directional = directional.SampleLevel(g_linearClamp, uvw, 0).rgb / (LTV_SCALE * a.a);
+    return s;
+}
+
 // Irradiance (lux) on a surface of normal n at the position: the SH's cosine convolution (band 0 x pi, band 1 x 2 pi / 3).
 float3 ltvIrradianceOf(LtvSh s, float3 n)
 {

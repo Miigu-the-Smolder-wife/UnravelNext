@@ -59,10 +59,12 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     // screen probes; the refraction service's rays likewise (RefractionLumenTrace.hlsl)
     bool lumenOnly = false;
     float lumenMaxRoughness = 0.4f, lumenFadeLength = 0.1f, lumenMaxRayIntensity = 40.0f, lumenTonemapRange = 10.0f;
+    float lumenMaxRoughnessFoliage = 0.2f;  // reflection.lumen_max_roughness_to_trace_foliage (Foliage and Subsurface pixels)
     bool lumenRefractionSurfaceCache = true;  // reflection.lumen_refraction_hit_surface_cache: water's and glass's ray hits read it too
     bool lumenScreenContinue = true;   // reflection.lumen_screen_trace_continue: world rays start where their screen traces ended
     float lumenScreenPullback = 0.08f; // ... less this distance (m)
     bool lumenSceneColorAtHit = true;  // reflection.lumen_sample_scene_color_at_hit (with lumen_screen_traces)
+    bool lumenHiResSurface = true;     // reflection.lumen_hi_res_surface: hits read the cards' high levels and report (surface_cache.feedback)
     float lumenSceneColorThickness = 0.01f;
     float lumenSceneColorNormalDegrees = 85.0f;
     float lumenSamplingBias = 0.1f;    // reflection.lumen_ggx_sampling_bias: the lobe tail's share that is not sampled
@@ -187,6 +189,7 @@ private:
         BufferRef cache;
         BufferRef surfaceCache;  // valid: the refraction service's hits read the surface cache
         SurfaceCacheCardRefs cards;  // reflection.lumen_only: the mesh cards its hits read (invalid: none)
+        bool hiResSurface = false;   // ... their high levels, with feedback (reflection.lumen_hi_res_surface)
         rt::RayScene::VsmRefs vsm;
         uint32_t frame = 0, experiment = 0, scene[8] = {};
         rt::RayScene* rays = nullptr;
