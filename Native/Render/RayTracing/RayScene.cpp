@@ -2612,8 +2612,11 @@ void RayScene::recordDecals(FramePassContext& fc, const ViewResources& main)
     m_decalTlasRef = {};
     if (!main.decalFrames.valid()) return;  // record() left words 16..19 at "no decals"
     RenderGraph& g = fc.graph;
-    constexpr uint32_t kFrameBytes = 128;  // DecalFrame (Decal.hlsli)
-    const uint32_t count = (uint32_t)(g.desc(main.decalFrames).size / kFrameBytes);
+    // (the records' size is the buffer's own stride: DecalFrame of Decal.hlsli, Decals.cpp kFrameBytes - a number kept
+    // here went stale when the record grew, and the boxes' count ran past the buffer from the fourth decal on)
+    const BufferDesc& decalFrames = g.desc(main.decalFrames);
+    if (decalFrames.stride == 0) fail("RayScene::recordDecals: the decal frames are not a structured buffer");
+    const uint32_t count = (uint32_t)(decalFrames.size / decalFrames.stride);
     if (count == 0) return;
     if (count > m_decalCapacity)
     {
