@@ -60,7 +60,8 @@ void main()
         state.Store(4 * VS_GROUP_BEGIN, min(state.Load(4 * VS_GROUP_WRITE), CAP_GROUPS));
         args.Store3(4 * VA_GROUPS, uint3(0, 0, 1));
         args.Store3(4 * VA_DEFERRED_CHUNKS, uint3((min(state.Load(4 * VS_DEFER_CHUNKS), CAP_DEFERRED) + 63) / 64, 1, 1));
-        storeDispatch(args, VA_PROXIES, min(state.Load(4 * VS_CHUNK_ITEMS), CAP_DEFERRED) * (CHUNK_INSTANCES / 64u));
+        const uint proxyGroups = min(state.Load(4 * VS_CHUNK_ITEMS), CAP_DEFERRED) * (CHUNK_INSTANCES / 64u);
+        args.Store3(4 * VA_PROXIES, uint3(min(proxyGroups, PROXY_DISPATCH_ROW), (proxyGroups + PROXY_DISPATCH_ROW - 1) / PROXY_DISPATCH_ROW, 1));
     }
     // (work queue: items still pending after its workers left; level passes: items appended by the last level)
     const bool complete = NODE_WORK_QUEUE != 0 ? state.Load(4 * VS_NODE_PENDING) == 0 : min(state.Load(4 * VS_NODE_WRITE), CAP_NODES) == state.Load(4 * VS_NODE_END);

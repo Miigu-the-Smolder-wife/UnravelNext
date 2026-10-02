@@ -39,7 +39,7 @@ void main(uint3 id : SV_DispatchThreadID)
     ray.TMax = asfloat(head.w);
     if (!scpRayOk(ray.Origin, ray.Direction) || !scpIntervalOk(ray.TMin, ray.TMax)) return;
     const RtSceneSrvs scene = rtSceneSrvs(P[6], P[7]);
-    const uint mask = sun ? RT_MASK_GI : RT_MASK_SHADOW;
+    const uint mask = sun ? RT_MASK_HIT_SHADOW : RT_MASK_SHADOW;
     const uint rayFlags = (P[0].w & 2048u) != 0 ? RAY_FLAG_FORCE_OPAQUE : RAY_FLAG_NONE;
     bool visible = true;
     [loop] for (uint tlas = 0; tlas < 2 && visible; ++tlas)

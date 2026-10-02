@@ -58,8 +58,13 @@ constexpr uint32_t rtInstanceMask(uint32_t flags)
 }
 // An instance whose every submesh is Glass or Water (raytracing.see_through_translucent): GI rays and shadow rays pass it
 // (the reference leaves translucent meshes out of its Lumen scene; the view's shadow maps give such casters a
-// transmittance, not a depth). Reflection and refraction rays still meet it.
-constexpr uint32_t rtInstanceMask(uint32_t flags, bool seeThrough) { return rtInstanceMask(flags) & (seeThrough ? ~(kRtMaskGi | kRtMaskShadow) : ~0u); }
+// transmittance, not a depth). Reflection and refraction rays still meet it. The emitter bit goes too: the GI rays'
+// mask is GI | emitter (they see the area lights' proxy instance), and a scene instance that kept that bit of
+// kRtMaskAll would still stop them.
+constexpr uint32_t rtInstanceMask(uint32_t flags, bool seeThrough)
+{
+    return rtInstanceMask(flags) & (seeThrough ? ~(kRtMaskGi | kRtMaskShadow | kRtMaskEmitter) : ~0u);
+}
 constexpr uint32_t kRtMaskFluid = 8u;  // W's triangle streams (refraction rays only: no scene records to shade them)
 constexpr uint32_t kRtInstanceEmitter = 0xFFFFFEu;  // RT_INSTANCE_EMITTER (RayScene.hlsli)
 constexpr uint32_t kRtInstanceStreamBase = 0xFFFF00u;  // + stream slot (< 64): RT_INSTANCE_STREAM (RayScene.hlsli)

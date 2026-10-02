@@ -68,7 +68,7 @@ bool scRayOk(float3 origin, float3 direction)
 bool scRayOk(RayDesc ray) { return scRayOk(ray.Origin, ray.Direction) && ray.TMin >= 0 && ray.TMax >= ray.TMin && ray.TMax < 1e30; }
 
 // A sampled light point's shadow ray under the GI mask (the sampled-point direct light: surface_cache.direct_analytic=false).
-bool scShadowVisible(RtSceneSrvs scene, RayDesc ray) { return scRayOk(ray.Origin, ray.Direction) && rtVisible(scene, ray, RT_MASK_GI); }
+bool scShadowVisible(RtSceneSrvs scene, RayDesc ray) { return scRayOk(ray.Origin, ray.Direction) && rtVisible(scene, ray, RT_MASK_HIT_SHADOW); }
 
 // An orthonormal frame around n (Duff et al. 2017).
 void scFrame(float3 n, out float3 t, out float3 bt)
@@ -428,7 +428,7 @@ void SurfaceCacheCellsGen()
                 r.Direction = toSun;
                 r.TMin = 0;
                 r.TMax = giRayLength();
-                if (scRayOk(r) && rtVisible(scene, r, RT_MASK_GI, shadowFlags)) sun = e * muS;
+                if (scRayOk(r) && rtVisible(scene, r, RT_MASK_HIT_SHADOW, shadowFlags)) sun = e * muS;
             }
         }
     }

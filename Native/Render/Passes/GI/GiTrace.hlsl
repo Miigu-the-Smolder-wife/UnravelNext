@@ -305,7 +305,7 @@ void GiTraceGen()
                     sr.TMin = 0;
                     sr.TMax = giRayLength();
                     L.sunIlluminance = e0;
-                    L.sunVisibility = rtVisible(scene, sr, RT_MASK_GI) ? 1.0 : 0.0;
+                    L.sunVisibility = rtVisible(scene, sr, RT_MASK_HIT_SHADOW) ? 1.0 : 0.0;
                 }
             }
             // Local lights: one next-event sample and its shadow ray (experiment 128: none).
@@ -339,7 +339,7 @@ void GiTraceGen()
                         one.distance = ls.distance;
                         one.weight = ls.L / ls.pdf;
                         const float3 f = rtLocalLightBrdfCos(mc, s.normal, -r.Direction, one.wi, (P[3].w & 1024) != 0);
-                        if (any(f > 0) && (!one.castShadow || rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, one, giBias(h, s.position)), RT_MASK_GI)))
+                        if (any(f > 0) && (!one.castShadow || rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, one, giBias(h, s.position)), RT_MASK_HIT_SHADOW)))
                             local += f * one.weight;
                     }
                 }
@@ -382,7 +382,7 @@ void GiTraceGen()
                         }
                     }
                     const bool visible = (any(f > 0) || (audit && any(fPoint > 0))) &&
-                                         (!ls.castShadow || rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, giBias(h, s.position)), RT_MASK_GI));
+                                         (!ls.castShadow || rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, giBias(h, s.position)), RT_MASK_HIT_SHADOW));
                     if (visible && any(f > 0))
                         local = f * ls.weight;
                     if (visible)

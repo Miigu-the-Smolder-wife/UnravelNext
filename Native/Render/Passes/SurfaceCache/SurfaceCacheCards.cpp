@@ -56,6 +56,7 @@ struct Tracked  // a scene instance as the card scene last saw it
     uint32_t mesh = 0xFFFFFFFFu;
     uint32_t scaleBits = 0, transformRevision = 0, materialKey = 0;
     uint8_t state = 0;  // 0 not in the card scene, 1 waiting for its mesh's cards, 2 added
+    uint8_t channels = 0;  // its lighting channels when it was taken (the mesh cards' record holds them)
     bool emissive = false;  // an emissive light source (emissiveSourceOf) when it was added
 };
 
@@ -402,7 +403,8 @@ struct SurfaceCacheCards::Impl
                 continue;
             }
             const uint32_t scaleBits = bits(scale);
-            if (t.state != 0 && (t.mesh != g.mesh || t.scaleBits != scaleBits))
+            const uint8_t channels = (uint8_t)scene::instanceLightingChannels(g.flags);
+            if (t.state != 0 && (t.mesh != g.mesh || t.scaleBits != scaleBits || t.channels != channels))
             {
                 if (t.state == 2) scene->removeInstance(i);
                 t.state = 0;
@@ -411,6 +413,7 @@ struct SurfaceCacheCards::Impl
             {
                 t.mesh = g.mesh;
                 t.scaleBits = scaleBits;
+                t.channels = channels;
                 t.materialKey = materialKeyOf(gs, *src, i);
                 t.emissive = emissiveSourceOf(gs, *src, i);
                 t.state = 1;

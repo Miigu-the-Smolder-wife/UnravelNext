@@ -147,7 +147,10 @@ float3 fxLitRadiance(LayerConstants c, float3 albedo, float3 offset, float3 D, f
             const uint index = froxelLight(froxels, range.x + i);
             const GpuLight light = loadLight(index);
             float3 toLight;
-            float3 El = shPunctualIlluminance(light, (light.position - g_cameraPosition) - offset, toLight);
+            // (a medium scatters a light by its volumetric scattering scale, as the light volume of the branch above
+            // holds it - not by its diffuse scale, which shPunctualIlluminance carries: Scene.hlsli; VolumeSetup.hlsl)
+            const float volumetric = lightVolumetricScale(light);
+            float3 El = shPunctualIlluminance(light, (light.position - g_cameraPosition) - offset, toLight) * (volumetric / max(lightDiffuseScale(light), 1e-4));
             if (lightType(light) > LIGHT_SPOT)
             {
                 const float3 p = (light.position - g_cameraPosition) - offset;
@@ -161,7 +164,7 @@ float3 fxLitRadiance(LayerConstants c, float3 albedo, float3 offset, float3 D, f
                                  : type == LIGHT_DISK ? SH_PI * light.size.x * light.size.x * facing
                                  : type == LIGHT_SPHERE ? SH_PI * light.size.x * light.size.x
                                                         : 2.0f * light.size.y * light.size.x + SH_PI * light.size.y * light.size.y;
-                El = lightMeanColor(light) * (light.intensity * lightDiffuseScale(light) * area * lightBarnDoorFar(light, -toLight) * shAreaWindow(light, p) / d2);
+                El = lightMeanColor(light) * (light.intensity * volumetric * area * lightBarnDoorFar(light, -toLight) * shAreaWindow(light, p) / d2);
             }
             float v = 1;
             if (lightCastsShadow(light) && c.shadowPageTable != UNX_NONE && c.shadowLights != UNX_NONE) v = shadowVisibilityDirect(sh, index, worldPos, -D);

@@ -367,8 +367,10 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
     s.lensD = lensD;
     s.lensS = lensS;
     const bool reset = u.reset || s.fresh || lensChanged;
-    // (an earlier pass of this frame may hold the previous history already: upscalePreviousColor - one import per frame)
-    const bool imported = !reset && s.previousFrame == fc.frame.frameIndex && s.previous.valid();
+    // (an earlier pass of this frame may hold the last frame's slot already: upscalePreviousColor - one import of a
+    // resource per frame, also on a frame that resets here for a reason upscalePreviousColor does not see - the lens)
+    const bool held = s.previousFrame == fc.frame.frameIndex && s.previous.valid();
+    const uint32_t heldSlot = s.last;
     s.fresh = false;
     const uint32_t prev = s.parity, next = prev ^ 1u;  // (the two-frame histories: flickering, thin coverage, keepSceneColor's)
     s.parity = next;
@@ -424,11 +426,12 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
     s.kept[slot].lensTanX = lens.tanX;
     s.kept[slot].lensTanY = lens.tanY;
     s.kept[slot].lensScale = lens.active ? lens.scale : 0.0f;
-    const TextureRef history = imported ? s.previous
-                                        : g.importTexture(s.history[prevSlot].Get(), { "m.upscale.history (previous)", HW, HH, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
-                                                          D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-    const TextureRef output = g.importTexture(s.history[slot].Get(), { "m.upscale.history", HW, HH, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
-                                              D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    const TextureRef history = held && prevSlot == heldSlot ? s.previous
+                                                            : g.importTexture(s.history[prevSlot].Get(), { "m.upscale.history (previous)", HW, HH, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
+                                                                              D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    const TextureRef output = held && slot == heldSlot ? s.previous
+                                                       : g.importTexture(s.history[slot].Get(), { "m.upscale.history", HW, HH, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
+                                                                         D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     const TextureRef motion = g.createTexture(TextureDesc{ "m.upscale.motion", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT });
     const TextureRef previousDepth = tsr ? g.createTexture(TextureDesc{ "m.upscale.previous depth", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT }) : TextureRef{};
     const TextureRef depth = view.depth, vis = view.visId;

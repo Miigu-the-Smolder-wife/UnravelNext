@@ -233,7 +233,7 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
 #if REFL_LOCAL_TRACE
             if (any(f > 0))  // (f = 0: the visibility multiplies nothing, no ray)
                 visible = !ls.castShadow ||
-                          rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, 1e-3 + 2e-4 * distance(s.position, g_cameraPosition)), RT_MASK_REFLECTION);
+                          rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, 1e-3 + 2e-4 * distance(s.position, g_cameraPosition)), RT_MASK_HIT_SHADOW);
 #endif
             if (visible)
             {

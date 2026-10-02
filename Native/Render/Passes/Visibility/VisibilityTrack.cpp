@@ -2392,6 +2392,9 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     const bool atlas = request.atlasSlots.valid();
     if (request.proxies && (!request.pixelKernel.empty() || !request.depthTarget.valid() || (request.tileLocal && !atlas)))
         fail("rasterizeDepth '%s': proxies are for depth-only requests over whole viewports or the tile atlas", request.name.c_str());
+    // (the proxy kernel's dispatch: 4 groups a chunk item in rows of 2048, D3D12's 2^22 groups at 2^20 items)
+    if (request.proxies && cfg.capDeferred > (1u << 20))
+        fail("rasterizeDepth '%s': proxies take visibility.max_deferred_items up to 1048576 (%u)", request.name.c_str(), cfg.capDeferred);
     if (request.proxies && !(request.proxyCoverage > 0 && request.proxyCoverage <= 1.27324f))
         fail("rasterizeDepth '%s': proxyCoverage %g (a share of the bounding disc; at most 4 / pi: its square)", request.name.c_str(), request.proxyCoverage);
     uint32_t atlasWidth = 0, atlasHeight = 0;

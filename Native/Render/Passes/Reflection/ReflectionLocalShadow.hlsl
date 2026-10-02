@@ -63,6 +63,6 @@ void ReflectionLocalShadowGen()
     // material transmits - Foliage, a Subsurface material's thin parts): its visibility is not read, no ray (the same
     // s.normal as the shading's).
     if (dot(s.normal, ls.wi) <= 0 && !rtHitTransmits(loadMaterial(s.material))) return;
-    if (rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, 1e-3 + 2e-4 * distance(s.position, g_cameraPosition)), RT_MASK_REFLECTION))
+    if (rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, 1e-3 + 2e-4 * distance(s.position, g_cameraPosition)), RT_MASK_HIT_SHADOW))
         rays.Store(reflRaysHitOffset(slot), record.x | (1u << 30));
 }

@@ -1483,7 +1483,7 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
             noise[i] = (float)(lattice < 0 ? lattice + 256.0 : lattice);
         }
     }
-    // E's grooms shadow the fog under the sun (shading.hair_shadows; FogScatter.hlsl, P[10].y)
+    // E's grooms shadow the fog under the sun (shading.hair_shadows; FogScatter.hlsl, P[10].z)
     const bool hairShadow = (!fc.quality.has("shading.hair_shadows") || fc.quality.boolean("shading.hair_shadows")) && fc.resources.hairDensityParams.valid() &&
                             fc.resources.hairDensity.valid() && fc.resources.hairDensityCoarse.valid();
     const BufferRef hairParams = fc.resources.hairDensityParams;

@@ -90,6 +90,9 @@ void main(uint3 id : SV_DispatchThreadID)
                                    : 0.0;
                 w *= saturate(dot(normal, d) / dist + min(extent / dist, 1.0) + slack);
                 if (!(w > 0)) continue;
+                // (the store adds 0 for a light in none of the instance's lighting channels - CardDirectStore.hlsl: it
+                // must not take one of the tile's slots from a light that lights it)
+                if ((lightChannels(loadLight(li)) & mcLightingChannels(mcLoadMeshCards(f, card.meshCards))) == 0) continue;
                 uint at = held;
                 if (held == CL_LIGHTS)
                 {

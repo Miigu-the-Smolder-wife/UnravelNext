@@ -415,7 +415,6 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     FrameResources resources;
     // output.async_compute_passes: the named passes on the async compute queue (RenderGraph::setAsyncPasses).
     graph.setAsyncPasses(m_quality.has("output.async_compute_passes") ? m_quality.strings("output.async_compute_passes") : std::vector<std::string>{});
-    importFxLights(graph, m_scene, resources);
     FrameServices services;
     FramePassContext fc{ m_device, graph, m_shaders, m_quality, m_scene, frame, resources, services,
                          [this, &frame, &fc](const ViewDesc& v) { return allocateFrameConstants(frame, v, &fc); }, &m_trackState, m_framesInFlight };
@@ -423,6 +422,10 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     m_debugDraw = tracks::debugBegin(fc);  // E (A15): before any frame constants, which carry its buffer
     // Scene textures into the material records before any frame constants (they carry the material buffer's SRV).
     tracks::prepareScene(fc);
+    // (after prepareScene: a rect light's image that changed makes the scene's light buffer anew there -
+    // GpuScene::setLightSourceTextures - and an import taken before it would name the buffer just released, so the FX
+    // lights written this frame would land in it while every reader loads the new one)
+    importFxLights(graph, m_scene, resources);
     tracks::lightFunctions(fc);  // E (A8): light function table and images, before every consumer
     services.rasterizeDepth = [](FramePassContext& c, const DepthRasterRequest& r) { tracks::rasterizeDepth(c, r); };
     services.traceRefractions = [](FramePassContext& c, BufferRef jobs, BufferRef results, uint32_t maxJobs) {
@@ -513,6 +516,7 @@ void FrameRenderer::recordImage(RenderGraph& graph, const FrameContext& in, Text
     m_scene.flushUpdates(frame.frameIndex, m_framesInFlight, m_shaders);
     m_debugDraw = 0xFFFFFFFFu;
     m_viewModelScale = 1.0f;
+    m_trackState.beginRecord();  // (a recording of its own: what the tracks import once a recording is keyed on it)
     tracks::particleLightCapacity(m_trackState, m_scene);  // A3: before the imports and every frame constants
     FrameResources resources;
     importFxLights(graph, m_scene, resources);
