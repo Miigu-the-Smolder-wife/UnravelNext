@@ -1366,6 +1366,25 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.computeConstants(k, 8);
                       ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
                   });
+        // V's water layer (W's fluid and basin surfaces): the surface's points ask for their pages too (VsmMark.hlsl
+        // P[1].y; the reference marks its pages at the water's depth as at the opaque one's).
+        if (main.waterDepth.valid())
+        {
+            const TextureRef water = main.waterDepth;
+            g.addPass("s.vsm.markwater", QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          b.use(water, Use::SrvCompute);
+                          b.use(requests, Use::UavCompute);
+                          b.keep();
+                      },
+                      [=](PassContext& ctx) {
+                          const uint32_t k[8] = { ctx.srv(water), ctx.uav(requests), ring, subtileStats ? 1u : 0u, dilationBits, 1, 0, 0 };
+                          ctx.cmd->SetPipelineState(pso);
+                          ctx.bindFrameConstants(mainConstants);
+                          ctx.computeConstants(k, 8);
+                          ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
+                      });
+        }
     }
     {
         // Air of the froxel integration (VsmMarkAir, VsmAir.hlsli): after the pixel marks, which store plainly.

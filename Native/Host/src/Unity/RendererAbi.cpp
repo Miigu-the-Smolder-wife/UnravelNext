@@ -1709,3 +1709,17 @@ UNX_API int32_t UNX_CALL UnxFrameSetLightning(UnxRenderer r, const UnxLightningD
         find(r)->setLightning(l);
     });
 }
+UNX_API int32_t UNX_CALL UnxFrameSetPoolWeather(UnxRenderer r, const UnxPoolWeatherDesc* pools, uint32_t count)
+{
+    return call([&] {
+        if (count && !pools) fail("UnxFrameSetPoolWeather: no basins");
+        std::vector<HostRenderer::PoolWeather> in(count);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const UnxPoolWeatherDesc& d = pools[i];
+            if (d.size != sizeof(UnxPoolWeatherDesc) || d.version != 1) fail("UnxFrameSetPoolWeather: UnxPoolWeatherDesc %u size %u version %u", i, d.size, d.version);
+            in[i] = { d.pool, d.steamDensity, d.steamHeight, d.steamRiseSpeed, d.steamTurbulence, d.rainExposure };
+        }
+        find(r)->setPoolWeather(in);
+    });
+}

@@ -59,39 +59,65 @@ struct State
     uint64_t waterBytes = 0;
 };
 
-// Turbid basin water as a froxel medium (defect queue 13 (75); Passes/Water/WaterMedia.hlsl): the W2 basins of the frame
-// whose Water material scatters add their optical depth and single-scattered source to the view's media slices (E's
-// particle media layout), combined with E's when present. Returns the slices to integrate (media unchanged when the
-// switch is off, the frame has no scattering basin, or there are no lists).
+// Basin water as a froxel medium (defect queue 13 (75); Passes/Water/WaterMedia.hlsl): the W2 basins of the frame
+// whose Water material scatters (shading.water_turbid), and the basin the camera is in (shading.water_underwater: the
+// underwater view takes the water's absorption, clear water's too), add their optical depth and single-scattered source
+// to the view's media slices (E's particle media layout), combined with E's when present. Returns the slices to
+// integrate (media unchanged when both switches are off, the frame has no such basin, or there are no lists).
+// The basins taken are listed in the track state "W.mediaPools" ({ frame index, pool ids ... }): W's surface pass marks
+// their streams, whose samples then take the water's extinction and scattered light from the air lookups
+// (WaterSurface.hlsli waterSlotMedium).
 TextureRef recordWaterMedia(FramePassContext& fc, const ViewResources& main, BufferRef lights, TextureRef media, const FroxelGridCpu& grid)
 {
     const QualityConfig& q = fc.quality;
-    if (!(q.has("shading.water_turbid") && q.boolean("shading.water_turbid")) || !lights.valid()) return media;
+    std::vector<uint64_t>& taken = fc.state<std::vector<uint64_t>>("W.mediaPools");
+    taken.assign(1, fc.frame.frameIndex);
+    const bool turbid = q.has("shading.water_turbid") && q.boolean("shading.water_turbid");
+    const bool underwater = q.has("shading.water_underwater") && q.boolean("shading.water_underwater");
+    if ((!turbid && !underwater) || !lights.valid()) return media;
     const scene::Scene* src = fc.scene.source();
     if (!src || fc.frame.poolCount == 0) return media;
     struct Rec
     {
-        float centre[3], cosYaw, sinYaw, halfX, halfZ, depth, sigmaS[3], g, sigmaA[3], pad;
+        float centre[3], cosYaw, sinYaw, halfX, halfZ, depth, sigmaS[3], g, sigmaA[3], shape;
     };
     static_assert(sizeof(Rec) == 64, "WaterMedia.hlsl basin record");
     std::vector<Rec> recs;
+    const float3 eye = main.view.position;
     for (uint32_t i = 0; i < fc.frame.poolCount; ++i)
     {
         const PoolFrame& p = fc.frame.pools[i];
         if (p.material >= src->materials.size()) continue;
         const scene::Material& m = src->materials[p.material];
-        if (!(m.waterScattering.x > 0 || m.waterScattering.y > 0 || m.waterScattering.z > 0)) continue;
+        const bool scatters = m.waterScattering.x > 0 || m.waterScattering.y > 0 || m.waterScattering.z > 0;
         Rec r{};
         for (int a = 0; a < 3; ++a) r.centre[a] = (float)p.centre[a];
         r.cosYaw = std::cos(p.yaw);
         r.sinYaw = std::sin(p.yaw);
+        const bool round = p.shape == 1;  // (sizeX = the diameter, sizeZ unused: PoolFrame)
         r.halfX = 0.5f * p.sizeX;
-        r.halfZ = 0.5f * p.sizeZ;
+        r.halfZ = round ? r.halfX : 0.5f * p.sizeZ;
         r.depth = p.depth;
-        r.sigmaS[0] = m.waterScattering.x, r.sigmaS[1] = m.waterScattering.y, r.sigmaS[2] = m.waterScattering.z;
+        r.shape = round ? 1.0f : 0.0f;
+        // The camera in the basin's water (its frame as the kernel's): under the still level - with 0.3 m for the waves
+        // and the near plane's reach above the eye - and inside the walls and the floor.
+        const float dx = eye.x - r.centre[0], dy = eye.y - r.centre[1], dz = eye.z - r.centre[2];
+        const float lx = dx * r.cosYaw - dz * r.sinYaw, lz = dx * r.sinYaw + dz * r.cosYaw;
+        const bool within = round ? lx * lx + lz * lz < r.halfX * r.halfX : std::abs(lx) < r.halfX && std::abs(lz) < r.halfZ;
+        const bool inside = within && dy < 0.3f && (p.depth <= 0 || dy > -p.depth - 0.1f);
+        if (!(turbid && scatters) && !(underwater && inside)) continue;
+        // (without shading.water_turbid the water scatters nothing toward the view, and its sigma_s stays in the beam's
+        //  extinction, as the surface's refracted path has it: WaterSurface.hlsli)
+        const float sigmaS[3] = { m.waterScattering.x, m.waterScattering.y, m.waterScattering.z };
+        const float base[3] = { m.baseColor.x, m.baseColor.y, m.baseColor.z };
+        for (int a = 0; a < 3; ++a)
+        {
+            r.sigmaS[a] = turbid ? sigmaS[a] : 0.0f;
+            r.sigmaA[a] = -std::log(std::max(base[a], 1e-6f)) + (turbid ? 0.0f : sigmaS[a]);
+        }
         r.g = m.waterAnisotropy;
-        r.sigmaA[0] = -std::log(std::max(m.baseColor.x, 1e-6f)), r.sigmaA[1] = -std::log(std::max(m.baseColor.y, 1e-6f)), r.sigmaA[2] = -std::log(std::max(m.baseColor.z, 1e-6f));
         recs.push_back(r);
+        taken.push_back(p.id);
     }
     if (recs.empty()) return media;
     State& s = fc.state<State>(kStateKey);
@@ -138,7 +164,9 @@ TextureRef recordWaterMedia(FramePassContext& fc, const ViewResources& main, Buf
     const bool sunMap = r.waterSunDepth.valid() && r.waterSunNormal.valid() && r.waterSunMedium.valid() && r.waterSunConstants.valid();
     const bool caustics = sunMap && r.waterSunCaustics.valid(), gi = r.giCache.valid(), functions = r.lightFunctions.valid();
     const bool luts = r.transmittanceLut.valid() && r.multiScatterLut.valid();
-    const uint32_t count = (uint32_t)recs.size(), basinSrv = s.waterSrvs[slot], existing = media.valid() ? 1u : 0u;
+    // (WaterMedia.hlsl P[2].w: bit 0 E's media are in the slices, bit 1 the diffusion term of a turbid water)
+    const bool many = turbid && q.has("shading.water_multiple_scattering") && q.boolean("shading.water_multiple_scattering");
+    const uint32_t count = (uint32_t)recs.size(), basinSrv = s.waterSrvs[slot], existing = (media.valid() ? 1u : 0u) | (many ? 2u : 0u);
     uint32_t texelBits = 0;
     std::memcpy(&texelBits, &grid.shadowTexelsPerTile, 4);
     const D3D12_GPU_VIRTUAL_ADDRESS constants = main.frameConstants;

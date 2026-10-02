@@ -22,6 +22,22 @@
 //        band A radiance attenuated over the straight path to band A (a visible, counted stand-in).
 //   Stage 2 (render A's M join): band A under water is lit as in air today (no surface transmission, absorption or
 //        caustics on the light's way down): FEATURES_GAME 1.9 stage 2.
+//   The water's own light (a Water material with sigma_s; the reference's single layer water has this term for every
+//        water material): what the water between P and band A scatters toward the camera, (1 - F) / n^2 of it.
+//        A stream whose medium is in the view's air volume (a basin's box, WaterMedia.hlsl: slot row word 3) takes it
+//        from there - the air lookups' in-scattering between P's depth and band A's on the pixel's straight ray (the
+//        medium's design condition: the refracted path lies within a tile of it). Any other stream (a fluid) takes the
+//        closed form of single scattering under the light at its surface, uniform along the path, as the reference's:
+//        (E_sun (1 - F_sun) visibility p_HG + the surroundings' mean radiance) sigma_s (1 - e^(-sigma_t d)) / sigma_t.
+//   Seen from inside the water (the underwater camera, FEATURES_GAME 1.3 (b); the reference's shaders have no such
+//        mode): the surface's normal on the camera's side points down. Inside Snell's window the world above arrives
+//        along the exact refracted direction x (1 - F) n^2 (WaterShading.hlsli: radiance grows by n^2 entering the
+//        denser medium) - a ray of R's in air from P (the job of medium 0xFF), with the straight view's band A as its
+//        stand-in - and the sun's disk through the surface analytically (R's rays leave it out); the water below is
+//        mirrored x F, all of it past the critical angle - a ray of R's inside the water (the job of the water's
+//        medium: its absorption, the bed, further reflections), with the GI source's mirror lobe as its stand-in. The
+//        camera's path to P is in the water: its medium is in the air lookups for a basin, and e^(-sigma_t s) here for
+//        a stream without one.
 #ifndef UNX_WATER_SURFACE_HLSLI
 #define UNX_WATER_SURFACE_HLSLI
 #include "Bindless.hlsli"
@@ -76,6 +92,22 @@ WaterSlot waterSlot(uint table, uint slot)
     s.vertices = v.x;
     s.material = v.y;
     return s;
+}
+// Slot row word 3 = 1: the stream's water is a medium of the view's air volume this frame (WaterMedia.hlsl; W's surface
+// pass writes it from S's list of the basins it took) - its extinction and what it scatters are in the air lookups.
+bool waterSlotMedium(uint table, uint slot)
+{
+    ByteAddressBuffer b = ResourceDescriptorHeap[table];
+    return b.Load(16 * slot + 12) == 1u;
+}
+// What a water scatters toward the camera along a path of length d inside it, per unit of the path's start (radiance
+// inside the water, nits): single scattering under one light for the whole path - the sun as it entered the surface
+// (sunIn, lux) through the phase function of the angle between the path and the sun's refracted direction (cosSun:
+// along the path against the light's travel), and the surroundings' mean radiance (around, nits; isotropic).
+float3 waterScatterAlong(float3 sigmaS, float3 sigmaT, float g, float d, float3 sunIn, float cosSun, float3 around)
+{
+    const float3 amount = sigmaS * (1 - exp(-sigmaT * max(d, 0.0))) / max(sigmaT, 1e-6);
+    return (sunIn * airMiePhase(cosSun, g) + around) * amount;
 }
 struct WaterShadeSrvs
 {
@@ -460,7 +492,8 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
     if (s.shadow.pageTable != UNX_NONE)
     {
         bool resident;
-        sunVisibility = shadowSunVisibilityAt(s.shadow, P, nv, z * shPixelAngle(D, Dx), resident);
+        // (the normal on the sun's side: the scattering and the view from below take the sun on the far side of nv)
+        sunVisibility = shadowSunVisibilityAt(s.shadow, P, dot(nv, normalize(g_sunDirection)) >= 0 ? nv : -nv, z * shPixelAngle(D, Dx), resident);
         if (!resident) { sunVisibility = 1; if (s.statistics != UNX_NONE) { RWByteAddressBuffer st = ResourceDescriptorHeap[s.statistics]; st.InterlockedAdd(4 * WATER_STAT_UNLIT, 1); } }
     }
     // (B5: the sun through the cloud layer at the surface, as S's sun slot of opaque pixels has it - no glint under a cloud)
@@ -505,13 +538,37 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
     // agreed with engine 2 for W2). Pure water (Pope & Fry 1997, 650 / 550 / 450 nm) is T = (0.712, 0.945, 0.991).
     const float3 sigmaA = -log(clamp(m.baseColor, 1e-6, 1.0)) + m.hairAbsorption;  // + sigma_s of a turbid Water material (v1.92): the beam's extinction sigma_t
     rays.sigmaA = sigmaA;
+    const float3 sigmaS = m.hairAbsorption;  // (0: clear water)
+    const bool mediumInAir = waterSlotMedium(s.slots, slot);
     float3 transmitted = 0;
-    float3 t;
-    if (fromAir && waterRefract(v, nv, 1.0 / ior, t))
+    float3 t = 0;
+    const bool enters = fromAir && waterRefract(v, nv, 1.0 / ior, t);
+    float3 H = P;
+    uint status = WATER_STAT_SHADED;
+    const bool met = enters && waterMarch(s, P, t, slot, H, status);
+    // The straight view's band A behind P, its own radiance (M's air removed: waterSurfaceRadiance at the pixel) and the
+    // air's in-scattering to it: the stand-in of a sample whose refracted ray is not followed here, and - where the
+    // water's medium is in the air volume - what the water scatters toward the camera between P and band A.
+    float zA = z;
+    float3 ownA = 0, inA = inscatter;
+    if (!met || (mediumInAir && fromAir))
     {
-        float3 H;
-        uint status;
-        if (waterMarch(s, P, t, slot, H, status))
+        Texture2D<float> bandA = ResourceDescriptorHeap[s.bandADepth];
+        zA = waterBandADepth(bandA, int2(pixel));
+        Texture2D<float4> src = ResourceDescriptorHeap[s.source];
+        ownA = src.SampleLevel(g_linearClamp, centre / float2(g_viewWidth, g_viewHeight), 0).rgb;
+        if (s.atm.transmittance != UNX_NONE && s.atm.aerial != UNX_NONE)
+        {
+            float3 tA = 1, EA = 0;
+            atmosphereAirView(s.atm, centre / float2(g_viewWidth, g_viewHeight), zA, inA, tA, EA);
+            ownA = max(ownA - inA * g_exposure, 0) / max(tA, 1e-6);
+        }
+    }
+    float waterPath = 0;  // the path's length inside the water, from P (the closed form's)
+    float3 window = 0;    // from below: the sun's disk through the surface (nits in air)
+    if (enters)
+    {
+        if (met)
         {
             const float3 h = waterProject(H);
             // The pixel's footprint through the refraction onto band A (the surface's tangent plane at H), integrated:
@@ -533,14 +590,14 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
                 sum += waterAbsorption(sigmaA, max(L + along * dLmajor, 0.0)) * waterSurfaceRadianceLod(s, h.xy + off, h.z, fp.lod);
             }
             transmitted = sum / float(fp.count) / (ior * ior);
+            waterPath = L;
         }
         else
         {
             // Fallback (counted): the straight view's band A behind P, attenuated over the straight path.
-            Texture2D<float> bandA = ResourceDescriptorHeap[s.bandADepth];
-            const float zA = waterBandADepth(bandA, int2(pixel));
             const float along = max(zA - z, 0.0) / max(dot(-v, -g_view[2].xyz), 1e-4);
-            transmitted = waterAbsorption(sigmaA, along) * waterSurfaceRadiance(s, centre, zA) / (ior * ior);
+            transmitted = waterAbsorption(sigmaA, along) * ownA / (ior * ior);
+            waterPath = along;
             stat = status;
             rays.refract = true;
             rays.refractDir = t;
@@ -548,14 +605,56 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
             rays.refractFallback = (1 - F) * transmitted;
         }
     }
+    else if (!fromAir)
+    {
+        // From inside the water. The mirror lobe is the water's own (the stand-in above: the GI source's): R's ray of the
+        // water's medium replaces it where the lobe is sharper than that source.
+        rays.refract = lobePixel < WATER_RAY_LOBE_HALF_ANGLE;
+        rays.refractDir = rays.reflectDir;
+        rays.refractWeight = F;
+        rays.refractFallback = rays.reflectFallback;
+        rays.reflectFallback = 0;
+        rays.reflectWeight = 0;
+        float3 tOut;
+        if (waterRefract(v, nv, ior, tOut))
+        {
+            // Snell's window: the world above along tOut. The sun's disk through the surface: its illuminance over the
+            // cone the surface's roughness and the pixel's normals spread the direction into (half the mirror lobe's
+            // spread, not under the disk's own radius) - its energy is the disk's.
+            const float cone = max(0.5 * lobePixel, max(g_sunAngularRadius, 1e-3));
+            if (sunVisibility > 0 && dot(tOut, l0) > cos(cone)) window = E * sunVisibility / (2 * SH_PI * (1 - cos(cone)));
+            transmitted = (ownA + window * g_exposure) * (ior * ior);
+            rays.reflect = lobePixel < WATER_RAY_LOBE_HALF_ANGLE;
+            rays.reflectDir = tOut;
+            rays.reflectWeight = (1 - F) * (ior * ior);
+            rays.reflectFallback = (1 - F) * ownA * (ior * ior);
+        }
+    }
+    // The water's own light toward the camera (exposed, at the camera).
+    float3 own = 0;
+    if (fromAir && mediumInAir) own = (1 - F) / (ior * ior) * max(inA - inscatter, 0) * g_exposure;  // (= airT x the water's part)
+    else if (!mediumInAir && any(sigmaS > 0) && (enters || !fromAir))
+    {
+        // the closed form: the sun as it entered the surface, the surroundings' mean radiance from the GI source
+        const float3 nUp = fromAir ? nv : -nv;  // out of the water
+        float3 sunIn = 0, ts = -l0;
+        if (sunVisibility > 0 && dot(nUp, l0) > 0 && waterRefract(l0, nUp, 1.0 / ior, ts)) sunIn = E * sunVisibility * (1 - waterFresnel(dot(nUp, l0), 1.0 / ior));
+        float3 around = 0;
+        if (giSourceIsVolume(s.giCache)) around = ltvRadianceMean(giSourceVolume(s.giCache), P);
+        const float g = clamp(m.hairBetaN, -0.99, 0.99);
+        if (fromAir) own = (1 - F) / (ior * ior) * waterScatterAlong(sigmaS, sigmaA, g, waterPath, sunIn, dot(t, -ts), around) * g_exposure * airT;
+        else own = waterScatterAlong(sigmaS, sigmaA, g, distance(g_cameraPosition, P), sunIn, dot(-v, -ts), around) * g_exposure;
+    }
     // (1 - F) of the light crossing; the exposure is in the band A values; the reflected terms are absolute radiance.
     const float3 surface = F * reflected * g_exposure + (1 - F) * transmitted;
+    // From inside a water without a medium in the air volume: the camera's path to P is the water's.
+    if (!fromAir && !mediumInAir) airT *= waterAbsorption(sigmaA, distance(g_cameraPosition, P));
     // (the camera's air path applies to the replaced terms as to the rest)
     rays.reflectWeight *= airT;
     rays.reflectFallback *= airT;
     rays.refractWeight *= airT;
     rays.refractFallback *= airT;
-    const float3 value = surface * airT + inscatter * g_exposure;
+    const float3 value = surface * airT + inscatter * g_exposure + own;
     rays.base = value - rays.reflectFallback - rays.refractFallback;
     return value;
 }

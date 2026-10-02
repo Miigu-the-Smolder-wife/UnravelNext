@@ -994,7 +994,7 @@ typedef struct UnxPassTiming
 UNX_API int32_t UNX_CALL UnxFramePassTimingsLatest(UnxRenderer r, UnxPassTiming* passes, uint32_t capacity, uint32_t* count);
 
 // ---- Weather (optional exports within ABI 6; after commit, any time): UnxFrameSetFog2, UnxFrameSetFogVolumes2,
-// UnxFrameSetClouds2, UnxFrameSetWeather, UnxFrameSetLightning. The first three take the frozen descriptions' fields
+// UnxFrameSetClouds2, UnxFrameSetWeather, UnxFrameSetLightning, UnxFrameSetPoolWeather. The first three take the frozen descriptions' fields
 // (UnxFogDesc, UnxFogVolumeDesc, UnxCloudDesc: the same names, units and limits) and what the renderer's frame has
 // gained since; each sets the same state as its first function - the latest call of either decides, and the first
 // function leaves the added fields at "none".
@@ -1123,6 +1123,29 @@ typedef struct UnxLightningDesc
 static_assert(sizeof(UnxLightningDesc) == 56, "UnxLightningDesc is part of the ABI");
 #endif
 UNX_API int32_t UNX_CALL UnxFrameSetLightning(UnxRenderer r, const UnxLightningDesc* lightning);
+
+// The basins' weather (render::PoolFrame::steam*, rainExposure; held until changed, like the basins): per basin of the
+// set UnxFrameSetPools gave, by its id.
+//   steam  over hot water: a local fog volume over the basin (as UnxFogVolumeDesc2's rising steam: from the still
+//          surface up to steamHeight, fading toward the rim), lit as the fog is; among the frame's 16 fog volumes, after
+//          the ones UnxFrameSetFogVolumes gave. steamDensity 0: none.
+//   rain   the share of the weather record's rain (UnxFrameSetWeather: rainRate) that reaches the surface - 1 under the
+//          open sky, 0 under a roof (the renderer does not find the roof itself): the drops disturb the surface.
+// A basin not named has neither. count 0: none.
+typedef struct UnxPoolWeatherDesc
+{
+    uint32_t size, version;             // sizeof (32), 1
+    uint32_t pool;                      // UnxPoolDesc::id
+    float steamDensity;                 // extinction (1/m) of the steam at the surface, >= 0
+    float steamHeight;                  // m above the still surface, > 0 with steam (1.5)
+    float steamRiseSpeed;               // m/s (0.3)
+    float steamTurbulence;              // [0, 1] (0.6)
+    float rainExposure;                 // [0, 1]
+} UnxPoolWeatherDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxPoolWeatherDesc) == 32, "UnxPoolWeatherDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetPoolWeather(UnxRenderer r, const UnxPoolWeatherDesc* pools, uint32_t count);
 
 #ifdef __cplusplus
 }

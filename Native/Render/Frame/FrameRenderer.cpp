@@ -410,6 +410,33 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
             for (int r = 0; r < 4; ++r) pv.m[r][3] += pv.m[r][0] * frame.originShift.x + pv.m[r][1] * frame.originShift.y + pv.m[r][2] * frame.originShift.z;
         }
     }
+    // Steam over hot water (PoolFrame::steamDensity): a local fog volume per such basin, after the frame's and the
+    // scene's own (the first kMaxFogVolumes of a frame take effect). The volume is centred on the still surface with the
+    // steam's height as its vertical half size and its source plane at the middle - nothing under the water, the density
+    // falling to a quarter at the top, fading over the outer 30 % toward the rim and the top; a round basin's is the
+    // ellipsoid, a rectangular one's the box with the basin's yaw. Basins are in the frame's coordinates, fog volumes in
+    // the world's (S takes the origin offset off again).
+    {
+        const float3 offset = m_scene.originOffset();
+        for (uint32_t i = 0; i < frame.poolCount && frame.fogVolumes.size() < kMaxFogVolumes; ++i)
+        {
+            const PoolFrame& p = frame.pools[i];
+            if (!(p.steamDensity > 0) || !(p.steamHeight > 0)) continue;
+            FogVolumeDesc d;
+            d.centre[0] = p.centre[0] + offset.x, d.centre[1] = p.centre[1] + offset.y, d.centre[2] = p.centre[2] + offset.z;
+            const bool round = p.shape == 1;
+            d.halfSize[0] = 0.5f * p.sizeX, d.halfSize[1] = p.steamHeight, d.halfSize[2] = round ? 0.5f * p.sizeX : 0.5f * p.sizeZ;
+            d.yaw = p.yaw;
+            d.shape = round ? 0u : 1u;
+            d.density = p.steamDensity;
+            d.heightFalloff = 2;
+            d.sourcePlane = 0.5f;
+            d.riseSpeed = p.steamRiseSpeed;
+            d.turbulence = p.steamTurbulence;
+            d.turbulenceScale = p.steamTurbulenceScale;
+            frame.fogVolumes.push_back(d);
+        }
+    }
     m_scene.flushUpdates(frame.frameIndex, m_framesInFlight, m_shaders);  // transforms, palettes, visibility of this frame
     tracks::particleLightCapacity(m_trackState, m_scene);  // A3: before the imports and every frame constants
     FrameResources resources;

@@ -449,6 +449,14 @@ public:
         float yaw = 0;
     };
     void setPools(std::span<const PoolInput> pools);
+    // The basins' weather (render::PoolFrame::steam*, rainExposure), by basin id: held until changed; a basin not named
+    // has none, an id not in the current set of basins waits for it.
+    struct PoolWeather
+    {
+        uint32_t id = 0;
+        float steamDensity = 0, steamHeight = 1.5f, steamRiseSpeed = 0.3f, steamTurbulence = 0.6f, rainExposure = 0;
+    };
+    void setPoolWeather(std::span<const PoolWeather> pools);
     // Sources for the next queued frame (world coordinates; the basin must be in the current set, the centre inside it).
     void addPoolSources(std::span<const FramePacket::PoolSource> sources);
     // The basins and sources the next queued frame takes, in that frame's coordinates (tests).
@@ -687,6 +695,7 @@ private:
     render::CloudLayerDesc m_clouds;                                 // (m_mutex) B5 the cloud layer every queued frame takes
     std::optional<render::OceanFrame> oceanFrameLocked() const;      // (m_mutex held) m_ocean in the current coordinates
     std::vector<PoolInput> m_pools;                                  // (m_mutex) W2 basins every queued frame takes (world)
+    std::vector<PoolWeather> m_poolWeather;                          // (m_mutex) their steam and rain exposure, by id
     std::vector<std::pair<uint32_t, water::PoolStats>> m_poolStats;  // (m_mutex) their latest statistics, copied after each record
     std::vector<FramePacket::PoolSource> m_pendingPoolSources;       // (m_mutex) for the next queued frame (world)
     void poolsLocked(FramePacket& packet);                           // (m_mutex held) basins and sources into the packet's coordinates

@@ -262,6 +262,14 @@ post_white_balance = false
 # cache's ambient) and lets the sun map's beam extinction include sigma_s. false (default): clear water as before
 # (bit-identical); a material with sigma_s = 0 is clear either way.
 water_turbid = false
+water_underwater = true              # the basin the camera is in is a medium of the view (WaterMedia.hlsl), clear water too: every
+                                     # path of an underwater view takes the water's absorption (and, with water_turbid, what it
+                                     # scatters), and the surface seen from below shows the world above inside Snell's window and
+                                     # mirrors the water outside it (WaterSurface.hlsli). false: the view from inside a basin is the
+                                     # view through air, as before (the surface from below still refracts and mirrors)
+water_multiple_scattering = true     # with water_turbid: the light scattered many times in a turbid water, as the diffusion limit's
+                                     # isotropic source (WaterMedia.hlsl: a milky bath is bright from every side instead of the dark
+                                     # grey single scattering leaves). false: single scattering and the ambient term alone
 
 # Motion blur (A5; COVERAGE 14.12 (2); MotionBlur.cpp): the shutter's open time as a fraction of the frame interval,
 # the exposure [t - s dt, t]; 0.5 = 180 degrees (the user's gate camera, 2026-09-26), 0 = instantaneous. Frames without
