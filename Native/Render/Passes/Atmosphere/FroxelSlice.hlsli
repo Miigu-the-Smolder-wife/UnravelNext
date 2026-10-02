@@ -11,6 +11,7 @@
 #include "Passes/Lights/LightFunction.hlsli"
 #include "Passes/Atmosphere/CloudShadowCommon.hlsli"
 #include "Passes/Hair/HairDensity.hlsli"
+#include "Passes/FX/ParticleShadow.hlsli"
 
 float3 froxelSelfAttenuation(float3 x) { return select(x > 1e-4, (1 - exp(-x)) / max(x, 1e-4), 1 - 0.5 * x); }
 
@@ -186,6 +187,9 @@ FroxelAirResult froxelAirSlice(FroxelGrid g, uint2 tile, uint s, bool nearShadow
         ByteAddressBuffer hair = ResourceDescriptorHeap[P[5].z];
         f = 1 - (1 - f) * hairTransmittance(P[5].z, o + dir * (0.5 * len) - hairDensityOrigin(hair), sun, 3.0e38f, 32u);
     }
+    // FX's particle shadow (P[9].w: the sun's particle transmittance map's parameters, UNX_NONE none - the free word
+    // beside the fog medium's second layer in FroxelIntegrate.hlsl): the same, at the segment's middle.
+    if (any(single > 0) && f < 1) f = 1 - (1 - f) * fxParticleShadow(P[9].w, o + dir * (0.5 * len));
     // The cloud layer's shadow (the sun map at the segment's middle; 1 without clouds): the air a surface is seen through
     // is lit as the surface under the same clouds is. Not in the sky correction: sky pixels show the layer itself.
     float cloud = 1;
