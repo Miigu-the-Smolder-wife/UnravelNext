@@ -153,10 +153,22 @@ int main(int argc, char** argv)
             else CHECK(scenegen::grooms(rq).empty());
             if (id == scenegen::SceneId::ShadingBall)
             {
-                CHECK(a.cameras.size() == 4 && a.cameras[0].name == "front" && a.cameras[1].name == "back" && a.cameras[2].name == "skin_close" &&
-                      a.cameras[3].name == "eye_close");
+                CHECK(a.cameras.size() == 5 && a.cameras[0].name == "front" && a.cameras[1].name == "back" && a.cameras[2].name == "skin_close" &&
+                      a.cameras[3].name == "eye_close" && a.cameras[4].name == "inputs");
                 CHECK(a.lights.size() == 2 && a.lights[0].castShadow && !a.lights[1].castShadow);
-                CHECK(a.instances.size() == 10);
+                CHECK(a.instances.size() == 14);
+                // the material inputs' plates: one material each for the uv transform, the detail maps, the height and the
+                // vertex colour with the emissive mask; the last one's mesh carries colours
+                uint32_t tiledPlates = 0, detailPlates = 0, heightPlates = 0, vertexPlates = 0, colouredMeshes = 0;
+                for (const scene::Material& m : a.materials)
+                {
+                    tiledPlates += m.uvScale.x == 3.0f && m.uvRotation != 0.0f && m.baseColorTexture != scene::kNone;
+                    detailPlates += m.detailColorTexture != scene::kNone && m.detailNormalTexture != scene::kNone && m.detailScale.x == 6.0f;
+                    heightPlates += m.heightTexture != scene::kNone && m.heightScale == 0.03f;
+                    vertexPlates += m.vertexColorTint && m.emissiveMaskTexture != scene::kNone && m.emissiveScale == 0.1f;
+                }
+                for (const scene::Mesh& m : a.meshes) colouredMeshes += m.colors.size() == m.positions.size() && !m.colors.empty();
+                CHECK(tiledPlates == 1 && detailPlates == 1 && heightPlates == 1 && vertexPlates == 1 && colouredMeshes == 1);
                 uint32_t subsurface = 0, oneLobe = 0, sheen = 0, coat = 0, clothBlend = 0, eyes = 0;
                 for (const scene::Material& m : a.materials)
                 {
