@@ -5,7 +5,8 @@
 #   2  the four game scenes: cut pictures at 1080p with the gi and direct layers (which stage a cut frame's blotch is in),
 #      timings at 1080p, 1440p and 4K;
 #   3  scenegen's scenes (outdoors, night, forest, water, interior): cut pictures and timings at 1080p, timings at 4K;
-#   4  the high tier's timings (lobby, 1080p and 4K) and the pictures without the height fog (lobby, city block).
+#   4  the high tier's timings (lobby, 1080p and 4K), the pictures with the height fog on (lobby, city block), and the
+#      lake's and the night city's timings with every changed caster making its pages stale (the cache as it was).
 # The summary (<out>\summary.txt): the furnace sheets, every timing run's GPU frame and largest pass groups, the gates
 # that failed. A device removal stops the batch.
 #   powershell -File Tools\Verify\Run-Ue6Batch.ps1 [-Out Cache\Ue6Batch] [-Skip furnace,game,generated,variants]
@@ -34,18 +35,23 @@ function Invoke-Step([string]$title, [string[]]$stepArgs) {
 
 if ($Skip -notcontains "furnace") {
     $layers = "gi,carddirect,cardindirect"
-    Invoke-Step "furnace room (night outside)" @("-File", "Tools\Verify\Run-Ue6Still.ps1", "-Name", "batch_furnace", "-Scene", "furnace_room", "-Layers", $layers)
-    Invoke-Step "furnace room (day outside)" @("-File", "Tools\Verify\Run-Ue6Still.ps1", "-Name", "batch_furnace_day", "-Scene", "furnace_room_day", "-Layers", $layers)
+    # (the fog is on in the furnace runs: it is the medium that shows what the air volume and the translucency volume
+    # let through the walls)
+    $fog = "atmosphere.fog.enabled=true"
+    Invoke-Step "furnace room (night outside)" @("-File", "Tools\Verify\Run-Ue6Still.ps1", "-Name", "batch_furnace", "-Scene", "furnace_room", "-Layers", $layers, "-Set", $fog)
+    Invoke-Step "furnace room (day outside)" @("-File", "Tools\Verify\Run-Ue6Still.ps1", "-Name", "batch_furnace_day", "-Scene", "furnace_room_day", "-Layers", $layers, "-Set", $fog)
     Invoke-Step "furnace room (day outside, no probe occlusion)" @("-File", "Tools\Verify\Run-Ue6Still.ps1", "-Name", "batch_furnace_day_noocc", "-Scene", "furnace_room_day",
-        "-Layers", $layers, "-Set", "lumen.radiance_cache_probe_occlusion=false")
+        "-Layers", $layers, "-Set", "$fog,lumen.radiance_cache_probe_occlusion=false")
     # what the fog adds to the day room, and which of its terms: no fog; the fog without its indirect light; the fog
     # sampled along the whole slice (the part past the wall too)
     Invoke-Step "furnace room (day outside, no fog)" @("-File", "Tools\Verify\Run-Ue6Still.ps1", "-Name", "batch_furnace_day_nofog", "-Scene", "furnace_room_day",
         "-Layers", $layers, "-Set", "atmosphere.fog.enabled=false")
     Invoke-Step "furnace room (day outside, fog without indirect light)" @("-File", "Tools\Verify\Run-Ue6Still.ps1", "-Name", "batch_furnace_day_fognoamb", "-Scene", "furnace_room_day",
-        "-Layers", $layers, "-Set", "atmosphere.fog.indirect_light=false")
+        "-Layers", $layers, "-Set", "$fog,atmosphere.fog.indirect_light=false")
     Invoke-Step "furnace room (day outside, slices not clipped at the surface)" @("-File", "Tools\Verify\Run-Ue6Still.ps1", "-Name", "batch_furnace_day_noclip", "-Scene", "furnace_room_day",
-        "-Layers", $layers, "-Set", "atmosphere.froxels.clip_at_surface=false")
+        "-Layers", $layers, "-Set", "$fog,atmosphere.froxels.clip_at_surface=false")
+    Invoke-Step "furnace room (day outside, the reference's depth offset threshold)" @("-File", "Tools\Verify\Run-Ue6Still.ps1", "-Name", "batch_furnace_day_ltvref", "-Scene", "furnace_room_day",
+        "-Layers", $layers, "-Set", "$fog,lumen.translucency_volume_depth_offset_threshold=1.0")
 }
 if ($Skip -notcontains "game") {
     Invoke-Step "game scenes 1080p (pictures with layers, timings)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", $Out, "-Resolutions", "1080p", "-Layers", "gi,direct")
@@ -58,10 +64,12 @@ if ($Skip -notcontains "generated") {
 if ($Skip -notcontains "variants") {
     Invoke-Step "high tier (lobby timings)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\tier_high", "-Only", "bt_lobby", "-Resolutions", "1080p,4K", "-SkipPictures",
         "-Set", "output.tier=high")
-    Invoke-Step "no fog (lobby pictures)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\no_fog", "-Only", "bt_lobby", "-Resolutions", "1080p", "-SkipTimings",
-        "-Set", "atmosphere.fog.enabled=false")
-    Invoke-Step "no fog (city block pictures, timings)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\no_fog", "-NoGame", "-Generated", "city_block", "-Resolutions", "1080p",
-        "-Set", "atmosphere.fog.enabled=false")
+    Invoke-Step "fog on (lobby pictures)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\fog", "-Only", "bt_lobby", "-Resolutions", "1080p", "-SkipTimings",
+        "-Set", "atmosphere.fog.enabled=true")
+    Invoke-Step "fog on (city block pictures, timings)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\fog", "-NoGame", "-Generated", "city_block", "-Resolutions", "1080p",
+        "-Set", "atmosphere.fog.enabled=true")
+    Invoke-Step "shadow cache as before (lake, city night timings)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\cache_all", "-NoGame", "-Generated", "waterside,city_night",
+        "-Resolutions", "1080p", "-SkipPictures", "-Set", "shadow.vsm.cache_min_change_texels=0")
 }
 & python Tools\Verify\batch_summary.py $outDir (Join-Path $root "Cache\Ue6Diag") | Out-File -Encoding utf8 (Join-Path $outDir "summary.txt")
 "batch finished $(Get-Date -Format s)" | Out-File -Encoding utf8 -Append $batchLog

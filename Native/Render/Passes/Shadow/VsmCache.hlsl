@@ -25,6 +25,17 @@
 //           or its light unchanged in range (local) -> the request is marked kept and its physical page used.
 //   MODE 4 (1 group): the free physical pages in page order (deterministic): the pages the scan assigns (VsmScan). With
 //           nothing kept (an uncacheable frame) it is 0, 1, 2, .. and the assignment is the one path's.
+// What a change is worth at a level (shadow.vsm.cache_min_change_texels, e texels; the batch of 2026-10-02: a lake's
+// 3,345 wind-moved trees made every resident page of every level stale every frame - 12 levels x 5 ms): each sphere
+// carries a code in its radius' 6 low mantissa bits,
+//   rigid (63): the caster moved, appeared, vanished, or deforms without a bound (morphs, terrain patches). The level's
+//           pages under it become stale when the caster is at least e texels of that level in radius (a smaller one
+//           changes less than a texel of the page);
+//   wind (0..62, the amplitude B = 2^((code - 40) / 4) m: Deformation.hlsli windOffsetBound): the wind moves a point by
+//           at most 0.8 B over any time and by B x windChangeFactor(dt) a frame, so a page drawn N frames ago is off by
+//           at most N x that. A level whose e texels exceed 0.8 B never becomes stale from it; the others every
+//           N = floor(e texel / (B x windChangeFactor(dt))) frames (1..64), each page on its own frame of the N (a hash
+//           of its slot): the shadow of a wind-moved caster is never more than e texels behind its geometry.
 // Error handling: the changed-caster list has a fixed capacity; past it the frame is uncacheable (flag), never partial.
 // P[0] = { caster state UAV (uint4 per instance), changed list UAV (raw: count, flags, 0, 0, then float4 spheres), instance
 //          count, VSM constants CBV }
@@ -32,6 +43,7 @@
 // P[2] = { free list UAV (raw: count, 0, 0, 0, then pages), atlas pages, scanned slots, cacheable (1) }
 // P[3] = { skin bounds SRV, skin instances SRV, skin count, stats UAV (raw; word 6: kept pages) }
 // P[4] = { local lights SRV (VsmLocalLight per shadow slot), local shadow slots in use, 0, 0 }
+// P[5] = { asuint(e: the least change that makes a page stale, texels of its level), asuint(windChangeFactor(dt)), frame index, 0 }
 // Frame constants of the main view (scene buffers, wind).
 #include "Deformation.hlsli"
 #include "Passes/Shadow/VsmLocal.hlsli"
@@ -41,11 +53,15 @@
 // The local lights' changed bits: VSM_LOCAL_LIGHTS / 32 words after the used-page bitmap (whose words cover the pages).
 uint localChangedOffset() { return (P[2].y + 31) / 32 * 4; }
 
-void appendSphere(RWByteAddressBuffer list, float3 centre, float radius)
+#define VSM_CHANGE_RIGID 63u
+uint changeCode(float amplitude) { return (uint)clamp(ceil(log2(max(amplitude, 1e-6)) * 4.0 + 40.0), 0.0, 62.0); }  // (rounded up)
+float changeAmplitude(uint code) { return exp2((float(code) - 40.0) / 4.0); }
+// (the radius is read back with its 6 low bits set: never under the caster's)
+void appendSphere(RWByteAddressBuffer list, float3 centre, float radius, uint code)
 {
     uint at;
     list.InterlockedAdd(0, 1u, at);
-    if (at < P[1].x) list.Store4(16 + at * 16, uint4(asuint(centre), asuint(radius)));
+    if (at < P[1].x) list.Store4(16 + at * 16, uint4(asuint(centre), (asuint(radius) & ~63u) | code));
     else list.InterlockedOr(4, VSM_CACHE_UNCACHEABLE);
 }
 
@@ -89,14 +105,19 @@ void main(uint i : SV_DispatchThreadID)
     const bool animated = (inst.flags & INSTANCE_WIND) != 0 || inst.morph != UNX_NONE || inst.patch != UNX_NONE;
     if (!changed && !animated) return;
     const GpuMesh mesh = loadMesh(inst.mesh);
-    const float grow = windOffsetBound(inst, mesh.boundsSphere.xyz, mesh.boundsSphere.w) + (inst.morph != UNX_NONE ? inst.morphRadius : 0.0);
+    const float wind = windOffsetBound(inst, mesh.boundsSphere.xyz, mesh.boundsSphere.w);
+    const float grow = wind + (inst.morph != UNX_NONE ? inst.morphRadius : 0.0);
     const float r = mesh.boundsSphere.w + grow;
-    if (casts) appendSphere(list, transformPoint(inst.objectToWorld, mesh.boundsSphere.xyz), r * stretch(inst.objectToWorld));
+    // the wind alone (its amplitude in the world), or anything else
+    const bool windOnly = !changed && inst.morph == UNX_NONE && inst.patch == UNX_NONE;
+    if (windOnly && !(wind > 0)) return;  // (no wind this frame: nothing moves)
+    const uint code = windOnly ? changeCode(wind * stretch(inst.objectToWorld)) : VSM_CHANGE_RIGID;
+    if (casts) appendSphere(list, transformPoint(inst.objectToWorld, mesh.boundsSphere.xyz), r * stretch(inst.objectToWorld), code);
     if (casted || casts)
     {
         const bool broken = (inst.flags & INSTANCE_MOTION_BREAK) != 0;
         const float3 before = broken ? inst.breakCentre : transformPoint(inst.prevObjectToWorld, mesh.boundsSphere.xyz);
-        appendSphere(list, before, r * max(stretch(inst.prevObjectToWorld), stretch(inst.objectToWorld)));
+        appendSphere(list, before, r * max(stretch(inst.prevObjectToWorld), stretch(inst.objectToWorld)), code);
     }
 }
 #elif MODE == 1
@@ -119,14 +140,27 @@ void main(uint j : SV_DispatchThreadID)
         list.InterlockedOr(4, VSM_CACHE_UNCACHEABLE);
         return;
     }
-    appendSphere(list, now.xyz, now.w);
-    appendSphere(list, before.xyz, before.w);
+    appendSphere(list, now.xyz, now.w, VSM_CHANGE_RIGID);
+    appendSphere(list, before.xyz, before.w, VSM_CHANGE_RIGID);
 }
 #elif MODE == 2
 // The resident sun pages of level k under a world sphere become stale (the sphere's light-space square, clamped to the
 // level's window; at most VSM_TABLE^2 pages, 64 lanes).
-void staleUnder(ConstantBuffer<VsmConstants> c, RWByteAddressBuffer table, float3 centre, float radius, uint k, uint lane)
+void staleUnder(ConstantBuffer<VsmConstants> c, RWByteAddressBuffer table, float3 centre, float radius, uint code, uint k, uint lane)
 {
+    // what the change is worth at this level (the header)
+    const float least = asfloat(P[5].x) * vsmTexel(k);
+    uint period = 1;
+    if (code == VSM_CHANGE_RIGID)
+    {
+        if (radius < least) return;
+    }
+    else
+    {
+        const float amplitude = changeAmplitude(code);
+        if (0.8 * amplitude < least) return;
+        period = (uint)clamp(floor(least / max(amplitude * asfloat(P[5].y), 1e-9)), 1.0, 64.0);
+    }
     const float3 ls = vsmLightSpaceAt(c, centre, k);
     const float pageSize = vsmPageSize(k);
     const int2 lo = max(int2(floor((ls.xy - radius) / pageSize)), vsmOrigin(c, k));
@@ -137,6 +171,7 @@ void staleUnder(ConstantBuffer<VsmConstants> c, RWByteAddressBuffer table, float
     {
         const int2 page = lo + int2(i % size.x, i / size.x);
         const uint slot = vsmSlot(page, k);
+        if (period > 1 && (P[5].z + ((slot * 2654435761u) >> 16)) % period != 0) continue;
         const uint2 e = table.Load2(slot * 8);
         if ((e.x & VSM_FLAG_RESIDENT) != 0 && e.y == vsmTag(page) && (e.x & VSM_FLAG_STALE) == 0) table.InterlockedOr(slot * 8, VSM_FLAG_STALE);
     }
@@ -153,8 +188,8 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     const uint count = min(header.x, P[1].x), k = group.x;
     [loop] for (uint i = group.y; i < count; i += STALE_GROUPS_PER_LEVEL)
     {
-        const float4 s = asfloat(list.Load4(16 + i * 16));
-        staleUnder(c, table, s.xyz, s.w, k, lane);
+        const uint4 s = list.Load4(16 + i * 16);
+        staleUnder(c, table, asfloat(s.xyz), asfloat(s.w | 63u), s.w & 63u, k, lane);
     }
 }
 #elif MODE == 3

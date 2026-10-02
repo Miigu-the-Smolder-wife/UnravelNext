@@ -47,16 +47,21 @@ bool ltvCellVisible(uint3 cell, uint hizSrv)
     return ltvDepthOfSlice(max(float(cell.z) - 1.0, 0.0)) < maxDepth;
 }
 
-// The cell's sample point kept in front of the depth buffer (GridCenterOffsetFromDepthBuffer 0.5, accepted while the
-// move is under one slice): a sample just behind a wall would light the air in front of it with the room behind.
-void ltvDepthConstraint(uint3 cell, inout float3 offset, uint depthSrv)
+// The cell's sample point kept in front of the depth buffer (GridCenterOffsetFromDepthBuffer 0.5): a sample behind a
+// wall would light the air in front of it with what is behind. threshold (slices): the move is made while it is under
+// this. The reference's is 1 (OffsetThresholdToAcceptDepthBufferOffset) - a visible cell's sample is up to 2.5 slices
+// behind its pixel's surface, so the cell past a wall keeps its sample outside in 3 frames of 4 and the wall's own cell
+// in 1 of 8, and the room's volume holds the sky (furnace_room_day: the fog's indirect light). Ours moves every such
+// sample (lumen.translucency_volume_depth_offset_threshold = 64): behind a thin object the cell then takes the light in
+// front of it on the frames its jittered sample falls on the object.
+void ltvDepthConstraint(uint3 cell, inout float3 offset, uint depthSrv, float threshold)
 {
     Texture2D<float> depth = ResourceDescriptorHeap[depthSrv];
     const uint2 pixel = min(uint2((float2(cell.xy) + offset.xy) * LTV_PIXEL_SIZE), uint2(g_viewWidth, g_viewHeight) - 1);
     const float sceneDepth = linearDepth(depth.Load(int3(pixel, 0)));
     const float limit = ltvSliceOfDepth(sceneDepth) - 0.5;
     const float delta = limit - (float(cell.z) + offset.z);
-    if (delta < 0 && -delta < 1.0) offset.z += delta;
+    if (delta < 0 && -delta < threshold) offset.z += delta;
 }
 
 #endif

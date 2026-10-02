@@ -24,7 +24,9 @@ sky_view_segments = 128              # quadratic segments x Gauss-Legendre 4 alo
 # light. The numbers are the reference's placed-fog defaults turned to metres (FogDensity 0.02 -> 0.002 / m,
 # FogHeightFalloff 0.2 -> 0.02 / m, volumetric scattering distribution 0.2, albedo white, extinction scale 1).
 [atmosphere.fog]
-enabled = true
+enabled = false                      # off unless the game asks for it (as the reference: a level has fog when a fog actor is placed).
+                                     # The batch of 2026-10-02 had it on everywhere: the sky and distant ground veiled grey, the
+                                     # interiors' ceilings hazed - a look to choose per scene, not a default
 density_per_m = 0.002                # extinction per metre at height_m (x extinction_scale)
 height_falloff_per_m = 0.02          # the density halves every 1 / this metres of height
 height_m = 0.0                       # the height (scene y) the density is given at

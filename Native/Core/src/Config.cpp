@@ -255,7 +255,11 @@ void QualityConfig::applyOverride(std::string_view assignment)
     while (!key.empty() && key.back() == ' ') key.pop_back();
     if (!m_values.count(key)) fail("override of unknown quality key '%s' (add it to %s first)", key.c_str(), m_origin.c_str());
     std::string origin = "override " + key;
-    Cursor c{ assignment.substr(eq + 1), 0, 1, &origin };
+    // (a string key takes a bare word: quotes do not survive every shell)
+    std::string text(assignment.substr(eq + 1));
+    while (!text.empty() && text.front() == ' ') text.erase(text.begin());
+    if (m_values[key].kind == Value::Kind::String && !text.empty() && text.front() != '"') text = "\"" + text + "\"";
+    Cursor c{ text, 0, 1, &origin };
     Value v = parseValue(c);
     if (!c.atLineEnd()) c.error("trailing text");
     m_values[key] = std::move(v);

@@ -1706,6 +1706,7 @@ void shade(FramePassContext& fc, ViewResources& view)
     tracks::water(fc, target);  // W (engine 1): the water surfaces' refraction targets are the shaded opaque scene and its depth
     shadingComposite(fc, target);
     view.exposureCorrection = target.exposureCorrection;  // a snap frame's own metering (Exposure.cpp): the chain and the caller
+    view.localDirect = target.localDirect;                 // (shading.mega_lights' result, for the gate's captures)
     if (translucentActive(fc, view)) translucentComposite(fc, view, target.color);  // A10 glass over the composited image
     TextureRef image = target.color;
     if (haze)

@@ -252,6 +252,7 @@ private:
         uint32_t width = 0, height = 0, parity = 0, revision = 0, epoch = 0, prevTemporalIndex = 0;
         bool valid = false;
         bool previousHadHistory = false;  // the frame before had a valid history (it was not a first frame, cut or restore)
+        uint32_t framesWithHistory = 0;   // frames in a row with a valid history (0: this is a first frame, a cut or a restore)
         float prevExposure = 0;
         float4x4 prevInvViewProj{};
     } m_lumen;

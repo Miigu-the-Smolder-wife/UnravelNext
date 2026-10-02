@@ -37,12 +37,31 @@ void main(uint2 px : SV_DispatchThreadID)
         const float3 a = z1 > z0 ? lerp(p0, p1, (z - z0) / (z1 - z0)) : p0, b = z1 > z0 ? lerp(p0, p1, (zEnd - z0) / (z1 - z0)) : p1;
         const float texel = vsmTexel(k);
         const float2 A = vsmLightSpaceAt(c, a, k).xy / texel, D = (vsmLightSpaceAt(c, b, k).xy - vsmLightSpaceAt(c, a, k).xy) / texel;
-        VsmAirWalk w = vsmAirWalkBegin(A, D, VSM_PAGE, 0, 1);
-        float ta, tb;
-        int2 page;
-        [loop] for (; steps < FRAGMENT_WALK_CAP && vsmAirWalkNext(w, ta, tb, page); ++steps)
-            if (vsmInWindow(c, page, k)) requests.InterlockedOr(vsmSlot(page, k) * 4, VSM_REQ_PIXEL);
-        if (w.t < w.tEnd) capped = true;
+        // the piece inside the level's window (pages outside it are never requested): a record at the far plane - a
+        // particle, a strand against the sky - sends the last level's piece out to there, thousands of pages (the ridge
+        // at sunset while turning, 2026-10-02: the error bit). Inside the window a piece crosses at most 2 x VSM_TABLE pages.
+        const float2 lo = float2(vsmOrigin(c, k)) * float(VSM_PAGE), hi = lo + float(VSM_TABLE) * float(VSM_PAGE);
+        float t0 = 0, t1 = 1;
+        bool inside = true;
+        [unroll] for (uint axis = 0; axis < 2; ++axis)
+        {
+            if (abs(D[axis]) < 1e-9) inside = inside && A[axis] >= lo[axis] && A[axis] < hi[axis];
+            else
+            {
+                const float u = (lo[axis] - A[axis]) / D[axis], v = (hi[axis] - A[axis]) / D[axis];
+                t0 = max(t0, min(u, v));
+                t1 = min(t1, max(u, v));
+            }
+        }
+        if (inside && t1 > t0)
+        {
+            VsmAirWalk w = vsmAirWalkBegin(A, D, VSM_PAGE, t0, t1);
+            float ta, tb;
+            int2 page;
+            [loop] for (; steps < FRAGMENT_WALK_CAP && vsmAirWalkNext(w, ta, tb, page); ++steps)
+                if (vsmInWindow(c, page, k)) requests.InterlockedOr(vsmSlot(page, k) * 4, VSM_REQ_PIXEL);
+            if (w.t < w.tEnd) capped = true;
+        }
         if (zEnd >= z1 || capped) break;
         z = zEnd / 1.0002;
         ++k;

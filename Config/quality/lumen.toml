@@ -47,6 +47,8 @@ radiance_cache_trace_capacity = 1024              # structural bound of probes t
 # 3 x 3 rays a cell that end in the radiance cache. false (default): not built; those readers get no indirect light from it.
 translucency_volume = true
 translucency_volume_end_distance_m = 80.0         # EndDistanceFromCamera (8000 cm)
+translucency_volume_depth_offset_threshold = 64.0 # slices: a cell's sample behind its pixel's surface is moved in front of it while the move
+                                                  # is under this (reference 1: samples past a wall stay there and bring the other side's light)
 translucency_volume_spatial_filter = true         # SpatialFilter
 translucency_volume_filter_samples = 3            # SpatialFilter.SampleCount: cells either side, per axis
 translucency_volume_filter_deviation = 5.0        # SpatialFilter.StandardDeviation (cells): close to a box

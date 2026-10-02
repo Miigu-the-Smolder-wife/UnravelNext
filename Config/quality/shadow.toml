@@ -18,6 +18,9 @@ lod_bias = 0.0                  # level = floor(log2(pixel footprint / level-0 t
 receiver_bias_texels = 1.0      # receiver-plane tolerance, texels of the compared level (x (1 + plane slope)); no lateral shift
 max_receiver_slope = 8.0        # clamp of the receiver plane's light-space gradient (surfaces within ~7 deg of grazing)
 height_margin_m = 500.0         # caster height range margin (dynamic casters) around the scene's bounds
+cache_min_change_texels = 0.5   # what makes a cached sun page stale (VsmCache.hlsl): a moved caster at least this many of the level's
+                                # texels in radius; a wind-moved one once the wind can have moved it this far since the page was drawn
+                                # (coarse levels never, middle levels every few frames). 0: every changed caster, every frame
 cache = true                    # sun page cache (VsmCache.hlsl; a design choice): a requested sun page keeps its content
                                 # when it was resident last frame and no changed caster (moved, deformed, skinned, wind, morph,
                                 # shown / hidden) touched it; the sun, the caster range, a scene revision, an origin rebase or a

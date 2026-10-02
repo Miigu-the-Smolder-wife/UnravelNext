@@ -6,7 +6,7 @@
 //   fast update: f = saturate(moving share / P[3].z (0.1)), f = saturate(min((f - 0.2) / 0.8, P[3].w (0.9))), kept at least
 //   at the history's f; N = min(N, (1 - f) x N_max): where the lighting moves the history shortens to one frame;
 //   blend: value = lerp(history, new, 1 / (1 + N)); a pixel without lighting this frame (no probe) with a history
-//   takes 1 / (1 + 4 N). No history: the new value, N = 0.
+//   takes 1 / (1 + 4 N). No history: the new values' mean over the pixel's surface around it (5 x 5 taps), N = 0.
 // Output: diffuse RGBA16F = irradiance x exposure, a = N + 1 (0 = no surface; M's a > 0 test and LgScreenData's
 // disocclusion test read it); rough specular RGBA16F, a = f; keys R32G32_UINT = { device depth bits, normal (2 x 15
 // bit octahedral) }, 0 = no surface.
@@ -131,6 +131,32 @@ void main(uint3 id : SV_DispatchThreadID)
                 fast = outFast;
             }
         }
+    }
+    // A pixel without history (a cut's first frame, a disocclusion) would show its one frame's estimate - a jittered place
+    // among its probes: it takes the mean of this frame's estimates on its own surface around it (5 x 5 taps 2 pixels
+    // apart: the same plane within the history's distance threshold, the normal within 25 degrees).
+    if (frames == 0 && lit)
+    {
+        const float4 plane = float4(s.normal, dot(s.position, s.normal));
+        float3 sumDiffuse = fresh.rgb, sumSpecular = freshSpecular;
+        float weight = 1;
+        [loop] for (int ty = -2; ty <= 2; ++ty)
+            [loop] for (int tx = -2; tx <= 2; ++tx)
+            {
+                if (tx == 0 && ty == 0) continue;
+                const int2 q = (int2)id.xy + int2(tx, ty) * 2;
+                if (any(q < 0) || any(q >= (int2)lgViewSize())) continue;
+                const float4 d = newDiffuse[q];
+                if (!(d.a > 0)) continue;
+                const LgSurface n = lgSurface((uint2)q);
+                if (!n.valid || dot(n.normal, s.normal) < 0.9) continue;
+                if (abs(dot(float4(n.position, -1), plane)) > asfloat(P[3].y) * max(s.depth, 1e-3)) continue;
+                sumDiffuse += d.rgb;
+                sumSpecular += newSpecular[q].rgb;
+                weight += 1;
+            }
+        outDiffuse = sumDiffuse / weight;
+        outSpecular = sumSpecular / weight;
     }
     diffuseOut[id.xy] = float4(max(outDiffuse, 0.0), frames + 1);
     specularOut[id.xy] = float4(max(outSpecular, 0.0), fast);

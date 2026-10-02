@@ -18,7 +18,7 @@
 // P[5] = { card frame SRV (UNX_NONE: none), radiance cache params SRV (UNX_NONE: none), indirection SRV, atlas SRV }
 // P[6], P[7] = RtSceneSrvs
 // P[8] = { asuint(cell jitter xyz), frame }, P[9] = { asuint(ray intensity cap, exposed units; 0: none), the radiance
-// cache's depth atlas SRV (UNX_NONE: no probe visibility test) }
+// cache's depth atlas SRV (UNX_NONE: no probe visibility test), asuint(the depth constraint's threshold, slices) }
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
@@ -39,7 +39,7 @@ void LumenTranslucencyVolumeTraceGen()
     trace[id] = 0;
     if (!ltvCellVisible(cell, P[0].z)) return;
     float3 offset = ltvFrameJitter();
-    ltvDepthConstraint(cell, offset, P[0].y);
+    ltvDepthConstraint(cell, offset, P[0].y, asfloat(P[9].z));
     const float3 origin = ltvCellPosition(float3(cell) + offset);
     const uint seed = ltvHash(cell.x + cell.y * 8191u + ltvFrame() * 26699u);
     const float2 uv = (float2(texel) + float2(ltvUnit(seed), ltvUnit(seed ^ 0x9e3779b9u))) / float(LTV_TRACE_RES);

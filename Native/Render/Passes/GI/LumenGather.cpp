@@ -96,6 +96,11 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     // The frame before this one was a first frame, a cut or a restore (it had no history itself).
     const bool previousFrameWasCut = !st.previousHadHistory;
     st.previousHadHistory = historyValid;
+    // Stochastic interpolation (one probe of a pixel's 4 drawn at random) leans on the pixels' history to average the
+    // draws: on a cut's first frames there is none (bath, f600: neighbouring pixels 4 x apart, the picture grainy until
+    // f603) - until the history holds 4 frames every pixel blends its 4 probes.
+    st.framesWithHistory = historyValid ? st.framesWithHistory + 1 : 0;
+    const bool stochasticInterpolation = L.stochasticInterpolation && st.framesWithHistory >= 4;
 
     const auto import = [&](ComPtr<ID3D12Resource>& t, const char* name, uint32_t w, uint32_t h, DXGI_FORMAT format) {
         return g.importTexture(t.Get(), TextureDesc{ name, w, h, 1, 1, format }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
@@ -735,7 +740,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   k[6] = c.srv(irradiance);
                   k[7] = c.srv(radianceBorder);
                   k[8] = bits(L.jitterWidth);
-                  k[9] = L.stochasticInterpolation ? 1u : 0u;
+                  k[9] = stochasticInterpolation ? 1u : 0u;
                   k[10] = bits(L.maxRoughnessRoughSpecular);
                   k[11] = c.srv(probeMoving);
                   // (lumen.short_range_ao is applied after the pixel filter, in M's composite: Unreal's default,

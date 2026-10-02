@@ -112,7 +112,7 @@ constexpr uint32_t kLocalFaceWords = 173, kLocalLightWords = 6 * kLocalFaceWords
 constexpr uint32_t kLocalViewWordOffset[kLocalMips] = { 0, 1, 2, 3, 5, 13, 45 };
 constexpr uint32_t kScanGroupSlots = 1024;  // VsmScan.hlsl
 constexpr uint32_t kScanGroupsMax = (kTotalSlots + kScanGroupSlots - 1) / kScanGroupSlots;
-constexpr uint32_t kCacheWords = 20;  // VsmCache.hlsl root constants P[0..4]
+constexpr uint32_t kCacheWords = 24;  // VsmCache.hlsl root constants P[0..5]
 
 // Views of the resources created once (constants ring).
 void createFixedViews(Device& device, State& s)
@@ -296,7 +296,10 @@ struct CasterBounds
     bool lod = false;
 };
 
-CasterBounds casterBounds(const GpuScene& scene, bool lod, float thresholdPx)
+// windSpeed: the frame's (m/s). A wind-moved caster stays within its sphere grown by the wind's bound
+// (Deformation.hlsli windOffsetBound, as V's culling takes it): it counts in the views it reaches, not in every view -
+// a forest of 1.1 M such trees stood at 4e8 cluster entries in level 0's 16 m window.
+CasterBounds casterBounds(const GpuScene& scene, bool lod, float thresholdPx, float windSpeed)
 {
     CasterBounds b;
     b.ranges = &scene.clusters().meshes;
@@ -313,7 +316,7 @@ CasterBounds casterBounds(const GpuScene& scene, bool lod, float thresholdPx)
         const gpu::Mesh& m = meshes[inst.mesh];
         const float4* r = inst.objectToWorld;
         const float errorScale = std::sqrt(r[0].x * r[0].x + r[0].y * r[0].y + r[0].z * r[0].z);  // VisibilityCommon.hlsli instanceScale
-        if ((inst.flags & (scene::InstanceSkinned | scene::InstanceWind)) != 0 || inst.morph != gpu::kNone)
+        if ((inst.flags & scene::InstanceSkinned) != 0 || inst.morph != gpu::kNone)
         {
             b.everywhere += cut(inst.mesh);
             b.everywhereMeshes.push_back({ inst.mesh < ranges.size() && ranges[inst.mesh].cutErrorBase > 0 ? inst.mesh : gpu::kNone, errorScale, cut(inst.mesh) });
@@ -324,7 +327,13 @@ CasterBounds casterBounds(const GpuScene& scene, bool lod, float thresholdPx)
                            r[2].x * c.x + r[2].y * c.y + r[2].z * c.z + r[2].w };
         const float scale = std::max({ std::sqrt(r[0].x * r[0].x + r[0].y * r[0].y + r[0].z * r[0].z), std::sqrt(r[1].x * r[1].x + r[1].y * r[1].y + r[1].z * r[1].z),
                                        std::sqrt(r[2].x * r[2].x + r[2].y * r[2].y + r[2].z * r[2].z) });
-        b.spheres.push_back({ w.x, w.y, w.z, m.boundsSphere.w * scale * 1.001f + 1e-3f });
+        float radius = m.boundsSphere.w;
+        if ((inst.flags & scene::InstanceWind) != 0 && inst.windStiffness > 0)
+        {
+            const float h = std::max(c.y + m.boundsSphere.w - inst.windAnchor, 0.0f);
+            radius += 0.002f / inst.windStiffness * h * h * windSpeed * windSpeed;
+        }
+        b.spheres.push_back({ w.x, w.y, w.z, radius * scale * 1.001f + 1e-3f });
         b.clusters.push_back(cut(inst.mesh));
         // per-view bound: not for terrain patches (C5: their replaced rectangles force the source clusters)
         const bool table = lod && inst.patch == gpu::kNone && inst.mesh < ranges.size() && ranges[inst.mesh].cutErrorBase > 0;
@@ -1067,12 +1076,22 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     // Local lights (MODE 3, 6): their data this frame and the shadow slots in use; a light's pages are kept while its
     // generation holds and no changed caster meets its range.
     const uint32_t localSlotsUsed = s.localUsed;
+    // what a change is worth at a level (VsmCache.hlsl): the least change in the level's texels, and how far the wind
+    // moves a point in this frame's time as a share of its bound (Deformation.hlsli windChangeFactor)
+    const float minChange = q.has("shadow.vsm.cache_min_change_texels") ? (float)q.number("shadow.vsm.cache_min_change_texels") : 0.0f;
+    const float frameSeconds = fc.frame.deltaTime > 0 ? fc.frame.deltaTime : 1.0f / 60.0f;
+    const float windChange = 0.4f * std::min(2.0f, 1.7f * frameSeconds);
+    uint32_t minChangeBits, windChangeBits;
+    std::memcpy(&minChangeBits, &minChange, 4);
+    std::memcpy(&windChangeBits, &windChange, 4);
+    const uint64_t frameIndex = fc.frame.frameIndex;
     auto cacheWords = [=](PassContext& ctx, uint32_t (&k)[kCacheWords]) {
         const uint32_t w[kCacheWords] = { casterStateRef.valid() ? ctx.uav(casterStateRef) : 0xFFFFFFFFu, ctx.uav(changed), instanceCount, ring,
                                           changedCapacity, ctx.uav(table), ctx.uav(requests), ctx.uav(usedPages),
                                           ctx.uav(freePages), pagesNow, scanSlots, cacheable ? 1u : 0u,
                                           skinCount ? ctx.srv(skinBounds) : 0xFFFFFFFFu, skinInstancesSrv, skinCount, ctx.uav(statsBuf),
-                                          localSlotsUsed ? localLightsSrv : 0xFFFFFFFFu, localSlotsUsed, 0, 0 };
+                                          localSlotsUsed ? localLightsSrv : 0xFFFFFFFFu, localSlotsUsed, 0, 0,
+                                          minChangeBits, windChangeBits, (uint32_t)frameIndex, 0 };
         std::memcpy(k, w, sizeof w);
     };
     {
@@ -1459,7 +1478,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     // shadow.vsm.raster_lod_bound false (A/B): the leaf count of every caster in every view it reaches
     const bool lodBound = !q.has("shadow.vsm.raster_lod_bound") || q.boolean("shadow.vsm.raster_lod_bound");
     const CasterBounds bounds =
-        fc.services.rasterizeDepth && split ? casterBounds(fc.scene, lodBound, (float)q.number("visibility.lod_error_px")) : CasterBounds{};
+        fc.services.rasterizeDepth && split ? casterBounds(fc.scene, lodBound, (float)q.number("visibility.lod_error_px"), fc.scene.source() ? fc.scene.source()->windSpeed : 0.0f) : CasterBounds{};
     uint32_t sunRequests = 0, localRequests = 0;
     if (fc.services.rasterizeDepth)
     {

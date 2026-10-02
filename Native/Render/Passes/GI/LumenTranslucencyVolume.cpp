@@ -44,6 +44,7 @@ struct Settings
     bool jitter = true;              // Temporal.Jitter
     float maxRayIntensity = 20.0f;   // MaxRayIntensity
     uint32_t clipmapBias = 3;        // ShareRadianceCacheWithOpaque.ClipmapBias
+    float depthThreshold = 64.0f;    // OffsetThresholdToAcceptDepthBufferOffset (reference 1; LumenTranslucencyVolumeGrid.hlsli)
     float traceDistance = 200.0f;
 };
 Settings settingsOf(const QualityConfig& q)
@@ -61,6 +62,7 @@ Settings settingsOf(const QualityConfig& q)
     s.jitter = flag("lumen.translucency_volume_jitter", true);
     s.maxRayIntensity = (float)num("lumen.translucency_volume_max_ray_intensity", 20.0);
     s.clipmapBias = (uint32_t)num("lumen.translucency_volume_clipmap_bias", 3);
+    s.depthThreshold = (float)num("lumen.translucency_volume_depth_offset_threshold", 64.0);
     s.traceDistance = (float)num("lumen.radiance_cache_trace_distance_m", 200.0);
     if (!(s.endDistance > 1) || s.filterSamples > 8 || !(s.historyWeight >= 0 && s.historyWeight < 1)) fail("lumen.translucency_volume: parameters out of range");
     return s;
@@ -364,6 +366,7 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
                   k[32] = bits(jitter[0]), k[33] = bits(jitter[1]), k[34] = bits(jitter[2]), k[35] = frame;
                   k[36] = bits(s.maxRayIntensity);
                   k[37] = cache ? c.srv(rcDepth) : 0xFFFFFFFFu;
+                  k[38] = bits(s.depthThreshold);
                   c.bindFrameConstants(cb);
                   // bands of whole slices, each at most kMaxRaysPerDispatch rays
                   const uint32_t perSlice = gridX * kTraceRes * gridY * kTraceRes;
@@ -384,11 +387,13 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
             g.addPass(kNames[axis], QueueType::Compute,
                       [&](PassBuilder& b) {
                           b.use(from, Use::SrvCompute);
+                          b.use(hiz, Use::SrvCompute);
                           b.use(to, Use::UavCompute);
                       },
                       [=, &shaders](PassContext& c) {
                           uint32_t k[40] = {};
                           k[0] = c.srv(from), k[1] = c.uav(to), k[2] = axis, k[3] = s.filterSamples;
+                          k[4] = c.srv(hiz);
                           k[16] = gridX, k[17] = gridY, k[18] = gridZ;
                           k[37] = bits(s.filterDeviation);
                           c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenTranslucencyVolumeFilter"));

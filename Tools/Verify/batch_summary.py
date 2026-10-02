@@ -28,7 +28,7 @@ def main(argv):
         return 2
     batch, diag = argv[1], argv[2]
     print('== furnace room (measured / expected per stage; the day room over the night room = light through the walls)')
-    for name in ('batch_furnace', 'batch_furnace_day', 'batch_furnace_day_noocc', 'batch_furnace_day_nofog', 'batch_furnace_day_fognoamb', 'batch_furnace_day_noclip'):
+    for name in ('batch_furnace', 'batch_furnace_day', 'batch_furnace_day_noocc', 'batch_furnace_day_nofog', 'batch_furnace_day_fognoamb', 'batch_furnace_day_noclip', 'batch_furnace_day_ltvref'):
         d = os.path.join(diag, name)
         if not os.path.isdir(d):
             continue
