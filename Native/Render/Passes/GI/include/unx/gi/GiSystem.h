@@ -91,6 +91,7 @@ struct GiSettings  // from Config/quality/gi.toml
                                            // false: it takes no cached light (Unreal's rule for an invalid sample)
         uint32_t raysPerDispatch = 262144; // the probe rays are traced in row bands of at most this many rays per DispatchRays
         bool screenTraces = true;          // the rays walk the depth pyramid first (ScreenTraces; needs the colour history)
+        bool compactTraces = true;         // the world rays are dispatched over a list of the trace texels that need one (CompactTraces)
         uint32_t screenTraceIterations = 50;        // HierarchicalScreenTraces.MaxIterations
         float screenTraceThickness = 0.02f;         // HierarchicalScreenTraces.RelativeDepthThickness
         uint32_t screenTraceThicknessSteps = 4;     // NumThicknessStepsToDetermineCertainty

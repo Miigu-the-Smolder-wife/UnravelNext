@@ -2612,8 +2612,11 @@ void RayScene::recordDecals(FramePassContext& fc, const ViewResources& main)
     m_decalTlasRef = {};
     if (!main.decalFrames.valid()) return;  // record() left words 16..19 at "no decals"
     RenderGraph& g = fc.graph;
-    constexpr uint32_t kFrameBytes = 128;  // DecalFrame (Decal.hlsli)
-    const uint32_t count = (uint32_t)(g.desc(main.decalFrames).size / kFrameBytes);
+    // (the frames' own stride: DecalFrame, Decal.hlsli - 144 B since the decals' lighting channels; a size written
+    // here went stale and counted 9 decals for 8)
+    const BufferDesc framesDesc = g.desc(main.decalFrames);
+    if (framesDesc.stride == 0) fail("ray scene: the decal frames buffer has no element stride");
+    const uint32_t count = (uint32_t)(framesDesc.size / framesDesc.stride);
     if (count == 0) return;
     if (count > m_decalCapacity)
     {
@@ -3047,7 +3050,7 @@ void RayScene::recordRuntime(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
         }
         if (live >= m_runtimeInstanceCap) break;  // GpuScene's own capacity: never reached
         desc.InstanceID = m_runtimeRecordBase + live;
-        desc.InstanceMask = kRtMaskScene;
+        desc.InstanceMask = rtInstanceMask(in.flags);  // (cast shadow, shadow only: as the scene's own instances)
         desc.InstanceContributionToHitGroupIndex = 0;
         desc.AccelerationStructure = m_runtimePool.address() + rb.offset;
         slot[m_dynamicDescs.size() + live] = desc;

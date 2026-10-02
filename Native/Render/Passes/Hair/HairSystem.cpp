@@ -447,6 +447,10 @@ public:
                                         ? (uint32_t)q.integer("shading.hair_density_resolution")
                                         : 0u;
         if (densityRes % 4 != 0 || densityRes > 128) fail("shading.hair_density_resolution must be a multiple of 4, at most 128 (0: no volume)");
+        // (HairDensity.hlsli HAIR_SHADOW_BODIES: the marches over the bodies with a block walk the nearest 64 and say
+        // nothing of the rest)
+        if (densityRes && q.has("shading.hair_density_bodies") && q.integer("shading.hair_density_bodies") > 64)
+            fail("shading.hair_density_bodies %lld: at most 64 (HairDensity.hlsli HAIR_SHADOW_BODIES)", (long long)q.integer("shading.hair_density_bodies"));
         const uint32_t densityBodies =
             densityRes && q.has("shading.hair_density_bodies") ? std::min<uint32_t>((uint32_t)bodies.size(), (uint32_t)std::max<int64_t>(q.integer("shading.hair_density_bodies"), 0)) : 0u;
         const uint32_t densityColumns = densityBodies ? std::min(densityBodies, 2048u / densityRes) : 0u;

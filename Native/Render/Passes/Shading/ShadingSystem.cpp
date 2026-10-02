@@ -2529,6 +2529,7 @@ void shade(FramePassContext& fc, ViewResources& view)
             motionBlurUpscaled(fc, view, image, blurred, products.motion, products.depth);
             image = blurred;
         }
+        view.chainInput = image;  // (captures of what the chain encodes: renderergate --capture-layers chain)
         postChain(fc, upscaleOutputView(fc, view), image);
         return;
     }

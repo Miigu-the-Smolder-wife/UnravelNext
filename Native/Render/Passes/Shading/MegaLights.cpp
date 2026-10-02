@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -111,6 +112,7 @@ struct Settings
     float minSampleWeight, hiddenWeight, hiddenWeightMiss, maxWeight, maxWeightHidden;
     float rayBias, rayNormalBias, rayEndBias;
     bool screenTraces;
+    bool compactTraces;
     float screenNormalBias, screenThickness, screenDistance;
     uint32_t screenIterations;
     float maxFrames, minFramesMiss, distanceThreshold, clampScale;
@@ -139,6 +141,7 @@ Settings settings(const QualityConfig& q)
     s.rayNormalBias = (float)q.number("shading.mega_lights_ray_normal_bias_m");
     s.rayEndBias = (float)q.number("shading.mega_lights_ray_end_bias_m");
     s.screenTraces = q.has("shading.mega_lights_screen_traces") && q.boolean("shading.mega_lights_screen_traces");
+    s.compactTraces = !q.has("shading.mega_lights_compact_traces") || q.boolean("shading.mega_lights_compact_traces");
     s.screenNormalBias = q.has("shading.mega_lights_screen_trace_normal_bias_m") ? (float)q.number("shading.mega_lights_screen_trace_normal_bias_m") : 0.0005f;
     s.screenThickness = q.has("shading.mega_lights_screen_trace_relative_thickness") ? (float)q.number("shading.mega_lights_screen_trace_relative_thickness") : 0.005f;
     s.screenDistance = q.has("shading.mega_lights_screen_trace_max_distance_m") ? (float)q.number("shading.mega_lights_screen_trace_max_distance_m") : 1.0f;
@@ -308,9 +311,69 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
     // coverage layer's instance has another depth and none
     const TextureRef pyramid = s.screenTraces && view.view.kind == gpu::ViewKind::Main && !instance ? fc.resources.screenTraceHzb : TextureRef{};
     const TextureRef traceDepth = view.depth;
+    // shading.mega_lights_compact_traces (the reference's CompactLightSampleTraces): the rays are dispatched over a list of
+    // the samples that ask for one (MegaLightsCompact.hlsl), in chunks of at most kRaysPerDispatch entries, instead of
+    // over every texel of the sample texture in bands of rows. The same rays for the same samples; the threads of the
+    // samples that ask for none - no light, no shadow, merged, no surface - are not launched.
+    const bool compactTraces = s.compactTraces;
+    const uint32_t sampleW = dsW * gridX, sampleH = dsH * gridY;
+    const uint32_t traceCapacity = sampleW * sampleH, traceChunks = (traceCapacity + kRaysPerDispatch - 1) / kRaysPerDispatch;
+    constexpr uint32_t kTraceDesc = rt::RayPipeline::kDispatchDescStride;
+    BufferRef traceList, traceArgs;
+    if (compactTraces)
+    {
+        traceList = g.createBuffer(BufferDesc{ "m.ml.trace list", 16 + (uint64_t)traceCapacity * 4, 0 });
+        traceArgs = g.createBuffer(BufferDesc{ "m.ml.trace dispatch", (uint64_t)traceChunks * kTraceDesc, 0 });
+        ID3D12Resource* descTemplate = pipeline.dispatchTemplate();
+        ID3D12PipelineState* resetPso = fc.shaders.compute("RayTracing/CompactDispatch.MODE0");
+        ID3D12PipelineState* sizesPso = fc.shaders.compute("RayTracing/CompactDispatch.MODE1");
+        ID3D12PipelineState* compactPso = fc.shaders.compute("Passes/Shading/MegaLightsCompact");
+        g.addPass("m.ml.compact.begin", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(traceArgs, Use::CopyDst);
+                      b.use(traceList, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      for (uint32_t chunk = 0; chunk < traceChunks; ++chunk) c.cmd->CopyBufferRegion(c.resource(traceArgs), (uint64_t)chunk * kTraceDesc, descTemplate, 0, kTraceDesc);
+                      const uint32_t k[4] = { c.uav(traceList), 0, 0, 0 };
+                      c.cmd->SetPipelineState(resetPso);
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch(1, 1, 1);
+                  });
+        g.addPass("m.ml.compact", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(samples, Use::SrvCompute);
+                      b.use(traceKeys, Use::SrvCompute);
+                      b.use(traceList, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      const uint32_t k[8] = { c.srv(samples), c.srv(traceKeys), c.uav(traceList), traceCapacity, sampleW, sampleH, s.factor | (s.count << 8), 0 };
+                      c.cmd->SetPipelineState(compactPso);
+                      c.bindFrameConstants(cb);
+                      c.computeConstants(k, 8);
+                      c.cmd->Dispatch((sampleW + 7) / 8, (sampleH + 7) / 8, 1);
+                  });
+        g.addPass("m.ml.compact.args", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(traceList, Use::UavCompute);
+                      b.use(traceArgs, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      const uint32_t k[12] = { c.uav(traceList), traceCapacity, c.uav(traceArgs), (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width),
+                                               kTraceDesc, kRaysPerDispatch, traceChunks, 1, kTraceDesc, 0, 0, 0 };
+                      c.cmd->SetPipelineState(sizesPso);
+                      c.computeConstants(k, 12);
+                      c.cmd->Dispatch(1, 1, 1);
+                  });
+    }
     g.addPass("m.ml.trace", QueueType::Compute,
               [&](PassBuilder& b) {
                   rays->declareTraversal(b);
+                  if (compactTraces)
+                  {
+                      b.use(traceList, Use::SrvCompute);
+                      b.use(traceArgs, Use::IndirectArgs);
+                  }
                   b.use(traceKeys, Use::SrvCompute);
                   b.use(samples, Use::UavCompute);
                   if (pyramid.valid())
@@ -322,18 +385,25 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
               [=, &pipeline](PassContext& c) {
                   uint32_t k[32] = { c.uav(samples), c.srv(traceKeys), 0, pyramid.valid() ? c.srv(traceDepth) : 0xFFFFFFFFu,
                                      dsW, dsH, s.factor | (s.count << 8), pyramid.valid() ? c.srv(pyramid) : 0xFFFFFFFFu,
-                                     asUint(s.rayBias), asUint(s.rayNormalBias), asUint(s.rayEndBias), 0,
+                                     asUint(s.rayBias), asUint(s.rayNormalBias), asUint(s.rayEndBias), compactTraces ? c.srv(traceList) + 1 : 0,
                                      asUint(s.screenNormalBias), asUint(s.screenThickness), asUint(s.screenDistance), s.screenIterations };
                   rays->rootConstants(k + 24);
                   c.bindFrameConstants(cb);
                   // Bands of rows, each its own DispatchRays of at most kRaysPerDispatch rays (one per sample texel): the
                   // sample texture grows with the resolution (1080p: 2.07 M texels, 4K: 8.3 M), a dispatch does not.
                   const uint32_t width = dsW * gridX, height = dsH * gridY, bandRows = std::max(1u, kRaysPerDispatch / std::max(width, 1u));
-                  for (uint32_t row = 0; row < height; row += bandRows)
+                  for (uint32_t row = 0; row < height && !compactTraces; row += bandRows)
                   {
                       k[2] = row;  // P[0].z
                       c.computeConstants(k, 32);
                       pipeline.dispatch(c.cmd, 0, width, std::min(bandRows, height - row));
+                  }
+                  // (compacted: the list in chunks, each an indirect dispatch of the entries it holds - none: nothing)
+                  for (uint32_t chunk = 0; chunk < traceChunks && compactTraces; ++chunk)
+                  {
+                      k[2] = chunk * kRaysPerDispatch;  // P[0].z: the dispatch's first entry
+                      c.computeConstants(k, 32);
+                      pipeline.dispatchIndirect(c.cmd, c.resource(traceArgs), (uint64_t)chunk * kTraceDesc);
                   }
               });
     // m.ml.hair (shading.hair_shadows; Passes/Hair/HairShadow.hlsl MODE 1): the hair between a sample's surface point and

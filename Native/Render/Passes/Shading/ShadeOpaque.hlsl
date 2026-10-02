@@ -509,8 +509,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     // material.parallax_shadow (MaterialInputs.hlsli mParallax): the pixel's height field hides the sun - the resolve left
     // the visibility in the class word of a height-mapped material's pixels (not an anisotropic material's or an eye's:
     // the word is theirs)
+    // (nor a Cut or Terrain material's: the resolve marches no height field there and writes no word)
     if (m.inputs != UNX_NONE && P[9].y != UNX_NONE && (m.classFlags & (MATERIAL_ANISOTROPIC | MATERIAL_EYE)) == 0 &&
-        loadMaterialInputs(m.inputs).heightTexture != UNX_NONE)
+        materialClass(m) != MATERIAL_CUT && materialClass(m) != MATERIAL_TERRAIN && loadMaterialInputs(m.inputs).heightTexture != UNX_NONE)
     {
         Texture2D<uint> classWords = ResourceDescriptorHeap[P[9].y];
         sunVisibility *= (classWords[pixel] & 0xFFu) / 255.0;
@@ -836,10 +837,11 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                     float3 lobe = 0;
 #if LAYERED == 1
                     if (aniso.on && !shLightSpecularInResult(lightIndex))
-                        lobe = ((cover > 0) ? keep : 1.0) * Lw * shAreaAniso(light, p, aniso.t, aniso.b, n, v, aniso.alpha, f0, 1 + f0 * (1 / (aniso.ab.x + aniso.ab.y) - 1));
+                        lobe = ((cover > 0) ? keep : 1.0) * Lw * lightSpecularScale(light) *
+                               shAreaAniso(light, p, aniso.t, aniso.b, n, v, aniso.alpha, f0, 1 + f0 * (1 / (aniso.ab.x + aniso.ab.y) - 1));
 #endif
 #if LAYERED == 2
-                    lobe = Lw * sheen.color * shAreaSheen(light, p, frame, v, sheen.roughness);
+                    lobe = Lw * lightSpecularScale(light) * sheen.color * shAreaSheen(light, p, frame, v, sheen.roughness);
 #endif
 #if MEGA_LIGHTS
                     mlSpecular += lobe;
@@ -991,7 +993,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
             else if (foliage && NoV * cosL < 0) f = back;
 #endif
 #if LAYERED
-            if (aniso.on && NoV > 0 && cosL > 0) f = frontL + shAnisoSpecular(aniso, f0, n, v, l);
+            if (aniso.on && NoV > 0 && cosL > 0) f = frontL + shAnisoSpecular(aniso, f0, n, v, l) * shLightSpecular();  // (as the lobe it replaces)
 #endif
 #if LAYERED == 2
             if (NoV > 0 && cosL > 0) f -= (f - frontL) * sheen.cloth;  // (the cloth blend: the base's specular lobe x (1 - cloth))
