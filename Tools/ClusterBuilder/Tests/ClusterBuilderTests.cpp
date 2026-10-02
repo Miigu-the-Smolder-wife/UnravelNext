@@ -1,6 +1,7 @@
 // Cluster builder self-checks on procedural meshes (CPU only, seconds):
 //   limits, crack-free uniform cuts (also across a submesh seam), monotone errors and enclosing spheres, hierarchy
-//   coverage, minimum feature widths of known shapes, thin geometry kept out of LOD thinning, determinism.
+//   coverage, minimum feature widths of known shapes, thin geometry kept out of LOD thinning (or thinned by whole
+//   pieces with its area kept: visibility.lod_thin_preserve_area), determinism.
 //   unx_test_clusterbuilder [filter]
 #include "unx/clusterbuilder/ClusterBuilder.h"
 #include "unx/clusterbuilder/ClusterHierarchy.h"
@@ -155,6 +156,31 @@ Built buildOne(scene::Mesh m)
     Built b;
     b.scene = oneMesh(std::move(m));
     b.data = build(b.scene, settings(), &b.stats);
+    return b;
+}
+
+bool sameClusterData(const render::ClusterData& a, const render::ClusterData& b)
+{
+    bool same = a.clusters.size() == b.clusters.size() && a.named.size() == b.named.size() && a.clusterVertexIndices == b.clusterVertexIndices &&
+                a.clusterTriangles == b.clusterTriangles && a.lodLevelClusters == b.lodLevelClusters && a.meshes.size() == b.meshes.size() &&
+                a.lodLevels.size() == b.lodLevels.size();
+    if (same) same = std::memcmp(a.clusters.data(), b.clusters.data(), a.clusters.size() * sizeof(render::gpu::Cluster)) == 0;
+    if (same) same = std::memcmp(a.meshes.data(), b.meshes.data(), a.meshes.size() * sizeof(a.meshes[0])) == 0;
+    if (same) same = std::memcmp(a.lodLevels.data(), b.lodLevels.data(), a.lodLevels.size() * sizeof(a.lodLevels[0])) == 0;
+    for (size_t i = 0; same && i < a.named.size(); ++i) same = a.named[i].name == b.named[i].name && a.named[i].bytes == b.named[i].bytes;
+    return same;
+}
+
+// Build with the builder's own vertices (LodVertices: thin geometry's enlarged pieces) appended to the mesh, as a host
+// does before it uploads the scene; the clusters then index the scene's vertices like any other build's.
+Built buildOneLod(scene::Mesh m, const Settings& st, LodVertices* made = nullptr)
+{
+    Built b;
+    b.scene = oneMesh(std::move(m));
+    LodVertices lod;
+    b.data = build(b.scene, st, &b.stats, &lod);
+    lod.appendTo(b.scene);
+    if (made) *made = std::move(lod);
     return b;
 }
 
@@ -531,7 +557,9 @@ UNX_TEST(feature_width_of_known_shapes)
 UNX_TEST(thin_geometry_is_not_thinned)
 {
     // 400 blades of 4 mm and 300 leaves of 5 cm, disconnected: LOD must not merge or collapse them (no sloppy
-    // fallback, thin-feature error limit), so every cut keeps each blade's and leaf's area.
+    // fallback, thin-feature error limit), so every cut keeps each blade's and leaf's area. This is a build that
+    // takes no vertices from the builder (buildOne), where visibility.lod_thin_preserve_area has no effect; the same
+    // holds with the setting off (thin_setting_off_is_the_build_without_it).
     scene::Mesh m;
     std::mt19937 rng(11);
     std::uniform_real_distribution<float> u(0.0f, 4.0f);
@@ -555,6 +583,438 @@ UNX_TEST(thin_geometry_is_not_thinned)
     (void)spheres;
 }
 
+namespace
+{
+// A tree crown: 'leaves' flat quads of 5 to 7 cm, uniformly oriented, in a ball of radius 2.5 m. Disconnected, so
+// each is its own component; a quad is two triangles.
+scene::Mesh leafCrown(uint32_t leaves, uint32_t seed)
+{
+    scene::Mesh m;
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> uni(0.0f, 1.0f);
+    auto direction = [&]() {
+        const float z = 2 * uni(rng) - 1, a = 6.2831853f * uni(rng), r = std::sqrt(std::max(0.0f, 1 - z * z));
+        return float3{ r * std::cos(a), z, r * std::sin(a) };
+    };
+    for (uint32_t i = 0; i < leaves; ++i)
+    {
+        const float3 centre = direction() * (2.5f * std::cbrt(uni(rng))) + float3{ 0, 4, 0 };
+        const float3 n = direction();
+        const float3 u = normalize(cross(n, std::fabs(n.y) < 0.9f ? float3{ 0, 1, 0 } : float3{ 1, 0, 0 })), v = cross(n, u);
+        const float half = 0.025f + 0.01f * uni(rng);
+        const uint32_t base = (uint32_t)m.positions.size();
+        for (int k = 0; k < 4; ++k)
+        {
+            m.positions.push_back(centre + u * (half * ((k & 1) ? 1.0f : -1.0f)) + v * (half * ((k & 2) ? 1.0f : -1.0f)));
+            m.normals.push_back(n);
+            m.uv0.push_back({ (float)(k & 1), (float)(k >> 1) });
+        }
+        m.indices.insert(m.indices.end(), { base, base + 1, base + 2, base + 2, base + 1, base + 3 });
+    }
+    return m;
+}
+
+// Undergrowth that is one DAG (curved components share the orientation class 0): 'leaves' quads of 5 cm folded 30
+// degrees along their diagonal, and 'ribbons' strips 5 cm x 6.4 m bent into arcs, 256 triangles each. A ribbon spans
+// several clusters, so in most groups it has vertices that another group uses (locked): it stays, and the leaves
+// around it take the group's whole deficit.
+scene::Mesh undergrowth(uint32_t leaves, uint32_t ribbons, uint32_t seed)
+{
+    scene::Mesh m;
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> uni(0.0f, 1.0f);
+    for (uint32_t i = 0; i < leaves; ++i)
+    {
+        const float yaw = 6.2831853f * uni(rng);
+        const float3 centre{ 8 * uni(rng), 0.2f + 0.6f * uni(rng), 8 * uni(rng) };
+        const float3 u{ std::cos(yaw), 0, std::sin(yaw) }, v{ -std::sin(yaw), 0, std::cos(yaw) }, up{ 0, 1, 0 };
+        const float half = 0.025f;
+        // corners a, b, c, d around the centre; b and c (the diagonal's far corners) raised: a fold of about 30 degrees
+        const float3 corner[4] = { centre - u * half - v * half, centre + u * half - v * half + up * 0.0095f, centre - u * half + v * half + up * 0.0095f,
+                                   centre + u * half + v * half };
+        const uint32_t base = (uint32_t)m.positions.size();
+        for (int k = 0; k < 4; ++k)
+        {
+            m.positions.push_back(corner[k]);
+            m.normals.push_back(up);
+            m.uv0.push_back({ (float)(k & 1), (float)(k >> 1) });
+        }
+        m.indices.insert(m.indices.end(), { base, base + 2, base + 1, base + 1, base + 2, base + 3 });
+    }
+    for (uint32_t i = 0; i < ribbons; ++i)
+    {
+        const float yaw = 6.2831853f * uni(rng), radius = 3.0f + 2.0f * uni(rng);
+        const float3 origin{ 8 * uni(rng), 1.0f + uni(rng), 8 * uni(rng) };
+        const float3 along{ std::cos(yaw), 0, std::sin(yaw) }, side{ -std::sin(yaw), 0, std::cos(yaw) };
+        const uint32_t base = (uint32_t)m.positions.size(), segments = 128;
+        for (uint32_t k = 0; k <= segments; ++k)
+        {
+            const float a = 6.4f * k / segments / radius;  // arc angle
+            const float3 c = origin + along * (radius * std::sin(a)) + float3{ 0, radius * (1 - std::cos(a)), 0 };
+            const float3 n = normalize(float3{ 0, 1, 0 } * std::cos(a) - along * std::sin(a));
+            for (int sgn : { -1, 1 })
+            {
+                m.positions.push_back(c + side * (0.025f * sgn));
+                m.normals.push_back(n);
+                m.uv0.push_back({ sgn < 0 ? 0.0f : 1.0f, (float)k / segments });
+            }
+        }
+        for (uint32_t k = 0; k < segments; ++k)
+        {
+            const uint32_t a = base + 2 * k;
+            m.indices.insert(m.indices.end(), { a, a + 2, a + 1, a + 1, a + 2, a + 3 });
+        }
+    }
+    return m;
+}
+
+struct CutReport
+{
+    float error = 0;
+    uint32_t triangles = 0, clusters = 0;
+    double area = 0;
+    float width = 0;  // median |minFeatureWidth| of the cut's clusters
+};
+
+// The stored LOD cuts of mesh 0 (uniform-error cuts, strictly coarser one after the other).
+std::vector<CutReport> cutsOf(const Built& b)
+{
+    std::vector<CutReport> out;
+    const auto& r = b.data.meshes[0];
+    for (uint32_t l = 0; l < r.lodLevelCount; ++l)
+    {
+        CutReport c;
+        c.error = b.data.lodLevels[r.lodLevelOffset + l].error;
+        const std::vector<uint32_t> clusters = cutAt(b.data, 0, c.error);
+        const std::vector<uint32_t> tris = trianglesOf(b.data, clusters);
+        c.triangles = (uint32_t)(tris.size() / 3);
+        c.clusters = (uint32_t)clusters.size();
+        c.area = areaOf(b.scene.meshes[0], tris);
+        std::vector<float> widths;
+        for (uint32_t ci : clusters) widths.push_back(std::fabs(b.data.clusters[ci].minFeatureWidth));
+        std::sort(widths.begin(), widths.end());
+        c.width = widths.empty() ? 0.0f : widths[widths.size() / 2];
+        CHECK(c.triangles == b.data.lodLevels[r.lodLevelOffset + l].triangleCount);
+        out.push_back(c);
+    }
+    return out;
+}
+
+// Every piece (triangles connected through vertices of one position) of a triangle list is a disk: no edge is used by
+// more than two triangles and vertices - edges + faces = 1. A crack along a border two groups share (one side keeps
+// an edge the other side splits) makes a second boundary loop in the piece, a missing triangle too.
+void checkPiecesAreDisks(const scene::Mesh& m, const std::vector<uint32_t>& tris, float t)
+{
+    std::map<std::tuple<float, float, float>, uint32_t> ids;
+    std::vector<uint32_t> parent;
+    auto idOf = [&](uint32_t v) {
+        const float3 p = m.positions[v];
+        const auto [it, isNew] = ids.emplace(std::make_tuple(p.x, p.y, p.z), (uint32_t)parent.size());
+        if (isNew) parent.push_back(it->second);
+        return it->second;
+    };
+    std::function<uint32_t(uint32_t)> root = [&](uint32_t x) { return parent[x] == x ? x : parent[x] = root(parent[x]); };
+    std::map<std::pair<uint32_t, uint32_t>, int> edges;
+    std::vector<std::array<uint32_t, 3>> faces;
+    for (size_t i = 0; i < tris.size(); i += 3)
+    {
+        const std::array<uint32_t, 3> f{ idOf(tris[i]), idOf(tris[i + 1]), idOf(tris[i + 2]) };
+        faces.push_back(f);
+        for (int e = 0; e < 3; ++e)
+        {
+            const uint32_t a = f[e], b = f[(e + 1) % 3];
+            if (++edges[{ std::min(a, b), std::max(a, b) }] > 2) fail("cut %g: an edge is used by more than two triangles", t);
+            parent[root(a)] = root(b);
+        }
+    }
+    std::map<uint32_t, int> euler;  // per piece: vertices - edges + faces
+    for (uint32_t v = 0; v < (uint32_t)parent.size(); ++v) ++euler[root(v)];
+    for (const auto& [e, count] : edges) --euler[root(e.first)];
+    for (const auto& f : faces) ++euler[root(f[0])];
+    for (const auto& [piece, chi] : euler)
+        if (chi != 1) fail("cut %g: a piece of the cut is not a disk (vertices - edges + faces = %d): a crack, a hole or a pinch", t, chi);
+}
+} // namespace
+
+UNX_TEST(thin_geometry_has_lod_and_keeps_its_area)
+{
+    // visibility.lod_thin_preserve_area, on a crown of 40,000 leaves (80,000 triangles; uniformly oriented, so the
+    // builder makes one DAG per orientation class as it does for a tree): the hierarchy is real (every stored cut
+    // has fewer triangles and clusters than the one before, the coarsest at most 1/8 of the source), every cut has the
+    // source's surface area within 10 %, the enlarged leaves are wider, and the structure holds (monotone errors,
+    // LOD and culling spheres around the moved vertices, the cut bound).
+    setDiskCache("");
+    clearMeshCache();
+    Settings st = settings();
+    st.thinPreserveArea = true;
+    LodVertices made;
+    const Built b = buildOneLod(leafCrown(40000, 5), st, &made);
+    checkStructure(b);
+    const scene::Mesh& mesh = b.scene.meshes[0];
+    const auto& stats = b.stats.meshes[0];
+    const double sourceArea = areaOf(mesh, mesh.indices);
+    const std::vector<CutReport> cuts = cutsOf(b);
+    logf("    crown: %u source tris in %u clusters; %u groups (%u terminal, %u thinned), depth %u, %u made vertices (%zu source), %.0f ms\n", stats.sourceTriangles,
+         stats.sourceClusters, stats.groups, stats.terminalGroups, stats.thinnedGroups, stats.depth, stats.lodVertices, mesh.positions.size() - made.meshes[0].positions.size(),
+         stats.buildMs);
+    for (const CutReport& c : cuts)
+        logf("    cut error %.4f m: %6u tris (1/%.1f), %5u clusters (1/%.1f), area %.3f of the source, median width %.4f m\n", c.error, c.triangles,
+             (double)cuts[0].triangles / c.triangles, c.clusters, (double)cuts[0].clusters / c.clusters, c.area / sourceArea, c.width);
+    CHECK(stats.thinnedGroups > 0 && stats.lodVertices > 0 && stats.lodVertices == made.meshes[0].positions.size());
+    CHECK(cuts.size() >= 4 && cuts[0].triangles == stats.sourceTriangles);
+    for (size_t l = 1; l < cuts.size(); ++l) CHECK(cuts[l].triangles < cuts[l - 1].triangles && cuts[l].clusters < cuts[l - 1].clusters && cuts[l].error > cuts[l - 1].error);
+    CHECK(cuts.back().triangles * 8 <= cuts[0].triangles && cuts.back().clusters * 8 <= cuts[0].clusters);
+    // Cuts at the stored levels and at errors between them.
+    std::vector<float> ts;
+    for (const CutReport& c : cuts) ts.push_back(c.error);
+    std::mt19937 rng(3);
+    for (int k = 0; k < 16; ++k) ts.push_back(std::uniform_real_distribution<float>(0.0f, cuts.back().error * 1.5f)(rng));
+    for (float t : ts)
+    {
+        const auto tris = trianglesOf(b.data, cutAt(b.data, 0, t));
+        const double a = areaOf(mesh, tris);
+        if (std::fabs(a - sourceArea) > 0.1 * sourceArea) fail("cut %g: area %.3f of the source", t, a / sourceArea);
+        checkPiecesAreDisks(mesh, tris, t);
+    }
+    // Enlarged leaves are measured as they are: flat sheets, wider at every level; the error that selects a cut is at
+    // least the width of the leaves it dropped, so a leaf is gone only where it is under the LOD threshold wide.
+    for (size_t l = 1; l < cuts.size(); ++l) CHECK(cuts[l].width > cuts[l - 1].width);
+    CHECK(cuts[1].error >= cuts[0].width);
+    const auto& r = b.data.meshes[0];
+    for (uint32_t c = r.clusterOffset; c < r.clusterOffset + r.clusterCount; ++c) CHECK(b.data.clusters[c].minFeatureWidth < 0);
+    for (uint32_t s : made.meshes[0].source) CHECK(s < mesh.positions.size() - made.meshes[0].positions.size());
+}
+
+UNX_TEST(thin_geometry_among_shared_borders)
+{
+    // Leaves and long ribbons in one DAG. A ribbon crosses cluster and group borders: where a group holds a part of
+    // one, that part's vertices are another group's too and it must stay as it is, while the group's leaves are
+    // thinned and take the whole deficit. No cut may open a ribbon (every piece of every cut is a disk) and every cut
+    // keeps the area.
+    setDiskCache("");
+    clearMeshCache();
+    Settings st = settings();
+    st.thinPreserveArea = true;
+    const Built b = buildOneLod(undergrowth(6000, 40, 9), st);
+    checkStructure(b);
+    const scene::Mesh& mesh = b.scene.meshes[0];
+    const auto& stats = b.stats.meshes[0];
+    const double sourceArea = areaOf(mesh, mesh.indices);
+    const std::vector<CutReport> cuts = cutsOf(b);
+    logf("    undergrowth: %u source tris in %u clusters; %u groups (%u terminal, %u thinned), depth %u, %u made vertices, %.0f ms\n", stats.sourceTriangles,
+         stats.sourceClusters, stats.groups, stats.terminalGroups, stats.thinnedGroups, stats.depth, stats.lodVertices, stats.buildMs);
+    for (const CutReport& c : cuts)
+        logf("    cut error %.4f m: %6u tris (1/%.1f), %5u clusters (1/%.1f), area %.3f of the source, median width %.4f m\n", c.error, c.triangles,
+             (double)cuts[0].triangles / c.triangles, c.clusters, (double)cuts[0].clusters / c.clusters, c.area / sourceArea, c.width);
+    CHECK(stats.thinnedGroups > 0);
+    CHECK(cuts.back().triangles * 8 <= cuts[0].triangles);
+    std::vector<float> ts;
+    for (const CutReport& c : cuts) ts.push_back(c.error);
+    std::mt19937 rng(5);
+    for (int k = 0; k < 16; ++k) ts.push_back(std::uniform_real_distribution<float>(0.0f, cuts.back().error * 1.5f)(rng));
+    for (float t : ts)
+    {
+        const auto tris = trianglesOf(b.data, cutAt(b.data, 0, t));
+        const double a = areaOf(mesh, tris);
+        if (std::fabs(a - sourceArea) > 0.1 * sourceArea) fail("cut %g: area %.3f of the source", t, a / sourceArea);
+        checkPiecesAreDisks(mesh, tris, t);
+    }
+}
+
+UNX_TEST(thin_setting_off_is_the_build_without_it)
+{
+    // With visibility.lod_thin_preserve_area off, a build that takes the builder's vertices gets none and gives the
+    // output of a build that does not take them: thin geometry is terminal, and every cut keeps each piece (the
+    // condition of thin_geometry_is_not_thinned).
+    setDiskCache("");
+    Settings off = settings();
+    off.thinPreserveArea = false;
+    Settings on = off;
+    on.thinPreserveArea = true;
+    scene::Mesh m;
+    std::mt19937 rng(11);
+    std::uniform_real_distribution<float> u(0.0f, 4.0f);
+    for (int i = 0; i < 400; ++i) addStrip(m, { u(rng), 0, u(rng) }, 0.004f, 0.3f, 8);
+    for (int i = 0; i < 300; ++i) addStrip(m, { u(rng), 0.5f + 0.1f * u(rng), u(rng) }, 0.05f, 0.05f, 1);
+    for (const scene::Mesh& source : { m, leafCrown(4000, 5), heightfield(96, 20.0f, 1.0f, true) })
+    {
+        clearMeshCache();
+        const scene::Scene sc = oneMesh(source);
+        const render::ClusterData plain = build(sc, on);  // takes no vertices: the setting has no effect
+        clearMeshCache();
+        LodVertices made;
+        Built b;
+        b.scene = sc;
+        b.data = build(b.scene, off, &b.stats, &made);
+        CHECK(made.meshes.size() == 1 && made.meshes[0].positions.empty() && made.meshes[0].source.empty());
+        CHECK(b.stats.meshes[0].thinnedGroups == 0 && b.stats.meshes[0].lodVertices == 0);
+        CHECK(sameClusterData(plain, b.data));
+        checkStructure(b);
+    }
+    // The old condition on the thin set, with the setting off.
+    clearMeshCache();
+    const Built b = buildOneLod(m, off);
+    const scene::Mesh& mesh = b.scene.meshes[0];
+    const double sourceArea = areaOf(mesh, mesh.indices);
+    const auto& r = b.data.meshes[0];
+    for (uint32_t l = 0; l < r.lodLevelCount; ++l)
+    {
+        const auto tris = trianglesOf(b.data, cutAt(b.data, 0, b.data.lodLevels[r.lodLevelOffset + l].error));
+        CHECK(std::fabs(areaOf(mesh, tris) - sourceArea) < 0.02 * sourceArea);
+    }
+    // And on: the same set has LOD (its leaves and, once they are two triangles each, its blades) and keeps the area.
+    clearMeshCache();
+    const Built t = buildOneLod(m, on);
+    checkStructure(t);
+    const std::vector<CutReport> cuts = cutsOf(t);
+    const double area = areaOf(t.scene.meshes[0], t.scene.meshes[0].indices);
+    for (const CutReport& c : cuts)
+    {
+        logf("    thin set, on: cut error %.4f m: %5u tris, %4u clusters, area %.3f of the source\n", c.error, c.triangles, c.clusters, c.area / area);
+        CHECK(std::fabs(c.area - area) < 0.1 * area);
+    }
+    CHECK(t.stats.meshes[0].thinnedGroups > 0 && cuts.back().triangles < b.stats.meshes[0].coarsestTriangles);
+}
+
+UNX_TEST(thin_setting_is_part_of_the_mesh_key)
+{
+    // The setting changes a mesh's hierarchy, so it is part of its identity: neither the previous build's hierarchies
+    // nor the disk cache's are reused across it, and with it the builder's vertices come back from both caches as built.
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / ("unx_cluster_thin_key_test_" + std::to_string(GetCurrentProcessId()));
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    setDiskCache(dir.string());
+    clearMeshCache();
+    Settings on = settings(), off = on;
+    on.thinPreserveArea = true;
+    off.thinPreserveArea = false;
+    const scene::Scene sc = oneMesh(leafCrown(4000, 5));
+    auto sameVertices = [](const LodVertices& a, const LodVertices& b) {
+        if (a.meshes.size() != b.meshes.size()) return false;
+        for (size_t m = 0; m < a.meshes.size(); ++m)
+            if (a.meshes[m].source != b.meshes[m].source || a.meshes[m].positions.size() != b.meshes[m].positions.size() ||
+                std::memcmp(a.meshes[m].positions.data(), b.meshes[m].positions.data(), a.meshes[m].positions.size() * sizeof(float3)) != 0)
+                return false;
+        return true;
+    };
+    BuildStats cold, warm, other, plain, fromDisk, otherDisk;
+    LodVertices a, b, c, d, e;
+    const render::ClusterData dataOn = build(sc, on, &cold, &a);
+    CHECK(cold.reusedMeshes == 0 && cold.diskMeshes == 0 && !a.meshes[0].positions.empty());
+    const render::ClusterData again = build(sc, on, &warm, &b);
+    CHECK(warm.reusedMeshes == 1 && sameClusterData(dataOn, again) && sameVertices(a, b));
+    const render::ClusterData dataOff = build(sc, off, &other, &c);
+    CHECK(other.reusedMeshes == 0 && other.diskMeshes == 0 && c.meshes[0].positions.empty() && !sameClusterData(dataOn, dataOff));
+    // (a build that takes no vertices is the build with the setting off: the same key)
+    const render::ClusterData dataPlain = build(sc, on, &plain);
+    CHECK(plain.reusedMeshes == 1 && sameClusterData(dataOff, dataPlain));
+    clearMeshCache();
+    const render::ClusterData disk = build(sc, on, &fromDisk, &d);
+    CHECK(fromDisk.diskMeshes == 1 && sameClusterData(dataOn, disk) && sameVertices(a, d));
+    clearMeshCache();
+    const render::ClusterData diskOff = build(sc, off, &otherDisk, &e);
+    CHECK(otherDisk.diskMeshes == 1 && sameClusterData(dataOff, diskOff) && e.meshes[0].positions.empty());
+    // Two cold builds are byte-identical, vertices included.
+    setDiskCache("");
+    clearMeshCache();
+    LodVertices f;
+    const render::ClusterData rebuilt = build(sc, on, nullptr, &f);
+    CHECK(sameClusterData(dataOn, rebuilt) && sameVertices(a, f));
+    clearMeshCache();
+    std::filesystem::remove_all(dir, ec);
+}
+
+UNX_TEST(thin_lod_of_scene_meshes)
+{
+    // visibility.lod_thin_preserve_area on the foliage of C's forest (with track C; each tree and grass mesh built on
+    // its own): the stored cuts of one tree, and per mesh the coarsest cut without and with the setting, with the
+    // instance-weighted totals -- what a far forest costs at least. A grass clump is 100 blades in about 25 orientation
+    // classes, so each of its DAGs is one cluster and nothing can be thinned; the last total is with
+    // visibility.sheet_orientation_min_width = 0.016 (blades clustered across orientations: one DAG per clump).
+    // Every stored cut of a thinned mesh must keep the mesh's area within 10 %; the rest is a report.
+#if !UNX_HAS_SCENEGEN
+    logf("    (no scene generator in this build: skipped)\n");
+#else
+    setDiskCache("");
+    scenegen::Request req;
+    req.id = scenegen::SceneId::ForestThin;
+    const scene::Scene s = scenegen::generate(req);
+    Settings on = settings(), off = on;
+    on.thinPreserveArea = true;
+    off.thinPreserveArea = false;
+    std::vector<uint64_t> instancesOf(s.meshes.size(), 0);
+    for (const auto& inst : s.instances) ++instancesOf[inst.mesh];
+    Settings across = on;
+    across.sheetOrientationMinWidth = 0.016f;
+    uint64_t sourceTris = 0, sourceClusters = 0, trisBefore = 0, clustersBefore = 0, trisAfter = 0, clustersAfter = 0, trisAcross = 0, clustersAcross = 0;
+    bool listed = false;
+    logf("    forest_thin foliage, per mesh (instances): source tris / clusters -> coarsest cut without | with the setting: tris / clusters (error m, area of the source, "
+         "median width m)\n");
+    for (uint32_t m = 0; m < s.meshes.size(); ++m)
+    {
+        if (s.meshes[m].name.find("_thin_") == std::string::npos) continue;
+        scene::Scene one;
+        one.materials = s.materials;
+        one.meshes.push_back(s.meshes[m]);
+        clearMeshCache();
+        Built plain;
+        plain.scene = one;
+        plain.data = build(plain.scene, off, &plain.stats);
+        clearMeshCache();
+        Built thin;
+        thin.scene = one;
+        LodVertices made;
+        thin.data = build(thin.scene, on, &thin.stats, &made);
+        made.appendTo(thin.scene);
+        checkStructure(thin);
+        const double sourceArea = areaOf(one.meshes[0], one.meshes[0].indices);
+        const std::vector<CutReport> before = cutsOf(plain), after = cutsOf(thin);
+        const MeshStats& st = thin.stats.meshes[0];
+        if (st.thinnedGroups > 0)
+            for (const CutReport& c : after)
+                if (std::fabs(c.area - sourceArea) > 0.1 * sourceArea) fail("mesh '%s', cut %g: area %.3f of the source", one.meshes[0].name.c_str(), c.error, c.area / sourceArea);
+        const uint64_t n = instancesOf[m];
+        sourceTris += n * st.sourceTriangles;
+        sourceClusters += n * st.sourceClusters;
+        trisBefore += n * before.back().triangles, clustersBefore += n * before.back().clusters;
+        trisAfter += n * after.back().triangles, clustersAfter += n * after.back().clusters;
+        {
+            clearMeshCache();
+            Built b;
+            b.scene = one;
+            LodVertices lod;
+            b.data = build(b.scene, across, &b.stats, &lod);
+            lod.appendTo(b.scene);
+            checkStructure(b);
+            const std::vector<CutReport> cuts = cutsOf(b);
+            for (const CutReport& c : cuts)
+                if (b.stats.meshes[0].thinnedGroups > 0 && std::fabs(c.area - sourceArea) > 0.1 * sourceArea)
+                    fail("mesh '%s' across orientations, cut %g: area %.3f of the source", one.meshes[0].name.c_str(), c.error, c.area / sourceArea);
+            trisAcross += n * cuts.back().triangles, clustersAcross += n * cuts.back().clusters;
+        }
+        logf("      %-14s (%7llu): %6u / %4u -> %6u / %4u (%.3f, %.3f, %.4f) | %5u / %4u (%.3f, %.3f, %.4f); %u of %u groups thinned, %u terminal (%u without), "
+             "%u vertices made (%zu source), build %.0f ms (%.0f without)\n",
+             one.meshes[0].name.c_str(), (unsigned long long)n, st.sourceTriangles, st.sourceClusters, before.back().triangles, before.back().clusters, before.back().error,
+             before.back().area / sourceArea, before.back().width, after.back().triangles, after.back().clusters, after.back().error, after.back().area / sourceArea,
+             after.back().width, st.thinnedGroups, st.groups, st.terminalGroups, plain.stats.meshes[0].terminalGroups, st.lodVertices, one.meshes[0].positions.size(),
+             st.buildMs, plain.stats.meshes[0].buildMs);
+        if (st.thinnedGroups > 0 && !listed)
+        {
+            listed = true;
+            for (const CutReport& c : after)
+                logf("        cut error %.4f m: %6u tris (1/%.1f), %5u clusters (1/%.1f), area %.3f of the source, median width %.4f m\n", c.error, c.triangles,
+                     (double)after[0].triangles / c.triangles, c.clusters, (double)after[0].clusters / c.clusters, c.area / sourceArea, c.width);
+        }
+    }
+    clearMeshCache();
+    logf("    forest_thin foliage, instance-weighted: source %llu tris in %llu clusters; coarsest cuts without the setting %llu tris in %llu clusters, with it %llu tris in "
+         "%llu clusters (1/%.1f of the triangles, 1/%.1f of the clusters); with it and blades clustered across orientations %llu tris in %llu clusters\n",
+         (unsigned long long)sourceTris, (unsigned long long)sourceClusters, (unsigned long long)trisBefore, (unsigned long long)clustersBefore, (unsigned long long)trisAfter,
+         (unsigned long long)clustersAfter, trisAfter ? (double)trisBefore / trisAfter : 0.0, clustersAfter ? (double)clustersBefore / clustersAfter : 0.0,
+         (unsigned long long)trisAcross, (unsigned long long)clustersAcross);
+#endif
+}
+
 UNX_TEST(wide_surfaces_simplify_fully)
 {
     // Rolling terrain has no thin features: the thin-feature guard must not limit it (coarsest cut within 10 % of the
@@ -576,18 +1036,6 @@ UNX_TEST(wide_surfaces_simplify_fully)
         }
         if (detail < 0.5f) CHECK(coarsest[1] * 10 <= coarsest[0] * 11 && coarsest[1] * 64 < 73728);
     }
-}
-
-bool sameClusterData(const render::ClusterData& a, const render::ClusterData& b)
-{
-    bool same = a.clusters.size() == b.clusters.size() && a.named.size() == b.named.size() && a.clusterVertexIndices == b.clusterVertexIndices &&
-                a.clusterTriangles == b.clusterTriangles && a.lodLevelClusters == b.lodLevelClusters && a.meshes.size() == b.meshes.size() &&
-                a.lodLevels.size() == b.lodLevels.size();
-    if (same) same = std::memcmp(a.clusters.data(), b.clusters.data(), a.clusters.size() * sizeof(render::gpu::Cluster)) == 0;
-    if (same) same = std::memcmp(a.meshes.data(), b.meshes.data(), a.meshes.size() * sizeof(a.meshes[0])) == 0;
-    if (same) same = std::memcmp(a.lodLevels.data(), b.lodLevels.data(), a.lodLevels.size() * sizeof(a.lodLevels[0])) == 0;
-    for (size_t i = 0; same && i < a.named.size(); ++i) same = a.named[i].name == b.named[i].name && a.named[i].bytes == b.named[i].bytes;
-    return same;
 }
 
 scene::Scene threeMeshScene()

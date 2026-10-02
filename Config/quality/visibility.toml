@@ -12,6 +12,11 @@ sheet_orientation_min_width = 0.0 # m: planar components at least this wide are 
                                   # classification of sheets); narrower ones are clustered across orientations
 lod_max_relative_width_error = 0.25  # a group may simplify only with error <= this x its narrowest feature width;
                                      # thin geometry is never thinned by LOD (far thin geometry goes to band C bricks)
+lod_thin_preserve_area = true     # a group of thin geometry that limit stops loses whole disconnected pieces instead (leaves,
+                                  # blades, needles: every other one, evenly through the group) and the pieces that stay are
+                                  # enlarged until the group has its surface area again: far thin geometry has LOD and covers
+                                  # the same share of the screen. Only in builds that take the builder's own vertices
+                                  # (clusterbuilder::LodVertices); false: such groups are terminal, as before
 lod_error_px = 1.0                # projected LOD error threshold
 occlusion_culling = true          # main view two-phase HiZ occlusion (false only for conservativeness tests)
 band_a_min_width_px = 1.5         # w_px >= this: vis buffer + analytic edge coverage
