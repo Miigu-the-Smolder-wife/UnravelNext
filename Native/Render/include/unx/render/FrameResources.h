@@ -89,6 +89,8 @@ struct ViewResources
                                    // visibility (unorm8); written only for pair-flag pixels (7.3)
     BufferRef froxelLights;        // this view's froxel light lists (7.4; v1.22): main view =      [S]
                                    // FrameResources::froxelLights, planar views: S shadowVisibility
+    TextureRef fogVolume;          // a planar reflection view's own fog volume (invalid: none; the main view's is    [S]
+                                   // FrameResources::fogVolume)
     TextureRef airVolume;          // this view's air volume (v1.15 layout; v1.22): main view =     [S]
                                    // FrameResources::aerialPerspective; planar views integrate from
                                    // the mirror plane on (the main view's mirror pixel has the rest)
@@ -332,6 +334,7 @@ struct FrameResources
     // lookups; their passes declare it with declareFog (Frame.h).                                                     [S]
     TextureRef fogVolume;
     FogView fog;
+    TextureRef fogSecondary[4];    // the planar reflection views' fog volumes of this frame (declareFog declares them too)
     TextureRef fogDebug;  // atmosphere.fog.debug_view: the fog alone per pixel (FogDebug.hlsl; the gate's layer "fog")
     // shading.mega_lights_volume (A; Passes/Atmosphere/MegaLightsVolume.hlsl): the main view's froxel grid, RGBA16F, the
     // local lights' sampled visible fluence (rgb x exposure) and its luminance-weighted direction moment (xyz): lit

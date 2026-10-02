@@ -49,7 +49,7 @@ void particles(FramePassContext& fc, ViewResources& view)
     frame.lighting.froxelLights = view.froxelLights;
     frame.lighting.fxLights = r.fxLights;
     frame.lighting.airVolume = view.airVolume;
-    frame.lighting.fogVolume = r.fogVolume;
+    frame.lighting.fogVolume = view.view.kind == gpu::ViewKind::Main ? r.fogVolume : view.fogVolume;
     frame.lighting.transmittanceLut = r.transmittanceLut;
     frame.lighting.multiScatterLut = r.multiScatterLut;
     // (the sampled local light of this view's froxel grid: the main view's in the frame resources, another view's in its own)

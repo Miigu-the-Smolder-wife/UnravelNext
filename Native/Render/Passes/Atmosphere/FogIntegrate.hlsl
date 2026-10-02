@@ -14,7 +14,7 @@
 // P[2] = asuint{ density, height falloff, height, phase g }, P[3] = asuint{ albedo r, g, b, start distance }
 // P[6] = { air volume SRV (this frame's; UNX_NONE: the far fog without casters), froxel lights SRV (the air's grid),
 //          previous translucency volume params SRV (UNX_NONE: none), transmittance LUT SRV }
-// Frame constants of the main view.
+// Frame constants of the view (the main view, or a planar reflection view).
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
 #include "Passes/Atmosphere/AtmosphereCommon.hlsli"
@@ -71,7 +71,8 @@ void main(uint3 id : SV_DispatchThreadID)
     // the fog beyond the volume
     const FogMedium fog = fogMedium(uint4(1, 0, 0, 0), P[2], P[3]);
     const float3 dir = ray / toRay;
-    const float3 p = g_cameraPosition + ray * g.farM;
+    const float tStart = airViewStart(g_clipPlane, g_cameraPosition, dir);  // (a planar reflection view: from the mirror on)
+    const float3 p = g_cameraPosition + dir * max(g.farM * toRay, tStart);
     float3 fromSun = 0, fromAround = 0;
     const float3 E = g_sunIlluminance * g_sunColor;
     if (any(E > 0))
@@ -90,7 +91,7 @@ void main(uint3 id : SV_DispatchThreadID)
     [loop] for (uint i = 0; i < g.zFar; ++i)
     {
         const float za = fogFarDepth(g, float(i)), zb = fogFarDepth(g, float(i) + 1.0);
-        const float t = exp(-fogOpticalDepth(fog, g_cameraPosition, dir, za * toRay, zb * toRay));
+        const float t = exp(-fogOpticalDepth(fog, g_cameraPosition, dir, max(za * toRay, tStart), zb * toRay));
         float3 farSource = fromSun + fromAround;
         if (farShadows)
         {

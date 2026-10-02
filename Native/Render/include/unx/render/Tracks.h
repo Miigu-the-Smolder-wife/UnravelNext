@@ -48,6 +48,9 @@ void shadowPages(FramePassContext& fc, const ViewResources& main);  // VSM marki
 void froxels(FramePassContext& fc, const ViewResources& main);
 // atmosphere.fog: the main view's fog parameters for its frame constants (gpu::FrameConstants::fog: SRV + 1; 0: no fog).
 // Called before the main view's constants are made; the volume itself is recorded by froxels().
+// A planar reflection view's fog record for its frame constants (0: none); key: the constants' address (the view's
+// froxel pass finds its volume by it).
+uint32_t fogParamsSecondary(FramePassContext& fc, const ViewDesc& view, uint64_t key);
 uint32_t fogParams(FramePassContext& fc, const ViewDesc& view);    // light lists + froxel integration
 void shadowVisibility(FramePassContext& fc, ViewResources& view); // writes view.shadowVisibility
 

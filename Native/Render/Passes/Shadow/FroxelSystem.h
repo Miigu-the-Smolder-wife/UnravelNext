@@ -53,6 +53,9 @@ FogView fogViewFor(const QualityConfig& q, const FogDesc& frame, uint32_t width,
 // this frame's parameter record; SRV + 1, or 0 with the fog off. The record says "no volume" until recordFroxels has
 // recorded the volume's passes.
 uint32_t fogPrepare(FramePassContext& fc, const ViewDesc& view);
+// A planar reflection view's (tracks::fogParamsSecondary; atmosphere.fog.secondary_views): 0 when the fog is off or the
+// frame's four volumes are taken. recordPlanarFroxels records the volume of the view whose frame constants are at key.
+uint32_t fogPrepareSecondary(FramePassContext& fc, const ViewDesc& view, uint64_t key);
 // froxels(fc, main): the air volume (FrameResources::froxels, ::aerialPerspective); records the lists itself when
 // shadowPages did not.
 void recordFroxels(FramePassContext& fc, const ViewResources& main);

@@ -21,6 +21,11 @@ uint32_t fogParams(FramePassContext& fc, const ViewDesc& view)
     return shadow::fogPrepare(fc, view);
 }
 
+uint32_t fogParamsSecondary(FramePassContext& fc, const ViewDesc& view, uint64_t key)
+{
+    return shadow::fogPrepareSecondary(fc, view, key);
+}
+
 void shadowVisibility(FramePassContext& fc, ViewResources& view)
 {
     shadow::recordVisibility(fc, view);

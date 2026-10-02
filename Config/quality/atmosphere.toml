@@ -56,6 +56,8 @@ far_shadows = true                   # the far slices' sun term outside the cast
                                      # slices (a ridge against a low sun shades the fog in front of it); false: no casters out there
 history_weight = 0.9                 # the history's share of a cell each frame (the reference's 0.9), the sample point jittered per frame
 shadow_texels_per_cell = 1.0         # the sun's shadow in a cell is read at the page level whose texel is the cell's width / this
+secondary_views = true               # planar reflection views get their own volume (up to four a frame; no history): a lake reflects
+                                     # the fogged shore and sky. false: mirrors show the world without fog
 debug_view = false                   # measurement only: the fog alone per pixel (FogDebug.hlsl) for the gate's capture layer "fog"
 sky_amount = 1.0                     # how much of the fog sky pixels take (1: the sky through the fog, as every other pixel - a height
                                      # fog covers the horizon and thins toward the zenith; 0: the sky left clear, the look of a

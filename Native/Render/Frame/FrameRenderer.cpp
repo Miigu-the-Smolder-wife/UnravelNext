@@ -106,7 +106,7 @@ FrameRenderer::~FrameRenderer()
     if (m_blueNoise.srv != 0xFFFFFFFFu) m_device.descriptors().freeResource(m_blueNoise.srv);
 }
 
-D3D12_GPU_VIRTUAL_ADDRESS FrameRenderer::allocateFrameConstants(const FrameContext& frame, const ViewDesc& view)
+D3D12_GPU_VIRTUAL_ADDRESS FrameRenderer::allocateFrameConstants(const FrameContext& frame, const ViewDesc& view, FramePassContext* fc)
 {
     if (m_slotFrame != frame.frameIndex)
     {
@@ -118,8 +118,9 @@ D3D12_GPU_VIRTUAL_ADDRESS FrameRenderer::allocateFrameConstants(const FrameConte
     gpu::FrameConstants c = frameConstants(m_scene, frame, view);
     c.debugDraw = m_debugDraw;
     c.blueNoise = m_blueNoise.srv;
-    // (the fog's volume is the main view's own)
+    // (the fog's volume is the view's own: the main view's, or a planar reflection view's - S makes one per such view)
     c.fog = view.kind == gpu::ViewKind::Main && view.width == frame.mainView.width && view.height == frame.mainView.height ? m_fogParams : 0;
+    if (view.kind == gpu::ViewKind::PlanarReflection && fc) c.fog = tracks::fogParamsSecondary(*fc, view, m_constants->GetGPUVirtualAddress() + offset);
     c.viewModelScale = view.kind == gpu::ViewKind::Main ? m_viewModelScale : 1.0f;  // other views see the true geometry
     // (the main view renders below the output: its texture footprints over the output pixel, GpuSceneLayout.h)
     const bool upscaled = frame.upscale.outputHeight > view.height && view.kind == gpu::ViewKind::Main && view.width == frame.mainView.width &&
@@ -344,7 +345,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     importFxLights(graph, m_scene, resources);
     FrameServices services;
     FramePassContext fc{ m_device, graph, m_shaders, m_quality, m_scene, frame, resources, services,
-                         [this, &frame](const ViewDesc& v) { return allocateFrameConstants(frame, v); }, &m_trackState, m_framesInFlight };
+                         [this, &frame, &fc](const ViewDesc& v) { return allocateFrameConstants(frame, v, &fc); }, &m_trackState, m_framesInFlight };
     m_debugDraw = 0xFFFFFFFFu;
     m_debugDraw = tracks::debugBegin(fc);  // E (A15): before any frame constants, which carry its buffer
     // Scene textures into the material records before any frame constants (they carry the material buffer's SRV).

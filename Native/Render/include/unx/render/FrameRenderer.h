@@ -36,7 +36,7 @@ public:
     static gpu::FrameConstants frameConstants(const GpuScene& scene, const FrameContext& frame, const ViewDesc& view);
 
 private:
-    D3D12_GPU_VIRTUAL_ADDRESS allocateFrameConstants(const FrameContext& frame, const ViewDesc& view);
+    D3D12_GPU_VIRTUAL_ADDRESS allocateFrameConstants(const FrameContext& frame, const ViewDesc& view, FramePassContext* fc = nullptr);
     Device& m_device;
     ShaderLibrary& m_shaders;
     const QualityConfig& m_quality;

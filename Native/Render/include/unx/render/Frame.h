@@ -36,6 +36,8 @@ struct FramePassContext;
 inline void declareFog(PassBuilder& b, const FrameResources& r, Use use)
 {
     if (r.fogVolume.valid()) b.use(r.fogVolume, use);
+    for (const TextureRef& t : r.fogSecondary)  // (a planar view's pass reads its own; declaring the others costs nothing)
+        if (t.valid()) b.use(t, use);
 }
 
 // Every resource a reader of the mesh-card surface cache touches (FrameResources::cards), as shader resources of 'use'

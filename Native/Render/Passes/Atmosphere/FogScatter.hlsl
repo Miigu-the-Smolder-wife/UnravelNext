@@ -20,12 +20,12 @@
 // P[3] = asuint{ albedo r, g, b, start distance (m) }
 // P[4] = { VSM table SRV, atlas SRV, blocks SRV, constants CBV (UNX_NONE: no sun shadows) }
 // P[5] = { VSM search bound SRV, asuint(shadow texels per cell), air lists SRV (the froxel grid; UNX_NONE: no local
-//          light), depth pyramid SRV }
+//          light), depth pyramid SRV (UNX_NONE: every cell is computed) }
 // P[6] = { local fluence SRV, direction moment SRV, previous translucency volume params SRV (UNX_NONE: none),
 //          transmittance LUT SRV }
 // P[7] = asuint{ jitter x, y, z in [0, 1), history weight }, P[8] = { VSM stats UAV (the walk's error word), depth SRV,
 //          asuint(the density's noise amount), asuint(1 / its scale in m) }, P[9].xyz = asuint(the noise's lattice offset)
-// Frame constants of the main view.
+// Frame constants of the view (the main view, or a planar reflection view: its fog starts at the mirror).
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
 #include "Passes/Atmosphere/AtmosphereCommon.hlsli"
@@ -41,8 +41,12 @@ void main(uint3 id : SV_DispatchThreadID)
     if (any(id >= uint3(g.x, g.y, g.z))) return;
     RWTexture3D<float4> output = ResourceDescriptorHeap[P[1].y];
     // the farthest surface of the cell's pixels
-    Texture2D<float> hiz = ResourceDescriptorHeap[P[5].w];
-    const float farthest = g_nearPlane / max(hiz.Load(int3(id.xy, fogHizMip(g))), 1e-30);
+    float farthest = 3.0e38;
+    if (P[5].w != 0xFFFFFFFFu)
+    {
+        Texture2D<float> hiz = ResourceDescriptorHeap[P[5].w];
+        farthest = g_nearPlane / max(hiz.Load(int3(id.xy, fogHizMip(g))), 1e-30);
+    }
     const float z0 = fogDepthOfSlice(g, float(id.z)), z1 = fogDepthOfSlice(g, float(id.z) + 1.0);
     if (z0 >= farthest)
     {
@@ -67,6 +71,7 @@ void main(uint3 id : SV_DispatchThreadID)
     const FogMedium fog = fogMedium(uint4(1, 0, 0, 0), P[2], P[3]);
     float sigma = fogExtinctionAt(fog, p.y) * fogDensityScale(p * float3(1, 2, 1) * asfloat(P[8].w) + asfloat(P[9].xyz), asfloat(P[8].z));
     if (zs * toRay < fog.start) sigma = 0;
+    if (!clipPlaneKeeps(p)) sigma = 0;  // (a planar reflection view: the ray before the mirror is not a path of light)
     float3 inScattered = 0;
     if (sigma > 0)
     {
