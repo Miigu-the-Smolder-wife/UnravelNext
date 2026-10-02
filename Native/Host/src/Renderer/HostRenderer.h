@@ -225,6 +225,10 @@ struct FramePacket
     render::CloudLayerDesc clouds;            // B5: the cloud layer (FrameContext::clouds)
     render::FogDesc fog;                      // the height fog (FrameContext::fog)
     std::vector<render::FogVolumeDesc> fogVolumes;  // local fog volumes (FrameContext::fogVolumes; world coordinates)
+    // the volumes' density grids (the host's copies: FogVolumeDesc::grid of the volumes above points into them)
+    std::vector<std::shared_ptr<const std::vector<uint8_t>>> fogGrids;
+    render::WeatherFrame weather;             // the weather record (FrameContext::weather)
+    render::LightningDesc lightning;          // this frame's lightning flash (FrameContext::lightning; intensity 0: none)
     // W2 closed basins (v1.78): the basins every frame takes (this frame's coordinates; the sources pointers are set when
     // the frame is recorded) and this frame's sources (each handed to one frame; a dropped frame's carry into the next).
     std::vector<render::PoolFrame> pools;
@@ -456,8 +460,12 @@ public:
     void setClouds(const render::CloudLayerDesc& clouds);
     // The height fog: held until changed; every queued frame takes the current medium.
     void setFog(const render::FogDesc& fog);
-    // Local fog volumes: the current set, held until changed.
+    // Local fog volumes: the current set, held until changed. A volume's density grid (FogVolumeDesc::grid) is copied.
     void setFogVolumes(const std::vector<render::FogVolumeDesc>& volumes);
+    // The weather record (FrameContext::weather: cloud cover, rain, wetness, snow): held until changed.
+    void setWeather(const render::WeatherFrame& weather);
+    // A lightning flash for the next queued frame only (intensity 0: none).
+    void setLightning(const render::LightningDesc& lightning);
     render::CloudLayerDesc clouds()
     {
         std::lock_guard lock(m_mutex);
@@ -674,6 +682,8 @@ private:
     std::optional<OceanInput> m_ocean;                               // (m_mutex) the sea every queued frame takes
     render::FogDesc m_fog;                                           // (m_mutex) the height fog every queued frame takes
     std::vector<render::FogVolumeDesc> m_fogVolumes;                 // (m_mutex) the local fog volumes every queued frame takes
+    std::vector<std::shared_ptr<const std::vector<uint8_t>>> m_fogGrids;  // (m_mutex) their density grids (m_fogVolumes point into them)
+    render::WeatherFrame m_weather;                                  // (m_mutex) the weather record every queued frame takes
     render::CloudLayerDesc m_clouds;                                 // (m_mutex) B5 the cloud layer every queued frame takes
     std::optional<render::OceanFrame> oceanFrameLocked() const;      // (m_mutex held) m_ocean in the current coordinates
     std::vector<PoolInput> m_pools;                                  // (m_mutex) W2 basins every queued frame takes (world)

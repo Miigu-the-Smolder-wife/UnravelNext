@@ -993,6 +993,137 @@ typedef struct UnxPassTiming
 // Writes min(capacity, passes) entries; *count receives the frame's pass count.
 UNX_API int32_t UNX_CALL UnxFramePassTimingsLatest(UnxRenderer r, UnxPassTiming* passes, uint32_t capacity, uint32_t* count);
 
+// ---- Weather (optional exports within ABI 6; after commit, any time): UnxFrameSetFog2, UnxFrameSetFogVolumes2,
+// UnxFrameSetClouds2, UnxFrameSetWeather, UnxFrameSetLightning. The first three take the frozen descriptions' fields
+// (UnxFogDesc, UnxFogVolumeDesc, UnxCloudDesc: the same names, units and limits) and what the renderer's frame has
+// gained since; each sets the same state as its first function - the latest call of either decides, and the first
+// function leaves the added fields at "none".
+
+// The height fog with its second layer (render::FogDesc::density2): another exponential layer of the same medium - a low
+// ground fog under a thin haze -, with its own density, falloff and height; the albedo and the phase function are the
+// fog's. density2 0: none (while it rains the rain's veil takes the layer: UnxFrameSetWeather). Null: the quality file's
+// atmosphere.fog decides, as UnxFrameSetFog(null).
+typedef struct UnxFogDesc2
+{
+    uint32_t size, version;             // sizeof (64), 1
+    float density;                      // extinction (1/m) at 'height', >= 0
+    float heightFalloff;                // the density halves every 1 / this metres of height, >= 0
+    float height;                       // world metres
+    float albedo[3];                    // scattering / extinction, [0, 1]
+    float phaseG;                       // Henyey-Greenstein asymmetry, (-1, 1)
+    float startDistance;                // m, >= 0
+    float skyAmount;                    // [0, 1]
+    float noiseAmount;                  // [0, 1]
+    float noiseScale;                   // m, >= 1
+    float density2;                     // the second layer's extinction (1/m) at 'height2', >= 0 (0: no second layer)
+    float heightFalloff2;               // its density halves every 1 / this metres of height, >= 0 (0: uniform in height)
+    float height2;                      // world metres
+} UnxFogDesc2;
+#ifdef __cplusplus
+static_assert(sizeof(UnxFogDesc2) == 64, "UnxFogDesc2 is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetFog2(UnxRenderer r, const UnxFogDesc2* fog);
+
+// Local fog volumes with rising steam and a density grid (render::FogVolumeDesc): the current set, held until changed,
+// as UnxFrameSetFogVolumes.
+//   steam   sourcePlane: the height inside the volume (0 bottom .. 0.95) the medium rises from - no density under it,
+//           heightFalloff counts from it (the water's surface in a volume that reaches under it). riseSpeed: the
+//           density's own variation moves up the volume's axis at this speed. turbulence: the variation's share of the
+//           density (0.5: from nothing to twice the mean; 1: wisps with gaps), a quarter of it at the source plane and all
+//           of it from a third of the height up. turbulenceScale: its largest features. All 0 (turbulenceScale any):
+//           the volume as UnxFrameSetFogVolumes gives it.
+//   grid    a density grid of the game's own (a simulation, authored wisps): gridSize texels per side (each 1 .. 32),
+//           one byte per texel, x fastest then y then z, over the volume's box [-1, 1]^3 along its axes - texel (0, 0, 0)
+//           at the corner (-1, -1, -1); read between texels; a texel is the density's factor (255: 1) on everything
+//           above. Copied by the call. grid null (gridSize 0, 0, 0): none.
+typedef struct UnxFogVolumeDesc2
+{
+    uint32_t size, version;             // sizeof (112), 1
+    double centre[3];                   // world, m
+    float halfSize[3];                  // m, > 0
+    float yaw;                          // rad, about the up axis
+    uint32_t shape;                     // 0 ellipsoid, 1 box
+    float density;                      // extinction (1/m) at the volume's bottom (the source plane), >= 0
+    float heightFalloff;                // >= 0 (0: uniform)
+    float edge;                         // (0, 1]
+    float albedo[3];                    // [0, 1]
+    float sourcePlane;                  // [0, 0.95]
+    float riseSpeed;                    // m/s
+    float turbulence;                   // [0, 1]
+    float turbulenceScale;              // m, > 0 where turbulence > 0
+    uint32_t gridSize[3];               // texels per side, each 1 .. 32 (0, 0, 0 without a grid)
+    const uint8_t* grid;                // gridSize[0] x gridSize[1] x gridSize[2] bytes, or null
+} UnxFogVolumeDesc2;
+#ifdef __cplusplus
+static_assert(sizeof(UnxFogVolumeDesc2) == 112, "UnxFogVolumeDesc2 is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetFogVolumes2(UnxRenderer r, const UnxFogVolumeDesc2* volumes, uint32_t count);
+
+// The cloud layer with the cirrus sheet (render::CloudLayerDesc::cirrus*): thin ice cloud at one altitude far above the
+// layer, with its own coverage map and drift, lit by the same sun and sky. A frame may have the sheet without the layer
+// (coverage 0, cirrusCoverage > 0). Null, or both coverages 0: no clouds.
+typedef struct UnxCloudDesc2
+{
+    uint32_t size, version;             // sizeof (64), 1
+    float coverage;                     // [0, 1] (0: no layer)
+    float baseAltitude, topAltitude;    // world metres, base < top
+    float sigmaMax, albedo;             // peak extinction (1/m) > 0, single-scattering albedo [0, 1]
+    float windX, windZ;                 // m/s
+    uint32_t seed;
+    float cirrusCoverage;               // [0, 1]: the share of the sheet's map that holds cirrus (0: no sheet)
+    float cirrusAltitude;               // world metres, > 0 (9000)
+    float cirrusOpticalDepth;           // vertical, where the map is full, > 0 (thin cirrus 0.03 .. 0.3)
+    float cirrusWindX, cirrusWindZ;     // m/s: the sheet's own drift
+    uint32_t reserved;                  // 0
+} UnxCloudDesc2;
+#ifdef __cplusplus
+static_assert(sizeof(UnxCloudDesc2) == 64, "UnxCloudDesc2 is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetClouds2(UnxRenderer r, const UnxCloudDesc2* clouds);
+
+// The weather record (render::WeatherFrame; held until changed): the one row the sky, the air and the surfaces read.
+//   cloudCover  the cloud layer's coverage in frames whose cloud description has no layer of its own (the layer's other
+//               values are then the defaults);
+//   rainRate    the rain's veil in the air (extinction 0.248 R^0.67 per km, in the fog's second layer where the frame
+//               sets none) and the rain shadow map: what is under cover stays dry;
+//   wetness     surfaces exposed to the rain darken and smooth by it (and by the surface state field's wet channel);
+//   snowRate, snowDepth  the snow cover on exposed surfaces;
+//   rainDirection        the direction the drops fall (the wind tilts it), any length > 0.
+// Null: no weather (every value 0).
+typedef struct UnxWeatherDesc
+{
+    uint32_t size, version;             // sizeof (48), 1
+    float rainRate;                     // mm/h, >= 0
+    float wetness;                      // [0, 1]
+    float snowRate;                     // mm/h water equivalent, >= 0
+    float snowDepth;                    // m, >= 0
+    float cloudCover;                   // [0, 1]
+    float rainDirection[3];             // (0, -1, 0): straight down
+    uint32_t reserved[2];               // 0
+} UnxWeatherDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxWeatherDesc) == 48, "UnxWeatherDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetWeather(UnxRenderer r, const UnxWeatherDesc* weather);
+
+// A lightning flash (render::LightningDesc), for the next queued frame only (as the debug primitives: a frame that is
+// never rendered drops it; call it for every frame of a flash with that frame's intensity): a source in or under the
+// cloud layer that lights the cloud around it - in the layer's picture, in the cloud in front of surfaces and in the sky
+// the rays read. The light on the ground is a scene light the game places for the flash. Null or intensity 0: no flash.
+typedef struct UnxLightningDesc
+{
+    uint32_t size, version;             // sizeof (56), 1
+    double position[3];                 // world, m: the channel's brightest stretch
+    float intensity;                    // luminous intensity (cd), the frame's mean over its exposure, >= 0
+    float color[3];                     // linear, >= 0 (0.8, 0.87, 1)
+    float radius;                       // m, > 0: the lit channel's extent (30)
+    uint32_t reserved;                  // 0
+} UnxLightningDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxLightningDesc) == 56, "UnxLightningDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetLightning(UnxRenderer r, const UnxLightningDesc* lightning);
+
 #ifdef __cplusplus
 }
 // The managed bridge (Assets/UnravelNextBridge/Runtime/Native/UnravelNextNative.cs) checks the same sizes at start.
