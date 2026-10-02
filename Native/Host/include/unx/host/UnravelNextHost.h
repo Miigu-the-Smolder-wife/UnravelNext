@@ -44,7 +44,10 @@ enum UnxResult
                             //    UnxSceneSetTerrainLayers (C5 terrain material, v1.74), UnxFrameSetClouds (B5, v1.77),
                             //    UnxFrameSetPools, UnxFrameAddPoolSources (W2, v1.78), UnxPoolStatsLatest (W2, v1.90),
                             //    UnxFrameSetWhiteBalance (v1.91), UnxFrameSetFog, UnxFrameSetFogVolumes (the height fog, local fog volumes),
-                            //    UnxSceneSetCharacterShading (skin, eye and cloth parameters of a material)
+                            //    UnxSceneSetCharacterShading (skin, eye and cloth parameters of a material),
+                            //    UnxMaterialInputsDefaults, UnxSceneSetMaterialInputs (uv transform, second uv set, detail
+                            //    maps, height, emissive scale and mask, vertex colour, dithered opacity),
+                            //    UnxSceneSetMeshAttributes (a mesh's second uv set and vertex colours)
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -701,6 +704,62 @@ typedef struct UnxCharacterShadingDesc
 static_assert(sizeof(UnxCharacterShadingDesc) == 80, "UnxCharacterShadingDesc is part of the ABI");
 #endif
 UNX_API int32_t UNX_CALL UnxSceneSetCharacterShading(UnxRenderer r, uint32_t material, const UnxCharacterShadingDesc* desc);
+
+// Material inputs (optional exports within ABI 6): what a game's materials carry beyond UnxMaterialDesc, for a material
+// already in the scene - every class but UNX_MATERIAL_CUT and UNX_MATERIAL_TERRAIN (ignored there).
+//   uv        the transform of the material's own textures (base colour, normal, roughness / metallic, emissive and its
+//             mask, occlusion on uv set 0, height): uv' = R(uvRotation) (uv x uvScale) + uvOffset - Unity's tiling and
+//             offset are uvScale and uvOffset. The alpha test cuts through it in every view, in the shadows and at ray hits.
+//   uv sets   occlusionUvSet / detailUvSet 1: that map is read on the mesh's second uv set (UnxSceneSetMeshAttributes; a
+//             mesh without one: its uv0), without the transform.
+//   detail    a tiled colour (UNX_TEXTURE_RGBA8_SRGB; multiplies the base colour, neutral at sRGB 0.5 - Unity's detail
+//             albedo x2) and normal (UNX_TEXTURE_RG8_NORMAL; its slopes add to the base normal's) at uv(detailUvSet) x
+//             detailScale + detailOffset, weighted by their strengths and, with UNX_MATERIAL_INPUT_VERTEX_BLEND, by the
+//             vertex colour's alpha.
+//   height    UNX_TEXTURE_R8_LINEAR, 1 = the surface, 0 = heightScale metres under it: parallax occlusion mapping in the
+//             main and planar views (the quality file's material.parallax_steps; the pixel's depth stays the surface's).
+//   emission  emissiveScale multiplies the material's emissive (the intensity apart from the colour); the mask
+//             (UNX_TEXTURE_R8_LINEAR, on the material's uv) multiplies it per texel.
+//   flags     UNX_MATERIAL_INPUT_VERTEX_TINT: the vertex colour's rgb multiplies the base colour;
+//             UNX_MATERIAL_INPUT_ALPHA_DITHER: an alpha-tested material's cut is dithered around its cutoff in the views
+//             (soft edges under the temporal upscale; ignored without an alpha cutoff).
+// Fill the description with UnxMaterialInputsDefaults first (a zeroed one names texture 0 four times and has no scale).
+// Before commit the material is changed in place; after commit the change reaches the GPU scene with the next queued
+// frame (textures must already be in the scene). UnxSceneEditMaterials describes a material anew without these fields:
+// the material keeps them.
+#define UNX_MATERIAL_INPUT_VERTEX_TINT 1u
+#define UNX_MATERIAL_INPUT_VERTEX_BLEND 2u
+#define UNX_MATERIAL_INPUT_ALPHA_DITHER 4u
+typedef struct UnxMaterialInputsDesc
+{
+    uint32_t size, version;             // sizeof (96), 1
+    float uvScale[2];                   // finite, != 0 (default 1, 1)
+    float uvOffset[2];
+    float uvRotation;                   // radians, counter-clockwise in uv
+    uint32_t occlusionUvSet;            // 0 or 1
+    uint32_t detailColorTexture;        // a scene texture or UNX_NONE
+    uint32_t detailNormalTexture;       // a scene texture or UNX_NONE
+    float detailScale[2];               // finite, != 0 (default 1, 1)
+    float detailOffset[2];
+    uint32_t detailUvSet;               // 0 or 1
+    float detailColorStrength;          // [0, 1] (default 1)
+    float detailNormalScale;            // [0, 4] (default 1)
+    uint32_t heightTexture;             // a scene texture or UNX_NONE
+    float heightScale;                  // m, [0, 1] (0: no parallax)
+    float emissiveScale;                // >= 0 (default 1)
+    uint32_t emissiveMaskTexture;       // a scene texture or UNX_NONE
+    uint32_t flags;                     // UNX_MATERIAL_INPUT_*
+    uint32_t reserved[2];               // 0
+} UnxMaterialInputsDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxMaterialInputsDesc) == 96, "UnxMaterialInputsDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxMaterialInputsDefaults(UnxMaterialInputsDesc* desc);
+UNX_API int32_t UNX_CALL UnxSceneSetMaterialInputs(UnxRenderer r, uint32_t material, const UnxMaterialInputsDesc* desc);
+// A mesh's optional vertex streams (before UnxSceneCommit; a mesh added with UnxSceneAddMesh): uv1 = 2 floats per vertex
+// (the second uv set) or null, colors = one RGBA8 per vertex with r in the low byte (linear values; Unity's Color32) or
+// null; vertexCount must be the mesh's.
+UNX_API int32_t UNX_CALL UnxSceneSetMeshAttributes(UnxRenderer r, uint32_t mesh, const float* uv1, const uint32_t* colors, uint32_t vertexCount);
 
 // Loads a .unxscene file (INTERFACES 6.2) as the renderer's content: textures, materials, meshes, skeletons, instances
 // (their flags included), lights, sun, atmosphere and wind, with the file's indices. Only before any content was added and

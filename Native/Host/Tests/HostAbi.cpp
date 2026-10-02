@@ -70,6 +70,9 @@ struct Api
     UNX_FN(UnxFrameGraphStatsLatest)
     UNX_FN(UnxVideoMemory)
     UNX_FN(UnxSceneSetCharacterShading)
+    UNX_FN(UnxMaterialInputsDefaults)
+    UNX_FN(UnxSceneSetMaterialInputs)
+    UNX_FN(UnxSceneSetMeshAttributes)
 #undef UNX_FN
     void load(const std::filesystem::path& path)
     {
@@ -104,6 +107,9 @@ struct Api
         UNX_FN(UnxFrameGraphStatsLatest)
         UNX_FN(UnxVideoMemory)
         UNX_FN(UnxSceneSetCharacterShading)
+        UNX_FN(UnxMaterialInputsDefaults)
+        UNX_FN(UnxSceneSetMaterialInputs)
+        UNX_FN(UnxSceneSetMeshAttributes)
 #undef UNX_FN
     }
     void ok(int32_t r, const char* what) const
@@ -154,6 +160,20 @@ void addLayerMaterials(scene::Scene& s)
     skin.subsurfaceLobeMix = 0.7f;
     skin.subsurfaceLobeRoughness = { 0.6f, 1.5f };
     s.materials.push_back(skin);
+    scene::Material tiled;  // material inputs (UnxSceneSetMaterialInputs): a uv transform, the emission's scale, a vertex tint
+    tiled.name = "abi tiled";
+    tiled.baseColor = { 0.5f, 0.4f, 0.3f };
+    tiled.emissive = { 1, 2, 3 };
+    tiled.emissiveScale = 2.5f;
+    tiled.uvScale = { 4, -2 };
+    tiled.uvOffset = { 0.25f, 0.5f };
+    tiled.uvRotation = 0.3f;
+    tiled.occlusionUvSet = 1;
+    tiled.detailScale = { 8, 8 };
+    tiled.detailUvSet = 1;
+    tiled.detailColorStrength = 0.5f;
+    tiled.vertexColorTint = true;
+    s.materials.push_back(tiled);
     scene::Material eye;
     eye.name = "abi eye";
     eye.cls = scene::MaterialClass::Subsurface;
@@ -324,6 +344,30 @@ void pushScene(const Api& api, UnxRenderer r, const scene::Scene& s)
             c.eyeIor = m.eyeIor;
             put3(c.eyeAxis, m.eyeAxis);
             api.ok(api.UnxSceneSetCharacterShading(r, materialIndex, &c), "UnxSceneSetCharacterShading");
+        }
+        // material inputs: the fields the description does not carry
+        if (scene::hasMaterialInputs(m) || m.emissiveScale != 1.0f)
+        {
+            UnxMaterialInputsDesc in;
+            api.ok(api.UnxMaterialInputsDefaults(&in), "UnxMaterialInputsDefaults");
+            in.uvScale[0] = m.uvScale.x, in.uvScale[1] = m.uvScale.y;
+            in.uvOffset[0] = m.uvOffset.x, in.uvOffset[1] = m.uvOffset.y;
+            in.uvRotation = m.uvRotation;
+            in.occlusionUvSet = m.occlusionUvSet;
+            in.detailColorTexture = m.detailColorTexture;
+            in.detailNormalTexture = m.detailNormalTexture;
+            in.detailScale[0] = m.detailScale.x, in.detailScale[1] = m.detailScale.y;
+            in.detailOffset[0] = m.detailOffset.x, in.detailOffset[1] = m.detailOffset.y;
+            in.detailUvSet = m.detailUvSet;
+            in.detailColorStrength = m.detailColorStrength;
+            in.detailNormalScale = m.detailNormalScale;
+            in.heightTexture = m.heightTexture;
+            in.heightScale = m.heightScale;
+            in.emissiveScale = m.emissiveScale;
+            in.emissiveMaskTexture = m.emissiveMaskTexture;
+            in.flags = (m.vertexColorTint ? UNX_MATERIAL_INPUT_VERTEX_TINT : 0u) | (m.vertexAlphaBlend ? UNX_MATERIAL_INPUT_VERTEX_BLEND : 0u) |
+                       (m.alphaDither ? UNX_MATERIAL_INPUT_ALPHA_DITHER : 0u);
+            api.ok(api.UnxSceneSetMaterialInputs(r, materialIndex, &in), "UnxSceneSetMaterialInputs");
         }
         ++materialIndex;
     }
