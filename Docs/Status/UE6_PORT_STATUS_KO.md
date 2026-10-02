@@ -256,7 +256,9 @@ GPU에서 돌린 것은 없다(시험 실행 파일·캡처·게이트·furnace 
 | 구름 | 1/4 해상도, 시간 재구성 없음, 3.27 ms | 사실상 못 씀 |
 | 모션 블러 | 업스케일 전 내부 해상도, 32 px 제한 (2026-10-03: 업스케일 뒤 출력 해상도 경로 코드 있음, 2.3.1) | 짧고 거친 줄무늬 |
 | 색 보정 | 장면 기준 그레이딩 없음(화이트 밸런스와 곡선 뒤 .cube LUT만) (2026-10-03: 결합 LUT 코드 있음, 2.3.1) | 게임이 룩을 못 바꿈 |
-| 피사계 심도 | 옥타브 피라미드 적분(원판만, 전경·배경 분리 없음) (2026-10-03 2차: 조리개 구조 경로 코드 있음, 2.3.1) | 전경 흐림이 초점면 물체 위로 번지지 않음, 보케 모양 없음 |
+| 피사계 심도 | 옥타브 피라미드 적분(원판만, 전경·배경 분리 없음) (2026-10-03 2차: 조리개 구조 경로 코드 있음. 3차: squeeze·Petzval·경통과 매트 박스·depth blur 코드 있음, 2.3.1) | 전경 흐림이 초점면 물체 위로 번지지 않음, 보케 모양 없음 |
+| 동적 해상도 | 없음. 내부 높이는 티어마다 고정(`output.render_scale`, `render_height_max`) (2026-10-03 3차: 컨트롤러 코드 있음, 기본 끔, 2.3.1) | 무거운 장면에서 프레임 시간이 예산을 넘어도 화소 수가 그대로임 |
+| 게임이 읽는 프레임 시간 | 프레임 GPU 시간과 패스별 시간만 있음. 해상도 배율·그룹 합계 없음 (2026-10-03 3차: `UnxFrameGetStatistics` 코드 있음, 2.3.1) | 게임이 프레임 조절에 쓸 값을 한 번에 못 읽음 |
 | 렌즈 투영 | 없음 (2026-10-03 2차: Panini 코드 있음, 2.3.1) | 넓은 시야각에서 화면 가장자리가 늘어남 |
 | HDR 출력 | 종이 흰색 = 1 선형 값까지만 쓰고 인코딩은 호스트 몫 (2026-10-03 2차: scRGB·ST 2084 인코딩 코드 있음, 2.3.1) | 호스트가 직접 변환해야 함 |
 
@@ -307,6 +309,37 @@ GPU에서 한 번도 돌리지 않았다. 아래는 코드에 적힌 내용이�
 | 렌즈 플레어 값 대조 | 참조 폴더의 `PostProcessLensFlares.cpp`·`.usf`와 대조해 확인한 것: 플레어 8개, 배율 (틴트 알파 − 0.5) × 7, 세기 × 블룸 세기, r + g + b 문턱, 반 배율 원판 마스크, 합성의 원판 마스크 둘, 보케 크기 = 플레어 뷰 폭의 %, `r.LensFlareQuality` 2. 문턱은 마스크를 곱한 색에 거는 것으로 고쳤다. 기억에 의존한 채 남은 값(참조 폴더에 없는 Engine 모듈의 `FPostProcessSettings` 기본값): LensFlareIntensity 1, LensFlareTint 흰색, LensFlareBokehSize 3, LensFlareThreshold 8, LensFlareTints 8개, 블룸 세기 0.675, 기본 보케 텍스처가 원판이라는 것. | `PostFlare.hlsl`, `Config/quality/shading.toml` | 코드 작성·빌드 통과, 실행 안 함 |
 | 호스트 내보내기 | 게임이 실행 중에 바꾸는 값을 `UnxFrameSetFog`와 같은 방식(바꿀 때까지 유지, null이면 품질 파일)으로 내보냈다. `UnxFrameSetColorGrading`(색 보정), `UnxFrameSetPost`(노출 보정, 측광 범위 EV, 블룸 세기, 비네트, 모션 블러 양, 조리개 날 수·최대 개방 지름; NaN이면 품질 파일 값), `UnxFrameSetDisplayEncoding`(HDR 인코딩, 종이 흰색). DOF의 조리개·초점 거리는 기존 `UnxFrameSetLens`다. 헤더와 ABI 파일 끝에 붙였고, `HostRenderer`에는 패킷 필드·설정 함수·10비트 HDR 출력 허용을 넣었다. 관리 코드(C#) 쪽 바인딩과 크기 검사는 이 저장소에 없어 건드리지 않았다. | `UnravelNextHost.h`, `RendererAbi.cpp`, `HostRenderer.h/.cpp`, `FrameContext.h`(`PostSettingsDesc`), `Exposure.cpp`, `Post.cpp`, `MotionBlur.cpp`, `DiaphragmDof.cpp` | 코드 작성·빌드 통과, 실행 안 함 |
 
+병합 때 `shading.dof_diaphragm`은 끔으로 바뀌었다(배치에서 보기 전까지. 돌아 본 것은 옥타브 경로다). 위 표의 첫 줄은 이 값으로 읽는다.
+
+#### 2026-10-03 3차 구간에 채운 것 (브랜치 `w/tsr`, lumen-ue6 020db7af 위) — 전부 코드 작성·빌드 통과, 실행 안 함
+
+GPU에서 한 번도 돌리지 않았다. 아래는 코드에 적힌 내용이고, 그림과 시간은 재지 않았다. 전부 기본값에서는 꺼져 있거나(동적 해상도, 렌즈 모양) 조리개 DOF 경로 안에 있다(그 경로가 기본 끔).
+
+| 항목 | 내용 | 위치 · 스위치 | 상태 |
+|---|---|---|---|
+| 동적 해상도 컨트롤러 | 업스케일되는 주 뷰의 내부 높이를 GPU 프레임 시간에 맞춘다. 프로파일러가 돌려주는 완료 프레임의 시간을, 그 프레임을 렌더한 해상도 비율과 짝지어 이력에 넣는다(시간은 몇 프레임 늦게 오므로 프레임마다 결정을 보관). 프레임마다 제안 = 비율 × √(목표 / 시간), 목표 = 예산 × (1 − 여유 %), 최근 16프레임을 프레임당 0.9로 가중. 최근 2프레임이 연속으로 예산을 넘으면 그 제안을 바로 적용하고 이력을 비운다. 그 밖에는 8프레임마다, 2 % 넘게 다를 때만 바꾸고, 올릴 때는 제안의 0.9만큼만 간다. 높이는 출력의 50~100 % 안, 고정 설정의 높이 이하. 우리 것 둘: 높이는 72줄 단위로 내림(한 번 바뀔 때마다 아래 줄의 다른 시스템 이력이 다시 시작하므로 굵게), 화소 수와 무관한 고정 시간을 빼고 계산하는 항(`…_fixed_ms`, 기본 0. 로비 측정 모델은 3.3 ms + 4.1 ms/백만 화소). 고정 설정이 네이티브 해상도인 뷰에는 적용하지 않는다. 4K 출력에서는 고정 높이 1080줄이 이미 50 %라 `min_percent`를 낮춰야 움직일 범위가 생긴다. **규칙과 기본값은 기억에 의존했다**: 언리얼의 `DynamicResolutionState`·`r.DynamicRes.*`는 Engine 모듈에 있고 그 모듈이 참조 폴더에 없다. | `DynamicResolution.cpp/.h`, `ShadingTrack.cpp`, `Tracks.h`(`tracks::dynamicResolutionHeight`, `dynamicResolutionStatus`), `FrameRenderer.cpp`(`setupUpscale`), `Stubs/TrackM.cpp` · `output.dynamic_resolution_target_ms` 0(끔), `…_headroom_percent` 10, `…_min_percent` 50, `…_max_percent` 100, `…_history_frames` 16, `…_frame_weight` 0.9, `…_change_period_frames` 8, `…_change_threshold_percent` 2, `…_increase_blend` 0.9, `…_over_budget_frames` 2, `…_step_lines` 72, `…_fixed_ms` 0 | 코드 작성·빌드 통과, 실행 안 함 |
+| 크기가 바뀔 때 M의 이력 | 다시 시작하지 않는다. 내부 해상도 텍스처(guide 고리, 깜빡임·thin 커버리지 이력, 보관하는 장면 색, DOF 반해상도 누적)는 칸마다 그 칸을 쓴 프레임의 크기를 갖는다. 이번 프레임이 쓰는 칸만 이번 크기로 다시 만들고, 읽는 쪽은 이전 텍스처 자신의 크기로 UV 재투영한다(guide는 Catmull-Rom, 나머지는 최근접·bilinear). 업스케일 출력과 그 이력은 출력 해상도라 그대로다. 이전 프레임 지터는 이번 내부 화소 단위로 환산한다. 고정 최대 크기 텍스처 + 뷰포트 방식(언리얼의 방식)은 쓰지 않았다: `g_viewWidth/Height`를 읽는 HLSL이 74개, 뷰 크기 텍스처에 GetDimensions를 쓰는 파일이 12개쯤, UV로 표집하는 파일이 46개이고 대부분 다른 트랙 파일이라 전부 고쳐야 한다. | `Upscale.cpp`(`UpscaleState`), `TsrDecimate.hlsl`(P[3].w, P[4].w), `DiaphragmDof.cpp`, `DdofStabilize.hlsl`, `FrameRenderer.cpp/.h` | 코드 작성·빌드 통과, 실행 안 함 |
+| DOF 렌즈 모양 | squeeze(보케가 가로로 1/squeeze: 넓은 수집의 표본 위치, 약한 초점 이탈 수집의 거리, 스프라이트 쿼드·교차·에너지, squeeze < 1일 때 타일 도달 거리), Petzval(수집 커널마다·스프라이트 블록마다 행렬 하나. 중심에서 멀수록 중심 방향으로 눌림, 음수면 접선 방향. 제외 상자와 모서리 반지름), 경통과 매트 박스(스프라이트의 보케를 경통 끝 평면에서 자름: 조리개를 채운 광선 다발이 경통 끝에서 축에서 벗어난 원이 되고 경통 테두리와 깃발 3개의 끝 선이 그것을 자른다), depth blur(초점과 무관하게 거리로 흐림: 반지름 × (1 − 2^(−거리/기준 거리)), 렌즈 쪽 반지름보다 클 때). 언리얼과 다르게 한 것: Petzval의 축은 화소 방향으로 잡는다(언리얼은 정규화된 정사각형에서 잡아 넓은 화면에서 타원이 기운다), 경통에서 다발이 좁아지는 양은 경통 길이로 계산한다(언리얼 식에는 그 자리에 경통 반지름이 있다), 전경은 조리개 위치를 뒤집는다(언리얼은 전경·배경을 같은 쪽으로 자른다), 비네팅 자료는 목록에 화소마다 저장하지 않고 메시 커널이 블록마다 계산한다, 깃발의 roll은 그림 오른쪽에서 위쪽으로 잰다. 넣지 않은 것: dynamic radius offset, 알파 채널, 호스트 프레임별 값(품질 파일 키만 있다). **기본값은 기억에 의존했다**(Engine 모듈의 `FPostProcessSettings`): squeeze 1, Petzval 0·falloff 1·상자 0, 경통 반지름 5 cm·길이 0, 깃발 없음, depth blur 반지름 0·1 km. | `DdofCommon.hlsli`(`ddofCoc`, `ddofPetzval`), `DdofGather.hlsl`, `DdofRecombine.hlsl`, `DdofReduce.hlsl`, `DdofSetup.hlsl`, `DdofScatter.hlsli/.ms/.ps.hlsl`, `DiaphragmDof.cpp` · `shading.dof_diaphragm_squeeze` 1, `…_petzval` 0, `…_petzval_falloff` 1, `…_petzval_box_x/y` 0, `…_petzval_box_radius` 0, `…_barrel_radius` 0.05, `…_barrel_length` 0, `…_matte_box_0..2_roll/pitch/length` 0, `…_depth_blur_radius` 0, `…_depth_blur_km` 1 | 코드 작성·빌드 통과, 실행 안 함 |
+| DOF 반해상도 누적의 속도 | 업스케일의 벡터 패스(`m.upscale.motion`)를 함수로 떼어(`upscaleMotion`) DOF 누적이 요청하면 업스케일보다 먼저 기록하고, 업스케일은 같은 텍스처를 쓴다. 누적은 화소 주변 8개 중 가장 가까운 표면을 벡터가 가리키는 깊이(레이어가 있으면 레이어 깊이)에서 찾아 그 화소의 벡터로 이력을 읽는다. 움직이는 물체·변형·레이어가 자기 움직임으로 따라간다. 끄면 예전처럼 카메라 재투영만 쓴다. | `Upscale.cpp/.h`(`UpscaleMotion`, `upscaleMotion`), `DdofStabilize.hlsl`, `DiaphragmDof.cpp` · `shading.dof_diaphragm_prefilter_velocity`(켬) | 코드 작성·빌드 통과, 실행 안 함 |
+| `UnxFrameGetStatistics` | 읽기 전용 선택 export. 구조체 하나(480 B, version 1)에: GPU가 끝낸 마지막 프레임의 GPU 시간과 그 프레임의 내부 해상도, 가장 최근에 기록한 프레임의 출력·내부 해상도와 배율, 동적 해상도 상태(동작 여부, 예산, 마지막 결정에 쓴 가중 시간, 높이 범위), 그 프레임의 패스를 그룹(패스 이름의 첫 '.' 앞: v, m, r, s, w, fx, hair …)별로 합한 시간(큰 것부터 최대 16개, 넘으면 마지막이 other). 이미 있던 것: `UnxFrameStatsLatest`(프레임 GPU 시간), `UnxFramePassTimingsLatest`(패스별). 새로 생긴 것은 해상도·컨트롤러 상태·그룹 합계다. 관리 코드(C#) 바인딩은 이 저장소에 없어 건드리지 않았다. | `UnravelNextHost.h`, `RendererAbi.cpp`(둘 다 파일 끝), `HostRenderer.h/.cpp`(`FramePacing`, 슬롯별 내부 크기) | 코드 작성·빌드 통과, 실행 안 함 |
+
+**해상도가 한 단계 바뀔 때 아직 다시 시작하는 시스템** (다른 트랙 파일이라 적어만 두고 고치지 않았다. 전부 "저장한 크기 ≠ 뷰 크기면 다시 만들고 이력 없음으로 표시"하는 방식이고, 재투영 커널이 이전 크기 = 현재 크기를 가정하고 정수 좌표로 읽는다. 줄 번호는 lumen-ue6 020db7af 기준):
+
+| 시스템 | 다시 시작하는 곳 | 한 단계에서 보이는 것 |
+|---|---|---|
+| GI 화면 프로브·수집 이력 | `GiSystem::ensureScreenHistory`(GiSystem.cpp:411), 레이어 이력(:624), 프로브 가림 이력 `ensureProbeHistory`(:386), `ensureLumen`(LumenGather.cpp:33: 텍스처 12장, 유효 프레임 0, 확률 보간 없이 4프레임), 잎 뒷면 이력(:152) | 간접광이 몇 프레임 노이즈에서 다시 수렴 |
+| 반투명 GI 볼륨 | `TvState::ensure`(LumenTranslucencyVolume.cpp:136), 격자 크기가 바뀔 때 | 볼륨 이력 없음 |
+| 짧은 거리 AO | `ShortRangeAoState::ensure`(LumenShortRangeAO.cpp:41) | AO 이력 없음 |
+| MegaLights 시간 누적 | `MegaLightsState::ensure`(Shading/MegaLights.cpp:60) | 국소광 노이즈 |
+| 반사 이력 | `ReflectionSystem::ensureHistory`(ReflectionSystem.cpp:580), 이력 지움 패스 | 반사 노이즈 |
+| 프록셀: MegaLights 볼륨·안개 볼륨 | `SampledLocalState`(FroxelSystem.cpp:1227), `FogState::ensure`(:1009), 격자 크기가 바뀔 때. 안개 셀은 16 px 고정, 프록셀 타일은 720줄 이하 24 px·그 위는 각도 기준이라 720줄 위에서는 약 30줄마다 `froxelTilePx`가 바뀌고 대기 LUT도 다시 만든다(AtmosphereSystem.cpp:338, :534) | 안개·공기 이력 없음 |
+| HZB | `ensureHiz`(VisibilityTrack.cpp:773) | 한 프레임 가림 컬링 없음(그림은 같고 시간이 늘어남) |
+| 커버리지 레이어 이력 | `ensureCoverage`(VisibilityTrack.cpp:1332) | 초기화 패스, 재투영 이력 없음 |
+| 구름 | CloudSystem.cpp:126 | 한 프레임 전체 march |
+| 렌더 그래프 계획 | 텍스처 크기가 계획 키에 들어 있다(RenderGraph.cpp:268, 캐시 8개) | 새 크기마다 계획 컴파일. 72줄 단위면 576~1080줄 사이가 8가지라 캐시에 들어간다 |
+
+다시 시작하지 않는 것: 업스케일 출력 이력, guide 고리, 깜빡임·thin 커버리지 이력, 보관 장면 색, DOF 누적(위 표), 그림자(화면 크기 이력 없음. 페이지 레벨은 화소 크기를 따라 옮겨 간다), 머리카락·물(뷰 크기 상태 없음), 월드 공간 캐시·radiance cache·카드 아틀라스·VSM 페이지. 다른 시스템을 다시 시작하지 않게 하려면 각 시스템이 M처럼 칸마다 크기를 갖고 UV로 읽거나, 전부 고정 최대 크기 텍스처 + 뷰포트로 가야 한다. 그 전까지는 단계가 굵고(72줄) 드물어야 한다(8프레임 간격, 2 % 문턱).
+
 ### 2.4 작업 순서와 현재 위치
 
 1. Lumen 마무리, TSR 구조, 톤 파이프라인·블룸·비네트 — 코드 완료, GPU에서 돌았다(6절).
@@ -317,7 +350,9 @@ GPU에서 한 번도 돌리지 않았다. 아래는 코드에 적힌 내용이�
    - **성능**: 4K 17.7~18.7 ms, 목표 6.06 ms(6.4). 같은 표본 수로는 닿지 않는다 — 내부 해상도와 표본 수는 사용자 결정(4절).
    - 반사 2×2 다운샘플 채택 여부, 표면 캐시 피드백(코드는 1.2에 있음, 실행 안 함), 서브서피스(재질 파라미터가 먼저 필요), 그림자 페이지 구조(정적/동적 분리, 굵은 페이지, HZB), 지오메트리(소프트웨어 래스터, 압축, 스트리밍 연결), 옛 경로 코드 삭제.
    - TSR·후처리(M)는 코드가 다 들어갔고 전부 실행 전이다(2.3.1의 2026-10-03 표 둘): resurrection, reprojection field, thin geometry(밝기 선·깜빡임 연동 포함), hole filling, 출력보다 큰 이력, 레이어 속도, 업스케일 뒤 모션 블러와 회전 단계, 조리개 구조 DOF, Panini, HDR 인코딩, 색 보정 LUT, 렌즈 플레어·샤픈·색수차, 호스트 내보내기. 다음은 배치에서 돌려 그림과 시간을 재는 것이다 — 먼저 볼 것: 조리개 DOF와 예전 경로의 A/B(`shading.dof_diaphragm`), resurrection과 이력 200 %의 비용, 깜빡임 커널의 그룹 메모리(한계까지 400 B).
-   - M에서 코드로도 없는 것: DOF의 squeeze·Petzval·경통 비네팅, thin geometry 커버리지의 반투명 비트, TSR 밖(네이티브 해상도·한 패스 업스케일)에서의 Panini, ACES 출력 변환, 관리 코드 쪽 새 내보내기 바인딩.
+   - 2026-10-03 3차(2.3.1의 세 번째 표, 전부 실행 전): 동적 해상도 컨트롤러(기본 끔), 크기가 바뀌어도 이어지는 M의 이력, DOF 렌즈 모양(squeeze·Petzval·경통과 매트 박스·depth blur)과 누적의 속도 벡터, `UnxFrameGetStatistics`. 배치에서 먼저 볼 것: 동적 해상도를 켜고 한 단계 바뀌는 프레임의 그림(다른 시스템 이력이 다시 시작하는 것이 얼마나 보이는지 — 2.3.1의 목록), 컨트롤러가 예산 근처에서 오르내리지 않는지, `…_fixed_ms`에 측정 모델의 3.3 ms를 넣었을 때와 0일 때의 차이.
+   - 동적 해상도에서 남은 것: 다른 트랙의 화면 이력이 단계마다 다시 시작한다(2.3.1 목록. 각 트랙이 칸별 크기 + UV 재투영이나 고정 최대 크기 텍스처로 바꿔야 한다). CPU 시간 예산과 프레임 시간 전체(GPU + 표시 간격)에 대한 조절은 없다(GPU 시간만 본다).
+   - M에서 코드로도 없는 것: DOF의 dynamic radius offset·알파 채널·렌즈 모양의 호스트 프레임별 값, thin geometry 커버리지의 반투명 비트, TSR 밖(네이티브 해상도·한 패스 업스케일)에서의 Panini, ACES 출력 변환, 관리 코드 쪽 새 내보내기 바인딩.
 
 ## 3. 언리얼과 다르게 둔 점
 
