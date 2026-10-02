@@ -4,5 +4,17 @@ lumen_downsample = 2        # one reflection ray per 2 x 2 pixels, resolved from
                             # reference's Reflections.DownsampleFactor 2): mirror detail under the block size is rebuilt
                             # over frames instead of traced each frame
 
+[gi]
+lumen_tile = 32             # one screen probe per 32 x 32 pixels (the reference's High: ScreenProbeGather.DownsampleFactor
+                            # 32): a quarter of the gather's rays; indirect shadows under that size come from the short
+                            # range occlusion alone
+
+[lumen]
+radiance_cache_probe_resolution = 16   # the reference's High: RadianceCache.ProbeResolution 16 - a quarter of a probe's rays
+
+[shading]
+mega_lights_samples = 2     # light samples per downsampled pixel (the reference's High: NumSamplesPerPixel 2): half the
+                            # shadow rays, more left to the filters
+
 [output]
 upscale_tsr_flickering = false  # no flickering (moire) heuristic: sub-pixel gratings may shimmer where they stand still

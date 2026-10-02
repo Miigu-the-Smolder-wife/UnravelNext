@@ -53,6 +53,9 @@
 #define BAND_MODE_A 0u         // every band in the band A lists (raster service, secondary views)
 #define BAND_MODE_COVERAGE 1u  // bands B and C in the coverage layer list (LIST_B) until the band C bricks exist
 #define BAND_MODE_FULL 2u      // band B in LIST_B, band C in LIST_C
+#define BAND_MODE_C_VISIBLE 3u // band B in LIST_B, band C in the band A lists: the visibility buffer's one sample a pixel
+                               // (a sliver under a quarter pixel wide covers a pixel centre as often as its coverage: the
+                               // temporal upscale averages it - what the reference does with every sub-pixel triangle)
 
 CullView loadView(uint view)
 {

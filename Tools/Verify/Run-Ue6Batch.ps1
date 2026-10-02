@@ -68,6 +68,10 @@ if ($Skip -notcontains "variants") {
         "-Set", "atmosphere.fog.enabled=true")
     Invoke-Step "fog on (city block pictures, timings)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\fog", "-NoGame", "-Generated", "city_block", "-Resolutions", "1080p",
         "-Set", "atmosphere.fog.enabled=true")
+    Invoke-Step "band C in the visibility buffer (lake)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\band_c_vis", "-NoGame", "-Generated", "waterside",
+        "-Resolutions", "1080p", "-Set", "visibility.coverage_band_c_visbuffer=true")
+    Invoke-Step "band C in the visibility buffer (train lounge)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\band_c_vis", "-Only", "te_lounge",
+        "-Resolutions", "1080p", "-Set", "visibility.coverage_band_c_visbuffer=true")
     Invoke-Step "shadow cache as before (lake, city night timings)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\cache_all", "-NoGame", "-Generated", "waterside,city_night",
         "-Resolutions", "1080p", "-SkipPictures", "-Set", "shadow.vsm.cache_min_change_texels=0")
 }

@@ -79,8 +79,8 @@ constexpr uint32_t kArgNodes = 0, kArgGroups = 3, kArgDeferredClusters = 6, kArg
 
 // Band modes of a cull run (CullShared.hlsli BAND_MODE_*): A = every band in the band A lists (raster service, secondary
 // views; classification still runs and is reported in Stats::triangles); Coverage = bands B and C in the coverage layer
-// list until the band C bricks exist; Full = band C in its own list.
-constexpr uint32_t kBandModeA = 0, kBandModeCoverage = 1, kBandModeFull = 2;
+// list until the band C bricks exist; Full = band C in its own list; CVisible = band C in the band A lists.
+constexpr uint32_t kBandModeA = 0, kBandModeCoverage = 1, kBandModeFull = 2, kBandModeCVisible = 3;
 
 // Coverage layer (CoverageTiles.hlsli, CoverageLayer.hlsli): tiles, tile list, blocks, scratch slots.
 constexpr uint32_t kCovTilePx = 8, kCovTileWords = 8, kCovTilePixels = 64, kCovBlock = 1024, kCovScratchWords = 256;

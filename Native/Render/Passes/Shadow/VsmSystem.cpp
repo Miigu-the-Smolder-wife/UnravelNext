@@ -1564,12 +1564,21 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             const uint64_t bound = split ? levelBound(bounds, v.viewProj, v.lodPixelsPerMetre) : 0;
             if (bound > listCapacity)
             {
-                // the level alone is over a run's lists: one request per instance batch of its casters
-                const std::vector<LevelBatch> batches = levelBatches(bounds, v.viewProj, v.lodPixelsPerMetre, listCapacity);
-                if (batches.empty())
-                    fail("S VSM: sun level %u can reach %llu cluster entries, over the raster list capacity %llu (visibility.max_visible_clusters), and its "
-                         "casters do not split into instance batches under it (one caster, or the moving casters alone, are over the capacity)",
-                         k, (unsigned long long)bound, (unsigned long long)listCapacity);
+                // The level alone is over a run's lists: one request per instance batch of its casters - while a few
+                // batches do it. The bound is every caster of the level's window at the level's cut, whatever pages are
+                // asked for: a forest's 1.1 M trees stand at thousands of capacities in the middle levels (5,146
+                // requests, batch 3), where a frame draws a few hundred pages. Past kMaxLevelBatches (or with no split)
+                // the level is one request without the guarantee: V's run reports an overflow of its lists
+                // (VSM_ERR_RASTER_OVERFLOW; the casters past the capacity are missing from that level's pages that frame).
+                constexpr size_t kMaxLevelBatches = 4;
+                std::vector<LevelBatch> batches = levelBatches(bounds, v.viewProj, v.lodPixelsPerMetre, listCapacity);
+                if (batches.empty() || batches.size() > kMaxLevelBatches)
+                {
+                    if (fc.frame.frameIndex == 0)
+                        logf("S VSM: sun level %u can reach %llu cluster entries (list capacity %llu): drawn as one request, an overflow is reported\n", k,
+                             (unsigned long long)bound, (unsigned long long)listCapacity);
+                    batches.assign(1, LevelBatch{ 0, 0 });
+                }
                 if (!r.views.empty())
                 {
                     fc.services.rasterizeDepth(fc, r);

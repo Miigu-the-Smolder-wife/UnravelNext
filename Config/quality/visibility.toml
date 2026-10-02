@@ -55,5 +55,9 @@ coverage_debug_stage = 0          # measurement only: 3 = the pixel kernel retur
                                   # test, 1 = after the fragment's math, 2 = after the append atomic; 0 = the layer
 max_coverage_fragments = 12582912 # unused since INTERFACES v1.37 (coverage layer v2); kept so binaries built before it still
                                   # start; removed after the next integrated rebuild
+coverage_band_c_visbuffer = true  # band C (under band_c_max_width_px wide) in the visibility buffer instead of the coverage layer: one
+                                  # sample a pixel, averaged by the temporal upscale (the reference's way with sub-pixel geometry). The
+                                  # batch of 2026-10-02: the train lounge's still view 15.0 -> 12.5 ms, the lake 23.3 -> 22.0, the
+                                  # pictures the same (false: band C in the coverage layer, as before)
 coverage_band_c = true            # with coverage_layer: band C clusters are drawn in the coverage layer until the band C
                                   # bricks exist; false leaves them undrawn (measurement of band B's cost only)

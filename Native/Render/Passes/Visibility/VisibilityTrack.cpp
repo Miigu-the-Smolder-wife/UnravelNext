@@ -53,7 +53,7 @@ struct Settings
     uint32_t oceanEdgesMin = 0;  // ocean edge pixel list capacity floor (entries)
     uint32_t coverageSpecialMin = 0;  // special record list capacity floor (entries)
     float lodErrorPx = 0, bandAMinPx = 0, bandCMaxPx = 0, bandAHysteresisPx = 0;
-    bool occlusion = true, coverageLayer = false, coverageBandC = true;
+    bool occlusion = true, coverageLayer = false, coverageBandC = true, coverageBandCVisible = false;
 
     static Settings load(const QualityConfig& q)
     {
@@ -73,6 +73,7 @@ struct Settings
         s.occlusion = q.boolean("visibility.occlusion_culling");
         s.coverageLayer = q.boolean("visibility.coverage_layer");
         s.coverageBandC = q.boolean("visibility.coverage_band_c");
+        s.coverageBandCVisible = q.has("visibility.coverage_band_c_visbuffer") && q.boolean("visibility.coverage_band_c_visbuffer");
         s.coverageHair = q.boolean("visibility.coverage_hair");
         s.rasterAmplification = q.has("visibility.raster_amplification") ? q.boolean("visibility.raster_amplification") : true;
         const int64_t stage = q.integer("visibility.coverage_debug_stage");
@@ -1672,7 +1673,7 @@ void visibility(FramePassContext& fc, ViewResources& view)
     r.viewCount = 1;
     // Secondary views (planar reflections) still draw every band in the vis buffer: their coverage layer needs its own
     // persistent heads and M's composite in that view (V status).
-    r.bandMode = full && cfg.coverageLayer ? (cfg.coverageBandC ? kBandModeCoverage : kBandModeFull) : kBandModeA;
+    r.bandMode = full && cfg.coverageLayer ? (cfg.coverageBandCVisible ? kBandModeCVisible : (cfg.coverageBandC ? kBandModeCoverage : kBandModeFull)) : kBandModeA;
 
     // Full views: two-phase occlusion against their persistent HiZ once a previous frame produced one. Planar
     // reflection views have no history: one phase without occlusion, no HiZ.
