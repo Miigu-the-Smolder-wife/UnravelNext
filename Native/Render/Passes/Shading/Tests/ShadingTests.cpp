@@ -539,8 +539,19 @@ void testScene(TestFrame& tf, Report& report)
     // ---- scene camera, linear and display outputs
     std::shared_ptr<std::vector<uint8_t>> gb, words, lin, disp, depthRb;
     ViewDesc desc;
+    // The display pass checks the writers' own encoding (ShadingCommon.hlsli shEncodeExposed: film curve, sRGB OETF),
+    // which they use when no post term is on. The chain's terms that are on by default (bloom, vignette, local exposure;
+    // Post.cpp postActive) are PostTests' subject and are off for this pass.
+    const double bloomDefault = tf.quality.number("shading.post_bloom_strength"), vignetteDefault = tf.quality.number("shading.post_vignette");
+    const bool localExposureDefault = tf.quality.boolean("shading.post_local_exposure");
     for (int pass = 0; pass < 2; ++pass)
     {
+        if (pass == 1)
+        {
+            tf.quality.applyOverride("shading.post_bloom_strength=0.0");
+            tf.quality.applyOverride("shading.post_vignette=0.0");
+            tf.quality.applyOverride("shading.post_local_exposure=false");
+        }
         tf.frame.outputLinearHdr = pass == 0;
         tf.run([&](FramePassContext& fc) {
             ViewResources v = tf.mainView(fc, W, H, 0);
@@ -560,6 +571,9 @@ void testScene(TestFrame& tf, Report& report)
         });
     }
     tf.frame.outputLinearHdr = false;
+    tf.quality.applyOverride(unx::format("shading.post_bloom_strength=%.9g", bloomDefault));
+    tf.quality.applyOverride(unx::format("shading.post_vignette=%.9g", vignetteDefault));
+    tf.quality.applyOverride(localExposureDefault ? "shading.post_local_exposure=true" : "shading.post_local_exposure=false");
     const double exposure = 1.0 / (1.2 * std::exp2(13.0));
     const float3 E = s.sun.color * s.sun.illuminance;
     double worst = 0;
@@ -3950,16 +3964,20 @@ void testCoatSun(TestFrame& tf, Report& report)
 // must agree pixel by pixel (the quadtree evaluates the panel as a few squares, the rect light as one polygon; the same
 // edge integral, the window w(d) of the rect light is 1 - (d / 1000)^4 ~ 1). The panel's own pixels (its material)
 // are skipped (its direct view is the material's emission in one run and black in the other).
+// The quadtree lights add the diffuse term alone (the emitters' specular is the reflection path's), while the kernel
+// shades a rect light's specular lobe too: the rect light's diffuse radiance is its frame minus the same frame over a
+// black ground (base colour 0: no diffuse term; f0 = 0.08 x specular and the lobe are those of the grey ground).
 void testEmissivePanel(TestFrame& tf, Report& report)
 {
     const float3 L{ 3000, 2800, 2500 };  // nits
     const float3 panelPos{ 0.4f, 2.6f, 0.5f };
     const float2 panelSize{ 1.2f, 0.8f };
-    auto renderGround = [&](bool quadtree, std::shared_ptr<std::vector<uint8_t>>& lin, std::shared_ptr<std::vector<uint8_t>>& words, uint32_t W, uint32_t H) {
+    auto renderGround = [&](bool quadtree, bool blackGround, std::shared_ptr<std::vector<uint8_t>>& lin, std::shared_ptr<std::vector<uint8_t>>& words, uint32_t W,
+                            uint32_t H) {
         scene::Scene s;
         s.name = quadtree ? "emissive panel (quadtree)" : "emissive panel (rect light)";
         scene::Material ground;
-        ground.baseColor = { 0.5f, 0.5f, 0.5f };
+        ground.baseColor = blackGround ? float3{ 0, 0, 0 } : float3{ 0.5f, 0.5f, 0.5f };
         scene::Material panel;
         panel.baseColor = { 0.02f, 0.02f, 0.02f };
         if (quadtree) panel.emissive = L;
@@ -4033,25 +4051,33 @@ void testEmissivePanel(TestFrame& tf, Report& report)
         tf.quality.applyOverride("shading.emissive_area_lights=false");
     };
     const uint32_t W = 640, H = 360;
-    std::shared_ptr<std::vector<uint8_t>> linQ, wordsQ, linR, wordsR;
-    renderGround(true, linQ, wordsQ, W, H);
-    renderGround(false, linR, wordsR, W, H);
-    double worst = 0, sumE = 0, sumR = 0, largest = 0;
+    std::shared_ptr<std::vector<uint8_t>> linQ, wordsQ, linR, wordsR, linS, wordsS;
+    renderGround(true, false, linQ, wordsQ, W, H);
+    renderGround(false, false, linR, wordsR, W, H);
+    renderGround(false, true, linS, wordsS, W, H);  // the rect light's specular lobe alone
+    double worst = 0, sumE = 0, sumR = 0, largest = 0, sumSpecular = 0, sumTotal = 0, largestSpecularShare = 0;
     uint32_t checked = 0;
     for (uint32_t y = 0; y < H; y += 2)
         for (uint32_t x = 0; x < W; x += 2)
         {
             if ((texelOf<uint32_t>(*wordsQ, W, x, y) & 0xFFFF) != 0 || (texelOf<uint32_t>(*wordsR, W, x, y) & 0xFFFF) != 0) continue;  // ground pixels alone
-            const float4 q = texelOf<float4>(*linQ, W, x, y), r = texelOf<float4>(*linR, W, x, y);
+            const float4 q = texelOf<float4>(*linQ, W, x, y), total = texelOf<float4>(*linR, W, x, y), specular = texelOf<float4>(*linS, W, x, y);
+            const float3 r{ total.x - specular.x, total.y - specular.y, total.z - specular.z };  // the rect light's diffuse radiance
             const double scale = std::max({ (double)r.x, (double)r.y, (double)r.z, 1e-3 });
             const double e = std::max({ std::abs(q.x - r.x), std::abs(q.y - r.y), std::abs(q.z - r.z) }) / scale;
-            if (e > worst && e > 2e-3) logf("  emissive panel px (%u,%u): quadtree (%.5f %.5f %.5f) rect light (%.5f %.5f %.5f)\n", x, y, q.x, q.y, q.z, r.x, r.y, r.z);
+            if (e > worst && e > 2e-3)
+                logf("  emissive panel px (%u,%u): quadtree (%.5f %.5f %.5f) rect light diffuse (%.5f %.5f %.5f) specular (%.5f %.5f %.5f)\n", x, y, q.x, q.y, q.z, r.x, r.y,
+                     r.z, specular.x, specular.y, specular.z);
             worst = std::max(worst, e);
             largest = std::max(largest, (double)r.x);
             sumE += std::abs(q.x - r.x), sumR += r.x;
+            sumSpecular += specular.x, sumTotal += total.x;
+            if (total.x > 1e-4) largestSpecularShare = std::max(largestSpecularShare, (double)specular.x / total.x);
             ++checked;
         }
-    logf("emissive panel: %u ground pixels, largest exposed radiance %.4f, energy-weighted error %.4g, worst %.4g\n", checked, largest, sumR > 0 ? sumE / sumR : 0, worst);
+    logf("emissive panel: %u ground pixels, largest exposed radiance %.4f, energy-weighted error %.4g, worst %.4g; the rect light's specular lobe is %.4g of its "
+         "radiance (largest share at a pixel %.3g)\n",
+         checked, largest, sumR > 0 ? sumE / sumR : 0, worst, sumTotal > 0 ? sumSpecular / sumTotal : 0, largestSpecularShare);
     report(checked > 10000 && largest > 0.02, "emissive panel: the panel lights the ground (exposed radiance)", largest, 0.02);
     report(sumR > 0 && sumE / sumR < 1e-3, "emissive panel: quadtree area lights vs the rect light (energy-weighted rel.)", sumR > 0 ? sumE / sumR : 1, 1e-3);
     report(worst < 5e-3, "emissive panel: quadtree area lights vs the rect light (worst pixel rel.)", worst, 5e-3);
@@ -4492,7 +4518,7 @@ int main(int argc, char** argv)
 {
     try
     {
-        bool debugLayer = true, gpuValidation = false, growth = false, glassOnly = false, glassJobsOnly = false, preshadeOnly = false, coatOnly = false, sheenOnly = false, anisoOnly = false, filmOnly = false, areaQuadOnly = false, warp = false;
+        bool debugLayer = true, gpuValidation = false, growth = false, glassOnly = false, glassJobsOnly = false, preshadeOnly = false, coatOnly = false, sheenOnly = false, anisoOnly = false, filmOnly = false, areaQuadOnly = false, emissiveOnly = false, warp = false;
         bool subsurfaceOnly = false;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
@@ -4512,6 +4538,7 @@ int main(int argc, char** argv)
             if (std::string(argv[i]) == "--film-image" && i + 1 < argc) g_filmImage = argv[i + 1];
             if (std::string(argv[i]) == "--area-quad") areaQuadOnly = true;
             if (std::string(argv[i]) == "--subsurface") subsurfaceOnly = true;
+            if (std::string(argv[i]) == "--emissive") emissiveOnly = true;
             if (std::string(argv[i]) == "--warp") warp = true;  // compute probes only (full frames render black on WARP)
         }
         ComPtr<ID3D12Device> warpDevice;
@@ -4533,6 +4560,12 @@ int main(int argc, char** argv)
         if (subsurfaceOnly)  // --subsurface: the Subsurface class's scatter frames alone
         {
             testSubsurfaceScatter(tf, report);
+            logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
+            return report.failures ? 1 : 0;
+        }
+        if (emissiveOnly)  // --emissive: the emissive panel (14.1b) alone
+        {
+            testEmissivePanel(tf, report);
             logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
             return report.failures ? 1 : 0;
         }

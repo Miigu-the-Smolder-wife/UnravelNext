@@ -80,7 +80,9 @@ int main()
         o.debugLayer = true;
         o.shaderDirectory = executableDirectory() / "shaders";
         o.qualityDirectory = std::filesystem::path(UNX_SOURCE_DIR) / "Config/quality";
-        o.qualityOverrides = { "gi.deterministic=true" };
+        // Item 2 compares the displayed frame with the curve and the OETF alone: the chain's terms that are on by default
+        // (bloom, vignette, local exposure; PostTests' subject) are off here.
+        o.qualityOverrides = { "gi.deterministic=true", "shading.post_bloom_strength=0.0", "shading.post_vignette=0.0", "shading.post_local_exposure=false" };
         HostRenderer h(o);
         h.scene() = host::test::oneBox();
         scene::Instance second = h.scene().instances[0];  // instance 1: the view model

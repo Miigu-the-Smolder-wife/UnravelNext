@@ -233,6 +233,10 @@ struct SurfaceCacheCards::Impl
         }
         waiting = 0;
         if (!src) return;
+        // Deterministic runs (gi.deterministic, debug.deterministic: the same frames give the same image bit for bit)
+        // wait for the generation: without it the frame in which a mesh's cards arrive depends on the workers' timing.
+        const QualityConfig& q = fc.quality;
+        const bool deterministic = (q.has("gi.deterministic") && q.boolean("gi.deterministic")) || (q.has("debug.deterministic") && q.boolean("debug.deterministic"));
         const std::vector<gpu::Instance>& instances = gs.instances();
         const uint32_t count = (uint32_t)std::min<size_t>({ (size_t)gs.staticInstanceCount(), instances.size(), src->instances.size() });
         const bool materialsMayDiffer = sceneRevision != gs.revision();
@@ -277,6 +281,12 @@ struct SurfaceCacheCards::Impl
                 // (the identity: the mesh's storage and size - another mesh under the same index is not taken for it)
                 const uint64_t identity = (uint64_t)(uintptr_t)mesh->positions.data() ^ ((uint64_t)mesh->positions.size() << 40) ^ ((uint64_t)mesh->indices.size() << 16);
                 const scene::MeshCards* cards = cache->find(*src, g.mesh, scale, identity);
+                if (!cards && deterministic)
+                {
+                    // the cards arrive in the frame that asks for them, not in the frame a worker happens to finish in
+                    cache->wait();
+                    cards = cache->find(*src, g.mesh, scale, identity);
+                }
                 if (!cards)
                 {
                     ++waiting;

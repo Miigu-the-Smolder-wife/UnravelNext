@@ -3,8 +3,8 @@
 //      half-resolution texels count 4) at every texel parity, within the unbiased half rounding of the pyramid's stores
 //      (the symmetric impulse's rounding errors are correlated: |dE|/E <= 5e-4; a toward-zero store gave -2.2e-3 and a
 //      stride-2 point-sampled down pass +/-100 %), and two runs are bit identical;
-//   2. the final pass against a CPU reference on an HDR ramp over the curve's whole range (vignetting 0.7 of this view's
-//      projection, PBR Neutral, an identity 33^3 LUT, sRGB, the triangular 10-bit dither of the same hash): every channel
+//   2. the final pass against a CPU reference on an HDR ramp over the curve's whole range (vignetting 0.7 on the corner
+//      circle, the film curve, an identity 33^3 LUT, sRGB, the triangular 10-bit dither of the same hash): every channel
 //      within 1 10-bit step, at most 0.01 % of them off by one (float pow/exp at rounding boundaries; without the
 //      shader's explicit rounding the hardware's UNORM conversion put 3 % one code low);
 //   3. grain and bloom: two runs bit identical (hashes of pixel and frame index), grain zero-mean (|mean| < 0.1 step);
@@ -294,6 +294,16 @@ float hashUnit(uint32_t x, uint32_t y, uint32_t z)
     return (float)(v[0] >> 8) * (1.0f / 16777216.0f);
 }
 float saturate(float v) { return std::min(1.0f, std::max(0.0f, v)); }
+// PostFinal.hlsl's vignetting at pixel (x, y): cos^4 on a circle through the corners, tan(angle) = radius x strength
+// (the corners at radius sqrt 2 whatever the aspect).
+float vignetteFactor(uint32_t x, uint32_t y, float strength)
+{
+    const float nx = (x + 0.5f) / kWidth * 2 - 1, ny = (y + 0.5f) / kHeight * 2 - 1;
+    const float aspect = (float)kHeight / (float)kWidth, scale = 1.4142136f / std::sqrt(1.0f + aspect * aspect) * strength;
+    const float tx = nx * scale, ty = ny * aspect * scale;
+    const float c2 = 1.0f / (1.0f + tx * tx + ty * ty);
+    return c2 * c2;
+}
 
 // ---------------------------------------------------------------- 8
 // A texture filled from CPU rows (the staging buffer lives until the graph executed: 'keep').
@@ -862,7 +872,12 @@ int main(int argc, char** argv)
             expect("bloom: deterministic (two runs bit identical)", first == again);
         }
 
-        // 2. The final pass against the CPU reference (identity LUT, vignetting 0.7).
+        // 2. The final pass against the CPU reference (identity LUT, vignetting 0.7). The reference is the pass without bloom
+        //    and local exposure (both on by default; bloom is item 1 and 3): they are off here and in item 4.
+        const auto finalPassAlone = [](QualityConfig& q) {
+            q.applyOverride("shading.post_bloom_strength=0.0");
+            q.applyOverride("shading.post_local_exposure=false");
+        };
         const std::filesystem::path cube = std::filesystem::temp_directory_path() / "unx_post_test_identity.cube";
         {
             std::ofstream out(cube);
@@ -874,12 +889,12 @@ int main(int argc, char** argv)
         const std::string lut = "shading.post_lut=\"" + cube.generic_string() + "\"";
         {
             QualityConfig q = loadQuality();
+            finalPassAlone(q);
             q.applyOverride(lut);
             q.applyOverride("shading.post_vignette=0.7");
             std::vector<uint8_t> hdr, out;
             uint32_t hp = 0, op = 0;
             chain(device, shaders, q, hdr, hp, out, op);
-            const float4x4 proj = ViewDesc::fromCamera(scene::Camera{}, kWidth, kHeight, float4x4{}).proj;
             uint64_t offByOne = 0, total = 0;
             int64_t signedSum = 0;
             int worst = 0;
@@ -889,10 +904,7 @@ int main(int argc, char** argv)
                     uint16_t h[4];
                     std::memcpy(h, hdr.data() + (size_t)y * hp + (size_t)x * 8, 8);
                     float e[3] = { halfToFloat(h[0]), halfToFloat(h[1]), halfToFloat(h[2]) };
-                    const float nx = (x + 0.5f) / kWidth * 2 - 1, ny = (y + 0.5f) / kHeight * 2 - 1;
-                    const float tx = nx / proj.m[0][0], ty = ny / proj.m[1][1];
-                    const float c2 = 1.0f / (1.0f + tx * tx + ty * ty);
-                    const float vig = 1.0f + (c2 * c2 - 1.0f) * 0.7f;
+                    const float vig = vignetteFactor(x, y, 0.7f);
                     for (float& c : e) c = std::max(c * vig, 0.0f);
                     unx::test::filmCurve(e, 1.0f);
                     const float n = hashUnit(x, y, kFrame ^ 0x5bd1e995u) + hashUnit(y, x, kFrame + 104729u) - 1.0f;
@@ -953,10 +965,10 @@ int main(int argc, char** argv)
         }
         // 4. HDR display output: peak 4 against the generalised curve, peak 1 against the SDR curve.
         {
-            const float4x4 proj = ViewDesc::fromCamera(scene::Camera{}, kWidth, kHeight, float4x4{}).proj;
             for (const float peak : { 4.0f, 1.0f })
             {
                 QualityConfig q = loadQuality();
+                finalPassAlone(q);
                 q.applyOverride("shading.post_vignette=0.7");
                 std::vector<uint8_t> hdr, out;
                 uint32_t hp = 0, op = 0;
@@ -969,10 +981,7 @@ int main(int argc, char** argv)
                         std::memcpy(h, hdr.data() + (size_t)y * hp + (size_t)x * 8, 8);
                         std::memcpy(ov, out.data() + (size_t)y * op + (size_t)x * 8, 8);
                         float e[3] = { halfToFloat(h[0]), halfToFloat(h[1]), halfToFloat(h[2]) };
-                        const float nx = (x + 0.5f) / kWidth * 2 - 1, ny = (y + 0.5f) / kHeight * 2 - 1;
-                        const float tx = nx / proj.m[0][0], ty = ny / proj.m[1][1];
-                        const float c2 = 1.0f / (1.0f + tx * tx + ty * ty);
-                        const float vig = 1.0f + (c2 * c2 - 1.0f) * 0.7f;
+                        const float vig = vignetteFactor(x, y, 0.7f);
                         for (float& c : e) c = std::max(c * vig, 0.0f);
                         unx::test::filmCurve(e, peak);
                         for (int c = 0; c < 3; ++c)

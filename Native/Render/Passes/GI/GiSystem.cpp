@@ -827,6 +827,9 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     // gi.lumen_only: the final gather alone (LumenGather.cpp) - no world cache update, no screen probes of the cache.
     if (s.lumen.enabled && s.lumen.only)  // (no world cache exists: the lookup statistics' gate has nothing to count)
     {
+        // decals at hits: this frame's records before the gather's and the radiance cache's ray passes declare them
+        // (declareDecals; without it they hold the previous frame's graph references)
+        rays.recordDecals(fc, main);
         recordLumen(fc, main, BufferRef{}, rays);
         return;
     }
