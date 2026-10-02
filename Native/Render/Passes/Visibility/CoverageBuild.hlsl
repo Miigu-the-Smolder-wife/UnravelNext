@@ -26,7 +26,7 @@
 //          list's header zeroed.
 // "Finishing" a tile writes coverageDepthRange for its pixels and its opaqueCovered bits (the union of the pixel's opaque
 // record masks is full and the band A surface lies behind the farthest of those records; COVERAGE_REDESIGN 4.6).
-#include "Passes/Visibility/CoverageLayer.hlsli"
+#include "Passes/Visibility/CoverageBuckets.hlsli"  // (the tile clears empty the depth buckets' cover too: MODE 1, 4 take it in P[0].z)
 
 void storeDispatch(RWByteAddressBuffer args, uint word, uint groups)
 {
@@ -45,6 +45,11 @@ void clearTile(uint tile, uint lane)
     RWByteAddressBuffer counters = ResourceDescriptorHeap[COV_COUNTERS];
     if (lane < COV_TILE_WORDS) headers.Store(4 * (tile * COV_TILE_WORDS + lane), 0);
     counters.Store(4 * (tile * COV_TILE_PIXELS + lane), 0);
+    if (COV_COVER != UNX_NONE)  // the depth buckets' cover of the pixel: no union, no fragment
+    {
+        RWByteAddressBuffer cover = ResourceDescriptorHeap[COV_COVER];
+        cover.Store2(8 * (tile * COV_TILE_PIXELS + lane), uint2(0, 0));
+    }
     const uint2 pixel = tilePixel(tile, lane);
     if (pixel.x < COV_WIDTH && pixel.y < COV_HEIGHT)
     {

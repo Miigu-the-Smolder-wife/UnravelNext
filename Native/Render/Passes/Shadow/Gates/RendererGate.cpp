@@ -67,6 +67,9 @@
 #if __has_include("unx/gi/GiSystem.h")
 #include "unx/gi/GiSystem.h"
 #endif
+#if __has_include("unx/shading/ShadingSystem.h")
+#include "unx/shading/ShadingSystem.h"  // (the coverage composite's counts in the summary)
+#endif
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
 #include "unx/render/FrameRenderer.h"
@@ -1515,6 +1518,33 @@ int main(int argc, char** argv)
                 logf("  V error bits (Stats::overflow of every run and frame: capacities, shader loop bounds 0x40 0x400; growing pools 0x100 0x2000 0x4000 not judged) 0x%x %s\n",
                      vBits, vOk ? "ok" : "FAIL");
                 if (!vOk) ++gateFailures;
+            }
+            {
+                // Where the coverage layer's work went, last frame (the A/B of visibility.coverage_depth_buckets,
+                // coverage_triangle_cull, coverage_compute_raster and shading.coverage_compact): the band B list's clusters
+                // and triangles by the test that removed them, the fragments by outcome (their per-wave counters run with
+                // visibility.coverage_statistics only), and the composite's light pixels.
+                const visibility::Stats cs = visibility::latestStats(renderer.trackState());
+                logf("  coverage clusters: %u band B list entries, %u behind band A (not drawn), %u behind the buckets' cover (not drawn)\n", cs.listEntries[4],
+                     cs.coverageClustersBehindBandA, cs.coverageClustersBehindCover);
+                logf("  coverage triangles: %u to the rasteriser, %u to the compute raster, culled by the mesh kernel: %u behind band A, %u behind the cover "
+                     "(band B + C triangles of the visible clusters: %u)\n",
+                     cs.coverageTriangles, cs.coverageTrianglesCompute, cs.coverageTrianglesBehindBandA, cs.coverageTrianglesBehindCover, cs.triangles[1] + cs.triangles[2]);
+                if (cs.coverageEvaluated)
+                    logf("  coverage fragments: %u with area in their pixel, %u stored (%.1f %%; %u by the compute raster) | dropped: %u behind band A (%.1f %%), %u behind "
+                         "the cover (%.1f %%), %u cut out by alpha, %u without weight\n",
+                         cs.coverageEvaluated, cs.coverageFragments, 100.0 * cs.coverageFragments / cs.coverageEvaluated, cs.coverageFragmentsCompute, cs.coverageCutBandA,
+                         100.0 * cs.coverageCutBandA / cs.coverageEvaluated, cs.coverageCutCover, 100.0 * cs.coverageCutCover / cs.coverageEvaluated, cs.coverageCutAlpha,
+                         cs.coverageCutWeight);
+                else
+                    logf("  coverage fragments: %u stored (%u by the compute raster); the dropped ones by test need visibility.coverage_statistics = true\n",
+                         cs.coverageFragments, cs.coverageFragmentsCompute);
+#if __has_include("unx/shading/ShadingSystem.h")
+                const shading::Stats ms = shading::latestStats(renderer.trackState());
+                logf("  coverage composite: %u light pixels (their walks visited %u records, shaded %u: %.2f per pixel; %u list entries), %u heavy pixels\n",
+                     ms.coverageLightPixels, ms.coverageWalked, ms.coverageShaded, ms.coverageLightPixels ? (double)ms.coverageShaded / ms.coverageLightPixels : 0.0,
+                     ms.coverageEntries, ms.coverageHeavyPixels);
+#endif
             }
             if (quality.integer("shadow.vsm.fragment_check") != 0)
             {

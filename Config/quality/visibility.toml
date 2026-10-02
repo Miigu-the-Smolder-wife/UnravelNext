@@ -90,3 +90,36 @@ coverage_band_c_visbuffer = true  # band C (under band_c_max_width_px wide) in t
                                   # pictures the same (false: band C in the coverage layer, as before)
 coverage_band_c = true            # with coverage_layer: band C clusters are drawn in the coverage layer until the band C
                                   # bricks exist; false leaves them undrawn (measurement of band B's cost only)
+# The coverage raster nearer first (CoverageBuckets.hlsli; COVERAGE_REDESIGN 4.5; the reference's raster bins and depth
+# buckets). Written 2026-10-03, built, not run: each switch keeps the path before it for the A/B.
+coverage_depth_buckets = 4        # the band B list is sorted by its clusters' nearest distance (256 log2 bins) and drawn in
+                                  # this many buckets of equal cluster counts, nearer first (2 .. 8); after each bucket its
+                                  # stored opaque fragments enter a per-pixel cover (mask union, farthest depth; 8 B a
+                                  # pixel) and the next buckets drop every fragment behind a full union of nearer
+                                  # fragments - weight zero in the composite - and every cluster or triangle behind
+                                  # tiles covered in every pixel; list entries behind band A (the final HiZ) are not drawn.
+                                  # 1 = the list drawn whole in one pass, every fragment stored (as before). The stored
+                                  # fragments with weight are the same; the hidden ones (waterside: 61.8 % of the stored)
+                                  # are gone from the records, so coverageDepthRange's far end is the farthest stored one.
+                                  # Costs 4 small passes for the bins and 2 per bucket boundary
+coverage_depth_buckets_min_clusters = 64  # the buckets' passes are recorded when the latest completed frame's band B list
+                                  # held at least this many clusters: a frame without thin geometry keeps the one pass
+coverage_triangle_cull = true     # the coverage mesh kernel culls a triangle that can leave no fragment: outside the view,
+                                  # behind band A over its rectangle (4 HiZ loads), behind the buckets' cover (its pixels
+                                  # when its rectangle holds at most 8, <= 9 tile headers otherwise) - the fragment
+                                  # kernel's tests, once per triangle; false = every
+                                  # triangle of a drawn cluster goes to the rasteriser (as before)
+coverage_drop_weightless = true   # a cluster fragment whose area rounds to step 0 of the record's 10 bits and that covers no
+                                  # subsample is not stored: its composite weight is area x share = 0 and it adds no bit
+                                  # to the mask union (the touching corners of the conservative raster). Readers that
+                                  # take the pixel's nearest record (the local lights' coverage instance) no longer meet
+                                  # such a record; false = stored (as before)
+coverage_compute_raster = false   # with the buckets: a compute kernel (CoverageRasterSw.hlsl) rasterises the triangles the
+                                  # near plane does not cut and whose rectangle holds at most 8 pixels - no triangle
+                                  # set-up, no primitive attributes; the mesh kernel skips exactly those. Its records equal
+                                  # the pixel kernel's up to the two compilations' float rounding. Off until the A/B says
+                                  # what the hardware's set-up costs per small triangle (the measured 1.13 ns per triangle
+                                  # is the mesh kernel and the set-up together)
+coverage_statistics = false       # counts only (gate summaries): the coverage fragments by outcome - evaluated, behind band
+                                  # A, behind the cover, cut by alpha, without weight - from per-wave atomics in the
+                                  # fragment kernels (a pixel kernel variant: its time is not the layer's)

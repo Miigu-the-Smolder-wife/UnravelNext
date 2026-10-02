@@ -122,7 +122,8 @@ uint skinSlot(CullScene cs, uint instance)
 #define VS_LIST_COUNT 9u      // + list (VS_LISTS lists, words 9 .. 16): entries appended so far (both phases)
 #define VS_COV_SPECIAL 17u    // special coverage records appended by the scatter (may exceed the capacity: the need)
 #define VS_OCEAN_EDGES 18u    // ocean edge pixels listed for W (OceanEdges.hlsl; may exceed the capacity: the need)
-                              // words 19 .. 20: unused
+#define VS_COV_CUT_BAND_A 19u // coverage fragments behind band A (visibility.coverage_statistics; CoverageFragment.hlsli)
+#define VS_COV_CUT_COVER 20u  // ... behind the opaque coverage of the depth buckets drawn before theirs
 #define VS_OVERFLOW 21u       // bits: capacity exceeded (OVERFLOW_*)
 #define VS_STAT_INSTANCES 22u // instances that reached the node pass
 #define VS_STAT_NODES 23u     // node items processed
@@ -148,8 +149,20 @@ uint skinSlot(CullScene cs, uint instance)
 #define VS_NODE_READ 46u      // node work queue: node items claimed by the traversal's workers
 #define VS_NODE_PENDING 47u   // node work queue: items kept in the queue whose processing has not finished (0: the
                               // traversal is complete)
+#define VS_COV_CUT_WEIGHT 64u // coverage fragments of no weight: area under half a record step and no subsample (statistics)
+#define VS_COV_CUT_ALPHA 65u  // ... cut out whole by the alpha test (statistics)
+#define VS_COV_CLUSTERS_HIZ 66u   // band B list entries behind band A (the final HiZ; CoverageBins.hlsl): not drawn
 #define VS_LIST_PHASE1 48u    // + list (words 48 .. 55): entries of phase 1 (snapshot)
-#define VS_WORDS 56u
+#define VS_COV_CLUSTERS_TILE 56u  // band B list entries behind the tiles' opaque coverage (depth buckets): not drawn
+#define VS_COV_TRIANGLES 57u      // coverage triangles the rasteriser took (CoverageRaster.ms: the band B list and the
+                                  // translucent lists; not culled by the mesh kernel)
+#define VS_COV_TRIANGLES_HIZ 58u  // ... culled by the mesh kernel: behind band A over the triangle's rectangle
+#define VS_COV_TRIANGLES_TILE 59u // ... culled by the mesh kernel: behind the tiles' opaque coverage
+#define VS_COV_TRIANGLES_SW 60u   // ... rasterised by the compute kernel (CoverageRasterSw.hlsl)
+#define VS_COV_FRAGMENTS_SW 61u   // fragments the compute kernel appended (counted in VS_COV_FRAGMENTS too)
+#define VS_COV_EVALUATED 62u      // coverage fragments with area in their pixel, before the tests (statistics)
+                                  // word 63: unused
+#define VS_WORDS 72u  // (words 64 .. 66: the coverage statistics above; kStateWords, and the readback slot holds them: kReadbackBytes)
 
 #define VS_LISTS 8u
 #define LIST_A_BACK 0u        // band A, opaque, back faces culled
