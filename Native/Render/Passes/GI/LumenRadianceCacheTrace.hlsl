@@ -24,6 +24,7 @@
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/SurfaceCache/CardLighting.hlsli"
 #include "Passes/GI/LumenRadianceCache.hlsli"
+#include "RayTracing/HitLocalSample.hlsli"
 
 float lrcBias(float3 p) { return 1e-3 + 2e-4 * distance(p, g_cameraPosition); }
 
@@ -110,7 +111,8 @@ void LumenRadianceCacheTraceGen()
                     L.sunVisibility = rtVisible(scene, sr, RT_MASK_GI) ? 1.0 : 0.0;
                 }
             }
-            // (no local-light sample at a hit without cards, as Lumen/LgTrace.hlsl)
+            // a hit without cards: one local-light sample, as Lumen/LgTrace.hlsl (experiment 128: none)
+            if (!fromSurfaceCache && (P[3].w & 128) == 0) L.local = rtHitLocalSample(scene, s, m, -r.Direction, footprint, lrcBias(s.position), seed);
             radiance = rtHitRadiance(m, s.normal, -r.Direction, L, footprintPerMetre);
         }
     }

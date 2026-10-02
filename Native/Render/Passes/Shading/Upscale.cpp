@@ -42,9 +42,9 @@ struct UpscaleState
     bool fresh = true;  // the textures hold nothing yet
     TextureRef previous;           // history[parity] in the graph of frame 'previousFrame' (upscalePreviousColor)
     uint64_t previousFrame = ~0ull;
-    // output.screen_trace_source = 0: the scene colour the upscale was given (the view's resolution, before the upscale,
-    // the display transform and anything after it), kept for the next frame's screen-space traces - the reference's
-    // default source (the scene colour ahead of post-processing). scene[parity] is the last one written.
+    // output.screen_trace_source = 0: the lit opaque scene colour (the view's resolution; before translucency, the air,
+    // the upscale and the display transform), kept for the next frame's screen-space traces - the reference's default
+    // source (keepSceneColor, UpscaleSceneKeep.hlsl). scene[parity] is the last one written.
     ComPtr<ID3D12Resource> scene[2];
     uint32_t sceneWidth = 0, sceneHeight = 0;
     DXGI_FORMAT sceneFormat = DXGI_FORMAT_UNKNOWN;
@@ -208,6 +208,42 @@ TextureRef upscalePreviousColor(FramePassContext& fc, const ViewResources& view)
     return s.previous;
 }
 
+void keepSceneColor(FramePassContext& fc, const ViewResources& view, TextureRef lit)
+{
+    if (!upscaleActive(fc, view) || !sceneColorSource(fc) || !view.depth.valid()) return;
+    RenderGraph& g = fc.graph;
+    const uint32_t w = view.view.width, h = view.view.height;
+    UpscaleState& s = fc.state<UpscaleState>("M.upscale");
+    // slot parity ^ 1: temporalUpscale, later in this frame, makes it the current one (read as scene[parity] next frame)
+    s.ensureScene(fc.device, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    const TextureRef kept = g.importTexture(s.scene[s.parity ^ 1u].Get(), { "m.scenecolor", w, h, 1, 1, s.sceneFormat }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    const TextureRef depth = view.depth;
+    const FrameResources& r = fc.resources;
+    const bool air = r.transmittanceLut.valid() && r.multiScatterLut.valid() && view.airVolume.valid();
+    const TextureRef transmittance = r.transmittanceLut, multiScatter = r.multiScatterLut, airVolume = view.airVolume;
+    const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
+    ID3D12PipelineState* pso = fc.shaders.compute("Passes/Shading/UpscaleSceneKeep");
+    g.addPass("m.scenecolor", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(lit, Use::SrvCompute);
+                  b.use(depth, Use::SrvCompute);
+                  b.use(kept, Use::UavCompute);
+                  if (air)
+                      for (TextureRef t : { transmittance, multiScatter, airVolume }) b.use(t, Use::SrvCompute);
+                  b.keep();
+              },
+              [=](PassContext& c) {
+                  const uint32_t none = 0xFFFFFFFFu;
+                  const uint32_t k[12] = { c.srv(lit), c.srv(depth), c.uav(kept), 0, w, h, 0, 0,
+                                           air ? c.srv(transmittance) : none, air ? c.srv(multiScatter) : none, air ? c.srv(airVolume) : none, 0 };
+                  c.cmd->SetPipelineState(pso);
+                  c.bindFrameConstants(cb);
+                  c.computeConstants(k, 12);
+                  c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+              });
+    s.sceneFresh = false;
+}
+
 TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, TextureRef src)
 {
     if (!view.depth.valid()) fail("M.upscale: the main view has no depth");
@@ -232,28 +268,6 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                                                           D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     const TextureRef output = g.importTexture(s.history[next].Get(), { "m.upscale.history", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
                                               D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-    if (sceneColorSource(fc))
-    {
-        // the scene colour as it comes in, kept for the next frame's screen traces (slot 'next': read as [parity] then)
-        // (with the frame's device depth in alpha: the screen traces' history depth test, UpscaleSceneKeep.hlsl)
-        s.ensureScene(fc.device, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
-        const TextureRef kept = g.importTexture(s.scene[next].Get(), { "m.scenecolor", w, h, 1, 1, s.sceneFormat }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-        const TextureRef keptDepth = view.depth;
-        ID3D12PipelineState* keepPso = fc.shaders.compute("Passes/Shading/UpscaleSceneKeep");
-        g.addPass("m.upscale.scenecolor", QueueType::Graphics,
-                  [&](PassBuilder& b) {
-                      b.use(src, Use::SrvCompute);
-                      b.use(keptDepth, Use::SrvCompute);
-                      b.use(kept, Use::UavCompute);
-                  },
-                  [src, kept, keptDepth, keepPso, w, h](PassContext& c) {
-                      const uint32_t k[8] = { c.srv(src), c.srv(keptDepth), c.uav(kept), 0, w, h, 0, 0 };
-                      c.cmd->SetPipelineState(keepPso);
-                      c.computeConstants(k, 8);
-                      c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-                  });
-        s.sceneFresh = false;
-    }
     const TextureRef motion = g.createTexture(TextureDesc{ "m.upscale.motion", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT });
     // output.upscale_tsr: the temporal super resolution's structure (Tsr.hlsli) in place of the one-pass accumulation
     const bool tsr = !fc.quality.has("output.upscale_tsr") || fc.quality.boolean("output.upscale_tsr");

@@ -211,7 +211,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         const float3 o = g_cameraPosition + dir * t0;
         // Local lights of the froxel's list (air at the segment's midpoint).
         const float3 pm = airLiftToSurface(a, o + dir * (0.5 * len));
-        const AirCoefficients cm = airCoefficients(a, max(0.0, airAltitude(a, pm)));
+        const AirCoefficients cm = airScaled(airCoefficients(a, max(0.0, airAltitude(a, pm))), airNearScale(t0, len));
         ByteAddressBuffer lists = ResourceDescriptorHeap[P[0].x];
         const uint2 h = lists.Load2(g.headerBase + froxelIndex(g, tile, s) * 8);
         myFirst = h.x;
@@ -380,7 +380,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             ++localWalk.entries;
             localWalk.runs += runs;
             const float3 pm = airLiftToSurface(a, o + dir * (0.5 * len));
-            const AirCoefficients cm = airCoefficients(a, max(0.0, airAltitude(a, pm)));
+            const AirCoefficients cm = airScaled(airCoefficients(a, max(0.0, airAltitude(a, pm))), airNearScale(z1 * toRay - len, len));
             gs_source[item] = runs == 0 ? 0.0 : airLocalEval(l, o, dir, mp, cm, a.mieG, P[4].y, li, froxelTileWidth(g, 0.5 * (z0 + z1)), partial, m);
         }
         GroupMemoryBarrierWithGroupSync();

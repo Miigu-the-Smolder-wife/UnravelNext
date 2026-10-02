@@ -366,6 +366,28 @@ float3 airGroundIndirect(AtmosphereParams a, uint transmittanceLut, float mus)
     return lerp(t.Load(int3(i0, a.transmittanceSize.y, 0)).rgb, t.Load(int3(i0 + 1, a.transmittanceSize.y, 0)).rgb, f);
 }
 
+// Where a view's atmosphere starts (the reference's aerial perspective start depth: the sky atmosphere component's
+// AerialPespectiveStartDepth, 0.1 km by default; SkyAtmosphere.usf moves the ray's start there and gives nearer pixels
+// no aerial perspective). The air between the camera and anything nearer is not drawn: an interior or the ground at
+// one's feet carries no veil of sun-lit and sky-lit air - the multiple scattering is not reduced by any caster's
+// shadow, so indoors it stayed whole (lobby, 2026-10-02: about 3 nits of blue over 25 m, a third of the picture at
+// EV 4, absent from the path-traced reference).
+// The air's coefficients over a segment [t0, t0 + len] of a camera ray (distances along the unit ray) are scaled by
+// the share of the segment past the start; the part before it keeps 1e-6 of the air, so that the air volume's ratios
+// L / (1 - T) stay defined in the near slices (particle media and local lights are stored through them, in the same
+// proportion as before).
+#ifndef AIR_VIEW_START_M
+#define AIR_VIEW_START_M 100.0
+#endif
+float airNearScale(float t0, float len) { return max(saturate((t0 + len - AIR_VIEW_START_M) / max(len, 1e-6)), 1e-6); }
+AirCoefficients airScaled(AirCoefficients c, float s)
+{
+    c.extinction *= s;
+    c.rayleigh *= s;
+    c.mie *= s;
+    return c;
+}
+
 // Planar reflection views (INTERFACES 7.4, v1.22): the virtual camera sits behind the mirror (clip plane of the view's
 // frame constants); the air of the reflected path starts where the ray crosses the mirror, the part before it being the
 // main view's (its mirror pixel applies it). Distance along the unit ray dir from the camera to that crossing: 0 without

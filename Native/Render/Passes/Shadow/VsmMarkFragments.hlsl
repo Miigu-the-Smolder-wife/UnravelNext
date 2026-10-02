@@ -9,7 +9,11 @@
 #include "Frame.hlsli"
 #include "Passes/Shadow/VsmAir.hlsli"
 
-#define FRAGMENT_WALK_CAP 256u
+// A level's piece is 1 / (128 x pixelScale) pages long along the view ray (the footprint doubles over it), so a segment
+// from the nearest level to the last crosses at most VSM_LEVELS x (sqrt(2) / (128 x pixelScale) + 2) pages: 180 at a
+// 720-row view with a 60 degree field, 314 at 1440 rows, more with a narrower field. 256 was under that (the train
+// lounge at 4K and while turning, 2026-10-02: the error bit); 1024 holds to 4000 rows at 60 degrees.
+#define FRAGMENT_WALK_CAP 1024u
 
 [numthreads(8, 8, 1)]
 void main(uint2 px : SV_DispatchThreadID)

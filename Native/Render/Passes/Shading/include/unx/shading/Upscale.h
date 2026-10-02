@@ -17,4 +17,8 @@ ViewResources upscaleOutputView(FramePassContext& fc, const ViewResources& view)
 // upscaled or the history holds nothing yet.
 TextureRef upscalePreviousColor(FramePassContext& fc, const ViewResources& view);
 TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, TextureRef src);
+// output.screen_trace_source = 0: keeps 'lit' - the view's opaque image right after the shading group, before water,
+// the coverage layers and glass - with the air taken off, as the scene colour upscalePreviousColor gives the next
+// frame's screen traces (UpscaleSceneKeep.hlsl). Recorded before temporalUpscale in the frame.
+void keepSceneColor(FramePassContext& fc, const ViewResources& view, TextureRef lit);
 } // namespace unx::render::shading

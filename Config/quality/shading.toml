@@ -16,11 +16,11 @@ output_encoding = "srgb"          # RGB10A2 display output
 # Stochastic direct light of the local lights (Passes/Shading/MegaLights.hlsli; user decision 2026-10-01: the lighting is
 # rebuilt on Unreal Engine's structure; owner A). true: every listed light is a candidate with its shadow (no slot limit),
 # the main view's kernels take N light samples per downsampled pixel with one shadow ray each (R's ray scene), then a
-# temporal and a spatial filter; false (default until the lobby verdict): the per-pixel loop with S's shadow slots,
-# bit-identical to before. The values below are Unreal's defaults (r.MegaLights.*, centimetres turned to metres); the
+# temporal and a spatial filter; false: the per-pixel loop with S's shadow slots (128 lights at most cast shadows). The values below are Unreal's defaults (r.MegaLights.*, centimetres turned to metres); the
 # ones that trade accuracy for cost or noise are the user's to set (UNREAL_COMPARISON_LIGHTS_KO.md 5):
 # samples, downsample, the weight caps, min_sample_weight, the history length and the filter radius.
-mega_lights = false
+mega_lights = true                                # default since 2026-10-02 (lobby against the path-traced reference: the ceiling 1.0x with it, 1.4-1.7x
+                                                  # without - 699 of the 827 lights shone unshadowed past the 128 slots; GPU frame 13.0 -> 7.1 ms at 1080p)
 mega_lights_downsample = 2                        # DownsampleMode: 2 = 2 x 2 (one sample pixel per block and frame), 1 = full
 mega_lights_samples = 4                           # NumSamplesPerPixel: 1, 2 or 4 per downsampled pixel
 mega_lights_min_sample_weight = 0.001             # MinSampleWeight: exposed luminance under which a light fades out of the sampling

@@ -1337,7 +1337,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         // reflection.lumen_only: the jobs' world rays in bands of kLumenBand threads, one world ray each; a hit's value is final
         // (ReflectionLumenTrace.hlsl) - the resolve passes below read the results as they read the combine pass's.
         // (a thread traces at most 2 rays - its world ray and, at a hit without cards, the sun's shadow ray: kBand calls a band)
-        constexpr uint32_t kLumenBand = kBand / 2;  // ReflectionLumenTrace.hlsl RL_BAND
+        constexpr uint32_t kLumenBand = kBand / 3;  // ReflectionLumenTrace.hlsl RL_BAND (a thread: its ray, the sun's, a light sample's)
         const uint32_t lumenBands = bandsFor((uint64_t)width * height, kLumenBand);
         g.addPass("r.refl.lumen.args", QueueType::Compute, [&](PassBuilder& b) { b.use(args, Use::UavCompute); },
                   [&shaders, args, lumenBands](PassContext& c) {

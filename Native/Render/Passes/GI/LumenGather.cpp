@@ -532,8 +532,9 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   c.bindFrameConstants(frameConstants);
                   // Bands of rows, each its own DispatchRays of at most raysPerDispatch rays (a structural bound on one
                   // dispatch's work: the atlas grows with the resolution, a dispatch does not).
-                  // (a thread traces at most 2 rays: the probe ray and, at a hit without cards, the sun's shadow ray)
-                  const uint32_t bandRows = std::max(1u, raysPerDispatch / 2u / std::max(traceX, 1u));
+                  // (a thread traces at most 3 rays: the probe ray and, at a hit without cards, the sun's shadow ray and
+                  // a local-light sample's)
+                  const uint32_t bandRows = std::max(1u, raysPerDispatch / 3u / std::max(traceX, 1u));
                   for (uint32_t row = 0; row < traceY; row += bandRows)
                   {
                       k[47] = row;

@@ -6,7 +6,8 @@
 //                   the material - diffuse albedo x E / pi and the specular albedo x E / pi (the lobe at the hit sees the
 //                   cards' light as uniform); no light sample, no shadow ray;
 //   without cards   (a deforming instance: skin, wind; a texel the cards do not cover) the sun through one shadow ray
-//                   to the disk's centre, and no indirect light - the reference lights such a hit with nothing;
+//                   to the disk's centre and, with localSample, one local-light sample with its shadow ray
+//                   (HitLocalSample.hlsli: a mirror showed such surfaces unlit); no indirect light;
 //   back of a one-sided surface: 0 (inside closed geometry).
 // exactCounts: RayScene's exact set hit counts (UAV; UNX_NONE: none) - a hit on a skinned instance counts there, as the
 // other reflection paths' hits do (RayScene picks the most-hit characters for exact refits).
@@ -16,6 +17,8 @@
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitDecals.hlsli"
 #include "Passes/SurfaceCache/CardLighting.hlsli"
+#include "RayTracing/HitLocalLights.hlsli"
+#include "RayTracing/HitLocalSample.hlsli"
 
 struct RlHit
 {
@@ -24,7 +27,8 @@ struct RlHit
     bool surface;     // a lit surface (not an emitter proxy, not the back of a one-sided surface)
 };
 
-RlHit rlShadeHit(RtSceneSrvs scene, RtHit hit, float3 origin, float3 direction, float coneWidth, float coneSpread, uint cardFrame, uint exactCounts)
+RlHit rlShadeHit(RtSceneSrvs scene, RtHit hit, float3 origin, float3 direction, float coneWidth, float coneSpread, uint cardFrame, uint exactCounts,
+                 bool localSample = false)
 {
     RlHit o;
     o.radiance = 0;
@@ -106,6 +110,11 @@ RlHit rlShadeHit(RtSceneSrvs scene, RtHit hit, float3 origin, float3 direction, 
                 L.sunIlluminance = e0;
                 L.sunVisibility = rtVisible(scene, sr, RT_MASK_GI) ? 1.0 : 0.0;
             }
+        }
+        if (localSample)
+        {
+            const uint seed = DispatchRaysIndex().x * 9781u + DispatchRaysIndex().y * 6271u + g_frameIndex * 26699u;
+            L.local = rtHitLocalSample(scene, s, m, -direction, footprint, 1e-3 + 2e-4 * distance(s.position, g_cameraPosition), seed);
         }
     }
     o.radiance = rtHitRadiance(m, s.normal, -direction, L, coneSpread);

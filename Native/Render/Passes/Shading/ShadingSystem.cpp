@@ -1701,6 +1701,7 @@ void shade(FramePassContext& fc, ViewResources& view)
     const std::vector<RenderGraph::BandedPass> passes = shadingPasses(fc, target);
     const material::ResolveOutputs& o = material::resolveOutputs(fc, target);
     fc.graph.addBandedGroup(view.view.kind != gpu::ViewKind::Main ? "m.lit.planar" : "m.lit", o.height, o.bands, passes);
+    keepSceneColor(fc, target, target.color);  // (main view with the upscale: the next frame's screen-trace source)
     tracks::water(fc, target);  // W (engine 1): the water surfaces' refraction targets are the shaded opaque scene and its depth
     shadingComposite(fc, target);
     view.exposureCorrection = target.exposureCorrection;  // a snap frame's own metering (Exposure.cpp): the chain and the caller

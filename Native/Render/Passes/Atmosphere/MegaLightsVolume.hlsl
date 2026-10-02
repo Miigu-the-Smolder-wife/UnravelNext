@@ -78,7 +78,7 @@ void MegaLightsVolumeGen()
     const float t0 = max(zs0 * toRay, tStart), len = zs1 * toRay - t0;
     const float3 o = g_cameraPosition + dir * t0;
     const float3 pm = airLiftToSurface(a, o + dir * (0.5 * len));
-    const AirCoefficients cm = airCoefficients(a, max(0.0, airAltitude(a, pm)));
+    const AirCoefficients cm = airScaled(airCoefficients(a, max(0.0, airAltitude(a, pm))), airNearScale(t0, len));
     const float lateral = froxelTileWidth(g, 0.5 * (zs0 + zs1));
     const uint count = clamp(P[1].y, 1u, ML_MAX_SAMPLES);
     const float minWeight = asfloat(P[2].x);

@@ -8,7 +8,7 @@
 // cards of its instance (CardLighting.hlsli clReadCards) - the cards' direct light (the sun and the local lights) and
 // radiosity - and shades its own material with it; no light sample, no shadow ray, no world-cache read; its own
 // emission stays. A hit that has no card there (a deforming instance: skin, wind; a texel the cards do not cover)
-// takes the sun (one shadow ray into the disk) and one local-light sample with its shadow ray, and - only with
+// takes the sun (one shadow ray into the disk) and one local-light sample with its shadow ray (HitLocalSample.hlsli), and - only with
 // gi.lumen_hit_fallback - the world cache's irradiance; without the fallback its indirect light is 0, as the
 // reference's invalid surface-cache sample. A ray that meets an analytic area light's proxy returns 0 (M shades
 // those lights; the proxy still occludes). A miss returns the sky.
@@ -38,6 +38,7 @@
 #include "Passes/GI/Lumen/LgCommon.hlsli"
 #include "Passes/SurfaceCache/CardLighting.hlsli"
 #include "Passes/GI/Lumen/LgRadianceCache.hlsli"
+#include "RayTracing/HitLocalSample.hlsli"
 
 float lgBias(float3 p) { return 1e-3 + 2e-4 * distance(p, g_cameraPosition); }
 // The world ray after a screen trace starts this much before the point the screen walk reached (m; Unreal's hardware
@@ -213,8 +214,8 @@ void LgTraceGen()
                     L.sunVisibility = rtVisible(scene, sr, RT_MASK_GI) ? 1.0 : 0.0;
                 }
             }
-            // (no local-light sample at a hit without cards: one random light per ray is the noise the cards remove; the
-            // reference lights such a hit with nothing at all)
+            // a hit without cards: one local-light sample (HitLocalSample.hlsli; experiment 128: none, as the reference)
+            if (!fromCards && (P[3].w & 128) == 0) L.local = rtHitLocalSample(scene, s, m, -r.Direction, footprint, lgBias(s.position), seed);
             radiance = rtHitRadiance(m, s.normal, -r.Direction, L, footprintPerMetre);
         }
     }

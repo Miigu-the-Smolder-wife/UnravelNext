@@ -155,6 +155,8 @@ struct SurfaceCacheCards::Impl
     bool restart = true;       // the card set starts from nothing
     bool loadingState = true;
     uint32_t loadLightingLeft = 0;
+    bool loadCaptured = false;   // this load has had cards to capture
+    uint32_t loadIdleFrames = 0;  // frames of this load with nothing to capture and no lighting round left
     float3 skyRadiance{}, sunIlluminance{};
     SurfaceCacheCardRefs published;
     McStats lastStats;
@@ -514,7 +516,11 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
 #endif
 
     // ---- the frame's updates, staged
-    const uint32_t rounds = s.loadingState ? s.settings.loadRounds : 1u;
+    // The load's pace runs only while it has work: cards to capture (the previous frame's count) or lighting rounds
+    // left after the last capture. Waiting for meshes whose cards are still being generated costs one round a frame
+    // (the train lounge, 2026-10-02: 406 slow meshes kept the cache at 8 rounds for the whole run, 3.3 ms a frame).
+    const bool loadWork = s.lastStats.pending > 0 || s.loadLightingLeft > 0;
+    const uint32_t rounds = s.loadingState && loadWork ? s.settings.loadRounds : 1u;
     auto staged = std::make_shared<std::vector<Round>>(rounds);
     s.staging.clear();
     for (Round& round : *staged) s.stageRound(fc, round, tableSrv);
@@ -522,15 +528,29 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
     const bool generating = s.waiting > 0 || s.cache->pending() > 0;
     if (s.loadingState)
     {
-        if (generating || s.lastStats.pending > 0) s.loadLightingLeft = s.settings.loadLightingRounds;
+        if (s.lastStats.pending > 0)
+        {
+            s.loadLightingLeft = s.settings.loadLightingRounds;
+            s.loadCaptured = true;
+            s.loadIdleFrames = 0;
+        }
         else if (s.loadLightingLeft > rounds) s.loadLightingLeft -= rounds;
         else
         {
+            // Nothing to capture and the lighting rounds are spent. The load is over when no mesh is being generated,
+            // when what came has been captured and lit (meshes that are still being generated follow at the frame's
+            // pace, as every later change does), or when the generation has given nothing for 120 frames.
             s.loadLightingLeft = 0;
-            s.loadingState = false;
-            logf("surface cache: loaded - %u mesh card sets, %u cards (%u visible), %u pages, atlas %.1f %% in use\n", s.lastStats.meshCards, s.lastStats.cards,
-                 s.lastStats.visibleCards, s.lastStats.mappedPages,
-                 100.0 * (double)s.lastStats.allocatedTexels / ((double)s.settings.cards.atlasSize * s.settings.cards.atlasSize));
+            if (!generating || s.loadCaptured || ++s.loadIdleFrames >= 120)
+            {
+                s.loadingState = false;
+                s.loadCaptured = false;
+                s.loadIdleFrames = 0;
+                logf("surface cache: loaded - %u mesh card sets, %u cards (%u visible), %u pages, atlas %.1f %% in use; %u instances wait for cards (%u meshes generating)\n",
+                     s.lastStats.meshCards, s.lastStats.cards, s.lastStats.visibleCards, s.lastStats.mappedPages,
+                     100.0 * (double)s.lastStats.allocatedTexels / ((double)s.settings.cards.atlasSize * s.settings.cards.atlasSize), s.waiting,
+                     (uint32_t)s.cache->pending());
+            }
         }
     }
     Impl::UploadSlot& slot = s.upload[fc.frame.frameIndex % std::min(std::max(fc.framesInFlight, 1u), kUploadSlots)];

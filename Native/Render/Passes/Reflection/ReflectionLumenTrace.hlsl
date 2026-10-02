@@ -28,7 +28,7 @@
 #include "Passes/Reflection/ScreenTrace.hlsli"
 #include "Passes/Reflection/ReflectionLumenHit.hlsli"
 
-#define RL_BAND 131072u
+#define RL_BAND 87381u
 #define RL_FLAG_SCREEN_START 1u
 #define RL_FLAG_SCENE_COLOUR 2u
 #define RL_FLAG_HISTORY_DEPTH 4u
@@ -103,6 +103,6 @@ void ReflectionLumenTraceGen()
     const float pixelSpread = 2 * g_tanHalfFovY / g_viewHeight;
     const float coneWidth = pixelSpread * s.linearDepth;
     const float coneSpread = pixelSpread + 2 * tan(reflectionLobeHalfAngle(s.roughness, dot(s.normal, s.view)));
-    const RlHit shade = rlShadeHit(scene, hit, r.Origin, direction, coneWidth, coneSpread, P[4].z, P[3].w);
+    const RlHit shade = rlShadeHit(scene, hit, r.Origin, direction, coneWidth, coneSpread, P[4].z, P[3].w, true);
     results[job] = reflPackResult(reflStorable(shade.radiance), hit.t, shade.motion);
 }

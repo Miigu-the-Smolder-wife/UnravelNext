@@ -122,6 +122,7 @@ FroxelAirResult froxelAirSlice(FroxelGrid g, uint2 tile, uint s)
     const float z0 = zs0, z1 = zs1;
     const float t0 = max(z0 * toRay, tStart), len = z1 * toRay - t0;
     const float3 o = g_cameraPosition + dir * t0;
+    const float nearScale = airNearScale(t0, len);  // (AtmosphereCommon.hlsli: no atmosphere before AIR_VIEW_START_M)
     // Substeps: the air's density is exponential in altitude; midpoint steps of at most stepAltitude.
     const float h0 = airAltitude(a, o), h1 = airAltitude(a, o + dir * len), hm = airAltitude(a, o + dir * (0.5 * len));
     const float dh = max(max(abs(h1 - h0), abs(hm - h0)), abs(hm - h1));
@@ -131,7 +132,7 @@ FroxelAirResult froxelAirSlice(FroxelGrid g, uint2 tile, uint s)
     [loop] for (uint k = 0; k < steps; ++k)
     {
         const float3 p = airLiftToSurface(a, o + dir * ((k + 0.5) * dt));
-        const AirCoefficients c = airCoefficients(a, max(0.0, airAltitude(a, p)));
+        const AirCoefficients c = airScaled(airCoefficients(a, max(0.0, airAltitude(a, p))), nearScale);
         const float3 w = exp(-tau) * airIntegral(c.extinction, dt);
         single += w * (c.rayleigh * phaseR + c.mie * phaseM) * ((experiment & 8) ? 1.0 : airSunTransmittance(a, tlut, p, sun));
         multi += w * (c.rayleigh + c.mie) * ((experiment & 16) ? 1.0 : airMultipleScattering(a, mlut, p, dir, sun));
