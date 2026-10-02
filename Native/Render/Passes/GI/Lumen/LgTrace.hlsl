@@ -36,6 +36,11 @@
 // P[8..11] = the common block (P[10].z adaptive SRV, P[10].w / P[11].x / P[11].y probe depth / normal / position SRVs),
 // P[11].w = first trace row of this dispatch (the pass splits the atlas into bands of at most gi.lumen_rays_per_dispatch
 // rays: each dispatch's work is bounded by its ray count, whatever the resolution).
+// gi.lumen_compact_traces (P[4].y bit 3; the reference's CompactTraces): the dispatch is one row of threads over the list
+// of the trace texels that need a world ray (LgCompactTraces.hlsl: a live probe's texel the screen trace did not
+// finish) - a thread's texel is entry DispatchRaysIndex().x + P[11].w of it (P[11].w = the dispatch's first entry; a
+// dispatch holds at most a third of gi.lumen_rays_per_dispatch entries). The list's SRV is in the sky word the variant
+// leaves free: P[1].x with the atmosphere (the constant sky's red), P[2].x without (the atmosphere's first LUT).
 #define GI_SKY_FOG_RETURN  // (GiSky.hlsli: the sky's share of the sun's light the fog scatters - atmosphere.fog.sun_through_fog)
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
@@ -51,6 +56,11 @@
 #include "RayTracing/HitHair.hlsli"
 
 float lgBias(float3 p) { return 1e-3 + 2e-4 * distance(p, g_cameraPosition); }
+#if SKY == SKY_ATMOSPHERE
+#define LG_TRACE_LIST P[1].x
+#else
+#define LG_TRACE_LIST P[2].x
+#endif
 // The world ray after a screen trace starts this much before the point the screen walk reached (m; Unreal's hardware
 // ray tracing pull-back bias is 8 cm).
 #define LG_SCREEN_PULLBACK 0.08
@@ -58,8 +68,15 @@ float lgBias(float3 p) { return 1e-3 + 2e-4 * distance(p, g_cameraPosition); }
 [shader("raygeneration")]
 void LgTraceGen()
 {
-    // (the atlas is traced in bands of rows, each its own DispatchRays: P[11].w = the band's first row)
-    const uint2 coord = DispatchRaysIndex().xy + uint2(0, P[11].w);
+    // (the atlas is traced in bands of rows, each its own DispatchRays: P[11].w = the band's first row - or, compacted,
+    // over the list of the texels that need a ray: P[11].w = the dispatch's first entry)
+    uint2 coord = DispatchRaysIndex().xy + uint2(0, P[11].w);
+    if ((P[4].y & 8u) != 0)
+    {
+        ByteAddressBuffer traceList = ResourceDescriptorHeap[LG_TRACE_LIST];
+        const uint entry = traceList.Load(16 + 4 * (DispatchRaysIndex().x + P[11].w));
+        coord = uint2(entry & 0xFFFFu, entry >> 16);
+    }
     const uint2 atlas = coord / LG_TRACE_RES, texel = coord % LG_TRACE_RES;
     const uint probe = lgProbeIndex(atlas);
     ByteAddressBuffer adaptive = ResourceDescriptorHeap[P[10].z];

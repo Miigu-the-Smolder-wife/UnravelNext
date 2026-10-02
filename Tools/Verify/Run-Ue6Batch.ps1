@@ -194,6 +194,11 @@ if ($Skip -notcontains "variants") {
                     @{ N = "merge_off"; S = "visibility.cull_pass_merge=false"; E = "same" },
                     @{ N = "fold_off"; S = "visibility.fold_small_passes=false,shadow.vsm.fold_small_passes=false,atmosphere.froxels.fold_small_passes=false,lumen.radiance_cache_fold_passes=false,surface_cache.mesh_cards_fold_passes=false"; E = "same" }) },
             # the sun's pages with moving casters (--moving) and the wind's trees: the cache's parts and the occlusion
+            # the ray passes' threads: one per ray traced (the compacted lists) against one per texel / job / sample
+            @{ Name = "lanes"; Scenes = "bt_lobby,city_night"; Time = $true; Layers = "gi,refl,direct"; Rows = @(
+                    @{ N = "gi_rays_over_atlas"; S = "gi.lumen_compact_traces=false"; E = "same" },
+                    @{ N = "refl_rays_over_jobs"; S = "reflection.lumen_compact_traces=false"; E = "same" },
+                    @{ N = "light_rays_over_samples"; S = "shading.mega_lights_compact_traces=false"; E = "same" }) },
             # the ray scene without its see-through instances' exclusion (glass in the GI and shadow rays again)
             @{ Name = "rays"; Scenes = "bt_lobby,te_lounge"; Time = $true; Layers = "gi,refl,direct"; Rows = @(
                     @{ N = "see_through_off"; S = "raytracing.see_through_translucent=false"; E = "differs" }) },

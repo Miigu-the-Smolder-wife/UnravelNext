@@ -151,6 +151,21 @@ RayPipeline::RayPipeline(Device& device, ShaderLibrary& shaders, const RayPipeli
     m_hit = base + hitAt;
     m_hitStride = recordStride;
     m_hitBytes = recordStride * desc.hitGroups.size();
+
+    // dispatchTemplate(): the descriptions without a size
+    d.Width = (uint64_t)std::max<size_t>(m_rayGen.size(), 1) * kDispatchDescStride;
+    check(device.d3d()->CreateCommittedResource3(&uploadHeap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_template)),
+          "dispatch description template");
+    m_template->SetName((wide(desc.library) + L" dispatch descriptions").c_str());
+    uint8_t* descriptions = nullptr;
+    check(m_template->Map(0, &none, reinterpret_cast<void**>(&descriptions)), "map dispatch description template");
+    std::memset(descriptions, 0, (size_t)d.Width);
+    for (uint32_t i = 0; i < (uint32_t)m_rayGen.size(); ++i)
+    {
+        const D3D12_DISPATCH_RAYS_DESC one = dispatchDesc(i, 0, 0, 0);
+        std::memcpy(descriptions + (size_t)i * kDispatchDescStride, &one, sizeof one);
+    }
+    m_template->Unmap(0, nullptr);
 }
 
 // Pipelines live until releaseDevice() or process exit; D3D objects keep their device alive, so no deferred release.

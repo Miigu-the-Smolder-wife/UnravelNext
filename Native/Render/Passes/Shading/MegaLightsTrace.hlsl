@@ -15,7 +15,10 @@
 // P[0] = { samples UAV (R32G32_UINT), downsampled key SRV, the dispatch's first row, depth SRV (the view's device depth) }:
 //        the sample texture goes in bands of rows, each at most 262,144 rays (MegaLights.cpp; DISPATCH_BOUNDS_KO.md)
 // P[1] = { downsampled width, height, factor | N << 8, depth pyramid SRV (ScreenTrace.hlsli; UNX_NONE: no screen traces) }
-// P[2] = { ray bias, normal bias, end bias (m, floats), 0 }
+// P[2] = { ray bias, normal bias, end bias (m, floats), the compacted list's SRV + 1 (raw; 0: none) }
+//        shading.mega_lights_compact_traces (the reference's CompactLightSampleTraces): the dispatch is one row of threads
+//        over the list of the samples that ask for a ray (MegaLightsCompact.hlsl) - a thread's sample texel is entry
+//        DispatchRaysIndex().x + P[0].z of it (P[0].z = the dispatch's first entry; at most 262,144 entries a dispatch)
 // P[3] = { screen trace normal bias (m), relative depth thickness, largest distance (m) (floats), iterations }
 // P[6], P[7] = RtSceneSrvs (RayShaders.hlsli)
 #include "RayTracing/RayShaders.hlsli"
@@ -27,7 +30,13 @@
 [shader("raygeneration")]
 void MegaLightsTraceGen()
 {
-    const uint2 texel = uint2(DispatchRaysIndex().x, DispatchRaysIndex().y + P[0].z);
+    uint2 texel = uint2(DispatchRaysIndex().x, DispatchRaysIndex().y + P[0].z);
+    if (P[2].w != 0)
+    {
+        ByteAddressBuffer traceList = ResourceDescriptorHeap[P[2].w - 1];
+        const uint entry = traceList.Load(16 + 4 * (DispatchRaysIndex().x + P[0].z));
+        texel = uint2(entry & 0xFFFFu, entry >> 16);
+    }
     RWTexture2D<uint2> samples = ResourceDescriptorHeap[P[0].x];
     const uint2 stored = samples[texel];
     const MlSample s = mlUnpack(stored);

@@ -133,6 +133,9 @@ lumen_rough_specular_from_gather = true  # with gi.lumen: pixels above the rough
                                        # final gather's rough specular (view.giRoughSpecular); false or no gather = the K path
 lumen_screen_traces = true             # a traced ray is first followed across the depth buffer (ScreenTrace.hlsli); a visible hit
                                        # takes the previous frame's colour and no world ray (needs the upscale's colour history)
+lumen_compact_traces = true            # CompactTraces: after the screen traces the world rays are dispatched over a list of the jobs that
+                                       # still need one, a thread per ray traced. false: a thread per job - those of the jobs the screen
+                                       # trace finished return at once and leave their waves partly idle (A/B)
 lumen_screen_trace_max_iterations = 50
 lumen_screen_trace_relative_depth_thickness = 0.005
 lumen_ggx_sampling_bias = 0.1          # QUALITY TRADE (user decision): this share of the GGX sample domain - the lobe's tail - is not
