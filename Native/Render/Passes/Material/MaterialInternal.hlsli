@@ -3,7 +3,8 @@
 //   material word  R32_UINT per pixel, written by the resolve:
 //                    bits  0..15  scene material index (M_MATERIAL_SKY = no surface)
 //                    bits 16..23  metallic unorm8 (material x roughMetal map)
-//                    bits 24..31  reserved (0)
+//                    bits 24..31  layered materials (MATERIAL_LAYERED): the layer's footprint-filtered roughness;
+//                                 every other material: 255 x (1 - the baked occlusion map's value) (0: unoccluded)
 //   emissive       RGBA16F per pixel, written only for materials with an emissive texture (nits, before exposure)
 //   tile lists     raw buffer: for shade class c, tiles[c * tileCount + i] = tile x | tile y << 16, i < count(c)
 //   tile args      raw buffer: for shade class c, D3D12_DISPATCH_ARGUMENTS at byte 12 c = (count(c), 1, 1)
@@ -50,6 +51,15 @@ uint mPackMaterialWord(uint material, float metallic, float coatRoughness = 0)
     return (material & 0xFFFFu) | (uint(round(saturate(metallic) * 255.0)) << 16) | (uint(round(saturate(coatRoughness) * 255.0)) << 24);
 }
 float mWordCoatRoughness(uint word) { return (word >> 24) / 255.0; }
+// The material's baked occlusion at the pixel (scene::Material::occlusionTexture; 1 = unoccluded): the word's top byte of
+// a material without a layer record (a layered material's top byte is its layer's roughness: 1).
+float mWordOcclusion(uint word, uint classFlags) { return (classFlags & MATERIAL_LAYERED) != 0 ? 1.0 : 1.0 - (word >> 24) / 255.0; }
+// Specular occlusion of a lobe of perceptual roughness r from an ambient occlusion ao at n.v (Lagarde and de Rousiers
+// 2014, the form the reference's GetSpecularOcclusion uses): 1 at ao = 1, ao for a rough lobe, sharper for a smooth one.
+float mSpecularOcclusion(float NoV, float roughness, float ao)
+{
+    return saturate(pow(saturate(NoV) + ao, exp2(-16.0 * roughness * roughness - 1.0)) - 1.0 + ao);
+}
 uint mWordMaterial(uint word) { return word & 0xFFFFu; }
 float mWordMetallic(uint word) { return ((word >> 16) & 0xFFu) / 255.0; }
 
@@ -58,6 +68,7 @@ float mWordMetallic(uint word) { return ((word >> 16) & 0xFFu) / 255.0; }
 //   moments     RGBA16_UNORM normal-map slope moments (LEAN family), see mNormalMoments
 //   roughMetal  RG8_UNORM: r = perceptual roughness factor, g = metallic factor
 //   emissive    RGBA8 sRGB or RGBA16F: multiplies the material's emissive (nits)
+//   occlusion   R8_UNORM baked ambient occlusion (1 = open), box mips; the Terrain class keeps its first splat map here
 //   slopeRange  S of the moments encoding (max |slope| of the source map)
 //   flags       clamp addressing per texture (M_TEX_* bits = gpu::MaterialTextureBit)
 //   coverage    R8_UNORM cut-out coverage of the base colour for alpha-tested materials (fraction of base texels whose
@@ -90,6 +101,7 @@ float4 mSampleGrad(Texture2D<float4> t, bool clampAddress, float2 uv, float2 duv
 #define M_TEX_NORMAL 2u
 #define M_TEX_ROUGH_METAL 4u
 #define M_TEX_EMISSIVE 8u
+#define M_TEX_OCCLUSION 16u
 
 MTextureSet mLoadTextureSet(uint tableSrv, uint material)
 {

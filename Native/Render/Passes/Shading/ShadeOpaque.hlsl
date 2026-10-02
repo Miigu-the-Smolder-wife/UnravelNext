@@ -1050,7 +1050,12 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         //   Foliage    the back side from the gather's backface irradiance (the screen probes at the reversed normal:
         //              the reference's backface diffuse), or without it the translucency volume (P[2].w).
         Texture2D<float4> diffuseIndirect = ResourceDescriptorHeap[P[9].w];
-        const float4 bent = lumenShortRangeAO(P[11].z, pixel, nv);
+        float4 bent = lumenShortRangeAO(P[11].z, pixel, nv);
+        // The material's baked occlusion (cavities under the screen's resolution or deeper than the short-range search;
+        // the reference's G-buffer AO): the indirect light takes the smaller of the two, the traced reflection the
+        // specular occlusion of the baked value alone (the screen's occluders are in its rays).
+        const float materialAo = mWordOcclusion(word, m.classFlags);
+        bent.w = min(bent.w, materialAo);
         if ((experiment & 2) == 0)
         {
             irradiance = max(diffuseIndirect[pixel].rgb, 0.0) / g_exposure * lumenAoMultibounce(s.baseColor * (1 - s.metallic), bent.w, 0.5);
@@ -1069,7 +1074,8 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
                 Texture2D<float4> roughSpecular = ResourceDescriptorHeap[P[11].y];
                 rough = max(roughSpecular[pixel].rgb, 0.0) / g_exposure * lumenAoSpecular(n, s.roughness, bent.w, v, bent.xyz * bent.w);
             }
-            const float4 refl = P[2].z != UNX_NONE ? reflectionRadiance(P[2].z, pixel) : float4(0, 0, 0, 0);
+            float4 refl = P[2].z != UNX_NONE ? reflectionRadiance(P[2].z, pixel) : float4(0, 0, 0, 0);
+            if (materialAo < 1) refl.rgb *= mSpecularOcclusion(NoV, s.roughness, materialAo);
             incident = lerp(rough, refl.rgb, saturate(refl.a));
 #if LAYERED == 1
             if (cover > 0)

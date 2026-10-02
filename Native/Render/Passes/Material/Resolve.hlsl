@@ -97,6 +97,7 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
 
             float3 baseColor, n;
             float roughness, metallic, variance;
+            float occlusion = 1;  // the baked occlusion map's value (1: none)
             if (materialClass(m) == MATERIAL_CUT)
             {
                 // A11 cut faces: textures through three object-space projections, the edge damage band (MaterialCut.hlsli)
@@ -126,6 +127,12 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
                     const float2 rm = mSampleGrad(t, (ts.flags & M_TEX_ROUGH_METAL) != 0, s.uv, s.duvdx, s.duvdy).xy;
                     roughness *= rm.x;
                     metallic *= rm.y;
+                }
+                // the baked occlusion map (materials without a layer record: the word's top byte is theirs)
+                if (ts.occlusion != UNX_NONE && (P[3].y & 1) == 0 && (m.classFlags & MATERIAL_LAYERED) == 0)
+                {
+                    Texture2D<float4> t = ResourceDescriptorHeap[ts.occlusion];
+                    occlusion = mSampleGrad(t, (ts.flags & M_TEX_OCCLUSION) != 0, s.uv, s.duvdx, s.duvdy).x;
                 }
 
                 // Shading normal (INTERFACES 8.1: TBN = (tangent, sign cross(n, t), normal) of the interpolants, result
@@ -195,7 +202,7 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
                 anisoWords[pixel] = anisoPackWord(decodeGBuffer(packed).normal, t, af);
             }
             gbuffer[pixel] = packed;
-            float coatRoughness = 0;
+            float coatRoughness = 1 - saturate(occlusion);  // (a material without a layer: 255 x (1 - occlusion), mWordOcclusion)
             if ((m.classFlags & MATERIAL_LAYERED) != 0)
             {
                 // A9: the coat's (or the sheen's) roughness band-limited by the footprint like the base's (MATERIAL_LAYERS

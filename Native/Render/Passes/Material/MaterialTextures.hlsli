@@ -9,7 +9,8 @@
 //                      (multiplies Material.emissive, nits). Box mips of the linear values.
 //   normalTexture      M's slope moments (RGBA16_UNORM, a range kept in M's material table): M-internal; other tracks
 //                      use the interpolated vertex normal.
-//   occlusionTexture   UNX_NONE (its use is not defined in INTERFACES 8.1 v1).
+//   occlusionTexture   R8: baked ambient occlusion (1 = open), box mips. M's resolve stores it per pixel (the material
+//                      word) and the shading kernel takes min(it, the short-range AO) for the indirect light.
 //   textureClamp       bit per texture (MaterialTextureBit, MATERIAL_TEXTURE_* below): 1 = clamp addressing.
 #ifndef UNX_M_MATERIAL_TEXTURES_HLSLI
 #define UNX_M_MATERIAL_TEXTURES_HLSLI
