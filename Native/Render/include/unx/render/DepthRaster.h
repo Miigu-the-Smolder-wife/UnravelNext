@@ -42,6 +42,10 @@ struct RasterView
     // every instance). A requester whose view can reach more clusters than a run's lists hold (a forest's million trees
     // in one shadow level) draws the view in several requests, a range of the instances each.
     uint32_t instanceFirst = 0, instanceEnd = 0;
+    // The smallest caster the view draws: an instance whose bounding sphere projects to under this many of the view's
+    // texels in radius (radius x lodPixelsPerMetre; perspective: over the distance to the sphere's nearest point) is not
+    // drawn into it. 0: every instance. A shadow level coarser than a caster gets less than a texel from it.
+    float minInstanceTexels = 0;
 };
 
 struct DepthRasterRequest

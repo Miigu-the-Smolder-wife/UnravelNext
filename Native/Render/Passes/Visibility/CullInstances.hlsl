@@ -3,7 +3,8 @@
 // Instance culling. PHASE=1 SOURCE=0: the run's flat instances (CullScene: dynamic and skinned instances, and every
 // instance outside a chunk) x every view (dispatch y = view); PHASE=1 SOURCE=1: one group per visible chunk item
 // (CullChunks PHASE=1), its members (<= CHUNK_INSTANCES: four passes of 64). Frustum + clip plane, raster-service tile
-// mask, and for views with occlusion the previous frame's HiZ with previous transforms: occluded instances are deferred
+// mask, the view's smallest instance (shadow views: instanceBelowView), and for views with occlusion the previous frame's
+// HiZ with previous transforms: occluded instances are deferred
 // to phase 2, visible ones push their per-depth hierarchy roots as node items. PHASE=2 (SOURCE unused): the deferred
 // instances, and the members of chunks that passed CullChunks PHASE=2, against this frame's HiZ.
 // Skinned instances are tested with their palette bounds (SkinBounds.hlsl; the previous palette's in phase 1). A skinned
@@ -44,7 +45,7 @@ void cullInstance(RWByteAddressBuffer state, uint instance, uint view, bool vali
             // A12 view models: the main view draws them with its projection remapped (ViewModel.hlsli viewModelClip), so the
             // view's planes and HiZ do not bound them; a few clusters, drawn untested.
             if ((inst.flags & INSTANCE_VIEW_MODEL) != 0) bounded = false;
-            visible = roots.rootCount > 0 && (!bounded || (frustumVisible(v, bounds) && tileVisible(v, view, bounds)));
+            visible = roots.rootCount > 0 && (!bounded || (frustumVisible(v, bounds) && !instanceBelowView(v, bounds) && tileVisible(v, view, bounds)));
             if (visible && bounded && (v.flags & CULL_VIEW_OCCLUSION) != 0)
             {
 #if PHASE == 1

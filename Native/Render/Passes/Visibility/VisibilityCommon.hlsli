@@ -8,7 +8,7 @@
 #include "Passes/Visibility/ClusterHierarchy.hlsli"
 #include "Passes/ViewModel/ViewModel.hlsli"
 
-// One view of a cull run (main view: one; depth raster service: one per RasterView). 320 B.
+// One view of a cull run (main view: one; depth raster service: one per RasterView). 372 B.
 struct CullView
 {
     row_major float4x4 viewProj;
@@ -35,6 +35,8 @@ struct CullView
     uint runtimeFirst, runtimeCount;   // C2b: runtime instances [first, first + count) follow the flat list
     uint gpuFirst, gpuCapacity;        // GPU-written instances (A3 mesh particles) after them; live count gpuInstanceCount()
     uint instanceFirst, instanceEnd;   // RasterView's instance batch: only these scene instances (instanceEnd 0: every instance)
+    float minInstancePx;               // RasterView::minInstanceTexels: instances whose bounds project to a smaller radius are
+                                       // not drawn into the view (0: every instance)
 };
 
 // Live count of the GPU-written instances (GpuScene::gpuInstanceRange; GpuSceneLayout.h kGpuInstanceCountElement).
@@ -337,6 +339,10 @@ float projectedLength(CullView v, float4 s, float worldLength)
     const float d = max(length(s.xyz - v.position) - s.w, v.nearPlane);
     return worldLength * v.lodScale / d;
 }
+
+// An instance too small for the view (RasterView::minInstanceTexels): its bounding sphere's radius projects to under the
+// view's minimum, taken at the sphere's nearest point (the largest it can appear).
+bool instanceBelowView(CullView v, float4 bounds) { return v.minInstancePx > 0 && projectedLength(v, bounds, bounds.w) < v.minInstancePx; }
 
 // Screen rectangle (pixels, inclusive) and nearest device depth of a world sphere under viewProj; false when the
 // sphere's box reaches the near plane (then it can never be occluded).

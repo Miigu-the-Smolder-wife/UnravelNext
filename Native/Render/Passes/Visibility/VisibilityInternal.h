@@ -6,7 +6,7 @@
 
 namespace unx::visibility::detail
 {
-struct CullView  // 320 B
+struct CullView  // 372 B
 {
     float4x4 viewProj;
     float4x4 prevViewProj;
@@ -32,6 +32,7 @@ struct CullView  // 320 B
     uint32_t runtimeFirst, runtimeCount;  // C2b runtime instances (GpuScene::staticInstanceCount onwards)
     uint32_t gpuFirst, gpuCapacity;       // GPU-written instances (GpuScene::gpuInstanceRange; live count in g_patchData)
     uint32_t instanceFirst, instanceEnd;  // RasterView's instance batch (instanceEnd 0: every instance)
+    float minInstancePx;                  // RasterView::minInstanceTexels (0: every instance)
 };
 
 // C3 instance hierarchy (VisibilityCommon.hlsli CullScene, CullChunk).
@@ -56,7 +57,7 @@ static_assert(sizeof(SkinJointSphere) == 32);
 constexpr uint32_t kChunkInstances = 256;  // CHUNK_INSTANCES
 constexpr float kChunkCell = 64.0f;         // metres (ARCHITECTURE 2.1: 64 m cells)
 constexpr uint32_t kSkinJointOrigin = 0xFFFFFFFFu;
-static_assert(sizeof(CullView) == 368);
+static_assert(sizeof(CullView) == 372);
 
 constexpr uint32_t kViewOcclusion = 1;
 constexpr uint32_t kViewCullBack = 2;

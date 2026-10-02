@@ -669,6 +669,7 @@ CullView viewOf(const RasterView& r, const DepthRasterRequest& req, const Settin
     v.tilesX = (r.viewportWidth + v.tilePx - 1) / v.tilePx;
     v.instanceFirst = r.instanceFirst;
     v.instanceEnd = r.instanceEnd;
+    v.minInstancePx = r.minInstanceTexels;
     return v;
 }
 

@@ -295,17 +295,22 @@ struct CasterBounds
     const std::vector<render::ClusterData::MeshRange>* ranges = nullptr;
     float thresholdPx = 1;
     bool lod = false;
+    // shadow.vsm.min_caster_texels: V leaves a placed caster out of a view where its sphere is under this many texels in
+    // radius (RasterView::minInstanceTexels), so it adds nothing to that view's bound. The spheres here are not smaller
+    // than V's (the largest axis scale, x 1.001 + 1 mm), so a caster left out of the bound is left out by V too.
+    float minTexels = 0;
 };
 
 // windSpeed: the frame's (m/s). A wind-moved caster stays within its sphere grown by the wind's bound
 // (Deformation.hlsli windOffsetBound, as V's culling takes it): it counts in the views it reaches, not in every view -
 // a forest of 1.1 M such trees stood at 4e8 cluster entries in level 0's 16 m window.
-CasterBounds casterBounds(const GpuScene& scene, bool lod, float thresholdPx, float windSpeed)
+CasterBounds casterBounds(const GpuScene& scene, bool lod, float thresholdPx, float windSpeed, float minTexels)
 {
     CasterBounds b;
     b.ranges = &scene.clusters().meshes;
     b.lod = lod;
     b.thresholdPx = thresholdPx;
+    b.minTexels = minTexels;
     const auto& meshes = scene.meshes();
     const auto& ranges = scene.clusters().meshes;  // the builder's cut bounds (runtime meshes: their whole hierarchies)
     auto cut = [&](uint32_t mesh) { return mesh < ranges.size() && ranges[mesh].cutBound != 0 ? ranges[mesh].cutBound : meshes[mesh].clusterCount; };
@@ -403,6 +408,7 @@ std::vector<LevelBatch> levelBatches(const CasterBounds& b, const float4x4& vp, 
         const float x = vp.m[0][0] * q.x + vp.m[0][1] * q.y + vp.m[0][2] * q.z + vp.m[0][3];
         const float y = vp.m[1][0] * q.x + vp.m[1][1] * q.y + vp.m[1][2] * q.z + vp.m[1][3];
         if (!(std::abs(x) <= 1 + q.w * sx && std::abs(y) <= 1 + q.w * sy)) continue;
+        if (b.minTexels > 0 && q.w * pixelsPerMetre < b.minTexels) continue;  // (under the level's smallest caster: not drawn)
         const float t = threshold / std::max(b.errorScale[i], 1e-12f);
         const uint64_t cut = b.lod ? casterCut(b, i, t, t) : b.clusters[i];
         if (cut > room) return {};
@@ -440,6 +446,7 @@ uint64_t levelBound(const CasterBounds& b, const float4x4& vp, float pixelsPerMe
         const float x = vp.m[0][0] * q.x + vp.m[0][1] * q.y + vp.m[0][2] * q.z + vp.m[0][3];
         const float y = vp.m[1][0] * q.x + vp.m[1][1] * q.y + vp.m[1][2] * q.z + vp.m[1][3];
         if (!(std::abs(x) <= 1 + q.w * sx && std::abs(y) <= 1 + q.w * sy)) continue;
+        if (b.minTexels > 0 && q.w * pixelsPerMetre < b.minTexels) continue;  // (under the level's smallest caster: not drawn)
         const float t = threshold / std::max(b.errorScale[i], 1e-12f);
         n += b.lod ? casterCut(b, i, t, t) : b.clusters[i];
     }
@@ -467,13 +474,19 @@ void localBounds(const CasterBounds& b, const VsmLocalLightCpu& l, uint64_t (&fa
         const float3 d = { q.x - l.position.x, q.y - l.position.y, q.z - l.position.z };
         const float rr = reach + q.w;
         if (dot(d, d) > rr * rr) continue;
+        // (under a mip's smallest caster: not drawn into its views; V takes the radius over the distance to the sphere's
+        // nearest point, at least its near plane 1e-4)
+        bool drawn[kLocalMips];
+        const float nearestPoint = std::max(std::sqrt(dot(d, d)) - q.w, 1e-4f);
+        for (uint32_t mip = 0; mip < kLocalMips; ++mip) drawn[mip] = !(b.minTexels > 0 && q.w * 0.5f * (float)(kPage << mip) / nearestPoint < b.minTexels);
         for (uint32_t f = 0; f < 6; ++f)
         {
             const float a = dot(d, axis[f]), x = dot(d, right[f]), y = dot(d, up[f]);
             if (a < -q.w || (a - x) * h < -q.w || (a + x) * h < -q.w || (a - y) * h < -q.w || (a + y) * h < -q.w) continue;
             if (!b.lod || b.mesh[i] == gpu::kNone)
             {
-                for (uint32_t mip = 0; mip < kLocalMips; ++mip) faces[f][mip] += b.clusters[i];
+                for (uint32_t mip = 0; mip < kLocalMips; ++mip)
+                    if (drawn[mip]) faces[f][mip] += b.clusters[i];
                 continue;
             }
             const float4& ls = b.lodSpheres[i];
@@ -481,6 +494,7 @@ void localBounds(const CasterBounds& b, const VsmLocalLightCpu& l, uint64_t (&fa
             const float centre = std::sqrt(dot(e, e)), nearest = std::max(centre - ls.w, 1e-4f), farthest = centre + ls.w;
             for (uint32_t mip = 0; mip < kLocalMips; ++mip)
             {
+                if (!drawn[mip]) continue;
                 const float perMetre = b.thresholdPx / (0.5f * (float)(kPage << mip) * std::max(b.errorScale[i], 1e-12f));
                 faces[f][mip] += casterCut(b, i, perMetre * nearest, perMetre * farthest);
             }
@@ -1562,8 +1576,15 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     const uint64_t listCapacity = split ? (uint64_t)q.integer("visibility.max_visible_clusters") : UINT64_MAX;
     // shadow.vsm.raster_lod_bound false (A/B): the leaf count of every caster in every view it reaches
     const bool lodBound = !q.has("shadow.vsm.raster_lod_bound") || q.boolean("shadow.vsm.raster_lod_bound");
-    const CasterBounds bounds =
-        fc.services.rasterizeDepth && split ? casterBounds(fc.scene, lodBound, (float)q.number("visibility.lod_error_px"), fc.scene.source() ? fc.scene.source()->windSpeed : 0.0f) : CasterBounds{};
+    // shadow.vsm.min_caster_texels: the page views leave out the casters under this many of their texels in radius (V's
+    // instance cull, RasterView::minInstanceTexels); the packing bounds leave them out too. The classification pages
+    // (below) keep every caster: a face lit there must be lit on every mip.
+    const float minCasterTexels = q.has("shadow.vsm.min_caster_texels") ? (float)q.number("shadow.vsm.min_caster_texels") : 0.0f;
+    if (!(minCasterTexels >= 0)) fail("shadow.vsm.min_caster_texels = %g: 0 (every caster) or a positive radius in texels", minCasterTexels);
+    const CasterBounds bounds = fc.services.rasterizeDepth && split
+                                    ? casterBounds(fc.scene, lodBound, (float)q.number("visibility.lod_error_px"),
+                                                   fc.scene.source() ? fc.scene.source()->windSpeed : 0.0f, minCasterTexels)
+                                    : CasterBounds{};
     uint32_t sunRequests = 0, localRequests = 0;
     if (fc.services.rasterizeDepth)
     {
@@ -1589,6 +1610,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             v.viewportX = v.viewportY = 0;
             v.viewportWidth = v.viewportHeight = kVirtual;
             v.lodPixelsPerMetre = 1.0f / std::ldexp(1.0f, (int)k - 10);
+            v.minInstanceTexels = minCasterTexels;
             v.userData = k;
             v.cullMaskOffset = k * (kTable * kTable / 32);
             const uint64_t bound = split ? levelBound(bounds, v.viewProj, v.lodPixelsPerMetre) : 0;
@@ -1688,6 +1710,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                         v.viewportX = v.viewportY = 0;
                         v.viewportWidth = v.viewportHeight = kPage << mip;
                         v.lodPixelsPerMetre = 0.5f * (float)(kPage << mip);  // focal length in texels (90 degree face)
+                        v.minInstanceTexels = minCasterTexels;
                         v.userData = slot | face << 7 | mip << 10;
                         v.cullMaskOffset = a * kLocalLightWords + face * kLocalFaceWords + kLocalViewWordOffset[mip];
                         r.views.push_back(v);
