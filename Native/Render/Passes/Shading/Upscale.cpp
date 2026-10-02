@@ -353,8 +353,9 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
     }
     const uint32_t rolling = reset ? 0u : (s.rolling + 1u) % cycle;
     const uint32_t slot = ringSlot(rolling, resurrection);
-    // (after a reset the last slot may be this frame's: the history bound then is not read - any other slot)
-    const uint32_t prevSlot = reset && s.last == slot ? (slot == 0 ? 3u : 0u) : s.last;
+    // (a reset frame's history is bound and not read: a slot other than this frame's that exists with or without the
+    // kept slots - the last slot may be this frame's, or one a ring without them does not have)
+    const uint32_t prevSlot = reset ? (slot == 0 ? 3u : 0u) : s.last;
     const float exposure = 1.0f / (1.2f * std::exp2(view.view.ev100));
     uint32_t keptSlot = prevSlot;
     bool canResurrect = false;
