@@ -54,6 +54,12 @@ struct Settings
     uint32_t coverageSpecialMin = 0;  // special record list capacity floor (entries)
     float lodErrorPx = 0, bandAMinPx = 0, bandCMaxPx = 0, bandAHysteresisPx = 0;
     bool occlusion = true, coverageLayer = false, coverageBandC = true, coverageBandCVisible = false;
+    // The coverage raster's depth buckets and what goes with them (CoverageBuckets.hlsli): buckets the band B list is
+    // drawn in, nearer first (1: drawn whole, as before); the fewest list entries of the latest completed frame that turn
+    // them on; the mesh kernel's triangle tests; the compute rasteriser of small triangles; the fragment counters.
+    uint32_t coverageDepthBuckets = 1, coverageBucketsMinClusters = 0;
+    bool coverageTriangleCull = false, coverageComputeRaster = false, coverageStatistics = false;
+    bool coverageDropWeightless = false;  // fragments without weight (no area step, no subsample) are not stored
 
     static Settings load(const QualityConfig& q)
     {
@@ -83,6 +89,19 @@ struct Settings
         s.coverageSpecialMin = (uint32_t)q.integer("visibility.coverage_special_min");
         s.oceanEdgesMin = (uint32_t)q.integer("visibility.ocean_edges_min");
         if (!(s.coveragePoolMinPerPixel > 0)) fail("visibility.coverage_pool_min_fragments_per_pixel = %g: must be positive", s.coveragePoolMinPerPixel);
+        // (keys newer than some quality files in use: absent = the layer as it was)
+        if (q.has("visibility.coverage_depth_buckets"))
+        {
+            const int64_t buckets = q.integer("visibility.coverage_depth_buckets");
+            if (buckets < 1 || buckets > (int64_t)kCovBucketsMax) fail("visibility.coverage_depth_buckets = %lld: 1 (the list drawn whole) .. %u", (long long)buckets, kCovBucketsMax);
+            s.coverageDepthBuckets = (uint32_t)buckets;
+        }
+        if (q.has("visibility.coverage_depth_buckets_min_clusters"))
+            s.coverageBucketsMinClusters = (uint32_t)std::max<int64_t>(q.integer("visibility.coverage_depth_buckets_min_clusters"), 0);
+        s.coverageTriangleCull = q.has("visibility.coverage_triangle_cull") && q.boolean("visibility.coverage_triangle_cull");
+        s.coverageComputeRaster = q.has("visibility.coverage_compute_raster") && q.boolean("visibility.coverage_compute_raster");
+        s.coverageStatistics = q.has("visibility.coverage_statistics") && q.boolean("visibility.coverage_statistics");
+        s.coverageDropWeightless = q.has("visibility.coverage_drop_weightless") && q.boolean("visibility.coverage_drop_weightless");
         return s;
     }
 };
@@ -103,6 +122,7 @@ struct Hiz
 struct Coverage
 {
     ComPtr<ID3D12Resource> headers, counters, list, depthRange;
+    ComPtr<ID3D12Resource> cover;  // depth buckets: per pixel { opaque union, ~farthest } of the buckets drawn (CoverageBuckets.hlsli)
     uint32_t width = 0, height = 0, tilesX = 0, tiles = 0;
     uint32_t capacity = 0;  // records
     uint32_t specialCapacity = 0;  // special record list entries (v1.73)
@@ -1183,13 +1203,25 @@ ComPtr<ID3D12Resource> createCoverageBuffer(Device& device, uint64_t bytes, cons
     return r;
 }
 
-void ensureCoverage(Device& device, Coverage& cv, uint32_t width, uint32_t height)
+void ensureCoverage(Device& device, Coverage& cv, uint32_t width, uint32_t height, bool cover)
 {
-    if (cv.headers && cv.width == width && cv.height == height) return;
-    for (ComPtr<ID3D12Resource>* r : { std::addressof(cv.headers), std::addressof(cv.counters), std::addressof(cv.list), std::addressof(cv.depthRange) })
+    // The depth buckets' cover (8 B per pixel of the tile grid) exists while they are configured; made later than the
+    // rest (the setting changed), every tile is emptied again with it.
+    if (cv.headers && cv.width == width && cv.height == height)
+    {
+        if (cover && !cv.cover)
+        {
+            cv.cover = createCoverageBuffer(device, (uint64_t)cv.tiles * kCovTilePixels * 8, L"V coverage cover (main view)");
+            cv.fresh = true;
+        }
+        return;
+    }
+    for (ComPtr<ID3D12Resource>* r : { std::addressof(cv.headers), std::addressof(cv.counters), std::addressof(cv.list), std::addressof(cv.depthRange), std::addressof(cv.cover) })
         if (*r) device.deferRelease(*r);
+    cv.cover.Reset();
     cv.tilesX = (width + kCovTilePx - 1) / kCovTilePx;
     cv.tiles = cv.tilesX * ((height + kCovTilePx - 1) / kCovTilePx);
+    if (cover) cv.cover = createCoverageBuffer(device, (uint64_t)cv.tiles * kCovTilePixels * 8, L"V coverage cover (main view)");
     cv.headers = createCoverageBuffer(device, (uint64_t)cv.tiles * kCovTileWords * 4, L"V coverage tile headers (main view)");
     cv.counters = createCoverageBuffer(device, (uint64_t)cv.tiles * kCovTilePixels * 4, L"V coverage pixel counters (main view)");
     cv.list = createCoverageBuffer(device, (uint64_t)(kCovListInfo + 4ull * cv.tiles) * 4, L"V coverage tile list (main view)");
@@ -1223,7 +1255,8 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
     ViewState& vs = s.views[view.viewId];
     Coverage& cv = vs.coverage;
     const std::string statsName = view.viewId == 0 ? std::string("main") : "view" + std::to_string(view.viewId);
-    ensureCoverage(fc.device, cv, width, height);
+    const bool bucketsConfigured = r.cfg.coverageDepthBuckets >= 2 && r.cfg.coverageDebugStage == 0;
+    ensureCoverage(fc.device, cv, width, height, bucketsConfigured);
     // Record capacity: 1.5 x the latest measured need (fragments appended in the latest completed frame, read here before
     // the frame's own passes), at least the floor, in
     // steps of 64 K records (1 MB); it grows at once and shrinks only below half, so the graph keeps its placed buffers
@@ -1243,6 +1276,19 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
         special = std::min<uint64_t>((special + kStep - 1) / kStep * kStep, kCovPoolMaxRecords);
         if (special > cv.specialCapacity || special * 2 < cv.specialCapacity) cv.specialCapacity = (uint32_t)special;
     }
+    // Depth buckets (CoverageBuckets.hlsli): the band B list drawn nearer first in buckets, each after the first cut by
+    // the cover of those before. Their passes (bins, cover) are recorded when the latest completed frame's band B list
+    // held at least the configured entries: a frame without thin geometry keeps the one raster pass. Either way the
+    // records of the fragments with weight are the same, so the frames between a change and its statistics only cost what
+    // the other path costs.
+    uint32_t buckets = 1;
+    if (bucketsConfigured)
+    {
+        const auto it = s.stats.find(statsName);
+        if (it != s.stats.end() && it->second.latest.frameIndex != UINT64_MAX && it->second.latest.listEntries[kListB] >= std::max(r.cfg.coverageBucketsMinClusters, 1u))
+            buckets = r.cfg.coverageDepthBuckets;
+    }
+    const bool binned = buckets >= 2, computeRaster = binned && r.cfg.coverageComputeRaster, triangleCull = r.cfg.coverageTriangleCull;
     RenderGraph& g = fc.graph;
     const uint32_t capacity = cv.capacity, tiles = cv.tiles, tilesX = cv.tilesX, slots = coverageScratchSlots(capacity);
     const BufferRef headers = g.importBuffer(cv.headers.Get(), { "v.coverage.tiles", (uint64_t)tiles * kCovTileWords * 4, 0 });
@@ -1257,6 +1303,12 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
     const BufferRef scratch = g.createBuffer({ "v.coverage.scratch", (uint64_t)slots * (kCovScratchWords + 1) * 4, 0 });
     const uint32_t specialCapacity = cv.specialCapacity;
     const BufferRef special = g.createBuffer({ "v.coverage.special", 16 + (uint64_t)specialCapacity * 8, 0 });
+    // Depth buckets: the persistent cover (emptied with the tiles), and the frame's binned list (per list entry its fine
+    // bin and its sorted place; with the compute rasteriser 4 words of taken triangles) and bucket arguments.
+    const BufferRef cover = cv.cover ? g.importBuffer(cv.cover.Get(), { "v.coverage.cover", (uint64_t)tiles * kCovTilePixels * 8, 0 }) : BufferRef{};
+    const BufferRef bins = binned ? g.createBuffer({ "v.coverage.bins", ((uint64_t)kCovBinHeaderWords + (uint64_t)(computeRaster ? kCovBinEntryWords : 2u) * r.cfg.capVisible) * 4, 0 })
+                                  : BufferRef{};
+    const BufferRef binArgs = binned ? g.createBuffer({ "v.coverage.binArgs", kCovArgWords * 4, 0 }) : BufferRef{};
     view.coverageSpecial = special;
     view.coverageTiles = headers;
     view.coverageRecords = records;
@@ -1273,13 +1325,14 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
     enum : uint32_t
     {
         kUseArgs = 1, kUseList = 2, kUseListRead = 4, kUseTiles = 8, kUseCounters = 16, kUseStream = 32, kUseRecords = 64, kUseRecordsRead = 128,
-        kUseStarts = 256, kUseRange = 512, kUseScratch = 1024, kUseDepthA = 2048, kUseSpecial = 4096
+        kUseStarts = 256, kUseRange = 512, kUseScratch = 1024, kUseDepthA = 2048, kUseSpecial = 4096,
+        kUseCover = 8192  // the tile clears: the depth buckets' cover in the records' slot (P[0].z)
     };
     auto constants = [=](const PassContext& c, uint32_t k[28], uint32_t uses, bool raster) {
         std::memset(k, 0, 28 * 4);
         k[0] = c.uav(run.state);
         k[1] = (uses & kUseArgs) ? c.uav(run.args) : kNone;
-        k[2] = (uses & kUseRecords) ? c.uav(records) : ((uses & kUseRecordsRead) ? c.srv(records) : kNone);
+        k[2] = (uses & kUseRecords) ? c.uav(records) : ((uses & kUseRecordsRead) ? c.srv(records) : ((uses & kUseCover) ? c.uav(cover) : kNone));
         k[3] = (uses & kUseStream) ? c.uav(stream) : kNone;
         k[4] = (uses & kUseStream) ? c.uav(keys) : kNone;
         k[5] = (uses & kUseList) ? c.uav(list) : ((uses & kUseListRead) ? c.srv(list) : kNone);
@@ -1333,6 +1386,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       if (uses & kUseScratch) b.use(scratch, Use::UavCompute);
                       if (uses & kUseDepthA) b.use(depthA, Use::SrvCompute);
                       if (uses & kUseSpecial) b.use(special, Use::UavCompute);
+                      if (uses & kUseCover) b.use(cover, Use::UavCompute);
                   },
                   [=](PassContext& c) {
                       uint32_t k[28];
@@ -1343,53 +1397,189 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       else c.cmd->Dispatch(groupsX, groupsY, 1);
                   });
     };
+    const uint32_t coverUse = cover.valid() ? (uint32_t)kUseCover : 0u;
     if (cv.fresh)
     {
-        build("init", 4, tilesX, tiles / tilesX, 0, kUseList | kUseTiles | kUseCounters | kUseRange);
+        build("init", 4, tilesX, tiles / tilesX, 0, kUseList | kUseTiles | kUseCounters | kUseRange | coverUse);
         cv.fresh = false;
     }
     build("prepare", 0, 1, 1, 0, kUseArgs | kUseListRead);
-    build("clear", 1, 0, 0, kArgCovClear, kUseListRead | kUseTiles | kUseCounters | kUseRange);
+    build("clear", 1, 0, 0, kArgCovClear, kUseListRead | kUseTiles | kUseCounters | kUseRange | coverUse);
 
+    // The pixel kernel's variant: the measurement stage, and the fragment counters (visibility.coverage_statistics).
+    const std::string psVariant = ".STAGE" + std::to_string(r.cfg.coverageDebugStage) + (r.cfg.coverageStatistics ? ".STATS1" : ".STATS0");
+    const std::string psoVariant = "stage" + std::to_string(r.cfg.coverageDebugStage) + (r.cfg.coverageStatistics ? ".stats" : "");
     MeshPipelineDesc d;
     d.meshShader = "Passes/Visibility/CoverageRaster.ms";
-    d.pixelShader = "Passes/Visibility/CoverageRaster.ps.STAGE" + std::to_string(r.cfg.coverageDebugStage);
+    d.pixelShader = "Passes/Visibility/CoverageRaster.ps" + psVariant;
     d.depthFormat = DXGI_FORMAT_UNKNOWN;
     d.depthWrite = false;
     d.cull = D3D12_CULL_MODE_NONE;  // one-sided back faces are culled by the mesh kernel (with the near clip)
     d.conservative = true;
-    ID3D12PipelineState* rasterPso = fc.shaders.mesh("v.coverage.stage" + std::to_string(r.cfg.coverageDebugStage), d);
+    ID3D12PipelineState* rasterPso = fc.shaders.mesh("v.coverage." + psoVariant, d);
     const D3D12_GPU_VIRTUAL_ADDRESS frameConstants = view.frameConstants;
     const TextureRef hiz = r.hiz;
-    g.addPass("v.coverage.raster", QueueType::Graphics,
-              [&](PassBuilder& b) {
-                  b.use(run.args, Use::IndirectArgs);
-                  b.use(run.visible, Use::SrvGraphics);
-                  b.use(run.lists, Use::SrvGraphics);
-                  b.use(run.state, Use::UavGraphics);
-                  b.use(stream, Use::UavGraphics);
-                  b.use(keys, Use::UavGraphics);
-                  if (hiz.valid()) b.use(hiz, Use::SrvGraphics);
-              },
-              [=](PassContext& c) {
-                  uint32_t k[32];
-                  constants(c, k, 0, true);
-                  k[3] = c.uav(stream);
-                  k[4] = c.uav(keys);
-                  if (!hiz.valid()) k[8] = kNone;
-                  std::memset(&k[24], 0, 8 * 4);
-                  k[24] = kListB;  // COV_RASTER_LIST; P[6].y 0: band B
-                  k[30] = kNone;
-                  c.cmd->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
-                  const D3D12_VIEWPORT vp{ 0, 0, (float)width, (float)height, 0, 1 };
-                  const D3D12_RECT sc{ 0, 0, (LONG)width, (LONG)height };
-                  c.cmd->RSSetViewports(1, &vp);
-                  c.cmd->RSSetScissorRects(1, &sc);
-                  c.bindFrameConstants(frameConstants);
-                  c.cmd->SetPipelineState(rasterPso);
-                  c.graphicsConstants(k, 32);
-                  c.cmd->ExecuteIndirect(meshSig, 1, c.resource(run.args), kArgCovMesh * 4, nullptr, 0);
-              });
+    // P[1].w of the cluster raster kernels (CoverageBuckets.hlsli COV_RASTER_*): the bucket, the triangle tests, the
+    // compute raster, the drop of fragments without weight. The hair and stream passes take 0: their records as before.
+    const uint32_t rasterFlags = (triangleCull ? 0x100u : 0u) | (computeRaster ? 0x200u : 0u) | (r.cfg.coverageDropWeightless ? 0x400u : 0u);
+    // The band B list's raster: the whole list (bucket < 0), or one depth bucket of the binned list - after the first
+    // with the cover (fragments) and the tile headers (clusters, triangles) the buckets before it left.
+    auto addClusterRaster = [&](int bucket) {
+        const bool fromBins = bucket >= 0, covered = bucket > 0;
+        g.addPass("v.coverage.raster", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(fromBins ? binArgs : run.args, Use::IndirectArgs);
+                      b.use(run.visible, Use::SrvGraphics);
+                      b.use(run.lists, Use::SrvGraphics);
+                      b.use(run.state, Use::UavGraphics);
+                      b.use(stream, Use::UavGraphics);
+                      b.use(keys, Use::UavGraphics);
+                      if (hiz.valid()) b.use(hiz, Use::SrvGraphics);
+                      if (fromBins) b.use(bins, Use::SrvGraphics);
+                      if (covered)
+                      {
+                          b.use(cover, Use::SrvGraphics);
+                          b.use(headers, Use::SrvGraphics);
+                      }
+                  },
+                  [=](PassContext& c) {
+                      uint32_t k[32];
+                      constants(c, k, 0, true);
+                      k[1] = fromBins ? c.srv(bins) : kNone;     // COV_BINS
+                      k[2] = covered ? c.srv(cover) : kNone;     // COV_COVER
+                      k[3] = c.uav(stream);
+                      k[4] = c.uav(keys);
+                      k[5] = covered ? c.srv(headers) : kNone;   // COV_TILE_HIZ
+                      k[7] = (fromBins ? (uint32_t)bucket : 0u) | (fromBins ? rasterFlags : rasterFlags & ~0x200u);
+                      if (!hiz.valid()) k[8] = kNone;
+                      std::memset(&k[24], 0, 8 * 4);
+                      k[24] = kListB;  // COV_RASTER_LIST; P[6].y 0: band B
+                      k[30] = kNone;
+                      c.cmd->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+                      const D3D12_VIEWPORT vp{ 0, 0, (float)width, (float)height, 0, 1 };
+                      const D3D12_RECT sc{ 0, 0, (LONG)width, (LONG)height };
+                      c.cmd->RSSetViewports(1, &vp);
+                      c.cmd->RSSetScissorRects(1, &sc);
+                      c.bindFrameConstants(frameConstants);
+                      c.cmd->SetPipelineState(rasterPso);
+                      c.graphicsConstants(k, 32);
+                      if (fromBins) c.cmd->ExecuteIndirect(meshSig, 1, c.resource(binArgs), (kCovArgDraw + 3 * (uint32_t)bucket) * 4, nullptr, 0);
+                      else c.cmd->ExecuteIndirect(meshSig, 1, c.resource(run.args), kArgCovMesh * 4, nullptr, 0);
+                  });
+    };
+    if (!binned) addClusterRaster(-1);
+    else
+    {
+        // CoverageBins.hlsl: direct (groupsX > 0) or indirect at argWord of the bin arguments.
+        enum : uint32_t { kBinArgs = 1, kBinLists = 2, kBinVisible = 4, kBinHiz = 8, kBinStream = 16, kBinCover = 32, kBinRead = 64 };
+        auto bin = [&](const char* name, uint32_t mode, uint32_t groupsX, uint32_t argWord, uint32_t uses, uint32_t bucket) {
+            ID3D12PipelineState* pso = fc.shaders.compute("Passes/Visibility/CoverageBins.MODE" + std::to_string(mode));
+            const bool indirect = groupsX == 0;
+            g.addPass(std::string("v.coverage.") + name, QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(run.state, Use::UavCompute);
+                          b.use(bins, (uses & kBinRead) ? Use::SrvCompute : Use::UavCompute);
+                          if (indirect) b.use(binArgs, Use::IndirectArgs);
+                          else if (uses & kBinArgs) b.use(binArgs, Use::UavCompute);
+                          if (uses & kBinLists) b.use(run.lists, Use::SrvCompute);
+                          if (uses & kBinVisible) b.use(run.visible, Use::SrvCompute);
+                          if ((uses & kBinHiz) && hiz.valid()) b.use(hiz, Use::SrvCompute);
+                          if (uses & kBinStream)
+                          {
+                              b.use(stream, Use::UavCompute);
+                              b.use(keys, Use::UavCompute);
+                          }
+                          if (uses & kBinCover)
+                          {
+                              b.use(cover, Use::UavCompute);
+                              b.use(headers, Use::UavCompute);
+                          }
+                      },
+                      [=](PassContext& c) {
+                          uint32_t k[28];
+                          std::memset(k, 0, sizeof k);
+                          k[0] = c.uav(run.state);
+                          k[1] = (uses & kBinRead) ? c.srv(bins) : c.uav(bins);                       // COV_BINS
+                          k[2] = (uses & kBinCover) ? c.uav(cover) : kNone;                           // COV_COVER
+                          k[3] = (uses & kBinStream) ? c.uav(stream) : kNone;
+                          k[4] = (uses & kBinStream) ? c.uav(keys) : kNone;
+                          k[5] = (!indirect && (uses & kBinArgs)) ? c.uav(binArgs) : kNone;            // COV_BIN_ARGS
+                          k[6] = capacity;
+                          k[7] = bucket;
+                          k[8] = (uses & kBinHiz) && hiz.valid() ? hizSrv : kNone;
+                          k[9] = width;
+                          k[10] = height;
+                          k[11] = hizSize;
+                          k[12] = (uses & kBinVisible) ? c.srv(run.visible) : kNone;
+                          k[13] = (uses & kBinLists) ? c.srv(run.lists) : kNone;
+                          k[14] = run.cfg.capVisible;
+                          k[15] = run.viewsSrv;
+                          std::memcpy(&k[16], &frontSign, 4);
+                          k[17] = (uses & kBinCover) ? c.uav(headers) : kNone;
+                          k[18] = tilesX;
+                          k[19] = tiles;
+                          k[24] = buckets;                                                            // COV_BUCKETS
+                          c.cmd->SetPipelineState(pso);
+                          c.bindFrameConstants(frameConstants);
+                          c.computeConstants(k, 28);
+                          if (indirect) c.cmd->ExecuteIndirect(dispatchSig, 1, c.resource(binArgs), argWord * 4, nullptr, 0);
+                          else c.cmd->Dispatch(groupsX, 1, 1);
+                      });
+        };
+        bin("bins.begin", 0, (kCovBinHeaderWords + 63) / 64, 0, kBinArgs, 0);
+        bin("bins.classify", 1, 0, kCovArgEntries, kBinLists | kBinVisible | kBinHiz, 0);
+        bin("bins.prefix", 2, 1, 0, kBinArgs, 0);
+        bin("bins.scatter", 3, 0, kCovArgEntries, kBinLists, 0);
+        // The compute rasteriser of a bucket's small triangles, before its mesh raster (which skips what this took).
+        ID3D12PipelineState* swPso = computeRaster ? fc.shaders.compute(std::string("Passes/Visibility/CoverageRasterSw.STATS") + (r.cfg.coverageStatistics ? "1" : "0")) : nullptr;
+        auto addComputeRaster = [&](uint32_t bucket) {
+            const bool covered = bucket > 0;
+            g.addPass("v.coverage.sw", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(binArgs, Use::IndirectArgs);
+                          b.use(run.visible, Use::SrvCompute);
+                          b.use(run.lists, Use::SrvCompute);
+                          b.use(run.state, Use::UavCompute);
+                          b.use(stream, Use::UavCompute);
+                          b.use(keys, Use::UavCompute);
+                          b.use(bins, Use::UavCompute);
+                          if (hiz.valid()) b.use(hiz, Use::SrvCompute);
+                          if (covered)
+                          {
+                              b.use(cover, Use::SrvCompute);
+                              b.use(headers, Use::SrvCompute);
+                          }
+                      },
+                      [=](PassContext& c) {
+                          uint32_t k[32];
+                          constants(c, k, 0, true);
+                          k[1] = c.uav(bins);                        // COV_BINS (the taken triangles are written)
+                          k[2] = covered ? c.srv(cover) : kNone;     // COV_COVER
+                          k[3] = c.uav(stream);
+                          k[4] = c.uav(keys);
+                          k[5] = covered ? c.srv(headers) : kNone;   // COV_TILE_HIZ
+                          k[7] = bucket | rasterFlags;
+                          if (!hiz.valid()) k[8] = kNone;
+                          std::memset(&k[24], 0, 8 * 4);
+                          k[24] = kListB;
+                          k[30] = kNone;
+                          c.cmd->SetPipelineState(swPso);
+                          c.bindFrameConstants(frameConstants);
+                          c.computeConstants(k, 32);
+                          c.cmd->ExecuteIndirect(dispatchSig, 1, c.resource(binArgs), (kCovArgDraw + 3 * bucket) * 4, nullptr, 0);
+                      });
+        };
+        for (uint32_t bucket = 0; bucket < buckets; ++bucket)
+        {
+            if (computeRaster) addComputeRaster(bucket);
+            addClusterRaster((int)bucket);
+            if (bucket + 1 < buckets)  // what the bucket stored enters the cover the next ones read
+            {
+                bin("cover.args", 4, 1, 0, kBinArgs, bucket);
+                bin("cover", 5, 0, kCovArgCover, kBinRead | kBinStream | kBinCover, bucket);
+            }
+        }
+    }
     // A6: the translucent lists' see-through records in the pixels of translucent class 2 (edges, seams, overlaps).
     const TextureRef translucentClass = view.translucentClass;
     if (translucentClass.valid())
@@ -1410,6 +1600,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       k[3] = c.uav(stream);
                       k[4] = c.uav(keys);
                       if (!hiz.valid()) k[8] = kNone;
+                      k[7] = rasterFlags & ~0x200u;  // (no bucket: the translucent lists are drawn whole)
                       std::memset(&k[24], 0, 8 * 4);
                       k[25] = 1;  // COV_RASTER_TRANSLUCENT
                       k[30] = c.srv(translucentClass);
@@ -1436,7 +1627,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
         const uint32_t groups = (segments + 31) / 32;
         MeshPipelineDesc hd = d;
         hd.meshShader = "Passes/Visibility/HairRaster.ms";
-        ID3D12PipelineState* hairPso = fc.shaders.mesh("v.coverage.hair.stage" + std::to_string(r.cfg.coverageDebugStage), hd);
+        ID3D12PipelineState* hairPso = fc.shaders.mesh("v.coverage.hair." + psoVariant, hd);
         g.addPass("v.coverage.hair", QueueType::Graphics,
                   [&](PassBuilder& b) {
                       b.use(hairSegments, Use::SrvGraphics);
@@ -1451,6 +1642,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       constants(c, k, 0, false);  // not the cluster lists: the hair inputs take P[3].xyz
                       k[3] = c.uav(stream);
                       k[4] = c.uav(keys);
+                      k[7] = 0;  // (the pixel kernel's switches, COV_RASTER_*: none)
                       if (!hiz.valid()) k[8] = kNone;
                       k[12] = c.srv(hairSegments);
                       k[13] = c.srv(hairBodies);
@@ -1483,7 +1675,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
         const uint32_t groups = (st.maxTriangles + 31) / 32;
         MeshPipelineDesc sd = d;
         sd.meshShader = "Passes/Visibility/StreamRaster.ms";
-        ID3D12PipelineState* streamPso = fc.shaders.mesh("v.coverage.stream.stage" + std::to_string(r.cfg.coverageDebugStage), sd);
+        ID3D12PipelineState* streamPso = fc.shaders.mesh("v.coverage.stream." + psoVariant, sd);
         g.addPass("v.coverage.stream", QueueType::Graphics,
                   [&](PassBuilder& b) {
                       b.use(st.vertices, Use::SrvGraphics);
@@ -1504,6 +1696,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       constants(c, k, 0, false);  // the stream inputs take P[3].xyz
                       k[3] = c.uav(stream);
                       k[4] = c.uav(keys);
+                      k[7] = 0;  // (the pixel kernel's switches, COV_RASTER_*: none)
                       if (!hiz.valid()) k[8] = kNone;
                       k[12] = c.srv(st.vertices);
                       k[13] = c.srv(st.drawArgs);
@@ -1580,6 +1773,18 @@ void readStats(FramePassContext& fc, State& s, const std::string& name)
         st.oceanEdges = w[kStateOceanEdges];
         st.coverageMeasured = w[kStateCovMeasured];
         st.coverageInvocations = w[kStateCovInvocations];
+        st.coverageClustersBehindBandA = w[kStateCovClustersHiz];
+        st.coverageClustersBehindCover = w[kStateCovClustersTile];
+        st.coverageTriangles = w[kStateCovTriangles];
+        st.coverageTrianglesBehindBandA = w[kStateCovTrianglesHiz];
+        st.coverageTrianglesBehindCover = w[kStateCovTrianglesTile];
+        st.coverageTrianglesCompute = w[kStateCovTrianglesSw];
+        st.coverageFragmentsCompute = w[kStateCovFragmentsSw];
+        st.coverageEvaluated = w[kStateCovEvaluated];
+        st.coverageCutBandA = w[kStateCovCutBandA];
+        st.coverageCutCover = w[kStateCovCutCover];
+        st.coverageCutAlpha = w[kStateCovCutAlpha];
+        st.coverageCutWeight = w[kStateCovCutWeight];
         st.mixedClusters = w[kStateStatMixedClusters];
         st.mixedTriangles = w[kStateStatMixedTriangles];
         st.chunkItems = w[kStateChunkItems];
@@ -1653,7 +1858,7 @@ void visibility(FramePassContext& fc, ViewResources& view)
                 if (it->second.hiz.texture) fc.device.deferRelease(it->second.hiz.texture);
                 if (it->second.hiz.srv != kNone) h.freeResource(it->second.hiz.srv);
                 for (uint32_t i : it->second.hiz.uavs) h.freeResource(i);
-                for (ComPtr<ID3D12Resource>* b : { std::addressof(it->second.coverage.headers), std::addressof(it->second.coverage.counters), std::addressof(it->second.coverage.list), std::addressof(it->second.coverage.depthRange) })
+                for (ComPtr<ID3D12Resource>* b : { std::addressof(it->second.coverage.headers), std::addressof(it->second.coverage.counters), std::addressof(it->second.coverage.list), std::addressof(it->second.coverage.depthRange), std::addressof(it->second.coverage.cover) })
                     if (*b) fc.device.deferRelease(*b);
                 it = s.views.erase(it);
             }

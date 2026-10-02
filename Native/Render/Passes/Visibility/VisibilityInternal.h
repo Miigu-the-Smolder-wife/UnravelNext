@@ -67,7 +67,11 @@ constexpr uint32_t kStateNodeWrite = 0, kStateNodeEnd = 2, kStateGroupWrite = 3,
                    kStateDeferClusters = 8, kStateListCount = 9, kStateCovSpecial = 17, kStateOceanEdges = 18, kStateOverflow = 21, kStateStatInstances = 22, kStateStatNodes = 23, kStateStatClusters = 24,
                    kStateStatTriangles = 25, kStateTilePairs = 29, kStateCovPool = 30, kStateCovInvocations = 31, kStateCovFragments = 32, kStateCovTiles = 33, kStateCovMeasured = 34,
                    kStateStatBandClusters = 35, kStateCovBlocks = 38, kStateCovHeavy = 39, kStateStatMixedClusters = 40,
-                   kStateStatMixedTriangles = 41, kStateChunkItems = 42, kStateDeferChunks = 43, kStateStatChunks = 44, kStateListPhase1 = 48, kStateWords = 56;
+                   kStateStatMixedTriangles = 41, kStateChunkItems = 42, kStateDeferChunks = 43, kStateStatChunks = 44, kStateListPhase1 = 48, kStateWords = 64;
+// Coverage layer statistics (VS_COV_*: fragments by test, band B list entries and triangles by test, the compute raster).
+constexpr uint32_t kStateCovCutBandA = 19, kStateCovCutCover = 20, kStateCovCutWeight = 45, kStateCovCutAlpha = 46, kStateCovClustersHiz = 47,
+                   kStateCovClustersTile = 56, kStateCovTriangles = 57, kStateCovTrianglesHiz = 58, kStateCovTrianglesTile = 59, kStateCovTrianglesSw = 60,
+                   kStateCovFragmentsSw = 61, kStateCovEvaluated = 62;
 constexpr uint32_t kLists = 8;
 constexpr uint32_t kListABack = 0, kListANone = 1, kListAAlphaBack = 2, kListAAlphaNone = 3, kListB = 4, kListC = 5, kListTBack = 6, kListTNone = 7;
 constexpr uint32_t kBandLists = 6;  // lists of the cull bands (the depth raster service draws these)
@@ -84,6 +88,10 @@ constexpr uint32_t kBandModeA = 0, kBandModeCoverage = 1, kBandModeFull = 2, kBa
 
 // Coverage layer (CoverageTiles.hlsli, CoverageLayer.hlsli): tiles, tile list, blocks, scratch slots.
 constexpr uint32_t kCovTilePx = 8, kCovTileWords = 8, kCovTilePixels = 64, kCovBlock = 1024, kCovScratchWords = 256;
+// Depth buckets (CoverageBins.hlsl): the binned band B list { header, per list entry: fine bin, sorted entry, 4 words of
+// triangles the compute rasteriser took } and its dispatch arguments (COVB_*, COVA_*).
+constexpr uint32_t kCovBucketsMax = 8, kCovBinHeaderWords = 320, kCovBinEntryWords = 6;
+constexpr uint32_t kCovArgEntries = 0, kCovArgCover = 3, kCovArgDraw = 8, kCovArgWords = 32;
 constexpr uint32_t kCovTileCount = 0, kCovTileBase = 1, kCovTileListed = 2, kCovTileOpaqueLo = 3, kCovTileOpaqueHi = 4, kCovTileHeavy = 5;
 constexpr uint32_t kCovListArgs = 0, kCovListCount = 3, kCovListRecords = 4, kCovListBlocks = 5, kCovListPool = 6, kCovListTilesX = 7,
                    kCovListBlockArgs = 8, kCovListHeavyCount = 11, kCovListHeavyArgs = 12, kCovListInfo = 16;
