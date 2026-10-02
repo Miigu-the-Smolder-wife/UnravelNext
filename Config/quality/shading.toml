@@ -11,8 +11,10 @@ coverage_tile_lights = false      # 14.1c (L2c): coverage records' direct light 
 coverage_tile_lights_capacity = 4096  # listed coverage tiles the field holds (6176 B each); tiles past it keep the per-record loop (exact)
 coverage_compact = true           # the coverage composite's light pixels (<= 16 records) in the compact form (CoverageShade.hlsli;
                                   # written 2026-10-03, built, not run): CoverageWalk weights each pixel's records nearer first
-                                  # and lists those with weight per tile, CoverageShadeList shades the list one record per lane
-                                  # (64 at a time; direct, then indirect), CoverageGather sums each pixel's entries over band A.
+                                  # and lists those with weight per tile, the list is shaded one record per lane, 64 at a time -
+                                  # in one kernel (CoverageShadeWhole: the surface, material and air once per record) unless
+                                  # the records run the area lights' loop (then CoverageShadeList's two parts, the DXIL limit) -
+                                  # and CoverageGather sums each pixel's entries over band A.
                                   # false: CoverageComposite shades inside each pixel lane's own loop - a wave then runs the
                                   # shading as often as its deepest pixel has visible records, the other lanes idle (A/B).
                                   # The same weights and shading calls; the per-pixel sum stays in float (the composite keeps

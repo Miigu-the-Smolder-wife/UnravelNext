@@ -1410,8 +1410,15 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         ID3D12PipelineState* light1 = compact ? nullptr : fc.shaders.compute(("Passes/Shading/CoverageComposite.PART1.OUTPUT" + output + ".AREA" + area).c_str());
         ID3D12PipelineState* light2 = compact ? nullptr : fc.shaders.compute(("Passes/Shading/CoverageComposite.PART2.OUTPUT" + output + ".AREA" + area).c_str());
         ID3D12PipelineState* walk = compact ? fc.shaders.compute("Passes/Shading/CoverageWalk") : nullptr;
-        ID3D12PipelineState* shadeList[2] = { compact ? fc.shaders.compute(("Passes/Shading/CoverageShadeList.PART1.AREA" + area).c_str()) : nullptr,
-                                              compact ? fc.shaders.compute(("Passes/Shading/CoverageShadeList.PART2.AREA" + area).c_str()) : nullptr };
+        // The list's shading in one kernel (direct and indirect light together: the surface, material and air once per
+        // fragment) where the fragments do not run the area lights' loop - no area light in the scene, or the local
+        // lights come from the coverage MegaLights instance; else in the composite's two parts (the one-kernel form with
+        // that loop is over the DXIL limit).
+        const bool compactWhole = compact && (!areaLights || covMlDiffuse.valid());
+        ID3D12PipelineState* shadeList[2] = {
+            !compact ? nullptr : fc.shaders.compute(compactWhole ? "Passes/Shading/CoverageShadeWhole" : ("Passes/Shading/CoverageShadeList.PART1.AREA" + area).c_str()),
+            !compact || compactWhole ? nullptr : fc.shaders.compute(("Passes/Shading/CoverageShadeList.PART2.AREA" + area).c_str())
+        };
         ID3D12PipelineState* gather = compact ? fc.shaders.compute(("Passes/Shading/CoverageGather.OUTPUT" + output).c_str()) : nullptr;
         const BufferRef covEntries = compact ? g.createBuffer({ "m.coverage visible", std::max<uint64_t>(capacity, 1) * 8, 0 }) : BufferRef{};
         const BufferRef covRadiance = compact ? g.createBuffer({ "m.coverage radiance", std::max<uint64_t>(capacity, 1) * 12, 0 }) : BufferRef{};
@@ -1879,7 +1886,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
                       });
         };
-        auto addShadeList = [&](uint32_t stage) {
+        auto addShadeList = [&](uint32_t stage) {  // 0: the one kernel, 1 and 2: the two parts
             g.addPass(stage == 1 ? "m.coverage direct" : "m.coverage", QueueType::Graphics,
                       [&](PassBuilder& b) {
                           useShading(b);
@@ -1903,7 +1910,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           k32[24] = k32[25] = gpu::kNone;
                           fragmentConstants(c, k32);  // P[6].zw, P[7], P[8].xy
                           k32[34] = gpu::kNone;       // P[8].z: no per-pixel direct sum in this form
-                          c.cmd->SetPipelineState(shadeList[stage - 1]);
+                          c.cmd->SetPipelineState(shadeList[stage == 2 ? 1 : 0]);
                           c.bindFrameConstants(cb);
                           c.computeConstants(k32, 48);
                           c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
@@ -2013,8 +2020,12 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         }
         if (compact)
         {
-            addShadeList(1);
-            addShadeList(2);
+            if (compactWhole) addShadeList(0);
+            else
+            {
+                addShadeList(1);
+                addShadeList(2);
+            }
             addGather();
         }
         else addComposite(2);
