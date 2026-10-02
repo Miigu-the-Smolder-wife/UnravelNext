@@ -28,7 +28,8 @@
 // P[5].x overflow need UAV (raw, 4 B per tile; with P[1].x): every tile's need starts at 0 (ShadowOverflow MODE0 writes
 // the listed tiles', ShadowOverflowScan allocates in tile order); P[5].y tiles per row. P[5].z the sun's screen-space
 // contact ray (shadowSunContact's packed word; 0: none): pixels the shadow map leaves lit ask the depth buffer for the
-// last centimetres.
+// last centimetres. P[5].w the self-shadow slack SRV (R16_FLOAT, ShadowSelfSlack.hlsl; 0xFFFFFFFF: none): the sun's
+// lookup of a pixel of a scene::InstanceNoSelfShadow instance starts past the instance's bounds, without a contact ray.
 // Frame constants of the view. Mixed pixels get their local slots here and their sun slot in pass 2.
 #include "Frame.hlsli"
 #include "Scene.hlsli"
@@ -64,7 +65,9 @@ void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out
     const float3 world = shadowReceiver(depthTex, P[0].y, px, depth, normal);
     facing = dot(normal, g_sunDirection) > 0 ? 1u : 2u;
     const float footprint = 2 * linearDepth(depth) * g_tanHalfFovY / g_viewHeight;
-    const VsmReceiver rc = vsmMakeReceiver(vc, world, normal, vsmLevelForFootprint(vc, footprint));
+    const float selfSlack = shadowSelfSlack(P[5].w, px);
+    const float3 worldSun = world + g_sunDirection * selfSlack;  // (the sun's lookups; the local slots stay at the surface)
+    const VsmReceiver rc = vsmMakeReceiver(vc, worldSun, normal, vsmLevelForFootprint(vc, footprint));
     uint k;
     float reach;
     const uint cls = vsmSunClassify(r, rc, footprint, tan(g_sunAngularRadius), k, reach, path);
@@ -127,12 +130,12 @@ void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out
         ts.lights = P[3].y;
         ts.pad0 = P[3].z;
         ts.layers = P[4].z;
-        sunT = shadowSunTransmittanceAt(ts, world, footprint, max(reach, footprint));
+        sunT = shadowSunTransmittanceAt(ts, worldSun, footprint, max(reach, footprint));
     }
     // B5 cloud shadow: the sun through the cloud layer at the receiver (P[4].w = transmittance LUT, UNX_NONE: none).
     if (cls != VSM_REGION_UMBRA && P[4].w != 0xFFFFFFFFu) sunT *= cloudSunTransmittanceFromLut(P[4].w, world);
     // The contact ray (settled lit pixels; the mixed ones take it in pass 2 with their filtered visibility).
-    if (cls != VSM_REGION_UMBRA && !mixed && sunT > 0) sunT *= shadowSunContact(depthTex, px, world, normal, P[5].z);
+    if (cls != VSM_REGION_UMBRA && !mixed && sunT > 0 && selfSlack == 0) sunT *= shadowSunContact(depthTex, px, world, normal, P[5].z);
     packed = (cls == VSM_REGION_UMBRA ? 0u : (uint)round(saturate(sunT) * 255.0)) | local;
 }
 

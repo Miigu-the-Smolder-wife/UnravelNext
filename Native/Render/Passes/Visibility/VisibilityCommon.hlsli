@@ -120,8 +120,15 @@ uint skinSlot(CullScene cs, uint instance)
 // them is tested (CullInstances SOURCE=1 skips the item); the proxy kernel draws them from the item.
 #define CHUNK_ITEM_PROXIES 0x80000000u
 
-// An instance a run draws: one of the run's instance mask (0: every instance) that is not hidden.
-bool instanceInRun(GpuInstance inst, uint mask) { return ((inst.flags & mask) != 0 || mask == 0) && (inst.flags & INSTANCE_HIDDEN) == 0; }
+// An instance a run draws: one of the run's instance mask (0: every instance) that is not hidden - and, for a
+// shadow-only instance (scene::InstanceShadowOnly), a run of the shadow casters (its mask names INSTANCE_CAST_SHADOW):
+// the views, the card captures and every other run leave it out.
+bool instanceInRun(GpuInstance inst, uint mask)
+{
+    if ((inst.flags & INSTANCE_HIDDEN) != 0) return false;
+    if ((inst.flags & INSTANCE_SHADOW_ONLY) != 0 && (mask & INSTANCE_CAST_SHADOW) == 0) return false;
+    return (inst.flags & mask) != 0 || mask == 0;
+}
 
 // Cull state words (RWByteAddressBuffer, 4 B each).
 #define VS_NODE_WRITE 0u

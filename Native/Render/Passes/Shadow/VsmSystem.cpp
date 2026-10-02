@@ -120,6 +120,7 @@ struct State
     bool cacheRange = false;
     uint32_t cacheRevision = UINT32_MAX;
     float cacheWind[4] = { -1, 0, 0, 0 };  // the scene wind the kept pages' wind casters were bounded with
+    bool noSelfShadow = false;  // this frame's scene has a scene::InstanceNoSelfShadow instance (ShadowSelfSlack.hlsl)
 };
 
 constexpr uint32_t kAtlasPagesPerRow = 128;                                        // VsmCommon.hlsli VSM_ATLAS_PAGES_PER_ROW
@@ -275,15 +276,18 @@ void lightBasis(float3 z, float3& x, float3& y)
     y = cross(z, x);
 }
 
-// Light-space height range of every shadow caster (bounding spheres), with a margin for dynamic motion.
-void casterHeightRange(const GpuScene& scene, float3 z, float& lo, float& hi)
+// Light-space height range of every shadow caster (bounding spheres), with a margin for dynamic motion. noSelfShadow:
+// an instance of the scene has scene::InstanceNoSelfShadow (the same walk over the instances).
+void casterHeightRange(const GpuScene& scene, float3 z, float& lo, float& hi, bool& noSelfShadow)
 {
     lo = 1e30f;
     hi = -1e30f;
+    noSelfShadow = false;
     const auto& inst = scene.instances();
     const auto& meshes = scene.meshes();
     for (const gpu::Instance& i : inst)
     {
+        noSelfShadow = noSelfShadow || ((i.flags & scene::InstanceNoSelfShadow) != 0 && (i.flags & gpu::kInstanceHidden) == 0);
         if ((i.flags & scene::InstanceCastShadow) == 0) continue;
         const gpu::Mesh& m = meshes[i.mesh];
         const float3 c{ m.boundsSphere.x, m.boundsSphere.y, m.boundsSphere.z };
@@ -1006,7 +1010,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     bool rangeKept = false;
     {
         float lo, hi;
-        casterHeightRange(fc.scene, sunDir, lo, hi);
+        casterHeightRange(fc.scene, sunDir, lo, hi, s.noSelfShadow);
         c.hMin = lo - margin;
         c.hMax = hi + margin;
         const bool sameSun = s.cacheRange && sunDir.x == s.cacheSun.x && sunDir.y == s.cacheSun.y && sunDir.z == s.cacheSun.z;
@@ -2190,6 +2194,30 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     const TextureRef depth = view.depth, gbuffer = view.gbuffer;
     const TextureRef mirrorMask = view.view.planarMask, mirrorTiles = view.view.planarTileMask;  // planar views: mirror pixels only
     const TextureRef atlas = s.atlasRef;
+    // scene::InstanceNoSelfShadow: where the view shows such an instance, the sun's lookups start past its bounds
+    // (ShadowSelfSlack.hlsl: the pixels' slack from the vis buffer). Recorded only when the scene has one.
+    TextureRef selfSlack;
+    if (s.noSelfShadow && view.visId.valid() && view.visibleClusters.valid())
+    {
+        selfSlack = g.createTexture(TextureDesc{ "S shadow self slack", w, h, 1, 1, DXGI_FORMAT_R16_FLOAT });
+        ID3D12PipelineState* ps = fc.shaders.compute("Passes/Shadow/ShadowSelfSlack");
+        const TextureRef visId = view.visId;
+        const BufferRef visibleClusters = view.visibleClusters;
+        const D3D12_GPU_VIRTUAL_ADDRESS viewConstants = view.frameConstants;
+        g.addPass("s.shadow.selfslack", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(visId, Use::SrvCompute);
+                      b.use(visibleClusters, Use::SrvCompute);
+                      b.use(selfSlack, Use::UavCompute);
+                  },
+                  [=](PassContext& ctx) {
+                      const uint32_t k[4] = { ctx.srv(visId), ctx.srv(visibleClusters), ctx.uav(selfSlack), 0 };
+                      ctx.cmd->SetPipelineState(ps);
+                      ctx.bindFrameConstants(viewConstants);
+                      ctx.computeConstants(k, 4);
+                      ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
+                  });
+    }
     // Local slots (1-3) and the overflow list from the view's froxel lists (INTERFACES 7.3, 7.4, v1.22): the main view's
     // (FrameRenderer sets them after froxels; tests without froxels: shadowPages' lists), a planar reflection view's own
     // (recorded here with its air volume from the mirror plane on).
@@ -2311,6 +2339,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   b.use(layers, Use::SrvCompute);
                   if (tlut.valid()) b.use(tlut, Use::SrvCompute);
                   if (useBuf.valid()) b.use(useBuf, Use::UavCompute);
+                  if (selfSlack.valid()) b.use(selfSlack, Use::SrvCompute);
               },
               [=](PassContext& ctx) {
                   const uint32_t k[24] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, overflowList ? ctx.uav(overflowTiles) : 0xFFFFFFFFu,
@@ -2319,7 +2348,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                                            overflowList ? ctx.uav(heads) : 0xFFFFFFFFu,
                                            mirrorMask.valid() ? ctx.srv(mirrorMask) : 0xFFFFFFFFu, mirrorTiles.valid() ? ctx.srv(mirrorTiles) : 0xFFFFFFFFu,
                                            ctx.srv(layers), tlut.valid() ? ctx.srv(tlut) : 0xFFFFFFFFu,
-                                           overflowList ? ctx.uav(needs) : 0xFFFFFFFFu, tilesX, contact, 0 };
+                                           overflowList ? ctx.uav(needs) : 0xFFFFFFFFu, tilesX, contact, selfSlack.valid() ? ctx.srv(selfSlack) : 0xFFFFFFFFu };
                   ctx.cmd->SetPipelineState(p1);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 24);
@@ -2354,14 +2383,15 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   b.use(layers, Use::SrvCompute);
                   if (tlut.valid()) b.use(tlut, Use::SrvCompute);
                   if (useBuf.valid()) b.use(useBuf, Use::UavCompute);
+                  if (selfSlack.valid()) b.use(selfSlack, Use::SrvCompute);
               },
               [=](PassContext& ctx) {
-                  const uint32_t k[16] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, contact, ctx.srv(table), ctx.srv(atlas), ctx.srv(bound),
+                  const uint32_t k[20] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, contact, ctx.srv(table), ctx.srv(atlas), ctx.srv(bound),
                                            ctx.srv(list), ctx.srv(blocks), ctx.uav(statsBuf), ctx.uav(filterList), rays, steps, ctx.srv(layers),
-                                           tlut.valid() ? ctx.srv(tlut) : 0xFFFFFFFFu };
+                                           tlut.valid() ? ctx.srv(tlut) : 0xFFFFFFFFu, selfSlack.valid() ? ctx.srv(selfSlack) : 0xFFFFFFFFu, 0, 0, 0 };
                   ctx.cmd->SetPipelineState(p2);
                   ctx.bindFrameConstants(constants);
-                  ctx.computeConstants(k, 16);
+                  ctx.computeConstants(k, 20);
                   ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(args), 0, nullptr, 0);
               });
     // The penumbra filter over the pixels the search left (ShadowPenumbra STAGE=1, full waves).
@@ -2392,14 +2422,15 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                       b.use(layers, Use::SrvCompute);
                       if (tlut.valid()) b.use(tlut, Use::SrvCompute);
                       if (useBuf.valid()) b.use(useBuf, Use::UavCompute);
+                      if (selfSlack.valid()) b.use(selfSlack, Use::SrvCompute);
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[16] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, contact, ctx.srv(table), ctx.srv(atlas), ctx.srv(bound),
+                      const uint32_t k[20] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, contact, ctx.srv(table), ctx.srv(atlas), ctx.srv(bound),
                                                ctx.srv(filterList), ctx.srv(blocks), 0xFFFFFFFFu, 0xFFFFFFFFu, rays, steps, ctx.srv(layers),
-                                               tlut.valid() ? ctx.srv(tlut) : 0xFFFFFFFFu };
+                                               tlut.valid() ? ctx.srv(tlut) : 0xFFFFFFFFu, selfSlack.valid() ? ctx.srv(selfSlack) : 0xFFFFFFFFu, 0, 0, 0 };
                       ctx.cmd->SetPipelineState(p3);
                       ctx.bindFrameConstants(constants);
-                      ctx.computeConstants(k, 16);
+                      ctx.computeConstants(k, 20);
                       ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(filterArgs), 0, nullptr, 0);
                   });
     }

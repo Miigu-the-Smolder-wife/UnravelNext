@@ -343,7 +343,8 @@ struct SurfaceCacheCards::Impl
             if (tracked[i].state == 2) scene->removeInstance(i);
         tracked.resize(count);
         const bool rebased = fc.frame.originShift.x != 0 || fc.frame.originShift.y != 0 || fc.frame.originShift.z != 0;
-        const uint32_t excluded = gpu::kInstanceHidden | gpu::kInstanceViewModel | scene::InstanceSkinned | scene::InstanceWind;
+        // (a shadow-only instance is in no view and no GI ray: it has no cards)
+        const uint32_t excluded = gpu::kInstanceHidden | gpu::kInstanceViewModel | scene::InstanceSkinned | scene::InstanceWind | scene::InstanceShadowOnly;
         for (uint32_t i = 0; i < count; ++i)
         {
             const gpu::Instance& g = instances[i];
