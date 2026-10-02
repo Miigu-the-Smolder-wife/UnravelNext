@@ -6,15 +6,23 @@
 // none. Ray: origin moved by the normal bias to the light's side of the surface, TMin = the bias, TMax = distance - the
 // end bias (r.MegaLights.HardwareRayTracing.Bias / NormalBias / EndBias of Unreal, in metres here; the end bias default
 // is S's rule instead: what lies within 5 cm of a light - its own fixture - casts no shadow, VsmLocalLight::nearM).
-// P[0] = { samples UAV (R32G32_UINT), downsampled key SRV, the dispatch's first row, 0 }: the sample texture goes in bands
-//        of rows, each at most 262,144 rays (MegaLights.cpp; DISPATCH_BOUNDS_KO.md)
-// P[1] = { downsampled width, height, factor | N << 8, 0 }
+// Screen traces first (shading.mega_lights_screen_traces; the reference's r.MegaLights.ScreenTraces, MegaLightsRayTracing.usf
+// ScreenSpaceRayTraceSamples): the sample's ray is walked across the depth buffer (ScreenTrace.hlsli) for at most the
+// screen trace distance (1 m) from the surface point lifted off the surface by its pixel's footprint on the normal x 2
+// (the reference's ApplyScreenSpaceRayBias) plus the normal bias; a hit hides the sample and no world ray follows. It is
+// what gives small things - and whatever the ray scene does not hold as it is drawn: deformed and displaced surfaces -
+// their contact shadows. A walk without a hit is followed by the world ray from the surface, as without it.
+// P[0] = { samples UAV (R32G32_UINT), downsampled key SRV, the dispatch's first row, depth SRV (the view's device depth) }:
+//        the sample texture goes in bands of rows, each at most 262,144 rays (MegaLights.cpp; DISPATCH_BOUNDS_KO.md)
+// P[1] = { downsampled width, height, factor | N << 8, depth pyramid SRV (ScreenTrace.hlsli; UNX_NONE: no screen traces) }
 // P[2] = { ray bias, normal bias, end bias (m, floats), 0 }
+// P[3] = { screen trace normal bias (m), relative depth thickness, largest distance (m) (floats), iterations }
 // P[6], P[7] = RtSceneSrvs (RayShaders.hlsli)
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
 #include "Passes/Shading/MegaLightsWorld.hlsli"  // mlSampleVisible
+#include "Passes/Reflection/ScreenTrace.hlsli"
 
 [shader("raygeneration")]
 void MegaLightsTraceGen()
@@ -35,6 +43,29 @@ void MegaLightsTraceGen()
     mPixelRay(float2(pixel) + 0.5, D, Dx, Dy);
     const float3 x = g_cameraPosition + D * linearZ;
     const float3 n = octDecode(key.y);
+    if (P[1].w != UNX_NONE)
+    {
+        const GpuLight g = loadLight(s.light);
+        RtLightSample ls;
+        if (rtLightSample(mlRtLight(g), x, s.uv.x, s.uv.y, ls) && dot(n, ls.wi) > 0)
+        {
+            float3 Dc, Dcx, Dcy;
+            mPixelRay(float2(pixel) + 1.0, Dc, Dcx, Dcy);  // the pixel's corner at the surface's depth
+            const float lift = abs(dot(g_cameraPosition + Dc * linearZ - x, n)) * 2.0 + asfloat(P[3].x);
+            const float reach = min(ls.distance - lightRayEndBias(g, asfloat(P[2].z)), asfloat(P[3].z));
+            if (reach > 0)
+            {
+                Texture2D<float> depth = ResourceDescriptorHeap[P[0].w];
+                Texture2D<float> pyramid = ResourceDescriptorHeap[P[1].w];
+                const SctResult walk = sctTrace(depth, pyramid, uint2(g_viewWidth, g_viewHeight), x + n * lift, ls.wi, reach, P[3].w, asfloat(P[3].y), 0);
+                if (walk.hit)
+                {
+                    samples[texel] = uint2(stored.x & 0x7FFFFFFFu, stored.y);
+                    return;
+                }
+            }
+        }
+    }
     const bool visible = mlSampleVisible(rtScene(), x, n, s.light, s.uv, asfloat(P[2].x), asfloat(P[2].y), asfloat(P[2].z));
     if (!visible) samples[texel] = uint2(stored.x & 0x7FFFFFFFu, stored.y);
 }

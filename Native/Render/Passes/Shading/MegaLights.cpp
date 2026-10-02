@@ -110,6 +110,9 @@ struct Settings
     bool guide, merge, temporal, spatial, historyVariance;
     float minSampleWeight, hiddenWeight, hiddenWeightMiss, maxWeight, maxWeightHidden;
     float rayBias, rayNormalBias, rayEndBias;
+    bool screenTraces;
+    float screenNormalBias, screenThickness, screenDistance;
+    uint32_t screenIterations;
     float maxFrames, minFramesMiss, distanceThreshold, clampScale;
     float radius, depthWeight, maxDisocclusionFrames, disocclusionDiffuse, disocclusionSpecular, historyStdDev;
     uint32_t spatialSamples;
@@ -135,6 +138,13 @@ Settings settings(const QualityConfig& q)
     s.rayBias = (float)q.number("shading.mega_lights_ray_bias_m");
     s.rayNormalBias = (float)q.number("shading.mega_lights_ray_normal_bias_m");
     s.rayEndBias = (float)q.number("shading.mega_lights_ray_end_bias_m");
+    s.screenTraces = q.has("shading.mega_lights_screen_traces") && q.boolean("shading.mega_lights_screen_traces");
+    s.screenNormalBias = q.has("shading.mega_lights_screen_trace_normal_bias_m") ? (float)q.number("shading.mega_lights_screen_trace_normal_bias_m") : 0.0005f;
+    s.screenThickness = q.has("shading.mega_lights_screen_trace_relative_thickness") ? (float)q.number("shading.mega_lights_screen_trace_relative_thickness") : 0.005f;
+    s.screenDistance = q.has("shading.mega_lights_screen_trace_max_distance_m") ? (float)q.number("shading.mega_lights_screen_trace_max_distance_m") : 1.0f;
+    s.screenIterations = q.has("shading.mega_lights_screen_trace_max_iterations") ? (uint32_t)q.integer("shading.mega_lights_screen_trace_max_iterations") : 50u;
+    if (s.screenIterations < 1 || s.screenIterations > 256 || !(s.screenDistance > 0) || !(s.screenThickness > 0))
+        fail("shading.mega_lights_screen_trace_*: 1..256 iterations, a positive distance and thickness");
     s.maxFrames = (float)q.number("shading.mega_lights_temporal_max_frames");
     s.minFramesMiss = (float)q.number("shading.mega_lights_temporal_min_frames_history_miss");
     s.distanceThreshold = (float)q.number("shading.mega_lights_temporal_distance_threshold");
@@ -288,15 +298,26 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
 
     rt::RayScene* rays = &rt::RayScene::get(fc);
     rt::RayPipeline& pipeline = rt::RayPipeline::get(fc.device, fc.shaders, rt::standardRayPipeline("Passes/Shading/MegaLightsTrace", { "MegaLightsTraceGen" }));
+    // screen traces: the main view's own depth and its pyramid (tracks::screenTraceInputs published it before GI); the
+    // coverage layer's instance has another depth and none
+    const TextureRef pyramid = s.screenTraces && view.view.kind == gpu::ViewKind::Main && !instance ? fc.resources.screenTraceHzb : TextureRef{};
+    const TextureRef traceDepth = view.depth;
     g.addPass("m.ml.trace", QueueType::Compute,
               [&](PassBuilder& b) {
                   rays->declareTraversal(b);
                   b.use(keys, Use::SrvCompute);
                   b.use(samples, Use::UavCompute);
+                  if (pyramid.valid())
+                  {
+                      b.use(pyramid, Use::SrvCompute);
+                      b.use(traceDepth, Use::SrvCompute);
+                  }
               },
               [=, &pipeline](PassContext& c) {
-                  uint32_t k[32] = { c.uav(samples), c.srv(keys), 0, 0, dsW, dsH, s.factor | (s.count << 8), 0,
-                                     asUint(s.rayBias), asUint(s.rayNormalBias), asUint(s.rayEndBias), 0 };
+                  uint32_t k[32] = { c.uav(samples), c.srv(keys), 0, pyramid.valid() ? c.srv(traceDepth) : 0xFFFFFFFFu,
+                                     dsW, dsH, s.factor | (s.count << 8), pyramid.valid() ? c.srv(pyramid) : 0xFFFFFFFFu,
+                                     asUint(s.rayBias), asUint(s.rayNormalBias), asUint(s.rayEndBias), 0,
+                                     asUint(s.screenNormalBias), asUint(s.screenThickness), asUint(s.screenDistance), s.screenIterations };
                   rays->rootConstants(k + 24);
                   c.bindFrameConstants(cb);
                   // Bands of rows, each its own DispatchRays of at most kRaysPerDispatch rays (one per sample texel): the

@@ -397,11 +397,14 @@ void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs
                       k[20] = directCapacity, k[21] = 0, k[22] = radiosityCapacity, k[23] = c.srv(pageLight);
                       c.bindFrameConstants(cb);
                       const uint64_t threads = (uint64_t)radiosityCapacity * 64;
-                      for (uint64_t first = 0; first < threads; first += kThreadsPerDispatch)
+                      // (a thread traces at most 3 rays - its own and, at a hit without cards, the sun's and a light
+                      // sample's: a dispatch holds a third of the threads)
+                      const uint64_t perDispatch = kThreadsPerDispatch / 3;
+                      for (uint64_t first = 0; first < threads; first += perDispatch)
                       {
                           k[18] = (uint32_t)first;
                           c.computeConstants(k, 32);
-                          radiosityTrace.dispatch(c.cmd, 0, (uint32_t)std::min<uint64_t>(kThreadsPerDispatch, threads - first), 1);
+                          radiosityTrace.dispatch(c.cmd, 0, (uint32_t)std::min<uint64_t>(perDispatch, threads - first), 1);
                       }
                   });
         g.addPass("r.card.radiosity.probe", QueueType::Compute,

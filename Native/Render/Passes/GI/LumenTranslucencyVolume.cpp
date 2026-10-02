@@ -19,7 +19,7 @@ namespace unx::render::gi
 namespace
 {
 constexpr uint32_t kRing = 4, kParamBytes = 96, kPixelSize = 32, kTraceRes = 3;
-constexpr uint32_t kMaxRaysPerDispatch = 262144;  // (a thread traces one ray)
+constexpr uint32_t kMaxRaysPerDispatch = 262144 / 3;  // threads: one traces at most 3 rays (its own; at a hit without cards the sun's and a light sample's)
 const char* kTraceLibrary[2] = { "Passes/GI/LumenTranslucencyVolumeTrace.SKY0", "Passes/GI/LumenTranslucencyVolumeTrace.SKY1" };
 
 // LumenTranslucencyVolume.hlsli LtvParams

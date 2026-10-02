@@ -30,6 +30,12 @@ mega_lights_hidden_weight_history_miss = 0.4      # GuideByHistory.LightHiddenWe
 mega_lights_merge_rays = true                     # MergeRays: samples of one light share a ray outside penumbrae
 mega_lights_max_shading_weight = 20.0             # MaxShadingWeight: cap of a sample's 1 / probability (energy lost above it)
 mega_lights_max_shading_weight_hidden = 5.0       # MaxShadingWeightForHiddenLight
+mega_lights_screen_traces = true                  # ScreenTraces: a sample's ray is walked across the depth buffer first (contact shadows, and
+                                                  # shadows of what the ray scene does not hold as drawn); a hit hides the sample
+mega_lights_screen_trace_max_iterations = 50      # ScreenTraces.MaxIterations
+mega_lights_screen_trace_max_distance_m = 1.0     # ScreenTraces.MaxDistance (100 cm)
+mega_lights_screen_trace_relative_thickness = 0.005  # ScreenTraces.RelativeDepthThickness
+mega_lights_screen_trace_normal_bias_m = 0.0005   # ScreenTraces.NormalBias (0.05 cm), on top of the pixel's footprint on the normal x 2
 mega_lights_ray_bias_m = 0.01                     # HardwareRayTracing.Bias (TMin)
 mega_lights_ray_normal_bias_m = 0.001             # HardwareRayTracing.NormalBias
 mega_lights_ray_end_bias_m = 0.01                 # HardwareRayTracing.EndBias (1 cm): where a shadow ray ends before its point on the
