@@ -62,7 +62,8 @@ upscale_tsr_reprojection_field = true   # with upscale_tsr: the reprojection fie
 upscale_tsr_reprojection_field_aa_speed = 0.125  # output pixels a frame the two sides of an edge must move apart by before the
                                         # boundary is found from the depth edge (r.TSR.ReprojectionField.AntiAliasPixelSpeed);
                                         # slower edges give the whole pixel to the foreground
-upscale_tsr_resurrection = true         # with upscale_tsr: history resurrection (TsrResurrect.hlsl; the reference's
+upscale_tsr_resurrection = false        # (off as the reference's default, until one batch has measured its cost and picture)
+                                        # with upscale_tsr: history resurrection (TsrResurrect.hlsl; the reference's
                                         # r.TSR.Resurrection, off in its defaults): the history keeps every 31st frame (two of them,
                                         # its Resurrection.PersistentFrameInterval / PersistentFrameCount) beside the previous one;
                                         # a pixel whose history is rejected or was hidden in the previous frame takes the kept
@@ -70,7 +71,8 @@ upscale_tsr_resurrection = true         # with upscale_tsr: history resurrection
                                         # the wall behind a passer-by, a view turned back) instead of starting from this frame's
                                         # samples. Costs two more histories and guides (4K output at 100 %: 2 x 63 MiB) and one
                                         # more reprojection and measure of the guide. false: the two-frame history
-upscale_tsr_history_percent = 200.0     # with upscale_tsr: the history's size, percent of the output's per axis (100 .. 200; the
+upscale_tsr_history_percent = 100.0     # (100 until measured: 200 at a 4K output is an 8K history and four times the update's pixels)
+                                        # with upscale_tsr: the history's size, percent of the output's per axis (100 .. 200; the
                                         # reference's r.TSR.History.ScreenPercentage, 200 on its epic tier): above 100 the history
                                         # holds detail beyond the output's pixels, each reprojection resamples it with less blur,
                                         # and m.tsr.resolve filters it down to the output (TsrResolve.hlsl). 200 at a 4K output: an
