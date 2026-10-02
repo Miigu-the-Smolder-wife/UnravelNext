@@ -16,8 +16,6 @@
 // P[3] = { minimum sample weight, hidden weight, hidden weight without history, history distance threshold } (floats)
 // P[4] = { vis id, visible clusters (UNX_NONE: static reprojection), sets' tiles X, tiles Y }
 // P[5] = { B2 stable area lights' mask (UNX_NONE: none), the tile list (raw; MegaLightsTiles.hlsl), 0, 0 }
-// P[6] = { weight cap, weight cap of a light guided as hidden, the caps' scale with the effective number of lights
-//          (mlWeightCap, MegaLightsSampling.hlsli; 0: the constant caps) } (floats)
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
@@ -145,9 +143,7 @@ void main(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID)
             o.light = r.light[i];
             o.visible = true;
             o.guidedVisible = guide ? r.wasVisible[i] : true;
-            // (the weight caps are applied here, with the place's effective number of lights - mlWeightCap; the shading
-            // kernels' own caps are open)
-            o.weight = min(r.sum / r.weight[i], mlWeightCap(r, o.guidedVisible ? asfloat(P[6].x) : asfloat(P[6].y), asfloat(P[6].z)));
+            o.weight = r.sum / r.weight[i];
             o.needsRay = lightCastsShadow(light);
             if (area) o.uv = float2(mlNoise(coord, g_frameIndex, 3), mlNoise(coord, g_frameIndex, 4));
             bool penumbra = true;

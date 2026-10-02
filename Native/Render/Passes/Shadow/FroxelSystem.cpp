@@ -768,7 +768,6 @@ SampledLocal recordSampledLocal(FramePassContext& fc, const ViewResources& view,
     if (samples != 1 && samples != 2 && samples != 4) fail("shading.mega_lights_volume_samples must be 1, 2 or 4");
     const float minWeight = (float)q.number("shading.mega_lights_volume_min_sample_weight"), cap = (float)q.number("shading.mega_lights_max_shading_weight");
     const float bias = (float)q.number("shading.mega_lights_ray_bias_m"), endBias = (float)q.number("shading.mega_lights_ray_end_bias_m");
-    const float capLightScale = q.has("shading.mega_lights_max_shading_weight_light_scale") ? (float)q.number("shading.mega_lights_max_shading_weight_light_scale") : 0.0f;
     const float frames = (float)q.number("shading.mega_lights_volume_max_frames");
     if (!(frames >= 1 && frames <= 64)) fail("shading.mega_lights_volume_max_frames must be in [1, 64]");
     rt::RayScene* rays = &rt::RayScene::get(fc);
@@ -793,7 +792,7 @@ SampledLocal recordSampledLocal(FramePassContext& fc, const ViewResources& view,
                   uint32_t k[32] = { ctx.srv(lights), ctx.uav(output), ctx.srv(tlut), functions.valid() ? ctx.srv(functions) : 0xFFFFFFFFu,
                                      previous.valid() ? ctx.srv(previous) : 0xFFFFFFFFu, samples, readers.valid() ? ctx.srv(readers) : 0xFFFFFFFFu, 0,
                                      bits(minWeight), bits(bias), bits(endBias), bits(ratio),
-                                     bits(cap), bits(frames), 0, bits(capLightScale),
+                                     bits(cap), bits(frames), 0, 0,
                                      ctx.uav(fluence), ctx.uav(moment), previous.valid() ? ctx.srv(prevFluence) : 0xFFFFFFFFu, previous.valid() ? ctx.srv(prevMoment) : 0xFFFFFFFFu };
                   rays->rootConstants(k + 24);
                   ctx.bindFrameConstants(constants);

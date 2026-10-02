@@ -108,7 +108,7 @@ struct Settings
 {
     uint32_t factor, count;
     bool guide, merge, temporal, spatial, historyVariance;
-    float minSampleWeight, hiddenWeight, hiddenWeightMiss, maxWeight, maxWeightHidden, weightLightScale;
+    float minSampleWeight, hiddenWeight, hiddenWeightMiss, maxWeight, maxWeightHidden;
     float rayBias, rayNormalBias, rayEndBias;
     bool screenTraces;
     float screenNormalBias, screenThickness, screenDistance;
@@ -135,8 +135,6 @@ Settings settings(const QualityConfig& q)
     s.hiddenWeightMiss = (float)q.number("shading.mega_lights_hidden_weight_history_miss");
     s.maxWeight = (float)q.number("shading.mega_lights_max_shading_weight");
     s.maxWeightHidden = (float)q.number("shading.mega_lights_max_shading_weight_hidden");
-    s.weightLightScale = q.has("shading.mega_lights_max_shading_weight_light_scale") ? (float)q.number("shading.mega_lights_max_shading_weight_light_scale") : 0.0f;
-    if (!(s.weightLightScale >= 0)) fail("shading.mega_lights_max_shading_weight_light_scale must not be negative");
     s.rayBias = (float)q.number("shading.mega_lights_ray_bias_m");
     s.rayNormalBias = (float)q.number("shading.mega_lights_ray_normal_bias_m");
     s.rayEndBias = (float)q.number("shading.mega_lights_ray_end_bias_m");
@@ -212,10 +210,8 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
     ml.on = true;
     ml.factor = s.factor;
     ml.count = s.count;
-    // (the caps are applied to the stored weights by m.ml.sample, which knows the place's effective number of lights -
-    // mlWeightCap; the shading kernels' own caps stay open)
-    ml.maxWeight = 60000.0f;
-    ml.maxWeightHidden = 60000.0f;
+    ml.maxWeight = s.maxWeight;
+    ml.maxWeightHidden = s.maxWeightHidden;
     ml.minSampleWeight = s.minSampleWeight;
     ml.samples = g.createTexture({ "m.ml samples", dsW * gridX, dsH * gridY, 1, 1, DXGI_FORMAT_R32G32_UINT });
     ml.keys = g.createTexture({ "m.ml keys", dsW, dsH, 1, 1, DXGI_FORMAT_R32G32_UINT });
@@ -288,16 +284,15 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
               },
               [=](PassContext& c) {
                   const uint32_t none = gpu::kNone;
-                  const uint32_t k[28] = { c.srv(gbuffer), c.srv(depth), c.srv(materialWord), c.srv(froxelLights),
+                  const uint32_t k[24] = { c.srv(gbuffer), c.srv(depth), c.srv(materialWord), c.srv(froxelLights),
                                            c.uav(samples), c.uav(keys), guide ? c.srv(sets) : none, guide ? c.srv(prevDepth) : none,
                                            dsW, dsH, s.factor | (s.count << 8) | ((guide ? 1u : 0u) | (s.merge ? 2u : 0u)) << 16, ltcSrv,
                                            asUint(s.minSampleWeight), asUint(s.hiddenWeight), asUint(s.hiddenWeightMiss), asUint(s.distanceThreshold),
                                            hasVis ? c.srv(visId) : none, hasVis ? c.srv(clusters) : none, tilesX, tilesY,
-                                           stable, c.srv(tileList), 0, 0,
-                                           asUint(s.maxWeight), asUint(s.maxWeightHidden), asUint(s.weightLightScale), 0 };
+                                           stable, c.srv(tileList), 0, 0 };
                   c.cmd->SetPipelineState(samplePso);
                   c.bindFrameConstants(cb);
-                  c.computeConstants(k, 28);
+                  c.computeConstants(k, 24);
                   c.cmd->ExecuteIndirect(dispatchSignature, 1, c.resource(tileList), 0, nullptr, 0);
               });
 

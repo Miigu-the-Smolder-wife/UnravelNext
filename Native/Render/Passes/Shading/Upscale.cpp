@@ -419,7 +419,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                                                asUint(theoreticBlend), flickering ? c.srv(moireError) : 0xFFFFFFFFu, 0, 0 };
                       c.cmd->SetPipelineState(rejectPso);
                       c.computeConstants(k, 12);
-                      c.cmd->Dispatch((w + 19) / 20, (h + 19) / 20, 1);  // TsrReject.hlsl TILE
+                      c.cmd->Dispatch((w + 15) / 16, (h + 15) / 16, 1);
                   });
         g.addPass("m.tsr.aa", QueueType::Graphics,
                   [&](PassBuilder& b) {
