@@ -12,7 +12,8 @@
 
 // meshoptimizer's cluster LOD scheme (demo/clusterlod.h, MIT, Arseny Kapoulkine): its helpers (clusterize, partition,
 // lockBoundary, boundsCompute, mergeGroups) are used as is; the build loop below is ours because it adds the
-// thin-feature error limit and drops the sloppy fallback (which merges disconnected leaves and blades into blobs).
+// thin-feature error limit and drops the sloppy fallback (which merges disconnected leaves and blades into blobs); past
+// that limit, thin geometry is thinned by whole pieces whose area the remaining ones take (Settings::thinPreserveArea).
 #pragma warning(push, 0)
 #pragma warning(disable : 4505)  // unused static helpers of the header
 #define CLUSTERLOD_IMPLEMENTATION
@@ -22,6 +23,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cfloat>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -63,6 +65,28 @@ struct MeshOut
     std::vector<clodNode> nodes;
     uint32_t levelCount = 0;
     MeshStats stats;
+    // The builder's own vertices (LodVertices): cluster vertex index (the mesh's vertex count) + i.
+    std::vector<float3> lodPositions;
+    std::vector<uint32_t> lodSources;
+};
+
+// The hierarchy's vertices: the mesh's own, then the ones made for enlarged thin geometry (enlargeIslands). Parallel
+// arrays that every DAG of the mesh appends to; meshoptimizer reads them through clodMesh (bind after they grow).
+struct Vertices
+{
+    std::vector<float3> positions;
+    std::vector<float> attributes;            // kAttributeCount per vertex
+    std::vector<unsigned char> boundaryLock;
+    std::vector<unsigned int> remap;          // canonical vertex of the same position
+    size_t sourceCount = 0;                   // the mesh's vertices
+    std::vector<uint32_t> source;             // per added vertex: the mesh vertex whose attributes it has
+    void bind(clodMesh& mesh) const
+    {
+        mesh.vertex_count = positions.size();
+        mesh.vertex_positions = &positions[0].x;
+        mesh.vertex_attributes = attributes.data();
+        mesh.vertex_lock = boundaryLock.data();
+    }
 };
 
 std::vector<unsigned int> simplifyLimited(const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& indices, const std::vector<unsigned char>& locks,
@@ -110,10 +134,393 @@ std::vector<size_t> foldedTriangles(const clodMesh& mesh, const std::vector<unsi
     return folded;
 }
 
-void buildSubmesh(const Settings& settings, bool morphed, const clodConfig& config, const clodMesh& mesh, const std::vector<unsigned int>& remap, std::vector<unsigned char>& locks,
+// ---- Thin geometry past the error limit (Settings::thinPreserveArea) ----------------------------------------------------
+// A group of leaves, blades or needles cannot simplify within the thin-feature limit: a collapse that removes one
+// would erode it. Such a group loses whole pieces instead (dropIslands) and the pieces that stay grow until the group
+// has its area again (enlargeIslands), so every cut covers what the source covers.
+constexpr double kIslandScaleMax = 4.0;  // largest enlargement of a piece along one axis
+constexpr double kAreaTolerance = 0.02;  // a thinned group keeps its area within this, or stays terminal
+constexpr double kDropShareMax = 0.75;   // of the candidate islands' triangles: the ones left take at most 4 x their area each
+
+// Islands of a group: its input triangles connected through welded vertices. A free island has no locked vertex, so no
+// other group, terminal cluster, submesh or instance uses its vertices: it can be dropped or moved as a whole without
+// opening a border. width = the feature width of its component (FeatureWidth.h).
+struct Islands
+{
+    std::unordered_map<unsigned int, uint32_t> ofVertex;  // welded vertex -> island
+    std::vector<uint8_t> free;
+    std::vector<float> width;
+    uint32_t of(unsigned int welded) const { return ofVertex.find(welded)->second; }
+};
+
+template <typename WidthOf>
+Islands islandsOf(const std::vector<unsigned int>& remap, const std::vector<unsigned char>& locks, const std::vector<unsigned int>& merged, const WidthOf& widthOf)
+{
+    Islands out;
+    std::vector<uint32_t> parent;
+    for (unsigned int v : merged)
+        if (out.ofVertex.emplace(remap[v], (uint32_t)parent.size()).second) parent.push_back((uint32_t)parent.size());
+    auto root = [&](uint32_t x) {
+        while (parent[x] != x) x = parent[x] = parent[parent[x]];
+        return x;
+    };
+    for (size_t t = 0; t < merged.size(); t += 3)
+        for (int k = 1; k < 3; ++k)
+        {
+            const uint32_t a = root(out.of(remap[merged[t]])), b = root(out.of(remap[merged[t + k]]));
+            if (a != b) parent[std::max(a, b)] = std::min(a, b);  // smaller root wins: deterministic
+        }
+    // Numbered in the order the group's triangles reach them.
+    std::vector<uint32_t> number(parent.size(), UINT32_MAX);
+    uint32_t count = 0;
+    for (unsigned int v : merged)
+    {
+        const uint32_t r = root(out.of(remap[v]));
+        if (number[r] == UINT32_MAX) number[r] = count++;
+    }
+    for (auto& [vertex, island] : out.ofVertex) island = number[root(island)];
+    out.free.assign(count, 1);
+    out.width.assign(count, 0.0f);
+    for (unsigned int v : merged)
+    {
+        const uint32_t island = out.of(remap[v]);
+        if (locks[v] & meshopt_SimplifyVertex_Lock) out.free[island] = 0;
+        out.width[island] = widthOf(v);
+    }
+    return out;
+}
+
+// Drops whole free islands from 'lod' until it has at most targetCount indices. The narrowest islands that hold twice
+// the excess are the candidates, and of those every other one goes along a space-filling curve through their centres,
+// so the group thins evenly instead of emptying one side. Returns whether any was dropped; widest = the largest width
+// dropped: what a cut loses with them is at most that wide, and the group's error is at least it.
+bool dropIslands(const Vertices& vertices, const Islands& islands, size_t targetCount, std::vector<unsigned int>& lod, float& widest)
+{
+    widest = 0;
+    if (lod.size() <= targetCount) return false;
+    struct Piece
+    {
+        uint32_t island;
+        size_t indices;
+    };
+    std::vector<uint32_t> slot(islands.free.size(), UINT32_MAX);
+    std::vector<Piece> pieces;
+    std::vector<float3> centres;  // sum of the triangle centres
+    for (size_t t = 0; t < lod.size(); t += 3)
+    {
+        const uint32_t island = islands.of(vertices.remap[lod[t]]);
+        if (!islands.free[island] || !(islands.width[island] < FLT_MAX)) continue;
+        if (slot[island] == UINT32_MAX)
+        {
+            slot[island] = (uint32_t)pieces.size();
+            pieces.push_back({ island, 0 });
+            centres.push_back({});
+        }
+        pieces[slot[island]].indices += 3;
+        centres[slot[island]] = centres[slot[island]] + (vertices.positions[lod[t]] + vertices.positions[lod[t + 1]] + vertices.positions[lod[t + 2]]) / 3.0f;
+    }
+    if (pieces.empty()) return false;
+    const size_t excess = lod.size() - targetCount;
+    std::vector<uint32_t> order(pieces.size());
+    for (uint32_t i = 0; i < (uint32_t)order.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&](uint32_t x, uint32_t y) {
+        const float wx = islands.width[pieces[x].island], wy = islands.width[pieces[y].island];
+        return wx != wy ? wx < wy : x < y;
+    });
+    size_t held = 0, candidates = 0;
+    while (candidates < order.size() && held < 2 * excess) held += pieces[order[candidates++]].indices;
+    order.resize(candidates);
+    std::vector<float3> points(candidates);
+    for (size_t i = 0; i < candidates; ++i) points[i] = centres[order[i]] / (float)(pieces[order[i]].indices / 3);
+    std::vector<unsigned int> rank(candidates);
+    meshopt_spatialSortRemap(rank.data(), &points[0].x, candidates, sizeof(float3));
+    std::vector<uint32_t> along(candidates);
+    for (size_t i = 0; i < candidates; ++i) along[rank[i]] = order[i];
+    // Error diffusion along the curve: the dropped share of the indices met so far follows 'share'. Where the free
+    // islands are too few to reach the target (the rest of the group is held by borders), some still stay to be enlarged.
+    const double share = std::min(kDropShareMax, (double)excess / (double)held);
+    double carried = 0;
+    std::vector<uint8_t> dropped(islands.free.size(), 0);
+    for (uint32_t i : along)
+    {
+        const Piece& piece = pieces[i];
+        carried += share * (double)piece.indices;
+        if (carried < 0.5 * (double)piece.indices) continue;
+        carried -= (double)piece.indices;
+        dropped[piece.island] = 1;
+        widest = std::max(widest, islands.width[piece.island]);
+    }
+    size_t write = 0;
+    for (size_t t = 0; t < lod.size(); t += 3)
+    {
+        if (dropped[islands.of(vertices.remap[lod[t]])]) continue;
+        for (int k = 0; k < 3; ++k) lod[write + k] = lod[t + k];
+        write += 3;
+    }
+    const bool any = write < lod.size();
+    lod.resize(write);
+    return any;
+}
+
+// Unit eigenvectors (rows of 'axes') of a symmetric 3 x 3 matrix, by cyclic Jacobi rotations. 'a' is destroyed.
+void symmetricAxes(double a[3][3], double axes[3][3])
+{
+    double v[3][3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+    for (int sweep = 0; sweep < 32; ++sweep)
+    {
+        const double off = std::fabs(a[0][1]) + std::fabs(a[0][2]) + std::fabs(a[1][2]);
+        if (!(off > 1e-14 * (std::fabs(a[0][0]) + std::fabs(a[1][1]) + std::fabs(a[2][2])))) break;
+        for (int p = 0; p < 2; ++p)
+            for (int q = p + 1; q < 3; ++q)
+            {
+                if (a[p][q] == 0) continue;
+                const double theta = (a[q][q] - a[p][p]) / (2 * a[p][q]);
+                const double t = (theta >= 0 ? 1.0 : -1.0) / (std::fabs(theta) + std::sqrt(theta * theta + 1));
+                const double c = 1 / std::sqrt(t * t + 1), sn = t * c;
+                for (int k = 0; k < 3; ++k)
+                {
+                    const double kp = a[k][p], kq = a[k][q];
+                    a[k][p] = c * kp - sn * kq;
+                    a[k][q] = sn * kp + c * kq;
+                }
+                for (int k = 0; k < 3; ++k)
+                {
+                    const double pk = a[p][k], qk = a[q][k];
+                    a[p][k] = c * pk - sn * qk;
+                    a[q][k] = sn * pk + c * qk;
+                }
+                for (int k = 0; k < 3; ++k)
+                {
+                    const double kp = v[k][p], kq = v[k][q];
+                    v[k][p] = c * kp - sn * kq;
+                    v[k][q] = sn * kp + c * kq;
+                }
+            }
+    }
+    for (int k = 0; k < 3; ++k)
+        for (int r = 0; r < 3; ++r) axes[k][r] = v[r][k];
+}
+
+// Gives a thinned group its area back (the reference's "preserve area"): every free island of 'lod' grows about its
+// centroid by one offset d along its principal axes (factor 1 + 2 d / its extent along the axis, at most
+// kIslandScaleMax). For a round island that is a uniform scale; a blade or a needle widens rather than lengthens, so
+// the same area costs the smallest displacement. d is the one offset that brings the group to areaBefore; islands with
+// a locked vertex stay where they are (other groups use their vertices), so the free ones take the whole deficit. The
+// moved vertices are new vertices (the group's own clusters keep theirs at every finer cut) and 'lod' is rewritten to
+// them; 'locks' gets their entries. Returns false when the area cannot be restored within kAreaTolerance (nothing is
+// changed; the group stays terminal). moved = the largest displacement.
+bool enlargeIslands(Vertices& vertices, std::vector<unsigned char>& locks, const Islands& islands, double areaBefore, std::vector<unsigned int>& lod, float& moved)
+{
+    struct Frame
+    {
+        double area = 0, centre[3] = {}, axes[3][3] = {}, extent[3] = {};
+    };
+    auto at = [&](unsigned int v, double out[3]) {
+        const float3 p = vertices.positions[v];
+        out[0] = p.x, out[1] = p.y, out[2] = p.z;
+    };
+    auto areaOf = [](const double e1[3], const double e2[3]) {
+        const double n[3] = { e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0] };
+        return 0.5 * std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    };
+    std::vector<uint32_t> slot(islands.free.size(), UINT32_MAX);
+    std::vector<Frame> frames;
+    double lockedArea = 0, freeArea = 0;
+    // Area and centroid (area-weighted triangle centres) of every free island.
+    for (size_t t = 0; t < lod.size(); t += 3)
+    {
+        double p[3][3];
+        for (int k = 0; k < 3; ++k) at(lod[t + k], p[k]);
+        const double e1[3] = { p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2] }, e2[3] = { p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2] };
+        const double area = areaOf(e1, e2);
+        const uint32_t island = islands.of(vertices.remap[lod[t]]);
+        if (!islands.free[island])
+        {
+            lockedArea += area;
+            continue;
+        }
+        if (slot[island] == UINT32_MAX)
+        {
+            slot[island] = (uint32_t)frames.size();
+            frames.push_back({});
+        }
+        Frame& f = frames[slot[island]];
+        f.area += area;
+        for (int r = 0; r < 3; ++r) f.centre[r] += area * (p[0][r] + p[1][r] + p[2][r]) / 3;
+        freeArea += area;
+    }
+    const double wanted = areaBefore - lockedArea;  // of the free islands
+    moved = 0;
+    if (freeArea >= wanted) return lockedArea + freeArea <= (1 + kAreaTolerance) * areaBefore;  // nothing was lost
+    if (!(freeArea > 0)) return false;
+    // Principal axes (second moments of the triangle corners about the centroid, area-weighted) and extents along them.
+    for (Frame& f : frames)
+        for (int r = 0; r < 3; ++r) f.centre[r] = f.area > 0 ? f.centre[r] / f.area : 0.0;
+    std::vector<std::array<double, 9>> moments(frames.size());
+    for (std::array<double, 9>& m : moments) m.fill(0.0);
+    for (size_t t = 0; t < lod.size(); t += 3)
+    {
+        const uint32_t island = islands.of(vertices.remap[lod[t]]);
+        if (slot[island] == UINT32_MAX) continue;
+        const Frame& f = frames[slot[island]];
+        double p[3][3];
+        for (int k = 0; k < 3; ++k) at(lod[t + k], p[k]);
+        const double e1[3] = { p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2] }, e2[3] = { p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2] };
+        const double area = areaOf(e1, e2);
+        for (int k = 0; k < 3; ++k)
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c) moments[slot[island]][3 * r + c] += area * (p[k][r] - f.centre[r]) * (p[k][c] - f.centre[c]);
+    }
+    for (size_t i = 0; i < frames.size(); ++i)
+    {
+        double a[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) a[r][c] = moments[i][3 * r + c];
+        symmetricAxes(a, frames[i].axes);
+    }
+    // Triangles of the free islands in their island's frame: corner coordinates along the axes.
+    struct Local
+    {
+        uint32_t frame;
+        double u[3][3];  // corner, axis
+    };
+    std::vector<Local> locals;
+    std::vector<std::array<double, 6>> range(frames.size(), std::array<double, 6>{ DBL_MAX, DBL_MAX, DBL_MAX, -DBL_MAX, -DBL_MAX, -DBL_MAX });
+    for (size_t t = 0; t < lod.size(); t += 3)
+    {
+        const uint32_t island = islands.of(vertices.remap[lod[t]]);
+        if (slot[island] == UINT32_MAX) continue;
+        const Frame& f = frames[slot[island]];
+        Local l;
+        l.frame = slot[island];
+        for (int k = 0; k < 3; ++k)
+        {
+            double p[3];
+            at(lod[t + k], p);
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                l.u[k][axis] = (p[0] - f.centre[0]) * f.axes[axis][0] + (p[1] - f.centre[1]) * f.axes[axis][1] + (p[2] - f.centre[2]) * f.axes[axis][2];
+                range[l.frame][axis] = std::min(range[l.frame][axis], l.u[k][axis]);
+                range[l.frame][3 + axis] = std::max(range[l.frame][3 + axis], l.u[k][axis]);
+            }
+        }
+        locals.push_back(l);
+    }
+    double reach = 0;
+    for (size_t i = 0; i < frames.size(); ++i)
+    {
+        Frame& f = frames[i];
+        for (int axis = 0; axis < 3; ++axis) f.extent[axis] = range[i][3 + axis] - range[i][axis];
+        const double largest = std::max({ f.extent[0], f.extent[1], f.extent[2] });
+        for (int axis = 0; axis < 3; ++axis)
+            if (!(f.extent[axis] > 1e-4 * largest)) f.extent[axis] = 0;  // flat along this axis: nothing to scale
+        reach = std::max(reach, largest);
+    }
+    auto factor = [](const Frame& f, int axis, double d) { return f.extent[axis] > 0 ? std::min(1 + 2 * d / f.extent[axis], kIslandScaleMax) : 1.0; };
+    auto areaAt = [&](double d) {
+        double total = 0;
+        for (const Local& l : locals)
+        {
+            const Frame& f = frames[l.frame];
+            double e1[3], e2[3];
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                const double k = factor(f, axis, d);
+                e1[axis] = k * (l.u[1][axis] - l.u[0][axis]);
+                e2[axis] = k * (l.u[2][axis] - l.u[0][axis]);
+            }
+            total += areaOf(e1, e2);
+        }
+        return total;
+    };
+    // The offset: the area grows with it, until every axis of every island is at kIslandScaleMax.
+    double lo = 0, hi = 0.5 * (kIslandScaleMax - 1) * reach;
+    if (lockedArea + areaAt(hi) < (1 - kAreaTolerance) * areaBefore) return false;
+    if (areaAt(hi) > wanted)
+        for (int it = 0; it < 64; ++it)
+        {
+            const double mid = 0.5 * (lo + hi);
+            (areaAt(mid) < wanted ? lo : hi) = mid;
+        }
+    const double offset = hi;
+
+    // New vertices, one per moved vertex; vertices of one position stay at one position (remap).
+    std::unordered_map<unsigned int, unsigned int> made, canonical;  // old vertex -> new; old welded vertex -> new canonical
+    for (unsigned int& index : lod)
+    {
+        const unsigned int v = index, welded = vertices.remap[v];
+        const uint32_t island = islands.of(welded);
+        if (slot[island] == UINT32_MAX) continue;
+        auto found = made.find(v);
+        if (found == made.end())
+        {
+            const unsigned int fresh = (unsigned int)vertices.positions.size();
+            const auto [first, isFirst] = canonical.emplace(welded, fresh);
+            float3 position;
+            if (isFirst)
+            {
+                const Frame& f = frames[slot[island]];
+                double p[3], q[3] = { f.centre[0], f.centre[1], f.centre[2] };
+                at(v, p);
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    const double u = (p[0] - f.centre[0]) * f.axes[axis][0] + (p[1] - f.centre[1]) * f.axes[axis][1] + (p[2] - f.centre[2]) * f.axes[axis][2];
+                    for (int r = 0; r < 3; ++r) q[r] += factor(f, axis, offset) * u * f.axes[axis][r];
+                }
+                position = { (float)q[0], (float)q[1], (float)q[2] };
+                moved = std::max(moved, length(position - vertices.positions[v]));
+            }
+            else position = vertices.positions[first->second];
+            float attributes[kAttributeCount];
+            std::memcpy(attributes, &vertices.attributes[(size_t)v * kAttributeCount], sizeof attributes);
+            vertices.positions.push_back(position);
+            vertices.attributes.insert(vertices.attributes.end(), attributes, attributes + kAttributeCount);
+            vertices.boundaryLock.push_back(0);
+            vertices.remap.push_back(first->second);
+            vertices.source.push_back(v < vertices.sourceCount ? (uint32_t)v : vertices.source[v - vertices.sourceCount]);
+            locks.push_back(locks[v] & meshopt_SimplifyVertex_Protect);
+            found = made.emplace(v, fresh).first;
+        }
+        index = found->second;
+    }
+    return true;
+}
+
+// Feature widths of a level's enlarged geometry. The mesh's width context (FeatureWidth.h) measures the mesh's own
+// vertices; enlarged islands are measured the same way on a context of their own: the triangles on made vertices of
+// the level's clusters and of the terminal clusters before it (those stay drawn beside them). An island's vertices are
+// all the mesh's or all made, so the two contexts never share a piece.
+struct LevelWidths
+{
+    std::vector<float3> positions;                      // the level's made vertices
+    std::vector<uint32_t> indices;                      // its triangles on them
+    std::unordered_map<unsigned int, uint32_t> local;   // hierarchy vertex -> index in positions
+    std::unique_ptr<detail::MeshWidthContext> context;  // over the two vectors above
+    // Adds the triangles of a list that are on made vertices; returns them in local indices.
+    std::vector<uint32_t> add(const Vertices& vertices, const std::vector<unsigned int>& triangles)
+    {
+        std::vector<uint32_t> added;
+        for (size_t t = 0; t < triangles.size(); t += 3)
+        {
+            if (triangles[t] < vertices.sourceCount) continue;
+            for (int k = 0; k < 3; ++k)
+            {
+                const unsigned int v = triangles[t + k];
+                const auto [it, isNew] = local.emplace(v, (uint32_t)positions.size());
+                if (isNew) positions.push_back(vertices.positions[v]);
+                added.push_back(it->second);
+            }
+        }
+        indices.insert(indices.end(), added.begin(), added.end());
+        return added;
+    }
+};
+
+void buildSubmesh(const Settings& settings, bool morphed, const clodConfig& config, clodMesh mesh, Vertices& vertices, std::vector<unsigned char>& locks,
                   const detail::MeshWidthContext& widths, uint32_t submesh, MeshOut& out)
 {
     using namespace clod;
+    const std::vector<unsigned int>& remap = vertices.remap;
     std::vector<Cluster> clusters = clusterize(config, mesh, mesh.indices, mesh.index_count);
     std::vector<detail::MeshWidthContext::Width> clusterWidth;
     for (Cluster& c : clusters)
@@ -129,6 +536,13 @@ void buildSubmesh(const Settings& settings, bool morphed, const clodConfig& conf
     // so their neighbours' simplifications must keep the shared border (lockBoundary only locks borders between the
     // groups of the current level).
     std::vector<unsigned char> frozen(mesh.vertex_count, 0);  // by welded position
+    // Enlarged thin geometry (thinPreserveArea): the widths of the pending clusters' made vertices, and the triangles
+    // on made vertices of the terminal clusters so far.
+    std::unique_ptr<LevelWidths> levelWidths;
+    std::vector<unsigned int> terminalMade;
+    auto componentWidth = [&](unsigned int v) {
+        return v < vertices.sourceCount ? widths.componentWidth(v) : levelWidths->context->componentWidth(levelWidths->local.find(v)->second);
+    };
 
     auto emit = [&](const std::vector<int>& group, const clodBounds& simplified) {
         GroupOut g;
@@ -145,7 +559,11 @@ void buildSubmesh(const Settings& settings, bool morphed, const clodConfig& conf
             c.submesh = submesh;
             c.width = clusterWidth[ci].narrowest;
             if (simplified.error == FLT_MAX)
+            {
                 for (unsigned int v : c.indices) frozen[remap[v]] = 1;
+                for (size_t t = 0; t < c.indices.size(); t += 3)
+                    if (c.indices[t] >= vertices.sourceCount) terminalMade.insert(terminalMade.end(), c.indices.begin() + t, c.indices.begin() + t + 3);
+            }
             out.clusters.push_back(std::move(c));
         }
         out.groups.push_back(g);
@@ -188,12 +606,26 @@ void buildSubmesh(const Settings& settings, bool morphed, const clodConfig& conf
             const float maxError = groupWidth >= FLT_MAX ? FLT_MAX : settings.maxRelativeWidthError * groupWidth;
             std::vector<unsigned int> simplified;
             bool stuck = false;
+            // Thin geometry the error limit stops (thinPreserveArea): whole free islands are dropped instead, and the
+            // ones that stay are enlarged below. What the limit protects is kept: no collapse erodes a thin feature.
+            const bool thin = settings.thinPreserveArea && maxError < FLT_MAX;
+            bool thinned = false;
+            Islands islands;  // of the group; made when the limit first stops it
             // A fold-over is removed by locking the input vertices around its corners (the collapses that produced
             // it) and simplifying again at the same error; the rest of the group still simplifies.
             for (int attempt = 0;; ++attempt)
             {
                 simplified = simplifyLimited(config, mesh, merged, locks, target, maxError, &error);
                 stuck = simplified.size() > merged.size() * config.simplify_threshold;
+                thinned = false;
+                if (stuck && thin)
+                {
+                    if (islands.free.empty()) islands = islandsOf(remap, locks, merged, componentWidth);
+                    float widest = 0;
+                    thinned = dropIslands(vertices, islands, target, simplified, widest);
+                    error = std::max(error, widest);
+                    stuck = simplified.size() > merged.size() * config.simplify_threshold;
+                }
                 if (stuck) break;
                 const std::vector<size_t> folded = foldedTriangles(mesh, remap, merged, simplified);
                 if (folded.empty()) break;
@@ -214,6 +646,31 @@ void buildSubmesh(const Settings& settings, bool morphed, const clodConfig& conf
                 for (unsigned int v : merged)
                     if (ring.count(remap[v])) locks[v] |= meshopt_SimplifyVertex_Lock;
             }
+            if (!stuck && thinned)
+            {
+                double area = 0;
+                for (size_t t = 0; t < merged.size(); t += 3)
+                    area += 0.5 * length(cross(vertices.positions[merged[t + 1]] - vertices.positions[merged[t]], vertices.positions[merged[t + 2]] - vertices.positions[merged[t]]));
+                const size_t firstMade = vertices.positions.size();
+                float moved = 0;
+                if (enlargeIslands(vertices, locks, islands, area, simplified, moved))
+                {
+                    vertices.bind(mesh);
+                    frozen.resize(mesh.vertex_count, 0);
+                    error += moved;  // the cut is within the simplification's error of the group, then moved by at most this
+                    if (vertices.positions.size() > firstMade)
+                    {
+                        // The group's sphere (its new clusters' LOD sphere) also holds the enlarged islands.
+                        const meshopt_Bounds reach = meshopt_computeSphereBounds(&vertices.positions[firstMade].x, vertices.positions.size() - firstMade, sizeof(float3), nullptr, 0);
+                        clodBounds both[2] = { bounds, bounds };
+                        std::memcpy(both[1].center, reach.center, sizeof reach.center);
+                        both[1].radius = reach.radius;
+                        bounds = boundsMerge(both, 2, sizeof(clodBounds));
+                    }
+                    ++out.stats.thinnedGroups;
+                }
+                else stuck = true;  // its area cannot be restored: the group keeps its geometry, as without thinPreserveArea
+            }
             if (stuck)
             {
                 bounds.error = FLT_MAX;  // terminal: stuck, the thin-feature error limit, or folds stop it
@@ -228,10 +685,47 @@ void buildSubmesh(const Settings& settings, bool morphed, const clodConfig& conf
             {
                 c.refined = refined;
                 c.bounds = bounds;
-                clusterWidth.push_back(widths.clusterWidth(c.indices.data(), c.indices.size()));
+                // (a cluster with made vertices gets its width when the level is complete, below)
+                const bool made = std::any_of(c.indices.begin(), c.indices.end(), [&](unsigned int v) { return v >= vertices.sourceCount; });
+                clusterWidth.push_back(made ? detail::MeshWidthContext::Width{} : widths.clusterWidth(c.indices.data(), c.indices.size()));
                 clusters.push_back(std::move(c));
                 pending.push_back((int)clusters.size() - 1);
             }
+        }
+        // Widths of the level's clusters with enlarged geometry, measured on that geometry (LevelWidths) as the source
+        // clusters' are on the mesh: an enlarged leaf is wider, and so are its band distances and its next error limit.
+        // Their triangles on the mesh's vertices keep the mesh's measure; the narrowest piece decides.
+        if (vertices.positions.size() > vertices.sourceCount)
+        {
+            std::unique_ptr<LevelWidths> level;
+            std::vector<std::pair<int, std::vector<uint32_t>>> made;  // cluster, its triangles on made vertices (level indices)
+            for (int ci : pending)
+            {
+                const std::vector<unsigned int>& indices = clusters[ci].indices;
+                if (std::none_of(indices.begin(), indices.end(), [&](unsigned int v) { return v >= vertices.sourceCount; })) continue;
+                if (!level)
+                {
+                    level = std::make_unique<LevelWidths>();
+                    level->add(vertices, terminalMade);
+                }
+                made.push_back({ ci, level->add(vertices, indices) });
+            }
+            if (level) level->context = std::make_unique<detail::MeshWidthContext>(level->positions, level->indices);
+            for (const auto& [ci, local] : made)
+            {
+                detail::MeshWidthContext::Width width = level->context->clusterWidth(local.data(), local.size());
+                std::vector<unsigned int> own;  // triangles on the mesh's vertices
+                for (size_t t = 0; t < clusters[ci].indices.size(); t += 3)
+                    if (clusters[ci].indices[t] < vertices.sourceCount) own.insert(own.end(), clusters[ci].indices.begin() + t, clusters[ci].indices.begin() + t + 3);
+                if (!own.empty())
+                {
+                    const detail::MeshWidthContext::Width w = widths.clusterWidth(own.data(), own.size());
+                    if (std::fabs(w.narrowest) < std::fabs(width.narrowest)) width.narrowest = w.narrowest;
+                    width.guard = std::min(width.guard, w.guard);
+                }
+                clusterWidth[ci] = width;
+            }
+            levelWidths = std::move(level);
         }
         ++depth;
     }
@@ -359,6 +853,14 @@ MeshOut buildMesh(const scene::Mesh& m, const Settings& settings, const std::vec
     for (uint32_t v : seamVertices) boundaryLock[remap[v]] = meshopt_SimplifyVertex_Lock;
     for (size_t v = 0; v < vertexCount; ++v) boundaryLock[v] = boundaryLock[remap[v]];
 
+    // The hierarchy's vertices: the mesh's; enlarged thin geometry adds its own (enlargeIslands).
+    Vertices vertices;
+    vertices.positions = m.positions;
+    vertices.attributes = std::move(attributes);
+    vertices.boundaryLock = std::move(boundaryLock);
+    vertices.remap = remap;
+    vertices.sourceCount = vertexCount;
+
     clodConfig config = clodDefaultConfig(settings.clusterTriangles);
     config.max_vertices = settings.clusterVertices;
     // Disconnected geometry (a leaf, a blade per component): the flex builder ends a meshlet at min_triangles when the
@@ -411,32 +913,32 @@ MeshOut buildMesh(const scene::Mesh& m, const Settings& settings, const std::vec
         clodMesh mesh{};
         mesh.indices = indices.data();
         mesh.index_count = indices.size();
-        mesh.vertex_count = vertexCount;
-        mesh.vertex_positions = &m.positions[0].x;
+        vertices.bind(mesh);  // vertex count, positions, attributes, locks
         mesh.vertex_positions_stride = sizeof(float3);
-        mesh.vertex_attributes = attributes.data();
         mesh.vertex_attributes_stride = kAttributeCount * sizeof(float);
-        mesh.vertex_lock = boundaryLock.data();
         mesh.attribute_weights = weights;
         mesh.attribute_count = kAttributeCount;
         mesh.attribute_protect_mask = (1u << kAttributeCount) - 1;  // normal and uv seams
 
         // Protect attribute discontinuities (same position, different attributes), as clodBuild does.
-        std::vector<unsigned char> locks(vertexCount, 0);
-        for (size_t v = 0; v < vertexCount; ++v)
+        std::vector<unsigned char> locks(mesh.vertex_count, 0);
+        for (size_t v = 0; v < mesh.vertex_count; ++v)
         {
-            const uint32_t r = remap[v];
+            const uint32_t r = vertices.remap[v];
             if (r == v) continue;
             for (uint32_t k = 0; k < kAttributeCount; ++k)
-                if (attributes[v * kAttributeCount + k] != attributes[r * kAttributeCount + k])
+                if (vertices.attributes[v * kAttributeCount + k] != vertices.attributes[r * kAttributeCount + k])
                 {
                     locks[v] |= meshopt_SimplifyVertex_Protect;
                     break;
                 }
         }
-        buildSubmesh(settings, settings.noSimplification || !m.blendShapes.empty() || m.vertexAnimation.framesPerSecond > 0, config, mesh, remap, locks, widths, s, out);
+        buildSubmesh(settings, settings.noSimplification || !m.blendShapes.empty() || m.vertexAnimation.framesPerSecond > 0, config, mesh, vertices, locks, widths, s, out);
         }
     }
+    out.lodPositions.assign(vertices.positions.begin() + vertexCount, vertices.positions.end());
+    out.lodSources = std::move(vertices.source);
+    out.stats.lodVertices = (uint32_t)out.lodPositions.size();
 
     // DAG invariants the cut relies on (exactly one of a group and its simplification is drawn at any error):
     // a cluster's own error is its source group's error, and never exceeds the error of the group it is in.
@@ -492,6 +994,7 @@ Settings Settings::fromQuality(const QualityConfig& q)
     s.clusterTriangles = (uint32_t)q.integer("visibility.cluster_triangles");
     s.clusterVertices = (uint32_t)q.integer("visibility.cluster_vertices");
     s.maxRelativeWidthError = (float)q.number("visibility.lod_max_relative_width_error");
+    s.thinPreserveArea = q.boolean("visibility.lod_thin_preserve_area");
     s.clusterMinTriangles = (uint32_t)q.integer("visibility.cluster_min_triangles");
     s.sheetOrientationMinWidth = (float)q.number("visibility.sheet_orientation_min_width");
     if (s.clusterTriangles < 4 || s.clusterTriangles > 128) fail("visibility.cluster_triangles must be 4..128 (vis id triangle field is 7 bits)");
@@ -539,7 +1042,9 @@ struct CutEdges
         uint32_t f = 0;
         for (uint32_t i = 0; i < 3; ++i)
         {
-            const uint32_t va = tri[(i + 1) % 3], vb = tri[(i + 2) % 3], a = welded[va], b = welded[vb];
+            const uint32_t va = tri[(i + 1) % 3], vb = tri[(i + 2) % 3];
+            if (va >= welded.size() || vb >= welded.size()) continue;  // the builder's own vertex (LodVertices): on no LOD 0 border
+            const uint32_t a = welded[va], b = welded[vb];
             if (a == render::gpu::kNone || b == render::gpu::kNone) continue;
             if (border.count(key(a, b))) f |= 1u << i;
             else if (borderVertex.count(a) && borderVertex.count(b))
@@ -622,8 +1127,10 @@ std::string meshKey(const scene::Mesh& m, const Settings& settings, const std::v
     }
     const uint32_t ints[3] = { settings.clusterTriangles, settings.clusterVertices, settings.clusterMinTriangles };
     const float floats[3] = { settings.maxRelativeWidthError, settings.widthAreaPercentile, settings.sheetOrientationMinWidth };
+    const uint32_t thin = settings.thinPreserveArea;
     h.update(ints, sizeof ints);
     h.update(floats, sizeof floats);
+    h.update(&thin, sizeof thin);
     const std::array<uint8_t, 32> d = h.finish();
     return std::string(reinterpret_cast<const char*>(d.data()), d.size());
 }
@@ -748,7 +1255,7 @@ bool g_diskCacheSet = false;
 // payload, and the payload's SHA-256 (a torn or corrupted file is rebuilt, never used). Written to a temporary file and
 // renamed, so readers never see a partial entry.
 constexpr uint32_t kDiskMagic = 0x4C43584Eu;  // "NXCL"
-constexpr uint32_t kDiskFormat = 1;
+constexpr uint32_t kDiskFormat = 2;  // 2: the builder's own vertices (LodVertices)
 
 std::string hexOf(const std::string& key)
 {
@@ -835,6 +1342,8 @@ std::vector<uint8_t> serialize(const MeshOut& mo)
     w.vec(mo.nodes);
     w.pod(mo.levelCount);
     w.pod(mo.stats);
+    w.vec(mo.lodPositions);
+    w.vec(mo.lodSources);
     return std::move(w.bytes);
 }
 
@@ -858,6 +1367,8 @@ bool deserialize(const uint8_t* p, size_t n, MeshOut& mo)
     r.vec(mo.nodes);
     r.pod(mo.levelCount);
     r.pod(mo.stats);
+    r.vec(mo.lodPositions);
+    r.vec(mo.lodSources);
     return r.ok && r.left == 0;
 }
 
@@ -955,9 +1466,38 @@ void setDiskCache(const std::string& directory)
     g_diskCacheSet = true;
 }
 
-render::ClusterData build(const scene::Scene& scene, const Settings& settings, BuildStats* stats)
+void LodVertices::appendTo(scene::Scene& scene) const
+{
+    for (size_t mi = 0; mi < meshes.size() && mi < scene.meshes.size(); ++mi)
+    {
+        scene::Mesh& m = scene.meshes[mi];
+        const Mesh& lod = meshes[mi];
+        const size_t count = m.positions.size();
+        const bool normals = m.normals.size() == count, tangents = m.tangents.size() == count, uv0 = m.uv0.size() == count;
+        const bool skin = m.skin.joints.size() == 4 * count && m.skin.weights.size() == 4 * count;
+        for (size_t i = 0; i < lod.positions.size(); ++i)
+        {
+            const uint32_t s = lod.source[i];  // (its streams are copied by value below: the vectors grow)
+            m.positions.push_back(lod.positions[i]);
+            if (normals) m.normals.push_back(float3(m.normals[s]));
+            if (tangents) m.tangents.push_back(float4(m.tangents[s]));
+            if (uv0) m.uv0.push_back(float2(m.uv0[s]));
+            if (skin)
+                for (uint32_t k = 0; k < 4; ++k)
+                {
+                    m.skin.joints.push_back(uint16_t(m.skin.joints[4 * s + k]));
+                    m.skin.weights.push_back(float(m.skin.weights[4 * s + k]));
+                }
+        }
+    }
+}
+
+render::ClusterData build(const scene::Scene& scene, const Settings& requested, BuildStats* stats, LodVertices* lodVertices)
 {
     const auto t0 = std::chrono::steady_clock::now();
+    // Without a place for the builder's own vertices, no cluster may index one: thin geometry stays as it is.
+    Settings settings = requested;
+    if (!lodVertices) settings.thinPreserveArea = false;
     const uint32_t meshCount = (uint32_t)scene.meshes.size();
     std::vector<std::string> keys(meshCount);
     const std::vector<std::vector<uint32_t>> seams = findSeams(scene);
@@ -1003,6 +1543,12 @@ render::ClusterData build(const scene::Scene& scene, const Settings& settings, B
     std::vector<MeshStats> meshStats(meshCount);
     for (uint32_t i = 0; i < meshCount; ++i) meshStats[i] = built[i]->stats;
 
+    if (lodVertices)
+    {
+        lodVertices->meshes.assign(meshCount, {});
+        for (uint32_t i = 0; i < meshCount; ++i) lodVertices->meshes[i] = { built[i]->lodPositions, built[i]->lodSources };
+    }
+
     render::ClusterData data;
     data.meshes.resize(scene.meshes.size());
     // Named buffers exist even when empty so V can always bind them.
@@ -1017,6 +1563,14 @@ render::ClusterData build(const scene::Scene& scene, const Settings& settings, B
         const scene::Mesh& m = scene.meshes[mi];
         const uint32_t clusterBase = (uint32_t)data.clusters.size();
         const CutEdges cutEdges = cutFaceBorderEdges(scene, m);
+        // What the clusters index: the mesh's vertices, then the builder's own (LodVertices).
+        std::vector<float3> withLod;
+        if (!mo.lodPositions.empty())
+        {
+            withLod = m.positions;
+            withLod.insert(withLod.end(), mo.lodPositions.begin(), mo.lodPositions.end());
+        }
+        const std::vector<float3>& positions = mo.lodPositions.empty() ? m.positions : withLod;
         render::ClusterData::MeshRange& range = data.meshes[mi];
         range.clusterOffset = clusterBase;
         range.clusterCount = (uint32_t)mo.clusters.size();
@@ -1047,7 +1601,7 @@ render::ClusterData build(const scene::Scene& scene, const Settings& settings, B
             {
                 const ClusterOut& c = mo.clusters[g.firstCluster + k];
                 const size_t indexCount = c.indices.size();
-                const meshopt_Bounds b = meshopt_computeClusterBounds(c.indices.data(), indexCount, &m.positions[0].x, m.positions.size(), sizeof(float3));
+                const meshopt_Bounds b = meshopt_computeClusterBounds(c.indices.data(), indexCount, &positions[0].x, positions.size(), sizeof(float3));
                 unsigned int localVertices[256];
                 unsigned char localTriangles[3 * 256];
                 const size_t vertexCount = clodLocalIndices(localVertices, localTriangles, c.indices.data(), indexCount);
@@ -1068,14 +1622,14 @@ render::ClusterData build(const scene::Scene& scene, const Settings& settings, B
                 const bool cut = cutEdges.cutSubmesh(c.submesh);
                 for (size_t t = 0; t < triangleCount; ++t)
                     data.clusterTriangles.push_back((uint32_t)localTriangles[3 * t] | (uint32_t)localTriangles[3 * t + 1] << 8 | (uint32_t)localTriangles[3 * t + 2] << 16 |
-                                                    (cut ? cutEdges.flags(&c.indices[3 * t], m.positions, rc.lodError) << kCutEdgeShift : 0u));
+                                                    (cut ? cutEdges.flags(&c.indices[3 * t], positions, rc.lodError) << kCutEdgeShift : 0u));
                 data.clusters.push_back(rc);
                 const float4 sphere{ c.lod.center[0], c.lod.center[1], c.lod.center[2], c.lod.radius };
                 appendNamed(data, kClusterLodSpheres, &sphere, sizeof sphere, sizeof(float4));
-                const SheetOrientation sheet = sheetOrientation(m.positions, c.indices.data(), indexCount);
+                const SheetOrientation sheet = sheetOrientation(positions, c.indices.data(), indexCount);
                 const float3 centre{ b.center[0], b.center[1], b.center[2] };
                 float slab = 0;
-                for (size_t v = 0; v < vertexCount; ++v) slab = std::max(slab, std::fabs(dot(sheet.axis, m.positions[localVertices[v]] - centre)));
+                for (size_t v = 0; v < vertexCount; ++v) slab = std::max(slab, std::fabs(dot(sheet.axis, positions[localVertices[v]] - centre)));
                 const float3 scaled = sheet.cosSpread > 0 ? sheet.axis * sheet.cosSpread : float3{ 0, 0, 0 };
                 const float4 sheetData{ scaled.x, scaled.y, scaled.z, slab };
                 appendNamed(data, kClusterSheets, &sheetData, sizeof sheetData, sizeof(float4));

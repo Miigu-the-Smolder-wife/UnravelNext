@@ -7,8 +7,11 @@
 // (bands A/B/C). Output is ClusterData for GpuScene::setClusters.
 //
 // Thin geometry is protected from LOD thinning: a group may be simplified only with an error below
-// visibility.lod_max_relative_width_error x its narrowest feature; otherwise the group is terminal and stays at its
-// geometry (far thin geometry is represented by band C bricks, not by collapsed triangles).
+// visibility.lod_max_relative_width_error x its narrowest feature. A group that limit stops is terminal and stays at
+// its geometry, unless visibility.lod_thin_preserve_area is on and the caller takes the builder's vertices
+// (LodVertices): then whole disconnected pieces of the group (leaves, blades, needles) are dropped evenly through it
+// and the remaining ones are enlarged until the group has its surface area again, so a far tree has few clusters and
+// still covers the same share of the screen.
 #include "unx/core/Config.h"
 #include "unx/render/GpuScene.h"
 #include "unx/scene/SceneData.h"
@@ -30,6 +33,9 @@ struct Settings
     // than sheetOrientationMinWidth are clustered across orientations instead of one DAG per orientation class.
     uint32_t clusterMinTriangles = 0;       // visibility.cluster_min_triangles
     float sheetOrientationMinWidth = 0;     // visibility.sheet_orientation_min_width (m)
+    // Thin geometry has LOD and keeps its area (see above). The enlarged pieces need vertices of their own, so it
+    // takes effect only in a build that returns them (build's lodVertices); other builds keep such groups terminal.
+    bool thinPreserveArea = false;          // visibility.lod_thin_preserve_area
 
     // Source clusters only, no LOD DAG (C2b runtime meshes: shallow hierarchies for GpuScene::addRuntimeMesh; meshes with
     // blend shapes or a vertex animation get this regardless). Not a quality key: exact at every distance.
@@ -51,6 +57,8 @@ struct MeshStats
     uint32_t nodes = 0;
     uint32_t lodLevels = 0;
     uint32_t coarsestTriangles = 0;   // triangles of the coarsest uniform cut
+    uint32_t thinnedGroups = 0;       // groups past the thin-feature limit: pieces dropped, the rest enlarged (thinPreserveArea)
+    uint32_t lodVertices = 0;         // vertices made for their enlarged pieces (LodVertices)
     double buildMs = 0;
 };
 
@@ -62,11 +70,31 @@ struct BuildStats
     uint32_t diskMeshes = 0;    // meshes not in memory whose hierarchy was read from the disk cache (setDiskCache)
 };
 
+// Vertices the builder makes (Settings::thinPreserveArea). Clusters index their mesh's vertices, and an enlarged piece
+// of thin geometry is at none of them, so the builder gives it new vertices after the mesh's own: cluster vertex index
+// (the mesh's vertex count) + i is meshes[m].positions[i], with every other stream (normal, tangent, uv, skin) of the
+// mesh vertex meshes[m].source[i]. The scene's meshes must hold them before anything reads vertices through cluster
+// indices (GpuScene::upload, R's cut geometry): build, then appendTo, then upload.
+struct LodVertices
+{
+    struct Mesh
+    {
+        std::vector<float3> positions;  // object space
+        std::vector<uint32_t> source;   // mesh vertex the other streams are copied from
+    };
+    std::vector<Mesh> meshes;  // one per scene mesh; empty lists for a mesh without any
+    // Appends every mesh's vertices to it (no triangle of Mesh::indices uses them). Once per build: the appended scene is
+    // another scene to the builder (its meshes' keys differ).
+    void appendTo(scene::Scene& scene) const;
+};
+
 // Builds the hierarchy of every mesh (meshes in parallel on the job pool). Deterministic: the same scene and
 // settings give byte-identical output. A mesh whose content (positions, normals, uv0, indices, submesh ranges) and
 // settings match one of the previous build's reuses its hierarchy (SHA-256 identity), so re-building an edited scene
 // costs only the new and changed meshes; identical meshes in one scene are built once.
-render::ClusterData build(const scene::Scene& scene, const Settings& settings, BuildStats* stats = nullptr);
+// lodVertices: where the builder's own vertices go. Without it no cluster indexes a vertex the mesh does not have, and
+// Settings::thinPreserveArea has no effect (the output is that of the setting off).
+render::ClusterData build(const scene::Scene& scene, const Settings& settings, BuildStats* stats = nullptr, LodVertices* lodVertices = nullptr);
 // Forgets the previous build's hierarchies (tests that compare two cold builds).
 void clearMeshCache();
 // Disk cache of hierarchies (C1, incremental cooking): a mesh whose key (content, settings, builder source hash) has an
