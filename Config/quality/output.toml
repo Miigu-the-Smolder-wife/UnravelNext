@@ -46,6 +46,10 @@ upscale_tsr = true                      # the temporal upscale in the structure 
                                         # frame after a cut), a history of 16 samples held to 4 where the pixel moves an output pixel
                                         # a frame and to 2 where rejected. false: the one-pass accumulation below (upscale_kernel,
                                         # upscale_history_frames*, which the TSR path does not read)
+upscale_tsr_kernel_by_samples = true    # with upscale_tsr: the update's kernel narrows as the pixel's samples can fill it (factor sqrt(n)
+                                        # for n samples gathered, up to the output pixel's): after a cut the picture sharpens over 4
+                                        # frames at x 2 (9 at x 3) without the input's lattice on small bright detail. false: the
+                                        # reference's rule (an output pixel wide from the second frame)
 upscale_tsr_flickering = true           # with upscale_tsr: the flickering heuristic (TsrFlicker.hlsl; the reference's
                                         # r.TSR.ShadingRejection.Flickering): a still pixel whose luma flips every frame with the
                                         # jitter (tile joints, gratings) keeps its history inside the flicker's amplitude

@@ -337,6 +337,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
         ID3D12PipelineState* rejectPso = shaders.compute("Passes/Shading/TsrReject");
         ID3D12PipelineState* aaPso = shaders.compute("Passes/Shading/TsrAntiAlias");
         ID3D12PipelineState* updatePso = shaders.compute("Passes/Shading/TsrUpdate");
+        const uint32_t updateFlags = fc.quality.has("output.upscale_tsr_kernel_by_samples") && fc.quality.boolean("output.upscale_tsr_kernel_by_samples") ? 2u : 0u;
         const float exposureRatio = u.exposureRatio;
         // the guide's blend of a held history: 1 / (1 + 16 / (input / output size)^2) (the reference's TheoricBlendFactor)
         const float fraction = (float)w / (float)W;
@@ -443,7 +444,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       b.use(output, Use::UavCompute);
                   },
                   [=](PassContext& c) {
-                      const uint32_t k[16] = { c.srv(src), c.srv(rejection), c.srv(dilated), c.srv(history), c.uav(output), w, h, reset ? 1u : 0u,
+                      const uint32_t k[16] = { c.srv(src), c.srv(rejection), c.srv(dilated), c.srv(history), c.uav(output), w, h, (reset ? 1u : 0u) | updateFlags,
                                                W, H, asUint(jx), asUint(jy), asUint(exposureRatio), c.srv(aa), 0, 0 };
                       c.cmd->SetPipelineState(updatePso);
                       c.computeConstants(k, 16);

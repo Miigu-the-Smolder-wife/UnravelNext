@@ -14,7 +14,8 @@
 //              relative luma change: high-contrast edges stay stable in motion).
 // P[0] = { colour SRV (internal, exposed linear), rejection SRV (RGBA8, TsrReject.hlsl), dilated motion SRV (RG32F),
 //          history SRV (output: rgb exposed linear, a = validity) }
-// P[1] = { output UAV (RGBA16F), internal width, height, flags (1: reset) }
+// P[1] = { output UAV (RGBA16F), internal width, height, flags (1: reset; 2: the kernel narrows with the samples
+//          gathered - output.upscale_tsr_kernel_by_samples) }
 // P[2] = { output width, height, asuint(jitter x), asuint(jitter y) }, P[3] = { asuint(exposure ratio), AA SRV (RG8_UINT), 0, 0 }
 #include "Passes/Shading/Tsr.hlsli"
 
@@ -82,7 +83,12 @@ void main(uint2 o : SV_DispatchThreadID)
         const float coarseRejected = min(coarseContribution * previousWeightMultiplier(rejectionBlend), 1.0);
         const float coarseRefining = min(coarseContribution * previousWeightMultiplier(refiningHysteresis), 1.0);
         const float refining = min(coarseRejected < coarseRefining ? 0.0 : 1.0, saturate(validity * TSR_HISTORY_SAMPLES));
-        const float kernelLerp = noHistory ? 0.0 : saturate(lowFrequencyRejection * 16.0 - 13.0) * refining;
+        // (flag 2) n samples gathered over an input pixel lie about 1 / sqrt(n) input pixels apart: a kernel narrower than
+        // that leaves the output pixels between them on the older, wider estimate - the input's lattice shows on small
+        // bright detail in the frames after a cut. The kernel factor follows sqrt(n) up to the output pixel's.
+        const float gathered = sqrt(max(validity * TSR_HISTORY_SAMPLES, 1.0));
+        const float filled = (P[1].w & 2u) != 0 ? saturate((gathered - 1.0) / max(inputToHistory - 1.0, 1e-3)) : 1.0;
+        const float kernelLerp = noHistory ? 0.0 : saturate(lowFrequencyRejection * 16.0 - 13.0) * refining * filled;
         kernelFactor = lerp(1.0 - 0.5 * noiseFiltering, inputToHistory, kernelLerp);
         currentWeight = tsrSampleWeight(lerp(1.0, inputToHistory, kernelLerp), dKO, 0.0) * TSR_HYSTERESIS;
         previousWeight = min((currentWeight > 0 ? currentWeight : coarseContribution) * previousWeightMultiplier(rejectionBlend), validity);

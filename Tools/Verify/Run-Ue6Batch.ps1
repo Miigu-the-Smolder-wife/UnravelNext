@@ -77,6 +77,9 @@ if ($Skip -notcontains "variants") {
         Final "high tier (lobby 4K pictures)" "tier_high" @("-Only", "bt_lobby", "-Resolutions", "4K", "-SkipTimings", "-Set", "output.tier=high")
         Final "performance tier (lobby 4K)" "tier_performance" @("-Only", "bt_lobby", "-Resolutions", "4K", "-Set", "output.tier=performance")
         Final "epic tier (lobby 4K pictures)" "tier_epic" @("-Only", "bt_lobby", "-Resolutions", "4K", "-SkipTimings")
+        # the upscale's kernel as the reference has it (an output pixel wide from the second frame after a cut)
+        Final "performance tier, the reference's kernel rule (lobby 4K pictures)" "tier_performance_refkernel" @("-Only", "bt_lobby", "-Resolutions", "4K", "-SkipTimings",
+            "-Set", "output.tier=performance,output.upscale_tsr_kernel_by_samples=false")
     }
     if ($Variants -contains "fog") {
         # the fog as it is by default when on: the sky through it, far shadows, the density's variation, the reflections' rays,
