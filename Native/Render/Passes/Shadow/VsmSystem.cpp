@@ -852,6 +852,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         s.latest.airClsLit = w[68];
         s.latest.airOmitted = w[69];
         s.latest.airWalked = w[70];
+        s.latest.staleSpared = w[72];
         s.latest.errorBits = w[15];
         if (w[15] & ~s.errorBitsSeen)
             logf("S VSM: error bits 0x%x (frame %llu): a shader loop reached its hard cap (INTERFACES 3.6; VsmCommon.hlsli VSM_ERR_*)\n", w[15],
@@ -1169,7 +1170,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                                           changedCapacity, ctx.uav(table), ctx.uav(requests), ctx.uav(usedPages),
                                           ctx.uav(freePages), pagesNow, scanSlots, cacheable ? 1u : 0u,
                                           skinCount ? ctx.srv(skinBounds) : 0xFFFFFFFFu, skinInstancesSrv, skinCount, ctx.uav(statsBuf),
-                                          localSlotsUsed ? localLightsSrv : 0xFFFFFFFFu, localSlotsUsed, 0, 0,
+                                          localSlotsUsed ? localLightsSrv : 0xFFFFFFFFu, localSlotsUsed, 0xFFFFFFFFu, 0,
                                           minChangeBits, windChangeBits, (uint32_t)frameIndex, 0 };
         std::memcpy(k, w, sizeof w);
     };
@@ -1245,14 +1246,23 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         }
         {
             ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmCache.MODE2");
+            // shadow.vsm.cache_hzb_filter: a changed caster under a page's stored surface leaves the page as it is
+            // (VsmCache.hlsl sphereUnderPage; the blocks are last frame's, of the pages as they were last drawn)
+            const bool hzbFilter = !q.has("shadow.vsm.cache_hzb_filter") || q.boolean("shadow.vsm.cache_hzb_filter");
             g.addPass("s.vsm.cache.stale", QueueType::Compute,
                       [&](PassBuilder& b) {
                           b.use(changed, Use::UavCompute);
                           b.use(table, Use::UavCompute);
+                          if (hzbFilter)
+                          {
+                              b.use(blocks, Use::SrvCompute);
+                              b.use(statsBuf, Use::UavCompute);
+                          }
                       },
                       [=](PassContext& ctx) {
                           uint32_t k[kCacheWords];
                           cacheWords(ctx, k);
+                          if (hzbFilter) k[18] = ctx.srv(blocks);
                           ctx.cmd->SetPipelineState(pso);
                           ctx.computeConstants(k, kCacheWords);
                           ctx.cmd->Dispatch(kLevels, 32, 1);  // VsmCache.hlsl STALE_GROUPS_PER_LEVEL

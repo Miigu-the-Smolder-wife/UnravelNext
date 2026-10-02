@@ -1451,6 +1451,8 @@ int main(int argc, char** argv)
             logf("  shadow overflow: lights past the third max %u, words needed max %u, tiles over capacity %u %s\n", overflowLightsMax, overflowWordsMax, overTiles,
                  overTiles ? "FAIL" : "ok");
             if (overTiles) ++gateFailures;
+            logf("  page cache (last frame): %u of %u requested pages kept, %u drawn; %u (changed caster, page) pairs left by the HZB filter\n", st.cachedPages,
+                 st.requested, st.dirty, st.staleSpared);
             logf("  S error bits (INTERFACES 3.6, shader loop caps) 0x%x %s\n", st.errorBitsSeen, st.errorBitsSeen ? "FAIL" : "ok");
             if (st.errorBitsSeen) ++gateFailures;
             // Fragment visibility of the coverage layer (ShadowFragments): pixels with records and pair pixels; with

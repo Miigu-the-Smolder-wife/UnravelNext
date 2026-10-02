@@ -34,6 +34,11 @@ min_caster_texels = 1.0         # a shadow view (a sun level, a local light's fa
                                 # stand's darkening of the ground under it). Blocker searches and wide penumbrae that read a
                                 # coarser level than the receiver's miss them the same way. The requests' packing bounds leave
                                 # the same casters out. 0: every caster in every view (A/B)
+cache_hzb_filter = true         # a changed caster makes a cached sun page stale only where it can show in it: a caster whose
+                                # bounding sphere lies under the page's stored surface over its whole footprint there (the page's
+                                # block hierarchy, its HZB) has no texel in the page before or after the change, so the page stays
+                                # (the reference's HZB-filtered invalidation: movers under roofs, bridges, canopies). The pages
+                                # hold the same depth as a redraw would give. false: every page under a changed caster (A/B)
 cache = true                    # sun page cache (VsmCache.hlsl; a design choice): a requested sun page keeps its content
                                 # when it was resident last frame and no changed caster (moved, deformed, skinned, wind, morph,
                                 # shown / hidden) touched it; the sun, the caster range, a scene revision, an origin rebase or a

@@ -18,7 +18,8 @@
 //   MODE 1 (before MODE 0): per skinned slot of V's bounds (FrameResources::skinBounds: current and previous world
 //           spheres), both spheres of a skinned instance casting now or last frame, every frame; an unbounded one (radius
 //           < 0) makes the frame uncacheable.
-//   MODE 2: per level and changed caster sphere, the resident sun pages of the level under it become stale.
+//   MODE 2: per level and changed caster sphere, the resident sun pages of the level under it become stale - unless the
+//           sphere lies under the page's stored surface (shadow.vsm.cache_hzb_filter, sphereUnderPage below).
 //   MODE 6: per local shadow slot, whether its light's range (farM around its position) meets a changed caster's sphere:
 //           a bit per light after the used-page bitmap (the light's pages are not kept this frame).
 //   MODE 3: per requested slot (sun and local) of a cacheable frame, keep: resident last frame, same tag, not stale (sun)
@@ -42,7 +43,8 @@
 // P[1] = { list capacity (spheres), page table UAV (raw), requests UAV (raw), used-page bitmap UAV (raw) }
 // P[2] = { free list UAV (raw: count, 0, 0, 0, then pages), atlas pages, scanned slots, cacheable (1) }
 // P[3] = { skin bounds SRV, skin instances SRV, skin count, stats UAV (raw; word 6: kept pages) }
-// P[4] = { local lights SRV (VsmLocalLight per shadow slot), local shadow slots in use, 0, 0 }
+// P[4] = { local lights SRV (VsmLocalLight per shadow slot), local shadow slots in use, page blocks SRV (raw, VsmPageMax:
+//          MODE 2's HZB filter; 0xFFFFFFFF: off), 0 }
 // P[5] = { asuint(e: the least change that makes a page stale, texels of its level), asuint(windChangeFactor(dt)), frame index, 0 }
 // Frame constants of the main view (scene buffers, wind).
 #include "Deformation.hlsli"
@@ -144,37 +146,76 @@ void main(uint j : SV_DispatchThreadID)
     appendSphere(list, before.xyz, before.w, VSM_CHANGE_RIGID);
 }
 #elif MODE == 2
+// HZB filter (shadow.vsm.cache_hzb_filter; the reference's HZB-filtered invalidation). A changed caster whose sphere lies
+// under the page's stored surface over all of its footprint in the page has no texel of its own there: where it stood it
+// was drawn behind the casters that are stored, and where it stands now it would be (each of its spheres, before and now,
+// is tested on its own; a caster that is itself the stored surface at a texel is not under it there: its top is at or
+// above what it stored). The page's content is the same with or without it, so the page stays. The block hierarchy
+// (VsmPageMax) is the page's HZB: a block's range.x is the lowest stored height of its texels, VSM_EMPTY when one has no
+// caster. The footprint's square is read on the block level where it spans at most 2 x 2 blocks.
+bool sphereUnderPage(ByteAddressBuffer blocks, uint phys, int2 page, uint k, float3 ls, float radius)
+{
+    const float texel = vsmTexel(k);
+    const int2 corner = page * (int)VSM_PAGE;
+    const int2 t0 = clamp(int2(floor((ls.xy - radius) / texel)) - corner, 0, (int)VSM_PAGE - 1);
+    const int2 t1 = clamp(int2(floor((ls.xy + radius) / texel)) - corner, 0, (int)VSM_PAGE - 1);
+    const uint size = (uint)max(t1.x - t0.x, t1.y - t0.y) + 1;
+    const uint m = size <= 8 ? 0u : min((uint)ceil(log2(size / 8.0)), 4u);
+    const int shift = 3 + (int)m, perPage = (int)(16u >> m);
+    const int2 b0 = t0 >> shift, b1 = t1 >> shift;
+    const uint top = vsmEncode(ls.z + radius);
+    [unroll] for (uint i = 0; i < 4; ++i)
+    {
+        const int2 b = int2((i & 1) ? b1.x : b0.x, (i & 2) ? b1.y : b0.y);
+        const uint lowest = blocks.Load((phys * VSM_BLOCK_ENTRIES + vsmBlockOffset(m) + (uint)(b.y * perPage + b.x)) * VSM_BLOCK_BYTES);
+        if (lowest == VSM_EMPTY || lowest <= top) return false;
+    }
+    return true;
+}
+
 // The resident sun pages of level k under a world sphere become stale (the sphere's light-space square, clamped to the
-// level's window; at most VSM_TABLE^2 pages, 64 lanes).
-void staleUnder(ConstantBuffer<VsmConstants> c, RWByteAddressBuffer table, float3 centre, float radius, uint code, uint k, uint lane)
+// level's window; at most VSM_TABLE^2 pages, 64 lanes). Returns the pages the HZB filter left as they are.
+uint staleUnder(ConstantBuffer<VsmConstants> c, RWByteAddressBuffer table, float3 centre, float radius, uint code, uint k, uint lane)
 {
     // what the change is worth at this level (the header)
     const float least = asfloat(P[5].x) * vsmTexel(k);
     uint period = 1;
     if (code == VSM_CHANGE_RIGID)
     {
-        if (radius < least) return;
+        if (radius < least) return 0;
     }
     else
     {
         const float amplitude = changeAmplitude(code);
-        if (0.8 * amplitude < least) return;
+        if (0.8 * amplitude < least) return 0;
         period = (uint)clamp(floor(least / max(amplitude * asfloat(P[5].y), 1e-9)), 1.0, 64.0);
     }
     const float3 ls = vsmLightSpaceAt(c, centre, k);
     const float pageSize = vsmPageSize(k);
     const int2 lo = max(int2(floor((ls.xy - radius) / pageSize)), vsmOrigin(c, k));
     const int2 hi = min(int2(floor((ls.xy + radius) / pageSize)), vsmOrigin(c, k) + (int)VSM_TABLE - 1);
-    if (any(lo > hi)) return;
+    if (any(lo > hi)) return 0;
     const uint2 size = uint2(hi - lo + 1);
+    uint spared = 0;
     [loop] for (uint i = lane; i < size.x * size.y; i += 64)
     {
         const int2 page = lo + int2(i % size.x, i / size.x);
         const uint slot = vsmSlot(page, k);
         if (period > 1 && (P[5].z + ((slot * 2654435761u) >> 16)) % period != 0) continue;
         const uint2 e = table.Load2(slot * 8);
-        if ((e.x & VSM_FLAG_RESIDENT) != 0 && e.y == vsmTag(page) && (e.x & VSM_FLAG_STALE) == 0) table.InterlockedOr(slot * 8, VSM_FLAG_STALE);
+        if ((e.x & VSM_FLAG_RESIDENT) == 0 || e.y != vsmTag(page) || (e.x & VSM_FLAG_STALE) != 0) continue;
+        if (P[4].z != 0xFFFFFFFFu)
+        {
+            ByteAddressBuffer blocks = ResourceDescriptorHeap[P[4].z];
+            if (sphereUnderPage(blocks, e.x & VSM_PHYS_MASK, page, k, ls, radius))
+            {
+                ++spared;
+                continue;
+            }
+        }
+        table.InterlockedOr(slot * 8, VSM_FLAG_STALE);
     }
+    return spared;
 }
 #define STALE_GROUPS_PER_LEVEL 32u
 [numthreads(64, 1, 1)]
@@ -186,10 +227,16 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[P[0].w];
     RWByteAddressBuffer table = ResourceDescriptorHeap[P[1].y];
     const uint count = min(header.x, P[1].x), k = group.x;
+    uint spared = 0;
     [loop] for (uint i = group.y; i < count; i += STALE_GROUPS_PER_LEVEL)
     {
         const uint4 s = list.Load4(16 + i * 16);
-        staleUnder(c, table, asfloat(s.xyz), asfloat(s.w | 63u), s.w & 63u, k, lane);
+        spared += staleUnder(c, table, asfloat(s.xyz), asfloat(s.w | 63u), s.w & 63u, k, lane);
+    }
+    if (spared != 0)
+    {
+        RWByteAddressBuffer stats = ResourceDescriptorHeap[P[3].w];
+        stats.InterlockedAdd(4 * 72, spared);  // (sphere, page) pairs the HZB filter left unchanged
     }
 }
 #elif MODE == 3
