@@ -221,6 +221,9 @@ struct FogView
     float farEndM = 0;
     float farM = 0, k = 0, b = 0;  // slice(depth) = log2(depth k + 1) b
     float density = 0, falloff = 0, height = 0, g = 0, start = 0;  // extinction (1/m) at height, its halving per metre, m, HG g, m
+    float density2 = 0, falloff2 = 0, height2 = 0;                 // the second layer (FogDesc::density2, or the rain's veil; 0: none)
+    bool rainVeil = false;         // the second layer is the rain's (atmosphere.fog.rain_veil)
+    bool farSkyLight = false;      // atmosphere.fog.far_sky_light (FogIntegrate.hlsl: the far slices' ambient light is the sky's)
     float albedo[3] = { 1, 1, 1 };
     float skyAmount = 0, historyWeight = 0.9f, shadowTexelsPerCell = 1;
     bool indirect = true;

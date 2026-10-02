@@ -206,12 +206,22 @@ FogView fogViewFor(const QualityConfig& q, const FrameContext& context, uint32_t
     // the frame's cloud layer in front of surfaces (atmosphere.clouds.veil): the volume runs for it alone too - a medium of
     // density 0 whose columns hold the cloud (FogIntegrate.hlsl)
     const bool veil = context.clouds.coverage > 0 && q.has("atmosphere.clouds.veil") && q.boolean("atmosphere.clouds.veil");
+    // The rain's veil (atmosphere.fog.rain_veil; the frame's one weather record, WeatherFrame::rainRate): falling rain is
+    // a medium too - its drops take light out of a path at 1.076 R^0.67 dB/km for a rate of R mm/h (the optical
+    // attenuation in rain: Carbonneau & Wisely 1998, from Marshall-Palmer drop sizes), 0.248 R^0.67 per km - 2.7 km of
+    // visibility at 10 mm/h. It takes the medium's second layer, uniform in height, where the frame sets none; the
+    // volume runs for it alone too. The fog's albedo and phase function light it (drops scatter far more forward).
+    const bool rain = context.weather.rainRate > 0 && q.has("atmosphere.fog.rain_veil") && q.boolean("atmosphere.fog.rain_veil");
     if (frame.enabled)
     {
         // the frame's medium (FrameContext::fog: the game's weather)
         f.density = frame.density;
         f.falloff = frame.heightFalloff;
         f.height = frame.height;
+        f.density2 = frame.density2;
+        f.falloff2 = frame.heightFalloff2;
+        f.height2 = frame.height2;
+        if (!(f.density2 >= 0) || !(f.falloff2 >= 0) || !std::isfinite(f.height2)) fail("FrameContext::fog: the second layer's density and falloff >= 0");
         f.g = frame.phaseG;
         f.start = frame.startDistance;
         f.skyAmount = frame.skyAmount;
@@ -224,9 +234,16 @@ FogView fogViewFor(const QualityConfig& q, const FrameContext& context, uint32_t
     else
     {
         const bool fileFog = q.boolean("atmosphere.fog.enabled");
-        if (!fileFog && !volumes && !veil) return f;
+        if (!fileFog && !volumes && !veil && !rain) return f;
         const float scale = (float)q.number("atmosphere.fog.extinction_scale");
         f.density = fileFog ? (float)q.number("atmosphere.fog.density_per_m") * scale : 0.0f;
+        if (fileFog && q.has("atmosphere.fog.second_density_per_m"))
+        {
+            f.density2 = (float)q.number("atmosphere.fog.second_density_per_m") * scale;
+            f.falloff2 = (float)q.number("atmosphere.fog.second_height_falloff_per_m");
+            f.height2 = (float)q.number("atmosphere.fog.second_height_m");
+            if (!(f.density2 >= 0) || !(f.falloff2 >= 0)) fail("atmosphere.fog: the second layer's density and falloff >= 0");
+        }
         f.falloff = (float)q.number("atmosphere.fog.height_falloff_per_m");
         f.height = (float)q.number("atmosphere.fog.height_m");
         f.g = (float)q.number("atmosphere.fog.phase_g");
@@ -261,10 +278,18 @@ FogView fogViewFor(const QualityConfig& q, const FrameContext& context, uint32_t
     if (f.farSlices > 64 || (f.farSlices != 0 && !(f.farEndM > f.farM))) fail("atmosphere.fog: far_slices <= 64, far_distance_m > volumetric_distance_m");
     f.k = 32.0f / f.farM;                                // (the reference's depth distribution scale)
     f.b = (float)f.gridZ / std::log2(33.0f);             // slice(farM) = gridZ
-    f.cells = f.density > 0 || f.volumes > 0;
+    if (rain && !(f.density2 > 0))
+    {
+        f.density2 = 0.248e-3f * std::pow(context.weather.rainRate, 0.67f);
+        f.falloff2 = 0;
+        f.height2 = 0;
+        f.rainVeil = true;
+    }
+    f.cells = f.density > 0 || f.density2 > 0 || f.volumes > 0;
     f.airOrder = !q.has("atmosphere.fog.air_order") || q.boolean("atmosphere.fog.air_order");
     f.onGiRays = q.has("atmosphere.fog.on_gi_rays") && q.boolean("atmosphere.fog.on_gi_rays");
-    f.sunThroughFog = f.density > 0 && q.has("atmosphere.fog.sun_through_fog") && q.boolean("atmosphere.fog.sun_through_fog");
+    f.farSkyLight = q.has("atmosphere.fog.far_sky_light") && q.boolean("atmosphere.fog.far_sky_light");
+    f.sunThroughFog = (f.density > 0 || f.density2 > 0) && q.has("atmosphere.fog.sun_through_fog") && q.boolean("atmosphere.fog.sun_through_fog");
     if (veil)
     {
         // The cloud is read between the far slices' faces: a surface in front of a cloud bank shares a slice with the
@@ -619,6 +644,9 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
     const bool sunThroughFog = sunFogView.on && sunFogView.sunThroughFog;
     const float sunFog[4] = { sunThroughFog ? sunFogView.density : fog.density, sunThroughFog ? sunFogView.falloff : fog.falloff,
                               sunThroughFog ? sunFogView.height - fc.scene.originOffset().y : fog.height, sunThroughFog ? sunFogView.g : fog.g };
+    // (the medium's second layer, for the same term: P[9])
+    const float sunFog2[3] = { sunThroughFog ? sunFogView.density2 : 0.0f, sunThroughFog ? sunFogView.falloff2 : 0.0f,
+                               sunThroughFog ? sunFogView.height2 - fc.scene.originOffset().y : 0.0f };
     const bool fogLocal = fog.on && fluence.valid() && moment.valid();
     const bool fogAmbient = fog.on && fog.ambient && fc.resources.translucencyGiPrevParams != 0xFFFFFFFFu && fc.resources.translucencyGiPrevAmbient.valid() &&
                             fc.resources.translucencyGiPrevDirectional.valid();
@@ -682,7 +710,7 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
         }
     };
     auto bind = [=](PassContext& ctx, uint32_t workDescriptor, uint32_t airDescriptor) {
-        uint32_t k[36] = { ctx.srv(lights), workDescriptor == 0xFFFFFFFFu ? ctx.uav(volume) : 0xFFFFFFFFu, ctx.srv(tlut), ctx.srv(mlut), 0, 0, 0, 0xFFFFFFFFu, 0, 0, 0, 0, localLights, slotOfLight,
+        uint32_t k[40] = { ctx.srv(lights), workDescriptor == 0xFFFFFFFFu ? ctx.uav(volume) : 0xFFFFFFFFu, ctx.srv(tlut), ctx.srv(mlut), 0, 0, 0, 0xFFFFFFFFu, 0, 0, 0, 0, localLights, slotOfLight,
                            bounded ? ctx.srv(readers) : 0xFFFFFFFFu, 0xFFFFFFFFu, media.valid() ? ctx.srv(media) : 0xFFFFFFFFu,
                            functions.valid() ? ctx.srv(functions) : 0xFFFFFFFFu, workDescriptor, airDescriptor };
         if (shadows)
@@ -708,7 +736,9 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
         std::memcpy(&k[31], &sunFog[3], 4);
         std::memcpy(&k[32], fog.albedo, 12);
         std::memcpy(&k[35], &fog.start, 4);
-        ctx.bindFrameConstants(constants); ctx.computeConstants(k, 36);
+        std::memcpy(&k[36], sunFog2, 12);
+        k[39] = 0;
+        ctx.bindFrameConstants(constants); ctx.computeConstants(k, 40);
     };
     if (queued)
     {
@@ -818,7 +848,7 @@ namespace
 // The fog's volume of the main view (FogVolume.hlsli): its textures live in the track's state with stable SRVs, and a
 // ring of parameter records (one per frame in flight) names them - the main view's frame constants carry the record's
 // SRV, so every kernel that looks the air up (Atmosphere.hlsli) finds the fog with it.
-constexpr uint32_t kFogRing = 4, kFogParamBytes = 80;
+constexpr uint32_t kFogRing = 4, kFogParamBytes = 96;
 struct FogParamsGpu  // FogVolume.hlsli FogParams
 {
     uint32_t slices, volumeSrv;
@@ -832,8 +862,10 @@ struct FogParamsGpu  // FogVolume.hlsli FogParams
     uint32_t grid;
     float farEndM;
     uint32_t flags;  // bit 0: on_gi_rays, bit 1: sun_through_fog
+    float density2, falloff2, height2;  // the second layer
+    uint32_t pad2;
 };
-static_assert(sizeof(FogParamsGpu) == kFogParamBytes, "FogParams is 80 B (FogVolume.hlsli)");
+static_assert(sizeof(FogParamsGpu) == kFogParamBytes, "FogParams is 96 B (FogVolume.hlsli)");
 constexpr uint32_t kFogVolumeBytes = 96;
 constexpr uint32_t kFogGridRunBytes = kMaxFogVolumes * kFogGridMax * kFogGridMax * kFogGridMax;  // a frame's density grids (R8)
 // A local volume as FogScatter.hlsl reads it: the rows of unit-from-render (the unit sphere or the cube [-1, 1]^3), then
@@ -1073,6 +1105,7 @@ struct FogState
             p.uvScale[1] = (float)height / (float)(view.gridY * view.cellPx);
             p.skyAmount = view.skyAmount;
             p.density = view.density; p.falloff = view.falloff; p.height = view.height; p.g = view.g;
+            p.density2 = view.density2; p.falloff2 = view.falloff2; p.height2 = view.height2;
             for (int c = 0; c < 3; ++c) p.albedo[c] = view.albedo[c];
             p.start = view.start;
             p.flags = (view.onGiRays ? 1u : 0u) | (view.sunThroughFog ? 2u : 0u);
@@ -1108,6 +1141,7 @@ uint32_t fogPrepare(FramePassContext& fc, const ViewDesc& view)
     FogView f = fogViewFor(fc.quality, fc.frame, view.width, view.height);
     if (!f.on || !fc.trackState) return 0;
     f.height -= fc.scene.originOffset().y;  // (the kernels' positions are the frame's render space: world - the origin offset)
+    f.height2 -= fc.scene.originOffset().y;
     FogState& st = fc.state<FogState>("S.fog.volume");
     st.ensure(fc.device, f);
     st.view = f;
@@ -1146,6 +1180,7 @@ uint32_t fogPrepareSecondary(FramePassContext& fc, const ViewDesc& view, uint64_
     sec.key[sec.used] = key;
     const uint32_t slot = ++sec.used;
     f.height -= fc.scene.originOffset().y;
+    f.height2 -= fc.scene.originOffset().y;
     f.historyWeight = 0;  // (no history: the view has no identity between frames)
     FogState& st = fc.state<FogState>(fogStateKey(slot));
     st.ensure(fc.device, f, false);
@@ -1491,7 +1526,7 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
                   },
                   [=](PassContext& ctx) {
                       const uint32_t none = 0xFFFFFFFFu;
-                      uint32_t k[44] = { grid0, grid1, bits(f.farM), bits(f.k),
+                      uint32_t k[48] = { grid0, grid1, bits(f.farM), bits(f.k),
                                          bits(f.b), ctx.uav(scatter), history.valid() ? ctx.srv(history) : none, clip ? 1u : 0u,
                                          bits(f.density), bits(f.falloff), bits(f.height), bits(f.g),
                                          bits(f.albedo[0]), bits(f.albedo[1]), bits(f.albedo[2]), bits(f.start),
@@ -1502,10 +1537,11 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
                                          bits(jitter[0]), bits(jitter[1]), bits(jitter[2]), bits(f.historyWeight),
                                          shadows ? ctx.uav(vsm.stats) : none, ctx.srv(fogDepth), bits(f.noiseAmount), bits(1.0f / f.noiseScale),
                                          bits(noise[0]), bits(noise[1]), bits(noise[2]), volumeSrv,
-                                         volumeCount, bits(exposureRatio), hairShadow ? ctx.srv(hairParams) : none, gridSrv };
+                                         volumeCount, bits(exposureRatio), hairShadow ? ctx.srv(hairParams) : none, gridSrv,
+                                         bits(f.density2), bits(f.falloff2), bits(f.height2), 0 };
                       ctx.cmd->SetPipelineState(ps);
                       ctx.bindFrameConstants(constants);
-                      ctx.computeConstants(k, 44);
+                      ctx.computeConstants(k, 48);
                       ctx.cmd->Dispatch((f.gridX + 3) / 4, (f.gridY + 3) / 4, (f.gridZ + 3) / 4);
                   });
     g.addPass("s.fog.integrate" + suffix, QueueType::Compute,
@@ -1526,16 +1562,17 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
               },
               [=](PassContext& ctx) {
                   const uint32_t none = 0xFFFFFFFFu;
-                  uint32_t k[28] = { grid0, grid1, bits(f.farM), bits(f.k),
+                  uint32_t k[32] = { grid0, grid1, bits(f.farM), bits(f.k),
                                      bits(f.b), cells ? ctx.srv(scatter) : none, ctx.uav(integrated), bits(f.farEndM),
                                      bits(f.density), bits(f.falloff), bits(f.height), bits(f.g),
                                      bits(f.albedo[0]), bits(f.albedo[1]), bits(f.albedo[2]), bits(f.start),
                                      withReaders ? ctx.srv(readers) : none, withAir ? ctx.srv(msLut) : none, f.airOrder ? 1u : 0u, f.cloudSteps,
-                                     cloudWord, withAir ? ctx.srv(air) : none, 0, 0,
-                                     farShadows ? ctx.srv(air) : none, farShadows || withReaders ? ctx.srv(lights) : none, ambient ? ambientParams : none, ctx.srv(tlut) };
+                                     cloudWord, withAir ? ctx.srv(air) : none, f.farSkyLight ? 1u : 0u, 0,
+                                     farShadows ? ctx.srv(air) : none, farShadows || withReaders ? ctx.srv(lights) : none, ambient ? ambientParams : none, ctx.srv(tlut),
+                                     bits(f.density2), bits(f.falloff2), bits(f.height2), 0 };
                   ctx.cmd->SetPipelineState(pi);
                   ctx.bindFrameConstants(constants);
-                  ctx.computeConstants(k, 28);
+                  ctx.computeConstants(k, 32);
                   ctx.cmd->Dispatch((f.gridX + 7) / 8, (f.gridY + 7) / 8, 1);
                   // (a planar view's record: its volume is this frame's transient)
                   if (!primary) record->write(frameIndex, true, viewWidth, viewHeight, ctx.srv(integrated));

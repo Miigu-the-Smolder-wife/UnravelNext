@@ -1133,6 +1133,8 @@ int main(int argc, char** argv)
         // (the twins are the fog alone: FogIntegrate.hlsl's order against the view's air - the atmosphere over the far
         //  slices' kilometres - is not in them; the frames here hold the form the twins have)
         tf.quality.applyOverride("atmosphere.fog.air_order=false");
+        // (the twins' far slices are lit by the sun alone: the sky's light there - far_sky_light - is not in them)
+        tf.quality.applyOverride("atmosphere.fog.far_sky_light=false");
         TestRaster raster(tf);
         raster.install();
         TestHiz hiz;

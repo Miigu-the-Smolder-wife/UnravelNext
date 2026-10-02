@@ -85,7 +85,9 @@ void fogSegment(inout float za, inout float zb, float limit)
 // The fog's extinction (1/m) at a height (the medium's density under its height held to 64 x, as fogOpticalDepth).
 float fogExtinctionAt(FogMedium f, float y)
 {
-    return f.density * min(exp2(-f.falloff * (y - f.height)), 64.0);
+    float sigma = f.density * min(exp2(-f.falloff * (y - f.height)), 64.0);
+    if (f.density2 > 0) sigma += f.density2 * min(exp2(-f.falloff2 * (y - f.height2)), 64.0);  // (the second layer)
+    return sigma;
 }
 
 // The density's variation about its mean (atmosphere.fog.noise_amount): value noise of two octaves on a lattice that
@@ -152,7 +154,7 @@ float fogVolumeGrid(uint gridBuffer, uint at, uint size, float3 u)
     return v * (1.0 / 255.0);
 }
 
-// The view's fog record (FroxelSystem.cpp FogParamsGpu; 80 B). The first 32 bytes are all a reader needs.
+// The view's fog record (FroxelSystem.cpp FogParamsGpu; 96 B). The first 32 bytes are all a reader needs.
 struct FogParams
 {
     uint slices;              // z | cell px << 16 | zFar << 24 (0: the volume is not there this frame)
@@ -167,6 +169,8 @@ struct FogParams
     uint grid;                // x | y << 16 (15 bits each) | atmosphere.fog.on_rays << 31
     float farEndM;
     uint flags;               // bit 0: atmosphere.fog.on_gi_rays, bit 1: atmosphere.fog.sun_through_fog (with a height fog)
+    float density2, falloff2, height2;  // the second layer (Fog.hlsli FogMedium; density2 0: none)
+    uint pad2;
 };
 // The record's medium: the height fog's mean (no variation, no start distance).
 FogMedium fogMediumOf(FogParams p)
@@ -179,6 +183,9 @@ FogMedium fogMediumOf(FogParams p)
     m.g = p.g;
     m.albedo = p.albedo;
     m.start = 0;
+    m.density2 = p.density2;
+    m.falloff2 = p.falloff2;
+    m.height2 = p.height2;
     return m;
 }
 // false: the view has no fog (g_fog 0), or its volume is not there this frame.

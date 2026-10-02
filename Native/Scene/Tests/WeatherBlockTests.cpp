@@ -160,6 +160,21 @@ int main()
         CHECK(bothBack.fog.phaseG == 0.6f && bothBack.fog.startDistance == 3.0f && bothBack.fog.skyAmount == 0.5f && bothBack.fog.noiseAmount == 0.2f &&
               bothBack.fog.noiseScale == 35.0f);
         CHECK(serialize(bothBack) == bothBytes);
+        CHECK(!contains(bothBytes, "FGL2"));
+
+        // the fog's second layer: its own block after FOGS
+        Scene layered = both;
+        layered.fog.density2 = 0.02f;
+        layered.fog.heightFalloff2 = 0.5f;
+        layered.fog.height2 = -3.0f;
+        validate(layered);
+        const std::vector<uint8_t> layeredBytes = serialize(layered);
+        CHECK(contains(layeredBytes, "FGL2"));
+        CHECK(layeredBytes.size() == bothBytes.size() + 4 + 3 * 4);
+        const Scene layeredBack = deserialize(layeredBytes);
+        CHECK(layeredBack.fog.density2 == 0.02f && layeredBack.fog.heightFalloff2 == 0.5f && layeredBack.fog.height2 == -3.0f);
+        CHECK(layeredBack.fog.density == 0.004f && layeredBack.clouds.coverage == 0.5f);
+        CHECK(serialize(layeredBack) == layeredBytes);
 
         // values outside the fields' ranges are refused
         Scene bad = cloudy;

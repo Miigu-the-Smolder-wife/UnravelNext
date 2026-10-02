@@ -38,6 +38,7 @@
 //          variation x its own turbulence (FogVolume.hlsli fogSteamScale: rising steam) x its grid's value, with its own
 //          albedo; the cell's light is the same.
 // P[10].w = the frame's density grids (raw SRV; UNX_NONE: no volume has one).
+// P[11] = asuint{ the medium's second layer: density (1/m at its height), height falloff, height (m), 0 } (Fog.hlsli)
 // P[10].y = asuint(this frame's exposure / the history's: the history's light at this frame's exposure; 1 without history)
 // P[10].z = E's hair density parameters (raw SRV; UNX_NONE: none - no hair this frame, or shading.hair_shadows off).
 // Frame constants of the view (the main view, or a planar reflection view: its fog starts at the mirror).
@@ -85,7 +86,7 @@ void main(uint3 id : SV_DispatchThreadID)
     const float zs = max(min(fogDepthOfSlice(g, float(id.z) + jitter.z), sampleDepth - 0.02), 0.0);
     const float3 p = g_cameraPosition + ray * zs;
 
-    const FogMedium fog = fogMedium(uint4(1, 0, 0, 0), P[2], P[3]);
+    const FogMedium fog = fogMedium(uint4(1, 0, 0, 0), P[2], P[3], P[11]);
     const float variation = fogDensityScale(p * float3(1, 2, 1) * asfloat(P[8].w) + asfloat(P[9].xyz), asfloat(P[8].z));
     float sigma = fogExtinctionAt(fog, p.y) * variation;
     if (zs * toRay < fog.start) sigma = 0;

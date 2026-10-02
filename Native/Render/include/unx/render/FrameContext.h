@@ -35,6 +35,7 @@ struct WeatherFrame
 // (Passes/Atmosphere/Celestial.h: sky::celestial, sky::directionalLight, sky::celestialFrame). flags: bit 0 the frame's
 // directional light (Scene::sun) is the moon (the sky pass leaves out its uniform solar disk), bit 1 the moon's disk is
 // drawn (a Lambert sphere lit by sunDirection), bit 2 the stars are drawn. 0 (the default): none of them, as before.
+// (bit 3 is S's, in the GPU record only: the sky view LUT holds the airglow - atmosphere.night_sky_in_lut.)
 struct CelestialFrame
 {
     float3 moonDirection{ 0, -1, 0 };
@@ -133,6 +134,12 @@ struct FogDesc
     float skyAmount = 1;           // [0, 1]: how much of the fog sky pixels take
     float noiseAmount = 0.3f;      // [0, 1]: the density's variation about its mean (0: a uniform medium)
     float noiseScale = 20;         // m: the variation's largest features
+    // A second layer of the same medium (the reference's SecondFogData): its own density, falloff and height, added to
+    // the first everywhere the fog is - a low ground fog under a thin haze. density2 0: none (the rain's veil then takes
+    // the layer while it rains: WeatherFrame::rainRate, atmosphere.fog.rain_veil).
+    float density2 = 0;            // extinction (1/m) at 'height2'
+    float heightFalloff2 = 0.02f;  // the layer's density halves every 1 / this metres of height
+    float height2 = 0;             // world metres
 };
 
 // A local fog volume: extra extinction inside an ellipsoid or a box, added to the frame's height fog in the fog's cells

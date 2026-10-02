@@ -607,6 +607,9 @@ constexpr uint32_t kFogTag = 0x53474F46u;    // "FOGS"
 // per such volume its index (u32), sourcePlane, riseSpeed, turbulence, turbulenceScale. A scene without them keeps the
 // bytes it had.
 constexpr uint32_t kFogSteamTag = 0x54535646u;  // "FVST"
+// "FGL2", after FOGS and before FVST, written when the fog has a second layer (density2 > 0): density2, heightFalloff2,
+// height2 (3 floats).
+constexpr uint32_t kFogLayerTag = 0x324C4746u;  // "FGL2"
 bool hasSteam(const FogVolume& v) { return v.sourcePlane != 0 || v.riseSpeed != 0 || v.turbulence != 0; }
 
 bool anyClouds(const Scene& s) { return s.clouds.coverage > 0; }
@@ -688,6 +691,13 @@ std::vector<uint8_t> serialize(const Scene& s)
     if (anyEye(s)) writeEye(w, s);
     if (anyClouds(s)) writeClouds(w, s);
     if (anyFog(s)) writeFog(w, s);
+    if (s.fog.density2 > 0)
+    {
+        w.pod(kFogLayerTag);
+        w.pod(s.fog.density2);
+        w.pod(s.fog.heightFalloff2);
+        w.pod(s.fog.height2);
+    }
     {
         uint64_t steam = 0;
         for (const FogVolume& v : s.fogVolumes) steam += hasSteam(v) ? 1 : 0;
@@ -984,6 +994,13 @@ Scene deserialize(const std::vector<uint8_t>& bytes)
         }
         tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
     }
+    if (tag == kFogLayerTag)
+    {
+        s.fog.density2 = r.pod<float>();
+        s.fog.heightFalloff2 = r.pod<float>();
+        s.fog.height2 = r.pod<float>();
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
     if (tag == kFogSteamTag)
     {
         const uint64_t count = r.pod<uint64_t>();
@@ -1243,8 +1260,9 @@ void validate(const Scene& s)
                                std::isfinite(f.albedo.y) && std::isfinite(f.albedo.z) && std::isfinite(f.phaseG) && std::isfinite(f.startDistance) &&
                                std::isfinite(f.skyAmount) && std::isfinite(f.noiseAmount) && std::isfinite(f.noiseScale);
         if (!fogFinite || f.density < 0 || f.heightFalloff < 0 || !(f.phaseG > -1 && f.phaseG < 1) || f.startDistance < 0 || f.skyAmount < 0 || f.skyAmount > 1 ||
-            f.noiseAmount < 0 || f.noiseAmount > 1 || (f.enabled && f.noiseScale < 1))
-            fail("fog: density and falloff >= 0, phase g in (-1, 1), start distance >= 0, sky amount and noise amount in [0, 1], noise scale >= 1 m");
+            f.noiseAmount < 0 || f.noiseAmount > 1 || (f.enabled && f.noiseScale < 1) || !(f.density2 >= 0) || !(f.heightFalloff2 >= 0) || !std::isfinite(f.height2) ||
+            !std::isfinite(f.density2) || !std::isfinite(f.heightFalloff2))
+            fail("fog: density and falloff >= 0 (both layers), phase g in (-1, 1), start distance >= 0, sky amount and noise amount in [0, 1], noise scale >= 1 m");
         for (size_t i = 0; i < s.fogVolumes.size(); ++i)
         {
             const FogVolume& v = s.fogVolumes[i];

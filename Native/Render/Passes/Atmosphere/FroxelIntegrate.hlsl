@@ -71,7 +71,7 @@
 // the fog's height), height falloff, height (m), phase g }, P[8] = { albedo r, g, b, start distance (m) } (floats).
 // P[6].x bit 2 (atmosphere.fog.sun_through_fog): part 2's sun transmittance x the share of the sun's light that passes
 // the height fog toward the sun as direct light (Fog.hlsli fogSunThrough; the medium in P[7], whether bit 0 is set or
-// not: the fog's own volume is FogVolume.hlsli's).
+// not: the fog's own volume is FogVolume.hlsli's). P[9] = the medium's second layer { density, falloff, height, 0 }.
 // Frame constants of the view (main, or a planar reflection view).
 #include "Passes/Atmosphere/FroxelSlice.hlsli"
 #include "Passes/Shadow/VsmCls.hlsli"
@@ -154,7 +154,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     if (s == 0) gs_lastSky = 0;
     // Particle media of this slice (P[4].x) and their optical depth before it and to far_m (inclusive scan in gs_tau,
     // reused below).
-    const FogMedium fog = fogMedium(P[6], P[7], P[8]);
+    const FogMedium fog = fogMedium(P[6], P[7], P[8], P[9]);
     const bool particleMedia = P[4].x != 0xFFFFFFFFu, media = particleMedia || fog.on;
     float3 mediaTau = 0, mediaSource = 0;
     if (particleMedia && s < g.slices)

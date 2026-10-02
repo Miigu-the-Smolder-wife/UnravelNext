@@ -371,6 +371,10 @@ struct Fog
     float skyAmount = 1;           // [0, 1]: how much of the fog sky pixels take
     float noiseAmount = 0.3f;      // [0, 1]: the density's variation about its mean
     float noiseScale = 20;         // m: the variation's largest features
+    // a second layer of the same medium (FogDesc::density2; file block "FGL2", written only with a density)
+    float density2 = 0;            // extinction (1/m) at 'height2'; 0: none
+    float heightFalloff2 = 0.02f;
+    float height2 = 0;             // m (scene y)
 };
 // Extra fog inside an ellipsoid or a box (mist in a hollow, steam): seen within the fog's near volume.
 struct FogVolume

@@ -46,7 +46,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     if (s == 0) gs_lastSky = 0;
     // Particle media of this slice (P[4].x) and their optical depth before it and to far_m (inclusive scan in gs_tau,
     // reused below).
-    const FogMedium fog = fogMedium(P[6], P[7], P[8]);  // (as FroxelIntegrate.hlsl: the fog is a medium of every slice)
+    const FogMedium fog = fogMedium(P[6], P[7], P[8], P[9]);  // (as FroxelIntegrate.hlsl: the fog is a medium of every slice)
     const bool particleMedia = P[4].x != 0xFFFFFFFFu, media = particleMedia || fog.on;
     float3 mediaTau = 0, mediaSource = 0;
     if (particleMedia && s < g.slices)
