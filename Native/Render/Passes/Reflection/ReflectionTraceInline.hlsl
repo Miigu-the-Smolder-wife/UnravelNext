@@ -11,6 +11,7 @@
 #define REFL_OVERFLOW 1  // use the same stored attributes/values as the split passes
 #define REFL_NO_CARDS 1  // (at the DXIL limit: the overflow jobs' hits read no mesh cards - ReflectionShade.hlsli g_reflCardFrame)
 #define REFL_NO_ACCUMULATOR (JOB == 2)  // (the G library is at the DXIL limit: ReflectionShade.hlsli g_reflAccPool)
+#define RT_HIT_EYE 0  // (at the DXIL limit: an overflow job's hit on an eye reads its colour at the surface's uv - HitShading.hlsli)
 #define GI_BATCH_CORNERS CORNERS
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/Reflection/ReflectionRay.hlsli"

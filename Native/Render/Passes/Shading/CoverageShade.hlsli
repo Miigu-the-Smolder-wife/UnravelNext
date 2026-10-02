@@ -36,6 +36,7 @@ static uint g_covListed = 0xFFFFFFFFu;
 #include "Bindless.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
+#include "Passes/Material/MaterialEye.hlsli"
 #include "Passes/Material/SurfaceLayers.hlsli"
 #include "Passes/Lights/LightFunction.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
@@ -227,7 +228,10 @@ struct CovMaterial
     float variance;   // slope variance (geometric + textures)
     float coatRoughness;  // A9: the coat's footprint-filtered perceptual roughness (layered materials; 0 otherwise)
 };
-CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTextureSet ts)
+// v0..v2: the triangle's deformed vertices (the ones sf was made from). An eye's fragment (MATERIAL_EYE) reads its base
+// colour at the iris point seen through the cornea, under the limbal ring (MaterialEye.hlsli); it is shaded as the plain
+// Subsurface model (a fragment has no eye word).
+CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTextureSet ts, MVertex v0, MVertex v1, MVertex v2)
 {
     float3 baseColor = m.baseColor, n;
     float roughness = m.roughness, metallic = m.metallic;
@@ -252,11 +256,6 @@ CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTexture
     else
 #endif
     {
-        if (ts.baseColor != UNX_NONE)
-        {
-            Texture2D<float4> t = ResourceDescriptorHeap[ts.baseColor];
-            baseColor *= mSampleGrad(t, (ts.flags & M_TEX_BASE_COLOR) != 0, sf.uv, sf.duvdx, sf.duvdy).rgb;
-        }
         if (ts.roughMetal != UNX_NONE)
         {
             Texture2D<float4> t = ResourceDescriptorHeap[ts.roughMetal];
@@ -273,6 +272,18 @@ CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTexture
             variance += mm.variance;
         }
         else n = normalize(sf.normal);
+        float2 uvColor = sf.uv;
+        if ((m.classFlags & MATERIAL_EYE) != 0)
+        {
+            const MEye e = mEyeEvaluate(visId, P[1].x, sf, m, n, v0, v1, v2);
+            uvColor = e.uv;
+            baseColor *= e.darkening;
+        }
+        if (ts.baseColor != UNX_NONE)
+        {
+            Texture2D<float4> t = ResourceDescriptorHeap[ts.baseColor];
+            baseColor *= mSampleGrad(t, (ts.flags & M_TEX_BASE_COLOR) != 0, uvColor, sf.duvdx, sf.duvdy).rgb;
+        }
     }
     CovMaterial o;
     o.baseColor = baseColor;
@@ -330,7 +341,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
     ByteAddressBuffer preshaded = ResourceDescriptorHeap[P[5].y];
     const CovMaterial cmat = covLoadMaterial(preshaded, g_covPreshadeSlot);
 #else
-    const CovMaterial cmat = covFragmentMaterial(visId, sf, m, ts);
+    const CovMaterial cmat = covFragmentMaterial(visId, sf, m, ts, v0, v1, v2);
 #endif
     float3 baseColor = cmat.baseColor, n = cmat.normal;
     float roughness = cmat.roughness, metallic = cmat.metallic, variance = cmat.variance;

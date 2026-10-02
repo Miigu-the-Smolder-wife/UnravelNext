@@ -62,7 +62,7 @@ void main(uint3 id : SV_DispatchThreadID)
 #endif
     const MVertex v0 = mTriangleVertex(visId, P[1].x, 0), v1 = mTriangleVertex(visId, P[1].x, 1), v2 = mTriangleVertex(visId, P[1].x, 2);
     const MSurface sf = mSurfaceFromVertices(tid, v0, v1, v2, covFragmentCentre(v0, v1, v2, pixel));
-    CovMaterial cm = covFragmentMaterial(visId, sf, m, mLoadTextureSet(P[1].y, tid.material));
+    CovMaterial cm = covFragmentMaterial(visId, sf, m, mLoadTextureSet(P[1].y, tid.material), v0, v1, v2);
 #if MODE == 4
     // the coat's (or the sheen's: one layer kind per material) roughness band-limited by the footprint like the base's
     // (MATERIAL_LAYERS 3.4, 1.4; as the resolve)

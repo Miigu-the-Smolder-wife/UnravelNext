@@ -165,6 +165,10 @@ struct RtSurface
     uint material;
     uint sceneInstance;
     bool frontFace;
+    // The hit triangle (HitShading.hlsli rtHitEye; a kernel that reads none of them compiles none of their loads): its
+    // rest-pose edges (object space), its edges as hit (world) and its uv edges.
+    float3 restE1, restE2, worldE1, worldE2;
+    float2 uvE1, uvE2;
 };
 
 // With the records it read (a caller needing more of the hit, e.g. its motion, does not load them again).
@@ -187,6 +191,9 @@ RtSurface rtSurfaceParts(RtSceneSrvs s, RtHit h, float3 origin, float3 direction
         const RtDeformedVertex a = d[ri.vertexBase + tri.poolIndex.x], b = d[ri.vertexBase + tri.poolIndex.y], c = d[ri.vertexBase + tri.poolIndex.z];
         p0 = a.position; p1 = b.position; p2 = c.position;
         n = normalize(octDecode(a.normalOct) * w.x + octDecode(b.normalOct) * w.y + octDecode(c.normalOct) * w.z);
+        const float3 rest0 = loadVertex(mesh, tri.meshVertex.x).position;
+        o.restE1 = loadVertex(mesh, tri.meshVertex.y).position - rest0;
+        o.restE2 = loadVertex(mesh, tri.meshVertex.z).position - rest0;
     }
     else
     {
@@ -195,12 +202,18 @@ RtSurface rtSurfaceParts(RtSceneSrvs s, RtHit h, float3 origin, float3 direction
         p1 = transformPoint(inst.objectToWorld, b.position);
         p2 = transformPoint(inst.objectToWorld, c.position);
         n = normalize(transformVector(inst.objectToWorld, a.normal * w.x + b.normal * w.y + c.normal * w.z));
+        o.restE1 = b.position - a.position;
+        o.restE2 = c.position - a.position;
     }
+    o.worldE1 = p1 - p0;
+    o.worldE2 = p2 - p0;
     o.position = origin + direction * h.t;
     o.geometricNormal = normalize(cross(p1 - p0, p2 - p0));
     const float2 uv0 = loadVertex(mesh, tri.meshVertex.x).uv, uv1 = loadVertex(mesh, tri.meshVertex.y).uv, uv2 = loadVertex(mesh, tri.meshVertex.z).uv;
     o.uv = uv0 * w.x + uv1 * w.y + uv2 * w.z;
     const float2 du = uv1 - uv0, dv = uv2 - uv0;
+    o.uvE1 = du;
+    o.uvE2 = dv;
     o.uvPerWorldArea = abs(du.x * dv.y - du.y * dv.x) / max(length(cross(p1 - p0, p2 - p0)), 1e-20);
     o.frontFace = h.frontFace != 0;
     if (!o.frontFace)

@@ -30,13 +30,14 @@ float rtTextureLod(Texture2D t, float uvPerWorldArea, float footprintLog2)
     return 0.5 * log2(max((float)w * h * uvPerWorldArea, 1e-20)) + footprintLog2;
 }
 
-GpuMaterial rtHitMaterial(GpuMaterial m, RtSurface s, float coneWidth, float cosTheta)
+// uvColor: where the base colour is read (the surface's uv; an eye's iris point).
+GpuMaterial rtHitMaterialAt(GpuMaterial m, RtSurface s, float2 uvColor, float coneWidth, float cosTheta)
 {
     const float footprint = log2(max(coneWidth, 1e-8) / max(abs(cosTheta), 1e-3));
     if (m.baseColorTexture != UNX_NONE)
     {
         Texture2D t = ResourceDescriptorHeap[m.baseColorTexture];
-        m.baseColor *= materialBaseColorLevel(m, s.uv, rtTextureLod(t, s.uvPerWorldArea, footprint)).rgb;
+        m.baseColor *= materialBaseColorLevel(m, uvColor, rtTextureLod(t, s.uvPerWorldArea, footprint)).rgb;
     }
     if (m.roughMetalTexture != UNX_NONE)
     {
@@ -53,6 +54,34 @@ GpuMaterial rtHitMaterial(GpuMaterial m, RtSurface s, float coneWidth, float cos
         m.emissive *= (m.textureClamp & MATERIAL_TEXTURE_EMISSIVE) ? t.SampleLevel(g_anisoClamp, s.uv, lod).rgb : t.SampleLevel(g_anisoWrap, s.uv, lod).rgb;
     }
     return m;
+}
+GpuMaterial rtHitMaterial(GpuMaterial m, RtSurface s, float coneWidth, float cosTheta) { return rtHitMaterialAt(m, s, s.uv, coneWidth, cosTheta); }
+
+// An eye (MATERIAL_EYE) at a ray hit: the base colour's uv - the iris point seen through the cornea along the ray
+// (modelEyeFrame through the hit triangle, modelEyePoint, as the resolve's MaterialEye.hlsli) - and the limbal ring's
+// factor (returned).
+float rtHitEye(GpuMaterial m, RtSurface s, float3 direction, inout float2 uv)
+{
+    const GpuMaterialEye e = loadMaterialEye(m.classFlags >> 16);
+    float3 t = float3(0, 0, -1);  // (the sclera: no frame)
+    if (length(s.uv - 0.5) < e.irisRadius)
+        t = modelEyeRay(modelEyeFrame(e.axis, s.restE1, s.restE2, s.worldE1, s.worldE2, s.uvE1, s.uvE2), direction, s.normal, e.eta);
+    const ModelEyePoint p = modelEyePoint(e, s.uv, t);
+    uv = p.uv;
+    return p.darkening;
+}
+// The material of a hit as a viewer along 'direction' (the ray's, unit) sees it: rtHitMaterial, and with RT_HIT_EYE = 1
+// (the reflection kernels set it; default 0: GI hits take the surface's uv) an eye's base colour at its iris point.
+#ifndef RT_HIT_EYE
+#define RT_HIT_EYE 0
+#endif
+GpuMaterial rtHitMaterialSeen(GpuMaterial m, RtSurface s, float3 direction, float coneWidth, float cosTheta)
+{
+    float2 uvColor = s.uv;
+#if RT_HIT_EYE
+    if ((m.classFlags & MATERIAL_EYE) != 0) m.baseColor *= rtHitEye(m, s, direction, uvColor);
+#endif
+    return rtHitMaterialAt(m, s, uvColor, coneWidth, cosTheta);
 }
 
 struct RtHitLighting
@@ -97,7 +126,9 @@ struct RtHitSplit
 // ModelSubsurface), Lambert diffuse light with no scattering pass behind it, and the light through thin parts
 // (modelSubsurfaceThin) from the sun and the light sample on the far side of the shading normal - the hit's one shadow
 // ray decides, as the direct view's visibility does. An eye (MATERIAL_EYE) is such a hit with its base colour at the
-// surface's uv: no refraction onto the iris.
+// surface's uv: no refraction onto the iris - except in the reflection kernels (RT_HIT_EYE, rtHitMaterialSeen), where
+// its base colour is read at the iris point seen through the cornea along the ray, under the limbal ring, so a mirror
+// shows the eye the direct view shows; its shading stays the hit's (no iris plane, no caustic).
 // The cloth blend (a sheen's cloth factor): the base's specular share of the sun term and of the cache's light x (1 - cloth).
 float3 rtHitRadianceSplit(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float pixelAngle, bool wantSun, out float3 sunFull, out RtHitSplit split)
 {

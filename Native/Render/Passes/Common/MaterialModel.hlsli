@@ -215,6 +215,42 @@ ModelEyePoint modelEyePoint(GpuMaterialEye e, float2 uv, float3 t)
     o.caustic = saturate(e.concavity * o.mask * rhoC);
     return o;
 }
+// The eye's frame at a point of its mesh, through the triangle there: the optical axis in world space - the material's
+// axis (the mesh's object space) in the basis of the triangle's rest edges a1, a2 and their normal, carried to its
+// deformed edges b1, b2 (world) and theirs, so a rigid instance, a skinned eye and a morphed one all turn the axis as
+// they turn the surface (no tangents needed) - and the iris plane's uv directions: the triangle's dP/du and dP/dv
+// (uv edges d1, d2) with their part along the axis removed (exact for a uv that is a projection along the axis,
+// whatever the cornea's shape).
+struct ModelEyeFrame
+{
+    float3 axis, eu, ev;  // unit; eu, ev in the iris plane
+};
+ModelEyeFrame modelEyeFrame(float3 axisObject, float3 a1, float3 a2, float3 b1, float3 b2, float2 d1, float2 d2)
+{
+    const float3 na = cross(a1, a2), nb = cross(b1, b2);
+    // (the normal by the edges' scale: |nb| / |na| is the area's, its root the length's)
+    const float invA = 1 / max(dot(na, na), 1e-30);
+    ModelEyeFrame f;
+    f.axis = normalize(b1 * (dot(cross(a2, na), axisObject) * invA) + b2 * (dot(cross(na, a1), axisObject) * invA) +
+                       nb * (dot(na, axisObject) * invA * sqrt(sqrt(dot(na, na) / max(dot(nb, nb), 1e-30)))));
+    // dP/du, dP/dv x the uv determinant squared: their directions are what counts
+    const float det = d1.x * d2.y - d1.y * d2.x;
+    float3 eu = (b1 * d2.y - b2 * d1.y) * det, ev = (b2 * d1.x - b1 * d2.x) * det;
+    eu -= f.axis * dot(f.axis, eu);
+    ev -= f.axis * dot(f.axis, ev);
+    if (!(dot(eu, eu) > 0)) eu = abs(f.axis.x) < 0.9 ? cross(f.axis, float3(1, 0, 0)) : cross(f.axis, float3(0, 1, 0));  // (a degenerate uv: any direction)
+    f.eu = normalize(eu);
+    if (!(dot(ev, ev) > 0)) ev = cross(f.axis, f.eu);
+    f.ev = normalize(ev);
+    return f;
+}
+// The ray that arrives along 'incident' (unit, towards the surface) refracted at the normal n (on the ray's side) into
+// the aqueous humour, in the eye's frame: modelEyePoint's t.
+float3 modelEyeRay(ModelEyeFrame f, float3 incident, float3 n, float eta)
+{
+    const float3 r = refract(incident, n, 1 / eta);
+    return float3(dot(r, f.eu), dot(r, f.ev), dot(r, f.axis));
+}
 // The eye word (R32_UINT): the iris plane's normal a, octahedral snorm10 x 2 (bits 0..19; one normal per eye, so its
 // rounding is a constant turn of at most a quarter of a degree, not a pattern), the mask m, unorm6 (bits 20..25), and
 // the caustic weight w, unorm6 (bits 26..31). A word of 0 in the mask's bits is the sclera.

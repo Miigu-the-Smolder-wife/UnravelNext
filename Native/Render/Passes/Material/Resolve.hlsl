@@ -94,7 +94,9 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
         }
         else
         {
-            const MSurface s = mSurfaceFromVis(visId, P[0].y, float2(pixel) + 0.5);
+            // (the triangle's deformed vertices stay at hand: an eye's frame takes them)
+            const MVertex v0 = mTriangleVertex(visId, P[0].y, 0), v1 = mTriangleVertex(visId, P[0].y, 1), v2 = mTriangleVertex(visId, P[0].y, 2);
+            const MSurface s = mSurfaceFromVertices(mTriangleIdentity(visId, P[0].y), v0, v1, v2, float2(pixel) + 0.5);
             const GpuMaterial m = loadMaterial(s.material);
             const MTextureSet ts = mLoadTextureSet(P[2].x, s.material);
 
@@ -156,7 +158,7 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
                     eye = true;
                     if (P[6].y != 0)
                     {
-                        const MEye e = mEyeEvaluate(visId, P[0].y, s, m, n);
+                        const MEye e = mEyeEvaluate(visId, P[0].y, s, m, n, v0, v1, v2);
                         eyeWord = e.word;
                         uvColor = e.uv;
                         baseColor *= e.darkening;
