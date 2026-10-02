@@ -5,6 +5,7 @@
 // and a temporal and spatial filter. Every view with S's froxel lists (planar reflection views: without history); needs
 // the R track's ray scene.
 #include <string>
+#include <vector>
 #include "unx/render/Frame.h"
 
 struct ID3D12CommandSignature;
@@ -28,6 +29,8 @@ struct MegaLightsFrame
     BufferRef sets;        // the persistent tile sets (previous frame's until m.ml.sets.filter rewrites them)
     TextureRef prevDepth;  // the previous frame's view depth (invalid without history)
     float exposureRatio = 1;
+    // m.ml.temporal's outputs, the spatial step's inputs (megaLightsSubsurface runs that step again on one class's tiles)
+    TextureRef temporalDiffuse, temporalSpecular, temporalMoments, temporalFrames, historyConfidence;
 };
 // m.ml.sample and m.ml.trace of the main view; 'on' is false when the switch is off or the view cannot run it (then the
 // shading kernels keep their loop). Creates the textures m.ml.shade writes.
@@ -40,4 +43,16 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
 // demodulated: the result stays divided by the modulation factors, diffuse in ml.lighting and specular in
 // ml.lightingSpecular (the reader multiplies its own factors).
 void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, MegaLightsFrame& ml, bool demodulated = false);
+// m.ml.spatial.sss (shading.subsurface_scatter; MegaLightsSpatialSubsurface.hlsl), after megaLightsDenoise: the spatial
+// step on the tiles of one shade class (the Subsurface class's lists of the material resolve: 'tiles' with one dispatch
+// per list band - first entry and argument offset in 'bands' - through 'dispatchSignature'), for that class's pixels,
+// with the two terms apart: the diffuse per unit f_d (x exposure, a = 0) into 'diffusePerAlbedo', the specular (x
+// exposure) into 'specular'. The caller creates both and has cleared the first.
+struct MegaLightsClassBand
+{
+    uint32_t firstTile = 0, argsOffset = 0;
+};
+void megaLightsSubsurface(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, const MegaLightsFrame& ml, BufferRef tiles, BufferRef tileArgs,
+                          const std::vector<MegaLightsClassBand>& bands, uint32_t shadeClass, ID3D12CommandSignature* dispatchSignature, TextureRef diffusePerAlbedo,
+                          TextureRef specular);
 } // namespace unx::render::shading

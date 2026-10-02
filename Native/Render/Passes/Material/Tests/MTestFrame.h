@@ -272,6 +272,7 @@ public:
         c.windDirection = sceneData.windDirection;
         c.windSpeed = sceneData.windSpeed;
         gpuScene.fill(c);
+        c.blueNoise = gpu::kNone;  // (no tile in the test frame: BlueNoise.hlsli's per-pixel hash)
         std::memcpy(mapped + slot * 1024, &c, sizeof c);
         return constants->GetGPUVirtualAddress() + (slot++) * 1024;
     }

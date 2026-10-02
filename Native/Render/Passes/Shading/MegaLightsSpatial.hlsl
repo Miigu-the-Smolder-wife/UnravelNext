@@ -19,6 +19,14 @@
 // P[5] = { specular output UAV (flag 4), 0, 0, 0 }
 // P[3] = { kernel radius (px, float), samples, depth weight scale (float), max disocclusion frames (float) }
 // P[4] = { disocclusion deviation scale diffuse, specular, history confidence deviation threshold, max frames } (floats)
+// ML_SPATIAL_SUBSURFACE = 1 (MegaLightsSpatialSubsurface.hlsl, m.ml.spatial.sss; shading.subsurface_scatter): the same
+// filter on the Subsurface class's tiles, one group per tile of the class's list, for that class's pixels alone, with the
+// two terms apart and the factors back: the output takes the diffuse per unit f_d (a = 0) - the first term of the class's
+// diffuse texture (SubsurfaceScatter.hlsli) -, P[5].x the specular. Flag 4 is set (two outputs).
+// P[6] = { tile list (raw), first entry, shade class, 0 }
+#ifndef ML_SPATIAL_SUBSURFACE
+#define ML_SPATIAL_SUBSURFACE 0
+#endif
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
@@ -45,11 +53,27 @@ float2 mlDisk(float2 u)
 }
 
 [numthreads(8, 8, 1)]
+#if ML_SPATIAL_SUBSURFACE
+void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
+{
+    ByteAddressBuffer classTiles = ResourceDescriptorHeap[P[6].x];
+    const uint classTile = classTiles.Load(4 * (P[6].y + gid.x));
+    const uint2 pixel = uint2(classTile & 0xFFFFu, classTile >> 16) * M_TILE + tid;
+    const uint2 size = P[2].yz;
+    if (any(pixel >= size)) return;
+    {
+        // (pixels of other classes in the tile keep the diffuse texture's 0)
+        Texture2D<uint> classWords = ResourceDescriptorHeap[P[1].w];
+        const uint classMaterial = mWordMaterial(classWords[pixel]);
+        if (classMaterial == M_MATERIAL_SKY || mShadeClassOf(loadMaterial(classMaterial)) != P[6].z) return;
+    }
+#else
 void main(uint3 id : SV_DispatchThreadID)
 {
     const uint2 pixel = id.xy;
     const uint2 size = P[2].yz;
     if (any(pixel >= size)) return;
+#endif
     RWTexture2D<float4> output = ResourceDescriptorHeap[P[2].x];
     Texture2D<float4> diffuseTex = ResourceDescriptorHeap[P[0].x];
     Texture2D<float4> specularTex = ResourceDescriptorHeap[P[0].y];
@@ -183,6 +207,16 @@ void main(uint3 id : SV_DispatchThreadID)
         }
     }
     const float metallic = mWordMetallic(word);
+#if ML_SPATIAL_SUBSURFACE
+    {
+        // diffuse x its factor is the lights' diffuse radiance f_d E x exposure: E x exposure, within f16 (f_d under 1e-5: 0 with it)
+        RWTexture2D<float4> outputSpecular = ResourceDescriptorHeap[P[5].x];
+        const float3 fd = g.baseColor * ((1 - metallic) / 3.14159265);
+        output[pixel] = float4(min(diffuse * mlDiffuseFactor(g.baseColor, metallic) / max(fd, 1e-5), 60000.0), 0);
+        outputSpecular[pixel] = float4(specular * mlSpecularFactor(g.baseColor, metallic, m.specular, g.roughness, NoV), 1);
+        return;
+    }
+#endif
     if ((P[2].w & 4u) != 0)
     {
         RWTexture2D<float4> outputSpecular = ResourceDescriptorHeap[P[5].x];

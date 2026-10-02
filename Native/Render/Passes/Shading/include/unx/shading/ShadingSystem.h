@@ -18,7 +18,12 @@ const std::vector<float>& ltcTable();
 // before the group (ShadeBegin) and returns the banded ones (edge detection, then the shading kernels over the band's
 // tiles; neither needs a lag), shadingComposite records what reads the whole view after the group (overflow fallback
 // tiles, statistics, edge composite). shade() is both around M's own group ("m.lit").
+// shadingScatter (shading.subsurface_scatter; scenes with Subsurface materials) records the Subsurface class's scatter
+// pass, which writes that class's pixels: after the group (it reads the class's diffuse light around each pixel) and
+// before anything that reads the lit image (the kept scene colour, the water's refraction source). A caller that leaves
+// it out gets it at the start of shadingComposite.
 std::vector<RenderGraph::BandedPass> shadingPasses(FramePassContext& fc, ViewResources& view);
+void shadingScatter(FramePassContext& fc, ViewResources& view);
 void shadingComposite(FramePassContext& fc, ViewResources& view);
 void shade(FramePassContext& fc, ViewResources& view);
 

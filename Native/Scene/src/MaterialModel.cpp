@@ -501,6 +501,61 @@ float3 evaluateSubsurface(const Surface& s, const Subsurface& k, float3 n, float
     return albedo + single * compensation;
 }
 
+// ---- Subsurface class (stage B: the diffusion profile)
+float3 subsurfaceScaling(float3 albedo)
+{
+    auto s = [](float a) {
+        a = saturate(a);
+        return 1.9f - a + 3.5f * (a - 0.8f) * (a - 0.8f);
+    };
+    return { s(albedo.x), s(albedo.y), s(albedo.z) };
+}
+
+float3 subsurfaceDistance(float3 meanFreePath, float3 albedo)
+{
+    const float3 s = subsurfaceScaling(albedo);
+    return { std::max(meanFreePath.x / s.x, 1e-6f), std::max(meanFreePath.y / s.y, 1e-6f), std::max(meanFreePath.z / s.z, 1e-6f) };
+}
+
+float subsurfaceProfile(float d, float r) { return subsurfaceRadialPdf(d, r) / (2 * kPi * r); }
+
+float subsurfaceRadialPdf(float d, float r)
+{
+    const float y = std::exp(-r / (3 * d));
+    return (y * y * y + y) / (4 * d);
+}
+
+float subsurfaceRadialCdf(float d, float r)
+{
+    const float y = std::exp(-r / (3 * d));
+    return 1 - 0.25f * (y * y * y) - 0.75f * y;
+}
+
+float subsurfaceRadius(float d, float xi)
+{
+    const float u = std::max(1 - xi, 1e-6f);
+    const float c = std::cbrt(2 * u + std::sqrt(1 + 4 * u * u)), c2 = c * c;
+    const float y = 4 * u / (c2 + 1 + 1 / c2);
+    return -3 * d * std::log(std::min(y, 1.0f));
+}
+
+float subsurfaceSampleRadius(float d, float centreCdf, uint32_t k, uint32_t pairs, float u)
+{
+    return subsurfaceRadius(d, centreCdf + (1 - centreCdf) * (((float)k + ((k & 1u) ? 1 - u : u)) / (float)pairs));
+}
+
+float subsurfaceSampleAngle(uint32_t k, float u)
+{
+    const float turns = u + (float)k * 0.61803398875f;
+    return 6.28318530718f * (turns - std::floor(turns));
+}
+
+float3 subsurfaceSampleWeight(float3 d, float r, float h, float pdf)
+{
+    const float rr = std::sqrt(r * r + h * h);
+    return { subsurfaceRadialPdf(d.x, rr) / pdf, subsurfaceRadialPdf(d.y, rr) / pdf, subsurfaceRadialPdf(d.z, rr) / pdf };
+}
+
 // ---- Anisotropy (A9, MATERIAL_LAYERS 1.5)
 float2 anisoAlphas(float roughness, float strength)
 {
