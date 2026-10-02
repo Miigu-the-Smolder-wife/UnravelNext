@@ -36,6 +36,10 @@ struct Stats
     uint32_t edgePixels = 0;
     uint32_t tiles = 0;
     uint32_t coverageErrors = 0;  // coverage composite error bits (0x400: a data-dependent loop reached its bound, 0x800: a heavy pixel open after the rounds)
+    // The coverage composite's work of the frame: light pixels (1..16 records) and heavy ones, the records the light pixels'
+    // walks visited (nearer first, until the pixel is complete or band A) and those of them with weight (shaded); the
+    // compact form's entries (shading.coverage_compact: = the shaded ones; 0 in the composite's form).
+    uint32_t coverageLightPixels = 0, coverageHeavyPixels = 0, coverageWalked = 0, coverageShaded = 0, coverageEntries = 0;
     // A10 glass over the translucent layer (TranslucentComposite.hlsl, class 1 pixels): panes composited, solid glass
     // drawn without refraction (until R's refraction rays), pixels whose sun visibility had no resident VSM page (lit).
     uint32_t glassPanePixels = 0, glassSolidPixels = 0, glassUnlitPixels = 0;

@@ -232,6 +232,8 @@ Stats latestStats(TrackState& state)
     for (uint32_t c = 0; c < 4; ++c) st.classTiles[c] = w[c];
     st.edgePixels = w[4];
     st.coverageErrors = ring.coverage[slot] ? w[5] : 0;
+    if (ring.coverage[slot])
+        st.coverageEntries = w[11], st.coverageWalked = w[12], st.coverageShaded = w[13], st.coverageLightPixels = w[14], st.coverageHeavyPixels = w[15];
     if (ring.glass[slot]) st.glassPanePixels = w[6], st.glassSolidPixels = w[7], st.glassUnlitPixels = w[8];
     if (ring.dof[slot]) st.dofPixels = w[9], st.dofClampedPixels = w[10];
     st.tiles = ring.tiles[slot];
@@ -1387,7 +1389,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             covMlSpecular = cml.lightingSpecular;
         }
 #endif
-        const BufferRef state = g.createBuffer({ "m.coverage state", 8 * 4, 0 });
+        const BufferRef state = g.createBuffer({ "m.coverage state", 16 * 4, 0 });  // COVS_WORDS
         const BufferRef args = g.createBuffer({ "m.coverage args", 16 * 4, 0 });
         const BufferRef pairs = g.createBuffer({ "m.coverage pairs", std::max<uint64_t>(capacity, 1) * 8, 0 });
         const BufferRef heavy = g.createBuffer({ "m.coverage heavy", heavyCap * 16 * 4, 0 });
@@ -1399,10 +1401,24 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                           fc.shaders.compute("Passes/Shading/CoverageBegin.MODE2") };
         // The fragment shading is split in two parts (the DXIL limit, CoverageComposite.hlsl): part 1 the direct light into
         // a per-pixel sum, part 2 the indirect light and the output; the heavy rounds run once per part.
-        ID3D12PipelineState* light1 = fc.shaders.compute(("Passes/Shading/CoverageComposite.PART1.OUTPUT" + output + ".AREA" + area).c_str());
-        ID3D12PipelineState* light2 = fc.shaders.compute(("Passes/Shading/CoverageComposite.PART2.OUTPUT" + output + ".AREA" + area).c_str());
+        // shading.coverage_compact (CoverageShade.hlsli; written 2026-10-03, built, not run): the light pixels in the
+        // compact form instead - the walk weights the fragments and lists those with weight per tile (CoverageWalk), two
+        // kernels shade the list one fragment per lane (CoverageShadeList: the same two parts) and the gather sums each
+        // pixel's entries with the band A remainder (CoverageGather). The same weights and shading calls; the sums stay
+        // in float. Entry buffers: one entry per record at most (V's record capacity).
+        const bool compact = fc.quality.has("shading.coverage_compact") && fc.quality.boolean("shading.coverage_compact");
+        ID3D12PipelineState* light1 = compact ? nullptr : fc.shaders.compute(("Passes/Shading/CoverageComposite.PART1.OUTPUT" + output + ".AREA" + area).c_str());
+        ID3D12PipelineState* light2 = compact ? nullptr : fc.shaders.compute(("Passes/Shading/CoverageComposite.PART2.OUTPUT" + output + ".AREA" + area).c_str());
+        ID3D12PipelineState* walk = compact ? fc.shaders.compute("Passes/Shading/CoverageWalk") : nullptr;
+        ID3D12PipelineState* shadeList[2] = { compact ? fc.shaders.compute(("Passes/Shading/CoverageShadeList.PART1.AREA" + area).c_str()) : nullptr,
+                                              compact ? fc.shaders.compute(("Passes/Shading/CoverageShadeList.PART2.AREA" + area).c_str()) : nullptr };
+        ID3D12PipelineState* gather = compact ? fc.shaders.compute(("Passes/Shading/CoverageGather.OUTPUT" + output).c_str()) : nullptr;
+        const BufferRef covEntries = compact ? g.createBuffer({ "m.coverage visible", std::max<uint64_t>(capacity, 1) * 8, 0 }) : BufferRef{};
+        const BufferRef covRadiance = compact ? g.createBuffer({ "m.coverage radiance", std::max<uint64_t>(capacity, 1) * 12, 0 }) : BufferRef{};
+        const BufferRef tileSpans = compact ? g.createBuffer({ "m.coverage tile spans", tiles * 8, 0 }) : BufferRef{};
+        const BufferRef pixelSpans = compact ? g.createBuffer({ "m.coverage pixel spans", tiles * 64 * 8, 0 }) : BufferRef{};
         ID3D12PipelineState* heavyReset = fc.shaders.compute("Passes/Shading/CoverageHeavyReset");
-        const TextureRef directSum = g.createTexture({ "m.coverage direct", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+        const TextureRef directSum = compact ? TextureRef{} : g.createTexture({ "m.coverage direct", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
         ID3D12PipelineState* sort = fc.shaders.compute("Passes/Shading/CoverageHeavySort");
         ID3D12PipelineState* heavyRounds[2] = { fc.shaders.compute(("Passes/Shading/CoverageHeavyRound.PART1.AREA" + area).c_str()),
                                                 fc.shaders.compute(("Passes/Shading/CoverageHeavyRound.PART2.AREA" + area).c_str()) };
@@ -1828,7 +1844,102 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
                       });
         };
-        addComposite(1);
+        // The compact form's stages (shading.coverage_compact): W the walk, S the list's shading (part 1, part 2), G the gather.
+        auto addWalk = [&] {
+            g.addPass("m.coverage.walk", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(v.coverageRecords, Use::SrvCompute);
+                          b.use(v.visibleClusters, Use::SrvCompute);
+                          b.use(v.depth, Use::SrvCompute);
+                          b.use(v.coverageTilePixels, Use::SrvCompute);
+                          b.use(v.coverageTileList, Use::SrvCompute);
+                          b.use(v.coverageTileList, Use::IndirectArgs);
+                          b.use(state, Use::UavCompute);
+                          b.use(heavy, Use::UavCompute);
+                          for (BufferRef x : { covEntries, pixelSpans, tileSpans }) b.use(x, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          uint32_t k[24] = {};
+                          k[0] = c.srv(v.coverageRecords);
+                          k[1] = c.srv(v.coverageTilePixels);
+                          k[2] = c.srv(v.coverageTileList);
+                          k[3] = c.uav(state);
+                          k[4] = c.srv(v.visibleClusters);  // P[1].x (the sort's tie order)
+                          k[6] = c.srv(v.depth);            // P[1].z
+                          k[8] = c.uav(covEntries);         // P[2]
+                          k[9] = c.uav(pixelSpans);
+                          k[10] = c.uav(tileSpans);
+                          k[11] = c.uav(heavy);
+                          k[21] = hcap;                     // P[5].yzw
+                          k[22] = ccap;
+                          k[23] = (uint32_t)capacity;
+                          c.cmd->SetPipelineState(walk);
+                          c.bindFrameConstants(cb);
+                          c.computeConstants(k, 24);
+                          c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
+                      });
+        };
+        auto addShadeList = [&](uint32_t stage) {
+            g.addPass(stage == 1 ? "m.coverage direct" : "m.coverage", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          useShading(b);
+                          if (covTileLights) b.use(covTlField, Use::SrvCompute);  // L2c
+                          if (shaded.valid()) b.use(shaded, Use::SrvCompute);
+                          b.use(v.coverageTileList, Use::SrvCompute);
+                          b.use(v.coverageTileList, Use::IndirectArgs);
+                          b.use(covEntries, Use::SrvCompute);
+                          b.use(tileSpans, Use::SrvCompute);
+                          b.use(covRadiance, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          uint32_t k[24] = { c.srv(v.coverageRecords), c.srv(tileSpans), c.srv(v.coverageTileList), c.srv(covEntries) };
+                          shadingConstants(c, k, gpu::kNone);
+                          k[8] = c.uav(covRadiance);  // P[2].x
+                          k[9] = k[10] = k[11] = gpu::kNone;
+                          k[23] = covTileLights ? c.srv(covTlField) : gpu::kNone;  // P[5].w (L2c)
+                          uint32_t k32[48] = {};
+                          std::memcpy(k32, k, sizeof k);
+                          k32[41] = covTileLights ? covTlCapacity : 0;  // P[10].y (L2c)
+                          k32[24] = k32[25] = gpu::kNone;
+                          fragmentConstants(c, k32);  // P[6].zw, P[7], P[8].xy
+                          k32[34] = gpu::kNone;       // P[8].z: no per-pixel direct sum in this form
+                          c.cmd->SetPipelineState(shadeList[stage - 1]);
+                          c.bindFrameConstants(cb);
+                          c.computeConstants(k32, 48);
+                          c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
+                      });
+        };
+        auto addGather = [&] {
+            g.addPass("m.coverage.gather", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          useBandA(b);
+                          b.use(v.coverageTileList, Use::SrvCompute);
+                          b.use(v.coverageTileList, Use::IndirectArgs);
+                          b.use(covRadiance, Use::SrvCompute);
+                          b.use(pixelSpans, Use::SrvCompute);
+                          b.use(tileSpans, Use::SrvCompute);
+                          b.use(v.color, Use::UavCompute);
+                          useParticles(b);
+                      },
+                      [=](PassContext& c) {
+                          uint32_t k[28] = {};
+                          k[0] = c.srv(covRadiance);
+                          k[1] = c.srv(pixelSpans);
+                          k[2] = c.srv(v.coverageTileList);
+                          k[3] = c.srv(tileSpans);
+                          k[7] = c.uav(v.color);         // P[1].w
+                          k[8] = c.srv(edgeRadiance);    // P[2]: the band A radiance under the fragments
+                          k[9] = c.srv(edgeResolved);
+                          k[10] = c.srv(edgeTiles);
+                          particleConstants(c, k + 24);  // P[6].xy
+                          c.cmd->SetPipelineState(gather);
+                          c.bindFrameConstants(cb);
+                          c.computeConstants(k, 28);
+                          c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
+                      });
+        };
+        if (compact) addWalk();
+        else addComposite(1);
         addBegin("m.coverage.heavy args", 1, 0);
         // F1: heavy pixels' runs of COV_BLOCK records sorted into the pair buffer.
         g.addPass("m.coverage.sort", QueueType::Graphics,
@@ -1900,7 +2011,13 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           });
             }
         }
-        addComposite(2);
+        if (compact)
+        {
+            addShadeList(1);
+            addShadeList(2);
+            addGather();
+        }
+        else addComposite(2);
         // F3: heavy pixels' band A remainder and output; a pixel the rounds left open sets the error bit.
         g.addPass("m.coverage.finish", QueueType::Graphics,
                   [&](PassBuilder& b) {
@@ -1931,7 +2048,12 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           b.use(state, Use::CopySrc);
                           b.keep();
                       },
-                      [dst, slot, state](PassContext& c) { c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes + 20, c.resource(state), 12, 4); });
+                      [dst, slot, state](PassContext& c) {
+                          c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes + 20, c.resource(state), 12, 4);
+                          // (the composite's counts: COVS_ENTRIES, COVS_WALKED, COVS_SHADED, COVS_LIGHT_PIXELS, then COVS_HEAVY)
+                          c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes + 44, c.resource(state), 32, 16);
+                          c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes + 60, c.resource(state), 8, 4);
+                      });
         }
     }
     return {};

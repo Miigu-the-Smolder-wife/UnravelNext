@@ -71,7 +71,28 @@ static uint g_covListed = 0xFFFFFFFFu;
 #define COVS_RUNS 4u        // runs of all heavy pixels (cursor slots)
 #define COVS_MAX_RUNS 5u    // the most runs of one heavy pixel
 #define COVS_OPEN 6u        // 6..7 open heavy pixels appended to active list 0 / 1 by a round
-#define COVS_WORDS 8u
+#define COVS_ENTRIES 8u     // compact form: entries of the visible fragment list (CoverageWalk)
+#define COVS_WALKED 9u      // statistics: records the light pixels' walks visited (nearer first, until the pixel is complete)
+#define COVS_SHADED 10u     // statistics: of them, the records with weight (shaded)
+#define COVS_LIGHT_PIXELS 11u  // statistics: light pixels
+#define COVS_WORDS 16u
+// Compact form of the light pixels' composite (shading.coverage_compact; CoverageWalk -> CoverageShadeList x 2 ->
+// CoverageGather). The composite kernel shades inside each pixel lane's own front-to-back loop, so a wave runs the
+// shading as many times as its deepest pixel has visible fragments, with the other lanes idle. Here the walk only
+// weights: a tile's fragments with weight become one contiguous run of entries { record element, weight } in pixel
+// order, the shading kernels take one entry per lane (64 at a time, the tile's probes and light field as before) and
+// keep weight x radiance per entry, and the gather sums each pixel's entries with the band A remainder. The same
+// weights and the same covShadeFragment calls as the composite; the sums are in float (the composite keeps part 1's sum
+// in half floats between its two kernels).
+//   m.coverage visible     raw, 8 B per entry: { element, weight (float bits) }
+//   m.coverage radiance    raw, 12 B per entry: weight x exposed radiance (float3), part 1 then part 1 + part 2
+//   m.coverage tile spans  raw, 8 B per listed tile: { first entry, entries }
+//   m.coverage pixel spans raw, 8 B per pixel of a listed tile (listed x 64 + pixel): { the pixel's first entry inside
+//                          the tile's run (bits 0..15) | entries << 16 | kind << 24, weight sum (float bits) }
+#define COVC_TILE_ENTRIES (COV_TILE_PIXELS * COV_LIGHT)  // entries of one tile at most (1,024: the shading rounds' bound)
+#define COVC_NONE 0u   // no record, or outside the view
+#define COVC_LIGHT 1u  // composited from its entries (CoverageGather writes the pixel)
+#define COVC_HEAVY 2u  // a heavy pixel (CoverageHeavy* write it)
 // Dispatch arguments (raw buffer 'm.coverage.args', written by CoverageBegin, read as arguments).
 #define COVA_SORT 4u        // 4..6 (heavy pixels x, y, most runs of one)
 #define COVA_ROUND 8u       // 8..10 the next heavy round (open pixels)

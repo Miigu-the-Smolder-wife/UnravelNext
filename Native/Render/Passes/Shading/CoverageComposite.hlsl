@@ -96,10 +96,12 @@ void main(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
     float3 sum = 0;
     float used = 0;
     uint covered = 0, prevVisId = 0, prevDepth = 0;
+    uint walked = 0, shaded = 0;  // statistics (part 2 counts them)
     [loop] for (uint f = 0; f < count; ++f)
     {
         const uint2 key = gs_sorted[gi][f];
         if (key.x < bandA) break;  // the rest lie behind the band A surface
+        ++walked;
         const CoverageFragment fr = coverageUnpackRecord(records[key.y]);
         if (fr.visId == prevVisId && key.x == prevDepth) continue;  // the hardware's clip duplicate
         prevVisId = fr.visId;
@@ -107,7 +109,11 @@ void main(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
         const uint bits = countbits(fr.mask);
         const float seen = bits > 0 ? countbits(fr.mask & ~covered) / (float)bits : 1 - countbits(covered) / 32.0;
         const float w = min(coverageFragmentArea(fr) * seen, max(1 - used, 0.0));
-        if (w > 0) sum += w * covFragmentRadiance(fr.visId, key.y, pixel, P[3].z);
+        if (w > 0)
+        {
+            sum += w * covFragmentRadiance(fr.visId, key.y, pixel, P[3].z);
+            ++shaded;
+        }
         used += w;
         covered |= fr.mask;
         if (covered == COV_MASK_FULL || used >= 1) break;
@@ -120,5 +126,14 @@ void main(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
     sum += direct[pixel].rgb + max(1 - used, 0.0) * covBandA(pixel);
     RWTexture2D<float4> color = ResourceDescriptorHeap[P[1].w];
     color[pixel] = shEncodeExposed(shParticles(sum, pixel, P[6].x, P[6].y));  // P[6].xy particle layer
+    // Statistics (the lanes still here are the tile's light pixels): the records their walks visited, those with weight.
+    RWByteAddressBuffer counters = ResourceDescriptorHeap[P[0].w];
+    const uint walkedSum = WaveActiveSum(walked), shadedSum = WaveActiveSum(shaded), lightSum = WaveActiveCountBits(true);
+    if (WaveIsFirstLane())
+    {
+        if (walkedSum > 0) counters.InterlockedAdd(4 * COVS_WALKED, walkedSum);
+        if (shadedSum > 0) counters.InterlockedAdd(4 * COVS_SHADED, shadedSum);
+        counters.InterlockedAdd(4 * COVS_LIGHT_PIXELS, lightSum);
+    }
 #endif
 }
