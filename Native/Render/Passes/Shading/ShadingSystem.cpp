@@ -701,7 +701,9 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         {
             // m.ml.sample, m.ml.trace; then m.ml.shade here (ShadeOpaque.hlsl with MEGA_LIGHTS = 1 on the class tile lists
             // of every band, the LAYERED variant of each class); then m.ml.sets, m.ml.temporal, m.ml.spatial
-            MegaLightsFrame ml = megaLightsSample(fc, view, o.materialWord, areaLights, ltcSrv, signature);
+            MegaLightsOptions mlOptions;
+            mlOptions.classWord = o.anisoWord;  // (an eye's iris pixels are weighed on the iris plane: their eye word)
+            MegaLightsFrame ml = megaLightsSample(fc, view, o.materialWord, areaLights, ltcSrv, signature, nullptr, mlOptions);
             if (!ml.on) fail("M.shading: shading.mega_lights could not start on a view (its inputs were present)");
             const bool mlMainView = view.view.kind == gpu::ViewKind::Main;
             auto mlKernel = [&](uint32_t layered) {

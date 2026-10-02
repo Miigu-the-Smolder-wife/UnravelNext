@@ -697,7 +697,8 @@ Texture eyeTexture(uint32_t size, float irisRadius)
 // competing with the key.
 // Above the row: over the sheen sphere the same material with the cloth factor 1 (the cloth blend: no base highlight
 // under the fuzz), and left of the centre two eyes (the eye model) of radius 0.12 m - ten times a human eye, the sclera's
-// mean free path with them - that look at the "front" camera.
+// mean free path with them - that look at the "front" camera and cast no shadow (a ray from the cornea towards a light
+// below its horizon starts inside the ball).
 // Cameras: "front" (the key's side), "back", "skin_close" (the Subsurface sphere's terminator from 0.6 m: the scale
 // at which skin's scatter is seen) and "eye_close" (the eyes from 0.9 m, off their axes: the iris's parallax under the
 // cornea).
@@ -792,7 +793,8 @@ Scene shadingBall(const Request& rq)
             const float3 axes[3] = { x, y, z };
             for (int c = 0; c < 3; ++c) m.m[0][c] = axes[c].x * eyeRadius, m.m[1][c] = axes[c].y * eyeRadius, m.m[2][c] = axes[c].z * eyeRadius;
             m.m[0][3] = centre.x, m.m[1][3] = centre.y, m.m[2][3] = centre.z;
-            addInstance(s, mesh, m);
+            // (no shadow: a light below the cornea's horizon reaches the iris through the ball - MegaLightsSampling.hlsli)
+            addInstance(s, mesh, m, 0);
         }
     }
     Material thin = skin;

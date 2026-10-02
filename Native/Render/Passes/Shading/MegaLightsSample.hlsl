@@ -16,7 +16,8 @@
 // P[2] = { downsampled width, height, factor | N << 8 | flags << 16 (1: guide by history, 2: merge rays), LTC table }
 // P[3] = { minimum sample weight, hidden weight, hidden weight without history, history distance threshold } (floats)
 // P[4] = { vis id, visible clusters (UNX_NONE: static reprojection), sets' tiles X, tiles Y }
-// P[5] = { B2 stable area lights' mask (UNX_NONE: none), the tile list (raw; MegaLightsTiles.hlsl), 0, 0 }
+// P[5] = { B2 stable area lights' mask (UNX_NONE: none), the tile list (raw; MegaLightsTiles.hlsl), the resolve's class
+//          word (R32_UINT; UNX_NONE: none - an instance without eyes): an eye's pixels' eye word (mlPointEye), 0 }
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
@@ -73,7 +74,15 @@ void main(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID)
     s.specular = m.specular;
     s.transmission = m.transmission;
     MlPoint surfacePoint = mlPointOf(s, offset, n, v, P[2].w);
-    if (s.cls == MATERIAL_SUBSURFACE) mlPointSubsurface(surfacePoint, s, modelSubsurfaceOf(m, s.roughness), P[2].w);
+    if (s.cls == MATERIAL_SUBSURFACE)
+    {
+        mlPointSubsurface(surfacePoint, s, modelSubsurfaceOf(m, s.roughness), P[2].w);
+        if ((m.classFlags & MATERIAL_EYE) != 0 && P[5].z != UNX_NONE)
+        {
+            Texture2D<uint> eyeWords = ResourceDescriptorHeap[P[5].z];
+            mlPointEye(surfacePoint, modelEyeOf(eyeWords[pixel], n));
+        }
+    }
     if (s.cls == MATERIAL_HAIR)
     {
         // a strand (the hair records' instance, CoverageHair.hlsl): light from either side of the fibre reaches the viewer,

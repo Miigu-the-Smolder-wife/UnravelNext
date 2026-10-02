@@ -6,8 +6,11 @@
 // ML_SUBSURFACE (default 0; m.ml.sample sets 1): a point can carry the Subsurface class's model (mlPointSubsurface: its two
 // specular lobes and the light through thin parts under point and spot lights, as ShadeOpaque's Subsurface variant shades
 // them; under area lights one lobe at the two's average roughness - a sampling weight, the shading takes both - and the
-// light through thin parts as the far side's cosine integral); world points have none. An eye's iris (MATERIAL_EYE) is
-// weighed as its cornea's surface: a light below that surface's horizon is not drawn for the pixel.
+// light through thin parts as the far side's cosine integral); world points have none. An eye's iris (MATERIAL_EYE,
+// mlPointEye) is weighed as the shading lights it: its diffuse term on the iris plane with the caustic, so a light below
+// the cornea's horizon and in front of the iris plane is offered. Its ray starts at the cornea's surface on the light's
+// side, inside the eyeball: an eyeball that casts shadows hides that light from its own iris (an eyeball instance
+// without InstanceCastShadow lets it through; the lids and the head still shadow it).
 #ifndef UNX_MEGA_LIGHTS_SAMPLING_HLSLI
 #define UNX_MEGA_LIGHTS_SAMPLING_HLSLI
 #include "Passes/Shading/ShadingCommon.hlsli"
@@ -37,6 +40,10 @@ struct MlPoint
     bool subsurface;       // the Subsurface class: the specular lobe is 'skin' (alpha, compensation, LTC: its average roughness)
     ModelSubsurface skin;
     float3 thin;           // f_d x transmission: the light through thin parts (0: none)
+    ModelEye eye;          // an eye's pixel (mask 0: none): the iris plane and the caustic normal (MaterialModel.hlsli)
+#if ML_AREA
+    float3x3 frameIris;    // the iris plane's shading frame
+#endif
 #endif
 };
 
@@ -66,6 +73,10 @@ MlPoint mlPointOf(ModelSurface s, float3 offset, float3 n, float3 v, uint ltcSrv
     p.subsurface = false;
     p.skin = (ModelSubsurface)0;
     p.thin = 0;
+    p.eye = (ModelEye)0;
+#if ML_AREA
+    p.frameIris = p.frame;
+#endif
 #endif
     return p;
 }
@@ -83,6 +94,14 @@ void mlPointSubsurface(inout MlPoint p, ModelSurface s, ModelSubsurface skin, ui
 #if ML_AREA
     p.specularLtc = mul(shLtcInverse(ltcSrv, max(p.NoV, 1e-4), skin.roughness), p.frame);
     p.specularAlbedo = shSpecularAlbedo(p.f0, max(p.NoV, 1e-4), skin.roughness);
+#endif
+}
+// The point of an eye's pixel (a Subsurface point): 'eye' = modelEyeOf of the pixel's eye word.
+void mlPointEye(inout MlPoint p, ModelEye eye)
+{
+    p.eye = eye;
+#if ML_AREA
+    p.frameIris = shShadingFrame(eye.iris, p.v, dot(eye.iris, p.v));
 #endif
 }
 #endif
@@ -124,7 +143,12 @@ float3 mlLightUnshadowed(MlPoint p, GpuLight light, uint lightIndex, uint stable
         float3 c = 0;
         if (p.NoV > 0)
         {
-            c = p.front * (SH_PI * shAreaIntegral(light, toCentre, p.frame, true));
+            float Id = shAreaIntegral(light, toCentre, p.frame, true);
+#if ML_SUBSURFACE
+            // an eye's iris: the plane's cosine integral with the caustic at the light's centre, on the mask's share
+            if (p.eye.mask > 0) Id = lerp(Id, shAreaIntegral(light, toCentre, p.frameIris, true) * modelEyeCaustic(p.eye, normalize(toCentre)), p.eye.mask);
+#endif
+            c = p.front * (SH_PI * Id);
             if (p.specular && !shSpecularInReflections(stableMask, lightIndex)) c += p.specularAlbedo * shAreaIntegral(light, toCentre, p.specularLtc, false);
         }
         // what crosses the surface: Foliage's transmission, a Subsurface point's light through thin parts
@@ -149,7 +173,10 @@ float3 mlLightUnshadowed(MlPoint p, GpuLight light, uint lightIndex, uint stable
     {
         if (p.NoV > 0 && cosL > 0) f = p.front + shSpecularSubsurface(p.f0, p.skin, p.compensation, p.n, p.v, l, p.NoV, cosL);
         else if (p.NoV * cosL < 0) f = p.thin * (modelSubsurfaceThin(abs(cosL), p.v, l) / abs(cosL));
-        return f * E * abs(cosL);
+        float3 radiance = f * abs(cosL);
+        // an eye's iris: the light on the iris plane in place of the cornea's surface, whatever the surface's cosine
+        if (p.eye.mask > 0 && p.NoV > 0) radiance += p.front * (modelEyeCosine(p.eye, cosL, l) - max(cosL, 0.0));
+        return radiance * E;
     }
 #endif
     if (p.NoV > 0 && cosL > 0) f = p.front + (p.specular ? shSpecular(p.f0, p.alpha, p.compensation, p.n, p.v, l, p.NoV, cosL) : 0.0);
