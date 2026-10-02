@@ -2087,6 +2087,40 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                       ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(filterArgs), 0, nullptr, 0);
                   });
     }
+    // The hair's shadow on the view's surfaces (shading.hair_shadows; Passes/Hair/HairShadow.hlsl MODE 0): the sun slot
+    // times what the frame's grooms let through towards the sun, from E's density volume, after the passes that write
+    // the slot. A frame without a volume records nothing; the hair records are shaded with the hair in front of them by
+    // M (the fragment visibility below stays the opaque casters').
+    {
+        const FrameResources hr = fc.resources;
+        const bool hairShadows = !fc.quality.has("shading.hair_shadows") || fc.quality.boolean("shading.hair_shadows");
+        if (hairShadows && !s.debugPaths && hr.hairDensityParams.valid() && hr.hairDensity.valid() && hr.hairDensityCoarse.valid())
+        {
+            const uint32_t hairSteps = fc.quality.has("shading.hair_shadow_steps") ? (uint32_t)fc.quality.integer("shading.hair_shadow_steps") : 32u;
+            if (hairSteps < 2 || hairSteps > 128) fail("shading.hair_shadow_steps must be in [2, 128]");
+            const float3 originOffset = view.view.position - hr.hairOrigin;
+            const BufferRef hairParams = hr.hairDensityParams;
+            const TextureRef hairFine = hr.hairDensity, hairCoarse = hr.hairDensityCoarse;
+            ID3D12PipelineState* ph = fc.shaders.compute("Passes/Hair/HairShadow.MODE0");
+            g.addPass("s.shadow.hair", QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          b.use(depth, Use::SrvCompute);
+                          b.use(hairParams, Use::SrvCompute);
+                          b.use(hairFine, Use::SrvCompute);
+                          b.use(hairCoarse, Use::SrvCompute);
+                          b.use(out, Use::UavCompute);
+                      },
+                      [=](PassContext& ctx) {
+                          uint32_t k[8] = { ctx.srv(hairParams), ctx.srv(depth), ctx.uav(out), hairSteps, 0, 0, 0, 0 };
+                          const float o[3] = { originOffset.x, originOffset.y, originOffset.z };
+                          std::memcpy(&k[4], o, 12);
+                          ctx.cmd->SetPipelineState(ph);
+                          ctx.bindFrameConstants(constants);
+                          ctx.computeConstants(k, 8);
+                          ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
+                      });
+        }
+    }
     // Fragment visibility of the coverage layer (S request 20260926_S_fragment_visibility, INTERFACES 7.3 v1.41): views
     // with V's coverage records. Pass 1 per listed tile (pixel depth ranges), pass 2 per block of records (pair pixels).
     if (view.coverageDepthRange.valid() && view.coverageTileList.valid() && view.coverageRecords.valid())

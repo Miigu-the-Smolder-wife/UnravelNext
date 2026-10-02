@@ -429,7 +429,8 @@ public:
         const uint32_t densityColumns = densityBodies ? std::min(densityBodies, 2048u / densityRes) : 0u;
         const uint32_t densityRows = densityBodies ? (densityBodies + densityColumns - 1) / densityColumns : 0u;
         if (densityRows * densityRes > 2048u) fail("shading.hair_density_bodies: %u blocks of %u cells exceed a 3D texture", densityBodies, densityRes);
-        std::vector<uint32_t> densityParams(4 + 8 * bodies.size(), 0);
+        // (parameters: header, the bodies' words, then the bodies with a block - their count and indices, nearest first)
+        std::vector<uint32_t> densityParams(4 + 8 * bodies.size() + 1 + densityBodies, 0);
         struct DensityBody
         {
             uint32_t body, block;
@@ -455,8 +456,10 @@ public:
                 const float extent[3] = { size.x, size.y, size.z };
                 for (int axis = 0; axis < 3; ++axis) w[4 + axis] = std::clamp((uint32_t)std::ceil(extent[axis] / cell), 1u, densityRes);
                 w[7] = (k % densityColumns) | ((k / densityColumns) << 16);
+                densityParams[4 + 8 * bodies.size() + 1 + densityList.size()] = order[k];
                 densityList.push_back({ order[k], k });
             }
+            densityParams[4 + 8 * bodies.size()] = (uint32_t)densityList.size();
         }
         const uint64_t constantsBytes = constants.size() * kConstantSlot, inputsBytes = std::max<size_t>(inputs.size(), 1) * 16,
                        headerBytes = (header.size() * 4 + 15) / 16 * 16, densityBytes = densityBodies ? (densityParams.size() * 4 + 15) / 16 * 16 : 0;
@@ -679,6 +682,7 @@ public:
             fc.resources.hairDensity = fine;
             fc.resources.hairDensityCoarse = low;
             fc.resources.hairDensityParams = params;
+            fc.resources.hairOrigin = v.position;
         }
     }
 

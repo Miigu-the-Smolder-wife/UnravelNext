@@ -4,6 +4,7 @@
 // light with S's shadow slots (128 lights with shadows) by N light samples per downsampled pixel, one shadow ray each,
 // and a temporal and spatial filter. Every view with S's froxel lists (planar reflection views: without history); needs
 // the R track's ray scene.
+#include <functional>
 #include <string>
 #include <vector>
 #include "unx/render/Frame.h"
@@ -35,8 +36,20 @@ struct MegaLightsFrame
 // m.ml.sample and m.ml.trace of the main view; 'on' is false when the switch is off or the view cannot run it (then the
 // shading kernels keep their loop). Creates the textures m.ml.shade writes.
 // dispatchSignature: M's one-dispatch command signature (material::dispatchSignature) for the tile list's dispatch.
+// What an instance changes of megaLightsSample's passes.
+struct MegaLightsOptions
+{
+    // m.ml.hair (shading.hair_shadows; Passes/Hair/HairShadow.hlsl MODE 1), after m.ml.trace in frames with E's hair
+    // density volume: a sample stays visible with the probability that the grooms between its surface point and its
+    // light let the light through. false: the hair records' own instance (a strand counts the hair in front of it itself).
+    bool hairShadow = true;
+    // The key m.ml.trace takes its rays' origins from (R32G32_UINT, width x height: the view depth along the downsampled
+    // pixel's ray and the packed normal, as m.ml.sample's key 'keys'), made by this function, which records its pass
+    // between m.ml.sample and m.ml.trace (sampling: the downsampling factor | samples << 8); empty: the sample's own key.
+    std::function<TextureRef(TextureRef keys, uint32_t width, uint32_t height, uint32_t sampling)> traceKeys;
+};
 MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, bool areaLights, uint32_t ltcSrv,
-                                 ID3D12CommandSignature* dispatchSignature, const char* instance = nullptr);
+                                 ID3D12CommandSignature* dispatchSignature, const char* instance = nullptr, const MegaLightsOptions& options = {});
 // instance: a second instance on the same view with its own state (the coverage layer's: "coverage"); 'view' then carries
 // that instance's depth and G-buffer.
 // m.ml.sets, m.ml.temporal and m.ml.spatial, after the caller's m.ml.shade; sets ml.lighting.
