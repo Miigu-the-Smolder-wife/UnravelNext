@@ -34,6 +34,15 @@ min_caster_texels = 1.0         # a shadow view (a sun level, a local light's fa
                                 # stand's darkening of the ground under it). Blocker searches and wide penumbrae that read a
                                 # coarser level than the receiver's miss them the same way. The requests' packing bounds leave
                                 # the same casters out. 0: every caster in every view (A/B)
+static_separate = true          # sun pages keep a static copy (the reference's r.Shadow.Virtual.Cache.StaticSeparate): the casters
+                                # that are not movable (not Dynamic, Skinned, Wind or a view model, no morph or terrain patch,
+                                # uploaded with the scene) are drawn into a second atlas, the movable ones into the sampled page,
+                                # and the static copy is merged in under the depth test. A page under a changed movable caster
+                                # keeps its static copy: only the movable casters there are drawn again (1,024 movers made their
+                                # pages redraw the whole city under them every frame). The sampled page holds what one raster of
+                                # all its casters gives - a depth buffer keeps the nearest fragment in any order. Costs a second
+                                # atlas (64 KB per page: 256 MB at 4096 pages) and a second family of sun raster requests
+                                # (s.vsm.static*). Needs cache. false: one atlas, a changed caster redraws its pages whole (A/B)
 cache_hzb_filter = true         # a changed caster makes a cached sun page stale only where it can show in it: a caster whose
                                 # bounding sphere lies under the page's stored surface over its whole footprint there (the page's
                                 # block hierarchy, its HZB) has no texel in the page before or after the change, so the page stays

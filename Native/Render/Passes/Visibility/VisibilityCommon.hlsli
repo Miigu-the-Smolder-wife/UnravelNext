@@ -8,7 +8,7 @@
 #include "Passes/Visibility/ClusterHierarchy.hlsli"
 #include "Passes/ViewModel/ViewModel.hlsli"
 
-// One view of a cull run (main view: one; depth raster service: one per RasterView). 372 B.
+// One view of a cull run (main view: one; depth raster service: one per RasterView). 376 B.
 struct CullView
 {
     row_major float4x4 viewProj;
@@ -37,7 +37,22 @@ struct CullView
     uint instanceFirst, instanceEnd;   // RasterView's instance batch: only these scene instances (instanceEnd 0: every instance)
     float minInstancePx;               // RasterView::minInstanceTexels: instances whose bounds project to a smaller radius are
                                        // not drawn into the view (0: every instance)
+    uint instanceSet;                  // RasterView::instanceSet: 0 every instance, 1 the ones that are not movable, 2 the movable
+                                       // ones (instanceInSet)
 };
+
+// The view's instance set (RasterView::instanceSet): movable = INSTANCE_MOVABLE_FLAGS, a bone palette, morph or terrain
+// patch, or an instance past the scene's uploaded ones (run-time and GPU-written: v.runtimeFirst on). Judged per
+// instance from its record of this frame; chunks are not skipped by set (a member can become movable - a terrain patch
+// set at run time - without its chunk being rebuilt), so a view of the movable set tests the members of every chunk it
+// sees.
+bool instanceInSet(CullView v, GpuInstance inst, uint instance)
+{
+    if (v.instanceSet == 0) return true;
+    const bool movable = (inst.flags & INSTANCE_MOVABLE_FLAGS) != 0 || inst.bonePalette != UNX_NONE || inst.morph != UNX_NONE || inst.patch != UNX_NONE ||
+                         instance >= v.runtimeFirst;
+    return (v.instanceSet == 2) == movable;
+}
 
 // Live count of the GPU-written instances (GpuScene::gpuInstanceRange; GpuSceneLayout.h kGpuInstanceCountElement).
 uint gpuInstanceCount(CullView v)
@@ -62,7 +77,7 @@ struct CullScene
 struct CullChunk
 {
     float4 sphere;  // world; radius < 0 until ChunkBounds ran
-    uint first, count, pad0, pad1;
+    uint first, count, pad0, pad1;  // pad0: the members' largest wind inflation per (m/s)^2 (float bits, ChunkBounds.hlsl)
 };
 
 #define CHUNK_INSTANCES 256u

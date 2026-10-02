@@ -37,6 +37,16 @@
 //           at most N x that. A level whose e texels exceed 0.8 B never becomes stale from it; the others every
 //           N = floor(e texel / (B x windChangeFactor(dt))) frames (1..64), each page on its own frame of the N (a hash
 //           of its slot): the shadow of a wind-moved caster is never more than e texels behind its geometry.
+// Static / dynamic pages (shadow.vsm.static_separate, P[4].w bit 0; the reference's r.Shadow.Virtual.Cache.StaticSeparate).
+// Every caster is in one of two sets: movable (Scene.hlsli INSTANCE_MOVABLE_FLAGS, a bone palette, morph or terrain patch,
+// or an instance past the scene's uploaded ones) or not. A sun page has a static copy (the casters that are not movable,
+// in the static atlas) and its sampled page = that copy merged with the movable casters' raster. A changed caster that
+// is movable now and was when the page was drawn touches only the second part: its sphere carries bit 6 beside the
+// change code, MODE 2 marks the pages under it VSM_FLAG_STALE_DYNAMIC, and MODE 3 keeps such a page (its physical page
+// and static copy) with VSM_REQ_DYNAMIC: the scan lists it for a clear of the sampled page, the movable casters' raster
+// and the merge. A change of a caster that is not movable - or of one that changed set, which stands in the other set's
+// content - makes the page stale as before (VSM_FLAG_STALE: everything is drawn anew). The set is part of the caster's
+// state word (VSM_CASTER_MOVABLE), so a change of set is a change.
 // Error handling: the changed-caster list has a fixed capacity; past it the frame is uncacheable (flag), never partial.
 // P[0] = { caster state UAV (uint4 per instance), changed list UAV (raw: count, flags, 0, 0, then float4 spheres), instance
 //          count, VSM constants CBV }
@@ -44,8 +54,9 @@
 // P[2] = { free list UAV (raw: count, 0, 0, 0, then pages), atlas pages, scanned slots, cacheable (1) }
 // P[3] = { skin bounds SRV, skin instances SRV, skin count, stats UAV (raw; word 6: kept pages) }
 // P[4] = { local lights SRV (VsmLocalLight per shadow slot), local shadow slots in use, page blocks SRV (raw, VsmPageMax:
-//          MODE 2's HZB filter; 0xFFFFFFFF: off), 0 }
-// P[5] = { asuint(e: the least change that makes a page stale, texels of its level), asuint(windChangeFactor(dt)), frame index, 0 }
+//          MODE 2's HZB filter; 0xFFFFFFFF: off), bit 0: static_separate }
+// P[5] = { asuint(e: the least change that makes a page stale, texels of its level), asuint(windChangeFactor(dt)), frame index,
+//          the scene's uploaded instances (GpuScene::staticInstanceCount: the instances from there on are movable) }
 // Frame constants of the main view (scene buffers, wind).
 #include "Deformation.hlsli"
 #include "Passes/Shadow/VsmLocal.hlsli"
@@ -55,15 +66,17 @@
 // The local lights' changed bits: VSM_LOCAL_LIGHTS / 32 words after the used-page bitmap (whose words cover the pages).
 uint localChangedOffset() { return (P[2].y + 31) / 32 * 4; }
 
+#define VSM_CASTER_MOVABLE (1u << 8)  // caster state word z, beside the cast / hidden flags: the caster's set (static_separate)
 #define VSM_CHANGE_RIGID 63u
 uint changeCode(float amplitude) { return (uint)clamp(ceil(log2(max(amplitude, 1e-6)) * 4.0 + 40.0), 0.0, 62.0); }  // (rounded up)
 float changeAmplitude(uint code) { return exp2((float(code) - 40.0) / 4.0); }
-// (the radius is read back with its 6 low bits set: never under the caster's)
-void appendSphere(RWByteAddressBuffer list, float3 centre, float radius, uint code)
+// (the radius is read back with its 7 low bits set: never under the caster's; bit 6: the change is of the movable
+// casters' part of a page alone, static_separate)
+void appendSphere(RWByteAddressBuffer list, float3 centre, float radius, uint code, bool dynamicOnly)
 {
     uint at;
     list.InterlockedAdd(0, 1u, at);
-    if (at < P[1].x) list.Store4(16 + at * 16, uint4(asuint(centre), (asuint(radius) & ~63u) | code));
+    if (at < P[1].x) list.Store4(16 + at * 16, uint4(asuint(centre), (asuint(radius) & ~127u) | code | (dynamicOnly ? 64u : 0u)));
     else list.InterlockedOr(4, VSM_CACHE_UNCACHEABLE);
 }
 
@@ -90,17 +103,32 @@ void main(uint i : SV_DispatchThreadID)
     if (i >= P[0].z) return;
     RWStructuredBuffer<uint4> state = ResourceDescriptorHeap[P[0].x];
     const GpuInstance inst = loadInstance(i);
-    const uint castFlags = inst.flags & (INSTANCE_CAST_SHADOW | INSTANCE_HIDDEN);
-    const uint4 now = uint4(inst.transformRevision, inst.deformRevision, castFlags, 1);
+    const uint castMask = INSTANCE_CAST_SHADOW | INSTANCE_HIDDEN, castFlags = inst.flags & castMask;
+    // static_separate: the caster's set (V draws the same sets: VisibilityCommon.hlsli instanceInSet)
+    const bool separate = (P[4].w & 1u) != 0;
+    const bool movable = separate && ((inst.flags & INSTANCE_MOVABLE_FLAGS) != 0 || inst.bonePalette != UNX_NONE || inst.morph != UNX_NONE ||
+                                      inst.patch != UNX_NONE || i >= P[5].w);
+    const uint4 now = uint4(inst.transformRevision, inst.deformRevision, castFlags | (movable ? VSM_CASTER_MOVABLE : 0u), 1);
     const uint4 last = state[i];
     state[i] = now;
-    const bool casts = castFlags == INSTANCE_CAST_SHADOW, casted = last.w != 0 && last.z == INSTANCE_CAST_SHADOW;
+    const bool casts = castFlags == INSTANCE_CAST_SHADOW, casted = last.w != 0 && (last.z & castMask) == INSTANCE_CAST_SHADOW;
     if (!casts && !casted) return;
+    // The change is of the movable casters' part of a page alone when the caster is movable and was when the pages were
+    // drawn (one seen for the first time stood in no page); a caster that changed set stands in the other set's content.
+    const bool wasMovable = last.w == 0 || (last.z & VSM_CASTER_MOVABLE) != 0;
+    const bool dynamicOnly = movable && wasMovable;
     RWByteAddressBuffer list = ResourceDescriptorHeap[P[0].y];
     if (inst.bonePalette != UNX_NONE)
     {
         // skinned: MODE 1 (V's posed bounds); without them (no V this frame) the frame is not cacheable
         if (P[3].z == 0) list.InterlockedOr(4, VSM_CACHE_UNCACHEABLE);
+        if (separate && !wasMovable)
+        {
+            // (it had no palette when the pages were drawn: it stands in their static copies with its rigid bounds)
+            const GpuMesh rigid = loadMesh(inst.mesh);
+            appendSphere(list, transformPoint(inst.prevObjectToWorld, rigid.boundsSphere.xyz),
+                         rigid.boundsSphere.w * max(stretch(inst.prevObjectToWorld), stretch(inst.objectToWorld)), VSM_CHANGE_RIGID, false);
+        }
         return;
     }
     const bool changed = any(last.xyz != now.xyz) || last.w == 0;
@@ -114,12 +142,12 @@ void main(uint i : SV_DispatchThreadID)
     const bool windOnly = !changed && inst.morph == UNX_NONE && inst.patch == UNX_NONE;
     if (windOnly && !(wind > 0)) return;  // (no wind this frame: nothing moves)
     const uint code = windOnly ? changeCode(wind * stretch(inst.objectToWorld)) : VSM_CHANGE_RIGID;
-    if (casts) appendSphere(list, transformPoint(inst.objectToWorld, mesh.boundsSphere.xyz), r * stretch(inst.objectToWorld), code);
+    if (casts) appendSphere(list, transformPoint(inst.objectToWorld, mesh.boundsSphere.xyz), r * stretch(inst.objectToWorld), code, dynamicOnly);
     if (casted || casts)
     {
         const bool broken = (inst.flags & INSTANCE_MOTION_BREAK) != 0;
         const float3 before = broken ? inst.breakCentre : transformPoint(inst.prevObjectToWorld, mesh.boundsSphere.xyz);
-        appendSphere(list, before, r * max(stretch(inst.prevObjectToWorld), stretch(inst.objectToWorld)), code);
+        appendSphere(list, before, r * max(stretch(inst.prevObjectToWorld), stretch(inst.objectToWorld)), code, dynamicOnly);
     }
 }
 #elif MODE == 1
@@ -134,7 +162,8 @@ void main(uint j : SV_DispatchThreadID)
     // casting now or last frame (MODE 1 runs before MODE 0 rewrites the state: it holds last frame's flags)
     RWStructuredBuffer<uint4> state = ResourceDescriptorHeap[P[0].x];
     const uint4 last = state[instances[j]];
-    const bool casts = (inst.flags & (INSTANCE_CAST_SHADOW | INSTANCE_HIDDEN)) == INSTANCE_CAST_SHADOW, casted = last.w != 0 && last.z == INSTANCE_CAST_SHADOW;
+    const uint castMask = INSTANCE_CAST_SHADOW | INSTANCE_HIDDEN;
+    const bool casts = (inst.flags & castMask) == INSTANCE_CAST_SHADOW, casted = last.w != 0 && (last.z & castMask) == INSTANCE_CAST_SHADOW;
     if (!casts && !casted) return;
     const float4 now = bounds[2 * j], before = bounds[2 * j + 1];
     if (now.w < 0 || before.w < 0)
@@ -142,8 +171,10 @@ void main(uint j : SV_DispatchThreadID)
         list.InterlockedOr(4, VSM_CACHE_UNCACHEABLE);
         return;
     }
-    appendSphere(list, now.xyz, now.w, VSM_CHANGE_RIGID);
-    appendSphere(list, before.xyz, before.w, VSM_CHANGE_RIGID);
+    // (static_separate: a skinned caster is movable; one that was not when the pages were drawn: MODE 0's rigid sphere)
+    const bool dynamicOnly = (P[4].w & 1u) != 0 && (last.w == 0 || (last.z & VSM_CASTER_MOVABLE) != 0);
+    appendSphere(list, now.xyz, now.w, VSM_CHANGE_RIGID, dynamicOnly);
+    appendSphere(list, before.xyz, before.w, VSM_CHANGE_RIGID, dynamicOnly);
 }
 #elif MODE == 2
 // HZB filter (shadow.vsm.cache_hzb_filter; the reference's HZB-filtered invalidation). A changed caster whose sphere lies
@@ -175,7 +206,8 @@ bool sphereUnderPage(ByteAddressBuffer blocks, uint phys, int2 page, uint k, flo
 
 // The resident sun pages of level k under a world sphere become stale (the sphere's light-space square, clamped to the
 // level's window; at most VSM_TABLE^2 pages, 64 lanes). Returns the pages the HZB filter left as they are.
-uint staleUnder(ConstantBuffer<VsmConstants> c, RWByteAddressBuffer table, float3 centre, float radius, uint code, uint k, uint lane)
+// flag: VSM_FLAG_STALE, or VSM_FLAG_STALE_DYNAMIC for a change of the movable casters' part alone (static_separate).
+uint staleUnder(ConstantBuffer<VsmConstants> c, RWByteAddressBuffer table, float3 centre, float radius, uint code, uint k, uint lane, uint flag)
 {
     // what the change is worth at this level (the header)
     const float least = asfloat(P[5].x) * vsmTexel(k);
@@ -203,7 +235,7 @@ uint staleUnder(ConstantBuffer<VsmConstants> c, RWByteAddressBuffer table, float
         const uint slot = vsmSlot(page, k);
         if (period > 1 && (P[5].z + ((slot * 2654435761u) >> 16)) % period != 0) continue;
         const uint2 e = table.Load2(slot * 8);
-        if ((e.x & VSM_FLAG_RESIDENT) == 0 || e.y != vsmTag(page) || (e.x & VSM_FLAG_STALE) != 0) continue;
+        if ((e.x & VSM_FLAG_RESIDENT) == 0 || e.y != vsmTag(page) || (e.x & (VSM_FLAG_STALE | flag)) != 0) continue;
         if (P[4].z != 0xFFFFFFFFu)
         {
             ByteAddressBuffer blocks = ResourceDescriptorHeap[P[4].z];
@@ -213,7 +245,7 @@ uint staleUnder(ConstantBuffer<VsmConstants> c, RWByteAddressBuffer table, float
                 continue;
             }
         }
-        table.InterlockedOr(slot * 8, VSM_FLAG_STALE);
+        table.InterlockedOr(slot * 8, flag);
     }
     return spared;
 }
@@ -231,7 +263,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     [loop] for (uint i = group.y; i < count; i += STALE_GROUPS_PER_LEVEL)
     {
         const uint4 s = list.Load4(16 + i * 16);
-        spared += staleUnder(c, table, asfloat(s.xyz), asfloat(s.w | 63u), s.w & 63u, k, lane);
+        spared += staleUnder(c, table, asfloat(s.xyz), asfloat(s.w | 127u), s.w & 63u, k, lane, (s.w & 64u) != 0 ? VSM_FLAG_STALE_DYNAMIC : VSM_FLAG_STALE);
     }
     if (spared != 0)
     {
@@ -281,7 +313,9 @@ void main(uint slot : SV_DispatchThreadID)
         kept = unchanged && (e.x & VSM_FLAG_RESIDENT) != 0 && (e.x & VSM_FLAG_STALE) == 0 && e.y == tag && phys < P[2].y;
         if (kept)
         {
-            requests.Store(slot * 4, req | VSM_REQ_KEPT);
+            // (static_separate: a movable caster changed under it - the page and its static copy are kept, the movable
+            // casters are drawn anew)
+            requests.Store(slot * 4, req | VSM_REQ_KEPT | ((e.x & VSM_FLAG_STALE_DYNAMIC) != 0 ? VSM_REQ_DYNAMIC : 0u));
             used.InterlockedOr((phys >> 5) * 4, 1u << (phys & 31u));
         }
     }
@@ -341,7 +375,8 @@ void main(uint light : SV_DispatchThreadID)
     bool changed = false;
     [loop] for (uint i = 0; i < count && !changed; ++i)
     {
-        const float4 s = asfloat(list.Load4(16 + i * 16));
+        const uint4 sw = list.Load4(16 + i * 16);
+        const float4 s = asfloat(uint4(sw.xyz, sw.w | 127u));  // (the radius with its code bits set: never under the caster's)
         changed = distance(s.xyz, l.position) <= s.w + l.farM;
     }
     if (changed)

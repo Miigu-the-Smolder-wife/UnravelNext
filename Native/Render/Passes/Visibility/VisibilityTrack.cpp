@@ -674,6 +674,7 @@ CullView viewOf(const RasterView& r, const DepthRasterRequest& req, const Settin
     v.instanceFirst = r.instanceFirst;
     v.instanceEnd = r.instanceEnd;
     v.minInstancePx = r.minInstanceTexels;
+    v.instanceSet = r.instanceSet;
     return v;
 }
 

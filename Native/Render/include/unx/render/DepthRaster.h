@@ -46,6 +46,11 @@ struct RasterView
     // texels in radius (radius x lodPixelsPerMetre; perspective: over the distance to the sphere's nearest point) is not
     // drawn into it. 0: every instance. A shadow level coarser than a caster gets less than a texel from it.
     float minInstanceTexels = 0;
+    // Which instances the view draws: 0 every instance; 1 the instances that keep their place and shape between frames
+    // (uploaded with the scene and not movable: gpu::instanceMovable); 2 the others (movable ones, and every run-time and
+    // GPU-written instance). A view of set 1 and a view of set 2 with one projection draw every instance exactly once
+    // between them (S's static / dynamic shadow pages).
+    uint32_t instanceSet = 0;
 };
 
 struct DepthRasterRequest

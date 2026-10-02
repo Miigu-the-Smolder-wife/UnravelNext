@@ -24,7 +24,7 @@ void cullInstance(RWByteAddressBuffer state, uint instance, uint view, bool vali
         roots = rootBuffer[inst.mesh];
         const CullView v = loadView(view);
         const bool inBatch = v.instanceEnd == 0 || (instance >= v.instanceFirst && instance < v.instanceEnd);  // (RasterView's instance batch)
-        if (((inst.flags & INSTANCE_MASK) != 0 || INSTANCE_MASK == 0) && (inst.flags & INSTANCE_HIDDEN) == 0 && inBatch)
+        if (((inst.flags & INSTANCE_MASK) != 0 || INSTANCE_MASK == 0) && (inst.flags & INSTANCE_HIDDEN) == 0 && inBatch && instanceInSet(v, inst, instance))
         {
             float4 bounds = worldSphere(inst, inst.objectToWorld, mesh.boundsSphere);
             float4 prevBounds = worldSphere(inst, inst.prevObjectToWorld, mesh.boundsSphere);

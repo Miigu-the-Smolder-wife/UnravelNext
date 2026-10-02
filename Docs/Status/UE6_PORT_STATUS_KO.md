@@ -76,7 +76,7 @@
 | 화면 공간 접촉 그림자(4표본, 0.015 × 깊이) | 없음 | 물체가 떠 보임, 접촉부 세부 없음 |
 | MegaLights 화면 추적·청색 잡음·LightPowerDelta | 없음 | 접촉 누설, 광원 변화 반응 느림 |
 | 항상 상주하는 굵은 페이지 + 페이지 팽창 | 있음 — 코드 작성·빌드 통과, 실행 안 함 (`shadow.vsm.coarse_pages`, `coarse_level_first/last`, `page_dilation`; `VsmMarkCoarse.hlsl`, `VsmMark.hlsl`; `UE6_WORKPLAN_KO.md` 8.2 (8)) | 제 레벨에 페이지가 없는 조회가 굵은 레벨에서 그림자를 받는다 |
-| 정적/동적 페이지 분리 + 병합 | 없음 | 움직이는 캐스터가 그 밑의 정적 형상까지 다시 그리게 함 |
+| 정적/동적 페이지 분리 + 병합 | 있음 — 코드 작성·빌드 통과, 실행 안 함 (`shadow.vsm.static_separate`; 정적 사본 아틀라스 + `s.vsm.merge`, V의 `RasterView::instanceSet`; `UE6_WORKPLAN_KO.md` 8.2 (7)) | 움직이는 캐스터 밑의 페이지는 정적 사본을 두고 움직이는 캐스터만 다시 그린다 |
 | 페이지별 HZB, HZB로 거른 무효화 | 무효화: 있음 — 코드 작성·빌드 통과, 실행 안 함 (`shadow.vsm.cache_hzb_filter`; 페이지의 블록 계층이 HZB, `VsmCache.hlsl` MODE 2; `UE6_WORKPLAN_KO.md` 8.2 (10)) | 저장된 표면 아래에서 움직이는 캐스터는 페이지를 다시 그리게 하지 않는다 |
 | SMRT 확률 광선 7×8 + TSR | 결정적 차단체 탐색 + 16탭 | 우리 쪽이 첫 프레임 잡음 없음(유지) |
 | 16광원 one-pass 투영 | 슬롯 3 + 넘침 목록, MegaLights가 대체 | MegaLights 기본화로 해결 |
