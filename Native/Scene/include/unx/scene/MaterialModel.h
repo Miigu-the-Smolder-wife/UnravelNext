@@ -165,7 +165,8 @@ float3 evaluateCoated(const Surface& s, const Coat& c, float3 n, float3 v, float
 float evaluateCoatLobe(const Coat& c, float3 n, float3 v, float3 l);  // f_c alone (without the cover)
 
 // Sheen layer (A9, MATERIAL_LAYERS 1.4; cloth): a Charlie microfacet surface over a Standard surface s, for n.v, n.l > 0,
-//   f = f_sh + f_s (1 - max(C) E_sh(n.v, r_sh)),   f_sh = C D(h) G2(v, l) / (4 n.v n.l),
+//   f = f_sh + (f_d + (1 - c) f_spec) (1 - max(C) E_sh(n.v, r_sh)),   f_sh = C D(h) G2(v, l) / (4 n.v n.l),
+//   f_d + f_spec = the Standard surface's diffuse and specular terms, c = the cloth factor (Sheen::cloth; 0: f_s whole),
 //   D = (2 + 1 / a) (1 - (n.h)^2)^(1 / (2 a)) / (2 pi)    Charlie (Estevez & Kulla 2017), a = alpha(r_sh)
 //   G2 = 1 / (1 + Lambda(v) + Lambda(l)),  Lambda(w) = A(n.w) / n.w - 1,  A(mu) = integral of D(m) max(0, w.m) dm
 // Smith masking derived from D itself (the projected area A, tabulated; no fitted shadowing), so the lobe's albedo is at
@@ -174,11 +175,18 @@ float evaluateCoatLobe(const Coat& c, float3 n, float3 v, float3 l);  // f_c alo
 // steep at grazing views and for sharp lobes), bilinear (sheenLookup); deterministic midpoint integration.
 // The base's scale takes the view side only (Imageworks' albedo scaling: energy bounded, exact under any lighting
 // integral).
-// r_sh in [0.1, 1] (scene validation).
+// The cloth blend (ue6-main ShadingModels.ush ClothBxDF read as a reference; the code is ours): the reference's cloth
+// lerps its specular from the GGX lobe to the fuzz lobe by Cloth and the diffuse's energy scale with it. Here the fuzz
+// (C = Cloth x FuzzColor) keeps the sheen layer's form and scale, and the cloth factor c takes the same share off the
+// base's specular lobe: at c = 1 the surface is diffuse under fuzz, at c = 0 the sheen layer over the whole base, and
+// in between every term is linear in c. Energy: the fuzz reflects at most max(C) E_sh towards v and the base is scaled
+// by what is left, so the cloth factor only lowers the sum.
+// r_sh in [0.1, 1], c in [0, 1] (scene validation).
 struct Sheen
 {
     float3 color{ 0, 0, 0 };
     float roughness = 0.5f;
+    float cloth = 0;
 };
 constexpr uint32_t kSheenTableMu = 64, kSheenTableR = 32, kSheenTableSize = 2 * kSheenTableMu * kSheenTableR;
 float sheenLookup(const float* table, float mu, float roughness);

@@ -402,6 +402,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     ModelSheen sheen = modelSheenOf(m);
     sheen.roughness = max(mWordCoatRoughness(word), 0.1);
     const float keepS = NoV > 0 ? modelSheenKeep(sheen, NoV) : 1;
+    const float keepCloth = 1 - sheen.cloth;  // the cloth blend: what stays of the base's specular lobe
 #endif
 #if LAYERED
     // A9 anisotropy (MATERIAL_LAYERS 1.5; anisotropic materials are layered): the base's specular lobe (AnisoShading.hlsli)
@@ -533,6 +534,8 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #endif
 #if SUBSURFACE
                     sun += spec * (lobe == 1 ? 1 - skin.mix : skin.mix);
+#elif LAYERED == 2
+                    sun += spec * keepCloth;
 #else
                     sun += spec;
 #endif
@@ -638,7 +641,8 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         float3x3 specular = mul(shLtcInverse(P[5].y, max(NoV, 1e-4), s.roughness), frame);
         float3 specularAlbedo = shSpecularAlbedo(f0, max(NoV, 1e-4), s.roughness);
 #endif
-#if LAYERED
+#if LAYERED == 2
+        specularAlbedo *= keepCloth;  // (the cloth blend)
 #endif
 #if LAYERED == 1
         float3x3 coatSpecular = frame, coatBase = frame;
@@ -887,6 +891,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #if LAYERED
             if (aniso.on && NoV > 0 && cosL > 0) f = frontL + shAnisoSpecular(aniso, f0, n, v, l);
 #endif
+#if LAYERED == 2
+            if (NoV > 0 && cosL > 0) f -= (f - frontL) * sheen.cloth;  // (the cloth blend: the base's specular lobe x (1 - cloth))
+#endif
 #if LAYERED == 1
             if (cover > 0) f = keep * f + cover * (modelCoatLobe(coat, n, v, l) + modelCoatUnder(s, coat, n, v, l));
 #endif
@@ -1132,7 +1139,8 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #if LAYERED == 2
     // the base's indirect light scaled; the sheen's from the irradiance: C E_sh(n.v) E / pi (exact for uniform incident
     // radiance; MATERIAL_LAYERS 1.4 states the shape error)
-    if (NoV > 0) radiance += keepS * (front * irradiance + incident * baseAlbedo) + sheen.color * (modelSheenAlbedo(NoV, sheen.roughness) / SH_PI) * irradiance;
+    // (the cloth blend: the base's specular lobe x keepCloth)
+    if (NoV > 0) radiance += keepS * (front * irradiance + incident * (baseAlbedo * keepCloth)) + sheen.color * (modelSheenAlbedo(NoV, sheen.roughness) / SH_PI) * irradiance;
     else
 #endif
     if (NoV > 0) radiance += front * irradiance + incident * baseAlbedo;

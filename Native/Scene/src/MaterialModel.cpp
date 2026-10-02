@@ -334,7 +334,9 @@ float3 evaluateSheen(const Surface& s, const Sheen& sh, float3 n, float3 v, floa
     if (!(cmax > 0)) return base;
     const float NoV = dot(n, v), NoL = dot(n, l);
     if (NoV <= 0 || NoL <= 0) return base;
-    return sh.color * evaluateSheenLobe(sh.roughness, n, v, l) + base * (1 - cmax * sheenAlbedo(NoV, sh.roughness));
+    // the cloth blend: the base's specular lobe x (1 - cloth) (f_d of a Standard surface is its whole albedo)
+    const float3 specular = base - s.baseColor * ((1 - s.metallic) / kPi);
+    return sh.color * evaluateSheenLobe(sh.roughness, n, v, l) + (base - specular * sh.cloth) * (1 - cmax * sheenAlbedo(NoV, sh.roughness));
 }
 
 float3 evaluateCoated(const Surface& s, const Coat& c, float3 n, float3 v, float3 l)

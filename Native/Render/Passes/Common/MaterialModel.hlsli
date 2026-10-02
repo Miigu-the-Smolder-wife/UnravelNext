@@ -214,6 +214,7 @@ struct ModelSheen
 {
     float3 color;      // C (0: none)
     float roughness;   // r_sh
+    float cloth;       // the cloth blend: the base's specular lobe x (1 - cloth) (0: the sheen over the whole base)
 };
 float modelSheenLookup(uint base, float mu, float r)
 {
@@ -275,12 +276,15 @@ float modelSheenSun(float r, float3 n, float3 v, float3 l0, float rho)
 }
 // The base's scale 1 - max(C) E_sh(n.v) (view side only).
 float modelSheenKeep(ModelSheen sh, float NoV) { return 1 - max(sh.color.r, max(sh.color.g, sh.color.b)) * modelSheenAlbedo(max(NoV, 1e-4), sh.roughness); }
+// The cloth blend (MaterialModel.h evaluateSheen): the fuzz takes the place of the share 'cloth' of the base's specular
+// lobe; the base's diffuse part keeps the sheen's scale alone. cloth = 0: the sheen over the whole base, as before.
 float3 modelEvaluateSheen(ModelSurface s, ModelSheen sh, float3 n, float3 v, float3 l)
 {
     const float3 base = modelEvaluate(s, n, v, l);
     if (!(max(sh.color.r, max(sh.color.g, sh.color.b)) > 0)) return base;
     if (dot(n, v) <= 0 || dot(n, l) <= 0) return base;
-    return sh.color * modelSheenLobe(sh.roughness, n, v, l) + base * modelSheenKeep(sh, dot(n, v));
+    const float3 specular = base - s.baseColor * ((1 - s.metallic) / MODEL_PI);  // (Standard: f_d is the whole albedo)
+    return sh.color * modelSheenLobe(sh.roughness, n, v, l) + (base - specular * sh.cloth) * modelSheenKeep(sh, dot(n, v));
 }
 // The sheen of a material (MATERIAL_SHEEN; none: colour 0).
 ModelSheen modelSheenOf(GpuMaterial m)
@@ -291,6 +295,7 @@ ModelSheen modelSheenOf(GpuMaterial m)
     const GpuMaterialLayers layers = loadMaterialLayers(m.classFlags >> 16);
     sh.color = layers.sheenColor;
     sh.roughness = layers.sheenRoughness;
+    sh.cloth = layers.cloth;
     return sh;
 }
 
