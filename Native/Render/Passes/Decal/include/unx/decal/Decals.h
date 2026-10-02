@@ -63,6 +63,7 @@ class DecalSet
 public:
     uint32_t add(const Decal& d);            // returns the decal's id
     void update(uint32_t id, const Decal& d);  // keeps its creation order
+    const Decal& get(uint32_t id) const;       // a live decal
     void remove(uint32_t id);
     void clear();
     uint32_t count() const { return m_live; }
