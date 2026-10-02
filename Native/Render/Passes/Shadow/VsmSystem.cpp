@@ -1939,8 +1939,17 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
         view.shadowOverflow = overflow;
         view.shadowOverflowFallbackTiles = fallback;
     }
-    const uint32_t ring = s.ringCbv[s.constantsOffset / kRingStride], off = 0;
+    const uint32_t ring = s.ringCbv[s.constantsOffset / kRingStride];
     const uint32_t rays = (uint32_t)fc.quality.integer("shadow.vsm.search_taps"), steps = (uint32_t)fc.quality.integer("shadow.vsm.filter_taps");
+    // The sun's screen-space contact ray (ShadowReceiver.hlsli shadowSunContact): steps | round(length x 2^20) << 8, 0 = off.
+    uint32_t contact = 0;
+    if (fc.quality.has("shadow.vsm.screen_ray_length") && fc.quality.has("shadow.vsm.screen_ray_steps"))
+    {
+        const double length = fc.quality.number("shadow.vsm.screen_ray_length");
+        const int64_t contactSteps = fc.quality.integer("shadow.vsm.screen_ray_steps");
+        if (length < 0 || length > 1 || contactSteps < 0 || contactSteps > 16) fail("shadow.vsm.screen_ray_*: a length in [0, 1] of the view depth and 0..16 steps");
+        if (length > 0 && contactSteps > 0) contact = (uint32_t)contactSteps | ((uint32_t)std::llround(length * 1048576.0) << 8);
+    }
     const D3D12_GPU_VIRTUAL_ADDRESS constants = view.frameConstants;
     const char* variant = s.debugPaths ? ".PATHS1" : ".PATHS0";
     ID3D12PipelineState* pc = fc.shaders.compute("Passes/Shadow/ShadowListClear");
@@ -2007,7 +2016,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                                            overflowList ? ctx.uav(heads) : 0xFFFFFFFFu,
                                            mirrorMask.valid() ? ctx.srv(mirrorMask) : 0xFFFFFFFFu, mirrorTiles.valid() ? ctx.srv(mirrorTiles) : 0xFFFFFFFFu,
                                            ctx.srv(layers), tlut.valid() ? ctx.srv(tlut) : 0xFFFFFFFFu,
-                                           overflowList ? ctx.uav(needs) : 0xFFFFFFFFu, tilesX, 0, 0 };
+                                           overflowList ? ctx.uav(needs) : 0xFFFFFFFFu, tilesX, contact, 0 };
                   ctx.cmd->SetPipelineState(p1);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 24);
@@ -2043,7 +2052,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   if (useBuf.valid()) b.use(useBuf, Use::UavCompute);
               },
               [=](PassContext& ctx) {
-                  const uint32_t k[16] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, off, ctx.srv(table), ctx.srv(atlas), ctx.srv(bound),
+                  const uint32_t k[16] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, contact, ctx.srv(table), ctx.srv(atlas), ctx.srv(bound),
                                            ctx.srv(list), ctx.srv(blocks), ctx.uav(statsBuf), ctx.uav(filterList), rays, steps, ctx.srv(layers),
                                            tlut.valid() ? ctx.srv(tlut) : 0xFFFFFFFFu };
                   ctx.cmd->SetPipelineState(p2);
@@ -2081,7 +2090,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                       if (useBuf.valid()) b.use(useBuf, Use::UavCompute);
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[16] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, off, ctx.srv(table), ctx.srv(atlas), ctx.srv(bound),
+                      const uint32_t k[16] = { ctx.srv(depth), ctx.srv(gbuffer), ctx.uav(out), ring, contact, ctx.srv(table), ctx.srv(atlas), ctx.srv(bound),
                                                ctx.srv(filterList), ctx.srv(blocks), 0xFFFFFFFFu, 0xFFFFFFFFu, rays, steps, ctx.srv(layers),
                                                tlut.valid() ? ctx.srv(tlut) : 0xFFFFFFFFu };
                       ctx.cmd->SetPipelineState(p3);

@@ -9,7 +9,8 @@
 //            pass: vsmSunPenumbra = search then filter; the receiver is rebuilt by the same shadowReceiver).
 // PATHS=1 (diagnostics): STAGE=0 writes each pixel's VSM_PATH_* instead of the visibility (no second list).
 // P[0].x depth SRV, P[0].y G-buffer SRV, P[0].z output UAV (R32_UINT), P[0].w VSM constants CBV
-// P[1].x unused, P[1].y page table SRV (raw), P[1].z pool SRV, P[1].w search bound SRV (raw)
+// P[1].x the sun's screen-space contact ray (shadowSunContact's packed word; 0: none), P[1].y page table SRV (raw),
+// P[1].z pool SRV, P[1].w search bound SRV (raw)
 // P[2].x penumbra list SRV (raw; STAGE=1: the filter list), P[2].y blocks SRV (raw), P[2].z statistics UAV (raw),
 // P[2].w filter list UAV (raw: count at 0, records of 16 B from 16: pixel y << 16 | x, radius, k | kf << 8, reach)
 // P[3].w the transmittance LUT (0xFFFFFFFF: none): the sun slot also x the cloud layer's sun transmittance (B5).
@@ -21,8 +22,13 @@
 #include "Passes/Atmosphere/CloudShadowCommon.hlsli"
 
 // The sun slot of a pixel: visibility x the thin casters' and the cloud layer's transmittance.
-void storeSun(uint2 px, float3 world, float footprint, float reach, float sun)
+void storeSun(uint2 px, float3 world, float3 normal, float footprint, float reach, float sun)
 {
+    if (sun > 0)
+    {
+        Texture2D<float> depthTex = ResourceDescriptorHeap[P[0].x];
+        sun *= shadowSunContact(depthTex, px, world, normal, P[1].x);
+    }
     if (P[3].z != 0xFFFFFFFFu && sun > 0)
     {
         ShadowSrvs ts = (ShadowSrvs)0;
@@ -80,7 +86,7 @@ void main(uint i : SV_DispatchThreadID)
         RWTexture2D<uint> output = ResourceDescriptorHeap[P[0].z];
         output[px] = path;
 #else
-        if (sun >= 0) storeSun(px, world, footprint, reach, sun);
+        if (sun >= 0) storeSun(px, world, normal, footprint, reach, sun);
         else
         {
             filter = true;
@@ -90,7 +96,7 @@ void main(uint i : SV_DispatchThreadID)
 #else
         const uint k = record.z & 0xFFu, kf = record.z >> 8;
         const VsmReceiver rc = vsmReceiverAt(vc, vsmMakeReceiver(vc, world, normal, k), k);
-        storeSun(px, world, footprint, asfloat(record.w), vsmSunPenumbraFilter(r, rc, asfloat(record.y), kf, P[3].y));
+        storeSun(px, world, normal, footprint, asfloat(record.w), vsmSunPenumbraFilter(r, rc, asfloat(record.y), kf, P[3].y));
 #endif
     }
 #if STAGE == 0

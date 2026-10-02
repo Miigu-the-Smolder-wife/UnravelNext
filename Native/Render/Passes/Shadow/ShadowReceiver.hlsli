@@ -51,4 +51,48 @@ float3 shadowReceiver(Texture2D<float> depth, uint gbufferSrv, uint2 px, float d
     return p0;
 }
 
+// Screen-space contact shadow of the sun (shadow.vsm.screen_ray_length / screen_ray_steps; the reference's
+// r.Shadow.Virtual.ScreenRayLength with its ShadowRayCast): a ray of length x the pixel's view depth toward the sun,
+// walked across the depth buffer in 'steps' samples. The shadow map cannot say what happens within its receiver
+// tolerance (a texel of the pixel's level, plus the visible surface's LOD error), so the last centimetres under a caster
+// stay lit and objects float; the depth buffer has that detail. A sample is a hit when the ray is behind the depth
+// buffer's surface there by less than the depth window of two steps (a thicker gap is a surface in front the ray passes
+// behind: unknown, left to the shadow map). The step phase is a fixed function of the pixel (no frame term: the first
+// frame after a cut has no noise to converge; the upscaler's jitter moves the pattern across the surface).
+// packed = steps | round(length x 2^20) << 8 (0: off). Returns 0 (occluded) or 1.
+#define SHADOW_CONTACT_LENGTH_SCALE (1.0 / 1048576.0)
+#define SHADOW_CONTACT_MAX_STEPS 16u  // structural bound of the walk
+float shadowSunContact(Texture2D<float> depth, uint2 px, float3 world, float3 normal, uint packed)
+{
+    const uint steps = min(packed & 0xFFu, SHADOW_CONTACT_MAX_STEPS);
+    if (steps == 0) return 1;
+    const float3 L = normalize(g_sunDirection);
+    if (dot(normal, L) <= 0) return 1;  // facing away: unlit, or lit through (transmission asks the shadow map alone)
+    const float4 c0 = mul(g_viewProj, float4(world, 1));
+    if (c0.w <= 1e-4) return 1;
+    const float rayLength = (packed >> 8) * SHADOW_CONTACT_LENGTH_SCALE * c0.w;
+    float4 c1 = mul(g_viewProj, float4(world + L * rayLength, 1));
+    // a ray toward the camera plane ends in front of it
+    if (c1.w < 0.05 * c0.w) c1 = lerp(c0, c1, (0.95 * c0.w) / max(c0.w - c1.w, 1e-6));
+    const float2 size = float2(g_viewWidth, g_viewHeight);
+    // the depth window of a hit: two steps of a ray of this length along the view axis (the reference's CompareTolerance x 2)
+    const float window = 4.0 * rayLength / steps;
+    // interleaved gradient noise of the pixel, in [0, 1)
+    const float phase = frac(52.9829189 * frac(dot(float2(px) + 0.5, float2(0.06711056, 0.00583715))));
+    [loop] for (uint i = 0; i < steps; ++i)
+    {
+        const float t = (i + 0.5 + phase) / steps;
+        const float4 c = lerp(c0, c1, t);
+        const float2 at = float2(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5) * size;
+        if (any(at < 0) || any(at >= size)) return 1;  // left the screen: the shadow map's answer stands
+        const int2 q = int2(floor(at));
+        if (all(q == int2(px))) continue;  // the ray's own surface
+        const float d = depth.Load(int3(q, 0));
+        if (d <= 0) continue;  // sky
+        const float behind = c.w - linearDepth(d);
+        if (behind > 0 && behind < window) return 0;
+    }
+    return 1;
+}
+
 #endif

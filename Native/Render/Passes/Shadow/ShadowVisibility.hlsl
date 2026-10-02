@@ -26,7 +26,9 @@
 // FrameResources::vsmLayers; 0xFFFFFFFF: none): slot 0 = opaque visibility x the thin casters' T (v1.26). P[4].w the
 // transmittance LUT (0xFFFFFFFF: none): slot 0 also x the cloud layer's sun transmittance (B5, CloudShadowCommon.hlsli).
 // P[5].x overflow need UAV (raw, 4 B per tile; with P[1].x): every tile's need starts at 0 (ShadowOverflow MODE0 writes
-// the listed tiles', ShadowOverflowScan allocates in tile order); P[5].y tiles per row.
+// the listed tiles', ShadowOverflowScan allocates in tile order); P[5].y tiles per row. P[5].z the sun's screen-space
+// contact ray (shadowSunContact's packed word; 0: none): pixels the shadow map leaves lit ask the depth buffer for the
+// last centimetres.
 // Frame constants of the view. Mixed pixels get their local slots here and their sun slot in pass 2.
 #include "Frame.hlsli"
 #include "Scene.hlsli"
@@ -129,6 +131,8 @@ void classifyPixel(uint2 px, out uint packed, out uint path, out bool mixed, out
     }
     // B5 cloud shadow: the sun through the cloud layer at the receiver (P[4].w = transmittance LUT, UNX_NONE: none).
     if (cls != VSM_REGION_UMBRA && P[4].w != 0xFFFFFFFFu) sunT *= cloudSunTransmittanceFromLut(P[4].w, world);
+    // The contact ray (settled lit pixels; the mixed ones take it in pass 2 with their filtered visibility).
+    if (cls != VSM_REGION_UMBRA && !mixed && sunT > 0) sunT *= shadowSunContact(depthTex, px, world, normal, P[5].z);
     packed = (cls == VSM_REGION_UMBRA ? 0u : (uint)round(saturate(sunT) * 255.0)) | local;
 }
 

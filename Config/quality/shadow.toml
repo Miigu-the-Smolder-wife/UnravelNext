@@ -19,6 +19,10 @@ receiver_bias_texels = 1.0      # receiver-plane tolerance, texels of the compar
 receiver_lod_texels = 2.0       # added to it per pixel of visibility.lod_error_px: the visible surface is a LOD cut that may lie that
                                 # far inside the casters' cut (a pixel footprint is 1 .. 2 texels of its level). 0: curved surfaces
                                 # show facet-sized self-shadow specks where the two cuts differ [measured: shading_ball]
+screen_ray_length = 0.015       # the sun's contact ray across the depth buffer, as a fraction of the pixel's view depth (reference:
+                                # r.Shadow.Virtual.ScreenRayLength 0.015): the shadow of the last centimetres under a caster, which
+                                # the map's receiver tolerance leaves lit (objects float). 0: off
+screen_ray_steps = 8            # depth-buffer samples along it (0: off; at most 16)
 max_receiver_slope = 8.0        # clamp of the receiver plane's light-space gradient (surfaces within ~7 deg of grazing)
 height_margin_m = 500.0         # caster height range margin (dynamic casters) around the scene's bounds
 cache_min_change_texels = 0.5   # what makes a cached sun page stale (VsmCache.hlsl): a moved caster at least this many of the level's
