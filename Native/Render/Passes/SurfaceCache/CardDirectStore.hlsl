@@ -4,11 +4,13 @@
 // texel. The texel's direct irradiance = the sum over the tile's lights of the light's unshadowed irradiance at the texel
 // (its integral over the light: mlLightUnshadowed with a Lambert point) x a punctual light's function toward the texel
 // (SurfaceCacheLightFunction.hlsli: profile, cookie or gobo at the texel's angle from the light, keys and flicker at the
-// frame's time) x its visible bit, plus the sun's; stored in the
+// frame's time) x its visible bit (x what the Glass on its shadow ray left of it, where the slot is tinted:
+// surface_cache.direct_tint, CardLighting.hlsli), plus the sun's; stored in the
 // direct atlas, and the final lighting atlas gets (direct + indirect) x albedo / pi + emission. The group's first thread
 // writes the tile's uniform bits: per light, whether the rays traced this update all agreed.
-// P[0] = { card frame SRV, select SRV, frame index, flags (bit 10: lights without their shadow rays) }
-// P[1], P[2], P[3] = sky and sun (GiSky.hlsli)
+// P[0] = { card frame SRV, select SRV, frame index, flags (bit 10: lights without their shadow rays, bit 12: every slot
+//          of a tile is tinted - else the sun's alone) }
+// P[1], P[2], P[3] = sky and sun (GiSky.hlsli); P[3].w = tile tint SRV (raw; UNX_NONE: none)
 // P[4] = { tile lights SRV (raw), tile shadow SRV (raw), uniform bits UAV (raw), page capacity }
 // P[5] = { direct list capacity, direct atlas UAV, final atlas UAV, indirect atlas SRV }
 // P[6], P[7] = RtSceneSrvs (the light data: its header names the frame's light function table)
@@ -38,6 +40,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     const uint base = index * CL_TILE_LIGHT_BYTES, shadowBase = index * CL_TILE_SHADOW_BYTES;
     const uint4 state = tileLights.Load4(base + 32);  // valid mask (2), uniform slots, sun
     const bool unshadowed = (P[0].w & 1024u) != 0;
+    const uint tintSlots = (P[0].w & 4096u) != 0 ? CL_SLOTS : 1u;
 
     if (t == 0)
     {
@@ -84,12 +87,18 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         const uint light = tileLights.Load(base + k * 4);
         if (light == MC_NONE) break;
         const GpuLight g = loadLight(light);
+        float3 through = 1;
         if (lightCastsShadow(g) && !unshadowed)
         {
             const uint from = ((state.z >> k) & 1u) != 0 ? t & ~9u : t;
             if (((tileShadow.Load(shadowBase + k * 8 + (from >> 5) * 4) >> (from & 31u)) & 1u) == 0) continue;
+            if (P[3].w != UNX_NONE && tintSlots > 1u)
+            {
+                ByteAddressBuffer tileTint = ResourceDescriptorHeap[P[3].w];
+                through = clTintUnpack(tileTint.Load(clTintOffset(index, tintSlots, k, from)));
+            }
         }
-        float3 el = 3.14159265 * mlLightUnshadowed(lambert, g, light, UNX_NONE);
+        float3 el = 3.14159265 * mlLightUnshadowed(lambert, g, light, UNX_NONE) * through;
         if (any(el > 0)) el *= scLightFunction(functions, g, light, texel.position, texelSize);
         if (!all(el >= 0) || !all(el < 1e30)) el = 0;  // (NaN, infinite: no light)
         e += el;
@@ -101,6 +110,12 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         if (muS > 0 && ((tileShadow.Load(shadowBase + CL_SUN_SLOT * 8 + (from >> 5) * 4) >> (from & 31u)) & 1u) != 0)
         {
             float3 es = giSunIlluminance(texel.position) * muS;
+            if (P[3].w != UNX_NONE)
+            {
+                // (what the Glass between the texel and the sun left: the texel's own ray's, or its 2 x 2's first)
+                ByteAddressBuffer tileTint = ResourceDescriptorHeap[P[3].w];
+                es *= clTintUnpack(tileTint.Load(clTintOffset(index, tintSlots, CL_SUN_SLOT, from)));
+            }
             if (!all(es >= 0) || !all(es < 1e30)) es = 0;
             e += es;
         }
