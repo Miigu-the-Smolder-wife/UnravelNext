@@ -16,6 +16,12 @@
 //                 surface then mirrors the lighting the view shows, not the cards' texels;
 //   else          the surface cache at the hit; a hit without cards: the sun and the frame's indirect light
 //                 (ReflectionLumenHit.hlsli; no local-light sample).
+// Water met from the air on the way (a segment outside the media that ends on one of W's streams or on a mesh of a
+// Water material: RayTracing/HitWater.hlsli) is entered: the path takes F x the hit's ambient light for the mirrored
+// part and the water's own light, and goes on along the refracted direction inside that water (its extinction and
+// index from there on) with (1 - F) / n^2 of its throughput - a bath reflected in a pane shows its surface and its bed
+// through the water. Every segment sees the streams (they were met from inside alone: a reflection job passed
+// through a basin's surface and showed the bed as in a dry basin).
 // A path whose throughput's largest channel falls under the threshold ends with what it has (the reference's
 // r.Lumen.RayTracedTranslucency.PathThroughputThreshold); the result's largest channel is held to the cap in exposed
 // units (its MaxRayIntensity; 0: none).
@@ -23,7 +29,7 @@
 // the shading - with the thread's one shadow ray, the sun's - follows the walk, outside its loop.
 // Result per job (8 B): RGBA16F exposed linear radiance, alpha 1 = traced.
 // P[0] = { jobs SRV (raw: header 16 B { count, dispatch x, y, z }, then 48 B jobs), results UAV (raw), max jobs, stream
-//          table SRV (raw: per triangle stream slot its vertex buffer SRV) }
+//          table SRV (raw: per triangle stream slot its vertex buffer SRV; from word 64 its scene material) }
 // P[1], P[2], P[3].xyz = sky and sun (GiSky.hlsli; P[1].w = ray length), P[3].w = asuint(exposure ratio of the previous
 // colour)
 // P[4] = { card frame SRV (UNX_NONE: none), frame, flags (bit 0: hits read the cards' high levels and report what they
@@ -39,9 +45,8 @@
 #include "Passes/Reflection/ScreenTrace.hlsli"
 #include "Passes/Reflection/ReflectionLumenHit.hlsli"
 #include "RayTracing/HitHair.hlsli"
+#include "RayTracing/HitWater.hlsli"  // (RT_INSTANCE_STREAM_BASE, RT_MASK_FLUID)
 
-#define RT_INSTANCE_STREAM_BASE 0xFFFF00u
-#define RT_MASK_FLUID 0x8u
 #define REFRACT_SEGMENTS 4u
 #define REFRACT_FLAG_HI_RES 1u
 #define REFRACT_FLAG_SCENE_COLOUR 2u
@@ -104,8 +109,9 @@ void RefractionGen()
     const uint at = 16 + job * 48;
     float3 o = asfloat(jobs.Load3(at)), d = normalize(asfloat(jobs.Load3(at + 16)));
     const uint flags = jobs.Load(at + 28);
-    const float3 sigmaA = asfloat(jobs.Load3(at + 32));
-    const float ior = max(asfloat(jobs.Load(at + 44)), 1.0);
+    // the medium the path is in while `inside`: the job's, or a water it entered from the air on the way
+    float3 sigmaA = asfloat(jobs.Load3(at + 32));
+    float ior = max(asfloat(jobs.Load(at + 44)), 1.0);
     int bounces = (int)((flags >> 8) & 3u);
     const RtSceneSrvs scene = rtScene();
     const uint hairParams = rtHairParams(scene);
@@ -126,7 +132,7 @@ void RefractionGen()
         r.Direction = d;
         r.TMin = 1e-4;
         r.TMax = giRayLength();
-        const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_REFLECTION | RT_MASK_EMITTER | RT_MASK_FAR | (inside ? RT_MASK_FLUID : 0u));
+        const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_REFLECTION | RT_MASK_EMITTER | RT_MASK_FAR | RT_MASK_FLUID);
         // the grooms on a segment outside the media (a volume walk: no ray)
         if (!inside && hairParams != UNX_NONE)
         {
@@ -141,6 +147,26 @@ void RefractionGen()
         }
         if (inside) throughput *= exp(-sigmaA * hit.t);
         const float3 x = o + d * hit.t;
+        if (!inside)
+        {
+            // water met from the air (HitWater.hlsli): its mirrored and own light here, the path on inside it
+            RtWaterSurface water;
+            if (rtWaterSurface(scene, hit, o, d, P[0].w, water))
+            {
+                if (!water.fromAir) break;  // (the under side of a sheet met from outside its water: nothing to follow)
+                float3 into;
+                float weight;
+                L += throughput * rtWaterFromAir(water, d, rtWaterAmbient(water, P[4].x, job * 9781u + segment * 6271u + P[4].y * 26699u), into, weight);
+                throughput *= weight;
+                sigmaA = water.sigmaT;
+                ior = water.ior;
+                d = normalize(into);
+                o = x - water.normal * 1e-3;
+                inside = true;
+                if (max(throughput.r, max(throughput.g, throughput.b)) < throughputFloor) break;
+                continue;
+            }
+        }
         bool exits = false;
         float3 n = 0;
         if (hit.instance >= RT_INSTANCE_STREAM_BASE && hit.instance < RT_INSTANCE_STREAM_BASE + 64)

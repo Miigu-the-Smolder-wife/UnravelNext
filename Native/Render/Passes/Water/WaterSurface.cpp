@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace unx::water
@@ -16,6 +17,7 @@ using namespace unx::render;
 namespace
 {
 constexpr uint32_t kStatCount = 16, kStatBytes = 64, kRing = 4, kSlots = 64, kRayJobs = 1u << 20;
+constexpr uint32_t kSecondaryViews = 8;  // views without identity (planar reflection views) whose water a frame shades
 // After the slot rows: the refraction source's pyramid, count + SRV per level (WaterSurface.hlsli WATER_LEVELS_OFFSET).
 // Then the calm-water block (WATER_PLANAR_OFFSET): 48 B per candidate plane.
 // Then the sea's block (OceanShading.hlsli, WATER_OCEAN_OFFSET): 96 B.
@@ -111,9 +113,27 @@ void addWaterPlane(FramePassContext& fc, const WaterPlane& plane)
     planes.list.push_back(plane);
 }
 
+namespace
+{
+// The frame's count of views without identity (planar reflection views) whose water was shaded: each takes a state of
+// its own (the slot table's upload ring is written when its passes execute).
+struct SecondaryCount
+{
+    uint64_t frame = UINT64_MAX;
+    uint32_t used = 0;
+};
+} // namespace
+
+// The main view; and (shading.water_secondary_views) the frame's other views with a water layer - A14 views and planar
+// reflection views: a pool seen in a mirror is water there too. Their samples take the stage 1 terms: no reflection
+// camera of their own and no ray jobs (R's service traces for the main view), so the mirror lobe is the GI source's and
+// a refracted ray that is not followed takes the straight view's stand-in; their water is not a medium of their air
+// (the closed-form scattering instead); and where the view has no coverage records the interior pass shades the layer's
+// edge pixels too, one sample each. The sea is the main view's alone (the view grid is its camera's).
 void waterSurface(FramePassContext& fc, ViewResources& view)
 {
-    if (view.view.kind != gpu::ViewKind::Main) return;
+    const bool mainView = view.view.kind == gpu::ViewKind::Main;
+    if (!mainView && fc.quality.has("shading.water_secondary_views") && !fc.quality.boolean("shading.water_secondary_views")) return;
     RenderGraph& g = fc.graph;
     const FrameResources& r = fc.resources;
     // W's streams (fluids: triangle streams with vertices; slot = index in the frame's list, 63 is the sea's).
@@ -125,22 +145,45 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
     // B7: the sea of this frame (W's waterGeometry: the view grid's surface, V's water layer holds its pixels as
     // COV_OCEAN_ID) is shaded by its own kernel in the interior pass's bands (WaterOcean.hlsl).
     const OceanSurfaceFrame sea = fc.trackState ? fc.state<OceanSurfaceFrame>("W.oceanFrame") : OceanSurfaceFrame{};
-    const bool ocean = interiorPass && sea.frame == fc.frame.frameIndex && sea.surface.valid() && r.oceanDepth.valid();
+    const bool ocean = mainView && interiorPass && sea.frame == fc.frame.frameIndex && sea.surface.valid() && r.oceanDepth.valid();
     const bool anyStreams = !slots.empty();
     if ((!anyStreams && !ocean) || (!interiorPass && !recordPass)) return;
     if (!fc.trackState) fail("W: water surface shading needs the renderer's track state");
-    SurfaceState& st = fc.state<SurfaceState>("W.surface");
-    st.ensure(fc.device);
-    WaterSurfaceDebug& debug = fc.state<WaterSurfaceDebug>("W.surface.debug");
-    const uint32_t ring = uint32_t(fc.frame.frameIndex % kRing);
     const uint32_t W = view.view.width, H = view.view.height;
     const TextureRef colour = view.color, bandARadiance = view.bandARadiance;
     if (interiorPass)
     {
         const DXGI_FORMAT format = g.desc(colour).format;
         if (format != DXGI_FORMAT_R16G16B16A16_FLOAT && format != DXGI_FORMAT_R32G32B32A32_FLOAT)
+        {
+            if (!mainView) return;  // (a view shaded straight into a display target: its water is left out)
             fail("W: the water layer needs the shaded colour as exposed linear float (M postActive), got format %u", (unsigned)format);
+        }
     }
+    std::string stateKey = "W.surface";
+    if (!mainView)
+    {
+        if (view.viewId != 0) stateKey += ".view" + std::to_string(view.viewId);
+        else
+        {
+            SecondaryCount& n = fc.state<SecondaryCount>("W.surface.secondary");
+            if (n.frame != fc.frame.frameIndex)
+            {
+                n.frame = fc.frame.frameIndex;
+                n.used = 0;
+            }
+            if (n.used == kSecondaryViews) return;  // (more such views than states: the others show no water)
+            stateKey += ".planar" + std::to_string(n.used++);
+        }
+    }
+    SurfaceState& st = fc.state<SurfaceState>(stateKey);
+    st.ensure(fc.device);
+    // (the tests' switches and the reflection cameras are the main view's)
+    WaterSurfaceDebug unused;
+    unused.planar = 0;
+    WaterSurfaceDebug& debug = mainView ? fc.state<WaterSurfaceDebug>("W.surface.debug") : unused;
+    const uint32_t ring = uint32_t(fc.frame.frameIndex % kRing);
+    const bool shadeEdges = !mainView && !recordPass;  // (WaterInterior.hlsl P[7].w: no records to shade the layer's edges)
 
     // The refraction source: band A's shaded radiance without the particle layer (M keeps it in bandARadiance), copied
     // (the interior pass overwrites the water pixels of the texture it reads).
@@ -326,6 +369,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
     // The streams whose water is a medium of the view's air volume this frame (slot row word 3; WaterSurface.hlsli
     // waterSlotMedium): the basins S took (FroxelSystem.cpp recordWaterMedia) among the basins' streams (PoolTrack.cpp).
     uint64_t mediumSlots = 0;
+    if (mainView)
     {
         const std::vector<uint64_t>& taken = fc.state<std::vector<uint64_t>>("W.mediaPools");
         const std::vector<uint64_t>& streams = fc.state<std::vector<uint64_t>>("W.poolStreams");
@@ -432,7 +476,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
     // Stage 3: R's ray service. Lists sized for a band of rows (2 jobs per pixel: a reflection and, for a fallback, a
     // refraction) and reused by the record rounds; without the service nothing is written and each pass runs once.
     ID3D12CommandSignature* signature = st.signature.Get();
-    const bool rays = static_cast<bool>(fc.services.traceRefractions) && (!interiorPass || bandARadiance.valid());
+    const bool rays = mainView && static_cast<bool>(fc.services.traceRefractions) && (!interiorPass || bandARadiance.valid());
     const uint32_t jobCapacity = std::max(debug.rayJobCapacity ? debug.rayJobCapacity : kRayJobs, 2 * W);
     const uint32_t bandRows = rays ? std::min(H, jobCapacity / (2 * W)) : H, sampleCapacity = W * bandRows, jobs = 2 * sampleCapacity;
     BufferRef jobList, results, samples, applyArgs;
@@ -572,7 +616,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                               k[25] = rays ? c.uav(results) : none;
                               k[26] = rays ? c.uav(samples) : none;
                               k[27] = jobs;
-                              k[28] = row0, k[29] = rows, k[30] = sampleCapacity, k[31] = 0;
+                              k[28] = row0, k[29] = rows, k[30] = sampleCapacity, k[31] = shadeEdges ? 1u : 0u;
                               c.cmd->SetPipelineState(kernel);
                               c.bindFrameConstants(cb);
                               c.computeConstants(k, 32);

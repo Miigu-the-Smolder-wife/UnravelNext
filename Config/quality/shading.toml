@@ -282,6 +282,9 @@ water_ocean_ray_distance_m = 400.0   # a sea pixel within this distance mirrors 
                                      # ones mirror the sky alone. 0: the sky everywhere
 water_shore_foam = 0.8               # foam where the sea thins out over the bed, at most this much of the surface (0: none) ...
 water_shore_foam_depth_m = 0.3       # ... from this depth of water down to none
+water_secondary_views = true         # the water layer is shaded in the frame's other views too - A14 views and planar reflection views:
+                                     # a pool in a mirror is water (stage 1 terms: no reflection camera or ray jobs of their own); a
+                                     # basin within 30 m of the camera is kept drawn for them. false: the main view alone, as before
 
 # Motion blur (A5; COVERAGE 14.12 (2); MotionBlur.cpp): the shutter's open time as a fraction of the frame interval,
 # the exposure [t - s dt, t]; 0.5 = 180 degrees (the user's gate camera, 2026-09-26), 0 = instantaneous. Frames without

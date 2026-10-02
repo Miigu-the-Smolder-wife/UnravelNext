@@ -450,9 +450,13 @@ bool waterMarch(WaterShadeSrvs s, float3 P, float3 t, uint slot, out float3 H, o
 //   refraction  (medium 0, the water's streams) from P along the exact Snell direction, for fallback samples only:
 //               (1 - F) / n^2 x airT x the radiance arriving inside the water at P (R: absorption, exits, reflections),
 //               in place of the straight-view stand-in
+// The jobs start off the surface on their own side (the reflection job in the medium it travels, the refraction job in
+// the other: `side` is the unit normal toward the reflection job's medium): R's rays meet W's streams, and a ray
+// leaving its own surface at a grazing angle would meet it again within the point's float error.
 struct WaterRayTerms
 {
     float3 P, reflectDir, refractDir, sigmaA;
+    float3 side;
     float ior;
     bool reflect, refract;
     float3 reflectWeight, reflectFallback, refractWeight, refractFallback;
@@ -531,6 +535,7 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
     rays = (WaterRayTerms)0;
     rays.P = P;
     rays.ior = ior;
+    rays.side = nv;  // (from the air: the mirror ray's side; from inside the water the window's ray swaps it below)
 
     // Air of the camera's path to P, sun illuminance there.
     const float z = dot(P - g_cameraPosition, -g_view[2].xyz);
@@ -701,6 +706,7 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
         rays.refractFallback = rays.reflectFallback;
         rays.reflectFallback = 0;
         rays.reflectWeight = 0;
+        rays.side = -nv;  // (the window's ray travels in the air above; the mirrored one stays in the water)
         float3 tOut;
         if (waterRefract(v, nv, ior, tOut))
         {
@@ -799,6 +805,7 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
 // Stage 3: appends a sample's jobs and its sample record (WaterRayApply.hlsl, 80 B) to the band's lists, the results zeroed
 // (alpha 0 = not traced: the stage 1 value stays). Lists: P[6] = { jobs UAV, results UAV, samples UAV, job capacity },
 // P[7].z = sample capacity (UNX_NONE in P[6].x: no lists). The caller sizes the band so both capacities hold every sample.
+float waterRayBias(float3 P) { return 1e-4 + 2e-5 * distance(P, g_cameraPosition); }
 void waterAppendRays(WaterRayTerms rays, uint target, uint statisticsUav)
 {
     if (P[6].x == UNX_NONE || !(rays.reflect || rays.refract)) return;
@@ -824,7 +831,7 @@ void waterAppendRays(WaterRayTerms rays, uint target, uint statisticsUav)
     {
         reflectJob = j++;
         const uint at = 16 + 48 * reflectJob;
-        jobs.Store4(at, uint4(asuint(rays.P), reflectJob));
+        jobs.Store4(at, uint4(asuint(rays.P + rays.side * waterRayBias(rays.P)), reflectJob));
         jobs.Store4(at + 16, uint4(asuint(rays.reflectDir), 0xFFu | record));
         jobs.Store4(at + 32, uint4(0, 0, 0, asuint(1.0)));
         results.Store2(8 * reflectJob, uint2(0, 0));
@@ -833,7 +840,7 @@ void waterAppendRays(WaterRayTerms rays, uint target, uint statisticsUav)
     {
         refractJob = j++;
         const uint at = 16 + 48 * refractJob;
-        jobs.Store4(at, uint4(asuint(rays.P), refractJob));
+        jobs.Store4(at, uint4(asuint(rays.P - rays.side * waterRayBias(rays.P)), refractJob));
         jobs.Store4(at + 16, uint4(asuint(rays.refractDir), (WATER_RAY_TIR_BOUNCES << 8) | record));
         jobs.Store4(at + 32, uint4(asuint(rays.sigmaA), asuint(rays.ior)));
         results.Store2(8 * refractJob, uint2(0, 0));

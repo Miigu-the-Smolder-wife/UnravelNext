@@ -2072,6 +2072,7 @@ void visibility(FramePassContext& fc, ViewResources& view)
     if (!vs)
     {
         resolveDepthTies(fc, s, r, view, view.depth, view.visId, 0, kAListCount);
+        waterLayer(fc, s, r, view);  // (a pool in a mirror: W shades the view's water as the main view's)
         recordStats(fc, s, r, statsName);  // the frame's last planar reflection view (R's planar reflection costs)
         return;
     }
@@ -2225,14 +2226,30 @@ void translucentLayer(FramePassContext& fc, State& s, const Run& r, ViewResource
 
 // Water layer (v1.61): the layer-1 triangle streams drawn with one sample per pixel over a copy of band A's depth (depth test
 // and write, both faces) into FrameResources::waterVis (vis id) and waterDepth (linear view depth, +inf = none).
+// Every view has one (the main view, A14 views, planar reflection views). A view with a clip plane (a mirror's) leaves
+// out the streams that lie in the plane or behind it - the middle of the stream's bounds not in front of the plane: the
+// calm water whose reflection the view is (its ripples straddle its own rest plane) - and clips the others' pixels at
+// the plane (WaterLayer.ps).
 void waterLayer(FramePassContext& fc, State& s, const Run& r, ViewResources& view)
 {
     std::vector<uint32_t> slots;
     const std::vector<TriangleStream>& streams = fc.resources.triangleStreams;
+    const float4 clip = view.view.clipPlane;
+    const bool clipped = clip.x != 0 || clip.y != 0 || clip.z != 0 || clip.w != 0;
     for (uint32_t slot = 0; slot < (uint32_t)streams.size(); ++slot)
-        if (streams[slot].layer == 1 && streams[slot].vertices.valid() && streams[slot].drawArgs.valid() && streams[slot].maxTriangles > 0) slots.push_back(slot);
+    {
+        const TriangleStream& st = streams[slot];
+        if (st.layer != 1 || !st.vertices.valid() || !st.drawArgs.valid() || st.maxTriangles == 0) continue;
+        if (clipped)
+        {
+            const float3 middle = (st.boundsMin + st.boundsMax) * 0.5f;
+            if (clip.x * middle.x + clip.y * middle.y + clip.z * middle.z + clip.w <= 0.02f) continue;
+        }
+        slots.push_back(slot);
+    }
     // v1.73: W's view-grid ocean (main view): merged into the same layer (COV_OCEAN_ID).
-    const TextureRef oceanDepth = view.viewId == 0 ? fc.resources.oceanDepth : TextureRef{};
+    const bool mainView = view.view.kind == gpu::ViewKind::Main && view.viewId == 0;
+    const TextureRef oceanDepth = mainView ? fc.resources.oceanDepth : TextureRef{};
     if (slots.empty() && !oceanDepth.valid()) return;
     RenderGraph& g = fc.graph;
     const uint32_t width = view.view.width, height = view.view.height;
@@ -2349,7 +2366,7 @@ void waterLayer(FramePassContext& fc, State& s, const Run& r, ViewResources& vie
     }
     view.waterVis = vis;
     view.waterDepth = linear;
-    if (view.viewId == 0)
+    if (mainView)
     {
         fc.resources.waterVis = vis;
         fc.resources.waterDepth = linear;
