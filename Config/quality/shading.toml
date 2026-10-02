@@ -77,10 +77,10 @@ hair_density_resolution = 64      # cells along the longest side of a body's box
 hair_density_bodies = 16          # the nearest bodies that get a block of the volume (resolution^3 x 6 B each); the others
                                   # are shaded as with resolution 0
 hair_density_steps = 16           # samples of a strand's march through the volume towards a light (the indirect light's
-                                  # four marches take half as many). A path longer than 1.5 cells a sample spends half of
-                                  # them on its first cells, one each - the hair next to the strand at the cells' size,
-                                  # which draws the edge of the hair's shadow on itself - and the rest on the remainder
-                                  # (the cells' means from 3 cells a sample on)
+                                  # four marches take half as many). A path longer than 1.5 cells a sample reads its first
+                                  # steps / 2 cells one by one - the hair next to the strand at the cells' size, which
+                                  # draws the edge of the hair's shadow on itself - and the rest in the cells' 4 x 4 x 4
+                                  # means, one coarse cell a sample (at most this many: 8 + 16 x 4 = 72 cells at 16)
 hair_march_jitter = true          # every march through the volume (the strands', hair_shadows') takes its samples at a
                                   # phase drawn per pixel / record / segment point and frame, so the cells' pattern along
                                   # a shadow's edge becomes noise the temporal filters remove (Unreal's hair voxel

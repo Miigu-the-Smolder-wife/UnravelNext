@@ -17,7 +17,8 @@
 // coverage layer (band B: exact segment-pixel area) through FrameResources::hairSegments (interface request
 // Docs/Design/Requests/20260926_E_hair_strands.md); shading is HairBsdf.hlsli (M's hair class).
 // LOD (ARCHITECTURE 2.8): a body whose follow strands would exceed 2 per pixel width keeps a deterministic subset with
-// widths scaled by 1 / fraction (projected coverage kept); denser than that is band C's strand bricks (V).
+// widths scaled by 1 / fraction (projected coverage kept); denser than that is band C's strand bricks (V). The subset is
+// the first strands of the body's LOD order (the follows by rising hash), and the frame holds only their segments.
 #include "unx/render/Frame.h"
 
 #include <cstdint>
@@ -96,8 +97,9 @@ private:
 HairSystem& hairSystem(render::TrackState& state);
 
 // Per-frame outputs (FrameResources::hairSegments / hairBodies): the segments of every drawn follow strand, 2 float4 each
-// (camera-relative p0, r0), (p1, r1), radius 0 = left out by LOD; the bodies' header (raw): body count, then per body 8
-// words { first segment, segments, segments per strand, material, instance, LOD keep fraction (float), width scale
-// (float), 0 }.
+// (camera-relative p0, r0), (p1, r1) - a body's strands in the follows' order when all are drawn, else the kept ones in
+// its LOD order, side by side (strands left out by the LOD have no segments); the bodies' header (raw): body count, then
+// per body 8 words { first segment, segments (of the strands drawn), segments per strand, material, instance, LOD keep
+// fraction (float), width scale (float), 0 }.
 constexpr uint32_t kBodyHeaderWords = 8;
 } // namespace unx::hair

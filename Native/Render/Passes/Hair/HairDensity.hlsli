@@ -12,11 +12,12 @@
 //   hairFibreCount / hairFibreCountWithin   a strand's: from a point inside its own body's hair to the volume's edge (or
 //       over at most 'reach' metres: a light inside the box), 'steps' samples, starting half a cell from the point (its
 //       own cell's hair is around it, not in front of it). A path of up to 1.5 cells a step reads the cells; a longer one
-//       reads the cells over its first steps / 2 cells - the hair next to the strand, whose edge is the edge of the
-//       shadow on it - and the rest in equal steps, in the cells up to 1.5 cells a step, in their means from 3 cells
-//       on, in both between. (One texture chosen by the whole path's step put every path longer than 1.5 x steps cells
-//       - 29 cm of a head's 1.2 cm cells at 16 steps: nearly every path through a groom - into the 4.7 cm means: the
-//       shadow's edge on the hair was as coarse as those, with a line where the choice changed.)
+//       reads the cells over its first steps / 2 cells, one a step - the hair next to the strand, whose edge is the edge
+//       of the shadow on it - and the rest in their means, one coarse cell a step (at most 'steps' of them: a longer
+//       rest in 'steps' equal steps). (One texture chosen by the whole path's step put every path longer than 1.5 x
+//       steps cells - 29 cm of a head's 1.2 cm cells at 16 steps: nearly every path through a groom - into the 4.7 cm
+//       means, read 6 cells apart: the shadow's edge on the hair was as coarse as those, with a line where the choice
+//       changed.) Samples: 'steps' for a short path, steps / 2 + the rest's coarse cells for a long one.
 //   hairFibreCountOthers   the fibres of the other bodies with a block on a strand's path to a light (a beard under the
 //       head's hair, the next head), by hairTransmittance's march.
 //   hairTransmittance   a surface's that is not hair (HairShadow.hlsl): exp(-n) of every body with a block along the
@@ -137,21 +138,16 @@ float hairFibreCountWithin(uint paramsSrv, uint body, float3 p, float3 d, float 
     float sum = 0;
     [loop] for (uint i = 0; i < nearSteps; ++i) sum += hairDensityAt(cells, fine, p + d * (t0 + (i + jitter) * dt));
     sum *= dt;
-    if (nearSteps < steps)
+    if (split)
     {
-        // the rest in equal steps: the cells up to 1.5 cells a step, their means from 3 on, both between
-        const uint farSteps = steps - nearSteps;
-        const float tFar = t0 + nearSteps * dt, dtFar = (t1 - tFar) / farSteps;
-        const float means = saturate((dtFar / b.cell - 1.5f) / 1.5f);
+        // the rest in the cells' means, a coarse cell a step (more than 'steps' of them: 'steps' equal steps)
+        const float tFar = t0 + nearSteps * dt;
+        const uint farSteps = clamp((uint)ceil((t1 - tFar) / (HAIR_DENSITY_COARSE * b.cell)), 1u, max(steps, 1u));
+        const float dtFar = (t1 - tFar) / farSteps;
         const HairDensityVolume low = hairDensityLevel(header, b, true);
         Texture3D<float> coarse = ResourceDescriptorHeap[low.srv];
         float far = 0;
-        [loop] for (uint k = 0; k < farSteps; ++k)
-        {
-            const float3 x = p + d * (tFar + (k + jitter) * dtFar);
-            if (means < 1) far += (1 - means) * hairDensityAt(cells, fine, x);
-            if (means > 0) far += means * hairDensityAt(coarse, low, x);
-        }
+        [loop] for (uint k = 0; k < farSteps; ++k) far += hairDensityAt(coarse, low, p + d * (tFar + (k + jitter) * dtFar));
         sum += far * dtFar;
     }
     return HAIR_FIBRES_PER_DENSITY * sum;

@@ -13,7 +13,8 @@
 //      - a capsule under the strands: after 2 s no node is inside radius + margin (1e-5 m);
 //      - wind along +z deflects the tips to +z;
 //      - follow strands at rest: segment ends = guide node + offset (camera-relative, 1e-5 m), consecutive segments
-//        share their end points, radii taper from root to tip; LOD far away keeps a subset with widths x 1 / fraction.
+//        share their end points, radii taper from root to tip; LOD far away keeps a subset with widths x 1 / fraction,
+//        whose segments alone are in the frame's buffer (header segments = kept strands x segments per strand).
 //   3. density volume (HairDensity.hlsl / .hlsli), two slabs of parallel strands (2 mm apart both ways, diameter 0.1 mm:
 //      rho = 25 / m; 6.4 cm thick: (pi / 4) rho L = 1.2566 fibres across one), rays across them, means over 64 rays
 //      (8 x 8 places over 12 x 6 cm: the strands' lattice and the segments' deposits beat with the cells):
@@ -280,7 +281,8 @@ int main(int argc, char** argv)
                     ViewResources v;
                     v.view = tf.frame.mainView;
                     tracks::hair(fc, v);
-                    seg = tf.readbackBuffer(fc, fc.resources.hairSegments, (uint64_t)G * 2 * (N - 1) * 32);
+                    // (the buffer holds the kept strands' segments: every strand's from near, a subset's from far)
+                    seg = tf.readbackBuffer(fc, fc.resources.hairSegments, fc.graph.desc(fc.resources.hairSegments).size);
                     head = tf.readbackBuffer(fc, fc.resources.hairBodies, 16 + hair::kBodyHeaderWords * 4);
                 });
                 return std::make_pair(seg, head);
@@ -315,15 +317,13 @@ int main(int argc, char** argv)
             std::memcpy(&frac1, h1 + 1 + 5, 4);
             std::memcpy(&scale1, h1 + 1 + 6, 4);
             const float* sf = reinterpret_cast<const float*>(segFar->data());
-            uint32_t kept = 0;
-            for (uint32_t f = 0; f < G * 2; ++f)
+            // the kept strands' segments side by side: the header's count, the buffer's size
+            const uint32_t kept = h1[1 + 1] / (N - 1);
+            S_CHECK(h1[1 + 1] == kept * (N - 1) && segFar->size() >= (size_t)kept * (N - 1) * 32, "far header: %u segments, buffer %zu B", h1[1 + 1], segFar->size());
+            for (uint32_t f = 0; f < kept; ++f)
             {
                 const float r0 = sf[8 * (f * (N - 1)) + 3];
-                if (r0 > 0)
-                {
-                    ++kept;
-                    S_CHECK(std::abs(r0 - 40e-6f * scale1) <= 1e-9f, "kept strand root radius %.4g, expected %.4g", r0, 40e-6f * scale1);
-                }
+                S_CHECK(std::abs(r0 - 40e-6f * scale1) <= 1e-9f, "kept strand %u root radius %.4g, expected %.4g", f, r0, 40e-6f * scale1);
             }
             S_CHECK(frac1 < 1 && std::abs(scale1 * frac1 - 1) < 1e-5 && kept > 0 && kept < G * 2, "far LOD: fraction %.4f, scale %.2f, kept %u of %u", frac1, scale1, kept, G * 2);
             std::printf("hair follows: nodes within %.1e m of guide + offset, continuous tapered segments; far LOD keeps %u of %u (fraction %.3f), widths x %.1f\n",
