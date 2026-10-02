@@ -72,6 +72,9 @@
 #ifndef SHADE_PART
 #define SHADE_PART 1  // ShadeIndirect.hlsl compiles this file with 2 (see the header)
 #endif
+#ifndef ML_FULLSCREEN
+#define ML_FULLSCREEN 0
+#endif
 #ifndef MEGA_LIGHTS
 #define MEGA_LIGHTS 0  // MegaLightsShade.hlsl compiles this file with 1: the local lights of the pixel's light samples alone
 #endif
@@ -90,7 +93,7 @@
 #include "Passes/Shading/AreaLight.hlsli"
 #if LAYERED
 #include "Passes/Shading/AnisoShading.hlsli"
-#if AREA_LOBES
+#if AREA_LOBES || (MEGA_LIGHTS && AREA)
 #include "Passes/Shading/AreaQuadrature.hlsli"
 #endif
 #endif
@@ -124,9 +127,13 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 [numthreads(8, 8, 1)]
 void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
 {
+#if ML_FULLSCREEN
+    const uint2 tileCoord = gid.xy;  // (MegaLightsShade.hlsl FULL = 1: every tile of the view)
+#else
     ByteAddressBuffer tiles = ResourceDescriptorHeap[P[1].x];
     const uint tile = tiles.Load(4 * (P[1].y + gid.x));
     const uint2 tileCoord = uint2(tile & 0xFFFFu, tile >> 16);
+#endif
     const uint2 pixel = tileCoord * M_TILE + tid;
     // The group's independent reads go out together before any of them is waited on: the records of the tile's 2 x 2 corner
     // screen probes (R's tile cache, split form: the probe counts come from the frame constants, so no header read comes
@@ -625,20 +632,30 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #if AREA
                 // L w (f_d pi I + E_s I_ltc) on the viewer's side of n; Foliage transmits what arrives on the other.
                 const float3 Lw = light.color * (light.intensity * window * visibility);
-#if AREA_LOBES
+#if AREA_LOBES || (MEGA_LIGHTS && LAYERED)
                 // A9 the lobes no LTC represents, over the light (AreaQuadrature.hlsli): the anisotropic base (MATERIAL_LAYERS
-                // 1.5; under a coat scaled like the base) and the sheen (1.4) - on the viewer's side
+                // 1.5; under a coat scaled like the base) and the sheen (1.4) - on the viewer's side. The lobe kernel
+                // (AREA_LOBES) holds these alone, with S's visibility; shading.mega_lights' kernel adds them to its specular
+                // with the light samples' weight (Lw), and the lobe kernel then does not run (ShadingSystem.cpp).
                 if (NoV > 0)
                 {
+                    float3 lobe = 0;
 #if LAYERED == 1
                     if (aniso.on && !shLightSpecularInResult(lightIndex))
-                        radiance += ((cover > 0) ? keep : 1.0) * Lw * shAreaAniso(light, p, aniso.t, aniso.b, n, v, aniso.alpha, f0, 1 + f0 * (1 / (aniso.ab.x + aniso.ab.y) - 1));
+                        lobe = ((cover > 0) ? keep : 1.0) * Lw * shAreaAniso(light, p, aniso.t, aniso.b, n, v, aniso.alpha, f0, 1 + f0 * (1 / (aniso.ab.x + aniso.ab.y) - 1));
 #endif
 #if LAYERED == 2
-                    radiance += Lw * sheen.color * shAreaSheen(light, p, frame, v, sheen.roughness);
+                    lobe = Lw * sheen.color * shAreaSheen(light, p, frame, v, sheen.roughness);
+#endif
+#if MEGA_LIGHTS
+                    mlSpecular += lobe;
+#else
+                    radiance += lobe;
 #endif
                 }
+#if AREA_LOBES
                 continue;
+#endif
 #endif
                 // Integrals in order: front diffuse, specular, back (Foliage) -- one inlined evaluator (the diffuse frames
                 // are rotations: closed forms on circular cones).

@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <string>
 
 namespace unx::render::shading
 {
@@ -33,6 +34,9 @@ uint32_t asUint(float f)
 }
 
 constexpr uint32_t kSetTile = 8, kSetBytes = 24;  // MegaLights.hlsli ML_HASH_TILE, 4 x ML_HASH_WORDS
+
+// The structural bound of one ray dispatch (DISPATCH_BOUNDS_KO.md): at most this many rays.
+constexpr uint32_t kRaysPerDispatch = 262144;
 
 struct MegaLightsState
 {
@@ -150,11 +154,11 @@ Settings settings(const QualityConfig& q)
 } // namespace
 
 MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, bool areaLights, uint32_t ltcSrv,
-                                 ID3D12CommandSignature* dispatchSignature)
+                                 ID3D12CommandSignature* dispatchSignature, const char* instance)
 {
     MegaLightsFrame ml;
 #if UNX_M_HAS_RAYTRACING
-    if (!fc.quality.boolean("shading.mega_lights") || view.view.kind != gpu::ViewKind::Main || !fc.trackState) return ml;
+    if (!fc.quality.boolean("shading.mega_lights") || !fc.trackState) return ml;
     const FrameResources r = fc.resources;
     // needs S's froxel lists (the candidates) and R's ray scene (the visibility); without either the shading kernels keep
     // their loop over the lists with S's slots
@@ -166,18 +170,32 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
     const uint32_t gridX = s.count >= 2 ? 2u : 1u, gridY = s.count >= 4 ? 2u : 1u;
     const uint32_t tilesX = (W + kSetTile - 1) / kSetTile, tilesY = (H + kSetTile - 1) / kSetTile;
 
-    MegaLightsState& st = fc.state<MegaLightsState>("M.megaLights");
-    st.ensure(fc.device, W, H);
+    // The view's persistent state (as Unreal runs MegaLights per view): the main view and every full auxiliary view (A14:
+    // render texture, mirror, portal, split - ViewResources::viewId) keep their own history. A planar reflection view has
+    // no identity between frames (R renders them through FrameServices::renderView): it keeps no state at all - its
+    // filter textures are the graph's transients, it never reads history (no temporal accumulation, no guiding by last
+    // frame's sets) and builds no sets (2026-10-01: a persistent state per planar view held 11 view-sized textures that
+    // nothing read, recreated whenever the view's size changed).
+    const bool mainView = view.view.kind == gpu::ViewKind::Main, fullView = mainView || view.viewId != 0;
+    if (mainView) ml.stateKey = "M.megaLights";
+    else if (fullView) ml.stateKey = "M.megaLights.view" + std::to_string(view.viewId);
+    if (fullView && instance) ml.stateKey += std::string(".") + instance;  // (a second instance of the view: the coverage layer's)
+    ml.transient = !fullView;
+    MegaLightsState* st = ml.transient ? nullptr : &fc.state<MegaLightsState>(ml.stateKey);
+    if (st) st->ensure(fc.device, W, H);
     const float3 shift = fc.frame.originShift;
-    const bool valid = !st.fresh && st.revision == fc.scene.revision() && fc.frame.discontinuity == 0 && shift.x == 0 && shift.y == 0 && shift.z == 0;
-    st.fresh = false;
-    st.revision = fc.scene.revision();
+    const bool valid = st && !st->fresh && st->revision == fc.scene.revision() && fc.frame.discontinuity == 0 && shift.x == 0 && shift.y == 0 && shift.z == 0;
     const float exposure = 1.0f / (1.2f * std::exp2(view.view.ev100));
-    ml.exposureRatio = valid && st.exposure > 0 ? exposure / st.exposure : 1.0f;
-    st.exposure = exposure;
-    ml.previous = st.parity;
-    ml.next = st.parity ^ 1u;
-    st.parity = ml.next;
+    ml.exposureRatio = valid && st->exposure > 0 ? exposure / st->exposure : 1.0f;
+    if (st)
+    {
+        st->fresh = false;
+        st->revision = fc.scene.revision();
+        st->exposure = exposure;
+        ml.previous = st->parity;
+        ml.next = st->parity ^ 1u;
+        st->parity = ml.next;
+    }
     ml.historyValid = valid && s.temporal;
     ml.on = true;
     ml.factor = s.factor;
@@ -197,13 +215,14 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
     const bool guide = s.guide && valid;
     // (one import per resource and frame: the sets are read here and rewritten by m.ml.sets.filter; the previous depth is
     // read here and by m.ml.temporal)
-    ml.sets = g.importBuffer(st.sets.Get(), BufferDesc{ "m.ml tile sets", st.setsBytes, 0 });
+    if (st) ml.sets = g.importBuffer(st->sets.Get(), BufferDesc{ "m.ml tile sets", st->setsBytes, 0 });
     if (valid)
-        ml.prevDepth = g.importTexture(st.depth[ml.previous].Get(), { "m.ml depth (previous)", W, H, 1, 1, DXGI_FORMAT_R32_FLOAT }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        ml.prevDepth = g.importTexture(st->depth[ml.previous].Get(), { "m.ml depth (previous)", W, H, 1, 1, DXGI_FORMAT_R32_FLOAT }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     const BufferRef sets = ml.sets;
     const TextureRef prevDepth = ml.prevDepth;
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
-    const uint32_t stable = r.areaLightStable;
+    // (B2's mask of lights whose specular the reflections carry: the main view's; other views shade every light's specular)
+    const uint32_t stable = mainView ? r.areaLightStable : gpu::kNone;
     // m.ml.tiles: the downsampled tiles with a surface (the sample kernel's dispatch list); the others' samples are emptied
     const uint32_t dsTilesX = (dsW + 7) / 8, dsTilesY = (dsH + 7) / 8;
     const BufferRef tileList = g.createBuffer({ "m.ml tiles", 16 + 4ull * dsTilesX * dsTilesY, 0 });
@@ -279,9 +298,16 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
                   uint32_t k[32] = { c.uav(samples), c.srv(keys), 0, 0, dsW, dsH, s.factor | (s.count << 8), 0,
                                      asUint(s.rayBias), asUint(s.rayNormalBias), asUint(s.rayEndBias), 0 };
                   rays->rootConstants(k + 24);
-                  c.computeConstants(k, 32);
                   c.bindFrameConstants(cb);
-                  pipeline.dispatch(c.cmd, 0, dsW * gridX, dsH * gridY);
+                  // Bands of rows, each its own DispatchRays of at most kRaysPerDispatch rays (one per sample texel): the
+                  // sample texture grows with the resolution (1080p: 2.07 M texels, 4K: 8.3 M), a dispatch does not.
+                  const uint32_t width = dsW * gridX, height = dsH * gridY, bandRows = std::max(1u, kRaysPerDispatch / std::max(width, 1u));
+                  for (uint32_t row = 0; row < height; row += bandRows)
+                  {
+                      k[2] = row;  // P[0].z
+                      c.computeConstants(k, 32);
+                      pipeline.dispatch(c.cmd, 0, width, std::min(bandRows, height - row));
+                  }
               });
 #else
     (void)fc;
@@ -294,12 +320,12 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
     return ml;
 }
 
-void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, MegaLightsFrame& ml)
+void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, MegaLightsFrame& ml, bool demodulated)
 {
     if (!ml.on) return;
     const Settings s = settings(fc.quality);
     RenderGraph& g = fc.graph;
-    MegaLightsState& st = fc.state<MegaLightsState>("M.megaLights");
+    MegaLightsState* st = ml.transient ? nullptr : &fc.state<MegaLightsState>(ml.stateKey);
     const uint32_t W = view.view.width, H = view.view.height;
     const uint32_t dsW = (W + s.factor - 1) / s.factor, dsH = (H + s.factor - 1) / s.factor;
     const uint32_t gridX = s.count >= 2 ? 2u : 1u, gridY = s.count >= 4 ? 2u : 1u;
@@ -309,9 +335,11 @@ void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureR
     const BufferRef clusters = view.visibleClusters;
     const bool hasVis = visId.valid() && clusters.valid();
 
-    // ---- the tile sets for the next frame's sampling
-    const BufferRef built = g.createBuffer({ "m.ml tile sets (built)", st.setsBytes, 0 });
+    // ---- the tile sets for the next frame's sampling (a view without state has no next frame)
+    const BufferRef built = st ? g.createBuffer({ "m.ml tile sets (built)", st->setsBytes, 0 }) : BufferRef{};
     const BufferRef history = ml.sets;
+    if (st)
+    {
     ID3D12PipelineState* buildPso = fc.shaders.compute("Passes/Shading/MegaLightsSets.MODE0");
     ID3D12PipelineState* filterPso = fc.shaders.compute("Passes/Shading/MegaLightsSets.MODE1");
     g.addPass("m.ml.sets", QueueType::Compute,
@@ -340,22 +368,27 @@ void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureR
                   c.cmd->Dispatch((tilesX + 7) / 8, (tilesY + 7) / 8, 1);
               });
 
-    // ---- temporal, then spatial
-    auto import = [&](ComPtr<ID3D12Resource>& t, const char* name, DXGI_FORMAT format) {
-        return g.importTexture(t.Get(), { name, W, H, 1, 1, format }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    }
+
+    // ---- temporal, then spatial (a view without state: the graph's transients, nothing kept)
+    // (std::addressof: ComPtr's operator& releases the pointer)
+    auto import = [&](ComPtr<ID3D12Resource>* t, const char* name, DXGI_FORMAT format) {
+        if (!t) return g.createTexture({ name, W, H, 1, 1, format });
+        return g.importTexture(t->Get(), { name, W, H, 1, 1, format }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     };
     const uint32_t p = ml.previous, n = ml.next;
-    const bool hist = ml.historyValid;
-    const TextureRef prevDiffuse = hist ? import(st.diffuse[p], "m.ml diffuse (previous)", DXGI_FORMAT_R16G16B16A16_FLOAT) : TextureRef{};
-    const TextureRef prevSpecular = hist ? import(st.specular[p], "m.ml specular (previous)", DXGI_FORMAT_R16G16B16A16_FLOAT) : TextureRef{};
-    const TextureRef prevMoments = hist ? import(st.moments[p], "m.ml moments (previous)", DXGI_FORMAT_R16G16B16A16_FLOAT) : TextureRef{};
-    const TextureRef prevFrames = hist ? import(st.frames[p], "m.ml frames (previous)", DXGI_FORMAT_R8_UINT) : TextureRef{};
+    const bool hist = ml.historyValid && st;
+    const TextureRef prevDiffuse = hist ? import(std::addressof(st->diffuse[p]), "m.ml diffuse (previous)", DXGI_FORMAT_R16G16B16A16_FLOAT) : TextureRef{};
+    const TextureRef prevSpecular = hist ? import(std::addressof(st->specular[p]), "m.ml specular (previous)", DXGI_FORMAT_R16G16B16A16_FLOAT) : TextureRef{};
+    const TextureRef prevMoments = hist ? import(std::addressof(st->moments[p]), "m.ml moments (previous)", DXGI_FORMAT_R16G16B16A16_FLOAT) : TextureRef{};
+    const TextureRef prevFrames = hist ? import(std::addressof(st->frames[p]), "m.ml frames (previous)", DXGI_FORMAT_R8_UINT) : TextureRef{};
     const TextureRef prevDepth = ml.prevDepth;  // (imported by megaLightsSample; valid whenever hist is)
-    const TextureRef outDiffuse = import(st.diffuse[n], "m.ml diffuse", DXGI_FORMAT_R16G16B16A16_FLOAT);
-    const TextureRef outSpecular = import(st.specular[n], "m.ml specular", DXGI_FORMAT_R16G16B16A16_FLOAT);
-    const TextureRef outMoments = import(st.moments[n], "m.ml moments", DXGI_FORMAT_R16G16B16A16_FLOAT);
-    const TextureRef outFrames = import(st.frames[n], "m.ml frames", DXGI_FORMAT_R8_UINT);
-    const TextureRef outDepth = import(st.depth[n], "m.ml depth", DXGI_FORMAT_R32_FLOAT);
+    const TextureRef outDiffuse = import(st ? std::addressof(st->diffuse[n]) : nullptr, "m.ml diffuse", DXGI_FORMAT_R16G16B16A16_FLOAT);
+    const TextureRef outSpecular = import(st ? std::addressof(st->specular[n]) : nullptr, "m.ml specular", DXGI_FORMAT_R16G16B16A16_FLOAT);
+    const TextureRef outMoments = import(st ? std::addressof(st->moments[n]) : nullptr, "m.ml moments", DXGI_FORMAT_R16G16B16A16_FLOAT);
+    const TextureRef outFrames = import(st ? std::addressof(st->frames[n]) : nullptr, "m.ml frames", DXGI_FORMAT_R8_UINT);
+    const TextureRef outDepth = import(st ? std::addressof(st->depth[n]) : nullptr, "m.ml depth", DXGI_FORMAT_R32_FLOAT);
+    const bool persistent = st != nullptr;
     const TextureRef confidence = g.createTexture({ "m.ml history confidence", W, H, 1, 1, DXGI_FORMAT_R8G8_UNORM });
     const TextureRef resolvedDiffuse = ml.resolvedDiffuse, resolvedSpecular = ml.resolvedSpecular;
     const float ratio = ml.exposureRatio;
@@ -371,7 +404,7 @@ void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureR
                       b.use(clusters, Use::SrvCompute);
                   }
                   for (TextureRef t : { outDiffuse, outSpecular, outMoments, outFrames, outDepth, confidence }) b.use(t, Use::UavCompute);
-                  b.keep();  // persistent state: the next frame's history
+                  if (persistent) b.keep();  // persistent state: the next frame's history
               },
               [=](PassContext& c) {
                   const uint32_t none = gpu::kNone;
@@ -388,22 +421,25 @@ void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureR
                   c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
               });
     ml.lighting = g.createTexture({ "m.ml lighting", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
-    const TextureRef lighting = ml.lighting;
+    if (demodulated) ml.lightingSpecular = g.createTexture({ "m.ml lighting specular", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+    const TextureRef lighting = ml.lighting, lightingSpecular = ml.lightingSpecular;
     ID3D12PipelineState* spatialPso = fc.shaders.compute("Passes/Shading/MegaLightsSpatial");
     g.addPass("m.ml.spatial", QueueType::Compute,
               [&](PassBuilder& b) {
                   for (TextureRef t : { outDiffuse, outSpecular, outMoments, outFrames, confidence, depth, gbuffer, materialWord }) b.use(t, Use::SrvCompute);
                   b.use(lighting, Use::UavCompute);
+                  if (demodulated) b.use(lightingSpecular, Use::UavCompute);
               },
               [=](PassContext& c) {
-                  const uint32_t k[20] = { c.srv(outDiffuse), c.srv(outSpecular), c.srv(outMoments), c.srv(outFrames),
+                  const uint32_t k[24] = { c.srv(outDiffuse), c.srv(outSpecular), c.srv(outMoments), c.srv(outFrames),
                                            c.srv(confidence), c.srv(depth), c.srv(gbuffer), c.srv(materialWord),
-                                           c.uav(lighting), W, H, (s.spatial ? 1u : 0u) | (s.historyVariance ? 2u : 0u),
+                                           c.uav(lighting), W, H, (s.spatial ? 1u : 0u) | (s.historyVariance ? 2u : 0u) | (demodulated ? 4u : 0u),
                                            asUint(s.radius), s.spatialSamples, asUint(s.depthWeight), asUint(s.maxDisocclusionFrames),
-                                           asUint(s.disocclusionDiffuse), asUint(s.disocclusionSpecular), asUint(s.historyStdDev), asUint(s.temporal ? s.maxFrames : 1.0f) };
+                                           asUint(s.disocclusionDiffuse), asUint(s.disocclusionSpecular), asUint(s.historyStdDev), asUint(s.temporal ? s.maxFrames : 1.0f),
+                                           demodulated ? c.uav(lightingSpecular) : gpu::kNone, 0, 0, 0 };
                   c.cmd->SetPipelineState(spatialPso);
                   c.bindFrameConstants(cb);
-                  c.computeConstants(k, 20);
+                  c.computeConstants(k, 24);
                   c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
               });
 }

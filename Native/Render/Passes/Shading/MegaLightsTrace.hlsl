@@ -6,7 +6,8 @@
 // none. Ray: origin moved by the normal bias to the light's side of the surface, TMin = the bias, TMax = distance - the
 // end bias (r.MegaLights.HardwareRayTracing.Bias / NormalBias / EndBias of Unreal, in metres here; the end bias default
 // is S's rule instead: what lies within 5 cm of a light - its own fixture - casts no shadow, VsmLocalLight::nearM).
-// P[0] = { samples UAV (R32G32_UINT), downsampled key SRV, 0, 0 }
+// P[0] = { samples UAV (R32G32_UINT), downsampled key SRV, the dispatch's first row, 0 }: the sample texture goes in bands
+//        of rows, each at most 262,144 rays (MegaLights.cpp; DISPATCH_BOUNDS_KO.md)
 // P[1] = { downsampled width, height, factor | N << 8, 0 }
 // P[2] = { ray bias, normal bias, end bias (m, floats), 0 }
 // P[6], P[7] = RtSceneSrvs (RayShaders.hlsli)
@@ -18,7 +19,7 @@
 [shader("raygeneration")]
 void MegaLightsTraceGen()
 {
-    const uint2 texel = DispatchRaysIndex().xy;
+    const uint2 texel = uint2(DispatchRaysIndex().x, DispatchRaysIndex().y + P[0].z);
     RWTexture2D<uint2> samples = ResourceDescriptorHeap[P[0].x];
     const uint2 stored = samples[texel];
     const MlSample s = mlUnpack(stored);

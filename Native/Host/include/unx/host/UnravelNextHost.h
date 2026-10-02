@@ -251,13 +251,16 @@ enum UnxLightType  // scene::LightType
 
 typedef struct UnxLightDesc
 {
-    uint32_t size, version;     // sizeof, 1
+    uint32_t size, version;     // sizeof, 2 (1: without rayEndBias - the same size, that field was reserved and is not read)
     uint32_t type, castShadow;
     float position[3], intensity;   // candela (point/spot) or luminance nits (area)
     float forward[3], range;
     float right[3], spotInner;
     float color[3], spotOuter;
-    float areaSize[2], reserved[2];
+    float areaSize[2];
+    float rayEndBias;           // version 2 (v1.93): where the light's shadow rays end, metres before the light (its housing
+                                // casts no shadow of it); negative: the engine's default (shading.mega_lights_ray_end_bias_m)
+    float reserved;
 } UnxLightDesc;
 
 // Sun, sky and wind (INTERFACES_KO.md 8.3). atmosphere* fields are the physical model of scene::Atmosphere.

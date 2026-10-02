@@ -91,7 +91,22 @@ float3 volumeLit(VolumeConstants c, float3 offset, float3 D, float g, float foot
         }
         if (n > 0) L += sum / (n * SH_PI);
     }
-    if (c.froxelLights != UNX_NONE)
+    // shading.mega_lights (render A; P[1].xy = the froxel grid's sampled local light, MegaLightsVolume.hlsl; as the lit
+    // sprites, FxLayerSetup.hlsl ML = 1): the local lights' visible fluence F and direction moment M at the particle's
+    // froxel with the phase function's first two SH bands, in place of the loop over the list with S's shadow maps (S
+    // assigns no local shadow maps under mega_lights).
+    if (c.froxelLights != UNX_NONE && P[1].x != UNX_NONE)
+    {
+        const FroxelGrid grid = froxelGrid(c.froxelLights);
+        const float3 uvw = float3((float2(pixel) + 0.5) / (float2(grid.gridX, grid.gridY) * grid.tilePx), max(froxelSliceCoord(grid, linearZ), 0.5) / grid.slices);
+        Texture3D<float4> fluenceVolume = ResourceDescriptorHeap[P[1].x];
+        Texture3D<float4> momentVolume = ResourceDescriptorHeap[P[1].y];
+        const float3 F = fluenceVolume.SampleLevel(g_linearClamp, uvw, 0).rgb / g_exposure;
+        const float3 M = momentVolume.SampleLevel(g_linearClamp, uvw, 0).rgb / g_exposure;
+        const float lumF = dot(F, float3(0.2126, 0.7152, 0.0722));
+        if (lumF > 0) L += F * (max(0.0f, 1.0f + 3.0f * g * dot(M, D) / lumF) / (4.0f * SH_PI));
+    }
+    else if (c.froxelLights != UNX_NONE)
     {
         FroxelSrvs froxels;
         froxels.lights = c.froxelLights;

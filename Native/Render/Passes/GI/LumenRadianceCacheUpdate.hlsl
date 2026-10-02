@@ -12,8 +12,9 @@
 //   MODE 4 select    one thread: clamps the allocators; the last bucket that fits the budget and the cost left in it.
 //   MODE 5 traces    per probe slot: probes in buckets up to the selected one are queued for tracing (new probes always;
 //                    past the budget they are traced at a quarter of the rays).
-//   MODE 6 finish    one thread: the trace count (at most the capacity) into the ray pass's dispatch description and
-//                    the filter passes' dispatch arguments.
+//   MODE 6 finish    one thread: the trace count (at most the capacity) into the ray pass's dispatch descriptions and
+//                    the filter passes' dispatch arguments, one of each per chunk of probes: a dispatch holds at most
+//                    P[2].w probes (the structural bound of one dispatch's work; the chunks past the count are empty).
 //   MODE 7 reset     per probe slot: empties the cache (a new scene, a size change, an origin shift).
 //   MODE 8 validate  per cell: a probe that has never been traced is not offered to readers (indirection = invalid;
 //                    it keeps its slot).
@@ -24,7 +25,9 @@
 // Trace record (raw, 16 B): probe centre (world), clipmap << 24 | slot | force downsample << 31.
 // P[0] = { parameters SRV (LrcParams), indirection UAV, probe slots UAV, state UAV }
 // P[1] = { free list UAV, traces UAV, depth SRV (MODE 1), tile px (MODE 1) }
-// P[2] = { ray dispatch description UAV, offset of its Width, filter dispatch arguments UAV, 0 } (MODE 6)
+// P[2] = { ray dispatch descriptions UAV, offset of a description's Width, filter dispatch arguments UAV, probes per
+//          dispatch } (MODE 6), P[3] = { chunks, stride of a ray dispatch description (bytes), 0, 0 }: chunk c's
+//          description at c x stride; its filter arguments at 32 c (filter) and 32 c + 16 (store).
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
 #include "Passes/GI/LumenRadianceCacheMark.hlsli"
@@ -224,10 +227,16 @@ void main()
     const uint count = min(state.Load(8), p.traceCapacity);
     state.Store(8, count);
     RWByteAddressBuffer rayDesc = ResourceDescriptorHeap[P[2].x];
-    rayDesc.Store3(P[2].y, uint3(p.probeResolution * p.probeResolution, count, 1));  // Width, Height, Depth
     RWByteAddressBuffer filterArgs = ResourceDescriptorHeap[P[2].z];
-    filterArgs.Store3(0, uint3((p.probeResolution + 7) / 8, (p.probeResolution + 7) / 8, count));
-    filterArgs.Store3(16, uint3((p.finalResolution + 7) / 8, (p.finalResolution + 7) / 8, count));
+    const uint perDispatch = max(P[2].w, 1u);
+    for (uint c = 0; c < P[3].x; ++c)
+    {
+        const uint n = count > c * perDispatch ? min(count - c * perDispatch, perDispatch) : 0;
+        // (an empty chunk: every dimension 0, a dispatch that launches nothing)
+        rayDesc.Store3(c * P[3].y + P[2].y, n > 0 ? uint3(p.probeResolution * p.probeResolution, n, 1) : uint3(0, 0, 0));  // Width, Height, Depth
+        filterArgs.Store3(32 * c, n > 0 ? uint3((p.probeResolution + 7) / 8, (p.probeResolution + 7) / 8, n) : uint3(0, 0, 0));
+        filterArgs.Store3(32 * c + 16, n > 0 ? uint3((p.finalResolution + 7) / 8, (p.finalResolution + 7) / 8, n) : uint3(0, 0, 0));
+    }
 }
 #elif MODE == 7
 [numthreads(64, 1, 1)]

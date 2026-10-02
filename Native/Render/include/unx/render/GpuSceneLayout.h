@@ -6,6 +6,7 @@
 #include "unx/render/ViewKind.h"
 
 #include <cstdint>
+#include <cstring>
 
 namespace unx::render::gpu
 {
@@ -233,9 +234,23 @@ struct Light  // 80 B
     float spotScale;         // 1 / max(cos(inner) - cos(outer), 1e-4)
     float2 size;
     float spotOffset;        // -cos(outer) * spotScale
-    uint32_t revision;
+    uint32_t revision;       // bits 0..15: the record's change count (wraps); bits 16..31 (v1.93): the light's shadow-ray end
+                             // bias in metres as a half float, sign bit set = none of its own (Scene.hlsli lightRayEndBias)
 };
 static_assert(sizeof(Light) == 80);
+// Light::revision from a change count and scene::Light::rayEndBias (negative: none).
+inline uint32_t lightRevisionWord(uint32_t count, float rayEndBias)
+{
+    uint32_t half = 0xBC00u;  // -1.0
+    if (rayEndBias >= 0)
+    {
+        uint32_t u;
+        std::memcpy(&u, &rayEndBias, 4);
+        const int32_t e = (int32_t)((u >> 23) & 0xFF) - 127 + 15;
+        half = e <= 0 ? 0u : (e >= 31 ? 0x7BFFu : (((uint32_t)e << 10) | ((u >> 13) & 0x3FFu)));  // (below 2^-14 m: 0)
+    }
+    return (count & 0xFFFFu) | (half << 16);
+}
 
 // One visible cluster of one instance in one view (V writes the list per view; vis id indexes it).
 struct VisibleCluster  // 8 B

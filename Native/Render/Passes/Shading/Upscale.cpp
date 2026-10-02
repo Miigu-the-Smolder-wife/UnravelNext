@@ -42,10 +42,47 @@ struct UpscaleState
     bool fresh = true;  // the textures hold nothing yet
     TextureRef previous;           // history[parity] in the graph of frame 'previousFrame' (upscalePreviousColor)
     uint64_t previousFrame = ~0ull;
+    // output.screen_trace_source = 0: the scene colour the upscale was given (the view's resolution, before the upscale,
+    // the display transform and anything after it), kept for the next frame's screen-space traces - the reference's
+    // default source (the scene colour ahead of post-processing). scene[parity] is the last one written.
+    ComPtr<ID3D12Resource> scene[2];
+    uint32_t sceneWidth = 0, sceneHeight = 0;
+    DXGI_FORMAT sceneFormat = DXGI_FORMAT_UNKNOWN;
+    bool sceneFresh = true;
+    TextureRef previousScene;
+    uint64_t previousSceneFrame = ~0ull;
+    void ensureScene(Device& d, uint32_t w, uint32_t h, DXGI_FORMAT format)
+    {
+        if (scene[0] && sceneWidth == w && sceneHeight == h && sceneFormat == format) return;
+        device = &d;
+        D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+        D3D12_RESOURCE_DESC1 desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = w;
+        desc.Height = h;
+        desc.DepthOrArraySize = desc.MipLevels = 1;
+        desc.Format = format;
+        desc.SampleDesc.Count = 1;
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        for (int k = 0; k < 2; ++k)
+        {
+            if (scene[k]) d.deferRelease(scene[k]);
+            check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
+                                                    IID_PPV_ARGS(scene[k].ReleaseAndGetAddressOf())),
+                  "M previous scene colour");
+            scene[k]->SetName(k ? L"M previous scene colour 1" : L"M previous scene colour 0");
+        }
+        sceneWidth = w;
+        sceneHeight = h;
+        sceneFormat = format;
+        sceneFresh = true;
+    }
     ~UpscaleState()
     {
         if (!device) return;
         for (auto& t : history)
+            if (t) device->deferRelease(t);
+        for (auto& t : scene)
             if (t) device->deferRelease(t);
     }
     void ensure(Device& d, uint32_t w, uint32_t h)
@@ -94,11 +131,30 @@ ViewResources upscaleOutputView(FramePassContext& fc, const ViewResources& view)
     return out;
 }
 
+namespace
+{
+// output.screen_trace_source: 0 = the scene colour before the upscale (the reference's default: scene colour ahead of
+// post-processing, its r.Lumen.ScreenTracingSource 0), 1 = the upscale's history (anti-aliased, output resolution).
+bool sceneColorSource(FramePassContext& fc) { return fc.quality.has("output.screen_trace_source") && fc.quality.integer("output.screen_trace_source") == 0; }
+} // namespace
+
 TextureRef upscalePreviousColor(FramePassContext& fc, const ViewResources& view)
 {
     if (!upscaleActive(fc, view)) return TextureRef{};
     const FrameContext::Upscale& u = fc.frame.upscale;
     UpscaleState& s = fc.state<UpscaleState>("M.upscale");
+    if (sceneColorSource(fc))
+    {
+        // (the size is the texture's own - RenderGraph::desc - not the output's)
+        if (!s.scene[0] || s.sceneFresh || u.reset || s.sceneWidth != view.view.width || s.sceneHeight != view.view.height) return TextureRef{};
+        if (s.previousSceneFrame != fc.frame.frameIndex || !s.previousScene.valid())
+        {
+            s.previousScene = fc.graph.importTexture(s.scene[s.parity].Get(), { "m.scenecolor (previous)", s.sceneWidth, s.sceneHeight, 1, 1, s.sceneFormat },
+                                                     D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+            s.previousSceneFrame = fc.frame.frameIndex;
+        }
+        return s.previousScene;
+    }
     if (!s.history[0] || s.width != u.outputWidth || s.height != u.outputHeight || s.fresh || u.reset) return TextureRef{};
     if (s.previousFrame != fc.frame.frameIndex || !s.previous.valid())
     {
@@ -134,6 +190,19 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                                                           D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     const TextureRef output = g.importTexture(s.history[next].Get(), { "m.upscale.history", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
                                               D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    if (sceneColorSource(fc))
+    {
+        // the scene colour as it comes in, kept for the next frame's screen traces (slot 'next': read as [parity] then)
+        s.ensureScene(fc.device, w, h, g.desc(src).format);
+        const TextureRef kept = g.importTexture(s.scene[next].Get(), { "m.scenecolor", w, h, 1, 1, s.sceneFormat }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+        g.addPass("m.upscale.scenecolor", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(src, Use::CopySrc);
+                      b.use(kept, Use::CopyDst);
+                  },
+                  [src, kept](PassContext& c) { c.cmd->CopyResource(c.resource(kept), c.resource(src)); });
+        s.sceneFresh = false;
+    }
     const TextureRef motion = g.createTexture(TextureDesc{ "m.upscale.motion", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT });
     const TextureRef depth = view.depth, vis = view.visId;
     const BufferRef clusters = view.visibleClusters;

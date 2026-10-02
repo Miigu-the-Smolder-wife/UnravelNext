@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: STEP=0,1
+// unx-variants: STEP=0,1 ML=0,1
 // Particle render pass, per particle of the latest tick's render ranges (ParticleLayerPass.hlsli RenderRange):
 //   STEP=0: the particle at the frame time (render rules request 2: a particle of both ticks by cubic Hermite of the two
 //           ends' positions and velocities, one born in the latest tick by p_n - v_n (1 - w) dt from age_n - (1 - w) dt >= 0,
@@ -95,6 +95,25 @@ float3 fxLitRadiance(LayerConstants c, float3 albedo, float3 offset, float3 D, f
         }
         if (n > 0) L += sum / (n * SH_PI);
     }
+    // ML = 1 (its own variant: both paths in one kernel pass the DXIL limit; ParticleLayer.cpp picks it when the volumes exist):
+    // shading.mega_lights (render A; P[1].xy = the froxel grid's sampled local light, MegaLightsVolume.hlsl - as Unreal's
+    // MegaLights lights translucency through its lit volume): the local lights' visible fluence F and luminance-weighted
+    // direction moment M at the particle's froxel (trilinear), with the phase function's first two SH bands:
+    // L = F (1 + 3 g (M . D) / lum(F)) / 4 pi. The loop over the list with S's shadow maps is then not run (S assigns no
+    // local shadow maps under mega_lights).
+#if ML
+    if (c.froxelLights != UNX_NONE && P[1].x != UNX_NONE)
+    {
+        const FroxelGrid grid = froxelGrid(c.froxelLights);
+        const float3 uvw = float3((float2(pixel) + 0.5) / (float2(grid.gridX, grid.gridY) * grid.tilePx), max(froxelSliceCoord(grid, linearZ), 0.5) / grid.slices);
+        Texture3D<float4> fluenceVolume = ResourceDescriptorHeap[P[1].x];
+        Texture3D<float4> momentVolume = ResourceDescriptorHeap[P[1].y];
+        const float3 F = fluenceVolume.SampleLevel(g_linearClamp, uvw, 0).rgb / g_exposure;
+        const float3 M = momentVolume.SampleLevel(g_linearClamp, uvw, 0).rgb / g_exposure;
+        const float lumF = dot(F, float3(0.2126, 0.7152, 0.0722));
+        if (lumF > 0) L += F * (max(0.0f, 1.0f + 3.0f * g * dot(M, D) / lumF) / (4.0f * SH_PI));
+    }
+#else
     // local lights of the froxel list at the particle (punctual exactly; area lights as their centre's point, exact
     // when the light is small against its distance)
     if (c.froxelLights != UNX_NONE)
@@ -131,6 +150,7 @@ float3 fxLitRadiance(LayerConstants c, float3 albedo, float3 offset, float3 D, f
             L += El * (v * fxPhase(dot(toLight, D), g));
         }
     }
+#endif
     return albedo * L;
 }
 float3 curve3(uint first, uint count, float u) { return count >= 2u ? nv_curve(first, count, u).yzw : float3(1, 1, 1); }

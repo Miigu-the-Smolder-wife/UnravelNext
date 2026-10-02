@@ -21,7 +21,8 @@
 [shader("raygeneration")]
 void ReflectionTraceGen()
 {
-    const uint job = DispatchRaysIndex().x + reflBand() * REFL_BAND;
+    // (the trace's band is counted in rays: REFL_BAND / the rays of a G job - ReflectionSystem.cpp jobBand)
+    const uint job = DispatchRaysIndex().x + reflBand() * (REFL_BAND / max(P[4].w & 0xFFu, 1u));
     StructuredBuffer<uint> jobList = ResourceDescriptorHeap[P[0].x];
     if (jobList[job] & REFL_JOB_DONE) return;  // its value came from the screen trace
     RWStructuredBuffer<uint3> results = ResourceDescriptorHeap[P[0].y];

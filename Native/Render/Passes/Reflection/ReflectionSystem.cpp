@@ -1,4 +1,5 @@
 #include "unx/refl/ReflectionSystem.h"
+#include "unx/refl/SurfaceCacheLightPairs.h"
 
 #include "unx/rt/RayPipeline.h"
 #if UNX_R_HAS_SHADING
@@ -56,9 +57,10 @@ constexpr uint32_t kArgumentsBytes = kPenumbraArgsOffset + 16;
 // Bands (ReflectionRay.hlsli REFL_BAND, REFL_INLINE_BAND): one DispatchRays launches at most kBand threads (the inline
 // pass kInlineBand jobs), so its time is bounded whatever a frame's counts are; the arguments buffer holds kMaxBands
 // copies of the descriptions, one per band (band b's at b x kArgumentsBytes). The surface cache's direct light:
-// kCellBand cells a dispatch (each up to 8 shadow rays, the sun's and the remainder light's).
+// kCellBand cells a dispatch, bounded in TraceRay calls: a cell traces up to 8 light rays, the remainder light and the
+// sun, each over the static and the dynamic TLAS = 20 calls, so 163,840 calls a dispatch (under kBand).
 constexpr uint32_t kSlotRowGroups = 16384;  // SurfaceCache.hlsli SC_ROW_THREADS / 64: the per-slot passes' dispatch rows
-constexpr uint32_t kBand = 262144, kInlineBand = 65536, kMaxBands = 128, kCellBand = 16384;
+constexpr uint32_t kBand = 262144, kInlineBand = 65536, kMaxBands = 128, kCellBand = 8192;
 constexpr uint32_t bandsFor(uint64_t count, uint32_t band) { return (uint32_t)std::clamp<uint64_t>((count + band - 1) / band, 1, kMaxBands); }
 const char* const kTraceLibrary[2] = { "Passes/Reflection/ReflectionTrace.SKY0", "Passes/Reflection/ReflectionTrace.SKY1" };
 const char* const kInlineLibrary[2][2][2] = {
@@ -171,6 +173,14 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.scDebugSkip = (uint32_t)num("surface_cache.debug_skip", 0);
     s.scShadowRaysOpaque = flag("surface_cache.shadow_rays_opaque", false);
     s.scDirectShadowInline = flag("surface_cache.direct_shadow_inline", false);
+    s.scDirectPairs = flag("surface_cache.direct_pairs", true);
+    s.scMeshCards = s.surfaceCache && flag("surface_cache.mesh_cards", false);
+    s.scMeshCardsTestSet = flag("surface_cache.mesh_cards_test_set", false);
+    // (the pairs hold direct_analytic lighting alone; the other modes are r.sc.cells' - asked for together, neither a silent
+    // drop of the mode nor a silent return to the path that stops the device is right)
+    if (s.surfaceCache && !s.scMeshCards && s.scDirectPairs && (s.scDirectStochastic || s.scRemainderLight || !s.scDirectAnalytic))
+        fail("surface_cache.direct_pairs lights cells by direct_analytic alone: direct_stochastic, remainder_light and direct_analytic = false need "
+             "surface_cache.direct_pairs = false (r.sc.cells - the path that hung the device in the bath lounge, 2026-10-02)");
     s.scDebugCount = (uint32_t)num("surface_cache.debug_count", 0);
     s.scDirectStochasticFrames = num("surface_cache.direct_stochastic_max_frames", 12.0);
     s.scDirectMinWeight = num("surface_cache.direct_stochastic_min_sample_weight", 0.001);
@@ -494,7 +504,7 @@ ReflectionSystem::~ReflectionSystem()
 // frame and its reads see the lighting of the frame before). Invalid until the first frame with surface_cache.enabled.
 BufferRef ReflectionSystem::surfaceCacheBuffer(FramePassContext& fc)
 {
-    if (!m_surfaceCache) return BufferRef{};
+    if (!m_surfaceCache || m_settings.scMeshCards) return BufferRef{};
     if (m_surfaceCacheFrame != fc.frame.frameIndex || !m_surfaceCacheRef.valid())
     {
         const uint64_t bytes = kSurfaceCacheHeaderBytes + (uint64_t)m_surfaceCacheEntries * kSurfaceCacheCellBytes +
@@ -1070,7 +1080,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const uint32_t rayCapacity = (s.experimentDisable & 64) ? 0 : m_rayCapacity;
     static_assert(48 + (1ull << 24) * 60 < (1ull << 30), "the rays buffer stays under 1 GiB");  // 64: every job inline (A/B of the split)
     // (bands of the ray passes: by what the frame can hold - a job per pixel, a slot per unit of capacity)
-    const uint32_t jobBands = bandsFor((uint64_t)width * height, kBand), slotBands = bandsFor(rayCapacity, kBand),
+    // (the trace pass: a job traces up to raysPerSample rays in its thread, so its band is kBand rays, not kBand jobs)
+    const uint32_t jobBand = kBand / std::max(s.raysPerSample & 0xFFu, 1u);
+    const uint32_t jobBands = bandsFor((uint64_t)width * height, jobBand), slotBands = bandsFor(rayCapacity, kBand),
                    inlineBands = bandsFor((uint64_t)width * height, kInlineBand);
     const BufferRef raysBuffer = g.createBuffer({ "R reflection rays", 48 + (uint64_t)rayCapacity * 60, 0 });  // REFL_RAYS_HEADER + REFL_RAYS_SLOT_BYTES
     // The GI hit accumulator pool (GiAccPool.hlsli; valid when gi.hit_accumulator's pool runs): reflection hits read it.
@@ -1080,7 +1092,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     BufferRef surfaceCache;
     bool surfaceCacheClear = false;
     const uint32_t surfaceCacheEntries = 1u << s.scEntriesLog2;
-    if (s.surfaceCache)
+    if (s.surfaceCache && !s.scMeshCards)
     {
         const uint64_t bytes = kSurfaceCacheHeaderBytes + (uint64_t)surfaceCacheEntries * kSurfaceCacheCellBytes +
                                (uint64_t)(surfaceCacheEntries / 4) * kSurfaceCacheProbeBytes;
@@ -1112,6 +1124,23 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         surfaceCache = surfaceCacheBuffer(fc);
     }
     const bool hitsUseSurfaceCache = surfaceCache.valid() && lumen && s.lumenHitSurfaceCache;
+    // surface_cache.mesh_cards (CardLighting.cpp): the card set of the frame and the card frame hits read through
+    CardSet cardSet;
+    BufferRef cardFrame;
+    if (s.scMeshCards)
+    {
+        if (s.scMeshCardsTestSet)
+        {
+            if (!m_cardTestSet) m_cardTestSet = std::make_unique<CardTestSet>(m_device);
+            cardSet = m_cardTestSet->record(fc);
+        }
+        if (cardSet.valid)
+        {
+            if (!m_cardLighting) m_cardLighting = std::make_unique<CardLighting>(m_device);
+            cardFrame = m_cardLighting->prepare(fc);
+        }
+    }
+    const bool hitsUseCards = cardFrame.valid() && lumen && s.lumenHitSurfaceCache;
     // Screen traces before the world rays (ReflectionScreenTrace.hlsl): a ray that meets a visible surface takes the
     // previous frame's colour there and its job traces no world ray. Without that colour (no upscale history) every
     // ray is a world ray.
@@ -1132,7 +1161,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   if (accPool.valid()) b.use(accPool, Use::SrvCompute);
                   if (hitsUseSurfaceCache) b.use(surfaceCache, Use::UavCompute);
               },
-              [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, accPool, surfaceCache, hitsUseSurfaceCache, jobBands,
+              [&shaders, args, raysBuffer, rayCapacity, layers, rayLayers, jobLayers, accPool, surfaceCache, hitsUseSurfaceCache, jobBands, jobBand, cardFrame, hitsUseCards,
                hitFlags = (s.hitConeLobes ? 1u : 0u) | (s.hitOrientedLights ? 2u : 0u) | (layers && s.layerFilter && s.hitStrictRead ? 4u : 0u) |
                           (s.lumenSurfaceCacheView ? 8u | ((s.lumenSurfaceCacheViewComponent & 7u) << 8) : 0u) | (screenContinue ? 16u : 0u)](PassContext& c) {
                   // (the layer buffers' UAVs and the hit shading's flags into the rays header: the shade, combine and inline
@@ -1140,7 +1169,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   const uint32_t k[16] = { c.uav(args), 2, kDescStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(raysBuffer), rayCapacity,
                                            layers ? c.uav(rayLayers) : 0xFFFFFFFFu, layers ? c.uav(jobLayers) : 0xFFFFFFFFu, hitFlags,
                                            accPool.valid() ? c.srv(accPool) : 0xFFFFFFFFu, hitsUseSurfaceCache ? c.uav(surfaceCache) : 0xFFFFFFFFu, jobBands,
-                                           kArgumentsBytes, kBand, 0, 0 };
+                                           kArgumentsBytes, jobBand, hitsUseCards ? c.srv(cardFrame) : 0xFFFFFFFFu, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionArgs"));
                   c.computeConstants(k, 16);
                   c.cmd->Dispatch(1, 1, 1);
@@ -1219,6 +1248,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         if (gi) b.use(cache, Use::UavGraphics);
         if (gi && accPool.valid()) b.use(accPool, Use::SrvGraphics);  // (the passes that shade: the accumulator's cell means)
         if (gi && hitsUseSurfaceCache) b.use(surfaceCache, Use::UavGraphics);  // (the passes that shade: hits mark and read their cells)
+        if (gi && hitsUseCards) m_cardLighting->declareRead(fc, b, Use::SrvGraphics);  // (the passes that shade: hits read their cards)
         if (gi && layers)  // (the passes that shade or combine: the layer records)
         {
             b.use(rayLayers, Use::UavGraphics);
@@ -1247,7 +1277,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           b.use(screen.prevColor, Use::SrvCompute);
                       },
                       [&shaders, modes, results, depth, gbuffer, jobs, screen, frame, width, height, rayLength, frameConstants, s, samplingBias16, screenContinue,
-                       outW = up.outputWidth, outH = up.outputHeight, ratio = up.exposureRatio, prevViewProj = up.prevViewProj](PassContext& c) {
+                       outW = g.desc(screen.prevColor).width, outH = g.desc(screen.prevColor).height, ratio = up.exposureRatio,
+                       prevViewProj = up.prevViewProj](PassContext& c) {
                           uint32_t k[32] = { c.srv(modes), c.uav(results), c.srv(depth), c.srv(gbuffer), c.uav(jobs), c.srv(screen.hzb), c.srv(screen.prevColor), frame,
                                              width, height, (outW & 0xFFFFu) | (outH << 16), asU(screenContinue ? std::max(s.lumenScreenPullback, 0.0f) : -1.0f), asU(rayLength), (s.lumenScreenIterations & 0xFFFFu) | (samplingBias16 << 16), asU(s.lumenScreenThickness),
                                              asU(ratio) };
@@ -1293,7 +1324,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           b.use(screen.prevColor, Use::SrvCompute);
                       },
                       [&shaders, modes, results, depth, gbuffer, jobs, raysBuffer, screen, frame, width, height, frameConstants, s, samplingBias16,
-                       outW = up.outputWidth, outH = up.outputHeight, ratio = up.exposureRatio, prevViewProj = up.prevViewProj](PassContext& c) {
+                       outW = g.desc(screen.prevColor).width, outH = g.desc(screen.prevColor).height, ratio = up.exposureRatio,
+                       prevViewProj = up.prevViewProj](PassContext& c) {
                           uint32_t k[32] = { c.srv(modes), c.uav(results), c.srv(depth), c.srv(gbuffer), c.srv(jobs), c.uav(raysBuffer), c.srv(screen.prevColor), frame,
                                              width, height, outW, outH, asU(s.lumenSceneColorThickness),
                                              asU(std::cos(std::clamp(s.lumenSceneColorNormalDegrees, 0.0f, 180.0f) * 0.01745329252f)),
@@ -1326,6 +1358,26 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   });
     };
     rayArgs("r.refl.rayargs", 0);
+    if (cardSet.valid)
+    {
+        // The surface cache on mesh cards: this frame's update selection, direct light, radiosity and final lighting -
+        // before this frame's hits read the cards.
+        CardLightingInputs cin;
+        cin.set = cardSet;
+        cin.frame = frame;
+        cin.skyVariant = variant;
+        cin.frameConstants = frameConstants;
+        cin.direct = s.scDirect;
+        cin.radiosity = s.scRadiosity;
+        cin.shadowRaysOpaque = s.scShadowRaysOpaque;
+        cin.radiosityCap = s.scRadiosityCap;
+        cin.radiosityFrames = s.scRadiosityFrames;
+        cin.directFactor = s.scDirectFactor;
+        cin.radiosityFactor = s.scRadiosityFactor;
+        cin.declareShared = [&](PassBuilder& b) { declareShared(b, false); };
+        cin.sharedConstants = [constantsFor](PassContext& c, uint32_t* k) { constantsFor(c, k, false); };
+        m_cardLighting->record(fc, cin);
+    }
     if (surfaceCache.valid())
     {
         // The surface cache's frame (SurfaceCache.hlsli): the upkeep of cells and probes marked up to last frame, the
@@ -1358,13 +1410,30 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
             fc.device, shaders, rt::standardRayPipeline(kSurfaceCacheLightLibrary[variant], { "SurfaceCacheSeedGen", "SurfaceCacheCellsGen", "SurfaceCacheProbesGen" }));
         const uint32_t lightFlags = (s.scDirect ? 1u : 0u) | (s.scRadiosity ? 2u : 0u) | (s.scRemainderLight ? 8u : 0u) | (s.scDirectStochastic ? 16u : 0u) | (s.scLightingFeedback ? 32u : 0u) |
                                     (s.scDirectAnalytic ? 64u : 0u) | ((s.scDebugSkip & 15u) << 7) | (s.scShadowRaysOpaque ? 2048u : 0u) | ((s.scDebugSkip & 16u) ? 4096u : 0u) |
-                                    (s.scDirectShadowInline ? 8192u : 0u) | (s.scDebugCount ? 16384u : 0u) | (s.scDebugCount == 2 ? 32768u : 0u);
+                                    (s.scDirectShadowInline ? 8192u : 0u) | (s.scDebugCount ? 16384u : 0u) | (s.scDebugCount == 2 ? 32768u : 0u) |
+                                    (s.scDebugCount == 3 ? 65536u : 0u);
         const uint32_t budgets[3] = { std::max(n / s.scCaptureFactor / (s.scCaptureBounces + 1), 1u), std::max(n / s.scDirectFactor, 1u),
                                       std::max(n / s.scRadiosityFactor / 16, 1u) };
         static const char* const kLightNames[3] = { "r.sc.seed", "r.sc.cells", "r.sc.probes" };
         for (uint32_t pass = 0; pass < 3; ++pass)
         {
             if (pass == 2 && !s.scRadiosity) continue;
+            if (pass == 1 && s.scDirectPairs)
+            {
+                // surface_cache.direct_pairs (A, SurfaceCacheLightPairs.cpp): the cells direct light as (cell, light) pairs -
+                // select without rays, one shadow ray per pair in bands, store - in place of r.sc.cells
+                SurfaceCachePairsInputs pin;
+                pin.surfaceCache = surfaceCache;
+                pin.budget = budgets[1];
+                pin.frame = frame;
+                pin.lightFlags = lightFlags;
+                pin.skyVariant = variant;
+                pin.frameConstants = frameConstants;
+                pin.declareShared = [&](PassBuilder& b) { declareShared(b, false); };
+                pin.sharedConstants = [constantsFor](PassContext& c, uint32_t* k) { constantsFor(c, k, false); };
+                recordSurfaceCacheLightPairs(fc, pin);
+                continue;
+            }
             g.addPass(kLightNames[pass], QueueType::Compute,
                       [&](PassBuilder& b) {
                           b.use(surfaceCache, Use::UavGraphics);
@@ -1383,7 +1452,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           k[17] = asU(minWeight);
                           c.bindFrameConstants(frameConstants);
                           // One dispatch of the capture paths (budget x (1 + bounces) rays: N / 64) and of the radiosity
-                          // (budget x 16 rays: N / 64); the direct light in bands of kCellBand cells (each up to 10 rays).
+                          // (budget x 16 rays: N / 64); the direct light in bands of kCellBand cells (each up to 20 TraceRay calls).
                           const uint32_t band = pass == 1 ? kCellBand : budget;
                           for (uint32_t first = 0; first < budget; first += band)
                           {

@@ -462,3 +462,84 @@ R 쪽 접점(R의 파일은 건드리지 않음): `Lumen/LgTrace.hlsl`의 CALL S
 6. 캐시 비움: 장면 revision·원점 이동·크기 변경 때. 카메라 컷에는 비우지 않음(월드 고정).
 
 품질을 내주는 값(언리얼 기본값): `radiance_cache_grid` 48, `_probe_resolution` 32, `_probes_per_frame` 100, `_downsample_distance_m` 40. 구조적 상한 `_trace_capacity` 1024(언리얼에는 없는 값: 한 dispatch의 최악 시간을 묶기 위한 것. 넘으면 다음 프레임).
+
+### 13.3 실행 기록 (잠금 안, 정확도 홀드 — ms는 참고값) — 2026-10-01 밤
+| 홀드 | 내용 | 결과 |
+|---|---|---|
+| 1 (1818054) | 로비 1080p 8 + 300 + 120프레임, AO + radiance cache(+ mega_lights, gi.lumen, 표면 캐시) | 종료 0, 장치 제거 없음, S 오류 비트 0, NaN·검은 화소 없음 |
+| 2 (8e32652) | 로비·기차 라운지·욕탕 홀 120프레임, 전 스위치. 로비 패스 CSV | 종료 0. `r.gi.rc.*` 13개 패스가 매 프레임 실행(trace 중앙값 0.198 ms), `r.gi.sao` 0.043 / `.temporal` 0.186 ms |
+| 3 (4393a34) | 호스트 테스트 HostVfxMegaLights, watergate interior 1440p `--planar on`, 로비 | 테스트 ok(lit 입자 25,712 화소, 광원 0 대비 24,326 화소 차이, 디버그 레이어 오류 0). 평면 뷰: `m.ml.*` 120프레임에 242회 |
+| 4 (coverage 인스턴스) | 로비·기차 라운지·욕탕 홀 1080p 120프레임, 전 스위치, 장면마다 패스 CSV | 종료 0, 장치 제거 없음, S 오류 비트 0, NaN·검은 화소 없음. `m.ml.cov.nearest / surface / shade` 매 프레임 실행(로비 0.039 / 0.021 / 0.036 ms, 기차 0.099 / 0.027 / 0.030 ms), `m.ml.sample` 등은 프레임당 2회(주 표면 + coverage 인스턴스). f119 평균 휘도: 로비 0.5040 → 0.4799, 기차 1.7554 → 1.7609, 욕탕 0.3085 → 0.3090(홀드 2 대비; 원인 분해는 병합 뒤 판정 때) |
+
+## 14. MegaLights에서 표본 경로가 아니던 곳 — 2026-10-01 밤 4차 (조정 22:30의 4번)
+S의 국소 그림자 맵이 꺼지는 켬 상태에서 국소광에 그림자가 없던 곳을 표본 경로로 옮김. 스위치는 전부 `shading.mega_lights`.
+
+| 곳 | 방식 (언리얼의 해당 경로) | 파일 | 상태 |
+|---|---|---|---|
+| A9 면광원 lobe(이방성 base, sheen) | 표본 음영 커널 안에서 광원 표본의 가중으로 평가해 정반사에 더함. 별도 lobe 패스는 켬에서 돌지 않음 | `ShadeOpaque.hlsl`(MEGA_LIGHTS && LAYERED), `ShadingSystem.cpp` | 8e32652, 실행됨 |
+| 주 뷰 외 뷰 | 뷰마다 MegaLights 실행(언리얼은 뷰별). 전체 보조 뷰는 viewId별 이력, 평면 반사 뷰는 이력 없이 공간 필터만 | `MegaLights.cpp`(뷰별 상태 키) | 8e32652, watergate 평면 뷰에서 실행됨 |
+| 입자 층(lit sprite·ribbon) | 표본 볼륨(s.ml.volume)이 프록셀마다 국소광의 보이는 fluence와 방향 모멘트를 같이 저장, 입자는 위상함수 SH 2밴드로 읽음(언리얼: MegaLights가 translucency volume을 비춤) | `MegaLightsVolume.hlsl`, `FroxelSystem.cpp`, `FxLayerSetup.hlsl`(ML1 변종), `ParticleLayer.cpp` | 4393a34, 호스트 테스트로 실행됨 |
+| coverage 조각(클러스터 레코드) | coverage 화소의 가장 가까운 불투명 조각에 MegaLights 인스턴스 하나 더(언리얼: hair 가시성 표본의 두 번째 인스턴스). 결과는 변조 계수로 나눈 확산·정반사로 두고, 화소의 조각마다 자기 계수를 곱해 더함 | `MegaLightsCoverage.hlsl`(MODE 0..3), `MegaLightsShade`(FULL1), `MegaLightsSpatial.hlsl`(플래그 4), `CoverageShade.hlsli`(P[11].xy), `ShadingSystem.cpp`(m.ml.cov.*) | 홀드 4에서 실행됨 |
+
+**언리얼과 다르게 둔 점 / 남은 곳**
+1. 입자: 볼륨 표본의 최소 가중은 공기와 같은 0.1(`mega_lights_volume_min_sample_weight`). 위상함수는 SH 2밴드(g가 큰 전방 산란 lobe는 뭉개짐). 주 뷰 격자만(다른 뷰의 입자는 예전 루프, 그림자 없음).
+2. coverage: 대표 표면의 baseColor·roughness는 재질 상수(텍스처 없음, 표본 선택과 lobe 모양에만 영향). 음영은 plain 커널 하나(층 재질의 coat lobe 없음). 화소 안 조각들은 대표 조각의 조명을 공유(자기 법선으로 다시 평가하지 않음).
+3. **정정(10-02)**: 앞서 "머리카락·스트림 레코드가 그림자 없이 남는다"고 적은 것은 틀렸다. 프록셀 광원 목록을 도는 커널을 전부 찾아보니 (`froxelLightRange` 사용처) 공기 적분·ShadeOpaque·CoverageShade·FxLayerSetup·VolumeSetup·S의 그림자 커널뿐이다. 머리카락 레코드는 음영 커널이 아직 없어 복사 0(CoverageSpecial MODE 0의 기본값)이고, 스트림(물 표면) 레코드는 W의 물 표면 모델이 국소광 목록을 돌지 않는다(국소광은 R의 반사·굴절 광선 히트에서만 들어옴). 실제로 남아 있던 곳은 **입자 매질(연기·불, `Volume/VolumeSetup.hlsl`)** 하나였고, lit 입자와 같은 방식(표본 볼륨의 fluence·모멘트)으로 옮겼다(빌드, 첫 실행 대기). 이를 위해 S가 표본 볼륨을 매질보다 먼저 기록하도록 순서를 바꿨다(`FroxelSystem.cpp recordFroxels`).
+4. 주 뷰 외 뷰의 공기(프록셀) 표본 볼륨 없음.
+
+## 15. 욕탕 라운지 장치 제거 보고와 구조 수정 (92b7c92) — 2026-10-01 밤 5차
+조정 23:45: 통합 브랜치(1dc6e51, 전 스위치 켬)가 욕탕 라운지에서 첫 캡처 프레임 전에 DEVICE_HUNG. 조정 지시대로 재현 없이 코드로 먼저 확인하고 고침.
+| 확인 | 결과 |
+|---|---|
+| radiance cache 프로브 광선 | **구조 규칙 위반**: 간접 DispatchRays 한 번에 최대 1024 프로브 × 32² = 1,048,576 광선(히트마다 그림자 광선 2개), 새 프로브는 항상 추적 → 첫 프레임에 상한. 추적·필터·저장을 256 프로브(262,144 광선) 청크로 분할(`kMaxRaysPerDispatch`). 프레임 총량은 그대로 |
+| MegaLights 뷰별 경로 | 평면 수에 비례하는 dispatch 없음(평면 뷰 프레임당 최대 4, 뷰마다 자기 프록셀 목록). 결함: 평면 뷰마다 읽지 않는 영구 텍스처 11장 → 상태 없이 transient로 변경 |
+| coverage 인스턴스 | V의 블록 인자(1024 레코드/그룹) + 전화면 패스: 묶여 있음 |
+
+실행(잠금 안, 라운지 1080p 8프레임씩): `lumen.radiance_cache`만 종료 0(r.gi.rc.trace 중앙값 0.44 / 최대 1.80 ms), `shading.mega_lights`만 종료 0, 둘 + AO 종료 0. 그 뒤 watergate `--planar on` 60프레임(평면 뷰는 sets 패스 없이 실행: m.ml.sample 182회 / m.ml.sets 120회)과 로비 전 스위치 60프레임 종료 0.
+**입증되지 않은 것**: hang은 재현하지 않았고 나누기 전 dispatch를 라운지에서 돌리지 않았다. "A의 스위치만으로는(수정 뒤) 라운지가 죽지 않는다"까지가 사실이다. 참고: A의 스위치만 켠 라운지에서는 평면 뷰가 렌더되지 않았고, 가장 느린 패스는 옛 반사 경로 `r.refl.inline.g` 최대 30 ms.
+실수 기록: transient 패치 첫 판에서 `&st->diffuse[n]`(ComPtr의 operator&가 포인터를 해제)로 "imported without a resource" 실패 — GPU 작업 전에 멈춤, `std::addressof`로 고침.
+
+## 16. 조정 06:30 목록 진행 (2026-10-02)
+- **d936d28 (07시)**: 1번과 2번의 A 수정 첫 실행 통과 — 로비 8프레임 스모크, watergate 평면 뷰 60프레임(`s.ml.volume` 122회 = 주 뷰 + 평면 뷰, `s.froxel.integrate.planar` 62회), 호스트 입자 테스트 ok(디버그 레이어 오류 0), 로비 60프레임 종료 0. 3번의 끝 바이어스 스윕은 줄에 걸림.
+- 1번 주 뷰 외 뷰의 표본 볼륨: 코드·빌드 끝(평면 반사 뷰가 자기 표본 볼륨을 이력 없이 가짐 — 공기 적분과 lit 입자가 읽음). 잠금 안 첫 실행(스모크 8 → watergate 평면 뷰 → 호스트 입자 테스트 → 로비 60) 대기.
+- 2번 dispatch 구조 상한 감사: `Docs/Status/DISPATCH_BOUNDS_KO.md`. A의 위반 3건 고침(코드는 1번과 같이 첫 실행 대기): `m.ml.trace` 행 띠, `s.ml.volume` 슬라이스 띠, radiance cache 청크 ÷3. R·S2에게 각자 항목 전달(R은 `r.gi.lg.trace` 띠를 광선 기준으로 고친다고 답함).
+- 3번 MegaLights 코브 띠 판정 자료: `Docs/Status/MEGALIGHTS_COVE_MEMO_KO.md`(광원·옛 규칙·언리얼 소스 정리 끝, 끝 바이어스 스윕 실행 대기).
+
+## 17. 조정 07:10 / 07:20 목록 진행 (2026-10-02 아침)
+- **① 광원별 Ray End Bias** (INTERFACES v1.93): a02773d — `scene::Light::rayEndBias`, 장면 파일 선택 블록 `LEND`, GPU 광원 `revision` 워드 상위 16비트, 호스트 ABI `UnxLightDesc` v2(v1도 받음), 게이트 `--light-ray-end-bias`. 전역 기본 0.05 → 0.01 m(언리얼 값). CPU 시험 `unx_test_scene_lightendbias` 통과, 로비 8프레임 스모크 통과. 60프레임 비교 [실측, 잠금 안, 로비 1080p, 1회씩]: 띠 화소의 빛 몫이 전역 1 cm(기본) 8.1 % / 모든 광원에 광원별 0.4 m 15.1 % / 전역 0.4 m 14.6 % — 광원별 값이 전역 값과 같은 효과(실행 간 편차는 재지 않음; 이미지는 비트 동일하지 않음: 프레임 59는 노출·시간 필터가 움직이는 중). `Results/Local/Fix-11/postgame/endbias_*`. C# 브리지는 Unravel 저장소 6481a58d(Unity에서는 돌려 보지 않음). 하우징 메시의 그림자 끄기는 기존 인스턴스 플래그로 됨(확인).
+- **② 표면 캐시 직접광 쌍 경로** `surface_cache.direct_pairs`(기본 false): 새 파일 `Passes/SurfaceCache/SurfaceCacheLightPairs.hlsli`, `...PairsSelect.hlsl`(compute, 광선 없음), `...PairsTrace.hlsl`(raygen, 쌍당 그림자 광선 1개) / `...PairsTraceInline.hlsl`(compute, 인라인 질의; `direct_pairs_inline`), `...PairsStore.hlsl`(compute), `Passes/Reflection/SurfaceCacheLightPairs.cpp`. S2의 `ReflectionSystem.cpp`에는 호출 한 곳과 설정 한 줄만. redesign-v2-refl cd6452c 병합(412d641) 위에서 빌드됨. 패스: `r.sc.pairs.select` → `r.sc.pairs.trace`(dispatch당 ≤ 262,144 스레드, 스레드당 광선 ≤ 1) → `r.sc.pairs.store`. `r.sc.cells`의 direct_analytic 조명과 같은 값(8광원 해석 적분 × 중심 그림자 광선 + 태양)이고, stochastic·remainder_light·비해석 모드는 이 경로에 없음. 광원 광선의 끝은 광원별 끝 바이어스(없으면 `shading.mega_lights_ray_end_bias_m`)를 따름 — 옛 경로의 5 cm 고정과 다른 점.
+- **라운지 실행** [실측, 잠금 안, 1080p, UNX_DRED=1, 표면 캐시 2^22]: 조정이 전한 승인으로는 A 세션의 권한 판정이 거부해 멈췄고, 사용자가 A 세션에 직접 "라운지 돌려"라고 한 뒤 돌림.
+  | 실행 | 설정 | 결과 |
+  |---|---|---|
+  | 로비 8프레임 (기본 / 인라인) | `reflection.lumen` + `surface_cache.enabled` + `direct_pairs` | 종료 0. `r.sc.pairs.select` 0.37 / `.trace` 0.10(인라인 0.05) / `.store` 0.13 ms(중앙값), `r.sc.cells` 없음 |
+  | **라운지 8프레임** | 같음 | **종료 0, 장치 제거 없음**, S 오류 비트 0, NaN·검은 화소 없음. select 0.44 / trace 0.10 / store 0.11 ms |
+  | 라운지 60프레임 | 같음 | 종료 0. select 0.42(최대 1.52) / trace 0.11(최대 1.05) / store 0.15 ms |
+  | 라운지 8프레임 전부 켬 | + `gi.lumen`, `shading.mega_lights`, `lumen.radiance_cache`, `lumen.short_range_ao` | 종료 0. `r.gi.rc.trace` 최대 1.50, `r.gi.lg.trace` 최대 4.11, `m.ml.trace` 최대 0.78 ms |
+  로그·CSV·캡처: `Results/Local/Fix-11/postgame/pairs_lounge8*`, `pairs_lounge60*`, `pairs_lounge_all*`. 값은 정확도 홀드의 참고값이다. 옛 `r.sc.cells` 경로는 라운지에서 돌리지 않았으므로 "hang의 원인"은 여전히 확정되지 않았다 — 같은 조명을 쌍 구조로 하면 라운지가 돈다는 것까지가 사실이다. 인라인 변종은 라운지에서 돌리지 않았다.
+- **③ 광원 격자 칸 목록 상한 제안**: bfc3cdd `Docs/Status/LIGHT_GRID_BOUND_PROPOSAL_KO.md`(R에게 전달). R은 `r.gi.lg.trace` 띠를 광선 기준으로 고침(redesign-v2 c4d2060).
+- 관찰: `unx_test_host_hostabi`가 "S VSM: sun level 0 can reach 4089109318 cluster entries"로 실패(장면 커밋 뒤, 첫 프레임). 값은 GPU 인스턴스 용량 × 가장 큰 메시의 클러스터 수 꼴이라 광원과 무관해 보이나, 이 변경 전에도 실패했는지는 확인하지 않았다.
+
+- **`direct_pairs` 기본 true** (조정 07:30): 기본 변종은 라운지를 통과한 `rtVisible` 쪽(인라인 변종은 로비에서만 돌았고 선택 사항으로 남김). `direct_stochastic` · `remainder_light` · `direct_analytic = false`를 쌍 경로와 같이 켜면 설정 단계에서 오류로 멈춘다(모드를 조용히 버리지도, 멈추는 옛 경로로 조용히 돌아가지도 않음). [실측, 잠금 안] 로비 8프레임, `reflection.lumen` + `surface_cache.enabled`(direct_pairs 지정 없음): 종료 0, `r.sc.pairs.trace` 8회 / `r.sc.cells` 0회; `direct_stochastic=true`를 더한 실행은 GPU 작업 전에 그 오류로 종료 1.
+
+### 17.1 라운지 hang — 확정된 것과 추정인 것 (2026-10-02)
+- **확정 [실측]**: (a) S2의 DRED·단계별 실행으로 멈추는 곳은 `r.sc.cells`가 광원 중심으로 쏘는 그림자 광선이었다(같은 셀의 태양 광선·광원 선택·해석 적분만으로는 통과; S2의 기록). (b) 같은 조명을 쌍 구조로 바꾼 `surface_cache.direct_pairs`(1f494fe: 선택은 광선 없는 compute, 쌍 레코드당 스레드 하나가 그림자 광선 1개, dispatch당 ≤ 262,144)는 라운지에서 8프레임·60프레임·전부 켬 8프레임 모두 장치 제거 없이 돌았다. (c) 같은 `rtVisible` 헬퍼·같은 마스크(0x10)·같은 구간 꼴을 쓰는 MegaLights 광선은 그 전에도 라운지를 통과했다.
+- **구조의 차이 [코드]**: 옛 구조는 ray generation 스레드 하나가 [loop] 안에서 TraceRay를 최대 18번(광원 8 + 나머지 1 + 태양 1, 각각 정적·동적 TLAS) 부르고, 고른 광원 배열·가중·MlPoint 등이 매 추적을 가로질러 살아 있었다. 새 구조는 추적을 가로질러 살아 있는 것이 쌍 주소뿐이다.
+- **미확정(추정)**: 왜 옛 구조가 **라운지에서만** 멈췄는지. 후보는 (1) 루프 안 다중 TraceRay + 큰 연속 상태가 이 드라이버에서 문제를 일으킴, (2) dispatch당 TraceRay 수(S2가 띠를 줄인 뒤에도 멈췄다고 보고), (3) 광원 중심으로 향하는 특정 광선 집합(셀이 벽 뒤·닫힌 형상 안쪽에 있고 2953개 거울 평면 주변의 얇은 형상을 지남). 어느 것도 가르는 실험을 하지 않았다 — 옛 경로를 라운지에서 다시 돌리지 않았고(화면 리셋 위험), 새 경로의 인라인 변종도 라운지에서 돌리지 않았다.
+
+### 17.2 판정 자료: 컷 직후 f1 / f4 / f16 — MegaLights 끔·켬 (조정 07:30의 4번) [실측, 잠금 안]
+조건: 게임 경로의 출력 이미지(`--capture-output`, 1080p), `gi.deterministic=true`, 정지 카메라(실행의 시작 = 컷), 300프레임, 프레임 1·4·16·299 캡처, 1회씩. 각 프레임의 자동 노출(ev100 로그)로 nit로 되돌린 뒤 비교. 빌드 1f494fe.
+- 오차 = 프레임 299 대비 휘도의 상대 RMS 차이, 입자 = (휘도 − 5×5 평균) / 5×5 평균의 RMS(프레임 299의 값은 장면 자체의 무늬).
+
+| 장면 | mega_lights | f1 오차 / 입자 | f4 오차 / 입자 | f16 오차 / 입자 | f299 입자 |
+|---|---|---|---|---|---|
+| 로비 | 끔 | 0.731 / 0.159 | 0.691 / 0.191 | 0.460 / 0.153 | 0.134 |
+| 로비 | 켬 | 0.786 / 0.164 | 0.703 / 0.194 | 0.481 / 0.152 | 0.133 |
+| 기차 라운지 | 끔 | 2.279 / 0.264 | 0.929 / 0.271 | 0.447 / 0.238 | 0.234 |
+| 기차 라운지 | 켬 | 2.348 / 0.263 | 0.949 / 0.271 | 0.453 / 0.239 | 0.234 |
+
+그림: `Results/Local/Fix-11/postgame/cut_lobby_grid.png`, `cut_train_grid.png` (행: 자름 1 끔, 자름 1 켬, 자름 2 끔, 자름 2 켬; 열: f1, f4, f16, f299). 분석 `cut_analyse.py`, 원본 `cut_<장면>_<끔|켬>_f*.pfm`.
+읽은 것(눈 + 수치):
+- 컷 직후의 오차는 끔·켬이 거의 같다(로비 f1 0.73 vs 0.79, f16 0.46 vs 0.48; 기차는 소수 둘째 자리까지 같음). 입자도 같다. 즉 **컷 직후 화면이 수렴 화면과 다른 정도는 MegaLights가 아닌 항에서 온다** — 그림에서 보이는 것은 양쪽 모두에 있는 천장의 얼룩(f4), 리셉션 데스크의 흰 얼룩(f4~f16, 10-01에 반사 항으로 귀속한 것), 바닥의 덩어리 잡음, f1의 체커 무늬(업스케일 첫 프레임)다.
+- 켬에서만 보이는 것: 로비 f1 코퍼 가장자리 근처의 작은 점 몇 개. 로비 천장의 따뜻한 띠가 없는 것은 코브 띠 판정(끝 바이어스)대로다.
+- 표본 4개 + 디노이저는 이 두 장면의 컷 직후에 끔보다 눈에 띄는 잡음을 더하지 않았다. 다만 컷 직후 f1~f16의 오차 자체(0.45~0.79, 기차 f1 2.3)는 크다 — GI·반사·노출 쪽의 판정 항목이다.
+- 재지 않은 것: 카메라 회전·이동 중, 1440p, 실행 간 편차.

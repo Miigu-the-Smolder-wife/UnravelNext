@@ -27,6 +27,7 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     g_reflHitFlags = reflHitFlags(rays);
     g_reflAccPool = reflAccPoolSrv(rays);
     g_reflSurfaceCache = reflSurfaceCacheUav(rays);
+    g_reflCardFrame = reflCardFrameSrv(rays);
     if (record.x == REFL_RAY_NONE)
     {
         rays.Store4(valueOffset, uint4(0, 0, 0, 0));  // valid bit clear

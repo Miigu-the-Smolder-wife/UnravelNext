@@ -37,13 +37,35 @@ shadow_rays_opaque = false            # QUALITY TRADE (user decision; the refere
                                       # hardware rays): true = the cells' shadow rays (lights, sun) take alpha-tested casters as
                                       # solid - no any-hit work per ray. Off here: it changes the cached shadows and did not
                                       # cure the lounge hang it was tried for (2026-10-02)
+direct_pairs = true                   # (A, 2026-10-02) the cells direct light as (cell, light) pairs in three passes: select
+                                      # (compute, no ray: the 8 strongest lights, their integrals, the sun), trace (one shadow
+                                      # ray per pair record, dispatches of at most 262,144), store. The same lighting as
+                                      # direct_analytic. Passes/SurfaceCache/SurfaceCacheLightPairs.hlsli.
+                                      # false: r.sc.cells lights the cell inside one ray generation thread (up to 18 TraceRay
+                                      # calls in loops) - THAT PATH STOPS THE DEVICE IN THE BATH LOUNGE (device hung,
+                                      # 2026-10-02); it also holds the modes the pairs do not: direct_stochastic,
+                                      # remainder_light, direct_analytic = false.
+direct_pairs_inline = false           # (with direct_pairs) the pair rays as inline queries in a compute kernel (no ray pipeline);
+                                      # false: a ray generation shader with rtVisible, as MegaLights traces - the variant that ran
+                                      # in the bath lounge. The inline variant ran in the lobby only (trace 0.05 ms against 0.10).
 direct_shadow_inline = false          # (with direct_analytic) the cell's lights are evaluated first and their shadow rays follow
                                       # as inline ray queries in a loop of a fixed count - no trace suspends the shader, and a
                                       # ray tests at most 64 alpha-tested candidates. Written for the lounge hang (the shadow
                                       # rays toward the light centres); NOT run yet
-debug_count = 0                       # diagnostics (1; 2 = of the empty reads only the back faces): counts this frame's radiosity rays that met geometry and those that read no
+debug_count = 0                       # diagnostics (1; 2 = of the empty reads only the back faces; 3 = sums instead: view g =
+                                      # the lit hits' sun irradiance, lux / 16 / 65536 summed, r = their local-light + indirect
+                                      # irradiance over that): counts this frame's radiosity rays that met geometry and those that read no
                                       # light there (no lit cell, a back face); shown by reflection.lumen_surface_cache_view with
                                       # lumen_surface_cache_view_component = 7 (r = the share, g = rays / 65536). NOT run yet
 base_cells = true                     # a mark also keeps the cell 3 levels coarser (8 x the size) at the point, and a read that
                                       # finds no lit cell at the point's level takes that base cell (reference: every mesh in
                                       # range keeps its lowest-resolution cards). false: such a read gets nothing
+mesh_cards = false                    # the cache as lighting on mesh cards (the reference's shipping structure; S2:
+                                      # Passes/SurfaceCache/CardLighting.hlsli) in place of the hashed cells: update selection by
+                                      # page priority, direct light per card tile (8 lights + the sun), radiosity per card probe,
+                                      # the final lighting atlas; hits read the cards of their instance. Needs a card set
+mesh_cards_test_set = false           # a hand-made card set (CardTestSet.cpp: six axis cards per rigid instance, material
+                                      # constants, built on the CPU) - S2's fixture until A's capture is there. NOT a renderer path
+mesh_cards_update_distance_m = 25     # the distance at which a card page's update speed halves (reference: the first clipmap's extent)
+mesh_cards_frustum_margin_m = 5       # pages within this of the view frustum update twice as fast
+mesh_cards_depth_bias_m = 0.10        # a hit reads a card texel whose depth is within this of the hit (reference: 10 cm)

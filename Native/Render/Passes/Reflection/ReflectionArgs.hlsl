@@ -25,5 +25,6 @@ void main()
     RWByteAddressBuffer rays = ResourceDescriptorHeap[P[1].x];
     rays.Store4(0, uint4(0, P[1].y, 0, jobs));
     rays.Store4(16, uint4(0, P[1].z, P[1].w, P[2].x));  // the layer buffers' UAVs (reflection.layers; UNX_NONE: off), hit flags
-    rays.Store4(32, uint4(P[2].y, P[2].z, 0, 0));       // the GI hit accumulator pool's SRV, the surface cache's UAV (UNX_NONE: none)
+    // the GI hit accumulator pool's SRV, the surface cache's UAV, the card frame's SRV (surface_cache.mesh_cards; UNX_NONE: none)
+    rays.Store4(32, uint4(P[2].y, P[2].z, P[3].z, 0));
 }

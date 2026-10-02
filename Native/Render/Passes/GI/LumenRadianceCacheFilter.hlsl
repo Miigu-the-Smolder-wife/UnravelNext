@@ -14,7 +14,7 @@
 // P[0] = { parameters SRV, state SRV, trace records SRV, indirection SRV }
 // P[1] = { MODE 0: traced radiance SRV / MODE 1: filtered SRV, depth atlas SRV, probe slots SRV, MODE 0: filtered UAV /
 //          MODE 1: cache atlas UAV (R11G11B10F) }
-// P[2] = { cache atlas SRV (MODE 0), max radiance hit angle (float, rad), 0, 0 }
+// P[2] = { cache atlas SRV (MODE 0), max radiance hit angle (float, rad), the dispatch's first trace record, 0 }
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
 #include "Passes/GI/LumenRadianceCache.hlsli"
@@ -24,7 +24,7 @@ void main(uint3 gid : SV_GroupID, uint3 id : SV_DispatchThreadID)
 {
     const LrcParams p = lrcParams(P[0].x);
     ByteAddressBuffer state = ResourceDescriptorHeap[P[0].y];
-    const uint trace = gid.z;
+    const uint trace = gid.z + P[2].z;
     if (trace >= state.Load(8)) return;
     ByteAddressBuffer traces = ResourceDescriptorHeap[P[0].z];
     const uint4 record = traces.Load4(trace * 16);

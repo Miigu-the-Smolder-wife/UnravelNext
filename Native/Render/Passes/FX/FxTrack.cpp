@@ -51,6 +51,10 @@ void particles(FramePassContext& fc, ViewResources& view)
     frame.lighting.airVolume = view.airVolume;
     frame.lighting.transmittanceLut = r.transmittanceLut;
     frame.lighting.multiScatterLut = r.multiScatterLut;
+    // (the sampled local light of this view's froxel grid: the main view's in the frame resources, another view's in its own)
+    const bool mainView = view.view.kind == gpu::ViewKind::Main;
+    frame.lighting.localFluence = mainView ? r.localFluence : view.localFluence;
+    frame.lighting.localMoment = mainView ? r.localMoment : view.localMoment;
     const fx::ParticleLayerOutput out = pass->record(*system, fc.graph, fc.shaders, fc.frame.frameIndex, frame);
     if (!out.valid) return;
     view.particleLayer = out.layer;

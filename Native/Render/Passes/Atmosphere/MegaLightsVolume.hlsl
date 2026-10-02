@@ -17,7 +17,13 @@
 // P[0] = { froxel lights (raw), output UAV, transmittance LUT (the air's parameters), light functions (UNX_NONE: none) }
 // P[1] = { previous output SRV (UNX_NONE: no history), N, tile readers SRV (FroxelTileDepth; UNX_NONE: every slice), 0 }
 // P[2] = { minimum sample weight, ray bias (m), end bias (m), exposure now / previous } (floats)
-// P[3] = { weight cap, max frames } (floats)
+// P[3] = { weight cap, max frames (floats), the dispatch's first slice, 0 }: the grid goes in bands of slices, each at most
+//        262,144 shadow rays (FroxelSystem.cpp)
+// P[4] = { fluence UAV, moment UAV, previous fluence SRV, previous moment SRV } (UNX_NONE: not kept): the same samples'
+//        light for lit particles (FxLayerSetup.hlsl), as Unreal's MegaLights lights the translucency volume: RGBA16F,
+//        fluence.rgb = sum of weight x visible irradiance toward each sampled light at the slice's midpoint (x exposure),
+//        moment.xyz = sum of weight x its luminance x the unit direction to the light; the reader evaluates its phase
+//        function's first two SH bands with them. The same history weight as the in-scattering.
 // P[6], P[7] = RtSceneSrvs
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
@@ -28,7 +34,7 @@
 [shader("raygeneration")]
 void MegaLightsVolumeGen()
 {
-    const uint3 id = DispatchRaysIndex();
+    const uint3 id = uint3(DispatchRaysIndex().xy, DispatchRaysIndex().z + P[3].z);
     const uint2 tile = id.xy;
     const uint s = id.z;
     RWTexture3D<float4> output = ResourceDescriptorHeap[P[0].y];
@@ -59,6 +65,13 @@ void MegaLightsVolumeGen()
     if (!wanted || h.y == 0)
     {
         output[id] = float4(0, 0, 0, wanted ? 1 : 0);
+        if (P[4].x != UNX_NONE)
+        {
+            RWTexture3D<float4> fluenceOut = ResourceDescriptorHeap[P[4].x];
+            RWTexture3D<float4> momentOut = ResourceDescriptorHeap[P[4].y];
+            fluenceOut[id] = 0;
+            momentOut[id] = 0;
+        }
         return;
     }
     const AtmosphereParams a = airParamsFromTexels(P[0].z);
@@ -88,7 +101,8 @@ void MegaLightsVolumeGen()
     }
 
     // ---- the samples' in-scattering
-    float3 now = 0;
+    float3 now = 0, fluenceNow = 0, momentNow = 0;
+    const float3 mid = o + dir * (0.5 * len);
     const RtSceneSrvs scene = rtScene();
     for (i = 0; i < count; ++i)
     {
@@ -106,16 +120,25 @@ void MegaLightsVolumeGen()
         }
         const float weight = min(r.sum / r.weight[i], asfloat(P[3].x)) / count;
         now += airLocalLight(light, o, dir, len, cm, a.mieG, P[0].w, li, lateral) * weight;
+        {
+            const float3 vm = mid - light.position;
+            const float dm = max(length(vm), 0.01);
+            const float3 Em = light.color * (froxelIntensity(light, vm / dm) * froxelWindow(light, dm) / (dm * dm) * weight);
+            fluenceNow += Em;
+            momentNow += (-vm / dm) * mlLuminance(Em);
+        }
     }
     now *= g_exposure;
+    fluenceNow *= g_exposure;
+    momentNow *= g_exposure;
     if (any(isnan(now)) || any(isinf(now))) now = 0;
+    if (any(isnan(fluenceNow)) || any(isinf(fluenceNow)) || any(isnan(momentNow)) || any(isinf(momentNow))) fluenceNow = momentNow = 0;
 
     // ---- history
     float n = 1;
-    float3 value = now;
+    float3 value = now, fluence = fluenceNow, moment = momentNow;
     if (P[1].x != UNX_NONE)
     {
-        const float3 mid = o + dir * (0.5 * len);
         const float4 clip = mul(g_prevViewProj, float4(mid, 1));
         if (clip.w > 0)
         {
@@ -129,9 +152,23 @@ void MegaLightsVolumeGen()
                 {
                     n = min(hist.a + 1, asfloat(P[3].y));
                     value = lerp(hist.rgb * asfloat(P[2].w), now, 1 / n);
+                    if (P[4].z != UNX_NONE)
+                    {
+                        Texture3D<float4> previousFluence = ResourceDescriptorHeap[P[4].z];
+                        Texture3D<float4> previousMoment = ResourceDescriptorHeap[P[4].w];
+                        fluence = lerp(previousFluence.SampleLevel(g_linearClamp, uvw, 0).rgb * asfloat(P[2].w), fluenceNow, 1 / n);
+                        moment = lerp(previousMoment.SampleLevel(g_linearClamp, uvw, 0).rgb * asfloat(P[2].w), momentNow, 1 / n);
+                    }
                 }
             }
         }
     }
     output[id] = float4(min(value, 60000.0), n);
+    if (P[4].x != UNX_NONE)
+    {
+        RWTexture3D<float4> fluenceOut = ResourceDescriptorHeap[P[4].x];
+        RWTexture3D<float4> momentOut = ResourceDescriptorHeap[P[4].y];
+        fluenceOut[id] = float4(min(fluence, 60000.0), n);
+        momentOut[id] = float4(clamp(moment, -60000.0, 60000.0), n);
+    }
 }

@@ -35,6 +35,10 @@ render_height_max = 1440
 # CPU model (Tools/ImageQuality, band 0.25-0.5 cycles/px against native, 2/3 scale): still energy 0.92 / SSIM 0.996,
 # 1.4 px/frame pan 0.56 / 0.92 (the 974c6bb kernel: 0.10 / 0.78 and 0.03 / 0.77).
 upscale_kernel = 60.0
+screen_trace_source = 1                # the previous frame colour screen-space traces read (GI, reflections): 1 = the upscale history
+                                        # (anti-aliased, output resolution); 0 = the scene colour before the upscale, as the
+                                        # reference (r.Lumen.ScreenTracingSource 0). 0 needs every reader to take the size from
+                                        # the texture (RenderGraph::desc): R reflections do, GI (LumenGather) not yet
 upscale_history_frames = 64
 # Moving: 4 (8 before 2026-09-29) with the Lanczos-3 moving history and its min / max clip (Upscale.hlsl): more of the
 # detail stays in the CPU model's slow pans (SSIM 0.73-0.77 -> 0.86-0.87 at 0.2-0.45 px / frame).

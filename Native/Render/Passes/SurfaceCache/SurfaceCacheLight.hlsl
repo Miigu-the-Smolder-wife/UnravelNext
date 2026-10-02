@@ -491,8 +491,22 @@ void SurfaceCacheProbesGen()
                 // surface_cache.debug_count: the radiosity rays that met geometry this frame (header word 14) and those
                 // of them that read nothing - no lit cell there, a back face, an emitter (word 15)
                 uint before;
-                b.InterlockedAdd(56, 1u, before);
-                if ((P[0].w & 32768u) != 0 ? !met : !lit) b.InterlockedAdd(60, 1u, before);  // (bit 15: the back faces alone)
+                if (P[0].w & 65536u)
+                {
+                    // (bit 16, surface_cache.debug_count 3: sums over the lit hits, lux / 16 - word 14 the cells' sun
+                    // irradiance, word 15 their local-light and indirect irradiance)
+                    if (lit)
+                    {
+                        const float3 w = float3(0.2126, 0.7152, 0.0722) / 16.0;
+                        b.InterlockedAdd(56, (uint)min(dot(cell.sun, w), 1e6), before);
+                        b.InterlockedAdd(60, (uint)min(dot(cell.direct + cell.indirect, w), 1e6), before);
+                    }
+                }
+                else
+                {
+                    b.InterlockedAdd(56, 1u, before);
+                    if ((P[0].w & 32768u) != 0 ? !met : !lit) b.InterlockedAdd(60, 1u, before);  // (bit 15: the back faces alone)
+                }
             }
         }
         const float brightest = max(radiance.r, max(radiance.g, radiance.b)) * g_exposure;

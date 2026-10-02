@@ -12,7 +12,8 @@
 // distance into the probe's place of the depth atlas.
 // P[0] = { world cache SRV (UNX_NONE: none), trace records SRV, temporary radiance UAV (RGBA16F), depth atlas UAV (R16_UINT) }
 // P[1], P[2], P[3] = sky and sun (GiSky.hlsli), P[1].w = the trace distance; P[3].w = gi.experiment_disable bits (8, 16, 128)
-// P[4] = { parameters SRV (LrcParams), state SRV, 0, 0 }, P[5].x = surface cache UAV (UNX_NONE: none)
+// P[4] = { parameters SRV (LrcParams), state SRV, the dispatch's first trace record, 0 }, P[5].x = surface cache UAV
+// (UNX_NONE: none). One dispatch holds at most 262,144 rays (LumenRadianceCache.cpp: chunks of probes).
 // P[6], P[7] = RtSceneSrvs
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
@@ -28,7 +29,7 @@ float lrcBias(float3 p) { return 1e-3 + 2e-4 * distance(p, g_cameraPosition); }
 [shader("raygeneration")]
 void LumenRadianceCacheTraceGen()
 {
-    const uint2 id = DispatchRaysIndex().xy;
+    const uint2 id = uint2(DispatchRaysIndex().x, DispatchRaysIndex().y + P[4].z);
     const LrcParams p = lrcParams(P[4].x);
     ByteAddressBuffer state = ResourceDescriptorHeap[P[4].y];
     if (id.y >= state.Load(8)) return;

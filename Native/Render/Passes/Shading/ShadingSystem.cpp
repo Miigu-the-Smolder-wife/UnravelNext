@@ -14,6 +14,7 @@
 #include "unx/scene/MaterialModel.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 
@@ -377,8 +378,9 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     // shading.mega_lights (MegaLights.cpp; main view with S's lists and R's ray scene): the local lights' direct light comes
     // from light samples (m.ml.*) and the kernels skip their loop over the lists, so the tile records are not built.
 #if UNX_M_HAS_RAYTRACING
-    const bool megaWanted = fc.quality.boolean("shading.mega_lights") && view.view.kind == gpu::ViewKind::Main && froxelLists && r.tlasStatic.valid() &&
-                            fc.trackState != nullptr && (experiment & 32) == 0;
+    // Every view runs it (as Unreal's MegaLights does per view): the main view, the full auxiliary views (their own history
+    // under viewId) and planar reflection views (no history: the spatial filter alone).
+    const bool megaWanted = fc.quality.boolean("shading.mega_lights") && froxelLists && r.tlasStatic.valid() && fc.trackState != nullptr && (experiment & 32) == 0;
 #else
     const bool megaWanted = false;
 #endif
@@ -451,7 +453,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     {
         res.fallbackArgs = fallback ? fc.graph.createBuffer({ "m.shade fallback args", 12, 0 }) : BufferRef{};
         res.edgeRadiance = fc.graph.createTexture({ "m.edge radiance", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
-        if (lobesOn) res.areaLobes = fc.graph.createTexture({ "m.area lobes", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+        // (shading.mega_lights: the lobes are in its kernel, on the light samples - no lobe texture, no lobe pass)
+        if (lobesOn && !megaWanted) res.areaLobes = fc.graph.createTexture({ "m.area lobes", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
         res.direct = fc.graph.createTexture({ "m.direct radiance", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
         res.edgePixels = fc.graph.createBuffer({ "m.edge pixels", ((uint64_t)v.view.width * v.view.height + 1) * 4, 0 });
         res.edgeArgs = fc.graph.createBuffer({ "m.edge args", 24, 0 });  // dispatch args + pixel count (Edge.hlsli)
@@ -527,9 +530,10 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             // m.ml.sample, m.ml.trace; then m.ml.shade here (ShadeOpaque.hlsl with MEGA_LIGHTS = 1 on the class tile lists
             // of every band, the LAYERED variant of each class); then m.ml.sets, m.ml.temporal, m.ml.spatial
             MegaLightsFrame ml = megaLightsSample(fc, view, o.materialWord, areaLights, ltcSrv, signature);
-            if (!ml.on) fail("M.shading: shading.mega_lights could not start on the main view (its inputs were present)");
+            if (!ml.on) fail("M.shading: shading.mega_lights could not start on a view (its inputs were present)");
+            const bool mlMainView = view.view.kind == gpu::ViewKind::Main;
             auto mlKernel = [&](uint32_t layered) {
-                const std::string name = std::string("Passes/Shading/MegaLightsShade.AREA") + (areaLights ? "1" : "0") + ".LAYERED" + std::to_string(layered);
+                const std::string name = std::string("Passes/Shading/MegaLightsShade.AREA") + (areaLights ? "1" : "0") + ".LAYERED" + std::to_string(layered) + ".FULL0";
                 return fc.shaders.compute(name.c_str());
             };
             ID3D12PipelineState* mlPlain = mlKernel(0);
@@ -584,7 +588,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                          k32[4] = c.srv(o.tiles);
                                          k32[5] = o.firstTile(cls, band);
                                          k32[6] = cls;
-                                         k32[16] = r.areaLightStable;  // P[4].x (B2)
+                                         k32[16] = mlMainView ? r.areaLightStable : gpu::kNone;  // P[4].x (B2; planar views: none, as PLANAR = 1)
                                          k32[17] = o.textureTableSrv;
                                          k32[18] = experiment;
                                          k32[20] = c.srv(v.froxelLights);
@@ -1032,6 +1036,129 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         const uint64_t heavyCap = std::max<uint64_t>(1, std::min(capacity / (kLight + 1), tiles * 64));  // > COV_LIGHT records each
         const uint64_t cursorCap = heavyCap + capacity / kBlock;                                   // >= sum of ceil(count / COV_BLOCK)
         RenderGraph& g = fc.graph;
+
+        // shading.mega_lights: the coverage layer's own MegaLights instance (MegaLightsCoverage.hlsl; as Unreal's second
+        // instance on the hair visibility samples). The surface = each coverage pixel's nearest opaque cluster fragment in
+        // front of band A; then the sample, trace, shade (full-screen kernel), temporal and spatial passes on it, kept
+        // divided by the modulation factors. The fragment kernels add it times each fragment's factors (P[11].xy) in place
+        // of their loop over the froxel list.
+        TextureRef covMlDiffuse, covMlSpecular;
+#if UNX_M_HAS_RAYTRACING
+        if (megaLighting.valid())
+        {
+            const uint32_t W = v.view.width, H = v.view.height;
+            const TextureRef nearest = g.createTexture({ "m.ml.cov nearest depth", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
+            const TextureRef element = g.createTexture({ "m.ml.cov element", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
+            const TextureRef covGbuffer = g.createTexture({ "m.ml.cov gbuffer", W, H, 1, 1, DXGI_FORMAT_R32G32_UINT });
+            const TextureRef covWord = g.createTexture({ "m.ml.cov material word", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
+            const TextureRef covDepth = g.createTexture({ "m.ml.cov depth", W, H, 1, 1, DXGI_FORMAT_R32_FLOAT });
+            std::array<ID3D12PipelineState*, 4> covKernel{};
+            for (int mode = 0; mode < 4; ++mode) covKernel[mode] = fc.shaders.compute(("Passes/Shading/MegaLightsCoverage.MODE" + std::to_string(mode)).c_str());
+            g.addPass("m.ml.cov.nearest", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(v.coverageRecords, Use::SrvCompute);
+                          b.use(v.coverageTileList, Use::SrvCompute);
+                          b.use(v.coverageTileList, Use::IndirectArgs);
+                          b.use(v.depth, Use::SrvCompute);
+                          b.use(nearest, Use::UavCompute);
+                          b.use(element, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          const uint32_t k[8] = { c.srv(v.coverageRecords), c.srv(v.coverageTileList), c.uav(nearest), c.uav(element), c.srv(v.depth), 0, 0, 0 };
+                          c.bindFrameConstants(cb);
+                          c.computeConstants(k, 8);
+                          c.cmd->SetPipelineState(covKernel[0]);
+                          c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                          // the per-record passes: V's arguments over the record blocks (tile list header words 8..10);
+                          // the depths are complete before the elements are chosen (one global UAV barrier between them)
+                          D3D12_GLOBAL_BARRIER gb{ D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                                   D3D12_BARRIER_ACCESS_UNORDERED_ACCESS };
+                          D3D12_BARRIER_GROUP group{ D3D12_BARRIER_TYPE_GLOBAL, 1 };
+                          group.pGlobalBarriers = &gb;
+                          for (int mode = 1; mode <= 2; ++mode)
+                          {
+                              c.cmd->Barrier(1, &group);
+                              c.cmd->SetPipelineState(covKernel[mode]);
+                              c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 32, nullptr, 0);
+                          }
+                      });
+            g.addPass("m.ml.cov.surface", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(v.coverageRecords, Use::SrvCompute);
+                          b.use(v.visibleClusters, Use::SrvCompute);
+                          b.use(nearest, Use::SrvCompute);
+                          b.use(element, Use::SrvCompute);
+                          for (TextureRef t : { covGbuffer, covWord, covDepth }) b.use(t, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          const uint32_t k[12] = { c.srv(v.coverageRecords), gpu::kNone, c.srv(nearest), c.srv(element), gpu::kNone, c.srv(v.visibleClusters), 0, 0,
+                                                   c.uav(covGbuffer), c.uav(covWord), c.uav(covDepth), 0 };
+                          c.bindFrameConstants(cb);
+                          c.computeConstants(k, 12);
+                          c.cmd->SetPipelineState(covKernel[3]);
+                          c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                      });
+            // the instance: the view with the coverage surface as its depth and G-buffer (no vis buffer: its history is
+            // reprojected as static)
+            ViewResources cview = view;
+            cview.depth = covDepth;
+            cview.gbuffer = covGbuffer;
+            cview.visId = {};
+            MegaLightsFrame cml = megaLightsSample(fc, cview, covWord, areaLights, ltcSrv, signature, "coverage");
+            if (!cml.on) fail("M.shading: the coverage layer's shading.mega_lights instance could not start");
+            ID3D12PipelineState* covShade = fc.shaders.compute((std::string("Passes/Shading/MegaLightsShade.AREA") + (areaLights ? "1" : "0") + ".LAYERED0.FULL1").c_str());
+            auto half = [](float f) {  // positive, in the half range (the weight caps)
+                uint32_t u;
+                std::memcpy(&u, &f, 4);
+                const int32_t e = (int32_t)((u >> 23) & 0xFF) - 127 + 15;
+                if (e <= 0) return 0u;
+                if (e >= 31) return 0x7BFFu;
+                return ((uint32_t)e << 10) | ((u >> 13) & 0x3FFu);
+            };
+            const uint32_t caps = half(cml.maxWeight) | (half(cml.maxWeightHidden) << 16), mlMode = cml.factor | (cml.count << 8);
+            const float minWeight = cml.minSampleWeight;
+            const TextureRef samples = cml.samples, keys = cml.keys, outDiffuse = cml.resolvedDiffuse, outSpecular = cml.resolvedSpecular;
+            const bool covMainView = view.view.kind == gpu::ViewKind::Main;
+            g.addPass("m.ml.cov.shade", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          for (TextureRef t : { covGbuffer, covDepth, covWord, samples, keys }) b.use(t, Use::SrvCompute);
+                          if (r.lightFunctions.valid()) b.use(r.lightFunctions, Use::SrvCompute);
+                          b.use(v.froxelLights, Use::SrvCompute);
+                          if (r.fxLights.valid()) b.use(r.fxLights, Use::SrvCompute);
+                          b.use(outDiffuse, Use::UavCompute);
+                          b.use(outSpecular, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          uint32_t k32[48];
+                          for (uint32_t& w : k32) w = gpu::kNone;
+                          k32[0] = c.srv(covGbuffer);
+                          k32[1] = c.srv(covDepth);
+                          k32[2] = c.srv(covWord);
+                          k32[5] = 0;
+                          k32[6] = 0xFFFFFFFEu;  // P[1].z: every shade class but the sky (the plain kernel: a layered material's base)
+                          k32[16] = covMainView ? r.areaLightStable : gpu::kNone;  // P[4].x (B2)
+                          k32[17] = o.textureTableSrv;
+                          k32[18] = experiment;
+                          k32[20] = c.srv(v.froxelLights);
+                          k32[21] = ltcSrv;
+                          k32[27] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : gpu::kNone;  // P[6].w (A8)
+                          k32[41] = c.srv(samples);     // P[10].y
+                          k32[42] = c.srv(keys);        // P[10].z
+                          k32[43] = c.uav(outDiffuse);  // P[10].w
+                          k32[44] = c.uav(outSpecular); // P[11].x
+                          k32[45] = caps;               // P[11].y
+                          std::memcpy(&k32[46], &minWeight, 4);  // P[11].z
+                          k32[47] = mlMode;             // P[11].w
+                          c.bindFrameConstants(cb);
+                          c.cmd->SetPipelineState(covShade);
+                          c.computeConstants(k32, 48);
+                          c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                      });
+            megaLightsDenoise(fc, cview, covWord, cml, true);
+            covMlDiffuse = cml.lighting;
+            covMlSpecular = cml.lightingSpecular;
+        }
+#endif
         const BufferRef state = g.createBuffer({ "m.coverage state", 8 * 4, 0 });
         const BufferRef args = g.createBuffer({ "m.coverage args", 16 * 4, 0 });
         const BufferRef pairs = g.createBuffer({ "m.coverage pairs", std::max<uint64_t>(capacity, 1) * 8, 0 });
@@ -1083,6 +1210,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             if (r.surfaceConstants.valid()) b.use(r.surfaceConstants, Use::SrvCompute);  // A7 surface layers (one buffer)
             if (r.lightFunctions.valid()) b.use(r.lightFunctions, Use::SrvCompute);    // A8 light functions
             if (r.rainShadow.valid()) b.use(r.rainShadow, Use::SrvCompute);
+            if (covMlDiffuse.valid())
+            {
+                b.use(covMlDiffuse, Use::SrvCompute);  // shading.mega_lights: the coverage instance (P[11].xy)
+                b.use(covMlSpecular, Use::SrvCompute);
+            }
             if (fragmentShadows)
             {
                 b.use(v.shadowFragmentVisibility, Use::SrvCompute);
@@ -1107,6 +1239,8 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             k[32] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : gpu::kNone;  // P[8].x (A8; the arrays hold 48)
             k[33] = v.coverageRecordRadiance.valid() ? c.srv(v.coverageRecordRadiance) : gpu::kNone;  // P[8].y (v1.75)
             waterSunConstants(c, k + 36, 4);  // P[9], P[10].x (v1.77)
+            k[44] = covMlDiffuse.valid() ? c.srv(covMlDiffuse) : gpu::kNone;   // P[11].x: shading.mega_lights' coverage instance
+            k[45] = covMlSpecular.valid() ? c.srv(covMlSpecular) : gpu::kNone;  // P[11].y
         };
         auto shadingConstants = [=](PassContext& c, uint32_t (&k)[24], uint32_t colour) {
             const uint32_t none = gpu::kNone;

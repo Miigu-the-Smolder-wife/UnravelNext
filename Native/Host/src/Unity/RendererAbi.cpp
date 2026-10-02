@@ -875,7 +875,10 @@ UNX_API int32_t UNX_CALL UnxSceneAddInstance(UnxRenderer r, const UnxInstanceDes
 UNX_API int32_t UNX_CALL UnxSceneAddLight(UnxRenderer r, const UnxLightDesc* d, uint32_t* index)
 {
     return call([&] {
-        requireStruct(d, "UnxLightDesc");
+        // version 2 (v1.93: rayEndBias) or 1 (the same size; that field was reserved - not read: no end bias of its own)
+        if (!d) fail("UnxLightDesc is null");
+        if (d->size != sizeof(UnxLightDesc) || (d->version != 1 && d->version != 2))
+            fail("UnxLightDesc ABI mismatch: size %u version %u, native %zu version 2 (or 1)", d->size, d->version, sizeof(UnxLightDesc));
         if (d->type > UNX_LIGHT_TUBE) fail("unknown light type %u", d->type);
         scene::Light l;
         l.type = (scene::LightType)d->type;
@@ -889,6 +892,7 @@ UNX_API int32_t UNX_CALL UnxSceneAddLight(UnxRenderer r, const UnxLightDesc* d, 
         l.spotOuter = d->spotOuter;
         l.size = { d->areaSize[0], d->areaSize[1] };
         l.castShadow = d->castShadow != 0;
+        l.rayEndBias = d->version >= 2 && d->rayEndBias >= 0 ? d->rayEndBias : -1.0f;
         auto h = find(r);
         const uint32_t i = h->add(h->scene().lights, std::move(l));
         if (index) *index = i;
