@@ -115,6 +115,13 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         return;
     }
     const float deviceDepth = layers ? depth.Load(int3(pixel, 0)) : 0;
+    if (mode == REFL_M && reflJob(m) == REFL_NO_JOB)
+    {
+        // reflection.lumen_downsample: no ray of its own - the ray-reuse pipeline's resolve and filter write its value
+        reflection[pixel] = float4(0, 0, 0, 1);
+        storeNoLayers(pixel);
+        return;
+    }
     if (mode == REFL_M)
     {
         const uint3 r = results[reflJob(m)];

@@ -69,6 +69,7 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     bool lumenScreenTraces = true;     // reflection.lumen_screen_traces: screen traces before the world rays (ScreenTrace.hlsli)
     uint32_t lumenScreenIterations = 50;
     float lumenScreenThickness = 0.005f;
+    uint32_t lumenDownsample = 1;      // reflection.lumen_downsample: 1, or 2 = one ray per 2 x 2 pixels (the reference's DownsampleFactor)
     bool lumenRoughFromGather = true;  // reflection.lumen_rough_specular_from_gather: untraced pixels take view.giRoughSpecular
     bool lumenReconstruction = true, lumenTemporal = true, lumenBilateral = true, lumenDisocclusionTonemap = true;
     uint32_t lumenReconstructionSamples = 5, lumenBilateralSamples = 4;

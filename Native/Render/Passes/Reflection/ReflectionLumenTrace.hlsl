@@ -2,8 +2,8 @@
 // unx-variants: SKY=0,1
 // r.refl.lumen.trace (reflection.lumen_only): the reflection rays of the Lumen path - the structure of Unreal's
 // LumenReflectionHardwareRayTracing (ue6-main read as a reference; the code is ours). One thread per job (a traced
-// pixel), dispatched indirectly in bands of at most 262,144 jobs; ONE world ray a thread (and, only at a hit that has no
-// mesh cards, the sun's shadow ray).
+// pixel), dispatched indirectly in bands of at most 131,072 jobs; ONE world ray a thread (and, only at a hit that has no
+// mesh cards, the sun's shadow ray): at most 262,144 TraceRay calls a dispatch.
 //   ray     the pixel's GGX visible-normal direction - the draw the screen trace made for the same pixel and frame
 //           (ReflectionReuse.hlsli reuseRay); it starts where the screen trace ended in front of the scene
 //           (results[job].x, less the pull-back; 0 without screen traces). A job the screen trace finished is skipped.
@@ -28,7 +28,7 @@
 #include "Passes/Reflection/ScreenTrace.hlsli"
 #include "Passes/Reflection/ReflectionLumenHit.hlsli"
 
-#define RL_BAND 262144u
+#define RL_BAND 131072u
 #define RL_FLAG_SCREEN_START 1u
 #define RL_FLAG_SCENE_COLOUR 2u
 #define RL_FLAG_HISTORY_DEPTH 4u

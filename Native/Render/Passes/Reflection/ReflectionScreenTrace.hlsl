@@ -27,6 +27,7 @@ void main(uint2 pixel : SV_DispatchThreadID)
     if (reflMode(m) != REFL_M) return;
     RWStructuredBuffer<uint3> results = ResourceDescriptorHeap[P[0].y];
     const uint job = reflJob(m);
+    if (job == REFL_NO_JOB) return;  // (reflection.lumen_downsample: the block's ray is another pixel's)
     results[job] = uint3(0, 0, 0);  // (the world ray's start: its surface, unless set below)
     Texture2D<float> depth = ResourceDescriptorHeap[P[0].z];
     Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[0].w];

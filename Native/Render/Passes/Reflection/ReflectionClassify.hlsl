@@ -34,9 +34,14 @@
 // tile of this dispatch is one tile of each view's tile mask. The classification pass runs before the views record.
 // P[7].x = M's material word (reflection.lumen_only: the top layer's roughness, ReflectionInternal.hlsli g_reflWords;
 // UNX_NONE: every pixel's G-buffer roughness).
+// P[7].y = reflection.lumen_downsample: factor (1 or 2) | this frame's offset x << 8 | y << 16. Factor 2 (the
+// reference's Reflections.DownsampleFactor): one traced pixel per 2 x 2 block - the block's pixel at the frame's
+// offset where that one traces, else the block's first traced-mode pixel - and the others keep mode M with no job
+// (REFL_NO_JOB): the resolve gives them the neighbouring blocks' rays (ReflectionReuseResolve).
 #include "Passes/Reflection/ReflectionInternal.hlsli"
 
 groupshared uint g_any;
+groupshared uint g_modes[64];
 groupshared uint g_planarCounts[64];
 groupshared uint g_viewAny[4];
 
@@ -155,6 +160,26 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : S
                     mode = REFL_G;
                     spacingLog2 = (uint)clamp(floor(log2(max(blur / 3, 1.0))), 0.0, (float)P[4].y);
                 }
+            }
+        }
+    }
+    if ((P[7].y & 0xFFu) > 1 && P[4].z != 0)
+    {
+        g_modes[lane] = mode;
+        GroupMemoryBarrierWithGroupSync();
+        if (mode == REFL_M)
+        {
+            const uint2 block = local & ~1u;
+            const uint offsetLane = (block.y + ((P[7].y >> 16) & 1u)) * 8 + block.x + ((P[7].y >> 8) & 1u);
+            if (lane != offsetLane)
+            {
+                bool first = g_modes[offsetLane] != REFL_M;
+                [unroll] for (uint b = 0; b < 4; ++b)
+                {
+                    const uint other = (block.y + (b >> 1)) * 8 + block.x + (b & 1u);
+                    if (other < lane && g_modes[other] == REFL_M) first = false;
+                }
+                job = first;
             }
         }
     }

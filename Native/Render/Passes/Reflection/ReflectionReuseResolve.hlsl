@@ -10,7 +10,38 @@
 // P[0] = { modes SRV, results SRV, depth SRV, gbuffer SRV }, P[1] = { reflection SRV (tile rows), resolved UAV, rows H, frame }
 // P[2] = { width, height, samples, flags (bit 0: no reconstruction - each pixel's own ray) }
 // P[3] = { asuint(radius px), asuint(ray intensity cap), asuint(tone-map range), asuint(GGX sampling bias) }; frame constants b1 = main view.
+// P[4].z = reflection.lumen_downsample: factor (1 or 2) | this frame's offset x << 8 | y << 16 (ReflectionClassify). With
+// factor 2 a block of 2 x 2 pixels has one ray: a neighbour is the traced pixel of the block the sample falls in, and a
+// pixel without its own ray first takes the rays of its block and of the three blocks on its side (the bilinear set),
+// whatever its roughness.
 #include "Passes/Reflection/ReflectionReuse.hlsli"
+
+// The traced pixel of q's block (q itself at factor 1) and its mode word; false: the block traced nothing.
+bool blockRay(Texture2D<uint> modes, int2 q, int2 size, out int2 traced, out uint word)
+{
+    traced = q;
+    word = 0;
+    const uint factor = P[4].z & 0xFFu;
+    if (factor <= 1)
+    {
+        word = modes.Load(int3(q, 0));
+        return reflMode(word) == REFL_M && reflJob(word) != REFL_NO_JOB;
+    }
+    const int2 block = q & ~1;
+    const int2 offset = int2((P[4].z >> 8) & 1u, (P[4].z >> 16) & 1u);
+    [unroll] for (int k = -1; k < 4; ++k)
+    {
+        const int2 p = block + (k < 0 ? offset : int2(k & 1, k >> 1));
+        if (any(p >= size)) continue;
+        word = modes.Load(int3(p, 0));
+        if (reflMode(word) == REFL_M && reflJob(word) != REFL_NO_JOB)
+        {
+            traced = p;
+            return true;
+        }
+    }
+    return false;
+}
 
 [numthreads(8, 8, 1)]
 void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
@@ -40,33 +71,54 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
     g_reflWords = P[4].x;  // (M's material word: the top layer's roughness, ReflectionInternal.hlsli; UNX_NONE: none)
     reuseSnapExposure(P[4].y);  // (the snap frame's exposure reference, ReflectionReuse.hlsli; UNX_NONE: none)
     const ReflSurface s = reflSurface(depth, gbuffer, pixel);
-    const uint3 own = results[reflJob(m)];
-    const float ownDistance = reflResultDistance(own);
-    float3 sum = reuseToFilter(reuseCapIntensity(reflResultRadiance(own), cap), range);
-    float weight = 1;
-    float nearest = ownDistance;
+    const bool hasOwn = reflJob(m) != REFL_NO_JOB;
+    float ownDistance = 65000.0;
+    float3 sum = 0;
+    float weight = 0;
+    float nearest = 65000.0;
+    if (hasOwn)
+    {
+        const uint3 own = results[reflJob(m)];
+        ownDistance = reflResultDistance(own);
+        sum = reuseToFilter(reuseCapIntensity(reflResultRadiance(own), cap), range);
+        weight = 1;
+        nearest = ownDistance;
+    }
     const float radius = s.roughness > 0.05 ? asfloat(P[3].x) * saturate(s.roughness * 8.0) : 0.0;
     const uint samples = P[2].z;
-    if ((P[2].w & 1u) == 0 && radius > 1.0 && samples > 0)
+    const bool reconstruct = (P[2].w & 1u) == 0 && radius > 1.0 && samples > 0;
+    // (a pixel without its own ray: a value without weights, should every weighted neighbour fall away)
+    float3 fallback = 0;
+    float fallbackDistance = 65000.0;
+    bool hasFallback = false;
+    if (reconstruct || !hasOwn)
     {
         const float alpha = max(s.roughness * s.roughness, 1e-4);
         const float a2 = alpha * alpha;
         // this pixel's own ray under the same weight (never dropped)
         float3 ownDir;
         float ownPdf;
-        if (reuseRay(s, pixel, frame, asfloat(P[3].w), ownDir, ownPdf))
+        if (hasOwn && reuseRay(s, pixel, frame, asfloat(P[3].w), ownDir, ownPdf))
         {
             weight = max(reuseGgxD(a2, saturate(dot(s.normal, normalize(s.view + ownDir)))) / ownPdf, 1e-3);
             sum *= weight;
         }
         const uint key = reuseHash(pixel.x + pixel.y * 65536u + (frame & 7u) * 0x9E3779B9u);
         const float2 shift = float2(reuseUnit(key), reuseUnit(key + 1));
-        [loop] for (uint i = 0; i < samples; ++i)
+        // (without an own ray: 4 block rays around the pixel first, then the disk)
+        const uint fixedSamples = hasOwn ? 0u : 4u;
+        const uint diskSamples = reconstruct ? samples : 0u;
+        const int2 side = int2((pixel.x & 1u) ? 2 : -2, (pixel.y & 1u) ? 2 : -2);
+        [loop] for (uint i = 0; i < fixedSamples + diskSamples; ++i)
         {
-            const int2 q = int2(floor(float2(pixel) + 0.5 + reuseDisk(i, samples, shift) * radius));
-            if (any(q < 0) || any(q >= int2(size)) || all(q == int2(pixel))) continue;
-            const uint mq = modes.Load(int3(q, 0));
-            if (reflMode(mq) != REFL_M) continue;
+            int2 q;
+            if (i < fixedSamples) q = int2(pixel) + int2((i & 1u) ? side.x : 0, (i >> 1) ? side.y : 0);
+            else q = int2(floor(float2(pixel) + 0.5 + reuseDisk(i - fixedSamples, diskSamples, shift) * radius));
+            if (any(q < 0) || any(q >= int2(size))) continue;
+            int2 traced;
+            uint mq;
+            if (!blockRay(modes, q, int2(size), traced, mq) || all(traced == int2(pixel))) continue;
+            q = traced;
             const ReflSurface t = reflSurface(depth, gbuffer, uint2(q));
             if (!t.valid) continue;
             float3 dir;
@@ -74,6 +126,12 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
             if (!reuseRay(t, uint2(q), frame, asfloat(P[3].w), dir, pdf)) continue;
             const uint3 r = results[reflJob(mq)];
             const float d = min(reflResultDistance(r), ownDistance);
+            if (!hasFallback)
+            {
+                fallback = reuseToFilter(reuseCapIntensity(reflResultRadiance(r), cap), range);
+                fallbackDistance = d;
+                hasFallback = true;
+            }
             const float3 toHit = t.position + dir * d - s.position;
             const float reach = length(toHit);
             const float3 seen = reach > 0 ? toHit / reach : dir;
@@ -84,6 +142,17 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
             weight += w;
             nearest = min(nearest, d);
         }
+    }
+    if (!(weight > 0))
+    {
+        if (!hasFallback)
+        {
+            resolved[pixel] = float4(0, 0, 0, -1);
+            return;
+        }
+        sum = fallback;
+        weight = 1;
+        nearest = fallbackDistance;
     }
     resolved[pixel] = float4(reflStorable(reuseFromFilter(sum / weight, range)), nearest);
 }

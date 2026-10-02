@@ -154,6 +154,8 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.lumenSamplingBias = std::clamp(num("reflection.lumen_ggx_sampling_bias", 0.1), 0.0f, 0.99f);
     s.lumenScreenIterations = (uint32_t)num("reflection.lumen_screen_trace_max_iterations", 50);
     s.lumenScreenThickness = num("reflection.lumen_screen_trace_relative_depth_thickness", 0.005);
+    s.lumenDownsample = (uint32_t)num("reflection.lumen_downsample", 1);
+    if (s.lumenDownsample != 1 && s.lumenDownsample != 2) fail("reflection.lumen_downsample must be 1 or 2");
     // The surface cache (Passes/SurfaceCache/SurfaceCache.hlsli); defaults are the reference's (ue6-main LumenScene*.cpp,
     // LumenRadiosity.cpp).
     s.surfaceCache = flag("surface_cache.enabled", false);
@@ -1039,6 +1041,9 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     // reflection.lumen_only: M's material word - a clearcoat pixel's reflection is traced, resolved and filtered at its
     // coat's roughness (ReflectionInternal.hlsli reflTopLayerRoughness; M composes it as the top layer)
     const TextureRef words = lumenOnly ? main.materialWord : TextureRef{};
+    // reflection.lumen_downsample: the factor and this frame's offset in the 2 x 2 block (ReflectionClassify, ReflectionReuseResolve)
+    static const uint32_t kDownsampleOffsets[4] = { 0x000000u, 0x010100u, 0x000100u, 0x010000u };
+    const uint32_t downsampleWord = lumen ? (s.lumenDownsample | (s.lumenDownsample > 1 ? kDownsampleOffsets[fc.frame.frameIndex & 3] : 0u)) : 1u;
     g.addPass("r.refl.classify", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(depth, Use::SrvCompute);
@@ -1058,7 +1063,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   }
               },
               [&shaders, depth, gbuffer, lobes, history, modes, jobs, args, reflection, s, focal, width, height, tilesX, tilesY, frameConstants, planarSrv,
-               planarOffset, planarCounts, planarViews, viewCount = planar.views, spacingLog2, lumen, words, roughSpecularValid = main.giRoughSpecular.valid()](PassContext& c) {
+               planarOffset, planarCounts, planarViews, viewCount = planar.views, spacingLog2, lumen, words, downsampleWord, roughSpecularValid = main.giRoughSpecular.valid()](PassContext& c) {
                   uint32_t k[32] = { c.srv(depth), c.srv(gbuffer), lobes.valid() && !lumen ? c.srv(lobes) : 0xFFFFFFFFu, c.srv(history),
                                      c.uav(modes), c.uav(jobs), c.uav(args), c.uav(reflection),
                                      asU(s.kHalfAngle), asU(s.mirrorRoughness), asU(focal), height,
@@ -1070,6 +1075,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       k[24 + v] = v < viewCount ? c.uav(planarViews[v].tileMask) : 0xFFFFFFFFu;
                   }
                   k[28] = words.valid() ? c.srv(words) : 0xFFFFFFFFu;
+                  k[29] = downsampleWord;
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionClassify"));
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
@@ -1328,13 +1334,15 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     }
     if (lumenOnly)
     {
-        // reflection.lumen_only: the jobs' world rays in bands of kBand threads, one ray each; a hit's value is final
+        // reflection.lumen_only: the jobs' world rays in bands of kLumenBand threads, one world ray each; a hit's value is final
         // (ReflectionLumenTrace.hlsl) - the resolve passes below read the results as they read the combine pass's.
-        const uint32_t lumenBands = bandsFor((uint64_t)width * height, kBand);
+        // (a thread traces at most 2 rays - its world ray and, at a hit without cards, the sun's shadow ray: kBand calls a band)
+        constexpr uint32_t kLumenBand = kBand / 2;  // ReflectionLumenTrace.hlsl RL_BAND
+        const uint32_t lumenBands = bandsFor((uint64_t)width * height, kLumenBand);
         g.addPass("r.refl.lumen.args", QueueType::Compute, [&](PassBuilder& b) { b.use(args, Use::UavCompute); },
                   [&shaders, args, lumenBands](PassContext& c) {
                       const uint32_t k[8] = { c.uav(args), 2, kDescStride, kLumenDescOffset + (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width),
-                                              kArgumentsBytes, kBand, lumenBands, 0 };
+                                              kArgumentsBytes, kLumenBand, lumenBands, 0 };
                       c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionLumenArgs"));
                       c.computeConstants(k, 8);
                       c.cmd->Dispatch(1, 1, 1);
@@ -1848,11 +1856,11 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       if (words.valid()) b.use(words, Use::SrvCompute);
                       if (snap.valid()) b.use(snap, Use::SrvCompute);
                   },
-                  [&shaders, modes, results, depth, gbuffer, reflection, resolved, width, height, tilesX, tilesY, frameConstants, reuseFrame, s, samplingBias16, words, snap](PassContext& c) {
+                  [&shaders, modes, results, depth, gbuffer, reflection, resolved, width, height, tilesX, tilesY, frameConstants, reuseFrame, s, samplingBias16, words, snap, downsampleWord](PassContext& c) {
                       const uint32_t k[20] = { c.srv(modes), c.srv(results), c.srv(depth), c.srv(gbuffer), c.srv(reflection), c.uav(resolved), height, reuseFrame,
                                                width, height, s.lumenReconstructionSamples, s.lumenReconstruction ? 0u : 1u,
                                                asU(s.lumenReconstructionRadius), asU(s.lumenMaxRayIntensity), asU(s.lumenTonemapRange),
-                                               asU(samplingBias16 / 65535.0f), words.valid() ? c.srv(words) : 0xFFFFFFFFu, snap.valid() ? c.srv(snap) : 0xFFFFFFFFu, 0, 0 };
+                                               asU(samplingBias16 / 65535.0f), words.valid() ? c.srv(words) : 0xFFFFFFFFu, snap.valid() ? c.srv(snap) : 0xFFFFFFFFu, downsampleWord, 0 };
                       c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionReuseResolve"));
                       c.computeConstants(k, 20);
                       c.bindFrameConstants(frameConstants);
