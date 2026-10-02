@@ -1263,6 +1263,11 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     {
         ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmMark");
         const bool subtileStats = q.integer("shadow.vsm.subtile_stats") != 0;  // measurement only
+        // shadow.vsm.page_dilation: pixels near a page border also request the page across it (VsmMark.hlsl)
+        const float dilation = q.has("shadow.vsm.page_dilation") ? (float)q.number("shadow.vsm.page_dilation") : 0.0f;
+        if (!(dilation >= 0 && dilation <= 0.5f)) fail("shadow.vsm.page_dilation = %g: a fraction of a page in [0, 0.5]", dilation);
+        uint32_t dilationBits;
+        std::memcpy(&dilationBits, &dilation, 4);
         const TextureRef depth = main.depth;
         const uint32_t w = main.view.width, h = main.view.height;
         g.addPass("s.vsm.mark", QueueType::Compute,
@@ -1272,10 +1277,10 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       b.keep();
                   },
                   [=](PassContext& ctx) {
-                      const uint32_t k[4] = { ctx.srv(depth), ctx.uav(requests), ring, subtileStats ? 1u : 0u };
+                      const uint32_t k[8] = { ctx.srv(depth), ctx.uav(requests), ring, subtileStats ? 1u : 0u, dilationBits, 0, 0, 0 };
                       ctx.cmd->SetPipelineState(pso);
                       ctx.bindFrameConstants(mainConstants);
-                      ctx.computeConstants(k, 4);
+                      ctx.computeConstants(k, 8);
                       ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
                   });
     }
@@ -1394,6 +1399,29 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.bindFrameConstants(mainConstants);
                       ctx.computeConstants(k, 8);
                       ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
+                  });
+    }
+    // shadow.vsm.coarse_pages: the pages around the camera on the coarse levels are requested every frame (VsmMarkCoarse):
+    // a lookup without a page on its own level finds one of them.
+    const uint32_t coarsePages = q.has("shadow.vsm.coarse_pages") ? (uint32_t)q.integer("shadow.vsm.coarse_pages") : 0u;
+    if (coarsePages > 0)
+    {
+        const int64_t first = q.integer("shadow.vsm.coarse_level_first"), last = q.integer("shadow.vsm.coarse_level_last");
+        if (first < 0 || last < first || last >= kLevels || coarsePages > 8)
+            fail("shadow.vsm coarse pages: levels %lld .. %lld of 0 .. %u, %u pages per axis (at most 8)", (long long)first, (long long)last, kLevels - 1, coarsePages);
+        ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmMarkCoarse");
+        const uint32_t word = (uint32_t)first | (uint32_t)last << 8 | coarsePages << 16;
+        const uint32_t threads = (uint32_t)(last - first + 1) * coarsePages * coarsePages;
+        chain.add("s.vsm.markcoarse",
+                  [&](PassBuilder& b) {
+                      b.use(requests, Use::UavCompute);
+                      b.keep();
+                  },
+                  [=](PassContext& ctx) {
+                      const uint32_t k[4] = { ctx.uav(requests), ring, word, 0 };
+                      ctx.cmd->SetPipelineState(pso);
+                      ctx.computeConstants(k, 4);
+                      ctx.cmd->Dispatch(groups(threads, 64), 1, 1);
                   });
     }
     {
