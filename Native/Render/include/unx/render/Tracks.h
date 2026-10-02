@@ -20,6 +20,9 @@ void particleMeshes(FramePassContext& fc);
 // GpuScene::setFxLightCapacity), then after simulation the lights of this frame at FrameResources::fxLights (before S).
 void particleLightCapacity(TrackState& state, GpuScene& scene);
 void particleLights(FramePassContext& fc, const ViewResources& main);
+// The sun's particle transmittance map (FxShadow.cpp; fx.particles.shadows): after simulation, before S's screen
+// visibility and the particle render pass. Writes FrameResources::particleShadowParams / particleShadowMap.
+void particleShadows(FramePassContext& fc, const ViewResources& main);
 
 // ---- V: visibility (core session) - Native/Render/Passes/Visibility, Tools/ClusterBuilder
 // Culling (two phase), band A/B/C classification, band A vis buffer + depth, HiZ, coverage layer (bands B/C).
@@ -40,6 +43,19 @@ void prepareScene(FramePassContext& fc);
 // M (A4): the main view's EV100 of this frame under automatic exposure (FrameContext::autoExposure), before any frame
 // constants; framesInFlight: the lag after which the host waited for a frame's histogram.
 float autoExposureEv100(TrackState& state, Device& device, const QualityConfig& quality, const FrameContext& frame, uint32_t framesInFlight);
+// M: dynamic resolution (output.dynamic_resolution_target_ms; Passes/Shading/DynamicResolution.cpp). The upscaled main
+// view's internal height of this frame, at most 'maxHeight' (the static settings' height) - FrameRenderer::setupUpscale
+// asks before the frame's constants; and what the controller decided last (a host's statistics).
+struct DynamicResolutionStatus
+{
+    bool active = false;           // a budget is set and the view is upscaled
+    float targetMs = 0;            // output.dynamic_resolution_target_ms
+    float averageMs = 0;           // the weighted GPU frame time the last decision was made from (0: none measured yet)
+    float scale = 1;               // internal height / output height of the last frame set up
+    uint32_t height = 0, minHeight = 0, maxHeight = 0;  // that frame's internal height and the range it may take
+};
+uint32_t dynamicResolutionHeight(TrackState& state, const QualityConfig& quality, const FrameContext& frame, uint32_t outputHeight, uint32_t maxHeight);
+DynamicResolutionStatus dynamicResolutionStatus(TrackState& state);
 void materialResolve(FramePassContext& fc, ViewResources& view);  // writes view.gbuffer
 void shading(FramePassContext& fc, ViewResources& view);          // writes view.color (+ edge/coverage composite)
 // M (B11 photo mode, FEATURES_GAME 17): an exposed-linear image made elsewhere (the GPU reference tracer's progressive

@@ -71,6 +71,8 @@ public:
     const std::vector<gpu::MaterialTextures>& published() const { return m_published; }
     bool anyEmissiveTexture() const { return m_anyEmissive; }
     uint32_t textureSrv(uint32_t sceneTexture) const { return m_textures.at(sceneTexture).srv; }
+    // Every scene texture's SRV (gpu::kNone: none), by scene texture index: GpuScene::setTextureSrvs.
+    std::vector<uint32_t> textureSrvs() const;
     // Per scene light the SRV of its source texture (scene::Light::sourceTexture: a rect's image), gpu::kNone for a light
     // without one: what GpuScene::setLightSourceTextures publishes. Valid after sync().
     std::vector<uint32_t> lightSourceTextures() const;

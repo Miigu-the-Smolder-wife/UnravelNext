@@ -267,6 +267,14 @@ post_white_balance = false
 # cache's ambient) and lets the sun map's beam extinction include sigma_s. false (default): clear water as before
 # (bit-identical); a material with sigma_s = 0 is clear either way.
 water_turbid = false
+water_underwater = true              # the basin the camera is in is a medium of the view (WaterMedia.hlsl), clear water too: every
+                                     # path of an underwater view takes the water's absorption (and, with water_turbid, what it
+                                     # scatters), and the surface seen from below shows the world above inside Snell's window and
+                                     # mirrors the water outside it (WaterSurface.hlsli). false: the view from inside a basin is the
+                                     # view through air, as before (the surface from below still refracts and mirrors)
+water_multiple_scattering = true     # with water_turbid: the light scattered many times in a turbid water, as the diffusion limit's
+                                     # isotropic source (WaterMedia.hlsl: a milky bath is bright from every side instead of the dark
+                                     # grey single scattering leaves). false: single scattering and the ambient term alone
 
 # Motion blur (A5; COVERAGE 14.12 (2); MotionBlur.cpp): the shutter's open time as a fraction of the frame interval,
 # the exposure [t - s dt, t]; 0.5 = 180 degrees (the user's gate camera, 2026-09-26), 0 = instantaneous. Frames without
@@ -316,3 +324,37 @@ dof_diaphragm_full_aperture = 0.0                   # DepthOfFieldMinFstop, as t
 dof_diaphragm_prefilter = true                      # r.DOF.TemporalAAQuality: a jittered (upscaled) view's half-resolution
 dof_diaphragm_prefilter_weight = 0.04               # picture accumulated first; the current frame's weight
                                                     # (r.TemporalAACurrentFrameWeight)
+dof_diaphragm_prefilter_velocity = true             # the prefilter's history is read where each pixel's own surface was: the
+                                                    # upscale's vectors (objects, deformation, the layers), made ahead of the
+                                                    # upscale for it. false: by the camera's motion only
+# The lens's shape (the reference's camera settings of the same names; their defaults are in its Engine module, which the
+# reference checkout does not have - the values below are those defaults as remembered: all of it off).
+dof_diaphragm_squeeze = 1.0                         # DepthOfFieldSqueezeFactor, 0.1 .. 10: an anamorphic lens - the bokeh is
+                                                    # narrower by it (2: ovals twice as tall as wide)
+dof_diaphragm_petzval = 0.0                         # DepthOfFieldPetzvalBokeh: away from the picture's centre the bokeh is
+                                                    # squashed towards the centre (> 0: the swirl) or across (< 0); 0: none
+dof_diaphragm_petzval_falloff = 1.0                 # DepthOfFieldPetzvalBokehFalloff: the power of the distance it grows by
+dof_diaphragm_petzval_box_x = 0.0                   # DepthOfFieldPetzvalExclusionBoxExtents: a box about the centre without
+dof_diaphragm_petzval_box_y = 0.0                   # it, as half extents in the picture's half sizes (0 .. 1)
+dof_diaphragm_petzval_box_radius = 0.0              # DepthOfFieldPetzvalExclusionBoxRadius: its corners' radius, of the
+                                                    # smaller extent
+dof_diaphragm_barrel_radius = 0.05                  # DepthOfFieldBarrelRadius (m; the reference's 5 cm): the lens barrel,
+dof_diaphragm_barrel_length = 0.0                   # DepthOfFieldBarrelLength (m): a tube in front of the aperture that cuts
+                                                    # the sprites' bokeh away from the picture's centre (the cat's eye);
+                                                    # length 0 and no flag: no vignetting of the bokeh
+# DepthOfFieldMatteBoxFlags, three flags on the barrel's rim that cut the sprites' bokeh along their far edge:
+# roll - where on the rim, degrees (0: the picture's right, 90: its top; ours - the reference's runs in its own lens
+# frame); pitch - its tilt from the axis, degrees (0: straight ahead, under 0: closing over the opening, above: opening
+# out); length (m; 0: no flag).
+dof_diaphragm_matte_box_0_roll = 0.0
+dof_diaphragm_matte_box_0_pitch = 0.0
+dof_diaphragm_matte_box_0_length = 0.0
+dof_diaphragm_matte_box_1_roll = 0.0
+dof_diaphragm_matte_box_1_pitch = 0.0
+dof_diaphragm_matte_box_1_length = 0.0
+dof_diaphragm_matte_box_2_roll = 0.0
+dof_diaphragm_matte_box_2_pitch = 0.0
+dof_diaphragm_matte_box_2_length = 0.0
+dof_diaphragm_depth_blur_radius = 0.0               # DepthOfFieldDepthBlurRadius: a blur by distance whatever the focus, its
+                                                    # radius far away in half-resolution pixels of a 1920-wide view; 0: none
+dof_diaphragm_depth_blur_km = 1.0                   # DepthOfFieldDepthBlurAmount: the distance (km) at which it is half

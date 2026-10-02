@@ -11,6 +11,7 @@
 #include "TestScenes.h"
 #include "unx/core/File.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -158,6 +159,63 @@ int main(int argc, char** argv)
         expect("a refused layer leaves the previous one", h.clouds().coverage == 0.5f);
         h.setClouds(render::CloudLayerDesc{});
         expect("coverage 0 clears the layer", h.clouds().coverage == 0);
+        // The weather set through UnxFrameSetClouds2 / SetFog2 / SetFogVolumes2 / SetWeather / SetLightning: what the
+        // setters refuse on the calling thread, and frames with all of it set.
+        render::CloudLayerDesc sheet;  // the cirrus sheet without the layer
+        sheet.cirrusCoverage = 0.4f;
+        h.setClouds(sheet);
+        expect("a cirrus sheet without a layer is held", h.clouds().coverage == 0 && h.clouds().cirrusCoverage == 0.4f);
+        render::CloudLayerDesc badSheet = sheet;
+        badSheet.cirrusOpticalDepth = 0;
+        expect("a cirrus sheet without optical depth is refused", throws([&] { h.setClouds(badSheet); }));
+        render::FogDesc fog;
+        fog.enabled = true;
+        fog.density2 = 0.01f, fog.heightFalloff2 = 0.5f, fog.height2 = 1;
+        h.setFog(fog);
+        render::FogDesc badFog = fog;
+        badFog.density2 = -1;
+        expect("a second fog layer of negative density is refused", throws([&] { h.setFog(badFog); }));
+        std::vector<uint8_t> texels(4 * 3 * 2, 128);
+        std::vector<render::FogVolumeDesc> steam(1);
+        steam[0].centre[1] = 1;
+        steam[0].shape = 1;
+        steam[0].sourcePlane = 0.2f, steam[0].riseSpeed = 0.3f, steam[0].turbulence = 0.6f, steam[0].turbulenceScale = 0.4f;
+        steam[0].grid = texels.data();
+        steam[0].gridSize[0] = 4, steam[0].gridSize[1] = 3, steam[0].gridSize[2] = 2;
+        h.setFogVolumes(steam);
+        std::fill(texels.begin(), texels.end(), (uint8_t)0);  // (the host's copy is the frames': the caller's texels are free again)
+        std::vector<render::FogVolumeDesc> badSteam = steam;
+        badSteam[0].gridSize[2] = render::kFogGridMax + 1;
+        expect("a density grid over 32 texels a side is refused", throws([&] { h.setFogVolumes(badSteam); }));
+        badSteam = steam;
+        badSteam[0].grid = nullptr;
+        expect("a density grid's size without its texels is refused", throws([&] { h.setFogVolumes(badSteam); }));
+        badSteam = steam;
+        badSteam[0].sourcePlane = 1;
+        expect("a source plane at the volume's top is refused", throws([&] { h.setFogVolumes(badSteam); }));
+        render::WeatherFrame weather;
+        weather.rainRate = 10, weather.wetness = 0.7f, weather.cloudCover = 0.8f;
+        weather.rainDirection = { 0.3f, -2.0f, 0 };  // (any length: the host makes it a unit vector)
+        h.setWeather(weather);
+        render::WeatherFrame badWeather = weather;
+        badWeather.wetness = 1.5f;
+        expect("a wetness above 1 is refused", throws([&] { h.setWeather(badWeather); }));
+        badWeather = weather;
+        badWeather.rainDirection = { 0, 0, 0 };
+        expect("a rain direction of length 0 is refused", throws([&] { h.setWeather(badWeather); }));
+        render::LightningDesc flash;
+        flash.position[1] = 2000;
+        flash.intensity = 1e8f;
+        h.setLightning(flash);
+        render::LightningDesc badFlash = flash;
+        badFlash.intensity = -1;
+        expect("a lightning flash of negative intensity is refused", throws([&] { h.setLightning(badFlash); }));
+        frames(3);  // (the flash is the first frame's; the second marches every texel again, the third is as before)
+        h.setFogVolumes({});
+        h.setFog(render::FogDesc{});
+        h.setWeather(render::WeatherFrame{});
+        h.setClouds(render::CloudLayerDesc{});
+        frames(1);
         expect("D3D12 debug layer errors 0", h.debugErrors() == 0);
         logf(failures ? "HOST OCEAN TEST FAILED (%u)\n" : "HOST OCEAN TEST PASS\n", failures);
         return failures ? 1 : 0;

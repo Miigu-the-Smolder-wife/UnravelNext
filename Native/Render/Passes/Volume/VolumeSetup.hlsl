@@ -4,7 +4,7 @@
 //   STEP=0 clear: the media and haze tile counts and fills, the counters (thread per tile of the larger grid).
 //   STEP=1 setup, thread per render thread: the particle at the frame time (FxLayerSetup.hlsl's interpolation: cubic
 //          Hermite of the two ticks' ends; born in the latest tick p_n - v_n (1 - w) dt; died in it p_(n-1) + v_(n-1) w dt),
-//          its appearance at that age; a volume-output particle -> media record (lit once: fxLitRadiance's law with
+//          its appearance at that age; a volume-output particle -> media record (lit once: fxLight's scattered light with
 //          albedo 1, i.e. L_in per unit scattering) and the froxel tiles its bounding sphere (tent cube half-width r x
 //          sqrt 3) covers; a distortion-output particle -> haze record and the 1/4-resolution tiles its support covers.
 //   STEP=4 count: the record's loose-quadtree cells (at most K x K, VolumeCommon.hlsli), thread per record and cell row.
@@ -48,7 +48,7 @@ float volumePhase(float cosTheta, float g)  // Henyey-Greenstein over the sphere
 
 // In-scattered radiance per unit scattering towards the camera at a camera-relative point (D: camera -> point, unit):
 // the sun (atmosphere transmittance, S's visibility in the air at 'footprint'), R's GI cache (isotropic) and the froxel
-// list's local lights, each with the phase function; the law of FxLayerSetup.hlsl fxLitRadiance with albedo 1.
+// list's local lights, each with the phase function; the law of FxLayerSetup.hlsl fxLight (its scattered light).
 float3 volumeLit(VolumeConstants c, float3 offset, float3 D, float g, float footprint, uint2 pixel, float linearZ)
 {
     const float3 worldPos = g_cameraPosition + offset;

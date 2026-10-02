@@ -7,6 +7,9 @@
 //                 with a half-resolution gather of the same radii as its stable bound;
 //   hole filling  what a blurred foreground uncovers behind itself.
 // The layers fade into each other over one pixel of radius around those bounds.
+// The radius is the bokeh's vertical one. An anamorphic lens (shading.dof_diaphragm_squeeze, the reference's
+// DepthOfFieldSqueezeFactor) has a bokeh narrower by the squeeze: a kernel's sample positions are x / squeeze, a
+// picture offset is x * squeeze before it is measured against a radius ("on the lens": the bokeh as a unit shape).
 #ifndef UNX_DDOF_COMMON_HLSLI
 #define UNX_DDOF_COMMON_HLSLI
 
@@ -26,7 +29,19 @@
 
 // The lens (DiaphragmDof.cpp): radius = infinity radius x (1 - focus / z), linear in the reversed device depth
 // (1 / z = device / near): lens = { radius at infinity, its slope over the device depth, lowest, highest }.
-float ddofCoc(float deviceDepth, float4 lens) { return clamp(lens.x - lens.y * deviceDepth, lens.z, lens.w); }
+// The depth blur (shading.dof_diaphragm_depth_blur_radius; the reference's DepthBlurRadius and DepthBlurExponent): a
+// blur by distance whatever the focus - radius x (1 - 2^(-z x exponent)), taken where it is wider than the lens's, on
+// the lens's side of the focus: blur = { radius (0: none), exponent x near plane }.
+float ddofCoc(float deviceDepth, float4 lens, float2 blur)
+{
+    float coc = lens.x - lens.y * deviceDepth;
+    if (blur.x > 0.0)
+    {
+        const float byDepth = (1.0 - exp2(-blur.y / max(deviceDepth, 1e-9))) * blur.x;
+        coc = coc < 0.0 ? -max(-coc, byDepth) : max(coc, byDepth);
+    }
+    return clamp(coc, lens.z, lens.w);
+}
 
 float ddofLuma4(float3 c) { return c.g * 2.0 + (c.r + c.b); }
 float ddofRcp(float x) { return x > 0.0 ? rcp(x) : 0.0; }
@@ -125,6 +140,35 @@ DdofSuggestion ddofSuggest(DdofTile t, uint layer)
     s.plain = s.maxAbs - s.minAbs < error;
     return s;
 }
+
+// The Petzval stretch (shading.dof_diaphragm_petzval; the reference's DepthOfFieldPetzvalBokeh, its
+// CalcPetzvalTransform): away from the picture's centre a bokeh is squashed along the direction to the centre (amount
+// > 0: the ovals lie around the centre - the swirl) or across it (amount < 0), to 1 / (1 + |amount| d^falloff) of its
+// width; d the distance from a box about the centre in which nothing is squashed (its half extents and its corners'
+// radius as a share of the smaller extent), all in the picture's half sizes.
+// 'at': the bokeh's centre, -1 .. 1 across the picture (y as the pixels'); petzval = { amount, falloff power, box half
+// extents x, y }, more = { corner radius, the picture's width / height }. Returns a symmetric 2 x 2 matrix (rows xy,
+// zw): 'toPicture' takes an offset on the lens to the picture (the gathers' sample positions), otherwise a picture
+// offset back onto the lens (the sprites). The identity where nothing is squashed.
+// (Ours: the axis is the direction in pixels. The reference takes it in the normalised square, which on a wide
+// picture leans the ovals away from the circle around the centre.)
+float4 ddofPetzval(float2 at, float4 petzval, float2 more, bool toPicture)
+{
+    const float4 identity = float4(1, 0, 0, 1);
+    if (petzval.x == 0.0) return identity;
+    const float corner = more.x * min(petzval.z, petzval.w);
+    const float2 fromBox = sign(at) * max(abs(at) - petzval.zw + corner, 0.0);
+    const float away = length(fromBox);
+    if (!(away - corner > 0.0)) return identity;
+    const float2 n = normalize(fromBox * float2(more.y, 1.0));
+    const float squash = 1.0 + abs(petzval.x) * pow(away - corner, petzval.y);
+    const float scale = toPicture ? rcp(squash) : squash;
+    const float along = petzval.x > 0.0 ? scale : 1.0, across = petzval.x > 0.0 ? 1.0 : scale;
+    const float2 t = float2(n.y, -n.x);
+    const float xy = n.x * n.y * along + t.x * t.y * across;
+    return float4(n.x * n.x * along + t.x * t.x * across, xy, xy, n.y * n.y * along + t.y * t.y * across);
+}
+float2 ddofTransform(float4 m, float2 v) { return float2(dot(m.xy, v), dot(m.zw, v)); }
 
 // The bokeh's edge along a direction, as a factor of the radius (1 for a disk; the edge table of DdofBokehLut.hlsl is
 // centred on its texel origin and wraps: a direction is looked up 15 texels out).

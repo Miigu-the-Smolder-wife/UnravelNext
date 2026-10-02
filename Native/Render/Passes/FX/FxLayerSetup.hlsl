@@ -13,15 +13,19 @@
 // shadows), each with the program's phase function (Henyey-Greenstein, g = medium_phase), once at the particle centre;
 // material 0 is emissive (colour = radiance, nit). Every particle then takes S's air between the camera and its centre:
 // premultiplied colour = alpha (T_air L + inscatter) (request 4: the surface behind already carries the full path).
-#if ML == 0 && GIV == 0
-// This variant (the lists' lights with S's shadow maps, the world cache: neither is the default path) stands 256 B under
-// the kernel size limit: its particles take the air without the height fog (Atmosphere.hlsli), and the lists' lights
-// without their light components (Scene.hlsli UNX_LIGHT_COMPONENTS: scales, falloff exponent, draw-distance fade).
-#define UNX_AIR_WITHOUT_FOG
-#define UNX_LIGHT_COMPONENTS 0
-#endif
+// Sprite looks (material 2 + i: look i; unx/fx/SpriteLooks.h, ParticleLayerPass.hlsli): the sprite is a quad - its
+// facing (the view plane, the camera's position, the velocity, an axis), rotation (the program's rotation curve + the
+// look's rate), aspect, stretch by speed and pivot give two world axes, projected at the centre to the record's screen
+// axes; the flipbook's frame at the particle's age; the light as a look takes it - emissive, lit as a medium, or for
+// the tile kernel's per-pixel normal the light's fluence F and first moment M at the centre (the same sun, local
+// light volume and indirect light): a surface of normal n receives F / 4 + M . n / 2, so the record holds
+// albedo F / 4 pi and M / lum(F) in the quad's frame. Every sprite's record carries its centre's travel on screen
+// since the previous frame (the particle moved back by its velocity over the frame, under the previous view).
+// The light is evaluated once per thread (setup: a sprite's and a ribbon point's are the same call) - two copies of it
+// put the variant with the lists' lights and the world cache over the kernel size limit.
 #include "Passes/FX/ParticleLayerPass.hlsli"
 #include "Passes/FX/FxParticleAt.hlsli"
+#include "Passes/FX/ParticleShadow.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
 #include "Passes/Shading/AreaLight.hlsli"
 #include "Passes/Atmosphere/Atmosphere.hlsli"
@@ -56,11 +60,18 @@ float fxPhase(float cosTheta, float g)  // Henyey-Greenstein, normalised over th
     return (1.0f - g2) / (4.0f * SH_PI * pow(max(1.0f + g2 - 2.0f * g * cosTheta, 1e-6f), 1.5f));
 }
 
-// Radiance a lit particle of albedo 'albedo' scatters towards the camera (D: camera -> particle, unit).
-float3 fxLitRadiance(LayerConstants c, float3 albedo, float3 offset, float3 D, float g, float footprint, uint2 pixel, float linearZ)
+// The light at a particle (offset: camera-relative; D: camera -> particle, unit): what a medium of phase asymmetry g
+// scatters towards the camera per unit albedo, and the light's fluence (the integral of the incident radiance over
+// directions) with its first moment (luminance x direction to the source) - what a look lit per pixel shades with.
+struct FxLight
+{
+    float3 scattered, fluence, moment;
+};
+float fxLuminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
+FxLight fxLight(LayerConstants c, float3 offset, float3 D, float g, float footprint, uint2 pixel, float linearZ)
 {
     const float3 worldPos = g_cameraPosition + offset;
-    float3 L = 0;
+    float3 L = 0, fluence = 0, moment = 0;
     AtmosphereSrvs atm;
     atm.transmittance = c.transmittance;
     atm.multiScatter = c.multiScatter;
@@ -85,14 +96,23 @@ float3 fxLitRadiance(LayerConstants c, float3 albedo, float3 offset, float3 D, f
         const float v = shadowSunVisibilityInAir(sh, worldPos, footprint, resident);
         if (resident) visibility = v;
     }
+    // (the shadow-casting sprites between the particle and the sun, its own puff's upper part included)
+    visibility *= fxParticleShadow(fxLayerExtra().shadowParams, worldPos);
     const float3 l = normalize(g_sunDirection);
-    // (added below: the ML variant's volume fetch brings the cloud layer's shadow on the sun)
-    float3 sunLight = E * (visibility * fxPhase(dot(l, D), g));
+    // (the sun's light is kept apart until the end: the ML variant's volume fetch brings the cloud layer's shadow on it)
+    float3 sunE = E * visibility;
     // indirect (GiSource.hlsli): the Lumen translucency volume's light through the phase function (band 0, and band 1 x
     // g), or R's GI cache, isotropic (the mean irradiance over the six axes / pi = fluence / 4 pi)
     // (GIV: the source's kind picks the kernel - both reads in one kernel pass the DXIL limit; ParticleLayer.cpp)
 #if GIV
-    if (giSourceIsVolume(c.giCache)) L += ltvInscatter(giSourceVolume(c.giCache), worldPos, D, g);
+    if (giSourceIsVolume(c.giCache) && giSourceVolume(c.giCache) != UNX_NONE)
+    {
+        // (ltvInscatter's value; the SH's band 0 is the fluence / (4 pi 0.282095), band 1 the moment x 3 / (4 pi 0.488603))
+        const LtvSh sh = ltvSample(ltvParams(giSourceVolume(c.giCache)), worldPos);
+        L += ltvInscatterOf(sh, D, g);
+        fluence += (4.0f * SH_PI * 0.282095f) * sh.ambient;
+        moment += (4.0f * SH_PI / 3.0f * 0.488603f) * float3(sh.directional.z, sh.directional.x, sh.directional.y);
+    }
 #else
     if (giSourceIsCache(c.giCache))
     {
@@ -101,13 +121,18 @@ float3 fxLitRadiance(LayerConstants c, float3 albedo, float3 offset, float3 D, f
         float3 sum = 0;
         float n = 0;
         const float3 axes[6] = { float3(1, 0, 0), float3(-1, 0, 0), float3(0, 1, 0), float3(0, -1, 0), float3(0, 0, 1), float3(0, 0, -1) };
-        [unroll] for (uint a = 0; a < 6u; ++a)
+        float3 difference = 0;
+        // (a loop: one copy of the cache read in the kernel - six unrolled were a third of its size)
+        [loop] for (uint a = 0; a < 6u; ++a)
         {
             float w;
             const float3 e = giCacheIrradianceAt(cache, h, worldPos, axes[a], 0, w);
-            if (w > 0) { sum += e; n += 1; }
+            if (w > 0) { sum += e; n += 1; difference += axes[a] * fxLuminance(e); }
         }
         if (n > 0) L += sum / (n * SH_PI);
+        // (irradiance on normal n = fluence / 4 + moment . n / 2: the six axes' mean and their differences)
+        if (n > 0) fluence += sum * (4.0f / n);
+        if (n == 6) moment += difference;
     }
 #endif
     // ML = 1 (its own variant: both paths in one kernel pass the DXIL limit; ParticleLayer.cpp picks it when the volumes exist):
@@ -124,12 +149,14 @@ float3 fxLitRadiance(LayerConstants c, float3 albedo, float3 offset, float3 D, f
         Texture3D<float4> fluenceVolume = ResourceDescriptorHeap[P[1].x];
         Texture3D<float4> momentVolume = ResourceDescriptorHeap[P[1].y];
         // (alpha: the cloud layer's sun transmittance at the froxel - MegaLightsVolume.hlsl; B5 cloud shadow on lit particles)
-        const float4 fluence = fluenceVolume.SampleLevel(g_linearClamp, uvw, 0);
-        const float3 F = fluence.rgb / g_exposure;
+        const float4 volumeFluence = fluenceVolume.SampleLevel(g_linearClamp, uvw, 0);
+        const float3 F = volumeFluence.rgb / g_exposure;
         const float3 M = momentVolume.SampleLevel(g_linearClamp, uvw, 0).rgb / g_exposure;
         const float lumF = dot(F, float3(0.2126, 0.7152, 0.0722));
         if (lumF > 0) L += F * (max(0.0f, 1.0f + 3.0f * g * dot(M, D) / lumF) / (4.0f * SH_PI));
-        sunLight *= fluence.a;
+        fluence += F;
+        moment += M;
+        sunE *= volumeFluence.a;
     }
 #else
     // local lights of the froxel list at the particle (punctual exactly; area lights as their centre's point, exact
@@ -166,10 +193,26 @@ float3 fxLitRadiance(LayerConstants c, float3 albedo, float3 offset, float3 D, f
             float v = 1;
             if (lightCastsShadow(light) && c.shadowPageTable != UNX_NONE && c.shadowLights != UNX_NONE) v = shadowVisibilityDirect(sh, index, worldPos, -D);
             L += El * (v * fxPhase(dot(toLight, D), g));
+            fluence += El * v;
+            moment += toLight * fxLuminance(El * v);
         }
     }
 #endif
-    return albedo * (L + sunLight);
+    L += sunE * fxPhase(dot(l, D), g);
+    fluence += sunE;
+    moment += l * fxLuminance(sunE);
+    FxLight o;
+    o.scattered = L;
+    o.fluence = fluence;
+    o.moment = moment;
+    return o;
+}
+// A world axis 'a' (view space) at view-space point v (distance = -v.z) on screen: the travel of the point's pixel per
+// unit of the axis (the projection's derivative; no shear).
+float2 fxProjectAxis(float3 v, float distance, float3 a)
+{
+    return float2(0.5f * g_viewWidth * g_proj[0][0] * (a.x * distance + v.x * a.z), -0.5f * g_viewHeight * g_proj[1][1] * (a.y * distance + v.y * a.z)) /
+           (distance * distance);
 }
 float3 curve3(uint first, uint count, float u) { return count >= 2u ? nv_curve(first, count, u).yzw : float3(1, 1, 1); }
 
@@ -178,15 +221,13 @@ float3 curve3(uint first, uint count, float u) { return count >= 2u ? nv_curve(f
 // range's valid window): camera-relative position at the frame time, width after the
 // pixel-footprint prefilter across it (the strip's profile widened to h' = sqrt(h^2 + 1/4) px, h its half width, at the same
 // integrated opacity: alpha h / h'), and its appearance before the air (the strip samples the air at each hit):
-// radiance x exposure (material 1 lit at the point like a sprite, 0 emissive), opacity. A point not alive at the frame time
+// radiance x exposure (lit at the point like a sprite, else emissive), opacity. A point not alive at the frame time
 // is written invalid: born after it (the newest births, the range's tail) or already dead (the oldest dying ones, its head);
 // the valid points are one window. A killed emitter or a refused material writes invalid points (nothing drawn).
-void ribbonPoint(LayerConstants c, RenderRange rr, uint k, uint birth, uint row, StreamEmitter e, StreamProgram p, bool drawn)
+// alive: the particle at the frame time (setup); radiance, size, alpha, age: its appearance there.
+// program, look: the point's program and its look + 1 (0: none), for the segment's record.
+void ribbonPoint(LayerConstants c, uint birth, uint row, bool alive, float3 pos, float age, float size, float3 radiance, float alpha, uint program, uint look)
 {
-    float3 pos;
-    float age;
-    bool dying;
-    const bool alive = drawn && fxParticleAt(c, rr, k, birth, row, p, pos, age, dying);
     if (c.ribbonRows == UNX_NONE) return;
     StructuredBuffer<uint2> rows = ResourceDescriptorHeap[c.ribbonRows];
     const uint2 place = rows[row];
@@ -202,31 +243,21 @@ void ribbonPoint(LayerConstants c, RenderRange rr, uint k, uint birth, uint row,
         appearance[index] = uint2(0, 0);
         return;
     }
-    const float u = saturate(age / p.lifetime);
-    const float size = p.size * e.sizeScale * curve1(p.sizeKeys, p.sizeCount, u);
-    const float3 colour = p.color.rgb * e.colorScale.rgb * curve3(p.colorKeys, p.colorCount, u);
-    float alpha = saturate(p.color.a * e.colorScale.a * curve1(p.alphaKeys, p.alphaCount, u));
-    const float3 v = mul((float3x3)g_view, pos);
-    const float distance = -v.z;
+    const float distance = -mul((float3x3)g_view, pos).z;
     float width = max(size, 0.0f);
-    float2 pixel = float2(0.5f * g_viewWidth, 0.5f * g_viewHeight);
     if (distance > g_nearPlane && width > 0)
     {
         const float h = 0.5f * width * g_proj[1][1] * 0.5f * g_viewHeight / distance;
         const float hEff = sqrt(h * h + 0.25f);
         width *= hEff / h;
         alpha *= h / hEff;
-        const float4 clip = mul(g_proj, float4(v, 1));
-        pixel = clamp(float2((clip.x / clip.w + 1) * 0.5f * g_viewWidth, (1 - clip.y / clip.w) * 0.5f * g_viewHeight), 0.0f,
-                      float2(g_viewWidth - 1, g_viewHeight - 1));
     }
-    const float linearZ = max(distance, g_nearPlane);
-    const float footprint = 2.0f * linearZ / (g_proj[1][1] * g_viewHeight);
-    const float3 radiance = p.material == 1u ? fxLitRadiance(c, colour, pos, normalize(pos), p.mediumPhase, max(size * 0.5f, footprint), (uint2)pixel, linearZ) : colour;
     rp.position = pos * c.streamAxes;  // (stream axes: FxRibbon builds the strip frame there and maps its vertices)
     rp.width = width;
     rp.age = age;
     rp.valid = 1u;
+    rp.program = program;
+    rp.look = look;
     points[index] = rp;
     appearance[index] = fxPackHalf4(float4(radiance * g_exposure, alpha));
 }
@@ -240,54 +271,170 @@ LayerRecord setup(LayerConstants c, uint t, uint group)
     StructuredBuffer<StreamProgram> programs = ResourceDescriptorHeap[c.programs];
     const StreamEmitter e = emitters[row];
     const StreamProgram p = programs[e.program];
-    // The particle material contract (0 emissive: colour = nit; 1 lit: colour = albedo): any other value is refused, not
-    // guessed (an old material-table index drew as emissive at the wrong scale).
-    const bool badMaterial = p.output == FX_OUTPUT_SPRITE && p.material > 1u;
-    if (WaveActiveAnyTrue(badMaterial) && WaveIsFirstLane()) fxLayerStatus(c, FX_LAYER_STATUS_MATERIAL);
-    const bool badRibbon = p.output == FX_OUTPUT_RIBBON && p.material > 1u;
-    if (WaveActiveAnyTrue(badRibbon) && WaveIsFirstLane()) fxLayerStatus(c, FX_LAYER_STATUS_MATERIAL);
-    if (p.output == FX_OUTPUT_RIBBON)
+    // The particle material contract (0 emissive: colour = nit; 1 lit: colour = albedo; 2 + i: look i of the renderer's
+    // table, unx/fx/SpriteLooks.h): a value without a set look is refused, not guessed (an old material-table index drew
+    // as emissive at the wrong scale).
+    const LayerExtra x = fxLayerExtra();
+    const bool sprite = p.output == FX_OUTPUT_SPRITE, ribbon = p.output == FX_OUTPUT_RIBBON;
+    const bool looked = p.material > 1u;
+    FxSpriteLook look = (FxSpriteLook)0;
+    if (looked && x.looks != UNX_NONE && p.material - 2u < x.lookCount)
     {
-        ribbonPoint(c, rr, k, birth, row, e, p, !badRibbon && (e.flags & FX_EMITTER_KILLED) == 0u && p.lifetime > 0);
-        return rec;
+        StructuredBuffer<FxSpriteLook> looks = ResourceDescriptorHeap[x.looks];
+        look = looks[p.material - 2u];
     }
-    if (badMaterial || p.output != FX_OUTPUT_SPRITE || (e.flags & FX_EMITTER_KILLED) != 0u || !(p.lifetime > 0)) return rec;
+    const bool badMaterial = (sprite || ribbon) && looked && (look.flags & FX_LOOK_VALID) == 0u;
+    if (WaveActiveAnyTrue(badMaterial) && WaveIsFirstLane()) fxLayerStatus(c, FX_LAYER_STATUS_MATERIAL);
+    if (!sprite && !ribbon) return rec;
+    const bool lit = looked ? (look.flags & FX_LOOK_LIT) != 0u : p.material == 1u;
 
-    float3 pos;
-    float age;
-    bool dying;
-    if (!fxParticleAt(c, rr, k, birth, row, p, pos, age, dying)) return rec;
-
-    // appearance at that age
-    const float u = saturate(age / p.lifetime);
+    // the particle at the frame time and its appearance at that age
+    float3 pos = 0, vel = 0;
+    float age = 0;
+    bool dying = false;
+    bool alive = !badMaterial && (e.flags & FX_EMITTER_KILLED) == 0u && p.lifetime > 0 && fxParticleAtV(c, rr, k, birth, row, p, pos, vel, age, dying);
+    const float u = alive ? saturate(age / p.lifetime) : 0.0f;
     const float size = p.size * e.sizeScale * curve1(p.sizeKeys, p.sizeCount, u);
     const float3 colour = p.color.rgb * e.colorScale.rgb * curve3(p.colorKeys, p.colorCount, u);
-    const float alpha = saturate(p.color.a * e.colorScale.a * curve1(p.alphaKeys, p.alphaCount, u));
-    if (!(size > 0) || !(alpha > 0)) return rec;
+    float alpha = saturate(p.color.a * e.colorScale.a * curve1(p.alphaKeys, p.alphaCount, u));
+    if (sprite && (!(size > 0) || !(alpha > 0))) alive = false;
+    if (!alive)
+    {
+        if (ribbon) ribbonPoint(c, birth, row, false, 0, 0, 0, 0, 0, 0u, 0u);
+        return rec;
+    }
+
+    // a look's quad: its world axes (right, up, facing: the normal toward the viewer), half sizes and centre
+    float3 right = g_view[0].xyz, up = g_view[1].xyz, facing = g_view[2].xyz, centreWorld = pos;
+    float halfU = 0.5f * size, halfV = 0.5f * size;
+    if (looked && sprite)
+    {
+        const uint mode = fxLookFacing(look);
+        const float3 toCamera = normalize(-pos);
+        if (mode == FX_FACING_CAMERA_POSITION)
+        {
+            const float3 side = cross(g_view[1].xyz, toCamera);
+            if (dot(side, side) > 1e-12f)
+            {
+                facing = toCamera;
+                right = normalize(side);
+                up = cross(facing, right);
+            }
+        }
+        else if (mode == FX_FACING_VELOCITY || mode == FX_FACING_AXIS)
+        {
+            // the up axis along the velocity (or the look's axis), the quad turned about it toward the camera
+            const float speed = length(vel);
+            const float3 along = mode == FX_FACING_AXIS ? look.axis : (speed > 1e-6f ? vel / speed : g_view[1].xyz);
+            const float3 side = cross(along, toCamera);
+            if (dot(side, side) > 1e-12f)
+            {
+                up = along;
+                right = normalize(side);
+                facing = cross(right, up);
+            }
+            if (mode == FX_FACING_VELOCITY && look.stretch > 0)
+            {
+                const float factor = 1.0f + look.stretch * speed / max(size, 1e-6f);
+                halfV *= look.stretchMax > 0 ? min(factor, look.stretchMax) : factor;
+            }
+        }
+        if (mode <= FX_FACING_CAMERA_POSITION)
+        {
+            // rotation about the facing direction: the program's curve (radians) at this age + the look's rate
+            const float angle = (p.rotationCount >= 2u ? nv_curve(p.rotationKeys, p.rotationCount, u).y : 0.0f) + look.rotationRate * age;
+            float sn, cs;
+            sincos(angle, sn, cs);
+            const float3 r0 = right, u0 = up;
+            right = r0 * cs + u0 * sn;
+            up = u0 * cs - r0 * sn;
+        }
+        halfU *= look.aspect;
+        centreWorld = pos - right * (look.pivot.x * halfU) - up * (look.pivot.y * halfV);
+    }
 
     // projection (camera-relative: the view's rotation, then its projection)
-    const float3 v = mul((float3x3)g_view, pos);
+    const float3 v = mul((float3x3)g_view, centreWorld);
     const float distance = -v.z;
-    if (!(distance > g_nearPlane)) return rec;
-    const float4 clip = mul(g_proj, float4(v, 1));
-    const float2 ndc = clip.xy / clip.w;
-    const float2 centre = float2((ndc.x + 1) * 0.5f * g_viewWidth, (1 - ndc.y) * 0.5f * g_viewHeight);
-    const float radius = 0.5f * size * g_proj[1][1] * 0.5f * g_viewHeight / distance;
-    // Pixel-footprint prefilter: the pixel box filter widens the profile to r' = sqrt(r^2 + 1/4) (radius of a half pixel)
-    // at the same integrated opacity (alpha r^2 / r'^2): a sprite below a pixel keeps its energy instead of being missed
-    // by pixel centres.
-    const float r2 = radius * radius, rEff2 = r2 + 0.25f;
-    const float rEff = sqrt(rEff2);
+    if (sprite && !(distance > g_nearPlane)) return rec;
+    float2 centre = float2(0.5f * g_viewWidth, 0.5f * g_viewHeight);  // (a ribbon point at or behind the near plane: lit there)
+    if (distance > g_nearPlane)
+    {
+        const float4 clip = mul(g_proj, float4(v, 1));
+        const float2 ndc = clip.xy / clip.w;
+        centre = float2((ndc.x + 1) * 0.5f * g_viewWidth, (1 - ndc.y) * 0.5f * g_viewHeight);
+    }
+
+    // the light, once (lit: colour = albedo; else emissive): at the centre, with the program's phase function for a
+    // medium, as fluence and moment for a look lit per pixel
+    const float linearZ = max(distance, g_nearPlane);  // (v.z along the view axis: the view depth)
+    const float footprint = 2.0f * linearZ / (g_proj[1][1] * g_viewHeight);
+    const bool pixelLit = lit && looked && sprite && fxLookNormal(look) != FX_NORMAL_NONE;
+    float3 radiance = colour, moment = 0;
+    if (lit)
+    {
+        const FxLight light = fxLight(c, centreWorld, normalize(centreWorld), p.mediumPhase, max(size * 0.5f, footprint),
+                                      (uint2)clamp(centre, 0, float2(g_viewWidth - 1, g_viewHeight - 1)), linearZ);
+        radiance = colour * light.scattered;
+        if (pixelLit)
+        {
+            // (FxLayerTile.hlsl: albedo F / 4 pi, and the moment over the fluence's luminance in the quad's frame)
+            radiance = colour * light.fluence / (4.0f * SH_PI);
+            const float lum = fxLuminance(light.fluence);
+            const float3 m = lum > 0 ? light.moment / lum : float3(0, 0, 0);
+            moment = float3(dot(m, right), dot(m, up), dot(m, facing));
+        }
+    }
+    if (ribbon)
+    {
+        ribbonPoint(c, birth, row, true, pos, age, size, radiance, alpha, e.program, looked ? p.material - 1u : 0u);
+        return rec;
+    }
+
+    float rEff, alphaScale;
+    bool small;
+    if (looked)
+    {
+        float2 aU = fxProjectAxis(v, distance, mul((float3x3)g_view, right * halfU)), aV = fxProjectAxis(v, distance, mul((float3x3)g_view, up * halfV));
+        const float lu = length(aU), lv = length(aV);
+        if (!(lu > 0) || !(lv > 0)) return rec;
+        // the pixel-footprint prefilter of the round sprites (below), along each axis
+        const float eu = sqrt(lu * lu + 0.25f), ev = sqrt(lv * lv + 0.25f);
+        aU *= eu / lu;
+        aV *= ev / lv;
+        alphaScale = lu * lv / (eu * ev);
+        rEff = eu + ev;  // (the quad's corners lie within it)
+        rec.axes = fxPackHalf4(float4(aU, aV));
+        const uint frames = max(p.columns, 1u) * max(p.rows, 1u);
+        float frame = min((float)p.firstFrame, frames - 1.0f);
+        if (frames > 1u)
+        {
+            // the frames once over the particle's life (the last one at its death), or at the program's rate, looping
+            if ((look.flags & FX_LOOK_FRAMES_OVER_LIFE) != 0u) frame += u * (frames - 1.0f - frame);
+            else frame = fmod(frame + age * max(p.framesPerSecond, 0.0f), (float)frames);
+        }
+        rec.frame = frame;
+        rec.uvOffset = fxPackHalf2(frac(p.uv.zw + p.uvScroll * age));
+        // (a look's image has its own detail: the 1/4 layer takes only the sprites of a look marked smooth)
+        small = (look.flags & FX_LOOK_SMOOTH) == 0u || min(eu, ev) < FX_LAYER_MIN_RADIUS;
+    }
+    else
+    {
+        const float radius = 0.5f * size * g_proj[1][1] * 0.5f * g_viewHeight / distance;
+        // Pixel-footprint prefilter: the pixel box filter widens the profile to r' = sqrt(r^2 + 1/4) (radius of a half pixel)
+        // at the same integrated opacity (alpha r^2 / r'^2): a sprite below a pixel keeps its energy instead of being missed
+        // by pixel centres.
+        const float r2 = radius * radius, rEff2 = r2 + 0.25f;
+        rEff = sqrt(rEff2);
+        alphaScale = r2 / rEff2;
+        small = rEff < FX_LAYER_MIN_RADIUS;
+    }
     if (centre.x + rEff < 0 || centre.y + rEff < 0 || centre.x - rEff > g_viewWidth || centre.y - rEff > g_viewHeight) return rec;
     rec.centre = centre;
     rec.radius = rEff;
     rec.depth = g_nearPlane / distance;
-    // lighting (material 1: lit; 0: emissive), then the air between the camera and the particle (S's air volume)
-    const float3 D = pos / distance;
-    const float linearZ = distance;  // (v.z along the view axis: the view depth)
-    const float footprint = 2.0f * distance / (g_proj[1][1] * g_viewHeight);
-    float3 radiance = p.material == 1u ? fxLitRadiance(c, colour, pos, normalize(pos), p.mediumPhase, max(size * 0.5f, footprint), (uint2)clamp(centre, 0, float2(g_viewWidth - 1, g_viewHeight - 1)), linearZ)
-                                       : colour;
+    // the air between the camera and the particle (S's air volume)
+    float3 inscatter = 0;
     if (c.airVolume != UNX_NONE && c.transmittance != UNX_NONE)
     {
         AtmosphereSrvs atm;
@@ -295,12 +442,29 @@ LayerRecord setup(LayerConstants c, uint t, uint group)
         atm.multiScatter = c.multiScatter;
         atm.skyView = UNX_NONE;
         atm.aerial = c.airVolume;
-        float3 inscatter, transmittance, sunAtDepth;
-        atmosphereAirView(atm, centre / float2(g_viewWidth, g_viewHeight), linearZ, inscatter, transmittance, sunAtDepth);
-        radiance = radiance * transmittance + inscatter;
+        float3 air, transmittance, sunAtDepth;
+        atmosphereAirView(atm, centre / float2(g_viewWidth, g_viewHeight), linearZ, air, transmittance, sunAtDepth);
+        // (a look's texture tints its own radiance, not the air in front: kept apart; an additive look hides nothing
+        // and takes none of it)
+        if (looked)
+        {
+            radiance *= transmittance;
+            if (fxLookBlend(look) != FX_BLEND_ADDITIVE) inscatter = air;
+        }
+        else radiance = radiance * transmittance + air;
     }
-    rec.radianceAlpha = fxPackHalf4(float4(radiance * g_exposure, alpha * r2 / rEff2));
-    rec.flags = rEff < FX_LAYER_MIN_RADIUS ? FX_LAYER_RECORD_SMALL : 0u;
+    // the centre's travel on screen since the previous frame: the particle moved back by its velocity over the frame,
+    // under the previous (unjittered) view
+    float2 motion = 0;
+    if (any(x.prevViewProj[3] != 0))
+    {
+        const float4 before = float4(g_cameraPosition + centreWorld - vel * g_deltaTime, 1);
+        const float3 pc = float3(dot(x.prevViewProj[0], before), dot(x.prevViewProj[1], before), dot(x.prevViewProj[3], before));
+        if (pc.z > 1e-6f) motion = clamp(centre - float2((pc.x / pc.z * 0.5f + 0.5f) * g_viewWidth, (0.5f - 0.5f * pc.y / pc.z) * g_viewHeight), -32000.0f, 32000.0f);
+    }
+    rec.radianceAlpha = fxPackHalf4(float4(radiance * g_exposure, alpha * alphaScale));
+    rec.extra = fxPackExtra(moment, inscatter * g_exposure, motion);
+    rec.flags = (small ? FX_LAYER_RECORD_SMALL : 0u) | (looked ? (p.material - 1u) << 8 : 0u);
     rec.program = e.program;
     return rec;
 }

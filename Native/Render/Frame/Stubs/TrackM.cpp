@@ -11,6 +11,8 @@ float autoExposureEv100(TrackState&, Device&, const QualityConfig&, const FrameC
     pending("M.autoExposureEv100 (track disabled in this build)");
     return frame.mainView.ev100;
 }
+uint32_t dynamicResolutionHeight(TrackState&, const QualityConfig&, const FrameContext&, uint32_t, uint32_t maxHeight) { return maxHeight; }
+DynamicResolutionStatus dynamicResolutionStatus(TrackState&) { return DynamicResolutionStatus{}; }
 void materialResolve(FramePassContext&, ViewResources&) { pending("M.materialResolve (track disabled in this build)"); }
 void shading(FramePassContext&, ViewResources&) { pending("M.shading (track disabled in this build)"); }
 void imagePost(FramePassContext&, ViewResources&, TextureRef) { pending("M.imagePost (track disabled in this build)"); }

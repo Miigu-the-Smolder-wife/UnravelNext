@@ -36,6 +36,20 @@ struct UpscaleProducts
     TextureRef motion, depth;
 };
 TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, TextureRef src, UpscaleProducts* products = nullptr);
+// The upscale's vectors (m.upscale.motion, UpscaleMotion.hlsl) for a pass recorded before temporalUpscale that
+// reprojects the internal-resolution picture by each pixel's own motion (the diaphragm depth of field's prefilter):
+// the pass is recorded at the first call of a frame, and temporalUpscale, the last, takes the same textures. They
+// read the view's depth, its vis buffer and the layers over the opaque surface, all complete once the view is
+// composed. Invalid references when the view is not upscaled.
+struct UpscaleMotion
+{
+    TextureRef motion;         // RG32F per internal pixel: its unjittered UV now - its UV in the previous frame
+    TextureRef depth;          // the device depth of the surface each vector is of (the view's, or the layers')
+    TextureRef previousDepth;  // (output.upscale_tsr) the point's view depth in the previous frame, how much it moves
+    TextureRef layers;         // (output.upscale_layer_motion) the pixel's layers
+    bool layerMotion = false;
+};
+UpscaleMotion upscaleMotion(FramePassContext& fc, const ViewResources& view);
 // output.screen_trace_source = 0: keeps 'lit' - the view's opaque image right after the shading group, before water,
 // the coverage layers and glass - with the air taken off, as the scene colour upscalePreviousColor gives the next
 // frame's screen traces (UpscaleSceneKeep.hlsl). Recorded before temporalUpscale in the frame.

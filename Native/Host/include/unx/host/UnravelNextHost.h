@@ -50,7 +50,11 @@ enum UnxResult
                             //    UnxSceneSetMeshAttributes (a mesh's second uv set and vertex colours),
                             //    UnxLightComponentsDefaults, UnxSceneSetLightComponents (a light's scales, source texture,
                             //    barn doors, lighting channels, draw distance, colour temperature, falloff exponent),
-                            //    UnxSceneSetInstanceLightingChannels
+                            //    UnxSceneSetInstanceLightingChannels,
+                            //    UnxFrameSetColorGrading, UnxFrameSetPost, UnxFrameSetDisplayEncoding (the picture's settings a game
+                            //    changes while it runs), UnxFrameSetFog2, UnxFrameSetFogVolumes2, UnxFrameSetClouds2,
+                            //    UnxFrameSetWeather, UnxFrameSetLightning, UnxFrameSetPoolWeather (the weather),
+                            //    UnxFrameGetStatistics (frame pacing data: GPU time, resolution, the dynamic resolution's state)
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -1059,6 +1063,204 @@ UNX_API int32_t UNX_CALL UnxFrameSetPost(UnxRenderer r, const UnxPostSettingsDes
 // paperWhiteNits: paper white's luminance in cd/m2 for encodings 1 and 2 (40 .. 1000; 0: the quality file's
 // output.hdr_paper_white_nits). The display's peak is displayPeak x paper white.
 UNX_API int32_t UNX_CALL UnxFrameSetDisplayEncoding(UnxRenderer r, int32_t encoding, float paperWhiteNits);
+
+// ---- Weather (optional exports within ABI 6; after commit, any time): UnxFrameSetFog2, UnxFrameSetFogVolumes2,
+// UnxFrameSetClouds2, UnxFrameSetWeather, UnxFrameSetLightning, UnxFrameSetPoolWeather. The first three take the frozen descriptions' fields
+// (UnxFogDesc, UnxFogVolumeDesc, UnxCloudDesc: the same names, units and limits) and what the renderer's frame has
+// gained since; each sets the same state as its first function - the latest call of either decides, and the first
+// function leaves the added fields at "none".
+
+// The height fog with its second layer (render::FogDesc::density2): another exponential layer of the same medium - a low
+// ground fog under a thin haze -, with its own density, falloff and height; the albedo and the phase function are the
+// fog's. density2 0: none (while it rains the rain's veil takes the layer: UnxFrameSetWeather). Null: the quality file's
+// atmosphere.fog decides, as UnxFrameSetFog(null).
+typedef struct UnxFogDesc2
+{
+    uint32_t size, version;             // sizeof (64), 1
+    float density;                      // extinction (1/m) at 'height', >= 0
+    float heightFalloff;                // the density halves every 1 / this metres of height, >= 0
+    float height;                       // world metres
+    float albedo[3];                    // scattering / extinction, [0, 1]
+    float phaseG;                       // Henyey-Greenstein asymmetry, (-1, 1)
+    float startDistance;                // m, >= 0
+    float skyAmount;                    // [0, 1]
+    float noiseAmount;                  // [0, 1]
+    float noiseScale;                   // m, >= 1
+    float density2;                     // the second layer's extinction (1/m) at 'height2', >= 0 (0: no second layer)
+    float heightFalloff2;               // its density halves every 1 / this metres of height, >= 0 (0: uniform in height)
+    float height2;                      // world metres
+} UnxFogDesc2;
+#ifdef __cplusplus
+static_assert(sizeof(UnxFogDesc2) == 64, "UnxFogDesc2 is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetFog2(UnxRenderer r, const UnxFogDesc2* fog);
+
+// Local fog volumes with rising steam and a density grid (render::FogVolumeDesc): the current set, held until changed,
+// as UnxFrameSetFogVolumes.
+//   steam   sourcePlane: the height inside the volume (0 bottom .. 0.95) the medium rises from - no density under it,
+//           heightFalloff counts from it (the water's surface in a volume that reaches under it). riseSpeed: the
+//           density's own variation moves up the volume's axis at this speed. turbulence: the variation's share of the
+//           density (0.5: from nothing to twice the mean; 1: wisps with gaps), a quarter of it at the source plane and all
+//           of it from a third of the height up. turbulenceScale: its largest features. All 0 (turbulenceScale any):
+//           the volume as UnxFrameSetFogVolumes gives it.
+//   grid    a density grid of the game's own (a simulation, authored wisps): gridSize texels per side (each 1 .. 32),
+//           one byte per texel, x fastest then y then z, over the volume's box [-1, 1]^3 along its axes - texel (0, 0, 0)
+//           at the corner (-1, -1, -1); read between texels; a texel is the density's factor (255: 1) on everything
+//           above. Copied by the call. grid null (gridSize 0, 0, 0): none.
+typedef struct UnxFogVolumeDesc2
+{
+    uint32_t size, version;             // sizeof (112), 1
+    double centre[3];                   // world, m
+    float halfSize[3];                  // m, > 0
+    float yaw;                          // rad, about the up axis
+    uint32_t shape;                     // 0 ellipsoid, 1 box
+    float density;                      // extinction (1/m) at the volume's bottom (the source plane), >= 0
+    float heightFalloff;                // >= 0 (0: uniform)
+    float edge;                         // (0, 1]
+    float albedo[3];                    // [0, 1]
+    float sourcePlane;                  // [0, 0.95]
+    float riseSpeed;                    // m/s
+    float turbulence;                   // [0, 1]
+    float turbulenceScale;              // m, > 0 where turbulence > 0
+    uint32_t gridSize[3];               // texels per side, each 1 .. 32 (0, 0, 0 without a grid)
+    const uint8_t* grid;                // gridSize[0] x gridSize[1] x gridSize[2] bytes, or null
+} UnxFogVolumeDesc2;
+#ifdef __cplusplus
+static_assert(sizeof(UnxFogVolumeDesc2) == 112, "UnxFogVolumeDesc2 is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetFogVolumes2(UnxRenderer r, const UnxFogVolumeDesc2* volumes, uint32_t count);
+
+// The cloud layer with the cirrus sheet (render::CloudLayerDesc::cirrus*): thin ice cloud at one altitude far above the
+// layer, with its own coverage map and drift, lit by the same sun and sky. A frame may have the sheet without the layer
+// (coverage 0, cirrusCoverage > 0). Null, or both coverages 0: no clouds.
+typedef struct UnxCloudDesc2
+{
+    uint32_t size, version;             // sizeof (64), 1
+    float coverage;                     // [0, 1] (0: no layer)
+    float baseAltitude, topAltitude;    // world metres, base < top
+    float sigmaMax, albedo;             // peak extinction (1/m) > 0, single-scattering albedo [0, 1]
+    float windX, windZ;                 // m/s
+    uint32_t seed;
+    float cirrusCoverage;               // [0, 1]: the share of the sheet's map that holds cirrus (0: no sheet)
+    float cirrusAltitude;               // world metres, > 0 (9000)
+    float cirrusOpticalDepth;           // vertical, where the map is full, > 0 (thin cirrus 0.03 .. 0.3)
+    float cirrusWindX, cirrusWindZ;     // m/s: the sheet's own drift
+    uint32_t reserved;                  // 0
+} UnxCloudDesc2;
+#ifdef __cplusplus
+static_assert(sizeof(UnxCloudDesc2) == 64, "UnxCloudDesc2 is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetClouds2(UnxRenderer r, const UnxCloudDesc2* clouds);
+
+// The weather record (render::WeatherFrame; held until changed): the one row the sky, the air and the surfaces read.
+//   cloudCover  the cloud layer's coverage in frames whose cloud description has no layer of its own (the layer's other
+//               values are then the defaults);
+//   rainRate    the rain's veil in the air (extinction 0.248 R^0.67 per km, in the fog's second layer where the frame
+//               sets none) and the rain shadow map: what is under cover stays dry;
+//   wetness     surfaces exposed to the rain darken and smooth by it (and by the surface state field's wet channel);
+//   snowRate, snowDepth  the snow cover on exposed surfaces;
+//   rainDirection        the direction the drops fall (the wind tilts it), any length > 0.
+// Null: no weather (every value 0).
+typedef struct UnxWeatherDesc
+{
+    uint32_t size, version;             // sizeof (48), 1
+    float rainRate;                     // mm/h, >= 0
+    float wetness;                      // [0, 1]
+    float snowRate;                     // mm/h water equivalent, >= 0
+    float snowDepth;                    // m, >= 0
+    float cloudCover;                   // [0, 1]
+    float rainDirection[3];             // (0, -1, 0): straight down
+    uint32_t reserved[2];               // 0
+} UnxWeatherDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxWeatherDesc) == 48, "UnxWeatherDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetWeather(UnxRenderer r, const UnxWeatherDesc* weather);
+
+// A lightning flash (render::LightningDesc), for the next queued frame only (as the debug primitives: a frame that is
+// never rendered drops it; call it for every frame of a flash with that frame's intensity): a source in or under the
+// cloud layer that lights the cloud around it - in the layer's picture, in the cloud in front of surfaces and in the sky
+// the rays read. The light on the ground is a scene light the game places for the flash. Null or intensity 0: no flash.
+typedef struct UnxLightningDesc
+{
+    uint32_t size, version;             // sizeof (56), 1
+    double position[3];                 // world, m: the channel's brightest stretch
+    float intensity;                    // luminous intensity (cd), the frame's mean over its exposure, >= 0
+    float color[3];                     // linear, >= 0 (0.8, 0.87, 1)
+    float radius;                       // m, > 0: the lit channel's extent (30)
+    uint32_t reserved;                  // 0
+} UnxLightningDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxLightningDesc) == 56, "UnxLightningDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetLightning(UnxRenderer r, const UnxLightningDesc* lightning);
+
+// The basins' weather (render::PoolFrame::steam*, rainExposure; held until changed, like the basins): per basin of the
+// set UnxFrameSetPools gave, by its id.
+//   steam  over hot water: a local fog volume over the basin (as UnxFogVolumeDesc2's rising steam: from the still
+//          surface up to steamHeight, fading toward the rim), lit as the fog is; among the frame's 16 fog volumes, after
+//          the ones UnxFrameSetFogVolumes gave. steamDensity 0: none.
+//   rain   the share of the weather record's rain (UnxFrameSetWeather: rainRate) that reaches the surface - 1 under the
+//          open sky, 0 under a roof (the renderer does not find the roof itself): the drops disturb the surface.
+// A basin not named has neither. count 0: none.
+typedef struct UnxPoolWeatherDesc
+{
+    uint32_t size, version;             // sizeof (32), 1
+    uint32_t pool;                      // UnxPoolDesc::id
+    float steamDensity;                 // extinction (1/m) of the steam at the surface, >= 0
+    float steamHeight;                  // m above the still surface, > 0 with steam (1.5)
+    float steamRiseSpeed;               // m/s (0.3)
+    float steamTurbulence;              // [0, 1] (0.6)
+    float rainExposure;                 // [0, 1]
+} UnxPoolWeatherDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxPoolWeatherDesc) == 32, "UnxPoolWeatherDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetPoolWeather(UnxRenderer r, const UnxPoolWeatherDesc* pools, uint32_t count);
+
+// ---- Frame pacing data (read-only; an optional export within ABI 6, a bridge probes for it; after commit, any time):
+// what a game paces its frames, scales its own load or draws a readout by - the renderer's GPU frame time, the main
+// view's resolution with the dynamic resolution's state (output.dynamic_resolution_target_ms), and the GPU time by pass
+// group. One call, one consistent snapshot; UnxFrameStatsLatest and UnxFramePassTimingsLatest hold the same frame's
+// times pass by pass.
+// The GPU times are of the last frame the GPU completed ('frameIndex': a few frames behind the newest one queued); the
+// view's sizes and the controller's state are of the newest frame recorded, and 'gpuRenderWidth/Height' is the
+// internal resolution the timed frame was rendered at, so a time can be set against the pixels it paid for.
+// A pass group is the pass names' part before the first '.' ("v" visibility, "m" material and shading with the upscale
+// and the post chain, "r" reflections and GI, "s" shadows, "w" water, "fx", "hair", ...): at most
+// UNX_FRAME_STATISTICS_GROUPS, the largest GPU time first; with more groups than that the last entry is "other", the
+// rest summed. The groups' times add up to the passes' time; the frame's time ('gpuMs') also has the time between
+// passes in it and counts the two queues' overlap once (UnxFrameGraphStats::queues).
+#define UNX_FRAME_STATISTICS_GROUPS 16
+typedef struct UnxFrameStatisticsGroup
+{
+    char name[16];              // UTF-8, zero-terminated, truncated to 15 bytes
+    float gpuMs;                // the group's passes, summed
+    uint32_t passes;
+} UnxFrameStatisticsGroup;
+typedef struct UnxFrameStatistics
+{
+    uint32_t size, version;     // sizeof, 1
+    uint64_t frameIndex;        // the frame the GPU times belong to (UnxFrameStats::frameIndex); UINT64_MAX: none yet
+    double gpuMs;               // that frame on the GPU, first to last timestamp over the queues
+    double cpuRecordMs, cpuSubmitMs;  // the newest frame's recording and submission on the CPU
+    uint32_t gpuRenderWidth, gpuRenderHeight;  // the main view's internal resolution in the timed frame (0: none yet)
+    uint32_t outputWidth, outputHeight;        // the main view of the newest frame recorded (0: none yet)
+    uint32_t renderWidth, renderHeight;        // ... and its internal resolution (the output's when it is not upscaled)
+    uint32_t dynamicResolution; // 1: the dynamic resolution's controller is running (a budget is set, the view upscaled)
+    float resolutionScale;      // renderHeight / outputHeight
+    float dynamicTargetMs;      // the controller's GPU time budget (0: off)
+    float dynamicMeasuredMs;    // the weighted GPU frame time its last decision was made from (0: none measured yet)
+    uint32_t minRenderHeight, maxRenderHeight;  // the range the controller moves the internal height in (off: renderHeight)
+    uint32_t passes;            // the timed frame's passes
+    uint32_t groupCount;        // entries of 'groups' filled
+    UnxFrameStatisticsGroup groups[UNX_FRAME_STATISTICS_GROUPS];
+} UnxFrameStatistics;
+#ifdef __cplusplus
+static_assert(sizeof(UnxFrameStatisticsGroup) == 24, "UnxFrameStatisticsGroup is part of the ABI");
+static_assert(sizeof(UnxFrameStatistics) == 480, "UnxFrameStatistics is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameGetStatistics(UnxRenderer r, UnxFrameStatistics* statistics);
 
 #ifdef __cplusplus
 }

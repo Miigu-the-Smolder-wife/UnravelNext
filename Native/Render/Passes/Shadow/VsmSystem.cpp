@@ -1457,6 +1457,25 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.computeConstants(k, 8);
                       ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
                   });
+        // V's water layer (W's fluid and basin surfaces): the surface's points ask for their pages too (VsmMark.hlsl
+        // P[1].y; the reference marks its pages at the water's depth as at the opaque one's).
+        if (main.waterDepth.valid())
+        {
+            const TextureRef water = main.waterDepth;
+            g.addPass("s.vsm.markwater", QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          b.use(water, Use::SrvCompute);
+                          b.use(requests, Use::UavCompute);
+                          b.keep();
+                      },
+                      [=](PassContext& ctx) {
+                          const uint32_t k[8] = { ctx.srv(water), ctx.uav(requests), ring, subtileStats ? 1u : 0u, dilationBits, 1, 0, 0 };
+                          ctx.cmd->SetPipelineState(pso);
+                          ctx.bindFrameConstants(mainConstants);
+                          ctx.computeConstants(k, 8);
+                          ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
+                      });
+        }
     }
     {
         // Air of the froxel integration (VsmMarkAir, VsmAir.hlsli): after the pixel marks, which store plainly.
@@ -2670,6 +2689,29 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                           ctx.cmd->SetPipelineState(ph);
                           ctx.bindFrameConstants(constants);
                           ctx.computeConstants(k, 12);
+                          ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
+                      });
+        }
+    }
+    // The particles' shadow under the sun (FX's transmittance map, Passes/FX/FxShadow.hlsl STEP 2): the sun's slot of
+    // the screen visibility times what the shadow-casting sprites let through at the pixel's surface.
+    {
+        const BufferRef particleParams = fc.resources.particleShadowParams, particleMap = fc.resources.particleShadowMap;
+        if (!s.debugPaths && particleParams.valid() && particleMap.valid())
+        {
+            ID3D12PipelineState* pp = fc.shaders.compute("Passes/FX/FxShadow.STEP2");
+            g.addPass("s.shadow.particles", QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          b.use(depth, Use::SrvCompute);
+                          b.use(particleParams, Use::SrvCompute);
+                          b.use(particleMap, Use::SrvCompute);
+                          b.use(out, Use::UavCompute);
+                      },
+                      [=](PassContext& ctx) {
+                          const uint32_t k[4] = { ctx.srv(particleParams), ctx.srv(depth), ctx.uav(out), 0 };
+                          ctx.cmd->SetPipelineState(pp);
+                          ctx.bindFrameConstants(constants);
+                          ctx.computeConstants(k, 4);
                           ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
                       });
         }

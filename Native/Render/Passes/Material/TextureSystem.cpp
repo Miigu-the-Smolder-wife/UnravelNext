@@ -397,6 +397,14 @@ void TextureSystem::clear()
     m_gpuBytes = 0;
 }
 
+std::vector<uint32_t> TextureSystem::textureSrvs() const
+{
+    std::vector<uint32_t> out;
+    out.reserve(m_textures.size());
+    for (const Resource& r : m_textures) out.push_back(r.srv);
+    return out;
+}
+
 std::vector<uint32_t> TextureSystem::lightSourceTextures() const
 {
     std::vector<uint32_t> out;

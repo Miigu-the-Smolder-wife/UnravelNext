@@ -71,15 +71,19 @@ struct UpscaleState
     // the upscale and the display transform), kept for the next frame's screen-space traces - the reference's default
     // source (keepSceneColor, UpscaleSceneKeep.hlsl). scene[parity] is the last one written.
     ComPtr<ID3D12Resource> scene[2];
-    uint32_t sceneWidth = 0, sceneHeight = 0;
+    uint32_t sceneWidth[2] = {}, sceneHeight[2] = {};  // per slot: the internal size of the frame that wrote it
     DXGI_FORMAT sceneFormat = DXGI_FORMAT_UNKNOWN;
     bool sceneFresh = true;
     TextureRef previousScene;
     uint64_t previousSceneFrame = ~0ull;
-    void ensureScene(Device& d, uint32_t w, uint32_t h, DXGI_FORMAT format)
+    UpscaleMotion motion;  // m.upscale.motion's outputs in the graph of frame 'motionFrame' (upscaleMotion)
+    uint64_t motionFrame = ~0ull;
+    // The internal-resolution textures (the kept scene colour, the guide ring, the flickering and thin-coverage pairs)
+    // under dynamic resolution: the internal size is each frame's own, so a slot has the size of the frame that wrote it.
+    // The frame that writes a slot next recreates it at its size (the other slots keep theirs); the readers reproject
+    // by UV and take each texture's size as it is (TsrDecimate.hlsl; the screen traces read by UV too). Nothing restarts.
+    ComPtr<ID3D12Resource> internalTexture(Device& d, uint32_t w, uint32_t h, DXGI_FORMAT format, const wchar_t* name, const char* what)
     {
-        if (scene[0] && sceneWidth == w && sceneHeight == h && sceneFormat == format) return;
-        device = &d;
         D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
         D3D12_RESOURCE_DESC1 desc{};
         desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -89,70 +93,78 @@ struct UpscaleState
         desc.Format = format;
         desc.SampleDesc.Count = 1;
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        for (int k = 0; k < 2; ++k)
+        ComPtr<ID3D12Resource> texture;
+        check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
+                                                IID_PPV_ARGS(texture.ReleaseAndGetAddressOf())),
+              what);
+        texture->SetName(name);
+        return texture;
+    }
+    // 'slot': the one this frame writes.
+    void ensureScene(Device& d, uint32_t w, uint32_t h, DXGI_FORMAT format, uint32_t slot)
+    {
+        const bool all = !scene[0] || sceneFormat != format;
+        if (!all && sceneWidth[slot] == w && sceneHeight[slot] == h) return;
+        device = &d;
+        for (uint32_t k = 0; k < 2; ++k)
         {
+            if (!all && k != slot) continue;
             if (scene[k]) d.deferRelease(scene[k]);
-            check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
-                                                    IID_PPV_ARGS(scene[k].ReleaseAndGetAddressOf())),
-                  "M previous scene colour");
-            scene[k]->SetName(k ? L"M previous scene colour 1" : L"M previous scene colour 0");
+            scene[k] = internalTexture(d, w, h, format, k ? L"M previous scene colour 1" : L"M previous scene colour 0", "M previous scene colour");
+            sceneWidth[k] = w;
+            sceneHeight[k] = h;
         }
-        sceneWidth = w;
-        sceneHeight = h;
         sceneFormat = format;
-        sceneFresh = true;
+        if (all) sceneFresh = true;
     }
     // output.upscale_tsr (Tsr.hlsli): the guide history at the internal resolution (R10G10B10A2: the scene colour in
     // the guide space at low frequency, a = the reprojection edge), in the history's ring: guide[last] is the last one.
     ComPtr<ID3D12Resource> guide[kRingSlots];
     ComPtr<ID3D12Resource> flicker[2];  // the flickering heuristic's history (RGBA8, TsrFlicker.hlsl), as the guide
     ComPtr<ID3D12Resource> thin[2];     // the thin geometry's coverage history (R8, TsrThin.hlsl), as the guide
-    uint32_t guideWidth = 0, guideHeight = 0;
+    uint32_t guideWidth[kRingSlots] = {}, guideHeight[kRingSlots] = {};  // per slot, as the scene colour's
+    uint32_t pairWidth[2] = {}, pairHeight[2] = {};                      // flicker[k] and thin[k]
     bool guideRing = false;
+    void makeGuide(Device& d, uint32_t k, uint32_t w, uint32_t h)
+    {
+        static const wchar_t* const guideNames[kRingSlots] = { L"M upscale guide 0", L"M upscale guide 1 (kept)", L"M upscale guide 2 (kept)", L"M upscale guide 3" };
+        if (guide[k]) d.deferRelease(guide[k]);
+        guide[k] = internalTexture(d, w, h, DXGI_FORMAT_R10G10B10A2_UNORM, guideNames[k], "M upscale guide");
+        guideWidth[k] = w;
+        guideHeight[k] = h;
+    }
+    void makePair(Device& d, uint32_t k, uint32_t w, uint32_t h)
+    {
+        if (flicker[k]) d.deferRelease(flicker[k]);
+        flicker[k] = internalTexture(d, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, k ? L"M upscale flickering history 1" : L"M upscale flickering history 0",
+                                     "M upscale flickering history");
+        if (thin[k]) d.deferRelease(thin[k]);
+        thin[k] = internalTexture(d, w, h, DXGI_FORMAT_R8_UNORM, k ? L"M upscale thin coverage history 1" : L"M upscale thin coverage history 0",
+                                  "M upscale thin coverage history");
+        pairWidth[k] = w;
+        pairHeight[k] = h;
+    }
+    // All of them at this frame's size, when there are none or the ring's shape changed (a reset).
     void ensureGuide(Device& d, uint32_t w, uint32_t h, bool withRing)
     {
-        if (guide[0] && guideWidth == w && guideHeight == h && guideRing == withRing) return;
+        if (guide[0] && guideRing == withRing) return;
         device = &d;
-        D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
-        D3D12_RESOURCE_DESC1 desc{};
-        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        desc.Width = w;
-        desc.Height = h;
-        desc.DepthOrArraySize = desc.MipLevels = 1;
-        desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
-        desc.SampleDesc.Count = 1;
-        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        static const wchar_t* const guideNames[kRingSlots] = { L"M upscale guide 0", L"M upscale guide 1 (kept)", L"M upscale guide 2 (kept)", L"M upscale guide 3" };
         for (uint32_t k = 0; k < kRingSlots; ++k)
         {
             if (guide[k]) d.deferRelease(guide[k]);
             guide[k].Reset();
-            if (!ringSlotUsed(k, withRing)) continue;
-            check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
-                                                    IID_PPV_ARGS(guide[k].ReleaseAndGetAddressOf())),
-                  "M upscale guide");
-            guide[k]->SetName(guideNames[k]);
+            guideWidth[k] = guideHeight[k] = 0;
+            if (ringSlotUsed(k, withRing)) makeGuide(d, k, w, h);
         }
-        for (int k = 0; k < 2; ++k)
-        {
-            if (flicker[k]) d.deferRelease(flicker[k]);
-            D3D12_RESOURCE_DESC1 fd = desc;
-            fd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-            check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &fd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
-                                                    IID_PPV_ARGS(flicker[k].ReleaseAndGetAddressOf())),
-                  "M upscale flickering history");
-            flicker[k]->SetName(k ? L"M upscale flickering history 1" : L"M upscale flickering history 0");
-            if (thin[k]) d.deferRelease(thin[k]);
-            fd.Format = DXGI_FORMAT_R8_UNORM;
-            check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &fd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
-                                                    IID_PPV_ARGS(thin[k].ReleaseAndGetAddressOf())),
-                  "M upscale thin coverage history");
-            thin[k]->SetName(k ? L"M upscale thin coverage history 1" : L"M upscale thin coverage history 0");
-        }
-        guideWidth = w;
-        guideHeight = h;
+        for (uint32_t k = 0; k < 2; ++k) makePair(d, k, w, h);
         guideRing = withRing;
         fresh = true;  // (the guides hold nothing: the frame is a reset)
+    }
+    // The slots this frame writes, at this frame's size (the internal size changed since they were last written).
+    void resizeGuide(Device& d, uint32_t slot, uint32_t pair, uint32_t w, uint32_t h)
+    {
+        if (guideWidth[slot] != w || guideHeight[slot] != h) makeGuide(d, slot, w, h);
+        if (pairWidth[pair] != w || pairHeight[pair] != h) makePair(d, pair, w, h);
     }
     ~UpscaleState()
     {
@@ -277,11 +289,13 @@ TextureRef upscalePreviousColor(FramePassContext& fc, const ViewResources& view)
     UpscaleState& s = fc.state<UpscaleState>("M.upscale");
     if (sceneColorSource(fc))
     {
-        // (the size is the texture's own - RenderGraph::desc - not the output's)
-        if (!s.scene[0] || s.sceneFresh || u.reset || s.sceneWidth != view.view.width || s.sceneHeight != view.view.height) return TextureRef{};
+        // (the size is the texture's own - RenderGraph::desc - neither the output's nor, under dynamic resolution, this
+        // frame's internal size: the readers sample it by UV)
+        if (!s.scene[0] || s.sceneFresh || u.reset || s.sceneWidth[s.parity] == 0) return TextureRef{};
         if (s.previousSceneFrame != fc.frame.frameIndex || !s.previousScene.valid())
         {
-            s.previousScene = fc.graph.importTexture(s.scene[s.parity].Get(), { "m.scenecolor (previous)", s.sceneWidth, s.sceneHeight, 1, 1, s.sceneFormat },
+            s.previousScene = fc.graph.importTexture(s.scene[s.parity].Get(),
+                                                     { "m.scenecolor (previous)", s.sceneWidth[s.parity], s.sceneHeight[s.parity], 1, 1, s.sceneFormat },
                                                      D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
             s.previousSceneFrame = fc.frame.frameIndex;
         }
@@ -310,7 +324,7 @@ void keepSceneColor(FramePassContext& fc, const ViewResources& view, TextureRef 
     const uint32_t w = view.view.width, h = view.view.height;
     UpscaleState& s = fc.state<UpscaleState>("M.upscale");
     // slot parity ^ 1: temporalUpscale, later in this frame, makes it the current one (read as scene[parity] next frame)
-    s.ensureScene(fc.device, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    s.ensureScene(fc.device, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, s.parity ^ 1u);
     const TextureRef kept = g.importTexture(s.scene[s.parity ^ 1u].Get(), { "m.scenecolor", w, h, 1, 1, s.sceneFormat }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     const TextureRef depth = view.depth;
     const FrameResources& r = fc.resources;
@@ -338,6 +352,117 @@ void keepSceneColor(FramePassContext& fc, const ViewResources& view, TextureRef 
                   c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
               });
     s.sceneFresh = false;
+}
+
+UpscaleMotion upscaleMotion(FramePassContext& fc, const ViewResources& view)
+{
+    if (!upscaleActive(fc, view) || !view.depth.valid()) return UpscaleMotion{};
+    UpscaleState& s = fc.state<UpscaleState>("M.upscale");
+    if (s.motionFrame == fc.frame.frameIndex && s.motion.motion.valid()) return s.motion;
+    const FrameContext::Upscale& u = fc.frame.upscale;
+    RenderGraph& g = fc.graph;
+    const uint32_t w = view.view.width, h = view.view.height;
+    const bool tsr = tsrOn(fc);
+    const TextureRef motion = g.createTexture(TextureDesc{ "m.upscale.motion", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT });
+    const TextureRef previousDepth = tsr ? g.createTexture(TextureDesc{ "m.upscale.previous depth", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT }) : TextureRef{};
+    const TextureRef depth = view.depth, vis = view.visId;
+    const BufferRef clusters = view.visibleClusters;
+    const bool hasVis = vis.valid() && clusters.valid();
+    const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
+    const float jx = u.jitterX, jy = u.jitterY;
+    const float4x4 prevViewProj = u.prevViewProj;
+    // output.upscale_layer_motion (with upscale_tsr): the layers over the opaque surface - glass, water, the coverage
+    // layer's thin fragments - give the pixel their own vector and depth, and the layers without a vector (particles,
+    // see-through fragments) mark it (UpscaleMotion.hlsl); the reference's translucent velocity and its
+    // has-pixel-animation mark. Off: every pixel moves as its opaque surface.
+    const bool layerMotion = tsr && fc.quality.has("output.upscale_layer_motion") && fc.quality.boolean("output.upscale_layer_motion");
+    const TextureRef trackedDepth = layerMotion ? g.createTexture(TextureDesc{ "m.upscale.tracked depth", w, h, 1, 1, DXGI_FORMAT_R32_FLOAT }) : TextureRef{};
+    const TextureRef layers = layerMotion ? g.createTexture(TextureDesc{ "m.upscale.layers", w, h, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM }) : TextureRef{};
+    const bool glass = layerMotion && hasVis && view.translucentVis.valid() && view.translucentDepth.valid() && view.translucentClass.valid();
+    const bool water = layerMotion && view.waterDepth.valid();
+    const bool coverage = layerMotion && view.coverageTiles.valid() && view.coverageTilePixels.valid() && view.coverageRecords.valid() &&
+                          view.coverageDepthRange.valid() && view.coverageTilesX != 0;
+    const bool particles = layerMotion && view.particleLayer.valid() && view.particleEdges.valid();
+    const TextureRef glassVis = view.translucentVis, glassDepth = view.translucentDepth, glassClass = view.translucentClass, waterDepth = view.waterDepth;
+    const TextureRef coverageRange = view.coverageDepthRange, particleLayer = view.particleLayer;
+    const BufferRef coverageTiles = view.coverageTiles, coveragePixels = view.coverageTilePixels, coverageRecords = view.coverageRecords;
+    const BufferRef particleEdges = view.particleEdges;
+    // (the particles' own vector where they hold the pixel: FX's layer motion and depth range)
+    const bool particleVectors = particles && view.particleMotion.valid() && view.particleDepthRange.valid();
+    const TextureRef particleMotion = view.particleMotion, particleRange = view.particleDepthRange;
+    const uint32_t coverageTilesX = view.coverageTilesX;
+    ID3D12PipelineState* motionPso = fc.shaders.compute("Passes/Shading/UpscaleMotion");
+    g.addPass("m.upscale.motion", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(depth, Use::SrvCompute);
+                  if (hasVis)
+                  {
+                      b.use(vis, Use::SrvCompute);
+                      b.use(clusters, Use::SrvCompute);
+                  }
+                  b.use(motion, Use::UavCompute);
+                  if (tsr) b.use(previousDepth, Use::UavCompute);
+                  if (layerMotion)
+                  {
+                      b.use(trackedDepth, Use::UavCompute);
+                      b.use(layers, Use::UavCompute);
+                  }
+                  if (glass)
+                      for (TextureRef t : { glassVis, glassDepth, glassClass }) b.use(t, Use::SrvCompute);
+                  if (water) b.use(waterDepth, Use::SrvCompute);
+                  if (coverage)
+                  {
+                      for (BufferRef buffer : { coverageTiles, coveragePixels, coverageRecords }) b.use(buffer, Use::SrvCompute);
+                      b.use(coverageRange, Use::SrvCompute);
+                  }
+                  if (particles)
+                  {
+                      b.use(particleLayer, Use::SrvCompute);
+                      b.use(particleEdges, Use::SrvCompute);
+                  }
+                  if (particleVectors)
+                  {
+                      b.use(particleMotion, Use::SrvCompute);
+                      b.use(particleRange, Use::SrvCompute);
+                  }
+              },
+              [=](PassContext& c) {
+                  const uint32_t none = 0xFFFFFFFFu;
+                  uint32_t k[40] = { hasVis ? c.srv(vis) : none, hasVis ? c.srv(clusters) : none, c.srv(depth), c.uav(motion), w, h, asUint(jx), asUint(jy) };
+                  for (int r = 0; r < 4; ++r)
+                      for (int col = 0; col < 4; ++col) k[8 + 4 * r + col] = asUint(prevViewProj.m[r][col]);
+                  k[24] = tsr ? c.uav(previousDepth) : none;
+                  k[25] = layerMotion ? c.uav(trackedDepth) : none;
+                  k[26] = layerMotion ? c.uav(layers) : none;
+                  k[27] = coverageTilesX;
+                  k[28] = glass ? c.srv(glassVis) : none;
+                  k[29] = glass ? c.srv(glassDepth) : none;
+                  k[30] = glass ? c.srv(glassClass) : none;
+                  k[31] = water ? c.srv(waterDepth) : none;
+                  k[32] = coverage ? c.srv(coverageTiles) : none;
+                  k[33] = coverage ? c.srv(coveragePixels) : none;
+                  k[34] = coverage ? c.srv(coverageRecords) : none;
+                  k[35] = coverage ? c.srv(coverageRange) : none;
+                  k[36] = particles ? c.srv(particleLayer) : none;
+                  k[37] = particles ? c.srv(particleEdges) : none;
+                  k[38] = particleVectors ? c.srv(particleMotion) : none;
+                  k[39] = particleVectors ? c.srv(particleRange) : none;
+                  c.cmd->SetPipelineState(motionPso);
+                  c.bindFrameConstants(cb);
+                  c.computeConstants(k, 40);
+                  c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+              });
+    // (the surface the vectors are of: the layers' depth where a layer has the pixel)
+    const TextureRef motionDepth = layerMotion ? trackedDepth : depth;
+    UpscaleMotion out;
+    out.motion = motion;
+    out.depth = motionDepth;
+    out.previousDepth = previousDepth;
+    out.layers = layers;
+    out.layerMotion = layerMotion;
+    s.motion = out;
+    s.motionFrame = fc.frame.frameIndex;
+    return out;
 }
 
 TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, TextureRef src, UpscaleProducts* products)
@@ -429,88 +554,16 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                                                           D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     const TextureRef output = g.importTexture(s.history[slot].Get(), { "m.upscale.history", HW, HH, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
                                               D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-    const TextureRef motion = g.createTexture(TextureDesc{ "m.upscale.motion", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT });
-    const TextureRef previousDepth = tsr ? g.createTexture(TextureDesc{ "m.upscale.previous depth", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT }) : TextureRef{};
-    const TextureRef depth = view.depth, vis = view.visId;
-    const BufferRef clusters = view.visibleClusters;
-    const bool hasVis = vis.valid() && clusters.valid();
+    // (m.upscale.motion: recorded here unless a pass before the upscale asked for the vectors - upscaleMotion)
+    const UpscaleMotion vectors = upscaleMotion(fc, view);
+    s.motionFrame = ~0ull;  // (this frame's last reader: a later graph records its own)
+    const TextureRef motion = vectors.motion, previousDepth = vectors.previousDepth, layers = vectors.layers;
+    const bool layerMotion = vectors.layerMotion;
+    const TextureRef depth = view.depth;
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
     const float jx = u.jitterX, jy = u.jitterY;
-    const float4x4 prevViewProj = u.prevViewProj;
-    // output.upscale_layer_motion (with upscale_tsr): the layers over the opaque surface - glass, water, the coverage
-    // layer's thin fragments - give the pixel their own vector and depth, and the layers without a vector (particles,
-    // see-through fragments) mark it (UpscaleMotion.hlsl); the reference's translucent velocity and its
-    // has-pixel-animation mark. Off: every pixel moves as its opaque surface.
-    const bool layerMotion = tsr && fc.quality.has("output.upscale_layer_motion") && fc.quality.boolean("output.upscale_layer_motion");
-    const TextureRef trackedDepth = layerMotion ? g.createTexture(TextureDesc{ "m.upscale.tracked depth", w, h, 1, 1, DXGI_FORMAT_R32_FLOAT }) : TextureRef{};
-    const TextureRef layers = layerMotion ? g.createTexture(TextureDesc{ "m.upscale.layers", w, h, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM }) : TextureRef{};
-    const bool glass = layerMotion && hasVis && view.translucentVis.valid() && view.translucentDepth.valid() && view.translucentClass.valid();
-    const bool water = layerMotion && view.waterDepth.valid();
-    const bool coverage = layerMotion && view.coverageTiles.valid() && view.coverageTilePixels.valid() && view.coverageRecords.valid() &&
-                          view.coverageDepthRange.valid() && view.coverageTilesX != 0;
-    const bool particles = layerMotion && view.particleLayer.valid() && view.particleEdges.valid();
-    const TextureRef glassVis = view.translucentVis, glassDepth = view.translucentDepth, glassClass = view.translucentClass, waterDepth = view.waterDepth;
-    const TextureRef coverageRange = view.coverageDepthRange, particleLayer = view.particleLayer;
-    const BufferRef coverageTiles = view.coverageTiles, coveragePixels = view.coverageTilePixels, coverageRecords = view.coverageRecords;
-    const BufferRef particleEdges = view.particleEdges;
-    const uint32_t coverageTilesX = view.coverageTilesX;
-    ID3D12PipelineState* motionPso = fc.shaders.compute("Passes/Shading/UpscaleMotion");
-    g.addPass("m.upscale.motion", QueueType::Graphics,
-              [&](PassBuilder& b) {
-                  b.use(depth, Use::SrvCompute);
-                  if (hasVis)
-                  {
-                      b.use(vis, Use::SrvCompute);
-                      b.use(clusters, Use::SrvCompute);
-                  }
-                  b.use(motion, Use::UavCompute);
-                  if (tsr) b.use(previousDepth, Use::UavCompute);
-                  if (layerMotion)
-                  {
-                      b.use(trackedDepth, Use::UavCompute);
-                      b.use(layers, Use::UavCompute);
-                  }
-                  if (glass)
-                      for (TextureRef t : { glassVis, glassDepth, glassClass }) b.use(t, Use::SrvCompute);
-                  if (water) b.use(waterDepth, Use::SrvCompute);
-                  if (coverage)
-                  {
-                      for (BufferRef buffer : { coverageTiles, coveragePixels, coverageRecords }) b.use(buffer, Use::SrvCompute);
-                      b.use(coverageRange, Use::SrvCompute);
-                  }
-                  if (particles)
-                  {
-                      b.use(particleLayer, Use::SrvCompute);
-                      b.use(particleEdges, Use::SrvCompute);
-                  }
-              },
-              [=](PassContext& c) {
-                  const uint32_t none = 0xFFFFFFFFu;
-                  uint32_t k[40] = { hasVis ? c.srv(vis) : none, hasVis ? c.srv(clusters) : none, c.srv(depth), c.uav(motion), w, h, asUint(jx), asUint(jy) };
-                  for (int r = 0; r < 4; ++r)
-                      for (int col = 0; col < 4; ++col) k[8 + 4 * r + col] = asUint(prevViewProj.m[r][col]);
-                  k[24] = tsr ? c.uav(previousDepth) : none;
-                  k[25] = layerMotion ? c.uav(trackedDepth) : none;
-                  k[26] = layerMotion ? c.uav(layers) : none;
-                  k[27] = coverageTilesX;
-                  k[28] = glass ? c.srv(glassVis) : none;
-                  k[29] = glass ? c.srv(glassDepth) : none;
-                  k[30] = glass ? c.srv(glassClass) : none;
-                  k[31] = water ? c.srv(waterDepth) : none;
-                  k[32] = coverage ? c.srv(coverageTiles) : none;
-                  k[33] = coverage ? c.srv(coveragePixels) : none;
-                  k[34] = coverage ? c.srv(coverageRecords) : none;
-                  k[35] = coverage ? c.srv(coverageRange) : none;
-                  k[36] = particles ? c.srv(particleLayer) : none;
-                  k[37] = particles ? c.srv(particleEdges) : none;
-                  k[38] = k[39] = 0;
-                  c.cmd->SetPipelineState(motionPso);
-                  c.bindFrameConstants(cb);
-                  c.computeConstants(k, 40);
-                  c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
-              });
     // (the surface the vectors are of: the layers' depth where a layer has the pixel)
-    const TextureRef motionDepth = layerMotion ? trackedDepth : depth;
+    const TextureRef motionDepth = vectors.depth;
     if (products)
     {
         products->motion = motion;
@@ -521,7 +574,12 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
         // Tsr.hlsli: dilate (+ the closest occluder scatter) -> decimate -> [resurrect] -> reject -> spatial
         // anti-aliasing -> update -> [resolve].
         const bool guideReset = reset;
-        const TextureRef previousGuide = g.importTexture(s.guide[prevSlot].Get(), { "m.tsr.guide (previous)", w, h, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM },
+        // (dynamic resolution: the slots this frame writes take this frame's internal size; the previous frame's guide,
+        // flickering and thin-coverage histories are read at the size they were written - TsrDecimate.hlsl reprojects
+        // by UV)
+        s.resizeGuide(fc.device, slot, next, w, h);
+        const uint32_t prevGuideW = s.guideWidth[prevSlot], prevGuideH = s.guideHeight[prevSlot], prevPairW = s.pairWidth[prev], prevPairH = s.pairHeight[prev];
+        const TextureRef previousGuide = g.importTexture(s.guide[prevSlot].Get(), { "m.tsr.guide (previous)", prevGuideW, prevGuideH, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM },
                                                          D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
         const TextureRef nextGuide = g.importTexture(s.guide[slot].Get(), { "m.tsr.guide", w, h, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
         // the kept frame: its history and guide, the guide reprojected and its measure against this frame
@@ -530,7 +588,8 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
         {
             keptHistory = g.importTexture(s.history[keptSlot].Get(), { "m.upscale.history (kept)", HW, HH, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
                                           D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-            keptGuide = g.importTexture(s.guide[keptSlot].Get(), { "m.tsr.guide (kept)", w, h, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+            keptGuide = g.importTexture(s.guide[keptSlot].Get(), { "m.tsr.guide (kept)", s.guideWidth[keptSlot], s.guideHeight[keptSlot], 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM },
+                                        D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
             resurrectedGuide = g.createTexture(TextureDesc{ "m.tsr.resurrected guide", w, h, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
             resurrectionMeasure = g.createTexture(TextureDesc{ "m.tsr.resurrection measure", w, h, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM });
         }
@@ -562,7 +621,8 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
         TextureRef previousFlicker, nextFlicker, reprojectedFlicker, moireError;
         if (flickering)
         {
-            previousFlicker = g.importTexture(s.flicker[prev].Get(), { "m.tsr.flicker (previous)", w, h, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+            previousFlicker = g.importTexture(s.flicker[prev].Get(), { "m.tsr.flicker (previous)", prevPairW, prevPairH, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM },
+                                              D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
             nextFlicker = g.importTexture(s.flicker[next].Get(), { "m.tsr.flicker", w, h, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
             reprojectedFlicker = g.createTexture(TextureDesc{ "m.tsr.reprojected flicker", w, h, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM });
             moireError = g.createTexture(TextureDesc{ "m.tsr.moire error", w, h, 1, 1, DXGI_FORMAT_R16_FLOAT });
@@ -580,7 +640,8 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
         TextureRef previousThin, nextThin, reprojectedThin, relaxation;
         if (thinGeometry)
         {
-            previousThin = g.importTexture(s.thin[prev].Get(), { "m.tsr.thin coverage (previous)", w, h, 1, 1, DXGI_FORMAT_R8_UNORM }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+            previousThin = g.importTexture(s.thin[prev].Get(), { "m.tsr.thin coverage (previous)", prevPairW, prevPairH, 1, 1, DXGI_FORMAT_R8_UNORM },
+                                           D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
             nextThin = g.importTexture(s.thin[next].Get(), { "m.tsr.thin coverage", w, h, 1, 1, DXGI_FORMAT_R8_UNORM }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
             reprojectedThin = g.createTexture(TextureDesc{ "m.tsr.reprojected thin coverage", w, h, 1, 1, DXGI_FORMAT_R8_UNORM });
             relaxation = g.createTexture(TextureDesc{ "m.tsr.thin relaxation", w, h, 1, 1, DXGI_FORMAT_R8_UNORM });
@@ -673,9 +734,10 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       const uint32_t none = 0xFFFFFFFFu;
                       uint32_t k[40] = { c.srv(dilated), c.srv(info), c.srv(scatter), c.srv(previousGuide), c.uav(reprojected), c.uav(decimateMask), w, h,
                                          asUint(jx), asUint(jy), asUint(exposureRatio), guideReset ? 1u : 0u,
-                                         flickering ? c.srv(previousFlicker) : none, flickering ? c.uav(reprojectedFlicker) : none, frameIndex, 0,
+                                         flickering ? c.srv(previousFlicker) : none, flickering ? c.uav(reprojectedFlicker) : none, frameIndex,
+                                         prevGuideW | (prevGuideH << 16),
                                          thinGeometry ? c.srv(previousThin) : none, thinGeometry ? c.uav(reprojectedThin) : none,
-                                         holeFilling ? c.uav(updateMotion) : none, 0,
+                                         holeFilling ? c.uav(updateMotion) : none, prevPairW | (prevPairH << 16),
                                          canResurrect ? c.srv(keptGuide) : none, canResurrect ? c.uav(resurrectedGuide) : none, asUint(keptExposureRatio),
                                          canResurrect ? c.srv(field) : none };
                       for (int r = 0; r < 4; ++r)

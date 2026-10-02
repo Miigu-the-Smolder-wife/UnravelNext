@@ -4,6 +4,8 @@
 // since the last frame; without an attached module or pending ticks the entry declares no passes.
 #include "unx/fx/ParticleLayer.h"
 #include "unx/fx/Particles.h"
+#include "unx/fx/SpriteLooks.h"
+#include "unx/render/GpuScene.h"
 #include "unx/render/Tracks.h"
 
 #include <memory>
@@ -35,6 +37,7 @@ void particles(FramePassContext& fc, ViewResources& view)
     frame.camera[2] = view.view.position.z + fc.frame.worldOrigin[2];
     for (int a = 0; a < 3; ++a) frame.streamAxes[a] = fc.frame.streamAxes[a];
     frame.time = fc.frame.time;
+    frame.ribbonSegments = fc.quality.has("fx.particles.ribbon_segments") ? (uint32_t)std::max<int64_t>(fc.quality.integer("fx.particles.ribbon_segments"), 1) : 1u;
     frame.soft = fc.quality.has("fx.particles.soft") && fc.quality.boolean("fx.particles.soft");
     frame.nearFade = fc.quality.has("fx.particles.near_fade") && fc.quality.boolean("fx.particles.near_fade");
     const FrameResources& r = fc.resources;
@@ -50,6 +53,8 @@ void particles(FramePassContext& fc, ViewResources& view)
     frame.lighting.gi = giSource(r);
     frame.lighting.froxelLights = view.froxelLights;
     frame.lighting.fxLights = r.fxLights;
+    frame.lighting.particleShadowParams = r.particleShadowParams;
+    frame.lighting.particleShadowMap = r.particleShadowMap;
     frame.lighting.airVolume = view.airVolume;
     frame.lighting.fogVolume = view.view.kind == gpu::ViewKind::Main ? r.fogVolume : view.fogVolume;
     frame.lighting.transmittanceLut = r.transmittanceLut;
@@ -58,9 +63,20 @@ void particles(FramePassContext& fc, ViewResources& view)
     const bool mainView = view.view.kind == gpu::ViewKind::Main;
     frame.lighting.localFluence = mainView ? r.localFluence : view.localFluence;
     frame.lighting.localMoment = mainView ? r.localMoment : view.localMoment;
+    // the sprite looks with the scene's textures, and for the main view under the temporal upscale the previous
+    // unjittered view (the sprites' motion: Upscale.cpp's layer motion)
+    frame.looks = &fx::spriteLooks(*fc.trackState);
+    frame.source = fc.scene.source();
+    frame.textureSrvs = fc.scene.textureSrvs();
+    if (view.view.kind == gpu::ViewKind::Main && fc.frame.upscale.outputWidth != 0 && !fc.frame.upscale.reset)
+    {
+        frame.prevViewProj = fc.frame.upscale.prevViewProj;
+        frame.motion = true;
+    }
     const fx::ParticleLayerOutput out = pass->record(*system, fc.graph, fc.shaders, fc.frame.frameIndex, frame);
     if (!out.valid) return;
     view.particleLayer = out.layer;
+    view.particleMotion = frame.motion ? out.motion : TextureRef{};
     view.particleDepthRange = out.depthRange;
     view.particleEdges = out.edges;
 }

@@ -230,6 +230,10 @@ struct FramePacket
     render::CloudLayerDesc clouds;            // B5: the cloud layer (FrameContext::clouds)
     render::FogDesc fog;                      // the height fog (FrameContext::fog)
     std::vector<render::FogVolumeDesc> fogVolumes;  // local fog volumes (FrameContext::fogVolumes; world coordinates)
+    // the volumes' density grids (the host's copies: FogVolumeDesc::grid of the volumes above points into them)
+    std::vector<std::shared_ptr<const std::vector<uint8_t>>> fogGrids;
+    render::WeatherFrame weather;             // the weather record (FrameContext::weather)
+    render::LightningDesc lightning;          // this frame's lightning flash (FrameContext::lightning; intensity 0: none)
     // W2 closed basins (v1.78): the basins every frame takes (this frame's coordinates; the sources pointers are set when
     // the frame is recorded) and this frame's sources (each handed to one frame; a dropped frame's carry into the next).
     std::vector<render::PoolFrame> pools;
@@ -256,6 +260,7 @@ struct FrameStats
     uint64_t frameIndex = UINT64_MAX;              // host frame number the GPU numbers belong to
     double gpuMs = 0, cpuRecordMs = 0, cpuSubmitMs = 0;
     uint32_t passes = 0;
+    uint32_t renderWidth = 0, renderHeight = 0;    // the main view's internal resolution in that frame
     GraphFrameStats graph;                         // the same frame's render graph
     struct QueueGaps
     {
@@ -263,6 +268,17 @@ struct FrameStats
         double headMs = 0, tailMs = 0, gapMs = 0;
     } queues[2];                                   // graphics, compute: time outside the passes (profiler list marks)
     std::vector<std::pair<std::string, double>> passMs;  // the same frame's passes in graph order
+};
+
+// UnxFrameGetStatistics: the main view's sizes in the newest frame recorded and the dynamic resolution's controller
+// (render::tracks::DynamicResolutionStatus; output.dynamic_resolution_target_ms).
+struct FramePacing
+{
+    uint32_t outputWidth = 0, outputHeight = 0;
+    uint32_t renderWidth = 0, renderHeight = 0;    // the internal resolution (the output's when the view is not upscaled)
+    bool dynamicResolution = false;                // the controller is running
+    float targetMs = 0, controllerMs = 0;          // its GPU time budget; the weighted frame time of its last decision
+    uint32_t minRenderHeight = 0, maxRenderHeight = 0;  // the range the internal height moves in
 };
 
 // B11 photo mode (FEATURES_GAME 17): E's GPU reference tracer on the renderer's device renders a snapshot of the scene
@@ -389,6 +405,8 @@ public:
     void setColorGrading(const render::ColorGradingDesc& grading);
     void setPost(const render::PostSettingsDesc& post, float exposureCompensation);
     void setDisplayEncoding(int32_t encoding, float paperWhiteNits);
+    // UnxFrameGetStatistics (read-only; with latestStats): what a game paces its frames by.
+    FramePacing framePacing() const;
     // A3 mesh particles (render C): the scene mesh a program's mesh_asset draws (committed mesh index or runtime mesh id;
     // 0xFFFFFFFF removes the mapping: its particles are not drawn and counted unmapped)
     void mapMeshAsset(uint64_t asset, uint32_t mesh);
@@ -457,6 +475,14 @@ public:
         float yaw = 0;
     };
     void setPools(std::span<const PoolInput> pools);
+    // The basins' weather (render::PoolFrame::steam*, rainExposure), by basin id: held until changed; a basin not named
+    // has none, an id not in the current set of basins waits for it.
+    struct PoolWeather
+    {
+        uint32_t id = 0;
+        float steamDensity = 0, steamHeight = 1.5f, steamRiseSpeed = 0.3f, steamTurbulence = 0.6f, rainExposure = 0;
+    };
+    void setPoolWeather(std::span<const PoolWeather> pools);
     // Sources for the next queued frame (world coordinates; the basin must be in the current set, the centre inside it).
     void addPoolSources(std::span<const FramePacket::PoolSource> sources);
     // The basins and sources the next queued frame takes, in that frame's coordinates (tests).
@@ -468,8 +494,12 @@ public:
     void setClouds(const render::CloudLayerDesc& clouds);
     // The height fog: held until changed; every queued frame takes the current medium.
     void setFog(const render::FogDesc& fog);
-    // Local fog volumes: the current set, held until changed.
+    // Local fog volumes: the current set, held until changed. A volume's density grid (FogVolumeDesc::grid) is copied.
     void setFogVolumes(const std::vector<render::FogVolumeDesc>& volumes);
+    // The weather record (FrameContext::weather: cloud cover, rain, wetness, snow): held until changed.
+    void setWeather(const render::WeatherFrame& weather);
+    // A lightning flash for the next queued frame only (intensity 0: none).
+    void setLightning(const render::LightningDesc& lightning);
     render::CloudLayerDesc clouds()
     {
         std::lock_guard lock(m_mutex);
@@ -647,10 +677,12 @@ private:
     HostState m_applied;
     uint64_t m_nextTicket = 1;
     FrameStats m_stats;
+    FramePacing m_pacing;  // (m_mutex)
 
     // Submission thread only.
     std::vector<std::array<uint64_t, 3>> m_slotFence;
     std::vector<uint64_t> m_slotHostFrame;
+    std::vector<std::array<uint32_t, 2>> m_slotRenderSize;  // the main view's internal size of the frame recorded in each slot
     std::vector<GraphFrameStats> m_slotGraph;  // the render graph of the frame recorded in each slot
     uint64_t m_recordedFrames = 0;
     float4x4 m_prevViewProj{};
@@ -691,9 +723,12 @@ private:
     std::optional<OceanInput> m_ocean;                               // (m_mutex) the sea every queued frame takes
     render::FogDesc m_fog;                                           // (m_mutex) the height fog every queued frame takes
     std::vector<render::FogVolumeDesc> m_fogVolumes;                 // (m_mutex) the local fog volumes every queued frame takes
+    std::vector<std::shared_ptr<const std::vector<uint8_t>>> m_fogGrids;  // (m_mutex) their density grids (m_fogVolumes point into them)
+    render::WeatherFrame m_weather;                                  // (m_mutex) the weather record every queued frame takes
     render::CloudLayerDesc m_clouds;                                 // (m_mutex) B5 the cloud layer every queued frame takes
     std::optional<render::OceanFrame> oceanFrameLocked() const;      // (m_mutex held) m_ocean in the current coordinates
     std::vector<PoolInput> m_pools;                                  // (m_mutex) W2 basins every queued frame takes (world)
+    std::vector<PoolWeather> m_poolWeather;                          // (m_mutex) their steam and rain exposure, by id
     std::vector<std::pair<uint32_t, water::PoolStats>> m_poolStats;  // (m_mutex) their latest statistics, copied after each record
     std::vector<FramePacket::PoolSource> m_pendingPoolSources;       // (m_mutex) for the next queued frame (world)
     void poolsLocked(FramePacket& packet);                           // (m_mutex held) basins and sources into the packet's coordinates

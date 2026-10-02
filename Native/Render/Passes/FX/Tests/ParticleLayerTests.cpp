@@ -177,7 +177,7 @@ void writePfm(const fs::path& path, const std::vector<uint8_t>& rgba32f, uint32_
 struct RunResult
 {
     std::vector<uint8_t> layer, edgeMask, composite;
-    std::vector<uint8_t> records;  // the pass's particle records (32 B each)
+    std::vector<uint8_t> records;  // the pass's particle records (fx::kLayerRecordBytes each)
     ViewDesc view;
     uint32_t status = 0, drawn = 0;  // the pass's status bits and records drawn
 };
@@ -352,10 +352,10 @@ RunResult run(Device& device, const Options& o, bool verify, bool lit = false, i
     auto layerBytes = rb.texture(graph, out.layer, layerPitch);
     const uint64_t edgeBytes = ((16ull + 4ull * out.layerWidth * out.layerHeight + 15) & ~15ull) + (uint64_t)out.edgeCapacity * 128;
     auto edgeData = rb.buffer(graph, out.edges, edgeBytes);
-    auto recordData = rb.buffer(graph, out.records, (uint64_t)std::max<uint32_t>(out.threads, 1) * 32);
+    auto recordData = rb.buffer(graph, out.records, (uint64_t)std::max<uint32_t>(out.threads, 1) * fx::kLayerRecordBytes);
     // the strip records after the sprite records (ribbon segments, FxLayerStrips)
     const uint32_t stripRecords = out.recordCount > out.threads ? out.recordCount - out.threads : 0u;
-    auto stripData = stripRecords ? rb.buffer(graph, out.records, (uint64_t)out.recordCount * 32) : nullptr;
+    auto stripData = stripRecords ? rb.buffer(graph, out.records, (uint64_t)out.recordCount * fx::kLayerRecordBytes) : nullptr;
     auto counterData = rb.buffer(graph, out.counters, 16);
     auto flagData = rb.buffer(graph, flags, 16);
     graph.execute(nullptr);
@@ -393,8 +393,8 @@ RunResult run(Device& device, const Options& o, bool verify, bool lit = false, i
         {
             float radius;
             uint32_t recordFlags;
-            std::memcpy(&radius, stripData->data() + (size_t)i * 32 + 8, 4);
-            std::memcpy(&recordFlags, stripData->data() + (size_t)i * 32 + 24, 4);
+            std::memcpy(&radius, stripData->data() + (size_t)i * fx::kLayerRecordBytes + 8, 4);
+            std::memcpy(&recordFlags, stripData->data() + (size_t)i * fx::kLayerRecordBytes + 24, 4);
             strips += radius > 0 && (recordFlags & 2u) != 0;  // FX_LAYER_RECORD_STRIP
         }
         FX_LOG("ribbons: %u points, %u segments drawn as strips", stripRecords, strips);

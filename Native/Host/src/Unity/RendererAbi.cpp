@@ -10,6 +10,7 @@
 #include "IUnityGraphicsD3D12.h"
 #include "IUnityInterface.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -1678,4 +1679,172 @@ UNX_API int32_t UNX_CALL UnxFrameSetPost(UnxRenderer r, const UnxPostSettingsDes
 UNX_API int32_t UNX_CALL UnxFrameSetDisplayEncoding(UnxRenderer r, int32_t encoding, float paperWhiteNits)
 {
     return call([&] { find(r)->setDisplayEncoding(encoding, paperWhiteNits); });
+}
+
+// ---- Weather: the frame's fog, fog volumes and clouds with what the renderer's frame gained after their first
+// descriptions were frozen, the weather record and the lightning flash (UnravelNextHost.h; optional exports within ABI 6).
+UNX_API int32_t UNX_CALL UnxFrameSetFog2(UnxRenderer r, const UnxFogDesc2* fog)
+{
+    return call([&] {
+        render::FogDesc f;  // null: the quality file's fog
+        if (fog)
+        {
+            if (fog->size != sizeof(UnxFogDesc2) || fog->version != 1) fail("UnxFrameSetFog2: UnxFogDesc2 size %u version %u", fog->size, fog->version);
+            f.enabled = true;
+            f.density = fog->density, f.heightFalloff = fog->heightFalloff, f.height = fog->height;
+            f.albedo[0] = fog->albedo[0], f.albedo[1] = fog->albedo[1], f.albedo[2] = fog->albedo[2];
+            f.phaseG = fog->phaseG, f.startDistance = fog->startDistance, f.skyAmount = fog->skyAmount;
+            f.noiseAmount = fog->noiseAmount, f.noiseScale = fog->noiseScale;
+            f.density2 = fog->density2, f.heightFalloff2 = fog->heightFalloff2, f.height2 = fog->height2;
+        }
+        find(r)->setFog(f);
+    });
+}
+UNX_API int32_t UNX_CALL UnxFrameSetFogVolumes2(UnxRenderer r, const UnxFogVolumeDesc2* volumes, uint32_t count)
+{
+    return call([&] {
+        if (count && !volumes) fail("UnxFrameSetFogVolumes2: no volumes");
+        std::vector<render::FogVolumeDesc> in(count);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const UnxFogVolumeDesc2& d = volumes[i];
+            if (d.size != sizeof(UnxFogVolumeDesc2) || d.version != 1) fail("UnxFrameSetFogVolumes2: UnxFogVolumeDesc2 %u size %u version %u", i, d.size, d.version);
+            render::FogVolumeDesc& v = in[i];
+            for (int k = 0; k < 3; ++k) v.centre[k] = d.centre[k], v.halfSize[k] = d.halfSize[k], v.albedo[k] = d.albedo[k], v.gridSize[k] = d.gridSize[k];
+            v.yaw = d.yaw, v.shape = d.shape, v.density = d.density, v.heightFalloff = d.heightFalloff, v.edge = d.edge;
+            v.sourcePlane = d.sourcePlane, v.riseSpeed = d.riseSpeed, v.turbulence = d.turbulence, v.turbulenceScale = d.turbulenceScale;
+            v.grid = d.grid;  // (the caller's texels: setFogVolumes checks the size and copies them)
+        }
+        find(r)->setFogVolumes(in);
+    });
+}
+UNX_API int32_t UNX_CALL UnxFrameSetClouds2(UnxRenderer r, const UnxCloudDesc2* clouds)
+{
+    return call([&] {
+        render::CloudLayerDesc c;  // null: no clouds (both coverages 0)
+        if (clouds)
+        {
+            if (clouds->size != sizeof(UnxCloudDesc2) || clouds->version != 1) fail("UnxFrameSetClouds2: UnxCloudDesc2 size %u version %u", clouds->size, clouds->version);
+            c.coverage = clouds->coverage;
+            c.baseAltitude = clouds->baseAltitude, c.topAltitude = clouds->topAltitude;
+            c.sigmaMax = clouds->sigmaMax, c.albedo = clouds->albedo;
+            c.windX = clouds->windX, c.windZ = clouds->windZ;
+            c.seed = clouds->seed;
+            c.cirrusCoverage = clouds->cirrusCoverage;
+            c.cirrusAltitude = clouds->cirrusAltitude, c.cirrusOpticalDepth = clouds->cirrusOpticalDepth;
+            c.cirrusWindX = clouds->cirrusWindX, c.cirrusWindZ = clouds->cirrusWindZ;
+        }
+        find(r)->setClouds(c);
+    });
+}
+UNX_API int32_t UNX_CALL UnxFrameSetWeather(UnxRenderer r, const UnxWeatherDesc* weather)
+{
+    return call([&] {
+        render::WeatherFrame w;  // null: no weather
+        if (weather)
+        {
+            if (weather->size != sizeof(UnxWeatherDesc) || weather->version != 1)
+                fail("UnxFrameSetWeather: UnxWeatherDesc size %u version %u", weather->size, weather->version);
+            w.rainRate = weather->rainRate, w.wetness = weather->wetness;
+            w.snowRate = weather->snowRate, w.snowDepth = weather->snowDepth;
+            w.cloudCover = weather->cloudCover;
+            w.rainDirection = { weather->rainDirection[0], weather->rainDirection[1], weather->rainDirection[2] };
+        }
+        find(r)->setWeather(w);
+    });
+}
+UNX_API int32_t UNX_CALL UnxFrameSetLightning(UnxRenderer r, const UnxLightningDesc* lightning)
+{
+    return call([&] {
+        render::LightningDesc l;  // null: no flash (intensity 0)
+        if (lightning)
+        {
+            if (lightning->size != sizeof(UnxLightningDesc) || lightning->version != 1)
+                fail("UnxFrameSetLightning: UnxLightningDesc size %u version %u", lightning->size, lightning->version);
+            for (int k = 0; k < 3; ++k) l.position[k] = lightning->position[k], l.color[k] = lightning->color[k];
+            l.intensity = lightning->intensity;
+            l.radius = lightning->radius;
+        }
+        find(r)->setLightning(l);
+    });
+}
+UNX_API int32_t UNX_CALL UnxFrameSetPoolWeather(UnxRenderer r, const UnxPoolWeatherDesc* pools, uint32_t count)
+{
+    return call([&] {
+        if (count && !pools) fail("UnxFrameSetPoolWeather: no basins");
+        std::vector<HostRenderer::PoolWeather> in(count);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const UnxPoolWeatherDesc& d = pools[i];
+            if (d.size != sizeof(UnxPoolWeatherDesc) || d.version != 1) fail("UnxFrameSetPoolWeather: UnxPoolWeatherDesc %u size %u version %u", i, d.size, d.version);
+            in[i] = { d.pool, d.steamDensity, d.steamHeight, d.steamRiseSpeed, d.steamTurbulence, d.rainExposure };
+        }
+        find(r)->setPoolWeather(in);
+    });
+}
+
+// ---- Frame pacing data: the GPU frame time, the main view's resolution with the dynamic resolution's state, the GPU
+// time by pass group (the pass names' part before the first '.').
+UNX_API int32_t UNX_CALL UnxFrameGetStatistics(UnxRenderer r, UnxFrameStatistics* statistics)
+{
+    return call([&] {
+        requireStruct(statistics, "UnxFrameStatistics");
+        const auto renderer = find(r);
+        const FrameStats s = renderer->latestStats();
+        const FramePacing p = renderer->framePacing();
+        statistics->frameIndex = s.frameIndex;
+        statistics->gpuMs = s.gpuMs;
+        statistics->cpuRecordMs = s.cpuRecordMs;
+        statistics->cpuSubmitMs = s.cpuSubmitMs;
+        statistics->gpuRenderWidth = s.renderWidth;
+        statistics->gpuRenderHeight = s.renderHeight;
+        statistics->outputWidth = p.outputWidth;
+        statistics->outputHeight = p.outputHeight;
+        statistics->renderWidth = p.renderWidth;
+        statistics->renderHeight = p.renderHeight;
+        statistics->dynamicResolution = p.dynamicResolution ? 1u : 0u;
+        statistics->resolutionScale = p.outputHeight ? (float)p.renderHeight / (float)p.outputHeight : 1.0f;
+        statistics->dynamicTargetMs = p.targetMs;
+        statistics->dynamicMeasuredMs = p.controllerMs;
+        statistics->minRenderHeight = p.minRenderHeight;
+        statistics->maxRenderHeight = p.maxRenderHeight;
+        statistics->passes = s.passes;
+        // the groups, the largest time first; the ones beyond the table summed into its last entry
+        struct Group
+        {
+            std::string name;
+            double ms = 0;
+            uint32_t passes = 0;
+        };
+        std::vector<Group> groups;
+        for (const auto& [name, ms] : s.passMs)
+        {
+            const std::string prefix = name.substr(0, name.find('.'));
+            auto at = std::find_if(groups.begin(), groups.end(), [&](const Group& g) { return g.name == prefix; });
+            if (at == groups.end()) at = groups.insert(groups.end(), Group{ prefix });
+            at->ms += ms;
+            ++at->passes;
+        }
+        std::stable_sort(groups.begin(), groups.end(), [](const Group& a, const Group& b) { return a.ms > b.ms; });
+        if (groups.size() > UNX_FRAME_STATISTICS_GROUPS)
+        {
+            Group other{ "other" };
+            for (size_t i = UNX_FRAME_STATISTICS_GROUPS - 1; i < groups.size(); ++i)
+            {
+                other.ms += groups[i].ms;
+                other.passes += groups[i].passes;
+            }
+            groups.resize(UNX_FRAME_STATISTICS_GROUPS - 1);
+            groups.push_back(other);
+        }
+        statistics->groupCount = (uint32_t)groups.size();
+        std::memset(statistics->groups, 0, sizeof statistics->groups);
+        for (size_t i = 0; i < groups.size(); ++i)
+        {
+            UnxFrameStatisticsGroup& out = statistics->groups[i];
+            std::memcpy(out.name, groups[i].name.data(), std::min(groups[i].name.size(), sizeof out.name - 1));
+            out.gpuMs = (float)groups[i].ms;
+            out.passes = groups[i].passes;
+        }
+    });
 }

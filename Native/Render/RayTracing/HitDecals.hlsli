@@ -8,7 +8,8 @@
 // Words 16..19 of the local-light grid header (RtSceneSrvs.pad, written per frame): { decal TLAS SRV, decal frames SRV,
 // M's material texture table (0xFFFFFFFF: constants only), decal count }; 0xFFFFFFFF in word 16: no decals this frame.
 // Condition: hit shading uses the interpolated normal (it applies no normal map, the base material's included), so a
-// decal changes base colour, roughness and metallic there; its normal (LEAN moments) is the direct view's alone.
+// decal changes base colour, roughness and metallic there; its normal (LEAN moments) is the direct view's alone, and
+// so is an emissive decal's emission.
 #ifndef UNX_RT_HIT_DECALS_HLSLI
 #define UNX_RT_HIT_DECALS_HLSLI
 #include "RayTracing/RayScene.hlsli"
@@ -54,6 +55,7 @@ void rtHitDecals(RtSceneSrvs scene, RtSurface s, float footprint, inout GpuMater
     dm.metallic = m.metallic;
     dm.normal = s.normal;
     dm.variance = 0;
+    dm.emissive = 0;
     DecalContext c;
     c.frames = w.y;
     c.tiles = DECAL_NONE;

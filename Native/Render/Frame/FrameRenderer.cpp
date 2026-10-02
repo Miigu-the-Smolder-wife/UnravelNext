@@ -266,6 +266,10 @@ void FrameRenderer::setupUpscale(FrameContext& frame)
         m_upscaleValid = false;
         return;
     }
+    // Dynamic resolution (output.dynamic_resolution_target_ms, M's DynamicResolution.cpp): the height above is the
+    // most the frame renders; the controller may take fewer lines to hold its GPU time budget. The output's size and
+    // the upscale's history stay; the internal size is this frame's alone.
+    h = std::clamp(tracks::dynamicResolutionHeight(m_trackState, m_quality, frame, v.height, h), 8u, h);
     const uint32_t W = v.width, H = v.height;
     const uint32_t w = std::max(8u, (uint32_t)std::lround((double)W * h / H));
     // 64 positions per internal pixel whatever the ratio: the upscale's narrow output-pixel kernel (output.upscale_kernel)
@@ -287,8 +291,9 @@ void FrameRenderer::setupUpscale(FrameContext& frame)
     const float exposure = 1.0f / (1.2f * std::exp2(v.ev100));
     u.exposureRatio = m_upscaleValid && m_upscalePrevExposure > 0 ? exposure / m_upscalePrevExposure : 1.0f;
     u.reset = !m_upscaleValid || !sameSize || frame.discontinuity != 0;
-    u.prevJitterX = u.reset ? jx : m_upscalePrevJitterX;
-    u.prevJitterY = u.reset ? jy : m_upscalePrevJitterY;
+    // (the previous frame's jitter in this frame's internal pixels: the internal size may have changed since)
+    u.prevJitterX = u.reset ? jx : m_upscalePrevJitterX * (m_upscalePrevInternalWidth ? (float)w / (float)m_upscalePrevInternalWidth : 1.0f);
+    u.prevJitterY = u.reset ? jy : m_upscalePrevJitterY * (m_upscalePrevInternalHeight ? (float)h / (float)m_upscalePrevInternalHeight : 1.0f);
     // The jittered projection: clip' = T clip with T translating NDC by (2 jx / w, -2 jy / h) (pixel +y is NDC -y), so
     // the content moves by (jx, jy) internal pixels: rows 0 and 1 of P gain the translation times row 3.
     const float tx = 2.0f * jx / (float)w, ty = -2.0f * jy / (float)h;
@@ -309,6 +314,8 @@ void FrameRenderer::setupUpscale(FrameContext& frame)
     m_upscalePrevJitterY = jy;
     m_upscalePrevWidth = W;
     m_upscalePrevHeight = H;
+    m_upscalePrevInternalWidth = w;
+    m_upscalePrevInternalHeight = h;
     m_upscaleValid = true;
 }
 
@@ -411,6 +418,33 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
             for (int r = 0; r < 4; ++r) pv.m[r][3] += pv.m[r][0] * frame.originShift.x + pv.m[r][1] * frame.originShift.y + pv.m[r][2] * frame.originShift.z;
         }
     }
+    // Steam over hot water (PoolFrame::steamDensity): a local fog volume per such basin, after the frame's and the
+    // scene's own (the first kMaxFogVolumes of a frame take effect). The volume is centred on the still surface with the
+    // steam's height as its vertical half size and its source plane at the middle - nothing under the water, the density
+    // falling to a quarter at the top, fading over the outer 30 % toward the rim and the top; a round basin's is the
+    // ellipsoid, a rectangular one's the box with the basin's yaw. Basins are in the frame's coordinates, fog volumes in
+    // the world's (S takes the origin offset off again).
+    {
+        const float3 offset = m_scene.originOffset();
+        for (uint32_t i = 0; i < frame.poolCount && frame.fogVolumes.size() < kMaxFogVolumes; ++i)
+        {
+            const PoolFrame& p = frame.pools[i];
+            if (!(p.steamDensity > 0) || !(p.steamHeight > 0)) continue;
+            FogVolumeDesc d;
+            d.centre[0] = p.centre[0] + offset.x, d.centre[1] = p.centre[1] + offset.y, d.centre[2] = p.centre[2] + offset.z;
+            const bool round = p.shape == 1;
+            d.halfSize[0] = 0.5f * p.sizeX, d.halfSize[1] = p.steamHeight, d.halfSize[2] = round ? 0.5f * p.sizeX : 0.5f * p.sizeZ;
+            d.yaw = p.yaw;
+            d.shape = round ? 0u : 1u;
+            d.density = p.steamDensity;
+            d.heightFalloff = 2;
+            d.sourcePlane = 0.5f;
+            d.riseSpeed = p.steamRiseSpeed;
+            d.turbulence = p.steamTurbulence;
+            d.turbulenceScale = p.steamTurbulenceScale;
+            frame.fogVolumes.push_back(d);
+        }
+    }
     m_scene.flushUpdates(frame.frameIndex, m_framesInFlight, m_shaders);  // transforms, palettes, visibility of this frame
     tracks::particleLightCapacity(m_trackState, m_scene);  // A3: before the imports and every frame constants
     FrameResources resources;
@@ -459,6 +493,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     tracks::simulation(fc);  // C0
     tracks::particleMeshes(fc);  // A3 (render C): mesh particle instances, before V's culling
     tracks::particleLights(fc, main);  // A3: FX particle lights into the scene light tail, before S's lists
+    tracks::particleShadows(fc, main);  // the sprites' shadow under the sun (S's screen visibility and the particles read it)
     tracks::waterGeometry(fc);  // W (B7/B8): ocean FFT and fluid surface into V's triangle streams
     tracks::atmosphere(fc);
     tracks::accelerationStructures(fc);

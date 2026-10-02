@@ -9,6 +9,9 @@
 // one diagonal, the diagonal alternating by pixel parity, so every border and corner has pixels that look across it. The
 // taps of a pixel near a page border then find the neighbour on the pixel's own level, not only its coarser ancestors.
 // 0: the pixel's page alone.
+// P[1].y 1: the depth is a layer's linear view depth, +inf where the layer has nothing (V's water layer: the water
+// surface's points ask for their pages as the opaque surface under them does - the sun's glint on the water and what
+// the water scatters read the shadow at the surface, which no opaque pixel may have asked for).
 // Frame constants of the view.
 #include "Frame.hlsli"
 #include "Passes/Shadow/VsmCommon.hlsli"
@@ -18,7 +21,12 @@ void main(uint2 px : SV_DispatchThreadID)
 {
     if (px.x >= g_viewWidth || px.y >= g_viewHeight) return;
     Texture2D<float> depthTex = ResourceDescriptorHeap[P[0].x];
-    const float depth = depthTex.Load(int3(px, 0));
+    float depth = depthTex.Load(int3(px, 0));
+    if (P[1].y != 0)
+    {
+        if (!(depth < 3.0e38)) return;  // no layer sample here
+        depth = g_nearPlane / max(depth, 1e-30);  // (reversed-Z infinite: device depth of a view depth)
+    }
     if (depth <= 0) return;  // sky
     ConstantBuffer<VsmConstants> c = ResourceDescriptorHeap[P[0].z];
     const float3 world = worldFromDepth(float2(px), depth);
