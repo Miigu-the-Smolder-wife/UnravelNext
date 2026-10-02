@@ -7,6 +7,20 @@
 
 namespace unx::render::refl
 {
+// The rules the frame's ray hits share (CardLayout.hlsli words 28..39; LumenHitIndirect.hlsli lhiRules): the readers'
+// root constants are full, so what every hit kernel needs travels with the card frame.
+struct CardHitRules
+{
+    float farStart = 0;                 // lumen.radiance_cache_far_field: the mesh cards' end, m (0: no far field)
+    float skyLeakingInvDistance = 0.1f; // 1 / lumen.skylight_leaking_full_distance_m
+    float distantScreenTrace = 0;       // reflection.lumen_distant_screen_traces: their length past the rays' end, m (0: none)
+    float distantSlopeTolerance = 2.0f; // reflection.lumen_distant_screen_trace_depth_threshold
+    float skyLeaking[3] = { 0, 0, 0 };  // lumen.skylight_leaking x lumen.skylight_leaking_tint (0: none)
+    float skyLeakingReflection = 0.25f; // lumen.skylight_leaking_reflection_average_albedo
+    float distantStepOffsetBias = 0;    // reflection.lumen_distant_screen_trace_step_offset_bias
+    bool foliageTransmission = true;    // surface_cache.foliage_transmission
+};
+
 struct CardSet
 {
     bool valid = false;
@@ -27,5 +41,6 @@ struct CardSet
     // run: the previous frame's (LumenHitIndirect.hlsli). hitVolumeParams 0xFFFFFFFF: none.
     uint32_t hitVolumeParams = 0xFFFFFFFFu;
     TextureRef hitVolumeAmbient, hitVolumeDirectional;
+    CardHitRules hitRules;
 };
 } // namespace unx::render::refl

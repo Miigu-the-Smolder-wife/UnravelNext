@@ -56,6 +56,7 @@ struct Tracked  // a scene instance as the card scene last saw it
     uint32_t mesh = 0xFFFFFFFFu;
     uint32_t scaleBits = 0, transformRevision = 0, materialKey = 0;
     uint8_t state = 0;  // 0 not in the card scene, 1 waiting for its mesh's cards, 2 added
+    bool emissive = false;  // an emissive light source (emissiveSourceOf) when it was added
 };
 
 struct CopyOp
@@ -179,6 +180,7 @@ SurfaceCacheCardSettings SurfaceCacheCardSettings::fromQuality(const QualityConf
     s.cards.minResolution = (uint32_t)num("surface_cache.mesh_cards_min_resolution", 4);
     s.cards.maxDistance = (float)num("surface_cache.mesh_cards_max_distance_m", 300.0);
     s.cards.minSize = (float)num("surface_cache.mesh_cards_min_size_m", 0.1);
+    s.emissiveLightSources = flag("surface_cache.mesh_cards_emissive_light_sources", true);
     s.cards.refreshFraction = (float)num("surface_cache.mesh_cards_refresh_fraction", 0.125);
     s.captureClusters = flag("surface_cache.mesh_cards_capture_clusters", false);
     s.cards.feedback = flag("surface_cache.feedback", true);
@@ -193,6 +195,23 @@ SurfaceCacheCardSettings SurfaceCacheCardSettings::fromQuality(const QualityConf
     s.cards.keepUnusedPagesFrames = (uint32_t)std::max(num("surface_cache.feedback_keep_unused_frames", 256), 1.0);
     s.feedbackResLevelBias = (float)num("surface_cache.feedback_res_level_bias", -0.5);
     s.lightingFeedback = flag("surface_cache.lighting_feedback", true);
+    {
+        // the rules the frame's ray hits share (CardSet.h CardHitRules)
+        CardHitRules& h = s.hitRules;
+        h.farStart = flag("lumen.radiance_cache_far_field", false) ? (float)num("surface_cache.mesh_cards_max_distance_m", 300.0) : 0.0f;
+        const float leaking = (float)std::max(num("lumen.skylight_leaking", 0.0), 0.0);
+        const std::vector<double> tint = q.has("lumen.skylight_leaking_tint") ? q.numbers("lumen.skylight_leaking_tint") : std::vector<double>{};
+        for (int c = 0; c < 3; ++c) h.skyLeaking[c] = leaking * (tint.size() == 3 ? (float)std::max(tint[c], 0.0) : 1.0f);
+        // (the reference clamps the distance to 10 cm .. its trace distance)
+        h.skyLeakingInvDistance = 1.0f / (float)std::max(num("lumen.skylight_leaking_full_distance_m", 10.0), 0.1);
+        h.skyLeakingReflection = (float)std::max(num("lumen.skylight_leaking_reflection_average_albedo", 0.25), 0.0);
+        // distant screen traces: the stretch past the rays' end the view may still show (none when the rays reach as far)
+        const float rayLength = (float)num("gi.ray_length_m", 1000.0), distant = (float)num("reflection.lumen_distant_screen_trace_max_distance_m", 2000.0);
+        h.distantScreenTrace = flag("reflection.lumen_distant_screen_traces", true) && distant > rayLength ? distant - rayLength : 0.0f;
+        h.distantSlopeTolerance = (float)std::max(num("reflection.lumen_distant_screen_trace_depth_threshold", 2.0), 0.0);
+        h.distantStepOffsetBias = (float)num("reflection.lumen_distant_screen_trace_step_offset_bias", 0.0);
+        h.foliageTransmission = flag("surface_cache.foliage_transmission", true);
+    }
     s.direct = flag("surface_cache.direct_lighting", true);
     s.radiosity = flag("surface_cache.radiosity", true);
     s.shadowRaysOpaque = flag("surface_cache.shadow_rays_opaque", false);
@@ -316,6 +335,26 @@ struct SurfaceCacheCards::Impl
         return h;
     }
 
+    // The reference's bEmissiveLightSource is a mark the artist sets on a primitive; here every instance one of whose
+    // materials emits light GI takes (not the emissive-for-the-view-only kind) is one: its emission is in the scene's
+    // light whether marked or not (surface_cache.mesh_cards_emissive_light_sources).
+    bool emissiveSourceOf(const GpuScene& gs, const scene::Scene& src, uint32_t instance) const
+    {
+        if (!settings.emissiveLightSources) return false;
+        const scene::Instance& in = src.instances[instance];
+        const scene::Mesh& mesh = src.meshes[in.mesh];
+        const std::vector<gpu::Material>& materials = gs.materials();
+        for (size_t sm = 0; sm < mesh.submeshes.size(); ++sm)
+        {
+            const uint32_t material = sm < in.materialOverrides.size() ? in.materialOverrides[sm] : mesh.submeshes[sm].material;
+            if (material >= materials.size()) continue;
+            const gpu::Material& gm = materials[material];
+            if (((gm.classFlags >> 8) & gpu::MaterialEmissiveVisibleOnly) != 0) continue;
+            if (gm.emissive.x > 0 || gm.emissive.y > 0 || gm.emissive.z > 0) return true;
+        }
+        return false;
+    }
+
     // The card scene follows the GPU scene: which instances have cards, where they are.
     void sync(FramePassContext& fc)
     {
@@ -376,6 +415,7 @@ struct SurfaceCacheCards::Impl
                 t.mesh = g.mesh;
                 t.scaleBits = scaleBits;
                 t.materialKey = materialKeyOf(gs, *src, i);
+                t.emissive = emissiveSourceOf(gs, *src, i);
                 t.state = 1;
             }
             if (t.state == 1)
@@ -394,7 +434,7 @@ struct SurfaceCacheCards::Impl
                     ++waiting;
                     continue;
                 }
-                scene->addInstance(i, *cards, matrixOf(g), scene::instanceLightingChannels(g.flags));
+                scene->addInstance(i, *cards, matrixOf(g), scene::instanceLightingChannels(g.flags), t.emissive);
                 t.state = 2;
                 t.transformRevision = g.transformRevision;
                 continue;
@@ -410,7 +450,15 @@ struct SurfaceCacheCards::Impl
                 if (key != t.materialKey)
                 {
                     t.materialKey = key;
-                    scene->refreshInstance(i);
+                    if (emissiveSourceOf(gs, *src, i) != t.emissive)
+                    {
+                        // it became a light source or stopped being one: its cards pass another size rule - added anew
+                        // (the next frame takes it from state 0)
+                        scene->removeInstance(i);
+                        t.state = 0;
+                    }
+                    else
+                        scene->refreshInstance(i);
                 }
             }
         }
@@ -885,6 +933,7 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
         set.feedbackBias = s.settings.feedbackResLevelBias;
         set.lightingFeedback = s.settings.lightingFeedback;
     }
+    set.hitRules = s.settings.hitRules;
     // lumen.hit_indirect: hits without cards take their indirect light from the previous frame's translucency volume
     // while the cache's own passes run (the final gather names this frame's sources afterwards: CardFrameSources.hlsl)
     const bool hitIndirect = !fc.quality.has("lumen.hit_indirect") || fc.quality.boolean("lumen.hit_indirect");
@@ -897,6 +946,9 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
     }
 
     // ---- the lighting's shared inputs: sky and sun (GiSky.hlsli), the ray scene
+    // E's grooms on the radiosity rays (HitHair.hlsli): the light header's words 22, 23, before rootConstants. Only when
+    // the frame's density volume is already published - recordHair settles the frame's answer for every later caller.
+    if (fc.resources.hairDensityParams.valid()) rays.recordHair(fc);
     uint32_t sceneWords[8];
     rays.rootConstants(sceneWords);
     const FrameResources& fr = fc.resources;
@@ -908,6 +960,7 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
     const BufferRef fxLights = fr.fxLights, fxLightCount = fr.fxLightCount;
     auto declareShared = [rayScene, atmosphere, luts, fxLights, fxLightCount](PassBuilder& b) {
         rayScene->declareTraversal(b);
+        rayScene->declareHair(b);
         if (atmosphere)
             for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
         if (fxLights.valid()) b.use(fxLights, Use::SrvGraphics);

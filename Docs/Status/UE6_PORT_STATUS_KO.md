@@ -33,7 +33,7 @@
 | M 합성을 언리얼의 DiffuseIndirectComposite 구조로: 확산 × 짧은 거리 AO(다중 반사), rough specular × 스페큘러 가림, 그 위에 반사를 몫만큼; 클리어코트는 윗층 = 코트 거칠기로 추적한 반사, 아랫층 = rough specular | ✔ | `ShadeOpaque.hlsl`(part 2), `ReflectionInternal.hlsli`의 `reflTopLayerRoughness` |
 | 설정 묶음과 기본값(`Config/quality`): 아래 스위치가 전부 기본 켬 | ✔ | `surface_cache.enabled`·`mesh_cards`, `gi.lumen`·`lumen_only`, `reflection.lumen`·`lumen_only`, `lumen.radiance_cache`·`short_range_ao`·`translucency_volume`, `output.screen_trace_source = 0` |
 
-옛 경로(월드 GI 해시 캐시, 그 화면 프로브, 반사의 K/G/M·rays buffer·inline·shade·combine 패스, 해시 셀 표면 캐시)는 스위치를 끄면 그대로 돈다. GPU 실행으로 새 경로를 확인한 뒤 코드에서 지운다.
+옛 경로(월드 GI 해시 캐시, 그 화면 프로브, 반사의 K/G/M·rays buffer·inline·shade·combine 패스, 해시 셀 표면 캐시)는 스위치를 끄면 그대로 돈다. GPU 실행으로 새 경로를 확인한 뒤 코드에서 지운다. 기본값에서 닿지 않는 파일·커널·설정 키와 그것을 참조하는 시험의 목록은 1.3.5에 있다(지운 것 없음).
 
 ### 1.2 2026-10-03 추가분 (브랜치 `w/cache`) — 전부 코드 작성·빌드 통과, 실행 안 함
 
@@ -64,14 +64,132 @@ GPU에서 돌린 것은 없다(시험 실행 파일·캡처·게이트·furnace 
 | 수집: ShortRangeGI | 안 옮김 | 언리얼에서 실험 기능, 기본 끔 |
 | 수집: IntegrateDownsampleFactor, GatherNumMips, SpatialFilterHalfKernelSize, FastUpdateModeUseNeighborhoodClamp, RadianceCache.SkyVisibility, ExtraAmbientOcclusion | 안 옮김 | 언리얼 기본값에서 꺼져 있거나 1 |
 | 수집: ScreenTraces SkipHairHits·SkipUnlitHits, MinimumOccupancy, ThicknessScaleWhenNoFallback | 안 옮김 | 기본 false이거나 거리장 대체 경로용 |
-| 수집·반사: HairStrands.ScreenTrace / VoxelTrace | 안 옮김 | 머리카락 트랙의 복셀·깊이 인터페이스가 필요 |
+| 수집·반사: HairStrands.ScreenTrace / VoxelTrace | 머리카락 트랙이 구현(`RayTracing/HitHair.hlsli`: 밀도 볼륨의 첫 가닥) | 1.3에서 남은 두 커널(카드 radiosity, 굴절 서비스)에도 넣었다 |
 | 반사: ScreenSpaceReconstruction, BilateralFilter(표본 수·반경·깊이 가중·disocclusion 프레임), Temporal, DenoiserTonemapRange, GGXSamplingBias, RoughnessFadeLength, SampleSceneColorAtHit, DownsampleFactor, 수집의 rough specular 재사용 | 이미 있음 | |
 | 반사: HiResSurface, SurfaceCacheFeedback | 1번에서 구현 | |
-| 반사: DistantScreenTraces | 안 옮김 | 언리얼에서는 광선 씬이 컬링 반경에서 끝나는 곳부터 화면을 따라가는 장치이고, far field가 켜지면 돌리지 않는다. 여기는 컬링 반경으로 끊기는 근거리 씬이 따로 없다: 반사 광선이 광선 씬 전체를 `gi.ray_length_m`까지 추적한다 |
+| 반사: DistantScreenTraces | 1.3에서 구현(기본 설정에서는 걷는 구간이 0) | 언리얼에서는 광선 씬이 컬링 반경에서 끝나는 곳부터 화면을 따라가는 장치이고, far field가 켜지면 돌리지 않는다. 여기는 컬링 반경으로 끊기는 근거리 씬이 따로 없다: 반사 광선이 광선 씬 전체를 `gi.ray_length_m`까지 추적한다. 그래서 광선 길이가 2 km보다 짧게 설정됐을 때만 돈다 |
 | 반사: RadianceCache(거친 반사 광선을 줄이고 캐시에서 읽기) | 안 옮김 | 언리얼 기본 0 |
 | 반사: DownsampleCheckerboard, MaxRoughnessToTraceClamp, SmoothBias, SpecularScale, Contrast | 안 옮김 | 기본값에서 동작 없음 |
-| 반사: 반투명 앞면 층 반사(front layer), HitLighting 모드·MaxBounces | 안 옮김 | 반투명 합성(M)과 재질 hit 셰이더가 필요. 기본은 표면 캐시 조명 |
+| 반사: 반투명 앞면 층 반사(front layer) | 굴절 서비스의 반사 job이 그 역할이다(1.3 9번에서 hit 처리를 반사 광선과 맞춤) | 거칠기 있는 로브 표본과 디노이저는 없다(1.3.2) |
+| 반사: HitLighting 모드·MaxBounces | 안 옮김 | 재질 hit 셰이더가 필요. 기본은 표면 캐시 조명 |
 | 반사: HierarchicalScreenTraces.IncludeTranslucencyDepth, MinimumOccupancy | 안 옮김 | 기본값에서 동작 같음 |
+
+### 1.3 2026-10-03 두 번째 구간 (브랜치 `w/cache`) — 전부 코드 작성·빌드 통과, 실행 안 함
+
+GPU에서 돌린 것은 없다(시험 실행 파일·캡처·게이트·furnace 포함). 확인은 `Tools\CI\Build.ps1 -Track all`의 `build ok`뿐이다. 빌드한 것은 마지막 커밋의 트리다: 항목별 커밋 7개는 그 트리를 나눠 담은 것이고, 중간 커밋을 따로 빌드하지 않았다. DXIL 크기는 가장 큰 것이 153 KB(`LgTrace`, 한도 200 KB).
+
+#### 1.3.1 구현한 것
+
+| # | 항목 | 내용 | 스위치(기본) | 위치 |
+|---|---|---|---|---|
+| 8 | 카드 radiosity 광선의 머리카락 | 머리카락 프록시(밀도 볼륨의 첫 가닥)를 쓰지 않던 마지막 GI 광선이었다. hit보다 앞에 가닥이 있으면 그 가닥이 hit이다(태양 그림자 광선 1개 + 국소광 표본 1개로 조명, 텍셀이 그 안에 들어 있는 머리는 제외). 스레드당 광선 상한 4는 그대로다(표면 hit의 그림자 광선과 프록시의 그림자 광선은 둘 중 하나만 쏜다). 표면 캐시가 `RayScene::recordHair`를 부른다 — 그 프레임의 밀도 볼륨이 표면 캐시 기록 시점에 이미 발행돼 있을 때만. 발행이 표면 캐시 기록보다 늦는 프레임 순서라면 이 광선은 머리카락을 보지 못한다(순서는 확인하지 않았다). | `raytracing.hair`(기존) | `CardRadiosityTrace.hlsl`, `SurfaceCacheCards.cpp` |
+| 9 | 굴절 서비스(= front layer 반사 + ray-traced translucency) | `RefractionLumenTrace.hlsl`(물·유리·coverage 층이 만든 반사/굴절 job을 추적)이 경로의 끝을 반사 광선과 같은 방식으로 처리한다. ① 마지막 hit이 화면에 보이면 이전 프레임 색(언리얼 SampleSceneColorAtHit; 깊이 두께·법선 임계는 주 반사와 같은 값, 법선은 G-buffer가 아니라 hit 면의 광선 쪽 법선) — 수면이 카드 텍셀이 아니라 뷰가 보여 주는 조명을 비춘다. ② 매질 밖 구간의 머리카락 프록시(태양만: 스레드당 그림자 광선 1개 유지). ③ 경로 throughput의 최대 채널이 임계 아래면 끝낸다. ④ 결과 상한(노출 단위). ⑤ 음영을 구간 루프 밖으로 뺐다(루프 안에 그림자 광선 없음). | `reflection.lumen_refraction_scene_color_at_hit`(켬), `lumen_refraction_path_throughput_threshold` 0.001, `lumen_refraction_max_ray_intensity` 0(상한 없음) | `RefractionLumenTrace.hlsl`, `ReflectionSystem.cpp`(recordRefraction) |
+| 10 | hit 규칙을 카드 프레임으로 | 카드 프레임이 128 B → 160 B(워드 28~39). hit 커널들의 루트 상수가 꽉 차서, 모든 hit이 같이 쓰는 값을 카드 프레임에 싣는다: far field 시작 거리, skylight leaking 색·거리·반사 몫, distant screen trace 구간·허용치·오프셋, 잎 투과 스위치. | — | `CardLayout.hlsli`, `CardFrame.hlsl`, `CardLighting.cpp`, `CardSet.h`(`CardHitRules`), `LumenHitIndirect.hlsli`(`lhiRules`) |
+| 11 | skylight leaking | 언리얼의 LumenSkylightLeaking(색조, 전체 거리 포함). 화면 프로브 광선과 translucency volume 광선의 hit: 광선 방향의 하늘 radiance × 색 × min(hit 거리 / 전체 거리, 1). 반사 hit: hit 법선 쪽 하늘 radiance × 색 × 평균 알베도 0.25. radiance cache 광선에는 넣지 않았다(언리얼도 화면 프로브용 캐시에서는 끈다). 언리얼은 거칠기 0.3으로 흐린 하늘 큐브를 읽고, 여기는 하늘 radiance를 그대로 읽는다. **가림이 없는 빛이다 — 0보다 크면 닫힌 방이 낮에 더 밝다. 기본 0이고, furnace 규칙은 0에서만 성립한다.** | `lumen.skylight_leaking` 0, `skylight_leaking_tint` [1,1,1], `skylight_leaking_full_distance_m` 10, `skylight_leaking_reflection_average_albedo` 0.25 | `LumenHitIndirect.hlsli`, `LgTrace.hlsl`, `LumenTranslucencyVolumeTrace.hlsl`, `ReflectionLumenHit.hlsli` |
+| 12 | 카드 없는 hit의 far field(반사·radiosity) | 카드 끝(300 m) 밖에서 volume도 irradiance 프로브도 답하지 않는 hit은 hit 법선 쪽 하늘 irradiance를 받는다. 화면 프로브·radiance cache·volume 광선에는 이미 있던 규칙이고, 반사와 카드 radiosity의 카드 없는 hit에만 빠져 있었다(거울 속 먼 지형이 태양만 받았다). | `lumen.radiance_cache_far_field`(기존, 켬) | `ReflectionLumenHit.hlsli`, `CardRadiosityTrace.hlsl` |
+| 13 | distant screen traces | 반사의 월드 광선이 아무것도 못 맞혔을 때, 광선 끝에서부터 깊이 버퍼를 16걸음 선형으로 걷고(slope compare tolerance 2.0, 걸음 오프셋 = 화소 잡음 + bias), 맞으면 이전 프레임 색. 걷는 구간 = (최대 거리 2 km − 광선 길이). 기본 광선 길이가 10 km라 구간이 0이고 아무것도 걷지 않는다. | `reflection.lumen_distant_screen_traces`(켬), `_max_distance_m` 2000, `_depth_threshold` 2.0, `_step_offset_bias` 0 | `ScreenTrace.hlsli`(`sctDistantTrace`), `ReflectionLumenTrace.hlsl` |
+| 14 | 잎을 지나는 빛(카드로 조명된 hit) | Foliage 재질의 hit이 카드에서 조명을 받으면 제 면의 (1 − t)만 남고 t 몫이 사라졌다. 카드는 양면 표면의 두 면을 각각의 카드에 갖고 있으므로, 반대쪽 면의 카드 조명을 법선을 뒤집어 읽어 투과 항으로 더한다. irradiance를 읽는 hit(화면 프로브, radiance cache, 반사): + base colour × (1 − metallic) / π × t × 반대쪽 irradiance. final 조명을 읽는 hit(radiosity, translucency volume): (1 − t) × 이쪽 + t × 반대쪽. 반대쪽 값도 카드 조명이라 그림자·가림은 카드와 같다. | `surface_cache.foliage_transmission`(켬) | `LumenHitIndirect.hlsli`(`lhiFoliageThrough`, `lhiFoliageFinal`), hit 커널 5개 |
+| 15 | 수집 보간의 잎 화소 | 보간의 깊이 가중에는 잎용 배율(× 0.25)이 있었는데, 화소 적분과 적응 프로브 표시가 `foliage = false`를 넘기고 있었다. 이제 M의 재질 워드에서 화소의 클래스를 읽는다(Foliage·Subsurface). 그런 재질이 씬에 있을 때만 워드를 묶는다. | 없음(항상) | `LgIntegrate.hlsl`, `LgAdaptiveMark.hlsl`, `LumenGather.cpp` |
+| 16 | 발광 광원의 카드 규칙 | 언리얼 bEmissiveLightSource: 카드 최소 면적 × 0.2, 카드 해상도 1까지 보임. 작은 조명 기구의 발광이 카드(발광 텍스처 포함)에 남는다 — 카드가 없으면 radiosity·volume 광선의 hit은 재질 상수(텍스처 없는 emissive 인자)로 발광을 읽는다. 재질이 발광을 시작하거나 멈추면 그 인스턴스를 다시 넣는다. | `surface_cache.mesh_cards_emissive_light_sources`(켬) | `MeshCardScene.cpp/.h`, `SurfaceCacheCards.cpp` |
+
+#### 1.3.2 대조 결과 — 같은 것, 다른 것, 옮기지 않은 것
+
+| 언리얼 | 상태 | 내용 |
+|---|---|---|
+| RayTracedTranslucency: MaxRayIntensity, PathThroughputThreshold | 9번에서 구현 | 상한은 기본 0(없음)으로 뒀다: job은 거울 방향 광선 1개이고 뒤에 디노이저가 없어, 상한은 반사된 밝은 부분을 어둡게만 한다(4절) |
+| RayTracedTranslucency: MaxPrimaryHitEvents / MaxSecondaryHitEvents | 형식이 다름 | 여기서는 job이 전반사 횟수(2비트)를 갖고, 경로는 표면 4개까지(`REFRACT_SEGMENTS`). 값은 job을 만드는 쪽(물·유리 합성)이 정한다 |
+| RayTracedTranslucency: SampleTranslucentReflectionInReflections, ForceOpaque, UseRayTracedRefraction | 안 옮김 | 반사·굴절 광선이 다른 반투명 메시를 불투명 표면으로 맞힌다(1.3.3) |
+| front layer 반사: 거칠기 로브 표본 + 재구성·시간·양방향 필터 | 안 옮김 | job 형식(48 B: 원점, 방향, 매질, 흡수, 굴절률)에 거칠기가 없고 결과가 화소 격자가 아니라 job 배열이다. job을 만드는 쪽(`WaterSurface.hlsli`, `TranslucentComposite.hlsl`)과 형식을 같이 바꿔야 한다. 지금은 거울 방향 1개 |
+| 수집: FullResolutionJitterWidth | 같음 | 폭 1 타일, 5~10 m 밖에서 절반, 옮긴 화소가 같은 평면일 때만(상대 평면 거리 가중 > 0.01) |
+| 수집: 프로브 공간 필터(3패스, hit 각도 10°, 위치 가중 1000), StochasticInterpolation | 같음 | |
+| 수집: 보간 가중의 bFoliage | 15번에서 고침 | 다른 점은 이것 하나였다 |
+| radiance cache / far field | 구조가 다름 | 언리얼: HLOD로 만든 별도 TLAS + far field 카드(표면 캐시 조명이 있다). 가까운 광선이 놓친 뒤 far field 광선을 쏜다. 여기: 광선 씬 하나를 10 km까지 추적하고, 카드 끝(300 m) 밖의 hit은 태양(그림자 광선) + **가려지지 않은** 하늘 irradiance를 받는다 — 저장된 바운스가 없다. 먼 실내·협곡의 hit이 실제보다 밝을 수 있다 |
+| 발광면이 광원이 되는 방식 | 같음 | 발광은 카드의 emissive → final 조명 → radiosity·수집 광선이 맞혀서 읽는다. 발광면을 향한 표본(next-event)은 언리얼 Lumen에도 없다. `MATERIAL_EMISSIVE_VISIBLE_ONLY`: 카드 캡처와 GI hit 커널 4개(화면 프로브, radiance cache, volume, radiosity)가 0으로 두고 반사 hit은 보인다 — 코드로 확인 |
+| bEmissiveLightSource | 16번에서 구현 | 언리얼은 아티스트가 프리미티브에 표시, 여기는 발광 재질(뷰 전용 제외)을 가진 인스턴스 전부 |
+| Skylight leaking | 11번에서 구현 | |
+| 카드 직접광의 잎 투과 | 언리얼에 없음 | 언리얼은 카드 직접광에서 투과를 끄고(`bUseSubsurfaceTransmission = false`) 카드 알베도에 SubsurfaceColor를 더한다. 여기는 14번(hit이 반대쪽 카드를 읽음) |
+| 스킨·애니메이션 메시의 카드 | 언리얼에 없음 | 1.3.4 |
+
+#### 1.3.3 코드에서 본 것 — 유리·물 메시와 Lumen 광선 (고치지 않았다, 결정 필요)
+
+사실(코드):
+
+- `rtInstanceMask`(`RayScene.h`): 숨긴 인스턴스 0, 그림자 캐스터는 전체 비트, 아니면 SHADOW 비트만 뺀 전체. 재질 클래스는 마스크에 들어가지 않는다. BLAS 지오메트리는 알파 테스트 재질만 non-opaque이고 any-hit는 알파만 본다. 그래서 Glass·Water 재질의 메시는 GI·반사·그림자 광선 모두에 불투명 표면이다.
+- 카드 캡처는 Glass·Water·Hair 클래스를 버린다(카드 없음). GI 광선이 유리를 맞히면 "카드 없는 hit"으로, 유리의 base colour를 가진 불투명 면으로 음영된다.
+- 카드와 hit의 **태양** 그림자 광선은 `RT_MASK_GI`(모든 인스턴스)다. 국소광 그림자 광선은 `RT_MASK_SHADOW`(캐스터만). 직접 뷰의 VSM은 `InstanceCastShadow` 인스턴스만 그린다.
+
+거기서 나오는 것(실행으로 확인하지 않았다):
+
+- 유리창 안쪽의 화면 프로브·radiosity 광선은 유리에서 멈춘다: 창 밖의 하늘과 햇빛 받은 바닥을 보지 못한다.
+- 캐스터가 아닌 유리 뒤의 바닥은 뷰에서는 햇빛을 받는데(VSM), 카드에서는 그늘이다(태양 그림자 광선이 유리에 막힘). 그 바닥에서 튕기는 빛이 표면 캐시에 없다.
+
+언리얼: Lumen 광선의 마스크는 `RAY_TRACING_MASK_OPAQUE`(반투명 메시 제외, `SkipTranslucent`), 그림자 광선은 `RAY_TRACING_MASK_OPAQUE_SHADOW`(bCastRayTracedShadows인 것만).
+
+고칠 자리는 `RayTracing/RayScene.cpp`(R 공용 파일, 이 작업 범위 밖)이다. 방법:
+
+- (a) 인스턴스의 재질이 전부 Glass/Water면 GI·SHADOW 비트를 뺀다(반사 비트는 남긴다). 창틀과 유리가 한 메시면 가르지 못한다.
+- (b) 유리·물 지오메트리를 non-opaque로 만들고, any-hit가 광선 payload의 표시를 보고 무시한다(언리얼의 방식). 지오메트리 단위라 섞인 메시도 된다.
+- 태양 그림자 광선의 마스크를 `RT_MASK_SHADOW`로 바꾸는 것(표면 캐시와 hit 커널, `HitHair.hlsli`, `HitLocalSample.hlsli`)은 뷰의 그림자와 맞추는 별도 변경이다. 유리가 캐스터 플래그를 갖고 있으면 이것만으로는 달라지지 않는다.
+
+7절의 "로비 간접광 부족"의 원인이라고 말하지 않는다: 로비에 유리가 있는지, 그 인스턴스의 캐스터 플래그가 무엇인지 이 작업에서 보지 않았다.
+
+#### 1.3.4 스킨·애니메이션 인스턴스의 카드 — 구현하지 않았다
+
+지금: 그런 인스턴스의 hit은 카드가 없고, 제 위치에서 태양(그림자 광선 1개) + 국소광 표본 1개(그림자 광선 1개) + 간접 irradiance(translucency volume 또는 irradiance 프로브)를 제 재질(텍스처 포함)로 음영한다.
+
+인스턴스마다 거친 카드(포즈된 경계 상자의 6면, 또는 뼈마다 캡슐)를 두는 안을 따졌다:
+
+- 여기서는 hit이 제 재질로 음영하므로, 그런 카드가 가질 것은 알베도가 아니라 **irradiance뿐**이다 — 캡처(변형된 메시를 매 프레임 6방향으로 다시 그리기)가 필요 없다. 상자 6면의 중심에서 카드 직접광과 같은 방식(광원별 그림자 광선)으로 irradiance를 갱신하고, hit은 법선으로 6면을 섞어 읽으면 된다.
+- 얻는 것: 그런 hit에서 그림자 광선 2개가 사라진다. 국소광 표본 1개의 잡음도 사라진다.
+- 잃는 것: 조명의 위치 해상도. 지금은 hit 자리에서 정확한 그림자를 받는데, 상자 한 면에 값 하나면 반쯤 그늘에 선 캐릭터가 평균 밝기가 된다. 거울 속 캐릭터에서 바로 보인다. 캡슐로 쪼개면 덜하지만 자기 그림자는 여전히 없다.
+- 표면에 붙은 카드(텍셀 ↔ 표면 점의 대응이 고정)는 변형 메시에서 성립하지 않는다: 포즈가 바뀔 때마다 대응이 바뀌어 radiosity의 시간 누적(4프레임)이 틀린 점의 값을 섞는다.
+
+결론: 지금 방식이 품질은 더 높고 비용(그런 hit당 그림자 광선 2개)만 더 든다. 그 비용이 문제라는 측정이 없다 — 캐릭터 hit은 보통 광선의 작은 몫이고, 디스패치 상한은 이미 그 광선을 포함해 잡혀 있다. 군중 장면에서 비용이 측정되면 GI 광선(화면 프로브·radiance cache·radiosity)에만 "인스턴스 상자 6면 irradiance"를 쓰고 반사는 지금대로 두는 것이 후보다.
+
+#### 1.3.5 기본값에서 닿지 않는 코드 — 삭제 결정을 위한 목록 (지운 것 없음)
+
+조건(현재 `Config/quality` 기본값): `gi.lumen = true`, `gi.lumen_only = true`, `reflection.lumen = true`, `reflection.lumen_only = true`, `surface_cache.enabled = true`, `surface_cache.mesh_cards = true`. 목록은 C++의 패스 기록 조건과 셰이더의 `#include` 그래프를 읽어 만들었다(실행으로 확인한 것 아님).
+
+**A. 월드 GI 해시 캐시와 그 화면 프로브** — `GiSystem::record`가 `recordLumen` 뒤에 돌아간다(`GiSystem.cpp` 828행 부근). 생성자도 캐시를 만들지 않는다.
+
+- 커널(`Passes/GI/`, 39개): `GiAccFix`, `GiAccFold`, `GiAccumulate`, `GiAdmissionInit`, `GiAdmissionMark`, `GiAdmissionMerge`, `GiAdmissionPrepare`, `GiAdmissionPublish`, `GiAdmissionScan`, `GiAdmissionShift`, `GiAgeHistogram`, `GiBackgroundList`, `GiBegin`, `GiCarry`, `GiDetAnchors`, `GiDetBackground`, `GiDetClear`, `GiDetDigits`, `GiDetFold`(C++ 어디에서도 이름으로 부르지 않는다 — 스위치와 무관하게 죽어 있다), `GiDetResolve`, `GiEvict`, `GiGuide`, `GiIntegrate`, `GiInvalidate`, `GiLayerTemporal`, `GiPrior`, `GiProbeFilter`, `GiProbeGather`, `GiProbeMapOwners`, `GiProbeMaps`, `GiProbePlace`, `GiRehash`, `GiScreenFilter`, `GiScreenIrradiance`, `GiSelect`, `GiShift`, `GiTableClear`, `GiTrace`, `GiUpdateSetup`.
+- 그 커널만 쓰는 헤더: `GiAccPool.hlsli`, `GiAdmission.hlsli`, `GiProbeWide.hlsli`, `GiSplitHistory.hlsli`. `GiCacheTile.hlsli`는 게이트 커널만 쓴다.
+- 살아 있는 커널이 include하지만 그 분기가 돌지 않는 헤더: `GiInternal.hlsli`(`LgTrace.hlsl`만), `GiCache.hlsli`(`LumenRadianceCacheTrace.hlsl`, 그리고 다른 트랙의 `ShadeOpaque.hlsl`, `TranslucentComposite.hlsl`, `FxLayerSetup.hlsl`, `VolumeSetup.hlsl`, `WaterMedia.hlsl`, `WaterSurface.hlsli`), `ScreenProbes.hlsli`(`ShadeOpaque.hlsl`, `CoverageShade.hlsli`): `giCache`와 `view.screenProbes`가 무효일 때 읽지 않는 분기다. 지우려면 그 커널들의 분기를 먼저 지워야 한다. `GiScreenHistory.hlsli`, `GiScreenInputs.hlsli`, `GiSky.hlsli`, `GiSource.hlsli`는 이름과 달리 새 경로가 쓴다(살아 있다).
+- 살아 있는 커널 안의 죽은 분기: `LgTrace.hlsl`, `LumenRadianceCacheTrace.hlsl`의 월드 캐시 읽기(`gi.lumen_hit_fallback`은 lumen_only에서 강제로 false).
+- C++: `GiSystem.cpp`에서 `record`의 early return 뒤 전부, `recordScreen`, `recordSecondaryScreen`, `ensureAdmission`, `recordAdmission`, `ensureProbeHistory`, `ensureScreenHistory`, `readLookupStats`. 살아 있는 것은 설정 읽기와 `recordLumen`(`LumenGather.cpp`).
+- 발행되지 않는 프레임 리소스: `giCache`, `giAccumulator`, `view.screenProbes`, `view.screenProbeMaps`. 읽는 쪽: `Shading/ShadingSystem.cpp`, `FX/ParticleLayer.cpp`, `Shadow/FroxelSystem.cpp`, `Volume/VolumePass.cpp`, `Reflection/ReflectionSystem.cpp`(다른 트랙 포함).
+- 설정 키(`gi.toml`, 60개): `rays_per_frame`, `cache_entries`, `cache_octahedral_texels`, `screen_probe_spacing_px`, `near_occlusion_radius_m`, `near_occlusion_taps`, `screen_occlusion_history_frames`, `screen_occlusion_spatial`, `screen_filter_cells`, `screen_update_frames`, `cache_cell_angle_deg`, `cache_cell_min_m`, `cache_levels_max`, `cache_max_age_frames`, `jacobi_updates`, `history_updates_max`, `split_bounce_history`, `bounce_history_updates`, `bounce_split`, `bounce_split_updates`, `bounce_visibility`, `miss_closure`, `hit_oriented_lights`, `anchor_resample`, `history_window_rule`, `lighting_recent_frames`, `path_guiding`, `path_guiding_uniform_share`, `screen_filter_adaptive`, `screen_wide_filter`, `screen_wide_passes`, `screen_wide_sigma_lo`, `screen_wide_sigma_hi`, `screen_temporal_frames`, `anchor_centroid`, `hit_accumulator`, `hit_accumulator_pool`, `hit_accumulator_pool_slots`, `hit_accumulator_alpha`, `hit_accumulator_fine_scale`, `hit_accumulator_min_samples`, `hit_accumulator_levels`, `hit_accumulator_window`, `hit_accumulator_window_recent`, `hit_accumulator_cell_scale`, `hit_accumulator_frame`, `hit_accumulator_ratio`, `history_updates_max_static`, `update_tiers`, `young_update_share`, `parent_prior`, `parent_delta_initial`, `relight_restart`, `hit_light_footprint_scale`, `light_invalidation`, `hit_light_footprint`, `hit_update_share`, `hit_cell_footprint_scale`, `anchor_visibility`; 그리고 `lumen_hit_fallback`. `relight_frames_max`는 읽는 코드가 없다. 살아 있는 키: `lumen`, `lumen_only`, 나머지 `lumen_*`, `ray_length_m`, `experiment_disable`, `deterministic`. 죽은 키도 `GiSettings::fromQuality`가 값 검사는 한다(없으면 실패하는 키가 있다).
+
+**B. 반사의 옛 경로** — `ReflectionSystem::record`의 `if (lumenOnly) … else { … }`의 else 쪽(`ReflectionSystem.cpp` 1454~1707행 부근)과 그 밖의 조건.
+
+- 커널(`Passes/Reflection/`): `ReflectionArgs`, `ReflectionTrace`, `ReflectionSceneColorAtHit`, `ReflectionRayArgs`, `ReflectionLocalShadow`, `ReflectionTraceInline`, `ReflectionShadeRays`, `ReflectionShadow`, `ReflectionPenumbra`, `ReflectionCombine`(이상 else 쪽), `RefractionTrace`(`recordRefraction`의 lumen_only 아닌 쪽), `ReflectionAccumulate`(`reflection.lumen`이면 ray-reuse 파이프라인이 대신 돈다).
+- `Passes/Reconstruct/LayerDenoise`, `LayerTemporal`, `LayerCompose`: 부르는 곳이 반사의 `layers` 경로뿐이고 `layers = reflection.layers && !lumen`이다.
+- 그 커널만 쓰는 헤더: `ReflectionHit.hlsli`, `ReflectionRay.hlsli`, `ReflectionShade.hlsli`, `ReflectionValue.hlsli`.
+- 살아 있는 것: `ReflectionBegin`, `Classify`, `Jobs`, `PlanarApron`, `HistoryClear`, `Hzb`, `ScreenTrace`, `LumenArgs`, `LumenTrace`, `Resolve`, `ReuseResolve`, `ReuseTemporal`, `ReuseFilter`, `RefractionArgs`, `RefractionLumenTrace`.
+- 설정 키(`reflection.toml`): `batch_gi_corners`, `temporal_history_max`, `temporal_lobe_shift`, `hit_cone_lobes`, `hit_strict_read`, `hit_oriented_lights`, `hit_accumulator`, `lumen_surface_cache_view`, `lumen_surface_cache_view_component`, `layers`, `layer_filter`, `layer_history_frames`, `layer_residual_whole`, `layer_mirror_lobe`, `layer_whole_value`, `layer_cross_mode`, `layer_history_bound`, `layer_view`. `cache_lobe_half_angle_min_deg`, `g_sample_spacing_px`, `g_rays_per_sample`은 살아 있는 `ReflectionClassify`에 전달되지만 `reflection.lumen`에서는 K 임계·G 모드 분기가 돌지 않는다(`g_rays_per_sample`은 버퍼 크기 계산에는 여전히 들어간다). `exact_set_min_hits`, `planar_max_wave_slope_deg`는 읽는 코드가 없다.
+
+**C. 해시 셀 표면 캐시** — `mesh_cards = true`면 버퍼를 만들지 않고, 그 패스 블록은 B의 else 안에도 있다(두 조건 모두로 막힌다).
+
+- 커널(`Passes/SurfaceCache/`): `SurfaceCacheBegin`, `SurfaceCacheUpdate`, `SurfaceCacheLight`, `SurfaceCacheLightPairsSelect`, `SurfaceCacheLightPairsStore`, `SurfaceCacheLightPairsTrace`, `SurfaceCacheLightPairsTraceInline`. 헤더: `SurfaceCache.hlsli`, `SurfaceCacheLightPairs.hlsli`.
+- C++: `Passes/Reflection/SurfaceCacheLightPairs.cpp` 전체, `ReflectionSystem.cpp`의 셀 캐시 버퍼와 `r.sc.*` 블록.
+- 설정 키(`surface_cache.toml`): `entries_log2`, `max_unused_frames`, `capture_bounces`, `remainder_light`, `direct_stochastic`, `direct_stochastic_max_frames`, `direct_stochastic_min_sample_weight`, `direct_analytic`, `bilinear_read`, `debug_skip`, `direct_pairs`, `direct_pairs_inline`, `direct_shadow_inline`, `debug_count`, `base_cells`.
+- 1.2의 7번(광원 함수)은 `SurfaceCacheLight.hlsl`과 `SurfaceCacheLightPairsSelect.hlsl`에도 넣었는데, 이 둘은 기본값에서 돌지 않는다. 도는 쪽은 `CardDirectStore`, `CardDirectCull`, `CardSelect`다.
+
+**D. 옛 경로는 아니지만 기본값에서 돌지 않는 것**: `CardCaptureCluster.ps.hlsl`(`mesh_cards_capture_clusters = false`), `LgProbeTemporal.hlsl`(`gi.lumen_temporal_filter_probes = false`, 언리얼 기본), distant screen traces(구간 0), skylight leaking(0), `lumen.gather_temporal_reject_normal`(끔).
+
+**E. 위 경로를 참조하는 시험·게이트**
+
+| 파일 | 참조 |
+|---|---|
+| `Passes/GI/Tests/GiAnalytic.cpp` | 설정을 `gi.lumen=false`로 덮어써서(853행) 월드 캐시와 그 화면 프로브를 돌린다. 닫힌 식 시험 전부가 옛 경로 위에 있다. 시험 커널 `GiTestEval`, `GiTestPrimary`, `ProbeTileCompare` |
+| `Passes/GI/Tests/Admission.cpp` | `GiAdmissionMark`·`Merge`·`Prepare`·`Publish`·`Scan`을 직접 돌린다. 시험 커널 `AdmissionFind` |
+| `Passes/GI/Tests/ProbeMapsAtlas.cpp` | 옛 화면 프로브의 맵 아틀라스(`ScreenProbes.hlsli`, `GiCache.hlsli`). 시험 커널 `ProbeMapsAtlasCompare`, `ProbeMapsAtlasFill` |
+| `Passes/GI/Gates/GiGate.cpp` | `readLookupStats`, 게이트 커널 `GiLookupStats`, `ProbeLookupBench`, `ProbeLookupBenchTile`(`GiCacheTile.hlsli`) |
+| `Passes/Reflection/Tests/ReflectionAnalytic.cpp` | 월드 캐시 검사(`GiCacheScan`, `gi.settings().capacity`). 설정은 기본값을 읽는다 |
+| `Passes/Reflection/Tests/PlanarMirror.cpp` | `resources.giCache`. 시험 커널 `PlanarTestView`가 `ReflectionHit`·`ReflectionShade`·`ReflectionValue.hlsli`, `SurfaceCache.hlsli`, `GiAccPool.hlsli`를 include한다 |
+| `Passes/Shadow/Gates/RendererGate.cpp` | `giCache` 계열 리소스와 `reflection.g_rays_per_sample`(다른 트랙의 게이트) |
+
+설정을 덮어쓰는 것은 `GiAnalytic.cpp`뿐이다. 나머지가 기본 설정(lumen_only)에서 무엇을 검사하게 되는지는 실행하지 않아 모른다.
 
 ### 1.1 최종 수집·반사 대조 결과 (2026-10-02, 코드 대조)
 
@@ -197,6 +315,13 @@ GPU에서 한 번도 돌리지 않았다. 아래는 코드에 적힌 내용이�
 16. radiance cache에 irradiance 프로브를 둔다(코드 작성·빌드 통과, 실행 안 함). 언리얼의 radiance cache는 같은 맵(`CalculateIrradiance`, 6×6)을 irradiance field gather에서만 만들고 화면 프로브 수집의 캐시에서는 끈다. 여기서는 수집의 캐시에 카드 없는 hit의 간접광용으로 만든다. 그런 hit이 프로브를 요청하는 목록(프레임당 2,048개까지, 넘으면 버리고 다음 프레임에 다시 요청)은 언리얼에 없다.
 17. 표면 캐시 직접광에 광원 함수를 곱한다(코드 작성·빌드 통과, 실행 안 함). 시간에 따라 변하는 함수의 광원이 비추는 카드 페이지는 직접광 갱신 속도를 4로 올린다(매 갱신 보장은 아니다: 예산 안에서 다른 페이지와 겨룬다). 언리얼은 light function atlas를 갱신 때 읽고 따로 우선순위를 올리지 않는다.
 18. 잎 화소 규칙의 대상: 언리얼은 "two-sided foliage 또는 subsurface 셰이딩 모델", 여기서는 Foliage·Subsurface 재질 클래스.
+19. 카드로 조명된 잎 hit의 투과(코드 작성·빌드 통과, 실행 안 함): 반대쪽 면의 카드 조명을 읽어 더한다(`surface_cache.foliage_transmission`). 언리얼의 카드에는 투과가 없고 카드 알베도에 SubsurfaceColor를 더한다.
+20. skylight leaking(코드 작성·빌드 통과, 실행 안 함): 언리얼은 거칠기 0.3으로 흐린 하늘 큐브, 여기는 하늘 radiance 그대로. 기본 0.
+21. distant screen traces(코드 작성·빌드 통과, 실행 안 함): 언리얼은 광선 씬의 컬링 반경에서 시작, 여기는 광선의 끝(`gi.ray_length_m`)에서 시작. 기본 광선 길이에서는 돌지 않는다.
+22. 굴절 서비스(front layer 반사 + ray-traced translucency의 여기 형태): job은 거울 방향 광선 1개이고 디노이저가 없다. 언리얼의 front layer 반사는 거칠기 로브를 표본해 반사 디노이저를 지난다(1.3.2).
+23. 발광 광원 카드 규칙의 대상: 언리얼은 아티스트가 표시한 프리미티브, 여기는 발광 재질(뷰 전용 제외)을 가진 인스턴스 전부(코드 작성·빌드 통과, 실행 안 함).
+24. 유리·물 메시는 GI·그림자 광선에 불투명하다(언리얼은 Lumen 광선에서 반투명 메시를 뺀다). 고치지 않았다: 1.3.3.
+25. far field: 광선 씬 하나를 10 km까지 추적하고, 카드 밖 hit은 태양 + 가려지지 않은 하늘 irradiance. 언리얼은 HLOD TLAS와 far field 카드의 표면 캐시 조명(1.3.2).
 
 ## 4. 품질을 내주는 값(언리얼 기본값에서 시작, 사용자 결정 대상)
 
@@ -206,6 +331,9 @@ GPU에서 한 번도 돌리지 않았다. 아래는 코드에 적힌 내용이�
 - `gi.lumen_max_ray_intensity`, `reflection.lumen_max_ray_intensity = 40`, `reflection.lumen_max_roughness = 0.4`, `reflection.lumen_ggx_sampling_bias = 0.1`
 - `reflection.lumen_max_roughness_to_trace_foliage = 0.2`(언리얼 기본: 잎·피부 화소는 거칠기 0.2 이상에서 전용 반사 광선 없음. 2026-10-03 추가, 실행 안 함)
 - `surface_cache.radiosity_min_trace_distance_m = 0.10`(언리얼 기본: 10 cm 안의 radiosity hit은 빛 0 — 구석이 조금 어두워진다. 2026-10-03 추가, 실행 안 함)
+- `reflection.lumen_refraction_max_ray_intensity = 0`(상한 없음. 언리얼: front layer 반사 40, ray-traced translucency 1000. 디노이저 없는 거울 광선이라 상한은 밝은 반사를 어둡게만 한다. 2026-10-03 추가, 실행 안 함)
+- `reflection.lumen_refraction_path_throughput_threshold = 0.001`(언리얼 기본. 그보다 약한 경로는 끊는다. 2026-10-03 추가, 실행 안 함)
+- `lumen.skylight_leaking = 0`(언리얼 기본. 올리면 실내가 밝아지는 대신 가림 없는 빛이 샌다 — furnace 규칙이 깨진다. 2026-10-03 추가, 실행 안 함)
 
 ## 5. 실행 방법
 

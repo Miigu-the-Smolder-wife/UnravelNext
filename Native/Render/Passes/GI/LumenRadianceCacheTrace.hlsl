@@ -164,6 +164,10 @@ void LumenRadianceCacheTraceGen()
             // a hit without cards: one local-light sample, as Lumen/LgTrace.hlsl (experiment 128: none)
             if (!fromSurfaceCache && (P[3].w & 128) == 0) L.local = rtHitLocalSample(scene, s, m, -r.Direction, footprint, lrcBias(s.position), seed);
             radiance = rtHitRadiance(m, s.normal, -r.Direction, L, footprintPerMetre);
+            // a leaf lit from its cards: the other side's light through it (LumenHitIndirect.hlsli)
+            if (fromSurfaceCache)
+                radiance += lhiFoliageThrough(lhiRules(P[5].x), mcFrame(P[5].x), m, s.sceneInstance, s.position,
+                                              dot(s.geometricNormal, r.Direction) > 0 ? -s.geometricNormal : s.geometricNormal);
         }
     }
     if (!all(radiance == radiance) || any(radiance < 0)) radiance = 0;

@@ -17,8 +17,9 @@
 // x AO; 0xFFFFFFFF: none - lumen.short_range_ao off), max multibounce albedo (float), 0, 0 }: the irradiance is read
 // along normalize(lerp(bent normal, normal, AO)) and multiplied by lumenAoMultibounce(base colour, AO), the rough
 // specular lobe by lumenAoSpecular (LumenShortRangeAO.hlsli); P[3].z = backface irradiance UAV (RGBA16F; 0xFFFFFFFF: the
-// scene has no Foliage) and P[3].w = M's material word SRV: a Foliage pixel also reads the probes' irradiance at its
-// reversed normal (what arrives on its back; the reference's backface diffuse), other pixels store 0,
+// scene has no Foliage) and P[3].w = M's material word SRV (0xFFFFFFFF: the scene has neither Foliage nor Subsurface):
+// a Foliage pixel also reads the probes' irradiance at its reversed normal (what arrives on its back; the reference's
+// backface diffuse), other pixels store 0; a Foliage or Subsurface pixel weighs its probes as foliage,
 // P[10].z adaptive SRV, P[10].w / P[11].y probe depth / position SRVs. b1 = the view.
 #include "Passes/GI/Lumen/LgInterpolate.hlsli"
 #include "Passes/GI/LumenShortRangeAO.hlsli"
@@ -97,8 +98,16 @@ void main(uint3 id : SV_DispatchThreadID)
             if (exp2(-1000000.0 * relative * relative) > 0.01) noiseOffset = offset;
         }
     }
+    // a foliage pixel (the reference's pixel with backface diffuse: here a Foliage or Subsurface material) takes its
+    // probes with the looser plane weight (LgInterpolate.hlsli: its depth weight x 0.25 - leaves lie off any plane)
+    uint pixelClass = MATERIAL_STANDARD;
+    if (P[3].w != 0xFFFFFFFFu)
+    {
+        Texture2D<uint> classWords = ResourceDescriptorHeap[P[3].w];
+        pixelClass = materialClass(loadMaterial(classWords.Load(int3(id.xy, 0)) & 0xFFFFu));
+    }
     LgProbeSample ps;
-    lgProbeWeights(pixel, noiseOffset, s.position, s.depth, s.normal, true, false, ps);
+    lgProbeWeights(pixel, noiseOffset, s.position, s.depth, s.normal, true, pixelClass == MATERIAL_FOLIAGE || pixelClass == MATERIAL_SUBSURFACE, ps);
     bool lit = dot(ps.weights, 1) >= LG_MIN_INTERPOLATION_WEIGHT;
     if (!lit)
     {
@@ -136,8 +145,7 @@ void main(uint3 id : SV_DispatchThreadID)
     if (P[3].z != 0xFFFFFFFFu)
     {
         float3 back = 0;
-        Texture2D<uint> words = ResourceDescriptorHeap[P[3].w];
-        if (materialClass(loadMaterial(words.Load(int3(id.xy, 0)) & 0xFFFFu)) == MATERIAL_FOLIAGE)
+        if (pixelClass == MATERIAL_FOLIAGE)
         {
             [unroll] for (uint cb = 0; cb < 4; ++cb)
                 if (ps.weights[cb] > 0) back += lgIrradianceAt(irradiance, ps.atlas[cb], -s.normal) * ps.weights[cb];

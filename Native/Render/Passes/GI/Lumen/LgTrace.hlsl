@@ -12,7 +12,8 @@
 // its indirect light from the translucency volume or the radiance cache's irradiance probes (LumenHitIndirect.hlsli;
 // lumen.hit_indirect - the reference's invalid surface-cache sample has none) - or, with gi.lumen_hit_fallback, from
 // the world cache instead. A ray that meets an analytic area light's proxy returns 0 (M shades
-// those lights; the proxy still occludes). A miss returns the sky.
+// those lights; the proxy still occludes). A miss returns the sky. A surface hit adds the skylight leaking the card
+// frame names (lumen.skylight_leaking, LumenHitIndirect.hlsli lhiSkyLeaking; 0 by default).
 // E's grooms (RayTracing/HitHair.hlsli; raytracing.hair): the ray's first fibre in the hair density volume, where it lies
 // before the hit, is the hit - the groom's proxy, lit by the sun's shadow ray and one local-light sample; the bounce
 // light behind it is not seen.
@@ -257,7 +258,13 @@ void LgTraceGen()
             // a hit without cards: one local-light sample (HitLocalSample.hlsli; experiment 128: none, as the reference)
             if (!fromCards && (P[3].w & 128) == 0) L.local = rtHitLocalSample(scene, s, m, -r.Direction, footprint, lgBias(s.position), seed);
             radiance = rtHitRadiance(m, s.normal, -r.Direction, L, footprintPerMetre);
+            // a leaf lit from its cards: the other side's light through it (LumenHitIndirect.hlsli)
+            if (fromCards)
+                radiance += lhiFoliageThrough(lhiRules(P[5].x), mcFrame(P[5].x), m, s.sceneInstance, s.position,
+                                              dot(s.geometricNormal, r.Direction) > 0 ? -s.geometricNormal : s.geometricNormal);
         }
+        // lumen.skylight_leaking (LumenHitIndirect.hlsli; 0 by default: nothing)
+        radiance += lhiSkyLeaking(lhiRules(P[5].x), r.Direction, hit.t);
     }
     if (!all(radiance == radiance) || any(radiance < 0)) radiance = 0;
 #if SKY == SKY_ATMOSPHERE

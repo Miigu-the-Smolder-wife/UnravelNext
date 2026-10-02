@@ -22,7 +22,7 @@ namespace
 constexpr uint32_t kTile = 8, kProbeSpacing = 4, kBuckets = 16;
 constexpr uint32_t kPageLightBytes = 16, kUniformBytes = 32, kTileLightBytes = 64, kTileShadowBytes = 72, kTraceThreads = 576;
 constexpr uint32_t kSelectHead = 64, kPageTiles = 256;  // (a page of 128 x 128 texels: the most tiles one listed page adds)
-constexpr uint32_t kFrameBytes = 128;  // (CardLayout.hlsli: 28 words in use)
+constexpr uint32_t kFrameBytes = 160;  // (CardLayout.hlsli: 40 words, 38 in use)
 // The structural bound of one dispatch (Docs/Status/DISPATCH_BOUNDS_KO.md): a thread traces at most one ray.
 constexpr uint32_t kThreadsPerDispatch = 262144;
 const char* const kStore[2] = { "Passes/SurfaceCache/CardDirectStore.SKY0", "Passes/SurfaceCache/CardDirectStore.SKY1" };
@@ -87,18 +87,22 @@ struct CardLighting::Impl
         if (r) device.deferRelease(r);
         r.Reset();
     }
-    // The card frame's words 0..27 (CardLayout.hlsli) and the pass's own two (P[5].xy: the frame, the select buffer).
+    // The card frame's words 0..39 (CardLayout.hlsli) and the pass's own two (P[5].xy: the frame, the select buffer).
     void frameWords(PassContext& c, const CardSet& cards, const CardLightingRefs& r, uint32_t pageCount, uint32_t frameWord, float depthBias, uint32_t selectUav,
-                    uint32_t k[32]) const
+                    uint32_t k[48]) const
     {
         const uint32_t none = 0xFFFFFFFFu;
-        const uint32_t words[32] = { c.srv(cards.instanceMap), c.srv(cards.meshCards), c.srv(cards.cards), c.srv(cards.cardPages), c.srv(cards.pageTable), c.srv(cards.depth),
+        const CardHitRules& h = cards.hitRules;
+        const uint32_t words[48] = { c.srv(cards.instanceMap), c.srv(cards.meshCards), c.srv(cards.cards), c.srv(cards.cardPages), c.srv(cards.pageTable), c.srv(cards.depth),
                                      c.srv(cards.albedo), c.srv(cards.normal), c.srv(cards.emissive), atlasSize, pageCount, frameWord, c.srv(r.final), c.srv(r.direct),
                                      c.srv(r.indirect), c.srv(r.pageLight), cards.instances, bits(depthBias),
                                      cards.feedback.valid() ? c.uav(cards.feedback) : none, cards.feedbackDither,
                                      c.uav(r.frame), selectUav, 0, 0,
                                      bits(cards.feedbackBias), cards.feedback.valid() ? c.uav(r.lastUsed) : none, cards.hitVolumeParams, none,
-                                     none, none, none, none };
+                                     none, none, none, none,
+                                     bits(h.farStart), bits(h.skyLeakingInvDistance), bits(h.distantScreenTrace), bits(h.distantSlopeTolerance),
+                                     bits(h.skyLeaking[0]), bits(h.skyLeaking[1]), bits(h.skyLeaking[2]), bits(h.skyLeakingReflection),
+                                     bits(h.distantStepOffsetBias), h.foliageTransmission ? 1u : 0u, 0, 0 };
         std::memcpy(k, words, sizeof words);
     }
 };
@@ -224,10 +228,10 @@ void CardLighting::recordFrame(FramePassContext& fc, const CardSet& set, bool re
                   b.keep();
               },
               [this, &shaders, set, r, pageCount, frameWord, depthBias](PassContext& c) {
-                  uint32_t k[32];
+                  uint32_t k[48];
                   m->frameWords(c, set, r, pageCount, frameWord, depthBias, 0xFFFFFFFFu, k);
                   c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardFrame"));
-                  c.computeConstants(k, 32);
+                  c.computeConstants(k, 48);
                   c.cmd->Dispatch(1, 1, 1);
               });
 }
@@ -293,10 +297,10 @@ void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs
                   b.keep();
               },
               [this, &shaders, set, r, select, pageCount, frame, depthBias = in.depthBias](PassContext& c) {
-                  uint32_t k[32];
+                  uint32_t k[48];
                   m->frameWords(c, set, r, pageCount, frame, depthBias, c.uav(select), k);
                   c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardFrame"));
-                  c.computeConstants(k, 32);
+                  c.computeConstants(k, 48);
                   c.cmd->Dispatch(1, 1, 1);
               });
 

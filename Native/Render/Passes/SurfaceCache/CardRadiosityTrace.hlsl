@@ -17,8 +17,13 @@
 // distance, one on a two-sided surface nearer than P[5].y (SkipTwoSidedHitDistance) again from just past the hit; once
 // (no loop). A hit nearer than P[3].w (MinTraceDistanceToSampleSurfaceCache) still blocks the ray and reads no light: at
 // that distance a card texel would light itself.
-// A thread traces at most 4 rays (the ray, its re-shoot, the sun's and the light sample's shadow rays) and nothing loops
-// around them: dispatches of at most 65,536 threads (CardLighting.cpp).
+// Hair (RayTracing/HitHair.hlsli; raytracing.hair): the grooms are not in the ray scene, so the ray's first fibre in E's
+// density volume, where it lies before the hit, ends the ray - the groom's proxy lit by the sun's shadow ray and one
+// local-light sample, as the screen probes', the radiance cache's and the volume's rays take it. The grooms the texel
+// lies inside are left out (a card under the hair). A floor under a head of hair is then shadowed by it in the bounce.
+// A thread traces at most 4 rays (the ray, its re-shoot, the sun's and the light sample's shadow rays - of the surface
+// hit or of the groom's proxy, never both) and nothing loops around them: dispatches of at most 65,536 threads
+// (CardLighting.cpp).
 // The radiance goes to the trace atlas at the probe's rays' texels: tile origin + probe x 4 + ray.
 // P[0] = { card frame SRV, select SRV, frame index, asuint(back-face skip distance, m; 0: no re-shoot) }
 // P[1], P[2], P[3].xyz = sky and sun (GiSky.hlsli; P[1].w = ray length), P[3].w = asuint(the least hit distance that
@@ -33,6 +38,7 @@
 #include "Passes/SurfaceCache/CardLighting.hlsli"
 #include "Passes/GI/LumenHitIndirect.hlsli"
 #include "RayTracing/HitLocalSample.hlsli"
+#include "RayTracing/HitHair.hlsli"
 
 [shader("raygeneration")]
 void CardRadiosityTraceGen()
@@ -90,7 +96,19 @@ void CardRadiosityTraceGen()
             hit = rtTraceClosest(scene, again, RAY_FLAG_NONE, RT_MASK_GI);
         }
     }
-    if (hit.t < 0) radiance = giSkyRadiance(ray.Direction);
+    // the grooms on the ray: its first fibre before the hit
+    const uint hairParams = rtHairParams(scene);
+    const uint hairSeed = rtHairSeed(out2, P[0].z);
+    RtHairHit hair;
+    hair.t = -1;
+    hair.body = hair.material = 0;
+    if (hairParams != 0xFFFFFFFFu) hair = rtHairFirst(hairParams, ray.Origin, ray.Direction, hit.t < 0 ? ray.TMax : hit.t, hairSeed, true);
+    if (hair.t >= 0)
+    {
+        g_rtHitCone = 0.37;
+        radiance = rtHairRadiance(scene, hairParams, hair, ray.Origin, ray.Direction, hair.t * 0.74, 1e-3 + 2e-4 * distance(ray.Origin, g_cameraPosition), hairSeed, true, true);
+    }
+    else if (hit.t < 0) radiance = giSkyRadiance(ray.Direction);
     else if (hit.t < asfloat(P[3].w)) radiance = 0;  // (too near to read the cache: the texel's own light)
     else if (hit.instance != RT_INSTANCE_EMITTER)  // (a light's own surface: the direct light carries it)
     {
@@ -101,7 +119,8 @@ void CardRadiosityTraceGen()
         {
             // (the cone of a ray of the 4 x 4 hemisphere map: about 20 degrees half angle)
             const ClSample cards = clReadCardsHiRes(f, s.sceneInstance, s.position, s.geometricNormal, CL_READ_FINAL, 0.37 * hit.t, traceCoord);
-            if (cards.valid) radiance = cards.final;
+            // (a leaf: (1 - t) of its side's light and t of the other side's - LumenHitIndirect.hlsli lhiFoliageFinal)
+            if (cards.valid) radiance = lhiFoliageFinal(lhiRules(P[0].x), f, m, s.sceneInstance, s.position, s.geometricNormal, cards.final);
             else
             {
                 // no card: the hit's direct light through the material's constants
@@ -109,8 +128,10 @@ void CardRadiosityTraceGen()
                 g_rtHitCone = 0.37;  // (a ray of the 4 x 4 hemisphere map: a cone of about 20 degrees half angle)
                 const float bias = 1e-3 + 2e-4 * distance(s.position, g_cameraPosition);
                 RtHitLighting L = (RtHitLighting)0;
-                L.irradiance = lhiIrradiance(lhiSources(P[0].x), s.position, s.normal, thread * 9781u + P[0].z * 26699u).rgb;
-                L.specularRadiance = L.irradiance / 3.14159265;
+                const float4 e = lhiIrradiance(lhiSources(P[0].x), s.position, s.normal, thread * 9781u + P[0].z * 26699u);
+                // (past the mesh cards' end, where no source answers: the sky's light on the hit - the far field)
+                L.irradiance = e.a > 0 ? e.rgb : giFarSkyIrradiance(s.position, s.normal, lhiRules(P[0].x).farStart);
+                L.specularRadiance = e.rgb / 3.14159265;
                 const float3 l = normalize(g_sunDirection);
                 if (dot(s.normal, l) > 0 || rtHitTransmits(m))
                 {

@@ -4,12 +4,17 @@
 //   surface         its material at the ray cone's footprint (textures, decals), its emission, and the light of the mesh
 //                   cards of its instance (CardLighting.hlsli clReadCards: direct light with the sun, radiosity) through
 //                   the material - diffuse albedo x E / pi and the specular albedo x E / pi (the lobe at the hit sees the
-//                   cards' light as uniform); no light sample, no shadow ray;
+//                   cards' light as uniform); no light sample, no shadow ray; a leaf also takes the other side's
+//                   card light through it (LumenHitIndirect.hlsli lhiFoliageThrough);
 //   without cards   (a deforming instance: skin, wind; a texel the cards do not cover) the sun through one shadow ray
 //                   to the disk's centre and, with localSample, one local-light sample with its shadow ray
 //                   (HitLocalSample.hlsli: a mirror showed such surfaces unlit); the indirect light the card frame
 //                   names (LumenHitIndirect.hlsli: this frame's translucency volume, else the radiance cache's
-//                   irradiance probes - a skinned character in a mirror is lit by the room it stands in);
+//                   irradiance probes - a skinned character in a mirror is lit by the room it stands in); past the
+//                   mesh cards' end, where neither answers, the sky's light on the hit (the far field: GiSky.hlsli
+//                   giFarSkyIrradiance, as the probes' rays - distant terrain in a mirror was lit by the sun alone);
+//   leaking         the skylight leaking the card frame names (lumen.skylight_leaking, LumenHitIndirect.hlsli
+//                   lhiSkyLeakingReflection; 0 by default);
 //   back of a one-sided surface: 0 (inside closed geometry).
 // hiRes (reflection.lumen_hi_res_surface; Unreal's r.Lumen.Reflections.HiResSurface): the hit reads the cards' highest
 // mapped level and reports the page and level its footprint wants (CardLighting.hlsli clFeedback; feedbackCoord: the
@@ -93,6 +98,7 @@ RlHit rlShadeHit(RtSceneSrvs scene, RtHit hit, float3 origin, float3 direction, 
     g_rtHitCone = 0.5 * coneSpread;
     RtHitLighting L = (RtHitLighting)0;
     bool fromCards = false;
+    const LhiRules rules = lhiRules(cardFrame);
     if (cardFrame != UNX_NONE)
     {
         const float3 face = dot(s.geometricNormal, direction) > 0 ? -s.geometricNormal : s.geometricNormal;
@@ -107,8 +113,9 @@ RlHit rlShadeHit(RtSceneSrvs scene, RtHit hit, float3 origin, float3 direction, 
     if (!fromCards)
     {
         const uint hitSeed = DispatchRaysIndex().x * 9781u + DispatchRaysIndex().y * 6271u + g_frameIndex * 26699u;
-        L.irradiance = lhiIrradiance(lhiSources(cardFrame), s.position, s.normal, hitSeed).rgb;
-        L.specularRadiance = L.irradiance / MODEL_PI;
+        const float4 e = lhiIrradiance(lhiSources(cardFrame), s.position, s.normal, hitSeed);
+        L.irradiance = e.a > 0 ? e.rgb : giFarSkyIrradiance(s.position, s.normal, rules.farStart);
+        L.specularRadiance = e.rgb / MODEL_PI;
         const float3 l = normalize(g_sunDirection);
         if (dot(s.normal, l) > 0 || rtHitTransmits(m))
         {
@@ -126,7 +133,10 @@ RlHit rlShadeHit(RtSceneSrvs scene, RtHit hit, float3 origin, float3 direction, 
         }
         if (localSample) L.local = rtHitLocalSample(scene, s, m, -direction, footprint, 1e-3 + 2e-4 * distance(s.position, g_cameraPosition), hitSeed);
     }
-    o.radiance = rtHitRadiance(m, s.normal, -direction, L, coneSpread);
+    o.radiance = rtHitRadiance(m, s.normal, -direction, L, coneSpread) + lhiSkyLeakingReflection(rules, s.normal);
+    // a leaf lit from its cards: the other side's light through it (LumenHitIndirect.hlsli)
+    if (fromCards)
+        o.radiance += lhiFoliageThrough(rules, mcFrame(cardFrame), m, s.sceneInstance, s.position, dot(s.geometricNormal, direction) > 0 ? -s.geometricNormal : s.geometricNormal);
     if (any(isnan(o.radiance)) || any(isinf(o.radiance))) o.radiance = 0;
     return o;
 }

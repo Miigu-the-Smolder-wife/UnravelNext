@@ -141,9 +141,29 @@ lumen_sample_scene_color_at_hit = true # a world ray's hit on a surface the view
                                        # not shaded (reference: SampleSceneColorAtHit 1 = with screen traces); needs lumen_screen_traces
 lumen_sample_scene_color_relative_depth_thickness = 0.01
 lumen_sample_scene_color_normal_threshold = 85.0   # degrees between the seen surface's normal and the direction to the camera
+lumen_distant_screen_traces = true     # a world ray that left the ray scene walks the depth buffer over the stretch past its end
+                                       # (r.Lumen.Reflections.DistantScreenTraces: 16 linear steps; the reference starts them at its
+                                       # ray tracing culling radius and drops them with a far field). Here every instance is in the
+                                       # ray scene to gi.ray_length_m, so the traces run only while that length is shorter than
+                                       # the distance below - with the default 10 km rays: never. Needs lumen_sample_scene_color_at_hit
+lumen_distant_screen_trace_max_distance_m = 2000.0     # DistantScreenTraces.MaxTraceDistance (200000 cm), from the ray's start
+lumen_distant_screen_trace_depth_threshold = 2.0       # DistantScreenTraces.DepthThreshold: the slope compare tolerance
+lumen_distant_screen_trace_step_offset_bias = 0.0      # DistantScreenTraces.StepOffsetBias: moves the centre of the step jitter
 lumen_screen_trace_continue = true     # a ray whose screen trace gave no value starts its world ray where that trace ended in
                                        # front of the scene (the space crossed is empty), not at its surface
 lumen_screen_trace_pullback = 0.08     # ... less this distance, m (reference: HardwareRayTracing.PullbackBias 8)
 lumen_refraction_hit_surface_cache = true  # the hits of water's and glass's reflection / refraction rays (FrameServices::traceRefractions)
                                        # take their light from the surface cache as the main view's reflection hits do
                                        # (needs lumen_hit_surface_cache and surface_cache.enabled)
+# The same rays on the Lumen path (lumen_only; RefractionLumenTrace.hlsl) - the renderer's form of the reference's
+# front-layer translucency reflections (a reflection job from the frontmost water / glass / coverage surface) and of its
+# ray-traced translucency (the refracted path):
+lumen_refraction_scene_color_at_hit = true          # a path's last hit on a surface the view sees takes the previous frame's
+                                                    # colour there (SampleSceneColorAtHit, as the main reflections' rays; their
+                                                    # thickness and normal threshold); needs lumen_screen_traces' previous colour
+lumen_refraction_path_throughput_threshold = 0.001  # a path whose throughput's largest channel is under this ends
+                                                    # (r.Lumen.RayTracedTranslucency.PathThroughputThreshold); 0 = never
+lumen_refraction_max_ray_intensity = 0.0            # (Q) a job's exposed radiance is held to this (the reference's MaxRayIntensity:
+                                                    # 40 for the front layer's reflections, 1000 for ray-traced translucency).
+                                                    # 0 = no cap: the jobs are mirror rays without a denoiser behind them, a cap
+                                                    # would only darken mirrored highlights - a trade to decide with a picture

@@ -40,6 +40,9 @@ struct McSettings
     uint32_t minResolution = 4;           // CardMinResolution: below it the card is hidden
     float maxDistance = 300.0f;           // card range from the camera (r.RayTracing.Culling.Radius 30000)
     float minSize = 0.1f;                 // MeshCardsMinSize 10
+    float emissiveMinAreaScale = 0.2f;    // an emissive light source's cards pass the size rule at this share of the
+                                          // area (LumenMeshCards::GetCardMinSurfaceArea: x 0.2), and stay visible down
+                                          // to a resolution of 1 (bEmissiveLightSource); 1: no such rule
     float refreshFraction = 0.125f;       // CardCaptureRefreshFraction: the share of the frame's captures spent on capturing
                                           // resident pages again (materials that change: animated emission, edits)
     uint32_t maxPages = 262144;           // page table entries (the GPU page buffers' fixed size: atlas texels / the
@@ -143,7 +146,10 @@ public:
     // The cards of one instance (mesh space cards of its mesh, the instance's object -> world: rotation, uniform scale,
     // translation). Returns its mesh cards index, mc::kNone when none of its cards passes the size rule.
     // lightingChannels: the instance's (scene::instanceLightingChannels): its cards take the lights that light it.
-    uint32_t addInstance(uint32_t sceneInstance, const scene::MeshCards& cards, const float3x4& objectToWorld, uint32_t lightingChannels = 1);
+    // emissiveLightSource (the reference's bEmissiveLightSource): the instance's emission lights the scene - smaller
+    // cards are kept (McSettings::emissiveMinAreaScale) and stay visible below the minimum card resolution, so a
+    // small lamp's emission is in the cache from as far as its cards reach.
+    uint32_t addInstance(uint32_t sceneInstance, const scene::MeshCards& cards, const float3x4& objectToWorld, uint32_t lightingChannels = 1, bool emissiveLightSource = false);
     // A rigid move (same scale): the cards follow, nothing is captured again.
     void setTransform(uint32_t sceneInstance, const float3x4& objectToWorld);
     // The instance's cards leave the atlas and the scene (hidden or removed instance, changed mesh, scale or materials:
@@ -221,6 +227,7 @@ private:
         float rotation[3][3] = {};  // columns = the mesh axes in world space (unit)
         bool mostlyTwoSided = false;
         uint32_t lightingChannels = 1;
+        bool emissiveLightSource = false;
     };
     struct PageEntry  // FLumenPageTableEntry
     {
