@@ -32,9 +32,12 @@
 //           mixed with the fog there and ordered against the air as above. A ridge inside the layer is veiled by the
 //           cloud in front of it and no more; the camera inside the layer sees the cloud from the first metres on (the
 //           cells' slices are centimetres there).
-// The sky's column is the fog alone, unordered (sky pixels show the layer's own image and the far-field sky; the air
-// volume holds no air along a sky ray): it is stored in the last far slice, which only depths past the far end read
-// (FogVolume.hlsli fogAt clamps there: fogOverSky). A surface in the last slice's span reads a blend toward it.
+// The sky's column is the fog alone (sky pixels show the layer's own image): it is stored in the last far slice, which
+// only depths past the far end read (FogVolume.hlsli fogAt clamps there: fogOverSky). A surface in the last slice's span
+// reads a blend toward it. With the order on, the sky's far slices are ordered too - against the air the far-field sky
+// the pixel adds is made of: the air volume holds none along a sky ray, so it is integrated here beside the slices
+// (fogSkyAirStep: the atmosphere's single scattering without casters and its multiple scattering, from the air's start
+// on, two midpoint steps a slice). A ridge in the fog and the sky beside it are then ordered alike.
 // P[0] = { grid x | y << 16, z | cell px << 16 | zFar << 24, asuint(far m), asuint(k) }
 // P[1] = { asuint(b), scatter SRV (UNX_NONE: the cells hold no medium - the cloud alone), integrated UAV (Texture3D
 //          RGBA16F, z + zFar slices), asuint(far end m) }
@@ -140,6 +143,22 @@ void fogCloudWalkTo(inout FogCloudWalk w, CloudRecord c, CloudFrameLight light, 
     }
 }
 
+// The air along the column's ray over [t0, t1] (m along the ray) for the sky's column: the far-field sky's terms - no
+// casters, no local lights -, advanced into the running in-scattering (x the view's exposure) and transmittance.
+void fogSkyAirStep(AtmosphereParams ap, float3 dir, float t0, float t1, inout float3 inScatter, inout float3 transmittance)
+{
+    const float from = max(t0, AIR_VIEW_START_M), len = t1 - from;
+    if (!(len > 0)) return;
+    const float3 sun = normalize(g_sunDirection);
+    const float nu = dot(dir, sun);
+    const float3 x = airLiftToSurface(ap, g_cameraPosition + dir * (from + 0.5 * len));
+    const AirCoefficients c = airCoefficients(ap, max(0.0, airAltitude(ap, x)));
+    const float3 source = (c.rayleigh * airRayleighPhase(nu) + c.mie * airMiePhase(nu, ap.mieG)) * airSunTransmittance(ap, P[6].w, x, sun) +
+                          (c.rayleigh + c.mie) * airMultipleScattering(ap, P[4].y, x, dir, sun);
+    inScatter += transmittance * source * (g_sunIlluminance * g_sunColor * g_exposure) * airIntegral(c.extinction, len);
+    transmittance *= exp(-c.extinction * len);
+}
+
 // One homogeneous stretch of the column: extinction sigma, light per metre 'source', length d, seen through T; the air in
 // front of it (transmittance airT, in-scattering airIn: 1 and 0 where the stretch is not ordered against the air).
 void fogStretch(float sigma, float3 source, float d, float3 airT, float3 airIn, inout float3 L, inout float T)
@@ -184,7 +203,8 @@ void main(uint3 id : SV_DispatchThreadID)
     // (the two by two tiles around it: the air volume holds their air that far) and in the tiles around the column's own
     // (the surfaces that may read the column: the cloud is marched that far).
     const bool air = P[5].y != 0xFFFFFFFFu;
-    const bool order = air && (P[4].z & 1u) != 0;
+    // (the order is taken where there is a medium to order: the cells', then the far slices' height fog)
+    const bool order = air && (P[4].z & 1u) != 0 && P[1].y != 0xFFFFFFFFu;
     float reachAir = 3.0e38, reachCloud = 3.0e38;
     if (P[4].x != 0xFFFFFFFFu && P[6].y != 0xFFFFFFFFu)
     {
@@ -278,6 +298,11 @@ void main(uint3 id : SV_DispatchThreadID)
     fromSun *= g_exposure;  // (exposed, as the cells' sources)
     fromAround *= g_exposure;
     const bool farShadows = P[6].x != 0xFFFFFFFFu && any(fromSun > 0);
+    const bool orderFar = air && (P[4].z & 1u) != 0 && fog.density > 0;
+    // (the sky's column: its air, integrated beside the slices)
+    AtmosphereParams skyAir = (AtmosphereParams)0;
+    if (orderFar) skyAir = airParamsFromTexels(P[6].w);
+    float3 skyAirIn = 0, skyAirT = 1;
     [loop] for (uint i = 0; i < g.zFar; ++i)
     {
         const float za = fogFarDepth(g, float(i)), zb = fogFarDepth(g, float(i) + 1.0);
@@ -295,20 +320,26 @@ void main(uint3 id : SV_DispatchThreadID)
             lit *= cloudSunTransmittanceFromLut(P[6].w, g_cameraPosition + dir * max(sqrt(za * zb) * toRay, tStart));
         }
         const float3 farSource = fromSun * lit + fromAround;
-        skyL += skyT * farSource * (1 - t);
+        const float middle = sqrt(za * zb);
+        if (orderFar)
+        {
+            fogSkyAirStep(skyAir, dir, max(za * toRay, tStart), middle * toRay, skyAirIn, skyAirT);
+            skyL += skyT * (skyAirT * (farSource * (1 - t)) + (1 - t) * skyAirIn);
+            fogSkyAirStep(skyAir, dir, max(middle * toRay, tStart), zb * toRay, skyAirIn, skyAirT);
+        }
+        else skyL += skyT * farSource * (1 - t);
         skyT *= t;
         const bool cloudHere = walk.on && zb * toRay > walk.t0;
-        const float middle = sqrt(za * zb);
-        if (air && (order || cloudHere) && middle <= reachAir) fogAirAt(uv, middle, airIn, airT);
+        if (air && (orderFar || cloudHere) && middle <= reachAir) fogAirAt(uv, middle, airIn, airT);
         if (cloudHere)
         {
             // (the slice's fog as a uniform medium along it: its optical depth and its light per metre)
             const float perMetre = tau / max((zb - za) * toRay, 1e-6);
-            fogSliceWithCloud(walk, cloud, cloudLight, dir, P[5].x, za * toRay, zb * toRay, perMetre, farSource * perMetre, order, airT, airIn, L, T);
+            fogSliceWithCloud(walk, cloud, cloudLight, dir, P[5].x, za * toRay, zb * toRay, perMetre, farSource * perMetre, orderFar, airT, airIn, L, T);
         }
         else
         {
-            L += T * ((order ? airT : float3(1, 1, 1)) * (farSource * (1 - t)) + (1 - t) * (order ? airIn : float3(0, 0, 0)));
+            L += T * ((orderFar ? airT : float3(1, 1, 1)) * (farSource * (1 - t)) + (1 - t) * (orderFar ? airIn : float3(0, 0, 0)));
             T *= t;
         }
         // (the last slice: the sky's column)
