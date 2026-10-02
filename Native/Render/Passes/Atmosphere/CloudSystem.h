@@ -14,7 +14,7 @@ void setCloudLayer(TrackState& state, const clouds::CloudLayer& layer);
 
 // Before the atmosphere record is compared: the cloud layer's SRVs + 1 (0, 0 without clouds); allocates the persistent
 // layer textures at the main view's quarter resolution when clouds are on.
-void cloudsPrepare(FramePassContext& fc, uint32_t srvs[2]);
+void cloudsPrepare(FramePassContext& fc, uint32_t& recordSrv);
 // After the atmosphere LUTs: this frame's cloud passes (nothing without clouds). tlutSrvSource: the transmittance LUT.
 void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut);
 

@@ -6,7 +6,7 @@
 // bounce and from mirrors. The sample is unbiased for the sum of the cell's lights; its one-light noise is averaged by
 // the reader (the probes' rays and filters, the reflections' reuse and history).
 // A thread that calls this traces one more ray: the dispatches count 3 rays a thread (the ray, the sun's, this one).
-// The includer is a ray library (RayShaders.hlsli: rtVisible) with HitShading.hlsli and HitLocalLights.hlsli.
+// The includer is a ray library (RayShaders.hlsli: rtShadowTransmittance) with HitShading.hlsli and HitLocalLights.hlsli.
 #ifndef UNX_RT_HIT_LOCAL_SAMPLE_HLSLI
 #define UNX_RT_HIT_LOCAL_SAMPLE_HLSLI
 
@@ -31,7 +31,9 @@ float3 rtHitLocalSample(RtSceneSrvs scene, RtSurface s, GpuMaterial m, float3 v,
     mc.roughness = sqrt(sqrt(alpha * alpha + g_rtHitCone * g_rtHitCone));
     const float3 f = rtLocalLightBrdfCos(mc, s.normal, v, ls.wi, false);
     if (!any(f > 0)) return 0;
-    if (ls.castShadow && !rtVisible(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, bias), RT_MASK_HIT_SHADOW)) return 0;
-    return f * ls.weight;
+    // (the light through the Glass on the way: RayShaders.hlsli rtShadowTransmittance - 0 or 1 in a library that did not
+    // ask for the panes' transmittance)
+    if (!ls.castShadow) return f * ls.weight;
+    return f * ls.weight * rtShadowTransmittance(scene, rtLocalShadowRay(s.position, s.geometricNormal, ls, bias), RT_MASK_HIT_SHADOW);
 }
 #endif

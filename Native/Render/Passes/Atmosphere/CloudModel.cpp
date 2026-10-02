@@ -151,6 +151,18 @@ CloudNoise generateNoise(uint32_t seed)
             n.weather[((size_t)y * kWeatherSize + x) * 2] = byte(remap(cov, 0.3, 0.7, 0, 1));
             n.weather[((size_t)y * kWeatherSize + x) * 2 + 1] = byte(remap(type, 0.35, 0.65, 0, 1));
         }
+    // The cirrus sheet: fibres - noise four times finer across (v) than along (u), its coordinates bent by a slow noise
+    // (the fibres curve and fan out), in patches of a few tens of kilometres. Tileable (every term has the map's period).
+    n.cirrus.resize((size_t)kCirrusSize * kCirrusSize);
+    for (uint32_t y = 0; y < kCirrusSize; ++y)
+        for (uint32_t x = 0; x < kCirrusSize; ++x)
+        {
+            const double u = (x + 0.5) / kCirrusSize, v = (y + 0.5) / kCirrusSize;
+            const double bu = u + 0.05 * (perlin(u, v, 0.1, 4, seed + 13) - 0.5), bv = v + 0.012 * (perlin(u, v, 0.6, 4, seed + 14) - 0.5);
+            const double fibres = 0.5 * perlin(bu, 4 * bv, 0.3, 8, seed + 15) + 0.3 * perlin(bu, 4 * bv, 0.3, 16, seed + 16) + 0.2 * perlin(bu, 4 * bv, 0.3, 32, seed + 17);
+            const double patches = perlin(u, v, 0.8, 3, seed + 18);
+            n.cirrus[(size_t)y * kCirrusSize + x] = byte(remap(fibres, 0.3, 0.7, 0, 1) * saturate(remap(patches, 0.3, 0.6, 0, 1)));
+        }
     return n;
 }
 
@@ -163,6 +175,8 @@ CloudOffsets offsetsFor(const CloudLayer& layer, const double originOffset[3], d
     o.detail[0] = (float)frac(wx / layer.detailPeriod), o.detail[1] = (float)frac(wy / layer.detailPeriod), o.detail[2] = (float)frac(wz / layer.detailPeriod);
     o.weather[0] = (float)frac(wx / layer.weatherPeriod), o.weather[1] = (float)frac(wz / layer.weatherPeriod);
     o.origin[0] = (float)originOffset[0], o.origin[1] = (float)originOffset[1], o.origin[2] = (float)originOffset[2];
+    o.cirrus[0] = (float)frac((originOffset[0] - layer.cirrusWindX * time) / layer.cirrusPeriod);
+    o.cirrus[1] = (float)frac((originOffset[2] - layer.cirrusWindZ * time) / layer.cirrusPeriod);
     return o;
 }
 
@@ -356,7 +370,7 @@ PathResult referencePathTraced(const CloudNoise& n, const CloudLayer& layer, con
 
 RayResult referenceApproximate(const CloudNoise& n, const CloudLayer& layer, const CloudOffsets& o, double R, const double origin[3], const double dir[3],
                                const double sunDir[3], double E, double skyRadiance, double maxDistance, double step, double a, double b, double c, int octaves,
-                               double s0, double s1)
+                               double s0, double s1, double powder)
 {
     const double cosTheta = dir[0] * sunDir[0] + dir[1] * sunDir[1] + dir[2] * sunDir[2];
     auto hg = [&](double g) { return (1 - g * g) / (4 * 3.141592653589793 * std::pow(1 + g * g - 2 * g * cosTheta, 1.5)); };
@@ -376,7 +390,8 @@ RayResult referenceApproximate(const CloudNoise& n, const CloudLayer& layer, con
         if (rho <= 0) continue;
         const double tauSun = E > 0 ? sunTau(n, layer, o, R, x, sunDir, step) : 0.0;
         double sun = 0;
-        for (int k = 0, K = std::min(octaves, 16); k < K; ++k) sun += ak[k] * pk[k] * std::exp(-bk[k] * tauSun);
+        const double deep = 1 - powder * std::exp(-2 * tauSun);  // (the octaves past the first: CloudModel.h)
+        for (int k = 0, K = std::min(octaves, 16); k < K; ++k) sun += ak[k] * pk[k] * std::exp(-bk[k] * tauSun) * (k > 0 ? deep : 1.0);
         const double hn = (altitudeOf(o, R, x) - layer.baseAltitude) / (layer.topAltitude - layer.baseAltitude);
         const double segment = (1 - std::exp(-rho * ds)) / rho;
         L += T * layer.albedo * rho * (sun * E + skyRadiance * std::max(0.0, s0 + s1 * hn)) * segment;

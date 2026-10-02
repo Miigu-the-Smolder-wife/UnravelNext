@@ -141,6 +141,7 @@ void prepareScene(FramePassContext& fc)
     // A no-op when nothing changed (GpuScene keeps the buffer and the revision).
     fc.scene.setMaterialTextures(t.published());
     // the rect lights' source textures (scene::Light::sourceTexture): the same textures' SRVs into the light records
+    fc.scene.setTextureSrvs(t.textureSrvs());  // (the scene textures for the tracks that sample one themselves: FX's sprite looks)
     // (and each image's mean colour, for the consumers that take the light as a point)
     if (const std::vector<uint32_t> sources = t.lightSourceTextures(); sources.size() == fc.scene.lights().size())
         fc.scene.setLightSourceTextures(sources, t.lightSourceMeans());
@@ -192,7 +193,9 @@ void resolve(FramePassContext& fc, ViewResources& view)
     view.reflectionLobeTiles = fc.graph.createTexture({ "m.reflection lobe tiles", o.tilesX, o.tilesY, 1, 1, DXGI_FORMAT_R8_UNORM });
     o.materialWord = fc.graph.createTexture({ "m.material word", W, H, 1, 1, DXGI_FORMAT_R32_UINT });
     view.materialWord = o.materialWord;
-    if (textures.anyEmissiveTexture()) o.emissive = fc.graph.createTexture({ "m.emissive", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+    // (every surface pixel's emission, in frames whose materials have an emissive texture or whose decals add emission)
+    if (textures.anyEmissiveTexture() || (view.decalEmissive && view.decalFrames.valid()))
+        o.emissive = fc.graph.createTexture({ "m.emissive", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
     // (the class word: anisotropic pixels' frame word, an eye's pixels' eye word - MaterialEye.hlsli; with
     // shading.eye_model off the resolve writes an eye's pixels the word 0: no iris, the plain Subsurface model)
     // material inputs (MaterialInputs.hlsli): the parallax's step bound and its sun shadow (the class word of a

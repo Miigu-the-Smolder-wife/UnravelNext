@@ -58,7 +58,10 @@ void CardDirectTraceGen()
         ray.Origin = texel.position + texel.normal * bias;
         ray.TMin = 0;
         ray.TMax = asfloat(P[1].w);
-        mask = RT_MASK_HIT_SHADOW;  // (the sun's casters, as the view's shadow maps: RayScene.hlsli)
+        // (the sun's casters, as the view's shadow maps: RayScene.hlsli; and the far field's proxies - raytracing.far_field:
+        // distant instances that are not in the near structure still shadow the texel, by their box's share of the rays.
+        // Which rays is a hash of the box and the ray, and a texel's sun ray is the same every update: a fixed dither)
+        mask = RT_MASK_HIT_SHADOW | RT_MASK_FAR;
     }
     else
     {

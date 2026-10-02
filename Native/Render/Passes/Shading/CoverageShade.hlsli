@@ -438,6 +438,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
     float roughness = cmat.roughness, metallic = cmat.metallic, variance = cmat.variance;
     const bool backSide = !sf.front && (m.classFlags & MATERIAL_TWO_SIDED) != 0;
     if (backSide) n = -n;
+    float3 decalEmission = 0;  // what E's emissive decals add to the fragment's emission (Decal.hlsli; the resolve's sum)
     if (P[10].z != UNX_NONE)
     {
         // E's decals of the view as upper layers of the fragment's material, as in the resolve and before the surface
@@ -445,6 +446,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
         // the pixel's on the fragment's plane, the geometric normal the side this fragment shades)
         DecalMaterial dm;
         dm.baseColor = baseColor; dm.roughness = roughness; dm.metallic = metallic; dm.normal = n; dm.variance = variance;
+        dm.emissive = 0;
         DecalSurface ds;
         ds.position = sf.offset; ds.dpdx = sf.dpdx; ds.dpdy = sf.dpdy;
         ds.geometricNormal = backSide ? -sf.geometricNormal : sf.geometricNormal;
@@ -454,6 +456,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
         dc.frames = P[10].z; dc.tiles = P[10].w; dc.materialTable = P[1].y;
         decalApply(dc, pixel, ds, dm);
         baseColor = dm.baseColor; roughness = dm.roughness; metallic = dm.metallic; n = dm.normal; variance = dm.variance;
+        decalEmission = dm.emissive;
     }
     if (P[7].z != UNX_NONE || P[7].w != UNX_NONE)
     {
@@ -490,6 +493,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
         }
         radiance *= mInputEmissiveMask(eu);
     }
+    radiance += decalEmission;
 #if COV_PART == 2 && COV_PART_EXPOSED
     radiance = 0;  // (the emission is part 1's)
 #elif COV_PART == 2

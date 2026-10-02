@@ -83,6 +83,33 @@ int main()
         CHECK(cloudyBack.clouds.sigmaMax == 0.03f && cloudyBack.clouds.albedo == 0.97f && cloudyBack.clouds.windX == 4.0f && cloudyBack.clouds.windZ == -2.5f);
         CHECK(!cloudyBack.fog.enabled && cloudyBack.fogVolumes.empty());
         CHECK(serialize(cloudyBack) == cloudyBytes);
+        CHECK(!contains(cloudyBytes, "CIRR"));
+
+        // the cirrus sheet: its own block, with the layer and without it
+        Scene wispy = cloudy;
+        wispy.clouds.cirrusCoverage = 0.4f;
+        wispy.clouds.cirrusAltitude = 10500.0f;
+        wispy.clouds.cirrusOpticalDepth = 0.2f;
+        wispy.clouds.cirrusWindX = 30.0f;
+        wispy.clouds.cirrusWindZ = -5.0f;
+        validate(wispy);
+        const std::vector<uint8_t> wispyBytes = serialize(wispy);
+        CHECK(contains(wispyBytes, "CIRR"));
+        CHECK(wispyBytes.size() == cloudyBytes.size() + 4 + 5 * 4);
+        const Scene wispyBack = deserialize(wispyBytes);
+        CHECK(wispyBack.clouds.coverage == 0.5f && wispyBack.clouds.cirrusCoverage == 0.4f && wispyBack.clouds.cirrusAltitude == 10500.0f);
+        CHECK(wispyBack.clouds.cirrusOpticalDepth == 0.2f && wispyBack.clouds.cirrusWindX == 30.0f && wispyBack.clouds.cirrusWindZ == -5.0f);
+        CHECK(serialize(wispyBack) == wispyBytes);
+        Scene sheetOnly = plainScene();
+        sheetOnly.clouds.cirrusCoverage = 0.3f;
+        validate(sheetOnly);
+        const std::vector<uint8_t> sheetBytes = serialize(sheetOnly);
+        CHECK(contains(sheetBytes, "CIRR") && !contains(sheetBytes, "CLDS"));
+        const Scene sheetBack = deserialize(sheetBytes);
+        CHECK(sheetBack.clouds.coverage == 0 && sheetBack.clouds.cirrusCoverage == 0.3f && sheetBack.clouds.cirrusAltitude == 9000.0f);
+        Scene badSheet = sheetOnly;
+        badSheet.clouds.cirrusOpticalDepth = 0.0f;
+        CHECK(refused(badSheet));
         CHECK(contentHash(plain) != contentHash(cloudy));
 
         // fog volumes alone: the block, the height fog stays disabled
@@ -113,6 +140,30 @@ int main()
             CHECK(d.shape == 0 && d.density == FogVolume{}.density && d.edge == FogVolume{}.edge);
         }
         CHECK(serialize(mistyBack) == mistyBytes);
+        CHECK(!contains(mistyBytes, "FVST"));
+
+        // steam values on one volume: the FVST block names it, the other keeps its defaults
+        Scene steamy = misty;
+        steamy.fogVolumes[1].sourcePlane = 0.25f;
+        steamy.fogVolumes[1].riseSpeed = 0.4f;
+        steamy.fogVolumes[1].turbulence = 0.8f;
+        steamy.fogVolumes[1].turbulenceScale = 0.3f;
+        validate(steamy);
+        const std::vector<uint8_t> steamyBytes = serialize(steamy);
+        CHECK(contains(steamyBytes, "FVST"));
+        CHECK(steamyBytes.size() == mistyBytes.size() + 4 + 8 + (4 + 4 * 4));  // tag, count, index + 4 floats
+        const Scene steamyBack = deserialize(steamyBytes);
+        CHECK(steamyBack.fogVolumes.size() == 2);
+        if (steamyBack.fogVolumes.size() == 2)
+        {
+            CHECK(steamyBack.fogVolumes[0].riseSpeed == 0 && steamyBack.fogVolumes[0].turbulence == 0 && steamyBack.fogVolumes[0].sourcePlane == 0);
+            const FogVolume& v = steamyBack.fogVolumes[1];
+            CHECK(v.sourcePlane == 0.25f && v.riseSpeed == 0.4f && v.turbulence == 0.8f && v.turbulenceScale == 0.3f);
+        }
+        CHECK(serialize(steamyBack) == steamyBytes);
+        Scene badSteam = steamy;
+        badSteam.fogVolumes[1].turbulence = 1.5f;
+        CHECK(refused(badSteam));
 
         // the height fog and the clouds together: both blocks, clouds first
         Scene both = cloudy;
@@ -136,6 +187,21 @@ int main()
         CHECK(bothBack.fog.phaseG == 0.6f && bothBack.fog.startDistance == 3.0f && bothBack.fog.skyAmount == 0.5f && bothBack.fog.noiseAmount == 0.2f &&
               bothBack.fog.noiseScale == 35.0f);
         CHECK(serialize(bothBack) == bothBytes);
+        CHECK(!contains(bothBytes, "FGL2"));
+
+        // the fog's second layer: its own block after FOGS
+        Scene layered = both;
+        layered.fog.density2 = 0.02f;
+        layered.fog.heightFalloff2 = 0.5f;
+        layered.fog.height2 = -3.0f;
+        validate(layered);
+        const std::vector<uint8_t> layeredBytes = serialize(layered);
+        CHECK(contains(layeredBytes, "FGL2"));
+        CHECK(layeredBytes.size() == bothBytes.size() + 4 + 3 * 4);
+        const Scene layeredBack = deserialize(layeredBytes);
+        CHECK(layeredBack.fog.density2 == 0.02f && layeredBack.fog.heightFalloff2 == 0.5f && layeredBack.fog.height2 == -3.0f);
+        CHECK(layeredBack.fog.density == 0.004f && layeredBack.clouds.coverage == 0.5f);
+        CHECK(serialize(layeredBack) == layeredBytes);
 
         // values outside the fields' ranges are refused
         Scene bad = cloudy;

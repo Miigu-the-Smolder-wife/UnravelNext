@@ -7,7 +7,8 @@
 // is the one of the stored pair list before (same pairs, same clipping); the pairs have no list and no capacity.
 // The prefix is built in groupshared memory (no wave intrinsics: the group may span several waves on any GPU).
 //   P[0] visible SRV (uint2), lists SRV (raw), state SRV (raw), list
-//   P[1] phase (1), list capacity, views SRV, viewport per view
+//   P[1] phase (1: the list's entries of phase 1, or all of a one-phase run; 2: the entries phase 2 appended), list
+//        capacity, views SRV, viewport per view
 //   P[2] tile rectangles SRV (uint2 per visible entry: packTileRect, bit 31 of .y = whole), atlas slots SRV, atlas tiles
 //        per row, atlas size
 //   P[3] tile mask SRV (raw: DepthRasterRequest::cullMask)
@@ -23,13 +24,14 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID)
     ByteAddressBuffer lists = ResourceDescriptorHeap[P[0].y];
     const uint list = P[0].w, capacity = P[1].y;
     const uint count = min(state.Load(4 * (VS_LIST_COUNT + list)), capacity);
-    const uint index = group.x + group.y * 65535;
+    const uint base = P[1].x == 2 ? state.Load(4 * (VS_LIST_PHASE1 + list)) : 0;
+    const uint index = base + group.x + group.y * 65535;
     const bool valid = index < count;  // uniform over the group
     const uint visibleIndex = valid ? lists.Load(4 * (list * capacity + index)) & ~LIST_ENTRY_MIXED : 0;
     StructuredBuffer<uint2> rects = ResourceDescriptorHeap[P[2].x];
     StructuredBuffer<uint2> visible = ResourceDescriptorHeap[P[0].x];
     const uint2 packed = valid ? rects[visibleIndex] : uint2(0, 0);
-    const uint view = valid ? visible[visibleIndex].y >> 24 : 0;
+    const uint view = valid ? itemView(visible[visibleIndex]) : 0;
     StructuredBuffer<CullView> views = ResourceDescriptorHeap[P[1].z];
     const CullView v = views[view];
     const uint2 a = uint2(packed.x & 0xFFFFu, packed.x >> 16), b = uint2(packed.y & 0xFFFFu, (packed.y >> 16) & 0x7FFFu);

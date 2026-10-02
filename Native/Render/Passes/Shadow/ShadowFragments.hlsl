@@ -57,7 +57,11 @@ VsmResources fragmentVsm()
     return r;
 }
 float pixelFootprint(float deviceDepth) { return 2 * linearDepth(deviceDepth) * g_tanHalfFovY / g_viewHeight; }
-float fragmentSunT(ShadowSrvs s, float3 p, float footprint) { return P[3].y != 0xFFFFFFFFu ? shadowSunTransmittanceAt(s, p, footprint, footprint) : 1.0; }
+float fragmentSunT(ShadowSrvs s, float3 p, float footprint)
+{
+    // the thin casters' layer and what the glass casters let through (its luminance: the fragments' sun has no colour)
+    return (P[3].y != 0xFFFFFFFFu ? shadowSunTransmittanceAt(s, p, footprint, footprint) : 1.0) * shadowSunTintLuminanceAt(s, p, footprint);
+}
 float fragmentCloudT(float3 p) { return P[4].z != 0xFFFFFFFFu ? cloudSunTransmittanceFromLut(P[4].z, p) : 1.0; }
 
 #if MODE == 0

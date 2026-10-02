@@ -22,9 +22,10 @@ short_range_ao_foliage_strength = 0.7        # ShortRangeAO.FoliageOcclusionStre
 # screen probes' rays end in (a ray is traced only up to the cache's coverage distance at its probe; a miss reads the
 # cache in the ray's direction). false (default): not built; the screen probes' rays run to their full length.
 radiance_cache = true
-radiance_cache_fold_passes = true                 # the cache's small bookkeeping dispatches share passes (PassChain.h): reset +
-                                                  # clear + mark, and reuse + allocate + select + traces - the same dispatches in
-                                                  # order, a barrier between them. false: a pass each (A/B)
+radiance_cache_fold_passes = true                 # the cache's small bookkeeping passes are timed as two scopes (PassChain.h):
+                                                  # reset + clear + mark + hit marks, and reuse + allocate + select + traces +
+                                                  # the ray dispatch descriptions - the same passes and barriers, one timestamp
+                                                  # each. false: a scope per pass (A/B)
 radiance_cache_clipmaps = 4                       # RadianceCache.NumClipmaps (the gather's); at most 6
 radiance_cache_extent_m = 25.0                    # ClipmapWorldExtent (2500 cm): level 0 spans +- this around the camera
 radiance_cache_distribution_base = 2.0            # ClipmapDistributionBase: each level's extent is this x the last

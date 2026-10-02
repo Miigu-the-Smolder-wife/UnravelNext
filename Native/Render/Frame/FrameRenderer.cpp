@@ -3,6 +3,7 @@
 #include "unx/render/Tracks.h"
 #include "unx/scene/SceneData.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <map>
@@ -315,11 +316,27 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     // History discontinuity (v1.35): no previous view in this frame; a restore also has no previous transforms or
     // palettes. The tracks reset their own temporal state from frame.discontinuity.
     FrameContext frame = in;
+    // The frame's weather record (FrameContext::weather: the World's one row for the sky, the air and the surfaces): its
+    // cloud cover is the cloud layer's coverage where the frame brings no layer of its own and its producer has not
+    // decided the clouds itself (the layer's other values stay the defaults). The rain's veil in the air and the wet
+    // surfaces read the same record (S's fogViewFor: atmosphere.fog.rain_veil; M's SurfaceLayers.hlsli).
+    if ((frame.sceneWeather & kSceneClouds) != 0 && !(frame.clouds.coverage > 0) && frame.weather.cloudCover > 0)
+        frame.clouds.coverage = std::min(frame.weather.cloudCover, 1.0f);
     // The scene description's weather where the frame brings none of its own (FrameContext::sceneWeather): the scene's
     // coordinates are the world's - the fog's height and the volumes' centres go through the origin offset as the
     // frame's own do (S), the cloud layer's altitudes are above the planet's surface.
     if (const scene::Scene* src = m_scene.source())
     {
+        // (the cirrus sheet comes with the scene's layer record, where the frame brings neither a layer nor a sheet)
+        if ((frame.sceneWeather & kSceneClouds) != 0 && !(frame.clouds.cirrusCoverage > 0) && src->clouds.cirrusCoverage > 0)
+        {
+            const scene::CloudLayer& c = src->clouds;
+            frame.clouds.cirrusCoverage = c.cirrusCoverage;
+            frame.clouds.cirrusAltitude = c.cirrusAltitude;
+            frame.clouds.cirrusOpticalDepth = c.cirrusOpticalDepth;
+            frame.clouds.cirrusWindX = c.cirrusWindX;
+            frame.clouds.cirrusWindZ = c.cirrusWindZ;
+        }
         if ((frame.sceneWeather & kSceneClouds) != 0 && !(frame.clouds.coverage > 0) && src->clouds.coverage > 0)
         {
             const scene::CloudLayer& c = src->clouds;
@@ -346,6 +363,9 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
             frame.fog.skyAmount = f.skyAmount;
             frame.fog.noiseAmount = f.noiseAmount;
             frame.fog.noiseScale = f.noiseScale;
+            frame.fog.density2 = f.density2;
+            frame.fog.heightFalloff2 = f.heightFalloff2;
+            frame.fog.height2 = f.height2;
         }
         if ((frame.sceneWeather & kSceneFogVolumes) != 0 && frame.fogVolumes.empty())
             for (const scene::FogVolume& v : src->fogVolumes)
@@ -359,6 +379,10 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
                 d.heightFalloff = v.heightFalloff;
                 d.edge = v.edge;
                 d.albedo[0] = v.albedo.x, d.albedo[1] = v.albedo.y, d.albedo[2] = v.albedo.z;
+                d.sourcePlane = v.sourcePlane;
+                d.riseSpeed = v.riseSpeed;
+                d.turbulence = v.turbulence;
+                d.turbulenceScale = v.turbulenceScale;
                 frame.fogVolumes.push_back(d);
             }
     }
@@ -384,6 +408,33 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
         {
             float4x4& pv = *pvp;
             for (int r = 0; r < 4; ++r) pv.m[r][3] += pv.m[r][0] * frame.originShift.x + pv.m[r][1] * frame.originShift.y + pv.m[r][2] * frame.originShift.z;
+        }
+    }
+    // Steam over hot water (PoolFrame::steamDensity): a local fog volume per such basin, after the frame's and the
+    // scene's own (the first kMaxFogVolumes of a frame take effect). The volume is centred on the still surface with the
+    // steam's height as its vertical half size and its source plane at the middle - nothing under the water, the density
+    // falling to a quarter at the top, fading over the outer 30 % toward the rim and the top; a round basin's is the
+    // ellipsoid, a rectangular one's the box with the basin's yaw. Basins are in the frame's coordinates, fog volumes in
+    // the world's (S takes the origin offset off again).
+    {
+        const float3 offset = m_scene.originOffset();
+        for (uint32_t i = 0; i < frame.poolCount && frame.fogVolumes.size() < kMaxFogVolumes; ++i)
+        {
+            const PoolFrame& p = frame.pools[i];
+            if (!(p.steamDensity > 0) || !(p.steamHeight > 0)) continue;
+            FogVolumeDesc d;
+            d.centre[0] = p.centre[0] + offset.x, d.centre[1] = p.centre[1] + offset.y, d.centre[2] = p.centre[2] + offset.z;
+            const bool round = p.shape == 1;
+            d.halfSize[0] = 0.5f * p.sizeX, d.halfSize[1] = p.steamHeight, d.halfSize[2] = round ? 0.5f * p.sizeX : 0.5f * p.sizeZ;
+            d.yaw = p.yaw;
+            d.shape = round ? 0u : 1u;
+            d.density = p.steamDensity;
+            d.heightFalloff = 2;
+            d.sourcePlane = 0.5f;
+            d.riseSpeed = p.steamRiseSpeed;
+            d.turbulence = p.steamTurbulence;
+            d.turbulenceScale = p.steamTurbulenceScale;
+            frame.fogVolumes.push_back(d);
         }
     }
     m_scene.flushUpdates(frame.frameIndex, m_framesInFlight, m_shaders);  // transforms, palettes, visibility of this frame
@@ -434,6 +485,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     tracks::simulation(fc);  // C0
     tracks::particleMeshes(fc);  // A3 (render C): mesh particle instances, before V's culling
     tracks::particleLights(fc, main);  // A3: FX particle lights into the scene light tail, before S's lists
+    tracks::particleShadows(fc, main);  // the sprites' shadow under the sun (S's screen visibility and the particles read it)
     tracks::waterGeometry(fc);  // W (B7/B8): ocean FFT and fluid surface into V's triangle streams
     tracks::atmosphere(fc);
     tracks::accelerationStructures(fc);

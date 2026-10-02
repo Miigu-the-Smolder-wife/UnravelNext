@@ -196,8 +196,13 @@ post_fringe = 0.0
 post_fringe_start = 0.0
 # Image-based lens flares (PostFlare.hlsl; the reference's lens flares, off in its project defaults -
 # r.DefaultFeature.LensFlare false): ghosts of the picture's bright parts, each spread to the aperture's shape, added
-# to the picture after the bloom. The values are the reference's post process defaults (its Engine module is not in the
-# reference checkout: these are the documented ones).
+# to the picture after the bloom. Checked against the reference checkout (PostProcessLensFlares.cpp / .usf): eight
+# flares, a flare's scale (its tint's 4th number - 0.5) x 7, the intensity x the bloom's intensity, the threshold on
+# r + g + b of the source faded by the disc mask at half scale, the bokeh size in percent of the flare view's width, the
+# composite's two disc masks, r.LensFlareQuality 2. From memory - they are FPostProcessSettings' defaults, in the Engine
+# module that is not in the checkout: LensFlareIntensity 1, LensFlareTint white, LensFlareBokehSize 3,
+# LensFlareThreshold 8, the eight LensFlareTints below, the bloom intensity 0.675, and the default bokeh texture being a
+# disc.
 post_lens_flare = false
 post_lens_flare_intensity = 1.0                 # LensFlareIntensity (x the reference's bloom intensity 0.675)
 post_lens_flare_tint = [1.0, 1.0, 1.0]          # LensFlareTint
@@ -262,6 +267,14 @@ post_white_balance = false
 # cache's ambient) and lets the sun map's beam extinction include sigma_s. false (default): clear water as before
 # (bit-identical); a material with sigma_s = 0 is clear either way.
 water_turbid = false
+water_underwater = true              # the basin the camera is in is a medium of the view (WaterMedia.hlsl), clear water too: every
+                                     # path of an underwater view takes the water's absorption (and, with water_turbid, what it
+                                     # scatters), and the surface seen from below shows the world above inside Snell's window and
+                                     # mirrors the water outside it (WaterSurface.hlsli). false: the view from inside a basin is the
+                                     # view through air, as before (the surface from below still refracts and mirrors)
+water_multiple_scattering = true     # with water_turbid: the light scattered many times in a turbid water, as the diffusion limit's
+                                     # isotropic source (WaterMedia.hlsl: a milky bath is bright from every side instead of the dark
+                                     # grey single scattering leaves). false: single scattering and the ambient term alone
 
 # Motion blur (A5; COVERAGE 14.12 (2); MotionBlur.cpp): the shutter's open time as a fraction of the frame interval,
 # the exposure [t - s dt, t]; 0.5 = 180 degrees (the user's gate camera, 2026-09-26), 0 = instantaneous. Frames without
@@ -277,3 +290,37 @@ motion_blur_max_percent = 5.0          # the longest blur, percent of the output
 motion_blur_samples = 16               # taps along the blur, a multiple of 4 (16: the reference's r.MotionBlurQuality 4)
 motion_blur_half_res_gather = true     # 16 x 16 pixel groups whose blur is longer than the taps gather once per 2 x 2
                                        # pixels (r.MotionBlur.HalfResGather): a quarter of the taps where the blur hides it
+motion_blur_after_upscale_rotation = true  # ours (the reference has no such stage): after the upscale too, a camera turn
+                                       # whose streak at the picture's centre exceeds 16 output pixels is blurred along
+                                       # its own arcs, exact at every depth (MotionRotation.hlsl), and the gather takes
+                                       # the rest of the motion. false: the gather takes the turn as any velocity, up to
+                                       # motion_blur_max_percent
+
+# Depth of field (A5; the lens is the frame's: FrameContext::lensAperture, lensFocus - no lens, no pass).
+# dof_diaphragm = true: the reference's diaphragm depth of field (DiaphragmDof.cpp, Ddof*.hlsl; its DiaphragmDOF passes
+# and r.DOF.* values): the circle of confusion per pixel, half-resolution gathers of the foreground, the background and
+# what the foreground uncovers (radius tiles choose each kernel), bright wide-radius pixels drawn as bokeh sprites,
+# the slight blur near the focus gathered at full resolution, all composed; at the internal resolution before the
+# temporal upscale. false: the octave-pyramid gather (DepthOfField.cpp), kept to compare against.
+dof_diaphragm = false                               # (off until a batch has looked at it: the octave path is the one that has run)
+dof_diaphragm_rings = 5                             # r.DOF.Gather.RingCount, 3 .. 5: the gather kernels' rings (ring i: 8 i samples)
+dof_diaphragm_max_levels = 4                        # r.DOF.Gather.MaxMipMapCount: coarser levels of the gather's input, 1 .. 4
+dof_diaphragm_max_foreground_radius = 0.025         # r.DOF.Kernel.MaxForegroundRadius: the widest blur in front of the focus,
+dof_diaphragm_max_background_radius = 0.025         # r.DOF.Kernel.MaxBackgroundRadius: and behind it, of the view's width
+dof_diaphragm_postfilter = 1                        # r.DOF.Gather.PostfilterMethod: 0 none, 1 the 3 x 3 median, 2 the 3 x 3 largest
+dof_diaphragm_recombine_pairs = 16                  # r.DOF.Recombine.Quality 2: the full-resolution gather's sample pairs (1: 12)
+dof_diaphragm_stable_range_boost = 0.0              # r.DOF.TAA.SOFHistoryRejectionBoost: widens the range the full-resolution
+                                                    # gather is held to near the focus (0 .. 0.125)
+dof_diaphragm_scatter = true                        # r.DOF.Scatter.ForegroundCompositing 1, BackgroundCompositing: the sprites
+dof_diaphragm_scatter_occlusion = true              # r.DOF.Scatter.BackgroundCompositing 2: a background sprite is hidden by
+                                                    # what the gather found nearer at the pixel
+dof_diaphragm_scatter_min_radius = 3.0              # r.DOF.Scatter.MinCocRadius: half-resolution pixels (at least 3)
+dof_diaphragm_scatter_max_sprite_ratio = 0.1        # r.DOF.Scatter.MaxSpriteRatio: of the half-resolution 2 x 2 blocks
+dof_diaphragm_scatter_neighbour_max_colour = 10.0   # r.DOF.Scatter.NeighborCompareMaxColor
+dof_diaphragm_blades = 5                            # DepthOfFieldBladeCount: 4 .. 16 diaphragm blades; under 4 a disc
+dof_diaphragm_full_aperture = 0.0                   # DepthOfFieldMinFstop, as the lens's widest aperture (diameter, m): the
+                                                    # blades are arcs of it (at or under the frame's aperture: a disc);
+                                                    # 0: straight blades (the reference's own default lens is f/1.2 wide open)
+dof_diaphragm_prefilter = true                      # r.DOF.TemporalAAQuality: a jittered (upscaled) view's half-resolution
+dof_diaphragm_prefilter_weight = 0.04               # picture accumulated first; the current frame's weight
+                                                    # (r.TemporalAACurrentFrameWeight)

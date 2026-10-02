@@ -101,6 +101,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gi : SV_G
     }
     f.opacity = opacity; f.cosFadeStart = r.cosFadeStart; f.cosFadeEnd = r.cosFadeEnd; f.edge = r.edge;
     f.color = r.color; f.channels = r.channels;
+    f.emissive = r.emissive; f.pad = 0;
     frames[id.x] = f;
 #else
     const uint decal = gid.x;

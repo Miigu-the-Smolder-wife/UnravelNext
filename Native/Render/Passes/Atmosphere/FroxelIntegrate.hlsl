@@ -71,7 +71,7 @@
 // the fog's height), height falloff, height (m), phase g }, P[8] = { albedo r, g, b, start distance (m) } (floats).
 // P[6].x bit 2 (atmosphere.fog.sun_through_fog): part 2's sun transmittance x the share of the sun's light that passes
 // the height fog toward the sun as direct light (Fog.hlsli fogSunThrough; the medium in P[7], whether bit 0 is set or
-// not: the fog's own volume is FogVolume.hlsli's).
+// not: the fog's own volume is FogVolume.hlsli's). P[9] = the medium's second layer { density, falloff, height, 0 }.
 // Frame constants of the view (main, or a planar reflection view).
 #include "Passes/Atmosphere/FroxelSlice.hlsli"
 #include "Passes/Shadow/VsmCls.hlsli"
@@ -154,7 +154,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     if (s == 0) gs_lastSky = 0;
     // Particle media of this slice (P[4].x) and their optical depth before it and to far_m (inclusive scan in gs_tau,
     // reused below).
-    const FogMedium fog = fogMedium(P[6], P[7], P[8]);
+    const FogMedium fog = fogMedium(P[6], P[7], P[8], P[9]);
     const bool particleMedia = P[4].x != 0xFFFFFFFFu, media = particleMedia || fog.on;
     float3 mediaTau = 0, mediaSource = 0;
     if (particleMedia && s < g.slices)
@@ -231,7 +231,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         const float3 o = g_cameraPosition + dir * t0;
         // Local lights of the froxel's list (air at the segment's midpoint).
         const float3 pm = airLiftToSurface(a, o + dir * (0.5 * len));
-        const AirCoefficients cm = airScaled(airCoefficients(a, max(0.0, airAltitude(a, pm))), airNearScale(t0, len));
+        const AirCoefficients cm = airScaled(airCoefficients(a, max(0.0, airAltitude(a, pm))), airNearScale(a.viewStartM, t0, len));
         ByteAddressBuffer lists = ResourceDescriptorHeap[P[0].x];
         const uint2 h = lists.Load2(g.headerBase + froxelIndex(g, tile, s) * 8);
         myFirst = h.x;
@@ -400,7 +400,7 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             ++localWalk.entries;
             localWalk.runs += runs;
             const float3 pm = airLiftToSurface(a, o + dir * (0.5 * len));
-            const AirCoefficients cm = airScaled(airCoefficients(a, max(0.0, airAltitude(a, pm))), airNearScale(z1 * toRay - len, len));
+            const AirCoefficients cm = airScaled(airCoefficients(a, max(0.0, airAltitude(a, pm))), airNearScale(a.viewStartM, z1 * toRay - len, len));
             gs_source[item] = runs == 0 ? 0.0 : airLocalEval(l, o, dir, mp, cm, a.mieG, P[4].y, li, froxelTileWidth(g, 0.5 * (z0 + z1)), partial, m);
         }
         GroupMemoryBarrierWithGroupSync();

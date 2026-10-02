@@ -10,7 +10,10 @@
 // As Unreal's decals: a decal changes only the parts of the material its channels name (base colour, normal,
 // roughness and metallic: a normal-only or roughness-only decal), its base colour is tinted by its colour, its opacity
 // fades with its size on screen and over its lifetime (DecalSetup.hlsl STEP 1 folds both into the frame record's
-// opacity), and an instance flagged INSTANCE_NO_DECALS takes none.
+// opacity), and an instance flagged INSTANCE_NO_DECALS takes none. A stain multiplies the base colour instead of
+// replacing it (base x lerp(1, decal, a): Unreal 4's DBuffer stain); an emissive decal adds its material's emission
+// x a to the pixel's (Unreal draws those into the scene colour after the base pass; here the resolve adds them to the
+// pixel's emission, which the shading reads - they light nothing else, as there).
 // Composition order: priority, then creation order (older first, a newer decal on top) - independent of list order.
 //
 // Per frame (Passes/Decal/Decals.cpp): DecalFrame records (camera-relative) and the 16 x 16 px tile lists, at most
@@ -32,6 +35,8 @@
 #define DECAL_CHANNEL_BASE_COLOR 1u
 #define DECAL_CHANNEL_NORMAL 2u       // the normal and its slope variance
 #define DECAL_CHANNEL_ROUGH_METAL 4u  // roughness and metallic
+#define DECAL_CHANNEL_EMISSIVE 8u     // the decal material's emission, added
+#define DECAL_STAIN (1u << 8)         // the base colour is multiplied, not replaced
 
 // CPU record (128 B): the box maps the unit cube [-1, 1]^3 to its space: p = box * (u, 1) (columns: the half-extent axes
 // X, Y, Z, then the centre).
@@ -48,9 +53,9 @@ struct DecalRecord
     // (g_time, s): in over [fadeInStart, fadeInStart + fadeInDuration], out over [fadeOutStart, + fadeOutDuration]; a
     // duration of 0: no such fade.
     float fadeScreenSize, fadeInStart, fadeInDuration, fadeOutStart;
-    float fadeOutDuration; float3 pad;
+    float fadeOutDuration, emissive; float2 pad;     // emissive: scale of the decal material's emission
 };
-// Per-frame record (144 B): camera-relative box and its inverse.
+// Per-frame record (160 B): camera-relative box and its inverse.
 struct DecalFrame
 {
     float4 toDecal[3];         // camera-relative position -> unit cube coordinates
@@ -59,7 +64,8 @@ struct DecalFrame
     float3 axisY; int priority;
     float3 axisZ; uint order;
     float opacity, cosFadeStart, cosFadeEnd, edge;  // opacity: the record's x its screen-size and lifetime fades
-    float3 color; uint channels;
+    float3 color; uint channels;                     // channels: DECAL_CHANNEL_* | DECAL_STAIN
+    float emissive; float3 pad;
 };
 
 // What decalApply reads: the frame records and tile lists (DECAL_NONE: no decals) and M's material texture table
@@ -85,6 +91,7 @@ struct DecalMaterial
     float roughness, metallic;
     float3 normal;
     float variance;
+    float3 emissive;  // what the emissive decals add to the pixel's emission (the caller starts it at 0)
 };
 
 float3 decalToUnit(DecalFrame d, float3 p)
@@ -115,9 +122,15 @@ float decalLayer(DecalContext c, DecalFrame d, DecalSurface s, out DecalMaterial
     float roughness = m.roughness, metallic = m.metallic;
     float3 n = s.geometricNormal;
     float variance = s.geometricVariance;
+    float3 emission = (d.channels & DECAL_CHANNEL_EMISSIVE) != 0 ? m.emissive * d.emissive : float3(0, 0, 0);
     if (c.materialTable != DECAL_NONE)
     {
         const MTextureSet ts = mLoadTextureSet(c.materialTable, d.material);
+        if (ts.emissive != UNX_NONE && (d.channels & DECAL_CHANNEL_EMISSIVE) != 0)
+        {
+            Texture2D<float4> t = ResourceDescriptorHeap[ts.emissive];
+            emission *= mSampleGrad(t, true, uv, duvdx, duvdy).rgb;
+        }
         if (ts.baseColor != UNX_NONE)
         {
             Texture2D<float4> t = ResourceDescriptorHeap[ts.baseColor];
@@ -152,6 +165,7 @@ float decalLayer(DecalContext c, DecalFrame d, DecalSurface s, out DecalMaterial
     layer.metallic = metallic;
     layer.normal = n;
     layer.variance = variance;
+    layer.emissive = emission;
     return saturate(a);
 }
 
@@ -184,7 +198,9 @@ void decalApplyList(DecalContext c, inout uint ids[DECAL_PER_TILE], uint count, 
         const float a = decalLayer(c, d, s, layer);
         if (!(a > 0)) continue;
         // (the decal's channels: the parts of the material it changes)
-        if ((d.channels & DECAL_CHANNEL_BASE_COLOR) != 0) m.baseColor = lerp(m.baseColor, layer.baseColor, a);
+        if ((d.channels & DECAL_CHANNEL_BASE_COLOR) != 0)
+            m.baseColor = (d.channels & DECAL_STAIN) != 0 ? m.baseColor * lerp(1.0f, layer.baseColor, a) : lerp(m.baseColor, layer.baseColor, a);
+        m.emissive += layer.emissive * a;  // (0 without the emissive channel)
         if ((d.channels & DECAL_CHANNEL_ROUGH_METAL) != 0)
         {
             m.roughness = lerp(m.roughness, layer.roughness, a);

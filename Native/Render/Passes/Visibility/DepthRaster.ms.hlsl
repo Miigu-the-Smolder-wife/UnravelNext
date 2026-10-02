@@ -1,5 +1,5 @@
 // unx-kernel: ms_6_6 main
-// unx-variants: TILE=0,1,2 DEPTH=0,1 OUT=64,128 AS=0,1
+// unx-variants: TILE=0,1,2 DEPTH=0,1,2 OUT=64,128 AS=0,1
 // Depth raster service (FrameServices::rasterizeDepth, INTERFACES 5.3): one mesh-shader group per draw-list entry,
 // any number of views (the visible entry carries the view). Outputs match struct DepthRasterPixel (DepthRaster.hlsli)
 // for the requester's pixel kernel: position, uv (alpha test), userData, material, instance.
@@ -13,8 +13,11 @@
 // DEPTH=1 (no pixel kernel: hardware depth only): only the position, the clip distances, the viewport and the cull flag
 // are exported. The attributes a pixel kernel reads (uv, userData, material, instance) are dead there, and each mesh
 // shader group's output size limits how many groups an SM holds at once.
+// DEPTH=2 (DepthRasterRequest::pixelNormals): the pixel kernel's attributes and each vertex's world normal and tangent
+// (deformVertex's: the surface frame the main view shades with).
 //   P[0] visible SRV (uint2), lists SRV (raw), state SRV (raw), list
-//   P[1] phase (always 1: the service culls in one phase), list capacity, views SRV, viewport per view (0 = one viewport)
+//   P[1] phase (1: the list's entries of phase 1, or all of a one-phase run; 2: the entries phase 2 appended - a run
+//        with tile occluders in two phases), list capacity, views SRV, viewport per view (0 = one viewport)
 //   P[2] tile rectangles SRV (TILE=1,2: read by the amplification stage), atlas slots SRV (raw, TILE=2), atlas tiles per
 //        row, atlas size (w | h << 16)
 //   P[3] tile mask SRV (raw, TILE=1,2)
@@ -34,8 +37,12 @@
 struct VertexOut
 {
     float4 position : SV_Position;
-#if !DEPTH
+#if DEPTH != 1
     float2 uv : TEXCOORD0;
+#endif
+#if DEPTH == 2
+    float3 normal : NORMAL;
+    float4 tangent : TANGENT;
 #endif
 #if TILE
     float4 clip : SV_ClipDistance0;  // >= 0 inside the pair's tile rectangle (left, right, top, bottom)
@@ -44,7 +51,7 @@ struct VertexOut
 
 struct PrimitiveOut
 {
-#if !DEPTH
+#if DEPTH != 1
     uint userData : USERDATA;
     uint material : MATERIAL;
     uint instance : INSTANCE;
@@ -77,7 +84,8 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     ByteAddressBuffer lists = ResourceDescriptorHeap[P[0].y];
     const uint list = P[0].w, capacity = P[1].y;
     const uint count = min(state.Load(4 * (VS_LIST_COUNT + list)), capacity);
-    const uint index = group.x + group.y * 65535;
+    const uint base = P[1].x == 2 ? state.Load(4 * (VS_LIST_PHASE1 + list)) : 0;
+    const uint index = base + group.x + group.y * 65535;
     const bool valid = index < count;  // uniform over the group
     const uint entryIndex = valid ? lists.Load(4 * (list * capacity + index)) : 0;
 #if TILE
@@ -90,7 +98,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
 #endif
     StructuredBuffer<uint2> visible = ResourceDescriptorHeap[P[0].x];
     const uint2 entry = valid ? visible[visibleIndex] : uint2(0, 0);
-    const uint view = entry.y >> 24;
+    const uint view = itemView(entry), instance = itemInstance(entry);
     StructuredBuffer<CullView> views = ResourceDescriptorHeap[P[1].z];
     const CullView v = views[view];
 #if TILE && !FROM_PAYLOAD
@@ -117,9 +125,9 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
         pair.z = run.y | (y << 16);
     }
 #endif
-    const GpuInstance inst = loadInstance(entry.x);
+    const GpuInstance inst = loadInstance(instance);
     const GpuMesh mesh = loadMesh(inst.mesh);
-    const GpuCluster cl = loadCluster(entry.y & 0xFFFFFFu);
+    const GpuCluster cl = loadCluster(itemIndex(entry));
     const uint material = clusterMaterial(inst, cl);
     // (the CPU picks OUT64 only when every cluster fits; the clamp only keeps an output count within the declaration)
     const uint vertexCount = valid ? min(clusterVertexCount(cl), MS_OUT) : 0, triangleCount = valid ? min(clusterTriangleCount(cl), MS_OUT) : 0;
@@ -136,7 +144,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     // the view's clip space: they cut the same tile edges.
     ByteAddressBuffer slots = ResourceDescriptorHeap[P[2].y];
     const uint tile = (pair.y >> 16) * v.tilesX + (pair.y & 0xFFFFu);
-    const uint slot = valid ? slots.Load(4 * (v.cullMaskOffset * 32 + tile)) : 0;
+    const uint slot = valid ? slots.Load(4 * (v.slotOffset + tile)) : 0;
     const float2 atlasSize = float2(P[2].w & 0xFFFFu, P[2].w >> 16);
     const float2 shift = float2(slot % P[2].z, slot / P[2].z) * v.tilePx - lo;
     const float2 scale = v.viewportSize / atlasSize;
@@ -154,8 +162,13 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
 #else
         verts[i].position = p;
 #endif
-#if !DEPTH
-        verts[i].uv = loadVertex(mesh, meshVertex).uv;
+#if DEPTH != 1
+        const VertexData source = loadVertex(mesh, meshVertex);
+        verts[i].uv = source.uv;
+#endif
+#if DEPTH == 2
+        verts[i].normal = d.normal;
+        verts[i].tangent = float4(d.tangent, source.tangentSign);
 #endif
 #if TILE
         verts[i].clip = float4(p.x - ndcLo.x * p.w, ndcHi.x * p.w - p.x, ndcLo.y * p.w - p.y, p.y - ndcHi.y * p.w);
@@ -171,10 +184,10 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
         const uint packed = clusterTriangles[cl.triangleOffset + t];
         const uint3 tri = uint3(packed & 0xFFu, (packed >> 8) & 0xFFu, (packed >> 16) & 0xFFu);
         tris[t] = tri;
-#if !DEPTH
+#if DEPTH != 1
         prims[t].userData = v.userData;
         prims[t].material = material;
-        prims[t].instance = entry.x;
+        prims[t].instance = instance;
 #endif
 #if TILE != 2
         prims[t].viewport = P[1].w != 0 ? view : 0;

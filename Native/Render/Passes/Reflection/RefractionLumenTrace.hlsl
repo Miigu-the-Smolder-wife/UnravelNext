@@ -33,6 +33,7 @@
 //          << 16, asuint(the result's cap, exposed units; 0: none) }
 // P[5] = { previous colour SRV, its width | height << 16, asuint(relative depth thickness), depth SRV }
 // P[6], P[7] = RtSceneSrvs; P[8..11] = the previous colour's view-projection (rows). b1 = the main view.
+#define RT_SHADOW_TRANSMITTANCE  // (the hits' shadow rays take what the Glass they cross leaves of the light: RayShaders.hlsli)
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/Reflection/ScreenTrace.hlsli"
@@ -74,7 +75,7 @@ bool refractSceneColour(RtSceneSrvs scene, RtHit hit, float3 origin, float3 dire
 {
     colour = 0;
     const uint flags = P[4].z;
-    if ((flags & REFRACT_FLAG_SCENE_COLOUR) == 0 || hit.instance == RT_INSTANCE_EMITTER) return false;
+    if ((flags & REFRACT_FLAG_SCENE_COLOUR) == 0 || !rtMeshHit(hit)) return false;
     const float2 size = float2(g_viewWidth, g_viewHeight);
     const float3 hitPoint = origin + direction * hit.t;
     const float4 at = sctProject(hitPoint, size);
@@ -125,7 +126,7 @@ void RefractionGen()
         r.Direction = d;
         r.TMin = 1e-4;
         r.TMax = giRayLength();
-        const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_REFLECTION | RT_MASK_EMITTER | (inside ? RT_MASK_FLUID : 0u));
+        const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_REFLECTION | RT_MASK_EMITTER | RT_MASK_FAR | (inside ? RT_MASK_FLUID : 0u));
         // the grooms on a segment outside the media (a volume walk: no ray)
         if (!inside && hairParams != UNX_NONE)
         {
@@ -147,7 +148,7 @@ void RefractionGen()
             exits = true;
             n = refractStreamNormal(hit.instance - RT_INSTANCE_STREAM_BASE, hit);
         }
-        else if (inside && (flags & 0xFFu) == 1u && hit.instance != RT_INSTANCE_EMITTER)
+        else if (inside && (flags & 0xFFu) == 1u && rtMeshHit(hit))
         {
             const RtSurface sg = rtSurface(scene, hit, o, d);
             if (!sg.frontFace && materialClass(loadMaterial(sg.material)) == MATERIAL_GLASS)

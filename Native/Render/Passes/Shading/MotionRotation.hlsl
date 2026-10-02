@@ -13,9 +13,14 @@
 // A first-person view model (INSTANCE_VIEW_MODEL, A12) turns with the camera, so it is no part of the rotated world: its
 // texels have weight 0 in the map (a direction behind it is unknown now, like one off the image) and its pixels keep
 // their value, as do the pixels with it in their 3 x 3 neighbourhood (their edge composite may hold a share of it).
+// After the temporal upscale (MotionBlur.cpp motionBlurUpscaled) the image is the upscaled one and the exposure is centred
+// on the frame's time: the arc is [lambda_p - s phi / 2, lambda_p + s phi / 2] (P[4].w), the frame constants are the
+// output view's, and the vis buffer - at the internal resolution - is read at the image pixel's place in it (P[5].w).
 // P[0] = { image SRV, map UAV / SRV, output UAV, vis id SRV or UNX_NONE (no view model this frame) }, P[1] = { map width,
 // map height, width, height }, P[2] = asfloat { lambda0, beta0, texel angle, arc s phi }, P[3..5] = asfloat axis a, e1, e2
-// (view space, xyz), P[3].w = visible clusters SRV (with a vis id SRV); frame constants of the view (projection).
+// (view space, xyz), P[3].w = visible clusters SRV (with a vis id SRV), P[4].w = asfloat(the arc's start from the pixel's
+// lambda: 0, or - arc / 2), P[5].w = asfloat(vis buffer pixels per image pixel: 1; 0 is taken as 1); frame constants of
+// the image's view (projection).
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
@@ -24,7 +29,8 @@ bool isViewModel(int2 pixel)
 {
     if (P[0].w == UNX_NONE) return false;
     Texture2D<uint> vis = ResourceDescriptorHeap[P[0].w];
-    const uint visId = vis.Load(int3(pixel, 0));
+    const float visScale = asfloat(P[5].w);
+    const uint visId = vis.Load(int3(visScale > 0 && visScale != 1 ? int2((float2(pixel) + 0.5) * visScale) : pixel, 0));
     if (visId == VIS_NONE) return false;
     return (loadInstance(loadVisibleCluster(P[3].w, visVisibleCluster(visId)).instance).flags & INSTANCE_VIEW_MODEL) != 0;
 }
@@ -148,7 +154,8 @@ void main(uint2 id : SV_DispatchThreadID)
     const float texel = asfloat(P[2].z), arc = asfloat(P[2].w);
     const float lambda = atan2(dot(d, e2), dot(d, e1)), beta = asin(clamp(dot(d, a), -1.0f, 1.0f));
     const float u = (lambda - asfloat(P[2].x)) / texel, v = (beta - asfloat(P[2].y)) / texel;
-    const float4 s = prefixAt(map, u + arc / texel, v) - prefixAt(map, u, v);
+    const float start = asfloat(P[4].w);
+    const float4 s = prefixAt(map, u + (start + arc) / texel, v) - prefixAt(map, u + start / texel, v);
     // the arc's samples that fell on the image (its span in texels is arc / texel); none: the pixel keeps its value
     output[id] = s.w > 0.5f ? float4(s.rgb / s.w, own.a) : own;
 }

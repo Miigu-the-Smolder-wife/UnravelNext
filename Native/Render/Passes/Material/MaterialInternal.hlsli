@@ -5,7 +5,8 @@
 //                    bits 16..23  metallic unorm8 (material x roughMetal map)
 //                    bits 24..31  layered materials (MATERIAL_LAYERED): the layer's footprint-filtered roughness;
 //                                 every other material: 255 x (1 - the baked occlusion map's value) (0: unoccluded)
-//   emissive       RGBA16F per pixel, written only for materials with an emissive texture (nits, before exposure)
+//   emissive       RGBA16F per pixel, in frames with an emissive texture or an emissive decal: every surface pixel's
+//                  emission (nits, before exposure)
 //   tile lists     raw buffer: for shade class c, tiles[c * tileCount + i] = tile x | tile y << 16, i < count(c)
 //   tile args      raw buffer: for shade class c, D3D12_DISPATCH_ARGUMENTS at byte 12 c = (count(c), 1, 1)
 //   tile flags     raw buffer, one uint per tile: 0 after the resolve; the shading kernels set bit 0 when the tile has

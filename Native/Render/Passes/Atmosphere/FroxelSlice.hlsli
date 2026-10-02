@@ -144,7 +144,7 @@ FroxelAirResult froxelAirSlice(FroxelGrid g, uint2 tile, uint s, bool nearShadow
     const float z0 = zs0, z1 = zs1;
     const float t0 = max(z0 * toRay, tStart), len = z1 * toRay - t0;
     const float3 o = g_cameraPosition + dir * t0;
-    const float nearScale = airNearScale(t0, len);  // (AtmosphereCommon.hlsli: no atmosphere before AIR_VIEW_START_M)
+    const float nearScale = airNearScale(a.viewStartM, t0, len);  // (AtmosphereCommon.hlsli: no atmosphere before the view's start)
     // Substeps: the air's density is exponential in altitude; midpoint steps of at most stepAltitude.
     const float h0 = airAltitude(a, o), h1 = airAltitude(a, o + dir * len), hm = airAltitude(a, o + dir * (0.5 * len));
     const float dh = max(max(abs(h1 - h0), abs(hm - h0)), abs(hm - h1));

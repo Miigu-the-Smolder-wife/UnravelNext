@@ -51,6 +51,16 @@ float3 shadowReceiver(Texture2D<float> depth, uint gbufferSrv, uint2 px, float d
     return p0;
 }
 
+// scene::InstanceNoSelfShadow (ShadowSelfSlack.hlsl): how far toward the sun a pixel's sun lookup starts - past its own
+// instance's bounds, so the instance's own casters lie behind the lookup; 0 for every other pixel, and without the
+// texture (0xFFFFFFFF: no such instance in the scene).
+float shadowSelfSlack(uint slackSrv, uint2 px)
+{
+    if (slackSrv == 0xFFFFFFFFu) return 0;
+    Texture2D<float> slack = ResourceDescriptorHeap[slackSrv];
+    return slack.Load(int3(px, 0));
+}
+
 // Screen-space contact shadow of the sun (shadow.vsm.screen_ray_length / screen_ray_steps; the reference's
 // r.Shadow.Virtual.ScreenRayLength with its ShadowRayCast): a ray of length x the pixel's view depth toward the sun,
 // walked across the depth buffer in 'steps' samples. The shadow map cannot say what happens within its receiver

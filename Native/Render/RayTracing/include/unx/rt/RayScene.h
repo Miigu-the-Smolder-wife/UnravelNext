@@ -2,12 +2,15 @@
 // Ray-traced scene of the R track (ARCHITECTURE 2.7, 2.8, 2.12). Ported from the previous engine's ray scene partition
 // and deformation logic (TitanNative RayScene.cpp / RayPartition.inl), not its structure:
 //  - one BLAS per mesh for rigid instances (original triangles, one geometry per submesh, OPAQUE unless the submesh
-//    material is alpha-tested, PREFER_FAST_TRACE, compacted), shared by every instance of the mesh;
+//    material is alpha-tested or see-through - Glass / Water, raytracing.see_through_translucent -, PREFER_FAST_TRACE,
+//    compacted), shared by every instance of the mesh;
 //  - one BLAS per deformed instance (skinned characters: world-space vertices written by RayTracing/Deform through
 //    deformVertex(), ALLOW_UPDATE, refit each frame);
 //  - a static TLAS (rigid, non-dynamic instances; rebuilt only when that set changes) and a dynamic TLAS (Dynamic and
 //    deformed instances; rebuilt every frame, <= raytracing.dynamic_tlas_instances_max).
 // Rays query the dynamic TLAS, then the static one with TMax clipped (RayShaders.hlsli).
+// With raytracing.far_field the static TLAS holds only the instances near the camera, and the others stand in the
+// dynamic TLAS as one instance of procedural boxes (the far field: below, and RayScene.hlsli).
 #include "unx/render/Frame.h"
 #include "unx/render/GpuScene.h"
 #include "unx/rt/ProxyPoseBound.h"
@@ -45,17 +48,36 @@ struct DeformJob  // 16 B (Deform.hlsl)
 constexpr uint32_t kRtInstanceDeformed = 1u;
 constexpr uint32_t kRtGeometryProxyIndices = 1u;
 constexpr uint32_t kRtMaskGi = 1u, kRtMaskReflection = 2u, kRtMaskEmitter = 4u, kRtMaskAll = 0xFFu;
+// The far field's proxies (raytracing.far_field; RayScene.hlsli RT_MASK_FAR): the bit of the one instance that holds
+// them. No scene instance carries it (kRtMaskScene), so a ray that adds it to its mask meets nothing more while the far
+// field is off.
+constexpr uint32_t kRtMaskFar = 64u;
+constexpr uint32_t kRtMaskScene = kRtMaskAll & ~kRtMaskFar;
 // Instances that cast shadows (scene::InstanceCastShadow) carry this bit; shadow rays of lights (shading.mega_lights) use it
 // alone, so a mesh that casts no shadow in S's shadow maps blocks no light here either. No other ray's mask has it.
 constexpr uint32_t kRtMaskShadow = 16u;
-// The mask of a scene instance from its gpu::Instance flags (hidden: none).
-constexpr uint32_t rtInstanceMask(uint32_t flags) { return (flags & 0x80000000u) ? 0u : ((flags & 1u) ? kRtMaskAll : (kRtMaskAll & ~kRtMaskShadow)); }
+// The shadow casters again, and with them the casters made of Glass / Water alone (which kRtMaskShadow leaves out): the
+// bit a shadow ray that gathers the panes' transmittance adds to its mask (RayShaders.hlsli rtShadowTransmittance).
+constexpr uint32_t kRtMaskShadowTint = 32u;
+// The mask of a scene instance from its gpu::Instance flags (hidden: none; scene::InstanceShadowOnly, bit 9: the shadow
+// rays alone when it casts, no ray otherwise).
+constexpr uint32_t rtInstanceMask(uint32_t flags)
+{
+    if (flags & 0x80000000u) return 0u;
+    if (flags & 0x200u) return (flags & 1u) ? (kRtMaskShadow | kRtMaskShadowTint) : 0u;
+    return (flags & 1u) ? kRtMaskScene : (kRtMaskScene & ~(kRtMaskShadow | kRtMaskShadowTint));
+}
 // An instance whose every submesh is Glass or Water (raytracing.see_through_translucent): GI rays and shadow rays pass it
-// (the reference leaves translucent meshes out of its Lumen scene; the view's shadow maps give such casters a
-// transmittance, not a depth). Reflection and refraction rays still meet it.
-constexpr uint32_t rtInstanceMask(uint32_t flags, bool seeThrough) { return rtInstanceMask(flags) & (seeThrough ? ~(kRtMaskGi | kRtMaskShadow) : ~0u); }
+// (the reference leaves translucent meshes out of its Lumen scene). It carries the reflection bit alone - reflection and
+// refraction rays meet it - and, when it casts shadows, the tint bit. Not "every bit but GI and shadow": GI rays also ask
+// for the emitters' bit (kRtMaskGi | kRtMaskEmitter), and an instance that kept that bit was still hit by them.
+constexpr uint32_t rtInstanceMask(uint32_t flags, bool seeThrough)
+{
+    return rtInstanceMask(flags) & (seeThrough ? (kRtMaskReflection | kRtMaskShadowTint) : ~0u);
+}
 constexpr uint32_t kRtMaskFluid = 8u;  // W's triangle streams (refraction rays only: no scene records to shade them)
 constexpr uint32_t kRtInstanceEmitter = 0xFFFFFEu;  // RT_INSTANCE_EMITTER (RayScene.hlsli)
+constexpr uint32_t kRtInstanceFar = 0xFFFFFDu;      // RT_INSTANCE_FAR (RayScene.hlsli): the far field's proxies
 constexpr uint32_t kRtInstanceStreamBase = 0xFFFF00u;  // + stream slot (< 64): RT_INSTANCE_STREAM (RayScene.hlsli)
 
 struct DynamicTlasCensus  // the dynamic TLAS's instance descriptors (sampled every 64 frames)
@@ -82,6 +104,13 @@ struct RaySceneStats
     uint64_t exactVertices = 0;            // vertices deformed per occupied slot's owner (last frame)
     uint32_t proxySwitches = 0;            // last frame: deformed instances whose proxy cut changed (BLAS rebuilt)
     float posedErrorOverBindMax = 0;       // last frame: largest finest-cut error bound in its pose over V's bind-pose error
+    // The far field (raytracing.far_field): proxies built, groups of static instances behind them, and at the last
+    // choice of the near set: instances in the static TLAS, instances that did not fit (raytracing.
+    // far_field_near_instances_max), the CPU time of the choice; choices since load; the proxies' BLAS and the build.
+    uint32_t farProxies = 0, farGroups = 0, farProxiesDropped = 0;
+    uint32_t nearInstances = 0, nearOverflow = 0;
+    uint64_t nearRebuilds = 0, farBlasBytes = 0;
+    double nearSelectMs = 0, farBuildMs = 0;
     DynamicTlasCensus dynamicCensus;
     // Since load (measurement summaries): frames recorded, and over them exact slots (re)built, exact slots occupied, exact
     // vertices deformed and proxy cut switches.
@@ -254,6 +283,56 @@ private:
     void publishLightSlot(FramePassContext& fc);
     bool m_emittersEnabled = false;  // raytracing.emitters
     void buildStaticTlas();
+    // The far field (raytracing.far_field; RayScene.hlsli): the reference's ray tracing instance culling
+    // (r.RayTracing.Culling 3: by distance or solid angle, radius 300 m, angle 1 degree) and its far-field scene of
+    // merged proxies, for this ray scene.
+    //   groups   every static instance smaller than far_field_proxy_max_radius_m belongs to a group: a size class
+    //            (its bounding radius by powers of two from 0.25 m) in a cell of the world (the class's cell: at
+    //            least far_field_proxy_size_m, at least 4 x the class's radius). A group is near while its cell's
+    //            centre is within the class's radius of the anchor: min(cull radius, class radius / tan(cull
+    //            angle)) + the cell's half diagonal + the rebuild distance - so whatever lies within the reference's
+    //            rule of the camera is near wherever in the cell it is and however far the camera is from the anchor.
+    //   near     the static TLAS holds the larger instances and the members of the near groups, chosen again when the
+    //            camera is more than far_field_rebuild_distance_m from the anchor (the anchor then moves to the camera:
+    //            going back and forth within that distance rebuilds nothing), when a static instance changes and
+    //            on an origin shift; at most far_field_near_instances_max (the structure's size; the smallest classes
+    //            are left out first and counted).
+    //   far      per group one box: the members' bounds, their opacity - 1 - exp(-(the members' mean projected area)
+    //            / (the box's)) - and the material that covers most of them; all boxes are one BLAS of procedural
+    //            primitives, one dynamic TLAS instance (id kRtInstanceFar, mask kRtMaskFar, the emitters' hit group:
+    //            RayShaders.hlsli rtFarIntersect). A box whose group is near does not exist for a ray: the test is
+    //            the same, on the same anchor (the frame's header).
+    // The groups and boxes are in source coordinates (the uploaded scene's; an origin shift translates the instance).
+    struct FarSettings
+    {
+        bool on = false;
+        float cullRadius = 300.0f, cullAngleDeg = 1.0f, rebuildDistance = 16.0f;
+        float proxySize = 16.0f, proxyMaxRadius = 32.0f, proxyMinOpacity = 0.02f;
+        uint32_t nearMax = 262144, proxiesMax = 1u << 20;
+    };
+    struct FarGroup
+    {
+        float3 centre;          // the cell's centre, source coordinates
+        float radius = 0;       // near while the centre is within this of the anchor
+        uint32_t first = 0, count = 0;  // its members in m_farMembers
+    };
+    FarSettings m_far;
+    std::vector<FarGroup> m_farGroups;         // largest class first
+    std::vector<uint32_t> m_farMembers;        // static descriptor indices, by group
+    std::vector<uint32_t> m_farAlwaysNear;     // static descriptor indices that have no group (large, hidden at load)
+    Buffer m_farRecords, m_farBlas;            // the proxies' records (also the BLAS's AABBs) and their BLAS
+    ComPtr<ID3D12Resource> m_farRing;          // kDescSlots x 256 B: the frame's header { anchor, records SRV }
+    uint8_t* m_farRingMapped = nullptr;
+    uint32_t m_farRingSrv[4] = { gpu::kNone, gpu::kNone, gpu::kNone, gpu::kNone };  // kDescSlots
+    uint32_t m_farProxies = 0;
+    float3 m_farAnchor{};                      // source coordinates
+    bool m_farAnchorValid = false;
+    uint32_t m_nearCount = 0;                  // descriptors in the static TLAS
+    void buildFarField(RayScene* previous, bool sameStatic);
+    // Writes the near set's descriptors (the larger instances, then the near groups' members) and returns their count.
+    uint32_t selectNear(D3D12_RAYTRACING_INSTANCE_DESC* out);
+    // The static TLAS's descriptor capacity: every static instance, or the near set's bound.
+    uint32_t staticCapacity() const;
     void recordDeform(ID3D12GraphicsCommandList7* cmd) const;
     // Refit (refit = true) or build every deformed BLAS; 'rebuild' (per deformed instance, optional) builds those whose proxy
     // cut changed this frame.
@@ -262,12 +341,20 @@ private:
     void selectExactSet(FramePassContext& fc);
     uint32_t maxMeshVertices() const;
     void recordDynamicTlas(ID3D12GraphicsCommandList7* cmd, D3D12_GPU_VIRTUAL_ADDRESS descs);
-    void recordStaticTlas(ID3D12GraphicsCommandList7* cmd, D3D12_GPU_VIRTUAL_ADDRESS descs);
+    void recordStaticTlas(ID3D12GraphicsCommandList7* cmd, D3D12_GPU_VIRTUAL_ADDRESS descs, uint32_t count);
     // INTERFACES 6.3 (v1.8): the instance's current transform and visibility (hidden = mask 0: no ray can hit it).
     void refreshDesc(D3D12_RAYTRACING_INSTANCE_DESC& d, const gpu::Instance& in, bool worldSpace, uint32_t sceneInstance) const;
     // Every submesh of the scene instance is Glass or Water (m_seeThrough; false for instances the source scene does
     // not hold and with raytracing.see_through_translucent off).
     bool seeThrough(uint32_t sceneInstance) const { return sceneInstance < m_seeThrough.size() && m_seeThrough[sceneInstance] != 0; }
+    // A Glass or Water material of the source scene (false with the switch off): its geometry is non-opaque in every
+    // BLAS, so that the any-hit shader lets GI and shadow rays pass a pane that shares a mesh with opaque submeshes
+    // (RayScene.hlsli: see-through geometry).
+    bool seeThroughMaterial(uint32_t material) const;
+    // The BLAS geometry flags of a submesh with this material: OPAQUE; none for an alpha-tested one; NO_DUPLICATE_ANYHIT
+    // for a see-through one (the any-hit shader adds each pane's optical depth to a shadow ray's payload once).
+    D3D12_RAYTRACING_GEOMETRY_FLAGS geometryFlags(uint32_t material) const;
+    bool m_seeThroughOn = true;  // raytracing.see_through_translucent
     static uint64_t staticKey(const gpu::Instance& in) { return ((uint64_t)(in.flags & gpu::kInstanceHidden) << 32) | in.transformRevision; }
 
     struct Frame  // graph references of the current frame
@@ -292,7 +379,7 @@ private:
         uint64_t offset = 0;  // in the compacted pool of this object's build
         D3D12_GPU_VIRTUAL_ADDRESS address = 0;  // the BLAS (this build's pool, or an inherited one)
         uint32_t geometryBase = gpu::kNone;
-        uint32_t alphaMask = 0;  // per submesh (<= 32): alpha-tested when built (an alpha change rebuilds)
+        uint32_t alphaMask = 0;  // per submesh (<= 32): non-opaque when built - alpha-tested or see-through (a change rebuilds)
         bool anyAlpha = false;
         bool built = false;      // has a BLAS (built here or inherited)
     };

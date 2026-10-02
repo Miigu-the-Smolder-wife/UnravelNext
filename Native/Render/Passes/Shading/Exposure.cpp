@@ -84,11 +84,12 @@ struct Params
     float linearDistance = 0;  // shading.exposure_linear_distance_ev (0: exponential all the way)
 };
 
-Params params(const QualityConfig& q)
+// (the metering range: the frame's - FrameContext::post, a game's run-time setting - where it gives one)
+Params params(const QualityConfig& q, const FrameContext& frame)
 {
     Params p;
-    p.minEv = (float)q.number("shading.exposure_min_ev");
-    p.maxEv = (float)q.number("shading.exposure_max_ev");
+    p.minEv = std::isfinite(frame.post.exposureMinEv) ? frame.post.exposureMinEv : (float)q.number("shading.exposure_min_ev");
+    p.maxEv = std::isfinite(frame.post.exposureMaxEv) ? frame.post.exposureMaxEv : (float)q.number("shading.exposure_max_ev");
     p.targetGrey = (float)q.number("shading.exposure_target_grey");
     p.tauUp = (float)q.number("shading.exposure_adapt_brighter_seconds");
     p.tauDown = (float)q.number("shading.exposure_adapt_darker_seconds");
@@ -134,7 +135,7 @@ float autoExposureEv100(TrackState& state, Device& device, const QualityConfig& 
 {
     ExposureState& s = state.get<ExposureState>("M.exposure");
     s.ensure(device);
-    const Params p = params(quality);
+    const Params p = params(quality, frame);
     // The newest histogram the host has waited for: the frame framesInFlight before this one (its slot was reused).
     bool metered = false;
     float target = s.ev;
@@ -199,7 +200,7 @@ BufferRef exposureMeter(FramePassContext& fc, const ExposureHistogram& h)
 {
     if (!exposureSnapping(fc) || !h.buffer.valid()) return {};
     ExposureState& s = fc.state<ExposureState>("M.exposure");
-    const Params p = params(fc.quality);
+    const Params p = params(fc.quality, fc.frame);
     const BufferRef correction = fc.graph.createBuffer({ "M exposure correction", 16, 0 });
     const BufferRef histogram = h.buffer;
     ID3D12PipelineState* meter = fc.shaders.compute("Passes/Shading/ExposureMeter");
@@ -231,7 +232,7 @@ ExposureHistogram exposureHistogram(FramePassContext& fc)
         s.importFrame = fc.frame.frameIndex;
     }
     h.buffer = s.imported;
-    const Params p = params(fc.quality);
+    const Params p = params(fc.quality, fc.frame);
     h.centreSigma = p.centreSigma;
     if (!s.cleared)
     {

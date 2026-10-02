@@ -7,7 +7,7 @@
 //           disc (or a polygon of P[1].z blades) of the texels whose r + g + b reaches the threshold - 91 taps on 5
 //           rings, each ring's count by its circumference. The reference draws a quad with a bokeh texture per bright
 //           pixel; the mean over the shape is the same sum gathered. The source fades towards the picture's corners
-//           (the reference's disc mask at half scale).
+//           (the reference's disc mask at half scale), and it is the faded colour the threshold is taken of, as there.
 //   STEP=1  the ghosts: per quarter-resolution pixel p, the sum over the 8 flares of tint_i x the spread image at
 //           centre + (p - centre) / scale_i (a negative scale mirrors), faded by two discs over the screen (a flare
 //           does not reach the border), plus the halo (ours, off by default: the mirrored image pulled towards the
@@ -54,8 +54,10 @@ void main(uint2 id : SV_DispatchThreadID)
             const float2 at = uv + float2(cos(angle), sin(angle)) * reach * texel;
             if (any(at < 0) || any(at > 1)) continue;
             const float3 c = source.SampleLevel(g_linearClamp, at, 0).rgb;
-            if (!all(isfinite(c)) || c.r + c.g + c.b < threshold) continue;
-            sum += max(c, 0.0) * discMask(at - 0.5);  // (the reference's mask of the source at half scale: ndc / 2)
+            if (!all(isfinite(c))) continue;
+            const float3 faded = max(c, 0.0) * discMask(at - 0.5);  // (the reference's mask of the source at half scale: ndc / 2)
+            if (faded.r + faded.g + faded.b < threshold) continue;
+            sum += faded;
         }
     }
     spread[id] = float4(sum / (float)(1 + 3 * RINGS * (RINGS + 1)), 0);

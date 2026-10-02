@@ -46,9 +46,12 @@ struct CelestialState
 double julianDay(int year, int month, int day, double hoursUt);
 CelestialState celestial(const CelestialTime& t);
 
-// The frame's directional light (the scene's Sun record): the sun while its altitude is >= civil twilight's end
-// (-6 deg), else the moon (FEATURES_GAME 11: below that, moonlight's shadows are above the sky's light; before, they are
-// buried under it). Moon illuminance at the observer: a Lambert sphere of albedo 'moonAlbedo' lit by the sun,
+// The frame's directional light (the scene's Sun record): the sun while it is up, and after sunset while the twilight
+// it still gives level ground (twilightIlluminance: the standard clear-sky values, scaled by the scene's sun over
+// 128 klx) is at least what the moon gives it directly; then the moon - with a full moon high in the sky near 9 degrees
+// of depression, later for a thin or low moon, never with the moon down (the sun's twilight is in the atmosphere's
+// tables to 23.6 degrees below the horizon; the slot flipped at -6 degrees before, where the twilight sky still gave
+// ten times the full moon's light and went dark with the flip). Moon illuminance at the observer: a Lambert sphere of albedo 'moonAlbedo' lit by the sun,
 // E = albedo x E_sun x (R_moon / d)^2 x (2 / 3) x phi(alpha), phi(alpha) = (sin alpha + (pi - alpha) cos alpha) / pi,
 // no opposition surge (the full moon ~0.2 lux here against 0.25-0.3 lux measured: condition recorded).
 struct DirectionalLight
@@ -57,6 +60,8 @@ struct DirectionalLight
     bool moon = false;    // the slot holds the moon (the sky draws the moon's disk with its phase, not a uniform disk)
 };
 DirectionalLight directionalLight(const CelestialState& s, const scene::Sun& sunAtTop, float moonAlbedo = 0.12f);
+// The twilight sky's illuminance on level ground under a clear sky, the sun depressionDeg below the horizon (lux).
+double twilightIlluminance(double depressionDeg);
 
 // The sky's celestial objects for a frame (FrameContext::celestial; Celestial.hlsli atmosphereCelestial): the moon's disk
 // (a Lambert sphere lit by the true sun: its phase and terminator exact for that model), the stars (point sources spread

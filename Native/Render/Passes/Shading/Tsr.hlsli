@@ -15,12 +15,16 @@
 //   m.tsr.decimate      parallax disocclusion (something closer landed where this pixel was: it was hidden then), the
 //                       previous guide - a low-resolution copy of the history in a perceptual space - reprojected, the
 //                       reprojection edge over the dilated vectors; the kept frame's guide reprojected by the cameras;
+//                       and hole filling (output.upscale_tsr_hole_filling): a disoccluded pixel's vector for the
+//                       history update is its occluder's - the history beside where the occluder was;
 //   m.tsr.thin          thin geometry detection (output.upscale_tsr_thin_geometry): the coverage history of the
-//                       coverage layer's thin fragments and pixel-wide lines of depth give the relaxation weight by
-//                       which the rejection's clamp box opens to the history's own neighbourhood;
+//                       coverage layer's thin fragments, pixel-wide lines of depth and kept pixel-wide lines of luma
+//                       give the relaxation weight by which the rejection's clamp box opens to the history's own
+//                       neighbourhood;
 //   m.tsr.flicker       the flickering heuristic: each pixel's luma followed over time; a gradient that flips its sign
 //                       every frame on a still surface is the jitter beating against a pattern finer than the pixels,
-//                       and its amplitude is the band inside which the rejection lets the history be;
+//                       and its amplitude is the band inside which the rejection lets the history be; in thin geometry
+//                       the measure follows the relaxed clamp and counts gradients under the history's encoding error;
 //   m.tsr.resurrect     history resurrection (output.upscale_tsr_resurrection): the kept frame's guide measured as the
 //                       previous frame's is; a pixel it matches better takes the kept frame's history;
 //   m.tsr.reject        the shading rejection: input and reprojected guide compared at low frequency after each was
@@ -40,10 +44,11 @@
 // The history update reads the field per output pixel: on a boundary the vector of the side the output pixel lies on,
 // and that vector carried to the output pixel's own position by the jacobian (a turn or a zoom reprojects every output
 // pixel to its own place instead of all of an input pixel's to one offset).
-// Not here: lens distortion, the reference's hole filling of a disoccluded pixel's vector by its occluder's, its
-// high-contrast line detection (the coverage layer has the thin fragments' share itself), thin geometry inside the
-// flickering heuristic. The flickering heuristic follows the final scene colour (the reference: the colour before
-// translucency, and less by what translucency changed).
+// With output.lens_panini_d the history is the picture under the lens projection (Lens.hlsli): the update takes each
+// history pixel's samples and vector at its place in the rendered picture and reads the history through the previous
+// frame's lens - the reference's lens distortion in TSR, evaluated instead of read from displacement tables.
+// Not here: the reference's translucency bit of the thin geometry's coverage. The flickering heuristic and the luma lines follow the final scene
+// colour (the reference: the colour before translucency, and less by what translucency changed).
 #ifndef UNX_TSR_HLSLI
 #define UNX_TSR_HLSLI
 #include "Bindless.hlsli"

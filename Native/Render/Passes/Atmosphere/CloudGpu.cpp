@@ -91,7 +91,7 @@ uint32_t srv(Device& device, ID3D12Resource* r, D3D12_SRV_DIMENSION dimension, D
     sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sd.Format = format;
     if (dimension == D3D12_SRV_DIMENSION_TEXTURE3D) sd.Texture3D.MipLevels = (UINT)-1;  // (every mip the texture has)
-    else sd.Texture2D.MipLevels = 1;
+    else sd.Texture2D.MipLevels = (UINT)-1;
     device.d3d()->CreateShaderResourceView(r, &sd, device.descriptors().resourceCpu(index));
     return index;
 }
@@ -142,6 +142,23 @@ std::vector<std::vector<uint8_t>> noiseMips(const std::vector<uint8_t>& texels, 
     }
     return levels;
 }
+// The mips of an R8 map (n^2, a power of two): each level's texel the mean of the four under it; down to 1 x 1.
+std::vector<std::vector<uint8_t>> mapMips(const std::vector<uint8_t>& texels, uint32_t n)
+{
+    std::vector<std::vector<uint8_t>> levels{ texels };
+    for (uint32_t size = n; size > 1; size /= 2)
+    {
+        const std::vector<uint8_t>& from = levels.back();
+        const uint32_t half = size / 2;
+        std::vector<uint8_t> to((size_t)half * half);
+        for (uint32_t y = 0; y < half; ++y)
+            for (uint32_t x = 0; x < half; ++x)
+                to[(size_t)y * half + x] = (uint8_t)((from[(size_t)(2 * y) * size + 2 * x] + from[(size_t)(2 * y) * size + 2 * x + 1] + from[(size_t)(2 * y + 1) * size + 2 * x] +
+                                                      from[(size_t)(2 * y + 1) * size + 2 * x + 1] + 2) / 4);
+        levels.push_back(std::move(to));
+    }
+    return levels;
+}
 std::vector<const uint8_t*> pointers(const std::vector<std::vector<uint8_t>>& levels)
 {
     std::vector<const uint8_t*> p;
@@ -166,16 +183,22 @@ CloudTextures uploadTextures(Device& device, const CloudNoise& noise)
     t.shapeSrv = srv(device, t.shape.Get(), D3D12_SRV_DIMENSION_TEXTURE3D, DXGI_FORMAT_R8G8_UNORM);
     t.detailSrv = srv(device, t.detail.Get(), D3D12_SRV_DIMENSION_TEXTURE3D, DXGI_FORMAT_R8G8_UNORM);
     t.weatherSrv = srv(device, t.weather.Get(), D3D12_SRV_DIMENSION_TEXTURE2D, DXGI_FORMAT_R8G8_UNORM);
+    // the cirrus sheet's map: R8 with every mip (the sheet is seen at grazing angles toward the horizon)
+    const std::vector<std::vector<uint8_t>> cirrus = mapMips(noise.cirrus, kCirrusSize);
+    t.cirrus = texture(device, D3D12_RESOURCE_DIMENSION_TEXTURE2D, kCirrusSize, kCirrusSize, 1, DXGI_FORMAT_R8_UNORM, L"S cloud cirrus map", (uint16_t)cirrus.size());
+    fill(device, t.cirrus.Get(), pointers(cirrus), kCirrusSize, kCirrusSize, 1, 1);
+    t.cirrusSrv = srv(device, t.cirrus.Get(), D3D12_SRV_DIMENSION_TEXTURE2D, DXGI_FORMAT_R8_UNORM);
     return t;
 }
 
 void releaseTextures(Device& device, CloudTextures& t)
 {
-    for (uint32_t i : { t.shapeSrv, t.detailSrv, t.weatherSrv })
+    for (uint32_t i : { t.shapeSrv, t.detailSrv, t.weatherSrv, t.cirrusSrv })
         if (i) device.descriptors().freeResource(i);
     device.deferRelease(t.shape);
     device.deferRelease(t.detail);
     device.deferRelease(t.weather);
+    device.deferRelease(t.cirrus);
     t = {};
 }
 
@@ -195,6 +218,10 @@ CloudRecord makeRecord(const CloudLayer& layer, const CloudOffsets& o, const Clo
     r.weatherOffset[0] = o.weather[0], r.weatherOffset[1] = o.weather[1];
     r.shape = t.shapeSrv, r.detail = t.detailSrv, r.weather = t.weatherSrv;
     r.shadowHalfExtent = shadowHalfExtent, r.shadowTexels = (float)shadowTexels;
+    r.cirrusAltitude = layer.cirrusAltitude, r.cirrusOpticalDepth = layer.cirrusOpticalDepth, r.cirrusCoverage = layer.cirrusCoverage;
+    r.invCirrus = 1 / layer.cirrusPeriod;
+    r.cirrusOffset[0] = o.cirrus[0], r.cirrusOffset[1] = o.cirrus[1];
+    r.cirrus = t.cirrusSrv;
     return r;
 }
 } // namespace unx::render::clouds

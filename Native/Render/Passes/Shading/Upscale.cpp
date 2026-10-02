@@ -62,7 +62,9 @@ struct UpscaleState
         float4x4 viewProj{};
         float exposure = 1;
         bool valid = false;
+        float lensTanX = 0, lensTanY = 0, lensScale = 0;  // the frame's lens projection (upscaleLens; scale 0: none)
     } kept[kRingSlots];
+    float lensD = 0, lensS = 0;  // the lens the history is under (a change restarts the history)
     TextureRef previous;           // history[last] in the graph of frame 'previousFrame' (upscalePreviousColor)
     uint64_t previousFrame = ~0ull;
     // output.screen_trace_source = 0: the lit opaque scene colour (the view's resolution; before translucency, the air,
@@ -221,6 +223,33 @@ bool upscaleActive(FramePassContext& fc, const ViewResources& view)
     return view.view.kind == gpu::ViewKind::Main && fc.frame.upscale.outputWidth != 0 && !fc.frame.outputLinearHdr;
 }
 
+LensProjection upscaleLens(FramePassContext& fc, const ViewResources& view)
+{
+    LensProjection lens;
+    if (!upscaleActive(fc, view) || !tsrOn(fc)) return lens;
+    const double d = fc.quality.has("output.lens_panini_d") ? fc.quality.number("output.lens_panini_d") : 0.0;
+    const double s = fc.quality.has("output.lens_panini_s") ? fc.quality.number("output.lens_panini_s") : 0.0;
+    if (!(d >= 0 && d <= 4) || !(s >= -1 && s <= 1)) fail("output.lens_panini_d %g in [0, 4], output.lens_panini_s %g in [-1, 1]", d, s);
+    if (!(d > 0.01)) return lens;  // (the reference: on above 0.01)
+    const float4x4& proj = fc.frame.upscale.proj;
+    const float tanX = 1.0f / proj.m[0][0], tanY = 1.0f / proj.m[1][1];
+    if (!std::isfinite(tanX) || !std::isfinite(tanY) || !(tanX > 0) || !(tanY > 0)) return lens;
+    // the rendered view's width fills the picture: the scale that brings the side's place on the lens plane to the side
+    const float D = (float)d;
+    const float invLength = 1.0f / std::sqrt(1.0f + tanX * tanX);
+    const float sinPhi = tanX * invLength, cosPhi = std::sqrt(std::max(1.0f - sinPhi * sinPhi, 0.0f));
+    const float scale = tanX / ((D + 1.0f) / (D + cosPhi) * sinPhi);
+    // (the centre's magnification; the reference gives up outside (1, 2): a field of view the projection cannot hold)
+    if (!std::isfinite(scale) || !(scale > 1.0f) || !(scale < 2.0f)) return lens;
+    lens.active = true;
+    lens.tanX = tanX;
+    lens.tanY = tanY;
+    lens.d = D;
+    lens.s = (float)s;
+    lens.scale = scale;
+    return lens;
+}
+
 ViewResources upscaleOutputView(FramePassContext& fc, const ViewResources& view)
 {
     ViewResources out = view;
@@ -258,6 +287,8 @@ TextureRef upscalePreviousColor(FramePassContext& fc, const ViewResources& view)
         }
         return s.previousScene;
     }
+    // (the history under a lens projection is not the rendered view's picture: no previous colour for the traces)
+    if (upscaleLens(fc, view).active) return TextureRef{};
     // (the history's own size: above the output's with output.upscale_tsr_history_percent - readers take the size from
     // RenderGraph::desc and sample by UV)
     uint32_t hw, hh;
@@ -329,7 +360,13 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
     UpscaleState& s = fc.state<UpscaleState>("M.upscale");
     s.ensure(fc.device, HW, HH, resurrection);
     if (tsr) s.ensureGuide(fc.device, w, h, resurrection);
-    const bool reset = u.reset || s.fresh;
+    // output.lens_panini_d: the history is the lens picture (Lens.hlsli); another lens, another history
+    const LensProjection lens = upscaleLens(fc, view);
+    const float lensD = lens.active ? lens.d : 0.0f, lensS = lens.active ? lens.s : 0.0f;
+    const bool lensChanged = s.lensD != lensD || s.lensS != lensS;
+    s.lensD = lensD;
+    s.lensS = lensS;
+    const bool reset = u.reset || s.fresh || lensChanged;
     // (an earlier pass of this frame may hold the previous history already: upscalePreviousColor - one import per frame)
     const bool imported = !reset && s.previousFrame == fc.frame.frameIndex && s.previous.valid();
     s.fresh = false;
@@ -379,9 +416,14 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
     s.rolling = rolling;
     s.accumulated = std::min(s.accumulated + 1u, cycle);
     s.last = slot;
+    // (the lens the previous and the kept frame's histories were written under: the field of view may have changed)
+    const UpscaleState::Kept lensPrevious = s.kept[prevSlot], lensKept = s.kept[keptSlot];
     s.kept[slot].viewProj = u.viewProj;
     s.kept[slot].exposure = exposure;
     s.kept[slot].valid = true;
+    s.kept[slot].lensTanX = lens.tanX;
+    s.kept[slot].lensTanY = lens.tanY;
+    s.kept[slot].lensScale = lens.active ? lens.scale : 0.0f;
     const TextureRef history = imported ? s.previous
                                         : g.importTexture(s.history[prevSlot].Get(), { "m.upscale.history (previous)", HW, HH, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
                                                           D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
@@ -411,6 +453,9 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
     const TextureRef coverageRange = view.coverageDepthRange, particleLayer = view.particleLayer;
     const BufferRef coverageTiles = view.coverageTiles, coveragePixels = view.coverageTilePixels, coverageRecords = view.coverageRecords;
     const BufferRef particleEdges = view.particleEdges;
+    // (the particles' own vector where they hold the pixel: FX's layer motion and depth range)
+    const bool particleVectors = particles && view.particleMotion.valid() && view.particleDepthRange.valid();
+    const TextureRef particleMotion = view.particleMotion, particleRange = view.particleDepthRange;
     const uint32_t coverageTilesX = view.coverageTilesX;
     ID3D12PipelineState* motionPso = fc.shaders.compute("Passes/Shading/UpscaleMotion");
     g.addPass("m.upscale.motion", QueueType::Graphics,
@@ -441,6 +486,11 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       b.use(particleLayer, Use::SrvCompute);
                       b.use(particleEdges, Use::SrvCompute);
                   }
+                  if (particleVectors)
+                  {
+                      b.use(particleMotion, Use::SrvCompute);
+                      b.use(particleRange, Use::SrvCompute);
+                  }
               },
               [=](PassContext& c) {
                   const uint32_t none = 0xFFFFFFFFu;
@@ -461,7 +511,8 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                   k[35] = coverage ? c.srv(coverageRange) : none;
                   k[36] = particles ? c.srv(particleLayer) : none;
                   k[37] = particles ? c.srv(particleEdges) : none;
-                  k[38] = k[39] = 0;
+                  k[38] = particleVectors ? c.srv(particleMotion) : none;
+                  k[39] = particleVectors ? c.srv(particleRange) : none;
                   c.cmd->SetPipelineState(motionPso);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 40);
@@ -511,6 +562,10 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
         // (the field's texture also carries the closest depth the resurrection reprojects by)
         const bool hasField = reprojectionField || canResurrect;
         const TextureRef field = hasField ? g.createTexture(TextureDesc{ "m.tsr.reprojection field", w, h, 1, 1, DXGI_FORMAT_R32G32B32A32_UINT }) : TextureRef{};
+        // output.upscale_tsr_hole_filling (the reference's reprojection hole filling, always on there): a disoccluded
+        // pixel's history is read by its occluder's vector (TsrDecimate.hlsl writes the update's copy of the vectors)
+        const bool holeFilling = !fc.quality.has("output.upscale_tsr_hole_filling") || fc.quality.boolean("output.upscale_tsr_hole_filling");
+        const TextureRef updateMotion = holeFilling ? g.createTexture(TextureDesc{ "m.tsr.hole filled motion", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT }) : dilated;
         // output.upscale_tsr_flickering (the reference's r.TSR.ShadingRejection.Flickering, default on)
         const bool flickering = !fc.quality.has("output.upscale_tsr_flickering") || fc.quality.boolean("output.upscale_tsr_flickering");
         TextureRef previousFlicker, nextFlicker, reprojectedFlicker, moireError;
@@ -540,6 +595,21 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
             relaxation = g.createTexture(TextureDesc{ "m.tsr.thin relaxation", w, h, 1, 1, DXGI_FORMAT_R8_UNORM });
         }
         ID3D12PipelineState* thinPso = thinGeometry ? fc.shaders.compute("Passes/Shading/TsrThin") : nullptr;
+        // the luma lines of the thin geometry detection (the reference's r.TSR.ThinGeometryDetection.Coverage.MinKeepLineContrast
+        // 0.30, HighContrastLineFadeRate 0.1, ...FadeRateInsideRegion 0.03, HighContrastLineWeight 0.6; contrast 0: none) and
+        // the detection inside the flickering heuristic (its r.TSR.ThinGeometryDetection.AntiFlickering)
+        auto thinNumber = [&](const char* key, double fallback) {
+            const double v = fc.quality.has(key) ? fc.quality.number(key) : fallback;
+            if (!(v >= 0 && v <= 1)) fail("%s %g: in [0, 1]", key, v);
+            return (float)v;
+        };
+        const float lineContrast = thinNumber("output.upscale_tsr_thin_geometry_line_contrast", 0.0);
+        const float lineFade = thinNumber("output.upscale_tsr_thin_geometry_line_fade_rate", 0.1);
+        const float lineFadeInside = thinNumber("output.upscale_tsr_thin_geometry_line_fade_rate_inside", 0.03);
+        const float lineWeight = thinNumber("output.upscale_tsr_thin_geometry_line_weight", 0.6);
+        const bool lumaLines = thinGeometry && lineContrast > 0;
+        const bool thinInFlicker = thinGeometry && flickering &&
+                                   (!fc.quality.has("output.upscale_tsr_thin_geometry_anti_flickering") || fc.quality.boolean("output.upscale_tsr_thin_geometry_anti_flickering"));
         const uint32_t frameIndex = (uint32_t)fc.frame.frameIndex;
         ShaderLibrary& shaders = fc.shaders;
         ID3D12PipelineState* clearPso = shaders.compute("Passes/Shading/TsrClear");
@@ -549,7 +619,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
         ID3D12PipelineState* aaPso = shaders.compute("Passes/Shading/TsrAntiAlias");
         ID3D12PipelineState* updatePso = shaders.compute("Passes/Shading/TsrUpdate");
         const uint32_t updateFlags = (fc.quality.has("output.upscale_tsr_kernel_by_samples") && fc.quality.boolean("output.upscale_tsr_kernel_by_samples") ? 2u : 0u) |
-                                     (reprojectionField ? 4u : 0u);
+                                     (reprojectionField ? 4u : 0u) | (lens.active ? 8u : 0u);
         const float historyScale = (float)HW / (float)W;
         const float exposureRatio = u.exposureRatio;
         // the guide's blend of a held history: 1 / (1 + 16 / (input / output size)^2) (the reference's TheoricBlendFactor)
@@ -600,6 +670,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                           b.use(previousThin, Use::SrvCompute);
                           b.use(reprojectedThin, Use::UavCompute);
                       }
+                      if (holeFilling) b.use(updateMotion, Use::UavCompute);
                       if (canResurrect)
                       {
                           b.use(keptGuide, Use::SrvCompute);
@@ -612,7 +683,8 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       uint32_t k[40] = { c.srv(dilated), c.srv(info), c.srv(scatter), c.srv(previousGuide), c.uav(reprojected), c.uav(decimateMask), w, h,
                                          asUint(jx), asUint(jy), asUint(exposureRatio), guideReset ? 1u : 0u,
                                          flickering ? c.srv(previousFlicker) : none, flickering ? c.uav(reprojectedFlicker) : none, frameIndex, 0,
-                                         thinGeometry ? c.srv(previousThin) : none, thinGeometry ? c.uav(reprojectedThin) : none, 0, 0,
+                                         thinGeometry ? c.srv(previousThin) : none, thinGeometry ? c.uav(reprojectedThin) : none,
+                                         holeFilling ? c.uav(updateMotion) : none, 0,
                                          canResurrect ? c.srv(keptGuide) : none, canResurrect ? c.uav(resurrectedGuide) : none, asUint(keptExposureRatio),
                                          canResurrect ? c.srv(field) : none };
                       for (int r = 0; r < 4; ++r)
@@ -641,6 +713,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
             g.addPass("m.tsr.thin", QueueType::Graphics,
                       [&](PassBuilder& b) {
                           if (layerMotion) b.use(layers, Use::SrvCompute);
+                          if (lumaLines) b.use(src, Use::SrvCompute);
                           b.use(motionDepth, Use::SrvCompute);
                           b.use(reprojectedThin, Use::SrvCompute);
                           b.use(decimateMask, Use::SrvCompute);
@@ -648,12 +721,14 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                           b.use(nextThin, Use::UavCompute);
                       },
                       [=](PassContext& c) {
-                          const uint32_t k[12] = { layerMotion ? c.srv(layers) : 0xFFFFFFFFu, c.srv(motionDepth), c.srv(reprojectedThin), c.srv(decimateMask),
+                          const uint32_t k[20] = { layerMotion ? c.srv(layers) : 0xFFFFFFFFu, c.srv(motionDepth), c.srv(reprojectedThin), c.srv(decimateMask),
                                                    c.uav(relaxation), c.uav(nextThin), w, h,
-                                                   asUint((float)thinErrorMultiplier), asUint((float)thinMaxRelaxation), frameIndex, guideReset ? 1u : 0u };
+                                                   asUint((float)thinErrorMultiplier), asUint((float)thinMaxRelaxation), frameIndex, guideReset ? 1u : 0u,
+                                                   lumaLines ? c.srv(src) : 0xFFFFFFFFu, asUint(lineContrast), asUint(lineFade), asUint(lineFadeInside),
+                                                   asUint(lineWeight), 0, 0, 0 };
                           c.cmd->SetPipelineState(thinPso);
                           c.bindFrameConstants(cb);
-                          c.computeConstants(k, 12);
+                          c.computeConstants(k, 20);
                           c.cmd->Dispatch((w + 15) / 16, (h + 15) / 16, 1);
                       });
         if (flickering)
@@ -663,12 +738,13 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                           b.use(reprojectedFlicker, Use::SrvCompute);
                           b.use(decimateMask, Use::SrvCompute);
                           b.use(info, Use::SrvCompute);
+                          if (thinInFlicker) b.use(relaxation, Use::SrvCompute);
                           b.use(moireError, Use::UavCompute);
                           b.use(nextFlicker, Use::UavCompute);
                       },
                       [=](PassContext& c) {
                           const uint32_t k[12] = { c.srv(src), c.srv(reprojectedFlicker), c.srv(decimateMask), c.srv(info), c.uav(moireError), c.uav(nextFlicker), w, h,
-                                                   guideReset ? 1u : 0u, 0, 0, 0 };
+                                                   guideReset ? 1u : 0u, thinInFlicker ? c.srv(relaxation) : 0xFFFFFFFFu, 0, 0 };
                           c.cmd->SetPipelineState(flickerPso);
                           c.bindFrameConstants(cb);
                           c.computeConstants(k, 12);
@@ -716,7 +792,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                   [&](PassBuilder& b) {
                       b.use(src, Use::SrvCompute);
                       b.use(rejection, Use::SrvCompute);
-                      b.use(dilated, Use::SrvCompute);
+                      b.use(updateMotion, Use::SrvCompute);
                       b.use(aa, Use::SrvCompute);
                       b.use(history, Use::SrvCompute);
                       b.use(output, Use::UavCompute);
@@ -725,13 +801,17 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                   },
                   [=](PassContext& c) {
                       const uint32_t none = 0xFFFFFFFFu;
-                      uint32_t k[36] = { c.srv(src), c.srv(rejection), c.srv(dilated), c.srv(history), c.uav(output), w, h, (reset ? 1u : 0u) | updateFlags,
+                      uint32_t k[48] = { c.srv(src), c.srv(rejection), c.srv(updateMotion), c.srv(history), c.uav(output), w, h, (reset ? 1u : 0u) | updateFlags,
                                          HW, HH, asUint(jx), asUint(jy), asUint(exposureRatio), c.srv(aa), hasField ? c.srv(field) : none, 0,
                                          canResurrect ? c.srv(keptHistory) : none, asUint(keptExposureRatio), asUint(historyScale), 0 };
                       for (int r = 0; r < 4; ++r)
                           for (int col = 0; col < 4; ++col) k[20 + 4 * r + col] = asUint(toKept.m[r][col]);
+                      const float lensConstants[12] = { lens.tanX, lens.tanY, lens.d, lens.s,
+                                                        lens.scale, lensPrevious.lensTanX, lensPrevious.lensTanY, lensPrevious.lensScale,
+                                                        lensKept.lensTanX, lensKept.lensTanY, lensKept.lensScale, 0 };
+                      std::memcpy(&k[36], lensConstants, sizeof lensConstants);
                       c.cmd->SetPipelineState(updatePso);
-                      c.computeConstants(k, 36);
+                      c.computeConstants(k, 48);
                       c.cmd->Dispatch((HW + 7) / 8, (HH + 7) / 8, 1);
                   });
         if (!resolvePso) return output;

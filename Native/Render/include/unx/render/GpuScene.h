@@ -293,6 +293,10 @@ public:
     const scene::Scene* source() const { return m_source; }
     const std::vector<gpu::Instance>& instances() const { return m_instances; }
     const std::vector<gpu::Light>& lights() const { return m_lights; }  // CPU mirror of the light records (revisions)
+    // The scene textures' SRVs as M's TextureSystem uploaded them (per scene::Scene::textures index; gpu::kNone: not
+    // uploaded): for a track that samples a scene texture itself (FX's sprite looks). M publishes them every frame.
+    void setTextureSrvs(std::vector<uint32_t> srvs) { m_textureSrvs = std::move(srvs); }
+    const std::vector<uint32_t>& textureSrvs() const { return m_textureSrvs; }
     // The lighting channels every instance is in (the AND of the instances' channels, 7 without instances): a light in
     // one of them lights every instance, which lets the tile kernels put it in a FAR sum (LightNearFar.hlsli). An
     // instance removed or changed since the upload still counts (the mask only narrows until the next upload).
@@ -383,6 +387,7 @@ private:
     std::vector<uint32_t> m_movedNow, m_movedBefore, m_posedNow, m_posedBefore;
     uint32_t m_windInstances = 0;  // instances with the wind flag (hasMotion)
     uint32_t m_channelsShared = 7;  // lightingChannelsShared
+    std::vector<uint32_t> m_textureSrvs;
     uint32_t m_viewModelInstances = 0;
     uint64_t m_viewModelRevision = 0;  // instances with gpu::kInstanceViewModel
     // Instances flagged gpu::kInstanceMotionBreak in this frame and in the previous flushed one (the flag lasts one frame).

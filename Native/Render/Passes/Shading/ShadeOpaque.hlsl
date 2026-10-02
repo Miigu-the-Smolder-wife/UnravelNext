@@ -473,12 +473,14 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     if (false)
 #else
     float3 radiance = m.emissive;
-    if (P[1].w != UNX_NONE && mEmissivePerPixel(mLoadTextureSet(P[4].y, materialIndex)))
+    // (the resolve's emissive texture, when the frame has one, holds every surface pixel's emission: the material's
+    // x its texture and mask, + E's emissive decals - Resolve.hlsl, Decal.hlsli)
+    if (P[1].w != UNX_NONE)
 #endif
 #if SHADE_PART == 1
     {
         Texture2D<float4> emissive = ResourceDescriptorHeap[P[1].w];
-        radiance = emissive[pixel].rgb;  // material emissive x texture, resolved at the footprint
+        radiance = emissive[pixel].rgb;  // material emissive x texture, resolved at the footprint, + emissive decals
     }
 #endif
 
@@ -500,6 +502,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     {
         Texture2D<uint> shadow = ResourceDescriptorHeap[P[2].x];
         sunVisibility = shadowSlot(shadow[pixel], 0);
+        // S's glass casters (shadow.vsm.translucent_tint): slot 0 has the luminance of what they let through, the
+        // texture's second half its colour
+        E *= shadowSunTintChroma(shadow, pixel);
     }
     // material.parallax_shadow (MaterialInputs.hlsli mParallax): the pixel's height field hides the sun - the resolve left
     // the visibility in the class word of a height-mapped material's pixels (not an anisotropic material's or an eye's:

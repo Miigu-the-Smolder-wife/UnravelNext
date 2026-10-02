@@ -126,6 +126,11 @@ struct FramePacket
     float displayPeak = 0;                         // FrameContext::displayPeak: 0 SDR, else HDR peak / paper white
     float lensAperture = 0, lensFocus = 0;         // FrameContext::lensAperture / lensFocus (the host's current lens)
     float whiteBalanceKelvin = 0, whiteBalanceTint = 0;  // FrameContext::whiteBalance* (v1.91; 0 = D65)
+    render::ColorGradingDesc grading;              // FrameContext::grading (the host's current grading)
+    render::PostSettingsDesc post;                 // FrameContext::post (the host's current post settings)
+    float exposureCompensation = 0;                // FrameContext::exposureCompensation
+    int32_t displayEncoding = -1;                  // FrameContext::displayEncoding / displayPaperWhite (HDR frames)
+    float displayPaperWhite = 0;
     // A3 mesh particles (render C): the host's asset -> mesh table when it changed (mesh = committed mesh index, a runtime
     // mesh id with bit 31, or 0xFFFFFFFF = unmapped); resolved on the render thread (fx::meshAssets)
     std::optional<std::vector<std::pair<uint64_t, uint32_t>>> meshAssets;
@@ -225,6 +230,10 @@ struct FramePacket
     render::CloudLayerDesc clouds;            // B5: the cloud layer (FrameContext::clouds)
     render::FogDesc fog;                      // the height fog (FrameContext::fog)
     std::vector<render::FogVolumeDesc> fogVolumes;  // local fog volumes (FrameContext::fogVolumes; world coordinates)
+    // the volumes' density grids (the host's copies: FogVolumeDesc::grid of the volumes above points into them)
+    std::vector<std::shared_ptr<const std::vector<uint8_t>>> fogGrids;
+    render::WeatherFrame weather;             // the weather record (FrameContext::weather)
+    render::LightningDesc lightning;          // this frame's lightning flash (FrameContext::lightning; intensity 0: none)
     // W2 closed basins (v1.78): the basins every frame takes (this frame's coordinates; the sources pointers are set when
     // the frame is recorded) and this frame's sources (each handed to one frame; a dropped frame's carry into the next).
     std::vector<render::PoolFrame> pools;
@@ -379,6 +388,13 @@ public:
     // The camera's white balance for the following frames (v1.91): the illuminant the camera is set to as a correlated
     // colour temperature (K; 0 = D65, no adaptation; else 1000..40000) and a tint (Duv, |tint| <= 0.1).
     void setWhiteBalance(float kelvin, float tint);
+    // The picture's settings for the following frames, each held until changed (UnxFrameSetColorGrading, UnxFrameSetPost,
+    // UnxFrameSetDisplayEncoding): the grading before the tone curve (enabled false: the quality file's), the post
+    // settings with the exposure compensation in stops, the HDR output's encoding (-1: the quality file's; 0 linear,
+    // 1 scRGB, 2 ST 2084) and paper white in cd/m2 (0: the quality file's).
+    void setColorGrading(const render::ColorGradingDesc& grading);
+    void setPost(const render::PostSettingsDesc& post, float exposureCompensation);
+    void setDisplayEncoding(int32_t encoding, float paperWhiteNits);
     // A3 mesh particles (render C): the scene mesh a program's mesh_asset draws (committed mesh index or runtime mesh id;
     // 0xFFFFFFFF removes the mapping: its particles are not drawn and counted unmapped)
     void mapMeshAsset(uint64_t asset, uint32_t mesh);
@@ -451,6 +467,14 @@ public:
         float yaw = 0;
     };
     void setPools(std::span<const PoolInput> pools);
+    // The basins' weather (render::PoolFrame::steam*, rainExposure), by basin id: held until changed; a basin not named
+    // has none, an id not in the current set of basins waits for it.
+    struct PoolWeather
+    {
+        uint32_t id = 0;
+        float steamDensity = 0, steamHeight = 1.5f, steamRiseSpeed = 0.3f, steamTurbulence = 0.6f, rainExposure = 0;
+    };
+    void setPoolWeather(std::span<const PoolWeather> pools);
     // Sources for the next queued frame (world coordinates; the basin must be in the current set, the centre inside it).
     void addPoolSources(std::span<const FramePacket::PoolSource> sources);
     // The basins and sources the next queued frame takes, in that frame's coordinates (tests).
@@ -462,8 +486,12 @@ public:
     void setClouds(const render::CloudLayerDesc& clouds);
     // The height fog: held until changed; every queued frame takes the current medium.
     void setFog(const render::FogDesc& fog);
-    // Local fog volumes: the current set, held until changed.
+    // Local fog volumes: the current set, held until changed. A volume's density grid (FogVolumeDesc::grid) is copied.
     void setFogVolumes(const std::vector<render::FogVolumeDesc>& volumes);
+    // The weather record (FrameContext::weather: cloud cover, rain, wetness, snow): held until changed.
+    void setWeather(const render::WeatherFrame& weather);
+    // A lightning flash for the next queued frame only (intensity 0: none).
+    void setLightning(const render::LightningDesc& lightning);
     render::CloudLayerDesc clouds()
     {
         std::lock_guard lock(m_mutex);
@@ -665,6 +693,11 @@ private:
     uint64_t m_fxRecorded = 0;  // (m_fxMutex held) packets written under UNX_FX_RECORD
     float m_lensAperture = 0, m_lensFocus = 0;  // (m_mutex) the lens every queued frame takes
     float m_whiteBalanceKelvin = 0, m_whiteBalanceTint = 0;  // (m_mutex) the white balance every queued frame takes (v1.91)
+    render::ColorGradingDesc m_grading;         // (m_mutex) the grading every queued frame takes
+    render::PostSettingsDesc m_post;            // (m_mutex) the post settings every queued frame takes
+    float m_exposureCompensation = 0;           // (m_mutex)
+    int32_t m_displayEncoding = -1;             // (m_mutex) the HDR output's encoding every queued frame takes
+    float m_displayPaperWhite = 0;              // (m_mutex)
     std::map<uint64_t, uint32_t> m_meshAssetMap;  // (m_mutex) A3 mesh particles: asset -> mesh
     bool m_meshAssetsChanged = false;             // (m_mutex)
     std::vector<std::pair<uint64_t, uint32_t>> m_meshAssetsRender;  // render thread: the latest table received
@@ -681,9 +714,12 @@ private:
     std::optional<OceanInput> m_ocean;                               // (m_mutex) the sea every queued frame takes
     render::FogDesc m_fog;                                           // (m_mutex) the height fog every queued frame takes
     std::vector<render::FogVolumeDesc> m_fogVolumes;                 // (m_mutex) the local fog volumes every queued frame takes
+    std::vector<std::shared_ptr<const std::vector<uint8_t>>> m_fogGrids;  // (m_mutex) their density grids (m_fogVolumes point into them)
+    render::WeatherFrame m_weather;                                  // (m_mutex) the weather record every queued frame takes
     render::CloudLayerDesc m_clouds;                                 // (m_mutex) B5 the cloud layer every queued frame takes
     std::optional<render::OceanFrame> oceanFrameLocked() const;      // (m_mutex held) m_ocean in the current coordinates
     std::vector<PoolInput> m_pools;                                  // (m_mutex) W2 basins every queued frame takes (world)
+    std::vector<PoolWeather> m_poolWeather;                          // (m_mutex) their steam and rain exposure, by id
     std::vector<std::pair<uint32_t, water::PoolStats>> m_poolStats;  // (m_mutex) their latest statistics, copied after each record
     std::vector<FramePacket::PoolSource> m_pendingPoolSources;       // (m_mutex) for the next queued frame (world)
     void poolsLocked(FramePacket& packet);                           // (m_mutex held) basins and sources into the packet's coordinates

@@ -97,6 +97,7 @@ struct RenderGraphStats
 {
     uint32_t declaredPasses = 0;
     uint32_t livePasses = 0;
+    uint32_t passScopes = 0;       // profiler scopes recorded (a timestamp each): live passes less those joined (joinPasses)
     uint32_t transientResources = 0;
     uint32_t barrierBatches = 0;   // Barrier() calls
     uint32_t barriers = 0;         // individual texture/buffer barriers
@@ -135,6 +136,14 @@ public:
     const BufferDesc& desc(BufferRef b) const;    // at record time (e.g. a buffer sized per frame by its producer)
 
     void addPass(std::string_view name, QueueType queue, const SetupFn& setup, ExecuteFn execute);
+    // The number of passes added so far this frame (the index the next pass gets).
+    uint32_t passCount() const;
+    // Passes [first, first + count), added one after the other, are one profiler scope 'name': one timestamp and one
+    // marker for the run, none between its passes. Nothing else changes - each pass keeps its declared uses, and the
+    // barriers between them are the plan's (a pass that reads what the one before wrote waits for it exactly as two
+    // separate passes do; two that touch different resources get no barrier and may overlap). Passes of the run that
+    // are culled, or end up on another queue or command list, split the scope where they fall (PassChain.h).
+    void joinPasses(uint32_t first, uint32_t count, std::string_view name);
 
     // A group of per-pixel passes recorded band by band (design revision 1, 4.8; INTERFACES 4): pass A on band 0, pass B
     // on band 0, ..., pass A on band 1, ..., so a band's intermediate data stays in L2 between producer and consumer

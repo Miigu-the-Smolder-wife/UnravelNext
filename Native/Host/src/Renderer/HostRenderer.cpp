@@ -910,6 +910,11 @@ scene::Scene HostRenderer::snapshot(bool photo) const
         s.clouds.albedo = cloudsNow.albedo;
         s.clouds.windX = cloudsNow.windX;
         s.clouds.windZ = cloudsNow.windZ;
+        s.clouds.cirrusCoverage = cloudsNow.cirrusCoverage;
+        s.clouds.cirrusAltitude = cloudsNow.cirrusAltitude - originOffset.y;
+        s.clouds.cirrusOpticalDepth = cloudsNow.cirrusOpticalDepth;
+        s.clouds.cirrusWindX = cloudsNow.cirrusWindX;
+        s.clouds.cirrusWindZ = cloudsNow.cirrusWindZ;
         s.fog.enabled = fogNow.enabled;
         s.fog.density = fogNow.density;
         s.fog.heightFalloff = fogNow.heightFalloff;
@@ -920,6 +925,9 @@ scene::Scene HostRenderer::snapshot(bool photo) const
         s.fog.skyAmount = fogNow.skyAmount;
         s.fog.noiseAmount = fogNow.noiseAmount;
         s.fog.noiseScale = fogNow.noiseScale;
+        s.fog.density2 = fogNow.density2;
+        s.fog.heightFalloff2 = fogNow.heightFalloff2;
+        s.fog.height2 = fogNow.height2 - originOffset.y;
         s.fogVolumes.clear();
         for (const render::FogVolumeDesc& v : fogVolumesNow)
         {
@@ -932,6 +940,11 @@ scene::Scene HostRenderer::snapshot(bool photo) const
             o.heightFalloff = v.heightFalloff;
             o.edge = v.edge;
             o.albedo = { v.albedo[0], v.albedo[1], v.albedo[2] };
+            // (the steam's values; a density grid is the frame's alone: the scene file holds none)
+            o.sourcePlane = v.sourcePlane;
+            o.riseSpeed = v.riseSpeed;
+            o.turbulence = v.turbulence;
+            o.turbulenceScale = v.turbulenceScale;
             s.fogVolumes.push_back(o);
         }
     }
@@ -1371,6 +1384,11 @@ void HostRenderer::setClouds(const render::CloudLayerDesc& c)
     if (!finite || c.coverage < 0 || c.coverage > 1 || (c.coverage > 0 && !(c.topAltitude > c.baseAltitude && c.sigmaMax > 0 && c.albedo >= 0 && c.albedo <= 1)))
         fail("clouds: coverage %g in [0, 1]; with coverage: base %g < top %g, sigma_max %g > 0, albedo %g in [0, 1]", c.coverage, c.baseAltitude, c.topAltitude, c.sigmaMax,
              c.albedo);
+    // the cirrus sheet (with or without the layer)
+    const bool cirrusFinite = std::isfinite(c.cirrusCoverage) && std::isfinite(c.cirrusAltitude) && std::isfinite(c.cirrusOpticalDepth) &&
+                              std::isfinite(c.cirrusWindX) && std::isfinite(c.cirrusWindZ);
+    if (!cirrusFinite || c.cirrusCoverage < 0 || c.cirrusCoverage > 1 || (c.cirrusCoverage > 0 && !(c.cirrusAltitude > 0 && c.cirrusOpticalDepth > 0)))
+        fail("clouds: cirrus coverage %g in [0, 1]; with coverage: altitude %g > 0, optical depth %g > 0", c.cirrusCoverage, c.cirrusAltitude, c.cirrusOpticalDepth);
     std::lock_guard lock(m_mutex);
     m_clouds = c;
 }
@@ -1385,9 +1403,33 @@ void HostRenderer::setFogVolumes(const std::vector<render::FogVolumeDesc>& volum
                   v.heightFalloff >= 0 && v.edge > 0 && v.edge <= 1;
         for (int k = 0; k < 3; ++k) ok = ok && std::isfinite(v.centre[k]) && std::isfinite(v.halfSize[k]) && v.halfSize[k] > 0 && v.albedo[k] >= 0 && v.albedo[k] <= 1;
         if (!ok) fail("fog volume %zu: finite values, half sizes > 0, shape 0 or 1, density and height falloff >= 0, edge in (0, 1], albedo in [0, 1]", i);
+        // rising steam (all 0: none)
+        const bool steam = std::isfinite(v.sourcePlane) && std::isfinite(v.riseSpeed) && std::isfinite(v.turbulence) && std::isfinite(v.turbulenceScale) &&
+                           v.sourcePlane >= 0 && v.sourcePlane <= 0.95f && v.turbulence >= 0 && v.turbulence <= 1 && (v.turbulence == 0 || v.turbulenceScale > 0);
+        if (!steam)
+            fail("fog volume %zu: source plane %g in [0, 0.95], rise speed %g finite, turbulence %g in [0, 1], turbulence scale %g > 0 with turbulence", i, v.sourcePlane,
+                 v.riseSpeed, v.turbulence, v.turbulenceScale);
+        // the density grid: all of it or none
+        const bool sized = v.gridSize[0] != 0 || v.gridSize[1] != 0 || v.gridSize[2] != 0;
+        bool grid = (v.grid != nullptr) == sized;
+        for (uint32_t n : v.gridSize) grid = grid && (!sized || (n >= 1 && n <= render::kFogGridMax));
+        if (!grid)
+            fail("fog volume %zu: density grid %u x %u x %u (each side 1 .. %u with texels; 0, 0, 0 and no texels without)", i, v.gridSize[0], v.gridSize[1], v.gridSize[2],
+                 render::kFogGridMax);
+    }
+    // The grids are the caller's memory: the frames read copies (a packet keeps its own references until it is recorded).
+    std::vector<render::FogVolumeDesc> held = volumes;
+    std::vector<std::shared_ptr<const std::vector<uint8_t>>> grids(held.size());
+    for (size_t i = 0; i < held.size(); ++i)
+    {
+        render::FogVolumeDesc& v = held[i];
+        if (!v.grid) continue;
+        grids[i] = std::make_shared<const std::vector<uint8_t>>(v.grid, v.grid + (size_t)v.gridSize[0] * v.gridSize[1] * v.gridSize[2]);
+        v.grid = grids[i]->data();
     }
     std::lock_guard lock(m_mutex);
-    m_fogVolumes = volumes;
+    m_fogVolumes = std::move(held);
+    m_fogGrids = std::move(grids);
 }
 
 void HostRenderer::setFog(const render::FogDesc& f)
@@ -1400,8 +1442,37 @@ void HostRenderer::setFog(const render::FogDesc& f)
         f.noiseAmount < 0 || f.noiseAmount > 1 || (f.enabled && f.noiseScale < 1))
         fail("fog: density %g >= 0, falloff %g >= 0, phase g %g in (-1, 1), start %g >= 0, sky amount %g in [0, 1], noise amount %g in [0, 1], noise scale %g >= 1",
              f.density, f.heightFalloff, f.phaseG, f.startDistance, f.skyAmount, f.noiseAmount, f.noiseScale);
+    if (!std::isfinite(f.density2) || !std::isfinite(f.heightFalloff2) || !std::isfinite(f.height2) || f.density2 < 0 || f.heightFalloff2 < 0)
+        fail("fog: the second layer's density %g >= 0, falloff %g >= 0, height %g finite", f.density2, f.heightFalloff2, f.height2);
     std::lock_guard lock(m_mutex);
     m_fog = f;
+}
+
+void HostRenderer::setWeather(const render::WeatherFrame& in)
+{
+    requireCommitted();
+    render::WeatherFrame w = in;
+    const float3 d = w.rainDirection;
+    const float length = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+    const bool finite = std::isfinite(w.rainRate) && std::isfinite(w.wetness) && std::isfinite(w.snowRate) && std::isfinite(w.snowDepth) &&
+                        std::isfinite(w.fogDensity) && std::isfinite(w.cloudCover) && std::isfinite(length);
+    if (!finite || w.rainRate < 0 || w.wetness < 0 || w.wetness > 1 || w.snowRate < 0 || w.snowDepth < 0 || w.fogDensity < 0 || w.cloudCover < 0 || w.cloudCover > 1 ||
+        !(length > 1e-6f))
+        fail("weather: rain rate %g >= 0, wetness %g in [0, 1], snow rate %g >= 0, snow depth %g >= 0, cloud cover %g in [0, 1], a rain direction of length > 0",
+             w.rainRate, w.wetness, w.snowRate, w.snowDepth, w.cloudCover);
+    w.rainDirection = { d.x / length, d.y / length, d.z / length };
+    std::lock_guard lock(m_mutex);
+    m_weather = w;
+}
+
+void HostRenderer::setLightning(const render::LightningDesc& l)
+{
+    requireCommitted();
+    bool ok = std::isfinite(l.intensity) && l.intensity >= 0 && std::isfinite(l.radius) && l.radius > 0;
+    for (int k = 0; k < 3; ++k) ok = ok && std::isfinite(l.position[k]) && std::isfinite(l.color[k]) && l.color[k] >= 0;
+    if (!ok) fail("lightning: a finite position, intensity %g >= 0, colour >= 0, radius %g > 0", l.intensity, l.radius);
+    std::lock_guard lock(m_mutex);
+    m_pending.lightning = l;  // (the next queued frame's alone: queueFrame starts the pending packet anew)
 }
 
 namespace
@@ -1467,6 +1538,13 @@ void HostRenderer::poolsLocked(FramePacket& packet)
         f.sizeX = p.sizeX, f.sizeZ = p.sizeZ, f.depth = p.depth, f.surfaceFilm = p.surfaceFilm;
         f.centre[0] = p.centre[0] - m_mainOriginOffset.x, f.centre[1] = p.centre[1] - m_mainOriginOffset.y, f.centre[2] = p.centre[2] - m_mainOriginOffset.z;
         f.yaw = p.yaw;
+        for (const PoolWeather& w : m_poolWeather)
+            if (w.id == p.id)
+            {
+                f.steamDensity = w.steamDensity, f.steamHeight = w.steamHeight, f.steamRiseSpeed = w.steamRiseSpeed;
+                f.steamTurbulence = w.steamTurbulence;
+                f.rainExposure = w.rainExposure;
+            }
         packet.pools.push_back(f);
     }
     for (FramePacket::PoolSource& s : m_pendingPoolSources)
@@ -1476,6 +1554,25 @@ void HostRenderer::poolsLocked(FramePacket& packet)
     }
     packet.poolSources = std::move(m_pendingPoolSources);
     m_pendingPoolSources.clear();
+}
+
+void HostRenderer::setPoolWeather(std::span<const PoolWeather> pools)
+{
+    requireCommitted();
+    for (size_t i = 0; i < pools.size(); ++i)
+    {
+        const PoolWeather& w = pools[i];
+        const bool finite = std::isfinite(w.steamDensity) && std::isfinite(w.steamHeight) && std::isfinite(w.steamRiseSpeed) && std::isfinite(w.steamTurbulence) &&
+                            std::isfinite(w.rainExposure);
+        if (!w.id || !finite || w.steamDensity < 0 || (w.steamDensity > 0 && !(w.steamHeight > 0)) || w.steamTurbulence < 0 || w.steamTurbulence > 1 ||
+            w.rainExposure < 0 || w.rainExposure > 1)
+            fail("pool weather %zu (id %u): id nonzero, steam density %g >= 0 with a height %g > 0, turbulence %g in [0, 1], rain exposure %g in [0, 1]", i, w.id,
+                 w.steamDensity, w.steamHeight, w.steamTurbulence, w.rainExposure);
+        for (size_t j = 0; j < i; ++j)
+            if (pools[j].id == w.id) fail("pool weather: id %u appears twice", w.id);
+    }
+    std::lock_guard lock(m_mutex);
+    m_poolWeather.assign(pools.begin(), pools.end());
 }
 
 std::pair<std::vector<render::PoolFrame>, std::vector<FramePacket::PoolSource>> HostRenderer::queuedPools()
@@ -1610,6 +1707,11 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.lensFocus = m_lensFocus;
     packet.whiteBalanceKelvin = m_whiteBalanceKelvin;
     packet.whiteBalanceTint = m_whiteBalanceTint;
+    packet.grading = m_grading;
+    packet.post = m_post;
+    packet.exposureCompensation = m_exposureCompensation;
+    packet.displayEncoding = m_displayEncoding;
+    packet.displayPaperWhite = m_displayPaperWhite;
     if (m_meshAssetsChanged)
     {
         packet.meshAssets.emplace(m_meshAssetMap.begin(), m_meshAssetMap.end());
@@ -1643,6 +1745,9 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.clouds = m_clouds;
     packet.fog = m_fog;
     packet.fogVolumes = m_fogVolumes;
+    packet.fogGrids = m_fogGrids;
+    packet.weather = m_weather;
+    packet.lightning = m_pending.lightning;
     poolsLocked(packet);  // W2: the basins (a state) and this frame's sources (handed over once)
     m_decalsChanged = false;
     m_pending = FramePacket{};
@@ -1963,6 +2068,11 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     fc.lensFocus = p.lensFocus;
     fc.whiteBalanceKelvin = p.whiteBalanceKelvin;
     fc.whiteBalanceTint = p.whiteBalanceTint;
+    fc.grading = p.grading;
+    fc.post = p.post;
+    fc.exposureCompensation = p.exposureCompensation;
+    fc.displayEncoding = p.displayEncoding;
+    fc.displayPaperWhite = p.displayPaperWhite;
     fc.timing = m_profiler ? m_profiler->lastCompleted() : nullptr;  // (the debug HUD, E)
     fc.originShift = p.originShift;  // C9
     for (int a = 0; a < 3; ++a)
@@ -1980,7 +2090,9 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     fc.ocean = p.ocean ? &*p.ocean : nullptr;
     fc.clouds = p.clouds;
     fc.fog = p.fog;
-    fc.fogVolumes = p.fogVolumes;
+    fc.fogVolumes = p.fogVolumes;  // (their density grids: p.fogGrids, alive until this frame is recorded)
+    fc.weather = p.weather;
+    fc.lightning = p.lightning;
     // W2: the basins with their sources grouped (valid until record() returns); sources of basins no longer present drop.
     m_poolFrames = p.pools;
     m_poolSourceFrames.clear();
@@ -2488,10 +2600,14 @@ void HostRenderer::renderOnHost(uint64_t ticket, const HostExecute& execute)
     if (od.Width != p.width || od.Height != p.height || !(od.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))
         fail("output texture is %llux%u flags 0x%x; the frame needs %ux%u with random write", (unsigned long long)od.Width, od.Height, (unsigned)od.Flags, p.width,
              p.height);
-    const DXGI_FORMAT format = p.displayPeak > 0 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R10G10B10A2_UNORM;
+    // (an HDR frame may be written straight into the HDR10 swap chain's 10-bit format: the chain then requires the
+    // ST 2084 encoding - the frame's, or the quality file's output.hdr_encoding - and says so otherwise)
+    const bool tenBitOutput = od.Format == DXGI_FORMAT_R10G10B10A2_UNORM || od.Format == DXGI_FORMAT_R10G10B10A2_TYPELESS;
+    const DXGI_FORMAT format = p.displayPeak > 0 && !tenBitOutput ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R10G10B10A2_UNORM;
     if (od.Format != format && !(format == DXGI_FORMAT_R10G10B10A2_UNORM && od.Format == DXGI_FORMAT_R10G10B10A2_TYPELESS) &&
         !(format == DXGI_FORMAT_R16G16B16A16_FLOAT && od.Format == DXGI_FORMAT_R16G16B16A16_TYPELESS))
-        fail("output texture format %u; the frame needs %s", (unsigned)od.Format, p.displayPeak > 0 ? "R16G16B16A16 FLOAT (HDR display)" : "R10G10B10A2 UNORM");
+        fail("output texture format %u; the frame needs %s", (unsigned)od.Format,
+             p.displayPeak > 0 ? "R16G16B16A16 FLOAT (HDR display; R10G10B10A2 UNORM too under the ST 2084 encoding)" : "R10G10B10A2 UNORM");
     const uint32_t slot = beginFrame(p);
     TextureDesc desc;
     desc.name = "host output";
@@ -2647,5 +2763,51 @@ void HostRenderer::renderStandalone(uint64_t ticket, void* readback, size_t read
         D3D12_RANGE none{ 0, 0 };
         s.readback->Unmap(0, &none);
     }
+}
+
+// ---- The picture's settings a game changes while it runs (UnxFrameSetColorGrading, UnxFrameSetPost,
+// UnxFrameSetDisplayEncoding): validated here, held under m_mutex, copied into every queued frame's packet.
+void HostRenderer::setColorGrading(const render::ColorGradingDesc& g)
+{
+    if (g.enabled)
+    {
+        bool ok = std::isfinite(g.temperature) && g.temperature >= 1667 && g.temperature <= 25000 && std::isfinite(g.tint) && g.shadowsMax > 0 &&
+                  std::isfinite(g.shadowsMax) && std::isfinite(g.highlightsMin) && std::isfinite(g.highlightsMax) && g.highlightsMax > g.highlightsMin;
+        for (const render::ColorGradingRange* r : { &g.global, &g.shadows, &g.midtones, &g.highlights })
+            for (int c = 0; c < 4; ++c)
+                ok = ok && std::isfinite(r->saturation[c]) && r->saturation[c] >= 0 && std::isfinite(r->contrast[c]) && r->contrast[c] >= 0 &&
+                     std::isfinite(r->gamma[c]) && r->gamma[c] > 0 && std::isfinite(r->gain[c]) && r->gain[c] >= 0 && std::isfinite(r->offset[c]);
+        if (!ok)
+            fail("colour grading: temperature %g K in [1667, 25000], finite values, saturation / contrast / gain >= 0, gamma > 0, shadows max %g > 0, "
+                 "highlights max %g > min %g",
+                 g.temperature, g.shadowsMax, g.highlightsMax, g.highlightsMin);
+    }
+    std::lock_guard lock(m_mutex);
+    m_grading = g;
+}
+
+void HostRenderer::setPost(const render::PostSettingsDesc& p, float exposureCompensation)
+{
+    // (a NaN leaves the value to the quality file; a set value must be one the chain takes)
+    auto unsetOr = [](float v, float lo, float hi) { return std::isnan(v) || (v >= lo && v <= hi); };
+    const bool range = std::isnan(p.exposureMinEv) || std::isnan(p.exposureMaxEv) || p.exposureMinEv < p.exposureMaxEv;
+    if (!std::isfinite(exposureCompensation) || std::abs(exposureCompensation) > 16 || !unsetOr(p.exposureMinEv, -30, 30) || !unsetOr(p.exposureMaxEv, -30, 30) ||
+        !range || !unsetOr(p.bloomStrength, 0, 1) || !unsetOr(p.vignette, 0, 1) || !unsetOr(p.motionBlurShutter, 0, 1) ||
+        !(p.diaphragmBlades == -1 || p.diaphragmBlades == 0 || (p.diaphragmBlades >= 4 && p.diaphragmBlades <= 16)) || !unsetOr(p.lensFullAperture, 0, 1))
+        fail("post settings: exposure compensation %g stops (|c| <= 16), metering range %g .. %g EV100 (min < max, within +-30), bloom %g, vignette %g and "
+             "motion blur %g in [0, 1], diaphragm blades %d (-1, 0 or 4 .. 16), full aperture %g m in [0, 1]; NaN leaves a value to the quality file",
+             exposureCompensation, p.exposureMinEv, p.exposureMaxEv, p.bloomStrength, p.vignette, p.motionBlurShutter, p.diaphragmBlades, p.lensFullAperture);
+    std::lock_guard lock(m_mutex);
+    m_post = p;
+    m_exposureCompensation = exposureCompensation;
+}
+
+void HostRenderer::setDisplayEncoding(int32_t encoding, float paperWhiteNits)
+{
+    if (encoding < -1 || encoding > 2 || !std::isfinite(paperWhiteNits) || !(paperWhiteNits == 0 || (paperWhiteNits >= 40 && paperWhiteNits <= 1000)))
+        fail("display encoding %d (-1 the quality file's, 0 linear, 1 scRGB, 2 ST 2084) and paper white %g cd/m2 (0, or 40 .. 1000)", encoding, paperWhiteNits);
+    std::lock_guard lock(m_mutex);
+    m_displayEncoding = encoding;
+    m_displayPaperWhite = paperWhiteNits;
 }
 } // namespace unx::host

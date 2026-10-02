@@ -1,6 +1,7 @@
 // Hit lighting of the reflection and refraction rays on the Lumen path (reflection.lumen_only): the surface cache, as
 // Unreal's default (r.Lumen.HardwareRayTracing.LightingMode 0), with the hit's own material.
 //   emitter proxy   the area light's radiance (RayScene.hlsli rtEmitterRadiance) where the ray paths own its specular;
+//   far proxy       (raytracing.far_field) the proxy's colour under the sun and the sky (RayTracing/HitFarField.hlsli);
 //   surface         its material at the ray cone's footprint (textures, decals), its emission, and the light of the mesh
 //                   cards of its instance (CardLighting.hlsli clReadCards: direct light with the sun, radiosity) through
 //                   the material - diffuse albedo x E / pi and the specular albedo x E / pi (the lobe at the hit sees the
@@ -34,6 +35,7 @@
 #include "RayTracing/HitLocalLights.hlsli"
 #include "RayTracing/HitLocalSample.hlsli"
 #include "Passes/GI/LumenHitIndirect.hlsli"
+#include "RayTracing/HitFarField.hlsli"
 
 struct RlHit
 {
@@ -49,6 +51,13 @@ RlHit rlShadeHit(RtSceneSrvs scene, RtHit hit, float3 origin, float3 direction, 
     o.radiance = 0;
     o.motion = 0;
     o.surface = false;
+    if (hit.instance == RT_INSTANCE_FAR)
+    {
+        // a proxy of the far field (raytracing.far_field; RayTracing/HitFarField.hlsli): no mesh records behind it
+        o.radiance = rtFarRadiance(scene, hit, origin, direction, true);
+        o.surface = true;
+        return o;
+    }
     if (hit.instance == RT_INSTANCE_EMITTER)
     {
         o.radiance = rtEmitterCounts(scene.pad, hit.primitive) ? rtEmitterRadiance(hit.primitive, origin, origin + direction * hit.t) : float3(0, 0, 0);
@@ -127,8 +136,10 @@ RlHit rlShadeHit(RtSceneSrvs scene, RtHit hit, float3 origin, float3 direction, 
                 sr.Direction = l;
                 sr.TMin = 0;
                 sr.TMax = giRayLength();
-                L.sunIlluminance = e0;
-                L.sunVisibility = rtVisible(scene, sr, RT_MASK_HIT_SHADOW) ? 1.0 : 0.0;
+                // (the sun through the Glass on the way: what the panes leave of it - RayShaders.hlsli rtShadowTransmittance)
+                const float3 through = rtShadowTransmittance(scene, sr, RT_MASK_HIT_SHADOW | RT_MASK_FAR);
+                L.sunIlluminance = e0 * through;
+                L.sunVisibility = any(through > 0) ? 1.0 : 0.0;
             }
         }
         if (localSample) L.local = rtHitLocalSample(scene, s, m, -direction, footprint, 1e-3 + 2e-4 * distance(s.position, g_cameraPosition), hitSeed);

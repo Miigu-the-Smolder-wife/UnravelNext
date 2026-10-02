@@ -60,6 +60,7 @@ void main(uint3 id : SV_DispatchThreadID)
     m.metallic = 0;
     m.normal = float3(0, 1, 0);
     m.variance = 0;
+    m.emissive = 0;
     DecalContext c;
     c.frames = P[0].w;
     c.tiles = P[0].z;

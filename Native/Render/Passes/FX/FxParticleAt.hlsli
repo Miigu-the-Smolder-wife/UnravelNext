@@ -22,9 +22,11 @@ RenderRange renderRange(LayerConstants c, uint t, uint group)
 // offsets are in stream space; c.streamAxes maps the result), and its age (false: not alive then). A particle of both ticks by
 // cubic Hermite of the two ends' positions and velocities; one born in the latest tick by p_n - v_n (1 - w) dt; one that died
 // in it by p_(n-1) + v_(n-1) w dt while w dt < lifetime - age_(n-1). 'dying' = a particle of the previous state only.
-bool fxParticleAt(LayerConstants c, RenderRange rr, uint k, uint birth, uint row, StreamProgram p, out float3 pos, out float age, out bool dying)
+// vel: its velocity at the frame time in the same axes (the Hermite's derivative; a birth's or a death's own velocity).
+bool fxParticleAtV(LayerConstants c, RenderRange rr, uint k, uint birth, uint row, StreamProgram p, out float3 pos, out float3 vel, out float age, out bool dying)
 {
     pos = 0;
+    vel = 0;
     age = 0;
     dying = (rr.prevCountFlags & 0x80000000u) != 0u;
     const float wdt = c.w * c.dt, rest = (1.0f - c.w) * c.dt;
@@ -36,6 +38,7 @@ bool fxParticleAt(LayerConstants c, RenderRange rr, uint k, uint birth, uint row
         const float4 pa = posAge[rr.stateBase + k];
         if (!(wdt < p.lifetime - pa.w)) return false;  // dead by the frame time
         pos = (c.offsetPrev + dynamic[row].originAnchor + pa.xyz + velocity[rr.stateBase + k].xyz * wdt) * c.streamAxes;
+        vel = velocity[rr.stateBase + k].xyz * c.streamAxes;
         age = pa.w + wdt;
     }
     else
@@ -57,13 +60,20 @@ bool fxParticleAt(LayerConstants c, RenderRange rr, uint k, uint birth, uint row
             const float3 v0 = velocity0[rr.prevBase + rel].xyz;
             const float w = c.w, w2 = w * w, w3 = w2 * w;
             pos = ((2 * w3 - 3 * w2 + 1) * p0 + (w3 - 2 * w2 + w) * c.dt * v0 + (3 * w2 - 2 * w3) * p1 + (w3 - w2) * c.dt * v1) * c.streamAxes;
+            vel = c.dt > 0 ? ((6 * w2 - 6 * w) * (p0 - p1) / c.dt + (3 * w2 - 4 * w + 1) * v0 + (3 * w2 - 2 * w) * v1) * c.streamAxes : v1 * c.streamAxes;
         }
         else
         {
             if (age < 0) return false;  // born after the frame time
             pos = (p1 - v1 * rest) * c.streamAxes;
+            vel = v1 * c.streamAxes;
         }
     }
     return true;
+}
+bool fxParticleAt(LayerConstants c, RenderRange rr, uint k, uint birth, uint row, StreamProgram p, out float3 pos, out float age, out bool dying)
+{
+    float3 vel;
+    return fxParticleAtV(c, rr, k, birth, row, p, pos, vel, age, dying);
 }
 #endif

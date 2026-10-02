@@ -7,18 +7,27 @@
 // just ghosts (5 % a frame). A gradient whose sign flips against the last frame's is a flicker; the smaller of the two
 // gradients' sizes is its amplitude. Their running sum and count (20 frames, x 0.95 a frame; only on what stands
 // still) give the moire error: the luma band inside which m.tsr.reject lets the history ghost.
-// One group per 16 x 16 internal pixels over a 32 x 32 region in group memory (the 3 x 3 chain reaches 6 pixels, the
+// Thin geometry (P[2].y: TsrThin.hlsl's relaxation weight w; the reference's r.TSR.ThinGeometryDetection.AntiFlickering):
+// where m.tsr.reject relaxes its clamp box by w, this measure does the same on the luma - the box between the filtered
+// input's range and the filtered history's by w, the history clamped into it, and where w > 0 that result's 3 x 3 range
+// as the box - so the gradient followed here is the one the relaxed rejection leaves. And thin geometry still flickers
+// under the relaxation with gradients too small for the history's 8 bits: where w > 0 a gradient under the encoding
+// error counts (as long as either frame's is above 7e-5), and the error fades in at the count a flicker of three times
+// the period settles at (a slower flicker is taken for one).
+// One group per 16 x 16 internal pixels over a 34 x 34 region in group memory (the 3 x 3 chain reaches 7 pixels, the
 // 5 x 5 dilation of the flicker 2 more), values as 16-bit pairs.
 // P[0] = { colour SRV (internal, exposed linear), reprojected flickering history SRV (RGBA8: luma in the guide space,
 //          gradient x 127 / 255 + 127 / 255, total variation, count / 20), decimate mask SRV (RG8), info SRV (RGBA16F,
 //          TsrDilate.hlsl: a = offset + is-moving / 2) }
-// P[1] = { moire error UAV (R16F), flickering history UAV (RGBA8, next frame's), width, height }, P[2].x = flags (1: reset)
+// P[1] = { moire error UAV (R16F), flickering history UAV (RGBA8, next frame's), width, height }
+// P[2] = { flags (1: reset), thin geometry relaxation SRV (R8; UNX_NONE: none), 0, 0 }
 // Frame constants b1 = the main view (the frame's time step).
 #include "Passes/Shading/Tsr.hlsli"
 #include "Passes/Common/Frame.hlsli"
 
 #define TILE 16
-#define BORDER 8
+#define BORDER 9
+#define THIN_GRADIENT 0.00007  // (the reference's ValidGeometryGradientThreshold)
 #define SIDE (TILE + 2 * BORDER)
 #define CELLS (SIDE * SIDE)
 #define MIN_BLEND 0.05
@@ -27,7 +36,7 @@
 
 groupshared uint gLH[CELLS];   // input luma, history luma
 groupshared uint gGB[CELLS];   // previous gradient (snorm), the clamped input's 3 x 3 range
-groupshared uint gAB[CELLS];   // stage 1 clamps; later: gradient variation, is-flicker
+groupshared uint gAB[CELLS];   // stage 1 clamps; stage 3b: the history in the relaxed box, the relaxation; later: gradient variation, is-flicker
 groupshared uint gCD[CELLS];   // stage 2 clamps; later: the updated history, the current gradient (snorm)
 groupshared uint gF[CELLS];    // filtered input, filtered history
 groupshared uint gE[CELLS];    // raw clamped energy, raw rejection
@@ -122,15 +131,41 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     }
     GroupMemoryBarrierWithGroupSync();
 
-    // 4: the clamp box, the energy it removes from the filtered history, the raw rejection
+    // 3b: the filtered history clamped into the box relaxed by the thin geometry's weight (gAB is free until stage 6)
+    const bool thin = P[2].y != UNX_NONE;
     for (i = lane; i < CELLS; i += TILE * TILE)
     {
         const int2 c = int2(i % SIDE, i / SIDE);
         if (!inMargin(c, 4)) continue;
+        float2 lo = 1, hi = 0;
+        [unroll] for (int k = 0; k < 9; ++k)
+        {
+            const float2 v = unpack2(gF[cellIndex(c + int2(k % 3, k / 3) - 1)]);
+            lo = min(lo, v);
+            hi = max(hi, v);
+        }
+        float weight = 0;
+        if (thin)
+        {
+            Texture2D<float> relaxationTexture = ResourceDescriptorHeap[P[2].y];
+            weight = relaxationTexture.Load(int3(clamp(origin + c, 0, size - 1), 0));
+            weight = weight > 1.0 / 127.0 ? weight : 0.0;
+        }
+        gAB[i] = pack2(clamp(unpack2(gF[i]).y, lerp(lo.x, lo.y, weight), lerp(hi.x, hi.y, weight)), weight);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    // 4: the clamp box, the energy it removes from the filtered history, the raw rejection
+    for (i = lane; i < CELLS; i += TILE * TILE)
+    {
+        const int2 c = int2(i % SIDE, i / SIDE);
+        if (!inMargin(c, 5)) continue;
+        const bool relaxed = unpack2(gAB[i]).y > 0;
         float lo = 1, hi = 0;
         [unroll] for (int k = 0; k < 9; ++k)
         {
-            const float v = unpack2(gF[cellIndex(c + int2(k % 3, k / 3) - 1)]).x;
+            const uint ni = cellIndex(c + int2(k % 3, k / 3) - 1);
+            const float v = relaxed ? unpack2(gAB[ni]).x : unpack2(gF[ni]).x;
             lo = min(lo, v);
             hi = max(hi, v);
         }
@@ -148,7 +183,7 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     for (i = lane; i < CELLS; i += TILE * TILE)
     {
         const int2 c = int2(i % SIDE, i / SIDE);
-        if (!inMargin(c, 5)) continue;
+        if (!inMargin(c, 6)) continue;
         float2 lows[3], mids[3], highs[3];
         [unroll] for (int x = -1; x <= 1; ++x)
         {
@@ -168,7 +203,8 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     for (i = lane; i < CELLS; i += TILE * TILE)
     {
         const int2 c = int2(i % SIDE, i / SIDE);
-        if (!inMargin(c, 6)) continue;
+        if (!inMargin(c, 7)) continue;
+        const bool relaxed = unpack2(gAB[i]).y > 0;
         float filteredEnergy = 0, clampBlend = 1;
         [unroll] for (int k = 0; k < 9; ++k)
         {
@@ -192,7 +228,9 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
         const float gradient = updated - ghosting;
         const float previousGradient = gradientRange.x * (255.0 / 127.0) - 1.0;
         const bool sameSign = gradient * previousGradient > 0;
-        const bool withinError = abs(gradient) < ENCODING_ERROR || abs(previousGradient) < ENCODING_ERROR;
+        bool withinError = abs(gradient) < ENCODING_ERROR || abs(previousGradient) < ENCODING_ERROR;
+        // (thin geometry: its residual flicker is that small)
+        if (relaxed && (abs(gradient) > THIN_GRADIENT || abs(previousGradient) > THIN_GRADIENT)) withinError = false;
         const float flicker = sameSign || withinError || cut ? 0.0 : 1.0;
         gAB[i] = pack2(min(abs(previousGradient), abs(gradient)) * flicker, flicker);
         gCD[i] = pack2(updated, gradient * 0.5 + 0.5);
@@ -228,8 +266,16 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     }
     const float quantizedCount = floor(count * (255.0 / MAX_COUNT)) * (MAX_COUNT / 255.0);
     variation = count > 0 ? variation * quantizedCount / count : 0.0;
-    // (the flicker's period in frames: 2, longer below 60 Hz; the count fades the error in past half of 1 - 0.95^period)
-    const float period = 2.0 / max(g_deltaTime * 60.0, 1.0);
+    // (the flicker's period in frames: 2, longer below 60 Hz; the count fades the error in past half of 1 - 0.95^period;
+    // a thin region's small gradients - the stage 6 rule again, at the pixel - at three times the period's count)
+    float period = 2.0 / max(g_deltaTime * 60.0, 1.0);
+    if (thin)
+    {
+        Texture2D<float> relaxationTexture = ResourceDescriptorHeap[P[2].y];
+        const bool small = abs(gradient) < ENCODING_ERROR || abs(previousGradient) < ENCODING_ERROR;
+        const bool present = abs(gradient) > THIN_GRADIENT || abs(previousGradient) > THIN_GRADIENT;
+        if (relaxationTexture.Load(int3(pixel, 0)) > 1.0 / 127.0 && small && present) period *= 3.0;
+    }
     const float fadeIn = saturate(count * (1.0 - pow(1.0 - MIN_BLEND, period)) - 0.5);
     const float error = count > 0 ? (abs(variation / count) + count * ENCODING_ERROR) * fadeIn : 0.0;
     RWTexture2D<float> errorOut = ResourceDescriptorHeap[P[1].x];

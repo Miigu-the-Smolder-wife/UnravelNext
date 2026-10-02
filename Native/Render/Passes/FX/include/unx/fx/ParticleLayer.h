@@ -4,6 +4,7 @@
 // -> records -> tile lists -> per tile a depth sort, the 1/4-resolution composite and the full-resolution edge blocks
 // (ParticleLayer.hlsli: what M's shading composite reads). Sprites, emission only for now (M0 stage 1).
 #include "unx/fx/Particles.h"
+#include "unx/fx/SpriteLooks.h"
 #include "unx/render/Frame.h"
 
 #include <cstdint>
@@ -23,6 +24,8 @@ struct ParticleLighting
     // shading.mega_lights: the froxel grid's sampled local light (FrameResources::localFluence / localMoment; invalid: the
     // setup loops over the froxel list's lights with S's shadow maps)
     render::TextureRef localFluence, localMoment;
+    // the sun's particle transmittance map (FrameResources::particleShadowParams / particleShadowMap; invalid: none)
+    render::BufferRef particleShadowParams, particleShadowMap;
     uint32_t vsmConstants = 0xFFFFFFFFu, vsmLocalLights = 0xFFFFFFFFu, vsmSlotOfLight = 0xFFFFFFFFu;
 };
 
@@ -35,15 +38,29 @@ struct ParticleLayerFrame
                                                    // the anchor offset is a difference)
     float streamAxes[3] = { 1, 1, 1 };             // stream space -> renderer world axis signs (FrameContext::streamAxes)
     double time = 0;                               // the particle stream's context time of this frame (s)
+    uint32_t ribbonSegments = 1;                   // fx.particles.ribbon_segments: pieces a strip segment's curve is drawn in
+                                                   // at most (1: straight segments)
     bool soft = false, nearFade = false;           // fx.particles.soft / near_fade (FxLayerTile.hlsl): a sprite as a ball
                                                    // that surfaces cut softly, and that fades out at the near plane
     ParticleLighting lighting;
+    // Sprite looks (unx/fx/SpriteLooks.h; null: none - a program whose material is past 1 is refused) with the scene
+    // their textures are of and its textures' SRVs (GpuScene::textureSrvs).
+    const SpriteLooks* looks = nullptr;
+    const scene::Scene* source = nullptr;
+    std::span<const uint32_t> textureSrvs;
+    // The previous frame's unjittered view-projection (world -> clip) for the sprites' motion; motion = false: the
+    // frame has none (the records' motion is 0).
+    float4x4 prevViewProj{};
+    bool motion = false;
 };
+
+constexpr uint32_t kLayerRecordBytes = 64;  // ParticleLayerPass.hlsli LayerRecord
 
 struct ParticleLayerOutput
 {
     bool valid = false;  // false: no tick yet (nothing to draw; the view's particle fields stay invalid)
     render::TextureRef layer, depthRange;  // RGBA16F / RG16F, ceil(W/4) x ceil(H/4)
+    render::TextureRef motion;             // RG16F, the same size: the particles' travel on screen since the previous frame
     render::BufferRef edges;               // raw: count, edge index table, edge blocks (ParticleLayer.hlsli)
     // the pass's own resources (tests read them)
     render::BufferRef constants, records, tileCounts, tileStarts, entries, counters;

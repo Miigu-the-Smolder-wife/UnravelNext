@@ -4,6 +4,11 @@
 //                          pixel's own previous depth: a closer one - by more than three pixels' size in the world plus
 //                          the pixel's depth error - means the pixel was hidden there. A closest occluder moving as the
 //                          pixel moves is the pixel's own surface: no disocclusion;
+//   hole filling           (P[4].z) a disoccluded pixel's own vector leads to the occluder's history; the occluder's
+//                          vector - the closest occluder's, carried in the scatter - leads to what was beside the
+//                          occluder then: the background the pixel most likely continues. The vector the history
+//                          update reads is replaced by it (the guide below is still reprojected by the pixel's own
+//                          vector: the rejection measures the disocclusion as it is), mask bit 8;
 //   reprojection edge      over the dilated vectors of the 3 x 3 neighbourhood: 0 where a neighbour's vector differs by
 //                          a pixel along its offset (the history on either side of such an edge is another surface's);
 //   guide                  the previous frame's guide reprojected (Catmull-Rom) with the exposure change applied;
@@ -14,11 +19,12 @@
 // P[0] = { dilated motion SRV (RG32F), info SRV (RGBA16F, TsrDilate.hlsl), scatter SRV (R32_UINT), previous guide SRV
 //          (R10G10B10A2: guide colour, a = uncertainty; UNX_NONE: no history) }
 // P[1] = { reprojected guide UAV (R10G10B10A2), mask UAV (RG8: r = bits / 255 - 1 off screen or cut, 2 parallax
-//          disocclusion, 16 off the kept frame's screen; g = reprojection edge), width, height }
+//          disocclusion, 8 hole-filled vector, 16 off the kept frame's screen; g = reprojection edge), width, height }
 // P[2] = { asuint(jitter x), asuint(jitter y), asuint(exposure ratio), flags (1: reset - first frame, cut, restore) }
 // P[3] = { previous flickering history SRV (RGBA8; UNX_NONE: none), reprojected flickering history UAV (RGBA8), frame, 0 }
 // P[4] = { previous thin coverage history SRV (R8; UNX_NONE: none), reprojected thin coverage UAV (R8; UNX_NONE: no
-//          thin geometry detection), 0, 0 }
+//          thin geometry detection), hole-filled motion UAV (RG32F: the vectors m.upscale reads; UNX_NONE: no hole
+//          filling), 0 }
 // P[5] = { kept frame's guide SRV (R10G10B10A2; UNX_NONE: no resurrection this frame), resurrected guide UAV
 //          (R10G10B10A2; UNX_NONE: none), asuint(this frame's exposure over the kept frame's), field SRV (RGBA32_UINT,
 //          Tsr.hlsli: z = the closest device depth) }, P[6..9] = rows of this frame's unjittered clip space to the
@@ -63,7 +69,8 @@ void main(uint2 id : SV_DispatchThreadID)
     const bool offScreen = (P[2].w & 1u) != 0 || any(previousUv < 0) || any(previousUv > 1);
 
     // parallax disocclusion
-    bool disoccluded = false;
+    bool disoccluded = false, canHoleFill = false;
+    float2 holeVector = 0;  // (pixels)
     if (!offScreen)
     {
         const float depth = linearDepth(previousZ);
@@ -90,6 +97,8 @@ void main(uint2 id : SV_DispatchThreadID)
         {
             const float anglePrecision = 2.0 * 3.14159265 / 32.0;
             const float2 holeVelocity = float2(cos(holeAngle), sin(holeAngle)) * holeLength;
+            canHoleFill = true;
+            holeVector = holeVelocity;
             const float velocityAngle = atan2(v[4].y, v[4].x), velocityLength = length(v[4]);
             const float lengthDifference = abs(holeLength - velocityLength) - 2.0;
             float angleDifference = abs(velocityAngle - holeAngle);
@@ -99,6 +108,12 @@ void main(uint2 id : SV_DispatchThreadID)
             mask = max(mask, lerp(cartesian, polar, saturate(min(holeLength, velocityLength) - 2.0)));
         }
         disoccluded = mask < 0.5;
+    }
+    const bool holeFilled = disoccluded && canHoleFill && P[4].z != UNX_NONE;
+    if (P[4].z != UNX_NONE)
+    {
+        RWTexture2D<float2> motionOut = ResourceDescriptorHeap[P[4].z];
+        motionOut[id] = holeFilled ? holeVector / float2(size) : vector;
     }
 
     float4 guide = float4(0, 0, 0, 0);
@@ -166,5 +181,5 @@ void main(uint2 id : SV_DispatchThreadID)
         RWTexture2D<float4> keptOut = ResourceDescriptorHeap[P[5].y];
         keptOut[id] = kept;
     }
-    maskOut[id] = float2(((offScreen ? 1.0 : 0.0) + (disoccluded ? 2.0 : 0.0) + (offKept ? 16.0 : 0.0)) / 255.0, edge);
+    maskOut[id] = float2(((offScreen ? 1.0 : 0.0) + (disoccluded ? 2.0 : 0.0) + (holeFilled ? 8.0 : 0.0) + (offKept ? 16.0 : 0.0)) / 255.0, edge);
 }

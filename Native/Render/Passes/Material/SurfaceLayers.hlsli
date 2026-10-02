@@ -8,8 +8,15 @@
 // Coverage: the channel value for the thin layers; snow d = max(0, exposure x weather snow depth + field snow change),
 // coverage (1 - exp(-d / SL_SNOW_EXTINCTION)) x slope factor (full up to SL_SNOW_FULL_DEG from up, none from
 // SL_SNOW_NONE_DEG: snow slides off steeper faces).
-// Wetness (the water film: a dielectric coat over the darkened substrate) comes with M's clearcoat layer (A9) and is not
-// applied here yet.
+// Wetness: a water film over the surface - the field's wet channel, and the weather's wetness where the rain reaches
+// (WeatherFrame::wetness x S's rain exposure: the one weather record). The film keeps light in: what the substrate
+// reflects (albedo a) meets the film's surface from inside and a share p of it returns to the substrate, so the wet
+// albedo is (1 - R) a (1 - p) / (1 - p a) (Lekner & Dorf 1988) with R = 0.02 the film's reflectance at normal incidence
+// and p = 1 - (1 - 0.066) / n^2 = 0.472 for water (n = 1.33; 0.066: the film's reflectance for diffuse light from
+// outside) - a = 0.3 becomes 0.18. The film's own surface is smooth: the lobe's roughness goes toward SL_WET_ROUGHNESS
+// with the square of the wetness (a damp surface keeps its relief, a soaked one shines). A metal's colour is its
+// surface reflection and stays. The film as its own layer (the clearcoat of ior 1.33, A9) is M's to add in the resolve;
+// this is the single-lobe form until then.
 // Layer materials [authoring values of measured order; constants until a game needs its own]: soot (charcoal albedo
 // 0.02-0.05), mineral dust (0.3-0.45), fresh blood (red ~0.3, green/blue ~0.01, liquid gloss), hoarfrost (0.7-0.8),
 // fresh snow (0.85-0.95 visible).
@@ -23,6 +30,8 @@
 #define SL_SNOW_EXTINCTION 0.01   // m: e-folding depth of the substrate's visibility under snow (visible light in fresh snow)
 #define SL_SNOW_FULL_DEG 40.0     // snow lies fully on faces up to this angle from up ...
 #define SL_SNOW_NONE_DEG 60.0     // ... and not at all from this one (angle of repose of dry snow)
+#define SL_WET_INTERNAL 0.472     // p: the share of the substrate's light the film's surface returns (water, n = 1.33)
+#define SL_WET_ROUGHNESS 0.08     // the lobe's roughness under a full film
 
 struct SurfaceLayerInputs
 {
@@ -64,11 +73,23 @@ void surfaceLayersApply(SurfaceLayerInputs in_, float3 world, float3 geometricNo
         c.pool = in_.surfacePool;
         st = surfaceStateAt(c, world);
     }
-    float snow = st.snow;
+    float snow = st.snow, wet = saturate(st.wet);
     if (in_.weather != 0xFFFFFFFFu)
     {
         const WeatherRecord w = weatherLoad(in_.weather);
-        if (w.snowDepth > 0) snow += rainExposure(in_.weather, world) * w.snowDepth;
+        if (w.snowDepth > 0 || w.wetness > 0)
+        {
+            const float exposure = rainExposure(in_.weather, world);
+            snow += exposure * w.snowDepth;
+            wet = max(wet, saturate(w.wetness) * exposure);
+        }
+    }
+    if (wet > 0)
+    {
+        const float3 a = m.baseColor;
+        const float3 film = 0.98f * a * (1.0f - SL_WET_INTERNAL) / (1.0f - SL_WET_INTERNAL * a);
+        m.baseColor = lerp(a, lerp(film, a, m.metallic), wet);
+        m.roughness = lerp(m.roughness, min(m.roughness, SL_WET_ROUGHNESS), wet * wet);
     }
     slBlend(m, saturate(st.blood), float3(0.30f, 0.012f, 0.010f), 0.2f, false, geometricNormal, geometricVariance);
     slBlend(m, saturate(st.scorch), float3(0.03f, 0.03f, 0.03f), 0.9f, false, geometricNormal, geometricVariance);

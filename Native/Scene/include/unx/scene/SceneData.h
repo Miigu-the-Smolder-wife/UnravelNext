@@ -290,6 +290,16 @@ enum InstanceFlags : uint32_t
     InstanceLightingChannelsShift = 4,
     InstanceLightingChannelsMask = 7u << 4,
     InstanceNoDecals = 1u << 7,  // the instance takes no projected decals (Unreal's bReceivesDecals off)
+    // Shadow casting per object (Unreal's primitive flags).
+    // ShadowOnly: with InstanceCastShadow, the instance is drawn into shadow maps and blocks the lights' shadow rays but
+    // is in no view, no reflection or GI ray and no card of the surface cache (a hidden primitive with bCastHiddenShadow;
+    // Unity's ShadowCastingMode.ShadowsOnly). Without InstanceCastShadow it is nowhere.
+    InstanceShadowOnly = 1u << 9,
+    // NoSelfShadow: the sun's shadow on the instance's own pixels leaves out the casters within the instance's bounds -
+    // itself - along the sun's direction; it still shades everything else and takes the shadows of casters beyond its
+    // bounds. The opaque view's sun slot only (S: ShadowSelfSlack.hlsl): not the coverage layer's fragments, the local
+    // lights' pages or their shadow rays.
+    InstanceNoSelfShadow = 1u << 8,
 };
 // The instance's lighting channels (3 bits) from its flags, and flags with them set.
 constexpr uint32_t instanceLightingChannels(uint32_t flags) { return ((flags >> InstanceLightingChannelsShift) & 7u) ^ 1u; }
@@ -414,6 +424,12 @@ struct CloudLayer
     float sigmaMax = 0.04f;                         // peak extinction (1/m)
     float albedo = 0.99f;                           // single-scattering albedo
     float windX = 0, windZ = 0;                     // m/s: the layer's drift
+    // the cirrus sheet (CloudLayerDesc::cirrus*; file block "CIRR", written only with a coverage): thin ice cloud at one
+    // altitude far above the layer, with or without the layer
+    float cirrusCoverage = 0;                       // [0, 1]; 0: none
+    float cirrusAltitude = 9000;                    // m
+    float cirrusOpticalDepth = 0.15f;               // vertical, where its map is full
+    float cirrusWindX = 0, cirrusWindZ = 0;         // m/s
 };
 struct Fog
 {
@@ -427,6 +443,10 @@ struct Fog
     float skyAmount = 1;           // [0, 1]: how much of the fog sky pixels take
     float noiseAmount = 0.3f;      // [0, 1]: the density's variation about its mean
     float noiseScale = 20;         // m: the variation's largest features
+    // a second layer of the same medium (FogDesc::density2; file block "FGL2", written only with a density)
+    float density2 = 0;            // extinction (1/m) at 'height2'; 0: none
+    float heightFalloff2 = 0.02f;
+    float height2 = 0;             // m (scene y)
 };
 // Extra fog inside an ellipsoid or a box (mist in a hollow, steam): seen within the fog's near volume.
 struct FogVolume
@@ -439,6 +459,12 @@ struct FogVolume
     float heightFalloff = 0;       // the density halves this many times from the volume's bottom to its top
     float edge = 0.3f;             // (0, 1]: the outer share of the volume over which the density fades to 0
     float3 albedo{ 1, 1, 1 };
+    // rising steam (unx/render/FrameContext.h FogVolumeDesc: the same fields; file block "FVST", written only for
+    // volumes that set any of them)
+    float sourcePlane = 0;         // [0, 0.95]: the height inside the volume the medium rises from
+    float riseSpeed = 0;           // m/s
+    float turbulence = 0;          // [0, 1]
+    float turbulenceScale = 0.5f;  // m
 };
 
 struct Camera

@@ -678,6 +678,17 @@ void writeAttributes(Writer& w, const Scene& s)
 // blocks of the file (after the material inputs and the vertex attributes).
 constexpr uint32_t kCloudTag = 0x53444C43u;  // "CLDS"
 constexpr uint32_t kFogTag = 0x53474F46u;    // "FOGS"
+// "CIRR", after CLDS and before FOGS, written when the scene has a cirrus sheet (cirrusCoverage > 0): cirrusCoverage,
+// cirrusAltitude, cirrusOpticalDepth, cirrusWindX, cirrusWindZ (5 floats).
+constexpr uint32_t kCirrusTag = 0x52524943u;  // "CIRR"
+// "FVST", after FOGS, written when a fog volume has steam values (source plane, rise speed, turbulence): u64 count, then
+// per such volume its index (u32), sourcePlane, riseSpeed, turbulence, turbulenceScale. A scene without them keeps the
+// bytes it had.
+constexpr uint32_t kFogSteamTag = 0x54535646u;  // "FVST"
+// "FGL2", after FOGS and before FVST, written when the fog has a second layer (density2 > 0): density2, heightFalloff2,
+// height2 (3 floats).
+constexpr uint32_t kFogLayerTag = 0x324C4746u;  // "FGL2"
+bool hasSteam(const FogVolume& v) { return v.sourcePlane != 0 || v.riseSpeed != 0 || v.turbulence != 0; }
 
 bool anyClouds(const Scene& s) { return s.clouds.coverage > 0; }
 bool anyFog(const Scene& s) { return s.fog.enabled || !s.fogVolumes.empty(); }
@@ -759,7 +770,42 @@ std::vector<uint8_t> serialize(const Scene& s)
     if (anyInputs(s)) writeInputs(w, s);
     if (anyAttributes(s)) writeAttributes(w, s);
     if (anyClouds(s)) writeClouds(w, s);
+    if (s.clouds.cirrusCoverage > 0)
+    {
+        w.pod(kCirrusTag);
+        w.pod(s.clouds.cirrusCoverage);
+        w.pod(s.clouds.cirrusAltitude);
+        w.pod(s.clouds.cirrusOpticalDepth);
+        w.pod(s.clouds.cirrusWindX);
+        w.pod(s.clouds.cirrusWindZ);
+    }
     if (anyFog(s)) writeFog(w, s);
+    if (s.fog.density2 > 0)
+    {
+        w.pod(kFogLayerTag);
+        w.pod(s.fog.density2);
+        w.pod(s.fog.heightFalloff2);
+        w.pod(s.fog.height2);
+    }
+    {
+        uint64_t steam = 0;
+        for (const FogVolume& v : s.fogVolumes) steam += hasSteam(v) ? 1 : 0;
+        if (steam != 0)
+        {
+            w.pod(kFogSteamTag);
+            w.pod(steam);
+            for (size_t i = 0; i < s.fogVolumes.size(); ++i)
+            {
+                const FogVolume& v = s.fogVolumes[i];
+                if (!hasSteam(v)) continue;
+                w.pod<uint32_t>((uint32_t)i);
+                w.pod(v.sourcePlane);
+                w.pod(v.riseSpeed);
+                w.pod(v.turbulence);
+                w.pod(v.turbulenceScale);
+            }
+        }
+    }
     return std::move(w.out);
 }
 
@@ -1050,6 +1096,16 @@ Scene deserialize(const std::vector<uint8_t>& bytes)
         c.windZ = r.pod<float>();
         tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
     }
+    if (tag == kCirrusTag)
+    {
+        CloudLayer& c = s.clouds;
+        c.cirrusCoverage = r.pod<float>();
+        c.cirrusAltitude = r.pod<float>();
+        c.cirrusOpticalDepth = r.pod<float>();
+        c.cirrusWindX = r.pod<float>();
+        c.cirrusWindZ = r.pod<float>();
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
     if (tag == kFogTag)
     {
         Fog& f = s.fog;
@@ -1076,6 +1132,28 @@ Scene deserialize(const std::vector<uint8_t>& bytes)
             v.heightFalloff = r.pod<float>();
             v.edge = r.pod<float>();
             v.albedo = r.pod<float3>();
+        }
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
+    if (tag == kFogLayerTag)
+    {
+        s.fog.density2 = r.pod<float>();
+        s.fog.heightFalloff2 = r.pod<float>();
+        s.fog.height2 = r.pod<float>();
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
+    if (tag == kFogSteamTag)
+    {
+        const uint64_t count = r.pod<uint64_t>();
+        for (uint64_t i = 0; i < count; ++i)
+        {
+            const uint32_t index = r.pod<uint32_t>();
+            if (index >= s.fogVolumes.size()) fail("unxscene: FVST names fog volume %u of %zu", index, s.fogVolumes.size());
+            FogVolume& v = s.fogVolumes[index];
+            v.sourcePlane = r.pod<float>();
+            v.riseSpeed = r.pod<float>();
+            v.turbulence = r.pod<float>();
+            v.turbulenceScale = r.pod<float>();
         }
         tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
     }
@@ -1373,20 +1451,26 @@ void validate(const Scene& s)
                             std::isfinite(c.albedo) && std::isfinite(c.windX) && std::isfinite(c.windZ);
         if (!finite || c.coverage < 0 || c.coverage > 1 || (c.coverage > 0 && !(c.topAltitude > c.baseAltitude && c.sigmaMax > 0 && c.albedo >= 0 && c.albedo <= 1)))
             fail("clouds: coverage in [0, 1]; with coverage: base altitude < top altitude, sigmaMax > 0, albedo in [0, 1]");
+        const bool cirrusFinite = std::isfinite(c.cirrusCoverage) && std::isfinite(c.cirrusAltitude) && std::isfinite(c.cirrusOpticalDepth) &&
+                                  std::isfinite(c.cirrusWindX) && std::isfinite(c.cirrusWindZ);
+        if (!cirrusFinite || c.cirrusCoverage < 0 || c.cirrusCoverage > 1 || (c.cirrusCoverage > 0 && !(c.cirrusAltitude > 0 && c.cirrusOpticalDepth > 0)))
+            fail("clouds: the cirrus sheet's coverage in [0, 1]; with coverage: altitude and optical depth > 0");
         const Fog& f = s.fog;
         const bool fogFinite = std::isfinite(f.density) && std::isfinite(f.heightFalloff) && std::isfinite(f.height) && std::isfinite(f.albedo.x) &&
                                std::isfinite(f.albedo.y) && std::isfinite(f.albedo.z) && std::isfinite(f.phaseG) && std::isfinite(f.startDistance) &&
                                std::isfinite(f.skyAmount) && std::isfinite(f.noiseAmount) && std::isfinite(f.noiseScale);
         if (!fogFinite || f.density < 0 || f.heightFalloff < 0 || !(f.phaseG > -1 && f.phaseG < 1) || f.startDistance < 0 || f.skyAmount < 0 || f.skyAmount > 1 ||
-            f.noiseAmount < 0 || f.noiseAmount > 1 || (f.enabled && f.noiseScale < 1))
-            fail("fog: density and falloff >= 0, phase g in (-1, 1), start distance >= 0, sky amount and noise amount in [0, 1], noise scale >= 1 m");
+            f.noiseAmount < 0 || f.noiseAmount > 1 || (f.enabled && f.noiseScale < 1) || !(f.density2 >= 0) || !(f.heightFalloff2 >= 0) || !std::isfinite(f.height2) ||
+            !std::isfinite(f.density2) || !std::isfinite(f.heightFalloff2))
+            fail("fog: density and falloff >= 0 (both layers), phase g in (-1, 1), start distance >= 0, sky amount and noise amount in [0, 1], noise scale >= 1 m");
         for (size_t i = 0; i < s.fogVolumes.size(); ++i)
         {
             const FogVolume& v = s.fogVolumes[i];
             const float values[] = { v.centre.x, v.centre.y, v.centre.z, v.halfSize.x, v.halfSize.y, v.halfSize.z, v.yaw, v.density, v.heightFalloff, v.edge,
-                                     v.albedo.x, v.albedo.y, v.albedo.z };
+                                     v.albedo.x, v.albedo.y, v.albedo.z, v.sourcePlane, v.riseSpeed, v.turbulence, v.turbulenceScale };
             bool ok = v.shape <= 1 && v.density >= 0 && v.heightFalloff >= 0 && v.edge > 0 && v.edge <= 1 && v.halfSize.x > 0 && v.halfSize.y > 0 && v.halfSize.z > 0 &&
-                      v.albedo.x >= 0 && v.albedo.x <= 1 && v.albedo.y >= 0 && v.albedo.y <= 1 && v.albedo.z >= 0 && v.albedo.z <= 1;
+                      v.albedo.x >= 0 && v.albedo.x <= 1 && v.albedo.y >= 0 && v.albedo.y <= 1 && v.albedo.z >= 0 && v.albedo.z <= 1 && v.sourcePlane >= 0 &&
+                      v.sourcePlane <= 0.95f && v.turbulence >= 0 && v.turbulence <= 1 && v.turbulenceScale > 0;
             for (float x : values) ok = ok && std::isfinite(x);
             if (!ok) fail("fog volume %zu: finite values, half sizes > 0, shape 0 or 1, density and height falloff >= 0, edge in (0, 1], albedo in [0, 1]", i);
         }

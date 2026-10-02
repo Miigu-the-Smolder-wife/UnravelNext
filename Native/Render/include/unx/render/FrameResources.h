@@ -72,6 +72,9 @@ struct ViewResources
     TextureRef materialWord;       // R32_UINT: material 16 | metallic 8 | layer roughness 8 [M]
                                    // (MaterialInternal.hlsli mPackMaterialWord)
     TextureRef shadowVisibility;   // R32_UINT, 4 light slots x 8 bit (7.3)                 [S]
+                                   // (in a frame with glass shadow casters - shadow.vsm.translucent_tint - twice the
+                                   //  view's height: the rows below the view's are what they let through at each
+                                   //  pixel, slot 0 x its luminance; ShadowVisibility.hlsli shadowSunTintChroma)
     TextureRef shadowOverflowTiles;  // R32_UINT ceil(W/8) x ceil(H/8) (main view, 7.3, v1.20): [S]
                                      // 0 = no shadow-casting light past the third in the tile,
                                      // 0xFFFFFFFF = over capacity (fallback list), else 1 + the
@@ -149,6 +152,8 @@ struct ViewResources
     TextureRef particleLayer;      // RGBA16F, 1/4 resolution: premultiplied radiance + transmittance   [FX]
     TextureRef particleDepthRange; // RG16F, 1/4 resolution: the layer's depth range per texel          [FX]
     BufferRef particleEdges;       // raw: full-resolution edge pixels of the layer + count              [FX]
+    TextureRef particleMotion;     // RG16F, 1/4 resolution: the particles' travel on screen since the   [FX]
+                                   // previous frame (pixels; weighted by what each adds to the pixel)
     // Heat haze (FEATURES_GAME 0.A-8; E's Passes/Volume; invalid = none): M re-reads the HDR target at p + D x (1 - z_p / z_b)
     // for pixels behind the haze (z_b: the pixel's view depth, z_p: distortionDepth's view depth).
     TextureRef distortionOffset;   // RG16F, ceil(W/4) x ceil(H/4): deflection D in full-resolution pixels (far-field    [E]
@@ -163,6 +168,7 @@ struct ViewResources
     // pass both to decalApply (Decal.hlsli).
     BufferRef decalFrames;         // StructuredBuffer<DecalFrame>: the frame's decals, camera-relative               [E]
     BufferRef decalTiles;          // raw: 16 x 16 px tile lists (<= 16 decals per tile, header + status)             [E]
+    bool decalEmissive = false;    // a live decal adds emission: M's resolve writes the emissive texture             [E]
     TextureRef color;              // final colour target of this view                      [M]
     // The temporal upscale's output (output resolution, RGBA16F: rgb = linear radiance x exposure before the post chain's
     // encoding, a = history weight; Upscale.cpp), for captures of the upscaled image; invalid when the frame renders at
@@ -221,6 +227,9 @@ struct FogView
     float farEndM = 0;
     float farM = 0, k = 0, b = 0;  // slice(depth) = log2(depth k + 1) b
     float density = 0, falloff = 0, height = 0, g = 0, start = 0;  // extinction (1/m) at height, its halving per metre, m, HG g, m
+    float density2 = 0, falloff2 = 0, height2 = 0;                 // the second layer (FogDesc::density2, or the rain's veil; 0: none)
+    bool rainVeil = false;         // the second layer is the rain's (atmosphere.fog.rain_veil)
+    bool farSkyLight = false;      // atmosphere.fog.far_sky_light (FogIntegrate.hlsl: the far slices' ambient light is the sky's)
     float albedo[3] = { 1, 1, 1 };
     float skyAmount = 0, historyWeight = 0.9f, shadowTexelsPerCell = 1;
     bool indirect = true;
@@ -302,6 +311,9 @@ struct FrameResources
     // relative to (the main view's camera) - a reader in another view adds its camera's offset from it.  [E]
     TextureRef hairDensity, hairDensityCoarse;
     BufferRef hairDensityParams;
+    // The sun's particle transmittance map (FX; Passes/FX/ParticleShadow.hlsli fxParticleShadow; invalid: none): its
+    // parameters (raw, 64 B: the reader's handle) and its texels (raw; a reader declares both).
+    BufferRef particleShadowParams, particleShadowMap;
     float3 hairOrigin{};
     // A3 FX particle lights (v1.81, render B's request): the whole scene light buffer (gpu::Light, stride 80; the FX tail at
     // [lightCount, lightCount + F)) and the count word (StructuredBuffer<uint>, element 0 = F), imported once per frame by

@@ -12,7 +12,8 @@
 // its indirect light from the translucency volume or the radiance cache's irradiance probes (LumenHitIndirect.hlsli;
 // lumen.hit_indirect - the reference's invalid surface-cache sample has none) - or, with gi.lumen_hit_fallback, from
 // the world cache instead. A ray that meets an analytic area light's proxy returns 0 (M shades
-// those lights; the proxy still occludes). A miss returns the sky. A surface hit adds the skylight leaking the card
+// those lights; the proxy still occludes). A hit on a proxy of the far field (raytracing.far_field; RayTracing/
+// HitFarField.hlsli) takes the proxy's colour under the sun and the sky. A miss returns the sky. A surface hit adds the skylight leaking the card
 // frame names (lumen.skylight_leaking, LumenHitIndirect.hlsli lhiSkyLeaking; 0 by default).
 // E's grooms (RayTracing/HitHair.hlsli; raytracing.hair): the ray's first fibre in the hair density volume, where it lies
 // before the hit, is the hit - the groom's proxy, lit by the sun's shadow ray and one local-light sample; the bounce
@@ -37,6 +38,7 @@
 // P[11].w = first trace row of this dispatch (the pass splits the atlas into bands of at most gi.lumen_rays_per_dispatch
 // rays: each dispatch's work is bounded by its ray count, whatever the resolution).
 #define GI_SKY_FOG_RETURN  // (GiSky.hlsli: the sky's share of the sun's light the fog scatters - atmosphere.fog.sun_through_fog)
+#define RT_SHADOW_TRANSMITTANCE  // (the hits' shadow rays take what the Glass they cross leaves of the light: RayShaders.hlsli)
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitDecals.hlsli"
@@ -49,6 +51,7 @@
 #include "Passes/GI/LumenHitIndirect.hlsli"
 #include "RayTracing/HitLocalSample.hlsli"
 #include "RayTracing/HitHair.hlsli"
+#include "RayTracing/HitFarField.hlsli"
 
 float lgBias(float3 p) { return 1e-3 + 2e-4 * distance(p, g_cameraPosition); }
 // The world ray after a screen trace starts this much before the point the screen walk reached (m; Unreal's hardware
@@ -121,7 +124,7 @@ void LgTraceGen()
         }
         if (coverage.valid) r.TMax = min(r.TMax, coverage.minTraceDistance);
     }
-    const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_GI | RT_MASK_EMITTER);
+    const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_GI | RT_MASK_EMITTER | RT_MASK_FAR);
     const uint seed = giRandom(coord.x * 9781u + coord.y * 6271u + lgFrame() * 26699u);
 
     float3 radiance = 0;
@@ -161,6 +164,13 @@ void LgTraceGen()
     {
         isHit = true;
         distanceToHit = hit.t;
+    }
+    else if (hit.instance == RT_INSTANCE_FAR)
+    {
+        // a proxy of the far field (raytracing.far_field): distant instances that are not in the near structure
+        isHit = true;
+        distanceToHit = hit.t;
+        radiance = rtFarRadiance(scene, hit, r.Origin, r.Direction, (P[3].w & 16) == 0);
     }
     else
     {
@@ -251,8 +261,10 @@ void LgTraceGen()
                     sr.Direction = l;
                     sr.TMin = 0;
                     sr.TMax = giRayLength();
-                    L.sunIlluminance = e0;
-                    L.sunVisibility = rtVisible(scene, sr, RT_MASK_HIT_SHADOW) ? 1.0 : 0.0;
+                    // (the sun through the Glass on the way: what the panes leave of it - RayShaders.hlsli rtShadowTransmittance)
+                    const float3 through = rtShadowTransmittance(scene, sr, RT_MASK_HIT_SHADOW | RT_MASK_FAR);
+                    L.sunIlluminance = e0 * through;
+                    L.sunVisibility = any(through > 0) ? 1.0 : 0.0;
                 }
             }
             // a hit without cards: one local-light sample (HitLocalSample.hlsli; experiment 128: none, as the reference)

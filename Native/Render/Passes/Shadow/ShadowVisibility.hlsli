@@ -9,8 +9,22 @@
 #include "Passes/Shadow/VsmSample.hlsli"
 #include "Passes/Shadow/VsmLocalSample.hlsli"
 #include "Passes/Shadow/VsmLayer.hlsli"
+#include "Passes/Shadow/VsmTint.hlsli"
 
 float shadowSlot(uint packed, uint slot) { return ((packed >> (8 * slot)) & 0xFFu) / 255.0; }
+
+// The colour of the sun through S's glass casters at a view pixel, over its luminance (shadow.vsm.translucent_tint).
+// Slot 0 holds the visibility x that luminance; the view's visibility texture then has a second half below the view's
+// height with the transmittance itself (VsmTint.hlsli vsmTintPack). The sun's light at the pixel is E x slot 0 x this.
+// 1 for a texture without the half.
+float3 shadowSunTintChroma(Texture2D<uint> visibility, uint2 pixel)
+{
+    uint width, height;
+    visibility.GetDimensions(width, height);
+    if (height < 2 * g_viewHeight) return 1;
+    const float3 t = vsmTintUnpack(visibility[pixel + uint2(0, g_viewHeight)]);
+    return t / max(vsmTintLuminance(t), 1e-3);
+}
 
 // This frame's virtual shadow maps (Docs/Design/Requests/20260925_S_sun_visibility_at.md): bindless indices of the page
 // table, the page atlas (pool: an SRV of FrameResources::vsmAtlas; v1.43 one path, the lookups read the atlas SRV from
@@ -166,6 +180,25 @@ float shadowSunTransmittanceAt(ShadowSrvs s, float3 worldPos, float footprint, f
     return vsmLayerTransmittance(layers, c.poolPagesX * c.poolPagesY, vsmEntry(r, page, k), page, ls.xy, k, reach, ls.z);
 }
 
+// What S's glass casters let through to a world point, as a luminance (shadow.vsm.translucent_tint, VsmTint.hlsli; 1
+// without them): the factor of a sun lookup that carries no colour. The views' slot 0 and the coverage fragments' sun
+// have it. shadowSunVisibilityAt and shadowSunClassifyAt (ray hits, water, the translucent layer) multiply it only in a
+// kernel compiled with SHADOW_SUN_TINT_AT 1: R's inline trace kernel stands at the DXIL limit without it, so by default
+// those lookups see the light past a glass caster whole.
+#ifndef SHADOW_SUN_TINT_AT
+#define SHADOW_SUN_TINT_AT 0
+#endif
+float shadowSunTintLuminanceAt(ShadowSrvs s, float3 worldPos, float footprint)
+{
+    VsmResources r;
+    r.table = ResourceDescriptorHeap[s.pageTable];
+    r.pool = ResourceDescriptorHeap[vsmAtlasSrv(s.constants)];
+    r.blocks = ResourceDescriptorHeap[s.blocks];
+    r.searchBound = ResourceDescriptorHeap[s.searchBound];
+    r.cbv = s.constants;
+    return vsmTintLuminance(vsmSunTint(r, worldPos, footprint));
+}
+
 // The 3 x 3 pages around 'centre' on level L are all resident: the nine table words read together (a short-circuit loop
 // waited for each read before the next; the answer is the same - shadow.vsm.use_stats counts all nine as read).
 // SHADOW_RESIDENCY_LOOP 1 before this file: the short-circuit loop - the same answer in 4 KB less code, for a path where
@@ -237,7 +270,11 @@ float shadowSunVisibilityAt(ShadowSrvs s, float3 worldPos, float3 normal, float 
     uint path;
     // Opaque casters (height field) times the thin casters' transmittance (v1.26).
     return vsmSunVisibility(r, worldPos, normal, vsmTexel(level), c.tanSunRadius, c.searchTaps, c.filterTaps, path) *
-           shadowSunTransmittanceAt(s, worldPos, footprint, footprint);
+           shadowSunTransmittanceAt(s, worldPos, footprint, footprint)
+#if SHADOW_SUN_TINT_AT
+           * vsmTintLuminance(vsmSunTint(r, worldPos, footprint))
+#endif
+        ;
 }
 
 // shadowSunVisibilityAt in two steps, for callers that defer the penumbra filter to a pass of their own (R's reflection
@@ -279,6 +316,9 @@ ShadowSunClassified shadowSunClassifyAt(ShadowSrvs s, float3 worldPos, float3 no
     const uint cls = vsmSunClassify(r, rc, texel, c.tanSunRadius, o.k, o.reach, path);
     // (umbra: visibility 0 whatever the thin casters pass; its transmittance is read by nobody)
     if (cls != VSM_REGION_UMBRA) o.transmittance = shadowSunTransmittanceAt(s, worldPos, footprint, footprint);
+#if SHADOW_SUN_TINT_AT
+    if (cls != VSM_REGION_UMBRA) o.transmittance *= vsmTintLuminance(vsmSunTint(r, worldPos, footprint));
+#endif
     o.penumbra = cls != VSM_REGION_LIT && cls != VSM_REGION_UMBRA;
     o.visibility = cls == VSM_REGION_LIT ? o.transmittance : 0;
     return o;
