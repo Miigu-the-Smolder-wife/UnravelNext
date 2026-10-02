@@ -3,7 +3,8 @@
 // scattered inside it reaches the camera through what lies in front: with extinction s and source S (per metre) over a
 // length d, the slice adds T x S (1 - e^(-s d)) / s and T becomes T e^(-s d) (the integral of a homogeneous slab: no
 // energy is lost to the slice's own thickness). Stored per slice: rgb = radiance in-scattered between the camera and
-// the slice's far face (nits), a = transmittance to that face.
+// the slice's far face x the view's exposure (the scatter volume's sources are exposed: FogVolume.hlsli), a =
+// transmittance to that face.
 // Past the volume's end the integration goes on through zFar slices (fogFarDepth) with the exponential height fog in
 // closed form (Fog.hlsli fogOpticalDepth) and the column's far source (nits per unit of optical depth): the sun through
 // the phase function, outside the casters' shadow as the air volume found it for its own slices there (the fraction of
@@ -67,7 +68,7 @@ void main(uint3 id : SV_DispatchThreadID)
         const float3 source = s.a > 0 ? max(s.rgb, 0.0) : float3(0, 0, 0);
         L += T * (sigma > 1e-7 ? source * ((1 - t) / sigma) : source * d);
         T *= t;
-        integrated[uint3(id.xy, z)] = float4(L, T);
+        integrated[uint3(id.xy, z)] = float4(min(L, 65504.0), T);
     }
     // the fog beyond the volume
     const FogMedium fog = fogMedium(uint4(1, 0, 0, 0), P[2], P[3]);
@@ -85,6 +86,8 @@ void main(uint3 id : SV_DispatchThreadID)
     if (P[6].z != 0xFFFFFFFFu) fromAround = fog.albedo * ltvInscatter(P[6].z, p, dir, fog.g);
     if (any(isnan(fromSun)) || any(isinf(fromSun))) fromSun = 0;
     if (any(isnan(fromAround)) || any(isinf(fromAround))) fromAround = 0;
+    fromSun *= g_exposure;  // (exposed, as the cells' sources)
+    fromAround *= g_exposure;
     const bool farShadows = P[6].x != 0xFFFFFFFFu && any(fromSun > 0);
     FroxelGrid fg = (FroxelGrid)0;
     if (farShadows) fg = froxelGrid(P[6].y);
@@ -107,6 +110,6 @@ void main(uint3 id : SV_DispatchThreadID)
         const float3 farSource = fromSun * lit + fromAround;
         L += T * farSource * (1 - t);
         T *= t;
-        integrated[uint3(id.xy, g.z + i)] = float4(L, T);
+        integrated[uint3(id.xy, g.z + i)] = float4(min(L, 65504.0), T);
     }
 }
