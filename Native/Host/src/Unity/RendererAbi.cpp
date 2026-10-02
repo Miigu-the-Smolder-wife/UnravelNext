@@ -10,6 +10,7 @@
 #include "IUnityGraphicsD3D12.h"
 #include "IUnityInterface.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -1779,5 +1780,71 @@ UNX_API int32_t UNX_CALL UnxFrameSetPoolWeather(UnxRenderer r, const UnxPoolWeat
             in[i] = { d.pool, d.steamDensity, d.steamHeight, d.steamRiseSpeed, d.steamTurbulence, d.rainExposure };
         }
         find(r)->setPoolWeather(in);
+    });
+}
+
+// ---- Frame pacing data: the GPU frame time, the main view's resolution with the dynamic resolution's state, the GPU
+// time by pass group (the pass names' part before the first '.').
+UNX_API int32_t UNX_CALL UnxFrameGetStatistics(UnxRenderer r, UnxFrameStatistics* statistics)
+{
+    return call([&] {
+        requireStruct(statistics, "UnxFrameStatistics");
+        const auto renderer = find(r);
+        const FrameStats s = renderer->latestStats();
+        const FramePacing p = renderer->framePacing();
+        statistics->frameIndex = s.frameIndex;
+        statistics->gpuMs = s.gpuMs;
+        statistics->cpuRecordMs = s.cpuRecordMs;
+        statistics->cpuSubmitMs = s.cpuSubmitMs;
+        statistics->gpuRenderWidth = s.renderWidth;
+        statistics->gpuRenderHeight = s.renderHeight;
+        statistics->outputWidth = p.outputWidth;
+        statistics->outputHeight = p.outputHeight;
+        statistics->renderWidth = p.renderWidth;
+        statistics->renderHeight = p.renderHeight;
+        statistics->dynamicResolution = p.dynamicResolution ? 1u : 0u;
+        statistics->resolutionScale = p.outputHeight ? (float)p.renderHeight / (float)p.outputHeight : 1.0f;
+        statistics->dynamicTargetMs = p.targetMs;
+        statistics->dynamicMeasuredMs = p.controllerMs;
+        statistics->minRenderHeight = p.minRenderHeight;
+        statistics->maxRenderHeight = p.maxRenderHeight;
+        statistics->passes = s.passes;
+        // the groups, the largest time first; the ones beyond the table summed into its last entry
+        struct Group
+        {
+            std::string name;
+            double ms = 0;
+            uint32_t passes = 0;
+        };
+        std::vector<Group> groups;
+        for (const auto& [name, ms] : s.passMs)
+        {
+            const std::string prefix = name.substr(0, name.find('.'));
+            auto at = std::find_if(groups.begin(), groups.end(), [&](const Group& g) { return g.name == prefix; });
+            if (at == groups.end()) at = groups.insert(groups.end(), Group{ prefix });
+            at->ms += ms;
+            ++at->passes;
+        }
+        std::stable_sort(groups.begin(), groups.end(), [](const Group& a, const Group& b) { return a.ms > b.ms; });
+        if (groups.size() > UNX_FRAME_STATISTICS_GROUPS)
+        {
+            Group other{ "other" };
+            for (size_t i = UNX_FRAME_STATISTICS_GROUPS - 1; i < groups.size(); ++i)
+            {
+                other.ms += groups[i].ms;
+                other.passes += groups[i].passes;
+            }
+            groups.resize(UNX_FRAME_STATISTICS_GROUPS - 1);
+            groups.push_back(other);
+        }
+        statistics->groupCount = (uint32_t)groups.size();
+        std::memset(statistics->groups, 0, sizeof statistics->groups);
+        for (size_t i = 0; i < groups.size(); ++i)
+        {
+            UnxFrameStatisticsGroup& out = statistics->groups[i];
+            std::memcpy(out.name, groups[i].name.data(), std::min(groups[i].name.size(), sizeof out.name - 1));
+            out.gpuMs = (float)groups[i].ms;
+            out.passes = groups[i].passes;
+        }
     });
 }

@@ -9,6 +9,7 @@
 // P[0] = { colour SRV (STEP=0: full resolution, exposed linear; STEP=1: the half resolution, a = radius),
 //          depth SRV (STEP=0), destination UAV (RGBA16F: rgb, a = radius), 0 }
 // P[1] = { source width, height, destination width, height }, P[2] = the lens (4 floats, DdofCommon.hlsli)
+// P[3] = { asuint(depth blur radius), asuint(depth blur exponent x near plane), 0, 0 } (STEP=0; DdofCommon.hlsli ddofCoc)
 #include "Bindless.hlsli"
 #include "Passes/Shading/DdofCommon.hlsli"
 
@@ -28,11 +29,12 @@ void main(uint2 id : SV_DispatchThreadID)
 #if STEP == 0
     Texture2D<float> depth = ResourceDescriptorHeap[P[0].y];
     const float4 lens = asfloat(P[2]);
+    const float2 depthBlur = asfloat(P[3].xy);
     [unroll] for (uint i = 0; i < 4; ++i)
     {
         const int2 p = min(int2(2 * id) + kDdofSquare[i], last);
         colour[i] = source.Load(int3(p, 0)).rgb;
-        coc[i] = ddofCoc(depth.Load(int3(p, 0)), lens);
+        coc[i] = ddofCoc(depth.Load(int3(p, 0)), lens, depthBlur);
     }
     float3 c;
     float radius;

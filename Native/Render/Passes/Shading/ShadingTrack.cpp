@@ -1,4 +1,5 @@
 // Track entry point of M (shading) (INTERFACES_KO.md 5.2). Signatures fixed by Tracks.h.
+#include "unx/shading/DynamicResolution.h"
 #include "unx/shading/Exposure.h"
 #include "unx/shading/Post.h"
 #include "unx/render/Tracks.h"
@@ -24,6 +25,13 @@ float autoExposureEv100(TrackState& state, Device& device, const QualityConfig& 
 {
     return shading::autoExposureEv100(state, device, quality, frame, framesInFlight);
 }
+
+// M: dynamic resolution (DynamicResolution.cpp).
+uint32_t dynamicResolutionHeight(TrackState& state, const QualityConfig& quality, const FrameContext& frame, uint32_t outputHeight, uint32_t maxHeight)
+{
+    return shading::dynamicResolutionHeight(state, quality, frame, outputHeight, maxHeight);
+}
+DynamicResolutionStatus dynamicResolutionStatus(TrackState& state) { return shading::dynamicResolutionStatus(state); }
 
 std::vector<RenderGraph::BandedPass> shadingPasses(FramePassContext& fc, ViewResources& view)
 {

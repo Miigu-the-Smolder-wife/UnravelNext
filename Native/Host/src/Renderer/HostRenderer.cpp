@@ -8,6 +8,7 @@
 #include "unx/render/GpuProfiler.h"
 #include "unx/render/RenderGraph.h"
 #include "unx/render/Shaders.h"
+#include "unx/render/Tracks.h"
 #include "unx/metrics/Metrics.h"
 #include "unx/reference/GpuPathTracer.h"
 
@@ -137,6 +138,7 @@ HostRenderer::HostRenderer(const HostRendererOptions& options) : m_options(optio
     m_slotFence.assign(options.framesInFlight, std::array<uint64_t, 3>{});
     m_slotHostFrame.assign(options.framesInFlight, UINT64_MAX);
     m_slotGraph.assign(options.framesInFlight, {});
+    m_slotRenderSize.assign(options.framesInFlight, {});
     m_standalone = std::make_unique<Standalone>();
 }
 
@@ -1869,6 +1871,8 @@ uint32_t HostRenderer::beginFrame(const FramePacket& p)
         std::lock_guard lock(m_mutex);
         m_stats.frameIndex = m_slotHostFrame[t->frame % m_options.framesInFlight];
         m_stats.graph = m_slotGraph[t->frame % m_options.framesInFlight];
+        m_stats.renderWidth = m_slotRenderSize[t->frame % m_options.framesInFlight][0];
+        m_stats.renderHeight = m_slotRenderSize[t->frame % m_options.framesInFlight][1];
         for (uint32_t q = 0; q < 2; ++q) m_stats.queues[q] = { t->queues[q].lists, t->queues[q].headMs, t->queues[q].tailMs, t->queues[q].gapMs };
         m_stats.gpuMs = t->gpuFrameMs;
         m_stats.passes = (uint32_t)t->passes.size();
@@ -2123,7 +2127,22 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     draw.triangles.insert(draw.triangles.end(), p.debugTriangles.begin(), p.debugTriangles.end());
     draw.glyphs.insert(draw.glyphs.end(), p.debugGlyphs.begin(), p.debugGlyphs.end());
     if (photoFrame(fc, p, output)) return;  // B11: the photo's image instead of the scene
-    m_frameRenderer->record(*m_graph, fc, output);
+    const ViewResources recorded = m_frameRenderer->record(*m_graph, fc, output);
+    {
+        // UnxFrameGetStatistics: the main view's sizes in this frame and what the dynamic resolution decided for it
+        const tracks::DynamicResolutionStatus dynamic = tracks::dynamicResolutionStatus(m_frameRenderer->trackState());
+        m_slotRenderSize[fc.frameIndex % m_options.framesInFlight] = { recorded.view.width, recorded.view.height };
+        std::lock_guard lock(m_mutex);
+        m_pacing.outputWidth = fc.mainView.width;
+        m_pacing.outputHeight = fc.mainView.height;
+        m_pacing.renderWidth = recorded.view.width;
+        m_pacing.renderHeight = recorded.view.height;
+        m_pacing.dynamicResolution = dynamic.active;
+        m_pacing.targetMs = dynamic.targetMs;
+        m_pacing.controllerMs = dynamic.averageMs;
+        m_pacing.minRenderHeight = dynamic.active ? dynamic.minHeight : recorded.view.height;
+        m_pacing.maxRenderHeight = dynamic.active ? dynamic.maxHeight : recorded.view.height;
+    }
     {
         // W2: the basins' statistics (read back by the record, framesInFlight records behind) for UnxPoolStatsLatest
         std::vector<std::pair<uint32_t, water::PoolStats>> stats;
@@ -2766,5 +2785,11 @@ void HostRenderer::setDisplayEncoding(int32_t encoding, float paperWhiteNits)
     std::lock_guard lock(m_mutex);
     m_displayEncoding = encoding;
     m_displayPaperWhite = paperWhiteNits;
+}
+
+FramePacing HostRenderer::framePacing() const
+{
+    std::lock_guard lock(m_mutex);
+    return m_pacing;
 }
 } // namespace unx::host

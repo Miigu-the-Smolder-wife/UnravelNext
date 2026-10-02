@@ -54,6 +54,7 @@ private:
     float4x4 m_upscalePrevJittered{}, m_upscalePrevViewProj{};
     float m_upscalePrevExposure = 0, m_upscalePrevJitterX = 0, m_upscalePrevJitterY = 0;
     uint32_t m_upscalePrevWidth = 0, m_upscalePrevHeight = 0;
+    uint32_t m_upscalePrevInternalWidth = 0, m_upscalePrevInternalHeight = 0;  // (the internal size may change per frame: dynamic resolution)
     bool m_upscaleValid = false;
     void setupUpscale(FrameContext& frame);
     BlueNoiseTexture m_blueNoise;        // FrameConstants::blueNoise of every view
