@@ -54,6 +54,10 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     bool layerHistoryBound = true;    // reflection.layer_history_bound: the history bounded by the frame's reconstruction (A/B)
     // reflection.lumen: the ray-reuse pipeline (ReflectionReuse.hlsli) in place of the G path, the accumulation and the layers
     bool lumen = false;
+    // reflection.lumen_only (with reflection.lumen): the world rays are the Lumen trace alone (ReflectionLumenTrace.hlsl:
+    // one ray a thread, hits lit from the mesh cards) - no rays buffer, no hit shading passes, no world GI cache, no
+    // screen probes; the refraction service's rays likewise (RefractionLumenTrace.hlsl)
+    bool lumenOnly = false;
     float lumenMaxRoughness = 0.4f, lumenFadeLength = 0.1f, lumenMaxRayIntensity = 40.0f, lumenTonemapRange = 10.0f;
     bool lumenRefractionSurfaceCache = true;  // reflection.lumen_refraction_hit_surface_cache: water's and glass's ray hits read it too
     bool lumenScreenContinue = true;   // reflection.lumen_screen_trace_continue: world rays start where their screen traces ended
@@ -181,6 +185,7 @@ private:
         TextureRef luts[4];
         BufferRef cache;
         BufferRef surfaceCache;  // valid: the refraction service's hits read the surface cache
+        SurfaceCacheCardRefs cards;  // reflection.lumen_only: the mesh cards its hits read (invalid: none)
         rt::RayScene::VsmRefs vsm;
         uint32_t frame = 0, experiment = 0, scene[8] = {};
         rt::RayScene* rays = nullptr;

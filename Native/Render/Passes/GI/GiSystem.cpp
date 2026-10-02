@@ -178,6 +178,8 @@ GiSettings GiSettings::fromQuality(const QualityConfig& q)
     if (q.has("gi.lumen_hit_surface_cache")) s.lumen.hitSurfaceCache = q.boolean("gi.lumen_hit_surface_cache");
     if (q.has("gi.lumen_cap_snap_exposure")) s.lumen.capSnapExposure = q.boolean("gi.lumen_cap_snap_exposure");
     if (q.has("gi.lumen_hit_fallback")) s.lumen.hitFallback = q.boolean("gi.lumen_hit_fallback");
+    s.lumen.only = s.lumen.enabled && q.has("gi.lumen_only") && q.boolean("gi.lumen_only");
+    if (s.lumen.only) s.lumen.hitFallback = false;  // (the fallback is the world cache's read)
     if (q.has("gi.lumen_screen_traces")) s.lumen.screenTraces = q.boolean("gi.lumen_screen_traces");
     if (q.has("gi.lumen_screen_trace_skip_after_cut")) s.lumen.screenTraceSkipAfterCut = q.boolean("gi.lumen_screen_trace_skip_after_cut");
     if (q.has("gi.lumen_rays_per_dispatch")) s.lumen.raysPerDispatch = (uint32_t)q.integer("gi.lumen_rays_per_dispatch");
@@ -816,6 +818,12 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
         }
     }
     const uint32_t windowRule = !s.windowByLighting ? 0u : (fc.frame.frameIndex - m_lightingChangedFrame < s.lightingRecentFrames ? 2u : 1u);
+    // gi.lumen_only: the final gather alone (LumenGather.cpp) - no world cache update, no screen probes of the cache.
+    if (s.lumen.enabled && s.lumen.only && !m_lookupStatsOn)
+    {
+        recordLumen(fc, main, BufferRef{}, rays);
+        return;
+    }
     if (s.deterministic) ensureAdmission(fc, main);
     const BufferRef cache = g.importBuffer(m_cache.Get(), { "GI cache", m_bytes, 0 });
     fc.resources.giCache = cache;

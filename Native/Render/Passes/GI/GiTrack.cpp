@@ -27,7 +27,7 @@ void globalIllumination(FramePassContext& fc, ViewResources& main)
         const gi::GiSettings& settings = gi::GiSystem::get(fc).settings();
         in.cards = settings.lumen.hitSurfaceCache ? fc.resources.cards : SurfaceCacheCardRefs{};
         // (with the cards and without gi.lumen_hit_fallback the hits read no world cache)
-        in.worldCache = in.cards.valid() && !settings.lumen.hitFallback ? BufferRef{} : fc.resources.giCache;
+        in.worldCache = (in.cards.valid() && !settings.lumen.hitFallback) || settings.lumen.only ? BufferRef{} : fc.resources.giCache;
         in.experiment = gi::GiSystem::get(fc).settings().experimentDisable;
         gi::lumenRadianceCacheUpdate(fc, main, rt::RayScene::get(fc), in, rc);
     }

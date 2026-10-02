@@ -84,6 +84,9 @@ struct GiSettings  // from Config/quality/gi.toml
         bool capSnapExposure = true;       // on a snap frame (first frames, cut, restore) the intensity cap is taken in
                                            // the exposure metered on the frame's traces (LgMeter.hlsl; not Unreal's)
         bool hitSurfaceCache = true;       // the hits read the surface cache when it exists (surface_cache.enabled)
+        bool only = false;                 // gi.lumen_only: the final gather alone - the world cache and its screen probes
+                                           // are neither updated nor published (their readers take the gather's outputs
+                                           // and the translucency volume)
         bool hitFallback = false;          // a hit without a lit cell is shaded from the world cache and a light sample;
                                            // false: it takes no cached light (Unreal's rule for an invalid sample)
         uint32_t raysPerDispatch = 262144; // the probe rays are traced in row bands of at most this many rays per DispatchRays

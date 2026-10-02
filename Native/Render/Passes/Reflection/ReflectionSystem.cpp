@@ -53,7 +53,8 @@ constexpr uint32_t kShadowDescOffset = 16 + 2 * kDescStride, kShadeArgsOffset = 
 constexpr uint32_t kLocalDescOffset = kCombineArgsOffset + 16;  // local-light shadow rays (ReflectionLocalShadow)
 constexpr uint32_t kInlineDescOffset = kLocalDescOffset + kDescStride;  // jobs over the ray capacity (ReflectionTraceInline, 2 x 2 variants)
 constexpr uint32_t kPenumbraArgsOffset = kInlineDescOffset + 4 * kDescStride;  // ReflectionPenumbra Dispatch arguments
-constexpr uint32_t kArgumentsBytes = kPenumbraArgsOffset + 16;
+constexpr uint32_t kLumenDescOffset = kPenumbraArgsOffset + 16;  // the Lumen trace's descriptions (reflection.lumen_only: SKY0, SKY1)
+constexpr uint32_t kArgumentsBytes = kLumenDescOffset + 2 * kDescStride;
 // Bands (ReflectionRay.hlsli REFL_BAND, REFL_INLINE_BAND): one DispatchRays launches at most kBand threads (the inline
 // pass kInlineBand jobs), so its time is bounded whatever a frame's counts are; the arguments buffer holds kMaxBands
 // copies of the descriptions, one per band (band b's at b x kArgumentsBytes). The surface cache's direct light:
@@ -74,6 +75,8 @@ const char* const kShadeKernel[2][2] = {
     { "Passes/Reflection/ReflectionShadeRays.SKY1.CORNERS0", "Passes/Reflection/ReflectionShadeRays.SKY1.CORNERS1" }
 };
 const char* const kRefractLibrary[2] = { "Passes/Reflection/RefractionTrace.SKY0", "Passes/Reflection/RefractionTrace.SKY1" };
+const char* const kLumenTraceLibrary[2] = { "Passes/Reflection/ReflectionLumenTrace.SKY0", "Passes/Reflection/ReflectionLumenTrace.SKY1" };
+const char* const kLumenRefractLibrary[2] = { "Passes/Reflection/RefractionLumenTrace.SKY0", "Passes/Reflection/RefractionLumenTrace.SKY1" };
 constexpr const char* kShadowLibrary = "Passes/Reflection/ReflectionShadow";
 constexpr const char* kLocalShadowLibrary = "Passes/Reflection/ReflectionLocalShadow";
 const char* const kSurfaceCacheLightLibrary[2] = { "Passes/SurfaceCache/SurfaceCacheLight.SKY0", "Passes/SurfaceCache/SurfaceCacheLight.SKY1" };
@@ -122,6 +125,7 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     const auto num = [&q](const char* key, double fallback) { return (float)(q.has(key) ? q.number(key) : fallback); };
     const auto flag = [&q](const char* key, bool fallback) { return q.has(key) ? q.boolean(key) : fallback; };
     s.lumen = flag("reflection.lumen", false);
+    s.lumenOnly = s.lumen && flag("reflection.lumen_only", false);
     s.lumenMaxRoughness = num("reflection.lumen_max_roughness_to_trace", 0.4);
     s.lumenFadeLength = num("reflection.lumen_roughness_fade_length", 0.1);
     s.lumenMaxRayIntensity = num("reflection.lumen_max_ray_intensity", 40.0);
@@ -180,6 +184,8 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     if (s.surfaceCache && !s.scMeshCards && s.scDirectPairs && (s.scDirectStochastic || s.scRemainderLight || !s.scDirectAnalytic))
         fail("surface_cache.direct_pairs lights cells by direct_analytic alone: direct_stochastic, remainder_light and direct_analytic = false need "
              "surface_cache.direct_pairs = false (r.sc.cells - the path that hung the device in the bath lounge, 2026-10-02)");
+    if (s.lumenOnly && s.surfaceCache && !s.scMeshCards)
+        fail("reflection.lumen_only lights its hits from the mesh cards: surface_cache.enabled needs surface_cache.mesh_cards");
     s.scDebugCount = (uint32_t)num("surface_cache.debug_count", 0);
     s.scDirectStochasticFrames = num("surface_cache.direct_stochastic_max_frames", 12.0);
     s.scDirectMinWeight = num("surface_cache.direct_stochastic_min_sample_weight", 0.001);
@@ -224,21 +230,30 @@ ReflectionSystem::ReflectionSystem(Device& device, ShaderLibrary& shaders, const
           "reflection arguments");
     m_arguments->SetName(L"R reflection dispatch arguments");
     uint8_t image[kArgumentsBytes] = {};
-    for (int v = 0; v < 2; ++v)
+    // (only the pipelines of the path that runs: reflection.lumen_only never makes the older path's state objects)
+    for (int v = 0; v < 2 && m_settings.lumenOnly; ++v)
+    {
+        const D3D12_DISPATCH_RAYS_DESC desc =
+            rt::RayPipeline::get(device, shaders, rt::standardRayPipeline(kLumenTraceLibrary[v], { "ReflectionLumenTraceGen" })).dispatchDesc(0, 0, 1, 1);
+        std::memcpy(image + kLumenDescOffset + v * kDescStride, &desc, sizeof desc);
+    }
+    for (int v = 0; v < 2 && !m_settings.lumenOnly; ++v)
     {
         const D3D12_DISPATCH_RAYS_DESC desc = rt::RayPipeline::get(device, shaders, rt::standardRayPipeline(kTraceLibrary[v], { "ReflectionTraceGen" })).dispatchDesc(0, 0, 1, 1);
         std::memcpy(image + 16 + v * kDescStride, &desc, sizeof desc);
     }
+    if (!m_settings.lumenOnly)
     {
         const D3D12_DISPATCH_RAYS_DESC desc = rt::RayPipeline::get(device, shaders, rt::standardRayPipeline(kShadowLibrary, { "ReflectionShadowGen" })).dispatchDesc(0, 0, 1, 1);
         std::memcpy(image + kShadowDescOffset, &desc, sizeof desc);
     }
+    if (!m_settings.lumenOnly)
     {
         const D3D12_DISPATCH_RAYS_DESC desc =
             rt::RayPipeline::get(device, shaders, rt::standardRayPipeline(kLocalShadowLibrary, { "ReflectionLocalShadowGen" })).dispatchDesc(0, 0, 1, 1);
         std::memcpy(image + kLocalDescOffset, &desc, sizeof desc);
     }
-    for (int v = 0; v < 4; ++v)
+    for (int v = 0; v < 4 && !m_settings.lumenOnly; ++v)
     {
         const D3D12_DISPATCH_RAYS_DESC desc =
             rt::RayPipeline::get(device, shaders, rt::standardRayPipeline(kInlineLibrary[v / 2][v % 2][m_settings.batchGiCorners], { "ReflectionTraceInlineGen" })).dispatchDesc(0, 0, 1, 1);
@@ -646,7 +661,9 @@ void ReflectionSystem::recordRefraction(FramePassContext& fc, BufferRef jobs, Bu
         }
     }
     const std::vector<std::pair<uint32_t, BufferRef>> streams = in.rays->streams();
-    rt::RayPipeline& pipeline = rt::RayPipeline::get(fc.device, fc.shaders, rt::standardRayPipeline(kRefractLibrary[in.variant], { "RefractionGen" }));
+    const bool lumenOnly = m_settings.lumenOnly;
+    const char* const* refractLibrary = lumenOnly ? kLumenRefractLibrary : kRefractLibrary;
+    rt::RayPipeline& pipeline = rt::RayPipeline::get(fc.device, fc.shaders, rt::standardRayPipeline(refractLibrary[in.variant], { "RefractionGen" }));
     if (!m_refractTemplate)
     {
         D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD };
@@ -665,7 +682,7 @@ void ReflectionSystem::recordRefraction(FramePassContext& fc, BufferRef jobs, Bu
         for (int v = 0; v < 2; ++v)
         {
             const D3D12_DISPATCH_RAYS_DESC desc =
-                rt::RayPipeline::get(fc.device, fc.shaders, rt::standardRayPipeline(kRefractLibrary[v], { "RefractionGen" })).dispatchDesc(0, 0, 1, 1);
+                rt::RayPipeline::get(fc.device, fc.shaders, rt::standardRayPipeline(refractLibrary[v], { "RefractionGen" })).dispatchDesc(0, 0, 1, 1);
             std::memcpy(m + v * kDescStride, &desc, sizeof desc);
         }
         m_refractTemplate->Unmap(0, nullptr);
@@ -696,16 +713,23 @@ void ReflectionSystem::recordRefraction(FramePassContext& fc, BufferRef jobs, Bu
                   b.use(args, Use::IndirectArgs);
                   b.use(jobs, Use::SrvGraphics);
                   b.use(results, Use::UavGraphics);
-                  b.use(in.cache, Use::UavGraphics);
-                  if (in.surfaceCache.valid()) b.use(in.surfaceCache, Use::UavGraphics);
-                  rt::RayScene::declareVsm(b, in.vsm);
+                  if (lumenOnly)
+                  {
+                      if (in.cards.valid()) declareSurfaceCacheCards(b, in.cards, Use::SrvGraphics);
+                  }
+                  else
+                  {
+                      b.use(in.cache, Use::UavGraphics);
+                      if (in.surfaceCache.valid()) b.use(in.surfaceCache, Use::UavGraphics);
+                      rt::RayScene::declareVsm(b, in.vsm);
+                  }
                   in.rays->declareTraversal(b);
                   in.rays->declareDecals(b);
                   for (const auto& st : streams) b.use(st.second, Use::SrvGraphics);
                   if (in.atmosphere)
                       for (const TextureRef& t : in.luts) b.use(t, Use::SrvGraphics);
               },
-              [&pipeline, in, jobs, results, maxJobs, streams, table, tableSrv, args](PassContext& c) {
+              [&pipeline, in, jobs, results, maxJobs, streams, table, tableSrv, args, lumenOnly](PassContext& c) {
                   // The stream table: each traced stream slot's vertex buffer SRV (known at execution).
                   uint32_t* t = reinterpret_cast<uint32_t*>(table);
                   for (uint32_t k = 0; k < 64; ++k) t[k] = 0xFFFFFFFFu;
@@ -715,6 +739,17 @@ void ReflectionSystem::recordRefraction(FramePassContext& fc, BufferRef jobs, Bu
                   k[4] = asU(in.sky.x), k[5] = asU(in.sky.y), k[6] = asU(in.sky.z), k[7] = asU(in.rayLength);
                   for (int i = 0; i < 4; ++i) k[8 + i] = in.atmosphere ? c.srv(in.luts[i]) : 0xFFFFFFFFu;
                   k[12] = asU(in.sun.x), k[13] = asU(in.sun.y), k[14] = asU(in.sun.z), k[15] = 0xFFFFFFFFu;
+                  if (lumenOnly)
+                  {
+                      // RefractionLumenTrace.hlsl: P[4] = { card frame SRV, frame, 0, 0 }
+                      k[16] = in.cards.valid() ? c.srv(in.cards.frame) : 0xFFFFFFFFu;
+                      k[17] = in.frame & 0xFFFFFFu;
+                      std::memcpy(&k[24], in.scene, sizeof in.scene);
+                      c.computeConstants(k, 32);
+                      c.bindFrameConstants(in.frameConstants);
+                      pipeline.dispatchIndirect(c.cmd, c.resource(args), 0);
+                      return;
+                  }
                   k[16] = k[17] = 0xFFFFFFFFu;
                   k[18] = c.uav(in.cache);
                   k[19] = 0;
@@ -748,6 +783,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const BufferRef results = g.createBuffer({ "R reflection results", (uint64_t)width * height * 12, 12 });
     // Reconstruction layers (ReflectionInternal.hlsli): per-job records beside the results, per-ray records beside the rays.
     const bool lumen = s.lumen;  // the ray-reuse pipeline (ReflectionReuse.hlsli): its own resolve, history and filter
+    const bool lumenOnly = s.lumenOnly;  // ... with the Lumen trace as its only world rays (ReflectionLumenTrace.hlsl)
     // the lobe tail's share that is not sampled, as the trace, its screen traces and the resolve's replays read it
     const uint32_t samplingBias16 = lumen ? (uint32_t)std::lround(s.lumenSamplingBias * 65535.0f) : 0u;
     const bool layers = s.layers && !lumen;
@@ -1076,7 +1112,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   [heap, tick](PassContext& pc) { pc.cmd->EndQuery(heap, D3D12_QUERY_TYPE_TIMESTAMP, tick + 1); });
     }
     // Rays buffer of the split passes (ReflectionRay.hlsli): header, hit records, ray -> job, values, shadow rays.
-    const uint32_t rayCapacity = (s.experimentDisable & 64) ? 0 : m_rayCapacity;
+    const uint32_t rayCapacity = (s.experimentDisable & 64) || lumenOnly ? 0 : m_rayCapacity;  // (lumen_only: no rays buffer)
     static_assert(48 + (1ull << 24) * 60 < (1ull << 30), "the rays buffer stays under 1 GiB");  // 64: every job inline (A/B of the split)
     // (bands of the ray passes: by what the frame can hold - a job per pixel, a slot per unit of capacity)
     // (the trace pass: a job traces up to raysPerSample rays in its thread, so its band is kBand rays, not kBand jobs)
@@ -1135,6 +1171,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const bool screenTraces = screen.hzb.valid() && screen.prevColor.valid();
     const bool screenContinue = screenTraces && s.lumenScreenContinue;  // world rays start at their screen traces' ends
     const BufferRef rayLayers = layers ? g.createBuffer({ "R reflection ray layers", std::max<uint64_t>((uint64_t)rayCapacity * 16, 16), 0 }) : BufferRef{};  // REFL_LAYER_RAY_BYTES
+    if (!lumenOnly)
     g.addPass("r.refl.args", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(args, Use::UavCompute);
@@ -1168,7 +1205,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const bool atmosphere = fr.transmittanceLut.valid() && fr.multiScatterLut.valid() && fr.skyViewLut.valid() && fr.aerialPerspective.valid();
     const TextureRef luts[4] = { fr.transmittanceLut, fr.multiScatterLut, fr.skyViewLut, fr.aerialPerspective };
     const int variant = atmosphere ? 0 : 1;
-    rt::RayPipeline& pipeline = rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline(kTraceLibrary[variant], { "ReflectionTraceGen" }));
+    rt::RayPipeline& pipeline = rt::RayPipeline::get(
+        fc.device, shaders, rt::standardRayPipeline(lumenOnly ? kLumenTraceLibrary[variant] : kTraceLibrary[variant], { lumenOnly ? "ReflectionLumenTraceGen" : "ReflectionTraceGen" }));
     const float3 sky = m_skyRadiance, sun = m_sunIlluminance;
     const float rayLength = (float)fc.quality.number("gi.ray_length_m");
     const uint32_t frame = (uint32_t)fc.frame.frameIndex;
@@ -1190,6 +1228,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     std::memcpy(m_refract.scene, scene, sizeof scene);
     m_refract.rays = &rays, m_refract.frameConstants = frameConstants, m_refract.variant = variant;
     if (hitsUseSurfaceCache && s.lumenRefractionSurfaceCache) m_refract.surfaceCache = surfaceCache;  // water's and glass's ray hits
+    if (lumenOnly && hitsUseCards && s.lumenRefractionSurfaceCache) m_refract.cards = cardRefs;
     // Root constants shared by the trace, shade, shadow and combine passes (ReflectionRay.hlsli).
     // gi = false (the traversal and the local-light shadow rays): GI's cache and screen probes are not bound (UNX_NONE)
     // nor declared, so those passes do not wait for GI's block (output.async_compute_passes).
@@ -1277,6 +1316,73 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       });
         }
     }
+    if (lumenOnly)
+    {
+        // reflection.lumen_only: the jobs' world rays in bands of kBand threads, one ray each; a hit's value is final
+        // (ReflectionLumenTrace.hlsl) - the resolve passes below read the results as they read the combine pass's.
+        const uint32_t lumenBands = bandsFor((uint64_t)width * height, kBand);
+        g.addPass("r.refl.lumen.args", QueueType::Compute, [&](PassBuilder& b) { b.use(args, Use::UavCompute); },
+                  [&shaders, args, lumenBands](PassContext& c) {
+                      const uint32_t k[8] = { c.uav(args), 2, kDescStride, kLumenDescOffset + (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width),
+                                              kArgumentsBytes, kBand, lumenBands, 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionLumenArgs"));
+                      c.computeConstants(k, 8);
+                      c.cmd->Dispatch(1, 1, 1);
+                  });
+        const bool sceneColour = screenTraces && s.lumenSceneColorAtHit;
+        const FrameContext::Upscale& up = fc.frame.upscale;
+        const TextureRef prevColor = sceneColour ? screen.prevColor : TextureRef{};
+        const uint32_t prevW = sceneColour ? g.desc(screen.prevColor).width : 0, prevH = sceneColour ? g.desc(screen.prevColor).height : 0;
+        g.addPass("r.refl.lumen.trace", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(args, Use::IndirectArgs);
+                      b.use(jobs, Use::SrvGraphics);
+                      b.use(results, Use::UavGraphics);
+                      b.use(depth, Use::SrvGraphics);
+                      b.use(gbuffer, Use::SrvGraphics);
+                      if (hitsUseCards) declareSurfaceCacheCards(b, cardRefs, Use::SrvGraphics);
+                      if (sceneColour) b.use(prevColor, Use::SrvGraphics);
+                      if (exactCounts.valid()) b.use(exactCounts, Use::UavGraphics);
+                      rays.declareTraversal(b);
+                      rays.declareDecals(b);
+                      if (atmosphere)
+                          for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
+                  },
+                  [&pipeline, jobs, results, depth, gbuffer, cardFrame, hitsUseCards, prevColor, prevW, prevH, sceneColour, screenContinue, exactCounts, luts, atmosphere, sky, sun,
+                   rayLength, frame, scene, samplingBias16, s, frameConstants, argumentResource, variant, timestamps, firstTick, lumenBands, ratio = up.exposureRatio,
+                   prevViewProj = up.prevViewProj](PassContext& c) {
+                      c.bindFrameConstants(frameConstants);
+                      c.cmd->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, firstTick);
+                      uint32_t k[48] = {};
+                      k[0] = c.srv(jobs);
+                      k[1] = c.uav(results);
+                      k[2] = asU(ratio);
+                      k[3] = (frame & 0xFFFFFFu) | ((screenContinue ? 1u : 0u) | (sceneColour ? 2u : 0u)) << 24;
+                      k[4] = asU(sky.x), k[5] = asU(sky.y), k[6] = asU(sky.z), k[7] = asU(rayLength);
+                      for (int i = 0; i < 4; ++i) k[8 + i] = atmosphere ? c.srv(luts[i]) : 0xFFFFFFFFu;
+                      k[12] = asU(sun.x), k[13] = asU(sun.y), k[14] = asU(sun.z);
+                      k[15] = exactCounts.valid() ? c.uav(exactCounts) : 0xFFFFFFFFu;
+                      k[16] = c.srv(depth);
+                      k[17] = c.srv(gbuffer);
+                      k[18] = hitsUseCards ? c.srv(cardFrame) : 0xFFFFFFFFu;
+                      k[20] = sceneColour ? c.srv(prevColor) : 0xFFFFFFFFu;
+                      k[21] = (prevW & 0xFFFFu) | (prevH << 16);
+                      k[22] = asU(s.lumenSceneColorThickness);
+                      k[23] = asU(std::cos(std::clamp(s.lumenSceneColorNormalDegrees, 0.0f, 180.0f) * 0.01745329252f));
+                      std::memcpy(&k[24], scene, sizeof scene);
+                      for (int r = 0; r < 4; ++r)
+                          for (int col = 0; col < 4; ++col) k[32 + 4 * r + col] = asU(prevViewProj.m[r][col]);
+                      for (uint32_t band = 0; band < lumenBands; ++band)
+                      {
+                          k[19] = band | (samplingBias16 << 16);
+                          c.computeConstants(k, 48);
+                          pipeline.dispatchIndirect(c.cmd, argumentResource, (uint64_t)band * kArgumentsBytes + kLumenDescOffset + variant * kDescStride);
+                      }
+                      c.cmd->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, firstTick + 1);
+                  });
+    }
+    else
+    {
     g.addPass("r.refl.trace", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(args, Use::IndirectArgs);
@@ -1528,6 +1634,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   c.cmd->ExecuteIndirect(dispatchSignature, 1, argumentResource, kCombineArgsOffset, nullptr, 0);
                   c.cmd->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, firstTick + 1);
               });
+    }  // (!lumenOnly)
     rays.recordExactReadback(fc);  // after the trace: the counts pick next frames' exact set
     const uint32_t planarCount = planar.views;
     // The pixels' layers (Passes/Reconstruct/LayerCommon.hlsli): the resolve writes them beside the value.
@@ -1855,7 +1962,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
               });
     // Counters for runs without the gate (Player, host gates): the GI header's reflection statistics (GI_H_STAT_HIT_*,
     // GI_H_STAT_G_*) of the frame framesInFlight ago, every reflection.stats_log_frames frames.
-    if (s.statsLogFrames > 0)
+    if (s.statsLogFrames > 0 && !lumenOnly)  // (the counters live in the world GI cache's header)
     {
         if (!m_statsReadback)
         {

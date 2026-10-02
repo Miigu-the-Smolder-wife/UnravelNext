@@ -437,7 +437,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     }
     g.addPass("r.gi.lg.trace", QueueType::Compute,
               [&](PassBuilder& b) {
-                  b.use(cache, Use::SrvGraphics);
+                  if (cache.valid()) b.use(cache, Use::SrvGraphics);  // (gi.lumen_only: none)
                   b.use(adaptive, Use::SrvGraphics);
                   b.use(probeDepth, Use::SrvGraphics);
                   b.use(probeNormal, Use::SrvGraphics);
@@ -459,7 +459,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
               },
               [=, &pipeline](PassContext& c) {
                   uint32_t k[48] = {};
-                  k[0] = c.srv(cache);
+                  k[0] = cache.valid() ? c.srv(cache) : 0xFFFFFFFFu;
                   k[1] = c.srv(rayInfo);
                   k[2] = c.uav(traceRadiance);
                   k[3] = c.uav(traceWord);
@@ -473,7 +473,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   k[14] = bits(sun.z);
                   k[15] = experiment;
                   k[16] = bits(skyBand);
-                  k[17] = (screenTraced ? 1u : 0u) | (!L.hitFallback && cards.valid() ? 2u : 0u);
+                  k[17] = (screenTraced ? 1u : 0u) | (!cache.valid() || (!L.hitFallback && cards.valid()) ? 2u : 0u);
                   k[18] = bits(L.normalBias);
                   k[19] = bits(L.movingSpeed);
                   k[20] = cards.valid() ? c.srv(cards.frame) : 0xFFFFFFFFu;

@@ -36,8 +36,11 @@ void screenTraceInputs(FramePassContext& fc, ViewResources& main)
 }
 void reflections(FramePassContext& fc, ViewResources& main)
 {
-    // Inputs: V's depth, M's G-buffer (and reflection lobe tiles when M provides them), R's GI of this frame.
-    if (!main.depth.valid() || !main.gbuffer.valid() || !main.screenProbes.valid() || !fc.resources.giCache.valid())
+    // Inputs: V's depth, M's G-buffer (and reflection lobe tiles when M provides them), R's GI of this frame - its
+    // screen probes and world cache; reflection.lumen_only reads neither.
+    const QualityConfig& q = fc.quality;
+    const bool lumenOnly = q.has("reflection.lumen") && q.boolean("reflection.lumen") && q.has("reflection.lumen_only") && q.boolean("reflection.lumen_only");
+    if (!main.depth.valid() || !main.gbuffer.valid() || (!lumenOnly && (!main.screenProbes.valid() || !fc.resources.giCache.valid())))
     {
         pending("R.reflections (waits for V depth, M G-buffer and R GI)");
         return;

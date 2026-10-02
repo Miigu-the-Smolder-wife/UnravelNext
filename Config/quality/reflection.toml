@@ -89,6 +89,10 @@ experiment_disable = 0                 # cost attribution only (recorded in the 
 # this renderer's passes, in place of the G path, the 32-frame accumulation and the layers. Planar mirrors and calm water
 # keep their raster cameras. Values are the reference's defaults (ue6-main LumenReflections.cpp, Scene.cpp).
 lumen = false
+lumen_only = false                     # with lumen: the world rays are ReflectionLumenTrace alone - one ray a thread in bands of 262,144, the hit lit from
+                                       # the mesh cards (a hit without cards: the sun by one shadow ray, no indirect light), the previous frame's colour
+                                       # where the view sees the hit; no rays buffer, no shade / shadow / combine passes, no world GI cache or screen
+                                       # probes. The refraction service traces RefractionLumenTrace. Needs surface_cache.mesh_cards with the surface cache
 lumen_max_roughness_to_trace = 0.4     # QUALITY TRADE (user decision): rougher pixels trace no ray and take the K path
 lumen_roughness_fade_length = 0.1      # the traced reflection fades into the K path over this much roughness below the limit
 lumen_max_ray_intensity = 40.0         # QUALITY TRADE (user decision): a ray's exposed radiance is capped here; 0 = no cap

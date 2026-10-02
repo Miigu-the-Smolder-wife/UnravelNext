@@ -193,6 +193,7 @@ experiment_disable = 0             # cost attribution only (recorded in the qual
 # defaults (ue6-main, r.Lumen.ScreenProbeGather.*); (Q) marks the ones that give up accuracy for stability - the user's
 # to decide. Differences from Unreal: Docs/Status/LUMEN_GATHER_KO.md.
 lumen = false
+lumen_only = false                         # with lumen: the final gather alone - the world cache and its screen probes are not updated or published (GiSystem::record returns after the gather); the hits read the mesh cards (surface_cache.mesh_cards), a hit without cards takes the sun by one shadow ray and no indirect light. Readers of the world cache take the translucency volume (lumen.translucency_volume) and the gather's outputs
 lumen_tile = 16                            # DownsampleFactor: one probe per 16 x 16 px
 lumen_adaptive_fraction = 0.5              # AdaptiveProbeAllocationFraction
 lumen_min_pdf_to_trace = 0.1               # ImportanceSample.MinPDFToTrace
