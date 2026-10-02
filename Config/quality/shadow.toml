@@ -115,10 +115,10 @@ page_dilation = 0.05            # a pixel within this fraction of a page of its 
                                 # reference's PageDilationBorderSizeDirectional 0.05): its search and penumbra taps find that
                                 # neighbour on the pixel's own level where they fell back to a coarser ancestor. More requested
                                 # pages near borders; the shadow there is read at the finer texel. 0: the pixel's page alone (A/B)
-fold_small_passes = true        # the page update's and the visibility's small dispatches share passes (PassChain.h): the
+fold_small_passes = true        # the page update's and the visibility's small passes are timed as scopes (PassChain.h): the
                                 # counters' clear with the cache's reset; the request propagation, the cache's keep and free
                                 # list and the scan's three steps; the pixel list's clear with the visibility pass; the
-                                # overflow scan's two levels. The same dispatches in the same order, a barrier between them.
+                                # overflow scan's two levels. The same passes and barriers, one timestamp a scope.
                                 # And a view without local shadow slots (shading.mega_lights shadows the local lights) records
                                 # no overflow count, scan and fill: they ran over an empty tile list. false: a pass each (A/B)
 use_stats = 0                     # 1: count which sun pages lookups read, by request kind (measurement only; RendererGate)
