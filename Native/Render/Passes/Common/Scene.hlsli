@@ -203,7 +203,7 @@ struct GpuLight
     // the light components (GpuSceneLayout.h Light; every word 0: a plain light) - read through the accessors below
     uint scales, scales2;
     float drawDistance, fadeRange, falloffExponent;
-    uint barnDoor, sourceTexture, lightPad;
+    uint barnDoor, sourceTexture, sourceMean;
 };
 
 struct GpuVisibleCluster
@@ -217,6 +217,7 @@ struct GpuVisibleCluster
 #define INSTANCE_SKINNED (1u << 2)
 #define INSTANCE_WIND (1u << 3)
 // scene::InstanceLightingChannels...: bits 4..6 = the instance's lighting channels ^ 1 (instanceLightingChannels below)
+#define INSTANCE_NO_DECALS (1u << 7)  // takes no projected decals (Passes/Decal/Decal.hlsli)
 #define INSTANCE_HIDDEN (1u << 31)  // gpu::kInstanceHidden: skipped by every reader (GpuScene::setInstanceVisible)
 // gpu::kInstanceMotionBreak (v1.45): a teleport or restore in this frame; prev* = current (zero motion), breakCentre = where
 // its bounding sphere was in the previous rendered frame (caches keyed by the old place invalidate from it).
@@ -301,10 +302,13 @@ float lightRayEndBias(GpuLight l, float fallback) { return (l.revision & 0x80000
 // must agree on: the opaque and coverage shading, the sampled lights, the air and fog, the surface cache, the ray hits.
 //   lighting channels   3 bits on a light and on an instance: a light lights the instances that share one. A kernel
 //                       that shades a point of an instance sets g_lightChannels to the instance's channels before it
-//                       evaluates lights (the light samples' weights of the opaque surface: MegaLightsSample.hlsl);
-//                       lightWindow is then 0 for a light in none of them. Unset (7): no test - the coverage layer's
-//                       fragments and the hair (their records name no instance), the air and the fog, the ray hits,
-//                       the surface cache's cards (Unreal tests neither fog nor hit lighting).
+//                       evaluates lights; lightWindow is then 0 for a light in none of them. Set by: the light
+//                       samples' weights (MegaLightsSample.hlsl: the opaque pixel's instance, the coverage layer's
+//                       nearest fragment's), the coverage fragments' light loop, the hair records (their body's
+//                       instance), the surface cache's cards (their mesh cards' instance). A sum of lights without a
+//                       receiver - the tile kernels' FAR terms - takes only lights that light every instance
+//                       (LightNearFar.hlsli nfLightsEveryInstance). Unset (7): no test - the air and the fog, the ray
+//                       hits, the surface cache's world cells (Unreal tests neither fog nor hit lighting).
 //   scales              specular, diffuse (direct shading), volumetric (the air's and fog's in-scattering), indirect (the
 //                       surface cache's direct light and the ray hits' light samples).
 //   lightWindow         what multiplies intensity / d^2 at distance d from the light: the range's window
@@ -354,6 +358,34 @@ float lightWindow(GpuLight l, float d)
     return w * w;
 }
 #endif
+// The light's colour for a consumer that takes the light as a point (the air and the fog, lit particles and volumes,
+// the tile kernels' FAR terms): a rect that shows an image (sourceTexture) has the image's mean colour times its own -
+// AreaLight.hlsli shAreaColor reads the image itself where the emitter's extent is resolved.
+float3 lightMeanColor(GpuLight l)
+{
+#if UNX_LIGHT_COMPONENTS
+    if (l.sourceTexture != 0)
+        return l.color * (float3(l.sourceMean & 0x1FFu, (l.sourceMean >> 9) & 0x1FFu, (l.sourceMean >> 18) & 0x1FFu) * exp2((float)(l.sourceMean >> 27) - 24.0));
+#endif
+    return l.color;
+}
+// The part of a rect light's area a far point in direction w (unit, from the light) sees past its barn doors:
+// lightBarnDoorRect's limit far from the emitter - along each of the emitter's axes the near side moves in by
+// height x |w_axis| / w_forward - spread. For the consumers that take the light as a point source of its projected
+// intensity (FroxelCommon.hlsli froxelIntensity).
+float lightBarnDoorFar(GpuLight l, float3 w)
+{
+#if UNX_LIGHT_COMPONENTS
+    if (l.barnDoor == 0) return 1;
+    const float height = f16tof32(l.barnDoor & 0xFFFFu), spread = f16tof32(l.barnDoor >> 16);
+    const float3 s = float3(dot(w, l.right), dot(w, cross(l.forward, l.right)), dot(w, l.forward));
+    if (s.z <= 0) return 0;
+    const float2 seen = saturate(1 - max(height * abs(s.xy) / s.z - spread, 0.0) / max(l.size, 1e-6));
+    return seen.x * seen.y;
+#else
+    return 1;
+#endif
+}
 // The part of a rect light a point sees past its barn doors (scene::Light::barnDoorAngle / Length; Unreal's GetRect with
 // bComputeVisibleRect): four flaps along the emitter's edges, 'height' in front of it and spread outwards by 'spread'.
 // From a point outside a flap, the flap's top edge hides the strip of the emitter behind it - the emitter's near side

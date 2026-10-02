@@ -141,7 +141,9 @@ void prepareScene(FramePassContext& fc)
     // A no-op when nothing changed (GpuScene keeps the buffer and the revision).
     fc.scene.setMaterialTextures(t.published());
     // the rect lights' source textures (scene::Light::sourceTexture): the same textures' SRVs into the light records
-    if (const std::vector<uint32_t> sources = t.lightSourceTextures(); sources.size() == fc.scene.lights().size()) fc.scene.setLightSourceTextures(sources);
+    // (and each image's mean colour, for the consumers that take the light as a point)
+    if (const std::vector<uint32_t> sources = t.lightSourceTextures(); sources.size() == fc.scene.lights().size())
+        fc.scene.setLightSourceTextures(sources, t.lightSourceMeans());
     // B2: which lights' specular R's reflection paths carry (only with R's emitters on; frames in flight use their own slot).
     if (fc.quality.has("raytracing.emitters") && fc.quality.boolean("raytracing.emitters"))
         fc.resources.areaLightStable = fc.state<AreaLightStability>("M.areaLightStability").publish(fc.device, fc.scene.lights(), fc.frame.frameIndex);

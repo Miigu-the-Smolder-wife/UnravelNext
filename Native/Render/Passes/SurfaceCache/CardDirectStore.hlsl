@@ -75,7 +75,8 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         return;
     }
     float3 e = 0;
-    const MlPoint lambert = mlPointLambert(texel.position, texel.normal, float3(1, 1, 1));  // (its radiance is irradiance / pi)
+    MlPoint lambert = mlPointLambert(texel.position, texel.normal, float3(1, 1, 1));  // (its radiance is irradiance / pi)
+    lambert.channels = mcLightingChannels(mcLoadMeshCards(f, card.meshCards));  // (a light that does not light the card's instance adds 0)
     const uint functions = scLightFunctionTable(rtSceneSrvs(P[6], P[7]).pad);
     const float texelSize = 2 * max(page.cardUvTexelScale.x * card.extent.x, page.cardUvTexelScale.y * card.extent.y);
     [loop] for (uint k = 0; k < CL_LIGHTS; ++k)

@@ -338,6 +338,8 @@ void GpuScene::upload(const scene::Scene& s)
     for (const scene::Instance& in : s.instances) m_instances.push_back(packInstance(in, &palette));
     m_windInstances = 0;
     for (const gpu::Instance& g : m_instances) m_windInstances += (g.flags & scene::InstanceWind) != 0;
+    m_channelsShared = 7;
+    for (const gpu::Instance& g : m_instances) m_channelsShared &= scene::instanceLightingChannels(g.flags);
     const std::vector<uint32_t>& remap = m_remap;
     // C4 morph records: per morph instance one record row, then its weights (current, previous).
     m_morphRows.clear();
@@ -836,6 +838,7 @@ void GpuScene::setInstances(std::span<const uint32_t> indices)
         const gpu::Instance g = packInstance(in, nullptr);
         if (i < m_instances.size()) m_windInstances -= (m_instances[i].flags & scene::InstanceWind) != 0;
         m_windInstances += (g.flags & scene::InstanceWind) != 0;
+        m_channelsShared &= scene::instanceLightingChannels(g.flags);
         if (i == m_instances.size())
         {
             m_instances.push_back(g);
@@ -1236,7 +1239,11 @@ void GpuScene::rebase(float3 shift)
             gpu::Light g = gpuLight(l, m_originOffset);
             g.revision = gpu::lightRevisionWord(m_revision, l.rayEndBias);
             // (the emitter's image is M's: the record keeps what setLightSourceTextures published)
-            if (lights.size() < m_lights.size()) g.sourceTexture = m_lights[lights.size()].sourceTexture;
+            if (lights.size() < m_lights.size())
+            {
+                g.sourceTexture = m_lights[lights.size()].sourceTexture;
+                g.sourceMean = m_lights[lights.size()].sourceMean;
+            }
             lights.push_back(g);
         }
         release(m_lightBuffer);
@@ -1272,15 +1279,17 @@ gpu::Light GpuScene::gpuLight(const scene::Light& l, float3 origin)
     return g;
 }
 
-void GpuScene::setLightSourceTextures(std::span<const uint32_t> srvPerLight)
+void GpuScene::setLightSourceTextures(std::span<const uint32_t> srvPerLight, std::span<const uint32_t> meanPerLight)
 {
-    if (srvPerLight.size() != m_lights.size()) fail("GpuScene::setLightSourceTextures: %zu entries for %zu lights", srvPerLight.size(), m_lights.size());
+    if (srvPerLight.size() != m_lights.size() || meanPerLight.size() != m_lights.size())
+        fail("GpuScene::setLightSourceTextures: %zu and %zu entries for %zu lights", srvPerLight.size(), meanPerLight.size(), m_lights.size());
     bool changed = false;
     for (size_t i = 0; i < m_lights.size(); ++i)
     {
-        const uint32_t word = srvPerLight[i] == gpu::kNone ? 0u : srvPerLight[i] + 1;
-        if (m_lights[i].sourceTexture == word) continue;
+        const uint32_t word = srvPerLight[i] == gpu::kNone ? 0u : srvPerLight[i] + 1, mean = word ? meanPerLight[i] : 0u;
+        if (m_lights[i].sourceTexture == word && m_lights[i].sourceMean == mean) continue;
         m_lights[i].sourceTexture = word;
+        m_lights[i].sourceMean = mean;
         m_lights[i].revision = (m_lights[i].revision & 0xFFFF0000u) | ((m_lights[i].revision + 1) & 0xFFFFu);
         changed = true;
     }
@@ -1301,6 +1310,7 @@ void GpuScene::setLights(std::span<const uint32_t> indices)
         gpu::Light g = gpuLight(l, m_originOffset);
         const gpu::Light& old = m_lights[i];
         g.sourceTexture = old.sourceTexture;  // (M's: setLightSourceTextures)
+        g.sourceMean = old.sourceMean;
         const bool shape = std::memcmp(&g.position, &old.position, sizeof g.position) != 0 || std::memcmp(&g.forward, &old.forward, sizeof g.forward) != 0 ||
                            std::memcmp(&g.right, &old.right, sizeof g.right) != 0 || g.range != old.range || g.spotScale != old.spotScale ||
                            g.spotOffset != old.spotOffset || std::memcmp(&g.size, &old.size, sizeof g.size) != 0 || g.typeFlags != old.typeFlags ||
@@ -1659,6 +1669,7 @@ uint32_t GpuScene::addRuntimeInstance(const scene::Instance& in)
     g.morph = gpu::kNone;
     g.patch = gpu::kNone;
     m_instances[index] = g;
+    m_channelsShared &= scene::instanceLightingChannels(g.flags);
     m_transformFrame[index] = UINT64_MAX;
     markRecord(index);
     return index;

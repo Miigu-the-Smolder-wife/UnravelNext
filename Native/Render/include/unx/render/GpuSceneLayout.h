@@ -5,6 +5,8 @@
 #include "unx/core/Math.h"
 #include "unx/render/ViewKind.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
@@ -297,6 +299,28 @@ inline uint32_t halfFloatBits(float value)
     return sign | (e <= 0 ? 0u : (e >= 31 ? 0x7BFFu : (((uint32_t)e << 10) | ((u >> 13) & 0x3FFu))));
 }
 
+// A linear colour as an RGB9E5 word (three 9-bit mantissas under one 5-bit exponent, DXGI's R9G9B9E5_SHAREDEXP layout:
+// channel = mantissa x 2^(exponent - 24)), and back.
+inline uint32_t rgb9e5(float3 c)
+{
+    const float limit = 65408.0f;  // (511 / 512) x 2^16
+    const float r = std::min(std::max(c.x, 0.0f), limit), g = std::min(std::max(c.y, 0.0f), limit), b = std::min(std::max(c.z, 0.0f), limit);
+    const float top = std::max(r, std::max(g, b));
+    int exponent = std::max(-16, top > 0 ? (int)std::floor(std::log2(top)) : -16) + 1 + 15;
+    float unit = std::exp2((float)(exponent - 24));
+    if ((int)std::floor(top / unit + 0.5f) == 512)
+    {
+        unit *= 2;
+        ++exponent;
+    }
+    return (uint32_t)std::floor(r / unit + 0.5f) | ((uint32_t)std::floor(g / unit + 0.5f) << 9) | ((uint32_t)std::floor(b / unit + 0.5f) << 18) | ((uint32_t)exponent << 27);
+}
+inline float3 rgb9e5ToFloat(uint32_t v)
+{
+    const float unit = std::exp2((float)(int)(v >> 27) - 24.0f);
+    return { (float)(v & 0x1FFu) * unit, (float)((v >> 9) & 0x1FFu) * unit, (float)((v >> 18) & 0x1FFu) * unit };
+}
+
 struct Light  // 112 B
 {
     float3 position;
@@ -321,7 +345,8 @@ struct Light  // 112 B
     float falloffExponent;   // point, spot: 0 = inverse square; > 0: (1 - (d / range)^2)^exponent, no inverse square
     uint32_t barnDoor;       // rect: half(flap height = length x cos angle) | half(flap spread = length x sin angle) << 16; 0: none
     uint32_t sourceTexture;  // rect: SRV of the emitter's image + 1 (M's TextureSystem publishes it; 0: uniform)
-    uint32_t pad;
+    uint32_t sourceMean;     // with sourceTexture: the image's mean colour (rgb9e5) - what a consumer that takes the light
+                             // as a point takes for the image (the air and fog, particles, the FAR tile terms, ray hits)
 };
 static_assert(sizeof(Light) == 112);
 // Light::revision from a change count and scene::Light::rayEndBias (negative: none).

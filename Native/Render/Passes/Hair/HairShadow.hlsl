@@ -154,7 +154,10 @@ void main(uint3 id : SV_DispatchThreadID)
     mPixelRay(float2(mlFullPixel(ds, factor, g_frameIndex)) + 0.5, D, Dx, Dy);
     const float3 offset = D * linearZ;
     RtLightSample ls;
-    if (!rtLightSample(hairShadowLight(loadLight(s.light)), g_cameraPosition + offset, s.uv.x, s.uv.y, ls)) return;
+    const GpuLight sampled = loadLight(s.light);
+    RtLight l = hairShadowLight(sampled);
+    if (!rtLightBarnDoors(sampled, g_cameraPosition + offset, l)) return;  // (the point m.ml.trace sampled: MegaLightsWorld.hlsli)
+    if (!rtLightSample(l, g_cameraPosition + offset, s.uv.x, s.uv.y, ls)) return;
     const float through = hairTransmittance(P[0].x, offset + asfloat(P[1].xyz), ls.wi, ls.distance, P[0].w, P[1].w != 0 ? blueNoise4(texel, g_frameIndex).y : 0.5f);
     if (through < 1) samples[texel] = through < 1.0 / 256 ? uint2(stored.x & 0x7FFFFFFFu, stored.y) : uint2(stored.x, asuint(s.weight * through));
 }

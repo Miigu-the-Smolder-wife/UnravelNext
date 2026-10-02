@@ -392,6 +392,7 @@ void TextureSystem::clear()
     for (Resource& r : m_coverage) release(r);
     m_textures.clear();
     m_coverage.clear();
+    m_meanOf.clear();
     release(m_table);
     m_gpuBytes = 0;
 }
@@ -409,6 +410,60 @@ std::vector<uint32_t> TextureSystem::lightSourceTextures() const
             if (f == scene::TextureFormat::Rgba8Srgb || f == scene::TextureFormat::Rgba16Float) srv = m_textures[l.sourceTexture].srv;
         }
         out.push_back(srv);
+    }
+    return out;
+}
+
+namespace
+{
+// The mean linear colour of a texture's level 0 as gpu::rgb9e5 (Rgba8Srgb or Rgba16Float; another format: white).
+uint32_t meanColorWord(const scene::Texture& t)
+{
+    const size_t n = (size_t)t.width * t.height;
+    double sum[3] = { 0, 0, 0 };
+    if (n > 0 && t.format == scene::TextureFormat::Rgba8Srgb && t.texels.size() >= n * 4)
+    {
+        float linear[256];
+        for (int i = 0; i < 256; ++i)
+        {
+            const float c = (float)i / 255.0f;
+            linear[i] = c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+        }
+        for (size_t i = 0; i < n; ++i)
+            for (int c = 0; c < 3; ++c) sum[c] += linear[t.texels[i * 4 + c]];
+    }
+    else if (n > 0 && t.format == scene::TextureFormat::Rgba16Float && t.texels.size() >= n * 8)
+    {
+        for (size_t i = 0; i < n; ++i)
+            for (int c = 0; c < 3; ++c)
+            {
+                uint16_t h;
+                std::memcpy(&h, t.texels.data() + i * 8 + c * 2, 2);
+                const int e = (h >> 10) & 31, m = h & 1023;
+                const float v = e == 0 ? std::ldexp((float)m, -24) : (e == 31 ? 0.0f : std::ldexp((float)(m + 1024), e - 25));  // (infinity, NaN: 0)
+                sum[c] += (h & 0x8000) ? 0.0f : v;
+            }
+    }
+    else return gpu::rgb9e5({ 1.0f, 1.0f, 1.0f });
+    return gpu::rgb9e5({ (float)(sum[0] / (double)n), (float)(sum[1] / (double)n), (float)(sum[2] / (double)n) });
+}
+} // namespace
+
+std::vector<uint32_t> TextureSystem::lightSourceMeans() const
+{
+    std::vector<uint32_t> out;
+    if (!m_source) return out;
+    if (m_meanOf.size() != m_source->textures.size()) m_meanOf.assign(m_source->textures.size(), 0);
+    for (const scene::Light& l : m_source->lights)
+    {
+        uint32_t mean = 0;
+        if (l.type == scene::LightType::Rect && l.sourceTexture != scene::kNone && l.sourceTexture < m_textures.size())
+        {
+            uint64_t& known = m_meanOf[l.sourceTexture];
+            if ((known >> 32) == 0) known = (1ull << 32) | meanColorWord(m_source->textures[l.sourceTexture]);
+            mean = (uint32_t)known;
+        }
+        out.push_back(mean);
     }
     return out;
 }

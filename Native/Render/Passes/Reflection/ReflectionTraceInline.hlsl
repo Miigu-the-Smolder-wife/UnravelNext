@@ -16,6 +16,12 @@
 #define UNX_MATERIAL_INPUTS 0  // (... and no material inputs: an overflow job's hit and its alpha test read the mesh's uv, without
                                // the material's transform, emissive mask or vertex tint - Scene.hlsli)
 #define GI_BATCH_CORNERS CORNERS
+#if SKY == 0
+// (these libraries are at the DXIL limit: the overflow jobs' light samples at hits take the lights without the
+// components of the record's pad word - falloff exponent, draw-distance fade, barn doors, specular scale;
+// HitLocalLights.hlsli)
+#define UNX_RT_LIGHT_COMPONENTS 0
+#endif
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/Reflection/ReflectionRay.hlsli"
 #include "Passes/Reflection/ReflectionHit.hlsli"

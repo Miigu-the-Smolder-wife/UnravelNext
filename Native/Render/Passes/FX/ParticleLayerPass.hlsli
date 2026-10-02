@@ -1,6 +1,6 @@
 // Particle render pass (G7; request 20260926_FX_particle_render_pass.md), shared declarations of its kernels. The view's
 // frame constants are the root CBV b1 (Common/Frame.hlsli); the pass's own values are one LayerConstants record whose
-// index is P[0].x.
+// index is P[0].x. P[0].y, P[0].z: fx.particles.soft and near_fade (FxLayerTile.hlsl).
 //
 // Screen space: full-resolution pixel i covers [i, i + 1) (centre i + 0.5); the layer pixel (lx, ly) covers the 4 x 4 block
 // [4 lx, 4 lx + 4) x [4 ly, 4 ly + 4) and is sampled at its centre (4 lx + 2, 4 ly + 2); a tile is 8 x 8 layer pixels

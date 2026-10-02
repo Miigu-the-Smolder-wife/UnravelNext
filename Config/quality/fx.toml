@@ -10,6 +10,10 @@ collision_readback = 4096    # collision events copied with the tick; more are f
                              # when the CPU reads the tick (exact either way)
 mesh_instances_max = 65536    # mesh particles (A3): scene instances the GPU writes per frame (RuntimeCapacity::gpuInstances);
                              # live mesh particles past it are counted (MeshParticleStats::overflow), a size to raise, never a cap
+soft = true                  # sprites as balls of their radius (FxLayerTile.hlsl): where a surface cuts a sprite, its opacity
+                             # is the part of the ball in front of the surface, so it meets the surface without an edge
+                             # (Unreal's depth fade / spherical particle opacity). false: a plane at the centre's depth
+near_fade = true             # a sprite whose ball reaches the near plane fades out instead of covering the view
 experiment_disable = 0       # timing attribution only, never a product setting: bit 1 (unused: volumes are records), 2 ribbon strips,
                              # 4 (unused: the sort moved to the render pass), 8 collisions (no surfaces, no grid), 16 context and world fields,
                              # 32 noise, 64 fields read from buffers instead of the constant

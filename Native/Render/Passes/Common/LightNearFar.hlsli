@@ -48,6 +48,10 @@ float nfLightExtent(GpuLight l)
 
 // Distance window w(d) of INTERFACES 8.2 (shPunctualIlluminance / shAreaWindow / froxelWindow): 0 beyond the range.
 float nfWindow(GpuLight l, float d) { return lightWindow(l, d); }
+// Lighting channels (Scene.hlsli): a FAR sum has no receiver, so a light may be FAR only when it lights every instance
+// of the scene - when it is in a channel all of them share (sharedChannels: GpuScene::lightingChannelsShared, the AND of the
+// instances' channels). Any other light is NEAR: the per-pixel path tests the receiver's channels.
+bool nfLightsEveryInstance(GpuLight l, uint sharedChannels) { return (lightChannels(l) & sharedChannels) != 0; }
 
 // Conditions 1-3 for a light whose shadow (5) and the region's continuity (4) the caller handles; d returns the distance
 // from the light's centre to the region's sphere.
@@ -113,7 +117,8 @@ float3 nfPolygonVector(float3 a, float3 b, float3 c, float3 d)
 // the light direction (exact). Rect: the polygon form above with the window at the centre (exact; 0 behind the emitting
 // side, as shAreaIntegral). Disk, sphere, tube: the far-field point equivalent (radiance x projected area / d^2, the
 // window at the centre; error O((r_e / d)^2), bounded by condition 2). Visibility is the caller's (1 for FAR). The FAR
-// term is diffuse light: the value carries the light's diffuse scale (a rect's barn doors are not in it).
+// term is diffuse light: the value carries the light's diffuse scale; a rect with barn doors is the part of it x sees
+// past them (Scene.hlsli lightBarnDoorRect, as shAreaIntegral), a rect with an image has the image's mean colour.
 float3 nfVectorIrradiance(GpuLight l, float3 x)
 {
     const uint type = lightType(l);
@@ -136,10 +141,15 @@ float3 nfVectorIrradiance(GpuLight l, float3 x)
     if (type == LIGHT_RECT)
     {
         if (dot(-v, l.forward) <= 0) return 0;  // behind the emitting side
-        const float3 ex = l.right * (0.5 * l.size.x), ey = up * (0.5 * l.size.y);
+        float3 centre = v;
+        float2 halfSize = 0.5 * l.size;
+#if UNX_LIGHT_COMPONENTS
+        if (l.barnDoor != 0 && !lightBarnDoorRect(l, v, up, centre, halfSize)) return 0;
+#endif
+        const float3 ex = l.right * halfSize.x, ey = up * halfSize.y;
         // Counter-clockwise seen from the receiver (the emitter faces it): the LTC segment order of shAreaIntegral.
-        const float3 e = nfPolygonVector(v - ex - ey, v + ex - ey, v + ex + ey, v - ex + ey);
-        return l.color * (l.intensity * w) * (dot(e, lh) >= 0 ? e : -e);
+        const float3 e = nfPolygonVector(centre - ex - ey, centre + ex - ey, centre + ex + ey, centre - ex + ey);
+        return lightMeanColor(l) * (l.intensity * w) * (dot(e, lh) >= 0 ? e : -e);
     }
     float area;
     if (type == LIGHT_DISK)

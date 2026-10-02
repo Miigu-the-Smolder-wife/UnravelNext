@@ -343,7 +343,7 @@ void MeshCardScene::removeInstance(uint32_t sceneInstance)
     m_dirty.instanceMap = true;
 }
 
-uint32_t MeshCardScene::addInstance(uint32_t sceneInstance, const scene::MeshCards& cards, const float3x4& objectToWorld)
+uint32_t MeshCardScene::addInstance(uint32_t sceneInstance, const scene::MeshCards& cards, const float3x4& objectToWorld, uint32_t lightingChannels)
 {
     if (sceneInstance < m_instanceMap.size() && m_instanceMap[sceneInstance] != mc::kNone)
         throw Error("mesh cards: scene instance " + std::to_string(sceneInstance) + " already has cards");
@@ -387,6 +387,7 @@ uint32_t MeshCardScene::addInstance(uint32_t sceneInstance, const scene::MeshCar
     entry.firstCard = addCardSpan((uint32_t)kept.size());
     entry.cardCount = (uint32_t)kept.size();
     entry.mostlyTwoSided = cards.mostlyTwoSided;
+    entry.lightingChannels = lightingChannels & 7u;
     m_meshCards[index] = entry;
     uint32_t slot = entry.firstCard;
     for (uint32_t i : kept)
@@ -1020,7 +1021,7 @@ void MeshCardScene::writeMeshCardsGpu(uint32_t index)
         g.worldToLocal[r][3] = e.objectToWorld.m[r][3];
     }
     g.cardOffset = e.firstCard;
-    g.countFlags = e.cardCount | (e.mostlyTwoSided ? 1u << 17 : 0u);
+    g.countFlags = e.cardCount | (e.mostlyTwoSided ? 1u << 17 : 0u) | ((e.lightingChannels ^ 1u) << 20);
     for (uint32_t& l : g.cardLookup) l = 0;
     for (uint32_t c = 0; c < e.cardCount; ++c) g.cardLookup[m_cards[e.firstCard + c].direction] |= 1u << c;
     markDirty(m_dirty.meshCards, index);

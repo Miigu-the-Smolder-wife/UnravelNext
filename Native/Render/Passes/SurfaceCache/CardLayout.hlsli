@@ -64,7 +64,7 @@ struct McMeshCards  // 80 B
 {
     float4 worldToLocal[3];  // xyz: the rows of the unit rotation world -> mesh card space, w: the world origin's component
     uint cardOffset;
-    uint countFlags;         // bits 0-15 cards (<= 32), bit 17 mostly two-sided
+    uint countFlags;         // bits 0-15 cards (<= 32), bit 17 mostly two-sided, bits 20-22 the instance's lighting channels ^ 1
     uint cardLookup[6];      // per direction d (-X, +X, -Y, +Y, -Z, +Z): bit i = card i of this mesh faces it
 };
 struct McCard  // 112 B
@@ -114,6 +114,8 @@ uint mcMeshCardsOf(McFrame f, uint sceneInstance)
     ByteAddressBuffer b = ResourceDescriptorHeap[f.instanceMap];
     return b.Load(sceneInstance * 4);
 }
+// The lighting channels of the mesh cards' instance (Scene.hlsli g_lightChannels).
+uint mcLightingChannels(McMeshCards m) { return ((m.countFlags >> 20) & 7u) ^ 1u; }
 uint mcDirection(McCard c) { return c.packed & 7u; }
 bool mcVisible(McCard c) { return (c.packed & 0x10000u) != 0; }
 uint2 mcResLevelSizeInTiles(McCardPage p) { return uint2(p.resLevelSizeInTiles & 0xFFFFu, p.resLevelSizeInTiles >> 16); }

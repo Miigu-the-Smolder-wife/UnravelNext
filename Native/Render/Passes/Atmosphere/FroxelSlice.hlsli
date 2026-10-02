@@ -67,7 +67,7 @@ float3 airLocalEval(GpuLight l, float3 o, float3 dir, AirLocalMap mp, AirCoeffic
     }
     // Partly lit: the interpolant over the lit set, within [0, the whole segment's] (the integrand is not negative).
     if (partial) sum = clamp(sum, 0.0, full);
-    return sum * (mp.half / mp.h) * l.color;
+    return sum * (mp.half / mp.h) * lightMeanColor(l);  // (a rect's image: its mean colour)
 }
 
 // Air in-scattering of an unshadowed light along o + dir t, t in [0, len] (nits), relative to the segment's start.

@@ -50,6 +50,10 @@ struct MegaLightsOptions
     // The material resolve's class word of the view's pixels (material::ResolveOutputs::anisoWord): m.ml.sample weighs an
     // eye's iris pixels with their eye word (the iris plane takes light from below the cornea's horizon). Invalid: none.
     TextureRef classWord;
+    // Per pixel the lighting channels of its surface's instance (an R8_UINT of the view's size; Scene.hlsli) for an
+    // instance whose surface is not the vis buffer's (the coverage layer's nearest fragment). Empty: the view's vis id
+    // gives the instance, and a view without one tests no channel.
+    TextureRef channels;
 };
 MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, bool areaLights, uint32_t ltcSrv,
                                  ID3D12CommandSignature* dispatchSignature, const char* instance = nullptr, const MegaLightsOptions& options = {});

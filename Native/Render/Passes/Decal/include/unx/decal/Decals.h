@@ -15,6 +15,16 @@ namespace unx::decal
 {
 constexpr uint32_t kNone = 0xFFFFFFFFu;
 
+// The parts of the receiver's material a decal changes (Decal::channels; Decal.hlsli DECAL_CHANNEL_*). Unreal names them
+// by the decal material's connected outputs: a normal-only decal, a roughness-only decal.
+enum DecalChannels : uint32_t
+{
+    DecalBaseColor = 1,
+    DecalNormal = 2,      // the normal and its slope variance
+    DecalRoughMetal = 4,  // roughness and metallic
+    DecalAllChannels = 7,
+};
+
 struct Decal
 {
     float3x4 box;                 // unit cube [-1, 1]^3 -> space: columns = half-extent axes X, Y, Z, then the centre
@@ -25,6 +35,16 @@ struct Decal
     float fadeStartDegrees = 60;  // angle between the surface's geometric normal and the box's +Z: full up to start,
     float fadeEndDegrees = 80;    // none from end on
     float edge = 0.25f;           // soft fraction of the box depth at its +-Z faces (0: hard)
+    float3 color = { 1, 1, 1 };   // tint of the decal's base colour (Unreal's decal colour)
+    uint32_t channels = DecalAllChannels;  // DecalChannels the decal changes
+    // Fade with the decal's size on screen (Unreal's FadeScreenSize; 0: none): with screen = the box's largest half
+    // extent / its distance and k = fadeScreenSize x 2 tan(half fov x) / view width x 600, the opacity is times
+    // saturate((screen - k) / (k / 2)) - gone below k, full from 1.5 k.
+    float fadeScreenSize = 0;
+    // Lifetime fades on the frame's clock (FrameContext::time, s): in over [fadeInStart, fadeInStart + fadeInDuration],
+    // out over [fadeOutStart, fadeOutStart + fadeOutDuration]; a duration of 0: no such fade. A decal that has faded
+    // out stays in the set (it costs its frame record, no tile entries) until the game removes it.
+    float fadeInStart = 0, fadeInDuration = 0, fadeOutStart = 0, fadeOutDuration = 0;
 };
 
 class DecalSet
@@ -37,7 +57,7 @@ public:
     uint32_t count() const { return m_live; }
     uint64_t revision() const { return m_revision; }
 
-    // GPU records of the live decals (dense), as Decal.hlsli DecalRecord (80 B each).
+    // GPU records of the live decals (dense), as Decal.hlsli DecalRecord (128 B each).
     std::vector<uint8_t> records() const;
 
 private:

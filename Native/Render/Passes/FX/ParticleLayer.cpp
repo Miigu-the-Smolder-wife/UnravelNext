@@ -203,6 +203,7 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
               });
 
     const D3D12_GPU_VIRTUAL_ADDRESS frameConstants = f.frameConstants;
+    const uint32_t softParticles = f.soft ? 1u : 0u, nearFade = f.nearFade ? 1u : 0u;  // P[0].yz (FxLayerTile.hlsl)
     // (words 4, 5 = P[1].xy: the setup kernel's sampled local light volumes - shading.mega_lights; UNX_NONE elsewhere)
     auto dispatch = [&](const char* name, const char* kernel, uint32_t groupCount, std::function<void(PassBuilder&)> uses, TextureRef volume0 = {}, TextureRef volume1 = {}) {
         if (groupCount == 0) return;
@@ -216,7 +217,8 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
                   },
                   [=](PassContext& c) {
                       const bool volumes = volume0.valid() && volume1.valid();
-                      const std::array<uint32_t, 8> p = { c.srv(o.constants), 0, 0, 0, volumes ? c.srv(volume0) : 0xFFFFFFFFu, volumes ? c.srv(volume1) : 0xFFFFFFFFu, 0, 0 };
+                      const std::array<uint32_t, 8> p = { c.srv(o.constants), softParticles, nearFade, 0, volumes ? c.srv(volume0) : 0xFFFFFFFFu,
+                                                          volumes ? c.srv(volume1) : 0xFFFFFFFFu, 0, 0 };
                       c.cmd->SetPipelineState(pso);
                       c.bindFrameConstants(frameConstants);
                       c.computeConstants(p.data(), 8);

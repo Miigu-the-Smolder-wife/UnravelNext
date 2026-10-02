@@ -95,7 +95,7 @@ void MegaLightsVolumeGen()
         if (airLocalMap(light, o, dir, len).h >= light.range) continue;  // the segment's line never enters the range: adds 0
         const float3 v = (o + dir * (0.5 * len)) - light.position;
         const float d = max(length(v), 0.01);
-        const float lum = froxelIntensity(light, v / d) * froxelWindow(light, d) / (d * d) * mlLuminance(light.color) * g_exposure;
+        const float lum = froxelIntensity(light, v / d) * froxelWindow(light, d) / (d * d) * mlLuminance(lightMeanColor(light)) * g_exposure;
         const float w = mlTargetWeight(lum, minWeight);
         if (w > 0) mlOffer(r, count, w, li, true);
     }
@@ -127,7 +127,7 @@ void MegaLightsVolumeGen()
             const float3 vm = mid - light.position;
             const float dm = max(length(vm), 0.01);
             const float cellRadiusSq = 0.25 * (len * len + 2.0 * lateral * lateral);
-            float3 Em = light.color * (froxelIntensity(light, vm / dm) * froxelWindow(light, dm) / (dm * dm + cellRadiusSq) * weight);
+            float3 Em = lightMeanColor(light) * (froxelIntensity(light, vm / dm) * froxelWindow(light, dm) / (dm * dm + cellRadiusSq) * weight);
             // (A8: the light's function toward the froxel, as the in-scattering above takes it - lit particles in a
             // gobo's beam or under a flickering lamp follow the light)
             if (P[0].w != UNX_NONE) Em *= lightFunction(P[0].w, li, light.forward, light.right, vm / dm, lateral / dm, g_time);
