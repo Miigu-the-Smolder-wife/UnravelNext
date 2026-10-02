@@ -2104,8 +2104,11 @@ void shade(FramePassContext& fc, ViewResources& view)
     // Depth of field (the lens's aperture integral) follows the time integral (FEATURES_GAME 4: time, then lens).
     // Temporal upscale (output.render_height_max): all of the above at the internal resolution into the chain's HDR
     // target (postTarget: the view's size), then the upscale to the output resolution, then the chain into view.color.
+    // With shading.motion_blur_after_upscale the time integral of an upscaled view follows the upscale instead, at the
+    // output resolution (the reference's order: lens, upscale, motion blur; motionBlurUpscaled).
     const bool post = postActive(fc, view);
-    const bool blur = motionBlurActive(fc, view), haze = distortionActive(fc, view), dof = depthOfFieldActive(fc, view);
+    const bool blurAfter = motionBlurActive(fc, view) && upscaleActive(fc, view) && motionBlurAfterUpscale(fc);
+    const bool blur = motionBlurActive(fc, view) && !blurAfter, haze = distortionActive(fc, view), dof = depthOfFieldActive(fc, view);
     const DXGI_FORMAT floatFormat = post ? DXGI_FORMAT_R16G16B16A16_FLOAT : fc.graph.desc(view.color).format;
     auto intermediate = [&](const char* name) { return fc.graph.createTexture(TextureDesc{ name, view.view.width, view.view.height, 1, 1, floatFormat }); };
     ViewResources target = view;
@@ -2158,8 +2161,16 @@ void shade(FramePassContext& fc, ViewResources& view)
     if (upscaleActive(fc, view))
     {
         // the output resolution from the internal image and the history (Upscale.cpp); the chain encodes it (postActive)
-        image = temporalUpscale(fc, view, image);
+        UpscaleProducts products;
+        image = temporalUpscale(fc, view, image, &products);
         view.upscaled = image;  // (captures of the upscaled image: renderergate --capture-output)
+        if (blurAfter)
+        {
+            const TextureDesc upscaled = fc.graph.desc(image);
+            const TextureRef blurred = fc.graph.createTexture(TextureDesc{ "m.motion.blurred", upscaled.width, upscaled.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+            motionBlurUpscaled(fc, view, image, blurred, products.motion, products.depth);
+            image = blurred;
+        }
         postChain(fc, upscaleOutputView(fc, view), image);
         return;
     }

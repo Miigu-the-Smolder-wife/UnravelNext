@@ -151,3 +151,13 @@ water_turbid = false
 # the exposure [t - s dt, t]; 0.5 = 180 degrees (the user's gate camera, 2026-09-26), 0 = instantaneous. Frames without
 # motion (static camera and scene) are unchanged.
 motion_blur_shutter = 0.5
+# With the temporal upscale the blur runs after it, on the upscaled image at the output resolution, as the reference's
+# (MotionBlur.cpp motionBlurUpscaled; MotionFlatten.hlsl, MotionApply.hlsl): the exposure is then centred on the frame's
+# time (the taps go both ways along the velocity, the reference's MotionBlurAmount 0.5 = this shutter) and a blur spans
+# up to motion_blur_max_percent of the output's width instead of 32 internal pixels. false: before the upscale at the
+# internal resolution, as views at their own resolution always are (the exposure [t - s dt, t], the rotation stage).
+motion_blur_after_upscale = true
+motion_blur_max_percent = 5.0          # the longest blur, percent of the output's width (the reference's MotionBlurMax 5)
+motion_blur_samples = 16               # taps along the blur, a multiple of 4 (16: the reference's r.MotionBlurQuality 4)
+motion_blur_half_res_gather = true     # 16 x 16 pixel groups whose blur is longer than the taps gather once per 2 x 2
+                                       # pixels (r.MotionBlur.HalfResGather): a quarter of the taps where the blur hides it

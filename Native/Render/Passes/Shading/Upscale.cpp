@@ -309,7 +309,7 @@ void keepSceneColor(FramePassContext& fc, const ViewResources& view, TextureRef 
     s.sceneFresh = false;
 }
 
-TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, TextureRef src)
+TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, TextureRef src, UpscaleProducts* products)
 {
     if (!view.depth.valid()) fail("M.upscale: the main view has no depth");
     const FrameContext::Upscale& u = fc.frame.upscale;
@@ -468,6 +468,11 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
               });
     // (the surface the vectors are of: the layers' depth where a layer has the pixel)
     const TextureRef motionDepth = layerMotion ? trackedDepth : depth;
+    if (products)
+    {
+        products->motion = motion;
+        products->depth = motionDepth;
+    }
     if (tsr)
     {
         // Tsr.hlsli: dilate (+ the closest occluder scatter) -> decimate -> [resurrect] -> reject -> spatial

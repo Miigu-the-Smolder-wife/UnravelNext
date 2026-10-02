@@ -16,7 +16,14 @@ ViewResources upscaleOutputView(FramePassContext& fc, const ViewResources& view)
 // the texture). Imported once per frame; temporalUpscale then uses the same reference. Invalid when the view is not
 // upscaled or the history holds nothing yet.
 TextureRef upscalePreviousColor(FramePassContext& fc, const ViewResources& view);
-TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, TextureRef src);
+// What the upscale leaves for the passes after it (the motion blur at the output resolution): each internal sample's
+// output-UV offset to the previous frame (RG32F, not dilated; UpscaleMotion.hlsl) and the device depth of the surface
+// that vector is of (the view's depth, or the tracked depth where a layer has the pixel).
+struct UpscaleProducts
+{
+    TextureRef motion, depth;
+};
+TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, TextureRef src, UpscaleProducts* products = nullptr);
 // output.screen_trace_source = 0: keeps 'lit' - the view's opaque image right after the shading group, before water,
 // the coverage layers and glass - with the air taken off, as the scene colour upscalePreviousColor gives the next
 // frame's screen traces (UpscaleSceneKeep.hlsl). Recorded before temporalUpscale in the frame.
