@@ -30,7 +30,8 @@ render_scale_min_height = 1080
 render_height_max = 1080               # 4K renders 1920 x 1080 and is upscaled x 2 (was 1440: 2560 x 1440. On the RTX 4080 the four
                                         # game scenes took 17.7-18.7 ms at 4K with it against 9.4-10.3 ms at 1440p, 2026-10-02)
 # Quality tier (the reference's scalability groups): Config/quality/tiers/<tier>.toml is laid over these files
-# (QualityConfig::applyTier). "epic" = the files as they are; "high" = the frame-rate tier.
+# (QualityConfig::applyTier). "epic" = the files as they are; "high" = the frame-rate tier (coarser probes, rays and
+# samples at the same internal height); "performance" = a lower internal height.
 tier = "epic"
 # The upscale's reconstruction (Passes/Shading/Upscale.hlsl): each frame's jittered samples weighted by exp(-K d^2), d in
 # output pixels (K 60: sigma 0.09 output px), accumulated over the 64-position Halton cycle, so a still image converges to

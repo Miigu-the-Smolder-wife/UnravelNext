@@ -1,0 +1,11 @@
+# The tier below "high" (output.tier = "performance"): the main view at a lower internal height. The frame is 2.7 ms of
+# work that does not depend on the resolution and 3.9 ms per million internal pixels [measured: lobby, 2026-10-02], so
+# the internal height is the one setting that moves a 4K frame by milliseconds. What it gives up is named per key.
+[output]
+render_height_max = 720         # 4K renders 1280 x 720 and is upscaled x 3 (1440p x 2): the temporal upscale rebuilds more of
+                                # the picture over frames - detail under an internal pixel arrives later after a cut or a
+                                # disocclusion, and thin features move with more shimmer
+upscale_tsr_flickering = false  # no flickering (moire) heuristic: sub-pixel gratings may shimmer where they stand still
+
+[reflection]
+lumen_downsample = 2            # one reflection ray per 2 x 2 internal pixels (as the high tier)

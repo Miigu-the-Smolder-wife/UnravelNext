@@ -71,7 +71,12 @@ if ($Skip -notcontains "variants") {
     }
     $fogOn = "atmosphere.fog.enabled=true"
     if ($Variants -contains "high") {
-        Final "high tier (lobby timings)" "tier_high" @("-Only", "bt_lobby", "-Resolutions", "1080p,4K", "-SkipPictures", "-Set", "output.tier=high")
+        # the tiers at 4K: timings, and the cut pictures to judge what each gives up (epic's are the game group's at 1080p:
+        # here at 4K too)
+        Final "high tier (lobby)" "tier_high" @("-Only", "bt_lobby", "-Resolutions", "1080p,4K", "-SkipPictures", "-Set", "output.tier=high")
+        Final "high tier (lobby 4K pictures)" "tier_high" @("-Only", "bt_lobby", "-Resolutions", "4K", "-SkipTimings", "-Set", "output.tier=high")
+        Final "performance tier (lobby 4K)" "tier_performance" @("-Only", "bt_lobby", "-Resolutions", "4K", "-Set", "output.tier=performance")
+        Final "epic tier (lobby 4K pictures)" "tier_epic" @("-Only", "bt_lobby", "-Resolutions", "4K", "-SkipTimings")
     }
     if ($Variants -contains "fog") {
         # the fog as it is by default when on: the sky through it, far shadows, the density's variation, the reflections' rays,
