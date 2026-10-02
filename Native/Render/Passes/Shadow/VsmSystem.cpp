@@ -956,7 +956,10 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     c.frame = (uint32_t)++s.frames;
     c.time = (float)fc.frame.time;
     c.lodBias = (float)q.number("shadow.vsm.lod_bias");
-    c.receiverBiasTexels = (float)q.number("shadow.vsm.receiver_bias_texels");
+    // (+ the visible surface's own LOD error: a pixel's cut may lie visibility.lod_error_px pixels inside the casters', and
+    // a pixel is up to receiver_lod_texels texels of its level - the level's texel is the largest not above the footprint)
+    c.receiverBiasTexels = (float)q.number("shadow.vsm.receiver_bias_texels") +
+                           (float)(q.number("shadow.vsm.receiver_lod_texels") * q.number("visibility.lod_error_px"));
     c.maxReceiverSlope = (float)q.number("shadow.vsm.max_receiver_slope");
     c.instanceCount = (uint32_t)fc.scene.instances().size();
     const int64_t searchTaps = q.integer("shadow.vsm.search_taps"), filterTaps = q.integer("shadow.vsm.filter_taps");
