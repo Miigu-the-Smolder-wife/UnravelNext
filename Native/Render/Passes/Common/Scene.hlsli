@@ -144,6 +144,10 @@ struct GpuLight
     float2 size;
     float spotOffset;
     uint revision;
+    // the light components (GpuSceneLayout.h Light; every word 0: a plain light) - read through the accessors below
+    uint scales, scales2;
+    float drawDistance, fadeRange, falloffExponent;
+    uint barnDoor, sourceTexture, lightPad;
 };
 
 struct GpuVisibleCluster
@@ -156,6 +160,7 @@ struct GpuVisibleCluster
 #define INSTANCE_DYNAMIC (1u << 1)
 #define INSTANCE_SKINNED (1u << 2)
 #define INSTANCE_WIND (1u << 3)
+// scene::InstanceLightingChannels...: bits 4..6 = the instance's lighting channels ^ 1 (instanceLightingChannels below)
 #define INSTANCE_HIDDEN (1u << 31)  // gpu::kInstanceHidden: skipped by every reader (GpuScene::setInstanceVisible)
 // gpu::kInstanceMotionBreak (v1.45): a teleport or restore in this frame; prev* = current (zero motion), breakCentre = where
 // its bounding sphere was in the previous rendered frame (caches keyed by the old place invalidate from it).
@@ -210,6 +215,87 @@ bool lightCastsShadow(GpuLight l) { return (l.typeFlags & 0x100u) != 0; }
 uint lightShadowIndex(GpuLight l) { return l.typeFlags >> 16; }
 // The light's own shadow-ray end bias (m; revision bits 16..31 as a half float), 'fallback' when it has none (sign bit).
 float lightRayEndBias(GpuLight l, float fallback) { return (l.revision & 0x80000000u) != 0 ? fallback : f16tof32(l.revision >> 16); }
+
+// ---- light components (scene::Light; Unreal's local light components). One place for what every consumer of a light
+// must agree on: the opaque and coverage shading, the sampled lights, the air and fog, the surface cache, the ray hits.
+//   lighting channels   3 bits on a light and on an instance: a light lights the instances that share one. A kernel
+//                       that shades a point of an instance sets g_lightChannels to the instance's channels before it
+//                       evaluates lights (the light samples' weights of the opaque surface: MegaLightsSample.hlsl);
+//                       lightWindow is then 0 for a light in none of them. Unset (7): no test - the coverage layer's
+//                       fragments and the hair (their records name no instance), the air and the fog, the ray hits,
+//                       the surface cache's cards (Unreal tests neither fog nor hit lighting).
+//   scales              specular, diffuse (direct shading), volumetric (the air's and fog's in-scattering), indirect (the
+//                       surface cache's direct light and the ray hits' light samples).
+//   lightWindow         what multiplies intensity / d^2 at distance d from the light: the range's window
+//                       saturate(1 - (d / range)^4)^2 of INTERFACES 8.2 - or, for a point or spot light with a falloff
+//                       exponent n, (1 - (d / range)^2)^n x d^2 (no inverse square: the intensity is the illuminance at
+//                       the light) -, times lightViewFade.
+//   lightViewFade       1, or the fade towards the light's draw distance from this view's camera:
+//                       saturate((drawDistance - |light - camera|) / fadeRange), a cut without a fade range.
+// UNX_LIGHT_COMPONENTS 0 before this file compiles the scales, the exponent and the fade out (every light as a plain one):
+// for a kernel at the DXIL size limit; such a kernel says so in its header.
+#ifndef UNX_LIGHT_COMPONENTS
+#define UNX_LIGHT_COMPONENTS 1
+#endif
+uint lightChannels(GpuLight l) { return ((l.typeFlags >> 9) & 7u) ^ 1u; }
+uint instanceLightingChannels(uint instanceFlags) { return ((instanceFlags >> 4) & 7u) ^ 1u; }
+static uint g_lightChannels = 7u;  // the receiver's channels
+#if UNX_LIGHT_COMPONENTS
+float lightSpecularScale(GpuLight l) { return 1 + f16tof32(l.scales & 0xFFFFu); }
+float lightDiffuseScale(GpuLight l) { return 1 + f16tof32(l.scales >> 16); }
+float lightVolumetricScale(GpuLight l) { return 1 + f16tof32(l.scales2 & 0xFFFFu); }
+float lightIndirectScale(GpuLight l) { return 1 + f16tof32(l.scales2 >> 16); }
+float lightViewFade(GpuLight l)
+{
+    if (!(l.drawDistance > 0)) return 1;
+    const float d = distance(l.position, g_cameraPosition);
+    return l.fadeRange > 0 ? saturate((l.drawDistance - d) / l.fadeRange) : (d < l.drawDistance ? 1.0 : 0.0);
+}
+float lightWindow(GpuLight l, float d)
+{
+    const float x = d / max(l.range, 1e-6), x2 = x * x;
+    float w = saturate(1 - x2 * x2);
+    w *= w;
+    if (l.falloffExponent > 0) w = pow(saturate(1 - x2), l.falloffExponent) * (d * d);
+    if ((lightChannels(l) & g_lightChannels) == 0) w = 0;
+    return w * lightViewFade(l);
+}
+#else
+float lightSpecularScale(GpuLight l) { return 1; }
+float lightDiffuseScale(GpuLight l) { return 1; }
+float lightVolumetricScale(GpuLight l) { return 1; }
+float lightIndirectScale(GpuLight l) { return 1; }
+float lightViewFade(GpuLight l) { return 1; }
+float lightWindow(GpuLight l, float d)
+{
+    const float x = d / max(l.range, 1e-6), x2 = x * x;
+    const float w = saturate(1 - x2 * x2);
+    return w * w;
+}
+#endif
+// The part of a rect light a point sees past its barn doors (scene::Light::barnDoorAngle / Length; Unreal's GetRect with
+// bComputeVisibleRect): four flaps along the emitter's edges, 'height' in front of it and spread outwards by 'spread'.
+// From a point outside a flap, the flap's top edge hides the strip of the emitter behind it - the emitter's near side
+// moves in by height x (the point's offset past the edge) / (its distance in front of the top) - spread at the height;
+// a point beside the housing below the flaps' top sees nothing. p: the light's centre relative to the point; up =
+// forward x right. centre, halfSize: the visible rect (in: the emitter's). false: nothing is visible.
+bool lightBarnDoorRect(GpuLight l, float3 p, float3 up, inout float3 centre, inout float2 halfSize)
+{
+    const float height = f16tof32(l.barnDoor & 0xFFFFu), spreadTop = f16tof32(l.barnDoor >> 16);
+    const float3 s = float3(dot(-p, l.right), dot(-p, up), dot(-p, l.forward));  // the point in the light's frame
+    const float depth = min(s.z, height);
+    const float spread = spreadTop * depth / max(height, 1e-4);
+    const float2 side = float2(s.x < 0 ? -1.0 : 1.0, s.y < 0 ? -1.0 : 1.0);
+    const float2 edge = halfSize + spread;  // the flaps' edge at that depth, on the point's side
+    const float2 shift = depth * (max(abs(s.xy), edge) - edge) / max(s.z - depth, 1e-3) - spread;
+    const float2 lo = clamp(-halfSize + shift * max(0.0, -side), -halfSize, halfSize);
+    const float2 hi = clamp(halfSize - shift * max(0.0, side), -halfSize, halfSize);
+    if (any(hi - lo <= 0)) return false;
+    const float2 mid = 0.5 * (lo + hi);
+    centre = p + l.right * mid.x + up * mid.y;
+    halfSize = 0.5 * (hi - lo);
+    return true;
+}
 
 // Instance material for a submesh (instance overrides first).
 uint instanceMaterial(GpuInstance inst, GpuSubmesh sub, uint submeshIndexInMesh)

@@ -47,12 +47,7 @@ float nfLightExtent(GpuLight l)
 }
 
 // Distance window w(d) of INTERFACES 8.2 (shPunctualIlluminance / shAreaWindow / froxelWindow): 0 beyond the range.
-float nfWindow(GpuLight l, float d)
-{
-    const float x = d / max(l.range, 1e-6), x2 = x * x;
-    const float w = saturate(1 - x2 * x2);
-    return w * w;
-}
+float nfWindow(GpuLight l, float d) { return lightWindow(l, d); }
 
 // Conditions 1-3 for a light whose shadow (5) and the region's continuity (4) the caller handles; d returns the distance
 // from the light's centre to the region's sphere.
@@ -117,14 +112,15 @@ float3 nfPolygonVector(float3 a, float3 b, float3 c, float3 d)
 // weighted irradiance a receiver of normal n gets as max(0, n . E). Point and spot: shPunctualIlluminance's value along
 // the light direction (exact). Rect: the polygon form above with the window at the centre (exact; 0 behind the emitting
 // side, as shAreaIntegral). Disk, sphere, tube: the far-field point equivalent (radiance x projected area / d^2, the
-// window at the centre; error O((r_e / d)^2), bounded by condition 2). Visibility is the caller's (1 for FAR).
+// window at the centre; error O((r_e / d)^2), bounded by condition 2). Visibility is the caller's (1 for FAR). The FAR
+// term is diffuse light: the value carries the light's diffuse scale (a rect's barn doors are not in it).
 float3 nfVectorIrradiance(GpuLight l, float3 x)
 {
     const uint type = lightType(l);
     const float3 v = l.position - x;
     const float d2 = max(dot(v, v), 1e-12), d = sqrt(d2);
     const float3 lh = v / d;
-    const float w = nfWindow(l, d);
+    const float w = nfWindow(l, d) * lightDiffuseScale(l);
     if (w <= 0) return 0;
     if (type == LIGHT_POINT || type == LIGHT_SPOT)
     {

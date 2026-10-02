@@ -43,7 +43,7 @@ RlHit rlShadeHit(RtSceneSrvs scene, RtHit hit, float3 origin, float3 direction, 
     o.surface = false;
     if (hit.instance == RT_INSTANCE_EMITTER)
     {
-        o.radiance = rtEmitterCounts(scene.pad, hit.primitive) ? rtEmitterRadiance(hit.primitive, origin) : float3(0, 0, 0);
+        o.radiance = rtEmitterCounts(scene.pad, hit.primitive) ? rtEmitterRadiance(hit.primitive, origin, origin + direction * hit.t) : float3(0, 0, 0);
         return o;
     }
     GpuInstance inst;

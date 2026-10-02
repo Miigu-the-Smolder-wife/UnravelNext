@@ -466,6 +466,35 @@ void writeLightEnd(Writer& w, const Scene& s)
         }
 }
 
+// Light components (scene::Light's scales, source texture, barn doors, channels, draw distance, temperature, falloff
+// exponent): an optional block after the ray end bias block, holding the lights that set one - a scene without such
+// lights writes the same bytes as before. u32 tag "LCMP", u64 count, then per light its index and the twelve values.
+constexpr uint32_t kLightComponentsTag = 0x504D434Cu;  // "LCMP"
+
+bool anyLightComponents(const Scene& s)
+{
+    for (const Light& l : s.lights)
+        if (hasLightComponents(l)) return true;
+    return false;
+}
+
+void writeLightComponents(Writer& w, const Scene& s)
+{
+    w.pod(kLightComponentsTag);
+    uint64_t count = 0;
+    for (const Light& l : s.lights) count += hasLightComponents(l);
+    w.pod(count);
+    for (uint32_t i = 0; i < s.lights.size(); ++i)
+    {
+        const Light& l = s.lights[i];
+        if (!hasLightComponents(l)) continue;
+        w.pod(i);
+        w.pod(l.specularScale); w.pod(l.diffuseScale); w.pod(l.volumetricScattering); w.pod(l.indirectIntensity);
+        w.pod(l.sourceTexture); w.pod(l.barnDoorAngle); w.pod(l.barnDoorLength); w.pod(l.lightingChannels);
+        w.pod(l.maxDrawDistance); w.pod(l.maxDistanceFadeRange); w.pod(l.temperature); w.pod(l.falloffExponent);
+    }
+}
+
 // Subsurface extension block, written only when a Subsurface-class material's parameters are not the defaults (scenes
 // written before the parameters existed, and scenes that keep the defaults, have the same bytes and content hashes as
 // before): u32 tag "SUBS", u64 count, then per material its index, subsurfaceMeanFreePath, subsurfaceLobeMix,
@@ -648,6 +677,7 @@ std::vector<uint8_t> serialize(const Scene& s)
     if (anyAnisotropy(s)) writeAnisotropy(w, s);
     if (anyFilm(s)) writeFilm(w, s);
     if (anyLightEnd(s)) writeLightEnd(w, s);
+    if (anyLightComponents(s)) writeLightComponents(w, s);
     if (anySubsurface(s)) writeSubsurface(w, s);
     if (anyCloth(s)) writeCloth(w, s);
     if (anyEye(s)) writeEye(w, s);
@@ -831,6 +861,20 @@ Scene deserialize(const std::vector<uint8_t>& bytes)
         }
         tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
     }
+    if (tag == kLightComponentsTag)
+    {
+        const uint64_t count = r.pod<uint64_t>();
+        for (uint64_t k = 0; k < count; ++k)
+        {
+            const uint32_t i = r.pod<uint32_t>();
+            if (i >= s.lights.size()) fail("unxscene: light components of light %u of %zu", i, s.lights.size());
+            Light& l = s.lights[i];
+            l.specularScale = r.pod<float>(); l.diffuseScale = r.pod<float>(); l.volumetricScattering = r.pod<float>(); l.indirectIntensity = r.pod<float>();
+            l.sourceTexture = r.pod<uint32_t>(); l.barnDoorAngle = r.pod<float>(); l.barnDoorLength = r.pod<float>(); l.lightingChannels = r.pod<uint32_t>();
+            l.maxDrawDistance = r.pod<float>(); l.maxDistanceFadeRange = r.pod<float>(); l.temperature = r.pod<float>(); l.falloffExponent = r.pod<float>();
+        }
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
     if (tag == kSubsurfaceTag)
     {
         const uint64_t count = r.pod<uint64_t>();
@@ -919,6 +963,39 @@ Scene deserialize(const std::vector<uint8_t>& bytes)
     if (tag != 0) fail("unxscene: unknown extension block 0x%08x", tag);
     if (r.at != bytes.size()) fail("unxscene: %zu trailing bytes", bytes.size() - r.at);
     return s;
+}
+
+float3 colorTemperatureTint(float kelvin)
+{
+    const double T = std::clamp((double)kelvin, 1000.0, 15000.0);
+    // Krystek 1985: the Planckian locus in CIE 1960 (u, v)
+    const double u = (0.860117757 + 1.54118254e-4 * T + 1.28641212e-7 * T * T) / (1.0 + 8.42420235e-4 * T + 7.08145163e-7 * T * T);
+    const double v = (0.317398726 + 4.22806245e-5 * T + 4.20481691e-8 * T * T) / (1.0 - 2.89741816e-5 * T + 1.61456053e-7 * T * T);
+    const double x = 3.0 * u / (2.0 * u - 8.0 * v + 4.0), y = 2.0 * v / (2.0 * u - 8.0 * v + 4.0);
+    // XYZ at Y = 1, then linear Rec.709 (its luminance row gives Y back: luminance 1 before the clamp)
+    const double X = x / y, Z = (1.0 - x - y) / y;
+    double rgb[3] = { 3.2404542 * X - 1.5371385 - 0.4985314 * Z, -0.9692660 * X + 1.8760108 + 0.0415560 * Z, 0.0556434 * X - 0.2040259 + 1.0572252 * Z };
+    for (double& c : rgb) c = std::max(c, 0.0);
+    const double luminance = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    return { (float)(rgb[0] / luminance), (float)(rgb[1] / luminance), (float)(rgb[2] / luminance) };
+}
+
+float3 lightColor(const Light& l)
+{
+    if (!(l.temperature > 0)) return l.color;
+    const float3 tint = colorTemperatureTint(l.temperature);
+    const float3 c{ l.color.x * tint.x, l.color.y * tint.y, l.color.z * tint.z };
+    const float before = 0.2126f * l.color.x + 0.7152f * l.color.y + 0.0722f * l.color.z, after = 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+    return after > 0 ? c * (before / after) : c;
+}
+
+bool hasLightComponents(const Light& l)
+{
+    const Light d;
+    return l.specularScale != d.specularScale || l.diffuseScale != d.diffuseScale || l.volumetricScattering != d.volumetricScattering ||
+           l.indirectIntensity != d.indirectIntensity || l.sourceTexture != d.sourceTexture || l.barnDoorAngle != d.barnDoorAngle ||
+           l.barnDoorLength != d.barnDoorLength || l.lightingChannels != d.lightingChannels || l.maxDrawDistance != d.maxDrawDistance ||
+           l.maxDistanceFadeRange != d.maxDistanceFadeRange || l.temperature != d.temperature || l.falloffExponent != d.falloffExponent;
 }
 
 void save(const Scene& scene, const std::filesystem::path& path)
@@ -1097,7 +1174,21 @@ void validate(const Scene& s)
             fail("instance %zu: transform must be rotation + uniform scale + translation", i);
     }
     for (size_t i = 0; i < s.lights.size(); ++i)
-        if (!unit(s.lights[i].forward)) fail("light %zu: forward not unit", i);
+    {
+        const Light& l = s.lights[i];
+        if (!unit(l.forward)) fail("light %zu: forward not unit", i);
+        for (float v : { l.specularScale, l.diffuseScale, l.volumetricScattering, l.indirectIntensity, l.barnDoorLength, l.maxDrawDistance, l.maxDistanceFadeRange,
+                         l.temperature, l.falloffExponent })
+            if (!std::isfinite(v) || v < 0) fail("light %zu: a light component is negative or not finite", i);
+        if (!std::isfinite(l.barnDoorAngle) || l.barnDoorAngle < 0 || l.barnDoorAngle > 1.5707964f) fail("light %zu: barn door angle outside [0, pi / 2]", i);
+        if (l.lightingChannels > 7) fail("light %zu: lighting channels are 3 bits", i);
+        if (l.sourceTexture != kNone)
+        {
+            if (l.sourceTexture >= s.textures.size()) fail("light %zu: source texture %u of %zu", i, l.sourceTexture, s.textures.size());
+            const TextureFormat f = s.textures[l.sourceTexture].format;
+            if (f != TextureFormat::Rgba8Srgb && f != TextureFormat::Rgba16Float) fail("light %zu: the source texture must be Rgba8Srgb or Rgba16Float", i);
+        }
+    }
     if (!unit(s.sun.direction)) fail("sun direction not unit");
     for (const Camera& c : s.cameras)
         if (!unit(c.forward) || !unit(c.up)) fail("camera '%s': forward/up not unit", c.name.c_str());

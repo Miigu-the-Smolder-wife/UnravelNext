@@ -1473,9 +1473,45 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           c.cmd->Dispatch(1, 1, 1);
                       });
         };
+        // E's grooms between the layer's fragments and the sun (shading.hair_shadows; Passes/Hair/HairShadow.hlsl MODE 2):
+        // per pixel with records the hair's transmittance at the 4 depths of S's sun profile. The cluster fragments
+        // multiply their sun visibility by it (CoverageShade.hlsli covFragmentShadow, P[11].z); the hair records count
+        // the hair themselves. Frames without a density volume record nothing.
+        TextureRef hairSun;
+        if (fragmentShadows && (!fc.quality.has("shading.hair_shadows") || fc.quality.boolean("shading.hair_shadows")) && r.hairDensityParams.valid() &&
+            r.hairDensity.valid() && r.hairDensityCoarse.valid())
+        {
+            const uint32_t hairSteps = fc.quality.has("shading.hair_shadow_steps") ? (uint32_t)fc.quality.integer("shading.hair_shadow_steps") : 32u;
+            if (hairSteps < 2 || hairSteps > 128) fail("shading.hair_shadow_steps must be in [2, 128]");
+            const uint32_t hairJitter = !fc.quality.has("shading.hair_march_jitter") || fc.quality.boolean("shading.hair_march_jitter") ? 1u : 0u;
+            const float3 originOffset = v.view.position - r.hairOrigin;
+            const BufferRef hairParams = r.hairDensityParams;
+            const TextureRef hairFine = r.hairDensity, hairCoarse = r.hairDensityCoarse, ranges = v.coverageDepthRange;
+            const uint32_t hairW = v.view.width, hairH = v.view.height;
+            hairSun = g.createTexture({ "m.coverage hair sun", hairW, hairH, 1, 1, DXGI_FORMAT_R32_UINT });
+            ID3D12PipelineState* hairProfile = fc.shaders.compute("Passes/Hair/HairShadow.MODE2");
+            g.addPass("m.coverage.hairsun", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(ranges, Use::SrvCompute);
+                          b.use(hairParams, Use::SrvCompute);
+                          b.use(hairFine, Use::SrvCompute);
+                          b.use(hairCoarse, Use::SrvCompute);
+                          b.use(hairSun, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          uint32_t k[8] = { c.srv(hairParams), c.srv(ranges), c.uav(hairSun), hairSteps, 0, 0, 0, hairJitter };
+                          const float o3[3] = { originOffset.x, originOffset.y, originOffset.z };
+                          std::memcpy(&k[4], o3, 12);
+                          c.cmd->SetPipelineState(hairProfile);
+                          c.bindFrameConstants(cb);
+                          c.computeConstants(k, 8);
+                          c.cmd->Dispatch((hairW + 7) / 8, (hairH + 7) / 8, 1);
+                      });
+        }
         // The fragment shading kernels' resources (CoverageShade.hlsli: P[1], P[3], P[4], P[5].x).
         auto useShading = [=](PassBuilder& b) {
             b.use(v.coverageRecords, Use::SrvCompute);
+            if (hairSun.valid()) b.use(hairSun, Use::SrvCompute);  // (P[11].z)
             b.use(v.visibleClusters, Use::SrvCompute);
             b.use(v.depth, Use::SrvCompute);
             if (froxelLists) b.use(v.froxelLights, Use::SrvCompute);
@@ -1521,6 +1557,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             waterSunConstants(c, k + 36, 4);  // P[9], P[10].x (v1.77)
             k[44] = covMlDiffuse.valid() ? c.srv(covMlDiffuse) : gpu::kNone;   // P[11].x: shading.mega_lights' coverage instance
             k[45] = covMlSpecular.valid() ? c.srv(covMlSpecular) : gpu::kNone;  // P[11].y
+            k[46] = hairSun.valid() ? c.srv(hairSun) : gpu::kNone;              // P[11].z: the grooms towards the sun
         };
         auto shadingConstants = [=](PassContext& c, uint32_t (&k)[24], uint32_t colour) {
             const uint32_t none = gpu::kNone;

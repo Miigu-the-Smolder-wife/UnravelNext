@@ -34,6 +34,11 @@ target_link_libraries(unx_test_scene_lightendbias PRIVATE unx_scene)
 add_executable(unx_test_scene_weather Tests/WeatherBlockTests.cpp)
 unx_target_defaults(unx_test_scene_weather)
 target_link_libraries(unx_test_scene_weather PRIVATE unx_scene)
+# Light components (scales, source texture, barn doors, channels, draw distance, temperature, falloff exponent): the
+# optional LCMP block, the instances' channel bits, the colour temperature's tint (CPU).
+add_executable(unx_test_scene_lightcomponents Tests/LightComponentsTests.cpp)
+unx_target_defaults(unx_test_scene_lightcomponents)
+target_link_libraries(unx_test_scene_lightcomponents PRIVATE unx_scene)
 # Mesh cards (render A, MESH_CARDS_INTERFACE_KO.md): the per-mesh card generator (CPU).
 add_executable(unx_test_scene_meshcards Tests/MeshCardsTests.cpp)
 unx_target_defaults(unx_test_scene_meshcards)

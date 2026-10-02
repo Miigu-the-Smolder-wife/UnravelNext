@@ -239,10 +239,21 @@ enum MaterialFlags : uint32_t
     MaterialEye = 1u << 7,          // a Subsurface material with an iris: a MaterialEyeRecord, index in classFlags bits 16..31
 };
 
-struct Light  // 80 B
+// A float as a half float's 16 bits (round toward zero; magnitudes past the half range saturate, below 2^-14: 0).
+inline uint32_t halfFloatBits(float value)
+{
+    uint32_t u;
+    std::memcpy(&u, &value, 4);
+    const uint32_t sign = (u >> 16) & 0x8000u;
+    const int32_t e = (int32_t)((u >> 23) & 0xFF) - 127 + 15;
+    return sign | (e <= 0 ? 0u : (e >= 31 ? 0x7BFFu : (((uint32_t)e << 10) | ((u >> 13) & 0x3FFu))));
+}
+
+struct Light  // 112 B
 {
     float3 position;
-    uint32_t typeFlags;      // LightType | castShadow << 8 | shadowIndex << 16 (S: VSM light slot, 0xFFFF = none)
+    uint32_t typeFlags;      // LightType | castShadow << 8 | (lighting channels ^ 1) << 9 (3 bits; 0: channel 0 alone) |
+                             // shadowIndex << 16 (S: VSM light slot, 0xFFFF = none)
     float3 forward;
     float range;
     float3 right;
@@ -253,8 +264,18 @@ struct Light  // 80 B
     float spotOffset;        // -cos(outer) * spotScale
     uint32_t revision;       // bits 0..15: the record's change count (wraps); bits 16..31 (v1.93): the light's shadow-ray end
                              // bias in metres as a half float, sign bit set = none of its own (Scene.hlsli lightRayEndBias)
+    // ---- the light components (scene::Light; Scene.hlsli's accessors). Every word is 0 for a light that sets none, so a
+    // zeroed record (the FX particle lights, tests) is a plain light.
+    uint32_t scales;         // half(specularScale - 1) | half(diffuseScale - 1) << 16
+    uint32_t scales2;        // half(volumetricScattering - 1) | half(indirectIntensity - 1) << 16
+    float drawDistance;      // m from the camera past which the light is not drawn; 0: no limit
+    float fadeRange;         // m before drawDistance over which it fades; 0: cut
+    float falloffExponent;   // point, spot: 0 = inverse square; > 0: (1 - (d / range)^2)^exponent, no inverse square
+    uint32_t barnDoor;       // rect: half(flap height = length x cos angle) | half(flap spread = length x sin angle) << 16; 0: none
+    uint32_t sourceTexture;  // rect: SRV of the emitter's image + 1 (M's TextureSystem publishes it; 0: uniform)
+    uint32_t pad;
 };
-static_assert(sizeof(Light) == 80);
+static_assert(sizeof(Light) == 112);
 // Light::revision from a change count and scene::Light::rayEndBias (negative: none).
 inline uint32_t lightRevisionWord(uint32_t count, float rayEndBias)
 {

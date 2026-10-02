@@ -277,7 +277,7 @@ float3 hairLocalLight(HairPoint p, HairStrand strand, GpuLight light, uint light
         if (window <= 0) return 0;
         l = normalize(toLight);
         const float3 t = normalize(abs(l.y) < 0.9 ? cross(l, float3(0, 1, 0)) : cross(l, float3(1, 0, 0)));
-        E = light.color * (light.intensity * window * SH_PI * shAreaIntegral(light, toLight, float3x3(t, cross(l, t), l), true));
+        E = shAreaColor(light, toLight) * (light.intensity * window * SH_PI * shAreaIntegral(light, toLight, float3x3(t, cross(l, t), l), true));
     }
     else
     {

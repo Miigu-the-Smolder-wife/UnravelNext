@@ -698,10 +698,18 @@ void updateLocalLights(FramePassContext& fc, State& s, const ViewResources& main
         const float3 eye = main.view.position;
         const float3 d = { l.position.x - eye.x, l.position.y - eye.y, l.position.z - eye.z };
         const float dist2 = dot(d, d), reach = l.range + emitterRadius(l);
+        // (the view's fade of a light toward its draw distance - scene::Light::maxDrawDistance, Scene.hlsli
+        // lightViewFade: a light faded out lights nothing and waits behind every other)
+        float fade = 1.0f;
+        if (l.maxDrawDistance > 0)
+        {
+            const float dist = std::sqrt(dist2);
+            fade = l.maxDistanceFadeRange > 0 ? std::min(std::max((l.maxDrawDistance - dist) / l.maxDistanceFadeRange, 0.0f), 1.0f) : (dist < l.maxDrawDistance ? 1.0f : 0.0f);
+        }
         Priority p;
-        p.inView = dist2 <= reach * reach || sphereInView(main.view.viewProj, l.position, reach);
+        p.inView = fade > 0 && (dist2 <= reach * reach || sphereInView(main.view.viewProj, l.position, reach));
         const float lum = std::max(0.2126f * l.color.x + 0.7152f * l.color.y + 0.0722f * l.color.z, 1e-6f);
-        p.value = std::max(l.intensity, 0.0f) * lum * reach * reach / std::max(std::max(dist2, reach * reach), 1e-6f);
+        p.value = std::max(l.intensity, 0.0f) * lum * fade * reach * reach / std::max(std::max(dist2, reach * reach), 1e-6f);
         return p;
     };
     std::vector<std::pair<Priority, uint32_t>> waiting;  // lights without a slot, best first
@@ -2361,8 +2369,10 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
     }
     // The hair's shadow on the view's surfaces (shading.hair_shadows; Passes/Hair/HairShadow.hlsl MODE 0): the sun slot
     // times what the frame's grooms let through towards the sun, from E's density volume, after the passes that write
-    // the slot. A frame without a volume records nothing; the hair records are shaded with the hair in front of them by
-    // M (the fragment visibility below stays the opaque casters').
+    // the slot - and, where S fills the local slots (no shading.mega_lights), slots 1..3 times what they let through
+    // towards each slot's light. A frame without a volume records nothing; the hair records are shaded with the hair in
+    // front of them by M (the fragment visibility below stays the opaque casters': M multiplies the cluster fragments'
+    // by HairShadow MODE 2's profile).
     {
         const FrameResources hr = fc.resources;
         const bool hairShadows = !fc.quality.has("shading.hair_shadows") || fc.quality.boolean("shading.hair_shadows");
@@ -2381,15 +2391,17 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                           b.use(hairParams, Use::SrvCompute);
                           b.use(hairFine, Use::SrvCompute);
                           b.use(hairCoarse, Use::SrvCompute);
+                          if (localSlots) b.use(froxelLists, Use::SrvCompute);
                           b.use(out, Use::UavCompute);
                       },
                       [=](PassContext& ctx) {
-                          uint32_t k[8] = { ctx.srv(hairParams), ctx.srv(depth), ctx.uav(out), hairSteps, 0, 0, 0, hairJitter };
+                          uint32_t k[12] = { ctx.srv(hairParams), ctx.srv(depth), ctx.uav(out), hairSteps, 0, 0, 0, hairJitter,
+                                             localSlots ? ctx.srv(froxelLists) : 0xFFFFFFFFu, 0, 0, 0 };
                           const float o[3] = { originOffset.x, originOffset.y, originOffset.z };
                           std::memcpy(&k[4], o, 12);
                           ctx.cmd->SetPipelineState(ph);
                           ctx.bindFrameConstants(constants);
-                          ctx.computeConstants(k, 8);
+                          ctx.computeConstants(k, 12);
                           ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
                       });
         }

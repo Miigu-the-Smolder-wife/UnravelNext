@@ -25,6 +25,8 @@
 // transmittance (waterSunLight, the direct parts only); P[10].x its caustics (UNX_NONE: none). P[8].x = E's light function table (A8; UNX_NONE: none),
 // P[8].y = ViewResources::coverageRecordRadiance (raw SRV, v1.75): special records (vis id top bits != 00: hair, streams,
 // M pre-shaded classes) are read from it (their owners shaded them, CoverageSpecial.hlsli), clusters are shaded here.
+// P[11].z = E's grooms between the fragments and the sun (Passes/Hair/HairShadow.hlsl MODE 2: the hair's transmittance
+// at the 4 depths of S's sun profile, R32_UINT; UNX_NONE: none) - a cluster fragment's sun visibility times its value.
 // COV_PRESHADE_CLASSES (CoverageSpecial.hlsl MODE=1, 2): covFragmentMaterial takes the material of its class as the
 // resolve - 1 Cut, 2 Terrain; COV_PRESHADE_LIGHT (MODE=3): covShadeFragment lights the material those kernels stored.
 #ifndef UNX_M_COVERAGE_SHADE_HLSLI
@@ -209,6 +211,15 @@ CovFragmentShadow covFragmentShadow(uint2 pixel, uint element, float linearZ)
         const float x = o.t * 3;
         const uint k = min((uint)x, 2u);
         o.sun = lerp(covByte(w.x, k), covByte(w.x, k + 1u), x - k);
+    }
+    if (P[11].z != UNX_NONE)
+    {
+        // the grooms towards the sun at the fragment's depth (the same 4 points)
+        Texture2D<uint> hairSun = ResourceDescriptorHeap[P[11].z];
+        const uint h = hairSun[pixel];
+        const float x = o.t * 3;
+        const uint k = min((uint)x, 2u);
+        o.sun *= lerp(covByte(h, k), covByte(h, k + 1u), x - k);
     }
     o.nearSlots = w.y;
     o.farSlots = w.z;
@@ -608,7 +619,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
                 const float3 p = (light.position - g_cameraPosition) - offset;
                 const float window = shAreaWindow(light, p);
                 if (window <= 0) continue;
-                const float3 Lw = light.color * (light.intensity * window * visibility);
+                const float3 Lw = shAreaColor(light, p) * (light.intensity * window * visibility);
                 uint first = NoV > 0 ? 0 : 2, last = foliage ? 3 : 2;
                 const bool specularInReflections = shSpecularInReflections(P[7].y, lightIndex);  // P[7].y: B2 mask
                 float scaleBase = 1;
@@ -680,8 +691,9 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
             else if (NoV > 0 && cosL > 0) f = front + shSpecular(f0, alpha, compensation, n, v, l, NoV, cosL);
             else if (foliage && NoV * cosL < 0) f = back;
 #if COV_COAT
-            if (cover > 0) f = keep * f + cover * (modelCoatLobe(coat, n, v, l) + modelCoatUnder(s, coat, n, v, l));
-            if (sheenOn && cosL > 0) f = keepS * (f - (f - front) * sheen.cloth) + sheen.color * modelSheenLobe(sheen.roughness, n, v, l);
+            // (the coat's and the sheen's lobes are specular light: the light's specular scale, ShadingCommon.hlsli)
+            if (cover > 0) f = keep * f + cover * (modelCoatLobe(coat, n, v, l) * shLightSpecular() + modelCoatUnder(s, coat, n, v, l));
+            if (sheenOn && cosL > 0) f = keepS * (f - (f - front) * sheen.cloth) + sheen.color * (modelSheenLobe(sheen.roughness, n, v, l) * shLightSpecular());
 #endif
             radiance += f * El * (abs(cosL) * visibility);
         }

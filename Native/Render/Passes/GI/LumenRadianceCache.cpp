@@ -468,6 +468,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
     const bool occlusion = s.occlusion;
     const float farStart = s.farStart;
     uint32_t sceneWords[8];
+    rays.recordHair(fc);  // E's grooms on the rays (HitHair.hlsli): the header's words 22, 23, before rootConstants
     rays.rootConstants(sceneWords);
     const std::array<uint32_t, 8> sceneSrvs = std::to_array(sceneWords);
     g.addPass("r.gi.rc.trace", QueueType::Compute,
@@ -481,6 +482,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   b.use(rayArgs, Use::IndirectArgs);
                   rays.declareTraversal(b);
                   rays.declareDecals(b);
+                  rays.declareHair(b);
                   if (atmosphere)
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
                   b.keep();

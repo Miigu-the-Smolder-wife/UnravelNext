@@ -262,6 +262,10 @@ public:
     // angles or shadow flag also bumps the scene revision (S's local pages, the GI epoch, R's ray scene). Call before the
     // frame's constants are allocated.
     void setLights(std::span<const uint32_t> indices);
+    // The rect lights' source textures (scene::Light::sourceTexture) as M's TextureSystem uploaded them: per scene light
+    // the texture's SRV, gpu::kNone for a light without one. The light records' sourceTexture words follow (no scene
+    // revision: the lights' shapes are the same).
+    void setLightSourceTextures(std::span<const uint32_t> srvPerLight);
     // Material textures published by M's texture system (INTERFACES_KO.md 6.3, v1.10): one entry per scene material.
     // Rewrites the material buffer (new SRV; the old one is released when the GPU is done) and bumps the revision of the
     // materials whose textures changed and the scene revision. Call before any frame constants of the frame are
@@ -311,6 +315,7 @@ private:
     gpu::Material packMaterial(const scene::Material& m) const;
     void rawUav(uint32_t& index, const Buffer& b, uint64_t bytes, bool fresh);  // fresh: a new descriptor, the old freed later
     void createLightBuffer(const std::vector<gpu::Light>& lights);  // lights + the FX tail (m_fxLightCapacity)
+    static gpu::Light gpuLight(const scene::Light& l, float3 origin);
     void createFxLightCount();
     struct Upload
     {
