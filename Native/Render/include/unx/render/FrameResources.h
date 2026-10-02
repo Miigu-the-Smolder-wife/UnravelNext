@@ -149,6 +149,8 @@ struct ViewResources
     TextureRef particleLayer;      // RGBA16F, 1/4 resolution: premultiplied radiance + transmittance   [FX]
     TextureRef particleDepthRange; // RG16F, 1/4 resolution: the layer's depth range per texel          [FX]
     BufferRef particleEdges;       // raw: full-resolution edge pixels of the layer + count              [FX]
+    TextureRef particleMotion;     // RG16F, 1/4 resolution: the particles' travel on screen since the   [FX]
+                                   // previous frame (pixels; weighted by what each adds to the pixel)
     // Heat haze (FEATURES_GAME 0.A-8; E's Passes/Volume; invalid = none): M re-reads the HDR target at p + D x (1 - z_p / z_b)
     // for pixels behind the haze (z_b: the pixel's view depth, z_p: distortionDepth's view depth).
     TextureRef distortionOffset;   // RG16F, ceil(W/4) x ceil(H/4): deflection D in full-resolution pixels (far-field    [E]

@@ -7,7 +7,8 @@
 //          sort, 1/4 layer and edge classification; shares the records, the tile lists and the sample function (sprite
 //          profile, strip hit).
 //   STEP=1 compose: the pass's output at the pixel through fxParticleLayerAt (the function M's shading calls) -> RGBA32F.
-// P[0] = (LayerConstants, output UAV, flags UAV (uint), 0)
+// P[0] = (LayerConstants, output UAV, flags UAV (uint), 0). Records without a look (the round profile, strips): a
+// look's sprites are not in the reference.
 #include "Passes/FX/ParticleLayerPass.hlsli"
 
 [numthreads(8, 8, 1)]

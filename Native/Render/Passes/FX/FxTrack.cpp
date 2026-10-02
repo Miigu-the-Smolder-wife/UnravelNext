@@ -4,6 +4,8 @@
 // since the last frame; without an attached module or pending ticks the entry declares no passes.
 #include "unx/fx/ParticleLayer.h"
 #include "unx/fx/Particles.h"
+#include "unx/fx/SpriteLooks.h"
+#include "unx/render/GpuScene.h"
 #include "unx/render/Tracks.h"
 
 #include <memory>
@@ -58,9 +60,20 @@ void particles(FramePassContext& fc, ViewResources& view)
     const bool mainView = view.view.kind == gpu::ViewKind::Main;
     frame.lighting.localFluence = mainView ? r.localFluence : view.localFluence;
     frame.lighting.localMoment = mainView ? r.localMoment : view.localMoment;
+    // the sprite looks with the scene's textures, and for the main view under the temporal upscale the previous
+    // unjittered view (the sprites' motion: Upscale.cpp's layer motion)
+    frame.looks = &fx::spriteLooks(*fc.trackState);
+    frame.source = fc.scene.source();
+    frame.textureSrvs = fc.scene.textureSrvs();
+    if (view.view.kind == gpu::ViewKind::Main && fc.frame.upscale.outputWidth != 0 && !fc.frame.upscale.reset)
+    {
+        frame.prevViewProj = fc.frame.upscale.prevViewProj;
+        frame.motion = true;
+    }
     const fx::ParticleLayerOutput out = pass->record(*system, fc.graph, fc.shaders, fc.frame.frameIndex, frame);
     if (!out.valid) return;
     view.particleLayer = out.layer;
+    view.particleMotion = frame.motion ? out.motion : TextureRef{};
     view.particleDepthRange = out.depthRange;
     view.particleEdges = out.edges;
 }

@@ -13,8 +13,11 @@
 //   thin       the coverage layer's opaque fragments in front of the opaque surface, where they cover a third of the
 //              pixel or more: the nearest one's own motion (a cluster fragment's triangle; a hair or stream fragment
 //              moves as the surface behind it does, carried to the fragment's depth);
-//   particles and the coverage layer's see-through fragments have no vector of their own: the pixel keeps the vector
-//              of what lies behind them and is marked animated by their opacity.
+//   particles  where the particle layer hides half the pixel or more: the particles' own travel on screen (FX's layer
+//              motion: each sprite moved back by its velocity over the frame, weighted by what it adds to the pixel)
+//              at their nearest depth, and what lies behind is seen through them; below that they have no vector -
+//              the pixel keeps the vector of what lies behind and is marked animated by their opacity;
+//   the coverage layer's see-through fragments have no vector of their own: animated by their opacity.
 // The tracked depth (the surface the vector is of) replaces the view's depth in m.tsr.dilate: the closest surface of a
 // neighbourhood, the parallax test and the motion blur take the layer's depth where a layer has the pixel.
 // P[0] = { vis id SRV (UNX_NONE: none), visible clusters SRV, depth SRV, motion UAV }, P[1] = { width, height,
@@ -26,7 +29,8 @@
 // P[7] = { translucent vis SRV, translucent depth SRV (linear view depth), translucent class SRV (UNX_NONE: no glass),
 //          water depth SRV (linear view depth; UNX_NONE: none) }
 // P[8] = { coverage tiles SRV (raw; UNX_NONE: no coverage layer), coverage tile pixels SRV (raw), coverage records SRV,
-//          coverage depth range SRV }, P[9] = { particle layer SRV (UNX_NONE: none), particle edges SRV, 0, 0 }
+//          coverage depth range SRV }, P[9] = { particle layer SRV (UNX_NONE: none), particle edges SRV, particle motion
+//          SRV (RG16F at the layer's size, pixels; UNX_NONE: no vectors), particle depth range SRV }
 // previous depth: r = the point's view depth in the previous frame (0: the sky, or
 // behind the previous camera) - the temporal super resolution's parallax test (Tsr.hlsli); g = how much the point
 // moves (0 still .. 1): its own displacement in the world over two pixel radii less one, or its parallax - the screen
@@ -42,6 +46,7 @@
 
 #define LAYER_FRAGMENTS 16u      // a pixel's records read at most (more: the first ones)
 #define LAYER_THIN_COVERAGE (1.0 / 3.0)
+#define LAYER_PARTICLE_OPACITY 0.5  // the particles' opacity from which the pixel's vector is theirs
 
 float4 prevClipOf(float4 p)
 {
@@ -92,6 +97,8 @@ void main(uint2 id : SV_DispatchThreadID)
     float d = opaque;
     float thin = 0, animated = 0;
     bool seeThrough = false;  // (a glass or water surface is tracked)
+    bool particleVector = false;
+    float2 particleTravel = 0;
     if (P[6].y != UNX_NONE)
     {
         if (P[7].z != UNX_NONE)
@@ -176,7 +183,24 @@ void main(uint2 id : SV_DispatchThreadID)
         {
             Texture2D<float4> particleLayer = ResourceDescriptorHeap[P[9].x];
             ByteAddressBuffer particleEdges = ResourceDescriptorHeap[P[9].y];
-            animated = max(animated, saturate(1.0 - fxParticleLayerAt(particleLayer, particleEdges, id).a));
+            const float opacity = saturate(1.0 - fxParticleLayerAt(particleLayer, particleEdges, id).a);
+            float nearest = 0;
+            if (P[9].z != UNX_NONE && opacity >= LAYER_PARTICLE_OPACITY)
+            {
+                Texture2D<float2> particleRange = ResourceDescriptorHeap[P[9].w];
+                nearest = particleRange.Load(int3(id / 4u, 0)).y;
+            }
+            if (nearest > d)
+            {
+                // the particles hold the pixel: their travel, at their nearest depth; the surface behind is seen through
+                Texture2D<float2> particleMotion = ResourceDescriptorHeap[P[9].z];
+                particleTravel = particleMotion.Load(int3(id / 4u, 0));
+                particleVector = true;
+                d = nearest;
+                visId = VIS_NONE;
+                seeThrough = true;
+            }
+            else animated = max(animated, opacity);
         }
     }
 
@@ -212,6 +236,13 @@ void main(uint2 id : SV_DispatchThreadID)
     {
         const float2 ndc = prevClip.xy / prevClip.w;
         m = uvNow - float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    }
+    if (particleVector)
+    {
+        // (the travel is this frame's jittered position less the previous unjittered one: the sample's content was at
+        // id + 0.5 - travel in the previous frame)
+        m = (particleTravel - jitter) / float2(size);
+        moving = 1;
     }
     motion[id] = all(isfinite(m)) ? m : float2(2, 2);
     if (P[6].x != UNX_NONE)

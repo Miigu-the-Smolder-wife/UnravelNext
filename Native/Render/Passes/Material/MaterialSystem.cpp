@@ -141,6 +141,7 @@ void prepareScene(FramePassContext& fc)
     // A no-op when nothing changed (GpuScene keeps the buffer and the revision).
     fc.scene.setMaterialTextures(t.published());
     // the rect lights' source textures (scene::Light::sourceTexture): the same textures' SRVs into the light records
+    fc.scene.setTextureSrvs(t.textureSrvs());  // (the scene textures for the tracks that sample one themselves: FX's sprite looks)
     // (and each image's mean colour, for the consumers that take the light as a point)
     if (const std::vector<uint32_t> sources = t.lightSourceTextures(); sources.size() == fc.scene.lights().size())
         fc.scene.setLightSourceTextures(sources, t.lightSourceMeans());
