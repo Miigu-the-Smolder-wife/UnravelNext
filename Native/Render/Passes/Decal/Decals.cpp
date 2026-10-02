@@ -18,7 +18,7 @@ using namespace unx::render;
 
 namespace
 {
-constexpr uint32_t kRecordBytes = 80, kFrameBytes = 128, kTilePx = 16, kTileWords = 9, kTilesHeader = 16;
+constexpr uint32_t kRecordBytes = 128, kFrameBytes = 144, kTilePx = 16, kTileWords = 9, kTilesHeader = 16;
 
 struct Record  // Decal.hlsli DecalRecord
 {
@@ -27,6 +27,10 @@ struct Record  // Decal.hlsli DecalRecord
     int32_t priority;
     uint32_t order;
     float opacity, cosFadeStart, cosFadeEnd, edge;
+    float color[3];
+    uint32_t channels;
+    float fadeScreenSize, fadeInStart, fadeInDuration, fadeOutStart;
+    float fadeOutDuration, pad[3];
 };
 static_assert(sizeof(Record) == kRecordBytes);
 
@@ -251,6 +255,10 @@ std::vector<uint8_t> DecalSet::records() const
         if (!(d.fadeStartDegrees >= 0 && d.fadeStartDegrees < d.fadeEndDegrees && d.fadeEndDegrees <= 180) || !(d.opacity >= 0 && d.opacity <= 1) ||
             !(d.edge >= 0 && d.edge <= 1))
             fail("decal: fade 0 <= start < end <= 180 degrees, opacity and edge in [0, 1]");
+        for (float v : { d.color.x, d.color.y, d.color.z, d.fadeScreenSize, d.fadeInDuration, d.fadeOutDuration })
+            if (!std::isfinite(v) || v < 0) fail("decal: colour, screen-size fade and fade durations are finite and not negative");
+        if (!std::isfinite(d.fadeInStart) || !std::isfinite(d.fadeOutStart)) fail("decal: fade start times are finite");
+        if (d.channels == 0 || d.channels > DecalAllChannels) fail("decal: channels %u (1..7: DecalChannels)", d.channels);
         Record r{};
         std::memcpy(r.box, d.box.m, sizeof r.box);
         r.material = d.material;
@@ -261,6 +269,11 @@ std::vector<uint8_t> DecalSet::records() const
         r.cosFadeStart = std::cos(d.fadeStartDegrees * 3.14159265358979f / 180.0f);
         r.cosFadeEnd = std::cos(d.fadeEndDegrees * 3.14159265358979f / 180.0f);
         r.edge = d.edge;
+        r.color[0] = d.color.x, r.color[1] = d.color.y, r.color[2] = d.color.z;
+        r.channels = d.channels;
+        r.fadeScreenSize = d.fadeScreenSize;
+        r.fadeInStart = d.fadeInStart, r.fadeInDuration = d.fadeInDuration;
+        r.fadeOutStart = d.fadeOutStart, r.fadeOutDuration = d.fadeOutDuration;
         const uint8_t* p = reinterpret_cast<const uint8_t*>(&r);
         out.insert(out.end(), p, p + sizeof r);
     }

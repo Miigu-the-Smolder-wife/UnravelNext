@@ -234,6 +234,7 @@ enum InstanceFlags : uint32_t
     // they share a channel (Light::lightingChannels); the sun lights every instance.
     InstanceLightingChannelsShift = 4,
     InstanceLightingChannelsMask = 7u << 4,
+    InstanceNoDecals = 1u << 7,  // the instance takes no projected decals (Unreal's bReceivesDecals off)
 };
 // The instance's lighting channels (3 bits) from its flags, and flags with them set.
 constexpr uint32_t instanceLightingChannels(uint32_t flags) { return ((flags >> InstanceLightingChannelsShift) & 7u) ^ 1u; }

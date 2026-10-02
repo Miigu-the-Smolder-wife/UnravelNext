@@ -161,6 +161,7 @@ struct GpuVisibleCluster
 #define INSTANCE_SKINNED (1u << 2)
 #define INSTANCE_WIND (1u << 3)
 // scene::InstanceLightingChannels...: bits 4..6 = the instance's lighting channels ^ 1 (instanceLightingChannels below)
+#define INSTANCE_NO_DECALS (1u << 7)  // takes no projected decals (Passes/Decal/Decal.hlsli)
 #define INSTANCE_HIDDEN (1u << 31)  // gpu::kInstanceHidden: skipped by every reader (GpuScene::setInstanceVisible)
 // gpu::kInstanceMotionBreak (v1.45): a teleport or restore in this frame; prev* = current (zero motion), breakCentre = where
 // its bounding sphere was in the previous rendered frame (caches keyed by the old place invalidate from it).
