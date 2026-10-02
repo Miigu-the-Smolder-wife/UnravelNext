@@ -147,6 +147,9 @@ ReflectionSettings ReflectionSettings::fromQuality(const QualityConfig& q)
     s.lumenRoughFromGather = flag("reflection.lumen_rough_specular_from_gather", true);
     s.lumenScreenTraces = flag("reflection.lumen_screen_traces", true);
     s.lumenRefractionSurfaceCache = flag("reflection.lumen_refraction_hit_surface_cache", true);
+    s.lumenRefractionSceneColor = flag("reflection.lumen_refraction_scene_color_at_hit", true);
+    s.lumenRefractionThroughput = std::clamp(num("reflection.lumen_refraction_path_throughput_threshold", 0.001), 0.0f, 1.0f);
+    s.lumenRefractionMaxIntensity = std::max(num("reflection.lumen_refraction_max_ray_intensity", 0.0), 0.0f);
     s.lumenScreenContinue = flag("reflection.lumen_screen_trace_continue", true);
     s.lumenScreenPullback = num("reflection.lumen_screen_trace_pullback", 0.08);
     s.lumenSceneColorAtHit = flag("reflection.lumen_sample_scene_color_at_hit", true);
@@ -720,6 +723,12 @@ void ReflectionSystem::recordRefraction(FramePassContext& fc, BufferRef jobs, Bu
                   if (lumenOnly)
                   {
                       if (in.cards.valid()) declareSurfaceCacheCards(b, in.cards, Use::SrvGraphics);
+                      if (in.prevColor.valid())
+                      {
+                          b.use(in.depth, Use::SrvGraphics);
+                          b.use(in.prevColor, Use::SrvGraphics);
+                      }
+                      in.rays->declareHair(b);
                   }
                   else
                   {
@@ -738,19 +747,33 @@ void ReflectionSystem::recordRefraction(FramePassContext& fc, BufferRef jobs, Bu
                   uint32_t* t = reinterpret_cast<uint32_t*>(table);
                   for (uint32_t k = 0; k < 64; ++k) t[k] = 0xFFFFFFFFu;
                   for (const auto& st : streams) t[st.first] = c.srv(st.second);
-                  uint32_t k[32] = {};
+                  uint32_t k[48] = {};
                   k[0] = c.srv(jobs), k[1] = c.uav(results), k[2] = maxJobs, k[3] = tableSrv;
                   k[4] = asU(in.sky.x), k[5] = asU(in.sky.y), k[6] = asU(in.sky.z), k[7] = asU(in.rayLength);
                   for (int i = 0; i < 4; ++i) k[8 + i] = in.atmosphere ? c.srv(in.luts[i]) : 0xFFFFFFFFu;
                   k[12] = asU(in.sun.x), k[13] = asU(in.sun.y), k[14] = asU(in.sun.z), k[15] = 0xFFFFFFFFu;
                   if (lumenOnly)
                   {
-                      // RefractionLumenTrace.hlsl: P[4] = { card frame SRV, frame, hits read the cards' high levels, 0 }
+                      // RefractionLumenTrace.hlsl: P[3].w = the previous colour's exposure ratio; P[4] = { card frame SRV,
+                      // frame, flags | the normal threshold's cosine (snorm8) << 8 | the throughput threshold (unorm16) << 16,
+                      // the result's cap }; P[5] = { previous colour, its size, the depth thickness, depth }; P[8..11] = its
+                      // view-projection
+                      const bool sceneColour = in.prevColor.valid();
+                      k[15] = asU(in.exposureRatio);
                       k[16] = in.cards.valid() ? c.srv(in.cards.frame) : 0xFFFFFFFFu;
                       k[17] = in.frame & 0xFFFFFFu;
-                      k[18] = in.hiResSurface ? 1u : 0u;
+                      k[18] = (in.hiResSurface ? 1u : 0u) | (sceneColour ? 2u : 0u) | (in.historyDepth ? 4u : 0u) |
+                              (((uint32_t)(int32_t)std::lround(in.sceneColorCos * 127.0f) & 0xFFu) << 8) |
+                              ((uint32_t)std::lround(std::clamp(in.throughputThreshold, 0.0f, 1.0f) * 65535.0f) << 16);
+                      k[19] = asU(in.maxRayIntensity);
+                      k[20] = sceneColour ? c.srv(in.prevColor) : 0xFFFFFFFFu;
+                      k[21] = (in.prevWidth & 0xFFFFu) | (in.prevHeight << 16);
+                      k[22] = asU(in.sceneColorThickness);
+                      k[23] = sceneColour ? c.srv(in.depth) : 0xFFFFFFFFu;
                       std::memcpy(&k[24], in.scene, sizeof in.scene);
-                      c.computeConstants(k, 32);
+                      for (int r = 0; r < 4; ++r)
+                          for (int col = 0; col < 4; ++col) k[32 + 4 * r + col] = asU(in.prevViewProj.m[r][col]);
+                      c.computeConstants(k, 48);
                       c.bindFrameConstants(in.frameConstants);
                       pipeline.dispatchIndirect(c.cmd, c.resource(args), 0);
                       return;
@@ -1249,6 +1272,19 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     if (hitsUseSurfaceCache && s.lumenRefractionSurfaceCache) m_refract.surfaceCache = surfaceCache;  // water's and glass's ray hits
     if (lumenOnly && hitsUseCards && s.lumenRefractionSurfaceCache) m_refract.cards = cardRefs;
     m_refract.hiResSurface = s.lumenHiResSurface;
+    m_refract.throughputThreshold = s.lumenRefractionThroughput;
+    m_refract.maxRayIntensity = s.lumenRefractionMaxIntensity;
+    if (lumenOnly && s.lumenRefractionSceneColor && screenTraces && depth.valid())
+    {
+        m_refract.depth = depth;
+        m_refract.prevColor = screen.prevColor;
+        m_refract.prevWidth = g.desc(screen.prevColor).width, m_refract.prevHeight = g.desc(screen.prevColor).height;
+        m_refract.sceneColorThickness = s.lumenSceneColorThickness;
+        m_refract.sceneColorCos = std::cos(std::clamp(s.lumenSceneColorNormalDegrees, 0.0f, 180.0f) * 0.01745329252f);
+        m_refract.exposureRatio = fc.frame.upscale.exposureRatio;
+        m_refract.prevViewProj = fc.frame.upscale.prevViewProj;
+        m_refract.historyDepth = historyDepth;
+    }
     // Root constants shared by the trace, shade, shadow and combine passes (ReflectionRay.hlsli).
     // gi = false (the traversal and the local-light shadow rays): GI's cache and screen probes are not bound (UNX_NONE)
     // nor declared, so those passes do not wait for GI's block (output.async_compute_passes).

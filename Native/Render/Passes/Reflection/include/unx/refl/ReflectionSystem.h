@@ -61,6 +61,10 @@ struct ReflectionSettings  // from Config/quality/reflection.toml
     float lumenMaxRoughness = 0.4f, lumenFadeLength = 0.1f, lumenMaxRayIntensity = 40.0f, lumenTonemapRange = 10.0f;
     float lumenMaxRoughnessFoliage = 0.2f;  // reflection.lumen_max_roughness_to_trace_foliage (Foliage and Subsurface pixels)
     bool lumenRefractionSurfaceCache = true;  // reflection.lumen_refraction_hit_surface_cache: water's and glass's ray hits read it too
+    // RefractionLumenTrace.hlsl (the front layer's reflections and the refracted paths)
+    bool lumenRefractionSceneColor = true;       // reflection.lumen_refraction_scene_color_at_hit
+    float lumenRefractionThroughput = 0.001f;    // reflection.lumen_refraction_path_throughput_threshold
+    float lumenRefractionMaxIntensity = 0.0f;    // reflection.lumen_refraction_max_ray_intensity (exposed units; 0: no cap)
     bool lumenScreenContinue = true;   // reflection.lumen_screen_trace_continue: world rays start where their screen traces ended
     float lumenScreenPullback = 0.08f; // ... less this distance (m)
     bool lumenSceneColorAtHit = true;  // reflection.lumen_sample_scene_color_at_hit (with lumen_screen_traces)
@@ -190,6 +194,14 @@ private:
         BufferRef surfaceCache;  // valid: the refraction service's hits read the surface cache
         SurfaceCacheCardRefs cards;  // reflection.lumen_only: the mesh cards its hits read (invalid: none)
         bool hiResSurface = false;   // ... their high levels, with feedback (reflection.lumen_hi_res_surface)
+        // reflection.lumen_refraction_scene_color_at_hit: the previous frame's colour where the view sees a path's
+        // last hit (prevColor invalid: none), with the main reflections' thresholds
+        TextureRef depth, prevColor;
+        uint32_t prevWidth = 0, prevHeight = 0;
+        float sceneColorThickness = 0.01f, sceneColorCos = 0, exposureRatio = 1;
+        bool historyDepth = false;
+        float4x4 prevViewProj{};
+        float throughputThreshold = 0.001f, maxRayIntensity = 0;
         rt::RayScene::VsmRefs vsm;
         uint32_t frame = 0, experiment = 0, scene[8] = {};
         rt::RayScene* rays = nullptr;

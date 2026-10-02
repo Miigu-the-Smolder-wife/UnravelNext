@@ -147,3 +147,15 @@ lumen_screen_trace_pullback = 0.08     # ... less this distance, m (reference: H
 lumen_refraction_hit_surface_cache = true  # the hits of water's and glass's reflection / refraction rays (FrameServices::traceRefractions)
                                        # take their light from the surface cache as the main view's reflection hits do
                                        # (needs lumen_hit_surface_cache and surface_cache.enabled)
+# The same rays on the Lumen path (lumen_only; RefractionLumenTrace.hlsl) - the renderer's form of the reference's
+# front-layer translucency reflections (a reflection job from the frontmost water / glass / coverage surface) and of its
+# ray-traced translucency (the refracted path):
+lumen_refraction_scene_color_at_hit = true          # a path's last hit on a surface the view sees takes the previous frame's
+                                                    # colour there (SampleSceneColorAtHit, as the main reflections' rays; their
+                                                    # thickness and normal threshold); needs lumen_screen_traces' previous colour
+lumen_refraction_path_throughput_threshold = 0.001  # a path whose throughput's largest channel is under this ends
+                                                    # (r.Lumen.RayTracedTranslucency.PathThroughputThreshold); 0 = never
+lumen_refraction_max_ray_intensity = 0.0            # (Q) a job's exposed radiance is held to this (the reference's MaxRayIntensity:
+                                                    # 40 for the front layer's reflections, 1000 for ray-traced translucency).
+                                                    # 0 = no cap: the jobs are mirror rays without a denoiser behind them, a cap
+                                                    # would only darken mirrored highlights - a trade to decide with a picture
