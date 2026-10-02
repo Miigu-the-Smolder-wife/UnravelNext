@@ -14,7 +14,8 @@
 #      where the group asks for it, a turning timing run. A variant's frame is compared with the base's at once
 #      (ab_compare.py -> <out>\ab\pictures.txt) and deleted; the base's frame goes when its scene is done, so at most two
 #      captures of the group are on disk at a time (the disk filled up once). The summary lists the differences and each
-#      variant's GPU frame against its base's.
+#      variant's GPU frame against its base's. Not in it, because the gate cannot make their inputs: the particles'
+#      switches (fx.particles.soft / near_fade: the host's particle systems) and the instances' shadow flags.
 # The summary (<out>\summary.txt): the furnace sheets, every timing run's GPU frame and largest pass groups, the A/B
 # sheet, the gates that failed. A device removal stops the batch.
 # Disk: the batch stops before it starts when the drive has under -MinFreeGB free; after the summary the captures' raw
@@ -180,15 +181,22 @@ if ($Skip -notcontains "variants") {
         # 2.3.1), one at a time against the defaults. A group: the scenes that exercise its switches, what every run of
         # it sets besides (Base) and passes to the gate (Gate), whether the captured frame is taken while turning (Turn:
         # the temporal upscale's and the blur's switches) and whether a timing run is made (Time), the layers captured
-        # beside the final picture, and its rows - N the variant's name, S what it sets (the other path of the switch),
-        # E what the picture should do: "same" (the switch changes structure, not the picture: a difference is a defect or
-        # noise) or "differs" (the switch is the feature: the number says how much).
+        # beside the final picture, and its rows - N the variant's name, S what it sets (the other path of the switch), G
+        # what it passes to the gate besides (a feature the frame's inputs switch on: a cirrus sheet, a fog volume, an HDR
+        # display), E what the picture should do: "same" (the switch changes structure, not the picture: a difference is
+        # a defect or noise), "differs" (the switch is the feature: the number says how much) or "unseen" (the stage lies
+        # after the captured image - the output encoding: the timing alone says something).
+        # The captured picture is the upscaler's output before the post chain (--capture-output); the chain layer is
+        # what the chain takes - after the motion blur that follows the upscale.
         $abGroups = @(
             @{ Name = "cull"; Scenes = "city_block,forest_thin"; Time = $true; Rows = @(
                     @{ N = "queue_off"; S = "visibility.traversal_work_queue=false"; E = "same" },
                     @{ N = "merge_off"; S = "visibility.cull_pass_merge=false"; E = "same" },
                     @{ N = "fold_off"; S = "visibility.fold_small_passes=false,shadow.vsm.fold_small_passes=false,atmosphere.froxels.fold_small_passes=false,lumen.radiance_cache_fold_passes=false,surface_cache.mesh_cards_fold_passes=false"; E = "same" }) },
             # the sun's pages with moving casters (--moving) and the wind's trees: the cache's parts and the occlusion
+            # the ray scene without its see-through instances' exclusion (glass in the GI and shadow rays again)
+            @{ Name = "rays"; Scenes = "bt_lobby,te_lounge"; Time = $true; Layers = "gi,refl,direct"; Rows = @(
+                    @{ N = "see_through_off"; S = "raytracing.see_through_translucent=false"; E = "differs" }) },
             @{ Name = "vsm"; Scenes = "city_block,city_night,forest_thin"; Gate = "--moving"; Time = $true; Layers = "shadow"; Rows = @(
                     @{ N = "separate_off"; S = "shadow.vsm.static_separate=false"; E = "same" },
                     @{ N = "hzbcull_off"; S = "shadow.vsm.static_hzb_cull=false"; E = "same" },
@@ -223,19 +231,51 @@ if ($Skip -notcontains "variants") {
                     @{ N = "composite_in_place"; S = "shading.coverage_compact=false"; E = "same" },
                     @{ N = "counters"; S = "visibility.coverage_statistics=true"; E = "same" }) },
             # the upscaler and the blur after it: a frame while the camera turns
-            @{ Name = "tsr"; Scenes = "bt_lobby,waterside"; Turn = $true; Time = $true; Rows = @(
+            @{ Name = "tsr"; Scenes = "bt_lobby,waterside"; Turn = $true; Time = $true; Layers = "chain"; Rows = @(
                     @{ N = "kernel_reference"; S = "output.upscale_tsr_kernel_by_samples=false"; E = "differs" },
                     @{ N = "flickering_off"; S = "output.upscale_tsr_flickering=false"; E = "differs" },
                     @{ N = "reprojection_field_off"; S = "output.upscale_tsr_reprojection_field=false"; E = "differs" },
                     @{ N = "thin_geometry_off"; S = "output.upscale_tsr_thin_geometry=false"; E = "differs" },
                     @{ N = "resurrection"; S = "output.upscale_tsr_resurrection=true"; E = "differs" },
                     @{ N = "history_200"; S = "output.upscale_tsr_history_percent=200"; E = "differs" },
-                    @{ N = "blur_before_upscale"; S = "shading.motion_blur_after_upscale=false"; E = "differs" }) },
+                    @{ N = "hole_filling_off"; S = "output.upscale_tsr_hole_filling=false"; E = "differs" },
+                    @{ N = "thin_anti_flicker_off"; S = "output.upscale_tsr_thin_geometry_anti_flickering=false"; E = "differs" },
+                    @{ N = "layer_motion_off"; S = "output.upscale_layer_motion=false"; E = "differs" },
+                    @{ N = "panini"; S = "output.lens_panini_d=1.0"; E = "differs" },
+                    @{ N = "blur_before_upscale"; S = "shading.motion_blur_after_upscale=false"; E = "differs" },
+                    @{ N = "blur_rotation_off"; S = "shading.motion_blur_after_upscale_rotation=false"; E = "differs" }) },
+            # the lens: the gate's camera is a pinhole without --lens (25 mm aperture focused at 3 m); the base is the
+            # octave path, the rows the diaphragm path and its parts
+            @{ Name = "dof"; Scenes = "bt_lobby,interior"; Gate = "--lens 0.025,3"; Time = $true; Rows = @(
+                    @{ N = "diaphragm"; S = "shading.dof_diaphragm=true"; E = "differs" },
+                    @{ N = "diaphragm_no_scatter"; S = "shading.dof_diaphragm=true,shading.dof_diaphragm_scatter=false"; E = "differs" },
+                    @{ N = "diaphragm_no_prefilter"; S = "shading.dof_diaphragm=true,shading.dof_diaphragm_prefilter=false"; E = "differs" }) },
+            # an HDR frame through the ST 2084 encoding against the SDR frame (the capture is taken before the chain)
+            @{ Name = "hdr"; Scenes = "bt_lobby"; Time = $true; Rows = @(
+                    @{ N = "hdr10"; S = "output.hdr_encoding=2"; G = "--display-peak 5"; E = "unseen" }) },
+            # the material inputs' plates (shading_ball's inputs camera): the bricks' height map
+            @{ Name = "material"; Scenes = "shading_ball"; Gate = "--camera inputs"; Time = $true; Rows = @(
+                    @{ N = "parallax_off"; S = "material.parallax_steps=0"; E = "differs" },
+                    @{ N = "parallax_64_steps"; S = "material.parallax_steps=64"; E = "differs" },
+                    @{ N = "parallax_shadow"; S = "material.parallax_shadow=true"; E = "differs" }) },
             @{ Name = "clouds"; Scenes = "ridge_sunset,city_block"; Gate = "--clouds 0.5"; Time = $true; Rows = @(
                     @{ N = "veil_off"; S = "atmosphere.clouds.veil=false"; E = "differs" },
-                    @{ N = "steps_unfiltered"; S = "atmosphere.clouds.filtered_steps=false"; E = "differs" }) },
+                    @{ N = "steps_unfiltered"; S = "atmosphere.clouds.filtered_steps=false"; E = "differs" },
+                    @{ N = "ground_light_off"; S = "atmosphere.clouds.ground_light=false"; E = "differs" },
+                    @{ N = "powder"; S = "atmosphere.clouds.powder=1.0"; E = "differs" },
+                    @{ N = "cirrus"; G = "--cirrus 0.6"; E = "differs" }) },
+            # under an overcast, in rain (8 mm/h): the far slices' sky light and the rain's veil
+            @{ Name = "weather"; Scenes = "ridge_sunset,city_block"; Base = "atmosphere.fog.enabled=true"; Gate = "--clouds 0.8 --rain 8"; Time = $true; Rows = @(
+                    @{ N = "far_sky_light_off"; S = "atmosphere.fog.far_sky_light=false"; E = "differs" },
+                    @{ N = "rain_veil_off"; S = "atmosphere.fog.rain_veil=false"; E = "differs" }) },
+            # a local fog volume in the interior's view (centre 1, 0.8, -2; radii 1, 0.8, 1; 0.8 per m): still, then as
+            # steam (height falloff 2, rising 0.3 m/s, turbulence 0.6 at 0.4 m) - against the room without it
+            @{ Name = "steam"; Scenes = "interior"; Time = $true; Rows = @(
+                    @{ N = "mist"; G = "--fog-volume 1,0.8,-2,1,0.8,1,0.8"; E = "differs" },
+                    @{ N = "steam"; G = "--fog-volume 1,0.8,-2,1,0.8,1,0.8,0,2,0.3,0.6,0.4"; E = "differs" }) },
             @{ Name = "fog"; Scenes = "ridge_sunset,city_night"; Base = "atmosphere.fog.enabled=true"; Rows = @(
-                    @{ N = "air_order_off"; S = "atmosphere.fog.air_order=false"; E = "differs" }) },
+                    @{ N = "air_order_off"; S = "atmosphere.fog.air_order=false"; E = "differs" },
+                    @{ N = "second_layer"; S = "atmosphere.fog.second_density_per_m=0.02,atmosphere.fog.second_height_falloff_per_m=0.2"; E = "differs" }) },
             @{ Name = "hair"; Scenes = "hair_ball"; Layers = "gi,refl"; Rows = @(
                     @{ N = "hair_off_rays"; S = "raytracing.hair=false"; E = "differs" }) },
             @{ Name = "eye"; Scenes = "shading_ball"; Gate = "--camera eye_close"; Rows = @(
@@ -268,7 +308,7 @@ if ($Skip -notcontains "variants") {
                 $file = Get-ChildItem -Path $Scenes -Filter "$scene*.unxscene" -ErrorAction SilentlyContinue | Select-Object -First 1
                 $sceneArg = if ($file) { $file.FullName } else { $scene }
                 $capture = $AbFrames - 1
-                $rows = @(@{ N = "base"; S = ""; E = "" }) + $group.Rows
+                $rows = @(@{ N = "base"; S = ""; G = ""; E = "" }) + $group.Rows
                 $basePicture = ""
                 foreach ($row in $rows) {
                     $title = "ab $($group.Name) / $scene / $($row.N)"
@@ -282,6 +322,7 @@ if ($Skip -notcontains "variants") {
                     $common = @("--scene", $sceneArg, "--resolution", $res, "--auto-exposure")
                     foreach ($s in $sets) { $common += @("--set", $s) }
                     if ($group.Gate) { $common += @($group.Gate -split " " | Where-Object { $_ }) }
+                    if ($row.G) { $common += @($row.G -split " " | Where-Object { $_ }) }
                     # the picture: one frame (the last), the camera still unless the group turns it
                     $pictureArgs = $common + @("--frames", "$AbFrames", "--warmup-frames", "0", "--capture-output", (Join-Path $dir "frame.pfm"), "--capture-frames", "$capture")
                     if ($group.Turn) { $pictureArgs += @("--path-rotate", "20") }
@@ -303,7 +344,7 @@ if ($Skip -notcontains "variants") {
                         }
                         if (-not $KeepRaw) { Get-ChildItem -Path $dir -Filter *.pfm -ErrorAction SilentlyContinue | Remove-Item -Force }
                     }
-                    $manifest += @(@{ group = $group.Name; scene = $scene; row = $row.N; set = $row.S; base = $group.Base; expected = $row.E;
+                    $manifest += @(@{ group = $group.Name; scene = $scene; row = $row.N; set = (@($row.S, $row.G) | Where-Object { $_ }) -join " "; base = $group.Base; expected = $row.E;
                             dir = (Join-Path "ab" (Join-Path $group.Name (Join-Path $scene $row.N))) })
                 }
                 if (-not $KeepRaw -and $basePicture) { Get-ChildItem -Path (Split-Path -Parent $basePicture) -Filter *.pfm -ErrorAction SilentlyContinue | Remove-Item -Force }
