@@ -9,9 +9,11 @@
 //              and the history is its mean over the jitter: blended 10 % a frame while the 3 x 3 neighbourhood's
 //              observation is of the history's distribution (a Student t test of the sums; a drop beyond it, or a
 //              neighbourhood with no thin geometry, takes the observation at once).
-//   cluster    inside thin geometry (the history's coverage above 0 over 5 x 5) the weight peaks where the coverage is
-//              near a half - the pixels that are neither the geometry nor its background - and is spread over 3 x 3,
-//              scaled by P[2].y (the reference's Coverage.MaxRelaxationWeight);
+//   cluster    inside thin geometry (the history's coverage above 0 over 5 x 5; here also a pixel the coverage layer
+//              has a thin fragment in now - the reference cannot tell a lone wire from an object's outline, the layer
+//              can) the weight peaks where the coverage is near a half - the pixels that are neither the geometry nor
+//              its background - and is spread over 3 x 3, scaled by P[2].y (the reference's
+//              Coverage.MaxRelaxationWeight);
 //   lines      a pixel-wide line of depth: the pixel nearer than both neighbours across it by P[2].x pixel sizes in
 //              the world, and so are its neighbours along it (one may miss: diagonals) - a wire, a pole, a branch of the
 //              opaque surface itself or of a tracked layer. Its weight is 1, 0.8 on the pixels next to it.
@@ -166,8 +168,9 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
         [unroll] for (int k = 0; k < 9; ++k) lo = min(lo, gZ[cellIndex(c + int2(k % 3, k / 3) - 1)]);
         // x exp(-20 x) (10 / 0.184) with x = the coverage's distance from a half + 0.02: 1 at x = 0.05
         const uint own = gP[i];
-        const float x = abs(unpack2(gXH[i]).y - 0.5) + 0.02;
-        const bool relax = lo > 0 && (own & (CELL_THIN_REGION | CELL_SAME | CELL_ANIMATED)) == (CELL_THIN_REGION | CELL_SAME);
+        const float2 xh = unpack2(gXH[i]);
+        const float x = abs(xh.y - 0.5) + 0.02;
+        const bool relax = (lo > 0 || xh.x > 0) && (own & (CELL_THIN_REGION | CELL_SAME | CELL_ANIMATED)) == (CELL_THIN_REGION | CELL_SAME);
         gEW[i] = pack2(unpack2(gEW[i]).x, relax ? x * exp(-20.0 * x) * (10.0 / 0.184) : 0.0);
     }
     GroupMemoryBarrierWithGroupSync();
