@@ -657,6 +657,8 @@ CullView viewOf(const RasterView& r, const DepthRasterRequest& req, const Settin
     v.userData = r.userData;
     v.tilePx = std::max(req.cullTilePx, 1u);
     v.tilesX = (r.viewportWidth + v.tilePx - 1) / v.tilePx;
+    v.instanceFirst = r.instanceFirst;
+    v.instanceEnd = r.instanceEnd;
     return v;
 }
 

@@ -22,7 +22,8 @@ void cullInstance(RWByteAddressBuffer state, uint instance, uint view, bool vali
         StructuredBuffer<MeshClusterRoots> rootBuffer = ResourceDescriptorHeap[ROOTS_SRV];
         roots = rootBuffer[inst.mesh];
         const CullView v = loadView(view);
-        if (((inst.flags & INSTANCE_MASK) != 0 || INSTANCE_MASK == 0) && (inst.flags & INSTANCE_HIDDEN) == 0)
+        const bool inBatch = v.instanceEnd == 0 || (instance >= v.instanceFirst && instance < v.instanceEnd);  // (RasterView's instance batch)
+        if (((inst.flags & INSTANCE_MASK) != 0 || INSTANCE_MASK == 0) && (inst.flags & INSTANCE_HIDDEN) == 0 && inBatch)
         {
             float4 bounds = worldSphere(inst, inst.objectToWorld, mesh.boundsSphere);
             float4 prevBounds = worldSphere(inst, inst.prevObjectToWorld, mesh.boundsSphere);

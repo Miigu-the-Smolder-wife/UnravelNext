@@ -6,7 +6,8 @@
 //   fast update: f = saturate(moving share / P[3].z (0.1)), f = saturate(min((f - 0.2) / 0.8, P[3].w (0.9))), kept at least
 //   at the history's f; N = min(N, (1 - f) x N_max): where the lighting moves the history shortens to one frame;
 //   blend: value = lerp(history, new, 1 / (1 + N)); a pixel without lighting this frame (no probe) with a history
-//   takes 1 / (1 + 4 N). No history: the new values' mean over the pixel's surface around it (5 x 5 taps), N = 0.
+//   takes 1 / (1 + 4 N). The new value of a pixel with N < 4 (no or a short history): this frame's values' mean over
+//   the pixel's surface around it (5 x 5 taps).
 // Output: diffuse RGBA16F = irradiance x exposure, a = N + 1 (0 = no surface; M's a > 0 test and LgScreenData's
 // disocclusion test read it); rough specular RGBA16F, a = f; keys R32G32_UINT = { device depth bits, normal (2 x 15
 // bit octahedral) }, 0 = no surface.
@@ -64,6 +65,9 @@ void main(uint3 id : SV_DispatchThreadID)
     const float maxFrames = asfloat(P[3].x);
     float3 outDiffuse = fresh.rgb, outSpecular = freshSpecular;
     float frames = 0, fast = 0;
+    bool hasHistory = false;
+    float3 historyD = 0, historyS = 0;
+    float historyAlpha = 1;
     if (lgHistoryValid())
     {
         float3 prevP, prevN;
@@ -125,17 +129,22 @@ void main(uint3 id : SV_DispatchThreadID)
                 frames = min(frames, (1 - fast) * maxFrames);
                 float alpha = 1 / (1 + frames);
                 if (!lit && frames >= 1) alpha = 1 / (1 + 4 * frames);
-                outDiffuse = lerp(historyDiffuse, fresh.rgb, alpha);
-                outSpecular = lerp(historySpecular, freshSpecular, alpha);
+                hasHistory = true;
+                historyD = historyDiffuse;
+                historyS = historySpecular;
+                historyAlpha = alpha;
                 if (backfaceOn && P[10].w != 0xFFFFFFFFu) outBackface = lerp(sumBackface / weight * ratio, freshBackface, alpha);
                 fast = outFast;
             }
         }
     }
-    // A pixel without history (a cut's first frame, a disocclusion) would show its one frame's estimate - a jittered place
-    // among its probes: it takes the mean of this frame's estimates on its own surface around it (5 x 5 taps 2 pixels
-    // apart: the same plane within the history's distance threshold, the normal within 25 degrees).
-    if (frames == 0 && lit)
+    // A pixel whose history is short (a cut's first frames, a disocclusion: under 4 frames) would show its one frame's
+    // estimate at a large share - a jittered place among its probes: its new value is the mean of this frame's estimates
+    // on its own surface around it (5 x 5 taps 2 pixels apart: the same plane within the history's distance threshold,
+    // the normal within 25 degrees). The batch of 2026-10-02: the cut's first frame alone came out clean (bath, the GI
+    // layer's pixel noise f600 0.075 -> 0.020) and its second (history of one frame) stood above it (0.033).
+    float3 meanDiffuse = fresh.rgb, meanSpecular = freshSpecular;
+    if (frames < 4 && lit)
     {
         const float4 plane = float4(s.normal, dot(s.position, s.normal));
         float3 sumDiffuse = fresh.rgb, sumSpecular = freshSpecular;
@@ -155,9 +164,11 @@ void main(uint3 id : SV_DispatchThreadID)
                 sumSpecular += newSpecular[q].rgb;
                 weight += 1;
             }
-        outDiffuse = sumDiffuse / weight;
-        outSpecular = sumSpecular / weight;
+        meanDiffuse = sumDiffuse / weight;
+        meanSpecular = sumSpecular / weight;
     }
+    outDiffuse = hasHistory ? lerp(historyD, meanDiffuse, historyAlpha) : meanDiffuse;
+    outSpecular = hasHistory ? lerp(historyS, meanSpecular, historyAlpha) : meanSpecular;
     diffuseOut[id.xy] = float4(max(outDiffuse, 0.0), frames + 1);
     specularOut[id.xy] = float4(max(outSpecular, 0.0), fast);
     if (backfaceOn)

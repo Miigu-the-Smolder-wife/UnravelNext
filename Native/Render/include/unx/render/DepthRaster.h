@@ -38,6 +38,10 @@ struct RasterView
     uint32_t userData = 0;         // passed to the pixel kernel (e.g. clipmap level / page group)
     uint32_t cullMaskOffset = UINT32_MAX;  // first uint32 word of this view's tile mask in DepthRasterRequest::cullMask;
                                            // UINT32_MAX = no mask (the whole viewport is rasterised)
+    // Instance batch: only the scene instances [instanceFirst, instanceEnd) are drawn into this view (instanceEnd 0:
+    // every instance). A requester whose view can reach more clusters than a run's lists hold (a forest's million trees
+    // in one shadow level) draws the view in several requests, a range of the instances each.
+    uint32_t instanceFirst = 0, instanceEnd = 0;
 };
 
 struct DepthRasterRequest

@@ -277,6 +277,7 @@ uint32_t groups(uint64_t n, uint32_t size) { return (uint32_t)((n + size - 1) / 
 struct CasterBounds
 {
     std::vector<float4> spheres;  // world bounding sphere per placed caster
+    std::vector<uint32_t> instance;   // its scene instance (ascending)
     std::vector<uint32_t> clusters;
     std::vector<uint32_t> mesh;       // per placed caster: its mesh (kNone: no per-view bound, 'clusters' in every view it reaches),
     std::vector<float> errorScale;    // V's instanceScale (the error's object-to-world factor),
@@ -334,6 +335,7 @@ CasterBounds casterBounds(const GpuScene& scene, bool lod, float thresholdPx, fl
             radius += 0.002f / inst.windStiffness * h * h * windSpeed * windSpeed;
         }
         b.spheres.push_back({ w.x, w.y, w.z, radius * scale * 1.001f + 1e-3f });
+        b.instance.push_back((uint32_t)(&inst - scene.instances().data()));
         b.clusters.push_back(cut(inst.mesh));
         // per-view bound: not for terrain patches (C5: their replaced rectangles force the source clusters)
         const bool table = lod && inst.patch == gpu::kNone && inst.mesh < ranges.size() && ranges[inst.mesh].cutErrorBase > 0;
@@ -363,6 +365,59 @@ uint32_t casterCut(const CasterBounds& b, size_t i, float lo, float hi)
 
 // The bound of an orthographic sun level view (levelViewProj: a sphere reaches it when its NDC x, y interval meets
 // [-1, 1]; every depth: the level's caster range follows the casters).
+// The casters counted in every view (CasterBounds::everywhere) at a level's texel.
+uint64_t everywhereBound(const CasterBounds& b, float pixelsPerMetre)
+{
+    if (!b.lod) return b.everywhere;
+    const float threshold = b.thresholdPx / pixelsPerMetre;
+    uint64_t n = b.everywhereFixed;
+    for (const CasterBounds::Moving& m : b.everywhereMeshes)
+    {
+        const float t = threshold / std::max(m.errorScale, 1e-12f);
+        n += m.mesh == gpu::kNone ? m.whole : std::min((*b.ranges)[m.mesh].cutBoundAt(t * (1 - 1e-4f), t * (1 + 1e-4f)), m.whole);
+    }
+    return n;
+}
+// A level whose bound is over the list capacity, as instance batches (RasterView::instanceFirst / instanceEnd): the placed
+// casters the view reaches, in instance order, cut into ranges whose bounds fit beside the casters counted in every
+// view (those are drawn in the range their index falls in: counted in each). Empty: no such split (the every-view
+// casters alone, or one caster, are over the capacity).
+struct LevelBatch
+{
+    uint32_t first, end;
+};
+std::vector<LevelBatch> levelBatches(const CasterBounds& b, const float4x4& vp, float pixelsPerMetre, uint64_t capacity)
+{
+    std::vector<LevelBatch> out;
+    const uint64_t every = everywhereBound(b, pixelsPerMetre);
+    if (every >= capacity) return out;
+    const uint64_t room = capacity - every;
+    const float threshold = b.thresholdPx / pixelsPerMetre;
+    const float sx = std::sqrt(vp.m[0][0] * vp.m[0][0] + vp.m[0][1] * vp.m[0][1] + vp.m[0][2] * vp.m[0][2]);
+    const float sy = std::sqrt(vp.m[1][0] * vp.m[1][0] + vp.m[1][1] * vp.m[1][1] + vp.m[1][2] * vp.m[1][2]);
+    uint64_t sum = 0;
+    uint32_t first = 0;
+    for (size_t i = 0; i < b.spheres.size(); ++i)
+    {
+        const float4& q = b.spheres[i];
+        const float x = vp.m[0][0] * q.x + vp.m[0][1] * q.y + vp.m[0][2] * q.z + vp.m[0][3];
+        const float y = vp.m[1][0] * q.x + vp.m[1][1] * q.y + vp.m[1][2] * q.z + vp.m[1][3];
+        if (!(std::abs(x) <= 1 + q.w * sx && std::abs(y) <= 1 + q.w * sy)) continue;
+        const float t = threshold / std::max(b.errorScale[i], 1e-12f);
+        const uint64_t cut = b.lod ? casterCut(b, i, t, t) : b.clusters[i];
+        if (cut > room) return {};
+        if (sum + cut > room)
+        {
+            out.push_back({ first, b.instance[i] });
+            first = b.instance[i];
+            sum = 0;
+        }
+        sum += cut;
+    }
+    out.push_back({ first, 0xFFFFFFFFu });
+    return out;
+}
+
 uint64_t levelBound(const CasterBounds& b, const float4x4& vp, float pixelsPerMetre)
 {
     uint64_t n = b.everywhere;
@@ -1508,9 +1563,30 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             v.cullMaskOffset = k * (kTable * kTable / 32);
             const uint64_t bound = split ? levelBound(bounds, v.viewProj, v.lodPixelsPerMetre) : 0;
             if (bound > listCapacity)
-                fail("S VSM: sun level %u can reach %llu cluster entries, over the raster list capacity %llu (visibility.max_visible_clusters): this scene "
-                     "needs instance batches of the level's casters",
-                     k, (unsigned long long)bound, (unsigned long long)listCapacity);
+            {
+                // the level alone is over a run's lists: one request per instance batch of its casters
+                const std::vector<LevelBatch> batches = levelBatches(bounds, v.viewProj, v.lodPixelsPerMetre, listCapacity);
+                if (batches.empty())
+                    fail("S VSM: sun level %u can reach %llu cluster entries, over the raster list capacity %llu (visibility.max_visible_clusters), and its "
+                         "casters do not split into instance batches under it (one caster, or the moving casters alone, are over the capacity)",
+                         k, (unsigned long long)bound, (unsigned long long)listCapacity);
+                if (!r.views.empty())
+                {
+                    fc.services.rasterizeDepth(fc, r);
+                    r = request("s.vsm.raster" + std::to_string(++sunRequests));
+                    sum = 0;
+                }
+                for (const LevelBatch& batch : batches)
+                {
+                    RasterView bv = v;
+                    bv.instanceFirst = batch.first;
+                    bv.instanceEnd = batch.end;
+                    r.views.push_back(bv);
+                    fc.services.rasterizeDepth(fc, r);
+                    r = request("s.vsm.raster" + std::to_string(++sunRequests));
+                }
+                continue;
+            }
             if (!r.views.empty() && sum + bound > listCapacity)
             {
                 fc.services.rasterizeDepth(fc, r);
@@ -1520,8 +1596,11 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             r.views.push_back(v);
             sum += bound;
         }
-        fc.services.rasterizeDepth(fc, r);
-        ++sunRequests;
+        if (!r.views.empty())
+        {
+            fc.services.rasterizeDepth(fc, r);
+            ++sunRequests;
+        }
     }
     if (fc.services.rasterizeDepth && activeLocal > 0)
     {

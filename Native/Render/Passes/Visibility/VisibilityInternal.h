@@ -31,7 +31,7 @@ struct CullView  // 320 B
     uint32_t cullSceneSrv;  // CullScene of the run (C3: instance chunks, flat list, skinned bounds)
     uint32_t runtimeFirst, runtimeCount;  // C2b runtime instances (GpuScene::staticInstanceCount onwards)
     uint32_t gpuFirst, gpuCapacity;       // GPU-written instances (GpuScene::gpuInstanceRange; live count in g_patchData)
-    uint32_t gpuPad0, gpuPad1;
+    uint32_t instanceFirst, instanceEnd;  // RasterView's instance batch (instanceEnd 0: every instance)
 };
 
 // C3 instance hierarchy (VisibilityCommon.hlsli CullScene, CullChunk).

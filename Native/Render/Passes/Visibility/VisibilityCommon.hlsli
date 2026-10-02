@@ -34,7 +34,7 @@ struct CullView
     uint cullSceneSrv;                 // CullScene (instance chunks, flat list, skinned bounds) of the run
     uint runtimeFirst, runtimeCount;   // C2b: runtime instances [first, first + count) follow the flat list
     uint gpuFirst, gpuCapacity;        // GPU-written instances (A3 mesh particles) after them; live count gpuInstanceCount()
-    uint gpuPad0, gpuPad1;
+    uint instanceFirst, instanceEnd;   // RasterView's instance batch: only these scene instances (instanceEnd 0: every instance)
 };
 
 // Live count of the GPU-written instances (GpuScene::gpuInstanceRange; GpuSceneLayout.h kGpuInstanceCountElement).
