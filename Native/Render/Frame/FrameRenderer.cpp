@@ -502,6 +502,10 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     for (ViewResources& v : aux) tracks::visibility(fc, v);
     tracks::visibility(fc, main);
     tracks::shadowPages(fc, main);  // reads V's products only (S, 2026-09-26); per-view marking: S (shadowMarkView)
+    // R: last frame's translucency volume, for the fog's indirect light - before the auxiliary views, whose own fog is
+    // recorded with their shadow visibility below (after them, their fog had no indirect light); it reads the main
+    // view's size and its own state only
+    tracks::translucencyVolumePrevious(fc, main);
     for (ViewResources& v : aux)
     {
         // The auxiliary chain of the planar reflection path; froxels, GI and reflections per view follow the tracks'
@@ -514,7 +518,6 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     tracks::decals(fc, main);  // E (A7): decal records and tile lists for the resolve
     tracks::surfaceState(fc);  // E (A7): the surface state field's changes
     tracks::materialResolve(fc, main);
-    tracks::translucencyVolumePrevious(fc, main);  // R: last frame's translucency volume, for the fog's indirect light
     tracks::froxels(fc, main);
     main.froxelLights = resources.froxelLights;  // the main view's per-view S products (v1.22)
     main.airVolume = resources.aerialPerspective;
