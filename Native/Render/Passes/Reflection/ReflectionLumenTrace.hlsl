@@ -27,6 +27,7 @@
 #include "Passes/Reflection/ReflectionReuse.hlsli"
 #include "Passes/Reflection/ScreenTrace.hlsli"
 #include "Passes/Reflection/ReflectionLumenHit.hlsli"
+#include "Passes/Atmosphere/FogVolume.hlsli"
 
 #define RL_BAND 87381u
 #define RL_FLAG_SCREEN_START 1u
@@ -63,9 +64,11 @@ void ReflectionLumenTraceGen()
     r.TMin = min(max(start, 0.0), giRayLength());
     r.TMax = giRayLength();
     const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_REFLECTION | RT_MASK_EMITTER);
+    // the fog along the ray (FogVolume.hlsli fogOverRay): the surface's place in the view
+    const float2 fogUv = (float2(pixel) + 0.5) / float2(size);
     if (hit.t < 0)
     {
-        results[job] = reflPackResult(reflStorable(giSkyRadiance(direction)), giRayLength(), 0);
+        results[job] = reflPackResult(reflStorable(fogOverRay(fogUv, s.linearDepth, r.Origin, direction, 65536.0, giSkyRadiance(direction))), giRayLength(), 0);
         return;
     }
     // the previous frame's colour where the view sees the hit
@@ -91,7 +94,7 @@ void ReflectionLumenTraceGen()
                         float3 colour;
                         if (sctPreviousColour(previous, uint2(P[5].y & 0xFFFFu, P[5].y >> 16), prevViewProj, hitPoint, asfloat(P[0].z), noise, colour, (flags & RL_FLAG_HISTORY_DEPTH) != 0))
                         {
-                            results[job] = reflPackResult(reflStorable(colour), hit.t, 0);
+                            results[job] = reflPackResult(reflStorable(fogOverRay(fogUv, s.linearDepth, r.Origin, direction, hit.t, colour)), hit.t, 0);
                             return;
                         }
                     }
@@ -104,5 +107,5 @@ void ReflectionLumenTraceGen()
     const float coneWidth = pixelSpread * s.linearDepth;
     const float coneSpread = pixelSpread + 2 * tan(reflectionLobeHalfAngle(s.roughness, dot(s.normal, s.view)));
     const RlHit shade = rlShadeHit(scene, hit, r.Origin, direction, coneWidth, coneSpread, P[4].z, P[3].w, true);
-    results[job] = reflPackResult(reflStorable(shade.radiance), hit.t, shade.motion);
+    results[job] = reflPackResult(reflStorable(fogOverRay(fogUv, s.linearDepth, r.Origin, direction, hit.t, shade.radiance)), hit.t, shade.motion);
 }

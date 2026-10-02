@@ -228,6 +228,7 @@ FogView fogViewFor(const QualityConfig& q, const FogDesc& frame, uint32_t width,
         for (int k = 0; k < 3; ++k) f.albedo[k] = (float)albedo[k] / scale;
     }
     f.indirect = q.boolean("atmosphere.fog.indirect_light");
+    f.onRays = q.has("atmosphere.fog.on_rays") && q.boolean("atmosphere.fog.on_rays");
     f.noiseDrift = (float)q.number("atmosphere.fog.noise_drift_mps");
     f.noiseWind = (float)q.number("atmosphere.fog.noise_wind_scale");
     if (!(f.noiseAmount >= 0 && f.noiseAmount <= 1) || !(f.noiseScale >= 1) || !(f.noiseDrift >= 0) || !(f.noiseWind >= 0))
@@ -865,7 +866,7 @@ struct FogState
         FogParamsGpu p{};
         if (on)
         {
-            p.grid = view.gridX | view.gridY << 16;
+            p.grid = view.gridX | view.gridY << 16 | (view.onRays ? 0x80000000u : 0u);
             p.slices = view.gridZ | view.cellPx << 16 | view.farSlices << 24;
             p.farM = view.farM; p.k = view.k; p.b = view.b;
             p.volumeSrv = volume != 0xFFFFFFFFu ? volume : integratedSrv; p.farEndM = view.farEndM;

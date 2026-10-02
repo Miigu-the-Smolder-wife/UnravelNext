@@ -116,7 +116,7 @@ struct FogParams
     float density, falloff, height, g;
     float3 albedo;
     float start;
-    uint grid;                // x | y << 16
+    uint grid;                // x | y << 16 (15 bits each) | atmosphere.fog.on_rays << 31
     float farEndM;
     uint pad;
 };
@@ -160,6 +160,32 @@ float4 fogAt(float2 uv, float depth)
     if (c < 1.0) v = float4(v.rgb * c, lerp(1.0, v.a, c));
     return v;
 }
+// The fog over a ray that leaves a surface the view sees (reflection rays; radiance in nits): the transmittance of the
+// height fog's closed form along the ray (the mean medium: no variation, no start distance), and as the fog's light the
+// mean source of the view's own path to that surface - the volume's in-scattering there over its opacity, so what the
+// cells around the surface hold (the sun outside the casters' shadow, the local lights, the indirect light): a room's
+// fog stays the room's. Where the view's path is too thin to tell its source (opacity under 0.4 %) the ray is left as it
+// is. uv, depth: the surface's place in the main view; t: the ray's length (a miss: any length past the fog).
+float3 fogOverRay(float2 uv, float depth, float3 origin, float3 dir, float t, float3 radiance)
+{
+    FogParams p;
+    if (!fogLoad(p) || (p.grid >> 31) == 0) return radiance;  // (bit 31 of the grid word: atmosphere.fog.on_rays)
+    FogMedium m;
+    m.on = true;
+    m.density = p.density;
+    m.falloff = p.falloff;
+    m.height = p.height;
+    m.g = p.g;
+    m.albedo = p.albedo;
+    m.start = 0;
+    const float T = exp(-fogOpticalDepth(m, origin, dir, 0.0, t));
+    if (T > 0.999) return radiance;
+    const float4 v = fogAt(uv, depth);
+    const float opacity = 1.0 - v.a;
+    if (opacity < 4e-3) return radiance;
+    return radiance * T + v.rgb * ((1.0 - T) / opacity);
+}
+
 // The air's in-scattering and transmittance with the fog in front of and inside it (the fog is the nearer, denser
 // medium: the air's light is taken through all of it).
 void fogOverAir(float2 uv, float depth, inout float3 inscatter, inout float3 transmittance)

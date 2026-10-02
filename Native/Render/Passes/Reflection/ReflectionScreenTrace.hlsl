@@ -15,6 +15,7 @@
 // P[8].y != 0: the previous colour's alpha is its frame's depth (the history depth test, ScreenTrace.hlsli).
 #include "Passes/Reflection/ReflectionReuse.hlsli"
 #include "Passes/Reflection/ScreenTrace.hlsli"
+#include "Passes/Atmosphere/FogVolume.hlsli"
 
 [numthreads(8, 8, 1)]
 void main(uint2 pixel : SV_DispatchThreadID)
@@ -53,6 +54,8 @@ void main(uint2 pixel : SV_DispatchThreadID)
     float3 radiance;
     if (!sctPreviousColour(previous, uint2(P[2].z & 0xFFFFu, P[2].z >> 16), prevViewProj, hit, asfloat(P[3].w), noise, radiance, P[8].y != 0)) return;
     RWStructuredBuffer<uint> jobs = ResourceDescriptorHeap[P[1].x];
+    // (the previous colour holds neither the air nor the fog: the fog along this ray is the ray's own)
+    radiance = fogOverRay((float2(pixel) + 0.5) / float2(size), s.linearDepth, origin, direction, distance(hit, s.position), radiance);
     results[job] = reflPackResult(reflStorable(radiance), distance(hit, s.position), 0);
     jobs[job] = jobs[job] | 0x80000000u;
 }

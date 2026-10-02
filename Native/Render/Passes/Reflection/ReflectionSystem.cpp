@@ -1314,6 +1314,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           b.use(screen.hzb, Use::SrvCompute);
                           b.use(screen.prevColor, Use::SrvCompute);
                           if (words.valid()) b.use(words, Use::SrvCompute);
+                          declareFog(b, fc.resources, Use::SrvCompute);  // (the fog along the rays: FogVolume.hlsli fogOverRay)
                       },
                       [&shaders, modes, results, depth, gbuffer, jobs, screen, frame, width, height, rayLength, frameConstants, s, samplingBias16, screenContinue, words, historyDepth,
                        outW = g.desc(screen.prevColor).width, outH = g.desc(screen.prevColor).height, ratio = up.exposureRatio,
@@ -1361,6 +1362,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       if (hitsUseCards) declareSurfaceCacheCards(b, cardRefs, Use::SrvGraphics);
                       if (sceneColour) b.use(prevColor, Use::SrvGraphics);
                       if (words.valid()) b.use(words, Use::SrvGraphics);
+                      declareFog(b, fc.resources, Use::SrvGraphics);  // (the fog along the rays)
                       if (exactCounts.valid()) b.use(exactCounts, Use::UavGraphics);
                       rays.declareTraversal(b);
                       rays.declareDecals(b);

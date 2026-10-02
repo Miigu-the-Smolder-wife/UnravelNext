@@ -5,19 +5,21 @@
 #   2  the four game scenes: cut pictures at 1080p with the gi and direct layers (which stage a cut frame's blotch is in),
 #      timings at 1080p, 1440p and 4K;
 #   3  scenegen's scenes (outdoors, night, forest, water, interior): cut pictures and timings at 1080p, timings at 4K;
-#   4  the high tier's timings (lobby, 1080p and 4K); the height fog on (lobby, city block, night city, ridge: pictures
-#      and timings); the far field off (ridge, city block, lake: what the far rays add and cost); the cloud layer at
-#      coverage 0.5 with and without its temporal accumulation (ridge, city block).
+#   4  variants, in groups (-Variants high,fog,fogab,far,clouds,nopass,grids; default all): the high tier's timings; the
+#      height fog on (pictures, timings) and each of its parts off in turn; the far field off; the cloud layer with and
+#      without its temporal accumulation; the frame without per-pass timestamps; the view-angle grids against pixel-sized.
 # The summary (<out>\summary.txt): the furnace sheets, every timing run's GPU frame and largest pass groups, the gates
 # that failed. A device removal stops the batch.
-#   powershell -File Tools\Verify\Run-Ue6Batch.ps1 [-Out Cache\Ue6Batch] [-Skip furnace,game,generated,variants]
+#   powershell -File Tools\Verify\Run-Ue6Batch.ps1 [-Out Cache\Ue6Batch] [-Skip furnace,game,generated,variants] [-Variants high,fog,...]
 param(
     [string]$Out = "Cache\Ue6Batch",
     [string[]]$Skip = @(),
-    [string]$GeneratedScenes = "city_block,forest_thin,waterside,interior,city_night,ridge_sunset,forest_combat"
+    [string]$GeneratedScenes = "city_block,forest_thin,waterside,interior,city_night,ridge_sunset,forest_combat",
+    [string[]]$Variants = @("high", "fog", "fogab", "far", "clouds", "nopass", "grids")
 )
 $ErrorActionPreference = "Stop"
 $Skip = @($Skip | ForEach-Object { $_ -split "," } | Where-Object { $_ })
+$Variants = @($Variants | ForEach-Object { $_ -split "," } | Where-Object { $_ })
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Set-Location $root
 $outDir = Join-Path $root $Out
@@ -63,24 +65,52 @@ if ($Skip -notcontains "generated") {
     Invoke-Step "generated scenes 4K (timings)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", $Out, "-NoGame", "-Generated", $GeneratedScenes, "-Resolutions", "4K", "-SkipPictures")
 }
 if ($Skip -notcontains "variants") {
-    Invoke-Step "high tier (lobby timings)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\tier_high", "-Only", "bt_lobby", "-Resolutions", "1080p,4K", "-SkipPictures",
-        "-Set", "output.tier=high")
-    Invoke-Step "fog on (lobby)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\fog", "-Only", "bt_lobby", "-Resolutions", "1080p",
-        "-Set", "atmosphere.fog.enabled=true")
-    Invoke-Step "fog on (city block, night city, ridge)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\fog", "-NoGame", "-Generated", "city_block,city_night,ridge_sunset",
-        "-Resolutions", "1080p", "-Set", "atmosphere.fog.enabled=true")
-    Invoke-Step "far field off (ridge, city block, lake)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\far_off", "-NoGame", "-Generated", "ridge_sunset,city_block,waterside",
-        "-Resolutions", "1080p", "-Layers", "gi", "-Set", "lumen.radiance_cache_far_field=false")
-    Invoke-Step "far field on, the gi layer (ridge, city block)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\far_on", "-NoGame", "-Generated", "ridge_sunset,city_block",
-        "-Resolutions", "1080p", "-Layers", "gi", "-SkipTimings")
-    Invoke-Step "clouds (ridge, city block)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\clouds", "-NoGame", "-Generated", "ridge_sunset,city_block",
-        "-Resolutions", "1080p", "-GateArgs", "--clouds 0.5")
-    Invoke-Step "clouds without temporal accumulation (ridge, city block)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\clouds_notemporal", "-NoGame",
-        "-Generated", "ridge_sunset,city_block", "-Resolutions", "1080p", "-GateArgs", "--clouds 0.5", "-Set", "atmosphere.clouds.temporal=false")
-    Invoke-Step "the frame without per-pass timestamps (lobby 1080p, 4K)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\nopass", "-Only", "bt_lobby",
-        "-Resolutions", "1080p,4K", "-SkipPictures", "-GateArgs", "--no-pass-timestamps")
-    Invoke-Step "clouds 4K (ridge timings)" @("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\clouds", "-NoGame", "-Generated", "ridge_sunset",
-        "-Resolutions", "4K", "-SkipPictures", "-GateArgs", "--clouds 0.5")
+    # Each group answers one question; -Variants picks groups (default: all).
+    function Final([string]$title, [string]$dir, [string[]]$more) {
+        Invoke-Step $title (@("-File", "Tools\Verify\Run-Ue6Final.ps1", "-Out", "$Out\$dir") + $more)
+    }
+    $fogOn = "atmosphere.fog.enabled=true"
+    if ($Variants -contains "high") {
+        Final "high tier (lobby timings)" "tier_high" @("-Only", "bt_lobby", "-Resolutions", "1080p,4K", "-SkipPictures", "-Set", "output.tier=high")
+    }
+    if ($Variants -contains "fog") {
+        # the fog as it is by default when on: the sky through it, far shadows, the density's variation, the reflections' rays,
+        # the lake's mirror
+        Final "fog on (lobby)" "fog" @("-Only", "bt_lobby", "-Resolutions", "1080p", "-Set", $fogOn)
+        Final "fog on (city block, night city, ridge, lake)" "fog" @("-NoGame", "-Generated", "city_block,city_night,ridge_sunset,waterside", "-Resolutions", "1080p", "-Set", $fogOn)
+        Final "fog on, 4K (lobby, night city timings)" "fog" @("-Only", "bt_lobby", "-Resolutions", "4K", "-SkipPictures", "-Set", $fogOn)
+    }
+    if ($Variants -contains "fogab") {
+        # one switch off at a time against the group above (pictures only)
+        Final "fog: no far shadows (ridge)" "fog_nofarshadow" @("-NoGame", "-Generated", "ridge_sunset", "-Resolutions", "1080p", "-SkipTimings", "-Set", "$fogOn,atmosphere.fog.far_shadows=false")
+        Final "fog: uniform density (night city)" "fog_nonoise" @("-NoGame", "-Generated", "city_night", "-Resolutions", "1080p", "-SkipTimings", "-Set", "$fogOn,atmosphere.fog.noise_amount=0")
+        Final "fog: not on reflection rays (night city)" "fog_norays" @("-NoGame", "-Generated", "city_night", "-Resolutions", "1080p", "-SkipTimings", "-Set", "$fogOn,atmosphere.fog.on_rays=false")
+        Final "fog: none in the mirror views (lake)" "fog_nomirror" @("-NoGame", "-Generated", "waterside", "-Resolutions", "1080p", "-SkipTimings", "-Set", "$fogOn,atmosphere.fog.secondary_views=false")
+        Final "fog under the cloud layer (ridge, city block)" "fog_clouds" @("-NoGame", "-Generated", "ridge_sunset,city_block", "-Resolutions", "1080p", "-SkipTimings", "-Set", $fogOn,
+            "-GateArgs", "--clouds 0.5")
+    }
+    if ($Variants -contains "far") {
+        Final "far field off (ridge, city block, lake)" "far_off" @("-NoGame", "-Generated", "ridge_sunset,city_block,waterside", "-Resolutions", "1080p", "-Layers", "gi",
+            "-Set", "lumen.radiance_cache_far_field=false")
+        Final "far field on, the gi layer (ridge, city block)" "far_on" @("-NoGame", "-Generated", "ridge_sunset,city_block", "-Resolutions", "1080p", "-Layers", "gi", "-SkipTimings")
+    }
+    if ($Variants -contains "clouds") {
+        Final "clouds (ridge, city block)" "clouds" @("-NoGame", "-Generated", "ridge_sunset,city_block", "-Resolutions", "1080p", "-GateArgs", "--clouds 0.5")
+        Final "clouds without temporal accumulation (ridge, city block)" "clouds_notemporal" @("-NoGame", "-Generated", "ridge_sunset,city_block", "-Resolutions", "1080p",
+            "-GateArgs", "--clouds 0.5", "-Set", "atmosphere.clouds.temporal=false")
+        Final "clouds 4K (ridge timings)" "clouds" @("-NoGame", "-Generated", "ridge_sunset", "-Resolutions", "4K", "-SkipPictures", "-GateArgs", "--clouds 0.5")
+    }
+    if ($Variants -contains "nopass") {
+        Final "the frame without per-pass timestamps (lobby 1080p, 4K)" "nopass" @("-Only", "bt_lobby", "-Resolutions", "1080p,4K", "-SkipPictures", "-GateArgs", "--no-pass-timestamps")
+    }
+    if ($Variants -contains "grids") {
+        # the froxel tiles and the translucency volume's cells at their pixel sizes of before (what the angular sizes save at 4K)
+        Final "pixel-sized grids (lobby 4K timings)" "grids_px" @("-Only", "bt_lobby", "-Resolutions", "4K", "-SkipPictures",
+            "-Set", "atmosphere.froxels.tile_reference_height=0,lumen.translucency_volume_grid_reference_height=0")
+        Final "pixel-sized grids (lobby 4K pictures)" "grids_px" @("-Only", "bt_lobby", "-Resolutions", "4K", "-SkipTimings",
+            "-Set", "atmosphere.froxels.tile_reference_height=0,lumen.translucency_volume_grid_reference_height=0")
+        Final "angular grids (lobby 4K pictures)" "grids_angle" @("-Only", "bt_lobby", "-Resolutions", "4K", "-SkipTimings")
+    }
 }
 & python Tools\Verify\batch_summary.py $outDir (Join-Path $root "Cache\Ue6Diag") | Out-File -Encoding utf8 (Join-Path $outDir "summary.txt")
 "batch finished $(Get-Date -Format s)" | Out-File -Encoding utf8 -Append $batchLog
