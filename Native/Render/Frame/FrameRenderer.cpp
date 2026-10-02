@@ -449,7 +449,6 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     FrameResources resources;
     // output.async_compute_passes: the named passes on the async compute queue (RenderGraph::setAsyncPasses).
     graph.setAsyncPasses(m_quality.has("output.async_compute_passes") ? m_quality.strings("output.async_compute_passes") : std::vector<std::string>{});
-    importFxLights(graph, m_scene, resources);
     FrameServices services;
     FramePassContext fc{ m_device, graph, m_shaders, m_quality, m_scene, frame, resources, services,
                          [this, &frame, &fc](const ViewDesc& v) { return allocateFrameConstants(frame, v, &fc); }, &m_trackState, m_framesInFlight };
@@ -458,6 +457,9 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     // Scene textures into the material records before any frame constants (they carry the material buffer's SRV).
     tracks::prepareScene(fc);
     tracks::lightFunctions(fc);  // E (A8): light function table and images, before every consumer
+    // (after prepareScene: a changed light source texture makes GpuScene rebuild the light buffer there - imported
+    // before it, the FX tail's writer would fill the released buffer and the frame's readers find an empty tail)
+    importFxLights(graph, m_scene, resources);
     services.rasterizeDepth = [](FramePassContext& c, const DepthRasterRequest& r) { tracks::rasterizeDepth(c, r); };
     services.traceRefractions = [](FramePassContext& c, BufferRef jobs, BufferRef results, uint32_t maxJobs) {
         tracks::refraction(c, jobs, results, maxJobs);
