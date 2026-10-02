@@ -1,14 +1,17 @@
 // unx-kernel: cs_6_6 main
 // m.tsr.reject (Tsr.hlsli; the reference's TSRRejectShading, MeasureRejection): the shading rejection of the history,
 // this frame's guide, and the spatial anti-aliaser's inputs. One group per 16 x 16 internal pixels; the chain of 3 x 3
-// operators needs 6 more pixels on every side, so the group works on a 28 x 28 region held in group memory (colours as
+// operators needs 7 more pixels on every side, so the group works on a 30 x 30 region held in group memory (colours as
 // three 11 / 11 / 10-bit square roots: the guide's own precision), one stage after the other:
 //   0  I = the input and H = the reprojected guide in the measurement space
 //   1  H' = H clamped to I's 3 x 3 range, I' = I clamped to H's 3 x 3 range
 //   2  C = I clamped to H''s 3 x 3 range (the input without what only its aliasing has), G = H clamped to I''s
 //   3  FI = blur(C), FH = blur(G), V = min(|variation(|I - C|)|, |variation(C)|), B = the 3 x 3 range of C
-//   4  the clamp box = the 3 x 3 range of FI widened by the error max(q, blur(V), B / 16) + q; E = |clamp(FH) - FH|,
-//      R = min over channels of 1 - E / max(|FI - FH|, B / 4 + q / 2)
+//   3b (thin geometry, P[2].z: TsrThin.hlsl's relaxation weight w) L = FH clamped into the box between FI's 3 x 3 range
+//      and FH's own, w of the way to FH's
+//   4  the clamp box = the 3 x 3 range of FI - where w > 0 the 3 x 3 range of L: what of the history its neighbourhood
+//      holds too, a thin feature a pixel aside of where this frame's samples found it - widened by the error
+//      max(q, blur(V), B / 16) + q; E = |clamp(FH) - FH|, R = min over channels of 1 - E / max(|FI - FH|, B / 4 + q / 2)
 //   5  the 3 x 3 medians of E and R
 //   6  per pixel: the 3 x 3 maximum of the median E over the same denominator -> the rejection (1 = the history
 //      holds), the 3 x 3 minimum of the median R -> how far the history may stay unclamped.
@@ -19,12 +22,17 @@
 //          rejection UAV (RGBA8: rejection, history clamp disable, validity decrease, bit 0 of a x 255: not disoccluded) }
 // P[1] = { guide UAV (R10G10B10A2, next frame's history: guide colour, a = this frame's reprojection edge), AA input UAV
 //          (RG8: LDR luma, mask), width, height }, P[2] = { asuint(theoretic blend factor), moire error SRV (R16F,
-//          TsrFlicker.hlsl; UNX_NONE: no flickering heuristic), 0, 0 }: inside the moire error (x 3: luma to a
-//          channel) the filtered guide is not clamped, and the denominator is at least the error's share of the channel
+//          TsrFlicker.hlsl; UNX_NONE: no flickering heuristic), thin geometry relaxation SRV (R8, TsrThin.hlsl;
+//          UNX_NONE: none), layers SRV (RGBA8, UpscaleMotion.hlsl; UNX_NONE: none) }: inside the moire error (x 3: luma to a
+//          channel) the filtered guide is not clamped, and the denominator is at least the error's share of the channel.
+//          The layers' rule: a pixel under a layer without a vector (g: particles, see-through fragments) or seen
+//          through a tracked glass or water whose background moves otherwise (b) keeps the history's clamp by that
+//          amount - the history cannot leave this frame's samples' range, no trail -, and the first also the validity's
+//          decrease (a short history: the layer's own change shows at once)
 #include "Passes/Shading/Tsr.hlsli"
 
 #define TILE 16
-#define BORDER 6
+#define BORDER 7
 #define SIDE (TILE + 2 * BORDER)
 #define CELLS (SIDE * SIDE)
 
@@ -159,20 +167,57 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     }
     GroupMemoryBarrierWithGroupSync();
 
+    // 3b: the filtered guide clamped into the relaxed box (gA is free until the medians)
+    const bool thin = P[2].z != 0xFFFFFFFFu;
+    if (thin)
+    {
+        Texture2D<float> relaxationTexture = ResourceDescriptorHeap[P[2].z];
+        for (i = lane; i < CELLS; i += TILE * TILE)
+        {
+            const int2 c = int2(i % SIDE, i / SIDE);
+            if (!inMargin(c, 4)) continue;
+            float3 inputMin = 1, inputMax = 0, guideMin = 1, guideMax = 0;
+            FOR_3X3(c, {
+                const float3 a = unpack(gC[ni]);
+                const float3 b = unpack(gD[ni]);
+                inputMin = min(inputMin, a);
+                inputMax = max(inputMax, a);
+                guideMin = min(guideMin, b);
+                guideMax = max(guideMax, b);
+            })
+            float weight = relaxationTexture.Load(int3(clamp(origin + c, 0, size - 1), 0));
+            weight = weight > 1.0 / 127.0 ? weight : 0.0;
+            gA[i] = pack(clamp(unpack(gD[i]), lerp(inputMin, guideMin, weight), lerp(inputMax, guideMax, weight)));
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+
     // 4: the clamp box, what it removes from the filtered guide, the raw rejection
     const float q = TSR_QUANTIZATION_ERROR, filteringWeight = 0.25;
     const bool moire = P[2].y != 0xFFFFFFFFu;
     for (i = lane; i < CELLS; i += TILE * TILE)
     {
         const int2 c = int2(i % SIDE, i / SIDE);
-        if (!inMargin(c, 4)) continue;
-        float3 blurredVariation = 0, boxMin = 1, boxMax = 0;
+        if (!inMargin(c, 5)) continue;
+        float3 blurredVariation = 0, boxMin = 1, boxMax = 0, relaxedMin = 1, relaxedMax = 0;
         FOR_3X3(c, {
             blurredVariation += unpack(gB[ni]) * nw;
             const float3 f = unpack(gC[ni]);
             boxMin = min(boxMin, f);
             boxMax = max(boxMax, f);
+            const float3 l = unpack(gA[ni]);
+            relaxedMin = min(relaxedMin, l);
+            relaxedMax = max(relaxedMax, l);
         })
+        if (thin)
+        {
+            Texture2D<float> relaxationTexture = ResourceDescriptorHeap[P[2].z];
+            if (relaxationTexture.Load(int3(clamp(origin + c, 0, size - 1), 0)) > 1.0 / 127.0)
+            {
+                boxMin = relaxedMin;
+                boxMax = relaxedMax;
+            }
+        }
         const float3 range = unpack(gG[i]);
         const float3 clampError = max(max(float3(q, q, q), blurredVariation), range * (filteringWeight * 0.25)) + q;
         const float3 filteredGuide = unpack(gD[i]), filteredInput = unpack(gC[i]);
@@ -205,7 +250,7 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     for (i = lane; i < CELLS; i += TILE * TILE)
     {
         const int2 c = int2(i % SIDE, i / SIDE);
-        if (!inMargin(c, 5)) continue;
+        if (!inMargin(c, 6)) continue;
         float4 lows[3], mids[3], highs[3];
         [unroll] for (int x = -1; x <= 1; ++x)
         {
@@ -266,8 +311,16 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     RWTexture2D<float4> guideOut = ResourceDescriptorHeap[P[1].x];
     guideOut[pixel] = float4(saturate(tsrLinearToGuide(tsrFromAccumulation(mixed))), velocityEdge);
 
-    const float disableClamp = disoccluded ? 0.0 : min(clampBlend, min(velocityEdge, guideUncertainty));
-    const float increaseValidity = disoccluded ? 0.0 : clampBlend;
+    float animated = 0, seenThrough = 0;
+    if (P[2].w != 0xFFFFFFFFu)
+    {
+        Texture2D<float4> layers = ResourceDescriptorHeap[P[2].w];
+        const float4 layer = layers.Load(int3(pixel, 0));
+        animated = layer.g;
+        seenThrough = layer.b;
+    }
+    const float disableClamp = disoccluded ? 0.0 : min(clampBlend, min(velocityEdge, guideUncertainty)) * (1.0 - max(animated, seenThrough));
+    const float increaseValidity = disoccluded ? 0.0 : clampBlend * (1.0 - animated);
     const bool antiAlias = gAlias[local.y * TILE + local.x] != 0 && (rejection < 0.25 || disoccluded);
     RWTexture2D<float4> rejectionOut = ResourceDescriptorHeap[P[0].w];
     // (the stores round down: a value is never raised by its 8 bits)

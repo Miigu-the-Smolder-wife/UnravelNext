@@ -14,6 +14,8 @@
 //          disocclusion; g = reprojection edge), width, height }
 // P[2] = { asuint(jitter x), asuint(jitter y), asuint(exposure ratio), flags (1: reset - first frame, cut, restore) }
 // P[3] = { previous flickering history SRV (RGBA8; UNX_NONE: none), reprojected flickering history UAV (RGBA8), frame, 0 }
+// P[4] = { previous thin coverage history SRV (R8; UNX_NONE: none), reprojected thin coverage UAV (R8; UNX_NONE: no
+//          thin geometry detection), 0, 0 }
 // Frame constants b1 = the main view.
 #include "Passes/Shading/Tsr.hlsli"
 #include "Passes/Common/Frame.hlsli"
@@ -120,6 +122,18 @@ void main(uint2 id : SV_DispatchThreadID)
         }
         RWTexture2D<float4> flickerOut = ResourceDescriptorHeap[P[3].y];
         flickerOut[id] = flicker;
+    }
+    if (P[4].y != UNX_NONE)
+    {
+        // the thin geometry's coverage history (TsrThin.hlsl): the nearest texel (a mean of coverages is not a coverage)
+        float coverage = 0;
+        if (!offScreen && !disoccluded && P[4].x != UNX_NONE)
+        {
+            Texture2D<float> previousCoverage = ResourceDescriptorHeap[P[4].x];
+            coverage = previousCoverage.Load(int3(clamp(int2(floor(previousUv * float2(size))), 0, size - 1), 0));
+        }
+        RWTexture2D<float> coverageOut = ResourceDescriptorHeap[P[4].y];
+        coverageOut[id] = coverage;
     }
     maskOut[id] = float2(((offScreen ? 1.0 : 0.0) + (disoccluded ? 2.0 : 0.0)) / 255.0, edge);
 }

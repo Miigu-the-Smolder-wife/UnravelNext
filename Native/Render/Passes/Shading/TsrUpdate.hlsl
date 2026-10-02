@@ -8,7 +8,12 @@
 //              weight. Where the history is rejected or missing O first moves by the spatial anti-aliaser's offset.
 //   history    Catmull-Rom at O less the dilated reprojection vector, times the exposure ratio; clamped to the samples'
 //              range except as far as the rejection pass found it consistent (history clamp disable).
-//   weights    the history's validity (alpha, 1 = 16 samples) capped where rejected (2 samples), the input's weight =
+//   field      (P[3].z; m.tsr.dilate's reprojection field) on a boundary K's vector, jacobian and rejection are read at
+//              the neighbour on O's side of it: the foreground's (the dilation's offset) where O reaches over the
+//              boundary, else the pixel across; the vector is carried from that pixel's centre to O by the jacobian;
+//              the rejection is the stricter of K's and that pixel's. A reprojection that magnifies the history (the
+//              jacobian's upscale factor) holds the history's weight down as a rejection of 1 / that factor would.
+//   weights   the history's validity (alpha, 1 = 16 samples) capped where rejected (2 samples), the input's weight =
 //              its alignment with O x 1 / 16, the history's = the input's x (1 - b) / b for the rejection's blend
 //              factor b, at most the validity, at most 1 - 0.75 x speed in output pixels a frame (not below the
 //              relative luma change: high-contrast edges stay stable in motion).
@@ -16,7 +21,8 @@
 //          history SRV (output: rgb exposed linear, a = validity) }
 // P[1] = { output UAV (RGBA16F), internal width, height, flags (1: reset; 2: the kernel narrows with the samples
 //          gathered - output.upscale_tsr_kernel_by_samples) }
-// P[2] = { output width, height, asuint(jitter x), asuint(jitter y) }, P[3] = { asuint(exposure ratio), AA SRV (RG8_UINT), 0, 0 }
+// P[2] = { output width, height, asuint(jitter x), asuint(jitter y) }, P[3] = { asuint(exposure ratio), AA SRV (RG8_UINT),
+//          field SRV (RGBA32_UINT, Tsr.hlsli; 0xFFFFFFFF: one vector per input pixel), 0 }
 #include "Passes/Shading/Tsr.hlsli"
 
 float previousWeightMultiplier(float blendFactor) { return (1.0 - blendFactor) / max(blendFactor, 1.0 / 1024.0); }
@@ -39,12 +45,39 @@ void main(uint2 o : SV_DispatchThreadID)
     float2 ppo = uv * float2(inSize) + jitter;
     int2 k = clamp(int2(floor(ppo)), 0, inSize - 1);
 
-    const float4 rejection = rejectionTexture.Load(int3(k, 0));
+    // the reprojection field: the input pixel the vector is read at and the vector's change from its centre to O
+    int2 kv = k;
+    float2 correction = 0;
+    float upscaleCorrection = 1;
+    if (P[3].z != 0xFFFFFFFFu)
+    {
+        Texture2D<uint4> fieldTexture = ResourceDescriptorHeap[P[3].z];
+        const float2 fromCentre = ppo - (floor(ppo) + 0.5);
+        const uint boundary = fieldTexture.Load(int3(k, 0)).y;
+        int2 dilateOffset = 0;
+        if (boundary != TSR_NO_BOUNDARY)
+        {
+            const int2 offset = tsrDecodeBoundaryOffset(boundary);
+            dilateOffset = tsrInsideBoundary(fromCentre, tsrDecodeBoundary(boundary), 1.0 / inputToHistory) ? offset : -offset;
+        }
+        kv = clamp(k + dilateOffset, 0, inSize - 1);
+        float2 dx, dy;
+        tsrDecodeJacobian(fieldTexture.Load(int3(kv, 0)).x, dx, dy);
+        const float2 coordinate = fromCentre - float2(dilateOffset);
+        correction = (coordinate.x * dx + coordinate.y * dy) / float2(inSize);
+        upscaleCorrection = 1.0 / max(tsrJacobianUpscale(dx, dy), 1.0);
+    }
+    float4 rejection = rejectionTexture.Load(int3(k, 0));
+    if (any(kv != k))
+    {
+        const float4 across = rejectionTexture.Load(int3(kv, 0));
+        rejection = float4(min(rejection.rg, across.rg), max(rejection.b, across.b), across.a);
+    }
     const float lowFrequencyRejection = rejection.r, disableHistoryClamp = rejection.g, decreaseValidity = rejection.b;
     const bool parallaxRejected = ((uint)round(rejection.a * 255.0) & 1u) == 0;
     const uint2 aa = aaTexture.Load(int3(k, 0));
     const float noiseFiltering = (float)aa.y / 255.0;
-    const float2 vector = motionTexture.Load(int3(k, 0));
+    const float2 vector = motionTexture.Load(int3(kv, 0)) + correction;
     const float2 previousUv = uv - vector;
     const bool offScreen = (P[1].w & 1u) != 0 || any(previousUv <= 0) || any(previousUv >= 1);
     const bool disoccluded = !offScreen && parallaxRejected;
@@ -75,7 +108,7 @@ void main(uint2 o : SV_DispatchThreadID)
     // the kernel's width and the weights
     float kernelFactor, currentWeight, previousWeight;
     {
-        const float rejectionBlend = offScreen ? 1.0 : 1.0 - lowFrequencyRejection;
+        const float rejectionBlend = offScreen ? 1.0 : 1.0 - min(lowFrequencyRejection, upscaleCorrection);
         const float coarseContribution = tsrSampleWeight(1.0, dKO, 0.0) * TSR_HYSTERESIS;
         const float idealContribution = tsrSampleWeight(inputToHistory, dKO, 0.0) * TSR_HYSTERESIS;
         const float validity = min(previousValidity, 1.0 - TSR_WEIGHT_CLAMPING_REJECTION * decreaseValidity);
