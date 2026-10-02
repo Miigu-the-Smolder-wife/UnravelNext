@@ -11,6 +11,9 @@
 //        VisibilityCommon.hlsli)
 //   P[7] band A minimum width px | band C maximum width px << 16 (f16 each), cluster sheets SRV (float4), coarse tile mask
 //        SRV (TileMaskCoarse.hlsl), its words per view
+//   P[8] raster requests with the software rasteriser (visibility.software_raster; DepthRasterSw.hlsl): the tiles' software
+//        pages SRV (raw: a word per mask bit, SW_PAGE_*; UNX_NONE = none in this run), the largest cluster rectangle in
+//        pixels the software rasteriser takes (float), 0, 0. Read by CullClusters only.
 #ifndef UNX_CULL_SHARED_HLSLI
 #define UNX_CULL_SHARED_HLSLI
 #include "Passes/Visibility/VisibilityCommon.hlsli"
@@ -50,6 +53,8 @@
 #define SHEETS_SRV P[7].y
 #define TILE_COARSE_SRV P[7].z
 #define TILE_COARSE_WORDS P[7].w
+#define SW_PAGES_SRV P[8].x
+#define SW_REQUEST_LIMIT_PX asfloat(P[8].y)
 
 // Band modes of a cull run: which list a cluster of each band is drawn from.
 #define BAND_MODE_A 0u         // every band in the band A lists (raster service, secondary views)

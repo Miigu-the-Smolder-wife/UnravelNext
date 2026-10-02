@@ -132,3 +132,32 @@ coverage_compute_raster = false   # with the buckets: a compute kernel (Coverage
 coverage_statistics = false       # counts only (gate summaries): the coverage fragments by outcome - evaluated, behind band
                                   # A, behind the cover, cut by alpha, without weight - from per-wave atomics in the
                                   # fragment kernels (a pixel kernel variant: its time is not the layer's)
+# The band A raster of a full view in raster bins (RasterBins.hlsl; the reference's raster bins, depth buckets and its
+# software rasteriser). Written 2026-10-03, built, not run: each switch off is the raster as before.
+raster_depth_sort = false         # after each cull phase the entries it added to the four band A lists (the raster
+                                  # pipelines: back-face culled or not, alpha tested or not) are sorted by their
+                                  # cluster's nearest distance (256 log2 bins, a counting sort) and the mesh raster draws
+                                  # the sorted copy, nearer first: the depth test drops what nearer clusters of the same
+                                  # draw cover before the pixel kernel (the alpha test's texture loads) and the writes.
+                                  # The same depth and vis ids up to the order of equal depths. Costs 4 small passes a
+                                  # phase and 4 B x 4 lists x the capacity. Off until the A/B says what the order gains
+software_raster = false           # clusters without alpha test whose rectangle on screen is at most
+                                  # software_raster_max_px a side (rigid or wind-deformed, a perspective view) are
+                                  # rasterised by a compute kernel (VisRasterSw.hlsl) into a 64-bit depth | vis id word
+                                  # per pixel by atomic max, and a pass writes those pixels into the depth buffer and the
+                                  # vis id target under the depth test before the HiZ is built; the mesh raster draws the
+                                  # rest. The same pixels as the hardware (1 / 256 px snap, top-left rule, pixel centres)
+                                  # up to the depth's float rounding. Needs 64-bit atomics on descriptor-heap resources
+                                  # (without them the mesh raster draws everything); not in debug.deterministic mode.
+                                  # In a raster request with an atlas (S's shadow pages) the same split, by the
+                                  # cluster's rectangle in its view (DepthRasterSw.hlsl). 8 B a pixel in the main view
+software_raster_max_px = 32       # the largest cluster rectangle the software rasteriser takes (1 .. 64: its integer
+                                  # edge functions hold 64 px). The reference decides per cluster by its triangles' size;
+                                  # here the cluster's rectangle bounds every triangle's loop
+software_raster_pages = 256       # a raster request's software pages (one per set tile of its views, 4 B a texel: 64 KB
+                                  # for a 128 px shadow page): the floor of the capacity, which is 1.5 x the set tiles
+                                  # of the request's latest completed frame, a power of two up to
+                                  # software_raster_pages_limit and the atlas's slots. A tile past the capacity loses
+                                  # nothing: the clusters over it stay with the mesh raster
+software_raster_pages_limit = 4096  # the most (<= 16384; 4096 pages of 128 px: 268 MB of transient memory for a request
+                                  # that draws them all)

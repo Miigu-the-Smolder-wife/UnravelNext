@@ -71,6 +71,11 @@ struct Settings
     uint32_t coverageDepthBuckets = 1, coverageBucketsMinClusters = 0;
     bool coverageTriangleCull = false, coverageComputeRaster = false, coverageStatistics = false;
     bool coverageDropWeightless = false;  // fragments without weight (no area step, no subsample) are not stored
+    // Raster bins of a full view's band A lists (RasterBins.hlsl): the phase's entries sorted nearer first; the software
+    // rasteriser of small clusters (VisRasterSw.hlsl, DepthRasterSw.hlsl) and its largest cluster rectangle in pixels.
+    bool rasterDepthSort = false, softwareRaster = false;
+    float softwareRasterMaxPx = 0;
+    uint32_t softwarePages = 0, softwarePagesLimit = 0;  // a raster request's software pages: the floor and the most
 
     static Settings load(const QualityConfig& q)
     {
@@ -122,6 +127,16 @@ struct Settings
         s.coverageComputeRaster = q.has("visibility.coverage_compute_raster") && q.boolean("visibility.coverage_compute_raster");
         s.coverageStatistics = q.has("visibility.coverage_statistics") && q.boolean("visibility.coverage_statistics");
         s.coverageDropWeightless = q.has("visibility.coverage_drop_weightless") && q.boolean("visibility.coverage_drop_weightless");
+        s.rasterDepthSort = q.has("visibility.raster_depth_sort") && q.boolean("visibility.raster_depth_sort");
+        s.softwareRaster = q.has("visibility.software_raster") && q.boolean("visibility.software_raster");
+        s.softwareRasterMaxPx = q.has("visibility.software_raster_max_px") ? (float)q.number("visibility.software_raster_max_px") : 32.0f;
+        // (RasterSw.hlsli SW_MAX_PX: the integer edge functions hold rectangles up to 64 px)
+        if (!(s.softwareRasterMaxPx >= 1 && s.softwareRasterMaxPx <= 64)) fail("visibility.software_raster_max_px = %g: 1 .. 64", s.softwareRasterMaxPx);
+        s.softwarePages = q.has("visibility.software_raster_pages") ? (uint32_t)q.integer("visibility.software_raster_pages") : 256u;
+        s.softwarePagesLimit = q.has("visibility.software_raster_pages_limit") ? (uint32_t)q.integer("visibility.software_raster_pages_limit") : 4096u;
+        // (the clear's dispatch is one group per page: 65535 a row; the page's byte offset stays in 32 bits)
+        if (s.softwarePages == 0 || s.softwarePages > s.softwarePagesLimit || s.softwarePagesLimit > 16384)
+            fail("visibility.software_raster_pages = %u, software_raster_pages_limit = %u: 1 <= pages <= limit <= 16384", s.softwarePages, s.softwarePagesLimit);
         return s;
     }
 };
@@ -186,6 +201,7 @@ struct State
         uint32_t overflowSeen = 0;  // every read frame's overflow bits
         bool overflowReported = false;
         uint32_t capVisible = 0;    // the run's visible-list capacity (visibleCapacity; 0: not set yet)
+        uint32_t capSoftwarePages = 0;  // a raster request's software page capacity (softwarePageCapacity; 0: not set yet)
     };
     std::map<std::string, StatsRun> stats;
     std::map<uint32_t, ViewState> views;  // A14: full views by id (0 = main)
@@ -194,6 +210,7 @@ struct State
     uint32_t sceneRevision = UINT32_MAX;
     uint64_t viewModelRevision = UINT64_MAX;  // GpuScene::viewModelRevision the instance hierarchy was built with
     uint32_t traversalLevels = 0;  // deepest per-depth tree of any mesh (node passes per phase without the work queue)
+    int atomic64 = -1;  // 64-bit atomics on descriptor-heap resources (the software rasteriser's depth | vis id word): -1 not asked
 
     // C3: instance chunks, flat list, skinned bounds (persistent; rebuilt at each scene revision).
     struct VBuffer
@@ -833,6 +850,8 @@ struct Run
     D3D12_GPU_VIRTUAL_ADDRESS frameConstants = 0;  // scene indices, time and wind for the kernels (b1)
     uint32_t bandMode = kBandModeA;
     bool storedPairs = false;  // tile-local run with the stored pair list (visibility.raster_amplification false, A/B)
+    BufferRef swPages;         // raster requests with the software rasteriser: the tiles' software pages (CullClusters)
+    float swLimitPx = 0;       // ... and the largest cluster rectangle it takes
     Settings cfg;
     std::string prefix;
 };
@@ -881,11 +900,14 @@ void declareCull(PassBuilder& b, const Run& r, Use argsUse)
         b.use(r.tileOccluders, Use::SrvCompute);
         b.use(r.occluderSlots, Use::SrvCompute);
     }
+    if (r.swPages.valid()) b.use(r.swPages, Use::SrvCompute);
 }
 
-void cullConstants(const PassContext& c, const Run& r, uint32_t phase, uint32_t k[32], uint32_t instanceCount)
+constexpr uint32_t kCullConstants = 36;  // CullShared.hlsli P[0 .. 8]
+
+void cullConstants(const PassContext& c, const Run& r, uint32_t phase, uint32_t k[kCullConstants], uint32_t instanceCount)
 {
-    std::memset(k, 0, 32 * 4);
+    std::memset(k, 0, kCullConstants * 4);
     k[0] = r.viewsSrv;
     k[1] = c.uav(r.state);
     k[2] = c.uav(r.args);
@@ -919,6 +941,8 @@ void cullConstants(const PassContext& c, const Run& r, uint32_t phase, uint32_t 
     k[29] = r.sheetsSrv;
     k[30] = r.tileCoarse.valid() ? c.srv(r.tileCoarse) : kNone;
     k[31] = r.tileCoarseWords;
+    k[32] = r.swPages.valid() ? c.srv(r.swPages) : kNone;
+    std::memcpy(&k[33], &r.swLimitPx, 4);
 }
 
 // One dispatch of a cull pass: direct (groupsX > 0) or indirect through the run's args at 'argWord'. 'after': it reads
@@ -946,7 +970,7 @@ void cullPass(FramePassContext& fc, State& s, const Run& r, const std::string& n
     ID3D12CommandSignature* sig = s.dispatchSignature.Get();
     fc.graph.addPass(r.prefix + name, QueueType::Graphics, [&](PassBuilder& b) { declareCull(b, r, direct ? Use::UavCompute : Use::IndirectArgs); },
                      [=](PassContext& c) {
-                         uint32_t k[32];
+                         uint32_t k[kCullConstants];
                          cullConstants(c, r, phase, k, instanceCount);
                          for (size_t i = 0; i < steps.size(); ++i)
                          {
@@ -962,7 +986,7 @@ void cullPass(FramePassContext& fc, State& s, const Run& r, const std::string& n
                              if (i == 0)
                              {
                                  c.bindFrameConstants(r.frameConstants);
-                                 c.computeConstants(k, 32);
+                                 c.computeConstants(k, kCullConstants);
                              }
                              if (direct) c.cmd->Dispatch(steps[i].groupsX, steps[i].groupsY, 1);
                              else c.cmd->ExecuteIndirect(sig, 1, c.resource(r.args), steps[i].argWord * 4, nullptr, 0);
@@ -1120,6 +1144,148 @@ void cullPhase(FramePassContext& fc, State& s, const Run& r, uint32_t phase)
     cullPass(fc, s, r, "prepare.draw.p" + p, "Passes/Visibility/CullPrepare.MODE3", phase, 1, 1, 0);
 }
 
+// Raster bins of a full view's band A lists (RasterBins.hlsl): the sorted copy of the lists, the bins (header, a key per
+// entry) and the bucket arguments. One set per run; each cull phase sorts the entries it added.
+struct RasterBinRefs
+{
+    BufferRef bins, args, sorted;
+    bool valid() const { return bins.valid(); }
+};
+constexpr uint32_t kRbHeaderWords = 16 + kAListCount * 512, kRbArgEntries = 0, kRbArgHw = 4, kRbArgSw = 16, kRbArgWords = 32;  // RB_*
+constexpr uint32_t kDsaClear = 0, kDsaMerge = 3, kDsaWords = 8, kDspFirst = 1;  // DepthRasterSw.hlsli DSA_*, DSP_*
+
+RasterBinRefs createRasterBins(FramePassContext& fc, const Run& r)
+{
+    RasterBinRefs b;
+    b.bins = fc.graph.createBuffer({ "v.raster.bins", ((uint64_t)kRbHeaderWords + (uint64_t)kAListCount * r.cfg.capVisible) * 4, 0 });
+    b.args = fc.graph.createBuffer({ "v.raster.binArgs", kRbArgWords * 4, 0 });
+    b.sorted = fc.graph.createBuffer({ "v.raster.sorted", (uint64_t)kAListCount * r.cfg.capVisible * 4, 0 });
+    return b;
+}
+
+// The phase's bins: begin (header, entry arguments), classify, prefix (places, hardware / software counts and their
+// arguments), scatter. softwareLimitPx: the software rasteriser's largest cluster rectangle (0: every entry hardware).
+void rasterBinPasses(FramePassContext& fc, State& s, const Run& r, const RasterBinRefs& rb, uint32_t phase, float softwareLimitPx)
+{
+    const uint32_t instanceCount = (uint32_t)fc.scene.instances().size();
+    ID3D12CommandSignature* sig = s.dispatchSignature.Get();
+    const char* names[4] = { "bins.begin.p", "bins.classify.p", "bins.prefix.p", "bins.scatter.p" };
+    for (uint32_t mode = 0; mode < 4; ++mode)
+    {
+        ID3D12PipelineState* pso = fc.shaders.compute("Passes/Visibility/RasterBins.MODE" + std::to_string(mode));
+        const bool indirect = mode == 1 || mode == 3;
+        fc.graph.addPass(r.prefix + names[mode] + std::to_string(phase), QueueType::Graphics,
+                         [&](PassBuilder& b) {
+                             declareCull(b, r, Use::UavCompute);
+                             b.use(rb.bins, Use::UavCompute);
+                             b.use(rb.args, indirect ? Use::IndirectArgs : Use::UavCompute);
+                             b.use(rb.sorted, Use::UavCompute);
+                         },
+                         [=](PassContext& c) {
+                             uint32_t k[kCullConstants + 4];  // (RasterBins.hlsl: P[9] after the cull kernels' words)
+                             cullConstants(c, r, phase, k, instanceCount);
+                             k[36] = c.uav(rb.bins);
+                             k[37] = indirect ? kNone : c.uav(rb.args);
+                             std::memcpy(&k[38], &softwareLimitPx, 4);
+                             k[39] = c.uav(rb.sorted);
+                             c.cmd->SetPipelineState(pso);
+                             c.bindFrameConstants(r.frameConstants);
+                             c.computeConstants(k, kCullConstants + 4);
+                             if (indirect) c.cmd->ExecuteIndirect(sig, 1, c.resource(rb.args), kRbArgEntries * 4, nullptr, 0);
+                             else c.cmd->Dispatch(mode == 0 ? (kRbHeaderWords + 63) / 64 : 1, 1, 1);
+                         });
+    }
+}
+
+// 64-bit atomics on resources taken from the descriptor heap: what the software rasteriser's depth | vis id word needs
+// (D3D12_FEATURE_D3D12_OPTIONS11; the reference requires the same of its visibility buffer).
+bool atomic64Supported(State& s, Device& device)
+{
+    if (s.atomic64 < 0)
+    {
+        D3D12_FEATURE_DATA_D3D12_OPTIONS11 o{};
+        const bool ok = SUCCEEDED(device.d3d()->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS11, &o, sizeof o)) && o.AtomicInt64OnDescriptorHeapResourceSupported;
+        s.atomic64 = ok ? 1 : 0;
+        if (!ok) logf("V: visibility.software_raster needs 64-bit atomics on descriptor-heap resources, which this device does not have: the mesh raster draws everything\n");
+    }
+    return s.atomic64 == 1;
+}
+
+// The software rasteriser's part of a phase of a full view (VisRasterSw.hlsl, VisSwResolve.ps): the phase's software
+// entries of the two lists without alpha test into the 64-bit words, then those pixels into the depth buffer and the vis
+// id target under the depth test. Before phase 1 the words are emptied.
+void softwareRasterPasses(FramePassContext& fc, State& s, const Run& r, const RasterBinRefs& rb, ViewResources& view, BufferRef words, uint32_t phase)
+{
+    const uint32_t width = view.view.width, height = view.view.height;
+    const D3D12_GPU_VIRTUAL_ADDRESS frameConstants = view.frameConstants;
+    const TextureRef depth = view.depth, visId = view.visId;
+    const uint32_t mirrored = view.view.mirrored ? 1u : 0u;
+    ID3D12CommandSignature* sig = s.dispatchSignature.Get();
+    if (phase == 1)
+    {
+        ID3D12PipelineState* clear = fc.shaders.compute("Passes/Visibility/VisRasterSw.MODE0");
+        fc.graph.addPass(r.prefix + "sw.clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(words, Use::UavCompute); },
+                         [=](PassContext& c) {
+                             const uint32_t groups = (uint32_t)(((uint64_t)width * height + 63) / 64);
+                             uint32_t k[12] = {};
+                             k[8] = c.uav(words);
+                             k[10] = width;
+                             k[11] = height;
+                             c.cmd->SetPipelineState(clear);
+                             c.computeConstants(k, 12);
+                             c.cmd->Dispatch(std::min(groups, 65535u), (groups + 65534) / 65535, 1);
+                         });
+    }
+    ID3D12PipelineState* raster = fc.shaders.compute("Passes/Visibility/VisRasterSw.MODE1");
+    fc.graph.addPass(r.prefix + "sw.raster.p" + std::to_string(phase), QueueType::Graphics,
+                     [&](PassBuilder& b) {
+                         b.use(rb.args, Use::IndirectArgs);
+                         b.use(rb.bins, Use::SrvCompute);
+                         b.use(rb.sorted, Use::SrvCompute);
+                         b.use(r.visible, Use::SrvCompute);
+                         b.use(r.state, Use::UavCompute);
+                         b.use(words, Use::UavCompute);
+                         b.use(depth, Use::SrvCompute);
+                     },
+                     [=](PassContext& c) {
+                         c.cmd->SetPipelineState(raster);
+                         c.bindFrameConstants(frameConstants);
+                         for (uint32_t l : { kListABack, kListANone })
+                         {
+                             const uint32_t k[16] = { c.srv(r.visible), c.srv(rb.sorted), c.uav(r.state), l, phase, r.cfg.capVisible, r.viewsSrv, c.srv(rb.bins),
+                                                      c.uav(words), c.srv(depth), width, height, mirrored, 0, 0, 0 };
+                             c.computeConstants(k, 16);
+                             c.cmd->ExecuteIndirect(sig, 1, c.resource(rb.args), (kRbArgSw + 3 * l) * 4, nullptr, 0);
+                         }
+                     });
+    MeshPipelineDesc d;
+    d.meshShader = "Passes/Visibility/PlanarFill.ms";  // one triangle over the view
+    d.pixelShader = "Passes/Visibility/VisSwResolve.ps";
+    d.renderTargets = { DXGI_FORMAT_R32_UINT };
+    d.depthFormat = DXGI_FORMAT_D32_FLOAT;
+    d.depthFunc = D3D12_COMPARISON_FUNC_GREATER;  // reversed Z: strictly nearer than what the targets hold
+    d.cull = D3D12_CULL_MODE_NONE;
+    ID3D12PipelineState* resolve = fc.shaders.mesh("v.sw.resolve", d);
+    fc.graph.addPass(r.prefix + "sw.resolve.p" + std::to_string(phase), QueueType::Graphics,
+                     [&](PassBuilder& b) {
+                         b.use(words, Use::SrvGraphics);
+                         b.use(depth, Use::DepthWrite);
+                         b.use(visId, Use::RenderTarget);
+                     },
+                     [=](PassContext& c) {
+                         const D3D12_CPU_DESCRIPTOR_HANDLE rtv = c.rtv(visId), dsv = c.dsv(depth);
+                         c.cmd->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+                         const D3D12_VIEWPORT vp{ 0, 0, (float)width, (float)height, 0, 1 };
+                         const D3D12_RECT sc{ 0, 0, (LONG)width, (LONG)height };
+                         c.cmd->RSSetViewports(1, &vp);
+                         c.cmd->RSSetScissorRects(1, &sc);
+                         const uint32_t k[4] = { c.srv(words), width, 0, 0 };
+                         c.cmd->SetPipelineState(resolve);
+                         c.graphicsConstants(k, 4);
+                         c.cmd->DispatchMesh(1, 1, 1);
+                     });
+}
+
 ID3D12PipelineState* visPipeline(FramePassContext& fc, uint32_t list, bool mirrored)
 {
     const bool back = list == kListABack || list == kListAAlphaBack;
@@ -1134,8 +1300,10 @@ ID3D12PipelineState* visPipeline(FramePassContext& fc, uint32_t list, bool mirro
     return fc.shaders.mesh(std::string("v.vis|") + (back ? "back" : "none") + (alpha ? "|alpha" : "") + (mirrored ? "|mirrored" : ""), d);
 }
 
-void rasterPass(FramePassContext& fc, State& s, const Run& r, ViewResources& view, uint32_t phase)
+// bins (a full view with raster bins): the lists are the depth-sorted copy and each list's dispatch its hardware entries.
+void rasterPass(FramePassContext& fc, State& s, const Run& r, ViewResources& view, uint32_t phase, const RasterBinRefs* bins = nullptr)
 {
+    const RasterBinRefs rb = bins ? *bins : RasterBinRefs{};
     ID3D12PipelineState* pso[kAListCount];
     for (uint32_t l = 0; l < kAListCount; ++l) pso[l] = visPipeline(fc, l, view.view.mirrored);
     ID3D12CommandSignature* sig = s.meshSignature.Get();
@@ -1159,9 +1327,9 @@ void rasterPass(FramePassContext& fc, State& s, const Run& r, ViewResources& vie
     }
     fc.graph.addPass(r.prefix + "raster.p" + std::to_string(phase), QueueType::Graphics,
                      [&](PassBuilder& b) {
-                         b.use(r.args, Use::IndirectArgs);
+                         b.use(rb.valid() ? rb.args : r.args, Use::IndirectArgs);
                          b.use(r.visible, Use::SrvGraphics);
-                         b.use(r.lists, Use::SrvGraphics);
+                         b.use(rb.valid() ? rb.sorted : r.lists, Use::SrvGraphics);
                          b.use(r.state, Use::SrvGraphics);
                          b.use(depth, Use::DepthWrite);
                          b.use(visId, Use::RenderTarget);
@@ -1190,10 +1358,11 @@ void rasterPass(FramePassContext& fc, State& s, const Run& r, ViewResources& vie
                          c.bindFrameConstants(frameConstants);
                          for (uint32_t l = 0; l < kAListCount; ++l)  // bands B and C: empty lists or the coverage layer
                          {
-                             const uint32_t k[8] = { c.srv(r.visible), c.srv(r.lists), c.srv(r.state), l, phase, r.cfg.capVisible, r.viewsSrv, 0 };
+                             const uint32_t k[8] = { c.srv(r.visible), rb.valid() ? c.srv(rb.sorted) : c.srv(r.lists), c.srv(r.state), l, phase, r.cfg.capVisible, r.viewsSrv, 0 };
                              c.cmd->SetPipelineState(pso[l]);
                              c.graphicsConstants(k, 8);
-                             c.cmd->ExecuteIndirect(sig, 1, c.resource(r.args), (kArgMesh + 3 * l) * 4, nullptr, 0);
+                             if (rb.valid()) c.cmd->ExecuteIndirect(sig, 1, c.resource(rb.args), (kRbArgHw + 3 * l) * 4, nullptr, 0);
+                             else c.cmd->ExecuteIndirect(sig, 1, c.resource(r.args), (kArgMesh + 3 * l) * 4, nullptr, 0);
                          }
                      });
 }
@@ -1904,6 +2073,10 @@ void readStats(FramePassContext& fc, State& s, const std::string& name)
         st.coverageCutCover = w[kStateCovCutCover];
         st.coverageCutAlpha = w[kStateCovCutAlpha];
         st.coverageCutWeight = w[kStateCovCutWeight];
+        st.softwareClusters = w[kStateSwClusters];
+        st.softwareTriangles = w[kStateSwTriangles];
+        st.softwareTiles = w[kStateSwTiles];
+        st.visibleCapacity = run.capVisible;
         st.mixedClusters = w[kStateStatMixedClusters];
         st.mixedTriangles = w[kStateStatMixedTriangles];
         st.chunkItems = w[kStateChunkItems];
@@ -1963,6 +2136,23 @@ uint32_t visibleCapacity(FramePassContext& fc, State& s, const std::string& name
         run.capVisible = (uint32_t)target;
     }
     return run.capVisible;
+}
+
+// A raster request's software page capacity (visibility.software_raster; DepthRasterSw.hlsl): 1.5 x the set tiles of the
+// request's latest completed frame, a power of two from visibility.software_raster_pages up to
+// software_raster_pages_limit and the atlas's slots; grows at once, shrinks below a quarter. A frame with more set tiles
+// than pages loses nothing: the clusters over a tile without a page stay with the mesh raster (CullClusters).
+uint32_t softwarePageCapacity(FramePassContext& fc, State& s, const std::string& name, const Settings& cfg, uint32_t atlasSlots)
+{
+    readStats(fc, s, name);
+    State::StatsRun& run = s.stats[name];
+    const uint64_t need = run.latest.frameIndex != UINT64_MAX ? run.latest.softwareTiles : 0;
+    const uint64_t limit = std::max<uint64_t>(std::min<uint64_t>(cfg.softwarePagesLimit, atlasSlots), 1);
+    uint64_t target = std::min<uint64_t>(cfg.softwarePages, limit);
+    while (target < need + need / 2 && target < limit) target <<= 1;
+    target = std::min(target, limit);
+    if (run.capSoftwarePages == 0 || target > run.capSoftwarePages || target * 4 <= run.capSoftwarePages) run.capSoftwarePages = (uint32_t)target;
+    return run.capSoftwarePages;
 }
 
 // Where this frame's copy of a run's cull state goes (the run's readback slot of this frame).
@@ -2083,7 +2273,18 @@ void visibility(FramePassContext& fc, ViewResources& view)
     }
 
     cullPhase(fc, s, r, 1);
-    rasterPass(fc, s, r, view, 1);
+    // Full views: the band A lists in raster bins (RasterBins.hlsl) - each phase's entries sorted nearer first
+    // (visibility.raster_depth_sort) and, with visibility.software_raster, the small clusters split off to the compute
+    // rasteriser, whose pixels join the targets before the HiZ is built. Deterministic mode replays the lists through the
+    // mesh kernels to settle depth ties, so it keeps the mesh raster alone.
+    const bool deterministic = fc.quality.has("debug.deterministic") && fc.quality.boolean("debug.deterministic");
+    const bool software = vs && cfg.softwareRaster && !deterministic && atomic64Supported(s, fc.device);
+    const RasterBinRefs rb = vs && !deterministic && (cfg.rasterDepthSort || software) ? createRasterBins(fc, r) : RasterBinRefs{};
+    const float softwareLimit = software ? cfg.softwareRasterMaxPx : 0.0f;
+    const BufferRef softwareWords = software ? g.createBuffer({ "v.sw.depthVis", (uint64_t)width * height * 8, 8 }) : BufferRef{};
+    if (rb.valid()) rasterBinPasses(fc, s, r, rb, 1, softwareLimit);
+    rasterPass(fc, s, r, view, 1, rb.valid() ? &rb : nullptr);
+    if (software) softwareRasterPasses(fc, s, r, rb, view, softwareWords, 1);
     if (!vs)
     {
         resolveDepthTies(fc, s, r, view, view.depth, view.visId, 0, kAListCount);
@@ -2094,7 +2295,9 @@ void visibility(FramePassContext& fc, ViewResources& view)
     if (occlusion)
     {
         cullPhase(fc, s, r, 2);
-        rasterPass(fc, s, r, view, 2);
+        if (rb.valid()) rasterBinPasses(fc, s, r, rb, 2, softwareLimit);
+        rasterPass(fc, s, r, view, 2, rb.valid() ? &rb : nullptr);
+        if (software) softwareRasterPasses(fc, s, r, rb, view, softwareWords, 2);
         hizPasses(fc, vs->hiz, r.hiz, view.depth, width, height, "final", cfg.foldSmall);
     }
     resolveDepthTies(fc, s, r, view, view.depth, view.visId, 0, kAListCount);
@@ -2438,7 +2641,95 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     r.viewCount = (uint32_t)views.size();
     r.viewsSrv = uploadViews(s, fc, views);
     if (r.tileMask.valid()) tileCoarsePass(fc, r, views);
+
+    // visibility.software_raster in a request that draws depth into a tile atlas (S's shadow pages): the small clusters
+    // go to the compute rasteriser (DepthRasterSw.hlsl) - pages of its own, one per set tile, given out before the cull
+    // (CullClusters keeps a cluster hardware when a tile under it has none), cleared and rasterised after it, and drawn
+    // into the atlas under the depth test at the end of the raster pass (DepthSwMerge). The request's target holds both
+    // results when the request's passes end: with S's two atlases each request merges into its own. Requests it does not
+    // cover (a pixel kernel, back-face culling, conservative raster, D16, tiles outside 64 .. 256 px) keep the mesh raster.
+    const bool software = cfg.softwareRaster && atlas && amplify && request.pixelKernel.empty() && !request.conservative && request.cull == D3D12_CULL_MODE_NONE &&
+                          depthFormat == DXGI_FORMAT_D32_FLOAT && request.cullTilePx >= 64 && request.cullTilePx <= 256;
+    BufferRef swArgs, swPages, swSlots, swDepth;
+    uint32_t swCapacity = 0;
+    if (software)
+    {
+        uint32_t mapWords = 0, maskWords = 0;  // the page map covers every view's mask bits; the widest view's mask words
+        for (const CullView& v : views)
+        {
+            if (v.cullMaskOffset == kNone) continue;
+            const uint32_t words = (v.tilesX * (((uint32_t)v.viewportSize.y + v.tilePx - 1) / v.tilePx) + 31) / 32;
+            maskWords = std::max(maskWords, words);
+            mapWords = std::max(mapWords, (v.cullMaskOffset + words) * 32);
+        }
+        swCapacity = softwarePageCapacity(fc, s, request.name, cfg, request.atlasTilesPerRow * (atlasHeight / request.cullTilePx));
+        const uint32_t tilePx = request.cullTilePx;
+        swArgs = fc.graph.createBuffer({ "v.sw.args", kDsaWords * 4, 0 });
+        swPages = fc.graph.createBuffer({ "v.sw.pages", std::max<uint64_t>(mapWords, 1) * 4, 0 });
+        swSlots = fc.graph.createBuffer({ "v.sw.pageSlots", ((uint64_t)kDspFirst + swCapacity) * 4, 0 });
+        swDepth = fc.graph.createBuffer({ "v.sw.pageDepth", (uint64_t)swCapacity * tilePx * tilePx * 4, 0 });
+        r.swPages = swPages;
+        r.swLimitPx = cfg.softwareRasterMaxPx;
+        ID3D12PipelineState* begin = fc.shaders.compute("Passes/Visibility/DepthRasterSw.MODE0");
+        ID3D12PipelineState* pages = fc.shaders.compute("Passes/Visibility/DepthRasterSw.MODE1");
+        const uint32_t viewsSrv = r.viewsSrv, viewCount = r.viewCount;
+        const BufferRef mask = request.cullMask, atlasSlots = request.atlasSlots;
+        fc.graph.addPass(request.name + ".sw.pages", QueueType::Graphics,
+                         [&](PassBuilder& b) {
+                             b.use(mask, Use::SrvCompute);
+                             b.use(atlasSlots, Use::SrvCompute);
+                             b.use(swArgs, Use::UavCompute);
+                             b.use(swPages, Use::UavCompute);
+                             b.use(swSlots, Use::UavCompute);
+                         },
+                         [=](PassContext& c) {
+                             const uint32_t k[8] = { viewsSrv, viewCount, c.srv(mask), c.srv(atlasSlots), c.uav(swArgs), c.uav(swPages), c.uav(swSlots), swCapacity };
+                             c.cmd->SetPipelineState(begin);
+                             c.computeConstants(k, 8);
+                             c.cmd->Dispatch(1, 1, 1);
+                             D3D12_GLOBAL_BARRIER gb{ D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                                      D3D12_BARRIER_ACCESS_UNORDERED_ACCESS };
+                             D3D12_BARRIER_GROUP group{ D3D12_BARRIER_TYPE_GLOBAL, 1 };
+                             group.pGlobalBarriers = &gb;
+                             c.cmd->Barrier(1, &group);  // (the pages count from the emptied arguments)
+                             c.cmd->SetPipelineState(pages);
+                             if (maskWords > 0) c.cmd->Dispatch((maskWords + 63) / 64, viewCount, 1);
+                         });
+    }
     cullPhase(fc, s, r, 1);
+    if (software)
+    {
+        ID3D12PipelineState* clear = fc.shaders.compute("Passes/Visibility/DepthRasterSw.MODE2");
+        ID3D12PipelineState* raster = fc.shaders.compute("Passes/Visibility/DepthRasterSw.MODE3");
+        ID3D12CommandSignature* dispatchSig = s.dispatchSignature.Get();
+        const uint32_t tilePx = request.cullTilePx;
+        fc.graph.addPass(request.name + ".sw.raster", QueueType::Graphics,
+                         [&](PassBuilder& b) {
+                             b.use(swArgs, Use::IndirectArgs);
+                             b.use(r.args, Use::IndirectArgs);
+                             b.use(swPages, Use::SrvCompute);
+                             b.use(swSlots, Use::SrvCompute);
+                             b.use(r.visible, Use::SrvCompute);
+                             b.use(r.lists, Use::SrvCompute);
+                             b.use(r.state, Use::UavCompute);
+                             b.use(swDepth, Use::UavCompute);
+                         },
+                         [=](PassContext& c) {
+                             const uint32_t k[12] = { c.srv(r.visible), c.srv(r.lists), c.uav(r.state), kListSw, 1, r.cfg.capVisible, r.viewsSrv, c.srv(swPages),
+                                                      c.uav(swDepth), c.srv(swSlots), swCapacity, tilePx };
+                             c.bindFrameConstants(r.frameConstants);
+                             c.cmd->SetPipelineState(clear);
+                             c.computeConstants(k, 12);
+                             c.cmd->ExecuteIndirect(dispatchSig, 1, c.resource(swArgs), kDsaClear * 4, nullptr, 0);
+                             D3D12_GLOBAL_BARRIER gb{ D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
+                                                      D3D12_BARRIER_ACCESS_UNORDERED_ACCESS };
+                             D3D12_BARRIER_GROUP group{ D3D12_BARRIER_TYPE_GLOBAL, 1 };
+                             group.pGlobalBarriers = &gb;
+                             c.cmd->Barrier(1, &group);  // (the raster's atomics start from the cleared pages)
+                             c.cmd->SetPipelineState(raster);
+                             c.cmd->ExecuteIndirect(dispatchSig, 1, c.resource(r.args), (kArgMesh + 3 * kListSw) * 4, nullptr, 0);
+                         });
+    }
 
     // Back-face lists exist only when BACK was requested; shadow casters need every band (band mode A puts all visible
     // clusters in band A lists).
@@ -2478,6 +2769,17 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     }
     ID3D12CommandSignature* sig = s.meshSignature.Get();
     const DepthRasterRequest req = request;
+    ID3D12PipelineState* mergePso = nullptr;
+    if (software)
+    {
+        MeshPipelineDesc d;
+        d.meshShader = "Passes/Visibility/DepthSwMerge.ms";
+        d.pixelShader = "Passes/Visibility/DepthSwMerge.ps";
+        d.depthFormat = depthFormat;
+        d.depthFunc = D3D12_COMPARISON_FUNC_GREATER;  // reversed Z: strictly nearer than what the mesh raster left
+        d.cull = D3D12_CULL_MODE_NONE;
+        mergePso = fc.shaders.mesh("v.depth.swmerge", d);
+    }
     // visibility.cull_pass_merge: the run's statistics copy is the raster pass's last command (the raster only reads the
     // cull state, so the state is final before it), not a pass of its own.
     const StatsCopy stats = cfg.passMerge ? statsCopy(fc, s, request.name) : StatsCopy{};
@@ -2498,6 +2800,12 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                          if (req.depthTarget.valid()) b.use(req.depthTarget, Use::DepthWrite);
                          for (const auto& [t, u] : req.textureUses) b.use(t, u);
                          for (const auto& [bu, u] : req.bufferUses) b.use(bu, u);
+                         if (mergePso)
+                         {
+                             b.use(swArgs, Use::IndirectArgs);
+                             b.use(swSlots, Use::SrvGraphics);
+                             b.use(swDepth, Use::SrvGraphics);
+                         }
                      },
                      [=](PassContext& c) {
                          if (req.depthTarget.valid())
@@ -2519,6 +2827,13 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                              c.cmd->SetPipelineState(pso[l]);
                              c.graphicsConstants(k, 32);
                              c.cmd->ExecuteIndirect(sig, 1, c.resource(r.args), (kArgMesh + 3 * l) * 4, nullptr, 0);
+                         }
+                         if (mergePso)  // the software rasteriser's pages into their tiles' slots, under the depth test
+                         {
+                             const uint32_t k[8] = { c.srv(swSlots), swCapacity, req.cullTilePx, req.atlasTilesPerRow, atlasWidth | atlasHeight << 16, c.srv(swDepth), 0, 0 };
+                             c.cmd->SetPipelineState(mergePso);
+                             c.graphicsConstants(k, 8);
+                             c.cmd->ExecuteIndirect(sig, 1, c.resource(swArgs), kDsaMerge * 4, nullptr, 0);
                          }
                          if (stats.readback) c.cmd->CopyBufferRegion(stats.readback, stats.offset, c.resource(r.state), 0, kStateWords * 4);
                      });

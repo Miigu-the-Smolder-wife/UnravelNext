@@ -162,6 +162,12 @@ uint skinSlot(CullScene cs, uint instance)
 #define VS_COV_FRAGMENTS_SW 61u   // fragments the compute kernel appended (counted in VS_COV_FRAGMENTS too)
 #define VS_COV_EVALUATED 62u      // coverage fragments with area in their pixel, before the tests (statistics)
                                   // word 63: unused
+#define VS_SW_CLUSTERS 67u        // clusters the software rasteriser drew (visibility.software_raster: RasterBins.hlsl's
+                                  // classification and VisRasterSw.hlsl; CullClusters' and DepthRasterSw.hlsl)
+#define VS_SW_TRIANGLES 68u       // their triangles that reached the pixel loop (not culled, some pixel under the rectangle)
+#define VS_SW_TILES 69u           // raster service: set tiles of the request's views (each wants a software page; may
+                                  // exceed the page capacity: the need)
+                                  // words 70 .. 71: unused
 #define VS_WORDS 72u  // (words 64 .. 66: the coverage statistics above; kStateWords, and the readback slot holds them: kReadbackBytes)
 
 #define VS_LISTS 8u
@@ -173,6 +179,8 @@ uint skinSlot(CullScene cs, uint instance)
 #define LIST_C 5u             // aggregate bricks
 #define LIST_T_BACK 6u        // translucent layer (A6, v1.67): band A width glass and water clusters of the main view with
 #define LIST_T_NONE 7u        // the coverage layer on, back faces culled / two-sided; drawn after both phases (all entries)
+#define LIST_SW LIST_T_BACK   // raster requests (band mode A: no translucent lists) with visibility.software_raster: the
+                              // clusters the software rasteriser draws (CullClusters softwareCluster, DepthRasterSw.hlsl)
 #define VS_BAND_LISTS 6u      // lists of the cull bands (the depth raster service draws these)
 #define VS_A_LISTS 4u         // lists drawn by the vis buffer raster: 0 .. VS_A_LISTS - 1
 
@@ -362,6 +370,13 @@ bool sheetTriangleBandB(CullView v, float3 a, float3 b, float3 c)
 // List entries carry the visible index; a mixed sheet cluster (drawn in a band A list and in the coverage list, split
 // per triangle) has LIST_ENTRY_MIXED set.
 #define LIST_ENTRY_MIXED 0x80000000u
+// A list entry the software rasteriser draws (visibility.software_raster; set by RasterBins.hlsl in the sorted lists of a
+// full view): the mesh kernel leaves it out. (A raster request's software clusters have a list of their own, LIST_SW.)
+#define LIST_ENTRY_SOFTWARE 0x40000000u
+#define LIST_ENTRY_FLAGS (LIST_ENTRY_MIXED | LIST_ENTRY_SOFTWARE)
+// A raster request's software pages (DepthRasterSw.hlsl): a word per bit of the request's tile mask.
+#define SW_PAGE_NONE 0xFFFFFFFFu  // the tile is not set
+#define SW_PAGE_FULL 0xFFFFFFFEu  // the tile is set and has no software page (past the capacity): its clusters stay hardware
 
 float projectedLength(CullView v, float4 s, float worldLength)
 {

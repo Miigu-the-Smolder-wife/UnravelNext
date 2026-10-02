@@ -77,9 +77,12 @@ constexpr uint32_t kStateNodeWrite = 0, kStateNodeEnd = 2, kStateGroupWrite = 3,
 constexpr uint32_t kStateCovCutBandA = 19, kStateCovCutCover = 20, kStateCovCutWeight = 64, kStateCovCutAlpha = 65, kStateCovClustersHiz = 66,
                    kStateCovClustersTile = 56, kStateCovTriangles = 57, kStateCovTrianglesHiz = 58, kStateCovTrianglesTile = 59, kStateCovTrianglesSw = 60,
                    kStateCovFragmentsSw = 61, kStateCovEvaluated = 62;
+// Software rasteriser (VS_SW_*): clusters and triangles it drew, a raster request's listed tiles.
+constexpr uint32_t kStateSwClusters = 67, kStateSwTriangles = 68, kStateSwTiles = 69;
 constexpr uint32_t kLists = 8;
 constexpr uint32_t kListABack = 0, kListANone = 1, kListAAlphaBack = 2, kListAAlphaNone = 3, kListB = 4, kListC = 5, kListTBack = 6, kListTNone = 7;
 constexpr uint32_t kBandLists = 6;  // lists of the cull bands (the depth raster service draws these)
+constexpr uint32_t kListSw = kListTBack;  // LIST_SW: a raster request's clusters for the software rasteriser
 constexpr uint32_t kAListCount = 4;  // lists drawn by the vis buffer raster
 
 // Indirect argument words.

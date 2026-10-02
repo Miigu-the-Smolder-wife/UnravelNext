@@ -14,16 +14,39 @@
 // Bands (ARCHITECTURE 2.1): w_face = projected minimum feature width seen face-on, w_min = w_face x (flat sheets) the
 // smallest |cos| between the view direction and the cluster's normals. A: w_min >= band A minimum; C: w_face < band C
 // maximum; B otherwise. The run's band mode picks the list of each band (BAND_MODE_*, CullShared.hlsli).
+// Raster requests with the software rasteriser (SW_PAGES_SRV; the reference decides hardware or software in its cluster
+// cull too): a cluster softwareCluster accepts goes to LIST_SW instead of its band A list.
 #include "Passes/Visibility/CullShared.hlsli"
 
 #define PI 3.14159265
 
 struct ClusterResult
 {
-    bool visible, defer, wholeRange, mixed;
+    bool visible, defer, wholeRange, mixed, software;
     uint list, list2, band, triangles, pairs;  // list2: the coverage list of a mixed sheet cluster (else VS_LISTS)
     uint2 tileA, tileB;
 };
+
+// A raster request's cluster for the software rasteriser (DepthRasterSw.hlsl; the request draws depth only, both faces):
+// its sphere's box lies in front of the near plane with a rectangle of at most the limit a side (so it is under at most
+// 2 x 2 tiles: [a, b], and every triangle's loop is bounded), the sphere bounds what is drawn (not skinned, not a view
+// model) and no triangle is dropped (no terrain patch), and every set tile under it has a software page. Four loads.
+bool softwareCluster(CullView v, GpuInstance inst, float4 s, uint2 a, uint2 b)
+{
+    if (SW_PAGES_SRV == UNX_NONE || TILE_STORED_PAIRS != 0 || v.cullMaskOffset == UNX_NONE || any(b - a > 1)) return false;
+    if ((inst.flags & (INSTANCE_SKINNED | INSTANCE_VIEW_MODEL)) != 0 || inst.patch != UNX_NONE) return false;
+    float4 rect;
+    float nearest;
+    if (!projectSphere(v.viewProj, v.viewportSize, s, rect, nearest)) return false;
+    if (max(rect.z - rect.x, rect.w - rect.y) > SW_REQUEST_LIMIT_PX) return false;
+    ByteAddressBuffer pages = ResourceDescriptorHeap[SW_PAGES_SRV];
+    [unroll] for (uint k = 0; k < 4; ++k)
+    {
+        const uint2 t = uint2((k & 1) ? b.x : a.x, (k & 2) ? b.y : a.y);
+        if (pages.Load(4 * (v.cullMaskOffset * 32 + t.y * v.tilesX + t.x)) == SW_PAGE_FULL) return false;
+    }
+    return true;
+}
 
 ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
 {
@@ -77,6 +100,7 @@ ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
         r.pairs = tileVisit(TILE_VISIT_COUNT, v, view, tileMasks(), r.tileA, r.tileB, r.wholeRange, 0, 0, 0, 0, 0, UNX_NONE, UNX_NONE);
         if (r.pairs == 0) return r;
         if (!unbounded && tilesOcclude(v, TILE_MASK_SRV, s)) return r;  // (hidden under the tiles' stored surface: DepthRaster.h)
+        r.software = softwareCluster(v, inst, s, r.tileA, r.tileB);
     }
     else if (!tileVisible(v, view, s))
         return r;
@@ -144,6 +168,7 @@ ClusterResult testCluster(uint instance, uint clusterIndex, uint view)
     const uint materialClass = m.classFlags & 0xFFu;
     if (BAND_MODE != BAND_MODE_A && drawBand == 0 && (materialClass == MATERIAL_GLASS || materialClass == MATERIAL_WATER))
         r.list = cullBack ? LIST_T_BACK : LIST_T_NONE;
+    if (r.software) r.list = LIST_SW;  // (band mode A: the list above is a band A list)
     r.list2 = r.mixed ? LIST_B : VS_LISTS;
     r.triangles = clusterTriangleCount(cl);
     r.visible = true;
@@ -161,7 +186,7 @@ void emit(RWByteAddressBuffer state, bool active, uint instance, uint clusterInd
     [unroll] for (uint k = 0; k < VS_LISTS; ++k)
         slot[k] = waveAppend(state, VS_LIST_COUNT + k, (r.list == k || r.list2 == k) ? entries : 0, CAP_VISIBLE, OVERFLOW_VISIBLE);
     // the pairs the amplification stage will launch (a statistic: nothing is stored per pair), or the stored list's
-    const uint pairCount = WaveActiveSum((visible && tileLocal && !stored) ? r.pairs : 0);
+    const uint pairCount = WaveActiveSum((visible && tileLocal && !stored && !r.software) ? r.pairs : 0);
     if (WaveIsFirstLane() && pairCount > 0) state.InterlockedAdd(4 * VS_TILE_PAIRS, pairCount);
     const uint pairBase = waveAppend(state, VS_TILE_PAIRS, stored ? entries : 0, CAP_VISIBLE, OVERFLOW_TILE_PAIRS);
     if (visible && idx < CAP_VISIBLE)

@@ -56,6 +56,10 @@ struct Stats
                                        // (0x100: the coverage record pool ran out; it grows from the next
                                        // completed frame)
     uint32_t overflowSeen = 0;         // 'overflow' of every frame of the run read back so far, OR-ed (gates)
+    // visibility.software_raster: clusters and triangles the compute rasteriser drew in this run (the main view's vis
+    // buffer; a raster request's atlas pages, and the set tiles it listed for its target).
+    uint32_t softwareClusters = 0, softwareTriangles = 0, softwareTiles = 0;
+    uint32_t visibleCapacity = 0;      // the run's visible-list capacity now (visibility.visible_clusters_follow_need)
 };
 // Stats::overflow bits of the pools that grow from the measured need (a frame over one is expected after a cut: the
 // coverage records, the special record list, the ocean edge list); every other bit is a capacity or a shader loop bound.

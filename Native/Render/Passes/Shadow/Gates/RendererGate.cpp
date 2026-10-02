@@ -1503,6 +1503,10 @@ int main(int argc, char** argv)
                      "translucent two-sided %u\n",
                      vs.listEntries[0], vs.listEntries[1], vs.listEntries[2], vs.listEntries[3], vs.listEntries[4], vs.listEntries[5], vs.listEntries[6],
                      vs.listEntries[7]);
+                // visibility.software_raster (the A/B's measure of how much of band A the compute rasteriser took) and the
+                // visible-list capacity the run has now (visibility.visible_clusters_follow_need).
+                logf("  V software raster: %u clusters, %u triangles past set-up (band A: %u clusters, %u triangles); visible-list capacity %u\n", vs.softwareClusters,
+                     vs.softwareTriangles, vs.bandClusters[0], vs.triangles[0], vs.visibleCapacity);
                 // Every cull run's last frame (the raster requests: shadow pages, cards) and the error bits of all its frames.
                 uint32_t vBits = 0;
                 for (const auto& [name, run] : visibility::latestStatsOfRuns(renderer.trackState()))
@@ -1512,6 +1516,9 @@ int main(int argc, char** argv)
                     logf("  V run %-24s %u instances, %u nodes, %u clusters tested, %u visible (%u tile pairs), %.3f M triangles, error bits 0x%x\n", name.c_str(),
                          run.instancesVisible, run.nodesTested, run.clustersTested, run.visibleClusters, run.tilePairs,
                          ((double)run.triangles[0] + run.triangles[1] + run.triangles[2]) / 1e6, run.overflowSeen);
+                    if (run.softwareTiles || run.softwareClusters)
+                        logf("    software raster: %u clusters, %u triangles past set-up, %u set tiles (each wants a software page); visible-list capacity %u\n",
+                             run.softwareClusters, run.softwareTriangles, run.softwareTiles, run.visibleCapacity);
                 }
                 // (0x100, 0x2000, 0x4000: pools that grow from the measured need - a frame over one after a cut is expected)
                 const bool vOk = (vBits & ~visibility::kOverflowGrowingPools) == 0;
