@@ -48,9 +48,13 @@
 //                   at the surface normal -, and on the iris mask's share every direct diffuse term on the iris plane
 //                   with the caustic (modelEyeCosine; the plane's normal, the mask and the caustic weight from the class
 //                   word P[9].y - without that texture an eye is plain) in place of the surface's cosine: the sun at the disk's centre,
-//                   point and spot lights, area lights by a cosine integral in the plane's frame. The indirect light,
-//                   the tile term and the emissive irradiance stay the surface's. The scatter pass leaves the iris its
-//                   own light (the mean free path x (1 - mask)).
+//                   point and spot lights, area lights by a cosine integral in the plane's frame. The indirect diffuse
+//                   light on the mask's share is the iris plane's (part 2 with SSS_SPLIT): with gi.lumen_only the final
+//                   gather's irradiance x the translucency volume's ratio E(a) / E(n) (the gather keeps its detail and
+//                   occlusion, the volume turns it to the plane; the ratio held to [1/4, 4]), in planar views the
+//                   volume's or the world cache's irradiance at a; the screen-probe path keeps the surface's. The tile
+//                   term and the emissive irradiance stay the surface's. The scatter pass leaves the iris its own light
+//                   (the mean free path x (1 - mask)).
 //        2 (the sheen class) carries the cloth blend (MaterialModel.hlsli modelEvaluateSheen): every specular term of the
 //                   base - the sun's lobe, point and spot lights, the area lights' LTC lobe, the indirect lobe - x (1 - cloth).
 // SSS_SPLIT = 1 (shading.subsurface_scatter, SubsurfaceScatter.hlsli states the passes): the Subsurface class's kernels
@@ -1151,6 +1155,15 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         if ((experiment & 2) == 0)
         {
             irradiance = max(diffuseIndirect[pixel].rgb, 0.0) / g_exposure * lumenAoMultibounce(s.baseColor * (1 - s.metallic), bent.w, 0.5);
+#if SUBSURFACE
+            if (eye.mask > 0 && giSourceIsVolume(P[2].w))
+            {
+                // an eye's iris (see the header): the gather's irradiance turned from the surface normal to the iris plane
+                const LtvSh sh = ltvSample(ltvParams(giSourceVolume(P[2].w)), worldPos);
+                const float3 eN = ltvIrradianceOf(sh, nv), eA = ltvIrradianceOf(sh, eye.iris);
+                irradiance *= lerp(1.0, clamp(eA / max(eN, 1e-6), 0.25, 4.0), eye.mask);
+            }
+#endif
             if (foliage && P[11].w != UNX_NONE)
             {
                 Texture2D<float4> backfaceIndirect = ResourceDescriptorHeap[P[11].w];
@@ -1185,6 +1198,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         // takes its nearest cell): irradiance on each side, the lobes' radiance from the mirror direction (two SH bands)
         const LtvSh sh = ltvSample(ltvParams(giSourceVolume(P[2].w)), worldPos);
         irradiance = ltvIrradianceOf(sh, nv);
+#if SUBSURFACE
+        if (eye.mask > 0) irradiance = lerp(irradiance, ltvIrradianceOf(sh, eye.iris), eye.mask);  // (an eye's iris: its plane's)
+#endif
         if (foliage) irradianceBack = ltvIrradianceOf(sh, -nv);
         if (NoV > 0) incident = ltvRadianceOf(sh, r);
 #if LAYERED == 1
@@ -1206,6 +1222,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
             e = screenIrradiance[pixel];
         }
         irradiance = e.a > 0 ? e.rgb / g_exposure : giCacheIrradiance(gi, worldPos, nv);
+#if SUBSURFACE
+        if (eye.mask > 0) irradiance = lerp(irradiance, giCacheIrradiance(gi, worldPos, eye.iris), eye.mask);  // (an eye's iris: its plane's)
+#endif
         if (foliage) irradianceBack = giCacheIrradiance(gi, worldPos, -nv);
         if (NoV > 0) incident = giCacheRadiance(gi, worldPos, n, r, halfAngle);  // looked up in this surface's normal class
 #if LAYERED == 1
