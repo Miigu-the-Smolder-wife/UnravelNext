@@ -63,7 +63,7 @@
 | 래스터 빈·앞→뒤 깊이 버킷 | 고정 리스트 8개 | coverage 층이 가려진 조각을 저장(물가 61.8 %) |
 | 클러스터 압축(양자화·스트립) | 무압축 | 메모리·대역폭 3~4배 [추정] |
 | 페이지 스트리밍 + GPU 피드백 | 스트리머만 있고 연결 안 됨 | 전부 상주 |
-| 그림자 뷰 HZB 가림 | 없음 | 가려진 캐스터도 래스터 |
+| 그림자 뷰 HZB 가림 | 움직이는 캐스터만(정적 사본의 페이지 HZB; 2.2) — 코드 작성·빌드 통과, 실행 안 함 | 가려진 정적 캐스터는 여전히 래스터 |
 | 레벨당 패스 1개(ping-pong) | 레벨당 prepare 패스 추가 | 순회 패스 2배 |
 | 용량 visible 4M | 1M | 숲에서 넘침 |
 
@@ -77,7 +77,7 @@
 | MegaLights 화면 추적·청색 잡음·LightPowerDelta | 없음 | 접촉 누설, 광원 변화 반응 느림 |
 | 항상 상주하는 굵은 페이지 + 페이지 팽창 | 있음 — 코드 작성·빌드 통과, 실행 안 함 (`shadow.vsm.coarse_pages`, `coarse_level_first/last`, `page_dilation`; `VsmMarkCoarse.hlsl`, `VsmMark.hlsl`; `UE6_WORKPLAN_KO.md` 8.2 (8)) | 제 레벨에 페이지가 없는 조회가 굵은 레벨에서 그림자를 받는다 |
 | 정적/동적 페이지 분리 + 병합 | 있음 — 코드 작성·빌드 통과, 실행 안 함 (`shadow.vsm.static_separate`; 정적 사본 아틀라스 + `s.vsm.merge`, V의 `RasterView::instanceSet`; `UE6_WORKPLAN_KO.md` 8.2 (7)) | 움직이는 캐스터 밑의 페이지는 정적 사본을 두고 움직이는 캐스터만 다시 그린다 |
-| 페이지별 HZB, HZB로 거른 무효화 | 무효화: 있음 — 코드 작성·빌드 통과, 실행 안 함 (`shadow.vsm.cache_hzb_filter`; 페이지의 블록 계층이 HZB, `VsmCache.hlsl` MODE 2; `UE6_WORKPLAN_KO.md` 8.2 (10)) | 저장된 표면 아래에서 움직이는 캐스터는 페이지를 다시 그리게 하지 않는다 |
+| 페이지별 HZB, HZB로 거른 무효화 | 무효화: 있음 — 코드 작성·빌드 통과, 실행 안 함 (`shadow.vsm.cache_hzb_filter`; 페이지의 블록 계층이 HZB, `VsmCache.hlsl` MODE 2; `UE6_WORKPLAN_KO.md` 8.2 (10)). 그림자 뷰의 HZB 가림: 움직이는 캐스터에 대해 있음 — 코드 작성·빌드 통과, 실행 안 함 (`shadow.vsm.static_hzb_cull`; 정적 사본의 페이지별 HZB `VsmStaticHzb.hlsl`, V의 `tilesOcclude`; 8.2 (9)). 정적 캐스터끼리의 가림은 없음 | 저장된 표면 아래에서 움직이는 캐스터는 페이지를 다시 그리게 하지 않고, 정적 표면 아래의 움직이는 캐스터는 래스터하지 않는다 |
 | SMRT 확률 광선 7×8 + TSR | 결정적 차단체 탐색 + 16탭 | 우리 쪽이 첫 프레임 잡음 없음(유지) |
 | 16광원 one-pass 투영 | 슬롯 3 + 넘침 목록, MegaLights가 대체 | MegaLights 기본화로 해결 |
 

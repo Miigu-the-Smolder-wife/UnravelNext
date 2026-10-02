@@ -51,6 +51,8 @@ struct RasterView
     // GPU-written instance). A view of set 1 and a view of set 2 with one projection draw every instance exactly once
     // between them (S's static / dynamic shadow pages).
     uint32_t instanceSet = 0;
+    // The view is tested against the request's tile occluders (DepthRasterRequest::tileOccluders).
+    bool tileOccluders = false;
 };
 
 struct DepthRasterRequest
@@ -92,6 +94,16 @@ struct DepthRasterRequest
     // whole atlas and a pixel kernel (optional; [earlydepthstencil] runs it after the depth test) sees atlas pixels.
     BufferRef atlasSlots;
     uint32_t atlasTilesPerRow = 0;
+    // Tile occluders (with the tile atlas and cullTilePx 128; S's page HZB of the static casters): a raw buffer of
+    // 341 floats per atlas slot - the farthest device depth already stored in the slot over each of its 16 x 16 blocks of
+    // 8 px, then over its blocks of 16, 32, 64 px and the whole tile (offsets 0, 256, 320, 336, 340; 0 = a pixel with
+    // nothing stored, which hides nothing). In a view with RasterView::tileOccluders, an instance, hierarchy node or
+    // cluster whose bounding sphere is farther than that depth everywhere under it, in every set tile under it, is not
+    // drawn: its fragments would lose the depth test against what the requester merges in afterwards. Spheres over more
+    // than 2 x 2 tiles are not tested. The cull kernels read both buffers through the views' records, so the requester
+    // gives their persistent raw SRVs (bindless indices) beside the graph handles.
+    BufferRef tileOccluders;
+    uint32_t tileOccludersSrv = UINT32_MAX, atlasSlotsSrv = UINT32_MAX;
     // Coverage mode (v1.26; S's VSM transmittance layer): conservative raster of band B clusters only, the pixel kernel
     // (compiled with DEPTH_RASTER_COVERAGE 1) gets the exact area, mask and centroid depth per texel
     // (depthRasterCoverage, DepthRaster.hlsli). Needs a pixel kernel and no depth target. Bands are judged in each

@@ -675,6 +675,14 @@ CullView viewOf(const RasterView& r, const DepthRasterRequest& req, const Settin
     v.instanceEnd = r.instanceEnd;
     v.minInstancePx = r.minInstanceTexels;
     v.instanceSet = r.instanceSet;
+    if (r.tileOccluders && req.tileOccluders.valid() && req.atlasSlots.valid())
+    {
+        if (req.cullTilePx != 128 || req.tileOccludersSrv == UINT32_MAX || req.atlasSlotsSrv == UINT32_MAX)
+            fail("rasterizeDepth '%s': tile occluders need 128 px tiles and the persistent SRVs of the occluders and the atlas slots", req.name.c_str());
+        v.flags |= kViewTileOccluders;
+        v.occluderSrv = req.tileOccludersSrv;
+        v.occluderSlotsSrv = req.atlasSlotsSrv;
+    }
     return v;
 }
 
@@ -786,6 +794,7 @@ struct Run
     BufferRef tileCoarse;  // runs with a tile mask: bit per 8 x 8 tiles (TileMaskCoarse.hlsl)
     BufferRef chunkWork;   // C3: visible chunk items [0, capDeferred), deferred chunks [capDeferred, 2 capDeferred)
     BufferRef chunks, skinBounds;  // C3 persistent buffers imported for this frame (read by the cull kernels)
+    BufferRef tileOccluders, occluderSlots;  // raster service: the request's tile occluders and atlas slots (tilesOcclude)
     uint32_t chunkCount = 0, flatCount = 0;
     uint32_t tileCoarseWords = 0;  // per view
     TextureRef hiz;
@@ -838,6 +847,11 @@ void declareCull(PassBuilder& b, const Run& r, Use argsUse)
     if (r.tileMask.valid()) b.use(r.tileMask, Use::SrvCompute);
     if (r.tilePairs.valid()) b.use(r.tilePairs, Use::UavCompute);
     if (r.tileCoarse.valid()) b.use(r.tileCoarse, Use::SrvCompute);
+    if (r.tileOccluders.valid())
+    {
+        b.use(r.tileOccluders, Use::SrvCompute);
+        b.use(r.occluderSlots, Use::SrvCompute);
+    }
 }
 
 void cullConstants(const PassContext& c, const Run& r, uint32_t phase, uint32_t k[32], uint32_t instanceCount)
@@ -2165,6 +2179,11 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     else if (request.tileLocal) r.tilePairs = fc.graph.createBuffer({ "v.cull.tilePairs", (uint64_t)cfg.capVisible * 12, 12 });  // (A/B)
     r.storedPairs = request.tileLocal && !amplify;
     r.instanceMask = request.instanceMask;
+    if (request.tileOccluders.valid() && request.atlasSlots.valid())
+    {
+        r.tileOccluders = request.tileOccluders;
+        r.occluderSlots = request.atlasSlots;
+    }
     std::vector<CullView> views;
     for (const RasterView& v : request.views) views.push_back(viewOf(v, request, cfg));
     r.viewCount = (uint32_t)views.size();

@@ -46,7 +46,7 @@ NodeResult testNode(uint2 it)
     bool keep = skinned || frustumVisible(v, s);
     // C5: a node reaching a terrain patch's replaced rectangle is traversed down to the source clusters.
     keep = keep && (patchForcesSource(inst, r.node.lodSphere) || projectedError(v, s, r.node.lodError * instanceScale(inst)) > v.lodThreshold);
-    keep = keep && (skinned || tileVisible(v, itemView(r.packed), s));
+    keep = keep && (skinned || (tileVisible(v, itemView(r.packed), s) && !tilesOcclude(v, TILE_MASK_SRV, s)));
     if (keep && !skinned && (v.flags & CULL_VIEW_OCCLUSION) != 0)
     {
 #if PHASE == 1

@@ -27,7 +27,8 @@ constexpr uint32_t kStatsSlots = 4, kStatsBytes = 512;  // VSM stats words (128;
 constexpr uint64_t kOverflowMinWords = 1u << 18;  // 1 MB overflow list at least (INTERFACES 7.3)
 constexpr uint32_t kErrRasterOverflow = 0x20;  // VsmCommon.hlsli VSM_ERR_RASTER_OVERFLOW
 constexpr uint32_t kMetaBytes = 48;  // VsmPageMeta
-constexpr uint32_t kBlockBytes = 341 * 32;  // VSM_BLOCK_ENTRIES x VsmBlock
+constexpr uint32_t kBlockEntries = 341;  // VSM_BLOCK_ENTRIES: blocks of 8, 16, 32, 64 and 128 texels of a page
+constexpr uint32_t kBlockBytes = kBlockEntries * 32;  // x VsmBlock
 
 struct State
 {
@@ -44,6 +45,11 @@ struct State
     // in the sampled atlas) and the kept pages whose movable casters are drawn anew this frame (VsmScan MODE 2).
     ComPtr<ID3D12Resource> atlasStatic, dynamicList;
     bool separate = false;  // the state was created with the static atlas
+    // shadow.vsm.static_hzb_cull: the static copies' HZB (VsmStaticHzb.hlsl: kBlockEntries floats per physical page) and
+    // the raw SRVs V's cull kernels read it and the sun's atlas slots through (DepthRasterRequest::tileOccluders).
+    ComPtr<ID3D12Resource> staticHzb;
+    uint32_t staticHzbSrv = UINT32_MAX, atlasSlotsSrv = UINT32_MAX;
+    bool hzbValid = false;  // the kept pages' static copies have their HZB (built in the frames that drew them)
     uint32_t ringCbv[kRingSlots] = {};  // constant buffer view of each ring slot (ConstantBuffer<VsmConstants>)
     uint8_t* ringMapped = nullptr;
     // Stats readback ring: slot i holds the counters of frame statsFrame[i], complete once the graphics queue passes
@@ -142,7 +148,7 @@ void createState(FramePassContext& fc, State& s, uint32_t pages, bool separate)
         fail("VSM atlas: %u pages is not a positive multiple of %u within one 16384^2 atlas", pages, kAtlasPagesPerRow);
     Device& d = fc.device;
     for (ComPtr<ID3D12Resource>* r : { std::addressof(s.atlas), std::addressof(s.meta), std::addressof(s.blocks), std::addressof(s.pageList), std::addressof(s.layers),
-                                       std::addressof(s.atlasStatic), std::addressof(s.dynamicList) })
+                                       std::addressof(s.atlasStatic), std::addressof(s.dynamicList), std::addressof(s.staticHzb) })
         if (*r)
         {
             d.deferRelease(*r);
@@ -188,6 +194,24 @@ void createState(FramePassContext& fc, State& s, uint32_t pages, bool separate)
     s.blocks = createBuffer(d, L"S VSM page blocks", (uint64_t)pages * kBlockBytes);
     s.pageList = createBuffer(d, L"S VSM page list", 8 + (uint64_t)pages * 8);
     s.dynamicList = createBuffer(d, L"S VSM dynamic page list", 8 + (uint64_t)pages * 8);
+    // A raw SRV of a buffer for readers that take the index from a record, not from their pass (V's cull views).
+    auto rawSrv = [&](ID3D12Resource* buffer, uint64_t bytes) {
+        DescriptorHeaps& h = d.descriptors();
+        const uint32_t index = h.allocateResource();
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = DXGI_FORMAT_R32_TYPELESS;
+        sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Buffer.NumElements = (UINT)(bytes / 4);
+        sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        d.d3d()->CreateShaderResourceView(buffer, &sd, h.resourceCpu(index));
+        return index;
+    };
+    if (separate)
+    {
+        s.staticHzb = createBuffer(d, L"S VSM static HZB", (uint64_t)pages * kBlockEntries * 4);
+        s.staticHzbSrv = rawSrv(s.staticHzb.Get(), (uint64_t)pages * kBlockEntries * 4);
+    }
     // Transmittance layer: the per-page words (0 = no layer) until V's coverage-mode raster fills layer pages (v1.26).
     s.layersBytes = ((uint64_t)pages * 4 + 255) & ~255ull;
     s.layers = createBuffer(d, L"S VSM transmittance layer", s.layersBytes);
@@ -216,6 +240,7 @@ void createState(FramePassContext& fc, State& s, uint32_t pages, bool separate)
         // (two sets of sun mask words and slots: every caster / the static casters, then the movable casters - VsmCullMask)
         s.cullMask = createBuffer(d, L"S VSM cull mask", (uint64_t)kSlots / 8 * 2);
         s.atlasSlots = createBuffer(d, L"S VSM atlas slots", (uint64_t)kSlots * 4 * 2);
+        s.atlasSlotsSrv = rawSrv(s.atlasSlots.Get(), (uint64_t)kSlots * 4 * 2);
         s.groups = createBuffer(d, L"S VSM scan groups", (uint64_t)kScanGroupsMax * 4);
         s.args = createBuffer(d, L"S VSM indirect args", 32);  // the page list's dispatch, then the dynamic page list's
         s.stats = createBuffer(d, L"S VSM stats", kStatsBytes);
@@ -1072,6 +1097,13 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                                                               D3D12_BARRIER_LAYOUT_SHADER_RESOURCE)
                                             : TextureRef{};
     const BufferRef dynamicList = g.importBuffer(s.dynamicList.Get(), BufferDesc{ "S VSM dynamic page list", 8 + (uint64_t)pagesNow * 8, 0 });
+    // shadow.vsm.static_hzb_cull (with static_separate): the movable casters' views are culled against the static copies' HZB
+    const bool hzbCull = separate && (!q.has("shadow.vsm.static_hzb_cull") || q.boolean("shadow.vsm.static_hzb_cull"));
+    const BufferRef staticHzb = hzbCull ? g.importBuffer(s.staticHzb.Get(), BufferDesc{ "S VSM static HZB", (uint64_t)pagesNow * kBlockEntries * 4, 0 }) : BufferRef{};
+    const uint32_t staticHzbSrv = s.staticHzbSrv, atlasSlotsSrv = s.atlasSlotsSrv;
+    // (the cull switched on over kept pages: their static copies were drawn without an HZB - this frame draws every page anew)
+    const bool hzbFresh = hzbCull && !s.hzbValid;
+    s.hzbValid = hzbCull;
     const BufferRef scanGroupsBuf = g.importBuffer(s.groups.Get(), BufferDesc{ "S VSM scan groups", (uint64_t)kScanGroupsMax * 4, 0 });
     const BufferRef args = g.importBuffer(s.args.Get(), BufferDesc{ "S VSM indirect args", 32, 0 });
     const BufferRef statsBuf = g.importBuffer(s.stats.Get(), BufferDesc{ "S VSM stats", kStatsBytes, 0 });
@@ -1112,8 +1144,9 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     const bool originShift = fc.frame.originShift.x != 0 || fc.frame.originShift.y != 0 || fc.frame.originShift.z != 0;
     // (the wind casters' spheres are bounded with this frame's wind: a changed scene wind redraws every page)
     const bool sameWind = s.cacheWind[0] == c.windSpeed && s.cacheWind[1] == c.windDirection.x && s.cacheWind[2] == c.windDirection.y && s.cacheWind[3] == c.windDirection.z;
-    const bool cacheable = cacheOn && rangeKept && sameWind && !stateFresh && !s.needsInit && !s.rasterRedraw && s.cacheFrame != UINT64_MAX && s.cacheFrame + 1 == fc.frame.frameIndex &&
-                           s.cacheRevision == fc.scene.revision() && !originShift && (fc.frame.discontinuity & kDiscontinuityRestore) == 0;
+    const bool cacheable = cacheOn && rangeKept && sameWind && !stateFresh && !s.needsInit && !s.rasterRedraw && !hzbFresh && s.cacheFrame != UINT64_MAX &&
+                           s.cacheFrame + 1 == fc.frame.frameIndex && s.cacheRevision == fc.scene.revision() && !originShift &&
+                           (fc.frame.discontinuity & kDiscontinuityRestore) == 0;
     s.cacheFrame = fc.frame.frameIndex;
     s.cacheRevision = fc.scene.revision();
     s.cacheWind[0] = c.windSpeed;
@@ -1692,7 +1725,8 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     // first word of the tile mask and slots). shadow.vsm.static_separate: the casters that are not movable into the static
     // atlas where a page is drawn anew, the movable ones into the sampled atlas where a page is drawn anew or its movable
     // casters changed; without it every caster into the sampled atlas.
-    auto sunFamily = [&](const std::string& base, TextureRef target, uint32_t maskWords, uint32_t instanceSet) {
+    // occluders: its views are culled against the static copies' HZB (the movable set's views, shadow.vsm.static_hzb_cull).
+    auto sunFamily = [&](const std::string& base, TextureRef target, uint32_t maskWords, uint32_t instanceSet, bool occluders) {
         uint32_t made = 0;
         auto request = [&](const std::string& name) {
             DepthRasterRequest r;
@@ -1700,6 +1734,12 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             r.instanceMask = scene::InstanceCastShadow;
             r.depthTarget = target;
             r.atlasSlots = atlasSlots;
+            if (occluders)
+            {
+                r.tileOccluders = staticHzb;
+                r.tileOccludersSrv = staticHzbSrv;
+                r.atlasSlotsSrv = atlasSlotsSrv;
+            }
             r.atlasTilesPerRow = kAtlasPagesPerRow;
             r.cullMask = mask;
             r.cullTilePx = kPage;
@@ -1719,6 +1759,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             v.minInstanceTexels = minCasterTexels;
             v.userData = k;
             v.instanceSet = instanceSet;
+            v.tileOccluders = occluders;
             v.cullMaskOffset = maskWords + k * (kTable * kTable / 32);
             const uint64_t bound = split ? levelBound(bounds, v.viewProj, v.lodPixelsPerMetre, instanceSet) : 0;
             if (bound > listCapacity)
@@ -1775,11 +1816,33 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     {
         if (separate)
         {
-            sunRequests = sunFamily("s.vsm.static", atlasStatic, 0, 1);
-            sunRequests += sunFamily("s.vsm.raster", atlas, kLevels * (kTable * kTable / 32), 2);
+            sunRequests = sunFamily("s.vsm.static", atlasStatic, 0, 1, false);
+            if (hzbCull)
+            {
+                // The HZB of the static copies drawn just now (VsmStaticHzb.hlsl: one group per page of the page list);
+                // the kept pages have theirs from the frame their copy was drawn in. Then the movable casters' views
+                // are culled against it: a caster under the static surface of every page it would be drawn into leaves
+                // no texel after the merge.
+                ID3D12PipelineState* ph = sh.compute("Passes/Shadow/VsmStaticHzb");
+                g.addPass("s.vsm.statichzb", QueueType::Compute,
+                          [&](PassBuilder& b) {
+                              b.use(pageList, Use::SrvCompute);
+                              b.use(args, Use::IndirectArgs);
+                              b.use(atlasStatic, Use::SrvCompute);
+                              b.use(staticHzb, Use::UavCompute);
+                              b.keep();
+                          },
+                          [=](PassContext& ctx) {
+                              const uint32_t k[4] = { ctx.srv(pageList), ctx.srv(atlasStatic), ctx.uav(staticHzb), 0 };
+                              ctx.cmd->SetPipelineState(ph);
+                              ctx.computeConstants(k, 4);
+                              ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(args), 0, nullptr, 0);
+                          });
+            }
+            sunRequests += sunFamily("s.vsm.raster", atlas, kLevels * (kTable * kTable / 32), 2, hzbCull);
         }
         else
-            sunRequests = sunFamily("s.vsm.raster", atlas, 0, 0);
+            sunRequests = sunFamily("s.vsm.raster", atlas, 0, 0, false);
     }
     if (fc.services.rasterizeDepth && activeLocal > 0)
     {
