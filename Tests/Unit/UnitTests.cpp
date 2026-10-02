@@ -1574,7 +1574,7 @@ UNX_TEST(subsurface_model_and_scene_block)
         scene::Material plain;
         plain.cls = scene::MaterialClass::Subsurface;
         packMaterialClass(plain, d);
-        CHECK(d.hairAbsorption.x == 0.0120f && d.hairAbsorption.y == 0.0064f && d.hairAbsorption.z == 0.0045f && d.hairBetaN == 0.85f && d.cutScale == 0.75f &&
+        CHECK(d.hairAbsorption.x == 0.00130f && d.hairAbsorption.y == 0.00095f && d.hairAbsorption.z == 0.00067f && d.hairBetaN == 0.85f && d.cutScale == 0.75f &&
               d.cutDamageWidth == 1.30f);
         gpu::Material st{};
         packMaterialClass(scene::Material{}, st);

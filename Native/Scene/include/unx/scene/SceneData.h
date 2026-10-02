@@ -103,7 +103,9 @@ struct Material
     // and lobe 1 the rest; transmission is the light through thin parts. subsurfaceMeanFreePath (per colour channel) is the
     // medium's mean free path 1 / sigma_t: the screen-space scattering pass spreads the diffuse light with Burley's profile
     // at d = l / s(albedo) (MaterialModel.h "Subsurface class, stage B"; 0 in a channel: no scattering there).
-    float3 subsurfaceMeanFreePath{ 0.0120f, 0.0064f, 0.0045f };  // m, >= 0
+    // The default is skin (measured reduced coefficients, Jensen et al. 2001: 1 / sigma_t' = 1.30 / 0.95 / 0.67 mm): the light
+    // spreads a few millimetres, which shows in close-ups; wax, jade or marble are an order of magnitude longer.
+    float3 subsurfaceMeanFreePath{ 0.00130f, 0.00095f, 0.00067f };  // m, >= 0
     float subsurfaceLobeMix = 0.85f;                               // [0, 1]
     float2 subsurfaceLobeRoughness{ 0.75f, 1.30f };                // >= 0
     // Terrain class (C5 cooked terrain tiles, FEATURES_GAME 9 direct blending): layer i's weight is channel i % 4 of splat

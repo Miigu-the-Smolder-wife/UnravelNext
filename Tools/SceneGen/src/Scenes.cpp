@@ -634,7 +634,8 @@ Scene furnaceRoom(const Request& rq, bool day)
 // reaches only the slab: the light through a thin part. Key: one shadow-casting point light, front-left, 2.1 m from the
 // row's centre. The sun is low and dim (4 degrees up, 100 lux above the atmosphere): it shows the sun's terms without
 // competing with the key.
-// Cameras: "front" (the key's side) and "back".
+// Cameras: "front" (the key's side), "back", and "skin_close" (the Subsurface sphere's terminator from 0.6 m: the scale
+// at which skin's scatter is seen).
 Scene shadingBall(const Request& rq)
 {
     Scene s;
@@ -717,6 +718,8 @@ Scene shadingBall(const Request& rq)
     s.lights.push_back(behind);
     s.cameras.push_back(camera("front", f3(0.55f, eye, 3.5f), f3(0.55f, eye, 0.0f), 6.0f, 45.0f));
     s.cameras.push_back(camera("back", f3(0.55f, eye, -3.5f), f3(0.55f, eye, 0.0f), 6.0f, 45.0f));
+    // the Subsurface sphere's terminator from 0.6 m (a pixel is about half a millimetre at 1080p: skin's scatter is a few)
+    s.cameras.push_back(camera("skin_close", f3(-0.35f, eye, 0.80f), f3(-0.62f, eye, 0.0f), 6.0f, 45.0f));
     for (const auto& c : s.cameras) s.paths.push_back(staticPath(c));
     (void)rq;
     return s;

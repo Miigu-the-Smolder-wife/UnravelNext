@@ -127,7 +127,7 @@ int main(int argc, char** argv)
             CHECK(!a.cameras.empty() && a.paths.size() == a.cameras.size());
             if (id == scenegen::SceneId::ShadingBall)
             {
-                CHECK(a.cameras.size() == 2 && a.cameras[0].name == "front" && a.cameras[1].name == "back");
+                CHECK(a.cameras.size() == 3 && a.cameras[0].name == "front" && a.cameras[1].name == "back" && a.cameras[2].name == "skin_close");
                 CHECK(a.lights.size() == 2 && a.lights[0].castShadow && !a.lights[1].castShadow);
                 CHECK(a.instances.size() == 7);
                 uint32_t subsurface = 0, oneLobe = 0, sheen = 0, coat = 0;

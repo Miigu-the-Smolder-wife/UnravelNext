@@ -4208,6 +4208,7 @@ void testSubsurfaceScatter(TestFrame& tf, Report& report)
     skin.roughness = 0.45f;
     skin.specular = 0.35f;
     skin.transmission = 0.0f;  // (no light through thin parts: the far side is black without the pass)
+    skin.subsurfaceMeanFreePath = { 0.0120f, 0.0064f, 0.0045f };  // (a wax's: the scatter spans several pixels at this view's distance)
     s.materials = { ground, skin };
     scene::Instance a;
     a.mesh = addPlane(s, 40, 0);
