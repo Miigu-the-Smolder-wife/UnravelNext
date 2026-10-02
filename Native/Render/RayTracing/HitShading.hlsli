@@ -13,9 +13,8 @@
 //                                                 wider ones the bilinear texel instead of the lobe average.
 // Material textures at hits: rtHitMaterial (M's published textures, INTERFACES v1.11, at the ray cone's level of detail).
 // Material inputs at hits (scene::Material; Scene.hlsli GpuMaterialInputs): the uv transform (with the level of detail
-// by its determinant), the emissive mask and the vertex tint (the emission's scale is in the material's emissive); none
-// of them with UNX_MATERIAL_INPUTS 0 (Scene.hlsli: a kernel at the DXIL limit). No parallax, no detail maps, no second
-// uv set: a hit is a cone's footprint.
+// by its determinant), the emissive mask and the vertex tint (the emission's scale is in the material's emissive). No
+// parallax, no detail maps, no second uv set: a hit is a cone's footprint.
 //   local lights                                  one next-event sample per hit (HitLocalLights.hlsli, the reference's
 //                                                 estimator), visibility by one shadow ray: unbiased, averaged by the
 //                                                 hit's history.
@@ -40,7 +39,6 @@ GpuMaterial rtHitMaterialAt(GpuMaterial m, RtSurface s, float2 uvColor, float co
     const float footprint = log2(max(coneWidth, 1e-8) / max(abs(cosTheta), 1e-3));
     float2 uv = s.uv;
     float uvPerWorldArea = s.uvPerWorldArea;
-#if UNX_MATERIAL_INPUTS
     if (m.inputs != UNX_NONE)
     {
         // the material's uv transform: its uv, and its texture area per world area by the determinant
@@ -48,9 +46,7 @@ GpuMaterial rtHitMaterialAt(GpuMaterial m, RtSurface s, float2 uvColor, float co
         uv = materialInputsUv(r, uv);
         uvColor = materialInputsUv(r, uvColor);
         uvPerWorldArea *= abs(r.uvU.x * r.uvV.y - r.uvU.y * r.uvV.x);
-#if RT_SURFACE_EXTRAS
         if ((r.flags & MATERIAL_INPUT_VERTEX_TINT) != 0) m.baseColor *= s.color.rgb;
-#endif
         if (r.emissiveMaskTexture != UNX_NONE)
         {
             Texture2D t = ResourceDescriptorHeap[r.emissiveMaskTexture];
@@ -58,7 +54,6 @@ GpuMaterial rtHitMaterialAt(GpuMaterial m, RtSurface s, float2 uvColor, float co
             m.emissive *= (r.textureClamp & 8u) ? t.SampleLevel(g_anisoClamp, uv, lod).x : t.SampleLevel(g_anisoWrap, uv, lod).x;
         }
     }
-#endif
     if (m.baseColorTexture != UNX_NONE)
     {
         Texture2D t = ResourceDescriptorHeap[m.baseColorTexture];
@@ -89,7 +84,7 @@ GpuMaterial rtHitMaterialAt(GpuMaterial m, RtSurface s, float2 uvColor, float co
 #ifndef RT_HIT_EYE
 #define RT_HIT_EYE 0
 #endif
-#if RT_HIT_EYE && RT_SURFACE_EXTRAS
+#if RT_HIT_EYE
 float rtHitEye(GpuMaterial m, RtSurface s, float3 direction, inout float2 uv)
 {
     const GpuMaterialEye e = loadMaterialEye(m.classFlags >> 16);
@@ -273,10 +268,13 @@ RtHitDirect rtHitDirectTerms(GpuMaterial m, float3 n, float3 v, float3 eSun, flo
     {
         const float tS = 1 - modelCoatEms(coat, muS), tL = 1 - modelCoatEms(coat, muL);
         d.B = tS * eSun + tL * localE;
-        d.C = (tS * eSun * modelCoatReturned(ms, coat, modelCoatRefractedCos(muS, coat.eta)) +
-               tL * localE * modelCoatReturned(ms, coat, modelCoatRefractedCos(muL, coat.eta))) / MODEL_PI;
+        // (the coat's returned light toward the sun and toward the sample by one inlined lookup: it stood three times
+        // here, 770 instructions of the hit kernels at the size limit)
+        float3 returned[2];
+        [loop] for (uint k = 0; k < 2; ++k) returned[k] = modelCoatReturned(ms, coat, modelCoatRefractedCos(k == 0 ? muS : muL, coat.eta));
+        d.C = (tS * eSun * returned[0] + tL * localE * returned[1]) / MODEL_PI;
         sunB = tS * eSun;
-        sunC = tS * eSun * modelCoatReturned(ms, coat, modelCoatRefractedCos(muS, coat.eta)) / MODEL_PI;
+        sunC = tS * eSun * returned[0] / MODEL_PI;
     }
     const float NoV = max(dot(n, v), 1e-4);
     const float3 albedo = m.baseColor * ((1 - m.metallic) / MODEL_PI);

@@ -148,19 +148,34 @@ bool reflStoredDirection(ReflJob j, RWByteAddressBuffer rays, uint capacity, uin
 // the rays exclude them. The control variate is then consistent: E[g_i] = gbar up to the quadrature's error, also where
 // the probe maps vary across the lobe (corners, contacts). The prefiltered map at the mirror direction (the K path's
 // value) differs from that mean where they vary, and biased the G estimate there. No unmasked direction: the K value.
+// Point k of that quadrature (k < REFL_LOBE_CONTROL_POINTS): 0..15 the stratified directions at the texel cone (false: a
+// masked direction, no point), 16 the mirror direction at the lobe's half-angle - the K value, a point only when the
+// sixteen gave none (n = the points taken so far). One lookup per point, so a kernel holds the lookup once: inlined for
+// the sixteen and again for the K value it was 2,700 instructions (13 KB) more in the libraries at the size limit.
+#define REFL_LOBE_CONTROL_POINTS 17u
+bool reflLobeControlPoint(ReflJob j, uint k, uint n, out float3 dir, out float coneHalfAngle)
+{
+    const bool mirror = k == 16;
+    const float2 u = (float2(k & 3u, (k >> 2) & 3u) + 0.5) / 4.0;
+    dir = reflSampleGgx(j.s.normal, j.s.view, j.alpha, u);
+    coneHalfAngle = mirror ? j.lobe : 0.1763;
+    if (!mirror) return dot(dir, j.s.normal) > 0;
+    dir = reflect(-j.s.view, j.s.normal);
+    return n == 0;
+}
 float3 reflLobeControl(ReflJob j, Texture2D<uint4> probes, GiProbeFootprint footprint, int2 probeCount)
 {
     float3 sum = 0;
     uint n = 0;
-    [loop] for (uint k = 0; k < 16; ++k)
+    [loop] for (uint k = 0; k < REFL_LOBE_CONTROL_POINTS; ++k)
     {
-        const float2 u = (float2(k & 3u, k >> 2) + 0.5) / 4.0;
-        const float3 dir = reflSampleGgx(j.s.normal, j.s.view, j.alpha, u);
-        if (dot(dir, j.s.normal) <= 0) continue;
-        sum += giProbeFootprintRadiance(probes, footprint, probeCount, dir, 0.1763, P[3].w);
+        float3 dir;
+        float coneHalfAngle;
+        if (!reflLobeControlPoint(j, k, n, dir, coneHalfAngle)) continue;
+        sum += giProbeFootprintRadiance(probes, footprint, probeCount, dir, coneHalfAngle, P[3].w);
         ++n;
     }
-    return n > 0 ? sum / n : giProbeFootprintRadiance(probes, footprint, probeCount, reflect(-j.s.view, j.s.normal), j.lobe, P[3].w);
+    return sum / n;  // (n >= 1: the K value when the sixteen were masked, and sum / 1 is the value itself)
 }
 
 float3 reflRayOrigin(ReflSurface s) { return s.position + s.normal * (1e-3 + 2e-4 * s.linearDepth); }

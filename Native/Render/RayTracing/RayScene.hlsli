@@ -162,9 +162,6 @@ float2 rtUv(GpuMesh mesh, uint3 meshVertex, float2 barycentrics)
 }
 
 // Surface at a hit, world space.
-#ifndef RT_SURFACE_EXTRAS
-#define RT_SURFACE_EXTRAS 1
-#endif
 struct RtSurface
 {
     float3 position;
@@ -175,18 +172,12 @@ struct RtSurface
     uint material;
     uint sceneInstance;
     bool frontFace;
-#if RT_SURFACE_EXTRAS
     // The hit triangle (HitShading.hlsli rtHitEye): its rest-pose edges (object space), its edges as hit (world) and its
-    // uv edges; and the vertex colour at the hit (white for a mesh without colours). RT_SURFACE_EXTRAS 0 (a kernel at the
-    // DXIL limit, which reads none of them): the surface has no such fields.
+    // uv edges; and the vertex colour at the hit (white for a mesh without colours).
     float3 restE1, restE2, worldE1, worldE2;
     float2 uvE1, uvE2;
     float4 color;
-#endif
 };
-// (The material inputs at a hit - the uv transform in its textures and its alpha test, the emissive mask, the vertex
-// tint - compile out with UNX_MATERIAL_INPUTS 0, Scene.hlsli.)
-
 // With the records it read (a caller needing more of the hit, e.g. its motion, does not load them again).
 RtSurface rtSurfaceParts(RtSceneSrvs s, RtHit h, float3 origin, float3 direction, out GpuInstance inst, out GpuMesh mesh, out RtInstance ri,
                          out RtTriangle tri)
@@ -207,11 +198,9 @@ RtSurface rtSurfaceParts(RtSceneSrvs s, RtHit h, float3 origin, float3 direction
         const RtDeformedVertex a = d[ri.vertexBase + tri.poolIndex.x], b = d[ri.vertexBase + tri.poolIndex.y], c = d[ri.vertexBase + tri.poolIndex.z];
         p0 = a.position; p1 = b.position; p2 = c.position;
         n = normalize(octDecode(a.normalOct) * w.x + octDecode(b.normalOct) * w.y + octDecode(c.normalOct) * w.z);
-#if RT_SURFACE_EXTRAS
         const float3 rest0 = loadVertex(mesh, tri.meshVertex.x).position;
         o.restE1 = loadVertex(mesh, tri.meshVertex.y).position - rest0;
         o.restE2 = loadVertex(mesh, tri.meshVertex.z).position - rest0;
-#endif
     }
     else
     {
@@ -220,12 +209,9 @@ RtSurface rtSurfaceParts(RtSceneSrvs s, RtHit h, float3 origin, float3 direction
         p1 = transformPoint(inst.objectToWorld, b.position);
         p2 = transformPoint(inst.objectToWorld, c.position);
         n = normalize(transformVector(inst.objectToWorld, a.normal * w.x + b.normal * w.y + c.normal * w.z));
-#if RT_SURFACE_EXTRAS
         o.restE1 = b.position - a.position;
         o.restE2 = c.position - a.position;
-#endif
     }
-#if RT_SURFACE_EXTRAS
     o.color = 1;
     o.worldE1 = p1 - p0;
     o.worldE2 = p2 - p0;
@@ -239,16 +225,13 @@ RtSurface rtSurfaceParts(RtSceneSrvs s, RtHit h, float3 origin, float3 direction
         loadVertexAttributes(attributeBase, tri.meshVertex.z, unusedUv, c2);
         o.color = c0 * w.x + c1 * w.y + c2 * w.z;
     }
-#endif
     o.position = origin + direction * h.t;
     o.geometricNormal = normalize(cross(p1 - p0, p2 - p0));
     const float2 uv0 = loadVertex(mesh, tri.meshVertex.x).uv, uv1 = loadVertex(mesh, tri.meshVertex.y).uv, uv2 = loadVertex(mesh, tri.meshVertex.z).uv;
     o.uv = uv0 * w.x + uv1 * w.y + uv2 * w.z;
     const float2 du = uv1 - uv0, dv = uv2 - uv0;
-#if RT_SURFACE_EXTRAS
     o.uvE1 = du;
     o.uvE2 = dv;
-#endif
     o.uvPerWorldArea = abs(du.x * dv.y - du.y * dv.x) / max(length(cross(p1 - p0, p2 - p0)), 1e-20);
     o.frontFace = h.frontFace != 0;
     if (!o.frontFace)

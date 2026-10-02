@@ -143,9 +143,7 @@ float3 nfVectorIrradiance(GpuLight l, float3 x)
         if (dot(-v, l.forward) <= 0) return 0;  // behind the emitting side
         float3 centre = v;
         float2 halfSize = 0.5 * l.size;
-#if UNX_LIGHT_COMPONENTS
         if (l.barnDoor != 0 && !lightBarnDoorRect(l, v, up, centre, halfSize)) return 0;
-#endif
         const float3 ex = l.right * halfSize.x, ey = up * halfSize.y;
         // Counter-clockwise seen from the receiver (the emitter faces it): the LTC segment order of shAreaIntegral.
         const float3 e = nfPolygonVector(centre - ex - ey, centre + ex - ey, centre + ex + ey, centre - ex + ey);

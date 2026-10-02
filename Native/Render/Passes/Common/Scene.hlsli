@@ -266,28 +266,18 @@ GpuLight loadLight(uint i) { StructuredBuffer<GpuLight> b = ResourceDescriptorHe
 uint materialClass(GpuMaterial m) { return m.classFlags & 0xFFu; }
 // The uv at which a material's own textures are read, from the mesh's uv0 (the material's uv transform; the identity
 // without a record), and the same with a footprint.
-// UNX_MATERIAL_INPUTS 0 before this file compiles the material inputs out of these two (the mesh's uv) and out of the ray
-// hits' material and emission (HitShading.hlsli, HitLocalLights.hlsli): for a kernel at the DXIL size limit; such a
-// kernel says so in its header.
-#ifndef UNX_MATERIAL_INPUTS
-#define UNX_MATERIAL_INPUTS 1
-#endif
 float2 materialUv(GpuMaterial m, float2 uv)
 {
-#if UNX_MATERIAL_INPUTS
     if (m.inputs != UNX_NONE) uv = materialInputsUv(loadMaterialInputs(m.inputs), uv);
-#endif
     return uv;
 }
 void materialUvFootprint(GpuMaterial m, inout float2 uv, inout float2 duvdx, inout float2 duvdy)
 {
-#if UNX_MATERIAL_INPUTS
     if (m.inputs == UNX_NONE) return;
     const GpuMaterialInputs r = loadMaterialInputs(m.inputs);
     uv = materialInputsUv(r, uv);
     duvdx = materialInputsUvStep(r, duvdx);
     duvdy = materialInputsUvStep(r, duvdy);
-#endif
 }
 uint clusterVertexCount(GpuCluster c) { return c.counts & 0xFFu; }
 uint clusterTriangleCount(GpuCluster c) { return (c.counts >> 8) & 0xFFu; }
@@ -317,15 +307,9 @@ float lightRayEndBias(GpuLight l, float fallback) { return (l.revision & 0x80000
 //                       the light) -, times lightViewFade.
 //   lightViewFade       1, or the fade towards the light's draw distance from this view's camera:
 //                       saturate((drawDistance - |light - camera|) / fadeRange), a cut without a fade range.
-// UNX_LIGHT_COMPONENTS 0 before this file compiles the scales, the exponent and the fade out (every light as a plain one):
-// for a kernel at the DXIL size limit; such a kernel says so in its header.
-#ifndef UNX_LIGHT_COMPONENTS
-#define UNX_LIGHT_COMPONENTS 1
-#endif
 uint lightChannels(GpuLight l) { return ((l.typeFlags >> 9) & 7u) ^ 1u; }
 uint instanceLightingChannels(uint instanceFlags) { return ((instanceFlags >> 4) & 7u) ^ 1u; }
 static uint g_lightChannels = 7u;  // the receiver's channels
-#if UNX_LIGHT_COMPONENTS
 float lightSpecularScale(GpuLight l) { return 1 + f16tof32(l.scales & 0xFFFFu); }
 float lightDiffuseScale(GpuLight l) { return 1 + f16tof32(l.scales >> 16); }
 float lightVolumetricScale(GpuLight l) { return 1 + f16tof32(l.scales2 & 0xFFFFu); }
@@ -345,28 +329,13 @@ float lightWindow(GpuLight l, float d)
     if ((lightChannels(l) & g_lightChannels) == 0) w = 0;
     return w * lightViewFade(l);
 }
-#else
-float lightSpecularScale(GpuLight l) { return 1; }
-float lightDiffuseScale(GpuLight l) { return 1; }
-float lightVolumetricScale(GpuLight l) { return 1; }
-float lightIndirectScale(GpuLight l) { return 1; }
-float lightViewFade(GpuLight l) { return 1; }
-float lightWindow(GpuLight l, float d)
-{
-    const float x = d / max(l.range, 1e-6), x2 = x * x;
-    const float w = saturate(1 - x2 * x2);
-    return w * w;
-}
-#endif
 // The light's colour for a consumer that takes the light as a point (the air and the fog, lit particles and volumes,
 // the tile kernels' FAR terms): a rect that shows an image (sourceTexture) has the image's mean colour times its own -
 // AreaLight.hlsli shAreaColor reads the image itself where the emitter's extent is resolved.
 float3 lightMeanColor(GpuLight l)
 {
-#if UNX_LIGHT_COMPONENTS
     if (l.sourceTexture != 0)
         return l.color * (float3(l.sourceMean & 0x1FFu, (l.sourceMean >> 9) & 0x1FFu, (l.sourceMean >> 18) & 0x1FFu) * exp2((float)(l.sourceMean >> 27) - 24.0));
-#endif
     return l.color;
 }
 // The part of a rect light's area a far point in direction w (unit, from the light) sees past its barn doors:
@@ -375,16 +344,12 @@ float3 lightMeanColor(GpuLight l)
 // intensity (FroxelCommon.hlsli froxelIntensity).
 float lightBarnDoorFar(GpuLight l, float3 w)
 {
-#if UNX_LIGHT_COMPONENTS
     if (l.barnDoor == 0) return 1;
     const float height = f16tof32(l.barnDoor & 0xFFFFu), spread = f16tof32(l.barnDoor >> 16);
     const float3 s = float3(dot(w, l.right), dot(w, cross(l.forward, l.right)), dot(w, l.forward));
     if (s.z <= 0) return 0;
     const float2 seen = saturate(1 - max(height * abs(s.xy) / s.z - spread, 0.0) / max(l.size, 1e-6));
     return seen.x * seen.y;
-#else
-    return 1;
-#endif
 }
 // The part of a rect light a point sees past its barn doors (scene::Light::barnDoorAngle / Length; Unreal's GetRect with
 // bComputeVisibleRect): four flaps along the emitter's edges, 'height' in front of it and spread outwards by 'spread'.

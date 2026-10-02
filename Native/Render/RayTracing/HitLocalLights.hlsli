@@ -33,12 +33,6 @@ bool rtLightBarnDoors(GpuLight g, float3 x, inout RtLight l)
 // The specular scale of the light rtLocalLightFinish sampled last, over its diffuse one (the record's intensity carries
 // the diffuse scale): what rtLocalLightBrdfCos multiplies the hit's specular lobes by. 1 until a light is sampled.
 static float g_rtLightSpecular = 1;
-// UNX_RT_LIGHT_COMPONENTS 0 before this file: a sample reads none of the record's pad word - the plain range window (no
-// falloff exponent, no draw-distance fade), a rect with barn doors unclipped, the light's specular scale as its
-// diffuse one (a library at the DXIL size limit; it says so in its header).
-#ifndef UNX_RT_LIGHT_COMPONENTS
-#define UNX_RT_LIGHT_COMPONENTS 1
-#endif
 
 static uint g_rtLightData = 0xFFFFFFFFu;
 RtLight rtLightFetch(uint i)
@@ -303,18 +297,12 @@ RtLocalSample rtLocalLightFinish(RtSceneSrvs scene, RtLocalChoice c, float3 x, f
     // The record's pad word (RayScene.cpp; 0 for an FX light): bit 0 - a falloff exponent or a draw distance; bit 1 - a
     // rect with barn doors; bits 16..31 - half(specular scale / diffuse scale - 1). The indirect and diffuse scales are
     // in the record's intensity (what GI carries on).
-#if UNX_RT_LIGHT_COMPONENTS
     const uint components = li < g_lightCount ? l.pad : 0u;
     g_rtLightSpecular = 1 + f16tof32(components >> 16);
-#else
-    const uint components = 0u;
-#endif
     const float3 centre = l.position;
     GpuLight own = (GpuLight)0;
     if ((components & 3u) != 0) own = loadLight(li);
-#if UNX_RT_LIGHT_COMPONENTS
     if ((components & 2u) != 0 && !rtLightBarnDoors(own, x, l)) return o;  // (the sample's point: on the part x sees)
-#endif
     RtLightSample s;
     if (!rtLightSample(l, x, u1, u2, s) || !(s.pdf > 0)) return o;
     o.valid = true;
@@ -438,12 +426,10 @@ RtEmissiveTriangle rtEmissiveTriangleOf(uint sceneInstance, uint meshTriangle, u
     o.m = loadMaterial(instanceMaterial(inst, loadSubmesh(mesh.submeshOffset + submesh), submesh));
     return o;
 }
-// Emitted radiance at the mesh's uv (emissive x its texture at level 0, at the material's uv, x its mask; the mesh's uv
-// and no mask with UNX_MATERIAL_INPUTS 0).
+// Emitted radiance at the mesh's uv (emissive x its texture at level 0, at the material's uv, x its mask).
 float3 rtEmissionAt(GpuMaterial m, float2 uv)
 {
     float3 e = m.emissive;
-#if UNX_MATERIAL_INPUTS
     GpuMaterialInputs r = (GpuMaterialInputs)0;
     r.emissiveMaskTexture = UNX_NONE;
     if (m.inputs != UNX_NONE)
@@ -451,19 +437,16 @@ float3 rtEmissionAt(GpuMaterial m, float2 uv)
         r = loadMaterialInputs(m.inputs);
         uv = materialInputsUv(r, uv);
     }
-#endif
     if (m.emissiveTexture != UNX_NONE)
     {
         Texture2D<float4> t = ResourceDescriptorHeap[m.emissiveTexture];
         e *= (m.textureClamp & MATERIAL_TEXTURE_EMISSIVE) ? t.SampleLevel(g_anisoClamp, uv, 0).rgb : t.SampleLevel(g_anisoWrap, uv, 0).rgb;
     }
-#if UNX_MATERIAL_INPUTS
     if (r.emissiveMaskTexture != UNX_NONE)
     {
         Texture2D<float4> t = ResourceDescriptorHeap[r.emissiveMaskTexture];
         e *= (r.textureClamp & 8u) ? t.SampleLevel(g_anisoClamp, uv, 0).x : t.SampleLevel(g_anisoWrap, uv, 0).x;
     }
-#endif
     return e;
 }
 // Solid-angle pdf of drawing the point seen from x at distance 'distance' along wi on the given triangle (entry e).

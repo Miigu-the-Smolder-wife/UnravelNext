@@ -427,9 +427,7 @@ float shAreaIntegralUnscaled(GpuLight l, float3 p, float3x3 T, bool orthonormal)
     {
         float3 centre = p;
         float2 halfSize = 0.5 * l.size;
-#if UNX_LIGHT_COMPONENTS
         if (l.barnDoor != 0 && !lightBarnDoorRect(l, p, up, centre, halfSize)) return 0;
-#endif
         const float3 ex = l.right * halfSize.x, ey = up * halfSize.y;
         ShLtcAcc acc = shLtcBegin();
         const float3 a = mul(T, centre - ex - ey), b = mul(T, centre + ex - ey), c = mul(T, centre + ex + ey), d = mul(T, centre - ex + ey);
@@ -494,7 +492,6 @@ float shAreaWindow(GpuLight l, float3 p) { return lightWindow(l, length(p)); }
 // integral alike (the reference makes one each: along the vector irradiance, along the lobe's mean direction).
 float3 shAreaColor(GpuLight l, float3 p)
 {
-#if UNX_LIGHT_COMPONENTS
     if (l.sourceTexture != 0 && lightType(l) == LIGHT_RECT)
     {
         Texture2D<float4> image = ResourceDescriptorHeap[l.sourceTexture - 1];
@@ -506,7 +503,6 @@ float3 shAreaColor(GpuLight l, float3 p)
         const float level = clamp(log2(max(s.z, 1e-6) * rsqrt(max(l.size.x * l.size.y, 1e-12))) + log2(min(width, height)) - 2, 0, levels - 1);
         return l.color * image.SampleLevel(g_linearClamp, uv, level).rgb;
     }
-#endif
     return l.color;
 }
 

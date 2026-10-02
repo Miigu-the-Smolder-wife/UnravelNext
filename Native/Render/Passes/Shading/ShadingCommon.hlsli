@@ -70,33 +70,34 @@ float3 shSpecularSubsurface(float3 f0, ModelSubsurface k, float3 compensation, f
 //   terminator band       (the disk crosses the shading normal's horizon, alpha >= 2 theta_s): polar product
 //                         quadrature over the cap with the cosine clipped per point (4 Gauss-Legendre radii in area x
 //                         12 angles), the only rule that follows the kink; < 1 px wide on curved surfaces.
+// One lobe in the kernel: the 4 x 12 points are a loop over two small tables (the ring's directions as constants, so no
+// sincos at run time). Unrolled, the lobe stood 48 times in every kernel that shades the sun - 6,500 instructions, about
+// 30 KB of DXIL, a seventh of the kernels at the size limit (ReflectionTraceInline, CoverageComposite); the band is a
+// rare branch, so the loop costs nothing where it is not taken. The sums keep their order (a ring, then the rings).
+static const float kShSunNodes[4] = { 0.0694318442, 0.3300094782, 0.6699905218, 0.9305681558 };    // Gauss-Legendre on [0, 1]
+static const float kShSunWeights[4] = { 0.1739274226, 0.3260725774, 0.3260725774, 0.1739274226 };
+static const float2 kShSunRing[12] = {  // (cos, sin) of (k + 1/2) 30 degrees
+    float2(0.9659258263, 0.2588190451),  float2(0.7071067812, 0.7071067812),   float2(0.2588190451, 0.9659258263),
+    float2(-0.2588190451, 0.9659258263), float2(-0.7071067812, 0.7071067812),  float2(-0.9659258263, 0.2588190451),
+    float2(-0.9659258263, -0.2588190451), float2(-0.7071067812, -0.7071067812), float2(-0.2588190451, -0.9659258263),
+    float2(0.2588190451, -0.9659258263), float2(0.7071067812, -0.7071067812),  float2(0.9659258263, -0.2588190451) };
 float3 shSunSpecularQuadrature(float3 f0, float alpha, float3 compensation, float3 n, float3 v, float3 l0, float NoV, float sinS, float cosS)
 {
-    const float4 glNodes = float4(0.0694318442, 0.3300094782, 0.6699905218, 0.9305681558);  // Gauss-Legendre on [0, 1]
-    const float4 glWeights = float4(0.1739274226, 0.3260725774, 0.3260725774, 0.1739274226);
     const float3 t = normalize(abs(l0.y) < 0.99 ? cross(float3(0, 1, 0), l0) : cross(float3(1, 0, 0), l0));
     const float3 b = cross(l0, t);
     float3 sum = 0;
-    [unroll] for (uint i = 0; i < 4; ++i)
+    [loop] for (uint i = 0; i < 4; ++i)
     {
         // Area-uniform radius: 1 - cos(theta) uniform in [0, 1 - cos theta_s].
-        const float c = 1 - glNodes[i] * (1 - cosS), s = sqrt(max(1 - c * c, 0.0));
+        const float c = 1 - kShSunNodes[i] * (1 - cosS), s = sqrt(max(1 - c * c, 0.0));
         float3 ring = 0;
-        // (MODEL_FILM kernels: a loop, so the film's F table is not inlined 48 times - DXIL limit; same arithmetic)
-#if MODEL_FILM
-        [loop]
-#else
-        [unroll]
-#endif
-        for (uint k = 0; k < 12; ++k)
+        [loop] for (uint k = 0; k < 12; ++k)
         {
-            float sp, cp;
-            sincos((k + 0.5) * (2 * SH_PI / 12), sp, cp);
-            const float3 l = l0 * c + (t * cp + b * sp) * s;
+            const float3 l = l0 * c + (t * kShSunRing[k].x + b * kShSunRing[k].y) * s;
             const float NoL = dot(n, l);
             if (NoL > 0) ring += shSpecularLobe(f0, alpha, compensation, n, v, l, NoV, NoL) * NoL;
         }
-        sum += ring * (glWeights[i] / 12);
+        sum += ring * (kShSunWeights[i] / 12);
     }
     return sum;  // mean of f_s cos over the cap
 }
@@ -291,11 +292,9 @@ float3 shPunctualIlluminance(GpuLight light, float3 toLight, out float3 l)
         const float sp = saturate(dot(-l, light.forward) * light.spotScale + light.spotOffset);
         i *= sp * sp;
     }
-#if UNX_LIGHT_COMPONENTS
     const float diffuse = max(lightDiffuseScale(light), 1e-4);
     g_shLightSpecular = lightSpecularScale(light) / diffuse;
     i *= diffuse;
-#endif
     return light.color * i;
 }
 

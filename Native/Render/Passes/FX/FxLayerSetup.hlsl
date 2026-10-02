@@ -13,13 +13,6 @@
 // shadows), each with the program's phase function (Henyey-Greenstein, g = medium_phase), once at the particle centre;
 // material 0 is emissive (colour = radiance, nit). Every particle then takes S's air between the camera and its centre:
 // premultiplied colour = alpha (T_air L + inscatter) (request 4: the surface behind already carries the full path).
-#if ML == 0 && GIV == 0
-// This variant (the lists' lights with S's shadow maps, the world cache: neither is the default path) stands 256 B under
-// the kernel size limit: its particles take the air without the height fog (Atmosphere.hlsli), and the lists' lights
-// without their light components (Scene.hlsli UNX_LIGHT_COMPONENTS: scales, falloff exponent, draw-distance fade).
-#define UNX_AIR_WITHOUT_FOG
-#define UNX_LIGHT_COMPONENTS 0
-#endif
 #include "Passes/FX/ParticleLayerPass.hlsli"
 #include "Passes/FX/FxParticleAt.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
@@ -89,7 +82,8 @@ float3 fxLitRadiance(LayerConstants c, float3 albedo, float3 offset, float3 D, f
     L += E * (visibility * fxPhase(dot(l, D), g));
     // indirect (GiSource.hlsli): the Lumen translucency volume's light through the phase function (band 0, and band 1 x
     // g), or R's GI cache, isotropic (the mean irradiance over the six axes / pi = fluence / 4 pi)
-    // (GIV: the source's kind picks the kernel - both reads in one kernel pass the DXIL limit; ParticleLayer.cpp)
+    // (GIV: the source's kind picks the kernel, ParticleLayer.cpp - with the lighting inlined twice both reads in one
+    // kernel passed the DXIL limit; it stands once now, and the four variants are 73 to 94 KB)
 #if GIV
     if (giSourceIsVolume(c.giCache)) L += ltvInscatter(giSourceVolume(c.giCache), worldPos, D, g);
 #else
@@ -99,17 +93,19 @@ float3 fxLitRadiance(LayerConstants c, float3 albedo, float3 offset, float3 D, f
         const GiHeader h = giHeader(cache);
         float3 sum = 0;
         float n = 0;
-        const float3 axes[6] = { float3(1, 0, 0), float3(-1, 0, 0), float3(0, 1, 0), float3(0, -1, 0), float3(0, 0, 1), float3(0, 0, -1) };
-        [unroll] for (uint a = 0; a < 6u; ++a)
+        // (a loop: one copy of the cache lookup in the kernel - six stood for 7,500 instructions, 31 KB)
+        [loop] for (uint a = 0; a < 6u; ++a)
         {
+            const float side = (a & 1u) ? -1.0 : 1.0;  // +x, -x, +y, -y, +z, -z
+            const float3 axis = float3((a >> 1) == 0 ? side : 0.0, (a >> 1) == 1 ? side : 0.0, (a >> 1) == 2 ? side : 0.0);
             float w;
-            const float3 e = giCacheIrradianceAt(cache, h, worldPos, axes[a], 0, w);
+            const float3 e = giCacheIrradianceAt(cache, h, worldPos, axis, 0, w);
             if (w > 0) { sum += e; n += 1; }
         }
         if (n > 0) L += sum / (n * SH_PI);
     }
 #endif
-    // ML = 1 (its own variant: both paths in one kernel pass the DXIL limit; ParticleLayer.cpp picks it when the volumes exist):
+    // ML = 1 (its own variant, as GIV above; ParticleLayer.cpp picks it when the volumes exist):
     // shading.mega_lights (render A; P[1].xy = the froxel grid's sampled local light, MegaLightsVolume.hlsl - as Unreal's
     // MegaLights lights translucency through its lit volume): the local lights' visible fluence F and luminance-weighted
     // direction moment M at the particle's froxel (trilinear), with the phase function's first two SH bands:
@@ -169,6 +165,17 @@ float3 fxLitRadiance(LayerConstants c, float3 albedo, float3 offset, float3 D, f
 }
 float3 curve3(uint first, uint count, float u) { return count >= 2u ? nv_curve(first, count, u).yzw : float3(1, 1, 1); }
 
+// What a particle of either output asks of the lighting. The kernel holds fxLitRadiance once (setup): each output's code is
+// two halves around that one call. With a call in the sprite's path and another in the ribbon point's the kernel carried
+// the whole lighting twice - 19,600 instructions each, four fifths of a kernel at the size limit.
+struct FxLitPoint
+{
+    bool lit;        // material 1 (colour = albedo); else the radiance is the colour
+    float3 colour, pos;
+    float phase, footprint, linearZ;
+    uint2 pixel;
+};
+
 // A ribbon particle's point of this frame in the render pass's ribbon layout (ParticleSystem: per ribbon row the births
 // [dying_birth, next_birth) of the latest tick, the ones that died in it first; FxRibbon then builds the strips over each
 // range's valid window): camera-relative position at the frame time, width after the
@@ -177,26 +184,37 @@ float3 curve3(uint first, uint count, float u) { return count >= 2u ? nv_curve(f
 // radiance x exposure (material 1 lit at the point like a sprite, 0 emissive), opacity. A point not alive at the frame time
 // is written invalid: born after it (the newest births, the range's tail) or already dead (the oldest dying ones, its head);
 // the valid points are one window. A killed emitter or a refused material writes invalid points (nothing drawn).
-void ribbonPoint(LayerConstants c, RenderRange rr, uint k, uint birth, uint row, StreamEmitter e, StreamProgram p, bool drawn)
+// ribbonPointBegin: the point up to its lighting request (false: nothing to light - no place in the layout, or an invalid
+// point, written); ribbonPointEnd: the point and its appearance with the radiance.
+struct FxRibbonPending
 {
+    uint index;
+    FxRibbonPoint record;
+    float alpha;
+};
+bool ribbonPointBegin(LayerConstants c, RenderRange rr, uint k, uint birth, uint row, StreamEmitter e, StreamProgram p, bool drawn, out FxRibbonPending pending,
+                      out FxLitPoint lp)
+{
+    pending = (FxRibbonPending)0;
+    lp = (FxLitPoint)0;
     float3 pos;
     float age;
     bool dying;
     const bool alive = drawn && fxParticleAt(c, rr, k, birth, row, p, pos, age, dying);
-    if (c.ribbonRows == UNX_NONE) return;
+    if (c.ribbonRows == UNX_NONE) return false;
     StructuredBuffer<uint2> rows = ResourceDescriptorHeap[c.ribbonRows];
     const uint2 place = rows[row];
-    if (place.x == FX_NONE) return;
+    if (place.x == FX_NONE) return false;
     const uint index = place.x + (birth - place.y);
-    if (index >= c.ribbonCapacity) { fxLayerStatus(c, FX_LAYER_STATUS_RANGE); return; }
-    RWStructuredBuffer<FxRibbonPoint> points = ResourceDescriptorHeap[c.ribbonPoints];
-    RWStructuredBuffer<uint2> appearance = ResourceDescriptorHeap[c.ribbonAppearance];
+    if (index >= c.ribbonCapacity) { fxLayerStatus(c, FX_LAYER_STATUS_RANGE); return false; }
     FxRibbonPoint rp = (FxRibbonPoint)0;
     if (!alive)
     {
+        RWStructuredBuffer<FxRibbonPoint> points = ResourceDescriptorHeap[c.ribbonPoints];
+        RWStructuredBuffer<uint2> appearance = ResourceDescriptorHeap[c.ribbonAppearance];
         points[index] = rp;  // valid = 0
         appearance[index] = uint2(0, 0);
-        return;
+        return false;
     }
     const float u = saturate(age / p.lifetime);
     const float size = p.size * e.sizeScale * curve1(p.sizeKeys, p.sizeCount, u);
@@ -218,13 +236,28 @@ void ribbonPoint(LayerConstants c, RenderRange rr, uint k, uint birth, uint row,
     }
     const float linearZ = max(distance, g_nearPlane);
     const float footprint = 2.0f * linearZ / (g_proj[1][1] * g_viewHeight);
-    const float3 radiance = p.material == 1u ? fxLitRadiance(c, colour, pos, normalize(pos), p.mediumPhase, max(size * 0.5f, footprint), (uint2)pixel, linearZ) : colour;
+    lp.lit = p.material == 1u;
+    lp.colour = colour;
+    lp.pos = pos;
+    lp.phase = p.mediumPhase;
+    lp.footprint = max(size * 0.5f, footprint);
+    lp.linearZ = linearZ;
+    lp.pixel = (uint2)pixel;
     rp.position = pos * c.streamAxes;  // (stream axes: FxRibbon builds the strip frame there and maps its vertices)
     rp.width = width;
     rp.age = age;
     rp.valid = 1u;
-    points[index] = rp;
-    appearance[index] = fxPackHalf4(float4(radiance * g_exposure, alpha));
+    pending.index = index;
+    pending.record = rp;
+    pending.alpha = alpha;
+    return true;
+}
+void ribbonPointEnd(LayerConstants c, FxRibbonPending pending, float3 radiance)
+{
+    RWStructuredBuffer<FxRibbonPoint> points = ResourceDescriptorHeap[c.ribbonPoints];
+    RWStructuredBuffer<uint2> appearance = ResourceDescriptorHeap[c.ribbonAppearance];
+    points[pending.index] = pending.record;
+    appearance[pending.index] = fxPackHalf4(float4(radiance * g_exposure, pending.alpha));
 }
 
 LayerRecord setup(LayerConstants c, uint t, uint group)
@@ -242,48 +275,69 @@ LayerRecord setup(LayerConstants c, uint t, uint group)
     if (WaveActiveAnyTrue(badMaterial) && WaveIsFirstLane()) fxLayerStatus(c, FX_LAYER_STATUS_MATERIAL);
     const bool badRibbon = p.output == FX_OUTPUT_RIBBON && p.material > 1u;
     if (WaveActiveAnyTrue(badRibbon) && WaveIsFirstLane()) fxLayerStatus(c, FX_LAYER_STATUS_MATERIAL);
-    if (p.output == FX_OUTPUT_RIBBON)
+    // Either output's first half, up to its lighting request (FxLitPoint): a ribbon point, or a sprite
+    const bool ribbon = p.output == FX_OUTPUT_RIBBON;
+    FxRibbonPending pending = (FxRibbonPending)0;
+    FxLitPoint lp = (FxLitPoint)0;
+    float2 centre = 0;
+    float alpha = 0, r2 = 0, rEff2 = 1, rEff = 0, linearZ = 0;
+    if (ribbon)
     {
-        ribbonPoint(c, rr, k, birth, row, e, p, !badRibbon && (e.flags & FX_EMITTER_KILLED) == 0u && p.lifetime > 0);
+        if (!ribbonPointBegin(c, rr, k, birth, row, e, p, !badRibbon && (e.flags & FX_EMITTER_KILLED) == 0u && p.lifetime > 0, pending, lp)) return rec;
+    }
+    else
+    {
+        if (badMaterial || p.output != FX_OUTPUT_SPRITE || (e.flags & FX_EMITTER_KILLED) != 0u || !(p.lifetime > 0)) return rec;
+
+        float3 pos;
+        float age;
+        bool dying;
+        if (!fxParticleAt(c, rr, k, birth, row, p, pos, age, dying)) return rec;
+
+        // appearance at that age
+        const float u = saturate(age / p.lifetime);
+        const float size = p.size * e.sizeScale * curve1(p.sizeKeys, p.sizeCount, u);
+        const float3 colour = p.color.rgb * e.colorScale.rgb * curve3(p.colorKeys, p.colorCount, u);
+        alpha = saturate(p.color.a * e.colorScale.a * curve1(p.alphaKeys, p.alphaCount, u));
+        if (!(size > 0) || !(alpha > 0)) return rec;
+
+        // projection (camera-relative: the view's rotation, then its projection)
+        const float3 v = mul((float3x3)g_view, pos);
+        const float distance = -v.z;
+        if (!(distance > g_nearPlane)) return rec;
+        const float4 clip = mul(g_proj, float4(v, 1));
+        const float2 ndc = clip.xy / clip.w;
+        centre = float2((ndc.x + 1) * 0.5f * g_viewWidth, (1 - ndc.y) * 0.5f * g_viewHeight);
+        const float radius = 0.5f * size * g_proj[1][1] * 0.5f * g_viewHeight / distance;
+        // Pixel-footprint prefilter: the pixel box filter widens the profile to r' = sqrt(r^2 + 1/4) (radius of a half pixel)
+        // at the same integrated opacity (alpha r^2 / r'^2): a sprite below a pixel keeps its energy instead of being missed
+        // by pixel centres.
+        r2 = radius * radius;
+        rEff2 = r2 + 0.25f;
+        rEff = sqrt(rEff2);
+        if (centre.x + rEff < 0 || centre.y + rEff < 0 || centre.x - rEff > g_viewWidth || centre.y - rEff > g_viewHeight) return rec;
+        rec.centre = centre;
+        rec.radius = rEff;
+        rec.depth = g_nearPlane / distance;
+        linearZ = distance;  // (v.z along the view axis: the view depth)
+        const float footprint = 2.0f * distance / (g_proj[1][1] * g_viewHeight);
+        lp.lit = p.material == 1u;
+        lp.colour = colour;
+        lp.pos = pos;
+        lp.phase = p.mediumPhase;
+        lp.footprint = max(size * 0.5f, footprint);
+        lp.linearZ = linearZ;
+        lp.pixel = (uint2)clamp(centre, 0, float2(g_viewWidth - 1, g_viewHeight - 1));
+    }
+    // lighting (material 1: lit; 0: emissive) - the kernel's one call
+    float3 radiance = lp.colour;
+    if (lp.lit) radiance = fxLitRadiance(c, lp.colour, lp.pos, normalize(lp.pos), lp.phase, lp.footprint, lp.pixel, lp.linearZ);
+    if (ribbon)
+    {
+        ribbonPointEnd(c, pending, radiance);
         return rec;
     }
-    if (badMaterial || p.output != FX_OUTPUT_SPRITE || (e.flags & FX_EMITTER_KILLED) != 0u || !(p.lifetime > 0)) return rec;
-
-    float3 pos;
-    float age;
-    bool dying;
-    if (!fxParticleAt(c, rr, k, birth, row, p, pos, age, dying)) return rec;
-
-    // appearance at that age
-    const float u = saturate(age / p.lifetime);
-    const float size = p.size * e.sizeScale * curve1(p.sizeKeys, p.sizeCount, u);
-    const float3 colour = p.color.rgb * e.colorScale.rgb * curve3(p.colorKeys, p.colorCount, u);
-    const float alpha = saturate(p.color.a * e.colorScale.a * curve1(p.alphaKeys, p.alphaCount, u));
-    if (!(size > 0) || !(alpha > 0)) return rec;
-
-    // projection (camera-relative: the view's rotation, then its projection)
-    const float3 v = mul((float3x3)g_view, pos);
-    const float distance = -v.z;
-    if (!(distance > g_nearPlane)) return rec;
-    const float4 clip = mul(g_proj, float4(v, 1));
-    const float2 ndc = clip.xy / clip.w;
-    const float2 centre = float2((ndc.x + 1) * 0.5f * g_viewWidth, (1 - ndc.y) * 0.5f * g_viewHeight);
-    const float radius = 0.5f * size * g_proj[1][1] * 0.5f * g_viewHeight / distance;
-    // Pixel-footprint prefilter: the pixel box filter widens the profile to r' = sqrt(r^2 + 1/4) (radius of a half pixel)
-    // at the same integrated opacity (alpha r^2 / r'^2): a sprite below a pixel keeps its energy instead of being missed
-    // by pixel centres.
-    const float r2 = radius * radius, rEff2 = r2 + 0.25f;
-    const float rEff = sqrt(rEff2);
-    if (centre.x + rEff < 0 || centre.y + rEff < 0 || centre.x - rEff > g_viewWidth || centre.y - rEff > g_viewHeight) return rec;
-    rec.centre = centre;
-    rec.radius = rEff;
-    rec.depth = g_nearPlane / distance;
-    // lighting (material 1: lit; 0: emissive), then the air between the camera and the particle (S's air volume)
-    const float3 D = pos / distance;
-    const float linearZ = distance;  // (v.z along the view axis: the view depth)
-    const float footprint = 2.0f * distance / (g_proj[1][1] * g_viewHeight);
-    float3 radiance = p.material == 1u ? fxLitRadiance(c, colour, pos, normalize(pos), p.mediumPhase, max(size * 0.5f, footprint), (uint2)clamp(centre, 0, float2(g_viewWidth - 1, g_viewHeight - 1)), linearZ)
-                                       : colour;
+    // the sprite's second half: the air between the camera and the particle (S's air volume)
     if (c.airVolume != UNX_NONE && c.transmittance != UNX_NONE)
     {
         AtmosphereSrvs atm;
