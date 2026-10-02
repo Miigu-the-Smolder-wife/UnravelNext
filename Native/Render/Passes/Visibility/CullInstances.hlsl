@@ -59,13 +59,15 @@ void cullInstance(RWByteAddressBuffer state, uint instance, uint view, bool vali
             }
         }
     }
-    const uint base = waveAppend(state, VS_NODE_WRITE, visible ? roots.rootCount : 0, CAP_NODES, OVERFLOW_NODES);
+    uint first, total;
+    const uint base = nodeReserve(state, visible ? roots.rootCount : 0, CAP_NODES, 0, first, total);
     if (visible)
     {
         RWStructuredBuffer<uint2> items = ResourceDescriptorHeap[NODE_ITEMS_UAV];
         for (uint k = 0; k < roots.rootCount; ++k)
             if (base + k < CAP_NODES) items[base + k] = uint2(instance, packItem(roots.nodeOffset + k, view));
     }
+    nodePublish(state, first, total);
     const uint d = waveAppend(state, VS_DEFER_INSTANCES, defer ? 1 : 0, CAP_DEFERRED, OVERFLOW_DEFER_INSTANCES);
     if (defer && d < CAP_DEFERRED)
     {

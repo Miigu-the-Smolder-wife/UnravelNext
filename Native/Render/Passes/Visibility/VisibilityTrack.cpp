@@ -1,7 +1,8 @@
 // Track entry points of V (visibility) (INTERFACES_KO.md 5.2, 5.3; ARCHITECTURE 2.1).
 //
 // A cull run (one view, or every view of a raster-service request) walks instances -> per-depth hierarchy roots ->
-// hierarchy nodes (one pass per tree level, indirect) -> hierarchy leaves (groups) -> clusters, with the DAG cut test
+// hierarchy nodes (one dispatch over the node work queue, CullNodes QUEUE=1; visibility.traversal_work_queue false: one
+// pass per tree level, indirect) -> hierarchy leaves (groups) -> clusters, with the DAG cut test
 // (a leaf is reached while its group error projects above the threshold; a cluster is drawn when its own error
 // projects at or below it), frustum, clip plane, normal cone and, for the main view, two-phase HiZ occlusion: phase 1
 // tests against the previous frame's HiZ with previous transforms and defers what it rejects; after the phase-1
@@ -49,6 +50,8 @@ struct Settings
     uint32_t coverageDebugStage = 0;
     bool coverageHair = false;  // visibility.coverage_hair (B10 strands in the coverage layer)
     bool rasterAmplification = true;  // visibility.raster_amplification (tile-local raster runs: no stored pairs)
+    bool workQueue = true;            // visibility.traversal_work_queue (the node traversal in one dispatch)
+    uint32_t workerGroups = 0;        // visibility.traversal_worker_groups (its dispatch: groups of 64 threads)
     double coveragePoolMinPerPixel = 0;
     uint32_t oceanEdgesMin = 0;  // ocean edge pixel list capacity floor (entries)
     uint32_t coverageSpecialMin = 0;  // special record list capacity floor (entries)
@@ -76,6 +79,10 @@ struct Settings
         s.coverageBandCVisible = q.has("visibility.coverage_band_c_visbuffer") && q.boolean("visibility.coverage_band_c_visbuffer");
         s.coverageHair = q.boolean("visibility.coverage_hair");
         s.rasterAmplification = q.has("visibility.raster_amplification") ? q.boolean("visibility.raster_amplification") : true;
+        s.workQueue = q.has("visibility.traversal_work_queue") ? q.boolean("visibility.traversal_work_queue") : true;
+        const int64_t workers = q.has("visibility.traversal_worker_groups") ? q.integer("visibility.traversal_worker_groups") : 1024;
+        if (workers < 1 || workers > 65535) fail("visibility.traversal_worker_groups = %lld: 1 .. 65535 (one dispatch row)", (long long)workers);
+        s.workerGroups = (uint32_t)workers;
         const int64_t stage = q.integer("visibility.coverage_debug_stage");
         if (stage < 0 || stage > 4) fail("visibility.coverage_debug_stage = %lld: 0 (the layer), 1 .. 4 (measurement variants)", (long long)stage);
         s.coverageDebugStage = (uint32_t)stage;
@@ -151,7 +158,7 @@ struct State
     uint64_t mainFrameConstantsFrame = UINT64_MAX;
     uint32_t sceneRevision = UINT32_MAX;
     uint64_t viewModelRevision = UINT64_MAX;  // GpuScene::viewModelRevision the instance hierarchy was built with
-    uint32_t traversalLevels = 0;  // deepest per-depth tree of any mesh (node passes per phase)
+    uint32_t traversalLevels = 0;  // deepest per-depth tree of any mesh (node passes per phase without the work queue)
 
     // C3: instance chunks, flat list, skinned bounds (persistent; rebuilt at each scene revision).
     struct VBuffer
@@ -855,7 +862,7 @@ void cullConstants(const PassContext& c, const Run& r, uint32_t phase, uint32_t 
     k[23] = r.cfg.capDeferred;
     k[24] = r.viewCount;
     k[25] = instanceCount;
-    k[26] = r.bandMode | (r.storedPairs ? 256u : 0u);  // CullShared.hlsli BAND_MODE, TILE_STORED_PAIRS
+    k[26] = r.bandMode | (r.storedPairs ? 256u : 0u) | (r.cfg.workQueue ? 512u : 0u);  // CullShared.hlsli BAND_MODE, TILE_STORED_PAIRS, NODE_WORK_QUEUE
     k[27] = r.tilePairs.valid() ? c.uav(r.tilePairs) : kNone;
     k[28] = halfBits(r.cfg.bandAMinPx) | halfBits(r.cfg.bandCMaxPx) << 16;
     k[29] = r.sheetsSrv;
@@ -940,8 +947,8 @@ void planarTileMask(FramePassContext& fc, Run& r, const ViewDesc& view)
     }
 }
 
-// One cull phase: instances (phase 1: all x views; phase 2: deferred), the traversal levels, the cluster pass(es) and
-// the draw arguments of the lists for this phase.
+// One cull phase: instances (phase 1: all x views; phase 2: deferred), the traversal (one dispatch over the node work
+// queue, or the levels), the cluster pass(es) and the draw arguments of the lists for this phase.
 void cullPhase(FramePassContext& fc, State& s, const Run& r, uint32_t phase)
 {
     const uint32_t instances = (uint32_t)fc.scene.instances().size();
@@ -974,11 +981,14 @@ void cullPhase(FramePassContext& fc, State& s, const Run& r, uint32_t phase)
         cullPass(fc, s, r, "instances.p2", "Passes/Visibility/CullInstances.PHASE2.SOURCE0", phase, 0, 0, kArgDeferredInstances);
         cullPass(fc, s, r, "seed.p2", "Passes/Visibility/CullSeed", phase, 0, 0, kArgSeedNodes);
     }
-    for (uint32_t level = 0; level < s.traversalLevels; ++level)
-    {
-        cullPass(fc, s, r, "prepare.nodes.p" + p + "." + std::to_string(level), "Passes/Visibility/CullPrepare.MODE0", phase, 1, 1, 0);
-        cullPass(fc, s, r, "nodes.p" + p + "." + std::to_string(level), "Passes/Visibility/CullNodes.PHASE" + p, phase, 0, 0, kArgNodes);
-    }
+    if (r.cfg.workQueue)
+        cullPass(fc, s, r, "nodes.p" + p, "Passes/Visibility/CullNodes.PHASE" + p + ".QUEUE1", phase, r.cfg.workerGroups, 1, 0);
+    else
+        for (uint32_t level = 0; level < s.traversalLevels; ++level)
+        {
+            cullPass(fc, s, r, "prepare.nodes.p" + p + "." + std::to_string(level), "Passes/Visibility/CullPrepare.MODE0", phase, 1, 1, 0);
+            cullPass(fc, s, r, "nodes.p" + p + "." + std::to_string(level), "Passes/Visibility/CullNodes.PHASE" + p + ".QUEUE0", phase, 0, 0, kArgNodes);
+        }
     cullPass(fc, s, r, "prepare.groups.p" + p, "Passes/Visibility/CullPrepare.MODE1", phase, 1, 1, 0);
     cullPass(fc, s, r, "clusters.p" + p, "Passes/Visibility/CullClusters.MODE0", phase, 0, 0, kArgGroups);
     if (phase == 2) cullPass(fc, s, r, "clusters.deferred.p2", "Passes/Visibility/CullClusters.MODE1", phase, 0, 0, kArgDeferredClusters);

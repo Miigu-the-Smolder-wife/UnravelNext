@@ -67,7 +67,8 @@ constexpr uint32_t kStateNodeWrite = 0, kStateNodeEnd = 2, kStateGroupWrite = 3,
                    kStateDeferClusters = 8, kStateListCount = 9, kStateCovSpecial = 17, kStateOceanEdges = 18, kStateOverflow = 21, kStateStatInstances = 22, kStateStatNodes = 23, kStateStatClusters = 24,
                    kStateStatTriangles = 25, kStateTilePairs = 29, kStateCovPool = 30, kStateCovInvocations = 31, kStateCovFragments = 32, kStateCovTiles = 33, kStateCovMeasured = 34,
                    kStateStatBandClusters = 35, kStateCovBlocks = 38, kStateCovHeavy = 39, kStateStatMixedClusters = 40,
-                   kStateStatMixedTriangles = 41, kStateChunkItems = 42, kStateDeferChunks = 43, kStateStatChunks = 44, kStateListPhase1 = 48, kStateWords = 56;
+                   kStateStatMixedTriangles = 41, kStateChunkItems = 42, kStateDeferChunks = 43, kStateStatChunks = 44, kStateNodeCommit = 45, kStateNodeRead = 46,
+                   kStateNodePending = 47, kStateListPhase1 = 48, kStateWords = 56;
 constexpr uint32_t kLists = 8;
 constexpr uint32_t kListABack = 0, kListANone = 1, kListAAlphaBack = 2, kListAAlphaNone = 3, kListB = 4, kListC = 5, kListTBack = 6, kListTNone = 7;
 constexpr uint32_t kBandLists = 6;  // lists of the cull bands (the depth raster service draws these)

@@ -1,7 +1,8 @@
 // unx-kernel: cs_6_6 main
 // unx-variants: MODE=0,1,2,3,4,5
 // Single-thread indirect-argument setup between cull passes (CullShared.hlsli root layout).
-//   MODE=0: next traversal level: node items [previous end, written) -> VA_NODES (64 per group).
+//   MODE=0: next traversal level: node items [previous end, written) -> VA_NODES (64 per group). Not with the node work
+//           queue (CullNodes QUEUE=1: one dispatch, no arguments).
 //   MODE=1: cluster pass: group items [previous end, written) -> VA_GROUPS (one group per item, 65535 per row).
 //   MODE=2: phase 2 inputs: deferred instances, deferred nodes (seed), deferred clusters (64 per group).
 //   MODE=4: chunk instance pass: one group per visible chunk item (CullChunks PHASE=1) -> VA_CHUNK_ITEMS.
@@ -49,6 +50,8 @@ void main()
         else base = state.Load(4 * (VS_LIST_PHASE1 + k));
         storeDispatch(args, VA_MESH + 3 * k, k >= LIST_T_BACK ? count : count - base);  // translucent lists: drawn once, after phase 2
     }
-    if (min(state.Load(4 * VS_NODE_WRITE), CAP_NODES) != state.Load(4 * VS_NODE_END)) state.InterlockedOr(4 * VS_OVERFLOW, OVERFLOW_NODE_DEPTH);
+    // (work queue: items still pending after its workers left; level passes: items appended by the last level)
+    const bool complete = NODE_WORK_QUEUE != 0 ? state.Load(4 * VS_NODE_PENDING) == 0 : min(state.Load(4 * VS_NODE_WRITE), CAP_NODES) == state.Load(4 * VS_NODE_END);
+    if (!complete) state.InterlockedOr(4 * VS_OVERFLOW, OVERFLOW_NODE_DEPTH);
 #endif
 }

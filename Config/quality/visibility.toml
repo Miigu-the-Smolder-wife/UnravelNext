@@ -49,6 +49,13 @@ raster_amplification = true       # tile-local raster runs (DepthRasterRequest::
                                   # (cluster, tile run) pair from the visible entry's tile rectangle (no pair is stored: no pair
                                   # capacity); false = the stored pair list of capacity max_visible_clusters (A/B)
 max_node_items = 4194304          # hierarchy traversal work items (instance, node) of both phases
+traversal_work_queue = true       # the hierarchy traversal of a cull run (main view, every raster-service request: shadow
+                                  # pages, cards) is one dispatch whose waves take node items from a work queue until it
+                                  # is empty (CullNodes QUEUE=1, the reference's persistent cull) - a pass for the whole
+                                  # tree where each level took a prepare pass and a node pass (10 passes a phase at depth
+                                  # 5). The same nodes, groups and deferrals as the level passes. false: the level passes (A/B)
+traversal_worker_groups = 1024    # its dispatch: groups of 64 threads, each wave a worker (a size, as the reference's
+                                  # persistent thread group count; an empty queue ends every worker after one read)
 max_group_items = 1048576         # hierarchy leaves reached (instance, group)
 max_deferred_items = 1048576      # phase-1 occluded instances / nodes / clusters retested in phase 2
 coverage_table_slots = 32         # unused since INTERFACES v1.41 (tile ranges replace the chunk tables); kept so binaries

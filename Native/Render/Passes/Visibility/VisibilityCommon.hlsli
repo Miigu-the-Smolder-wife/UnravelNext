@@ -125,6 +125,10 @@ uint skinSlot(CullScene cs, uint instance)
 #define VS_CHUNK_ITEMS 42u    // (chunk, view) items of the chunks that passed CullChunks in this phase
 #define VS_DEFER_CHUNKS 43u   // chunks occluded against the previous HiZ in phase 1 (tested again in phase 2)
 #define VS_STAT_CHUNKS 44u    // chunk items expanded to their instances (both phases)
+#define VS_NODE_COMMIT 45u    // node work queue (CullNodes QUEUE=1): node items [0, min(this, capacity)) are stored
+#define VS_NODE_READ 46u      // node work queue: node items claimed by the traversal's workers
+#define VS_NODE_PENDING 47u   // node work queue: items kept in the queue whose processing has not finished (0: the
+                              // traversal is complete)
 #define VS_LIST_PHASE1 48u    // + list (words 48 .. 55): entries of phase 1 (snapshot)
 #define VS_WORDS 56u
 
@@ -164,7 +168,8 @@ uint skinSlot(CullScene cs, uint instance)
 #define OVERFLOW_DEFER_INSTANCES 8u
 #define OVERFLOW_DEFER_NODES 16u
 #define OVERFLOW_DEFER_CLUSTERS 32u
-#define OVERFLOW_NODE_DEPTH 64u        // node items left unprocessed after the last traversal iteration
+#define OVERFLOW_NODE_DEPTH 64u        // node items left unprocessed after the last traversal iteration (work queue: after
+                                       // its workers left)
 #define OVERFLOW_TILE_PAIRS 128u
 #define OVERFLOW_COVERAGE 256u         // the coverage record pool ran out (its fragments are lost; the pool grows)
 #define OVERFLOW_COVERAGE_DEPTH 512u   // unused since v1.41 (was: a coverage tile past its extension tree)
@@ -185,6 +190,38 @@ uint waveAppend(RWByteAddressBuffer state, uint word, uint n, uint capacity, uin
     base = WaveReadLaneFirst(base);
     if (total > 0 && base + total > capacity && WaveIsFirstLane()) state.InterlockedOr(4 * VS_OVERFLOW, overflowBit);
     return base + prefix;
+}
+
+// Node queue append (the hierarchy traversal's items; CullNodes.hlsl). Wave-aggregated like waveAppend: 'n' entries per
+// lane, returns this lane's first index; 'first' and 'total' are the wave's (uniform). The entries kept (below the
+// capacity) are counted in VS_NODE_PENDING before they are stored, less 'retired' (uniform over the wave: the items the
+// wave finished with these appends, 0 outside the traversal), so the count never reads 0 while entries are still to come.
+// After storing them the caller publishes them: nodePublish in the passes that run before the traversal, the
+// traversal's own ordered publish while its workers read the queue. Uniform control flow.
+uint nodeReserve(RWByteAddressBuffer state, uint n, uint capacity, uint retired, out uint first, out uint total)
+{
+    total = WaveActiveSum(n);
+    const uint prefix = WavePrefixSum(n);
+    uint base = 0;
+    if (WaveIsFirstLane())
+    {
+        if (total > 0)
+        {
+            state.InterlockedAdd(4 * VS_NODE_WRITE, total, base);
+            if (base + total > capacity) state.InterlockedOr(4 * VS_OVERFLOW, OVERFLOW_NODES);
+        }
+        const uint kept = min(base + total, capacity) - min(base, capacity);
+        if (kept != retired) state.InterlockedAdd(4 * VS_NODE_PENDING, kept - retired);  // (two's complement: may subtract)
+    }
+    first = WaveReadLaneFirst(base);
+    return first + prefix;
+}
+
+// Publishes a wave's node items [first, first + total) from a pass that runs before the traversal (nothing reads the
+// queue meanwhile): the queue's end is the largest published end, which is VS_NODE_WRITE once the pass is done.
+void nodePublish(RWByteAddressBuffer state, uint first, uint total)
+{
+    if (total > 0 && WaveIsFirstLane()) state.InterlockedMax(4 * VS_NODE_COMMIT, first + total);
 }
 
 uint packItem(uint index, uint view) { return index | (view << 24); }
