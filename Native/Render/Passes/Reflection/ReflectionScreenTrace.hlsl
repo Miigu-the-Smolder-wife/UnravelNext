@@ -13,9 +13,13 @@
 // P[4..7] = the previous view-projection of the previous colour (rows). Frame constants b1 = main view.
 // P[8].x = M's material word (the top layer's roughness, ReflectionInternal.hlsli g_reflWords; UNX_NONE: none),
 // P[8].y != 0: the previous colour's alpha is its frame's depth (the history depth test, ScreenTrace.hlsli).
+// P[8].z = E's hair density parameters (raw SRV; UNX_NONE: none): the depth buffer holds no hair, so a ray whose first
+// fibre (RayTracing/HitHair.hlsli: the draw the world trace makes for the same pixel and frame) lies before its screen
+// hit takes no value here - the world trace shades the groom.
 #include "Passes/Reflection/ReflectionReuse.hlsli"
 #include "Passes/Reflection/ScreenTrace.hlsli"
 #include "Passes/Atmosphere/FogVolume.hlsli"
+#include "RayTracing/HitHair.hlsli"
 
 [numthreads(8, 8, 1)]
 void main(uint2 pixel : SV_DispatchThreadID)
@@ -48,6 +52,7 @@ void main(uint2 pixel : SV_DispatchThreadID)
     const float resume = pullback >= 0 && r.iterations > 0 ? max(distance(hit, s.position) + (r.hit ? 0.0 : 0.02) - pullback, 0.0) : 0.0;
     results[job] = uint3(asuint(resume), 0, 0);
     if (!r.hit || r.uncertain) return;
+    if (rtHairFirst(P[8].z, s.position, direction, distance(hit, s.position), rtHairSeed(pixel, P[1].w & 0xFFFFFFu)).t >= 0) return;
     Texture2D<float4> previous = ResourceDescriptorHeap[P[1].z];
     const float4x4 prevViewProj = float4x4(asfloat(P[4]), asfloat(P[5]), asfloat(P[6]), asfloat(P[7]));
     const float noise = reuseUnit(pixel.x + pixel.y * 65536u + (P[1].w & 7u) * 0x9E3779B9u + 0x2545F491u);

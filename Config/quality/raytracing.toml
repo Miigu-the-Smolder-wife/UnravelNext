@@ -13,6 +13,16 @@ emitters = true                        # analytic area lights as ray geometry (d
                                        # radiance in the cache's emitter texels, apart from the texels; those feed the K path
                                        # (probe maps) and glass/water, so M skips the lights' LTC specular in the main view.
                                        # Ray hits read the texels alone with their NEE sample; planar views shade by LTC)
+hair = true                            # strand hair on rays (RayTracing/HitHair.hlsli): the grooms' proxy for the reflection
+                                       # rays and the final gather's rays is E's density volume (shading.hair_density_*), not
+                                       # geometry in the TLAS - a ray's first fibre in the volume (drawn per ray: a groom is as
+                                       # opaque to rays as its fibres make it) is a hit, lit as a matte surface of the hair
+                                       # material's base colour facing out of the groom: the sun and one local-light sample,
+                                       # each through its shadow ray and the hair in front of it. Mirrors show the grooms and
+                                       # bounce light is blocked by them (Unreal traces its hair voxels on the same rays and
+                                       # takes the hit as black). Costs a box test per body with a block on each such ray and
+                                       # the march where a box is crossed. Not on: shadow rays of hits and cards, the radiance
+                                       # cache's and the translucency volume's rays, refraction rays
 proxy_error_model = "measured"         # a cut's error for the choice: "measured" = bind-pose Hausdorff x proxy_posed_factor,
                                        # "bound" = the certified posed bound (50-170x the measured error; tests)
 proxy_posed_factor = 1.5               # posed / bind-pose error margin of skin-aware cuts (measured up to 1.32)
