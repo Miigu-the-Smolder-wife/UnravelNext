@@ -1,6 +1,7 @@
 // unx-kernel: cs_6_6 main
-// Post chain, final pass (Post.cpp): exposed HDR -> bloom mix -> natural vignetting -> tone curve -> grading LUT ->
-// grain -> sRGB OETF -> 10-bit triangular dither -> the display output (RGB10A2).
+// Post chain, final pass (Post.cpp): exposed HDR (with the scene colour fringe and the sharpen) -> local exposure ->
+// bloom mix -> lens flares -> natural vignetting -> tone curve (or the combined grading LUT: grading and curve in one
+// lookup) -> grading LUT -> grain -> sRGB OETF -> 10-bit triangular dither -> the display output (RGB10A2).
 // P[0] = { HDR SRV, bloom SRV (half resolution; UNX_NONE: off), output UAV, LUT SRV (UNX_NONE: none) },
 // P[1] = { asfloat bloom strength, asfloat vignette, asfloat grain, frame index }, P[2] = { width, height, asfloat display
 // peak, tone curve (0 film shFilm, 1 PBR Neutral) }, P[3] = { exposure correction SRV (raw: float c; UNX_NONE: none: a
@@ -12,6 +13,15 @@
 // Local exposure (shading.post_local_exposure, LocalExposure.hlsli), first of all: P[7] = { grid SRV (UNX_NONE: off),
 // blurred SRV, asuint(uv scale x), asuint(uv scale y) }, P[8] = { asuint(highlight), asuint(shadow), asuint(detail),
 // asuint(blend) }, P[9].x = asuint(log2 middle grey). The bloom tail is of the image with it (PostDownsample.hlsl).
+// P[10] = { asuint(sharpen / 6) (shading.post_sharpen; 0: off), asuint(fringe scale of red), asuint(fringe scale of
+// green) (shading.post_fringe; both 0: off), asuint(fringe start) }:
+//   fringe    the scene colour fringe (the reference's chromatic aberration in the tonemapper): red and green are read
+//             nearer the image centre than blue - per axis, by their scale x the distance beyond the start offset -
+//             as a lens focuses the longer wavelengths at a smaller magnification;
+//   sharpen   the tonemapper's sharpen: the pixel less the mean of its four neighbours, added back x 4 x sharpen / 6,
+//             less next to very bright content (the mask 1 - the largest luminance step to a neighbour, exposed).
+// P[11] = { lens flare SRV (RGBA16F, quarter resolution: PostFlare.hlsl; UNX_NONE: off), combined grading LUT SRV
+// (Texture3D RGBA16F: PostGradeLut.hlsl; UNX_NONE: the curve is evaluated here), its size, 0 }.
 // Frame constants of the view (its projection gives the field angle).
 #include "Bindless.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
@@ -37,6 +47,25 @@ void main(uint2 id : SV_DispatchThreadID)
     {
         ByteAddressBuffer correction = ResourceDescriptorHeap[P[3].x];
         correctionFactor = asfloat(correction.Load(0));  // a snap frame exposed for itself (Exposure.cpp, ExposureMeter.hlsl)
+    }
+    const float2 fringe = asfloat(P[10].yz);
+    if (fringe.x > 0 || fringe.y > 0)
+    {
+        const float2 ndc = (float2(id) + 0.5) / float2(P[2].xy) * 2 - 1;
+        const float2 beyond = sign(ndc) * saturate(abs(ndc) - asfloat(P[10].w));
+        e.r = hdr.SampleLevel(g_linearClamp, (ndc - beyond * fringe.x) * 0.5 + 0.5, 0).r;
+        e.g = hdr.SampleLevel(g_linearClamp, (ndc - beyond * fringe.y) * 0.5 + 0.5, 0).g;
+    }
+    const float sharpen = asfloat(P[10].x);
+    if (sharpen > 0)
+    {
+        const int2 last = int2(P[2].xy) - 1;
+        const float3 c1 = hdr.Load(int3(max(int2(id) - int2(1, 0), 0), 0)).rgb, c2 = hdr.Load(int3(min(int2(id) + int2(1, 0), last), 0)).rgb;
+        const float3 c3 = hdr.Load(int3(max(int2(id) - int2(0, 1), 0), 0)).rgb, c4 = hdr.Load(int3(min(int2(id) + int2(0, 1), last), 0)).rgb;
+        const float3 y = float3(0.3, 0.59, 0.11);
+        const float4 steps = abs(dot(e, y) - float4(dot(c1, y), dot(c2, y), dot(c3, y), dot(c4, y)));
+        const float edgeMask = saturate(1.0 - correctionFactor * max(max(steps.x, steps.y), max(steps.z, steps.w)));
+        e -= (c1 + c2 + c3 + c4 - 4.0 * e) * (edgeMask * sharpen);
     }
     if (P[7].x != UNX_NONE)
     {
@@ -65,6 +94,12 @@ void main(uint2 id : SV_DispatchThreadID)
         const float3 t01 = tail.Load(int3(clamp(b + int2(0, 1), int2(0, 0), hi), 0)).rgb, t11 = tail.Load(int3(clamp(b + int2(1, 1), int2(0, 0), hi), 0)).rgb;
         e = lerp(e, lerp(lerp(t00, t10, f.x), lerp(t01, t11, f.x), f.y), bloom);  // PSF = (1 - s) delta + s tail
     }
+    if (P[11].x != UNX_NONE)
+    {
+        // image-based lens flares: stray light the lens adds (ghosts of the bright parts, PostFlare.hlsl)
+        Texture2D<float4> flare = ResourceDescriptorHeap[P[11].x];
+        e += flare.SampleLevel(g_linearClamp, (float2(id) + 0.5) / float2(P[2].xy), 0).rgb;
+    }
     e *= correctionFactor;
     if (P[3].y != 0)
     {
@@ -89,7 +124,17 @@ void main(uint2 id : SV_DispatchThreadID)
     const float range = hdrDisplay ? peak : 1.0;
     // d: the curve's output over the display's range (0..1), so the LUT and grain act the same in SDR and HDR
     float3 d;
-    if (P[2].w == 1u) d = hdrDisplay ? saturate(shPbrNeutralPeak(max(e, 0.0), peak) / peak) : saturate(shPbrNeutral(max(e, 0.0)));
+    if (P[11].y != UNX_NONE)
+    {
+        // the combined LUT (PostGradeLut.hlsl): the grading and the curve at the scene colour's log2 code (14 stops
+        // around grey 0.18 at 444 / 1023, 0 at code 0), the value's square root stored
+        Texture3D<float4> grade = ResourceDescriptorHeap[P[11].y];
+        const float n = (float)P[11].z;
+        const float3 code = saturate(log2(max(e, 0.0) + 0.18 * exp2(-444.0 / 1023.0 * 14.0)) / 14.0 - log2(0.18) / 14.0 + 444.0 / 1023.0);
+        const float3 v = grade.SampleLevel(g_linearClamp, code * ((n - 1.0) / n) + 0.5 / n, 0).rgb;
+        d = saturate(v * v);
+    }
+    else if (P[2].w == 1u) d = hdrDisplay ? saturate(shPbrNeutralPeak(max(e, 0.0), peak) / peak) : saturate(shPbrNeutral(max(e, 0.0)));
     else d = saturate(shFilm(max(e, 0.0), range) / range);
     if (P[0].w != UNX_NONE)
     {

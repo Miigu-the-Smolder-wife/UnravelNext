@@ -7,13 +7,22 @@
 //   reprojection edge      over the dilated vectors of the 3 x 3 neighbourhood: 0 where a neighbour's vector differs by
 //                          a pixel along its offset (the history on either side of such an edge is another surface's);
 //   guide                  the previous frame's guide reprojected (Catmull-Rom) with the exposure change applied;
-//   flickering history     the previous frame's (TsrFlicker.hlsl), nearest texel at a position dithered within a texel.
+//   flickering history     the previous frame's (TsrFlicker.hlsl), nearest texel at a position dithered within a texel;
+//   resurrection           (P[5].x; output.upscale_tsr_resurrection) the guide of the frame kept for resurrection,
+//                          reprojected by the cameras alone - the pixel's closest depth carried from this frame's view
+//                          to the kept frame's (what moved by itself since then does not match and is not resurrected).
 // P[0] = { dilated motion SRV (RG32F), info SRV (RGBA16F, TsrDilate.hlsl), scatter SRV (R32_UINT), previous guide SRV
 //          (R10G10B10A2: guide colour, a = uncertainty; UNX_NONE: no history) }
 // P[1] = { reprojected guide UAV (R10G10B10A2), mask UAV (RG8: r = bits / 255 - 1 off screen or cut, 2 parallax
-//          disocclusion; g = reprojection edge), width, height }
+//          disocclusion, 16 off the kept frame's screen; g = reprojection edge), width, height }
 // P[2] = { asuint(jitter x), asuint(jitter y), asuint(exposure ratio), flags (1: reset - first frame, cut, restore) }
 // P[3] = { previous flickering history SRV (RGBA8; UNX_NONE: none), reprojected flickering history UAV (RGBA8), frame, 0 }
+// P[4] = { previous thin coverage history SRV (R8; UNX_NONE: none), reprojected thin coverage UAV (R8; UNX_NONE: no
+//          thin geometry detection), 0, 0 }
+// P[5] = { kept frame's guide SRV (R10G10B10A2; UNX_NONE: no resurrection this frame), resurrected guide UAV
+//          (R10G10B10A2; UNX_NONE: none), asuint(this frame's exposure over the kept frame's), field SRV (RGBA32_UINT,
+//          Tsr.hlsli: z = the closest device depth) }, P[6..9] = rows of this frame's unjittered clip space to the
+//          kept frame's
 // Frame constants b1 = the main view.
 #include "Passes/Shading/Tsr.hlsli"
 #include "Passes/Common/Frame.hlsli"
@@ -121,5 +130,41 @@ void main(uint2 id : SV_DispatchThreadID)
         RWTexture2D<float4> flickerOut = ResourceDescriptorHeap[P[3].y];
         flickerOut[id] = flicker;
     }
-    maskOut[id] = float2(((offScreen ? 1.0 : 0.0) + (disoccluded ? 2.0 : 0.0)) / 255.0, edge);
+    if (P[4].y != UNX_NONE)
+    {
+        // the thin geometry's coverage history (TsrThin.hlsl): the nearest texel (a mean of coverages is not a coverage)
+        float coverage = 0;
+        if (!offScreen && !disoccluded && P[4].x != UNX_NONE)
+        {
+            Texture2D<float> previousCoverage = ResourceDescriptorHeap[P[4].x];
+            coverage = previousCoverage.Load(int3(clamp(int2(floor(previousUv * float2(size))), 0, size - 1), 0));
+        }
+        RWTexture2D<float> coverageOut = ResourceDescriptorHeap[P[4].y];
+        coverageOut[id] = coverage;
+    }
+    bool offKept = true;
+    if (P[5].y != UNX_NONE)
+    {
+        float4 kept = float4(0, 0, 0, 0);
+        if (P[5].x != UNX_NONE)
+        {
+            Texture2D<uint4> field = ResourceDescriptorHeap[P[5].w];
+            const float4x4 toKept = float4x4(asfloat(P[6]), asfloat(P[7]), asfloat(P[8]), asfloat(P[9]));
+            const float4 clip = mul(toKept, float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, asfloat(field.Load(int3(id, 0)).z), 1.0));
+            if (clip.w > 1e-6)
+            {
+                const float2 keptUv = float2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
+                offKept = !all(keptUv >= 0) || !all(keptUv <= 1);
+                if (!offKept)
+                {
+                    Texture2D<float4> keptGuide = ResourceDescriptorHeap[P[5].x];
+                    kept = saturate(keptGuide.SampleLevel(g_linearClamp, keptUv, 0));
+                    kept.rgb = saturate(tsrLinearToGuide(tsrGuideToLinear(kept.rgb) * asfloat(P[5].z)));
+                }
+            }
+        }
+        RWTexture2D<float4> keptOut = ResourceDescriptorHeap[P[5].y];
+        keptOut[id] = kept;
+    }
+    maskOut[id] = float2(((offScreen ? 1.0 : 0.0) + (disoccluded ? 2.0 : 0.0) + (offKept ? 16.0 : 0.0)) / 255.0, edge);
 }

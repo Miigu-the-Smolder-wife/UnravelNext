@@ -1,7 +1,11 @@
 // Post chain of M in HDR (FEATURES_GAME 4 "order" and 6; render A item A4). When a post term is on, the main view is
 // shaded into an exposed-linear RGBA16F target (the shading writers' linear variant) and this chain writes the display
-// output: lens PSF (bloom: a shift-invariant, energy-conserving pyramid kernel, the PSF's tail holding the fraction
-// shading.post_bloom_strength of the energy) -> natural vignetting (cos^4 of the field angle) -> tone curve (PBR Neutral,
+// output: scene colour fringe and sharpen (shading.post_fringe, post_sharpen: the reference's tonemapper terms) -> lens
+// PSF (bloom: a shift-invariant, energy-conserving pyramid kernel, the PSF's tail holding the fraction
+// shading.post_bloom_strength of the energy) -> image-based lens flares (shading.post_lens_flare: PostFlare.hlsl, from
+// the bloom chain's 1/8 level) -> natural vignetting (cos^4 of the field angle) -> [scene-referred colour grading
+// (shading.post_grading_*, FrameContext::grading): baked with the curve into the combined LUT, gradeLut below, read
+// once in place of the curve] -> tone curve (PBR Neutral,
 // INTERFACES 8.4) -> grading LUT (33^3 .cube, after the curve) -> film grain (deterministic hash, after the curve) ->
 // triangular dither of the 10-bit output -> sRGB. With every term off the chain is not recorded and the writers encode
 // directly (gates and reference comparisons are unchanged: the quality keys default to off). An HDR display
@@ -40,7 +44,20 @@ struct PostParams
     // Local exposure (LocalExposure.hlsli; the reference's bilateral method)
     bool localExposure = false;
     float leHighlight = 0.8f, leShadow = 0.8f, leDetail = 1.0f, leBlend = 0.6f, leMiddleGreyBias = 0.0f, leKernelPercent = 50.0f;
+    // The tonemapper's sharpen (the reference's r.Tonemapper.Sharpen: 0 off, 1 full) and scene colour fringe (its
+    // SceneFringeIntensity in percent and ChromaticAberrationStartOffset)
+    float sharpen = 0, fringe = 0, fringeStart = 0;
+    PostLensFlare flare;
 };
+
+// A [r, g, b, w] (or [r, g, b]) quality value.
+void readVector(const QualityConfig& q, const char* key, float* out, size_t count)
+{
+    if (!q.has(key)) return;
+    const std::vector<double> v = q.numbers(key);
+    if (v.size() != count) fail("%s must have %zu numbers", key, count);
+    for (size_t i = 0; i < count; ++i) out[i] = (float)v[i];
+}
 
 PostParams params(const QualityConfig& q)
 {
@@ -70,6 +87,27 @@ PostParams params(const QualityConfig& q)
     else fail("shading.post_tone_curve = \"%s\": film or neutral", curve.c_str());
     if (p.bloom < 0 || p.bloom > 1 || p.vignette < 0 || p.vignette > 1 || p.grain < 0 || p.grain >= 0.4f || p.levels < 1 || p.levels > 10)
         fail("shading.post_*: bloom strength and vignette in [0, 1], 0 <= grain < 0.4, 1 <= bloom levels <= 10");
+    p.sharpen = num("shading.post_sharpen", 0);
+    p.fringe = num("shading.post_fringe", 0);
+    p.fringeStart = num("shading.post_fringe_start", 0);
+    if (p.sharpen < 0 || p.sharpen > 10 || p.fringe < 0 || p.fringe > 100 || p.fringeStart < 0 || p.fringeStart >= 1)
+        fail("shading.post_sharpen in [0, 10], post_fringe in [0, 100] percent, post_fringe_start in [0, 1)");
+    PostLensFlare& f = p.flare;
+    f.on = q.has("shading.post_lens_flare") && q.boolean("shading.post_lens_flare");
+    f.intensity = num("shading.post_lens_flare_intensity", 1.0f);
+    f.bokehSize = num("shading.post_lens_flare_bokeh_size", 3.0f);
+    f.threshold = num("shading.post_lens_flare_threshold", 8.0f);
+    f.halo = num("shading.post_lens_flare_halo", 0.0f);
+    f.blades = q.has("shading.post_lens_flare_blades") ? (uint32_t)q.integer("shading.post_lens_flare_blades") : 0u;
+    readVector(q, "shading.post_lens_flare_tint", f.tint, 3);
+    static const char* const tintKeys[8] = { "shading.post_lens_flare_tint_1", "shading.post_lens_flare_tint_2", "shading.post_lens_flare_tint_3",
+                                             "shading.post_lens_flare_tint_4", "shading.post_lens_flare_tint_5", "shading.post_lens_flare_tint_6",
+                                             "shading.post_lens_flare_tint_7", "shading.post_lens_flare_tint_8" };
+    for (int i = 0; i < 8; ++i) readVector(q, tintKeys[i], f.tints[i], 4);
+    if (f.intensity < 0 || f.bokehSize < 0 || f.bokehSize > 32 || f.threshold < 0 || f.halo < 0 || f.blades > 16 || f.blades == 1 || f.blades == 2)
+        fail("shading.post_lens_flare_*: intensity, threshold and halo >= 0, bokeh size in [0, 32] percent, blades 0 or 3 .. 16");
+    // (as the reference: no flares without intensity, a tint or a bokeh size)
+    if (!(f.intensity > 0) || !(f.bokehSize > 0) || (f.tint[0] <= 0 && f.tint[1] <= 0 && f.tint[2] <= 0)) f.on = false;
     return p;
 }
 
@@ -196,6 +234,168 @@ uint32_t asUint(float f)
     std::memcpy(&u, &f, 4);
     return u;
 }
+
+// The frame's colour grading: the game's (FrameContext::grading) or the quality file's shading.post_grading_*.
+ColorGradingDesc gradingOf(FramePassContext& fc)
+{
+    if (fc.frame.grading.enabled) return fc.frame.grading;
+    const QualityConfig& q = fc.quality;
+    ColorGradingDesc g;
+    auto num = [&](const char* k, float d) { return q.has(k) ? (float)q.number(k) : d; };
+    g.temperature = num("shading.post_grading_temperature", 6500.0f);
+    g.tint = num("shading.post_grading_tint", 0.0f);
+    g.shadowsMax = num("shading.post_grading_shadows_max", 0.09f);
+    g.highlightsMin = num("shading.post_grading_highlights_min", 0.5f);
+    g.highlightsMax = num("shading.post_grading_highlights_max", 1.0f);
+    struct Keys
+    {
+        ColorGradingRange* range;
+        const char* saturation;
+        const char* contrast;
+        const char* gamma;
+        const char* gain;
+        const char* offset;
+    };
+    const Keys keys[4] = {
+        { &g.global, "shading.post_grading_saturation", "shading.post_grading_contrast", "shading.post_grading_gamma", "shading.post_grading_gain",
+          "shading.post_grading_offset" },
+        { &g.shadows, "shading.post_grading_shadows_saturation", "shading.post_grading_shadows_contrast", "shading.post_grading_shadows_gamma",
+          "shading.post_grading_shadows_gain", "shading.post_grading_shadows_offset" },
+        { &g.midtones, "shading.post_grading_midtones_saturation", "shading.post_grading_midtones_contrast", "shading.post_grading_midtones_gamma",
+          "shading.post_grading_midtones_gain", "shading.post_grading_midtones_offset" },
+        { &g.highlights, "shading.post_grading_highlights_saturation", "shading.post_grading_highlights_contrast", "shading.post_grading_highlights_gamma",
+          "shading.post_grading_highlights_gain", "shading.post_grading_highlights_offset" },
+    };
+    for (const Keys& k : keys)
+    {
+        readVector(q, k.saturation, k.range->saturation, 4);
+        readVector(q, k.contrast, k.range->contrast, 4);
+        readVector(q, k.gamma, k.range->gamma, 4);
+        readVector(q, k.gain, k.range->gain, 4);
+        readVector(q, k.offset, k.range->offset, 4);
+    }
+    return g;
+}
+
+// Nothing to grade: every value at its default (the picture is the curve's alone and the chain evaluates it per pixel).
+bool gradingNeutral(const ColorGradingDesc& g)
+{
+    if (g.temperature != 6500.0f || g.tint != 0.0f) return false;
+    for (const ColorGradingRange* r : { &g.global, &g.shadows, &g.midtones, &g.highlights })
+        for (int i = 0; i < 4; ++i)
+            if (r->saturation[i] != 1 || r->contrast[i] != 1 || r->gamma[i] != 1 || r->gain[i] != 1 || r->offset[i] != 0) return false;
+    return true;
+}
+
+// The combined grading LUT (PostGradeLut.hlsl): a persistent N^3 table, rebuilt in the frame whose inputs differ from
+// the ones it was built from.
+struct GradeState
+{
+    Device* device = nullptr;
+    ComPtr<ID3D12Resource> lut;
+    uint32_t size = 0;
+    std::vector<float> key;  // the inputs of the table as it is
+    ~GradeState()
+    {
+        if (device && lut) device->deferRelease(lut);
+    }
+    void ensure(Device& d, uint32_t n)
+    {
+        if (lut && size == n) return;
+        device = &d;
+        if (lut) d.deferRelease(lut);
+        D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
+        D3D12_RESOURCE_DESC1 desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+        desc.Width = desc.Height = n;
+        desc.DepthOrArraySize = (UINT16)n;
+        desc.MipLevels = 1;
+        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        desc.SampleDesc.Count = 1;
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
+                                                IID_PPV_ARGS(lut.ReleaseAndGetAddressOf())),
+              "M combined grading LUT");
+        lut->SetName(L"M combined grading LUT");
+        size = n;
+        key.clear();
+    }
+};
+
+// The combined LUT of this frame's grading under the chain's curve and display peak; its build passes when it is stale.
+TextureRef gradeLut(FramePassContext& fc, const ColorGradingDesc& grade, uint32_t curve, float peak, D3D12_GPU_VIRTUAL_ADDRESS cb, uint32_t& sizeOut)
+{
+    const int64_t size = fc.quality.has("shading.post_grading_lut_size") ? fc.quality.integer("shading.post_grading_lut_size") : 32;
+    if (size < 8 || size > 64) fail("shading.post_grading_lut_size %lld: in [8, 64]", (long long)size);
+    if (!(grade.temperature >= 1667 && grade.temperature <= 25000) || !(grade.shadowsMax > 0) || !(grade.highlightsMax > grade.highlightsMin))
+        fail("colour grading: temperature in [1667, 25000] K, shadows max > 0, highlights max > highlights min");
+    const uint32_t n = (uint32_t)size;
+    sizeOut = n;
+    RenderGraph& g = fc.graph;
+    GradeState& s = fc.state<GradeState>("M.post.grade");
+    s.ensure(fc.device, n);
+    const TextureDesc desc{ "m.post.grade lut", n, n, (uint16_t)n, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D };
+    const TextureRef lut = g.importTexture(s.lut.Get(), desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
+    std::vector<float> key = { grade.temperature, grade.tint, grade.shadowsMax, grade.highlightsMin, grade.highlightsMax, (float)curve, peak };
+    const ColorGradingRange* ranges[4] = { &grade.global, &grade.shadows, &grade.midtones, &grade.highlights };
+    for (const ColorGradingRange* r : ranges)
+        for (const float* v : { r->saturation, r->contrast, r->gamma, r->gain, r->offset }) key.insert(key.end(), v, v + 4);
+    if (key == s.key) return lut;
+    s.key = key;
+    // linear Rec.709 -> white-balanced ACEScg (AP1): the Bradford adaptation of the grading's white to D65 (the tint in
+    // the reference's unit: 1 = 0.05 Duv), then ShadingCommon.hlsli shFilm's Rec.709 -> AP1
+    // (6500 K with no tint is the grading's neutral white: no adaptation)
+    float wb[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    if (grade.temperature != 6500.0f || grade.tint != 0.0f) whiteBalanceMatrix(grade.temperature, grade.tint * 0.05f, wb);
+    const float toAp1[9] = { 0.6130973f, 0.3395229f, 0.0473793f, 0.0701942f, 0.9163556f, 0.0134526f, 0.0206156f, 0.1095698f, 0.8698151f };
+    float toWorking[9];
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) toWorking[i * 3 + j] = toAp1[i * 3] * wb[j] + toAp1[i * 3 + 1] * wb[3 + j] + toAp1[i * 3 + 2] * wb[6 + j];
+    TextureDesc workingDesc = desc;
+    workingDesc.name = "m.post.grade working";
+    const TextureRef working = g.createTexture(workingDesc);
+    ID3D12PipelineState* pso = fc.shaders.compute("Passes/Shading/PostGradeLut");
+    const ColorGradingRange global = grade.global;
+    const float shadowsMax = grade.shadowsMax, highlightsMin = grade.highlightsMin, highlightsMax = grade.highlightsMax;
+    for (uint32_t mode = 0; mode < 3; ++mode)
+    {
+        const ColorGradingRange range = *ranges[1 + mode];
+        g.addPass("m.post.grade.range", QueueType::Graphics, [&](PassBuilder& b) { b.use(working, Use::UavCompute); },
+                  [=](PassContext& c) {
+                      uint32_t k[40] = { c.uav(working), 0xFFFFFFFFu, n, mode };
+                      for (int i = 0; i < 3; ++i)
+                      {
+                          for (int j = 0; j < 3; ++j) k[4 + 4 * i + j] = asUint(toWorking[i * 3 + j]);
+                          // the range's values with the global ones: r, g, b times the masters; offsets add
+                          k[16 + i] = asUint(range.saturation[i] * global.saturation[i] * range.saturation[3] * global.saturation[3]);
+                          k[20 + i] = asUint(range.contrast[i] * global.contrast[i] * range.contrast[3] * global.contrast[3]);
+                          k[24 + i] = asUint(1.0f / std::max(range.gamma[i] * global.gamma[i] * range.gamma[3] * global.gamma[3], 1e-3f));
+                          k[28 + i] = asUint(range.gain[i] * global.gain[i] * range.gain[3] * global.gain[3]);
+                          k[32 + i] = asUint(range.offset[i] + global.offset[i] + range.offset[3] + global.offset[3]);
+                      }
+                      k[36] = asUint(shadowsMax);
+                      k[37] = asUint(highlightsMin);
+                      k[38] = asUint(highlightsMax);
+                      c.cmd->SetPipelineState(pso);
+                      c.bindFrameConstants(cb);
+                      c.computeConstants(k, 40);
+                      c.cmd->Dispatch((n + 3) / 4, (n + 3) / 4, (n + 3) / 4);
+                  });
+    }
+    g.addPass("m.post.grade.curve", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(working, Use::UavCompute);
+                  b.use(lut, Use::UavCompute);
+              },
+              [=](PassContext& c) {
+                  const uint32_t k[8] = { c.uav(working), c.uav(lut), n, 3u, curve, asUint(peak), 0, 0 };
+                  c.cmd->SetPipelineState(pso);
+                  c.bindFrameConstants(cb);
+                  c.computeConstants(k, 8);
+                  c.cmd->Dispatch((n + 3) / 4, (n + 3) / 4, (n + 3) / 4);
+              });
+    return lut;
+}
 } // namespace
 
 bool translucentActive(FramePassContext&, const ViewResources& view)
@@ -225,7 +425,8 @@ bool postActive(FramePassContext& fc, const ViewResources& view)
     if (exposureSnapping(fc)) return true;  // a snap frame's exposure correction (Exposure.cpp) is applied by the chain
     const PostParams p = params(fc.quality);
     // (the shading kernels' own display encoding is the film curve: another curve needs the chain)
-    return p.bloom > 0 || p.vignette > 0 || p.grain > 0 || !p.lut.empty() || p.curve != 0 || p.localExposure;
+    return p.bloom > 0 || p.vignette > 0 || p.grain > 0 || !p.lut.empty() || p.curve != 0 || p.localExposure || p.sharpen > 0 || p.fringe > 0 || p.flare.on ||
+           !gradingNeutral(gradingOf(fc));
 }
 
 TextureRef postTarget(FramePassContext& fc, const ViewResources& view)
@@ -285,7 +486,8 @@ PostLocalExposure localExposureInputs(FramePassContext& fc, TextureRef hdr, cons
 }
 } // namespace
 
-TextureRef postBloomTail(FramePassContext& fc, TextureRef hdr, uint32_t levelCount, const PostLocalExposure& localExposure)
+TextureRef postBloomTail(FramePassContext& fc, TextureRef hdr, uint32_t levelCount, const PostLocalExposure& localExposure, const PostLensFlare* flare,
+                         TextureRef* flareOut)
 {
     RenderGraph& g = fc.graph;
     const TextureDesc hd = g.desc(hdr);
@@ -332,6 +534,55 @@ TextureRef postBloomTail(FramePassContext& fc, TextureRef hdr, uint32_t levelCou
                           c.cmd->Dispatch((dd.width + 7) / 8, (dd.height + 7) / 8, 1);
                       });
         }
+        // Image-based lens flares (PostFlare.hlsl), from the 1/8 level as the down chain left it (before the levels are
+        // merged below): the bright parts spread to the aperture's shape, then the ghosts at quarter resolution.
+        if (flare && flare->on && flareOut && levels.size() >= 3)
+        {
+            const TextureRef source = levels[2];
+            const TextureDesc sourceDesc = g.desc(source), flareDesc = g.desc(levels[1]);
+            const TextureRef spread = g.createTexture(TextureDesc{ "m.post.flare spread", sourceDesc.width, sourceDesc.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+            const TextureRef ghosts = g.createTexture(TextureDesc{ "m.post.flare", flareDesc.width, flareDesc.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+            ID3D12PipelineState* spreadPso = fc.shaders.compute("Passes/Shading/PostFlare.STEP0");
+            ID3D12PipelineState* ghostPso = fc.shaders.compute("Passes/Shading/PostFlare.STEP1");
+            const PostLensFlare lf = *flare;
+            // the shape's radius: the reference's bokeh size is a diameter in percent of the flare view's width, drawn
+            // over an image at half scale (its guard band) - twice that against the image
+            const float radius = lf.bokehSize * 0.01f * (float)sourceDesc.width;
+            g.addPass("m.post.flare.spread", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(source, Use::SrvCompute);
+                          b.use(spread, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          const uint32_t k[8] = { c.srv(source), c.uav(spread), sourceDesc.width, sourceDesc.height, asUint(lf.threshold), asUint(radius), lf.blades, 0 };
+                          c.cmd->SetPipelineState(spreadPso);
+                          c.computeConstants(k, 8);
+                          c.cmd->Dispatch((sourceDesc.width + 7) / 8, (sourceDesc.height + 7) / 8, 1);
+                      });
+            g.addPass("m.post.flare.ghosts", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(spread, Use::SrvCompute);
+                          b.use(ghosts, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          // (the reference: the flare's colour x its bloom intensity 0.675; a flare's scale from its tint's
+                          // alpha, (alpha - 0.5) x (the flares' count - 1))
+                          const float amount = lf.intensity * 0.675f;
+                          uint32_t k[40] = { c.srv(spread), c.uav(ghosts), flareDesc.width, flareDesc.height,
+                                             asUint(amount * lf.tint[0]), asUint(amount * lf.tint[1]), asUint(amount * lf.tint[2]), asUint(lf.halo) };
+                          for (int i = 0; i < 8; ++i)
+                          {
+                              k[8 + 4 * i] = asUint(lf.tints[i][0]);
+                              k[9 + 4 * i] = asUint(lf.tints[i][1]);
+                              k[10 + 4 * i] = asUint(lf.tints[i][2]);
+                              k[11 + 4 * i] = asUint((lf.tints[i][3] - 0.5f) * 7.0f);
+                          }
+                          c.cmd->SetPipelineState(ghostPso);
+                          c.computeConstants(k, 40);
+                          c.cmd->Dispatch((flareDesc.width + 7) / 8, (flareDesc.height + 7) / 8, 1);
+                      });
+            *flareOut = ghosts;
+        }
         // Up the pyramid: level l += tent(level l + 1), equal weights per level (each level a Gaussian-like octave).
         for (size_t l = levels.size() - 1; l > 0; --l)
         {
@@ -363,8 +614,17 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
     RenderGraph& g = fc.graph;
     PostLocalExposure le;
     if (p.localExposure) le = localExposureInputs(fc, hdr, p);
-    TextureRef bloom;
-    if (p.bloom > 0) bloom = postBloomTail(fc, hdr, p.levels, le);
+    TextureRef bloom, flare;
+    if (p.bloom > 0 || p.flare.on)
+    {
+        // (the flares read the bloom chain's 1/8 level: without bloom the chain's first three levels are made for them)
+        if (p.flare.on && p.bloom > 0 && p.levels < 3) fail("shading.post_lens_flare needs shading.post_bloom_levels >= 3");
+        const TextureRef tail = postBloomTail(fc, hdr, p.bloom > 0 ? p.levels : 3u, le, &p.flare, &flare);
+        if (p.bloom > 0) bloom = tail;
+    }
+    // the fringe's scales: red and green against blue by their wavelengths (611.3, 549.1, 464.3 nm), beyond the start
+    const float fringeScale = p.fringe * 0.01f / (1.0f - p.fringeStart);
+    const float fringeR = fringeScale * 0.007f * (611.3f - 464.3f), fringeG = fringeScale * 0.007f * (549.1f - 464.3f);
     LutState* lut = nullptr;
     if (!p.lut.empty())
     {
@@ -375,6 +635,13 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
     const TextureRef output = view.color;
     const uint32_t lutSrv = lut ? lut->srv : 0xFFFFFFFFu, frame = (uint32_t)fc.frame.frameIndex;
     const float peak = fc.frame.displayPeak;  // 0: SDR
+    // scene-referred colour grading: with any value off its default, the combined LUT in place of the curve
+    TextureRef grade;
+    uint32_t gradeSize = 0;
+    {
+        const ColorGradingDesc grading = gradingOf(fc);
+        if (!gradingNeutral(grading)) grade = gradeLut(fc, grading, p.curve, peak, cb, gradeSize);
+    }
     const BufferRef correction = view.exposureCorrection;  // a snap frame's own metering (Exposure.cpp)
     float wb[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
     const uint32_t wbOn = whiteBalanceOn(p, fc.frame, wb) ? 1u : 0u;  // v1.91 (PostFinal P[3].y, P[4..6])
@@ -389,9 +656,11 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
                       b.use(le.grid, Use::SrvCompute);
                       b.use(le.blurred, Use::SrvCompute);
                   }
+                  if (flare.valid()) b.use(flare, Use::SrvCompute);
+                  if (grade.valid()) b.use(grade, Use::SrvCompute);
               },
               [=](PassContext& c) {
-                  uint32_t k[40] = { c.srv(hdr), bloom.valid() ? c.srv(bloom) : 0xFFFFFFFFu, c.uav(output), lutSrv,
+                  uint32_t k[48] = { c.srv(hdr), bloom.valid() ? c.srv(bloom) : 0xFFFFFFFFu, c.uav(output), lutSrv,
                                      asUint(p.bloom), asUint(p.vignette), asUint(p.grain), frame, w, h, asUint(peak), p.curve,
                                      correction.valid() ? c.srv(correction) : 0xFFFFFFFFu, wbOn, 0, 0 };
                   for (uint32_t i = 0; i < 3; ++i)
@@ -405,9 +674,17 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
                   k[34] = asUint(le.detail);
                   k[35] = asUint(le.blend);
                   k[36] = asUint(le.logMiddleGrey);
+                  k[40] = asUint(p.sharpen / 6.0f);  // P[10]: sharpen, fringe
+                  k[41] = asUint(fringeR);
+                  k[42] = asUint(fringeG);
+                  k[43] = asUint(p.fringeStart);
+                  k[44] = flare.valid() ? c.srv(flare) : 0xFFFFFFFFu;  // P[11]: lens flares, the combined grading LUT
+                  k[45] = grade.valid() ? c.srv(grade) : 0xFFFFFFFFu;
+                  k[46] = gradeSize;
+                  k[47] = 0;
                   c.cmd->SetPipelineState(final);
                   c.bindFrameConstants(cb);
-                  c.computeConstants(k, 40);
+                  c.computeConstants(k, 48);
                   c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
               });
 }

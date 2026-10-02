@@ -7,6 +7,12 @@
 //        when its streak at the image centre exceeds 16 px and the axis is outside the view (yaw and pitch: the
 //        first-person turn); the gather then takes the residual velocity (translation, objects). Roll about an axis in the
 //        view stays with the gather (its streaks are short near the axis).
+// With the temporal upscale (shading.motion_blur_after_upscale) the blur runs after it, on the upscaled image at the
+// output resolution, as the reference's does (motionBlurUpscaled; MotionFlatten.hlsl, MotionApply.hlsl): the upscale's
+// vectors flattened to a velocity per internal sample and a range per 16 x 16 tile, the tiles' ranges spread to the
+// tiles their velocities reach, then the gather along the neighbourhood's longest velocity - up to
+// shading.motion_blur_max_percent of the output's width, both ways from the pixel, shading.motion_blur_samples taps, at
+// half resolution where the blur is longer than the taps. The stages above stay for views at their own resolution.
 // And the heat haze composite of E's fields (Distortion.hlsl).
 #include "unx/shading/MotionBlur.h"
 #include "unx/core/Config.h"
@@ -325,6 +331,103 @@ bool motionRotationBlur(FramePassContext& fc, const ViewResources& view, Texture
     const RotationStage rotation = rotationStage(view.view, shutterOf(fc.quality), q);
     if (rotation.active) rotationPasses(fc, view, src, dst, rotation);
     return rotation.active;
+}
+
+bool motionBlurAfterUpscale(FramePassContext& fc)
+{
+    return !fc.quality.has("shading.motion_blur_after_upscale") || fc.quality.boolean("shading.motion_blur_after_upscale");
+}
+
+void motionBlurUpscaled(FramePassContext& fc, const ViewResources& view, TextureRef src, TextureRef dst, TextureRef motion, TextureRef depth)
+{
+    RenderGraph& g = fc.graph;
+    const TextureDesc sd = g.desc(src);
+    const uint32_t W = sd.width, H = sd.height, w = view.view.width, h = view.view.height;
+    const float shutter = shutterOf(fc.quality);
+    // the reference's MotionBlurMax (percent of the screen's width a blur may span, 5), its quality's tap count (16 at
+    // r.MotionBlurQuality 4) and r.MotionBlur.HalfResGather
+    const double maxPercent = fc.quality.has("shading.motion_blur_max_percent") ? fc.quality.number("shading.motion_blur_max_percent") : 5.0;
+    const int64_t samples = fc.quality.has("shading.motion_blur_samples") ? fc.quality.integer("shading.motion_blur_samples") : 16;
+    const bool halfGather = !fc.quality.has("shading.motion_blur_half_res_gather") || fc.quality.boolean("shading.motion_blur_half_res_gather");
+    if (!(maxPercent > 0 && maxPercent <= 100)) fail("shading.motion_blur_max_percent %g: percent of the output's width in (0, 100]", maxPercent);
+    if (samples < 4 || samples > 64 || samples % 4 != 0) fail("shading.motion_blur_samples %lld: a multiple of 4 in [4, 64]", (long long)samples);
+    constexpr uint32_t kFlattenTile = 16, kFilterTile = 16;  // MOTION_FLATTEN_TILE, MOTION_FILTER_TILE
+    const uint32_t tw = (w + kFlattenTile - 1) / kFlattenTile, th = (h + kFlattenTile - 1) / kFlattenTile;
+    const uint32_t hw = (W + 1) / 2, hh = (H + 1) / 2;
+    // velocities in output pixels over half the shutter (the gather goes both ways), at most half the span
+    const float scaleX = (float)W * shutter * 0.5f, scaleY = (float)H * shutter * 0.5f;
+    const float maxVelocity = (float)W * 0.5f * (float)maxPercent * 0.01f;
+    const float tilesPerPixel = (float)w / (float)W / (float)kFlattenTile;
+    const uint32_t radius = std::clamp((uint32_t)std::ceil(maxVelocity * tilesPerPixel), 1u, 8u);
+    const TextureRef flat = g.createTexture(TextureDesc{ "m.motion.flat", w, h, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+    const TextureRef tiles = g.createTexture(TextureDesc{ "m.motion.tile range", tw, th, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+    const TextureRef gathered = g.createTexture(TextureDesc{ "m.motion.tile range gathered", tw, th, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+    const TextureRef halfColour = g.createTexture(TextureDesc{ "m.motion.half colour", hw, hh, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
+    ID3D12PipelineState* flattenPso = fc.shaders.compute("Passes/Shading/MotionFlatten.STEP0");
+    ID3D12PipelineState* gatherPso = fc.shaders.compute("Passes/Shading/MotionFlatten.STEP1");
+    ID3D12PipelineState* halfPso = fc.shaders.compute("Passes/Shading/MotionFlatten.STEP2");
+    ID3D12PipelineState* applyHalfPso = fc.shaders.compute("Passes/Shading/MotionApply.HALF1");
+    ID3D12PipelineState* applyPso = fc.shaders.compute("Passes/Shading/MotionApply.HALF0");
+    const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
+    g.addPass("m.motion.flatten", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(motion, Use::SrvCompute);
+                  b.use(depth, Use::SrvCompute);
+                  b.use(flat, Use::UavCompute);
+                  b.use(tiles, Use::UavCompute);
+              },
+              [=](PassContext& c) {
+                  const uint32_t k[12] = { c.srv(motion), c.srv(depth), c.uav(flat), c.uav(tiles), w, h, asUint(scaleX), asUint(scaleY), asUint(maxVelocity), 0, 0, 0 };
+                  c.cmd->SetPipelineState(flattenPso);
+                  c.bindFrameConstants(cb);
+                  c.computeConstants(k, 12);
+                  c.cmd->Dispatch(tw, th, 1);
+              });
+    g.addPass("m.motion.tile gather", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(tiles, Use::SrvCompute);
+                  b.use(gathered, Use::UavCompute);
+              },
+              [=](PassContext& c) {
+                  const uint32_t k[8] = { c.srv(tiles), c.uav(gathered), tw, th, asUint(tilesPerPixel), radius, 0, 0 };
+                  c.cmd->SetPipelineState(gatherPso);
+                  c.bindFrameConstants(cb);
+                  c.computeConstants(k, 8);
+                  c.cmd->Dispatch((tw + 7) / 8, (th + 7) / 8, 1);
+              });
+    g.addPass("m.motion.half colour", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(src, Use::SrvCompute);
+                  b.use(halfColour, Use::UavCompute);
+              },
+              [=](PassContext& c) {
+                  const uint32_t k[8] = { c.srv(src), c.uav(halfColour), hw, hh, W, H, 0, 0 };
+                  c.cmd->SetPipelineState(halfPso);
+                  c.bindFrameConstants(cb);
+                  c.computeConstants(k, 8);
+                  c.cmd->Dispatch((hw + 7) / 8, (hh + 7) / 8, 1);
+              });
+    // the two gathers: each takes the 16 x 16 pixel groups of its own classes (MotionApply.hlsl), together every pixel
+    const uint32_t gx = (W + kFilterTile - 1) / kFilterTile, gy = (H + kFilterTile - 1) / kFilterTile;
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        ID3D12PipelineState* pso = pass == 0 ? applyHalfPso : applyPso;
+        g.addPass(pass == 0 ? "m.motion.apply.half" : "m.motion.apply", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(src, Use::SrvCompute);
+                      b.use(halfColour, Use::SrvCompute);
+                      b.use(flat, Use::SrvCompute);
+                      b.use(gathered, Use::SrvCompute);
+                      b.use(dst, Use::UavCompute);
+                  },
+                  [=](PassContext& c) {
+                      const uint32_t k[16] = { c.srv(src), c.srv(halfColour), c.srv(flat), c.srv(gathered), c.uav(dst), W, H, (uint32_t)samples,
+                                               w, h, tw, th, halfGather ? 1u : 0u, 0, 0, 0 };
+                      c.cmd->SetPipelineState(pso);
+                      c.computeConstants(k, 16);
+                      c.cmd->Dispatch(gx, gy, 1);
+                  });
+    }
 }
 
 bool distortionActive(FramePassContext&, const ViewResources& view)
