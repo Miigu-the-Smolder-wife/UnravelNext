@@ -53,11 +53,17 @@ float froxelNodeDepth(FroxelGrid g, uint n) { return n == 0 ? 0.0 : froxelSliceD
 // Main view: camera forward, and the world-space ray through the centre of a tile scaled to unit view depth (the point
 // at view depth z is g_cameraPosition + ray * z). Tile centres follow the lookup (texel x <-> pixel (x + 0.5) tilePx).
 float3 froxelForward() { return -normalize(g_view[2].xyz); }
+// From the view's basis and the projection's terms: the view-space point at view depth 1 (z = -1, where clip.w = 1) whose
+// NDC is the pixel's, turned to the world by the view matrix's rows (orthonormal: the camera's right, up and back - a
+// planar reflection view's mirrored ones). No world position enters: the ray is as exact 10 km from the render origin
+// as at it (through g_invViewProj it was the difference of two positions - the near plane's point and the camera, 5 cm
+// apart - and missed the pixel by 2 pixels at 1 km and by 13 to 17 at 10 km: FogTests 9). The projection is a
+// perspective one with clip.w = -z_view and independent x and y (centred, cropped or jittered: Math.h, FrameRenderer.cpp).
 float3 froxelRayAt(float2 pixel)
 {
     const float2 ndc = float2(pixel.x / g_viewWidth * 2 - 1, 1 - pixel.y / g_viewHeight * 2);
-    const float4 p = mul(g_invViewProj, float4(ndc, 1, 1));  // device depth 1 = view depth g_nearPlane
-    return (p.xyz / p.w - g_cameraPosition) / g_nearPlane;
+    const float2 v = float2((ndc.x + g_proj[0][2] - g_proj[0][3]) / g_proj[0][0], (ndc.y + g_proj[1][2] - g_proj[1][3]) / g_proj[1][1]);
+    return g_view[0].xyz * v.x + g_view[1].xyz * v.y - g_view[2].xyz;
 }
 float3 froxelTileRay(FroxelGrid g, uint2 tile) { return froxelRayAt((float2(tile) + 0.5) * g.tilePx); }
 // Lateral width of a tile at view depth z (m).

@@ -9,7 +9,8 @@
 //   [4]  detail offset xyz, sky dome SRV (RGBA16F, cloudDomeUv: the layer seen from the camera in every direction)
 //   [5]  weather offset xy, cloud layer SRV (RGBA16F), cloud distance SRV (R16F, km) (the frame's; readers)
 //   [6]  world origin offset xyz (world = renderer space + origin), 0
-//   [7]  SRVs: shape (Texture3D R8), detail (Texture3D R8), weather (Texture2D RG8), shadow (Texture2D RGBA32_UINT)
+//   [7]  SRVs: shape, detail (Texture3D RG8 with mips: the noise, its deviation under a mip's texel), weather (Texture2D
+//        RG8), shadow (Texture2D RGBA32_UINT)
 //   [8]  toward the sun xyz (unit), shadow half extent (m)
 //   [9]  shadow centre xyz (renderer space), shadow texels per side
 //   [10] sun illuminance at the layer (lux, rgb), sky radiance over the upper hemisphere (tests, CloudMarch mode 4)
@@ -89,6 +90,72 @@ float cloudDensity(CloudRecord c, float3 x)
     return c.sigmaMax * saturate((base - erosion) / max(1 - erosion, 1e-4));
 }
 
+// The mean density over a stretch of 'footprint' metres around x (atmosphere.clouds.filtered_steps): what a march step
+// longer than the noise's texels stands for. A point sample of the field at such a step's middle is one draw of a
+// quantity that varies over the step: neighbouring rays draw differently (structure where the cloud is smooth) and,
+// exp(-tau) being convex, the mean transmittance of such draws is above that of the mean optical depth (the sun's light
+// under thick cloud came out too bright with 40 .. 320 m steps toward the sun).
+// The shape and detail noise are read at the mip whose texel is the footprint; a mip texel holds the mean of the texels
+// under it and, in its second channel, their standard deviation x 2 (CloudGpu.cpp uploadTextures). The density is a
+// clamped function of both, so the density of the mean noise is not the mean density: the two clamps are averaged in
+// closed form with the values under the footprint taken as spread evenly about their mean with that deviation (half
+// width sqrt(3) x deviation) and the two noises as independent - derived, not fitted; the erosion's division is
+// linearised about the means. At mip 0 the deviation is 0 and this is cloudDensity. The weather map and the height
+// profile vary over kilometres and hundreds of metres: they are taken at x.
+#define CLOUD_SHAPE_TEXELS 128.0   // CloudModel.h kShapeSize, kDetailSize
+#define CLOUD_DETAIL_TEXELS 32.0
+// Mean of saturate(v) for v spread evenly over [m - w, m + w]; spread: the half width of the even spread that has the
+// result's variance.
+float cloudMeanClamp(float m, float w, out float spread)
+{
+    spread = 0;
+    if (!(w > 1e-3)) return saturate(m);
+    const float lo = m - w, hi = m + w;
+    if (lo >= 0 && hi <= 1)
+    {
+        spread = w;
+        return m;
+    }
+    // the shares of the spread under 0 (value 0), over 1 (value 1) and between (the value itself, from l to h)
+    const float under = saturate(-lo / (2 * w)), over = saturate((hi - 1) / (2 * w)), inside = max(1 - under - over, 0.0);
+    const float l = saturate(lo), h = saturate(hi);
+    const float mean = inside * 0.5 * (l + h) + over;
+    // the variance from the nearer clamp (small numbers stay small: no difference of values near 1)
+    float variance;
+    if (mean <= 0.5) variance = inside * (l * l + l * h + h * h) * (1.0 / 3.0) + over - mean * mean;
+    else
+    {
+        const float a = 1 - h, b = 1 - l, low = inside * 0.5 * (a + b) + under;
+        variance = inside * (a * a + a * b + b * b) * (1.0 / 3.0) + under - low * low;
+    }
+    spread = sqrt(max(3 * variance, 0.0));
+    return mean;
+}
+float cloudDensityFiltered(CloudRecord c, float3 x, float footprint)
+{
+    const float hn = (cloudAltitude(c, x) - c.base) / (c.top - c.base);
+    if (hn <= 0 || hn >= 1 || c.coverage <= 0) return 0;
+    Texture2D<float2> weather = ResourceDescriptorHeap[c.weather];
+    const float2 w = weather.SampleLevel(g_linearWrap, x.xz * c.invWeather + c.weatherOffset, 0);
+    const float cov = saturate(w.x * 2 * c.coverage);
+    if (cov <= 0) return 0;
+    const float topN = 0.35 + 0.65 * w.y;
+    const float profile = saturate(hn / 0.08) * saturate((topN - hn) / (0.25 * topN));
+    Texture3D<float2> shape = ResourceDescriptorHeap[c.shape];
+    const float2 s = shape.SampleLevel(g_linearWrap, x * c.invShape + c.shapeOffset, log2(max(footprint * c.invShape * CLOUD_SHAPE_TEXELS, 1.0)));
+    float baseSpread;
+    const float base = cloudMeanClamp((s.x * profile - (1 - cov)) / cov, 0.8660254 * s.y * profile / cov, baseSpread);  // (sqrt(3) x (y / 2))
+    if (base <= 0) return 0;
+    Texture3D<float2> detail = ResourceDescriptorHeap[c.detail];
+    const float2 d = detail.SampleLevel(g_linearWrap, x * c.invDetail + c.detailOffset, log2(max(footprint * c.invDetail * CLOUD_DETAIL_TEXELS, 1.0)));
+    const float erosion = d.x * c.detailStrength, erosionSpread = 0.8660254 * d.y * c.detailStrength;
+    const float inv = 1.0 / max(1 - erosion, 1e-4);
+    // (base - erosion) / (1 - erosion) about the means: its slope in base is inv, in erosion (base - 1) inv^2
+    const float slope = (base - 1) * inv * inv;
+    float unused;
+    return c.sigmaMax * cloudMeanClamp((base - erosion) * inv, sqrt(baseSpread * baseSpread * inv * inv + erosionSpread * erosionSpread * slope * slope), unused);
+}
+
 // The sky dome's parameterization (the cloud layer seen from the camera, every azimuth: clouds have no symmetry about the
 // sun's plane): u = azimuth / 2 pi, v = sqrt((e - e0) / (pi/2 - e0)) with elevation e from e0 = -10 deg (dense near the
 // horizon, where the clouds' angular features are smallest).
@@ -145,6 +212,11 @@ float cloudMsSun(CloudMsPhases m, float tauSun)
     return sum;
 }
 float cloudSkyRamp(CloudRecord c, float3 x) { return max(0.0, CLOUD_SKY_S0 + CLOUD_SKY_S1 * (cloudAltitude(c, x) - c.base) / (c.top - c.base)); }
+// The ground's light (atmosphere.clouds.ground_light; the frame only): the lower hemisphere at the ground's radiance
+// enters the layer from its base as the sky's enters from its top - the sky's ramp mirrored in height. NOT in the path
+// tracer's fit (its ground is black): an approximation on top of an approximation, for cloud bases that are not lit by
+// the sky alone under a high sun.
+float cloudGroundRamp(CloudRecord c, float3 x) { return max(0.0, CLOUD_SKY_S0 + CLOUD_SKY_S1 * (c.top - cloudAltitude(c, x)) / (c.top - c.base)); }
 
 // Roots of t^2 + 2 b t + C = 0 (a ray against a sphere: b = (p - centre) . d, C = |p - centre|^2 - r^2) in the stable
 // form (no cancellation between -b and the square root). False when the ray misses the sphere.

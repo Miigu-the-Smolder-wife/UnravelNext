@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: MODE=0,1,2,3,4
+// unx-variants: MODE=0,1,2,3,4,5
 // FogTests: the fog's functions (Fog.hlsli, FogVolume.hlsli) at query points, one thread per query; FogTests.cpp holds
 // their C++ twins.
 // MODE 0: the closed form. 3 float4 per query: { ray origin, t0 }, { ray direction (unit), t1 }, { a height y, 0, 0, 0 };
@@ -17,6 +17,8 @@
 //         the same radiance, with the record's sky amount in w (-1: the view has no volume).
 // MODE 4: the sun at a point as FogScatter.hlsl takes it. { position, 0 } -> { the air's transmittance to the sun x the
 //         cloud layer's, 1 }. P[2].x = the transmittance LUT's SRV.
+// MODE 5: the view's rays. { pixel position x, y, 0, 0 } -> { froxelRayAt(pixel), 0 } (FroxelCommon.hlsli: the ray through
+//         the pixel position at unit view depth).
 // P[0] = { queries SRV (StructuredBuffer<float4>), output UAV (RWStructuredBuffer<float4>), query count, 0 }.
 // Frame constants of the view.
 #include "Bindless.hlsli"
@@ -66,9 +68,11 @@ void main(uint id : SV_DispatchThreadID)
     const float3 radiance = float3(100, 200, 300);
     output[6 * id + 4] = float4(fogOverRay(q0.xy, q0.z, q1.xyz, q2.xyz, q0.w, radiance), 0);
     output[6 * id + 5] = float4(fogOverSky(q0.xy, radiance), there ? p.skyAmount : -1.0);
-#else
+#elif MODE == 4
     const float3 p = queries[id].xyz;
     const AtmosphereParams a = airParamsFromTexels(P[2].x);
     output[id] = float4(airSunTransmittance(a, P[2].x, airLiftToSurface(a, p), normalize(g_sunDirection)) * cloudSunTransmittanceFromLut(P[2].x, p), 1);
+#else
+    output[id] = float4(froxelRayAt(queries[id].xy), 0);
 #endif
 }

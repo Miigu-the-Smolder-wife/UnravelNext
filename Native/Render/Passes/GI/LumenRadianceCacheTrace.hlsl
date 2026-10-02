@@ -20,6 +20,7 @@
 // (CardLayout.hlsli mcFrame; UNX_NONE: none). One dispatch holds at most 262,144 rays (LumenRadianceCache.cpp: chunks
 // of probes).
 // P[6], P[7] = RtSceneSrvs
+#define GI_SKY_FOG_RETURN  // (GiSky.hlsli: the sky's share of the sun's light the fog scatters - atmosphere.fog.sun_through_fog)
 #include "RayTracing/RayShaders.hlsli"
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitDecals.hlsli"

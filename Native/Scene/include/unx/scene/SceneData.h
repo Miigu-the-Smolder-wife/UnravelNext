@@ -303,6 +303,45 @@ struct Atmosphere
     float3 groundAlbedo{ 0.1f, 0.1f, 0.1f };
 };
 
+// The scene's weather: a cloud layer, the height fog and local fog volumes, in the terms the renderer's frame takes them
+// (unx/render/FrameContext.h CloudLayerDesc, FogDesc, FogVolumeDesc: the same fields and units; the kernels are
+// Passes/Atmosphere/Cloud*.hlsl, Fog*.hlsl). A frame whose producer sets none of its own takes the scene's
+// (FrameRenderer, FrameContext::sceneWeather). File blocks "CLDS" and "FOGS", written only when the scene has them: a
+// scene without weather has the bytes and the content hash it had. The reference path tracer does not render them.
+struct CloudLayer
+{
+    float coverage = 0;                             // [0, 1]: the share of the weather map that becomes cloud; 0: no layer
+    float baseAltitude = 1500, topAltitude = 4000;  // m above the planet's surface (the scene's origin lies on it)
+    float sigmaMax = 0.04f;                         // peak extinction (1/m)
+    float albedo = 0.99f;                           // single-scattering albedo
+    float windX = 0, windZ = 0;                     // m/s: the layer's drift
+};
+struct Fog
+{
+    bool enabled = false;
+    float density = 0.002f;        // extinction (1/m) at 'height'
+    float heightFalloff = 0.02f;   // the density halves every 1 / this metres of height
+    float height = 0;              // m (scene y)
+    float3 albedo{ 1, 1, 1 };      // scattering / extinction
+    float phaseG = 0.2f;           // Henyey-Greenstein asymmetry, (-1, 1)
+    float startDistance = 0;       // m from the camera: no fog nearer
+    float skyAmount = 1;           // [0, 1]: how much of the fog sky pixels take
+    float noiseAmount = 0.3f;      // [0, 1]: the density's variation about its mean
+    float noiseScale = 20;         // m: the variation's largest features
+};
+// Extra fog inside an ellipsoid or a box (mist in a hollow, steam): seen within the fog's near volume.
+struct FogVolume
+{
+    float3 centre{};               // m
+    float3 halfSize{ 1, 1, 1 };    // m: the ellipsoid's radii or the box's half extents along its axes
+    float yaw = 0;                 // rad about +y
+    uint32_t shape = 0;            // 0 ellipsoid, 1 box
+    float density = 0.05f;         // extinction (1/m) at the volume's bottom, away from its boundary
+    float heightFalloff = 0;       // the density halves this many times from the volume's bottom to its top
+    float edge = 0.3f;             // (0, 1]: the outer share of the volume over which the density fades to 0
+    float3 albedo{ 1, 1, 1 };
+};
+
 struct Camera
 {
     std::string name;
@@ -344,6 +383,9 @@ struct Scene
     float windSpeed = 0;               // m/s
     std::vector<Camera> cameras;
     std::vector<CameraPath> paths;
+    CloudLayer clouds;                 // coverage 0: none
+    Fog fog;                           // enabled false: none
+    std::vector<FogVolume> fogVolumes;
 };
 
 // .unxscene binary file (little endian): "UNXSCENE", u32 version, then the fields in declaration order with u64

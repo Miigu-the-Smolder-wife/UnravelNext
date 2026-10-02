@@ -369,8 +369,12 @@ int main(int argc, char** argv)
         uint64_t shiftAt = UINT64_MAX;  // --origin-shift-at F --origin-shift x,y,z: a C9 rebase at frame F (repros)
         std::vector<FogVolumeDesc> fogVolumes;  // --fog-volume x,y,z,rx,ry,rz,density[,shape[,height falloff]]: a local fog volume (repeatable)
         bool passTimestamps = true;      // --no-pass-timestamps: the frame's GPU time alone (no per-pass queries, no pass CSV)
-        float fogDensity = 0;            // --fog D: the frame's height fog (FrameContext::fog) at extinction D (1/m), other fields default
-        float cloudCoverage = 0;         // --clouds C: B5 cloud layer (FrameContext::clouds) with coverage C, other fields default
+        // The scene's own weather (scene::Scene::clouds, fog, fogVolumes) applies where these are not given; given, they
+        // decide (--clouds 0, --fog 0: none, whatever the scene says). --no-scene-weather: the scene's blocks are not used.
+        float fogDensity = -1;           // --fog D: the frame's height fog (FrameContext::fog) at extinction D (1/m), other fields default
+        float cloudCoverage = -1;        // --clouds C[,base,top]: B5 cloud layer (FrameContext::clouds) with coverage C between the
+        float cloudBase = -1, cloudTop = -1;  // altitudes base and top (m; a layer low enough for a peak to stand in it), other fields default
+        bool sceneWeather = true;
         float3 shiftBy{};  // --time YYYY-MM-DDTHH:MM (UT), --place lat,lon: sun, moon, stars (B4)
         // P0 motion and change options (see the head comment).
         double pathTime = -1;  // --path-time T: still at P(T); negative = not given
@@ -427,7 +431,16 @@ int main(int argc, char** argv)
             else if (a == "--place") placeArg = next();
             else if (a == "--auto-exposure") autoExposure = true;
             else if (a == "--origin-shift-at") shiftAt = std::stoull(next());
-            else if (a == "--clouds") cloudCoverage = std::stof(next());
+            else if (a == "--clouds")
+            {
+                std::vector<float> v;
+                std::stringstream list(next());
+                for (std::string item; std::getline(list, item, ',');) v.push_back(std::stof(item));
+                if (v.size() != 1 && v.size() != 3) fail("--clouds C[,base,top]");
+                cloudCoverage = v[0];
+                if (v.size() == 3) cloudBase = v[1], cloudTop = v[2];
+            }
+            else if (a == "--no-scene-weather") sceneWeather = false;
             else if (a == "--no-pass-timestamps") passTimestamps = false;
             else if (a == "--fog-volume")
             {
@@ -942,13 +955,21 @@ int main(int argc, char** argv)
                 const float3 offset = gpuScene.originOffset();
                 cam.position = cam.position - offset;
                 fc.mainView = ViewDesc::fromCamera(cam, rr.width, rr.height, prev);
-                fc.clouds.coverage = cloudCoverage;
-                if (fogDensity > 0)
+                if (cloudCoverage >= 0)
                 {
-                    fc.fog.enabled = true;
+                    fc.clouds.coverage = cloudCoverage;
+                    if (cloudTop > cloudBase) fc.clouds.baseAltitude = cloudBase, fc.clouds.topAltitude = cloudTop;
+                    fc.sceneWeather &= ~kSceneClouds;
+                }
+                if (fogDensity >= 0)
+                {
+                    fc.fog.enabled = fogDensity > 0;
                     fc.fog.density = fogDensity;
+                    fc.sceneWeather &= ~kSceneFog;
                 }
                 fc.fogVolumes = fogVolumes;
+                if (!fogVolumes.empty()) fc.sceneWeather &= ~kSceneFogVolumes;
+                if (!sceneWeather) fc.sceneWeather = 0;
                 if (gustPeriodS > 0)
                 {
                     const bool gust = ((uint64_t)(fc.time / gustPeriodS) & 1) != 0;

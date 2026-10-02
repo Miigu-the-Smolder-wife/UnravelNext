@@ -447,6 +447,8 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     // cut, so its screen-trace input is invalid) and skips the walk. gi.lumen_screen_trace_skip_after_cut (default
     // false, not an Unreal rule) also skips it in the frame after, which reads the cut frame's colour.
     const bool screenTraced = L.screenTraces && pyramid.valid() && prevColor.valid() && !(L.screenTraceSkipAfterCut && previousFrameWasCut);
+    // atmosphere.fog.on_gi_rays: the probes' rays take the fog along them (the kernels read the fog's volume: FogVolume.hlsli)
+    const bool fogOnGiRays = fc.resources.fog.on && fc.resources.fog.onGiRays;
     if (screenTraced)
     {
         const FrameContext::Upscale up = fc.frame.upscale;
@@ -465,6 +467,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                       b.use(traceWord, Use::UavCompute);
                       if (farField) b.use(rcIndirection, Use::SrvCompute);
                       rays.declareHair(b);  // (a ray that meets a groom first is the world trace's)
+                      if (fogOnGiRays) declareFog(b, fc.resources, Use::SrvCompute);  // (FogVolume.hlsli fogOverGiRay)
                   },
                   [=, &shaders](PassContext& c) {
                       uint32_t k[48] = {};
@@ -514,6 +517,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   rays.declareHair(b);
                   if (atmosphere)
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
+                  if (fogOnGiRays) declareFog(b, fc.resources, Use::SrvGraphics);  // (FogVolume.hlsli fogOverGiRay)
               },
               [=, &pipeline](PassContext& c) {
                   uint32_t k[48] = {};

@@ -147,9 +147,31 @@ bool cloudSunMapCovers(CloudRecord c, float3 x)
 // attenuates. The map earlier than that shows: from 1.3 km on (12 steps) its levels drew contours under the clouds
 // [measured 2026-10-02, ridge at sunset]. A sample the map does not reach (clouds toward the horizon, past its extent) marches on
 // in its last, longest steps for as many steps again.
-float cloudSunTauNear(CloudRecord c, float3 x, uint steps)
+// filtered (atmosphere.clouds.filtered_steps): a step's density is its mean (CloudCommon.hlsli cloudDensityFiltered: the
+// noise at the mip of the step's length) and the path ends where the sun's ray leaves the layer, the last step cut
+// there. With point samples a 40 .. 320 m step's optical depth was one draw of the field per step: neighbouring view
+// samples drew very different depths (contour-like structure under thick cloud) and the mean of exp(-tau) over such
+// draws is above exp(-mean tau) (the cloud's underside too bright against the whole-path march, sun_steps = 0); and a
+// step whose middle lay past the layer's top was dropped whole, with the part of it still inside. false: the point
+// samples (the picture before; an A/B).
+float cloudSunTauNear(CloudRecord c, float3 x, uint steps, bool filtered)
 {
     float tau = 0, t = 0, dt = CLOUD_SUN_STEP;
+    if (filtered)
+    {
+        float t0, t1;
+        if (!cloudShellSpan(c, x, c.sunDir, 3.0e38, t0, t1) || t0 > 0) return 0;  // (x is in the layer: its samples have a density)
+        [loop] for (uint i = 0; i < 2 * steps && tau < CLOUD_SUN_TAU_MAX && t < t1; ++i)
+        {
+            // (the marched steps are done: the sun map from here where it reaches, else as many of the longest steps again)
+            if (i == steps && cloudSunMapCovers(c, x + c.sunDir * t)) return tau + cloudSunTau(c, x + c.sunDir * t);
+            if (i < steps && i >= CLOUD_SUN_NEAR_STEPS && ((i - CLOUD_SUN_NEAR_STEPS) & 1) == 0) dt = min(dt * 2, CLOUD_SUN_STEP_MAX);
+            const float len = min(dt, t1 - t);
+            tau += cloudDensityFiltered(c, x + c.sunDir * (t + 0.5 * len), len) * len;
+            t += len;
+        }
+        return tau;
+    }
     [loop] for (uint k = 0; k < steps && tau < CLOUD_SUN_TAU_MAX; ++k)
     {
         if (k >= CLOUD_SUN_NEAR_STEPS && ((k - CLOUD_SUN_NEAR_STEPS) & 1) == 0) dt = min(dt * 2, CLOUD_SUN_STEP_MAX);

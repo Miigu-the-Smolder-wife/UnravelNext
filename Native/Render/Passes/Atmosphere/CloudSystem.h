@@ -18,6 +18,10 @@ void cloudsPrepare(FramePassContext& fc, uint32_t srvs[2]);
 // After the atmosphere LUTs: this frame's cloud passes (nothing without clouds). tlutSrvSource: the transmittance LUT.
 void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut);
 
+// The frame's cloud lighting word for the kernels that light the cloud (CloudMarch.hlsl P[3].w, FogIntegrate.hlsl):
+// atmosphere.clouds.sun_steps | filtered_steps << 8 | ground_light << 9.
+uint32_t cloudSunWord(const QualityConfig& quality);
+
 struct CloudStats
 {
     uint32_t cappedPixels = 0, cappedSunPaths = 0;  // the last read frame's step bounds reached (CloudMarch.hlsl)

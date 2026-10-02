@@ -28,11 +28,32 @@ float giUnit(uint x) { return (giRandom(x) >> 8) * (1.0 / 16777216.0); }
 
 float giRayLength() { return asfloat(P[1].w); }
 
+#if SKY == SKY_ATMOSPHERE && defined(GI_SKY_FOG_RETURN)
+// atmosphere.fog.sun_through_fog (FogVolume.hlsli; the kernels that define GI_SKY_FOG_RETURN before this file: Lumen's
+// probe, radiance cache and translucency volume rays): what the height fog takes from the sun's direct light on surfaces
+// comes back from the sky - a uniform radiance over the upper hemisphere whose irradiance on level ground is the direct
+// irradiance the fog removed there, x the fog's albedo. Taken at the camera, as the rays' sky is.
+float3 giFogSkyReturn(AtmosphereSrvs a, float3 dir)
+{
+    FogParams p;
+    if (dir.y <= 0 || !fogLoad(p) || (p.flags & 2u) == 0) return 0;
+    const float3 sun = normalize(g_sunDirection);
+    if (sun.y <= 0) return 0;
+    const float removed = 1.0 - fogSunThrough(fogMediumOf(p), g_cameraPosition, sun);
+    return atmosphereSunIlluminance(a, g_cameraPosition) * p.albedo * (sun.y * removed / 3.14159265358979);
+}
+#endif
+
 float3 giSkyRadiance(float3 dir)
 {
 #if SKY == SKY_ATMOSPHERE
     AtmosphereSrvs a = { P[2].x, P[2].y, P[2].z, P[2].w };
+#ifdef GI_SKY_FOG_RETURN
+    if (P[2].z == UNX_NONE) return 0;
+    return atmosphereSkyRadianceCloudy(a, dir) + giFogSkyReturn(a, dir);
+#else
     return P[2].z == UNX_NONE ? 0 : atmosphereSkyRadianceCloudy(a, dir);  // B5: the cloud layer in front of the sky
+#endif
 #else
     return asfloat(P[1].xyz);
 #endif

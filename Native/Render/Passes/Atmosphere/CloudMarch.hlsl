@@ -10,9 +10,11 @@
 // relative error, S_STATUS_KO.md 9); the exact grid solve replaces it after the weekly reset. Modes 1 and 2 stay single
 // scattering (the tests' exact comparison). The sky's radiance at the cloud is the atmosphere's horizontal-ground sky
 // irradiance / pi (airGroundIndirect: at the ground, not at the layer's altitude; part of the approximation).
-// Mode 0 (the frame, CloudSystem.cpp): the whole view ray (no depth clip: the readers apply the layer per full-resolution
-// pixel where the surface lies beyond the cloud, so no upsampling halo at geometry edges), the sun's illuminance at the
-// cloud through the atmosphere (transmittance LUT at the span's middle), rows [P[1].w, P[1].w + 64) of the output (the
+// Mode 0 (the frame, CloudSystem.cpp): the whole view ray, whatever the pixel shows - the layer's texels do not know
+// the scene's depth, so their upsampling carries nothing across geometry edges. Sky pixels take the layer whole
+// (Atmosphere.hlsli airApplyClouds); a surface takes the part of the cloud in front of it from the fog's volume, which
+// marches that part along its own columns with this light (FogIntegrate.hlsl, atmosphere.clouds.veil). The sun's
+// illuminance at the cloud through the atmosphere (transmittance LUT at the span's middle), rows [P[1].w, P[1].w + 64) of the output (the
 // dispatch is split into 64-row bands: each band's worst time is bounded), counters of the step bounds reached in the
 // stats UAV P[2].y (uint 0: pixels whose span needed more than CLOUD_MARCH_STEPS, 1: sun paths past CLOUD_SUN_MAX_STEPS).
 // P[0] = { cloud record SRV, output UAV, depth SRV (tests: UNX_NONE), scale (pixels of the view per output texel) }
@@ -24,7 +26,13 @@
 // modes 1-2) or first row (mode 0) };
 // P[2] = { transmittance LUT SRV (mode 0), stats UAV (mode 0), distance UAV (mode 0: R16F, km, extinction-weighted mean),
 // multiple-scattering table SRV (mode 0) }.
-// P[3].w (modes 0 and 3) = the sun path's marched steps (cloudSunTauNear; 0: the whole path, cloudSunTauMarch).
+// P[3].w (modes 0 and 3) = the sun path's marched steps (cloudSunTauNear; 0: the whole path, cloudSunTauMarch) | flags
+// << 8: bit 0 atmosphere.clouds.filtered_steps (a step's density is its mean: CloudCommon.hlsli cloudDensityFiltered -
+// the view's steps and the sun path's long ones), bit 1 atmosphere.clouds.ground_light (CloudLight.hlsli).
+// Modes 0 and 3 start the span with short steps: the first is the ray's footprint where the span begins (not under
+// CLOUD_STEP_MIN), each next one CLOUD_STEP_GROWTH times longer until the equal steps' length is reached - a span that
+// begins at the camera (the camera inside the layer) is not sampled first at half a 200 m step from it. At most
+// CLOUD_RAMP_STEPS more steps than the equal steps would be. The tests' modes keep the equal steps of their CPU twins.
 // P[3].z bits 8.. (mode 0 with a history) = the dispatch's phase: 1 = a thread per 2 x 2 block marches the block's texel of
 // this frame (every lane of a wave marches: a dispatch over all texels with a quarter of its lanes marching takes as
 // long as one with all of them); 2 = a thread per texel fills the block's other texels (the frame's own texel is left).
@@ -37,14 +45,16 @@
 // T_air(0, d_c) the air's in-scattering and transmittance from the camera to the cloud distance d_c (CLOUD_AIR_STEPS
 // midpoint steps: sun single scattering through the transmittance LUT + the J_ms multiple scattering; the casters'
 // shadows in that air are not included), rgb = in(0, d_c) (1 - T_c) + T_air(0, d_c) L_c and a = T_c, so a pixel beyond
-// the cloud has in' = rgb + T_c in(0, d_s) and T' = T_c T_air(0, d_s) (Atmosphere.hlsli airApplyClouds).
+// the cloud - a sky pixel - has in' = rgb + T_c in(0, d_s) and T' = T_c T_air(0, d_s) (Atmosphere.hlsli airApplyClouds).
 // b1 = the view.
-#include "Passes/Atmosphere/CloudShadowCommon.hlsli"
-#include "Passes/Atmosphere/AtmosphereCommon.hlsli"
-#include "Frame.hlsli"
+#include "Passes/Atmosphere/CloudLight.hlsli"
 
 #define CLOUD_MARCH_STEPS 256u
 #define CLOUD_AIR_STEPS 16u
+#define CLOUD_STEP_MIN 25.0
+#define CLOUD_STEP_GROWTH 1.15
+#define CLOUD_RAMP_STEPS 32u     // (25 m x 1.15^20 = 409 m: the ramp reaches a 400 m equal step in 20 steps; a span cut to
+                                 // CLOUD_MARCH_STEPS has longer ones - 2 km in 32)
 
 [numthreads(8, 8, 1)]
 void main(uint2 id : SV_DispatchThreadID)
@@ -77,6 +87,8 @@ void main(uint2 id : SV_DispatchThreadID)
         }
     }
     const float tMax = test ? asfloat(P[1].w) : 3.0e38;
+    const uint sunSteps = P[3].w & 0xFFu;
+    const bool filtered = !test && (P[3].w & 0x100u) != 0;
     float3 L = 0, sunIlluminance = c.sunIlluminance, skyRadiance = P[1].z == 4 ? c.skyRadianceTest : 0;
     float distanceSum = 0, distanceWeight = 0;
     uint capped = 0, sunCapped = 0;
@@ -86,36 +98,53 @@ void main(uint2 id : SV_DispatchThreadID)
     {
         // The pixel angle from the projection (the view's vertical field of view over its height), times the scale.
         const float pixelAngle = dome ? 6.2831853 / P[1].x : length(worldFromDepth(pixel + float2(0, 1), 1e-6) - far) / length(far - g_cameraPosition) * scale;
-        const float stepLength = clamp(0.5 * (t0 + t1) * pixelAngle, 25.0, 400.0);
+        const float stepLength = clamp(0.5 * (t0 + t1) * pixelAngle, CLOUD_STEP_MIN, 400.0);
         const uint wanted = (uint)ceil((t1 - t0) / stepLength), steps = clamp(wanted, 1u, CLOUD_MARCH_STEPS);
         capped = wanted > CLOUD_MARCH_STEPS ? 1u : 0u;
-        if (!test)
-        {
-            // The sun at the cloud: top-of-atmosphere illuminance through the air to the span's middle.
-            const AtmosphereParams ap = airParamsFromTexels(P[2].x);
-            const float3 mid = g_cameraPosition + dir * (0.5 * (t0 + t1));
-            sunIlluminance = g_sunIlluminance * g_sunColor * airSunTransmittance(ap, P[2].x, mid, c.sunDir);
-            skyRadiance = g_sunIlluminance * g_sunColor * airGroundIndirect(ap, P[2].x, dot(airUp(ap, mid), c.sunDir)) * (1 / 3.14159265);
-        }
+        // The frame's light (the tests' modes: the record's): the sun at the cloud through the air to the span's middle,
+        // the sky's and the ground's radiance there.
+        CloudFrameLight light = (CloudFrameLight)0;
+        if (!test) light = cloudFrameLight(c, P[2].x, g_cameraPosition + dir * (0.5 * (t0 + t1)), dir, (P[3].w & 0x200u) != 0);
         const float dt = (t1 - t0) / steps;
         const float phase = cloudPhase(c, dot(dir, c.sunDir));
         const CloudMsPhases ms = cloudMsPhases(c, dot(dir, c.sunDir));
-        [loop] for (uint s = 0; s < steps && T > 1e-4; ++s)
+        // (the frame: short steps first - the footprint where the span begins, growing to dt)
+        const uint bound = test ? steps : steps + CLOUD_RAMP_STEPS;
+        float t = t0, next = clamp(t0 * pixelAngle, CLOUD_STEP_MIN, dt);
+        [loop] for (uint s = 0; s < bound && T > 1e-4; ++s)
         {
-            const float3 x = g_cameraPosition + dir * (t0 + (s + 0.5) * dt);
-            const float rho = cloudDensity(c, x);
+            float d = dt, at = t0 + (s + 0.5) * dt;
+            if (!test)
+            {
+                if (!(t < t1)) break;
+                d = min(next, t1 - t);
+                at = t + 0.5 * d;
+                t += d;
+                next = min(next * CLOUD_STEP_GROWTH, dt);
+            }
+            const float3 x = g_cameraPosition + dir * at;
+            const float rho = filtered ? cloudDensityFiltered(c, x, d) : cloudDensity(c, x);
             if (rho <= 0) continue;
-            const float segment = (1 - exp(-rho * dt)) / rho;
-            // Mode 2 (attribution): the map alone.
-            // (modes 0 and 3 with P[3].w steps: the near field marched, the sun map beyond - atmosphere.clouds.sun_steps)
-            const float tauSun = P[1].z == 2 ? cloudSunTau(c, x) : (approximate && P[1].z != 4 && P[3].w != 0 ? cloudSunTauNear(c, x, P[3].w) : cloudSunTauMarch(c, x));
-            if (tauSun < 0) sunCapped = 1;
-            const float w = T * (1 - exp(-rho * dt));
-            const float sun = approximate ? cloudMsSun(ms, abs(tauSun)) : phase * exp(-abs(tauSun));
-            L += T * c.albedo * rho * (sun * sunIlluminance + (approximate ? cloudSkyRamp(c, x) : 0.0) * skyRadiance) * segment;
-            distanceSum += w * (t0 + (s + 0.5) * dt);
+            const float segment = (1 - exp(-rho * d)) / rho;
+            const float w = T * (1 - exp(-rho * d));
+            if (test)
+            {
+                // Mode 2 (attribution): the map alone.
+                const float tauSun = P[1].z == 2 ? cloudSunTau(c, x) : cloudSunTauMarch(c, x);
+                if (tauSun < 0) sunCapped = 1;
+                const float sun = approximate ? cloudMsSun(ms, abs(tauSun)) : phase * exp(-abs(tauSun));
+                L += T * c.albedo * rho * (sun * sunIlluminance + (approximate ? cloudSkyRamp(c, x) : 0.0) * skyRadiance) * segment;
+            }
+            else
+            {
+                // (modes 0 and 3 with sun steps: the near field marched, the sun map beyond - atmosphere.clouds.sun_steps)
+                const float tauSun = cloudFrameSunTau(c, x, sunSteps, filtered);
+                if (tauSun < 0) sunCapped = 1;
+                L += T * rho * cloudFrameSource(c, light, x, tauSun) * segment;
+            }
+            distanceSum += w * at;
             distanceWeight += w;
-            T *= exp(-rho * dt);
+            T *= exp(-rho * d);
         }
     }
     if (test)

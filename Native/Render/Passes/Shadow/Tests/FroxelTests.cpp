@@ -936,6 +936,12 @@ int main(int argc, char** argv)
             // ---- 6. Reader bound: production integrates only the slices a reader reaches (FroxelIntegrate.hlsl); every
             //         node a surface pixel of the 3 x 3 tile neighbourhood reads, and the sky correction of tiles with
             //         sky around them, must be the same bits as with every slice integrated.
+            //         Without atmosphere.froxels.clip_at_surface: with it the bounded integration samples a slice's light
+            //         in front of the tile's farthest surface only (FroxelSlice.hlsli froxelSampledLength; the every-slice
+            //         mode has no readers and no clip), and the slice that holds the surface is then another number by
+            //         design - the bound itself is what this section compares.
+            const bool clipAtSurface = tf.quality.boolean("atmosphere.froxels.clip_at_surface");
+            tf.quality.applyOverride("atmosphere.froxels.clip_at_surface=false");
             wantDepth = true;
             run(sc, 6);
             const std::vector<uint8_t> full = lastVolume;
@@ -944,6 +950,7 @@ int main(int argc, char** argv)
             shadow::setFroxelFullDepth(tf.trackState, true);
             wantDepth = false;
             const std::vector<uint8_t> bounded = lastVolume;
+            tf.quality.applyOverride(clipAtSurface ? "atmosphere.froxels.clip_at_surface=true" : "atmosphere.froxels.clip_at_surface=false");
             const uint32_t pd = TestFrame::rowPitch(W, 4);
             std::vector<float> tileZ(fg.gridX * fg.gridY, 0.0f);
             std::vector<uint8_t> tileSky(fg.gridX * fg.gridY, 0);
