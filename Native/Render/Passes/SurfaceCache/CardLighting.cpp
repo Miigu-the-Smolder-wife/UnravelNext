@@ -389,17 +389,19 @@ void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs
                       b.use(trace, Use::UavGraphics);
                   },
                   [&radiosityTrace, cb, sharedConstants, frameBuffer, select, pageLight, trace, frame, capacity, directCapacity, radiosityCapacity,
-                   cap = in.radiosityCap](PassContext& c) {
+                   cap = in.radiosityCap, skipBackFace = in.radiositySkipBackFace, skipTwoSided = in.radiositySkipTwoSided,
+                   minTraceDistance = in.radiosityMinTraceDistance](PassContext& c) {
                       uint32_t k[32] = {};
                       sharedConstants(c, k);
-                      k[0] = c.srv(frameBuffer), k[1] = c.srv(select), k[2] = frame, k[3] = 0;
+                      k[0] = c.srv(frameBuffer), k[1] = c.srv(select), k[2] = frame, k[3] = bits(skipBackFace);
+                      k[15] = bits(minTraceDistance);
                       k[16] = c.uav(trace), k[17] = bits(cap), k[19] = capacity;
-                      k[20] = directCapacity, k[21] = 0, k[22] = radiosityCapacity, k[23] = c.srv(pageLight);
+                      k[20] = directCapacity, k[21] = bits(skipTwoSided), k[22] = radiosityCapacity, k[23] = c.srv(pageLight);
                       c.bindFrameConstants(cb);
                       const uint64_t threads = (uint64_t)radiosityCapacity * 64;
-                      // (a thread traces at most 3 rays - its own and, at a hit without cards, the sun's and a light
-                      // sample's: a dispatch holds a third of the threads)
-                      const uint64_t perDispatch = kThreadsPerDispatch / 3;
+                      // (a thread traces at most 4 rays - its own, its re-shoot past a near back face and, at a hit
+                      // without cards, the sun's and a light sample's: a dispatch holds a quarter of the threads)
+                      const uint64_t perDispatch = kThreadsPerDispatch / 4;
                       for (uint64_t first = 0; first < threads; first += perDispatch)
                       {
                           k[18] = (uint32_t)first;

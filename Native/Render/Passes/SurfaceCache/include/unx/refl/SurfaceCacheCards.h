@@ -31,6 +31,8 @@ struct SurfaceCacheCardSettings  // Config/quality/surface_cache.toml
     McSettings cards;
     bool direct = true, radiosity = true, shadowRaysOpaque = false;
     float radiosityCap = 40.0f, radiosityFrames = 4.0f;
+    float radiositySkipBackFace = 0.05f, radiositySkipTwoSided = 0.01f;  // metres; 0: the radiosity rays are not re-shot
+    float radiosityMinTraceDistance = 0.10f;
     uint32_t directFactor = 32, radiosityFactor = 64;
     float depthBias = 0.10f;
     uint32_t loadRounds = 8;          // update rounds a frame while a level loads

@@ -21,6 +21,9 @@ struct CardLightingInputs
     bool shadowRaysOpaque = false;      // surface_cache.shadow_rays_opaque
     float radiosityCap = 40.0f;         // surface_cache.radiosity_max_ray_intensity (exposed units; 0: none)
     float radiosityFrames = 4.0f;       // surface_cache.radiosity_max_frames_accumulated
+    // The radiosity rays' re-shoot past a near back face (surface_cache.radiosity_avoid_self_intersections; metres,
+    // 0: none) and the least hit distance that reads light (surface_cache.radiosity_min_trace_distance_m).
+    float radiositySkipBackFace = 0.05f, radiositySkipTwoSided = 0.01f, radiosityMinTraceDistance = 0.10f;
     uint32_t directFactor = 32;         // surface_cache.direct_update_factor
     uint32_t radiosityFactor = 64;      // surface_cache.radiosity_update_factor
     float depthBias = 0.10f;            // surface_cache.mesh_cards_depth_bias_m

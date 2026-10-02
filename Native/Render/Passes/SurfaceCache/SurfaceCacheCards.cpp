@@ -115,6 +115,10 @@ SurfaceCacheCardSettings SurfaceCacheCardSettings::fromQuality(const QualityConf
     s.shadowRaysOpaque = flag("surface_cache.shadow_rays_opaque", false);
     s.radiosityCap = (float)num("surface_cache.radiosity_max_ray_intensity", 40.0);
     s.radiosityFrames = (float)num("surface_cache.radiosity_max_frames_accumulated", 4.0);
+    const bool reshoot = flag("surface_cache.radiosity_avoid_self_intersections", true);
+    s.radiositySkipBackFace = reshoot ? std::max((float)num("surface_cache.radiosity_skip_back_face_m", 0.05), 0.0f) : 0.0f;
+    s.radiositySkipTwoSided = reshoot ? std::max((float)num("surface_cache.radiosity_skip_two_sided_m", 0.01), 0.0f) : 0.0f;
+    s.radiosityMinTraceDistance = std::max((float)num("surface_cache.radiosity_min_trace_distance_m", 0.10), 0.0f);
     s.directFactor = std::max((uint32_t)num("surface_cache.direct_update_factor", 32), 1u);
     s.radiosityFactor = std::max((uint32_t)num("surface_cache.radiosity_update_factor", 64), 1u);
     s.depthBias = (float)num("surface_cache.mesh_cards_depth_bias_m", 0.10);
@@ -755,6 +759,9 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
         in.shadowRaysOpaque = s.settings.shadowRaysOpaque;
         in.radiosityCap = s.settings.radiosityCap;
         in.radiosityFrames = s.settings.radiosityFrames;
+        in.radiositySkipBackFace = s.settings.radiositySkipBackFace;
+        in.radiositySkipTwoSided = s.settings.radiositySkipTwoSided;
+        in.radiosityMinTraceDistance = s.settings.radiosityMinTraceDistance;
         in.directFactor = s.settings.directFactor;
         in.radiosityFactor = s.settings.radiosityFactor;
         in.depthBias = depthBias;

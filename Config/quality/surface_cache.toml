@@ -13,6 +13,18 @@ direct_update_factor = 32             # cells relit per frame = slots / this (re
 radiosity_update_factor = 64          # probes updated per frame = slots / this / 16 (reference: texels / 64, a probe per 4 x 4)
 radiosity_max_ray_intensity = 40.0    # QUALITY TRADE (user decision): a radiosity ray's exposed radiance is capped here; 0 = no cap
 radiosity_max_frames_accumulated = 4.0
+radiosity_avoid_self_intersections = true  # (mesh cards) a radiosity ray whose first hit is a near back face is shot once
+                                      # more past it (reference: r.Lumen.HardwareRayTracing.AvoidSelfIntersections, the
+                                      # retrace mode): the ray geometry is not the captured surface texel for texel, and a
+                                      # ray that starts under it would bring the surface's own inside. false: the first
+                                      # hit stands
+radiosity_skip_back_face_m = 0.05     # ... the back of a one-sided surface nearer than this: again from this distance
+                                      # (reference: SkipBackFaceHitDistance 5 cm)
+radiosity_skip_two_sided_m = 0.01     # ... a two-sided surface nearer than this: again from just past the hit (reference:
+                                      # SkipTwoSidedHitDistance 1 cm)
+radiosity_min_trace_distance_m = 0.10 # (mesh cards) a radiosity ray's hit nearer than this blocks the ray and reads no
+                                      # light: a card texel would light itself (reference:
+                                      # MinTraceDistanceToSampleSurfaceCache 10 cm). 0: every hit reads the cache
 direct_lighting = true
 radiosity = true
 remainder_light = false               # QUALITY TRADE (user decision) when false, as the reference: a cell's direct light is its 8
