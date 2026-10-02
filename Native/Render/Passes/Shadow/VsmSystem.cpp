@@ -1854,9 +1854,16 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     }
     if (fc.services.rasterizeDepth && activeLocal > 0)
     {
-        // Local lights: the (light, face, mip) views (42 per light) packed into requests of at most 252 views (V's
-        // 255-view limit) whose bounds (localBound per view) sum to at most the list capacity; each view's viewport is its
-        // mip's resolution, the tile masks and slots are packed per light (VsmLocalCullMask).
+        // Local lights: the (light, face, mip) views (42 per light) packed into requests of at most
+        // shadow.vsm.local_request_views views (whole lights; V's limit: kDepthRasterMaxViews) whose bounds (localBound per
+        // view) sum to at most the list capacity; each view's viewport is its mip's resolution, the tile masks and slots
+        // are packed per light (VsmLocalCullMask). 252 (6 lights) was the limit of V's 8-bit view field: a cull chain per
+        // 6 lights.
+        const uint32_t viewsPerLight = 6 * kLocalMips;
+        const int64_t requestViewsWanted = q.has("shadow.vsm.local_request_views") ? q.integer("shadow.vsm.local_request_views") : 252;
+        if (requestViewsWanted < (int64_t)viewsPerLight || requestViewsWanted > (int64_t)kDepthRasterMaxViews)
+            fail("shadow.vsm.local_request_views = %lld: %u (one light) .. %u", (long long)requestViewsWanted, viewsPerLight, kDepthRasterMaxViews);
+        const uint32_t requestViews = (uint32_t)requestViewsWanted / viewsPerLight * viewsPerLight;
         auto request = [&]() {
             DepthRasterRequest r;
             r.name = "s.vsm.localraster" + std::to_string(localRequests++);
@@ -1888,7 +1895,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                     for (uint32_t mip = 0; mip < kLocalMips; ++mip)
                     {
                         const uint64_t bound = faceBounds[face][mip];
-                        if (!r.views.empty() && (sum + bound > listCapacity || r.views.size() >= (split ? 252u : 42u * 6u) || (!split && face == 0 && mip == 0 && a % 6 == 0)))
+                        if (!r.views.empty() && (sum + bound > listCapacity || r.views.size() >= (split ? requestViews : 42u * 6u) || (!split && face == 0 && mip == 0 && a % 6 == 0)))
                         {
                             fc.services.rasterizeDepth(fc, r);
                             r = request();

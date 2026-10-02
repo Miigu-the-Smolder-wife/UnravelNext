@@ -67,14 +67,14 @@ void cullInstance(RWByteAddressBuffer state, uint instance, uint view, bool vali
     {
         RWStructuredBuffer<uint2> items = ResourceDescriptorHeap[NODE_ITEMS_UAV];
         for (uint k = 0; k < roots.rootCount; ++k)
-            if (base + k < CAP_NODES) items[base + k] = uint2(instance, packItem(roots.nodeOffset + k, view));
+            if (base + k < CAP_NODES) items[base + k] = packItem(instance, roots.nodeOffset + k, view);
     }
     nodePublish(state, first, total);
     const uint d = waveAppend(state, VS_DEFER_INSTANCES, defer ? 1 : 0, CAP_DEFERRED, OVERFLOW_DEFER_INSTANCES);
     if (defer && d < CAP_DEFERRED)
     {
-        RWStructuredBuffer<uint> deferred = ResourceDescriptorHeap[DEFER_INSTANCES_UAV];
-        deferred[d] = packItem(instance, view);
+        RWStructuredBuffer<uint2> deferred = ResourceDescriptorHeap[DEFER_INSTANCES_UAV];
+        deferred[d] = uint2(instance, view);
     }
     const uint s = WaveActiveCountBits(visible);
     if (WaveIsFirstLane() && s > 0) state.InterlockedAdd(4 * VS_STAT_INSTANCES, s);
@@ -112,12 +112,12 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint lane : SV
     uint view = 0, first = 0, count = 0, membersSrv = 0;
     if (any)
     {
-        RWStructuredBuffer<uint> work = ResourceDescriptorHeap[CHUNK_WORK_UAV];
-        const uint packed = work[item];
-        view = itemView(packed);
+        RWStructuredBuffer<uint2> work = ResourceDescriptorHeap[CHUNK_WORK_UAV];
+        const uint2 chunkItem = work[item];
+        view = chunkItem.y;
         const CullScene cs = loadCullScene(loadView(view).cullSceneSrv);
         StructuredBuffer<CullChunk> chunks = ResourceDescriptorHeap[cs.chunkSrv];
-        const CullChunk ch = chunks[itemIndex(packed)];
+        const CullChunk ch = chunks[chunkItem.x];
         first = ch.first;
         count = min(ch.count, CHUNK_INSTANCES);
         membersSrv = cs.chunkInstancesSrv;
@@ -139,10 +139,10 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint lane : SV
     uint instance = 0, view = 0;
     if (valid)
     {
-        RWStructuredBuffer<uint> deferred = ResourceDescriptorHeap[DEFER_INSTANCES_UAV];
-        const uint packed = deferred[id.x];
-        instance = itemIndex(packed);
-        view = itemView(packed);
+        RWStructuredBuffer<uint2> deferred = ResourceDescriptorHeap[DEFER_INSTANCES_UAV];
+        const uint2 item = deferred[id.x];
+        instance = item.x;
+        view = item.y;
     }
     cullInstance(state, instance, view, valid);
 #endif

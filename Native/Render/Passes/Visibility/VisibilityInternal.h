@@ -65,6 +65,9 @@ constexpr uint32_t kViewOcclusion = 1;
 constexpr uint32_t kViewCullBack = 2;
 constexpr uint32_t kViewTileSingle = 4;  // tile-local pairs are single tiles (atlas mode)
 constexpr uint32_t kViewTileOccluders = 8;  // tested against the request's tile occluders (RasterView::tileOccluders)
+// Views of one cull run: the work items' view field is 16 bits (VisibilityCommon.hlsli packItem), a run's views one
+// upload chunk of this many.
+constexpr uint32_t kViewsPerRun = 4096;
 
 // Cull state words.
 constexpr uint32_t kStateNodeWrite = 0, kStateNodeEnd = 2, kStateGroupWrite = 3, kStateVisible = 5, kStateDeferInstances = 6, kStateDeferNodes = 7,

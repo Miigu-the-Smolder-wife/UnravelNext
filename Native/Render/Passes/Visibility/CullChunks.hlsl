@@ -19,7 +19,7 @@ float4 chunkSphere(CullChunk ch)
 void main(uint3 id : SV_DispatchThreadID)
 {
     RWByteAddressBuffer state = ResourceDescriptorHeap[STATE_UAV];
-    RWStructuredBuffer<uint> work = ResourceDescriptorHeap[CHUNK_WORK_UAV];
+    RWStructuredBuffer<uint2> work = ResourceDescriptorHeap[CHUNK_WORK_UAV];
     uint chunk = 0, view = 0;
     bool valid;
 #if PHASE == 1
@@ -33,9 +33,9 @@ void main(uint3 id : SV_DispatchThreadID)
     valid = id.x < count;
     if (valid)
     {
-        const uint packed = work[CAP_DEFERRED + id.x];
-        chunk = itemIndex(packed);
-        view = itemView(packed);
+        const uint2 item = work[CAP_DEFERRED + id.x];
+        chunk = item.x;
+        view = item.y;
     }
     const CullScene cs = loadCullScene(loadView(view).cullSceneSrv);
 #endif
@@ -64,7 +64,7 @@ void main(uint3 id : SV_DispatchThreadID)
     }
 #if PHASE == 1
     const uint a = waveAppend(state, VS_CHUNK_ITEMS, visible ? 1 : 0, CAP_DEFERRED, OVERFLOW_CHUNK_ITEMS);
-    if (visible && a < CAP_DEFERRED) work[a] = packItem(chunk, view);
+    if (visible && a < CAP_DEFERRED) work[a] = uint2(chunk, view);
     // the chunk instance pass's arguments (one group per item; CullPrepare MODE=4 stores the same)
     const uint added = WaveActiveCountBits(visible);
     if (added > 0 && WaveIsFirstLane())  // (the first lane's 'a' is the wave's first item)
@@ -73,16 +73,16 @@ void main(uint3 id : SV_DispatchThreadID)
         raiseDispatch(args, VA_CHUNK_ITEMS, min(a + added, CAP_DEFERRED));
     }
     const uint d = waveAppend(state, VS_DEFER_CHUNKS, defer ? 1 : 0, CAP_DEFERRED, OVERFLOW_DEFER_CHUNKS);
-    if (defer && d < CAP_DEFERRED) work[CAP_DEFERRED + d] = packItem(chunk, view);
+    if (defer && d < CAP_DEFERRED) work[CAP_DEFERRED + d] = uint2(chunk, view);
 #else
     const uint n = visible ? min(ch.count, CHUNK_INSTANCES) : 0;
     const uint base = waveAppend(state, VS_DEFER_INSTANCES, n, CAP_DEFERRED, OVERFLOW_DEFER_INSTANCES);
     if (n > 0)
     {
         StructuredBuffer<uint> members = ResourceDescriptorHeap[cs.chunkInstancesSrv];
-        RWStructuredBuffer<uint> deferred = ResourceDescriptorHeap[DEFER_INSTANCES_UAV];
+        RWStructuredBuffer<uint2> deferred = ResourceDescriptorHeap[DEFER_INSTANCES_UAV];
         [loop] for (uint k = 0; k < n; ++k)  // n <= CHUNK_INSTANCES
-            if (base + k < CAP_DEFERRED) deferred[base + k] = packItem(members[ch.first + k], view);
+            if (base + k < CAP_DEFERRED) deferred[base + k] = uint2(members[ch.first + k], view);
     }
     const uint s2 = WaveActiveCountBits(visible);
     if (WaveIsFirstLane() && s2 > 0) state.InterlockedAdd(4 * VS_STAT_CHUNKS, s2);

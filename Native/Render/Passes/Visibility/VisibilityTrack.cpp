@@ -42,7 +42,8 @@ using namespace unx::visibility::detail;
 namespace hier = unx::clusterbuilder::gpu;
 
 constexpr uint32_t kNone = gpu::kNone;
-constexpr uint32_t kViewsPerSlot = 4096;  // cull views of one upload chunk per frame in flight (more chunks as a frame needs)
+constexpr uint32_t kViewsPerSlot = kViewsPerRun;  // cull views of one upload chunk per frame in flight (more chunks as a frame needs)
+static_assert(kViewsPerRun <= kDepthRasterMaxViews && kDepthRasterMaxViews <= 65536);
 constexpr uint32_t kReadbackBytes = 320;  // >= kStateWords x 4 (a slot holds one copy of the cull state)
 static_assert(kReadbackBytes >= kStateWords * 4);
 
@@ -842,10 +843,10 @@ Run createRun(FramePassContext& fc, const Settings& cfg, const std::string& pref
     r.groupItems = g.createBuffer({ "v.cull.groups", (uint64_t)cfg.capGroups * 8, 8 });
     r.visible = g.createBuffer({ "v.visibleClusters", (uint64_t)cfg.capVisible * 8, 8 });
     r.lists = g.createBuffer({ "v.lists", (uint64_t)cfg.capVisible * 4 * kLists, 0 });
-    r.deferInstances = g.createBuffer({ "v.cull.deferredInstances", (uint64_t)cfg.capDeferred * 4, 4 });
+    r.deferInstances = g.createBuffer({ "v.cull.deferredInstances", (uint64_t)cfg.capDeferred * 8, 8 });
     r.deferNodes = g.createBuffer({ "v.cull.deferredNodes", (uint64_t)cfg.capDeferred * 8, 8 });
     r.deferClusters = g.createBuffer({ "v.cull.deferredClusters", (uint64_t)cfg.capDeferred * 8, 8 });
-    r.chunkWork = g.createBuffer({ "v.cull.chunkWork", (uint64_t)cfg.capDeferred * 8, 4 });
+    r.chunkWork = g.createBuffer({ "v.cull.chunkWork", (uint64_t)cfg.capDeferred * 16, 8 });
     r.nodesSrv = fc.scene.srv(clusterbuilder::kClusterNodes);
     r.rootsSrv = fc.scene.srv(clusterbuilder::kMeshClusterRoots);
     r.spheresSrv = fc.scene.srv(clusterbuilder::kClusterLodSpheres);
@@ -2350,7 +2351,8 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     if (!request.depthTarget.valid() && request.pixelKernel.empty()) fail("rasterizeDepth '%s': neither a depth target nor a pixel kernel", request.name.c_str());
     if (s.mainFrameConstantsFrame != fc.frame.frameIndex)
         fail("rasterizeDepth '%s': called before V's main view of this frame (it reads the frame's scene indices and time)", request.name.c_str());
-    if (request.views.size() >= 256) fail("rasterizeDepth '%s': %zu views (limit 255, 8-bit view field)", request.name.c_str(), request.views.size());
+    if (request.views.size() > kDepthRasterMaxViews)
+        fail("rasterizeDepth '%s': %zu views (limit %u: DepthRaster.h kDepthRasterMaxViews)", request.name.c_str(), request.views.size(), kDepthRasterMaxViews);
     if (request.coverage || request.bands != 7)
         fail("rasterizeDepth '%s': coverage mode and band selection (v1.26) are not implemented yet (V)", request.name.c_str());
     if (request.tileLocal && (!request.cullMask.valid() || request.cullTilePx == 0))

@@ -90,7 +90,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
 #endif
     StructuredBuffer<uint2> visible = ResourceDescriptorHeap[P[0].x];
     const uint2 entry = valid ? visible[visibleIndex] : uint2(0, 0);
-    const uint view = entry.y >> 24;
+    const uint view = itemView(entry), instance = itemInstance(entry);
     StructuredBuffer<CullView> views = ResourceDescriptorHeap[P[1].z];
     const CullView v = views[view];
 #if TILE && !FROM_PAYLOAD
@@ -117,9 +117,9 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
         pair.z = run.y | (y << 16);
     }
 #endif
-    const GpuInstance inst = loadInstance(entry.x);
+    const GpuInstance inst = loadInstance(instance);
     const GpuMesh mesh = loadMesh(inst.mesh);
-    const GpuCluster cl = loadCluster(entry.y & 0xFFFFFFu);
+    const GpuCluster cl = loadCluster(itemIndex(entry));
     const uint material = clusterMaterial(inst, cl);
     // (the CPU picks OUT64 only when every cluster fits; the clamp only keeps an output count within the declaration)
     const uint vertexCount = valid ? min(clusterVertexCount(cl), MS_OUT) : 0, triangleCount = valid ? min(clusterTriangleCount(cl), MS_OUT) : 0;
@@ -174,7 +174,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
 #if !DEPTH
         prims[t].userData = v.userData;
         prims[t].material = material;
-        prims[t].instance = entry.x;
+        prims[t].instance = instance;
 #endif
 #if TILE != 2
         prims[t].viewport = P[1].w != 0 ? view : 0;

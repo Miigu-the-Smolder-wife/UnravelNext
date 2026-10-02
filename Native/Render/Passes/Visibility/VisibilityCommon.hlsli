@@ -256,9 +256,16 @@ void nodePublish(RWByteAddressBuffer state, uint first, uint total)
     if (total > 0 && WaveIsFirstLane()) state.InterlockedMax(4 * VS_NODE_COMMIT, first + total);
 }
 
-uint packItem(uint index, uint view) { return index | (view << 24); }
-uint itemIndex(uint packed) { return packed & 0xFFFFFFu; }
-uint itemView(uint packed) { return packed >> 24; }
+// Work items and visible entries: uint2 (instance, index of a node or cluster) with the view in the two words' top
+// bytes - its low 8 bits over the index, bits 8 .. 15 over the instance (instances, nodes and clusters are below 2^24:
+// refreshScene). A run of at most 256 views has the instance word free of view bits, so the main view's visible list
+// (one view) reads as before: .x the instance, .y the cluster | view << 24. A raster request holds up to 4096 views
+// (kViewsPerSlot); its visible list is read by V's own raster kernels only. Chunk items and deferred instances are
+// plain pairs (chunk or instance, view).
+uint2 packItem(uint instance, uint index, uint view) { return uint2(instance | ((view >> 8) << 24), index | ((view & 0xFFu) << 24)); }
+uint itemInstance(uint2 item) { return item.x & 0xFFFFFFu; }
+uint itemIndex(uint2 item) { return item.y & 0xFFFFFFu; }
+uint itemView(uint2 item) { return (item.y >> 24) | ((item.x >> 24) << 8); }
 
 float instanceScale(GpuInstance inst) { return length(inst.objectToWorld[0].xyz); }
 

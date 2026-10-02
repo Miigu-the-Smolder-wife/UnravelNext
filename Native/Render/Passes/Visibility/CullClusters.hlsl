@@ -167,7 +167,7 @@ void emit(RWByteAddressBuffer state, bool active, uint instance, uint clusterInd
     if (visible && idx < CAP_VISIBLE)
     {
         RWStructuredBuffer<uint2> visibleList = ResourceDescriptorHeap[VISIBLE_UAV];
-        visibleList[idx] = uint2(instance, packItem(clusterIndex, view));
+        visibleList[idx] = packItem(instance, clusterIndex, view);
         RWByteAddressBuffer lists = ResourceDescriptorHeap[LISTS_UAV];
         uint s = 0, s2 = 0;
         [unroll] for (uint k = 0; k < VS_LISTS; ++k)
@@ -196,7 +196,7 @@ void emit(RWByteAddressBuffer state, bool active, uint instance, uint clusterInd
     if (defer && d < CAP_DEFERRED)
     {
         RWStructuredBuffer<uint2> deferred = ResourceDescriptorHeap[DEFER_CLUSTERS_UAV];
-        deferred[d] = uint2(instance, packItem(clusterIndex, view));
+        deferred[d] = packItem(instance, clusterIndex, view);
     }
     [unroll] for (uint b = 0; b < 3; ++b)
     {
@@ -225,14 +225,14 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupThreadID)
     RWStructuredBuffer<uint2> groups = ResourceDescriptorHeap[GROUP_ITEMS_UAV];
     const uint2 g = groups[item];
     StructuredBuffer<ClusterNode> nodes = ResourceDescriptorHeap[NODES_SRV];
-    const ClusterNode leaf = nodes[itemIndex(g.y)];
-    const uint view = itemView(g.y);
+    const ClusterNode leaf = nodes[itemIndex(g)];
+    const uint view = itemView(g), instance = itemInstance(g);
     for (uint base = 0; base < leaf.count; base += 32)  // uniform over the group: one leaf per group
     {
         const bool active = base + lane < leaf.count;
         ClusterResult r = (ClusterResult)0;
-        if (active) r = testCluster(g.x, leaf.first + base + lane, view);
-        emit(state, active, g.x, leaf.first + base + lane, view, r);
+        if (active) r = testCluster(instance, leaf.first + base + lane, view);
+        emit(state, active, instance, leaf.first + base + lane, view, r);
     }
 }
 #else
@@ -247,9 +247,9 @@ void main(uint i : SV_DispatchThreadID)
     {
         RWStructuredBuffer<uint2> deferred = ResourceDescriptorHeap[DEFER_CLUSTERS_UAV];
         d = deferred[i];
-        r = testCluster(d.x, itemIndex(d.y), itemView(d.y));
+        r = testCluster(itemInstance(d), itemIndex(d), itemView(d));
         r.defer = false;
     }
-    emit(state, active, d.x, itemIndex(d.y), itemView(d.y), r);
+    emit(state, active, itemInstance(d), itemIndex(d), itemView(d), r);
 }
 #endif

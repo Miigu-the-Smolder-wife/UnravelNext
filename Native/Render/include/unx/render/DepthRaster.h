@@ -25,6 +25,9 @@ struct DepthRasterOverflow
 using DepthRasterOverflows = std::map<std::string, DepthRasterOverflow>;
 inline const char* kDepthRasterOverflowKey = "depthRaster.overflows";
 
+// The most views one request holds (the cull work items carry the view in 16 bits; a run's views are one upload chunk).
+constexpr uint32_t kDepthRasterMaxViews = 4096;
+
 // S -> V: rasterise shadow-casting clusters into depth-like targets through V's cluster pipeline (cull, LOD, deform,
 // mesh shader). V owns geometry; the requester owns the output: either hardware depth into 'depthTarget', or its own
 // pixel kernel (e.g. atomic depth into paged storage) with the extra resources it declares.

@@ -29,7 +29,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID)
     StructuredBuffer<uint2> rects = ResourceDescriptorHeap[P[2].x];
     StructuredBuffer<uint2> visible = ResourceDescriptorHeap[P[0].x];
     const uint2 packed = valid ? rects[visibleIndex] : uint2(0, 0);
-    const uint view = valid ? visible[visibleIndex].y >> 24 : 0;
+    const uint view = valid ? itemView(visible[visibleIndex]) : 0;
     StructuredBuffer<CullView> views = ResourceDescriptorHeap[P[1].z];
     const CullView v = views[view];
     const uint2 a = uint2(packed.x & 0xFFFFu, packed.x >> 16), b = uint2(packed.y & 0xFFFFu, (packed.y >> 16) & 0x7FFFu);

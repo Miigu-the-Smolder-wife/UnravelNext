@@ -47,6 +47,11 @@ static_separate = true          # sun pages keep a static copy (the reference's 
                                 # all its casters gives - a depth buffer keeps the nearest fragment in any order. Costs a second
                                 # atlas (64 KB per page: 256 MB at 4096 pages) and a second family of sun raster requests
                                 # (s.vsm.static*). Needs cache. false: one atlas, a changed caster redraws its pages whole (A/B)
+local_request_views = 4032      # local lights' page views (42 per light: 6 faces x 7 mips) in one of V's raster requests - one
+                                # cull chain per request, so 96 lights share one where the list capacity allows it
+                                # (visibility.max_visible_clusters still splits them). 252: six lights per request, the limit
+                                # of V's 8-bit view field before the 16-bit one (A/B). Only without shading.mega_lights: with
+                                # it S draws no local page
 static_hzb_cull = true          # with static_separate: the movable casters' views are culled against the HZB of the pages' static
                                 # copies (VsmStaticHzb.hlsl; the reference's per-page HZB): an instance, hierarchy node or cluster
                                 # that lies under the static surface in every page it would be drawn into is not drawn - after the
