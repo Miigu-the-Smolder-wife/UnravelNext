@@ -20,6 +20,9 @@ void particleMeshes(FramePassContext& fc);
 // GpuScene::setFxLightCapacity), then after simulation the lights of this frame at FrameResources::fxLights (before S).
 void particleLightCapacity(TrackState& state, GpuScene& scene);
 void particleLights(FramePassContext& fc, const ViewResources& main);
+// The sun's particle transmittance map (FxShadow.cpp; fx.particles.shadows): after simulation, before S's screen
+// visibility and the particle render pass. Writes FrameResources::particleShadowParams / particleShadowMap.
+void particleShadows(FramePassContext& fc, const ViewResources& main);
 
 // ---- V: visibility (core session) - Native/Render/Passes/Visibility, Tools/ClusterBuilder
 // Culling (two phase), band A/B/C classification, band A vis buffer + depth, HiZ, coverage layer (bands B/C).

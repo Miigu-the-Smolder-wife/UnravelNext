@@ -23,6 +23,15 @@ enum DecalChannels : uint32_t
     DecalNormal = 2,      // the normal and its slope variance
     DecalRoughMetal = 4,  // roughness and metallic
     DecalAllChannels = 7,
+    DecalEmissive = 8,    // the decal material's emission x Decal::emissive, added to the receiver's (the direct view)
+};
+// How a decal's material meets the receiver's (Unreal 4's decal blend modes).
+enum class DecalBlend : uint32_t
+{
+    Translucent = 0,  // every channel of Decal::channels blends toward the decal's by its opacity
+    Stain = 1,        // the base colour is multiplied by lerp(1, the decal's, opacity); the other channels blend
+    Normal = 2,       // the normal alone (whatever Decal::channels says)
+    Emissive = 3,     // the emission alone, added
 };
 
 struct Decal
@@ -37,6 +46,8 @@ struct Decal
     float edge = 0.25f;           // soft fraction of the box depth at its +-Z faces (0: hard)
     float3 color = { 1, 1, 1 };   // tint of the decal's base colour (Unreal's decal colour)
     uint32_t channels = DecalAllChannels;  // DecalChannels the decal changes
+    DecalBlend blend = DecalBlend::Translucent;
+    float emissive = 1;           // scale of the decal material's emission (with DecalEmissive)
     // Fade with the decal's size on screen (Unreal's FadeScreenSize; 0: none): with screen = the box's largest half
     // extent / its distance and k = fadeScreenSize x 2 tan(half fov x) / view width x 600, the opacity is times
     // saturate((screen - k) / (k / 2)) - gone below k, full from 1.5 k.
@@ -55,9 +66,11 @@ public:
     void remove(uint32_t id);
     void clear();
     uint32_t count() const { return m_live; }
+    bool anyEmissive() const;  // a live decal adds emission (the resolve then writes the emissive texture)
     uint64_t revision() const { return m_revision; }
 
     // GPU records of the live decals (dense), as Decal.hlsli DecalRecord (128 B each).
+    static uint32_t channelWord(const Decal& d);  // DecalRecord::channels: the channels its blend leaves, | the stain bit
     std::vector<uint8_t> records() const;
 
 private:

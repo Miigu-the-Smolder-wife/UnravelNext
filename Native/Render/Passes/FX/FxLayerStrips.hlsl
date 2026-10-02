@@ -7,7 +7,11 @@
 //           sprite records, so the order is deterministic) - the screen square around the segment's four vertices (the
 //           whole view when it crosses the near plane), device depth of its nearest vertex (the tile sort key), SMALL
 //           unless both ends are at least FX_LAYER_MIN_RADIUS wide on screen (thinner strips take the full-resolution
-//           walk) - and the tile counts of that square.
+//           walk) - and the tile counts of that square. With tessellation (LayerExtra::ribbonSegments > 1,
+//           ParticleLayerPass.hlsli fxStripSampleOf) the segment is a cubic's pieces: the square also holds the cubic's
+//           two inner control points (the ends moved a third of the segment along their tangents) with the ends' side
+//           vectors - the curve lies within its control points' hull. The record takes its point's program and look; a
+//           look's strip is drawn at full resolution unless the look is marked smooth.
 #include "Passes/FX/ParticleLayerPass.hlsli"
 
 [numthreads(256, 1, 1)]
@@ -29,12 +33,30 @@ void main(uint3 id : SV_DispatchThreadID)
         return;
     }
     RWStructuredBuffer<FxRibbonVertex> vertices = ResourceDescriptorHeap[c.ribbonVertices];
-    const float3 corners[4] = { vertices[2u * j].position, vertices[2u * j + 1u].position, vertices[2u * k].position, vertices[2u * k + 1u].position };
+    float3 corners[8] = { vertices[2u * j].position, vertices[2u * j + 1u].position, vertices[2u * k].position, vertices[2u * k + 1u].position,
+                          float3(0, 0, 0), float3(0, 0, 0), float3(0, 0, 0), float3(0, 0, 0) };
+    const LayerExtra x = fxLayerExtra();
+    uint cornerCount = 4u;
+    if (x.ribbonSegments > 1u)
+    {
+        RWStructuredBuffer<float4> tangents = ResourceDescriptorHeap[x.ribbonTangents];
+        const float3 ta = tangents[j].xyz * c.streamAxes, tb = tangents[k].xyz * c.streamAxes;
+        if (dot(ta, tb) < cos(FX_RIBBON_PIECE_ANGLE))
+        {
+            const float3 third = (0.5f * (corners[2] + corners[3]) - 0.5f * (corners[0] + corners[1])) ;
+            const float reach = length(third) / 3.0f;
+            corners[4] = corners[0] + ta * reach;
+            corners[5] = corners[1] + ta * reach;
+            corners[6] = corners[2] - tb * reach;
+            corners[7] = corners[3] - tb * reach;
+            cornerCount = 8u;
+        }
+    }
     float2 lo = float2(1e30f, 1e30f), hi = float2(-1e30f, -1e30f);
     float nearest = 0;
     uint behind = 0u;
-    float distances[4];
-    [unroll] for (uint q = 0u; q < 4u; ++q)
+    float distances[8];
+    [loop] for (uint q = 0u; q < cornerCount; ++q)
     {
         const float3 v = mul((float3x3)g_view, corners[q]);
         distances[q] = -v.z;
@@ -45,7 +67,7 @@ void main(uint3 id : SV_DispatchThreadID)
         hi = max(hi, s);
         nearest = max(nearest, g_nearPlane / distances[q]);
     }
-    if (behind == 4u)
+    if (behind == cornerCount)
     {
         records[c.stripBase + k] = rec;
         return;
@@ -72,8 +94,17 @@ void main(uint3 id : SV_DispatchThreadID)
     rec.radius = 0.5f * length(hi - lo);
     rec.depth = nearest;
     rec.radianceAlpha = uint2(k, j);
-    rec.flags = FX_LAYER_RECORD_STRIP | (min(hA, hB) < FX_LAYER_MIN_RADIUS ? FX_LAYER_RECORD_SMALL : 0u);
-    rec.program = 0;
+    // (the point's program and look, FxLayerSetup's ribbonPoint)
+    RWStructuredBuffer<FxRibbonPoint> points = ResourceDescriptorHeap[c.ribbonPoints];
+    const FxRibbonPoint own = points[k];
+    bool small = min(hA, hB) < FX_LAYER_MIN_RADIUS;
+    if (own.look != 0u && x.looks != UNX_NONE)
+    {
+        StructuredBuffer<FxSpriteLook> looks = ResourceDescriptorHeap[x.looks];
+        small = small || (looks[own.look - 1u].flags & FX_LOOK_SMOOTH) == 0u;
+    }
+    rec.flags = FX_LAYER_RECORD_STRIP | (small ? FX_LAYER_RECORD_SMALL : 0u) | (own.look << 8);
+    rec.program = own.program;
     records[c.stripBase + k] = rec;
     uint2 t0, t1;
     if (!fxLayerTiles(c, rec, t0, t1)) return;

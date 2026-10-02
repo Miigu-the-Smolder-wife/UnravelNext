@@ -453,6 +453,9 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
     const TextureRef coverageRange = view.coverageDepthRange, particleLayer = view.particleLayer;
     const BufferRef coverageTiles = view.coverageTiles, coveragePixels = view.coverageTilePixels, coverageRecords = view.coverageRecords;
     const BufferRef particleEdges = view.particleEdges;
+    // (the particles' own vector where they hold the pixel: FX's layer motion and depth range)
+    const bool particleVectors = particles && view.particleMotion.valid() && view.particleDepthRange.valid();
+    const TextureRef particleMotion = view.particleMotion, particleRange = view.particleDepthRange;
     const uint32_t coverageTilesX = view.coverageTilesX;
     ID3D12PipelineState* motionPso = fc.shaders.compute("Passes/Shading/UpscaleMotion");
     g.addPass("m.upscale.motion", QueueType::Graphics,
@@ -483,6 +486,11 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       b.use(particleLayer, Use::SrvCompute);
                       b.use(particleEdges, Use::SrvCompute);
                   }
+                  if (particleVectors)
+                  {
+                      b.use(particleMotion, Use::SrvCompute);
+                      b.use(particleRange, Use::SrvCompute);
+                  }
               },
               [=](PassContext& c) {
                   const uint32_t none = 0xFFFFFFFFu;
@@ -503,7 +511,8 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                   k[35] = coverage ? c.srv(coverageRange) : none;
                   k[36] = particles ? c.srv(particleLayer) : none;
                   k[37] = particles ? c.srv(particleEdges) : none;
-                  k[38] = k[39] = 0;
+                  k[38] = particleVectors ? c.srv(particleMotion) : none;
+                  k[39] = particleVectors ? c.srv(particleRange) : none;
                   c.cmd->SetPipelineState(motionPso);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 40);

@@ -2693,6 +2693,29 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                       });
         }
     }
+    // The particles' shadow under the sun (FX's transmittance map, Passes/FX/FxShadow.hlsl STEP 2): the sun's slot of
+    // the screen visibility times what the shadow-casting sprites let through at the pixel's surface.
+    {
+        const BufferRef particleParams = fc.resources.particleShadowParams, particleMap = fc.resources.particleShadowMap;
+        if (!s.debugPaths && particleParams.valid() && particleMap.valid())
+        {
+            ID3D12PipelineState* pp = fc.shaders.compute("Passes/FX/FxShadow.STEP2");
+            g.addPass("s.shadow.particles", QueueType::Compute,
+                      [&](PassBuilder& b) {
+                          b.use(depth, Use::SrvCompute);
+                          b.use(particleParams, Use::SrvCompute);
+                          b.use(particleMap, Use::SrvCompute);
+                          b.use(out, Use::UavCompute);
+                      },
+                      [=](PassContext& ctx) {
+                          const uint32_t k[4] = { ctx.srv(particleParams), ctx.srv(depth), ctx.uav(out), 0 };
+                          ctx.cmd->SetPipelineState(pp);
+                          ctx.bindFrameConstants(constants);
+                          ctx.computeConstants(k, 4);
+                          ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
+                      });
+        }
+    }
     // Fragment visibility of the coverage layer (S request 20260926_S_fragment_visibility, INTERFACES 7.3 v1.41): views
     // with V's coverage records. Pass 1 per listed tile (pixel depth ranges), pass 2 per block of records (pair pixels).
     if (view.coverageDepthRange.valid() && view.coverageTileList.valid() && view.coverageRecords.valid())

@@ -39,9 +39,19 @@ struct LayerConstants
     float streamAxes[3];  // stream space -> renderer axis signs: fxParticleAt maps each camera-relative position
 };
 static_assert(sizeof(LayerConstants) == 256);
-constexpr uint32_t kConstantSlots = 64, kConstantSlotBytes = 256;
+// Mirror of ParticleLayerPass.hlsli LayerExtra.
+struct LayerExtra
+{
+    uint32_t looks, lookCount, ribbonTangents, motion;
+    float prevViewProj[4][4];
+    uint32_t shadowParams, ribbonSegments, pad[2];
+};
+static_assert(sizeof(LayerExtra) == 96);
+// A ring slot: the constants, the extra record, the sprite looks' records.
+constexpr uint32_t kExtraOffset = 256, kLooksOffset = 512;
+constexpr uint32_t kConstantSlots = 64, kConstantSlotBytes = kLooksOffset + kMaxSpriteLooks * kSpriteLookBytes;
 constexpr uint32_t kLayerScale = 4, kTilePixels = 32;  // FX_LAYER_SCALE, FX_LAYER_TILE x FX_LAYER_SCALE
-constexpr uint32_t kRecordBytes = 32, kEdgeBlockBytes = 128;
+constexpr uint32_t kRecordBytes = kLayerRecordBytes, kEdgeBlockBytes = 128;
 
 uint32_t groups(uint64_t n, uint32_t size) { return (uint32_t)((n + size - 1) / size); }
 uint64_t align(uint64_t v, uint64_t a) { return (v + a - 1) / a * a; }
@@ -85,8 +95,10 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
     // Tile entries: a sprite's square covers at least one tile; the buffer takes 4 per record + one per tile, and more
     // sets FX_LAYER_STATUS_ENTRY_OVERFLOW (reported; the capacity is a cost term to redesign, never a silent cap).
     const uint32_t entryCapacity = std::max<uint32_t>(recordCount * 4u + tiles, 4096u);
-    // Edge blocks: a quarter of the layer pixels (overflow reported the same way).
-    const uint32_t edgeCapacity = std::max<uint32_t>(lw * lh / 4u, 4096u);
+    // Edge blocks: a quarter of the layer pixels (overflow reported the same way); with sprite looks, whose sprites are
+    // drawn at full resolution unless their look is marked smooth, every layer pixel may be one.
+    const bool looked = f.looks && f.looks->any();
+    const uint32_t edgeCapacity = looked ? std::max<uint32_t>(lw * lh, 4096u) : std::max<uint32_t>(lw * lh / 4u, 4096u);
     const uint64_t edgeIndexBytes = align(16u + 4ull * lw * lh, 16);
 
     // frame time between the previous tick's end (w = 0) and the latest tick's end (w = 1)
@@ -101,7 +113,13 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
     out.entryCapacity = entryCapacity;
     out.edgeCapacity = edgeCapacity;
     out.w = (float)w;
-    out.constants = g.createBuffer(BufferDesc{ "fx.layer.constants", kConstantSlotBytes, (uint32_t)sizeof(LayerConstants) });
+    out.constants = g.createBuffer(BufferDesc{ "fx.layer.constants", (uint32_t)sizeof(LayerConstants), (uint32_t)sizeof(LayerConstants) });
+    const BufferRef extra = g.createBuffer(BufferDesc{ "fx.layer.extra", (uint32_t)sizeof(LayerExtra), (uint32_t)sizeof(LayerExtra) });
+    // the sprite looks' records of this frame (their textures as the scene's uploaded SRVs)
+    std::vector<uint8_t> lookRecords;
+    if (looked) lookRecords = f.looks->records(f.source, f.textureSrvs);
+    const uint32_t lookCount = (uint32_t)(lookRecords.size() / kSpriteLookBytes);
+    const BufferRef looks = lookCount ? g.createBuffer(BufferDesc{ "fx.layer.looks", (uint64_t)lookCount * kSpriteLookBytes, kSpriteLookBytes }) : BufferRef{};
     out.records = g.createBuffer(BufferDesc{ "fx.layer.records", (uint64_t)std::max<uint32_t>(recordCount, 1) * kRecordBytes, kRecordBytes });
     // ribbons: this frame's points, their half4 appearance, FxRibbon's links, vertices (2 per point), run starts, tangents
     const uint32_t rb = std::max<uint32_t>(ribbons, 1);
@@ -118,6 +136,7 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
     out.counters = g.createBuffer(BufferDesc{ "fx.layer.counters", 16, 4 });
     out.layer = g.createTexture(TextureDesc{ "fx.layer", lw, lh, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
     out.depthRange = g.createTexture(TextureDesc{ "fx.layer.depthRange", lw, lh, 1, 1, DXGI_FORMAT_R16G16_FLOAT });
+    out.motion = g.createTexture(TextureDesc{ "fx.layer.motion", lw, lh, 1, 1, DXGI_FORMAT_R16G16_FLOAT });
     out.edges = g.createBuffer(BufferDesc{ "fx.layer.edges", edgeIndexBytes + (uint64_t)edgeCapacity * kEdgeBlockBytes, 0 });
 
     // constants: stream anchors relative to the camera in stream space (double differences; the axis signs are their own
@@ -152,8 +171,27 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
     const ParticleRenderInputs inputs = in;
     const BufferRef ribbonRowsRef = ribbons ? in.ribbonRows : BufferRef{};
     const ParticleLayerOutput o = out;
-    g.addPass("fx.layer.constants", QueueType::Graphics, [=](PassBuilder& b) { b.use(o.constants, Use::CopyDst); },
+    LayerExtra lx{};
+    lx.lookCount = lookCount;
+    lx.ribbonSegments = std::clamp(f.ribbonSegments, 1u, 16u);
+    if (f.motion)
+        for (int r = 0; r < 4; ++r)
+            for (int col = 0; col < 4; ++col) lx.prevViewProj[r][col] = f.prevViewProj.m[r][col];
+    if (lookCount) std::memcpy(mapped + kLooksOffset, lookRecords.data(), lookRecords.size());
+    g.addPass("fx.layer.constants", QueueType::Graphics,
+              [=](PassBuilder& b) {
+                  b.use(o.constants, Use::CopyDst);
+                  b.use(extra, Use::CopyDst);
+                  if (looks.valid()) b.use(looks, Use::CopyDst);
+              },
               [=](PassContext& c) mutable {
+                  if (looks.valid()) c.cmd->CopyBufferRegion(c.resource(looks), 0, upload, uploadOffset + kLooksOffset, (uint64_t)lookCount * kSpriteLookBytes);
+                  lx.looks = looks.valid() ? c.srv(looks) : 0xFFFFFFFFu;
+                  lx.ribbonTangents = c.uav(ribbonTangents);
+                  lx.shadowParams = f.lighting.particleShadowParams.valid() && f.lighting.particleShadowMap.valid() ? c.srv(f.lighting.particleShadowParams) : 0xFFFFFFFFu;
+                  lx.motion = c.uav(o.motion);
+                  std::memcpy(mapped + kExtraOffset, &lx, sizeof lx);
+                  c.cmd->CopyBufferRegion(c.resource(extra), 0, upload, uploadOffset + kExtraOffset, sizeof lx);
                   lc.posAgeCur = c.srv(inputs.posAge[1]);
                   lc.velocityCur = c.srv(inputs.velocity[1]);
                   lc.posAgePrev = c.srv(inputs.posAge[0]);
@@ -211,13 +249,15 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
         g.addPass(name, QueueType::Graphics,
                   [=](PassBuilder& b) {
                       b.use(o.constants, Use::SrvCompute);
+                      b.use(extra, Use::SrvCompute);
+                      if (looks.valid()) b.use(looks, Use::SrvCompute);
                       if (volume0.valid()) b.use(volume0, Use::SrvCompute);
                       if (volume1.valid()) b.use(volume1, Use::SrvCompute);
                       uses(b);
                   },
                   [=](PassContext& c) {
                       const bool volumes = volume0.valid() && volume1.valid();
-                      const std::array<uint32_t, 8> p = { c.srv(o.constants), softParticles, nearFade, 0, volumes ? c.srv(volume0) : 0xFFFFFFFFu,
+                      const std::array<uint32_t, 8> p = { c.srv(o.constants), softParticles, nearFade, c.srv(extra), volumes ? c.srv(volume0) : 0xFFFFFFFFu,
                                                           volumes ? c.srv(volume1) : 0xFFFFFFFFu, 0, 0 };
                       c.cmd->SetPipelineState(pso);
                       c.bindFrameConstants(frameConstants);
@@ -244,7 +284,8 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
              groups(threads, 256), [=](PassBuilder& b) {
         for (const BufferRef& x : inputBuffers)
             if (x.valid()) b.use(x, Use::SrvCompute);
-        for (const BufferRef& x : { lighting.vsmPageTable, lighting.vsmPool, lighting.vsmBlocks, lighting.vsmSearchBound, lighting.vsmLayers, lighting.froxelLights, lighting.fxLights })
+        for (const BufferRef& x : { lighting.vsmPageTable, lighting.vsmPool, lighting.vsmBlocks, lighting.vsmSearchBound, lighting.vsmLayers, lighting.froxelLights, lighting.fxLights,
+                                    lighting.particleShadowParams, lighting.particleShadowMap })
             if (x.valid()) b.use(x, Use::SrvCompute);
         declareGiSource(b, lighting.gi, Use::SrvCompute);
         for (const TextureRef& x : { lighting.vsmAtlas, lighting.airVolume, lighting.transmittanceLut, lighting.multiScatterLut, lighting.fogVolume })
@@ -281,6 +322,8 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
                   });
         dispatch("fx.layer.strips", "Passes/FX/FxLayerStrips.STEP1", groups(ribbons, 256), [=](PassBuilder& b) {
             b.use(ribbonLinks, Use::UavCompute);
+            b.use(ribbonPoints, Use::UavCompute);
+            b.use(ribbonTangents, Use::UavCompute);
             b.use(o.ribbonVertices, Use::UavCompute);
             b.use(o.records, Use::UavCompute);
             b.use(o.tileCounts, Use::UavCompute);
@@ -308,9 +351,13 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
         b.use(f.depth, Use::SrvCompute);
         b.use(o.layer, Use::UavCompute);
         b.use(o.depthRange, Use::UavCompute);
+        b.use(o.motion, Use::UavCompute);
+        if (in.programs.valid()) b.use(in.programs, Use::SrvCompute);  // (a look's flipbook layout is its program's)
         b.use(o.edges, Use::UavCompute);
         b.use(o.ribbonVertices, Use::UavCompute);
         b.use(o.ribbonAppearance, Use::UavCompute);
+        b.use(ribbonPoints, Use::UavCompute);
+        b.use(ribbonTangents, Use::UavCompute);
         for (const TextureRef& x : { lighting.airVolume, lighting.transmittanceLut, lighting.multiScatterLut, lighting.fogVolume })
             if (x.valid()) b.use(x, Use::SrvCompute);
     });
