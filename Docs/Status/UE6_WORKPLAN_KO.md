@@ -62,36 +62,35 @@
 
 - (2)의 LOD가 먼저. 그 뒤 남는 것: 그림자 레벨의 텍셀보다 작은 인스턴스를 V의 인스턴스 컬에서 제외(뷰 레코드에 최소 반지름), 요청 수 줄이기(빈 요청 1개가 약 0.2 ms).
 
-## 4. 캐릭터 음영 (조사 완료)
+## 4. 캐릭터 음영
 
-| | 현황 | 근거 |
+| | 현황 | 남은 것 |
 |---|---|---|
-| 피부 | 모델 없음: Subsurface 클래스가 일반 불투명 커널로 그려짐 | `ShadeOpaque.hlsl:23`, `ShadingSystem.cpp:781` |
-| 머리카락 | 가닥 시뮬레이션·래스터·섬유 BSDF(R/TT/TRT+꼬리)는 있으나 음영에 연결 안 됨: 기록의 복사휘도 0 | `HairBsdf.hlsli:109`(포함처는 테스트뿐), `CoverageSpecial.hlsl:39`, `visibility.coverage_hair = false` |
-| 눈 | 없음 | — |
-| 천 | Charlie sheen 층 있음(클리어코트와 배타) | `MaterialModel.hlsli:183-246` |
-| 클리어코트 | 있음 | `MaterialModel.hlsli:264-342` |
+| 피부 | A: 이중 GGX 로브 + 얇은 부분 투과광(`ShadeOpaque` LAYERED=3, `MegaLightsShade`). B: 화면 공간 SSS(`SubsurfaceScatter.hlsli`: Burley 프로파일, d = ℓ / s(A), s(A) = 1.9 − A + 3.5(A − 0.8)², 접평면 표본 16개, 알베도는 산란 뒤). 기본 평균 자유 경로 = 피부 실측 1.30 / 0.95 / 0.67 mm | 광선 hit·coverage 층의 피부, 1인칭 뷰모델 반지름, 면광원·평면 반사 뷰는 컴파일만 됨, 호스트 ABI에 파라미터 없음 |
+| 머리카락 | 가닥 기록 음영: 폭 평균 섬유 모델 + 이중 산란, 몸마다 64³ 밀도 볼륨(빛 쪽 섬유 수), 자체 MegaLights 인스턴스, 반투명 볼륨 SH의 간접광 | 다른 물체에 그림자 없음, 반사·GI에 없음, 근접 비용(373만 기록에서 +18 ms), 머리 그림자 경계의 계단 — 2단계 에이전트 진행 중(`char-hair2`) |
+| 눈 | 없음 | 각막 굴절·홍채 깊이·림버스(원본 `EyeBxDF`) |
+| 천 | Charlie sheen 층 있음(클리어코트와 배타) | fuzz 혼합 |
+| 클리어코트 | 있음 | — |
 
-- 재질 레코드에 subsurface·눈·이중 스펙큘러 필드가 없다(`Scene.hlsli:71-102`, `SceneData.h:63-128`). MegaLights와 광선 hit은 Subsurface를 일반으로 취급.
-- 원본: `ShadingModels.ush` `SubsurfaceProfileBxDF`:592(이중 GGX + Burley 확산 + 투과), `PostProcessSubsurface.usf`(분리형/버얼리 화면 공간 SSS), `TransmissionCommon.ush`, `HairBsdf.ush`(+ `EvaluateHairMultipleScattering`:45, 이중 산란), `EyeBxDF`:959, `ClothBxDF`:674.
-- **할 일 순서**: 재질 필드(산란 색·평균 자유 경로·이중 로브) → 피부 BRDF(이중 스펙큘러 + 투과) → 화면 공간 SSS 패스 → 머리카락 기록 음영 연결(+ 다중 산란 근사, 그림자) → 눈 → 천의 fuzz 혼합.
+## 5. 구름
 
-## 5. 구름 (조사 완료)
+- 있음: 구형 껍질 한 층의 볼륨 레이마치, 이중 HG, 2옥타브 다중 산란 근사, 1/4 해상도, 태양 방향 깊은 불투명도 맵.
+- 이번에 더한 것: 2×2 블록의 한 텍셀씩 추적 + 재투영(`atmosphere.clouds.temporal`), 돔은 프레임당 16행 갱신. 구름 그림자가 안개 셀·원거리 안개·공기의 단일 산란에 드리운다. 구름 뒤의 태양 원반·달·별이 구름 투과율을 받는다.
+- 없음: 불투명 지오메트리 앞의 구름(산 정상이 구름 속에 있는 경우), 씬 파일의 구름·안개 블록(지금은 호스트 API와 게이트 인자).
 
-- 있음: 구형 껍질 한 층의 볼륨 레이마치(Perlin-Worley), 이중 HG, 2옥타브 다중 산란 근사, 1/4 해상도, 태양 방향 깊은 불투명도 맵(±16 km, 불투명 그림자와 GI hit이 읽음).
-- 없음: 시간 재구성·지터·양방향 업샘플(원본 `VolumetricRenderTarget.usf:262`), 불투명 지오메트리 앞의 구름(하늘 픽셀에만 합성), 공기·안개·반투명에 드리우는 구름 그림자, 콘텐츠 연결(설정 키 없음, 게이트 `--clouds`뿐, scenegen 미사용).
-- 비용 [문서의 실측]: 720p에서 march 3.27 ms(320×180) — 시간 재구성 없이는 비싸다.
-- **할 일**: 프레임 분할 추적 + 재투영 재구성, 설정 키와 scenegen 씬, 안개·공기에 구름 그림자.
+## 6. 원거리 GI
 
-## 6. 원거리 GI (조사 완료)
+- radiance cache 프로브와 반투명 볼륨의 광선이 `lumen.radiance_cache_far_field_distance_m`(10 km)까지 간다. 카드 범위(300 m) 밖 hit은 직접광 + 하늘 조도 근사(`giFarSkyIrradiance`: 법선 방향 하늘 복사휘도 × π).
+- 실내(로비) 비용 변화 없음 [패스 중앙값]. 퍼니스 방 낮 = 밤 유지. 실외 A/B는 배치 7.
+- 원본과의 차이: 원본은 HLOD로 만든 원거리 TLAS와 원거리 카드를 쓴다. 여기는 TLAS 하나에 전체 인스턴스가 있어 거리만 늘렸다 — 인스턴스 수가 큰 씬(숲)에서의 순회 비용은 배치에서 본다.
 
-- radiance cache 프로브 광선은 200 m에서 끝나고 그 너머는 하늘: 200 m 밖 지형이 가리지도 반사하지도 않는다. 카드는 300 m까지. TLAS는 전체 인스턴스(컬링·HLOD·원거리 TLAS 없음).
-- 원본: 원거리 TLAS 층(HLOD), `r.LumenScene.FarField.MaxTraceDistance` 1e6 cm, 근/원 디더(`LumenHardwareRayTracingCommon.ush:1200-1221`).
-- **할 일**: 캐시 프로브 광선을 원거리까지(TLAS가 이미 전체를 담고 있으므로 거리만 늘리고, 원거리 hit은 카드 없이 직접광 + 하늘 근사), 비용 측정 후 원거리 전용 마스크.
+## 7. 티어
 
-## 7. high 티어
-
-- 첫 정의(반사 반해상도 + TSR flicker 끔): 로비 4K 12.11 → 11.59 ms. 원본 High 묶음(프로브 32 px, radiance cache 프로브 16², MegaLights 표본 2)을 더함 — 측정 대기.
+| 티어 | 로비 4K (프레임 / 패스 합, ms) | 정의 |
+|---|---|---|
+| epic | 11.76 / 11.44 (안개 켬) | 파일 값 그대로 |
+| high | 9.98 / 9.64 | 프로브 32 px, 반사 2×2당 1광선, MegaLights 표본 2, radiance cache 프로브 16², TSR flicker 끔 |
+| performance | 7.44 / 7.25 | 내부 720줄(4K ×3), 반사 2×2당 1광선, TSR flicker 끔 |
 
 ## 8. 4K 목표와 최적화 점검
 
