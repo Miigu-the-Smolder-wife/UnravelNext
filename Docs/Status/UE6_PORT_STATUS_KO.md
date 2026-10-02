@@ -372,6 +372,8 @@ GPU에서 한 번도 돌리지 않았다. 아래는 코드에 적힌 내용이�
 - 로비는 경로 추적 기준 영상이 있다(`UnravelNext-refl\Cache\Reference\lobby\host_ev4_480x270_4096_…`, 호스트 카메라, 4096 spp, EV 4). `Tools\Verify\ref_blocks.py`가 4×3 블록 평균 밝기 비를 낸다. 한계: 기준은 클리어코트·공기·햇빛 집광이 없고 로비 한 시점뿐이다(바닥은 코팅 대리석이라 수치를 그대로 믿기 어렵다).
 - `Tools\Verify\Run-Ue6Still.ps1 -Name X -Set k=v,…`: 정지 카메라 한 번 + 기준 대비 블록 비(설정 하나를 바꿔 볼 때).
 - `Tools\Verify\Run-Ue6Batch.ps1`의 `ab` 묶음(`-Variants ab`, `-Ab <묶음>`): 2026-10-03 이후 실행 없이 쓴 스위치를 하나씩 기본값과 견준다 — 변형당 캡처 한 프레임(비교 뒤 삭제)과 회전 시간 실행. 요약의 A/B 장에 그림 차이와 GPU 프레임 차가 나온다. 배치는 여유 공간 30 GB 미만이면 시작하지 않고, 요약 뒤에 원본 프레임(`*.pfm`)을 지운다(`-KeepRaw`). 아직 돌리지 않았다(`UE6_WORKPLAN_KO.md` 8.3 (g)).
+  - 그 뒤에 더한 묶음(`UE6_WORKPLAN_KO.md` 8.5): lanes(광선 패스의 목록 디스패치), rays, dof, hdr, material, weather, steam, 그리고 tsr·clouds·fog의 새 행. 게이트에 `--lens`, `--rain`, `--display-peak`, 캡처 층 `chain`.
+- 병합 검토(읽기; `UE6_WORKPLAN_KO.md` 12절): 일곱 브랜치의 21,257줄에서 실행하면 틀리는 것 18건을 찾아 고쳤다 — 가장 큰 둘은 기본 경로에 있었다(see-through 인스턴스가 GI 광선을 막던 것, 데칼 8개부터 틀리던 광선 씬의 데칼 수). 고치지 않고 적어 둔 것 10건(비의 장막에 위쪽 끝이 없는 것이 가장 크다). 코드 작성·빌드 통과, 실행 안 함.
 
 ## 6. 실행 결과 (2026-10-02, RTX 4080)
 

@@ -15,7 +15,7 @@
 | `w/hair` | 머리카락 2단계 전부, 머리카락의 남은 빈틈, 국소광 구성요소(9절) | 국소광 구성요소의 남은 한계, 입자·데칼을 원본과 대조해 빠진 것 구현 |
 | `w/char` | 눈, 천 혼합, 광선 hit·coverage·면광원·뷰모델의 피부, `UnxSceneSetCharacterShading` | 눈의 남은 빈틈, 재질 입력(UV 변환·둘째 UV·디테일 맵·시차 맵·emissive 배율·버텍스 컬러), 광원 구성요소·채널의 호스트 ABI |
 | `w/atmo` | 안개 노출 전 저장, 뷰 기저의 프록셀 광선, 불투명 앞 구름, 씬 파일 날씨 블록, GI 광선·보조 뷰 안개, 구름 밀도의 mip 필터 | 프록셀 테스트 기준 재작성, 권운층, 입자의 구름 그림자, 둘째 안개층·강수·번개·달·황혼, 욕탕 김(국소 볼륨의 상승·난류·밀도 격자) |
-| `w/opt` | V 계층 순회 작업 큐, 컬 패스 병합, 텍셀 미만 캐스터 제외, 프록셀 후보 1회, 작은 패스 접기, 게이트 통계, VSM 정적/동적 분리·굵은 페이지·HZB 컬·HZB 무효화 | 남은 패스 접기, 뷰 필드 확장, 정적-정적 가림, 카드 캡처가 V에 요구한 인터페이스, 국소광 VSM의 같은 구조, 인스턴스 집합 그림자, 한 번에 도는 A/B 배치 스크립트(실행 안 함) |
+| `w/opt` | V 계층 순회 작업 큐, 컬 패스 병합, 텍셀 미만 캐스터 제외, 프록셀 후보 1회, 작은 패스 접기, 게이트 통계, VSM 정적/동적 분리·굵은 페이지·HZB 컬·HZB 무효화; 광선 패스의 목록 디스패치(8.4); 병합 검토와 그 수정(12절) | 남은 패스 접기, 뷰 필드 확장, 정적-정적 가림, 카드 캡처가 V에 요구한 인터페이스, 국소광 VSM의 같은 구조, 인스턴스 집합 그림자, 한 번에 도는 A/B 배치 스크립트(실행 안 함) |
 | `w/tsr` | TSR resurrection·reprojection field·thin geometry·이력 해상도, 업스케일 뒤 모션 블러, 층 모션, 샤픈·렌즈 플레어·색수차, 컬러 그레이딩 결합 LUT | 조리개 DOF, TSR의 남은 조각, 렌즈 왜곡·파니니·HDR 출력, 프레임별 후처리 호스트 export |
 | `w/cache` | 표면 캐시 해상도 피드백, 클러스터 카드 캡처(끔), 캡처의 재질 층, radiosity 재추적, 카드 없는 hit의 간접광, 직접광의 광원 함수 | 원거리 화면 추적, 반투명 앞면 층 반사, Lumen 재대조 2차, 죽은 옛 경로 목록(삭제는 안 함) |
 | `w/coverage` | coverage 층: 깊이 버킷과 픽셀 cover, 삼각형 컬, compute 래스터(끔), 가벼운 픽셀의 목록 셰이딩, 통계 | V 소프트웨어 래스터(주 뷰·그림자 뷰), 대역 A 래스터 빈, 클러스터 압축, 스트리밍 연결, visible 용량 |
@@ -290,6 +290,7 @@ high 티어: 같은 커밋에서의 비교가 아직 없다(Batch2 기본 vs Bat
 | `shadow.vsm.local_static_separate` | true | 변한 캐스터가 닿은 국소광의 페이지 전체를 다시 그림 | 8.3 (f) |
 | `shadow.vsm.local_request_views` | 4032 | 252: 광원 6개마다 래스터 요청 하나 | 8.3 (b) |
 | `surface_cache.mesh_cards_capture_clusters` | **false** | (켜면) 카드 캡처가 V의 래스터 서비스 한 번 | 8.3 (e) |
+| `gi.lumen_compact_traces`, `reflection.lumen_compact_traces`, `shading.mega_lights_compact_traces` | true | 광선 패스가 텍셀·job·표본마다 스레드를 띄움(대부분 바로 돌아감) | 8.4 |
 
 **(1) 계층 컬을 한 커널의 작업 큐로** — `visibility.traversal_work_queue`(기본 true), `visibility.traversal_worker_groups`(1024).
 V의 컬 한 번(메인 뷰, 그리고 `rasterizeDepth` 요청마다: VSM 태양 레벨·국소광·분류 페이지가 모두 이 경로다 — VSM에 따로 된 계층 컬은 없다)이 노드 순회를 레벨마다 `prepare.nodes` + `nodes` 두 패스로 돌던 것을(깊이 5에서 단계당 10패스), 노드 항목을 작업 큐로 쓰는 디스패치 하나(`nodes.p1` / `nodes.p2`, `CullNodes.hlsl` QUEUE=1)로 바꿨다. 원본의 persistent cull(`NaniteHierarchyTraversal.ush`)과 같은 구조다: 고정된 수의 그룹을 띄우고, 웨이브 하나가 작업자 하나로 큐가 빌 때까지 돈다.
@@ -417,13 +418,13 @@ V의 컬 한 번(메인 뷰, 그리고 `rasterizeDepth` 요청마다: VSM 태양
 - **유리 캐스터의 투과색** — `shadow.vsm.translucent_tint`(기본 true), `tint_page_texels`(32, 커널에 컴파일).
   - 조사: `VsmLayer.hlsli`의 투과 층은 스칼라(T(h) 매듭 4개)이고 **채워진 적이 없다** — 층을 채울 V의 coverage 모드 래스터(`DepthRasterRequest::coverage`)가 구현돼 있지 않아 모든 조회가 1을 받는다. 유리는 불투명 캐스터로 그려졌다(검은 그림자). 언리얼의 VSM에도 반투명 캐스터의 색 투과는 없다(광선 추적 그림자의 `bTranslucentShadow`에만 있다). 넣은 것은 그 층과 별개의 얕은 구조다.
   - 구조(`VsmTint.hlsli`): Glass 클래스 재질이 있는 씬에서 태양 페이지의 불투명 계열은 유리 클러스터를 그리지 않고(`RasterView::materialFilter`), 유리만 그리는 요청 `s.vsm.tint`가 **틴트 아틀라스**(RGBA16, 페이지당 32 × 32 텍셀, 페이지 아틀라스와 같은 배치)에 쓴다: rgb = 텍셀 위 유리 면들이 통과시키는 비율의 곱(블렌드 곱), a = 태양에 가장 가까운 유리의 깊이(블렌드 최대). 화소 커널(`VsmTintPixel.ps`): 판유리(양면 재질)는 (1 − F)² t / (1 − F² t²), 속이 찬 유리는 면마다 (1 − F)√t — t는 base colour(× 텍스처), F는 보간 법선에 대한 태양 입사각의 프레넬. 반투명 합성(`TranslucentComposite.hlsl`)의 판유리 식과 같다.
-  - 받는 쪽: 가장 가까운 유리보다 뒤(틴트 텍셀 2개 높이 + 16비트 한 단계 이상)에 있는 점이 그 텍셀의 rgb를 받는다. 뷰의 태양 슬롯(슬롯 0)과 coverage 조각의 태양에는 그 휘도가 곱해지고, 불투명 음영(`ShadeOpaque.hlsl` 파트 1)은 색을 받는다 — 뷰의 그림자 가시성 텍스처가 유리가 있는 프레임에는 세로 2배이고 아래 절반이 화소별 투과색이다(`shadowSunTintChroma`: 음영 커널에 남는 루트 상수가 없어 같은 텍스처에 실었다. 게이트의 `shadow` 층 캡처도 그런 프레임에는 세로 2배다).
+  - 받는 쪽: 가장 가까운 유리보다 뒤(틴트 텍셀 2개 높이 + 16비트 한 단계 이상)에 있는 점이 그 텍셀의 rgb를 받는다. 뷰의 태양 슬롯(슬롯 0)과 coverage 조각의 태양에는 그 휘도가 곱해지고, 불투명 음영(`ShadeOpaque.hlsl` 파트 1)은 색을 받는다 — 뷰의 그림자 가시성 텍스처가 유리가 있는 프레임에는 세로 2배이고 아래 절반이 화소별 투과색이다(`shadowSunTintChroma`: 음영 커널에 남는 루트 상수가 없어 같은 텍스처에 실었다. 게이트의 `shadow` 층 캡처는 뷰 높이만 낸다).
   - 한계: 층이 하나다 — 두 유리 사이의 점은 둘 다의 색을 받는다. 태양에 가파른 유리 면은 제 색을 조금 받는다. 틴트 텍셀이 레벨 텍셀의 4배라 색 그림자 가장자리가 그만큼 무르다. 광선 hit·물·반투명 층의 태양 조회(`shadowSunVisibilityAt`)는 색도 휘도도 받지 않는다(유리 뒤가 온전히 밝다): R의 인라인 추적 커널이 DXIL 한도에 924 B 남아 있어 조회를 넣으면 빌드가 실패한다 — `SHADOW_SUN_TINT_AT 1`로 컴파일하는 커널만 받는다. 국소광 페이지에서는 유리가 여전히 불투명하다. 요청은 하나로 낸다(리스트 상한 계산이 유리만 따로 세지 않는다).
   - 비용: 페이지당 8 KB(4096페이지에 32 MB), 유리가 있는 씬에서 프레임당 래스터 요청 하나와 지우기 패스 하나.
 - **작은 캐스터 프록시** — `shadow.vsm.aggregate_small_casters`(기본 true), `aggregate_coverage`(0.5). 8.1 (3)은 레벨 텍셀보다 작은 캐스터를 그 레벨에서 뺐다(먼 숲·풀밭의 그림자가 없어진다). 이제 그런 캐스터 가운데 인스턴스 청크의 구성원(정적 인스턴스)은 **프록시**로 그린다(`DepthProxy.ms.hlsl`, `DepthRasterRequest::proxies`): 경계 구 중심에 태양을 향한 정사각형 하나, 넓이 = 경계 원 넓이 × `aggregate_coverage`. 텍셀보다 작은 사각형은 넓이 비율만큼의 확률로 텍셀 중심을 덮으므로 굵은 레벨의 그림자가 "덮인 땅의 비율"로 남는다. 구성원이 모두 그만큼 작은 청크는 구성원별 컬을 하지 않는다(`chunkBelowView`: `ChunkBounds`가 청크의 최대 구성원 반지름을 남긴다) — 청크 항목 하나가 메시 그룹 4개(구성원 64개씩)로 그려진다.
   - 각 구성원은 한 번만 그려진다: 인스턴스 컬이 빼는 조건(`instanceBelowView`)과 프록시가 그리는 조건이 같은 함수다. 집합(정적/동적)·마스크·배치 범위도 같은 검사를 거친다.
   - 한계: 동적·스킨·런타임 인스턴스(평면 목록)는 프록시가 없다(전처럼 빠진다). 타일 아틀라스에서 프록시는 중심이 놓인 타일에만 그려진다(경계를 넘는 1텍셀 미만 부분은 빠진다). `aggregate_coverage`는 재질·메시와 무관한 상수다. 태양 레벨에만 넣었다(국소광 면에는 없다).
-- **인스턴스별 그림자 플래그** — `scene::InstanceShadowOnly`(비트 7), `scene::InstanceNoSelfShadow`(비트 8). 스위치 없음(플래그를 준 인스턴스에만 작용한다).
+- **인스턴스별 그림자 플래그** — `scene::InstanceShadowOnly`(비트 9: 병합에서 7은 `InstanceNoDecals`가 됐다), `scene::InstanceNoSelfShadow`(비트 8). 스위치 없음(플래그를 준 인스턴스에만 작용한다).
   - ShadowOnly(언리얼의 hidden + `bCastHiddenShadow`, Unity의 ShadowsOnly): 그림자 맵과 광원 그림자 광선에는 있고 뷰·GI/반사 광선·표면 캐시 카드에는 없다. V의 `instanceInRun`(실행의 인스턴스 마스크가 CastShadow를 포함할 때만 그린다), 광선 씬의 `rtInstanceMask`(그림자 마스크만), 카드의 제외 플래그.
   - NoSelfShadow: 그 인스턴스의 화소에서 태양 조회가 경계 구 지름만큼 태양 쪽에서 시작한다(`s.shadow.selfslack` → `ShadowVisibility`·`ShadowPenumbra`; 접촉 광선 없음). 씬에 그런 인스턴스가 있을 때만 패스가 기록된다. 한계: 불투명 뷰의 태양 슬롯만 — coverage 조각, 국소광 페이지·그림자 광선은 아니다. 경계 구 안에 있는 다른 캐스터의 그림자도 같이 빠진다.
 
@@ -433,6 +434,67 @@ V의 컬 한 번(메인 뷰, 그리고 `rasterizeDepth` 요청마다: VSM 태양
 - 시간은 묶음이 요구할 때 회전 실행 한 번(`-AbFrames` 300프레임): 요약에 변형 − 기준의 GPU 프레임 중앙값, 범위 수, 가장 많이 움직인 패스 묶음.
 - 표의 `expected`: `same`(구조만 바꾸는 스위치 — 그림 차이는 결함이거나 잡음), `differs`(스위치가 곧 기능 — 숫자는 얼마나 달라지는지).
 - 배치가 못 재는 것: 인스턴스 플래그 두 가지(플래그를 쓰는 씬이 없다). 국소광 묶음은 MegaLights를 끈 기준 위에서만 잰다. 유리 캐스터는 게임 씬(bt_lobby, te_lounge)에만 있다 — scenegen 씬에는 Glass 재질이 없다.
+
+### 8.4 레인 점유와 의존 적재: 큰 화소 패스 읽기 (2026-10-03, 브랜치 `w/opt`)
+
+**코드 작성·빌드 통과, 실행 안 함.** 4K 프레임의 큰 묶음(`r.gi` 2.32, `m.ml` 1.54, `r.refl` 1.27, `m.lit` + `m.resolve` 0.93 ms; 8절의 표)의 커널을 "웨이브의 레인 가운데 몇이 일하는가", "레인마다 앞 적재의 결과로 다음 적재를 하는가"로 읽었다. 이득은 점유율 산술이다 — 잰 값이 아니다.
+
+**고친 것: 광선 패스 세 곳이 "추적하는 광선마다 스레드 하나"가 됐다** (원본의 `CompactTraces` / `CompactLightSampleTraces`와 같은 구조).
+
+| 패스 | 전: 스레드를 띄우는 단위 | 바로 돌아가던 스레드 | 지금 | 스위치(기본 true; false = 전) |
+|---|---|---|---|---|
+| `r.gi.lg.trace` | trace 아틀라스의 모든 텍셀(프로브 슬롯 × 64) | 쓰지 않는 adaptive 슬롯, 하늘 위 프로브, screen trace가 끝낸 텍셀 | `r.gi.lg.compact`가 만든 목록의 항목 | `gi.lumen_compact_traces` |
+| `r.refl.lumen.trace` | 모든 job | screen trace가 끝낸 job(`REFL_JOB_DONE`) | `r.refl.lumen.compact`의 목록(screen trace가 도는 프레임) | `reflection.lumen_compact_traces` |
+| `m.ml.trace` | 표본 텍스처의 모든 텍셀(내부 1080p에서 207만) | 광원 없는 표본, 그림자 없는 광원, 이웃 광선에 합쳐진 표본, 표면 없는 화소 | `m.ml.compact`의 목록 | `shading.mega_lights_compact_traces` |
+
+- 구조: 목록을 채우는 컴퓨트 커널(`LgCompactTraces.hlsl`, `ReflectionCompactTraces.hlsl`, `MegaLightsCompact.hlsl`: 웨이브당 원자 연산 하나로 자리 배정) → `RayTracing/CompactDispatch.hlsl`이 개수를 청크별 간접 `DispatchRays` 기술의 Width로 쓴다(청크 = 전의 밴드와 같은 스레드 상한: GI 87,381, 반사 87,381, MegaLights 262,144; 빈 청크는 0 × 0 × 0) → 광선 생성 커널이 `목록[DispatchRaysIndex().x + 청크 시작]`에서 제 텍셀·job을 읽는다. `RayPipeline::dispatchTemplate()`: 파이프라인이 제 dispatch 기술(크기 0)을 업로드 버퍼로 들고 있다.
+- 그림: 같은 광선이 같은 텍셀·job·표본에 같은 값을 쓴다(난수는 좌표에서 나온다). 목록의 순서만 프레임마다 다르다 — 순서에 기대는 것은 표면 캐시 피드백·hit mark의 넣는 순서뿐이고 그것은 전에도 정해져 있지 않았다. 죽은 슬롯의 0 쓰기는 compact 커널이 한다.
+- 루트 상수: GI·반사 trace는 48워드를 다 쓰고 있어, 목록의 SRV를 그 변형이 쓰지 않는 하늘 워드에 실었다(대기 변형 SKY0: `P[1].x` = 상수 하늘의 빨강, SKY1: `P[2].x` = 대기 LUT). MegaLights는 `P[2].w`(SRV + 1, 0 = 없음).
+- **예상 이득(산술)**: 웨이브(32레인)는 레인 하나라도 추적하면 가장 느린 레인이 끝날 때까지 남는다. 살아 있는 슬롯의 비율을 v, 그 가운데 광선이 필요한 비율을 a라 하면 전에는 살아 있는 웨이브가 거의 다 추적 웨이브였고(레인 32개가 모두 빌 확률 (1 − a)^32 ≈ 0) 지금은 a배만 뜬다 — 음영 쪽 일(광선 생성, hit의 재질·카드·광원 표본)이 **a배**가 된다. BVH 순회 자체는 광선 수가 같으므로 줄지 않는다: 패스 시간에서 순회가 차지하는 몫이 이득의 상한을 정한다.
+  - GI: 내부 1080p에서 아틀라스 960 × 816 = 783,360 텍셀. v ≈ 0.7~0.8(균일 프로브 8,160 + 쓰인 adaptive), a = 1 − (screen hit 비율). 원본이 드는 screen hit 비율 0.4~0.7이면 띄우는 스레드는 783 k → 170~380 k.
+  - 반사: a = 1 − (screen trace가 끝낸 job의 비율). 화면 안의 것을 비추는 바닥이면 절반 이상이 끝난다.
+  - MegaLights: a = (그림자 광원의 표본) × (합쳐지지 않은 것). 표본 4개가 광원 1~2개로 합쳐지는 화소가 대부분이면 a ≈ 0.25~0.5, 광원이 닿지 않는 화소는 0 — 207만 스레드 → 50~100만.
+  - 더 드는 것: 목록 패스 하나(텍셀·화소·표본당 적재 2~3개: 207만 표본에 0.02~0.03 ms 수준)와 1스레드 패스 둘, 목록 버퍼(GI 3.1 MB, 반사·MegaLights 각 8.3 MB, 임시).
+- **잴 것**: 배치의 `lanes` 묶음(스위치 셋을 하나씩 끔; 그림은 `same`) — `r.gi.lg.trace`, `r.refl.lumen.trace`, `m.ml.trace`의 시간과 로그의 목록 개수.
+
+**읽었고 그대로 둔 것** (점유가 문제가 아니거나, 분포를 재야 판단할 수 있는 것):
+
+| 패스 | 레인이 갈리는 곳 | 판단 |
+|---|---|---|
+| `r.gi.lg.temporal` | 이력이 4프레임 미만인 화소만 5 × 5 평균(24탭 × 적재 4) | 그런 화소는 실루엣·화면 가장자리를 따라 수 프레임 폭의 **띠**다: 8 × 8 그룹보다 넓어 그 웨이브는 거의 차 있다. 정지 프레임에서는 아무도 들어가지 않는다. 낭비는 띠의 경계 그룹뿐. |
+| `r.gi.lg.integrate` | 거친 스펙큘러(roughness < 0.8)만 방향 4개 × 프로브 1~4개 | 재질 영역 단위로 갈린다(웨이브 안에서 섞이지 않는다). |
+| `r.gi.lg.integrate` / `temporal` / `screentrace` | 화소의 재질 워드 → 재질 레코드(클래스)의 의존 적재 | 3비트를 위해 적재 하나. 재질 워드에 남는 비트가 없다(인덱스 16 + metallic 8 + coat/occlusion 8). 화소당 적재 1개(작고 캐시에 있는 버퍼)라 그대로. |
+| `r.gi.sao` | 없음(하늘 화소만 바로 나감) | 일이 고르다. |
+| `m.ml.temporal` | 5 × 5 이웃은 이력과 표본이 모두 있는 화소(조명 닿는 곳의 대부분) | 차 있다. 조명이 닿지 않는 영역은 화소마다 이전 표면 찾기 + 키 12개를 읽고 버린다 — 레인 점유가 아니라 영역 단위의 헛일: 타일 목록으로 건너뛸 수 있다(출력 지우기가 따로 필요). 게임 씬(실내)은 거의 전부 조명 안이라 이득이 없고, 야외 야경에서만 있다. |
+| `m.ml.spatial` | 잡음 있는 화소만 필터 탭(8~16탭 × 적재 4) | **분포를 재야 한다.** 잡음 화소는 흩어져 있다: 비율 q일 때 웨이브가 루프에 들어갈 확률은 1 − (1 − q)^32 — q = 5 %면 81 %, 20 %면 99.9 %. q가 5 % 안팎이면 목록으로 모으는 것이 패스의 약 40 %를 줄이고, 20 %를 넘으면 차이가 없다. q는 실행해야 안다(다음 배치에서 `m.ml.spatial`의 필터 화소 수를 통계로 낸 뒤 결정). |
+| `m.ml.shade`(= `ShadeOpaque` MEGA_LIGHTS) | 화소의 표본 0~4개만큼 광원 루프 | 화소별 루프 길이가 다르다(평균/최대). 클래스 타일 목록으로 이미 모여 있고, 표본 수로 다시 모으려면 화소 목록이 필요하다. 그대로. |
+| `m.lit`(`ShadeOpaque`) | 재질 클래스 | 클래스별 타일 목록 + 클래스별 커널 변형으로 이미 모여 있다. 클래스가 섞인 타일에서만 각 커널이 제 화소만 한다. |
+| `m.resolve` | cut / terrain / 눈 / parallax(16걸음) / 데칼 분기 | 재질 영역 단위. **의존 적재 사슬이 가장 길다**: vis id → visible cluster → 인스턴스 → 클러스터 → 삼각형 인덱스 → 꼭짓점 3개(변형 포함) → 재질 → 텍스처 집합 → 텍스처. 가시성 버퍼 구조의 값이다; 줄이려면 삼각형 단위 캐시 같은 다른 구조가 필요하다. |
+| `r.refl.screentrace` | 추적 화소(roughness < 0.4)만 HZB 걷기 | 화소 단위 디스패치(타일 유효 플래그로 빈 타일은 첫 적재에서 나감). job 목록으로 돌리면 섞인 타일에서 차지만, 걷기 길이가 레인마다 달라 남는 낭비가 더 크다. 그대로. |
+| `r.refl.reuse.resolve` / `temporal` / `filter` | 추적 화소만 | 타일 플래그 + 재질 영역 단위. |
+| 이전 표면 찾기(`giPreviousSurface`: GI·MegaLights·반사 temporal) | 움직이는 인스턴스의 화소만 꼭짓점 3개의 이전 위치 | 정지 인스턴스는 인스턴스 레코드에서 바로 나간다(이미 그렇게 돼 있다). |
+
+### 8.5 A/B 배치에 더한 것 (2026-10-03, 브랜치 `w/opt`)
+
+**코드 작성·빌드 통과, 실행 안 함**(스크립트는 구문 분석만). 8.3 (g)의 `ab` 묶음에 그 뒤에 쓰인 스위치를 더했다 — 묶음 20개.
+
+| 묶음 | 씬 | 변형 |
+|---|---|---|
+| lanes(새) | bt_lobby, city_night | 8.4의 스위치 셋을 하나씩 끔(`same`) |
+| rays(새) | bt_lobby, te_lounge | `raytracing.see_through_translucent=false` |
+| tsr | bt_lobby, waterside (회전) | + `upscale_tsr_hole_filling=false`, `upscale_tsr_thin_geometry_anti_flickering=false`, `upscale_layer_motion=false`, `lens_panini_d=1.0`, `motion_blur_after_upscale_rotation=false` |
+| dof(새) | bt_lobby, interior | 게이트 `--lens 0.025,3`; `shading.dof_diaphragm=true`, 거기서 scatter 끔, prefilter 끔 (기준 = 옥타브 경로) |
+| hdr(새) | bt_lobby | `--display-peak 5` + `output.hdr_encoding=2` (`unseen`: 캡처는 인코딩 앞이다 — 시간만) |
+| material(새) | shading_ball (`--camera inputs`) | `material.parallax_steps=0`, `=64`, `material.parallax_shadow=true` |
+| clouds | ridge_sunset, city_block | + `ground_light=false`, `powder=1.0`, `--cirrus 0.6` |
+| weather(새) | ridge_sunset, city_block (`--clouds 0.8 --rain 8`, 안개 켬) | `far_sky_light=false`, `rain_veil=false` |
+| steam(새) | interior | `--fog-volume`(정지한 안개 덩이), 같은 덩이를 김으로(상승 0.3 m/s, 난류 0.6) |
+| fog | ridge_sunset, city_night | + 둘째 층(`second_density_per_m=0.02`) |
+
+- 행이 게이트 인자를 줄 수 있다(`G`): 스위치가 아니라 프레임 입력이 켜는 기능(권운, 안개 덩이, HDR 표시).
+- 게이트(`unx_gate_shadow_renderergate`)에 더한 것: `--lens 조리개,초점`(m; 없으면 핀홀이라 DOF가 돌지 않는다), `--rain R`(mm/h), `--display-peak P`, 캡처 층 `chain`(업스케일된 뷰에서 후처리 사슬이 받는 그림: 업스케일 뒤의 모션 블러가 들어 있다 — `--capture-output`의 final은 업스케일러 출력이라 그 블러가 안 보인다). `shadow` 층은 뷰 높이만 낸다(유리 캐스터가 있는 프레임의 아래 절반은 투과색이다).
+- 배치가 못 재는 것: `fx.particles.soft` / `near_fade`(입자는 호스트만 만든다 — 게이트에 입자 시스템이 없다), 인스턴스 그림자 플래그.
+
 
 ## 9. 국소광 구성요소 (2026-10-03, 브랜치 `w/hair`)
 
@@ -579,3 +641,60 @@ Unreal의 재질 그래프와 Unity 재질이 흔히 쓰는 입력 가운데 렌
 레코드: `DecalRecord` 80 → 128 B, `DecalFrame` 128 → 144 B. `Native/Host`의 `UnxDecalDesc`에는 새 필드가 없다(기본값으로 들어간다) — 호스트 ABI는 후속이다.
 
 실행해서 확인할 것(순서대로): `unx_test_decal_decaltests`(레코드 크기가 바뀌었다), `unx_test_host_hostdecal`, 입자 레이어 테스트(`fx.particles.soft`가 꺼진 기본 `ParticleLayerFrame`은 전과 같은 값이어야 한다), 그 뒤 still: 바닥에 걸친 연기 스프라이트(소프트 켬/끔), 카메라가 스프라이트 안에 있을 때, 멀어지는 데칼(화면 크기 페이드), 수명 페이드 구간, 법선만·roughness만 데칼, `InstanceNoDecals` 인스턴스.
+
+## 12. 병합 검토 (2026-10-03 밤, 브랜치 `w/opt`)
+
+오늘 밤 일곱 브랜치에서 병합된 `Native`·`Config` 21,257줄(305 파일, `c9f2f515..020db7af`)을 **읽어서** 검토했다. 실행한 것은 없다 — 고친 것은 코드 작성·빌드 통과, 실행 안 함. 병합이 텍스트 충돌로 드러낸 넷(컬 상태 워드, `FogScatter` P[10].y, `MegaLightsSample` P[5].z, 인스턴스 플래그 비트) 말고, 컴파일은 되고 실행하면 틀리는 것을 찾는 것이 목적이다.
+
+### 12.1 방법
+
+- **기계 검사 셋**(스크립트는 저장소에 넣지 않았다 — 일회용):
+  1. 설정 키: C++가 읽는 키(직접 읽기와 has() 대체값 도우미 `num` / `flag` / `numberOr` …)를 `Config/quality/*.toml`의 673개 키와 티어 파일에 대조. 없는 키 0, 읽는 형과 값의 형 불일치 0, 파일 안·파일 사이 중복 0, 제 파일 접두사 밖의 키 0, 티어 파일의 모르는 키 0, `Tools`의 `--set`이 이름 붙인 없는 키 0. 읽는 리터럴이 없는 키 28개는 모두 오늘 이전부터 그랬다(빌더·참조 도구의 키, 쓰이지 않는 키). 파일에 없는데 도우미로 읽는 키 하나(`surface_cache.mesh_cards_test_set`: 테스트 전용, 오늘 이전).
+  2. 루트 상수 개수: 상수를 넘기는 패스 456개에서 `computeConstants(k, N)`의 N과 그 패스의 커널(include 포함)이 읽는 가장 높은 P[] 워드를 대조. 64건이 "N 너머를 읽는다"로 걸렸고 모두 확인했다 — MODE·변형에 갇힌 읽기이거나 커널 연결이 틀린 것. 실제 결함 0.
+  3. 리소스 선언: 실행 람다가 `c.srv / uav / resource / rtv / dsv(X)`로 잡는 식별자 가운데 같은 패스의 `b.use`에 이름이 없는 것 54건. 모두 도우미(`declareHair`, `declareSurfaceCacheCards`, `declareSet`, `cullInputs`, 루프 변수)로 선언되거나, 인덱스를 레코드에 적기만 하고 역참조하지 않는 패스다. 실제 결함 0. (확인한 규칙: `c.srv()`는 선언을 검사하지 않는다 — 그 프레임의 살아 있는 패스 어느 것도 그 뷰를 선언하지 않으면 UINT32_MAX를 주고, 읽는 커널은 그것을 "없음"으로 본다.)
+- **읽기**: 여덟 구획 — 음영·MegaLights·머리카락 / 업스케일·후처리 / GI / 반사·표면 캐시 / 대기·안개·프록셀 / VSM·그림자 가시성 / V(컬·래스터 서비스·coverage) / 재질·데칼·입자·광선 씬 — 을 서로 독립된 읽기 에이전트 여덟이 맡았다(오늘 바뀐 패스마다 k[] ↔ 커널 헤더 ↔ 실제 P[] 읽기, `b.use`, C++ ↔ HLSL 레코드, 루프 상한과 오류 비트). 보고된 것은 소스에서 다시 확인한 뒤에 고쳤다. 트랙에 걸친 구조(`gpu::Light`, `FrameConstants`, 인스턴스 플래그, 조명 `typeFlags`, 머리카락 밀도 파라미터)는 따로 직접 대조했다.
+
+### 12.2 찾아서 고친 것 (커밋 `0b2cd8fe`; 게이트의 캡처는 `a09c400a`)
+
+| # | 무엇 | 실행하면 | 고침 |
+|---|---|---|---|
+| 1 | **see-through 인스턴스가 GI 광선을 여전히 막는다(기본 경로)** — `RayScene.h` `rtInstanceMask(flags, seeThrough)` | Glass / Water만으로 된 인스턴스의 마스크가 0xEE로 남는데 GI 광선의 마스크는 GI \| EMITTER(0x05): 0x04로 만난다. `raytracing.see_through_translucent`가 프로브·radiance cache 광선에는 효과가 없었고, radiance cache의 앞 광선(0x01)은 지나가고 본 광선은 멈췄다 | EMITTER 비트도 지운다(반사 0x6·굴절·비 지도는 0x2로 계속 만난다) |
+| 2 | **광선 씬의 데칼 수** — `RayScene.cpp`가 `DecalFrame`을 128 B로 셈(오늘 144 B가 됐다) | 데칼 8개부터 n / 8개를 더 센다: `r.decals.boxes`가 버퍼 끝 너머를 읽고 그만큼 AABB를 더 만든다 | 버퍼의 stride로 센다 |
+| 3 | 작은 유리 캐스터의 프록시 — `DepthProxy.ms.hlsl` | 틴트가 켜지면 불투명 계열은 유리 **클러스터**를 빼는데 프록시에는 재질 필터가 없었다: 레벨 텍셀보다 작은 유리 인스턴스가 굵은 레벨에 불투명 사각형으로 그려지고 틴트는 없다(8.3 (f)의 두 기능이 서로를 몰랐다) | 구성원의 submesh 재질(앞 8개)이 모두 Glass면 유리 캐스터: 필터를 적용 |
+| 4 | 프록시의 `DispatchMesh` 격자 — `CullPrepare.hlsl` | 청크 항목이 용량(1,048,576)의 마지막 16개에 닿으면 65535 × 65 = 4,259,775 그룹: D3D12 상한 2^22 초과 | 2048열 격자(2048 × 2048); 프록시 요청은 `max_deferred_items` 2^20까지 |
+| 5 | 틴트의 레벨 탐색 — `VsmTint.hlsli` | 4레벨 위에서 조용히 끝났다: 가장 가까운 상주 페이지가 그보다 굵으면 깊이는 그 페이지(유리 없음)에서 오고 틴트는 1 — 유리 그림자가 사라진다 | 깊이 조회처럼 모든 굵은 레벨 |
+| 6 | 틴트 아틀라스 재생성 — `VsmSystem.cpp` | SRV 디스크립터를 제자리에서 덮어썼다: 비행 중인 프레임이 새(아직 지워지지 않은) 아틀라스를 읽는다 | 새 인덱스(옛 것은 지연 해제), 페이지 아틀라스와 같게 |
+| 7 | 색 보정 LUT의 이중 import — `Post.cpp` `gradeLut` | 사진 저장 경로(`recordImage`)는 후처리 사슬을 두 번 기록한다: 같은 리소스의 그래프 노드가 둘, 각자 import 레이아웃에서 시작 — 틀린 LayoutBefore, 또는 배리어 없이 UAV 쓰기 | 기록당 한 번 import; `recordImage`도 `beginRecord()` |
+| 8 | 업스케일러 이력 슬롯의 이중 import — `Upscale.cpp` | 렌즈(Panini)가 켜졌다 꺼지는 프레임에, screen trace의 이전 색(`output.screen_trace_source = 1`)이 이미 잡은 슬롯을 reset 경로가 다시 import | 그 프레임에 잡힌 슬롯은 그 노드를 쓴다 |
+| 9 | 이방성 로브의 specular 배율 — `ShadeOpaque.hlsl`(= `m.ml.shade`) | 광원의 specular 배율을 coat·sheen은 받고 anisotropic 로브(점·스폿, 면광원의 구적 로브)는 안 받았다: 배율 0인 광원의 하이라이트가 남는다 | 배율을 곱한다 |
+| 10 | parallax 태양 가림 바이트 — `ShadeOpaque.hlsl` | 높이 맵이 있는 Cut / Terrain 재질의 화소는 resolve가 워드를 쓰지 않는데 읽는 쪽은 읽었다: 임시 텍스처의 남은 값이 태양에 곱해진다(클래스 워드 텍스처가 있는 씬: 눈·이방성·parallax_shadow) | 읽는 쪽이 두 클래스를 뺀다 |
+| 11 | 카드 직접광과 lighting channel — `CardDirectCull.hlsl`, `SurfaceCacheCards.cpp` | 채널이 안 맞는 광원이 타일의 8슬롯과 그림자 광선을 차지하고 저장에서 0이 된다: 후보가 8을 넘으면 맞는 광원이 밀려난다. 카드 레코드의 채널은 인스턴스를 넣을 때만 잡혔다 | 선택에서 뺀다; 채널이 바뀐 인스턴스는 다시 넣는다 |
+| 12 | 조명 받는 스프라이트의 배율 — `FxLayerSetup.hlsl` | 광 볼륨이 없는 경로가 volumetric 배율 대신 diffuse 배율을 썼다(`VolumeSetup`은 오늘 고쳐졌고 이쪽이 빠졌다): 볼륨이 도는지에 따라 밝기가 다르다 | 같은 식 |
+| 13 | DOF 산란 스프라이트의 둘째 행 — `DdofScatter.ms.hlsl` | 65,535그룹을 넘으면 `DispatchMesh`가 2행인데 커널이 `gid.y`를 무시(실제 크기에서는 닿지 않는다) | 인덱스에 행을 넣는다 |
+| 14 | 예전 경로의 hit 그림자 광선 마스크 — `GiTrace`(3), `SurfaceCacheLight`(2)·pairs의 태양, `ReflectionHit` / `LocalShadow` / `Shade` | Lumen 경로만 `RT_MASK_HIT_SHADOW`로 바뀌었다: 여기서는 ShadowOnly 캐스터가 그림자를 안 드리우고, 그림자를 안 드리우는 메시가 가렸다(기본 설정에서는 돌지 않는 경로) | 같은 마스크 |
+| 15 | 런타임 인스턴스의 광선 마스크 — `RayScene.cpp` | 항상 0xFF: 플래그(CastShadow, ShadowOnly)가 무시된다 | `rtInstanceMask(flags)` |
+| 16 | FX 조명 꼬리의 import 순서 — `FrameRenderer.cpp` | rect 광원의 이미지가 바뀌는 프레임에 `prepareScene`이 조명 버퍼를 새로 만드는데 import는 그 앞: FX 조명이 옛 버퍼에 쓰이고 읽는 쪽은 새 버퍼를 본다 | import를 뒤로 |
+| 17 | 머리카락 밀도 body — `HairSystem.cpp` | 행진은 블록 있는 body를 64개까지만 걷고 나머지는 말없이 뺀다(기본 16) | `shading.hair_density_bodies > 64`는 실패 |
+| 18 | 게이트의 `shadow` 층 캡처 | 유리가 있는 프레임과 없는 프레임(틴트 끔)의 캡처 높이가 달라 A/B가 비교되지 않는다 | 뷰 높이만 낸다 |
+
+### 12.3 찾았고 고치지 않은 것
+
+- **비의 장막에 위쪽 끝이 없다**(`atmosphere.fog.rain_veil`, 기본 켬; `FroxelSystem.cpp`): 밀도가 높이와 무관해서 열의 적분이 `far_distance_m`(65 km)까지 간다 — 1 mm/h에서 천정 방향 광학 깊이 약 16: 비가 오면 하늘 화소가 모두 안개 색이 된다. `sun_through_fog`(기본 끔)를 켜면 비만으로 태양 직사광이 e^-51이 된다. 지수 감쇠 두 층인 지금의 매질 모형으로는 "구름 밑까지의 판"을 적을 수 없어 손대지 않았다 — 대기 쪽의 결정이 필요하다. 배치의 `weather / rain_veil_off`가 크기를 보여 준다.
+- `UpscaleMotion.hlsl`: 화소의 층 fragment를 16개까지만 읽는다(넘으면 처음 16개, 순서 미정). 오류 비트가 없다.
+- `shading.motion_blur_max_percent`: 타일 수집 반지름이 8타일로 묶여 있다 — 내부 1920줄 폭에서 약 13 %(네이티브에서는 6.7 %)를 넘으면 속도가 쓸고 간 타일에 닿지 않는다. 기본 5 %는 3타일. 값의 범위(100까지 받는다)와 맞지 않는다.
+- `FogIntegrate`의 구름 태양 경로: `atmosphere.clouds.sun_steps = 0`(기본 24)일 때 걸음 상한에 닿은 것을 세지 않는다(`CloudMarch`는 센다).
+- `shadow.vsm.subtile_stats = 1`(측정 모드, 기본 0)의 비트 16..31이 `VSM_REQ_DYNAMIC`(30)·`VSM_REQ_KEPT`(31)와 겹친다: 캐시와 같이 켜면 안 된다.
+- has() 대체값이 toml과 다른 곳 셋(키가 파일에 있는 동안은 영향 없음): `output.upscale_history_frames_moving` 8 / 4, `shading.dof_diaphragm_blades` 0 / 5, `output.upscale_tsr_thin_geometry_line_contrast` 0 / 0.30.
+- 같은 프레임 번호로 기록을 다시 시도할 때의 가드: `RcState::recordedFrame`, `TvState`, `RayScene::m_decalFrame`, 새 `m_hairFrame`은 프레임 번호만 본다(카드와 V는 `recordSerial`도 본다). 실패한 기록을 같은 번호로 다시 하면 앞 기록의 그래프 참조가 남는다.
+- `decal.cull`이 UAV 인덱스를 `StructuredBuffer`로 연다(`Decals.cpp:110,131` ↔ `DecalSetup.hlsl:108`; 오늘 이전부터).
+- (의심) `DiaphragmDof.cpp`의 `ringStep[2]`가 `ringCount[1]`로 나눈다 — 원본도 그런지 확인하지 못했다. 블러가 15타일을 넘을 때만 다르다(기본 반지름에서는 닿지 않는다).
+- 설계가 그렇게 둔 것: 광선 hit과 표면 캐시 월드 셀은 lighting channel을 보지 않는다(원본도 같다); `lrcHitMark`는 2,048개를 넘는 위치를 버린다(목록 상한).
+
+### 12.4 대조해서 맞은 것
+
+- **C++ ↔ HLSL 레코드**(멤버 순서·패딩·크기, 원시 오프셋 읽는 쪽까지): `gpu::Light` 112 B ↔ `GpuLight` ↔ `FxLights`의 쓰기; `FrameConstants` 608 B ↔ `Frame.hlsli`(끝의 여분 두 워드는 HLSL에 선언하지 않는다 — 주석대로); `gpu::Material` 112 B, `MaterialInputs` 80 B, 눈 레코드 64 B; `DecalRecord` 128 B·`DecalFrame` 144 B(`Decals.cpp` ↔ `Decal.hlsli` ↔ `DecalSetup`); `CullView` 400 B·`CullScene`·`CullChunk`; `VS_*`(72워드, 통계 64..66)·`VA_*`(78)·읽기 320 B; 카드 프레임 160 B(워드 22..27, 28..39)·캡처 레코드 80 B·`McMeshCards` 80 / `McCard` 112 / `McCardPage` 64·`countFlags`(17, 20..22); `VsmConstants` 144 + 20 × 64 B·`VsmLocalLight` 48 B·통계 워드; 광선 조명 헤더(워드 11, 15, 16..23; 20..23은 매 프레임 "없음"으로 되돌린다)·`RtLightRecord` 96 B; 머리카락 밀도 파라미터(헤더 8, body 8, 목록)와 모든 읽는 쪽; `FogParams` 96 B·안개 덩이 96 B·`CloudRecord` 240 B·`AtmosphereParams` 176 B·날씨 레코드 96 B; `LrcParams` 256 B·`LtvParams` 96 B·hit mark 목록.
+- **트랙에 걸친 비트**: 인스턴스 플래그(0..3, 채널 4..6, NoDecals 7, NoSelfShadow 8, ShadowOnly 9, 29..31) — 새 비트를 리터럴로 쓴 곳은 `RayScene.h`의 0x200 하나; 조명 `typeFlags`(종류 0..7, 그림자 8, 채널 9..11, 그림자 슬롯 16..31); 재질 `classFlags` 16..31(층 인덱스 / 눈 레코드: 모든 읽는 쪽이 클래스를 먼저 본다; 눈은 LAYERED를 갖지 않는다); 재질 워드 윗바이트(occlusion / coat roughness: LAYERED를 먼저 본다); half float 워드(`revision`, `scales`, `scales2`, `barnDoor`, `sourceMean`).
+- **작업 항목 패킹**(8.3 (b)): visible 리스트를 읽는 다른 트랙(재질, GI 이력, 반사, 모션, MegaLights coverage)은 `.x`를 통째로 읽는다 — 그들이 보는 것은 뷰 하나짜리 메인·평면 뷰의 리스트뿐이고, 뷰가 256개를 넘는 래스터 요청의 리스트는 V의 래스터 커널만 읽는다.
+- **루트 상수, 슬롯별**: 병합이 고친 세 충돌이 모든 호출자에서 끝까지 맞는다(`MegaLightsSample` P[5].z / .w는 메인·coverage·머리카락 인스턴스 모두 24워드; `FogScatter` P[10] = { 덩이 수, 노출비, 머리카락, 격자 }; 컬 통계는 이름으로만 쓴다). 그 밖에 대조한 것: ShadeOpaque 계열(밴드·fallback·scatter), MegaLights 전부, coverage(compact와 비-compact), 머리카락; TSR·모션 블러·두 DOF·후처리·노출; GI 광선 패스 넷과 radiance cache MODE 0..9; 반사·굴절·카드 전부와 클러스터 캡처(`pixelViews` → P[4].x); 안개·구름·프록셀 리스트; VSM 전부(약 50곳)와 그림자 가시성; V의 컬·래스터·coverage; 재질 resolve·데칼·입자.
+- **선언과 순서**: `PassChain`의 단계는 각자 선언한다; 2단계 가림의 순서(래스터 1 → `statichzb.p1` → 컬 2 → 래스터 2); 틴트 아틀라스는 `s.vsm.tint.ready`가 읽을 수 있는 상태로 둔다; 2배 높이 가시성 텍스처의 읽는 쪽은 모두 화소로 인덱싱한다; 머리카락 밀도 텍스처는 `declareHair`와 각 패스가 선언한다; 안개 볼륨의 뜻이 바뀐 것(노출 전 저장, 구름 장막)은 모든 읽는 쪽이 `FogVolume.hlsli`를 거친다.
+- **루프**: 오늘 더해진 루프는 모두 상수나 CPU가 정한 수로 묶여 있다(순회 작업 큐, coverage bins·compute 래스터, 추측 레벨, 머리카락 행진, `clFeedback`, parallax ≤ 64걸음). 조용히 자르던 셋은 위에 적었다(틴트 레벨: 고침; 머리카락 body: 실패로; 층 fragment 16개: 남음).
