@@ -79,8 +79,13 @@ public:
         c.windDirection = sceneData.windDirection;
         c.windSpeed = sceneData.windSpeed;
         gpuScene.fill(c);
+        // atmosphere.fog, as FrameRenderer::allocateFrameConstants: the main view's record, a planar reflection view's own
+        const D3D12_GPU_VIRTUAL_ADDRESS address = constants->GetGPUVirtualAddress() + slot * 1024;
+        c.fog = view.kind == gpu::ViewKind::Main ? fogParams : 0;
+        if (view.kind == gpu::ViewKind::PlanarReflection && fogSecondary) c.fog = fogSecondary(view, address);
         std::memcpy(mapped + slot * 1024, &c, sizeof c);
-        return constants->GetGPUVirtualAddress() + (slot++) * 1024;
+        ++slot;
+        return address;
     }
 
     // Records one frame: 'build' declares passes with the context; then executes and waits.
@@ -199,6 +204,11 @@ public:
     FrameContext frame;
     FrameServices testServices;
     TrackState trackState;
+    // atmosphere.fog (FogTests): FrameConstants::fog of the views whose constants are made from here on - the main view's
+    // record (tracks::fogParams: SRV + 1; 0: none, as every other S test runs) and, for a planar reflection view, what
+    // this returns for the view and its constants' address (tracks::fogParamsSecondary's key).
+    uint32_t fogParams = 0;
+    std::function<uint32_t(const ViewDesc&, D3D12_GPU_VIRTUAL_ADDRESS)> fogSecondary;
 
 private:
     ComPtr<ID3D12Resource> makeReadback(uint64_t bytes) { return makeBuffer(bytes, D3D12_HEAP_TYPE_READBACK); }

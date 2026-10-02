@@ -94,14 +94,7 @@ float3 shadeSky(uint2 pixel, Texture2D<uint> words)
     // (M's mirror pixels, W's calm water), as R's reflection rays exclude it - drawn here it would count twice.
     if (!celestialMoonHoldsLight(P[2].y) && g_viewKind != VIEW_PLANAR_REFLECTION) radiance += sun * behindClouds * shSunDiskCoverage(D, Dx, Dy);
     // The height fog over the sky (atmosphere.fog.sky_amount; 0: the sky is left alone): along the ray to the far slices' end.
-    {
-        FogParams fogParams;
-        if (fogLoad(fogParams) && fogParams.skyAmount > 0)
-        {
-            const float4 fog = fogAt((float2(pixel) + 0.5) / float2(g_viewWidth, g_viewHeight), 3.0e38);
-            radiance = lerp(radiance, radiance * fog.a + fog.rgb, fogParams.skyAmount);
-        }
-    }
+    radiance = fogOverSky((float2(pixel) + 0.5) / float2(g_viewWidth, g_viewHeight), radiance);
     RWTexture2D<float4> color = ResourceDescriptorHeap[P[0].y];
     shExposureHistogram(P[4].w, radiance, pixel, asfloat(P[4].z));  // P[4].w histogram, P[4].z centre sigma (main view)
     color[pixel] = shEncodeExposed(shParticles(radiance * g_exposure, pixel, P[5].z, P[5].w));  // P[5].zw particle layer

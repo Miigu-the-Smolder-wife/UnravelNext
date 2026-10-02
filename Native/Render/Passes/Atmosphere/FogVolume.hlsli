@@ -195,4 +195,15 @@ void fogOverAir(float2 uv, float depth, inout float3 inscatter, inout float3 tra
     inscatter = inscatter * fog.a + fog.rgb;
     transmittance *= fog.a;
 }
+
+// The sky behind the fog (a sky pixel of the main view; radiance in nits, not exposed): atmosphere.fog.sky_amount of the
+// fog along the whole ray, to the far slices' end - 0 leaves the sky as it is, 1 takes it through the fog as every other
+// pixel is.
+float3 fogOverSky(float2 uv, float3 radiance)
+{
+    FogParams p;
+    if (!fogLoad(p) || !(p.skyAmount > 0)) return radiance;
+    const float4 fog = fogAt(uv, 3.0e38);
+    return lerp(radiance, radiance * fog.a + fog.rgb, p.skyAmount);
+}
 #endif
