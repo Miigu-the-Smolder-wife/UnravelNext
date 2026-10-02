@@ -511,6 +511,10 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
         // (the field's texture also carries the closest depth the resurrection reprojects by)
         const bool hasField = reprojectionField || canResurrect;
         const TextureRef field = hasField ? g.createTexture(TextureDesc{ "m.tsr.reprojection field", w, h, 1, 1, DXGI_FORMAT_R32G32B32A32_UINT }) : TextureRef{};
+        // output.upscale_tsr_hole_filling (the reference's reprojection hole filling, always on there): a disoccluded
+        // pixel's history is read by its occluder's vector (TsrDecimate.hlsl writes the update's copy of the vectors)
+        const bool holeFilling = !fc.quality.has("output.upscale_tsr_hole_filling") || fc.quality.boolean("output.upscale_tsr_hole_filling");
+        const TextureRef updateMotion = holeFilling ? g.createTexture(TextureDesc{ "m.tsr.hole filled motion", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT }) : dilated;
         // output.upscale_tsr_flickering (the reference's r.TSR.ShadingRejection.Flickering, default on)
         const bool flickering = !fc.quality.has("output.upscale_tsr_flickering") || fc.quality.boolean("output.upscale_tsr_flickering");
         TextureRef previousFlicker, nextFlicker, reprojectedFlicker, moireError;
@@ -540,6 +544,21 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
             relaxation = g.createTexture(TextureDesc{ "m.tsr.thin relaxation", w, h, 1, 1, DXGI_FORMAT_R8_UNORM });
         }
         ID3D12PipelineState* thinPso = thinGeometry ? fc.shaders.compute("Passes/Shading/TsrThin") : nullptr;
+        // the luma lines of the thin geometry detection (the reference's r.TSR.ThinGeometryDetection.Coverage.MinKeepLineContrast
+        // 0.30, HighContrastLineFadeRate 0.1, ...FadeRateInsideRegion 0.03, HighContrastLineWeight 0.6; contrast 0: none) and
+        // the detection inside the flickering heuristic (its r.TSR.ThinGeometryDetection.AntiFlickering)
+        auto thinNumber = [&](const char* key, double fallback) {
+            const double v = fc.quality.has(key) ? fc.quality.number(key) : fallback;
+            if (!(v >= 0 && v <= 1)) fail("%s %g: in [0, 1]", key, v);
+            return (float)v;
+        };
+        const float lineContrast = thinNumber("output.upscale_tsr_thin_geometry_line_contrast", 0.0);
+        const float lineFade = thinNumber("output.upscale_tsr_thin_geometry_line_fade_rate", 0.1);
+        const float lineFadeInside = thinNumber("output.upscale_tsr_thin_geometry_line_fade_rate_inside", 0.03);
+        const float lineWeight = thinNumber("output.upscale_tsr_thin_geometry_line_weight", 0.6);
+        const bool lumaLines = thinGeometry && lineContrast > 0;
+        const bool thinInFlicker = thinGeometry && flickering &&
+                                   (!fc.quality.has("output.upscale_tsr_thin_geometry_anti_flickering") || fc.quality.boolean("output.upscale_tsr_thin_geometry_anti_flickering"));
         const uint32_t frameIndex = (uint32_t)fc.frame.frameIndex;
         ShaderLibrary& shaders = fc.shaders;
         ID3D12PipelineState* clearPso = shaders.compute("Passes/Shading/TsrClear");
@@ -600,6 +619,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                           b.use(previousThin, Use::SrvCompute);
                           b.use(reprojectedThin, Use::UavCompute);
                       }
+                      if (holeFilling) b.use(updateMotion, Use::UavCompute);
                       if (canResurrect)
                       {
                           b.use(keptGuide, Use::SrvCompute);
@@ -612,7 +632,8 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       uint32_t k[40] = { c.srv(dilated), c.srv(info), c.srv(scatter), c.srv(previousGuide), c.uav(reprojected), c.uav(decimateMask), w, h,
                                          asUint(jx), asUint(jy), asUint(exposureRatio), guideReset ? 1u : 0u,
                                          flickering ? c.srv(previousFlicker) : none, flickering ? c.uav(reprojectedFlicker) : none, frameIndex, 0,
-                                         thinGeometry ? c.srv(previousThin) : none, thinGeometry ? c.uav(reprojectedThin) : none, 0, 0,
+                                         thinGeometry ? c.srv(previousThin) : none, thinGeometry ? c.uav(reprojectedThin) : none,
+                                         holeFilling ? c.uav(updateMotion) : none, 0,
                                          canResurrect ? c.srv(keptGuide) : none, canResurrect ? c.uav(resurrectedGuide) : none, asUint(keptExposureRatio),
                                          canResurrect ? c.srv(field) : none };
                       for (int r = 0; r < 4; ++r)
@@ -641,6 +662,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
             g.addPass("m.tsr.thin", QueueType::Graphics,
                       [&](PassBuilder& b) {
                           if (layerMotion) b.use(layers, Use::SrvCompute);
+                          if (lumaLines) b.use(src, Use::SrvCompute);
                           b.use(motionDepth, Use::SrvCompute);
                           b.use(reprojectedThin, Use::SrvCompute);
                           b.use(decimateMask, Use::SrvCompute);
@@ -648,12 +670,14 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                           b.use(nextThin, Use::UavCompute);
                       },
                       [=](PassContext& c) {
-                          const uint32_t k[12] = { layerMotion ? c.srv(layers) : 0xFFFFFFFFu, c.srv(motionDepth), c.srv(reprojectedThin), c.srv(decimateMask),
+                          const uint32_t k[20] = { layerMotion ? c.srv(layers) : 0xFFFFFFFFu, c.srv(motionDepth), c.srv(reprojectedThin), c.srv(decimateMask),
                                                    c.uav(relaxation), c.uav(nextThin), w, h,
-                                                   asUint((float)thinErrorMultiplier), asUint((float)thinMaxRelaxation), frameIndex, guideReset ? 1u : 0u };
+                                                   asUint((float)thinErrorMultiplier), asUint((float)thinMaxRelaxation), frameIndex, guideReset ? 1u : 0u,
+                                                   lumaLines ? c.srv(src) : 0xFFFFFFFFu, asUint(lineContrast), asUint(lineFade), asUint(lineFadeInside),
+                                                   asUint(lineWeight), 0, 0, 0 };
                           c.cmd->SetPipelineState(thinPso);
                           c.bindFrameConstants(cb);
-                          c.computeConstants(k, 12);
+                          c.computeConstants(k, 20);
                           c.cmd->Dispatch((w + 15) / 16, (h + 15) / 16, 1);
                       });
         if (flickering)
@@ -663,12 +687,13 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                           b.use(reprojectedFlicker, Use::SrvCompute);
                           b.use(decimateMask, Use::SrvCompute);
                           b.use(info, Use::SrvCompute);
+                          if (thinInFlicker) b.use(relaxation, Use::SrvCompute);
                           b.use(moireError, Use::UavCompute);
                           b.use(nextFlicker, Use::UavCompute);
                       },
                       [=](PassContext& c) {
                           const uint32_t k[12] = { c.srv(src), c.srv(reprojectedFlicker), c.srv(decimateMask), c.srv(info), c.uav(moireError), c.uav(nextFlicker), w, h,
-                                                   guideReset ? 1u : 0u, 0, 0, 0 };
+                                                   guideReset ? 1u : 0u, thinInFlicker ? c.srv(relaxation) : 0xFFFFFFFFu, 0, 0 };
                           c.cmd->SetPipelineState(flickerPso);
                           c.bindFrameConstants(cb);
                           c.computeConstants(k, 12);
@@ -716,7 +741,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                   [&](PassBuilder& b) {
                       b.use(src, Use::SrvCompute);
                       b.use(rejection, Use::SrvCompute);
-                      b.use(dilated, Use::SrvCompute);
+                      b.use(updateMotion, Use::SrvCompute);
                       b.use(aa, Use::SrvCompute);
                       b.use(history, Use::SrvCompute);
                       b.use(output, Use::UavCompute);
@@ -725,7 +750,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                   },
                   [=](PassContext& c) {
                       const uint32_t none = 0xFFFFFFFFu;
-                      uint32_t k[36] = { c.srv(src), c.srv(rejection), c.srv(dilated), c.srv(history), c.uav(output), w, h, (reset ? 1u : 0u) | updateFlags,
+                      uint32_t k[36] = { c.srv(src), c.srv(rejection), c.srv(updateMotion), c.srv(history), c.uav(output), w, h, (reset ? 1u : 0u) | updateFlags,
                                          HW, HH, asUint(jx), asUint(jy), asUint(exposureRatio), c.srv(aa), hasField ? c.srv(field) : none, 0,
                                          canResurrect ? c.srv(keptHistory) : none, asUint(keptExposureRatio), asUint(historyScale), 0 };
                       for (int r = 0; r < 4; ++r)

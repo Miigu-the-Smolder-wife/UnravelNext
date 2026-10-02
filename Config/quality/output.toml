@@ -88,6 +88,19 @@ upscale_tsr_thin_geometry_error_multiplier = 200.0  # a line of depth is thin ge
                                         # this many pixel sizes in the world (r.TSR.ThinGeometryDetection.ErrorMultiplier)
 upscale_tsr_thin_geometry_max_relaxation = 0.037    # the relaxation weight inside thin geometry's clusters, where the
                                         # coverage is near a half (r.TSR.ThinGeometryDetection.Coverage.MaxRelaxationWeight)
+upscale_tsr_thin_geometry_line_contrast = 0.30      # a pixel-wide line of luma is thin geometry too where it is brighter than
+                                        # both sides by this much in the guide space (...Coverage.MinKeepLineContrast); such a
+                                        # line is kept in the coverage history and the pixels around it are relaxed. 0: none
+upscale_tsr_thin_geometry_line_fade_rate = 0.1      # the chance a frame that a kept line is not a line drops it
+                                        # (r.TSR.ThinGeometryDetection.HighContrastLineFadeRate; 0 never, 1 at once), and
+upscale_tsr_thin_geometry_line_fade_rate_inside = 0.03  # inside thin geometry's coverage (...FadeRateInsideRegion)
+upscale_tsr_thin_geometry_line_weight = 0.6         # the relaxation weight around a kept line where no cluster weight is
+                                        # (r.TSR.ThinGeometryDetection.HighContrastLineWeight)
+upscale_tsr_thin_geometry_anti_flickering = true    # the flickering heuristic measures with the thin geometry's relaxed
+                                        # clamp and counts its small gradients (r.TSR.ThinGeometryDetection.AntiFlickering)
+upscale_tsr_hole_filling = true         # with upscale_tsr: a pixel that was hidden in the previous frame reads the history
+                                        # by its occluder's vector - what was beside the occluder - instead of its own, which
+                                        # leads to the occluder (the reference's reprojection hole filling; no switch there)
 upscale_layer_motion = true             # with upscale_tsr: the layers over the opaque surface move by themselves
                                         # (UpscaleMotion.hlsl; the reference's translucent velocity output and has-pixel-animation
                                         # mark): a glass pane, the water surface and the coverage layer's thin fragments (a third of

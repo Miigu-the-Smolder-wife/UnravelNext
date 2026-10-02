@@ -22,7 +22,8 @@
 //              its alignment with O x 1 / 16, the history's = the input's x (1 - b) / b for the rejection's blend
 //              factor b, at most the validity, at most 1 - 0.75 x speed in output pixels a frame (not below the
 //              relative luma change: high-contrast edges stay stable in motion).
-// P[0] = { colour SRV (internal, exposed linear), rejection SRV (RGBA8, TsrReject.hlsl), dilated motion SRV (RG32F),
+// P[0] = { colour SRV (internal, exposed linear), rejection SRV (RGBA8, TsrReject.hlsl), dilated motion SRV (RG32F;
+//          with output.upscale_tsr_hole_filling the decimate's copy, a disoccluded pixel's vector its occluder's),
 //          history SRV (output: rgb exposed linear, a = validity) }
 // P[1] = { output UAV (RGBA16F), internal width, height, flags (1: reset; 2: the kernel narrows with the samples
 //          gathered - output.upscale_tsr_kernel_by_samples; 4: the reprojection field's jacobian and boundary apply) }
@@ -90,6 +91,12 @@ void main(uint2 o : SV_DispatchThreadID)
     const uint rejectionBits = (uint)round(rejection.a * 255.0);
     const bool parallaxRejected = (rejectionBits & 1u) == 0;
     const bool resurrected = (rejectionBits & 2u) != 0 && P[4].x != 0xFFFFFFFFu;
+    if ((rejectionBits & 4u) != 0)
+    {
+        // a hole-filled vector (TsrDecimate.hlsl) is the occluder's: the pixel's own jacobian says nothing about it
+        correction = 0;
+        upscaleCorrection = 1;
+    }
     const uint2 aa = aaTexture.Load(int3(k, 0));
     const float noiseFiltering = (float)aa.y / 255.0;
     float2 vector = motionTexture.Load(int3(kv, 0)) + correction;
