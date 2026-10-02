@@ -453,7 +453,7 @@ bool RtScene::alphaOpaque(uint32_t instance, uint32_t triangle, float u, float v
     const uint32_t* tri = &md.src->indices[3 * (size_t)triangle];
     const float2 a = md.src->uv0[tri[0]], b = md.src->uv0[tri[1]], c = md.src->uv0[tri[2]];
     const float w = 1 - u - v;
-    const float2 uv{ a.x * w + b.x * u + c.x * v, a.y * w + b.y * u + c.y * v };
+    const float2 uv = scene::materialUv(mat, { a.x * w + b.x * u + c.x * v, a.y * w + b.y * u + c.y * v });  // (the material's uv transform)
     return m_textures[mat.baseColorTexture].sample(uv).a >= mat.alphaCutoff;
 }
 
@@ -571,7 +571,21 @@ Surface RtScene::surface(const Hit& hit, float3 rayDir) const
         const float2 a = md.src->uv0[tri[0]], b = md.src->uv0[tri[1]], c = md.src->uv0[tri[2]];
         uv = { a.x * w + b.x * u + c.x * v, a.y * w + b.y * u + c.y * v };
     }
+    // Material inputs (scene::Material): the uv transform, the emission's scale and mask and the vertex tint are here; the
+    // second uv set, the detail maps and the height's parallax are the engine's alone (MaterialInputs.hlsli).
+    uv = scene::materialUv(mat, uv);
     float3 base = mat.baseColor;
+    if (mat.vertexColorTint && !md.src->colors.empty())
+    {
+        float3 tint{ 0, 0, 0 };
+        const float weights[3] = { w, u, v };
+        for (uint32_t k = 0; k < 3; ++k)
+        {
+            const uint32_t c8 = md.src->colors[tri[k]];
+            tint = tint + float3{ (float)(c8 & 0xFF), (float)((c8 >> 8) & 0xFF), (float)((c8 >> 16) & 0xFF) } * (weights[k] / 255.0f);
+        }
+        base = base * tint;
+    }
     float rough = mat.roughness, metal = mat.metallic;
     if (mat.cls == scene::MaterialClass::Cut)
     {
@@ -632,7 +646,9 @@ Surface RtScene::surface(const Hit& hit, float3 rayDir) const
             tg = normalize(tg);
             const float3 bt = cross(n, tg) * t0.w;
             const Texel nt = m_textures[mat.normalTexture].sample(uv);
-            const float x = 2 * nt.r - 1, y = 2 * nt.g - 1, z = std::sqrt(std::max(0.0f, 1 - x * x - y * y));
+            const float xt = 2 * nt.r - 1, yt = 2 * nt.g - 1, z = std::sqrt(std::max(0.0f, 1 - xt * xt - yt * yt));
+            const float2 xy = scene::materialUvToTangent(mat, { xt, yt });
+            const float x = xy.x, y = xy.y;
             n = normalize(tg * x + bt * y + n * z);
         }
     }
@@ -682,12 +698,13 @@ Surface RtScene::surface(const Hit& hit, float3 rayDir) const
     s.ior = mat.ior;
     if (mat.emissive.x > 0 || mat.emissive.y > 0 || mat.emissive.z > 0)
     {
-        float3 e = mat.emissive;
+        float3 e = mat.emissive * mat.emissiveScale;
         if (mat.emissiveTexture != scene::kNone)
         {
             const Texel t = m_textures[mat.emissiveTexture].sample(uv);
             e = e * float3{ t.r, t.g, t.b };
         }
+        if (mat.emissiveMaskTexture != scene::kNone) e = e * m_textures[mat.emissiveMaskTexture].sample(uv).r;
         if (s.frontFacing) s.emission = Rgb(e);
     }
     return s;
