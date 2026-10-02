@@ -1474,6 +1474,7 @@ void LodVertices::appendTo(scene::Scene& scene) const
         const Mesh& lod = meshes[mi];
         const size_t count = m.positions.size();
         const bool normals = m.normals.size() == count, tangents = m.tangents.size() == count, uv0 = m.uv0.size() == count;
+        const bool uv1 = m.uv1.size() == count, colors = m.colors.size() == count;
         const bool skin = m.skin.joints.size() == 4 * count && m.skin.weights.size() == 4 * count;
         for (size_t i = 0; i < lod.positions.size(); ++i)
         {
@@ -1482,6 +1483,8 @@ void LodVertices::appendTo(scene::Scene& scene) const
             if (normals) m.normals.push_back(float3(m.normals[s]));
             if (tangents) m.tangents.push_back(float4(m.tangents[s]));
             if (uv0) m.uv0.push_back(float2(m.uv0[s]));
+            if (uv1) m.uv1.push_back(float2(m.uv1[s]));
+            if (colors) m.colors.push_back(uint32_t(m.colors[s]));
             if (skin)
                 for (uint32_t k = 0; k < 4; ++k)
                 {

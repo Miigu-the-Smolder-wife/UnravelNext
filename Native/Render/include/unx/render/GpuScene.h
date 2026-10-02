@@ -278,6 +278,7 @@ public:
     // A9: a material of the scene is anisotropic (the anisotropy table is in coatTable; M's resolve writes the frame word)
     bool anyAnisotropic() const { return m_anisotropic; }
     bool anyEye() const { return m_eyes; }  // the scene has an eye material (the resolve's class word texture)
+    bool anyHeight() const { return m_heights; }  // the scene has a material with a height map (parallax; packMaterialInputs)
     const std::vector<gpu::Mesh>& meshes() const { return m_meshes; }
     uint32_t revision() const { return m_revision; }
     ID3D12Resource* buffer(const char* name) const;  // "vertices", "indices", "instances", "bonePalette", "prevBonePalette", ...
@@ -330,6 +331,12 @@ private:
     void buildLayerTables(bool anisotropic);
     bool m_anisotropic = false;
     bool m_eyes = false;  // an eye material in the scene (packMaterialLayers)
+    // Material inputs (gpu::MaterialInputs; a material's record index in gpu::Material::inputs), with the textures M
+    // published last (setMaterialTextures), and the meshes' optional vertex streams (gpu::VertexAttributes).
+    Buffer m_materialInputBuffer, m_meshAttributeTable, m_vertexAttributeBuffer;
+    std::vector<gpu::MaterialTextures> m_publishedTextures;
+    void packMaterialInputs(std::vector<gpu::Material>& materials);
+    bool m_heights = false;
     std::vector<float> m_filmTables;  // A9 thin film tables, appended to the coat table after the anisotropy table
     std::vector<float4> m_morphRows;
     std::vector<uint32_t> m_morphMeshBlock;  // per mesh: word offset of its block in m_morphData, kNone = no morph

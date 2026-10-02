@@ -601,14 +601,22 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
             std::memcpy(&e.slopeRange, &splat1, 4);
             e.flags = clampBit(m.terrainSplat[0], gpu::MaterialTextureBaseColor) | clampBit(m.terrainSplat[1], gpu::MaterialTextureEmissive);
         }
-        if (e.emissive != gpu::kNone) m_anyEmissive = true;
-        table.push_back(e);
+        // the material inputs' textures (scene::Material detail maps, height, emissive mask): to the material's record in
+        // the GPU scene; a masked emission is per pixel like a textured one (the resolve's emissive texture)
         gpu::MaterialTextures pub;
+        pub.detailColor = srvOf(m.detailColorTexture, scene::TextureFormat::Rgba8Srgb, scene::TextureFormat::Rgba8Srgb, m, "detail colour");
+        pub.detailNormal = srvOf(m.detailNormalTexture, scene::TextureFormat::Rg8Normal, scene::TextureFormat::Rg8Normal, m, "detail normal");
+        pub.detailSlopeRange = m.detailNormalTexture != scene::kNone ? m_slopeRange[m.detailNormalTexture] : 0.0f;
+        pub.height = srvOf(m.heightTexture, scene::TextureFormat::R8Linear, scene::TextureFormat::R8Linear, m, "height");
+        pub.emissiveMask = srvOf(m.emissiveMaskTexture, scene::TextureFormat::R8Linear, scene::TextureFormat::R8Linear, m, "emissive mask");
+        pub.inputClamp = clampBit(m.detailColorTexture, 1u) | clampBit(m.detailNormalTexture, 2u) | clampBit(m.heightTexture, 4u) | clampBit(m.emissiveMaskTexture, 8u);
+        if (pub.emissiveMask != gpu::kNone) e.flags |= gpu::MaterialTextureEmissiveMask;
+        if (e.emissive != gpu::kNone || pub.emissiveMask != gpu::kNone) m_anyEmissive = true;
+        table.push_back(e);
         pub.baseColor = e.baseColor;
         pub.normal = e.moments;
         pub.roughMetal = e.roughMetal;
         pub.emissive = e.emissive;
-        pub.occlusion = gpu::kNone;
         pub.clamp = e.flags;
         m_published.push_back(pub);
     }

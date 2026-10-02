@@ -111,7 +111,7 @@ GpuScene::~GpuScene()
                        &m_skinBuffer, &m_bonePalette, &m_prevBonePalette, &m_albedoTable, &m_specularTable, &m_coverageTable, &m_clusterBuffer, &m_lodLevelBuffer,
                        &m_lodLevelClusterBuffer,
                        &m_clusterVertexIndexBuffer, &m_clusterTriangleBuffer, &m_morphRecords, &m_morphData, &m_patchData, &m_terrainLayerBuffer, &m_materialLayerBuffer, &m_coatTable,
-                       &m_fxLightCount })
+                       &m_fxLightCount, &m_materialInputBuffer, &m_meshAttributeTable, &m_vertexAttributeBuffer })
         release(*b);
     for (auto& [name, b] : m_named) release(b);
     DescriptorHeaps& h = m_device.descriptors();
@@ -205,9 +205,16 @@ void GpuScene::upload(const scene::Scene& s)
     std::vector<gpu::Vertex> vertices;
     std::vector<uint32_t> indices;
     std::vector<gpu::SkinVertex> skin;
+    // the optional vertex streams (a second uv set, vertex colours): one record per vertex of a mesh that has either
+    std::vector<gpu::VertexAttributes> attributes;
+    std::vector<uint32_t> attributeFirst;  // per mesh: 1 + its first record, 0 = none
     m_meshes.clear();
     for (const scene::Mesh& m : s.meshes)
     {
+        attributeFirst.push_back(m.uv1.empty() && m.colors.empty() ? 0u : 1u + (uint32_t)attributes.size());
+        if (attributeFirst.back() != 0)
+            for (size_t v = 0; v < m.positions.size(); ++v)
+                attributes.push_back({ m.uv1.empty() ? (m.uv0.empty() ? float2{} : m.uv0[v]) : m.uv1[v], m.colors.empty() ? 0xFFFFFFFFu : m.colors[v], 0 });
         gpu::Mesh g{};
         float3 lo{ 1e30f, 1e30f, 1e30f }, hi{ -1e30f, -1e30f, -1e30f };
         for (const float3& p : m.positions)
@@ -380,7 +387,8 @@ void GpuScene::upload(const scene::Scene& s)
     }
 
     for (Buffer* b : { &m_instanceBuffer, &m_meshBuffer, &m_submeshBuffer, &m_vertexBuffer, &m_indexBuffer, &m_materialBuffer, &m_materialRemapBuffer, &m_lightBuffer,
-                       &m_skinBuffer, &m_bonePalette, &m_prevBonePalette, &m_albedoTable, &m_specularTable, &m_coverageTable, &m_coatTable, &m_morphRecords, &m_morphData })
+                       &m_skinBuffer, &m_bonePalette, &m_prevBonePalette, &m_albedoTable, &m_specularTable, &m_coverageTable, &m_coatTable, &m_morphRecords, &m_morphData,
+                       &m_meshAttributeTable, &m_vertexAttributeBuffer })
         release(*b);
     // C2b runtime regions start 16-byte aligned after the content (the scatter writes 16-byte elements).
     auto regionStart = [](size_t count, uint32_t stride) { return (uint32_t)((count * stride + 15) / 16 * 16 / stride); };
@@ -409,6 +417,12 @@ void GpuScene::upload(const scene::Scene& s)
     m_submeshBuffer = createStructured(submeshes.data(), sizeof(gpu::Submesh), submeshes.size(), L"scene submeshes", pool, pool ? m_rtFirst[RtSubmeshes] + rc.submeshes : 0);
     m_vertexBuffer = createStructured(vertices.data(), sizeof(gpu::Vertex), vertices.size(), L"scene vertices", pool, pool ? m_rtFirst[RtVertices] + rc.vertices : 0);
     m_indexBuffer = createStructured(indices.data(), sizeof(uint32_t), indices.size(), L"scene indices", pool, pool ? m_rtFirst[RtIndices] + rc.indices : 0);
+    if (!attributes.empty())
+    {
+        // (the table covers the mesh buffer's runtime tail: a runtime mesh has no such streams, its zero says so)
+        m_meshAttributeTable = createStructured(attributeFirst.data(), sizeof(uint32_t), attributeFirst.size(), L"scene mesh attribute table", false, m_meshBuffer.count);
+        m_vertexAttributeBuffer = createStructured(attributes.data(), sizeof(gpu::VertexAttributes), attributes.size(), L"scene vertex attributes");
+    }
     if (pool)
     {
         rawUav(m_rtUav[RtMeshes], m_meshBuffer, (uint64_t)m_meshBuffer.count * sizeof(gpu::Mesh), true);
@@ -432,8 +446,10 @@ void GpuScene::upload(const scene::Scene& s)
     // frame after the anisotropy frame read zeros).
     release(m_coatTable);
     m_anisotropic = false;
+    m_publishedTextures.clear();  // (M publishes this scene's textures: setMaterialTextures)
     packTerrainLayers(materials);
     packMaterialLayers(materials);
+    packMaterialInputs(materials);
     m_materialBuffer = createStructured(materials.data(), sizeof(gpu::Material), materials.size(), L"scene materials");
     m_materialRemapBuffer = createStructured(remap.data(), sizeof(uint32_t), remap.size(), L"scene material remap");
     createLightBuffer(lights);
@@ -592,12 +608,52 @@ void GpuScene::packMaterialLayers(std::vector<gpu::Material>& materials)
     if (!layers.empty()) m_materialLayerBuffer = createStructured(layers.data(), sizeof(gpu::MaterialLayers), layers.size(), L"material layers");
 }
 
+// The material inputs' records (gpu::MaterialInputs) of every material that has one, in material order; its 'inputs' is
+// the index. The texture fields are what M published last (none before its first sync).
+void GpuScene::packMaterialInputs(std::vector<gpu::Material>& materials)
+{
+    const scene::Scene& s = *m_source;
+    std::vector<gpu::MaterialInputs> inputs;
+    m_heights = false;
+    for (size_t i = 0; i < materials.size() && i < s.materials.size(); ++i)
+    {
+        const scene::Material& m = s.materials[i];
+        materials[i].inputs = gpu::kNone;
+        if (!scene::hasMaterialInputs(m)) continue;
+        gpu::MaterialInputs r{};
+        const float c = std::cos(m.uvRotation), sn = std::sin(m.uvRotation);
+        r.uvU[0] = c * m.uvScale.x, r.uvU[1] = -sn * m.uvScale.y, r.uvU[2] = m.uvOffset.x;
+        r.uvV[0] = sn * m.uvScale.x, r.uvV[1] = c * m.uvScale.y, r.uvV[2] = m.uvOffset.y;
+        r.detailScaleU = m.detailScale.x, r.detailScaleV = m.detailScale.y;
+        r.detailOffset[0] = m.detailOffset.x, r.detailOffset[1] = m.detailOffset.y;
+        r.detailColor = m.detailColorStrength;
+        r.detailNormal = m.detailNormalScale;
+        const bool uv = m.uvScale.x != 1 || m.uvScale.y != 1 || m.uvOffset.x != 0 || m.uvOffset.y != 0 || m.uvRotation != 0;
+        r.flags = (uv ? gpu::MaterialInputUv : 0u) | (m.occlusionUvSet == 1 ? gpu::MaterialInputOcclusionUv1 : 0u) | (m.detailUvSet == 1 ? gpu::MaterialInputDetailUv1 : 0u) |
+                  (m.vertexColorTint ? gpu::MaterialInputVertexTint : 0u) | (m.vertexAlphaBlend ? gpu::MaterialInputVertexBlend : 0u) |
+                  (m.alphaDither ? gpu::MaterialInputDither : 0u);
+        const gpu::MaterialTextures t = i < m_publishedTextures.size() ? m_publishedTextures[i] : gpu::MaterialTextures{};
+        r.detailColorTexture = t.detailColor;
+        r.detailNormalTexture = t.detailNormal;
+        r.detailSlopeRange = t.detailSlopeRange;
+        r.heightTexture = m.heightScale > 0 ? t.height : gpu::kNone;
+        r.heightScale = m.heightScale;
+        r.emissiveMaskTexture = t.emissiveMask;
+        r.textureClamp = t.inputClamp;
+        m_heights = m_heights || (m.heightTexture != scene::kNone && m.heightScale > 0);
+        materials[i].inputs = (uint32_t)inputs.size();
+        inputs.push_back(r);
+    }
+    release(m_materialInputBuffer);
+    if (!inputs.empty()) m_materialInputBuffer = createStructured(inputs.data(), sizeof(gpu::MaterialInputs), inputs.size(), L"material inputs");
+}
+
 gpu::Material GpuScene::packMaterial(const scene::Material& m) const
 {
     gpu::Material g{};
     g.baseColor = m.baseColor;
     g.roughness = m.roughness;
-    g.emissive = m.emissive;
+    g.emissive = m.emissive * m.emissiveScale;  // (the emission's intensity apart from its colour)
     g.metallic = m.metallic;
     g.specular = m.specular;
     g.alphaCutoff = m.alphaCutoff;
@@ -605,7 +661,8 @@ gpu::Material GpuScene::packMaterial(const scene::Material& m) const
     g.ior = m.ior;
     g.classFlags = (uint32_t)m.cls | ((m.twoSided ? gpu::MaterialTwoSided : 0u) | (m.alphaCutoff > 0 ? gpu::MaterialAlphaTested : 0u) |
                                        (m.emissiveVisibleOnly ? gpu::MaterialEmissiveVisibleOnly : 0u)) << 8;
-    g.baseColorTexture = g.normalTexture = g.roughMetalTexture = g.emissiveTexture = g.occlusionTexture = gpu::kNone;  // setMaterialTextures
+    g.baseColorTexture = g.normalTexture = g.roughMetalTexture = g.emissiveTexture = gpu::kNone;  // setMaterialTextures
+    g.inputs = gpu::kNone;  // packMaterialInputs
     g.textureClamp = 0;
     g.revision = m_revision;
     packMaterialClass(m, g);
@@ -839,7 +896,6 @@ void GpuScene::setMaterials(std::span<const uint32_t> indices)
             g.normalTexture = old.normalTexture;
             g.roughMetalTexture = old.roughMetalTexture;
             g.emissiveTexture = old.emissiveTexture;
-            g.occlusionTexture = old.occlusionTexture;
             g.textureClamp = old.textureClamp;
             m_materials[i] = g;
         }
@@ -848,6 +904,7 @@ void GpuScene::setMaterials(std::span<const uint32_t> indices)
     release(m_materialBuffer);
     packTerrainLayers(m_materials);
     packMaterialLayers(m_materials);
+    packMaterialInputs(m_materials);
     // a runtime edit that makes the first anisotropic material brings the anisotropy table (the table only grows)
     if (!m_anisotropic)
         for (uint32_t i : indices)
@@ -953,23 +1010,27 @@ void GpuScene::setMaterialTextures(const std::vector<gpu::MaterialTextures>& per
     {
         gpu::Material& g = m_materials[i];
         const gpu::MaterialTextures& t = perMaterial[i];
+        // (the material inputs' textures are kept per material and go to its record: packMaterialInputs below)
+        const gpu::MaterialTextures before = i < m_publishedTextures.size() ? m_publishedTextures[i] : gpu::MaterialTextures{};
         if (g.baseColorTexture == t.baseColor && g.normalTexture == t.normal && g.roughMetalTexture == t.roughMetal && g.emissiveTexture == t.emissive &&
-            g.occlusionTexture == t.occlusion && g.textureClamp == t.clamp)
+            g.textureClamp == t.clamp && before.detailColor == t.detailColor && before.detailNormal == t.detailNormal && before.height == t.height &&
+            before.emissiveMask == t.emissiveMask && before.detailSlopeRange == t.detailSlopeRange && before.inputClamp == t.inputClamp)
             continue;
         g.baseColorTexture = t.baseColor;
         g.normalTexture = t.normal;
         g.roughMetalTexture = t.roughMetal;
         g.emissiveTexture = t.emissive;
-        g.occlusionTexture = t.occlusion;
         g.textureClamp = t.clamp;
         g.revision = revision;
         changed = true;
     }
     if (!changed) return;
+    m_publishedTextures = perMaterial;
     m_revision = revision;
     release(m_materialBuffer);
     packTerrainLayers(m_materials);
     packMaterialLayers(m_materials);
+    packMaterialInputs(m_materials);
     m_materialBuffer = createStructured(m_materials.data(), sizeof(gpu::Material), m_materials.size(), L"scene materials");
 }
 
@@ -1833,6 +1894,9 @@ void GpuScene::fill(gpu::FrameConstants& f) const
     f.patchData = m_patchData.resource ? m_patchData.srv : gpu::kNone;
     f.terrainLayers = m_terrainLayerBuffer.resource ? m_terrainLayerBuffer.srv : gpu::kNone;
     f.materialLayers = m_materialLayerBuffer.resource ? m_materialLayerBuffer.srv : gpu::kNone;
+    f.materialInputs = m_materialInputBuffer.resource ? m_materialInputBuffer.srv : gpu::kNone;
+    f.meshAttributes = m_meshAttributeTable.resource ? m_meshAttributeTable.srv : gpu::kNone;
+    f.vertexAttributes = m_vertexAttributeBuffer.resource ? m_vertexAttributeBuffer.srv : gpu::kNone;
     f.coatTable = m_coatTable.resource ? m_coatTable.srv : gpu::kNone;
     f.fxLightCount = m_fxLightCapacity > 0 && m_fxLightCount.resource ? m_fxLightCount.srv : gpu::kNone;
     f.fxLightCapacity = m_fxLightCapacity;
