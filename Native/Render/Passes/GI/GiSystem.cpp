@@ -276,6 +276,12 @@ GiSystem::GiSystem(Device& device, const QualityConfig& quality) : m_device(devi
     D3D12_FEATURE_DATA_D3D12_OPTIONS11 o11{};
     check(device.d3d()->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS11, &o11, sizeof o11), "OPTIONS11");
     if (!o11.AtomicInt64OnDescriptorHeapResourceSupported) fail("GI cache: 64-bit atomics on descriptor-heap resources are required (hash keys)");
+    // gi.lumen_only: the world cache is never updated or read - it is not allocated (nor its accumulator pool)
+    if (m_settings.lumen.only)
+    {
+        logf("GI: gi.lumen_only - the final gather alone, no world cache\n");
+        return;
+    }
     const Layout l = layoutOf(m_settings);
     m_bytes = l.end;
     D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT }, upload{ D3D12_HEAP_TYPE_UPLOAD };
@@ -819,7 +825,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
     }
     const uint32_t windowRule = !s.windowByLighting ? 0u : (fc.frame.frameIndex - m_lightingChangedFrame < s.lightingRecentFrames ? 2u : 1u);
     // gi.lumen_only: the final gather alone (LumenGather.cpp) - no world cache update, no screen probes of the cache.
-    if (s.lumen.enabled && s.lumen.only && !m_lookupStatsOn)
+    if (s.lumen.enabled && s.lumen.only)  // (no world cache exists: the lookup statistics' gate has nothing to count)
     {
         recordLumen(fc, main, BufferRef{}, rays);
         return;
@@ -1441,6 +1447,7 @@ ID3D12CommandSignature* GiSystem::dispatchSignature()
 
 GiStats GiSystem::readStats()
 {
+    if (!m_cache) return GiStats{};  // gi.lumen_only: no world cache
     m_device.waitIdle();
     D3D12_HEAP_PROPERTIES rb{ D3D12_HEAP_TYPE_READBACK };
     D3D12_RESOURCE_DESC1 d{};

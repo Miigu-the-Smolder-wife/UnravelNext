@@ -3,7 +3,7 @@
 [lumen]
 # Short-range AO and bent normal (Passes/GI/LumenShortRangeAO.hlsli): the occlusion nearer than the screen probes resolve,
 # from the depth buffer. false (default): not computed; the final gather then applies no short-range occlusion.
-short_range_ao = false
+short_range_ao = true
 short_range_ao_downsample = 2                # ShortRangeAO.DownsampleFactor (1 or 2)
 short_range_ao_slices = 2                    # (Q) HorizonSearch.SliceCount
 short_range_ao_steps = 3                     # (Q) HorizonSearch.StepsPerSlice
@@ -21,7 +21,7 @@ short_range_ao_foliage_strength = 0.7        # ShortRangeAO.FoliageOcclusionStre
 # Far-field radiance cache (Passes/GI/LumenRadianceCache.hlsli): world-space probes on clipmaps around the camera that the
 # screen probes' rays end in (a ray is traced only up to the cache's coverage distance at its probe; a miss reads the
 # cache in the ray's direction). false (default): not built; the screen probes' rays run to their full length.
-radiance_cache = false
+radiance_cache = true
 radiance_cache_clipmaps = 4                       # RadianceCache.NumClipmaps (the gather's); at most 6
 radiance_cache_extent_m = 25.0                    # ClipmapWorldExtent (2500 cm): level 0 spans +- this around the camera
 radiance_cache_distribution_base = 2.0            # ClipmapDistributionBase: each level's extent is this x the last
@@ -43,7 +43,7 @@ radiance_cache_trace_capacity = 1024              # structural bound of probes t
 # Translucency volume (Passes/GI/LumenTranslucencyVolume.hlsli): indirect light for what is not an opaque surface of the
 # view - air and fog, particles, water, glass - on a view-aligned grid (cells 32 px wide, 26 exponential slices to 80 m),
 # 3 x 3 rays a cell that end in the radiance cache. false (default): not built; those readers get no indirect light from it.
-translucency_volume = false
+translucency_volume = true
 translucency_volume_end_distance_m = 80.0         # EndDistanceFromCamera (8000 cm)
 translucency_volume_spatial_filter = true         # SpatialFilter
 translucency_volume_filter_samples = 3            # SpatialFilter.SampleCount: cells either side, per axis

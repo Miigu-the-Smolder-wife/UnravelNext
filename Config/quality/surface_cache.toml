@@ -3,7 +3,7 @@
 # defaults follow ue6-main's card surface cache (LumenSceneRendering.cpp, LumenSceneLighting.cpp,
 # LumenSceneDirectLighting.cpp, LumenRadiosity.cpp); the texels are cells of a hashed world grid.
 [surface_cache]
-enabled = false
+enabled = true
 entries_log2 = 22                     # cell slots (2^22; 52 B each, with the probes 255 MB). The reference's atlas: 4096^2 = 2^24
                                       # texels. The lobby lit 1.9 M cells of 2^21 (table 91 % full: marks failed) [measured]
 max_unused_frames = 255               # a cell is kept this long past its last mark (reference: unused pages 256 frames)
@@ -60,7 +60,7 @@ debug_count = 0                       # diagnostics (1; 2 = of the empty reads o
 base_cells = true                     # a mark also keeps the cell 3 levels coarser (8 x the size) at the point, and a read that
                                       # finds no lit cell at the point's level takes that base cell (reference: every mesh in
                                       # range keeps its lowest-resolution cards). false: such a read gets nothing
-mesh_cards = false                    # the cache as lighting on mesh cards (the reference's shipping structure:
+mesh_cards = true                     # the cache as lighting on mesh cards (the reference's shipping structure:
                                       # unx/refl/SurfaceCacheCards.h) in place of the hashed cells: every rigid instance in
                                       # range keeps cards captured into atlases whatever the view sees; update selection by
                                       # page priority, direct light per card tile (8 lights + the sun), radiosity per card

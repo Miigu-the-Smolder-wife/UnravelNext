@@ -1063,7 +1063,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                                      c.uav(modes), c.uav(jobs), c.uav(args), c.uav(reflection),
                                      asU(s.kHalfAngle), asU(s.mirrorRoughness), asU(focal), height,
                                      width, height, planarSrv, planarOffset, c.uav(planarCounts), spacingLog2,
-                                     (lumen ? 1u : 0u) | (lumen && s.lumenRoughFromGather && roughSpecularValid ? 2u : 0u), asU(s.lumenMaxRoughness) };
+                                     (lumen ? 1u : 0u) | (lumen && s.lumenRoughFromGather && roughSpecularValid && !s.lumenOnly ? 2u : 0u), asU(s.lumenMaxRoughness) };  // (lumen_only: M mixes the rough specular)
                   for (uint32_t v = 0; v < kPlanarMax; ++v)
                   {
                       k[20 + v] = v < viewCount ? c.uav(planarViews[v].mask) : 0xFFFFFFFFu;
