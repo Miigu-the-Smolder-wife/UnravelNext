@@ -76,7 +76,8 @@ struct GpuMaterial
     float metallic;
     float specular, alphaCutoff, transmission, ior;
     uint classFlags, baseColorTexture, normalTexture, roughMetalTexture;
-    uint emissiveTexture, occlusionTexture, revision, textureClamp;  // textureClamp: bit per texture, 1 = g_anisoClamp
+    uint emissiveTexture, inputs, revision, textureClamp;  // inputs: the material's GpuMaterialInputs record (UNX_NONE: none);
+                                                           // textureClamp: bit per texture, 1 = g_anisoClamp
     float3 hairAbsorption;  // Hair class (v1.66): sigma_a, beta_N, cuticle tilt (beta_M = roughness, eta = ior); Glass: the
                             // solid body's sigma_a (1/m, A10 R-2); Water (v1.92): the medium's scattering sigma_s (1/m) and
                             // hairBetaN its Henyey-Greenstein g (turbid baths, defect queue 13 (75)); Subsurface: the mean
@@ -121,6 +122,61 @@ struct GpuMaterialEye
     float4 reserved2;
 };
 GpuMaterialEye loadMaterialEye(uint i) { StructuredBuffer<GpuMaterialEye> b = ResourceDescriptorHeap[g_materialLayers]; return b[i]; }
+
+// Material inputs (gpu::MaterialInputs, 80 B; scene::Material's uv transform, second uv set, detail maps, height,
+// emissive mask, vertex colour, dithered opacity): the record of a material that has any, at GpuMaterial::inputs.
+struct GpuMaterialInputs
+{
+    float3 uvU;              // the material's uv: u' = uvU.xy . uv + uvU.z,
+    float detailScaleU;      //   the detail maps': uv(set) x detailScale + detailOffset
+    float3 uvV;              //   v' = uvV.xy . uv + uvV.z
+    float detailScaleV;
+    float2 detailOffset;
+    float detailColor;       // strength of the detail colour
+    float detailNormal;      // scale of the detail normal's slopes
+    uint flags;              // MATERIAL_INPUT_*
+    uint detailColorTexture, detailNormalTexture;  // M's SRVs (UNX_NONE: none): RGBA8 sRGB, slope moments
+    float detailSlopeRange;
+    uint heightTexture;      // R8
+    float heightScale;       // m
+    uint emissiveMaskTexture;  // R8
+    uint textureClamp;       // clamp addressing: 1 detail colour, 2 detail normal, 4 height, 8 emissive mask
+};
+#define MATERIAL_INPUT_UV 1u             // the uv transform is not the identity
+#define MATERIAL_INPUT_OCCLUSION_UV1 2u  // the occlusion map on the second uv set
+#define MATERIAL_INPUT_DETAIL_UV1 4u     // the detail maps on the second uv set
+#define MATERIAL_INPUT_VERTEX_TINT 8u    // the vertex colour's rgb multiplies the base colour
+#define MATERIAL_INPUT_VERTEX_BLEND 16u  // the vertex colour's alpha weighs the detail maps
+#define MATERIAL_INPUT_DITHER 32u        // dithered opacity (the views' alpha test)
+GpuMaterialInputs loadMaterialInputs(uint i) { StructuredBuffer<GpuMaterialInputs> b = ResourceDescriptorHeap[g_materialInputs]; return b[i]; }
+// The uv at which a material's own textures are read (the mesh's uv0 through the material's transform), and a uv
+// difference (a footprint's axis) through its linear part.
+float2 materialInputsUv(GpuMaterialInputs r, float2 uv) { return float2(dot(r.uvU.xy, uv) + r.uvU.z, dot(r.uvV.xy, uv) + r.uvV.z); }
+float2 materialInputsUvStep(GpuMaterialInputs r, float2 duv) { return float2(dot(r.uvU.xy, duv), dot(r.uvV.xy, duv)); }
+
+// A mesh's optional vertex streams (gpu::VertexAttributes, 16 B): the second uv set and the vertex colour.
+struct GpuVertexAttributes
+{
+    float2 uv1;
+    uint color;  // RGBA8, r in the low byte
+    uint pad;
+};
+// 1 + the first record of mesh 'meshIndex' (GpuInstance::mesh), 0: the mesh has neither stream (its second uv set is then
+// its uv0, its colour white).
+uint meshAttributeBase(uint meshIndex)
+{
+    if (g_meshAttributes == UNX_NONE) return 0;
+    StructuredBuffer<uint> first = ResourceDescriptorHeap[g_meshAttributes];
+    return first[meshIndex];
+}
+// The streams of a vertex (meshVertex mesh-relative) of a mesh whose base (meshAttributeBase) is not 0.
+void loadVertexAttributes(uint base, uint meshVertex, out float2 uv1, out float4 color)
+{
+    StructuredBuffer<GpuVertexAttributes> b = ResourceDescriptorHeap[g_vertexAttributes];
+    const GpuVertexAttributes a = b[base - 1 + meshVertex];
+    uv1 = a.uv1;
+    color = float4(a.color & 0xFFu, (a.color >> 8) & 0xFFu, (a.color >> 16) & 0xFFu, a.color >> 24) / 255.0;
+}
 
 struct GpuTerrainLayer  // v1.74: a Standard material read at terrain uv0 x scale + offset
 {
@@ -207,6 +263,31 @@ GpuMaterial loadMaterial(uint i) { StructuredBuffer<GpuMaterial> b = ResourceDes
 GpuLight loadLight(uint i) { StructuredBuffer<GpuLight> b = ResourceDescriptorHeap[g_lights]; return b[i]; }
 
 uint materialClass(GpuMaterial m) { return m.classFlags & 0xFFu; }
+// The uv at which a material's own textures are read, from the mesh's uv0 (the material's uv transform; the identity
+// without a record), and the same with a footprint.
+// UNX_MATERIAL_INPUTS 0 before this file compiles the material inputs out of these two (the mesh's uv) and out of the ray
+// hits' material and emission (HitShading.hlsli, HitLocalLights.hlsli): for a kernel at the DXIL size limit; such a
+// kernel says so in its header.
+#ifndef UNX_MATERIAL_INPUTS
+#define UNX_MATERIAL_INPUTS 1
+#endif
+float2 materialUv(GpuMaterial m, float2 uv)
+{
+#if UNX_MATERIAL_INPUTS
+    if (m.inputs != UNX_NONE) uv = materialInputsUv(loadMaterialInputs(m.inputs), uv);
+#endif
+    return uv;
+}
+void materialUvFootprint(GpuMaterial m, inout float2 uv, inout float2 duvdx, inout float2 duvdy)
+{
+#if UNX_MATERIAL_INPUTS
+    if (m.inputs == UNX_NONE) return;
+    const GpuMaterialInputs r = loadMaterialInputs(m.inputs);
+    uv = materialInputsUv(r, uv);
+    duvdx = materialInputsUvStep(r, duvdx);
+    duvdy = materialInputsUvStep(r, duvdy);
+#endif
+}
 uint clusterVertexCount(GpuCluster c) { return c.counts & 0xFFu; }
 uint clusterTriangleCount(GpuCluster c) { return (c.counts >> 8) & 0xFFu; }
 uint clusterSubmesh(GpuCluster c) { return c.counts >> 16; }  // index within the mesh

@@ -193,7 +193,9 @@ void main(uint i : SV_DispatchThreadID)
         {
             float2 uv, duvdx, duvdy;
             mPlaneUv(t, D, Dx, Dy, uv, duvdx, duvdy);
-            cut = edgeCutoutCoverage(ts, loadMaterial(t.material).alphaCutoff, uv, duvdx, duvdy);
+            const GpuMaterial cutMaterial = loadMaterial(t.material);
+            materialUvFootprint(cutMaterial, uv, duvdx, duvdy);  // (the material's uv transform: the base colour's uv)
+            cut = edgeCutoutCoverage(ts, cutMaterial.alphaCutoff, uv, duvdx, duvdy);
         }
         [unroll] for (uint j = 0; j < EDGE_GROUPS; ++j)
             if (j == g)

@@ -1844,7 +1844,7 @@ void RayScene::updateEmissive(FramePassContext& fc)
         {
             const uint32_t mat = in.materialOverrides.empty() ? m.submeshes[k].material : in.materialOverrides[k];
             // (v1.92: a visible-only emissive is no GI emitter - weight 0, never drawn, MIS pdf 0 at a texel ray's hit)
-            const float3 e = src->materials[mat].emissiveVisibleOnly ? float3{ 0, 0, 0 } : src->materials[mat].emissive;
+            const float3 e = src->materials[mat].emissiveVisibleOnly ? float3{ 0, 0, 0 } : src->materials[mat].emissive * src->materials[mat].emissiveScale;
             lum[k] = 0.2126f * e.x + 0.7152f * e.y + 0.0722f * e.z;
             any = any || lum[k] > 0;
         }

@@ -184,12 +184,12 @@ EmissiveCook cookEmissiveLights(const scene::Scene& scene, const EmissiveCookCon
             const uint32_t mat = in.materialOverrides.empty() ? sub.material : in.materialOverrides[k];
             if (mat >= scene.materials.size()) continue;
             const scene::Material& material = scene.materials[mat];
-            const float3 e = material.emissive;
+            const float3 e = material.emissive * material.emissiveScale;
             const double lum = 0.2126 * e.x + 0.7152 * e.y + 0.0722 * e.z;
             if (!(lum > 0)) continue;
             const uint32_t triangles = sub.indexCount / 3;
             if (in.flags & scene::InstanceSkinned) { out.trianglesSkinned += triangles; continue; }
-            if (material.emissiveTexture != scene::kNone) { out.trianglesTextured += triangles; continue; }
+            if (material.emissiveTexture != scene::kNone || material.emissiveMaskTexture != scene::kNone) { out.trianglesTextured += triangles; continue; }
             out.convertedMaterials[mat / 32] |= 1u << (mat % 32);
             for (uint32_t t = 0; t < triangles; ++t)
             {

@@ -20,6 +20,9 @@
 // The includer is a ray library (RayShaders.hlsli) with GiSky.hlsli's sky and sun in P[1..3].
 #ifndef UNX_REFLECTION_LUMEN_HIT_HLSLI
 #define UNX_REFLECTION_LUMEN_HIT_HLSLI
+#ifndef RT_HIT_EYE
+#define RT_HIT_EYE 1  // a reflected eye shows its iris through the cornea (HitShading.hlsli rtHitMaterialSeen)
+#endif
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitDecals.hlsli"
 #include "Passes/SurfaceCache/CardLighting.hlsli"
@@ -83,7 +86,7 @@ RlHit rlShadeHit(RtSceneSrvs scene, RtHit hit, float3 origin, float3 direction, 
         o.motion = length(delta) / max(footprint, 1e-6);
     }
     GpuMaterial m = loadMaterial(s.material);
-    m = rtHitMaterial(m, s, footprint, dot(s.normal, direction));
+    m = rtHitMaterialSeen(m, s, direction, footprint, dot(s.normal, direction));
     rtHitDecals(scene, s, footprint, m);
     if (!s.frontFace && (m.classFlags & MATERIAL_TWO_SIDED) == 0) return o;
     o.surface = true;

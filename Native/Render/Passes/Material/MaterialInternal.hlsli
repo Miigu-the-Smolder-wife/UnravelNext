@@ -102,12 +102,16 @@ float4 mSampleGrad(Texture2D<float4> t, bool clampAddress, float2 uv, float2 duv
 #define M_TEX_ROUGH_METAL 4u
 #define M_TEX_EMISSIVE 8u
 #define M_TEX_OCCLUSION 16u
+#define M_TEX_EMISSIVE_MASK 32u  // the material has an emissive mask (GpuMaterialInputs): its emission is per pixel
 
 MTextureSet mLoadTextureSet(uint tableSrv, uint material)
 {
     StructuredBuffer<MTextureSet> t = ResourceDescriptorHeap[tableSrv];
     return t[material];
 }
+// Whether the material's emission varies over its surface (an emissive texture or mask): the resolve then writes it per
+// pixel into the emissive texture, which the shading kernels read in place of the material's constant.
+bool mEmissivePerPixel(MTextureSet ts) { return ts.emissive != UNX_NONE || (ts.flags & M_TEX_EMISSIVE_MASK) != 0; }
 
 // Normal-map slope moments at a footprint (LEAN family, Olano & Baker 2010). Texel k of mip L stores, over the base
 // texels it covers, the mean slope mu = E[(x/z, y/z)], the internal variance trace E|s|^2 - |mu|^2 and |mu|^2, encoded

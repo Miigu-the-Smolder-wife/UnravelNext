@@ -63,24 +63,27 @@ void main(uint3 id : SV_DispatchThreadID)
     const GpuMaterial m = loadMaterial(sf.material);
     if (materialClass(m) != MATERIAL_GLASS) return;  // (water: W's pass)
     const MTextureSet ts = mLoadTextureSet(P[1].y, sf.material);
+    // (the material's uv transform: Scene.hlsli materialUvFootprint)
+    float2 uv = sf.uv, duvdx = sf.duvdx, duvdy = sf.duvdy;
+    materialUvFootprint(m, uv, duvdx, duvdy);
     float3 tint = m.baseColor;
     if (ts.baseColor != UNX_NONE)
     {
         Texture2D<float4> t = ResourceDescriptorHeap[ts.baseColor];
-        tint *= mSampleGrad(t, (ts.flags & M_TEX_BASE_COLOR) != 0, sf.uv, sf.duvdx, sf.duvdy).rgb;
+        tint *= mSampleGrad(t, (ts.flags & M_TEX_BASE_COLOR) != 0, uv, duvdx, duvdy).rgb;
     }
     float roughness = m.roughness;
     if (ts.roughMetal != UNX_NONE)
     {
         Texture2D<float4> t = ResourceDescriptorHeap[ts.roughMetal];
-        roughness *= mSampleGrad(t, (ts.flags & M_TEX_ROUGH_METAL) != 0, sf.uv, sf.duvdx, sf.duvdy).x;
+        roughness *= mSampleGrad(t, (ts.flags & M_TEX_ROUGH_METAL) != 0, uv, duvdx, duvdy).x;
     }
     float variance = (dot(sf.dndx, sf.dndx) + dot(sf.dndy, sf.dndy)) / 12.0;
     float3 n;
     if (ts.moments != UNX_NONE)
     {
         Texture2D<float4> t = ResourceDescriptorHeap[ts.moments];
-        const MSlopeMoments mm = mNormalMoments(t, sf.uv, sf.duvdx, sf.duvdy, ts.slopeRange, (ts.flags & M_TEX_NORMAL) != 0);
+        const MSlopeMoments mm = mNormalMoments(t, uv, duvdx, duvdy, ts.slopeRange, (ts.flags & M_TEX_NORMAL) != 0);
         const float3 B = sf.tangentSign * cross(sf.normal, sf.tangent);
         n = normalize(sf.tangent * mm.mean.x + B * mm.mean.y + sf.normal);
         variance += mm.variance;

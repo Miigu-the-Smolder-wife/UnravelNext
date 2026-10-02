@@ -620,6 +620,121 @@ UNX_API int32_t UNX_CALL UnxSceneSetCharacterShading(UnxRenderer r, uint32_t mat
     });
 }
 
+UNX_API int32_t UNX_CALL UnxMaterialInputsDefaults(UnxMaterialInputsDesc* d)
+{
+    return call([&] {
+        if (!d) fail("UnxMaterialInputsDesc output is null");
+        const host::MaterialInputs in;
+        std::memset(d, 0, sizeof *d);
+        d->size = sizeof *d;
+        d->version = 1;
+        d->uvScale[0] = in.uvScale.x, d->uvScale[1] = in.uvScale.y;
+        d->detailScale[0] = in.detailScale.x, d->detailScale[1] = in.detailScale.y;
+        d->detailColorTexture = d->detailNormalTexture = d->heightTexture = d->emissiveMaskTexture = UNX_NONE;
+        d->detailColorStrength = in.detailColorStrength;
+        d->detailNormalScale = in.detailNormalScale;
+        d->emissiveScale = in.emissiveScale;
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxSceneSetMaterialInputs(UnxRenderer r, uint32_t material, const UnxMaterialInputsDesc* d)
+{
+    return call([&] {
+        if (!d) fail("UnxSceneSetMaterialInputs: no description");
+        if (d->size != sizeof(UnxMaterialInputsDesc) || d->version != 1)
+            fail("UnxSceneSetMaterialInputs: UnxMaterialInputsDesc size %u version %u", d->size, d->version);
+        if ((d->flags & ~(UNX_MATERIAL_INPUT_VERTEX_TINT | UNX_MATERIAL_INPUT_VERTEX_BLEND | UNX_MATERIAL_INPUT_ALPHA_DITHER)) != 0)
+            fail("UnxSceneSetMaterialInputs: unknown flags 0x%x", d->flags);
+        host::MaterialInputs in;
+        in.uvScale = { d->uvScale[0], d->uvScale[1] };
+        in.uvOffset = { d->uvOffset[0], d->uvOffset[1] };
+        in.uvRotation = d->uvRotation;
+        in.occlusionUvSet = d->occlusionUvSet;
+        in.detailColorTexture = d->detailColorTexture;
+        in.detailNormalTexture = d->detailNormalTexture;
+        in.detailScale = { d->detailScale[0], d->detailScale[1] };
+        in.detailOffset = { d->detailOffset[0], d->detailOffset[1] };
+        in.detailUvSet = d->detailUvSet;
+        in.detailColorStrength = d->detailColorStrength;
+        in.detailNormalScale = d->detailNormalScale;
+        in.heightTexture = d->heightTexture;
+        in.heightScale = d->heightScale;
+        in.emissiveScale = d->emissiveScale;
+        in.emissiveMaskTexture = d->emissiveMaskTexture;
+        in.vertexColorTint = (d->flags & UNX_MATERIAL_INPUT_VERTEX_TINT) != 0;
+        in.vertexAlphaBlend = (d->flags & UNX_MATERIAL_INPUT_VERTEX_BLEND) != 0;
+        in.alphaDither = (d->flags & UNX_MATERIAL_INPUT_ALPHA_DITHER) != 0;
+        find(r)->setMaterialInputs(material, in);
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxSceneSetMeshAttributes(UnxRenderer r, uint32_t mesh, const float* uv1, const uint32_t* colors, uint32_t vertexCount)
+{
+    return call([&] {
+        if (!uv1 && !colors) fail("UnxSceneSetMeshAttributes: neither a second uv set nor colours");
+        std::vector<float2> uvs;
+        if (uv1)
+        {
+            uvs.resize(vertexCount);
+            for (uint32_t v = 0; v < vertexCount; ++v) uvs[v] = { uv1[2 * v], uv1[2 * v + 1] };
+        }
+        std::vector<uint32_t> cols;
+        if (colors) cols.assign(colors, colors + vertexCount);
+        find(r)->setMeshAttributes(mesh, std::move(uvs), std::move(cols));
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxLightComponentsDefaults(UnxLightComponentsDesc* d)
+{
+    return call([&] {
+        if (!d) fail("UnxLightComponentsDesc output is null");
+        const scene::Light l;
+        std::memset(d, 0, sizeof *d);
+        d->size = sizeof *d;
+        d->version = 1;
+        d->specularScale = l.specularScale;
+        d->diffuseScale = l.diffuseScale;
+        d->volumetricScattering = l.volumetricScattering;
+        d->indirectIntensity = l.indirectIntensity;
+        d->sourceTexture = UNX_NONE;
+        d->barnDoorAngle = l.barnDoorAngle;
+        d->barnDoorLength = l.barnDoorLength;
+        d->lightingChannels = l.lightingChannels;
+        d->maxDrawDistance = l.maxDrawDistance;
+        d->maxDistanceFadeRange = l.maxDistanceFadeRange;
+        d->temperature = l.temperature;
+        d->falloffExponent = l.falloffExponent;
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxSceneSetLightComponents(UnxRenderer r, uint32_t light, const UnxLightComponentsDesc* d)
+{
+    return call([&] {
+        if (!d) fail("UnxSceneSetLightComponents: no description");
+        if (d->size != sizeof(UnxLightComponentsDesc) || d->version != 1)
+            fail("UnxSceneSetLightComponents: UnxLightComponentsDesc size %u version %u", d->size, d->version);
+        scene::Light c;
+        c.specularScale = d->specularScale;
+        c.diffuseScale = d->diffuseScale;
+        c.volumetricScattering = d->volumetricScattering;
+        c.indirectIntensity = d->indirectIntensity;
+        c.sourceTexture = d->sourceTexture;
+        c.barnDoorAngle = d->barnDoorAngle;
+        c.barnDoorLength = d->barnDoorLength;
+        c.lightingChannels = d->lightingChannels;
+        c.maxDrawDistance = d->maxDrawDistance;
+        c.maxDistanceFadeRange = d->maxDistanceFadeRange;
+        c.temperature = d->temperature;
+        c.falloffExponent = d->falloffExponent;
+        find(r)->setLightComponents(light, c);
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxSceneSetInstanceLightingChannels(UnxRenderer r, uint32_t instance, uint32_t channels)
+{
+    return call([&] { find(r)->setInstanceLightingChannels(instance, channels); });
+}
+
 UNX_API int32_t UNX_CALL UnxFrameSetClouds(UnxRenderer r, const UnxCloudDesc* clouds)
 {
     return call([&] {

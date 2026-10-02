@@ -48,9 +48,13 @@
 //                   at the surface normal -, and on the iris mask's share every direct diffuse term on the iris plane
 //                   with the caustic (modelEyeCosine; the plane's normal, the mask and the caustic weight from the class
 //                   word P[9].y - without that texture an eye is plain) in place of the surface's cosine: the sun at the disk's centre,
-//                   point and spot lights, area lights by a cosine integral in the plane's frame. The indirect light,
-//                   the tile term and the emissive irradiance stay the surface's. The scatter pass leaves the iris its
-//                   own light (the mean free path x (1 - mask)).
+//                   point and spot lights, area lights by a cosine integral in the plane's frame. The indirect diffuse
+//                   light on the mask's share is the iris plane's (part 2 with SSS_SPLIT): with gi.lumen_only the final
+//                   gather's irradiance x the translucency volume's ratio E(a) / E(n) (the gather keeps its detail and
+//                   occlusion, the volume turns it to the plane; the ratio held to [1/4, 4]), in planar views the
+//                   volume's or the world cache's irradiance at a; the screen-probe path keeps the surface's. The tile
+//                   term and the emissive irradiance stay the surface's. The scatter pass leaves the iris its own light
+//                   (the mean free path x (1 - mask)).
 //        2 (the sheen class) carries the cloth blend (MaterialModel.hlsli modelEvaluateSheen): every specular term of the
 //                   base - the sun's lobe, point and spot lights, the area lights' LTC lobe, the indirect lobe - x (1 - cloth).
 // SSS_SPLIT = 1 (shading.subsurface_scatter, SubsurfaceScatter.hlsli states the passes): the Subsurface class's kernels
@@ -98,6 +102,12 @@
 // P[9].y A9 anisotropy word (Resolve.hlsl; UNX_NONE = no anisotropic and no eye material): read by the LAYERED variants,
 //        whose anisotropic pixels shade the base specular with the anisotropic lobe (AnisoShading.hlsli), and by the
 //        Subsurface variant for an eye's pixels (the eye word; SHADE_PART 3 reads its mask)
+//        and by every variant's part 1 for the pixels of a height-mapped material: the sun's visibility through the
+//        height field (material.parallax_shadow; bits 0..7)
+// P[11].zw (part 1 without MEGA_LIGHTS: the froxel lists' light loop) the vis buffer and V's visible clusters (UNX_NONE:
+//        none): the pixel's instance gives the receiver's lighting channels (Scene.hlsli g_lightChannels), so a light
+//        in none of them adds nothing. Part 2 reads the gather's textures there (above); with MEGA_LIGHTS the sampling
+//        tests the channels (MegaLightsSample.hlsl).
 // P[8].xy (SHADE_PART 3) the vis buffer and V's visible clusters in frames whose view models are drawn through
 //        viewmodel.fov_override_degrees (UNX_NONE: none): a view-model pixel scatters at its true size
 // P[10].y the stochastic local lights' result (shading.mega_lights, MegaLights.hlsli; RGBA16F exposed radiance, m.ml.spatial;
@@ -463,7 +473,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     if (false)
 #else
     float3 radiance = m.emissive;
-    if (P[1].w != UNX_NONE && mLoadTextureSet(P[4].y, materialIndex).emissive != UNX_NONE)
+    if (P[1].w != UNX_NONE && mEmissivePerPixel(mLoadTextureSet(P[4].y, materialIndex)))
 #endif
 #if SHADE_PART == 1
     {
@@ -490,6 +500,15 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     {
         Texture2D<uint> shadow = ResourceDescriptorHeap[P[2].x];
         sunVisibility = shadowSlot(shadow[pixel], 0);
+    }
+    // material.parallax_shadow (MaterialInputs.hlsli mParallax): the pixel's height field hides the sun - the resolve left
+    // the visibility in the class word of a height-mapped material's pixels (not an anisotropic material's or an eye's:
+    // the word is theirs)
+    if (m.inputs != UNX_NONE && P[9].y != UNX_NONE && (m.classFlags & (MATERIAL_ANISOTROPIC | MATERIAL_EYE)) == 0 &&
+        loadMaterialInputs(m.inputs).heightTexture != UNX_NONE)
+    {
+        Texture2D<uint> classWords = ResourceDescriptorHeap[P[9].y];
+        sunVisibility *= (classWords[pixel] & 0xFFu) / 255.0;
     }
     if (P[8].w != UNX_NONE)
     {
@@ -641,6 +660,16 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #else
         const uint2 range = froxelLightRange(froxels, pixel, linearZ);
         const uint indexBase = froxelIndexBase(froxels);
+#if SHADE_PART == 1
+        // lighting channels: the receiver's are its instance's (the pixel's vis id), for every light of the loop below
+        if (P[11].z != UNX_NONE)
+        {
+            Texture2D<uint> channelVis = ResourceDescriptorHeap[P[11].z];
+            const uint channelVisId = channelVis[pixel];
+            if (channelVisId != VIS_NONE)
+                g_lightChannels = instanceLightingChannels(loadInstance(loadVisibleCluster(P[11].w, visVisibleCluster(channelVisId)).instance).flags);
+        }
+#endif
 #endif
         uint shadowOrdinal = 0, overflowRecord = 0xFFFFFFFFu;
         uint2 overflowPacked = uint2(0xFFFFFFFFu, 0);
@@ -963,10 +992,11 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
             if (NoV > 0 && cosL > 0) f -= (f - frontL) * sheen.cloth;  // (the cloth blend: the base's specular lobe x (1 - cloth))
 #endif
 #if LAYERED == 1
-            if (cover > 0) f = keep * f + cover * (modelCoatLobe(coat, n, v, l) + modelCoatUnder(s, coat, n, v, l));
+            // (the coat's and the sheen's lobes take the light's specular scale: ShadingCommon.hlsli shLightSpecular)
+            if (cover > 0) f = keep * f + cover * (modelCoatLobe(coat, n, v, l) * shLightSpecular() + modelCoatUnder(s, coat, n, v, l));
 #endif
 #if LAYERED == 2
-            if (NoV > 0 && cosL > 0) f = keepS * f + sheen.color * modelSheenLobe(sheen.roughness, n, v, l);
+            if (NoV > 0 && cosL > 0) f = keepS * f + sheen.color * (modelSheenLobe(sheen.roughness, n, v, l) * shLightSpecular());
 #endif
 #if MEGA_LIGHTS
             {
@@ -1151,6 +1181,15 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         if ((experiment & 2) == 0)
         {
             irradiance = max(diffuseIndirect[pixel].rgb, 0.0) / g_exposure * lumenAoMultibounce(s.baseColor * (1 - s.metallic), bent.w, 0.5);
+#if SUBSURFACE
+            if (eye.mask > 0 && giSourceIsVolume(P[2].w))
+            {
+                // an eye's iris (see the header): the gather's irradiance turned from the surface normal to the iris plane
+                const LtvSh sh = ltvSample(ltvParams(giSourceVolume(P[2].w)), worldPos);
+                const float3 eN = ltvIrradianceOf(sh, nv), eA = ltvIrradianceOf(sh, eye.iris);
+                irradiance *= lerp(1.0, clamp(eA / max(eN, 1e-6), 0.25, 4.0), eye.mask);
+            }
+#endif
             if (foliage && P[11].w != UNX_NONE)
             {
                 Texture2D<float4> backfaceIndirect = ResourceDescriptorHeap[P[11].w];
@@ -1185,6 +1224,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         // takes its nearest cell): irradiance on each side, the lobes' radiance from the mirror direction (two SH bands)
         const LtvSh sh = ltvSample(ltvParams(giSourceVolume(P[2].w)), worldPos);
         irradiance = ltvIrradianceOf(sh, nv);
+#if SUBSURFACE
+        if (eye.mask > 0) irradiance = lerp(irradiance, ltvIrradianceOf(sh, eye.iris), eye.mask);  // (an eye's iris: its plane's)
+#endif
         if (foliage) irradianceBack = ltvIrradianceOf(sh, -nv);
         if (NoV > 0) incident = ltvRadianceOf(sh, r);
 #if LAYERED == 1
@@ -1206,6 +1248,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
             e = screenIrradiance[pixel];
         }
         irradiance = e.a > 0 ? e.rgb / g_exposure : giCacheIrradiance(gi, worldPos, nv);
+#if SUBSURFACE
+        if (eye.mask > 0) irradiance = lerp(irradiance, giCacheIrradiance(gi, worldPos, eye.iris), eye.mask);  // (an eye's iris: its plane's)
+#endif
         if (foliage) irradianceBack = giCacheIrradiance(gi, worldPos, -nv);
         if (NoV > 0) incident = giCacheRadiance(gi, worldPos, n, r, halfAngle);  // looked up in this surface's normal class
 #if LAYERED == 1

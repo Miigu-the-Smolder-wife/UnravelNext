@@ -134,9 +134,9 @@
 
 | | 현황 | 남은 것 |
 |---|---|---|
-| 피부 | A: 이중 GGX 로브 + 얇은 부분 투과광(`ShadeOpaque` LAYERED=3, `MegaLightsShade`). B: 화면 공간 SSS(`SubsurfaceScatter.hlsli`: Burley 프로파일, d = ℓ / s(A), s(A) = 1.9 − A + 3.5(A − 0.8)², 접평면 표본 16개, 알베도는 산란 뒤). 기본 평균 자유 경로 = 피부 실측 1.30 / 0.95 / 0.67 mm. **2026-10-03 추가(코드·빌드만, 실행 안 함)**: 광선 hit(반사·GI·카드 라디오시티·radiance cache·반투명 볼륨)이 법선 뒤쪽의 태양과 국소광 표본에서 얇은 부분 투과광 W를 받는다(`HitShading.hlsli`, `HitLocalLights.hlsli`, `rtHitTransmits`; hit의 그림자 광선 하나가 가림을 정한다 — 화면 공간 패스와 두 번째 로브는 hit에 없다). coverage 층의 MegaLights 인스턴스가 Subsurface 조각을 그 클래스의 커널(LAYERED3.FULL1)로 음영한다. 면광원을 통한 얇은 부분 투과광(뒤쪽 코사인 적분 × 중심 방향의 W / c)과 그 표본 가중치. 1인칭 뷰모델이 `viewmodel.fov_override_degrees`로 그려질 때 산란 패스가 vis 버퍼로 뷰모델 픽셀을 찾아 실제 광선(화면 평면 성분 ÷ 배율)으로 반지름을 잡는다 | 실행 검증 전체(이번 작업은 GPU에서 아무것도 돌리지 않았다). hit·coverage 조각에는 화면 공간 산란이 없다(Lambert). coverage 조각의 레코드별 루프(MegaLights 끔)는 면광원 투과광이 없다. 면광원·평면 반사 뷰의 피부는 여전히 실행으로 확인된 적이 없다 |
+| 피부 | A: 이중 GGX 로브 + 얇은 부분 투과광(`ShadeOpaque` LAYERED=3, `MegaLightsShade`). B: 화면 공간 SSS(`SubsurfaceScatter.hlsli`: Burley 프로파일, d = ℓ / s(A), s(A) = 1.9 − A + 3.5(A − 0.8)², 접평면 표본 16개, 알베도는 산란 뒤). 기본 평균 자유 경로 = 피부 실측 1.30 / 0.95 / 0.67 mm. **2026-10-03 추가(코드·빌드만, 실행 안 함)**: 광선 hit(반사·GI·카드 라디오시티·radiance cache·반투명 볼륨)이 법선 뒤쪽의 태양과 국소광 표본에서 얇은 부분 투과광 W를 받는다(`HitShading.hlsli`, `HitLocalLights.hlsli`, `rtHitTransmits`; hit의 그림자 광선 하나가 가림을 정한다 — 화면 공간 패스와 두 번째 로브는 hit에 없다). coverage 층의 MegaLights 인스턴스가 Subsurface 조각을 그 클래스의 커널(LAYERED3.FULL1)로 음영한다. 면광원을 통한 얇은 부분 투과광(뒤쪽 코사인 적분 × 중심 방향의 W / c)과 그 표본 가중치. 1인칭 뷰모델이 `viewmodel.fov_override_degrees`로 그려질 때 산란 패스가 vis 버퍼로 뷰모델 픽셀을 찾아 실제 광선(화면 평면 성분 ÷ 배율)으로 반지름을 잡는다 | 실행 검증 전체(이번 작업은 GPU에서 아무것도 돌리지 않았다). hit·coverage 조각에는 화면 공간 산란이 없다(Lambert). coverage 조각의 레코드별 루프(MegaLights 끔)는 면광원 투과광이 없다. 면광원·평면 반사 뷰의 피부는 실행으로 확인된 적이 없다(평면 뷰의 패스 기록은 다시 읽어 빠진 것이 없었고, 그 뷰의 프레임 셋을 `testSubsurfaceScatter`에 추가했다 — 4.2절) |
 | 머리카락 | 가닥 기록 음영: 폭 평균 섬유 모델 + 이중 산란, 몸마다 64³ 밀도 볼륨(빛 쪽 섬유 수), 자체 MegaLights 인스턴스, 반투명 볼륨 SH의 간접광. 2단계(브랜치 `w/hair`, 4.1절): 다른 표면과 다른 몸의 머리카락에 드리우는 그림자, 그림자 경계의 계단을 없애는 행진 규칙과 지터, 세그먼트 단위 음영·기록 목록·정렬 크기, 반사 광선과 최종 수집 광선의 프록시. **빌드만 했다. GPU에서 실행한 적이 없다(테스트·그림·시간 모두 없음)** | 4.1절의 실행 확인 전부. 머리 그림자가 없는 곳: 안개·공기의 국소광, `mega_lights` 없는 coverage 프래그먼트의 국소광, 픽셀의 세 번째 그림자 광원 뒤의 국소광, 광선 hit·카드의 그림자 광선. 광선이 보는 머리카락에는 섬유 모델이 없다. 기록 수(가닥이 지키는 광학 두께 × 실루엣)는 그대로다 |
-| 눈 | **2026-10-03 구현(코드·빌드만, 실행 안 함)**. 눈 = 홍채가 있는 Subsurface 재질(`scene::Material::eyeIrisRadius > 0`; 새 클래스 없음, GPU 플래그 `MATERIAL_EYE` + 층 버퍼의 64 B 레코드). 구 모양 메시 하나가 공막·홍채·각막이다: uv (0.5, 0.5)가 광축이 나오는 점, `eyeAxis`가 메시 object 공간의 광축. 리졸브(`Passes/Material/MaterialEye.hlsli`): 픽셀 삼각형의 rest 변과 변형된 변으로 광축을 월드로 옮기고(강체·스키닝·모프 공통, 탄젠트 불필요), 시선을 음영 법선에서 굴절시켜(수양액 굴절률) 각막 캡 아래 홍채 평면과 만나는 점의 uv에서 base colour를 읽는다 — 홍채 깊이·시차, 동공 배율, 림버스 어두운 고리. 픽셀마다 눈 워드 하나(홍채 평면 법선 10+10비트, 마스크 6비트, caustic 가중 6비트)를 비등방 워드 텍스처에 쓴다(재질 워드는 건드리지 않는다). 음영(`ShadeOpaque` LAYERED=3, `SubsurfaceDirect`, `MegaLightsShade`): 스펙큘러는 표면 법선의 한 로브(각막), 확산은 마스크만큼 홍채 평면에서 받고 caustic 항 0.8 + 0.2(p + 1)cos^p(c·l)로 비스듬한 빛이 반대편에 모인다(태양·점광·스폿·면광원). 공막은 피부 SSS로 산란하고 홍채는 자기 빛을 유지한다(평균 자유 경로 × (1 − 마스크)). 스위치 `shading.eye_model`. 모델 정의는 `MaterialModel.h` "Eye"(C++이 기준, HLSL은 거울). 진단 씬 `shading_ball`에 10배 크기 눈 두 개(front 카메라를 본다)와 카메라 `eye_close` | 실행 검증 전체. 광선 hit·coverage 조각·카드에서는 굴절 없는 한 로브 Subsurface로 보인다(base colour는 표면 uv). 홍채의 간접광은 표면 법선의 것이다. MegaLights는 각막 표면의 지평선 아래 광원을 그 픽셀에 뽑지 않는다(홍채 평면은 볼 수 있어도). 홍채 전용 노멀맵 없음(평면 + caustic 기울기) |
+| 눈 | **2026-10-03 구현(코드·빌드만, 실행 안 함)**. 눈 = 홍채가 있는 Subsurface 재질(`scene::Material::eyeIrisRadius > 0`; 새 클래스 없음, GPU 플래그 `MATERIAL_EYE` + 층 버퍼의 64 B 레코드). 구 모양 메시 하나가 공막·홍채·각막이다: uv (0.5, 0.5)가 광축이 나오는 점, `eyeAxis`가 메시 object 공간의 광축. 리졸브(`Passes/Material/MaterialEye.hlsli`): 픽셀 삼각형의 rest 변과 변형된 변으로 광축을 월드로 옮기고(강체·스키닝·모프 공통, 탄젠트 불필요), 시선을 음영 법선에서 굴절시켜(수양액 굴절률) 각막 캡 아래 홍채 평면과 만나는 점의 uv에서 base colour를 읽는다 — 홍채 깊이·시차, 동공 배율, 림버스 어두운 고리. 픽셀마다 눈 워드 하나(홍채 평면 법선 10+10비트, 마스크 6비트, caustic 가중 6비트)를 비등방 워드 텍스처에 쓴다(재질 워드는 건드리지 않는다). 음영(`ShadeOpaque` LAYERED=3, `SubsurfaceDirect`, `MegaLightsShade`): 스펙큘러는 표면 법선의 한 로브(각막), 확산은 마스크만큼 홍채 평면에서 받고 caustic 항 0.8 + 0.2(p + 1)cos^p(c·l)로 비스듬한 빛이 반대편에 모인다(태양·점광·스폿·면광원). 공막은 피부 SSS로 산란하고 홍채는 자기 빛을 유지한다(평균 자유 경로 × (1 − 마스크)). 스위치 `shading.eye_model`. 모델 정의는 `MaterialModel.h` "Eye"(C++이 기준, HLSL은 거울). 진단 씬 `shading_ball`에 10배 크기 눈 두 개(front 카메라를 본다)와 카메라 `eye_close` | 실행 검증 전체. 2차(4.2절)에서 메운 것: 홍채 간접광, 광원 표본의 홍채 가중치, 반사 hit·coverage 조각의 홍채 색. 남은 것: GI hit·카드·`ReflectionTraceInline`(넘침 작업)의 눈은 표면 uv의 색이다. hit과 coverage 조각의 음영은 한 로브 Subsurface다(홍채 평면·caustic 없음). 각막 지평선 아래 광원은 눈알이 그림자를 드리우면 자기 홍채에 닿지 못한다. 홍채 전용 노멀맵 없음(평면 + caustic 기울기) |
 | 천 | Charlie sheen 층(클리어코트와 배타). **2026-10-03 추가(코드·빌드만, 실행 안 함)**: cloth 혼합 `scene::Material::cloth` ∈ [0, 1] — f = C·f_sh + (f_d + (1 − cloth)·f_spec)(1 − max(C)·E_sh). 0이면 기존 sheen과 비트 단위로 같고 1이면 fuzz 아래 GGX 하이라이트가 없다. 원본 Cloth 모델(FuzzColor, Cloth)은 sheenColor = Cloth × FuzzColor, cloth = Cloth. 적용: 태양·점광·스폿·면광원 LTC 로브·간접 스펙큘러(`ShadeOpaque` LAYERED=2), MegaLights, coverage 사전 음영 레코드, 광선 hit, 참조 패스 트레이서(`evaluateSheen`) | 실행 검증 전체. sheen과 클리어코트는 여전히 배타. fuzz 로브의 Fresnel(원본은 Schlick(FuzzColor))은 없다: 색은 상수 C |
 | 클리어코트 | 있음 | — |
 
@@ -162,6 +162,22 @@
 - 합성은 이미 마스크 합집합이 차면 멈춘다. 남은 비용은 기록당 정렬과 합성이다.
 
 실행해서 확인할 것(순서대로): `unx_test_hair_hairtests`(밀도 볼륨 3절: 파라미터 배치가 바뀌었다), `unx_test_visibility_haircoveragetests`, `unx_test_host_hosthair`, `hair_ball` still(자기 그림자 경계, 바닥·두피의 그림자, 두 머리 사이 그림자), 거울이나 젖은 바닥이 있는 씬의 반사, 그 뒤 시간 측정(`m.hair*`, `m.coverage*`, `r.refl.lumen.trace`, `r.gi.lg.trace`).
+
+### 4.2 눈·피부 2차 (2026-10-03, 브랜치 `w/char`)
+
+**코드 작성·빌드 통과, 실행 안 함.** 테스트 실행 파일·still·게이트를 돌리지 않았다. 아래는 코드에 있는 것이다.
+
+| 항목 | 코드에 있는 것 | 한계 [코드] |
+|---|---|---|
+| 홍채 간접광 | `ShadeOpaque` 2부(SSS 분리 커널 `SubsurfaceIndirect`): 마스크만큼 홍채 평면의 조도를 쓴다. `gi.lumen_only`는 최종 수집 조도 × 반투명 볼륨의 비 E(홍채 법선) / E(표면 법선)(1/4~4로 제한) — 수집의 세부와 차폐는 남고 방향만 볼륨이 돌린다. 평면 반사 뷰는 볼륨 또는 월드 캐시를 홍채 법선으로 직접 조회 | 화면 프로브 경로와 `shading.subsurface_scatter` 끔(분리하지 않는 커널)은 표면 법선 그대로. 볼륨이 없으면 바뀌지 않는다 |
+| 광원 표본의 홍채 | `m.ml.sample`이 눈 픽셀의 눈 워드(리졸브의 클래스 워드, `MegaLightsOptions::classWord`)를 읽어 음영과 같은 식으로 가중한다: 점·스폿은 `modelEyeCosine`, 면광원은 홍채 평면 프레임의 코사인 적분 × caustic. 각막 지평선 아래·홍채 평면 앞의 광원이 뽑힌다 | 그 표본의 그림자 광선은 각막 표면에서 빛 쪽(눈알 안)으로 출발한다: 눈알이 그림자를 드리우는 인스턴스면 자기 홍채를 가린다. `InstanceCastShadow`가 없는 눈알이면 통과하고 눈꺼풀·머리는 그대로 가린다(`shading_ball`의 눈은 그림자를 끔). 슬롯(VSM) 경로는 표면점의 가시성 그대로 |
+| 광선 hit의 눈 | 반사·굴절 커널(`ReflectionShade.hlsli`, `ReflectionLumenHit.hlsli`: `rtHitMaterialSeen`, `RT_HIT_EYE`)이 hit 삼각형의 rest 변·hit 변·uv 변(`RtSurface`)으로 눈의 프레임을 세우고(`modelEyeFrame`: 리졸브와 공용) 광선을 각막에서 굴절시켜 홍채 점의 uv에서 base colour를 읽고 림버스 고리를 곱한다. 거울이 흰 공이 아니라 눈을 보여 준다 | hit의 음영은 표면 법선의 한 로브(홍채 평면·caustic 없음). GI hit과 `ReflectionTraceInline`(DXIL 한도)은 표면 uv. `shading.eye_model` 스위치는 리졸브만 끈다 |
+| coverage 조각의 눈 | `covFragmentMaterial`이 조각의 삼각형으로 같은 계산을 한다(홍채 점의 uv, 림버스) | 조각에는 눈 워드가 없어 음영은 Subsurface 그대로 |
+| 평면 반사 뷰의 피부 | 패스 기록은 1차부터 있었다(`SubsurfaceDirect`/`SubsurfaceIndirect` PLANAR=1, `m.sss.clear.planar`, `m.sss.scatter.planar`와 fallback, `m.ml.spatial.sss`). 산란 커널의 투영은 뷰의 광선을 쓴다(잘린 투영·거울 투영 공통). 다시 읽어 빠진 것은 찾지 못했다. `testSubsurfaceScatter`에 평면 뷰(거울 x = −1.2)의 프레임 셋을 추가: 끔 / 산란 없는 켬 / 켬 | 테스트는 작성만 했다 |
+
+리졸브는 눈의 프레임에 자기 삼각형의 변형된 정점을 넘긴다(다시 변형하지 않는다): `Resolve.DEBUG1.PLANAR_MASK1` 103,092 → 93,020 B.
+
+국소광 구성요소의 남은 두 항목(9절)도 이 브랜치에서 넣었다: `ShadeOpaque`의 coat·sheen 로브 × `shLightSpecular()`, 프록셀 리스트 경로의 채널 검사(1부가 P[11].zw의 vis 버퍼로 픽셀의 인스턴스 채널을 읽어 `g_lightChannels`에 둔다; fallback 타일도 같다).
 
 ## 5. 구름
 
@@ -361,8 +377,8 @@ Unreal의 light component에 있고 여기에 없던 여섯 가지를 썼다. **
 
 한계 [코드]:
 
-- `Native/Host` ABI에 새 필드가 없다(다른 작업의 몫으로 남겼다). 지금은 씬 파일과 `scene::Light`·`Instance::flags`로만 넣을 수 있다.
-- `ShadeOpaque.hlsl` 본문에 남은 것: 국소광의 coat·sheen 로브에 specular 스케일(`shLightSpecular()`을 곱하면 된다), 프록셀 리스트 경로(`mega_lights` 끔)의 채널 검사(광원 루프 앞에서 `g_lightChannels`에 인스턴스 채널을 넣으면 된다).
+- `Native/Host` ABI: `w/char`에서 넣었다(코드·빌드만) — `UnxSceneSetLightComponents(renderer, light, UnxLightComponentsDesc*)`(64 B: 스케일 4개, 소스 텍스처, barn door, 채널, 그리기 거리와 페이드, 색온도, 감쇠 지수; 커밋 전; `UnxLightComponentsDefaults`로 채운 뒤 고친다)와 인스턴스 채널(`UnxInstanceDesc::flags`에 `UNX_INSTANCE_LIGHTING_CHANNELS(mask)`, 또는 커밋 전 `UnxSceneSetInstanceLightingChannels`). 값 검사는 커밋의 `scene::validate`. 커밋 뒤 광원 편집은 호스트에 원래 없다.
+- `ShadeOpaque.hlsl` 본문: `w/char`에서 넣었다(코드·빌드만) — 국소광의 coat·sheen 로브 × `shLightSpecular()`, 프록셀 리스트 경로(`mega_lights` 끔)의 채널 검사(1부가 vis 버퍼로 픽셀의 인스턴스 채널을 읽는다; fallback 타일 포함). 면광원 로브 커널(`AreaLobes`)과 FAR 타일 항에는 채널 검사가 없다.
 - 채널 검사가 없는 곳: coverage 프래그먼트와 머리카락(기록에 인스턴스가 없다), surface cache 카드(카드의 인스턴스 채널을 넣지 않았다), FAR 타일 항.
 - barn door가 없는 곳: 그림자 광선의 표본점(가려진 부분으로도 광선이 간다), FAR 타일 항, 공기·안개의 세기, 방출면 프록시.
 - 소스 텍스처: diffuse와 specular가 조회 한 번을 같이 쓴다(원본은 각각). mip은 텍스처 시스템의 것이고 원본의 가우시안 프리필터가 아니다. 입자·공기·FAR 타일 항은 텍스처 없는 색이다. 텍스처를 처음 올린 프레임에 광원 버퍼를 다시 만든다(FX 광원이 그 프레임에 빠질 수 있다).
@@ -371,3 +387,51 @@ Unreal의 light component에 있고 여기에 없던 여섯 가지를 썼다. **
 - 큰 커널(B, 한도 204,800): `ReflectionTraceInline.SKY0.JOB2.CORNERS1` 203,648, `CoverageComposite.PART1.*.AREA1` 199,460, `GiTrace.SKY0.SPLIT1` 193,968.
 
 실행해서 확인할 것(순서대로): `unx_test_scene_lightcomponents`(CPU), 광원 레코드 크기가 바뀌었으므로 `unx_test_shading_shadingtests`·`unx_test_fx_fxlighttests`·`unx_test_raytracing_fxlighthits`, 그 뒤 항목마다 still(스케일 0과 2, 텍스처를 붙인 rect, barn door 각도 2개, 채널이 다른 두 물체, 거리 페이드 구간 안팎, 지수 2와 8).
+
+## 10. 재질 입력 (2026-10-03, 브랜치 `w/char`)
+
+Unreal의 재질 그래프와 Unity 재질이 흔히 쓰는 입력 가운데 렌더러에 없던 것을 넣었다. **코드 작성·빌드 통과, 실행 안 함**: 전 트랙 빌드만 통과했고 테스트 실행 파일·still·게이트를 한 번도 돌리지 않았다. 아래는 코드에 있는 것이고 그림과 수치로 확인된 것은 없다.
+
+데이터 [코드]:
+
+- `scene::Material`(`SceneData.h`): `uvScale`·`uvOffset`·`uvRotation`, `occlusionUvSet`·`detailUvSet`, `detailColorTexture`·`detailNormalTexture`·`detailScale`·`detailOffset`·`detailColorStrength`·`detailNormalScale`, `heightTexture`·`heightScale`, `emissiveScale`·`emissiveMaskTexture`, `vertexColorTint`·`vertexAlphaBlend`, `alphaDither`. Cut·Terrain 클래스에는 정의하지 않는다(검증). `scene::Mesh`: `uv1`, `colors`(RGBA8).
+- 씬 파일: 선택 블록 "MINP"(재질), "VATT"(메시). 날씨 블록("CLDS", "FOGS") 앞에 쓴다. 없는 씬의 바이트와 해시는 그대로.
+- GPU: `gpu::MaterialInputs`(80 B) — 입력이 있는 재질만 레코드를 갖고 `gpu::Material::inputs`(M이 한 번도 게시하지 않던 occlusion 칸)가 인덱스. `FrameConstants` 592 → 608 B: `materialInputs`(남던 워드), `meshAttributes`(메시별 1 + 첫 레코드), `vertexAttributes`(`gpu::VertexAttributes` 16 B: uv1, 색). `emissiveScale`은 `gpu::Material::emissive`에 접어 넣는다(모든 소비자가 그대로 받는다; 방출 광원·방출 삼각형 가중치도 같다). 디테일·높이·마스크 텍스처의 SRV는 M의 텍스처 시스템이 게시한다(`GpuScene::setMaterialTextures`).
+- 클러스터 빌더가 만든 정점(`LodVertices::appendTo`)이 새 스트림을 복사한다.
+
+| 항목 | 코드에 있는 것 | 소비자 | 한계 [코드] |
+|---|---|---|---|
+| 1. UV 변환 | uv' = R(회전)(uv × 스케일) + 오프셋(KHR_texture_transform의 순서; Unity의 tiling·offset). footprint도 선형부를 지난다. 노멀맵의 기울기는 변환의 전치(스케일 제외)로 메시 탄젠트 프레임에 돌아온다 | 리졸브, coverage 조각, 유리 합성, edge 합성의 cut-out, 알파 테스트(뷰 래스터·그림자·coverage 다각형·광선 any-hit: `materialBaseColorGrad/Level`이 변환을 건다), 광선 hit(상세도는 행렬식으로 보정), 카드 캡처, 참조 패스 트레이서 | `ReflectionTraceInline`(넘침 작업, DXIL 한도)은 `UNX_MATERIAL_INPUTS 0`: 변환 없는 uv. 참조 GPU 트레이서에는 없다 |
+| 2. 둘째 UV | 메시의 `uv1`을 픽셀 삼각형의 정점 스트림에서 무게중심으로 보간(도함수 포함; 읽는 재질만 로드). occlusion 맵과 디테일 맵이 고를 수 있다. `uv1`이 없는 메시는 uv0 | 리졸브 | hit·coverage 조각·카드는 둘째 UV를 읽지 않는다(occlusion 자체를 쓰지 않는다) |
+| 3. 디테일 맵 | 색: base × lerp(1, 디테일 × 2^2.2, w × 세기)(sRGB 0.5에서 중립; Unity의 detail albedo ×2). 노멀: 평균 기울기 × w × 스케일을 디테일 uv의 프레임에서 더한다 — 세트 0은 메시 탄젠트 프레임, 세트 1은 그 세트의 화면 도함수 프레임 — 기울기 분산 × (w × 스케일)²은 footprint 분산에 더한다(`mNormalMoments`가 base 맵에 하는 것과 같은 방식). w = 1 또는 버텍스 알파 | 리졸브 | hit·coverage 조각·카드·참조에는 없다(footprint가 디테일보다 크다). 디테일 마스크 텍스처는 없다(버텍스 알파만) |
+| 4. 높이(시차) | `mParallax`: 높이장이 표면 아래 `heightScale` m. 시선을 텍스처 uv에서 `material.parallax_steps`(기본 16, 최대 64) 등간격 + 할선 1회로 행진; 시선 코사인을 1/8 이상으로 잡는다. uv 세트 0의 모든 텍스처가 만난 점에서 읽힌다. 픽셀 깊이·위치는 그대로. `material.parallax_shadow`(기본 끔): 만난 점에서 태양 쪽으로 steps/2 걸음 — 가시성을 클래스 워드의 바이트에 쓰고 `ShadeOpaque` 1부가 태양 가시성에 곱한다 | 리졸브(본 뷰·평면 뷰), 태양 그림자는 음영 커널 | 자기 그림자는 태양만(국소광 없음), 비등방·눈 재질에는 없다(워드가 그들 것). hit·coverage 조각·카드·참조에는 시차가 없다. 실루엣은 평평하다 |
+| 5. emissive | `emissiveScale`(세기를 색과 따로) × emissive 텍스처 × 마스크(R8, 재질 uv). 마스크만 있는 재질도 픽셀별 emissive가 된다 | 리졸브, coverage 조각, 광선 hit과 방출 삼각형 표본, 카드, 참조 패스 트레이서 | 방출 면광원 변환(14.1b)은 마스크 재질을 텍스처 재질처럼 건너뛴다(캐시 경로) |
+| 6. 버텍스 컬러 | rgb가 base colour를 곱한다(`vertexColorTint`), 알파가 디테일의 가중치(`vertexAlphaBlend`). 색이 없는 메시는 흰색·알파 1 | 리졸브, coverage 조각(틴트), 광선 hit(틴트: `RtSurface::color`), 참조 패스 트레이서(틴트) | 카드에는 없다. 런타임 메시(C2b)와 지형 패치에는 스트림이 없다. Terrain 클래스의 층 가중치는 여전히 splat 맵 |
+| 7. 디더 불투명도 | `alphaDither`: 뷰의 래스터(`VisRaster.ps`, `DepthTie.ps`, `TranslucentLayer.ps`: `alphaTestCoveredAt`)가 cutoff + 잡음 − 0.5에서 자른다(interleaved gradient noise; 시간 업스케일이 켜져 있으면 프레임마다 움직인다). 부드러운 알파(머리카락 카드, 가장자리)용 | V의 뷰 래스터 | 거리에서의 cut-out 보존은 이미 알파 mip이 한다(coverage-preserving) — 디더는 그것과 별개. 그림자·광선·coverage 다각형·카드는 cutoff 그대로. 업스케일이 꺼져 있으면 고정 무늬. edge 합성의 cut-out 가중치는 cutoff 기준 |
+
+게임 입력(코드·빌드만): ABI 6 안의 선택 export, `UnxSceneSetCharacterShading` 옆.
+
+- `UnxSceneSetMaterialInputs(renderer, material, UnxMaterialInputsDesc*)`(96 B) + `UnxMaterialInputsDefaults`. 커밋 전에는 씬 재질에 바로, 커밋 뒤에는 다음 프레임의 재질 편집(`FramePacket::inputEdits`). `UnxSceneEditMaterials`로 다시 기술해도 유지된다. Cut·Terrain에서는 무시, 알파 컷오프 없는 재질의 디더도 무시.
+- `UnxSceneSetMeshAttributes(renderer, mesh, uv1, colors, vertexCount)`: 커밋 전.
+- C# 브리지는 이 저장소 밖이라 고치지 않았다.
+
+진단 씬과 테스트(작성만, 실행 안 함):
+
+- `shading_ball`: 구 줄 아래 앞쪽에 판 네 장(UV 변환 체커, 디테일, 벽돌 높이 3 cm, 버텍스 컬러 + emissive 줄무늬 마스크), 카메라 `inputs`. 콘텐츠 해시가 바뀐다.
+- `unx_unit_tests`: `material_inputs_and_scene_blocks`(CPU), `material_inputs_on_the_gpu`(`Passes/Test/MaterialInputs.hlsl`). `unx_test_scenegen`의 shading_ball 내용. `unx_test_host_hostabi`가 입력 재질·메시 스트림·광원 구성요소·채널을 ABI로 넘긴다.
+
+커널 크기(B, 한도 204,800; lumen-ue6 6002fd76을 병합한 뒤. dev 값은 `ReflectionTraceInline`만 dev 소스를 직접 컴파일해 쟀고 나머지는 9절의 기록이다):
+
+| 커널 | 병합 전 dev | 지금 |
+|---|---|---|
+| `ReflectionTraceInline.SKY0.JOB2.CORNERS1` | 204,256 | 204,296 (`RT_HIT_EYE 0`, `RT_SURFACE_EXTRAS 0`, `UNX_MATERIAL_INPUTS 0`) |
+| `FxLayerSetup.STEP0.ML0.GIV0` | 204,544 | 204,544 |
+| `CoverageComposite.PART1.OUTPUT1.AREA1` | 199,460 | 203,256 (눈 +1.9 KB, 재질 입력 +1.9 KB) |
+| `CoverageComposite.PART2.OUTPUT0.AREA1` | — | 200,436 |
+| `GiTrace.SKY0.SPLIT1` | 193,968 | 197,032 |
+| `Resolve.DEBUG1.PLANAR_MASK1` | 103,092 | 100,168 (눈 정점 재사용 −10 KB, 재질 입력 +7.1 KB) |
+| `MegaLightsSample.AREA1` | — | 113,296 |
+
+`CoverageComposite.PART1`은 한도까지 1,544 B, `ReflectionTraceInline`은 504 B 남았다. 다음에 이 두 커널에 닿는 변경은 먼저 크기를 본다. (`rtHitMaterial`을 함수로 한 겹 감싸면 라이브러리 커널에서 176 B가 든다: 매크로로 두었다.)
+
+실행해서 확인할 것(순서대로): `unx_unit_tests`(위 두 테스트와 `eye_model_*`), `unx_test_scenegen`, `unx_test_host_hostabi`, `unx_test_shading_shadingtests --subsurface`(평면 뷰 프레임 포함), 그다음 `Run-Ue6Still.ps1 -Scene shading_ball`의 카메라 `inputs`·`eye_close`(still 스크립트가 카메라를 고르는지 먼저 본다). `FrameConstants` 크기와 `gpu::Material::inputs`가 바뀌었으므로 레코드를 직접 읽는 테스트가 먼저 깨질 수 있다.

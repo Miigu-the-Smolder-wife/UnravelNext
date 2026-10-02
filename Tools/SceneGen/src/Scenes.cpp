@@ -711,7 +711,12 @@ Texture eyeTexture(uint32_t size, float irisRadius)
 // competing with the key.
 // Above the row: over the sheen sphere the same material with the cloth factor 1 (the cloth blend: no base highlight
 // under the fuzz), and left of the centre two eyes (the eye model) of radius 0.12 m - ten times a human eye, the sclera's
-// mean free path with them - that look at the "front" camera.
+// mean free path with them - that look at the "front" camera and cast no shadow (a ray from the cornea towards a light
+// below its horizon starts inside the ball).
+// Below the row and in front of it, four plates of 0.5 m leaning back 50 degrees show the material inputs
+// (scene::Material; Passes/Material/MaterialInputs.hlsli), from -x: a checker tiled 3 x 3 and turned 30 degrees (the uv
+// transform); a plain plate under a detail colour and a detail normal tiled 6 x 6; bricks with a height map 3 cm deep
+// (parallax); a plate tinted by its vertex colours with emissive stripes (the mask) at a tenth of its emissive (the scale).
 // Cameras: "front" (the key's side), "back", "skin_close" (the Subsurface sphere's terminator from 0.6 m: the scale
 // at which skin's scatter is seen) and "eye_close" (the eyes from 0.9 m, off their axes: the iris's parallax under the
 // cornea).
@@ -806,7 +811,8 @@ Scene shadingBall(const Request& rq)
             const float3 axes[3] = { x, y, z };
             for (int c = 0; c < 3; ++c) m.m[0][c] = axes[c].x * eyeRadius, m.m[1][c] = axes[c].y * eyeRadius, m.m[2][c] = axes[c].z * eyeRadius;
             m.m[0][3] = centre.x, m.m[1][3] = centre.y, m.m[2][3] = centre.z;
-            addInstance(s, mesh, m);
+            // (no shadow: a light below the cornea's horizon reaches the iris through the ball - MegaLightsSampling.hlsli)
+            addInstance(s, mesh, m, 0);
         }
     }
     Material thin = skin;
@@ -818,6 +824,92 @@ Scene shadingBall(const Request& rq)
         b.material(addMaterial(s, thin));
         b.box(slab - f3(0.3f, 0.3f, 0.0025f), slab + f3(0.3f, 0.3f, 0.0025f));
         addInstance(s, addMesh(s, b.finish(false)), float3x4{});
+    }
+    // the material inputs' plates
+    {
+        const float lean = 50.0f * kPi / 180.0f, half = 0.25f;
+        const float3 right = f3(1, 0, 0), up = f3(0, std::cos(lean), -std::sin(lean));
+        auto plate = [&](const char* name, float x, const Material& material, bool colours) {
+            MeshBuilder b(name);
+            b.material(addMaterial(s, material));
+            const float3 c = f3(x, 0.9f, 0.75f);
+            b.quad4(c - right * half - up * half, c + right * half - up * half, c + right * half + up * half, c - right * half + up * half, { 0, 0 }, { 1, 0 }, { 1, 1 },
+                    { 0, 1 });
+            Mesh mesh = b.finish(true);
+            // (red, green, blue and white corners: the tint is a gradient over the plate)
+            if (colours) mesh.colors = { 0xFF0000FFu, 0xFF00FF00u, 0xFFFF0000u, 0xFFFFFFFFu };
+            addInstance(s, addMesh(s, std::move(mesh)), float3x4{});
+        };
+        auto colourTexture = [&](const char* name, uint32_t size, const std::function<float3(float, float)>& colour) {
+            Texture t = makeTexture(name, size, size, scene::TextureFormat::Rgba8Srgb);
+            for (uint32_t y = 0; y < size; ++y)
+                for (uint32_t x = 0; x < size; ++x)
+                {
+                    const float3 c = colour((x + 0.5f) / size, (y + 0.5f) / size);
+                    uint8_t* p = &t.texels[4 * ((size_t)y * size + x)];
+                    p[0] = toSrgb8(c.x), p[1] = toSrgb8(c.y), p[2] = toSrgb8(c.z), p[3] = 255;
+                }
+            return addTexture(s, std::move(t));
+        };
+        auto greyTexture = [&](const char* name, uint32_t size, const std::function<float(float, float)>& value) {
+            Texture t = makeTexture(name, size, size, scene::TextureFormat::R8Linear);
+            for (uint32_t y = 0; y < size; ++y)
+                for (uint32_t x = 0; x < size; ++x) t.texels[(size_t)y * size + x] = toUnorm8(value((x + 0.5f) / size, (y + 0.5f) / size));
+            return addTexture(s, std::move(t));
+        };
+        // bricks: 4 x 8 to the tile, every other row offset by half a brick; 1 on a brick, 0 in the mortar
+        auto brick = [](float u, float v) {
+            const float row = std::floor(v * 8.0f), fu = u * 4.0f + (((int)row & 1) ? 0.5f : 0.0f), fv = v * 8.0f;
+            const float du = std::fabs(fu - std::floor(fu) - 0.5f), dv = std::fabs(fv - std::floor(fv) - 0.5f);
+            return smoothstepf(0.5f, 0.44f, du) * smoothstepf(0.5f, 0.38f, dv);
+        };
+        Material tiled;
+        tiled.name = "plate_tiled";
+        tiled.roughness = 0.6f;
+        tiled.baseColor = f3(1, 1, 1);
+        tiled.baseColorTexture = colourTexture("inputs_checker", 64, [](float u, float v) {
+            // two colours, and one orange cell in a corner: the tile's orientation
+            if (u < 0.25f && v < 0.25f) return f3(0.9f, 0.4f, 0.05f);
+            return (((int)(u * 4.0f) + (int)(v * 4.0f)) & 1) ? f3(0.75f, 0.75f, 0.7f) : f3(0.08f, 0.1f, 0.16f);
+        });
+        tiled.uvScale = { 3, 3 };
+        tiled.uvRotation = 30.0f * kPi / 180.0f;
+        plate("plate_tiled", -1.05f, tiled, false);
+
+        Material detailed;
+        detailed.name = "plate_detail";
+        detailed.baseColor = f3(0.45f, 0.5f, 0.42f);
+        detailed.roughness = 0.45f;
+        detailed.detailColorTexture = colourTexture("inputs_detail_colour", 128, [&](float u, float v) {
+            const float g = 0.2176f * (0.6f + 0.8f * fbm2(u * 8.0f, v * 8.0f, 77u, 3, 8));  // around the neutral value (sRGB 0.5)
+            return f3(g, g, g);
+        });
+        detailed.detailNormalTexture =
+            addTexture(s, normalMapFromHeight("inputs_detail_normal", 128, 0.08f, [](float u, float v) { return 0.0015f * fbm2(u * 16.0f, v * 16.0f, 78u, 3, 16); }));
+        detailed.detailScale = { 6, 6 };
+        plate("plate_detail", -0.35f, detailed, false);
+
+        Material bricks;
+        bricks.name = "plate_parallax";
+        bricks.baseColor = f3(1, 1, 1);
+        bricks.roughness = 0.8f;
+        bricks.baseColorTexture = colourTexture("inputs_bricks", 256, [&](float u, float v) {
+            const float b = brick(u, v);
+            return f3(0.2f, 0.19f, 0.18f) * (1 - b) + f3(0.45f, 0.17f, 0.1f) * b;
+        });
+        bricks.heightTexture = greyTexture("inputs_bricks_height", 256, brick);
+        bricks.heightScale = 0.03f;
+        plate("plate_parallax", 0.35f, bricks, false);
+
+        Material painted;
+        painted.name = "plate_vertex";
+        painted.baseColor = f3(0.8f, 0.8f, 0.8f);
+        painted.roughness = 0.5f;
+        painted.vertexColorTint = true;
+        painted.emissive = f3(600.0f, 420.0f, 150.0f);
+        painted.emissiveScale = 0.1f;
+        painted.emissiveMaskTexture = greyTexture("inputs_stripes", 64, [](float u, float) { return std::fmod(u * 4.0f, 1.0f) < 0.25f ? 1.0f : 0.0f; });
+        plate("plate_vertex", 1.05f, painted, true);
     }
     scene::Light key;
     key.type = scene::LightType::Point;
@@ -838,6 +930,8 @@ Scene shadingBall(const Request& rq)
     // the Subsurface sphere's terminator from 0.6 m (a pixel is about half a millimetre at 1080p: skin's scatter is a few)
     s.cameras.push_back(camera("skin_close", f3(-0.35f, eye, 0.80f), f3(-0.62f, eye, 0.0f), 6.0f, 45.0f));
     s.cameras.push_back(camera("eye_close", f3(-0.75f, eye + 0.70f, 0.90f), f3(-0.35f, eye + 0.62f, 0.0f), 6.0f, 45.0f));
+    // the material inputs' plates from the side, low: the bricks' parallax
+    s.cameras.push_back(camera("inputs", f3(-0.9f, 1.45f, 2.0f), f3(0.1f, 0.9f, 0.75f), 6.0f, 45.0f));
     for (const auto& c : s.cameras) s.paths.push_back(staticPath(c));
     (void)rq;
     return s;

@@ -19,7 +19,8 @@
 // Lighting channels (Scene.hlsli): the pixel's instance - its vis id's - gives the point's channels; a light in none of
 // them weighs 0 and is never sampled, so m.ml.shade needs no test. An instance without a vis id (the coverage layer's,
 // the hair records'): every channel.
-// P[5] = { B2 stable area lights' mask (UNX_NONE: none), the tile list (raw; MegaLightsTiles.hlsl), 0, 0 }
+// P[5] = { B2 stable area lights' mask (UNX_NONE: none), the tile list (raw; MegaLightsTiles.hlsl), the resolve's class
+//          word (R32_UINT; UNX_NONE: none - an instance without eyes): an eye's pixels' eye word (mlPointEye), 0 }
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
@@ -76,7 +77,15 @@ void main(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID)
     s.specular = m.specular;
     s.transmission = m.transmission;
     MlPoint surfacePoint = mlPointOf(s, offset, n, v, P[2].w);
-    if (s.cls == MATERIAL_SUBSURFACE) mlPointSubsurface(surfacePoint, s, modelSubsurfaceOf(m, s.roughness), P[2].w);
+    if (s.cls == MATERIAL_SUBSURFACE)
+    {
+        mlPointSubsurface(surfacePoint, s, modelSubsurfaceOf(m, s.roughness), P[2].w);
+        if ((m.classFlags & MATERIAL_EYE) != 0 && P[5].z != UNX_NONE)
+        {
+            Texture2D<uint> eyeWords = ResourceDescriptorHeap[P[5].z];
+            mlPointEye(surfacePoint, modelEyeOf(eyeWords[pixel], n));
+        }
+    }
     if (s.cls == MATERIAL_HAIR)
     {
         // a strand (the hair records' instance, CoverageHair.hlsl): light from either side of the fibre reaches the viewer,

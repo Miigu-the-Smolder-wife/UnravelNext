@@ -15,5 +15,15 @@ bool alphaTestCovered(uint material, float2 uv)
     if ((m.classFlags & MATERIAL_ALPHA_TESTED) == 0) return true;
     return materialBaseColorGrad(m, uv, ddx(uv), ddy(uv)).a >= m.alphaCutoff;  // no texture: 1, covered
 }
+// The same in a view's own raster (the visibility pixel kernels; pixelPosition = SV_Position.xy): a material with
+// dithered opacity (scene::Material::alphaDither; M's materialAlphaThreshold) is cut at the pixel's threshold of the
+// frame, the same in every pass of the view. The depth raster service (shadows) keeps the cutoff above: one cut shape
+// for cached pages.
+bool alphaTestCoveredAt(uint material, float2 uv, float2 pixelPosition)
+{
+    const GpuMaterial m = loadMaterial(material);
+    if ((m.classFlags & MATERIAL_ALPHA_TESTED) == 0) return true;
+    return materialBaseColorGrad(m, uv, ddx(uv), ddy(uv)).a >= materialAlphaThreshold(m, pixelPosition);
+}
 
 #endif

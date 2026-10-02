@@ -158,7 +158,59 @@ struct Material
     // Glass solid bodies (one-sided; A10 R-2): baseColor is the body's transmittance over attenuationDistance metres, so
     // sigma_a = -ln(baseColor) / attenuationDistance (1/m). A pane (two-sided) takes baseColor per pass as before.
     float attenuationDistance = 0.01f;
+    // ---- Material inputs (Passes/Material/MaterialInputs.hlsli states how the resolve reads them; every value at its
+    // default: none). They belong to the classes whose textures are read at the mesh's uv - every class but Cut and
+    // Terrain (validation).
+    // (1) The uv transform of the material's own textures (base colour, normal, roughness / metallic, emissive and its
+    // mask, occlusion on uv set 0, height): uv' = R(uvRotation) (uv x uvScale) + uvOffset (KHR_texture_transform's
+    // order; Unity's tiling and offset are uvScale and uvOffset). The alpha test reads the base colour through it in
+    // every view, in the shadows and at ray hits.
+    float2 uvScale{ 1, 1 };                  // finite, != 0
+    float2 uvOffset{ 0, 0 };
+    float uvRotation = 0.0f;                 // radians, counter-clockwise in uv
+    // (2) The second uv set (Mesh::uv1; a mesh without one: its uv0) for the occlusion map and the detail maps, read
+    // without the transform above.
+    uint32_t occlusionUvSet = 0;             // 0 or 1
+    // (3) Detail maps over the base (the reference's detail texturing; Unity's secondary maps), tiled at
+    // uv(detailUvSet) x detailScale + detailOffset. The detail colour multiplies the base colour by
+    // lerp(1, detail x 2^2.2, w detailColorStrength) (neutral at sRGB 0.5); the detail normal's slopes x w
+    // detailNormalScale add to the base normal's, its slope variance x the square to the footprint's (the specular
+    // band limit). w = 1, or the vertex colour's alpha with vertexAlphaBlend.
+    uint32_t detailColorTexture = kNone;     // Rgba8Srgb
+    uint32_t detailNormalTexture = kNone;    // Rg8Normal
+    float2 detailScale{ 1, 1 };              // finite, != 0
+    float2 detailOffset{ 0, 0 };
+    uint32_t detailUvSet = 0;                // 0 or 1
+    float detailColorStrength = 1.0f;        // [0, 1]
+    float detailNormalScale = 1.0f;          // [0, 4]
+    // (4) Height (parallax occlusion mapping in the resolve; the pixel's depth and position stay the surface's): the
+    // height field lies heightScale metres deep under the surface (texture 1 = the surface, 0 = the floor); the view ray
+    // is marched through it in the texture's uv (material.parallax_steps linear steps and one secant step) and every
+    // texture on uv set 0 is read where it meets the field. No texture or heightScale 0: none.
+    uint32_t heightTexture = kNone;          // R8Linear
+    float heightScale = 0.0f;                // m, [0, 1]
+    // (5) Emission: emissive x emissiveScale (the intensity apart from the colour) x the emissive texture x the mask
+    // (on the material's uv).
+    float emissiveScale = 1.0f;              // >= 0, finite
+    uint32_t emissiveMaskTexture = kNone;    // R8Linear
+    // (6) Vertex colour (Mesh::colors; a mesh without them: white, alpha 1): its rgb multiplies the base colour
+    // (vertexColorTint), its alpha weighs the detail maps (vertexAlphaBlend).
+    bool vertexColorTint = false;
+    bool vertexAlphaBlend = false;
+    // (7) Dithered opacity of an alpha-tested material (the reference's dithered opacity mask): in the views' rasters the
+    // cut is alpha >= alphaCutoff + noise - 0.5, the noise per pixel in [0, 1) and new every frame under the temporal
+    // upscale, so the accumulated picture shows the alpha's fraction (soft edges, hair cards). Shadows, ray hits and the
+    // coverage layer keep the cut at alphaCutoff. (At a distance the cut shape keeps its coverage without this: M's
+    // coverage-preserving alpha mips.)
+    bool alphaDither = false;
 };
+// Whether a material has a material input other than emissiveScale (the renderer keeps a record for those that do).
+bool hasMaterialInputs(const Material& m);
+// The uv at which a material's own textures are read, from the mesh's uv0 (the material's uv transform).
+float2 materialUv(const Material& m, float2 uv);
+// A tangent-space normal's x, y (or a slope) from the axes of the material's uv to the mesh's tangent frame: the
+// transform's transpose with each axis's scale taken out (a rotated texture's bumps turn with it, a mirrored one's flip).
+float2 materialUvToTangent(const Material& m, float2 xy);
 
 struct Submesh
 {
@@ -207,6 +259,9 @@ struct Mesh
                                    // mesh has a normal texture (the generator/importer computes them once, so the
                                    // reference and the renderer use the same tangent frame)
     std::vector<float2> uv0;
+    std::vector<float2> uv1;       // optional second uv set (Material::occlusionUvSet, detailUvSet)
+    std::vector<uint32_t> colors;  // optional vertex colours, RGBA8 with r in the low byte (linear values;
+                                   // Material::vertexColorTint, vertexAlphaBlend)
     std::vector<uint32_t> indices; // triangle list, counter-clockwise front faces
     std::vector<Submesh> submeshes;
     SkinStream skin;               // empty = rigid

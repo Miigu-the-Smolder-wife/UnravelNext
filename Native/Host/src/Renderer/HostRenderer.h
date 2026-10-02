@@ -94,6 +94,24 @@ struct CharacterShading
     float3 eyeAxis{ 0, 0, 1 };
 };
 
+// Material inputs of a material (UnxSceneSetMaterialInputs): scene::Material's fields of that name, which the material
+// description of the ABI does not carry. Defaults are scene::Material's.
+struct MaterialInputs
+{
+    float2 uvScale{ 1, 1 }, uvOffset{ 0, 0 };
+    float uvRotation = 0;
+    uint32_t occlusionUvSet = 0;
+    uint32_t detailColorTexture = scene::kNone, detailNormalTexture = scene::kNone;
+    float2 detailScale{ 1, 1 }, detailOffset{ 0, 0 };
+    uint32_t detailUvSet = 0;
+    float detailColorStrength = 1, detailNormalScale = 1;
+    uint32_t heightTexture = scene::kNone;
+    float heightScale = 0;
+    float emissiveScale = 1;
+    uint32_t emissiveMaskTexture = scene::kNone;
+    bool vertexColorTint = false, vertexAlphaBlend = false, alphaDither = false;
+};
+
 // Everything one frame needs, copied on the main thread.
 struct FramePacket
 {
@@ -153,6 +171,8 @@ struct FramePacket
     std::vector<std::pair<uint32_t, scene::Material>> materialEdits;
     // Character shading set after commit (setCharacterShading), applied after this packet's material edits.
     std::vector<std::pair<uint32_t, CharacterShading>> characterEdits;
+    // Material inputs set after commit (setMaterialInputs), applied after this packet's material edits.
+    std::vector<std::pair<uint32_t, MaterialInputs>> inputEdits;
     // A7 surface state field (E's surface::SurfaceField, fed from NativeVfx nv_surface_delta): delta batches in the host's
     // order (each: removed keys, then changed bricks), changed half-lives, and the frame's VFX context time.
     struct SurfaceDelta
@@ -299,6 +319,17 @@ public:
     // material takes it; after commit it is an edit of the next queued frame. The groups that are not defined on the
     // material's class are ignored (applyCharacter); a later editMaterials of the material keeps it (keepCharacter).
     void setCharacterShading(uint32_t material, const CharacterShading& c);
+    // Material inputs of a material of the scene (main thread; the values and the textures' indices and formats are
+    // checked here). Before commit the scene material takes them; after commit they are an edit of the next queued frame.
+    // Ignored on the Cut and Terrain classes; the dither without an alpha cutoff (applyInputs). A later editMaterials of
+    // the material keeps them (keepInputs).
+    void setMaterialInputs(uint32_t material, const MaterialInputs& in);
+    // A mesh's second uv set and vertex colours (before commit; either may be empty, each as long as the mesh's vertices).
+    void setMeshAttributes(uint32_t mesh, std::vector<float2> uv1, std::vector<uint32_t> colors);
+    // A light's components (before commit; 'components' carries them in a scene::Light - its other fields are not read)
+    // and an instance's lighting channels (before commit; a 3-bit mask). scene::validate checks the values at commit.
+    void setLightComponents(uint32_t light, const scene::Light& components);
+    void setInstanceLightingChannels(uint32_t instance, uint32_t channels);
     SceneCommitInfo commit();
     // Quality override before commit ("section.key=value", QualityConfig::applyOverride): a game's post terms, for example.
     void overrideQuality(const std::string& assignment);
@@ -528,6 +559,8 @@ private:
     static void applyEdits(const FramePacket& p, scene::Scene& s);
     static void applyCharacter(const CharacterShading& c, scene::Material& m);
     static void keepCharacter(const scene::Material& old, scene::Material& next);
+    static void applyInputs(const MaterialInputs& in, scene::Material& m);
+    static void keepInputs(const scene::Material& old, scene::Material& next);
     void ensureStandaloneOutput(uint32_t width, uint32_t height, DXGI_FORMAT format);
     // Paces the frame slot, applies the packet's scene updates, declares the frame; returns the frame slot.
     uint32_t beginFrame(const FramePacket& packet);

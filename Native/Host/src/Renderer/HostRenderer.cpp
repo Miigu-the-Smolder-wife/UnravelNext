@@ -364,6 +364,129 @@ void HostRenderer::keepCharacter(const scene::Material& old, scene::Material& ne
     if (old.cls == next.cls) applyCharacter(c, next);
 }
 
+void HostRenderer::setMaterialInputs(uint32_t material, const MaterialInputs& in)
+{
+    auto finite2 = [](float2 v) { return std::isfinite(v.x) && std::isfinite(v.y); };
+    if (!(finite2(in.uvScale) && in.uvScale.x != 0 && in.uvScale.y != 0 && finite2(in.uvOffset) && std::isfinite(in.uvRotation)))
+        fail("material inputs: the uv transform needs a finite scale other than 0, a finite offset and rotation");
+    if (!(finite2(in.detailScale) && in.detailScale.x != 0 && in.detailScale.y != 0 && finite2(in.detailOffset)))
+        fail("material inputs: the detail maps need a finite uv scale other than 0 and a finite offset");
+    if (in.occlusionUvSet > 1 || in.detailUvSet > 1) fail("material inputs: a uv set is 0 or 1");
+    if (!(in.detailColorStrength >= 0 && in.detailColorStrength <= 1 && in.detailNormalScale >= 0 && in.detailNormalScale <= 4))
+        fail("material inputs: detailColorStrength in [0, 1], detailNormalScale in [0, 4]");
+    if (!(in.heightScale >= 0 && in.heightScale <= 1)) fail("material inputs: heightScale %g outside [0, 1] (metres)", in.heightScale);
+    if (!(in.emissiveScale >= 0 && std::isfinite(in.emissiveScale))) fail("material inputs: emissiveScale must be >= 0 and finite");
+    // (the textures are fixed at commit and their list does not change after it: read without the lock)
+    auto texture = [&](uint32_t t, scene::TextureFormat f, const char* what) {
+        if (t == scene::kNone) return;
+        if (t >= m_scene.textures.size()) fail("material inputs: %s texture %u of %zu", what, t, m_scene.textures.size());
+        if (m_scene.textures[t].format != f) fail("material inputs: %s texture %u has format %u", what, t, (unsigned)m_scene.textures[t].format);
+    };
+    texture(in.detailColorTexture, scene::TextureFormat::Rgba8Srgb, "detail colour");
+    texture(in.detailNormalTexture, scene::TextureFormat::Rg8Normal, "detail normal");
+    texture(in.heightTexture, scene::TextureFormat::R8Linear, "height");
+    texture(in.emissiveMaskTexture, scene::TextureFormat::R8Linear, "emissive mask");
+    if (!m_committed)
+    {
+        if (material >= m_scene.materials.size()) fail("material inputs: material %u of %zu", material, m_scene.materials.size());
+        applyInputs(in, m_scene.materials[material]);
+        return;
+    }
+    std::lock_guard lock(m_mutex);
+    if (material >= m_hostMaterials) fail("material inputs: material %u of %u", material, m_hostMaterials);
+    m_pending.inputEdits.push_back({ material, in });
+}
+
+// The inputs on a material: none of them on the Cut and Terrain classes (their textures are not read at the mesh's uv)
+// but the emission's scale, and no dither without an alpha test.
+void HostRenderer::applyInputs(const MaterialInputs& in, scene::Material& m)
+{
+    const bool uvClass = m.cls != scene::MaterialClass::Cut && m.cls != scene::MaterialClass::Terrain;
+    const MaterialInputs none;
+    const MaterialInputs& v = uvClass ? in : none;
+    m.uvScale = v.uvScale;
+    m.uvOffset = v.uvOffset;
+    m.uvRotation = v.uvRotation;
+    m.occlusionUvSet = v.occlusionUvSet;
+    m.detailColorTexture = v.detailColorTexture;
+    m.detailNormalTexture = v.detailNormalTexture;
+    m.detailScale = v.detailScale;
+    m.detailOffset = v.detailOffset;
+    m.detailUvSet = v.detailUvSet;
+    m.detailColorStrength = v.detailColorStrength;
+    m.detailNormalScale = v.detailNormalScale;
+    m.heightTexture = v.heightTexture;
+    m.heightScale = v.heightScale;
+    m.emissiveMaskTexture = v.emissiveMaskTexture;
+    m.vertexColorTint = v.vertexColorTint;
+    m.vertexAlphaBlend = v.vertexAlphaBlend;
+    m.alphaDither = v.alphaDither && m.alphaCutoff > 0;
+    m.emissiveScale = in.emissiveScale;
+}
+
+// A material described anew (the ABI's description has no such fields) keeps the old one's inputs.
+void HostRenderer::keepInputs(const scene::Material& old, scene::Material& next)
+{
+    MaterialInputs in;
+    in.uvScale = old.uvScale;
+    in.uvOffset = old.uvOffset;
+    in.uvRotation = old.uvRotation;
+    in.occlusionUvSet = old.occlusionUvSet;
+    in.detailColorTexture = old.detailColorTexture;
+    in.detailNormalTexture = old.detailNormalTexture;
+    in.detailScale = old.detailScale;
+    in.detailOffset = old.detailOffset;
+    in.detailUvSet = old.detailUvSet;
+    in.detailColorStrength = old.detailColorStrength;
+    in.detailNormalScale = old.detailNormalScale;
+    in.heightTexture = old.heightTexture;
+    in.heightScale = old.heightScale;
+    in.emissiveScale = old.emissiveScale;
+    in.emissiveMaskTexture = old.emissiveMaskTexture;
+    in.vertexColorTint = old.vertexColorTint;
+    in.vertexAlphaBlend = old.vertexAlphaBlend;
+    in.alphaDither = old.alphaDither;
+    applyInputs(in, next);
+}
+
+void HostRenderer::setMeshAttributes(uint32_t mesh, std::vector<float2> uv1, std::vector<uint32_t> colors)
+{
+    requireOpen();
+    if (mesh >= m_scene.meshes.size()) fail("mesh attributes: mesh %u of %zu", mesh, m_scene.meshes.size());
+    scene::Mesh& m = m_scene.meshes[mesh];
+    if ((!uv1.empty() && uv1.size() != m.positions.size()) || (!colors.empty() && colors.size() != m.positions.size()))
+        fail("mesh attributes: mesh %u has %zu vertices (uv1 %zu, colours %zu)", mesh, m.positions.size(), uv1.size(), colors.size());
+    m.uv1 = std::move(uv1);
+    m.colors = std::move(colors);
+}
+
+void HostRenderer::setLightComponents(uint32_t light, const scene::Light& c)
+{
+    requireOpen();
+    if (light >= m_scene.lights.size()) fail("light components: light %u of %zu", light, m_scene.lights.size());
+    scene::Light& l = m_scene.lights[light];
+    l.specularScale = c.specularScale;
+    l.diffuseScale = c.diffuseScale;
+    l.volumetricScattering = c.volumetricScattering;
+    l.indirectIntensity = c.indirectIntensity;
+    l.sourceTexture = c.sourceTexture;
+    l.barnDoorAngle = c.barnDoorAngle;
+    l.barnDoorLength = c.barnDoorLength;
+    l.lightingChannels = c.lightingChannels;
+    l.maxDrawDistance = c.maxDrawDistance;
+    l.maxDistanceFadeRange = c.maxDistanceFadeRange;
+    l.temperature = c.temperature;
+    l.falloffExponent = c.falloffExponent;
+}
+
+void HostRenderer::setInstanceLightingChannels(uint32_t instance, uint32_t channels)
+{
+    requireOpen();
+    if (instance >= m_scene.instances.size()) fail("lighting channels: instance %u of %zu", instance, m_scene.instances.size());
+    if (channels > 7) fail("lighting channels: 0x%x (three bits)", channels);
+    m_scene.instances[instance].flags = scene::withLightingChannels(m_scene.instances[instance].flags, channels);
+}
+
 void HostRenderer::applyEdits(const FramePacket& p, scene::Scene& s)
 {
     for (const auto& [i, m] : p.materialEdits)
@@ -372,10 +495,13 @@ void HostRenderer::applyEdits(const FramePacket& p, scene::Scene& s)
         {
             scene::Material next = m;
             keepCharacter(s.materials[i], next);
+            keepInputs(s.materials[i], next);
             s.materials[i] = std::move(next);
         }
     for (const auto& [i, c] : p.characterEdits)
         if (i < s.materials.size()) applyCharacter(c, s.materials[i]);
+    for (const auto& [i, in] : p.inputEdits)
+        if (i < s.materials.size()) applyInputs(in, s.materials[i]);
     for (const auto& [i, inst] : p.instanceEdits)
         if (i == s.instances.size()) s.instances.push_back(inst);
         else s.instances[i] = inst;
@@ -1457,6 +1583,7 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.instanceEdits = std::move(m_pending.instanceEdits);
     packet.materialEdits = std::move(m_pending.materialEdits);
     packet.characterEdits = std::move(m_pending.characterEdits);
+    packet.inputEdits = std::move(m_pending.inputEdits);
     packet.surfaceDeltas = std::move(m_pending.surfaceDeltas);
     packet.surfaceHalfLives = m_pending.surfaceHalfLives;
     packet.surfaceTime = m_surfaceTime;
@@ -1502,6 +1629,7 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
         next.instanceEdits.insert(next.instanceEdits.begin(), std::make_move_iterator(dropped.instanceEdits.begin()), std::make_move_iterator(dropped.instanceEdits.end()));
         next.materialEdits.insert(next.materialEdits.begin(), std::make_move_iterator(dropped.materialEdits.begin()), std::make_move_iterator(dropped.materialEdits.end()));
         next.characterEdits.insert(next.characterEdits.begin(), dropped.characterEdits.begin(), dropped.characterEdits.end());
+        next.inputEdits.insert(next.inputEdits.begin(), dropped.inputEdits.begin(), dropped.inputEdits.end());
         next.surfaceDeltas.insert(next.surfaceDeltas.begin(), std::make_move_iterator(dropped.surfaceDeltas.begin()), std::make_move_iterator(dropped.surfaceDeltas.end()));
         if (!next.surfaceHalfLives) next.surfaceHalfLives = dropped.surfaceHalfLives;
         if (!next.decals) next.decals = dropped.decals;
@@ -1541,6 +1669,7 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         carried.instanceEdits.insert(carried.instanceEdits.end(), std::make_move_iterator(old.instanceEdits.begin()), std::make_move_iterator(old.instanceEdits.end()));
         carried.materialEdits.insert(carried.materialEdits.end(), std::make_move_iterator(old.materialEdits.begin()), std::make_move_iterator(old.materialEdits.end()));
         carried.characterEdits.insert(carried.characterEdits.end(), old.characterEdits.begin(), old.characterEdits.end());
+        carried.inputEdits.insert(carried.inputEdits.end(), old.inputEdits.begin(), old.inputEdits.end());
         carried.surfaceDeltas.insert(carried.surfaceDeltas.end(), std::make_move_iterator(old.surfaceDeltas.begin()), std::make_move_iterator(old.surfaceDeltas.end()));
         if (old.surfaceHalfLives) carried.surfaceHalfLives = old.surfaceHalfLives;
         if (old.decals) carried.decals = old.decals;
@@ -1574,6 +1703,7 @@ std::optional<FramePacket> HostRenderer::takePacket(uint64_t ticket)
         p.instanceEdits.insert(p.instanceEdits.begin(), std::make_move_iterator(carried.instanceEdits.begin()), std::make_move_iterator(carried.instanceEdits.end()));
         p.materialEdits.insert(p.materialEdits.begin(), std::make_move_iterator(carried.materialEdits.begin()), std::make_move_iterator(carried.materialEdits.end()));
         p.characterEdits.insert(p.characterEdits.begin(), carried.characterEdits.begin(), carried.characterEdits.end());
+        p.inputEdits.insert(p.inputEdits.begin(), carried.inputEdits.begin(), carried.inputEdits.end());
         p.surfaceDeltas.insert(p.surfaceDeltas.begin(), std::make_move_iterator(carried.surfaceDeltas.begin()), std::make_move_iterator(carried.surfaceDeltas.end()));
         if (!p.surfaceHalfLives) p.surfaceHalfLives = carried.surfaceHalfLives;
         if (!p.decals) p.decals = carried.decals;
@@ -1654,11 +1784,12 @@ uint32_t HostRenderer::beginFrame(const FramePacket& p)
         }
     }
     // Scene edits (the scene already has them, takePacket): materials first, since new instances may override with them.
-    if (!p.materialEdits.empty() || !p.instanceEdits.empty() || !p.characterEdits.empty())
+    if (!p.materialEdits.empty() || !p.instanceEdits.empty() || !p.characterEdits.empty() || !p.inputEdits.empty())
     {
         std::vector<uint32_t> materials, instances;
         for (const auto& e : p.materialEdits) materials.push_back(e.first);
         for (const auto& e : p.characterEdits) materials.push_back(e.first);  // (character shading: the material's record again)
+        for (const auto& e : p.inputEdits) materials.push_back(e.first);      // (material inputs: likewise)
         for (const auto& e : p.instanceEdits) instances.push_back(e.first);
         auto unique = [](std::vector<uint32_t>& v) {
             std::sort(v.begin(), v.end());

@@ -1898,6 +1898,168 @@ UNX_TEST(eye_model_and_scene_blocks)
     }
 }
 
+UNX_TEST(material_inputs_and_scene_blocks)
+{
+    // Material inputs (scene::Material: uv transform, second uv set, detail maps, height, emissive scale and mask, vertex
+    // colour, dithered opacity) and the meshes' optional vertex streams, CPU:
+    //   1  hasMaterialInputs: none by default, each field by itself, the emission's scale not;
+    //   2  materialUv (scale, then rotation, then offset) and materialUvToTangent (the transpose's rotation, a mirrored
+    //      axis's sign);
+    //   3  the scene file's blocks ("MINP", "VATT"): none without them, an exact round trip, the content hash;
+    //   4  validation: the values' ranges, the textures' formats, the classes, the streams' sizes, what a detail normal
+    //      map and a height map need of the mesh.
+    const scene::Material plain;
+    CHECK(!scene::hasMaterialInputs(plain));
+    {
+        scene::Material m = plain;
+        m.emissiveScale = 3;
+        CHECK(!scene::hasMaterialInputs(m));
+        auto with = [&](auto&& change) {
+            scene::Material x = plain;
+            change(x);
+            return scene::hasMaterialInputs(x);
+        };
+        CHECK(with([](scene::Material& x) { x.uvScale = { 2, 1 }; }) && with([](scene::Material& x) { x.uvOffset = { 0, 0.5f }; }) &&
+              with([](scene::Material& x) { x.uvRotation = 0.1f; }) && with([](scene::Material& x) { x.occlusionUvSet = 1; }) &&
+              with([](scene::Material& x) { x.detailColorTexture = 0; }) && with([](scene::Material& x) { x.detailNormalTexture = 0; }) &&
+              with([](scene::Material& x) { x.heightTexture = 0; }) && with([](scene::Material& x) { x.emissiveMaskTexture = 0; }) &&
+              with([](scene::Material& x) { x.vertexColorTint = true; }) && with([](scene::Material& x) { x.vertexAlphaBlend = true; }) &&
+              with([](scene::Material& x) { x.alphaDither = true; }));
+    }
+
+    // 2
+    {
+        const float2 same = scene::materialUv(plain, { 0.3f, -1.7f });
+        CHECK(same.x == 0.3f && same.y == -1.7f);
+        scene::Material m = plain;
+        m.uvScale = { 2, 3 };
+        m.uvRotation = 1.57079633f;  // a quarter turn: (x, y) -> (-y, x)
+        m.uvOffset = { 10, 20 };
+        const float2 t = scene::materialUv(m, { 1, 1 });
+        CHECK(std::fabs(t.x - (10 - 3)) < 1e-5f && std::fabs(t.y - (20 + 2)) < 1e-5f);
+        // a bump's slope along the texture's u lies along the mesh's -v after the quarter turn
+        const float2 s = scene::materialUvToTangent(m, { 1, 0 });
+        CHECK(std::fabs(s.x) < 1e-6f && std::fabs(s.y + 1) < 1e-6f);
+        scene::Material mirrored = plain;
+        mirrored.uvScale = { -4, 1 };
+        const float2 sm = scene::materialUvToTangent(mirrored, { 0.5f, 0.25f });
+        CHECK(sm.x == -0.5f && sm.y == 0.25f);
+        const float2 st = scene::materialUvToTangent(plain, { 0.5f, 0.25f });
+        CHECK(st.x == 0.5f && st.y == 0.25f);
+    }
+
+    // 3, 4
+    {
+        auto contains = [](const std::vector<uint8_t>& bytes, const char* tag) {
+            for (size_t i = 0; i + 4 <= bytes.size(); ++i)
+                if (std::memcmp(bytes.data() + i, tag, 4) == 0) return true;
+            return false;
+        };
+        scene::Scene before = tinyScene();
+        scene::Texture grey;
+        grey.name = "grey";
+        grey.width = grey.height = 2;
+        grey.format = scene::TextureFormat::R8Linear;
+        grey.texels = { 0, 85, 170, 255 };
+        scene::Texture colour;
+        colour.name = "colour";
+        colour.width = colour.height = 1;
+        colour.format = scene::TextureFormat::Rgba8Srgb;
+        colour.texels = { 128, 128, 128, 255 };
+        scene::Texture normal;
+        normal.name = "normal";
+        normal.width = normal.height = 1;
+        normal.format = scene::TextureFormat::Rg8Normal;
+        normal.texels = { 128, 128 };
+        before.textures = { grey, colour, normal };
+        before.meshes[0].tangents.assign(4, float4{ 1, 0, 0, 1 });
+        scene::validate(before);
+        const std::vector<uint8_t> beforeBytes = scene::serialize(before);
+        CHECK(!contains(beforeBytes, "MINP") && !contains(beforeBytes, "VATT"));
+
+        scene::Scene with = before;
+        scene::Material in;
+        in.name = "inputs";
+        in.alphaCutoff = 0.4f;
+        in.baseColorTexture = 1;
+        in.uvScale = { 2, -3 };
+        in.uvOffset = { 0.25f, -0.5f };
+        in.uvRotation = 0.7f;
+        in.occlusionUvSet = 1;
+        in.detailColorTexture = 1;
+        in.detailNormalTexture = 2;
+        in.detailScale = { 4, 5 };
+        in.detailOffset = { 0.1f, 0.2f };
+        in.detailUvSet = 1;
+        in.detailColorStrength = 0.6f;
+        in.detailNormalScale = 1.5f;
+        in.heightTexture = 0;
+        in.heightScale = 0.02f;
+        in.emissiveScale = 2.5f;
+        in.emissiveMaskTexture = 0;
+        in.vertexColorTint = true;
+        in.vertexAlphaBlend = true;
+        in.alphaDither = true;
+        with.materials.push_back(in);
+        scene::Material scaled = plain;  // (the emission's scale alone: in the block, though the renderer keeps no record for it)
+        scaled.name = "scaled";
+        scaled.emissiveScale = 0.5f;
+        with.materials.push_back(scaled);
+        with.meshes[0].uv1 = { { 0, 0 }, { 2, 0 }, { 2, 2 }, { 0, 2 } };
+        with.meshes[0].colors = { 0xFF0000FFu, 0xFF00FF00u, 0x80FF0000u, 0xFFFFFFFFu };
+        scene::validate(with);
+        const std::vector<uint8_t> withBytes = scene::serialize(with);
+        CHECK(contains(withBytes, "MINP") && contains(withBytes, "VATT"));
+        scene::Scene bare = with;  // the same scene without the inputs and the streams: the difference is the two blocks
+        scene::Material inBare = plain;
+        inBare.name = in.name, inBare.alphaCutoff = in.alphaCutoff, inBare.baseColorTexture = in.baseColorTexture;
+        bare.materials[bare.materials.size() - 2] = inBare;
+        bare.materials.back().emissiveScale = 1;
+        bare.meshes[0].uv1.clear();
+        bare.meshes[0].colors.clear();
+        CHECK(withBytes.size() == scene::serialize(bare).size() + (4 + 8 + 2 * (4 + 84)) + (4 + 8 + 4 + (8 + 4 * 8) + (8 + 4 * 4)));
+        const scene::Scene back = scene::deserialize(withBytes);
+        const scene::Material& b = back.materials[back.materials.size() - 2];
+        CHECK(b.uvScale.x == 2 && b.uvScale.y == -3 && b.uvOffset.x == 0.25f && b.uvOffset.y == -0.5f && b.uvRotation == 0.7f && b.occlusionUvSet == 1 &&
+              b.detailColorTexture == 1 && b.detailNormalTexture == 2 && b.detailScale.x == 4 && b.detailScale.y == 5 && b.detailOffset.x == 0.1f &&
+              b.detailOffset.y == 0.2f && b.detailUvSet == 1 && b.detailColorStrength == 0.6f && b.detailNormalScale == 1.5f && b.heightTexture == 0 &&
+              b.heightScale == 0.02f && b.emissiveScale == 2.5f && b.emissiveMaskTexture == 0 && b.vertexColorTint && b.vertexAlphaBlend && b.alphaDither);
+        CHECK(back.materials.back().emissiveScale == 0.5f && !scene::hasMaterialInputs(back.materials.back()) && !scene::hasMaterialInputs(back.materials[0]));
+        CHECK(back.meshes[0].uv1.size() == 4 && back.meshes[0].uv1[2].x == 2 && back.meshes[0].colors.size() == 4 && back.meshes[0].colors[2] == 0x80FF0000u);
+        CHECK(scene::serialize(back) == withBytes);
+        CHECK(scene::contentHash(with) != scene::contentHash(bare));
+
+        auto invalid = [&](auto&& change) {
+            scene::Scene s = with;
+            change(s, s.materials[s.materials.size() - 2]);
+            return throws([&] { scene::validate(s); });
+        };
+        CHECK(invalid([](scene::Scene&, scene::Material& m) { m.uvScale.x = 0; }));
+        CHECK(invalid([](scene::Scene&, scene::Material& m) { m.detailScale.y = 0; }));
+        CHECK(invalid([](scene::Scene&, scene::Material& m) { m.detailUvSet = 2; }));
+        CHECK(invalid([](scene::Scene&, scene::Material& m) { m.detailNormalScale = 5; }));
+        CHECK(invalid([](scene::Scene&, scene::Material& m) { m.heightScale = 1.5f; }));
+        CHECK(invalid([](scene::Scene&, scene::Material& m) { m.emissiveScale = -1; }));
+        CHECK(invalid([](scene::Scene&, scene::Material& m) { m.alphaCutoff = 0; }));                     // (dither without an alpha test)
+        CHECK(invalid([](scene::Scene&, scene::Material& m) { m.heightTexture = 1; }));                   // (an sRGB texture as a height map)
+        CHECK(invalid([](scene::Scene&, scene::Material& m) { m.detailNormalTexture = 0; }));             // (an R8 texture as a normal map)
+        CHECK(invalid([](scene::Scene&, scene::Material& m) { m.emissiveMaskTexture = 7; }));             // (out of range)
+        CHECK(invalid([](scene::Scene&, scene::Material& m) { m.cls = scene::MaterialClass::Cut; }));
+        CHECK(invalid([](scene::Scene& s, scene::Material&) { s.meshes[0].uv1.pop_back(); }));
+        CHECK(invalid([](scene::Scene& s, scene::Material&) { s.meshes[0].colors.push_back(0); }));
+        // a detail normal map on uv set 0, or a height map, on a mesh the material is used on: tangents and uv0
+        auto usedOnMesh = [&](auto&& change) {
+            scene::Scene s = with;
+            s.meshes[0].submeshes[0].material = (uint32_t)s.materials.size() - 2;
+            change(s, s.materials[s.materials.size() - 2]);
+            return throws([&] { scene::validate(s); });
+        };
+        CHECK(!usedOnMesh([](scene::Scene&, scene::Material&) {}));
+        CHECK(usedOnMesh([](scene::Scene& s, scene::Material& m) { m.detailUvSet = 0, s.meshes[0].tangents.clear(); }));
+        CHECK(!usedOnMesh([](scene::Scene& s, scene::Material&) { s.meshes[0].tangents.clear(); }));  // (set 1: the frame of its own derivatives)
+    }
+}
+
 UNX_TEST(subsurface_profile_and_sampling)
 {
     // Subsurface class, stage B (MaterialModel.h: the diffusion profile and the scatter pass's estimate), CPU:
@@ -2796,6 +2958,135 @@ UNX_TEST(eye_model_on_the_gpu)
     CHECK(worstPoint < 1e-5);
     CHECK(worstWord < 1e-5);
     CHECK(worstCosine < 1e-4);
+    testDevice().deferRelease(constants);
+    testDevice().deferRelease(rb);
+}
+
+UNX_TEST(material_inputs_on_the_gpu)
+{
+    // Material inputs on the GPU: the records GpuScene packs (gpu::MaterialInputs, a material's index in its 'inputs'; the
+    // emission's scale in the material's emissive) and the meshes' vertex streams (gpu::VertexAttributes), read through
+    // FrameConstants by Passes/Test/MaterialInputs.hlsl - the material's uv and a slope in the mesh's frame against
+    // scene::materialUv / materialUvToTangent, the alpha test's threshold of a dithered material within [cutoff - 0.5,
+    // cutoff + 0.5] and spread over it, a plain one's equal to its cutoff.
+    scene::Scene s = tinyScene();
+    const uint32_t first = (uint32_t)s.materials.size();
+    {
+        scene::Material a;
+        a.name = "transformed";
+        a.alphaCutoff = 0.5f;
+        a.alphaDither = true;
+        a.uvScale = { 2, -3 };
+        a.uvRotation = 0.7f;
+        a.uvOffset = { 0.25f, -0.5f };
+        a.vertexColorTint = true;
+        a.emissive = { 1, 2, 3 };
+        a.emissiveScale = 4;
+        s.materials.push_back(a);
+        scene::Material b;  // no record: the emission's scale alone, and an alpha test without dither
+        b.name = "scaled";
+        b.alphaCutoff = 0.3f;
+        b.emissive = { 1, 1, 1 };
+        b.emissiveScale = 0.5f;
+        s.materials.push_back(b);
+        scene::Material c;
+        c.name = "second set";
+        c.occlusionUvSet = 1;
+        c.detailUvSet = 1;
+        c.detailScale = { 4, 5 };
+        c.vertexAlphaBlend = true;
+        s.materials.push_back(c);
+        s.meshes[0].uv1 = { { 0.5f, 0 }, { 2.5f, 0 }, { 2.5f, 2 }, { 0.5f, 2 } };
+        s.meshes[0].colors = { 0xFF0000FFu, 0xFF00FF00u, 0x80FF0000u, 0xFFFFFFFFu };
+    }
+    const uint32_t count = (uint32_t)s.materials.size() - first;
+    scene::validate(s);
+    GpuScene gs(testDevice());
+    gs.upload(s);
+    CHECK(gs.materials()[first].inputs == 0 && gs.materials()[first + 1].inputs == gpu::kNone && gs.materials()[first + 2].inputs == 1 &&
+          gs.materials()[0].inputs == gpu::kNone);
+    CHECK(gs.materials()[first].emissive.x == 4 && gs.materials()[first].emissive.z == 12 && gs.materials()[first + 1].emissive.y == 0.5f);
+    CHECK(!gs.anyHeight());
+    gpu::FrameConstants fc{};
+    gs.fill(fc);
+    CHECK(fc.materialInputs != gpu::kNone && fc.meshAttributes != gpu::kNone && fc.vertexAttributes != gpu::kNone);
+    ComPtr<ID3D12Resource> constants, rb;
+    const uint32_t n = 4096, bytes = n * 64;
+    {
+        D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD }, rp{ D3D12_HEAP_TYPE_READBACK };
+        D3D12_RESOURCE_DESC1 rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = (sizeof(gpu::FrameConstants) + 255) / 256 * 256;
+        rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        check(testDevice().d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&constants)),
+              "constants");
+        void* mapped = nullptr;
+        check(constants->Map(0, nullptr, &mapped), "map constants");
+        std::memcpy(mapped, &fc, sizeof fc);
+        constants->Unmap(0, nullptr);
+        rd.Width = bytes;
+        check(testDevice().d3d()->CreateCommittedResource3(&rp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&rb)), "readback");
+    }
+    ID3D12PipelineState* pso = shaders().compute("Passes/Test/MaterialInputs");
+    RenderGraph g(testDevice());
+    const BufferRef out = g.createBuffer({ "material inputs out", bytes, 0 });
+    const D3D12_GPU_VIRTUAL_ADDRESS address = constants->GetGPUVirtualAddress();
+    g.addPass("material inputs", QueueType::Graphics, [&](PassBuilder& b) { b.use(out, Use::UavCompute); },
+              [=](PassContext& ctx) {
+                  const uint32_t k[8] = { ctx.uav(out), n, first, count, 0, 4, 0, 0 };  // (mesh 0, its 4 vertices)
+                  ctx.cmd->SetPipelineState(pso);
+                  ctx.bindFrameConstants(address);
+                  ctx.computeConstants(k, 8);
+                  ctx.cmd->Dispatch((n + 63) / 64, 1, 1);
+              });
+    ID3D12Resource* dst = rb.Get();
+    g.addPass("material inputs readback", QueueType::Graphics,
+              [&](PassBuilder& b) {
+                  b.use(out, Use::CopySrc);
+                  b.keep();
+              },
+              [=](PassContext& ctx) { ctx.cmd->CopyBufferRegion(dst, 0, ctx.resource(out), 0, bytes); });
+    g.execute(nullptr);
+    for (uint32_t q = 0; q < kQueueTypeCount; ++q) testDevice().queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
+    const float* v = nullptr;
+    check(rb->Map(0, nullptr, (void**)&v), "map readback");
+    double worstUv = 0, worstSlope = 0, ditherLo = 1, ditherHi = 0, ditherMean = 0;
+    uint32_t wrong = 0, dithered = 0;
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        const float* p = v + 16 * i;
+        const uint32_t* w = reinterpret_cast<const uint32_t*>(p);
+        const uint32_t k = i % count;
+        const scene::Material& m = s.materials[first + k];
+        const float2 uv = scene::materialUv(m, { p[0], p[1] }), slope = scene::materialUvToTangent(m, { p[2], p[3] });
+        worstUv = std::max({ worstUv, std::fabs((double)p[4] - uv.x), std::fabs((double)p[5] - uv.y) });
+        worstSlope = std::max({ worstSlope, std::fabs((double)p[6] - slope.x), std::fabs((double)p[7] - slope.y) });
+        const uint32_t wantFlags = k == 0 ? (gpu::MaterialInputUv | gpu::MaterialInputVertexTint | gpu::MaterialInputDither)
+                                          : k == 2 ? (gpu::MaterialInputOcclusionUv1 | gpu::MaterialInputDetailUv1 | gpu::MaterialInputVertexBlend) : 0u;
+        wrong += w[8] != wantFlags || w[9] != (k == 0 ? 0u : k == 2 ? 1u : gpu::kNone);
+        wrong += k == 2 && (p[10] != 4.0f || p[11] != 5.0f);
+        // the alpha test's threshold: a dithered material's within half of its cutoff, the others' their cutoff
+        if (k == 0)
+        {
+            ++dithered;
+            ditherLo = std::min(ditherLo, (double)p[12]);
+            ditherHi = std::max(ditherHi, (double)p[12]);
+            ditherMean += p[12];
+        }
+        else wrong += p[12] != m.alphaCutoff;
+        // the mesh's streams: base 1 (its records are the buffer's first), vertex i % 4
+        const uint32_t vertex = i % 4;
+        wrong += w[13] != 1 || p[14] != s.meshes[0].uv1[vertex].x || w[15] != s.meshes[0].colors[vertex];
+    }
+    rb->Unmap(0, nullptr);
+    ditherMean /= std::max(dithered, 1u);
+    logf("    material inputs on the GPU over %u points: uv %.2e, slope %.2e against scene::materialUv / materialUvToTangent; %u wrong record or stream words; "
+         "dither threshold in [%.3f, %.3f], mean %.3f\n", n, worstUv, worstSlope, wrong, ditherLo, ditherHi, ditherMean);
+    CHECK(worstUv < 1e-5 && worstSlope < 1e-5);
+    CHECK(wrong == 0);
+    CHECK(ditherLo >= 1.0 / 255 - 1e-6 && ditherLo < 0.1 && ditherHi > 0.9 && ditherHi <= 1.0 && std::fabs(ditherMean - 0.5) < 0.05);
     testDevice().deferRelease(constants);
     testDevice().deferRelease(rb);
 }

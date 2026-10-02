@@ -561,7 +561,7 @@ void writeCloth(Writer& w, const Scene& s)
 
 // Eye extension block, written only when a material is an eye (eyeIrisRadius != 0): u32 tag "EYES", u64 count, then per
 // material its index, eyeIrisRadius, eyeIrisDepth, eyeLimbusWidth, eyeLimbusDarkening, eyePupilScale, eyeIrisConcavity,
-// eyeIor, eyeAxis. After it only the weather blocks.
+// eyeIor, eyeAxis.
 constexpr uint32_t kEyeTag = 0x53455945u;  // "EYES"
 
 bool hasEye(const Material& m) { return m.eyeIrisRadius != 0.0f; }
@@ -595,12 +595,87 @@ void writeEye(Writer& w, const Scene& s)
     }
 }
 
+// Material inputs extension block, written only when a material has one (hasMaterialInputs, or an emissiveScale other
+// than 1): u32 tag "MINP", u64 count, then per material its index, uvScale, uvOffset, uvRotation, occlusionUvSet,
+// detailColorTexture, detailNormalTexture, detailScale, detailOffset, detailUvSet, detailColorStrength,
+// detailNormalScale, heightTexture, heightScale, emissiveScale, emissiveMaskTexture and a u32 of flags (1 vertexColorTint,
+// 2 vertexAlphaBlend, 4 alphaDither).
+constexpr uint32_t kInputsTag = 0x504E494Du;  // "MINP"
+
+bool writesInputs(const Material& m) { return hasMaterialInputs(m) || m.emissiveScale != 1.0f; }
+
+bool anyInputs(const Scene& s)
+{
+    for (const Material& m : s.materials)
+        if (writesInputs(m)) return true;
+    return false;
+}
+
+void writeInputs(Writer& w, const Scene& s)
+{
+    w.pod(kInputsTag);
+    uint64_t count = 0;
+    for (const Material& m : s.materials) count += writesInputs(m);
+    w.pod(count);
+    for (uint32_t i = 0; i < s.materials.size(); ++i)
+    {
+        const Material& m = s.materials[i];
+        if (!writesInputs(m)) continue;
+        w.pod(i);
+        w.pod(m.uvScale);
+        w.pod(m.uvOffset);
+        w.pod(m.uvRotation);
+        w.pod(m.occlusionUvSet);
+        w.pod(m.detailColorTexture);
+        w.pod(m.detailNormalTexture);
+        w.pod(m.detailScale);
+        w.pod(m.detailOffset);
+        w.pod(m.detailUvSet);
+        w.pod(m.detailColorStrength);
+        w.pod(m.detailNormalScale);
+        w.pod(m.heightTexture);
+        w.pod(m.heightScale);
+        w.pod(m.emissiveScale);
+        w.pod(m.emissiveMaskTexture);
+        w.pod((uint32_t)((m.vertexColorTint ? 1u : 0u) | (m.vertexAlphaBlend ? 2u : 0u) | (m.alphaDither ? 4u : 0u)));
+    }
+}
+
+// Vertex attributes extension block, written only when a mesh has a second uv set or vertex colours: u32 tag "VATT",
+// u64 count, then per mesh its index, uv1 and colors (arrays; an absent one is empty). After it only the weather blocks.
+constexpr uint32_t kAttributesTag = 0x54544156u;  // "VATT"
+
+bool hasAttributes(const Mesh& m) { return !m.uv1.empty() || !m.colors.empty(); }
+
+bool anyAttributes(const Scene& s)
+{
+    for (const Mesh& m : s.meshes)
+        if (hasAttributes(m)) return true;
+    return false;
+}
+
+void writeAttributes(Writer& w, const Scene& s)
+{
+    w.pod(kAttributesTag);
+    uint64_t count = 0;
+    for (const Mesh& m : s.meshes) count += hasAttributes(m);
+    w.pod(count);
+    for (uint32_t i = 0; i < s.meshes.size(); ++i)
+    {
+        const Mesh& m = s.meshes[i];
+        if (!hasAttributes(m)) continue;
+        w.pod(i);
+        w.podArray(m.uv1);
+        w.podArray(m.colors);
+    }
+}
+
 // The scene's weather, two optional blocks after the material blocks (a scene without them writes the bytes it wrote
 // before). "CLDS", written when the layer has coverage: coverage, baseAltitude, topAltitude, sigmaMax, albedo, windX,
 // windZ (7 floats). "FOGS", written when the fog is enabled or the scene has fog volumes: u32 enabled, density,
 // heightFalloff, height, albedo (3), phaseG, startDistance, skyAmount, noiseAmount, noiseScale (11 floats), u64 volume
 // count, then per volume centre (3), halfSize (3), yaw, u32 shape, density, heightFalloff, edge, albedo (3). The last
-// blocks of the file.
+// blocks of the file (after the material inputs and the vertex attributes).
 constexpr uint32_t kCloudTag = 0x53444C43u;  // "CLDS"
 constexpr uint32_t kFogTag = 0x53474F46u;    // "FOGS"
 
@@ -681,6 +756,8 @@ std::vector<uint8_t> serialize(const Scene& s)
     if (anySubsurface(s)) writeSubsurface(w, s);
     if (anyCloth(s)) writeCloth(w, s);
     if (anyEye(s)) writeEye(w, s);
+    if (anyInputs(s)) writeInputs(w, s);
+    if (anyAttributes(s)) writeAttributes(w, s);
     if (anyClouds(s)) writeClouds(w, s);
     if (anyFog(s)) writeFog(w, s);
     return std::move(w.out);
@@ -919,6 +996,48 @@ Scene deserialize(const std::vector<uint8_t>& bytes)
         }
         tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
     }
+    if (tag == kInputsTag)
+    {
+        const uint64_t count = r.pod<uint64_t>();
+        for (uint64_t k = 0; k < count; ++k)
+        {
+            const uint32_t i = r.pod<uint32_t>();
+            if (i >= s.materials.size()) fail("unxscene: material inputs of material %u of %zu", i, s.materials.size());
+            Material& m = s.materials[i];
+            m.uvScale = r.pod<float2>();
+            m.uvOffset = r.pod<float2>();
+            m.uvRotation = r.pod<float>();
+            m.occlusionUvSet = r.pod<uint32_t>();
+            m.detailColorTexture = r.pod<uint32_t>();
+            m.detailNormalTexture = r.pod<uint32_t>();
+            m.detailScale = r.pod<float2>();
+            m.detailOffset = r.pod<float2>();
+            m.detailUvSet = r.pod<uint32_t>();
+            m.detailColorStrength = r.pod<float>();
+            m.detailNormalScale = r.pod<float>();
+            m.heightTexture = r.pod<uint32_t>();
+            m.heightScale = r.pod<float>();
+            m.emissiveScale = r.pod<float>();
+            m.emissiveMaskTexture = r.pod<uint32_t>();
+            const uint32_t flags = r.pod<uint32_t>();
+            m.vertexColorTint = (flags & 1u) != 0;
+            m.vertexAlphaBlend = (flags & 2u) != 0;
+            m.alphaDither = (flags & 4u) != 0;
+        }
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
+    if (tag == kAttributesTag)
+    {
+        const uint64_t count = r.pod<uint64_t>();
+        for (uint64_t k = 0; k < count; ++k)
+        {
+            const uint32_t i = r.pod<uint32_t>();
+            if (i >= s.meshes.size()) fail("unxscene: vertex attributes of mesh %u of %zu", i, s.meshes.size());
+            r.podArray(s.meshes[i].uv1);
+            r.podArray(s.meshes[i].colors);
+        }
+        tag = r.at < bytes.size() ? r.pod<uint32_t>() : 0;
+    }
     if (tag == kCloudTag)
     {
         CloudLayer& c = s.clouds;
@@ -1015,6 +1134,30 @@ std::string contentHash(const Scene& scene)
     return Sha256::hex(std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
 }
 
+bool hasMaterialInputs(const Material& m)
+{
+    const Material d;
+    return m.uvScale.x != d.uvScale.x || m.uvScale.y != d.uvScale.y || m.uvOffset.x != 0 || m.uvOffset.y != 0 || m.uvRotation != 0 || m.occlusionUvSet != 0 ||
+           m.detailColorTexture != kNone || m.detailNormalTexture != kNone || m.heightTexture != kNone || m.emissiveMaskTexture != kNone || m.vertexColorTint ||
+           m.vertexAlphaBlend || m.alphaDither;
+}
+
+float2 materialUv(const Material& m, float2 uv)
+{
+    if (m.uvScale.x == 1 && m.uvScale.y == 1 && m.uvOffset.x == 0 && m.uvOffset.y == 0 && m.uvRotation == 0) return uv;
+    const float c = std::cos(m.uvRotation), s = std::sin(m.uvRotation);
+    const float x = uv.x * m.uvScale.x, y = uv.y * m.uvScale.y;
+    return { c * x - s * y + m.uvOffset.x, s * x + c * y + m.uvOffset.y };
+}
+
+float2 materialUvToTangent(const Material& m, float2 xy)
+{
+    if (m.uvScale.x == 1 && m.uvScale.y == 1 && m.uvRotation == 0) return xy;
+    const float c = std::cos(m.uvRotation), s = std::sin(m.uvRotation);
+    const float sx = m.uvScale.x < 0 ? -1.0f : 1.0f, sy = m.uvScale.y < 0 ? -1.0f : 1.0f;
+    return { sx * (c * xy.x + s * xy.y), sy * (-s * xy.x + c * xy.y) };
+}
+
 void validate(const Scene& s)
 {
     for (size_t i = 0; i < s.textures.size(); ++i)
@@ -1030,6 +1173,28 @@ void validate(const Scene& s)
         const Material& m = s.materials[i];
         if (!texOk(m.baseColorTexture) || !texOk(m.normalTexture) || !texOk(m.roughMetalTexture) || !texOk(m.emissiveTexture) || !texOk(m.occlusionTexture))
             fail("material %zu '%s': texture index out of range", i, m.name.c_str());
+        // material inputs
+        {
+            auto texIs = [&](uint32_t t, TextureFormat f) { return t == kNone || (t < s.textures.size() && s.textures[t].format == f); };
+            if (!texIs(m.detailColorTexture, TextureFormat::Rgba8Srgb) || !texIs(m.detailNormalTexture, TextureFormat::Rg8Normal) ||
+                !texIs(m.heightTexture, TextureFormat::R8Linear) || !texIs(m.emissiveMaskTexture, TextureFormat::R8Linear))
+                fail("material %zu '%s': a detail colour (Rgba8Srgb), detail normal (Rg8Normal), height or emissive mask (R8Linear) texture is out of range or of another format",
+                     i, m.name.c_str());
+            auto finite2 = [](float2 v) { return std::isfinite(v.x) && std::isfinite(v.y); };
+            if (!(finite2(m.uvScale) && m.uvScale.x != 0 && m.uvScale.y != 0 && finite2(m.uvOffset) && std::isfinite(m.uvRotation)))
+                fail("material %zu '%s': the uv transform needs a finite scale other than 0, a finite offset and rotation", i, m.name.c_str());
+            if (!(finite2(m.detailScale) && m.detailScale.x != 0 && m.detailScale.y != 0 && finite2(m.detailOffset)))
+                fail("material %zu '%s': the detail maps need a finite uv scale other than 0 and a finite offset", i, m.name.c_str());
+            if (m.occlusionUvSet > 1 || m.detailUvSet > 1) fail("material %zu '%s': a uv set is 0 or 1", i, m.name.c_str());
+            if (!(m.detailColorStrength >= 0 && m.detailColorStrength <= 1 && m.detailNormalScale >= 0 && m.detailNormalScale <= 4))
+                fail("material %zu '%s': detailColorStrength in [0, 1], detailNormalScale in [0, 4]", i, m.name.c_str());
+            if (!(m.heightScale >= 0 && m.heightScale <= 1)) fail("material %zu '%s': heightScale in [0, 1] (metres)", i, m.name.c_str());
+            if (!(m.emissiveScale >= 0 && std::isfinite(m.emissiveScale))) fail("material %zu '%s': emissiveScale >= 0 (finite)", i, m.name.c_str());
+            if (m.alphaDither && !(m.alphaCutoff > 0)) fail("material %zu '%s': dithered opacity is the alpha test's (alphaCutoff > 0)", i, m.name.c_str());
+            if (hasMaterialInputs(m) && (m.cls == MaterialClass::Cut || m.cls == MaterialClass::Terrain))
+                fail("material %zu '%s': material inputs (uv transform, second uv set, detail, height, emissive mask, vertex colour, dither) are not defined on the "
+                     "Cut and Terrain classes", i, m.name.c_str());
+        }
         if (m.roughness < 0 || m.roughness > 1 || m.metallic < 0 || m.metallic > 1) fail("material %zu '%s': roughness/metallic outside [0,1]", i, m.name.c_str());
         if (m.cls == MaterialClass::Hair && !(m.hairEumelanin >= 0 && m.hairPheomelanin >= 0 && m.hairBetaN > 0 && m.hairBetaN <= 1 && std::isfinite(m.hairTilt) && m.ior > 1))
             fail("material %zu '%s': hair needs melanin >= 0, beta_N in (0, 1], a finite tilt and ior > 1", i, m.name.c_str());
@@ -1123,7 +1288,8 @@ void validate(const Scene& s)
     {
         const Mesh& m = s.meshes[i];
         const size_t n = m.positions.size();
-        if (m.normals.size() != n || (!m.uv0.empty() && m.uv0.size() != n) || (!m.tangents.empty() && m.tangents.size() != n))
+        if (m.normals.size() != n || (!m.uv0.empty() && m.uv0.size() != n) || (!m.tangents.empty() && m.tangents.size() != n) ||
+            (!m.uv1.empty() && m.uv1.size() != n) || (!m.colors.empty() && m.colors.size() != n))
             fail("mesh %zu '%s': vertex stream sizes differ", i, m.name.c_str());
         if (m.indices.size() % 3) fail("mesh %zu '%s': index count not a multiple of 3", i, m.name.c_str());
         for (uint32_t idx : m.indices)
@@ -1135,6 +1301,14 @@ void validate(const Scene& s)
         for (const Submesh& sm : m.submeshes)
             if (s.materials[sm.material].normalTexture != kNone && (m.tangents.empty() || m.uv0.empty()))
                 fail("mesh %zu '%s': a normal-mapped material needs tangents and uv0", i, m.name.c_str());
+        for (const Submesh& sm : m.submeshes)
+        {
+            // (a detail normal map on uv set 1 takes its frame from that set's derivatives: no tangents needed)
+            const Material& mat = s.materials[sm.material];
+            if (mat.detailNormalTexture != kNone && mat.detailUvSet == 0 && (m.tangents.empty() || m.uv0.empty()))
+                fail("mesh %zu '%s': a detail normal map on uv set 0 needs tangents and uv0", i, m.name.c_str());
+            if (mat.heightTexture != kNone && mat.heightScale > 0 && m.uv0.empty()) fail("mesh %zu '%s': a height map needs uv0", i, m.name.c_str());
+        }
         for (const Submesh& sm : m.submeshes)
             if (s.materials[sm.material].anisotropy > 0 && m.tangents.empty())
                 fail("mesh %zu '%s': an anisotropic material needs tangents (the lobe's direction)", i, m.name.c_str());
