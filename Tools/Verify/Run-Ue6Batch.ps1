@@ -188,6 +188,8 @@ if ($Skip -notcontains "variants") {
         # after the captured image - the output encoding: the timing alone says something).
         # The captured picture is the upscaler's output before the post chain (--capture-output); the chain layer is
         # what the chain takes - after the motion blur that follows the upscale.
+        # A scene of a group may name its camera: scene@camera (the gate's --camera for that scene; its results go under
+        # scene_camera).
         $abGroups = @(
             @{ Name = "cull"; Scenes = "city_block,forest_thin"; Time = $true; Rows = @(
                     @{ N = "queue_off"; S = "visibility.traversal_work_queue=false"; E = "same" },
@@ -210,7 +212,7 @@ if ($Skip -notcontains "variants") {
                     @{ N = "coarse_off"; S = "shadow.vsm.coarse_pages=0,shadow.vsm.page_dilation=0"; E = "differs" },
                     @{ N = "contact_off"; S = "shadow.vsm.screen_ray_length=0"; E = "differs" }) },
             # the levels coarser than their casters: every caster drawn (the reference), left out, or as proxies (default)
-            @{ Name = "forest"; Scenes = "forest_thin,forest_combat,waterside"; Time = $true; Layers = "shadow"; Rows = @(
+            @{ Name = "forest"; Scenes = "forest_thin,forest_combat,waterside,showcase_shore@forest_edge"; Time = $true; Layers = "shadow"; Rows = @(
                     @{ N = "every_caster"; S = "shadow.vsm.min_caster_texels=0"; E = "differs" },
                     @{ N = "small_left_out"; S = "shadow.vsm.aggregate_small_casters=false"; E = "differs" }) },
             @{ Name = "lights"; Scenes = "city_night,te_lounge"; Time = $true; Rows = @(
@@ -220,10 +222,10 @@ if ($Skip -notcontains "variants") {
             @{ Name = "local"; Scenes = "city_night,te_lounge"; Base = "shading.mega_lights=false"; Gate = "--moving"; Time = $true; Layers = "shadow"; Rows = @(
                     @{ N = "six_lights_a_request"; S = "shadow.vsm.local_request_views=252"; E = "same" },
                     @{ N = "local_separate_off"; S = "shadow.vsm.local_static_separate=false"; E = "same" }) },
-            # glass casters (the generated scenes have none): the game scenes
-            @{ Name = "tint"; Scenes = "bt_lobby,te_lounge"; Time = $true; Layers = "shadow"; Rows = @(
+            # glass casters: the game scenes and the atrium's roof (the first generated scene with them)
+            @{ Name = "tint"; Scenes = "bt_lobby,te_lounge,showcase_atrium@floor"; Time = $true; Layers = "shadow"; Rows = @(
                     @{ N = "glass_opaque"; S = "shadow.vsm.translucent_tint=false"; E = "differs" }) },
-            @{ Name = "cards"; Scenes = "bt_lobby,interior"; Time = $true; Layers = "gi,cardalbedo,cardfinal"; Rows = @(
+            @{ Name = "cards"; Scenes = "bt_lobby,interior,showcase_bathhouse"; Time = $true; Layers = "gi,cardalbedo,cardfinal"; Rows = @(
                     @{ N = "capture_clusters"; S = "surface_cache.mesh_cards_capture_clusters=true"; E = "same" },
                     @{ N = "feedback_off"; S = "surface_cache.feedback=false"; E = "differs" },
                     @{ N = "feedback_gather"; S = "surface_cache.feedback_gather=true"; E = "differs" },
@@ -272,18 +274,58 @@ if ($Skip -notcontains "variants") {
             # under an overcast, in rain (8 mm/h): the far slices' sky light and the rain's veil
             @{ Name = "weather"; Scenes = "ridge_sunset,city_block"; Base = "atmosphere.fog.enabled=true"; Gate = "--clouds 0.8 --rain 8"; Time = $true; Rows = @(
                     @{ N = "far_sky_light_off"; S = "atmosphere.fog.far_sky_light=false"; E = "differs" },
-                    @{ N = "rain_veil_off"; S = "atmosphere.fog.rain_veil=false"; E = "differs" }) },
+                    @{ N = "rain_veil"; S = "atmosphere.fog.rain_veil=true"; E = "differs" }) },  # (off by default: the veil has no top)
             # a local fog volume in the interior's view (centre 1, 0.8, -2; radii 1, 0.8, 1; 0.8 per m): still, then as
             # steam (height falloff 2, rising 0.3 m/s, turbulence 0.6 at 0.4 m) - against the room without it
             @{ Name = "steam"; Scenes = "interior"; Time = $true; Rows = @(
                     @{ N = "mist"; G = "--fog-volume 1,0.8,-2,1,0.8,1,0.8"; E = "differs" },
                     @{ N = "steam"; G = "--fog-volume 1,0.8,-2,1,0.8,1,0.8,0,2,0.3,0.6,0.4"; E = "differs" }) },
-            @{ Name = "fog"; Scenes = "ridge_sunset,city_night"; Base = "atmosphere.fog.enabled=true"; Rows = @(
+            @{ Name = "fog"; Scenes = "ridge_sunset,city_night,showcase_shore@reeds"; Base = "atmosphere.fog.enabled=true"; Rows = @(
                     @{ N = "air_order_off"; S = "atmosphere.fog.air_order=false"; E = "differs" },
                     @{ N = "second_layer"; S = "atmosphere.fog.second_density_per_m=0.02,atmosphere.fog.second_height_falloff_per_m=0.2"; E = "differs" }) },
-            @{ Name = "hair"; Scenes = "hair_ball"; Layers = "gi,refl"; Rows = @(
+            @{ Name = "hair"; Scenes = "hair_ball,showcase_bathhouse@figure"; Layers = "gi,refl"; Rows = @(
                     @{ N = "hair_off_rays"; S = "raytracing.hair=false"; E = "differs" }) },
-            @{ Name = "eye"; Scenes = "shading_ball"; Gate = "--camera eye_close"; Rows = @(
+            # ---- the showcase scenes (UE6_WORKPLAN_KO.md 15: Tools/SceneGen/src/Showcase.cpp; the gate applies their extras -
+            # light functions, decals, one camera's rain). A camera a group: what the camera shows is what its rows switch.
+            @{ Name = "glass_bath"; Scenes = "showcase_bathhouse"; Gate = "--camera panes"; Time = $true; Layers = "shadow,gi,cardfinal"; Rows = @(
+                    @{ N = "glass_opaque"; S = "shadow.vsm.translucent_tint=false"; E = "differs" },
+                    @{ N = "cards_untinted"; S = "surface_cache.direct_tint=false"; E = "differs" },
+                    @{ N = "glass_stops_rays"; S = "raytracing.see_through_translucent=false"; E = "differs" }) },
+            @{ Name = "glass_atrium"; Scenes = "showcase_atrium"; Gate = "--camera floor"; Time = $true; Layers = "shadow,gi,cardfinal"; Rows = @(
+                    @{ N = "glass_opaque"; S = "shadow.vsm.translucent_tint=false"; E = "differs" },
+                    @{ N = "cards_untinted"; S = "surface_cache.direct_tint=false"; E = "differs" },
+                    @{ N = "glass_stops_rays"; S = "raytracing.see_through_translucent=false"; E = "differs" }) },
+            @{ Name = "glass_lamp"; Scenes = "showcase_bathhouse"; Gate = "--camera lamp"; Time = $true; Layers = "gi,cardfinal"; Rows = @(
+                    @{ N = "cards_lights_tinted"; S = "surface_cache.direct_tint_lights=true"; E = "differs" }) },
+            @{ Name = "emissive_bath"; Scenes = "showcase_bathhouse"; Gate = "--camera bath"; Layers = "gi,cardfinal"; Rows = @(
+                    @{ N = "emissive_cards_off"; S = "surface_cache.mesh_cards_emissive_light_sources=false"; E = "differs" },
+                    @{ N = "steam_off"; S = "atmosphere.fog.local_volumes=false"; E = "differs" }) },
+            @{ Name = "emissive_atrium"; Scenes = "showcase_atrium"; Gate = "--camera gallery"; Layers = "gi,cardfinal"; Rows = @(
+                    @{ N = "emissive_cards_off"; S = "surface_cache.mesh_cards_emissive_light_sources=false"; E = "differs" }) },
+            @{ Name = "figure"; Scenes = "showcase_bathhouse"; Gate = "--camera figure"; Time = $true; Layers = "gi,refl"; Rows = @(
+                    @{ N = "eye_plain"; S = "shading.eye_model=false"; E = "differs" },
+                    @{ N = "scatter_off"; S = "shading.subsurface_scatter=false"; E = "differs" },
+                    @{ N = "hair_off_rays"; S = "raytracing.hair=false"; E = "differs" }) },
+            @{ Name = "inputs"; Scenes = "showcase_bathhouse"; Gate = "--camera tiles"; Time = $true; Rows = @(
+                    @{ N = "parallax_off"; S = "material.parallax_steps=0"; E = "differs" },
+                    @{ N = "parallax_shadow"; S = "material.parallax_shadow=true"; E = "differs" }) },
+            @{ Name = "leaves"; Scenes = "showcase_atrium"; Gate = "--camera planter"; Layers = "gi"; Rows = @(
+                    @{ N = "leaf_transmission_off"; S = "surface_cache.foliage_transmission=false"; E = "differs" }) },
+            @{ Name = "farfield"; Scenes = "showcase_shore"; Gate = "--camera forest_edge"; Time = $true; Layers = "gi,refl,shadow"; Rows = @(
+                    @{ N = "far_field"; S = "raytracing.far_field=true"; E = "differs" },
+                    @{ N = "far_field_2deg"; S = "raytracing.far_field=true,raytracing.far_field_cull_angle_deg=2.0"; E = "differs" },
+                    @{ N = "every_caster"; S = "shadow.vsm.min_caster_texels=0"; E = "differs" }) },
+            @{ Name = "ridge"; Scenes = "showcase_shore"; Gate = "--camera ridge"; Time = $true; Rows = @(
+                    @{ N = "veil_off"; S = "atmosphere.clouds.veil=false"; E = "differs" },
+                    @{ N = "steps_unfiltered"; S = "atmosphere.clouds.filtered_steps=false"; E = "differs" }) },
+            @{ Name = "mist"; Scenes = "showcase_shore"; Gate = "--camera reeds"; Time = $true; Rows = @(
+                    @{ N = "volumes_off"; S = "atmosphere.fog.local_volumes=false"; E = "differs" }) },
+            # the rain on the shore's pier (the extras' weather of its rain camera: 8 mm/h, wetness 0.9): the veil, and
+            # the frame without the extras' rain
+            @{ Name = "rain"; Scenes = "showcase_shore"; Gate = "--camera rain"; Time = $true; Rows = @(
+                    @{ N = "rain_veil"; S = "atmosphere.fog.rain_veil=true"; E = "differs" },
+                    @{ N = "dry"; G = "--rain 0"; E = "differs" }) },
+            @{ Name = "eye"; Scenes = "shading_ball@eye_close,showcase_bathhouse@figure"; Rows = @(
                     @{ N = "eye_plain"; S = "shading.eye_model=false"; E = "differs" }) }
         )
         if (Test-Path "C:\Users\USER\UnravelNext\.gpulock\HOLD") { throw "the GPU lock is on HOLD (C:\Users\USER\UnravelNext\.gpulock\HOLD): no hardware runs until it is removed" }
@@ -308,10 +350,13 @@ if ($Skip -notcontains "variants") {
             if ($Ab.Count -gt 0 -and $Ab -notcontains $group.Name) { continue }
             $res = if ($group.Res) { $group.Res } else { "1080p" }
             $layers = @(); if ($group.Layers) { $layers = @($group.Layers -split ",") }
-            foreach ($scene in ($group.Scenes -split ",")) {
+            foreach ($sceneSpec in ($group.Scenes -split ",")) {
+                # scene, or scene@camera: that scene from the camera named
+                $sceneName, $sceneCamera = $sceneSpec -split "@", 2
+                $scene = if ($sceneCamera) { "${sceneName}_$sceneCamera" } else { $sceneName }  # (the results' key)
                 # a saved game scene by its name's start, else a generated scene by name (as Run-Ue6Still.ps1)
-                $file = Get-ChildItem -Path $Scenes -Filter "$scene*.unxscene" -ErrorAction SilentlyContinue | Select-Object -First 1
-                $sceneArg = if ($file) { $file.FullName } else { $scene }
+                $file = Get-ChildItem -Path $Scenes -Filter "$sceneName*.unxscene" -ErrorAction SilentlyContinue | Select-Object -First 1
+                $sceneArg = if ($file) { $file.FullName } else { $sceneName }
                 $capture = $AbFrames - 1
                 $rows = @(@{ N = "base"; S = ""; G = ""; E = "" }) + $group.Rows
                 $basePicture = ""
@@ -326,6 +371,7 @@ if ($Skip -notcontains "variants") {
                     if ($row.S) { $sets += @($row.S -split ",") }
                     $common = @("--scene", $sceneArg, "--resolution", $res, "--auto-exposure")
                     foreach ($s in $sets) { $common += @("--set", $s) }
+                    if ($sceneCamera) { $common += @("--camera", $sceneCamera) }
                     if ($group.Gate) { $common += @($group.Gate -split " " | Where-Object { $_ }) }
                     if ($row.G) { $common += @($row.G -split " " | Where-Object { $_ }) }
                     # the picture: one frame (the last), the camera still unless the group turns it
