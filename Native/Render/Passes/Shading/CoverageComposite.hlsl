@@ -21,6 +21,7 @@
 // P[8].z the direct sum (PART=1 UAV, PART=2 SRV)
 #define COV_PART PART
 #define COV_PART_EXPOSED 1
+#define UNX_LAYERS_WITHOUT_SHORE  // (SurfaceLayers.hlsli: this kernel is at the size limit - its fragments take no shore wetness)
 #include "Bindless.hlsli"
 #include "Passes/Shading/CoverageShade.hlsli"
 

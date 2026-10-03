@@ -56,4 +56,28 @@ float2 waterSplit(float cosI, bool fromAir)
     float R = waterFresnel(cosI, fromAir ? 1.0 / kWaterIor : kWaterIor);
     return float2(R, 1.0 - R);
 }
+
+// The light a water returns after many scatterings, per unit of the irradiance that entered its surface (WaterMedia.hlsl
+// has the same closed form for the basins' froxels): a half space of single-scattering albedo w = sigma_s / sigma_t and
+// asymmetry g reflects R_d = (1 - s)(1 - 0.139 s) / (1 + 1.17 s), s = sqrt((1 - w) / (1 - w g)) (van de Hulst's
+// similarity relation); a layer of reduced optical depth tau* = (sigma_a + sigma_s (1 - g)) depth over the bed returns
+// 0.75 tau* / (1 + 0.75 tau*) of that (the two-stream slab; the bed's own albedo is not in it); single scattering already
+// holds w (1 - g) / (8 (1 + g)^2) of it. The rest leaves the surface as a Lambert surface's light would: x E_in / pi is
+// its radiance inside the water at the surface.
+// waterDiffuseAlbedo: the whole (R_d x the slab's share); waterDiffuseSource: less single scattering's part, for a
+// caller that adds the single scattering itself.
+float3 waterDiffuseAlbedo(float3 sigmaA, float3 sigmaS, float g, float depth)
+{
+    const float3 sigmaT = max(sigmaA, 0.0) + sigmaS, reduced = max(sigmaA, 0.0) + sigmaS * (1 - g);
+    const float3 w = sigmaS / max(sigmaT, 1e-6);
+    const float3 sv = sqrt(saturate((1 - w) / max(1 - w * g, 1e-6)));
+    const float3 halfSpace = (1 - sv) * (1 - 0.139 * sv) / (1 + 1.17 * sv);
+    const float3 tauStar = reduced * max(depth, 0.0);
+    return halfSpace * (0.75 * tauStar / (1 + 0.75 * tauStar));
+}
+float3 waterDiffuseSource(float3 sigmaA, float3 sigmaS, float g, float depth)
+{
+    const float3 w = sigmaS / max(max(sigmaA, 0.0) + sigmaS, 1e-6);
+    return max(waterDiffuseAlbedo(sigmaA, sigmaS, g, depth) - w * (1 - g) / (8 * (1 + g) * (1 + g)), 0.0);
+}
 #endif

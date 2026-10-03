@@ -637,38 +637,66 @@ void ReflectionSystem::ensureHistory(uint32_t width, uint32_t height)
     m_historyHeight = height;
 }
 
+namespace
+{
+// The stream table (RayTracing/HitWater.hlsli, RefractionTrace.hlsl): per frame slot of a ring of 4, 128 words - word
+// `slot` the triangle stream's vertex buffer SRV (UNX_NONE: not traced), word 64 + slot its scene material.
+constexpr uint32_t kStreamTableWords = 128;
+void ensureStreamTable(Device& device, ComPtr<ID3D12Resource>& table, uint8_t*& mapped, uint32_t srv[4])
+{
+    if (table) return;
+    D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD };
+    D3D12_RESOURCE_DESC1 d{};
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d.Width = 4 * kStreamTableWords * 4;
+    d.Height = d.DepthOrArraySize = d.MipLevels = 1;
+    d.SampleDesc.Count = 1;
+    d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    check(device.d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&table)),
+          "R refraction stream table");
+    D3D12_RANGE none{ 0, 0 };
+    check(table->Map(0, &none, reinterpret_cast<void**>(&mapped)), "map R refraction stream table");
+    for (uint32_t k = 0; k < 4; ++k)
+    {
+        srv[k] = device.descriptors().allocateResource();
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Format = DXGI_FORMAT_R32_TYPELESS;
+        sd.Buffer.FirstElement = k * kStreamTableWords;
+        sd.Buffer.NumElements = kStreamTableWords;
+        sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+        device.d3d()->CreateShaderResourceView(table.Get(), &sd, device.descriptors().resourceCpu(srv[k]));
+    }
+}
+// The frame's streams' materials by slot (FrameResources::triangleStreams).
+std::vector<uint32_t> streamMaterials(const FramePassContext& fc)
+{
+    std::vector<uint32_t> materials(64, 0xFFFFFFFFu);
+    for (size_t k = 0; k < fc.resources.triangleStreams.size() && k < materials.size(); ++k) materials[k] = fc.resources.triangleStreams[k].material;
+    return materials;
+}
+// A pass's execute: this frame's table (the SRVs are known only then; every pass that reads it writes the same words).
+void fillStreamTable(PassContext& c, uint8_t* table, const std::vector<std::pair<uint32_t, BufferRef>>& streams, const std::vector<uint32_t>& materials)
+{
+    uint32_t* t = reinterpret_cast<uint32_t*>(table);
+    for (uint32_t k = 0; k < kStreamTableWords; ++k) t[k] = 0xFFFFFFFFu;
+    for (const auto& st : streams)
+    {
+        t[st.first] = c.srv(st.second);
+        t[64 + st.first] = materials[st.first];
+    }
+}
+} // namespace
+
 void ReflectionSystem::recordRefraction(FramePassContext& fc, BufferRef jobs, BufferRef results, uint32_t maxJobs)
 {
     if (!m_refract.valid || m_refract.frameIndex != fc.frame.frameIndex || maxJobs == 0 || !jobs.valid() || !results.valid()) return;
     const RefractionInputs in = m_refract;
     RenderGraph& g = fc.graph;
-    if (!m_streamTable)
-    {
-        D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD };
-        D3D12_RESOURCE_DESC1 d{};
-        d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        d.Width = 4 * 256;
-        d.Height = d.DepthOrArraySize = d.MipLevels = 1;
-        d.SampleDesc.Count = 1;
-        d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        check(m_device.d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_streamTable)),
-              "R refraction stream table");
-        D3D12_RANGE none{ 0, 0 };
-        check(m_streamTable->Map(0, &none, reinterpret_cast<void**>(&m_streamTableMapped)), "map R refraction stream table");
-        for (uint32_t k = 0; k < 4; ++k)
-        {
-            m_streamTableSrv[k] = m_device.descriptors().allocateResource();
-            D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
-            sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-            sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            sd.Format = DXGI_FORMAT_R32_TYPELESS;
-            sd.Buffer.FirstElement = k * 64;
-            sd.Buffer.NumElements = 64;
-            sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-            m_device.d3d()->CreateShaderResourceView(m_streamTable.Get(), &sd, m_device.descriptors().resourceCpu(m_streamTableSrv[k]));
-        }
-    }
+    ensureStreamTable(m_device, m_streamTable, m_streamTableMapped, m_streamTableSrv);
     const std::vector<std::pair<uint32_t, BufferRef>> streams = in.rays->streams();
+    const std::vector<uint32_t> materials = streamMaterials(fc);
     const bool lumenOnly = m_settings.lumenOnly;
     const char* const* refractLibrary = lumenOnly ? kLumenRefractLibrary : kRefractLibrary;
     rt::RayPipeline& pipeline = rt::RayPipeline::get(fc.device, fc.shaders, rt::standardRayPipeline(refractLibrary[in.variant], { "RefractionGen" }));
@@ -714,7 +742,7 @@ void ReflectionSystem::recordRefraction(FramePassContext& fc, BufferRef jobs, Bu
                   c.computeConstants(k, 4);
                   c.cmd->Dispatch(1, 1, 1);
               });
-    uint8_t* table = m_streamTableMapped + (in.frameIndex % 4) * 256;
+    uint8_t* table = m_streamTableMapped + (in.frameIndex % 4) * (kStreamTableWords * 4);
     const uint32_t tableSrv = m_streamTableSrv[in.frameIndex % 4];
     g.addPass("r.refract", QueueType::Compute,
               [&](PassBuilder& b) {
@@ -743,11 +771,9 @@ void ReflectionSystem::recordRefraction(FramePassContext& fc, BufferRef jobs, Bu
                   if (in.atmosphere)
                       for (const TextureRef& t : in.luts) b.use(t, Use::SrvGraphics);
               },
-              [&pipeline, in, jobs, results, maxJobs, streams, table, tableSrv, args, lumenOnly](PassContext& c) {
-                  // The stream table: each traced stream slot's vertex buffer SRV (known at execution).
-                  uint32_t* t = reinterpret_cast<uint32_t*>(table);
-                  for (uint32_t k = 0; k < 64; ++k) t[k] = 0xFFFFFFFFu;
-                  for (const auto& st : streams) t[st.first] = c.srv(st.second);
+              [&pipeline, in, jobs, results, maxJobs, streams, materials, table, tableSrv, args, lumenOnly](PassContext& c) {
+                  // The stream table: each traced stream slot's vertex buffer SRV (known at execution) and material.
+                  fillStreamTable(c, table, streams, materials);
                   uint32_t k[48] = {};
                   k[0] = c.srv(jobs), k[1] = c.uav(results), k[2] = maxJobs, k[3] = tableSrv;
                   k[4] = asU(in.sky.x), k[5] = asU(in.sky.y), k[6] = asU(in.sky.z), k[7] = asU(in.rayLength);
@@ -1442,6 +1468,14 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         const FrameContext::Upscale& up = fc.frame.upscale;
         const TextureRef prevColor = sceneColour ? screen.prevColor : TextureRef{};
         const uint32_t prevW = sceneColour ? g.desc(screen.prevColor).width : 0, prevH = sceneColour ? g.desc(screen.prevColor).height : 0;
+        // W's streams on the rays (RayTracing/HitWater.hlsli: a ray that meets a basin's or a fluid's surface): the stream
+        // table, in the word the atmosphere's variant leaves free (P[3].x; the constant-sky variant keeps its sun there
+        // and meets no stream)
+        const std::vector<std::pair<uint32_t, BufferRef>> streams = atmosphere ? rays.streams() : std::vector<std::pair<uint32_t, BufferRef>>{};
+        const std::vector<uint32_t> materials = streamMaterials(fc);
+        if (!streams.empty()) ensureStreamTable(m_device, m_streamTable, m_streamTableMapped, m_streamTableSrv);
+        uint8_t* streamTable = streams.empty() ? nullptr : m_streamTableMapped + (fc.frame.frameIndex % 4) * (kStreamTableWords * 4);
+        const uint32_t streamTableSrv = streams.empty() ? 0xFFFFFFFFu : m_streamTableSrv[fc.frame.frameIndex % 4];
         g.addPass("r.refl.lumen.trace", QueueType::Compute,
                   [&](PassBuilder& b) {
                       b.use(args, Use::IndirectArgs);
@@ -1458,10 +1492,11 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       rays.declareTraversal(b);
                       rays.declareDecals(b);
                       rays.declareHair(b);
+                      for (const auto& st : streams) b.use(st.second, Use::SrvGraphics);
                       if (atmosphere)
                           for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
                   },
-                  [&pipeline, traceList, compactTraces, jobs, results, depth, gbuffer, cardFrame, hitsUseCards, prevColor, prevW, prevH, sceneColour, screenContinue, exactCounts, luts, atmosphere, sky, sun,
+                  [&pipeline, traceList, compactTraces, streams, materials, streamTable, streamTableSrv, jobs, results, depth, gbuffer, cardFrame, hitsUseCards, prevColor, prevW, prevH, sceneColour, screenContinue, exactCounts, luts, atmosphere, sky, sun,
                    rayLength, frame, scene, samplingBias16, s, frameConstants, argumentResource, variant, timestamps, firstTick, lumenBands, words, historyDepth, ratio = up.exposureRatio,
                    prevViewProj = up.prevViewProj](PassContext& c) {
                       c.bindFrameConstants(frameConstants);
@@ -1477,6 +1512,11 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       // (ReflectionLumenTrace.hlsl RL_TRACE_LIST: the sky word its variant leaves free)
                       if (compactTraces) k[atmosphere ? 4 : 8] = c.srv(traceList);
                       k[12] = asU(sun.x), k[13] = asU(sun.y), k[14] = asU(sun.z);
+                      if (atmosphere)
+                      {
+                          if (streamTable) fillStreamTable(c, streamTable, streams, materials);
+                          k[12] = streamTableSrv;  // (ReflectionLumenTrace.hlsl SKY0: P[3].x)
+                      }
                       k[15] = exactCounts.valid() ? c.uav(exactCounts) : 0xFFFFFFFFu;
                       k[16] = c.srv(depth);
                       k[17] = c.srv(gbuffer);

@@ -64,6 +64,22 @@ struct WaterPlanes
 };
 void addWaterPlane(render::FramePassContext& fc, const WaterPlane& plane);
 
+// B7: the frame's sea as the surface pass shades it (W's waterGeometry fills the track state "W.oceanFrame" when the
+// frame has a sea it draws; a record of another frame is stale). The view grid's surface (FrameResources::waterSurface)
+// gives each sea pixel its rest position and depth; the cascades' displacement and slopes its normal; the foam clipmap
+// its foam (Passes/Water/OceanShading.hlsli).
+struct OceanSurfaceFrame
+{
+    uint64_t frame = UINT64_MAX;
+    render::TextureRef surface, displacement, slopes, foam;  // (foam invalid: none)
+    uint32_t foamParams = 0xFFFFFFFFu;
+    uint32_t material = 0xFFFFFFFFu;  // scene material of the sea's water; none: the built-in open ocean's
+    float lengths[3] = {};            // the cascades' tile sizes (m)
+    // the spectrum's tail for the slopes a pixel does not resolve: Phillips' constant alpha of the sea state, its peak
+    // wavenumber, the cascades' finest wavenumber (1/m) and the wind at 10 m (m/s)
+    float alpha = 0, peakWavenumber = 0, finestWavenumber = 0, windSpeed = 0;
+};
+
 void waterSurface(render::FramePassContext& fc, render::ViewResources& view);
 WaterSurfaceStats latestWaterSurfaceStats(render::TrackState& state);
 } // namespace unx::water

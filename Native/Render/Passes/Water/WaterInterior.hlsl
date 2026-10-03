@@ -13,7 +13,8 @@
 // P[5] bandARadiance UAV (RGBA16F), particle layer SRV, particle edges SRV (UNX_NONE: no particle layer)
 // P[6] stage 3 (UNX_NONE: none): jobs UAV (raw, FrameServices::traceRefractions: head 16 B { count, x, y, z }, 48 B per
 //      job), results UAV (raw, 8 B per job), samples UAV (raw: head 16 B { count }, 64 B per sample, WaterRayApply.hlsl),
-//      job capacity; P[7] first row of the band, rows in it, sample capacity, 0
+//      job capacity; P[7] first row of the band, rows in it, sample capacity, bit 0: the layer's edge pixels are shaded
+//      too (a view without coverage records - a planar reflection view: one sample for a pixel the water covers in part)
 // With stage 3 the pass runs once per band of rows; each interior sample writes its stage 1 value as without it, and its
 // jobs (a reflection job where the surface's lobe is sharper than the GI cache, a refraction job for a fallback) with
 // their results zeroed (alpha 0: not traced, the stage 1 value stays) and one sample record for the apply pass.
@@ -52,7 +53,11 @@ void main(uint3 id : SV_DispatchThreadID)
     if (slot == 63u) return;  // the sea (COV_OCEAN_SLOT): its own surface, not a stream triangle
     Texture2D<float> water = ResourceDescriptorHeap[P[1].y];
     Texture2D<float> bandA = ResourceDescriptorHeap[P[0].z];
-    if (waterEdge(vis, water, bandA, pixel, slot)) return;
+    if ((P[7].w & 1u) == 0)
+    {
+        if (waterEdge(vis, water, bandA, pixel, slot)) return;
+    }
+    else if (!(water[pixel] < g_nearPlane / max(bandA[pixel], 1e-30))) return;  // (the water behind band A)
 
     WaterShadeSrvs s;
     s.source = P[0].y;

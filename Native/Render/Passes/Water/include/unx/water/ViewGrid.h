@@ -16,6 +16,10 @@ struct ViewGridCamera
     float position[3] = {};
     float forward[3] = { 1, 0, 0 }, right[3] = { 0, 0, 1 }, up[3] = { 0, 1, 0 };  // orthonormal, world
     float tanX = 0.57735f, tanY = 0.32476f;  // tan of the half field of view
+    // The projection's centre offset in NDC (the frame's sub-pixel jitter): a view direction with tangents (x, y) is at
+    // NDC (x / tanX - offset[0], y / tanY - offset[1]) - what a renderer's jittered projection does to its pixels, so the
+    // grid's pixels are the frame's.
+    float offset[2] = { 0, 0 };
     uint32_t width = 0, height = 0;
     float nearPlane = 0.05f;  // view depth (m) of the renderer's near plane (ViewDesc::nearPlane)
 };

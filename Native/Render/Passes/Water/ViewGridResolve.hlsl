@@ -69,7 +69,7 @@ void main(uint2 pixel : SV_DispatchThreadID)
     const float2 meshX0 = w.x * x0v[0] + w.y * x0v[1] + w.z * x0v[2];
     const float meshDepth = 1.0 / inverseDepth;
     // The pixel's ray (the projection's inverse).
-    const float sx = c.x / float(p.width) * 2 - 1, sy = 1 - c.y / float(p.height) * 2;
+    const float sx = c.x / float(p.width) * 2 - 1 + p.offset.x, sy = 1 - c.y / float(p.height) * 2 + p.offset.y;
     const float3 ray = normalize(p.forward + sx * p.tanX * p.right + sy * p.tanY * p.up);
     const float along = dot(ray, p.forward);
     float t = meshDepth / along;

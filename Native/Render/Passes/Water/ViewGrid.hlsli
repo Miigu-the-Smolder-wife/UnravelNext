@@ -7,11 +7,12 @@
 // Parameter buffer (raw):
 //   float4 rows 0 camera position (x, y, z), water level        1 right (x, y, z), tan(fov x / 2)
 //               2 up (x, y, z), tan(fov y / 2)                  3 forward (x, y, z), far ring (m: the water body's extent)
-//               4 phi_0 (rad: the first column), 0, theta (rad), near-field radius r_n (m, horizontal)
+//               4 phi_0 (rad: the first column), projection offset x (NDC), theta (rad), near-field radius r_n (m, horizontal)
 //               5 columns, rows, width, height (uint)
 //               6 cascade lengths (m) 0..2, near plane (m: view depth; points nearer are invalid)
 //               7 mask: lake centre x, z, radius (m), enabled (uint; 0 = open sea)
-//               8 near-field levels K (uint), spacing coefficient (s(t) = coefficient sqrt(t)), distance floor t_floor (m), 0
+//               8 near-field levels K (uint), spacing coefficient (s(t) = coefficient sqrt(t)), distance floor t_floor (m),
+//                 projection offset y (NDC; the offset: ViewGrid.h ViewGridCamera::offset - the frame's sub-pixel jitter)
 //   from byte 144, per near level i (32 B): (inner radius, outer radius (m, horizontal), spacing s_i (m), points per side
 //               n_i (uint)), (lattice origin x, z (int: point (a, b) is at (origin + (a, b)) s_i), 0, 0)
 //   byte 400: the screen's angular window (azimuth min, max, elevation min, max; rad)
@@ -37,6 +38,7 @@ struct ViewGridParams
     float3 lengths;
     float nearPlane;
     float2 lakeCentre; float lakeRadius; uint lake;
+    float2 offset;
     uint srv;
 };
 ViewGridParams viewGridParams(uint srv)
@@ -49,6 +51,7 @@ ViewGridParams viewGridParams(uint srv)
     r = asfloat(b.Load4(32));  p.up = r.xyz; p.tanY = r.w;
     r = asfloat(b.Load4(48));  p.forward = r.xyz; p.far = r.w;
     r = asfloat(b.Load4(64));  p.phi0 = r.x; p.theta = r.z; p.nearRadius = r.w;
+    p.offset = float2(r.y, asfloat(b.Load(140)));
     const uint4 u = b.Load4(80); p.columns = u.x; p.rows = u.y; p.width = u.z; p.height = u.w;
     r = asfloat(b.Load4(96));  p.lengths = r.xyz; p.nearPlane = r.w;
     const uint4 m = b.Load4(112); p.lakeCentre = asfloat(m.xy); p.lakeRadius = asfloat(m.z); p.lake = m.w;
@@ -153,7 +156,7 @@ float3 viewGridProject(ViewGridParams p, float3 world)
 {
     const float3 v = world - p.camera;
     const float z = dot(v, p.forward);
-    const float x = dot(v, p.right) / (z * p.tanX), y = dot(v, p.up) / (z * p.tanY);
+    const float x = dot(v, p.right) / (z * p.tanX) - p.offset.x, y = dot(v, p.up) / (z * p.tanY) - p.offset.y;
     return float3((x * 0.5 + 0.5) * float(p.width), (0.5 - y * 0.5) * float(p.height), z);
 }
 // How far a displacement of at most `bound` moves a rest point's direction at horizontal distance r: in elevation at most

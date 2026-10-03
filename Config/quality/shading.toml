@@ -279,6 +279,23 @@ water_underwater = true              # the basin the camera is in is a medium of
 water_multiple_scattering = true     # with water_turbid: the light scattered many times in a turbid water, as the diffusion limit's
                                      # isotropic source (WaterMedia.hlsl: a milky bath is bright from every side instead of the dark
                                      # grey single scattering leaves). false: single scattering and the ambient term alone
+water_ocean = true                   # the frame's sea (FrameContext::ocean, the host's UnxFrameSetOcean) is drawn: the FFT cascades, the
+                                     # camera's surface (the view grid) and its shading (WaterOcean.hlsl). false: a frame's sea is ignored
+water_ocean_foam = true              # the sea's foam clipmap (Foam.h: where crests break, decaying) is kept and shaded
+water_ocean_ray_distance_m = 400.0   # a sea pixel within this distance mirrors what a reflection ray finds (ships, the shore); farther
+                                     # ones mirror the sky alone. 0: the sky everywhere
+water_shore_foam = 0.8               # foam where the sea thins out over the bed, at most this much of the surface (0: none) ...
+water_shore_foam_depth_m = 0.3       # ... from this depth of water down to none
+water_shore_wet = true               # the frame's water bodies wet the surfaces they touch (SurfaceLayers.hlsli: the wet film's albedo
+                                     # and gloss): everything under a basin's or the sea's still level and ...
+water_shore_band_m = 0.06            # ... this band above it (the sea: its waves' height when that is more), ending ...
+water_shore_margin_m = 0.25          # ... this far beyond the body's outline
+water_waterline = true               # with the camera half under a basin's water, the meniscus line where the surface meets the lens
+water_waterline_mm = 1.0             # (WaterLine.hlsl): the dark line's e-fold width at the near plane ...
+water_waterline_strength = 0.6       # ... and how much of the light it takes at its middle
+water_secondary_views = true         # the water layer is shaded in the frame's other views too - A14 views and planar reflection views:
+                                     # a pool in a mirror is water (stage 1 terms: no reflection camera or ray jobs of their own); a
+                                     # basin within 30 m of the camera is kept drawn for them. false: the main view alone, as before
 
 # Motion blur (A5; COVERAGE 14.12 (2); MotionBlur.cpp): the shutter's open time as a fraction of the frame interval,
 # the exposure [t - s dt, t]; 0.5 = 180 degrees (the user's gate camera, 2026-09-26), 0 = instantaneous. Frames without

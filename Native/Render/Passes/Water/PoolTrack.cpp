@@ -136,6 +136,15 @@ void poolGeometry(FramePassContext& fc)
 
     std::vector<PoolSource> sources;
     std::vector<RainDrop> rain;
+    // A basin out of the main view may still be in a reflection view of the frame (a mirror behind the camera's back shows
+    // it; those views are made later, in the shading) and on the reflection rays: with shading.water_secondary_views a
+    // basin whose centre is within 30 m of the camera is drawn as a visible one.
+    const bool secondary = !fc.quality.has("shading.water_secondary_views") || fc.quality.boolean("shading.water_secondary_views");
+    auto nearCamera = [&](const PoolFrame& p) {
+        if (!secondary) return false;
+        const double dx = p.centre[0] - frame.mainView.position.x, dy = p.centre[1] - frame.mainView.position.y, dz = p.centre[2] - frame.mainView.position.z;
+        return dx * dx + dy * dy + dz * dz < 30.0 * 30.0;
+    };
     for (uint32_t i = 0; i < frame.poolCount; ++i)
     {
         const PoolFrame& in = frame.pools[i];
@@ -161,7 +170,7 @@ void poolGeometry(FramePassContext& fc)
             PoolPlacement vp;
             vp.centre[0] = in.centre[0], vp.centre[1] = in.centre[1], vp.centre[2] = in.centre[2];
             vp.yaw = in.yaw;
-            bool rvisible = Pool::visible(visDesc, vp, frame.mainView.viewProj);
+            bool rvisible = Pool::visible(visDesc, vp, frame.mainView.viewProj) || nearCamera(in);
             for (const AuxView& a : frame.auxViews) rvisible = rvisible || Pool::visible(visDesc, vp, a.view.viewProj);
             if (!rvisible && !in.sourceCount) continue;
             if (fc.resources.triangleStreams.size() >= kMaxTriangleStreams) fail("W: basin %u exceeds the frame's %u triangle streams", in.id, kMaxTriangleStreams);
@@ -207,7 +216,7 @@ void poolGeometry(FramePassContext& fc)
         PoolPlacement placement;
         placement.centre[0] = in.centre[0], placement.centre[1] = in.centre[1], placement.centre[2] = in.centre[2];
         placement.yaw = in.yaw;
-        bool visible = Pool::visible(desc, placement, frame.mainView.viewProj);
+        bool visible = Pool::visible(desc, placement, frame.mainView.viewProj) || nearCamera(in);
         for (const AuxView& a : frame.auxViews) visible = visible || Pool::visible(desc, placement, a.view.viewProj);
         if (!visible && !in.sourceCount) continue;  // evolved exactly when next drawn or disturbed
         if (fc.resources.triangleStreams.size() >= kMaxTriangleStreams) fail("W: basin %u exceeds the frame's %u triangle streams", in.id, kMaxTriangleStreams);

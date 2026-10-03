@@ -38,6 +38,15 @@
 //        medium: its absorption, the bed, further reflections), with the GI source's mirror lobe as its stand-in. The
 //        camera's path to P is in the water: its medium is in the air lookups for a basin, and e^(-sigma_t s) here for
 //        a stream without one.
+//   The sea (WATER_OCEAN: WaterOcean.hlsl's kernel alone; the streams' kernels compile without it): the sample is the
+//        view grid's pixel (OceanShading.hlsli: the point on the pixel's ray, the normal low-passed over the pixel's
+//        footprint, the slope variance the footprint removes). That variance widens the sun's lobe and the mirror cone
+//        and takes the mean Fresnel term's place of the smooth surface's; the mirror lobe's stand-in is the sky along
+//        the mirror direction held over the horizon (the far sea reflects the sky; a reflection job replaces it within
+//        the mirror rays' reach); the bed is looked for only where the straight view's water lets 1 / 256 of the
+//        clearest channel through (the open sea is its own light); that light is the water's single scattering under
+//        the sun and the sky and, of the light scattered many times, the diffusion limit's closed form (WaterShading.hlsli
+//        waterDiffuseSource); foam (the clipmap's and the shore's) covers the surface as a white Lambert layer.
 #ifndef UNX_WATER_SURFACE_HLSLI
 #define UNX_WATER_SURFACE_HLSLI
 #include "Bindless.hlsli"
@@ -53,6 +62,9 @@
 #include "Passes/Reflection/Reflection.hlsli"
 #include "WaterShading.hlsli"
 #include "WaterFootprint.hlsli"
+#ifdef WATER_OCEAN
+#include "OceanShading.hlsli"
+#endif
 
 #define WATER_STAT_SHADED 0u     // samples whose refracted ray met band A inside the water (exact path)
 #define WATER_STAT_OFFSCREEN 1u  // fallbacks: the refracted ray left the screen
@@ -192,6 +204,7 @@ float waterBandADepth(Texture2D<float> depth, int2 q) { return g_nearPlane / max
 //   elsewhere the sample keeps its reflection job (R's ray, exact for any surface).
 #define WATER_PLANAR_OFFSET (WATER_LEVELS_OFFSET + 64u)
 #define WATER_PLANAR_MAX 4u
+#define WATER_OCEAN_OFFSET (WATER_PLANAR_OFFSET + 48u * WATER_PLANAR_MAX)  // the sea's block (OceanShading.hlsli), 96 B
 #define WATER_PLANAR_SHIFT 0.1  // px: the reflection camera's image offset allowed against the exact mirror ray
 float waterPlanarShift(float4 plane, float3 P, float3 n, float d, float pixelAngle)
 {
@@ -437,9 +450,13 @@ bool waterMarch(WaterShadeSrvs s, float3 P, float3 t, uint slot, out float3 H, o
 //   refraction  (medium 0, the water's streams) from P along the exact Snell direction, for fallback samples only:
 //               (1 - F) / n^2 x airT x the radiance arriving inside the water at P (R: absorption, exits, reflections),
 //               in place of the straight-view stand-in
+// The jobs start off the surface on their own side (the reflection job in the medium it travels, the refraction job in
+// the other: `side` is the unit normal toward the reflection job's medium): R's rays meet W's streams, and a ray
+// leaving its own surface at a grazing angle would meet it again within the point's float error.
 struct WaterRayTerms
 {
     float3 P, reflectDir, refractDir, sigmaA;
+    float3 side;
     float ior;
     bool reflect, refract;
     float3 reflectWeight, reflectFallback, refractWeight, refractFallback;
@@ -456,15 +473,55 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
     mPixelRay(centre, D, Dx, Dy);
     float3 P, n, e1, e2, na, nb, nc, mRaw;
     float sHit;
+#ifdef WATER_OCEAN
+    // the sea: the view grid's pixel (the sample is on the pixel's ray; no triangle)
+    const OceanShade sea = oceanShadeLoad(s.slots, WATER_OCEAN_OFFSET);
+    const OceanSurfacePoint seaPoint = oceanSurfacePoint(sea, pixel, D, Dx, Dy);
+    P = seaPoint.P;
+    n = seaPoint.n;
+    sHit = seaPoint.depth;
+    e1 = e2 = na = nb = nc = mRaw = 0;
+    GpuMaterial m = (GpuMaterial)0;
+    if (sea.material != UNX_NONE) m = loadMaterial(sea.material);
+    else
+    {
+        float3 seaT, seaS;
+        float seaG;
+        oceanWater(seaT, seaS, seaG);
+        m.baseColor = exp(-(seaT - seaS));
+        m.hairAbsorption = seaS;
+        m.hairBetaN = seaG;
+    }
+#else
     waterTriangleHitFull(ws.vertices, tri, g_cameraPosition, D, P, n, sHit, e1, e2, na, nb, nc, mRaw);
-    const float3 v = normalize(g_cameraPosition - P);
     const GpuMaterial m = loadMaterial(ws.material);
+#endif
+    const float3 v = normalize(g_cameraPosition - P);
     const float ior = m.ior > 1.0001 ? m.ior : kWaterIor;
     const float roughness = max(m.roughness, 0.0);
     const float r = min(sqrt(max(roughness * roughness, 1e-4)), 1.0);
     const bool fromAir = dot(n, v) > 0;
     const float3 nv = fromAir ? n : -n;  // the normal on the camera's side
     const float NoV = saturate(dot(nv, v));
+#ifdef WATER_OCEAN
+    // (the mean Fresnel term over the slopes the pixel does not resolve; the footprint's differentials on the still
+    //  plane: the resolved normal is the footprint's mean, its change across the pixel is in that variance)
+    const float F = fromAir ? oceanMeanFresnel(NoV, seaPoint.variance) : waterFresnel(NoV, ior);
+    WaterDifferentials dif;
+    dif.dPx = seaPoint.dPx;
+    dif.dPy = seaPoint.dPy;
+    dif.dNx = dif.dNy = 0;
+    {
+        const float dLen = length(D);
+        const float3 d = D / dLen;
+        dif.dDx = (Dx - d * dot(d, Dx)) / dLen;
+        dif.dDy = (Dy - d * dot(d, Dy)) / dLen;
+    }
+    const float spread = waterReflectionSpread(-v, nv, dif);
+    const float alphaPixel = sqrt(max(r * r, 1e-4) * max(r * r, 1e-4) + spread * spread / 6.0 + seaPoint.variance);
+    const float rPixel = min(sqrt(alphaPixel), 1.0);
+    const float lobePixel = max(reflectionLobeHalfAngle(rPixel, NoV), spread);
+#else
     const float F = waterFresnel(NoV, fromAir ? 1.0 / ior : ior);
     // The pixel footprint (WaterFootprint.hlsli): ray differentials through the interpolated normal. The reflection's
     // direction sweeps `spread` over the pixel: the mirror cone and the sun lobe are integrated over it.
@@ -473,10 +530,12 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
     const float alphaPixel = sqrt(max(r * r, 1e-4) * max(r * r, 1e-4) + spread * spread / 6.0);  // GGX alpha^2 + the normals' variance x 2
     const float rPixel = min(sqrt(alphaPixel), 1.0);
     const float lobePixel = max(reflectionLobeHalfAngle(r, NoV), spread);
+#endif
     stat = fromAir ? WATER_STAT_SHADED : WATER_STAT_INSIDE;
     rays = (WaterRayTerms)0;
     rays.P = P;
     rays.ior = ior;
+    rays.side = nv;  // (from the air: the mirror ray's side; from inside the water the window's ray swaps it below)
 
     // Air of the camera's path to P, sun illuminance there.
     const float z = dot(P - g_cameraPosition, -g_view[2].xyz);
@@ -513,6 +572,18 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
             st.InterlockedAdd(4 * WATER_STAT_PLANAR, 1);
         }
     }
+#ifdef WATER_OCEAN
+    else if (fromAir && s.atm.skyView != UNX_NONE && s.atm.transmittance != UNX_NONE)
+    {
+        // the sky (with the cloud layer) along the mirror direction, held over the horizon: what a facet turned from
+        // the view would mirror from below is another wave's light, the sky's in the end
+        float3 up = waterReflect(v, nv);
+        up.y = max(up.y, 0.02);
+        const float3 mirror = atmosphereSkyRadianceCloudy(s.atm, normalize(up));
+        reflected += mirror;
+        rays.reflectFallback = F * mirror * g_exposure;
+    }
+#endif
     else if (giSourceIsVolume(s.giCache))
     {
         // (GiSource.hlsli: the translucency volume's radiance from the mirror direction - two SH bands)
@@ -531,6 +602,9 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
         rays.reflectFallback = F * mirror * g_exposure;
     }
     rays.reflect = fromAir && lobePixel < WATER_RAY_LOBE_HALF_ANGLE && !planar;
+#ifdef WATER_OCEAN
+    rays.reflect = rays.reflect && distance(g_cameraPosition, P) < sea.rayReach;  // (past the reach: the sky alone)
+#endif
     rays.reflectDir = waterReflect(v, nv);
     rays.reflectWeight = F;
     // Transmission along the refracted ray.
@@ -545,7 +619,19 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
     const bool enters = fromAir && waterRefract(v, nv, 1.0 / ior, t);
     float3 H = P;
     uint status = WATER_STAT_SHADED;
+#ifdef WATER_OCEAN
+    // the straight view's water: where it lets under 1 / 256 of its clearest channel through, the bed is not looked for
+    // (no march, no refraction job; the stand-in below is black by its own absorption)
+    bool deep;
+    {
+        Texture2D<float> bandADeep = ResourceDescriptorHeap[s.bandADepth];
+        const float thickness = max(waterBandADepth(bandADeep, int2(pixel)) - z, 0.0) / max(dot(-v, -g_view[2].xyz), 1e-4);
+        deep = min(sigmaA.r, min(sigmaA.g, sigmaA.b)) * thickness > 5.545;
+    }
+    const bool met = enters && !deep && waterMarch(s, P, t, slot, H, status);
+#else
     const bool met = enters && waterMarch(s, P, t, slot, H, status);
+#endif
     // The straight view's band A behind P, its own radiance (M's air removed: waterSurfaceRadiance at the pixel) and the
     // air's in-scattering to it: the stand-in of a sample whose refracted ray is not followed here, and - where the
     // water's medium is in the air volume - what the water scatters toward the camera between P and band A.
@@ -598,11 +684,16 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
             const float along = max(zA - z, 0.0) / max(dot(-v, -g_view[2].xyz), 1e-4);
             transmitted = waterAbsorption(sigmaA, along) * ownA / (ior * ior);
             waterPath = along;
-            stat = status;
-            rays.refract = true;
-            rays.refractDir = t;
-            rays.refractWeight = (1 - F) / (ior * ior);
-            rays.refractFallback = (1 - F) * transmitted;
+#ifdef WATER_OCEAN
+            if (!deep)
+#endif
+            {
+                stat = status;
+                rays.refract = true;
+                rays.refractDir = t;
+                rays.refractWeight = (1 - F) / (ior * ior);
+                rays.refractFallback = (1 - F) * transmitted;
+            }
         }
     }
     else if (!fromAir)
@@ -615,6 +706,7 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
         rays.refractFallback = rays.reflectFallback;
         rays.reflectFallback = 0;
         rays.reflectWeight = 0;
+        rays.side = -nv;  // (the window's ray travels in the air above; the mirrored one stays in the water)
         float3 tOut;
         if (waterRefract(v, nv, ior, tOut))
         {
@@ -632,8 +724,35 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
     }
     // The water's own light toward the camera (exposed, at the camera).
     float3 own = 0;
+#ifdef WATER_OCEAN
+    float3 skyE = 0;  // the sky's irradiance on the level sea (lux)
+    if (s.atm.transmittance != UNX_NONE)
+    {
+        const AtmosphereParams ap = airParamsFromTexels(s.atm.transmittance);
+        skyE = g_sunIlluminance * g_sunColor * airGroundIndirect(ap, s.atm.transmittance, dot(airUp(ap, P), l0));
+    }
+    if (fromAir && enters && any(sigmaS > 0))
+    {
+        // single scattering along the refracted path under the sun as it entered and the sky's light inside the water
+        // (0.934 of it enters a level surface; its mean path is 1.2 depths: a mean radiance of 0.934 x 1.2 / 4 pi of
+        // the irradiance), and the light scattered many times as the diffusion limit has it
+        float3 sunIn = 0, ts = -l0;
+        float cosIn = 0;
+        if (sunVisibility > 0 && dot(nv, l0) > 0 && waterRefract(l0, nv, 1.0 / ior, ts))
+        {
+            cosIn = dot(nv, l0);
+            sunIn = E * sunVisibility * (1 - waterFresnel(cosIn, 1.0 / ior));
+        }
+        const float g = clamp(m.hairBetaN, -0.99, 0.99);
+        const float3 single = waterScatterAlong(sigmaS, sigmaA, g, waterPath, sunIn, dot(t, -ts), skyE * (0.934 * 1.2 / (4 * SH_PI)));
+        const float3 many = waterDiffuseSource(sigmaA - sigmaS, sigmaS, g, waterPath * abs(t.y)) * (sunIn * cosIn + 0.934 * skyE) * (1 / SH_PI);
+        own = (1 - F) / (ior * ior) * (single + many) * g_exposure * airT;
+    }
+    if (false)
+#else
     if (fromAir && mediumInAir) own = (1 - F) / (ior * ior) * max(inA - inscatter, 0) * g_exposure;  // (= airT x the water's part)
     else if (!mediumInAir && any(sigmaS > 0) && (enters || !fromAir))
+#endif
     {
         // the closed form: the sun as it entered the surface, the surroundings' mean radiance from the GI source
         const float3 nUp = fromAir ? nv : -nv;  // out of the water
@@ -654,7 +773,23 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
     rays.reflectFallback *= airT;
     rays.refractWeight *= airT;
     rays.refractFallback *= airT;
+#ifdef WATER_OCEAN
+    // foam over the surface: a white Lambert layer under the sun and the sky, the water's terms under what it leaves open
+    float3 value = surface * airT + own;
+    const float foam = fromAir ? oceanFoam(sea, seaPoint, waterPath * abs(t.y)) : 0.0;
+    if (foam > 0)
+    {
+        const float3 lit = (E * (sunVisibility * saturate(dot(nv, l0))) + skyE) * (sea.foamAlbedo / SH_PI);
+        value = value * (1 - foam) + lit * (foam * g_exposure) * airT;
+        rays.reflectWeight *= 1 - foam;
+        rays.reflectFallback *= 1 - foam;
+        rays.refractWeight *= 1 - foam;
+        rays.refractFallback *= 1 - foam;
+    }
+    value += inscatter * g_exposure;
+#else
     const float3 value = surface * airT + inscatter * g_exposure + own;
+#endif
     rays.base = value - rays.reflectFallback - rays.refractFallback;
     return value;
 }
@@ -670,6 +805,7 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
 // Stage 3: appends a sample's jobs and its sample record (WaterRayApply.hlsl, 80 B) to the band's lists, the results zeroed
 // (alpha 0 = not traced: the stage 1 value stays). Lists: P[6] = { jobs UAV, results UAV, samples UAV, job capacity },
 // P[7].z = sample capacity (UNX_NONE in P[6].x: no lists). The caller sizes the band so both capacities hold every sample.
+float waterRayBias(float3 P) { return 1e-4 + 2e-5 * distance(P, g_cameraPosition); }
 void waterAppendRays(WaterRayTerms rays, uint target, uint statisticsUav)
 {
     if (P[6].x == UNX_NONE || !(rays.reflect || rays.refract)) return;
@@ -695,7 +831,7 @@ void waterAppendRays(WaterRayTerms rays, uint target, uint statisticsUav)
     {
         reflectJob = j++;
         const uint at = 16 + 48 * reflectJob;
-        jobs.Store4(at, uint4(asuint(rays.P), reflectJob));
+        jobs.Store4(at, uint4(asuint(rays.P + rays.side * waterRayBias(rays.P)), reflectJob));
         jobs.Store4(at + 16, uint4(asuint(rays.reflectDir), 0xFFu | record));
         jobs.Store4(at + 32, uint4(0, 0, 0, asuint(1.0)));
         results.Store2(8 * reflectJob, uint2(0, 0));
@@ -704,7 +840,7 @@ void waterAppendRays(WaterRayTerms rays, uint target, uint statisticsUav)
     {
         refractJob = j++;
         const uint at = 16 + 48 * refractJob;
-        jobs.Store4(at, uint4(asuint(rays.P), refractJob));
+        jobs.Store4(at, uint4(asuint(rays.P - rays.side * waterRayBias(rays.P)), refractJob));
         jobs.Store4(at + 16, uint4(asuint(rays.refractDir), (WATER_RAY_TIR_BOUNCES << 8) | record));
         jobs.Store4(at + 32, uint4(asuint(rays.sigmaA), asuint(rays.ior)));
         results.Store2(8 * refractJob, uint2(0, 0));

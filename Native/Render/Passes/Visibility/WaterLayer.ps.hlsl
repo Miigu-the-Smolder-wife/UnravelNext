@@ -1,6 +1,7 @@
 // unx-kernel: ps_6_6 main
 // Water layer pixels (WaterLayer.ms): the triangle's vis id and the linear view depth at the pixel centre (the depth test
-// keeps the nearest water surface in front of band A).
+// keeps the nearest water surface in front of band A). A view with a clip plane (a reflection view) keeps the pixels in
+// front of it.
 #include "Frame.hlsli"
 
 struct Out
@@ -11,6 +12,7 @@ struct Out
 
 Out main(float4 position : SV_Position, nointerpolation uint visId : VISID)
 {
+    if (!clipPlaneKeeps(worldFromDepth(position.xy - 0.5, position.z))) discard;
     Out o;
     o.visId = visId;
     o.depth = linearDepth(position.z);

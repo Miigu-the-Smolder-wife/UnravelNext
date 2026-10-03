@@ -79,6 +79,8 @@ struct OceanFrame
     float horizontalBound = 0, verticalBound = 0;  // the roughest sea's R and A (m), used until the sea is measured
     uint32_t lake = 0;                        // water body: 0 the open sea, 1 a circular lake
     float lakeCentre[2] = {}, lakeRadius = 0; // (x, z) in this frame's coordinates, m
+    uint32_t material = 0xFFFFFFFFu;          // scene material of its water (M's Water class: absorption, scattering, index);
+                                              // none: the open ocean's (Passes/Water/OceanShading.hlsli oceanWater)
 };
 
 // W2 (engine 2 W, INTERFACES v1.78; FEATURES_GAME 1.10): a closed basin (bath, pool) of this frame, read by W's
