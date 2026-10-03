@@ -3056,7 +3056,10 @@ void testPreshadedRecords(TestFrame& tf, Report& report)
                 // the sheen's change is linear in C (keepS and the lobe both are): (C 0.02) - base = 2 x ((C 0.01) - base)
                 const double scale = std::max(std::abs(da[c]), 1e-3);
                 sheenChange = std::max(sheenChange, std::abs(ds[c] - da[c]) / scale);
-                sheenLinear = std::max(sheenLinear, std::isfinite(ds[c] + ds2[c]) ? std::abs((ds2[c] - da[c]) - 2 * (ds[c] - da[c])) / scale : 1e9);
+                // C2 + C0 - 2*C1 has four rounding weights, each at most 2^-11 for
+                // an f16 record. Normalize by the propagated bound, not three weights.
+                const double roundingBound = (std::abs(ds2[c]) + std::abs(da[c]) + 2 * std::abs(ds[c])) / 2048 + 1e-6 * scale;
+                sheenLinear = std::max(sheenLinear, std::isfinite(ds[c] + ds2[c]) ? std::abs((ds2[c] - da[c]) - 2 * (ds[c] - da[c])) / std::max(roundingBound, 1e-12) : 1e9);
             }
         }
     logf("preshade: %u records, %u listed as kind 5, %u channel values differ\n", recordCount, listedSpecial, differing);
@@ -3067,10 +3070,10 @@ void testPreshadedRecords(TestFrame& tf, Report& report)
     // A9: cover 0.001 moves the radiance by at most ~0.001 of it (the coat's terms are bounded by the base's here), plus f16
     report(worstCoat <= 3e-3, "preshade: clearcoat records (MODE 4 / 5 / 6, cover 0.001) = Standard records in the composite", worstCoat, 3e-3);
     // A9 sheen through MODE 4 / 5 / 6: the change from the Standard records is linear in the sheen colour (the model's
-    // values are the band A path's, ShadingTests --sheen); f16 records: 3 x 2^-11 of the value
+    // values are the band A path's, ShadingTests --sheen); four f16 rounding weights.
     logf("preshade: sheen colour 0.01 changes the records by up to %.3g of their value\n", sheenChange);
     report(sheenChange > 1e-3, "preshade: sheen records (MODE 4 / 5 / 6) carry the sheen", sheenChange, 1e-3);
-    report(sheenLinear <= 1.5e-3, "preshade: sheen records' change is linear in the colour (0.02 vs 2 x 0.01)", sheenLinear, 1.5e-3);
+    report(sheenLinear <= 1, "preshade: sheen linearity residual / propagated f16 rounding bound", sheenLinear, 1);
 }
 
 // ---------------------------------------------------------------- 14. clearcoat sun lobe (A9, CoatSunProbe.hlsl)
@@ -4529,7 +4532,12 @@ void testSubsurfaceScatter(TestFrame& tf, Report& report)
         PlanarShot shot;
         tf.frame.outputLinearHdr = true;
         tf.run([&](FramePassContext& fc) {
-            const ViewResources mainV = tf.mainView(fc, W, H, 0);
+            ViewResources mainV = tf.mainView(fc, W, H, 0);
+            // Aim at the virtual sphere behind x=-1.2; the original narrow-FOV camera aimed at
+            // the real sphere, leaving it outside the reflected view entirely.
+            scene::Camera mirrorCamera = cam;
+            mirrorCamera.forward = normalize(float3{-2.4f, 0.6f, 0} - cam.position);
+            mainV.view = ViewDesc::fromCamera(mirrorCamera, W, H, float4x4{});
             ViewResources v;
             v.view = ViewDesc::planarReflection(mainV.view, float4{ 1, 0, 0, 1.2f }, 0, 0, W, H);
             v.frameConstants = fc.frameConstantsFor(v.view);

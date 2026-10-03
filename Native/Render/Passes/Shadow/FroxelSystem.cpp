@@ -5,6 +5,7 @@
 #include "../Atmosphere/CloudSystem.h"
 
 #include "unx/render/GpuScene.h"
+#include "unx/render/HistoryResize.h"
 #include "unx/render/PassChain.h"
 #include "unx/scene/SceneData.h"
 #include "unx/render/Tracks.h"
@@ -309,8 +310,10 @@ FogView fogViewFor(const QualityConfig& q, const FrameContext& context, uint32_t
     if (rain && !(f.density2 > 0))
     {
         f.density2 = 0.248e-3f * std::pow(context.weather.rainRate, 0.67f);
-        f.falloff2 = 0;
-        f.height2 = 0;
+        // Negative falloff is internal only: a uniform rain layer below the cloud base.
+        // Authored fog descriptors continue to require nonnegative falloff.
+        f.falloff2 = -1;
+        f.height2 = context.clouds.baseAltitude;
         f.rainVeil = true;
     }
     f.cells = f.density > 0 || f.density2 > 0 || f.volumes > 0;
@@ -1042,8 +1045,9 @@ struct FogState
         }
     }
     // textures false: the record's ring alone (a planar view's volume is a transient of its frame)
-    void ensure(Device& d, const FogView& f, bool textures = true)
+    void ensure(FramePassContext& fc, const FogView& f, bool textures = true)
     {
+        Device& d = fc.device;
         device = &d;
         if (!srvs)
         {
@@ -1097,6 +1101,15 @@ struct FogState
         }
         if (!textures) return;
         if (scatter[0] && x == f.gridX && y == f.gridY && z == f.gridZ && zFar == f.farSlices) return;
+        const bool keep = scatter[0] && !fresh && z == f.gridZ && zFar == f.farSlices;
+        ComPtr<ID3D12Resource> oldScatter[2] = {scatter[0], scatter[1]};
+        if (integrated)
+        {
+            DescriptorHeaps* h = &d.descriptors();
+            const uint32_t oldSrv = integratedSrv;
+            d.deferCall([h, oldSrv] { h->freeResource(oldSrv); });
+            integratedSrv = h->allocateResource();
+        }
         releaseTextures();
         D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
         auto texture = [&](ComPtr<ID3D12Resource>& out, uint32_t slices, const wchar_t* name) {
@@ -1116,6 +1129,8 @@ struct FogState
         texture(scatter[0], f.gridZ, L"S fog scatter 0");
         texture(scatter[1], f.gridZ, L"S fog scatter 1");
         texture(integrated, f.gridZ + f.farSlices, L"S fog volume");
+        if (keep)
+            for (int k = 0; k < 2; ++k) preserveHistoryResize(fc, oldScatter[k], scatter[k].Get());
         D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
         sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         sd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -1123,7 +1138,7 @@ struct FogState
         sd.Texture3D.MipLevels = 1;
         d.d3d()->CreateShaderResourceView(integrated.Get(), &sd, d.descriptors().resourceCpu(integratedSrv));
         x = f.gridX; y = f.gridY; z = f.gridZ; zFar = f.farSlices;
-        fresh = true;
+        fresh = !keep;
     }
     // This frame's record: on = false says "no volume" (FogVolume.hlsli fogLoad).
     // volume: the integrated volume's SRV where it is not the persistent one.
@@ -1179,7 +1194,7 @@ uint32_t fogPrepare(FramePassContext& fc, const ViewDesc& view)
     f.height -= fc.scene.originOffset().y;  // (the kernels' positions are the frame's render space: world - the origin offset)
     f.height2 -= fc.scene.originOffset().y;
     FogState& st = fc.state<FogState>("S.fog.volume");
-    st.ensure(fc.device, f);
+    st.ensure(fc, f);
     st.view = f;
     st.preparedFrame = fc.frame.frameIndex;
     st.write(fc.frame.frameIndex, false);
@@ -1219,7 +1234,7 @@ uint32_t fogPrepareSecondary(FramePassContext& fc, const ViewDesc& view, uint64_
     f.height2 -= fc.scene.originOffset().y;
     f.historyWeight = 0;  // (no history: the view has no identity between frames)
     FogState& st = fc.state<FogState>(fogStateKey(slot));
-    st.ensure(fc.device, f, false);
+    st.ensure(fc, f, false);
     st.view = f;
     st.preparedFrame = fc.frame.frameIndex;
     st.write(fc.frame.frameIndex, false);
@@ -1301,6 +1316,7 @@ SampledLocal recordSampledLocal(FramePassContext& fc, const ViewResources& view,
         SampledLocalState& st = fc.state<SampledLocalState>("S.froxels.sampledLocal");
         if (!st.volume[0] || st.x != grid.gridX || st.y != grid.gridY || st.z != grid.slices)
         {
+            const bool keep = st.volume[0] && !st.fresh && st.z == grid.slices;
             st.device = &fc.device;
             D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
             D3D12_RESOURCE_DESC1 rd{};
@@ -1315,15 +1331,17 @@ SampledLocal recordSampledLocal(FramePassContext& fc, const ViewResources& view,
             for (auto* set : { st.volume, st.fluence, st.moment })
                 for (int k = 0; k < 2; ++k)
                 {
+                    ComPtr<ID3D12Resource> old = set[k];
                     if (set[k]) fc.device.deferRelease(set[k]);
                     set[k].Reset();
                     check(fc.device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
                                                                     IID_PPV_ARGS(&set[k])),
                           "S sampled local in-scattering");
                     set[k]->SetName(set == st.volume ? L"S ml volume" : (set == st.fluence ? L"S ml volume fluence" : L"S ml volume moment"));
+                    if (keep) preserveHistoryResize(fc, old, set[k].Get());
                 }
             st.x = grid.gridX; st.y = grid.gridY; st.z = grid.slices;
-            st.fresh = true;
+            st.fresh = !keep;
         }
         const float3 shift = fc.frame.originShift;
         const bool valid = !st.fresh && st.revision == fc.scene.revision() && fc.frame.discontinuity == 0 && shift.x == 0 && shift.y == 0 && shift.z == 0;

@@ -2,6 +2,7 @@
 // final gather). Persistent state: the filtered result and the view depth of the previous frame (ping-pong); the history
 // is dropped on a new scene revision, a history discontinuity, an origin shift or a size change.
 #include "unx/gi/LumenShortRangeAO.h"
+#include "unx/render/HistoryResize.h"
 
 #include "unx/core/Config.h"
 #include "unx/render/Device.h"
@@ -38,13 +39,14 @@ struct ShortRangeAoState
             for (ComPtr<ID3D12Resource>* t : { std::addressof(value[k]), std::addressof(depth[k]) })
                 if (*t) device->deferRelease(*t);
     }
-    void ensure(Device& d, uint32_t w, uint32_t h)
+    void ensure(FramePassContext& fc, uint32_t w, uint32_t h)
     {
         if (value[0] && width == w && height == h) return;
-        release();
+        Device& d = fc.device;
         device = &d;
         D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
         auto texture = [&](ComPtr<ID3D12Resource>& out, DXGI_FORMAT format, const wchar_t* name) {
+            const auto old = out;
             D3D12_RESOURCE_DESC1 desc{};
             desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
             desc.Width = w;
@@ -57,6 +59,11 @@ struct ShortRangeAoState
             check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
                                                     IID_PPV_ARGS(&out)),
                   "R short-range AO history");
+            if (old)
+            {
+                if (!fresh) preserveHistoryResize(fc, old, out.Get());
+                else d.deferRelease(old);
+            }
             out->SetName(name);
         };
         for (int k = 0; k < 2; ++k)
@@ -66,7 +73,6 @@ struct ShortRangeAoState
         }
         width = w;
         height = h;
-        fresh = true;
     }
 };
 } // namespace
@@ -89,7 +95,7 @@ TextureRef lumenShortRangeAO(FramePassContext& fc, const ViewResources& view)
     RenderGraph& g = fc.graph;
     const uint32_t W = view.view.width, H = view.view.height, w = (W + factor - 1) / factor, h = (H + factor - 1) / factor;
     ShortRangeAoState& st = fc.state<ShortRangeAoState>("R.lumenShortRangeAO");
-    st.ensure(fc.device, W, H);
+    st.ensure(fc, W, H);
     const float3 shift = fc.frame.originShift;
     const bool valid = !st.fresh && st.revision == fc.scene.revision() && fc.frame.discontinuity == 0 && shift.x == 0 && shift.y == 0 && shift.z == 0;
     st.fresh = false;

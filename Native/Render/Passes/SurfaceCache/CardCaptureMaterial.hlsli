@@ -182,9 +182,23 @@ CcMaterial ccMaterial(CcSurface i)
         const float2 uvDetail = (detailSet1 ? i.uv1 : i.uv) * detailScale + r.detailOffset;
         const float2 uvDetailDx = (detailSet1 ? i.uv1Dx : i.uvDx) * detailScale, uvDetailDy = (detailSet1 ? i.uv1Dy : i.uvDy) * detailScale;
         const float detailWeight = (r.flags & MATERIAL_INPUT_VERTEX_BLEND) != 0 ? saturate(i.color.a) : 1.0;
+        float2 uvColor = uv;
+        if ((m.classFlags & MATERIAL_EYE) != 0)
+        {
+            const GpuMaterialEye eye = loadMaterialEye(m.classFlags >> 16);
+            float3 ax, ay, az;
+            ccAxes(i.direction, ax, ay, az);
+            const float3 meshNormal = normalize(ax * n.x + ay * n.y + az * n.z);
+            const ModelEyeFrame frame = modelEyeFrame(eye.axis, i.scaledDx, i.scaledDy, i.scaledDx, i.scaledDy, i.uvDx, i.uvDy);
+            const ModelEyePoint irisPoint = modelEyePoint(eye, i.uv, modelEyeRay(frame, -az, meshNormal, eye.eta));
+            uvColor = irisPoint.uv;
+            float2 unusedDx = i.uvDx, unusedDy = i.uvDy;
+            materialUvFootprint(m, uvColor, unusedDx, unusedDy);
+            baseColor *= irisPoint.darkening;
+        }
         if (m.baseColorTexture != UNX_NONE)
         {
-            const float4 c = ccSample(m.baseColorTexture, (m.textureClamp & M_TEX_BASE_COLOR) != 0, uv, uvDx, uvDy);
+            const float4 c = ccSample(m.baseColorTexture, (m.textureClamp & M_TEX_BASE_COLOR) != 0, uvColor, uvDx, uvDy);
             baseColor *= c.rgb;
             alpha = c.a;
         }

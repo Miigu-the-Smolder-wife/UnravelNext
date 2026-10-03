@@ -40,6 +40,7 @@
 // illuminance (SKY1) (GiSky.hlsli), P[3].w = seed bounces; P[6], P[7] = RtSceneSrvs. Frame constants b1 = main view.
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/GI/GiSky.hlsli"
+#define RT_HIT_EYE 1
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
 #include "Passes/Shading/MegaLightsWorld.hlsli"
@@ -100,7 +101,7 @@ bool scMeet(RWByteAddressBuffer b, ScLayout l, RtSceneSrvs scene, RtHit hit, Ray
     if (!s.frontFace && (m.classFlags & MATERIAL_TWO_SIDED) == 0) return false;
     position = s.position;
     face = dot(s.geometricNormal, ray.Direction) > 0 ? -s.geometricNormal : s.geometricNormal;
-    m = rtHitMaterial(m, s, scCellSize(l, s.position), dot(s.normal, ray.Direction));
+    m = rtHitMaterialSeen(m, s, ray.Direction, scCellSize(l, s.position), dot(s.normal, ray.Direction));
     scMarkAs(b, l, position, face, scAlbedoOf(m), m.emissive, markBits);
     cell = scRead(b, l, position, face);
     return true;

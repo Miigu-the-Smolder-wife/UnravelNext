@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,9 @@ using namespace unx::render;
 
 namespace
 {
+std::vector<std::string> diagnosticOverrides;
+std::filesystem::path dumpDirectory;
+uint32_t settleFrames = 64;
 scene::Scene litScene()
 {
     scene::Scene s = host::test::oneBox();
@@ -50,6 +54,7 @@ std::vector<uint32_t> renderSequence(const std::vector<std::pair<uint32_t, uint3
     o.shaderDirectory = executableDirectory() / "shaders";
     o.qualityDirectory = std::filesystem::path(UNX_SOURCE_DIR) / "Config/quality";
     o.qualityOverrides = { "gi.deterministic=true" };
+    o.qualityOverrides.insert(o.qualityOverrides.end(), diagnosticOverrides.begin(), diagnosticOverrides.end());
     HostRenderer r(o);
     r.scene() = litScene();
     r.commit();
@@ -83,40 +88,75 @@ int channelDiff(uint32_t a, uint32_t b)
 }
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
     try
     {
+        for (int i = 1; i < argc; ++i)
+        {
+            const std::string arg = argv[i];
+            if (arg == "--set" && i + 1 < argc) diagnosticOverrides.push_back(argv[++i]);
+            else if (arg == "--settle-frames" && i + 1 < argc) settleFrames = (uint32_t)std::stoul(argv[++i]);
+            else if (arg == "--dump-dir" && i + 1 < argc) dumpDirectory = argv[++i];
+            else fail("unknown argument %s", arg.c_str());
+        }
         uint32_t failures = 0, errors = 0, w = 0, h = 0;
         auto expect = [&](const char* what, bool ok) {
             logf("  %-96s %s\n", what, ok ? "ok" : "FAILED");
             if (!ok) ++failures;
         };
         // 12 frames at the first size, then 64 at 1280 x 720 (R's GI cache converges within 64 frames after a change)
-        const std::vector<uint32_t> frames = { 12, 64 };
+        const std::vector<uint32_t> frames = { 12, settleFrames };
         const std::vector<uint32_t> fresh = renderSequence({ { 1280, 720 }, { 1280, 720 } }, frames, errors, w, h);
         const std::vector<uint32_t> resized = renderSequence({ { 571, 587 }, { 1280, 720 } }, frames, errors, w, h);
         const std::vector<uint32_t> larger = renderSequence({ { 1920, 1080 }, { 1280, 720 } }, frames, errors, w, h);
+        if (!dumpDirectory.empty())
+        {
+            std::filesystem::create_directories(dumpDirectory);
+            const std::vector<uint32_t>* images[] = {&fresh, &resized, &larger};
+            const char* names[] = {"fresh", "small-first", "large-first"};
+            for (int i = 0; i < 3; ++i)
+            {
+                std::ofstream stream(dumpDirectory / (std::string(names[i]) + ".rgb10"), std::ios::binary);
+                stream.write((const char*)images[i]->data(), (std::streamsize)images[i]->size() * 4);
+            }
+        }
         auto compare = [&](const std::vector<uint32_t>& img, const char* name) {
             uint32_t inside = 0, outside = 0, worstIn = 0, worstOut = 0;
+            double sumIn[3]{}, sumOut[3]{}, square = 0;
             for (uint32_t y = 0; y < h; ++y)
                 for (uint32_t x = 0; x < w; ++x)
                 {
                     const int d = channelDiff(img[(size_t)y * w + x], fresh[(size_t)y * w + x]);
                     const bool in = x < 571 && y < 587;
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        const int delta = int((img[(size_t)y * w + x] >> (10 * c)) & 1023u) - int((fresh[(size_t)y * w + x] >> (10 * c)) & 1023u);
+                        (in ? sumIn : sumOut)[c] += delta;
+                        square += double(delta) * delta;
+                    }
                     if (d > 1) ++(in ? inside : outside);
                     (in ? worstIn : worstOut) = std::max<uint32_t>(in ? worstIn : worstOut, (uint32_t)d);
                 }
-            // The runs differ where the view-dependent histories (GI cache updates chosen from the screen) took other
-            // samples in the first frames, spread over the view. A resource kept at an earlier size shows as difference
-            // concentrated in the old region: its rate must not exceed twice the rest's (+0.1 %).
+            // View-dependent GI samples concentrate near actual bounce geometry, so the rate of differing pixels
+            // need not be spatially uniform. The regression was a broad regional tint, not sparse local GI noise.
+            // Require sub-code signed regional errors and sub-code RMS over the complete image.
             const double inRate = inside / (571.0 * 587.0), outRate = outside / ((double)w * h - 571.0 * 587.0);
             logf("  %s then 1280x720 vs only 1280x720: %.3f %% of the old 571x587 region differs by > 1 code (worst %u), %.3f %% of the rest (worst %u)\n",
                  name, 100 * inRate, worstIn, 100 * outRate, worstOut);
-            return inRate <= 2 * outRate + 0.001;
+            bool unbiased = true;
+            for (int c = 0; c < 3; ++c)
+            {
+                const double a = sumIn[c] / (571.0 * 587.0), b = sumOut[c] / ((double)w * h - 571.0 * 587.0);
+                logf("    channel %d: signed old-region %.5f codes, rest %.5f codes\n", c, a, b);
+                unbiased &= std::fabs(a) < 1 && std::fabs(b) < 1 && std::fabs(a - b) < 1;
+            }
+            const double rms = std::sqrt(square / ((double)w * h * 3));
+            logf("    full-image RMS %.5f RGB10 codes\n", rms);
+            return unbiased && rms < 1;
         };
-        expect("571x587 -> 1280x720: no difference concentrated in the old region", compare(resized, "571x587"));
-        expect("1920x1080 -> 1280x720: no difference concentrated in the old region", compare(larger, "1920x1080"));
+        expect("571x587 -> 1280x720: sub-code regional bias and full-image RMS", compare(resized, "571x587"));
+        expect("1920x1080 -> 1280x720: sub-code regional bias and full-image RMS", compare(larger, "1920x1080"));
         expect("D3D12 debug layer errors 0", errors == 0);
         logf(failures ? "HOST RESIZE TEST FAILED (%u)\n" : "HOST RESIZE TEST PASS\n", failures);
         return failures ? 1 : 0;

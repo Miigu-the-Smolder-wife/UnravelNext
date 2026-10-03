@@ -53,10 +53,11 @@ struct Gpu
     ComPtr<ID3D12Device> external;
     Device device;
     ShaderLibrary shaders;
-    Gpu(bool debugLayer, bool warp)
+    Gpu(bool debugLayer, bool warp, bool gbv)
         : external(warp ? warpDevice() : nullptr), device([&] {
               DeviceOptions o;
               o.debugLayer = debugLayer && !warp;
+              o.gpuValidation = gbv && !warp;
               o.externalDevice = external.Get();
               return o;
           }()),
@@ -126,13 +127,14 @@ int main(int argc, char** argv)
 {
     try
     {
-        bool debugLayer = true, warp = false;
+        bool debugLayer = true, warp = false, gbv = false;
         for (int i = 1; i < argc; ++i)
         {
             if (std::string(argv[i]) == "--no-debug-layer") debugLayer = false;
             if (std::string(argv[i]) == "--warp") warp = true;
+            if (std::string(argv[i]) == "--gbv") gbv = true;
         }
-        Gpu gpu(debugLayer, warp);
+        Gpu gpu(debugLayer, warp, gbv);
         QualityConfig quality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
         GpuScene scene(gpu.device);
         FrameServices services;

@@ -76,6 +76,9 @@ struct Mesh  // 80 B
     uint32_t skinOffset;     // first SkinVertex, kNone when rigid
 };
 static_assert(sizeof(Mesh) == 80);
+constexpr uint32_t kCompactVertexOffset = 1u << 31;
+inline uint32_t vertexStride(const Mesh& m) { return (m.vertexOffset & kCompactVertexOffset) ? 28u : 32u; }
+inline uint64_t vertexByteOffset(const Mesh& m) { return (uint64_t)(m.vertexOffset & ~kCompactVertexOffset) * vertexStride(m); }
 
 struct Submesh  // 16 B
 {
@@ -431,8 +434,14 @@ struct FrameConstants
     // ClusterBuilder ClusterStream.h; Passes/Common/ClusterStream.hlsli loadClusterVertex), 0 = the scene has none.
     // clusterPages: the SRV + 1 of the frame's cluster page table (visibility.cluster_streaming: tracks::
     // clusterPageTable), 0 = no streaming this frame. Frame.hlsli declares the two only with UNX_CLUSTER_STREAM.
-    uint32_t blueNoise, fog, materialInputs;
+    // A zero-initialized frame may be built by isolated tracks and host diagnostics. Descriptor 0
+    // is a real buffer, not an absent optional texture: use the shared absent-resource sentinel.
+    uint32_t blueNoise = kNone;
+    uint32_t fog = 0;  // SRV + 1: zero is the absent fog convention
+    uint32_t materialInputs = kNone;
     uint32_t meshAttributes, vertexAttributes, clusterStream, clusterPages;
+    uint32_t vertexSigns = kNone;
+    uint32_t vertexPadding[3] = {};
 };
-static_assert(sizeof(FrameConstants) == 608);
+static_assert(sizeof(FrameConstants) == 624);
 } // namespace unx::render::gpu

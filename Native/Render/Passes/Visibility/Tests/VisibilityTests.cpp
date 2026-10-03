@@ -82,6 +82,7 @@ ShaderLibrary& shaders()
     static ShaderLibrary lib(device(), executableDirectory() / "shaders");
     return lib;
 }
+std::vector<std::string> testOverrides;
 QualityConfig quality(const std::vector<std::string>& overrides = {})
 {
     QualityConfig q = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
@@ -90,6 +91,7 @@ QualityConfig quality(const std::vector<std::string>& overrides = {})
     q.applyOverride("output.render_scale=1");
     q.applyOverride("output.render_height_max=0");
     for (const std::string& o : overrides) q.applyOverride(o);
+    for (const std::string& o : testOverrides) q.applyOverride(o);
     return q;
 }
 
@@ -1260,11 +1262,12 @@ UNX_TEST(planar_mask_draws_only_mirror_pixels)
             mirror += mask[(size_t)y * width + x];
         }
     ComPtr<ID3D12Resource> constants, maskTexture, maskUpload;
+    constexpr uint64_t frameStride = (sizeof(gpu::FrameConstants) + 255ull) & ~255ull;
     {
         D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD }, dh{ D3D12_HEAP_TYPE_DEFAULT };
         D3D12_RESOURCE_DESC1 rd{};
         rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        rd.Width = 1024;
+        rd.Width = 2 * frameStride;
         rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
         rd.SampleDesc.Count = 1;
         rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
@@ -1304,9 +1307,9 @@ UNX_TEST(planar_mask_draws_only_mirror_pixels)
         const uint32_t slot = f % 2;
         uint8_t* cp = nullptr;
         check(constants->Map(0, nullptr, reinterpret_cast<void**>(&cp)), "map constants");
-        std::memcpy(cp + 512 * slot, &fcData, sizeof fcData);
+        std::memcpy(cp + frameStride * slot, &fcData, sizeof fcData);
         constants->Unmap(0, nullptr);
-        const D3D12_GPU_VIRTUAL_ADDRESS address = constants->GetGPUVirtualAddress() + 512 * slot;
+        const D3D12_GPU_VIRTUAL_ADDRESS address = constants->GetGPUVirtualAddress() + frameStride * slot;
         FramePassContext fc{ device(), graph, shaders(), q, gs, frame, resources, services, [=](const ViewDesc&) { return address; }, &trackState, 2 };
         ViewResources vr;
         vr.view = view;
@@ -1434,8 +1437,8 @@ struct CoverageScene
 // overlap on screen at different depths, half of them wound the other way (one-sided: culled), a two-sided group, and a
 // 0.1 mm strip crossing the near plane (its vertex normals differ along it: the perspective-correct normal). Opaque
 // columns 1.3 px wide in front of the upper blades cover whole pixels with the union of their two triangles
-// (opaqueCovered). A stack of 4,000 glass cards (see-through records: no opaque cover),
-// each 6 x 0.3 px on the same spot at 2 .. 3.6 m, puts 48,000 fragments in one tile (the extension root and its 2-level
+// (opaqueCovered). A stack of 5,000 glass cards (see-through records: no opaque cover),
+// each 6 x 0.3 px on the same spot at 2 .. 4 m, puts 60,000 fragments in one tile (the extension root and its 2-level
 // subtree).
 CoverageScene coverageScene()
 {
@@ -1504,7 +1507,7 @@ CoverageScene coverageScene()
     s.meshes.push_back(columns);
     scene::Mesh stack;
     stack.name = "card stack";
-    for (int k = 0; k < 4000; ++k)
+    for (int k = 0; k < 5000; ++k)
     {
         const float z = 2.0f + 0.0004f * k;
         const float3 c = world(100.0f, 300.4f, z);
@@ -1975,7 +1978,11 @@ UNX_TEST(coverage_layer_is_exact)
     };
     for (const Config& config : configs)
     {
-        const QualityConfig q = quality(config.keys);
+        auto keys = config.keys;
+        // This oracle checks every B/C fragment. Production may instead raster
+        // band C into the visibility buffer and reconstruct it through TSR.
+        keys.push_back("visibility.coverage_band_c_visbuffer=false");
+        const QualityConfig q = quality(keys);
         const uint32_t width = 640, height = 360, tilesX = (width + 7) / 8, tileCount = tilesX * ((height + 7) / 8);
         const bool smallFloor = std::string(config.name) == "small capacity floor";
         const bool depthBuckets = std::string(config.name) == "depth buckets";
@@ -2304,7 +2311,7 @@ UNX_TEST(coverage_layer_is_exact)
                         continue;
                     }
                 }
-                if (++missing <= 5) logf("    missing: pixel %u, area %g, depth %g\n", k.second, e.area, e.depth);
+                if (++missing <= 5) logf("    missing: triangle %llu, pixel %u, area %g, depth %g\n", (unsigned long long)k.first, k.second, e.area, e.depth);
             }
             if (depthBuckets) logf("    [%s] frame %zu: %zu expected fragments absent behind a full union of nearer stored opaque records\n", config.name, f, hidden);
             const bool full = fragmentSum < capacity;  // a frame at capacity may have lost fragments (OVERFLOW_COVERAGE)
@@ -2328,6 +2335,11 @@ UNX_TEST(coverage_layer_is_exact)
 int main(int argc, char** argv)
 {
     const char* filter = argc > 1 ? argv[1] : nullptr;
+    for (int i = 2; i < argc; ++i)
+    {
+        if (std::string(argv[i]) != "--set" || i + 1 >= argc) fail("expected --set key=value");
+        testOverrides.emplace_back(argv[++i]);
+    }
     int failed = 0, run = 0;
     for (const TestCase& t : registry())
     {

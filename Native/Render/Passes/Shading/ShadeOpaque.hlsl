@@ -1266,20 +1266,15 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     }
 #endif
     // ==== W CALL SITE (sky and GI light under water; Passes/Water/WaterLight.hlsli waterIndirectTransmittance) ====
-    // The indirect light gathered above, on a surface under W's water, takes the water over it. Compiled out
-    // (UNX_WATER_INDIRECT is defined nowhere): this part of the kernel is being restructured for its size - enable it
-    // after that work is merged, in the variants with room. It needs the sun's water map here: FrameResources::waterSunDepth
-    // / waterSunNormal / waterSunMedium / waterSunConstants, which part 1 has in P[8] and this part does not bind yet
-    // (W_SUN_MAP below: the four SRVs, wherever this part's constants put them).
-#ifdef UNX_WATER_INDIRECT
+    // Both shading parts bind the four sun-space water-map SRVs in P[8]. The indirect part's
+    // gathered irradiance and reflection lobes traverse the water column before reaching this surface.
     {
-        const float3 underWater = waterIndirectTransmittance(W_SUN_MAP.x, W_SUN_MAP.y, W_SUN_MAP.z, W_SUN_MAP.w, worldPos);
+        const float3 underWater = waterIndirectTransmittance(P[8].x, P[8].y, P[8].z, P[8].w, worldPos);
         irradiance *= underWater;
         irradianceBack *= underWater;
         incident *= underWater;
         coatIncident *= underWater;
     }
-#endif
     // ==== end of the W call site ====
 #if LAYERED == 1
     if (cover > 0 && NoV > 0)

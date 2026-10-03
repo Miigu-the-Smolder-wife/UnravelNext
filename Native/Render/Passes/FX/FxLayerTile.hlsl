@@ -80,7 +80,11 @@ float4 composite(uint count, float2 p, float opaqueFar, float opaqueNear, bool l
         if (layer)
         {
             const bool cut = ball && soft ? zc + R > zNear : r.depth < opaqueNear;  // (a surface of the block cuts the sprite)
-            if ((r.flags & FX_LAYER_RECORD_SMALL) != 0u || (!strip && cut)) { edge = true; continue; }
+            // A ribbon's width does not bound variation along its length: caps,
+            // tessellated bends and interpolated depth can cross this block even
+            // when its centre misses. The sprite profile's band bound does not
+            // apply to strips; retain their full-resolution samples.
+            if (strip || (r.flags & FX_LAYER_RECORD_SMALL) != 0u || cut) { edge = true; continue; }
         }
         float a, sampleDepth;
         float3 colour;

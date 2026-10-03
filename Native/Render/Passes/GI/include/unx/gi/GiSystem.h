@@ -257,7 +257,7 @@ private:
         float prevExposure = 0;
         float4x4 prevInvViewProj{};
     } m_lumen;
-    void ensureLumen(uint32_t width, uint32_t height, uint32_t atlasX, uint32_t atlasY);
+    void ensureLumen(FramePassContext& fc, uint32_t width, uint32_t height, uint32_t atlasX, uint32_t atlasY);
     void recordLumen(FramePassContext& fc, ViewResources& view, BufferRef cache, rt::RayScene& rays);
     // Change boxes for GiInvalidate (B3): a mapped upload ring, one slot per frame of kChangeSlots, raw SRVs.
     static constexpr uint32_t kChangeSlots = 4, kChangeBoxesMax = 256, kChangeSlotBytes = 16 + kChangeBoxesMax * 32 + 240;

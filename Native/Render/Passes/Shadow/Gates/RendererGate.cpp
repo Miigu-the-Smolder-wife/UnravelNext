@@ -378,6 +378,7 @@ int main(int argc, char** argv)
         std::string sceneName = "city_block", resolutionArg = "both", out;
         uint32_t frames = 600;
         bool moving = false;
+        bool validate = false;
         float sunDegPerS = 0;  // moving sun (time of day): the sun turns about the horizontal axis normal to it
         std::string capturePath;  // --capture: last frame's linear radiance as PFM
         bool captureUpscaled = false;  // --capture-output: the upscaled image (ViewResources::upscaled) instead of the native frame
@@ -451,6 +452,7 @@ int main(int argc, char** argv)
             else if (a == "--frames") frames = (uint32_t)std::stoul(next());
             else if (a == "--camera") cameraName = next();
             else if (a == "--moving") moving = true;
+            else if (a == "--validate") validate = true;
             else if (a == "--sun-deg-per-s") sunDegPerS = std::stof(next());
             else if (a == "--wind-gust-period-s") gustPeriodS = std::stof(next());
             else if (a == "--capture") capturePath = next();
@@ -857,7 +859,10 @@ int main(int argc, char** argv)
             if (made) logf("thin geometry LOD: %zu groups thinned with their area kept, %zu vertices made\n", thinned, made);
         }
         lodVertices.appendTo(s);
-        Device device({});
+        DeviceOptions deviceOptions;
+        deviceOptions.debugLayer = validate;
+        deviceOptions.gpuValidation = validate;
+        Device device(deviceOptions);
         std::vector<CaptureSlot> captures;  // --capture (last frame wins) or --capture-frames, per layer
         ShaderLibrary shaders(device, executableDirectory() / "shaders");
         GpuScene gpuScene(device);
@@ -1753,6 +1758,12 @@ int main(int argc, char** argv)
             logf("  visibility paths (%% of %.2f M pixels): no caster %.1f, reach lit %.1f, reach umbra %.1f, search lit %.1f, disk lit %.1f, disk umbra %.1f, filtered %.1f\n",
                  px / 1e6, 100 * st.pathNoCaster / px, 100 * st.pathRegionLit / px, 100 * st.pathRegionUmbra / px, 100 * st.pathSearchLit / px, 100 * st.pathDiskLit / px,
                  100 * st.pathDiskUmbra / px, 100 * st.pathFiltered / px);
+        }
+        if (validate)
+        {
+            const uint32_t errors = device.drainDebugMessages();
+            logf("D3D12 debug layer + GPU validation errors: %u\n", errors);
+            if (errors != 0) ++gateFailures;
         }
         return gateFailures ? 1 : 0;
 #endif

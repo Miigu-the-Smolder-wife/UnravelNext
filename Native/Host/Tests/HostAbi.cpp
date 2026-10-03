@@ -62,6 +62,8 @@ struct Api
     UNX_FN(UnxSceneSave)
     UNX_FN(UnxFrameSetSun)
     UNX_FN(UnxFrameSetEnvironment)
+    UNX_FN(UnxFrameSetClouds2)
+    UNX_FN(UnxFrameSetFog2)
     UNX_FN(UnxFrameSetInstanceVisible)
     UNX_FN(UnxFrameSetSkeletons)
     UNX_FN(UnxFrameSetTransforms)
@@ -102,6 +104,8 @@ struct Api
         UNX_FN(UnxSceneSave)
         UNX_FN(UnxFrameSetSun)
         UNX_FN(UnxFrameSetEnvironment)
+        UNX_FN(UnxFrameSetClouds2)
+        UNX_FN(UnxFrameSetFog2)
         UNX_FN(UnxFrameSetInstanceVisible)
         UNX_FN(UnxFrameSetSkeletons)
         UNX_FN(UnxFrameSetTransforms)
@@ -649,6 +653,11 @@ int main(int argc, char** argv)
             content.seed = 0;
             content.cameras.clear();
             content.paths.clear();
+            // pushScene sends committed render content. Weather is a frame input and is
+            // tested through its setters and live save below, after commit.
+            content.clouds = {};
+            content.fog = {};
+            content.fogVolumes.clear();
             const std::string expected = scene::contentHash(content);
             const bool same = expected == hash;
             logf("round trip %-12s %zu meshes %zu instances %zu textures %zu lights: %s\n", scenegen::sceneName(id), s.meshes.size(), s.instances.size(),
@@ -748,6 +757,19 @@ int main(int argc, char** argv)
             // A pose buffer of the wrong length is refused before anything is recorded.
             if (api.UnxFrameSetSkeletons(r, 2, skeletons, poseA, 3) == UNX_OK) fail("UnxFrameSetSkeletons accepted a short pose buffer");
             const std::filesystem::path saved = bin / "host_abi_live.unxscene";
+            UnxCloudDesc2 clouds{};
+            clouds.size = sizeof clouds; clouds.version = 1;
+            clouds.coverage = 0.4f; clouds.baseAltitude = 1500; clouds.topAltitude = 4000;
+            clouds.sigmaMax = 0.04f; clouds.albedo = 0.99f;
+            clouds.cirrusCoverage = 0.25f; clouds.cirrusAltitude = 9000; clouds.cirrusOpticalDepth = 0.2f;
+            api.ok(api.UnxFrameSetClouds2(r, &clouds), "UnxFrameSetClouds2");
+            UnxFogDesc2 fog{};
+            fog.size = sizeof fog; fog.version = 1;
+            fog.density = 0.002f; fog.heightFalloff = 0.02f; fog.skyAmount = 1;
+            fog.albedo[0] = fog.albedo[1] = fog.albedo[2] = 1;
+            fog.phaseG = 0.2f; fog.noiseScale = 20;
+            fog.density2 = 0.001f; fog.heightFalloff2 = 0.01f; fog.height2 = 25;
+            api.ok(api.UnxFrameSetFog2(r, &fog), "UnxFrameSetFog2");
             api.ok(api.UnxSceneSave(r, saved.string().c_str(), "live", nullptr), "UnxSceneSave");
             api.ok(api.UnxRendererDestroy(r), "UnxRendererDestroy");
             const scene::Scene live = scene::load(saved);
@@ -759,6 +781,8 @@ int main(int argc, char** argv)
             ok = ok && live.sun.illuminance == 95000 && live.sun.direction.y == 0.6f && live.sun.direction.z == 0.8f;
             ok = ok && live.atmosphere.mieScattering.x == 2.1e-5f && live.atmosphere.rayleighScaleHeight == env.rayleighScaleHeight;
             ok = ok && live.windSpeed == windy.windSpeed && live.windDirection.x == 0.6f && live.windDirection.z == -0.8f;
+            ok = ok && live.clouds.coverage == clouds.coverage && live.clouds.cirrusCoverage == clouds.cirrusCoverage;
+            ok = ok && live.fog.enabled && live.fog.density2 == fog.density2 && live.fog.height2 == fog.height2;
             // Instance 1 was hidden: the saved list is the host's list without it (instance 2 comes next).
             ok = ok && live.instances[1].mesh == s.instances[2].mesh;
             logf("live scene save: %zu of %zu instances (1 hidden), newest transform, bulk poses, sun, atmosphere and wind: %s\n", live.instances.size(), s.instances.size(),

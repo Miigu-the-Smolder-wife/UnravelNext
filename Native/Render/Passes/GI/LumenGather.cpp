@@ -5,6 +5,7 @@
 // probes) -> rays (structured importance sampling) -> trace -> composite -> spatial filter x N -> irradiance and
 // bordered radiance -> integrate (per pixel) -> temporal (per pixel).
 #include "unx/gi/GiSystem.h"
+#include "unx/render/HistoryResize.h"
 
 #include "unx/gi/LumenRadianceCache.h"
 #include "unx/gi/LumenTranslucencyVolume.h"
@@ -31,13 +32,14 @@ uint32_t bits(float f)
 }
 } // namespace
 
-void GiSystem::ensureLumen(uint32_t width, uint32_t height, uint32_t atlasX, uint32_t atlasY)
+void GiSystem::ensureLumen(FramePassContext& fc, uint32_t width, uint32_t height, uint32_t atlasX, uint32_t atlasY)
 {
     LumenState& st = m_lumen;
     if (st.diffuse[0] && st.width == width && st.height == height) return;
     D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
-    const auto create = [&](ComPtr<ID3D12Resource>& t, DXGI_FORMAT format, uint32_t w, uint32_t h, const wchar_t* name) {
-        if (t) m_device.deferRelease(t);
+    const auto create = [&](ComPtr<ID3D12Resource>& t, DXGI_FORMAT format, uint32_t w, uint32_t h, const wchar_t* name, bool probe = false) {
+        const auto old = t;
+        if (old && !st.valid) m_device.deferRelease(old);
         D3D12_RESOURCE_DESC1 d{};
         d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         d.Width = w;
@@ -50,19 +52,25 @@ void GiSystem::ensureLumen(uint32_t width, uint32_t height, uint32_t atlasX, uin
                                                        IID_PPV_ARGS(&t)),
               "GI lumen history");
         t->SetName(name);
+        if (old && st.valid)
+        {
+            const uint32_t block = probe && w == atlasX * 8 ? 8u : 1u;
+            preserveHistoryResize(fc, old, t.Get(), block,
+                                  probe ? (st.height + m_settings.lumen.tile - 1) / m_settings.lumen.tile : 0,
+                                  probe ? (height + m_settings.lumen.tile - 1) / m_settings.lumen.tile : 0);
+        }
     };
     for (int k = 0; k < 2; ++k)
     {
-        create(st.probeDepth[k], DXGI_FORMAT_R32_FLOAT, atlasX, atlasY, k ? L"R lumen probe depth 1" : L"R lumen probe depth 0");
-        create(st.probePosition[k], DXGI_FORMAT_R32G32B32A32_FLOAT, atlasX, atlasY, k ? L"R lumen probe position 1" : L"R lumen probe position 0");
-        create(st.probeRadiance[k], DXGI_FORMAT_R16G16B16A16_FLOAT, atlasX * 8, atlasY * 8, k ? L"R lumen probe radiance 1" : L"R lumen probe radiance 0");
+        create(st.probeDepth[k], DXGI_FORMAT_R32_FLOAT, atlasX, atlasY, k ? L"R lumen probe depth 1" : L"R lumen probe depth 0", true);
+        create(st.probePosition[k], DXGI_FORMAT_R32G32B32A32_FLOAT, atlasX, atlasY, k ? L"R lumen probe position 1" : L"R lumen probe position 0", true);
+        create(st.probeRadiance[k], DXGI_FORMAT_R16G16B16A16_FLOAT, atlasX * 8, atlasY * 8, k ? L"R lumen probe radiance 1" : L"R lumen probe radiance 0", true);
         create(st.diffuse[k], DXGI_FORMAT_R16G16B16A16_FLOAT, width, height, k ? L"R lumen diffuse 1" : L"R lumen diffuse 0");
         create(st.specular[k], DXGI_FORMAT_R16G16B16A16_FLOAT, width, height, k ? L"R lumen rough specular 1" : L"R lumen rough specular 0");
         create(st.keys[k], DXGI_FORMAT_R32G32_UINT, width, height, k ? L"R lumen keys 1" : L"R lumen keys 0");
     }
     st.width = width;
     st.height = height;
-    st.valid = false;
 }
 
 void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef cache, rt::RayScene& rays)
@@ -76,7 +84,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     const uint32_t uniform = probesX * probesY;
     const uint32_t maxAdaptive = (uint32_t)((float)uniform * L.adaptiveFraction);
     const uint32_t atlasRows = probesY + (maxAdaptive + probesX - 1) / probesX;
-    ensureLumen(width, height, probesX, atlasRows);
+    ensureLumen(fc, width, height, probesX, atlasRows);
 
     const float3 shift = fc.frame.originShift;
     if (fc.scene.revision() != st.revision || m_epoch != st.epoch || fc.frame.discontinuity != 0 || shift.x != 0 || shift.y != 0 || shift.z != 0) st.valid = false;
@@ -163,15 +171,16 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
             d.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
             for (int k = 0; k < 2; ++k)
             {
+                ComPtr<ID3D12Resource> old = st.backface[k];
                 if (st.backface[k]) m_device.deferRelease(st.backface[k]);
                 check(m_device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
                                                                IID_PPV_ARGS(st.backface[k].ReleaseAndGetAddressOf())),
                       "GI lumen backface history");
                 st.backface[k]->SetName(k ? L"R lumen backface 1" : L"R lumen backface 0");
+                if (old && st.backfaceHistory) preserveHistoryResize(fc, old, st.backface[k].Get());
             }
             st.backfaceWidth = width;
             st.backfaceHeight = height;
-            st.backfaceHistory = false;
         }
         backfaceHistory = st.backfaceHistory && historyValid;
         st.backfaceHistory = true;

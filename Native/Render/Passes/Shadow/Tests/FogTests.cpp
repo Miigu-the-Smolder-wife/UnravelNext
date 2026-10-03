@@ -1168,6 +1168,22 @@ int main(int argc, char** argv)
         };
 
         // The model of a frame from the test's inputs: FrameContext::fog and fogVolumes, the quality keys, the scene.
+        {
+            // Vertical up/down, horizontal above/below the cloud base, and a rebased origin.
+            const std::vector<float4> input = {
+                {0, 0, 0, 0}, {0, 1, 0, 65000}, {1500, 0.000248f, 1600, 0},
+                {0, 2000, 0, 0}, {0, -1, 0, 1000}, {1500, 0.000248f, 1400, 0},
+                {0, 1600, 0, 0}, {1, 0, 0, 1000}, {1500, 0.000248f, 1600, 0},
+                {0, 1400, 0, 0}, {1, 0, 0, 1000}, {1500, 0.000248f, 1400, 0},
+                {0, -10000, 0, 0}, {0, 1, 0, 65000}, {-8500, 0.000248f, -8400, 0}};
+            const auto result = probe(6, input, 5, 1, noWords);
+            const double expected[5] = {0.372, 0.124, 0, 0.248, 0.372};
+            double error = 0;
+            for (int i = 0; i < 5; ++i) error = std::max(error, std::abs(result[i].x - expected[i]));
+            report(error < 1e-6, "rain veil: cloud-base clipping, horizontal paths and origin rebase", error, 1e-6);
+            report(result[0].y == 0 && std::abs(result[0].z - std::exp(-0.372)) < 1e-6,
+                   "rain veil: no rain above clouds and finite solar transmittance", result[0].z, std::exp(-0.372));
+        }
         auto makeModel = [&](const scene::Scene& sc, const ViewDesc& view, uint64_t first, uint64_t readFrame, double time, bool history, bool planar, double exposure) {
             Model m;
             m.view = { view, d3(view.position) };

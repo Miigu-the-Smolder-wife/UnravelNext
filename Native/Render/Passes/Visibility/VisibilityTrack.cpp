@@ -2967,9 +2967,9 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
     // (CullClusters keeps a cluster hardware when a tile under it has none), cleared and rasterised after it, and drawn
     // into the atlas under the depth test at the end of the raster pass (DepthSwMerge). The request's target holds both
     // results when the request's passes end: with S's two atlases each request merges into its own. Requests it does not
-    // cover (a pixel kernel, back-face culling, conservative raster, D16, tiles outside 64 .. 256 px) keep the mesh raster.
+    // cover (a pixel kernel, back-face culling, conservative raster, tiles outside 64 .. 256 px) keep the mesh raster.
     const bool software = cfg.softwareRaster && atlas && amplify && request.pixelKernel.empty() && !request.conservative && request.cull == D3D12_CULL_MODE_NONE &&
-                          request.depthTarget.valid() && request.depthWrite && depthFormat == DXGI_FORMAT_D32_FLOAT && request.cullTilePx >= 64 && request.cullTilePx <= 256;
+                          request.depthTarget.valid() && request.depthWrite && request.cullTilePx >= 64 && request.cullTilePx <= 256;
     BufferRef swArgs, swPages, swSlots, swDepth;
     uint32_t swCapacity = 0;
     if (software)

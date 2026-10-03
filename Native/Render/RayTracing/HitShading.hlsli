@@ -105,18 +105,24 @@ GpuMaterial rtHitMaterialAt(GpuMaterial m, RtSurface s, float2 uvColor, float co
 float rtHitEye(GpuMaterial m, RtSurface s, float3 direction, inout float2 uv)
 {
     const GpuMaterialEye e = loadMaterialEye(m.classFlags >> 16);
-    float3 t = float3(0, 0, -1);  // (the sclera: no frame)
+    float3 t = float3(0, 0, -1), axis = s.normal;  // (the sclera: no frame)
     if (length(s.uv - 0.5) < e.irisRadius)
-        t = modelEyeRay(modelEyeFrame(e.axis, s.restE1, s.restE2, s.worldE1, s.worldE2, s.uvE1, s.uvE2), direction, s.normal, e.eta);
+    {
+        const ModelEyeFrame frame = modelEyeFrame(e.axis, s.restE1, s.restE2, s.worldE1, s.worldE2, s.uvE1, s.uvE2);
+        axis = frame.axis;
+        t = modelEyeRay(frame, direction, s.normal, e.eta);
+    }
     const ModelEyePoint p = modelEyePoint(e, s.uv, t);
+    g_rtEyeWord = modelEyePack(axis, p.mask, p.caustic);
     uv = p.uv;
     return p.darkening;
 }
 // The material of a hit as a viewer along 'direction' (the ray's, unit) sees it: rtHitMaterial, and with RT_HIT_EYE = 1
-// (the reflection kernels set it; default 0: GI hits take the surface's uv) an eye's base colour at its iris point.
+// (reflection, GI and card-lighting kernels set it) an eye's base colour at its iris point.
 GpuMaterial rtHitMaterialSeen(GpuMaterial m, RtSurface s, float3 direction, float coneWidth, float cosTheta)
 {
     float2 uvColor = s.uv;
+    g_rtEyeWord = 0;
     if ((m.classFlags & MATERIAL_EYE) != 0) m.baseColor *= rtHitEye(m, s, direction, uvColor);
     return rtHitMaterialAt(m, s, uvColor, coneWidth, cosTheta);
 }
@@ -165,10 +171,9 @@ struct RtHitSplit
 // A Subsurface-class hit: one specular lobe at the material's roughness (not the class's two lobes, MaterialModel.hlsli
 // ModelSubsurface), Lambert diffuse light with no scattering pass behind it, and the light through thin parts
 // (modelSubsurfaceThin) from the sun and the light sample on the far side of the shading normal - the hit's one shadow
-// ray decides, as the direct view's visibility does. An eye (MATERIAL_EYE) is such a hit with its base colour at the
-// surface's uv: no refraction onto the iris - except in the reflection kernels (RT_HIT_EYE, rtHitMaterialSeen), where
-// its base colour is read at the iris point seen through the cornea along the ray, under the limbal ring, so a mirror
-// shows the eye the direct view shows; its shading stays the hit's (no iris plane, no caustic).
+// ray decides, as the direct view's visibility does. RT_HIT_EYE consumers use rtHitMaterialSeen to read an eye's colour
+// through the cornea at the refracted iris point, including the limbal ring. The packed eye word carries the iris plane
+// and caustic into its sun and local-light diffuse terms; the specular lobe stays on the cornea.
 // The cloth blend (a sheen's cloth factor): the base's specular share of the sun term and of the cache's light x (1 - cloth).
 float3 rtHitRadianceSplit(GpuMaterial m, float3 n, float3 v, RtHitLighting L, float pixelAngle, bool wantSun, out float3 sunFull, out RtHitSplit split)
 {
@@ -201,6 +206,8 @@ float3 rtHitRadianceSplit(GpuMaterial m, float3 n, float3 v, RtHitLighting L, fl
             // across the surface: through the leaf (model v1), or through a Subsurface hit's thin part (W)
             sunFull = albedo * s.transmission * L.sunIlluminance * (foliage ? -NoL : modelSubsurfaceThin(-NoL, v, l0));
     }
+    if ((m.classFlags & MATERIAL_EYE) != 0 && modelEyeMask(g_rtEyeWord) > 0 && NoV > 0)
+        sunFull += albedo * L.sunIlluminance * (rtHitDiffuseCosine(m, n, l0) - max(NoL, 0.0));
     const float3 cachedSpecular = shSpecularAlbedo(f0, NoV, s.roughness) * L.specularRadiance;
     float3 cached = diffuseAlbedo * L.irradiance + cachedSpecular;
     if ((m.classFlags & MATERIAL_LAYERED) != 0 && !foliage)

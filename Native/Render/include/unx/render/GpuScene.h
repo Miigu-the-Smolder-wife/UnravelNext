@@ -318,6 +318,10 @@ private:
         uint32_t count = 0;
     };
     Buffer createStructured(const void* data, size_t stride, size_t count, const wchar_t* name, bool uav = false, size_t capacity = 0);
+    void rawVertexSrv();
+    void compactSourceVertices();
+    Buffer m_vertexSigns;
+    bool m_compactSourceVertices = false;
     void release(Buffer& b);
     void markRecord(uint32_t instance);
     void writePalette(uint32_t instance, std::vector<float4>& palette);  // jointToModel x inverseBind of its skeleton

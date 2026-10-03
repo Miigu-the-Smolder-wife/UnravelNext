@@ -3,11 +3,12 @@
 // deterministic points - a surface point's uv around the iris, the refracted view ray in the eye's frame, a light on
 // either side of the surface (n = +z; the iris plane's normal is P[1].xyz) - with the eye's parameters from the scene's
 // material record P[0].z (loadMaterialEye: GpuScene's record), through FrameConstants. Per point 16 words into a raw
-// UAV: uv (2), t (3), l (3), the point's uv (2), mask, darkening, caustic, the eye word, the cosine from that word, 0.
+// UAV: uv (2), t (3), l (3), the point's uv (2), mask, darkening, caustic, the eye word, model and ray-hit cosines.
 //   P[0].x output UAV (raw), P[0].y point count, P[0].z the eye material; P[1].xyz the iris plane's normal (float bits)
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
 #include "Passes/Common/MaterialModel.hlsli"
+#include "RayTracing/HitLayers.hlsli"
 
 float hash01(uint x)
 {
@@ -41,6 +42,8 @@ void main(uint i : SV_DispatchThreadID)
     const ModelEyePoint p = modelEyePoint(e, uv, t);
     const uint word = modelEyePack(axis, p.mask, p.caustic);
     const float cosine = modelEyeCosine(modelEyeOf(word, n), dot(n, l), l);
+    g_rtEyeWord = word;
+    const float hitCosine = rtHitDiffuseCosine(m, n, l);
     RWByteAddressBuffer o = ResourceDescriptorHeap[P[0].x];
     const uint b = 64 * i;
     o.Store2(b, asuint(uv));
@@ -48,5 +51,5 @@ void main(uint i : SV_DispatchThreadID)
     o.Store3(b + 20, asuint(l));
     o.Store2(b + 32, asuint(p.uv));
     o.Store3(b + 40, uint3(asuint(p.mask), asuint(p.darkening), asuint(p.caustic)));
-    o.Store3(b + 52, uint3(word, asuint(cosine), 0));
+    o.Store3(b + 52, uint3(word, asuint(cosine), asuint(hitCosine)));
 }

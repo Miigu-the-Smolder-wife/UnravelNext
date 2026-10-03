@@ -72,7 +72,20 @@ float fogOpticalDepth(FogMedium f, float3 origin, float3 dir, float t0, float t1
     t0 = max(t0, f.start);
     if (!f.on || !(t1 > t0)) return 0;
     float tau = fogLayerDepth(f.density, f.falloff, f.height, origin, dir, t0, t1);
-    if (f.density2 > 0) tau += fogLayerDepth(f.density2, f.falloff2, f.height2, origin, dir, t0, t1);
+    if (f.density2 > 0)
+    {
+        if (f.falloff2 < 0)
+        {
+            // Internal rain layer: clip the path at its ceiling rather than integrating
+            // uniform rain through the entire atmosphere (including the sun's path).
+            float a = t0, b = t1;
+            if (abs(dir.y) < 1e-8) { if (origin.y > f.height2) b = a; }
+            else if (dir.y > 0) b = min(b, (f.height2 - origin.y) / dir.y);
+            else a = max(a, (f.height2 - origin.y) / dir.y);
+            tau += f.density2 * max(b - a, 0.0);
+        }
+        else tau += fogLayerDepth(f.density2, f.falloff2, f.height2, origin, dir, t0, t1);
+    }
     return min(tau, 64.0);
 }
 

@@ -28,6 +28,7 @@
 #include "unx/gi/GiSystem.h"
 #include "unx/refl/ReflectionSystem.h"
 #include "unx/render/GpuScene.h"
+#include "unx/render/Tracks.h"
 #include "unx/rt/RayPipeline.h"
 #include "unx/rt/RayScene.h"
 #include "unx/scene/MaterialModel.h"
@@ -718,6 +719,9 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
                           c.bindFrameConstants(fcAddress);
                           primary.dispatch(c.cmd, 0, width, height, 1);
                       });
+        // Lumen hit lighting consumes the card frame and its indirect sources. Match the
+        // production order even though primary visibility is ray traced by this harness.
+        tracks::surfaceCache(fc, main);
         gi::GiSystem& gi = gi::GiSystem::get(fc);
         gi.setConstantSky(sky, { 0, 0, 0 });
         gi.record(fc, main, rays);
@@ -745,7 +749,11 @@ Outcome run(Device& device, ShaderLibrary& shaders, const QualityConfig& quality
     }
     if (g_checkFurnaceAnchors || g_scanCache)
     {
-        if (gi::GiSystem* gi = gi::GiSystem::find(state)) out.invalidAnchors = scanCache(device, shaders, *gi, 2.0f, g_scanCache);
+        if (gi::GiSystem* gi = gi::GiSystem::find(state))
+        {
+            if (gi->cache()) out.invalidAnchors = scanCache(device, shaders, *gi, 2.0f, g_scanCache);
+            else logf("world-cache anchor scan: skipped (gi.lumen_only has no world cache); reflection checks still run\n");
+        }
         g_scanCache = g_checkFurnaceAnchors = false;  // the closed furnace only
     }
     CommandList cl = device.acquireCommandList(QueueType::Graphics);
@@ -822,7 +830,7 @@ int main(int argc, char** argv)
         // the old test also had stochastic failures (GiTrace's MIS history).
         // Keep the 3% + z*sigma gate; allow 256 frames, without extra rays per frame.
         uint32_t frames = 256;
-        bool validate = false, furnaceOnly = false;
+        bool validate = false, furnaceOnly = false, lumenFurnace = false;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
@@ -831,6 +839,7 @@ int main(int argc, char** argv)
             else if (a == "--set" && i + 1 < argc) overrides.push_back(argv[++i]);
             else if (a == "--validate") validate = true;
             else if (a == "--furnace-only") furnaceOnly = true;
+            else if (a == "--lumen-furnace") lumenFurnace = true;
             else if (a == "--scan-cache") g_scanCache = true;  // diagnostics: GI cache entries vs the furnace (first scene only)
             else fail("unknown argument %s", a.c_str());
         }
@@ -848,12 +857,25 @@ int main(int argc, char** argv)
         bool pass = true;
 
         const scene::Scene furnace = furnaceWithMirrors(1, 0.5f);
+        QualityConfig furnaceQuality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+        furnaceQuality.applyOverride("gi.experiment_disable=1024");
+        for (const std::string& setting : overrides) furnaceQuality.applyOverride(setting);
+        if (!lumenFurnace)
+        {
+            // This closed-form oracle assumes the Lambert world cache. Mesh cards deliberately use
+            // diffuse + 0.45 * F0, finite probes and a 10 cm near-hit exclusion; their result is a
+            // different transport approximation. Keep the exact Lambert regression on its own path.
+            // Every subsequent case below still exercises the configured production reflection path.
+            for (const char* setting : {"gi.lumen=false", "reflection.lumen=false", "gi.lumen_only=false", "reflection.lumen_only=false", "surface_cache.enabled=false"})
+                furnaceQuality.applyOverride(setting);
+            logf("Lambert furnace: explicit world-cache baseline; later cases use configured production defaults\n");
+        }
         g_checkFurnaceAnchors = true;
-        const Outcome a = run(device, shaders, quality, furnace, { 0, 0, 0 },
+        const Outcome a = run(device, shaders, furnaceQuality, furnace, { 0, 0, 0 },
                               furnaceExpectation(ViewDesc::fromCamera(furnace.cameras[0], 1920, 1080, float4x4{}), 1920, 1080, 1.0, 0.5), frames, 1920, 1080);
         // reflection.lumen (the ray-reuse pipeline) has no G pixels: every traced pixel is an M sample and the glossy half
         // above the roughness limit is K. The values are checked as before; the G terms have nothing to check.
-        const bool noGlossyPath = quality.has("reflection.lumen") && quality.boolean("reflection.lumen");
+        const bool noGlossyPath = furnaceQuality.has("reflection.lumen") && furnaceQuality.boolean("reflection.lumen");
         const bool okGlossy = noGlossyPath ? a.glossy == 0 : a.glossy > 0 && std::fabs(a.meanG - 1) < 0.01 && a.excessG <= 0;
         const bool okA = a.invalidAnchors == 0 && a.mirror > 0 && okGlossy && std::fabs(a.meanM - 1) < 0.01 && a.excessM <= 0;
         logf("furnace (value / expected; cache L = 2): %u surface samples: K %u, M %u (mean %.4f, worst %.2f %%, %u beyond 3 %% + z sigma), G %u (mean %.4f, worst %.2f %%) -> %s\n", a.surface, a.k,
@@ -1041,7 +1063,13 @@ int main(int argc, char** argv)
                 tailSum += a2 / (a2 + th * th);
                 return Expectation{ f, 0 };
             };
-            const Outcome c = run(device, shaders, quality, t, { 0, 0, 0 }, expected, 16, 1920, 1080);
+            // This oracle contains direct light only. Card radiosity adds a real floor bounce
+            // outside that model; isolate it here while the other fixtures retain production GI.
+            QualityConfig directQuality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+            directQuality.applyOverride("gi.experiment_disable=1024");
+            for (const auto& value : overrides) directQuality.applyOverride(value);
+            directQuality.applyOverride("surface_cache.radiosity=false");
+            const Outcome c = run(device, shaders, directQuality, t, { 0, 0, 0 }, expected, 16, 1920, 1080);
             const double allowed = std::ceil(tailSum + 4 * std::sqrt(tailSum) + 2);
             const bool okE = c.mirror > 1000 && std::fabs(c.meanM - 1) < 0.01 && c.outliersM <= allowed;
             logf("local light at hits: %u M pixels on the lit wall's reflection (mean value / expected %.4f, worst %.2f %%, %u beyond 3 %%; "

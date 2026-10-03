@@ -117,6 +117,13 @@ struct Builder
         n.luminance = (float)(lum / nodeArea);
         n.plane = planeIndex;
         n.firstChild = kNone;
+        const float3 reference = pb.tris[inside[0]].radiance;
+        n.uniform = std::abs(area - nodeArea) <= nodeArea * 1e-7;
+        for (uint32_t ti : inside)
+        {
+            const float3 value = pb.tris[ti].radiance;
+            n.uniform = n.uniform && value.x == reference.x && value.y == reference.y && value.z == reference.z;
+        }
         const uint32_t index = (uint32_t)out.nodes.size();
         out.nodes.push_back(n);
         const bool leaf = 2 * half <= cfg.leafSize + 1e-9 || depth >= cfg.maxDepth;
@@ -281,7 +288,7 @@ std::vector<uint32_t> emissiveLightsImage(const EmissiveCook& cook)
         putf(o + 16, n.radiance.x); putf(o + 20, n.radiance.y); putf(o + 24, n.radiance.z);
         w[(o + 28) / 4] = n.plane;
         w[(o + 32) / 4] = n.firstChild;
-        w[(o + 36) / 4] = 0; w[(o + 40) / 4] = 0; w[(o + 44) / 4] = 0;
+        w[(o + 36) / 4] = n.uniform ? 1u : 0u; w[(o + 40) / 4] = 0; w[(o + 44) / 4] = 0;
     }
     std::copy(cook.convertedMaterials.begin(), cook.convertedMaterials.end(), w.begin() + bitsetOffset / 4);
     return w;

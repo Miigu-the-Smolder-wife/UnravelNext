@@ -47,7 +47,11 @@ cbuffer FrameConstants : register(b1)
 #if UNX_CLUSTER_STREAM
     uint g_clusterStream;  // compressed cluster vertices (ClusterStream.hlsli): the raw words' SRV + 1, 0: none
     uint g_clusterPages;   // the frame's cluster page table (visibility.cluster_streaming): its SRV + 1, 0: none
+#else
+    uint2 g_vertexLayoutPadding;
 #endif
+    uint g_vertexSigns;  // lossless compact source vertices: one tangent-handedness bit per static vertex
+    uint3 g_vertexPadding;
 };
 
 // Reversed-Z infinite projection: device depth d = near / viewDistance (1 at the near plane, 0 = sky).

@@ -2017,7 +2017,8 @@ UNX_TEST(material_inputs_and_scene_blocks)
         bare.materials.back().emissiveScale = 1;
         bare.meshes[0].uv1.clear();
         bare.meshes[0].colors.clear();
-        CHECK(withBytes.size() == scene::serialize(bare).size() + (4 + 8 + 2 * (4 + 84)) + (4 + 8 + 4 + (8 + 4 * 8) + (8 + 4 * 4)));
+        // MINP has 80 bytes of fields per record, preceded by its 4-byte material index.
+        CHECK(withBytes.size() == scene::serialize(bare).size() + (4 + 8 + 2 * (4 + 80)) + (4 + 8 + 4 + (8 + 4 * 8) + (8 + 4 * 4)));
         const scene::Scene back = scene::deserialize(withBytes);
         const scene::Material& b = back.materials[back.materials.size() - 2];
         CHECK(b.uvScale.x == 2 && b.uvScale.y == -3 && b.uvOffset.x == 0.25f && b.uvOffset.y == -0.5f && b.uvRotation == 0.7f && b.occlusionUvSet == 1 &&
@@ -2949,11 +2950,12 @@ UNX_TEST(eye_model_on_the_gpu)
         const float3 nrm{ 0, 0, 1 }, l{ p[5], p[6], p[7] };
         below += l.z < 0 && mask > 0;
         const float cosine = scene::model::eyeCosine(mask, a, scene::model::eyeCausticNormal(a, nrm, caustic), l.z, l);
-        worstCosine = std::max(worstCosine, std::fabs((double)p[14] - cosine) / std::max((double)cosine, 1e-2));
+        worstCosine = std::max({ worstCosine, std::fabs((double)p[14] - cosine) / std::max((double)cosine, 1e-2),
+                                std::fabs((double)p[15] - cosine) / std::max((double)cosine, 1e-2) });
     }
     rb->Unmap(0, nullptr);
     logf("    eye on the GPU vs scene::model over %u points (%u iris, %u limbus, %u sclera, %u lit from below the surface): point %.2e, word over its rounding %.2e, "
-         "cosine (relative) %.2e\n", n, iris, limbus, sclera, below, worstPoint, worstWord, worstCosine);
+         "model/ray cosine (relative) %.2e\n", n, iris, limbus, sclera, below, worstPoint, worstWord, worstCosine);
     CHECK(iris > 500 && limbus > 100 && sclera > 500 && below > 100);
     CHECK(worstPoint < 1e-5);
     CHECK(worstWord < 1e-5);
@@ -3545,6 +3547,33 @@ UNX_TEST(round_pool_modes)
     CHECK(std::abs(t.modes[4 * s1] - std::sqrt(1.8411837813 * std::tanh(1.8411837813 * 0.5) * 9.81)) < 1e-3);
 }
 
+
+UNX_TEST(lossless_source_vertex_pool)
+{
+    scene::Scene scene;
+    scene.materials.push_back({});
+    scene::Mesh mesh;
+    mesh.name = "lossless vertex layout";
+    for (uint32_t i = 0; i < 300; ++i)
+    {
+        mesh.positions.push_back({(float)i * 0.125f, (float)(i % 7), -0.25f});
+        mesh.normals.push_back({0, 1, 0});
+        mesh.tangents.push_back({1, 0, 0, i & 1u ? -1.0f : 1.0f});
+        mesh.uv0.push_back({(float)i * 13.25f, -1000.125f});
+    }
+    mesh.indices = {0, 1, 2}; mesh.submeshes.push_back({0, 3, 0});
+    scene.meshes.push_back(mesh);
+    GpuScene gpuScene(testDevice());
+    gpuScene.upload(scene);
+    ClusterData clusters; clusters.meshes.resize(1);
+    gpuScene.setClusters(std::move(clusters));
+    CHECK(gpu::vertexStride(gpuScene.meshes()[0]) == 28);
+    CHECK(gpu::vertexByteOffset(gpuScene.meshes()[0]) == 0);
+    CHECK(gpuScene.buffer("vertices")->GetDesc().Width == ((300 * 28 + 31) / 32) * 32);
+    CHECK(gpuScene.buffer("vertices")->GetDesc().Width < 300 * sizeof(gpu::Vertex));
+    gpu::FrameConstants frame{}; gpuScene.fill(frame);
+    CHECK(frame.vertexSigns != gpu::kNone);
+}
 
 int main(int argc, char** argv)
 {

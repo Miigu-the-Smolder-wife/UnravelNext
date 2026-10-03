@@ -1,4 +1,5 @@
 #include "unx/refl/ReflectionSystem.h"
+#include "unx/render/HistoryResize.h"
 #include "unx/refl/SurfaceCacheLightPairs.h"
 
 #include "unx/rt/RayPipeline.h"
@@ -578,10 +579,10 @@ ScreenTraceInputs ReflectionSystem::screenTraceInputs(FramePassContext& fc, View
     return m_screenInputs;
 }
 
-void ReflectionSystem::ensureHistory(uint32_t width, uint32_t height)
+void ReflectionSystem::ensureHistory(FramePassContext& fc, uint32_t width, uint32_t height)
 {
     if (m_history && m_historyWidth == width && m_historyHeight == height) return;
-    if (m_history) m_device.deferRelease(m_history);
+    const auto oldDistance = m_history;
     D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
     D3D12_RESOURCE_DESC1 d{};
     d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -594,8 +595,11 @@ void ReflectionSystem::ensureHistory(uint32_t width, uint32_t height)
     check(m_device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_history)),
           "reflection distance history");
     m_history->SetName(L"R reflection distance history");
+    if (oldDistance) preserveHistoryResize(fc, oldDistance, m_history.Get());
     for (int k = 0; k < 2; ++k)
     {
+        const auto oldAccum = m_accum[k], oldAccumKeys = m_accumKeys[k];
+        const ComPtr<ID3D12Resource> oldLayers[3] = {m_layerStochastic[k], m_layerResidual[k], m_layerKeys[k]};
         if (m_accum[k]) m_device.deferRelease(m_accum[k]);
         if (m_accumKeys[k]) m_device.deferRelease(m_accumKeys[k]);
         if (m_layerStochastic[k]) m_device.deferRelease(m_layerStochastic[k]);
@@ -618,6 +622,7 @@ void ReflectionSystem::ensureHistory(uint32_t width, uint32_t height)
                                                                IID_PPV_ARGS(targets[t]->ReleaseAndGetAddressOf())),
                       "reflection layer history");
                 (*targets[t])->SetName(names[t][k]);
+                if (oldLayers[t]) preserveHistoryResize(fc, oldLayers[t], targets[t]->Get());
             }
             continue;
         }
@@ -631,8 +636,10 @@ void ReflectionSystem::ensureHistory(uint32_t width, uint32_t height)
                                                        IID_PPV_ARGS(&m_accumKeys[k])),
               "reflection accumulation keys");
         m_accumKeys[k]->SetName(k ? L"R reflection accumulation keys 1" : L"R reflection accumulation keys 0");
+        if (oldAccum) preserveHistoryResize(fc, oldAccum, m_accum[k].Get());
+        if (oldAccumKeys) preserveHistoryResize(fc, oldAccumKeys, m_accumKeys[k].Get());
     }
-    m_accumReset = true;
+    m_accumReset = m_accumReset || !oldDistance;
     m_historyWidth = width;
     m_historyHeight = height;
 }
@@ -825,8 +832,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const ReflectionSettings& s = m_settings;
     const uint32_t width = main.view.width, height = main.view.height;
     const uint32_t tilesX = (width + 7) / 8, tilesY = (height + 7) / 8;
-    const bool fresh = !m_history || m_historyWidth != width || m_historyHeight != height;
-    ensureHistory(width, height);
+    const bool fresh = !m_history;
+    ensureHistory(fc, width, height);
 
     main.reflection = g.createTexture({ "R reflection", width, height + tilesY, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
     const TextureRef reflection = main.reflection, depth = main.depth, gbuffer = main.gbuffer, probes = main.screenProbes, lobes = main.reflectionLobeTiles;

@@ -352,13 +352,15 @@ float3 rtLocalLightBrdfCos(GpuMaterial m, float3 n, float3 v, float3 wi, bool di
     const float NoL = dot(n, wi);
     const float3 albedo = s.baseColor * ((1 - s.metallic) / MODEL_PI);
     const bool foliage = s.cls == MATERIAL_FOLIAGE;
+    const float diffuseCosine = rtHitDiffuseCosine(m, n, wi);
     if (NoL <= 0)
     {
+        if ((m.classFlags & MATERIAL_EYE) != 0 && diffuseCosine > 0) return albedo * diffuseCosine;
         // across the surface: through the leaf, or through a Subsurface hit's thin part (W)
         if (foliage) return albedo * s.transmission * -NoL;
         return s.cls == MATERIAL_SUBSURFACE ? albedo * (s.transmission * modelSubsurfaceThin(-NoL, v, wi)) : 0;
     }
-    const float3 diffuse = (foliage ? albedo * (1 - s.transmission) : albedo) * NoL;
+    const float3 diffuse = (foliage ? albedo * (1 - s.transmission) : albedo) * diffuseCosine;
     if (diffuseOnly) return diffuse;
     const float NoV = max(dot(n, v), 1e-4);
     const float alpha = modelAlpha(s.roughness);

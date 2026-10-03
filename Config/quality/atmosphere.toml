@@ -81,9 +81,7 @@ start_distance_m = 0.0               # no fog nearer than this
 second_density_per_m = 0.0           # a second layer of the same medium (the reference's SecondFogData): extinction per metre at
 second_height_falloff_per_m = 0.02   # second_height_m, its own falloff - a low ground fog under a thin haze. 0: none. The game's
 second_height_m = 0.0                # fog (FrameContext::fog) brings its own
-rain_veil = false                    # (off: the veil has no top - uniform in height, its column integrates to 65 km, so any rain
-                                     # gives the zenith an optical depth near 16 and the sky turns fog-coloured; found by reading,
-                                     # 2026-10-03. On again when the veil ends at the cloud base)
+rain_veil = true                     # rain ends at the cloud base; rays and solar transmittance use the same clipped layer
                                      # while it rains (the frame's weather record: rain rate R mm/h) the rain itself is a medium:
                                      # 0.248 R^0.67 per km (the optical attenuation in rain, 1.076 R^0.67 dB/km), uniform in height,
                                      # as the second layer where the frame sets none - the distance fades in rain. The volume runs
@@ -136,7 +134,7 @@ sky_amount = 1.0                     # how much of the fog sky pixels take (1: t
 
 [atmosphere.froxels]
 integration_queue = true             # same air-slice estimator in dense waves; false is the tile-scheduled A/B path
-tile_px = 24
+tile_px = 16                         # 24 exceeded the 1% near-air interpolation gate at the Mie peak; 16 passes it
 tile_reference_height = 720          # tile_px holds for main views up to this height; a higher one gets tiles larger in proportion
                                      # (1080 internal: 36 px) - the grid keeps its angle per tile, and the lists, the air volume and the
                                      # sampled local light cost the same at every output. 0: tile_px at every resolution

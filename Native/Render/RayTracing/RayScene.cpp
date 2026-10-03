@@ -739,7 +739,7 @@ void RayScene::buildMeshBlas()
             D3D12_RAYTRACING_GEOMETRY_DESC g{};
             g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
             g.Flags = geometryFlags(sm.submeshes[s].material);
-            g.Triangles.VertexBuffer = { vertices + (uint64_t)gm.vertexOffset * sizeof(gpu::Vertex), sizeof(gpu::Vertex) };
+            g.Triangles.VertexBuffer = { vertices + gpu::vertexByteOffset(gm), gpu::vertexStride(gm) };
             g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
             g.Triangles.VertexCount = gm.vertexCount;
             g.Triangles.IndexBuffer = indices + ((uint64_t)gm.indexOffset + sm.submeshes[s].indexOffset) * sizeof(uint32_t);
@@ -3089,7 +3089,7 @@ void RayScene::recordRuntime(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
                 D3D12_RAYTRACING_GEOMETRY_DESC g{};
                 g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
                 g.Flags = geometryFlags(subs[s].material);
-                g.Triangles.VertexBuffer = { vertices + (uint64_t)gm.vertexOffset * sizeof(gpu::Vertex), sizeof(gpu::Vertex) };
+                g.Triangles.VertexBuffer = { vertices + gpu::vertexByteOffset(gm), gpu::vertexStride(gm) };
                 g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
                 g.Triangles.VertexCount = gm.vertexCount;
                 g.Triangles.IndexBuffer = indices + ((uint64_t)gm.indexOffset + subs[s].indexOffset) * sizeof(uint32_t);

@@ -285,6 +285,7 @@ struct CovMaterial
     float3 normal;    // world, unit (before the side and view rules)
     float variance;   // slope variance (geometric + textures)
     float coatRoughness;  // A9: the coat's footprint-filtered perceptual roughness (layered materials; 0 otherwise)
+    uint eyeWord;
 };
 // v0..v2: the triangle's deformed vertices (the ones sf was made from). An eye's fragment (MATERIAL_EYE) reads its base
 // colour at the iris point seen through the cornea, under the limbal ring (MaterialEye.hlsli); it is shaded as the plain
@@ -296,6 +297,7 @@ struct CovMaterial
 CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTextureSet ts, MVertex v0, MVertex v1, MVertex v2, uint parallax)
 {
     float3 baseColor = m.baseColor, n;
+    uint eyeWord = 0;
     float roughness = m.roughness, metallic = m.metallic;
     float variance = (dot(sf.dndx, sf.dndx) + dot(sf.dndy, sf.dndy)) / 12.0;
 #if COV_PRESHADE_CLASSES == 1
@@ -367,6 +369,7 @@ CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTexture
             const MEye e = mEyeEvaluate(visId, P[1].x, sf, m, n, v0, v1, v2);
             uvColor = iu.on ? materialInputsUv(iu.r, e.uv) : e.uv;
             baseColor *= e.darkening;
+            eyeWord = e.word;
         }
         if (ts.baseColor != UNX_NONE)
         {
@@ -383,6 +386,7 @@ CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTexture
     o.normal = n;
     o.variance = variance;
     o.coatRoughness = 0;
+    o.eyeWord = eyeWord;
     return o;
 }
 
@@ -402,6 +406,7 @@ void covStoreMaterial(RWByteAddressBuffer b, uint slot, CovMaterial c)
     b.Store4(48 * slot, uint4(asuint(c.baseColor), asuint(c.roughness)));
     b.Store4(48 * slot + 16, uint4(asuint(c.normal), asuint(c.metallic)));
     b.Store2(48 * slot + 32, uint2(asuint(c.variance), asuint(c.coatRoughness)));
+    b.Store(48 * slot + 40, c.eyeWord);
 }
 CovMaterial covLoadMaterial(ByteAddressBuffer b, uint slot)
 {
@@ -414,6 +419,7 @@ CovMaterial covLoadMaterial(ByteAddressBuffer b, uint slot)
     const uint2 vr = b.Load2(48 * slot + 32);
     c.variance = asfloat(vr.x);
     c.coatRoughness = asfloat(vr.y);
+    c.eyeWord = b.Load(48 * slot + 40);
     return c;
 }
 
@@ -509,6 +515,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
     const float3 worldPos = g_cameraPosition + offset;
     const float linearZ = dot(offset, -g_view[2].xyz);  // view depth (D has unit depth along the view axis)
     const float3 v = sf.view;
+    const ModelEye eye = modelEyeOf(cmat.eyeWord, n);
     const float NoV = dot(n, v);
     const float3 diffuse = s.baseColor * ((1 - s.metallic) / SH_PI);
 #if COV_COAT
@@ -606,6 +613,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
                                         (NoL > 0 ? modelCoatUnder(s, coat, n, v, l0) * above * cap : 0));
         if (sheenOn) sun = keepS * sun + sheen.color * (modelSheenSun(sheen.roughness, n, v, l0, g_sunAngularRadius) * cap);
 #endif
+        if (eye.mask > 0 && NoV > 0) sun += front * cap * (modelEyeCosine(eye, above, l0) - above);
         radiance += sun * sunVisibility;
     }
 
@@ -748,6 +756,12 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
                     const float3x3 T = j == 0 ? frame : (j == 1 ? specular : (j == 5 ? specular1 : (NoV > 0 ? frameBack : frame)));
 #endif
                     const float I = shAreaIntegral(light, p, T, j == 0 || j == 2);
+                    if (j == 0 && eye.mask > 0 && NoV > 0)
+                    {
+                        const float3x3 irisFrame = shShadingFrame(eye.iris, v, dot(eye.iris, v));
+                        const float irisI = shAreaIntegral(light, p, irisFrame, true);
+                        radiance += scaleBase * Lw * front * (SH_PI * eye.mask * (irisI * modelEyeCaustic(eye, normalize(p)) - I));
+                    }
                     if (j == 5)
                     {
                         radiance += Lw * (specularAlbedo1 * I);
@@ -795,6 +809,8 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
             if (sheenOn && cosL > 0) f = keepS * (f - (f - front) * sheen.cloth) + sheen.color * (modelSheenLobe(sheen.roughness, n, v, l) * shLightSpecular());
 #endif
             radiance += f * El * (abs(cosL) * visibility);
+            if (eye.mask > 0 && NoV > 0)
+                radiance += front * El * ((modelEyeCosine(eye, cosL, l) - max(cosL, 0.0)) * visibility);
         }
         g_lightChannels = 7u;
         if (fieldOn)
@@ -874,7 +890,9 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
         // translucency volume at the fragment: irradiance on each side, the lobe's radiance from the mirror direction
         const LtvSh sh = ltvSample(ltvParams(giSourceVolume(P[6].z)), worldPos);
         const float3 nv = NoV > 0 ? n : -n;
-        const float3 irr = (experiment & 2) == 0 ? ltvIrradianceOf(sh, nv) : 0;
+        float3 irr = (experiment & 2) == 0 ? ltvIrradianceOf(sh, nv) : 0;
+        if ((experiment & 2) == 0 && NoV > 0 && eye.mask > 0)
+            irr = lerp(irr, ltvIrradianceOf(sh, eye.iris), eye.mask);
         const float3 inc = NoV > 0 && (experiment & 4) == 0 ? ltvRadianceOf(sh, reflect(-v, n)) : 0;
 #if COV_COAT
         if (cover > 0 && NoV > 0)

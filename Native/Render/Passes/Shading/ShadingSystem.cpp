@@ -1329,6 +1329,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             const TextureRef covDepth = g.createTexture({ "m.ml.cov depth", W, H, 1, 1, DXGI_FORMAT_R32_FLOAT });
             // (the nearest fragment's lighting channels: the instance's samples take no light its instance is not lit by)
             const TextureRef covChannels = g.createTexture({ "m.ml.cov lighting channels", W, H, 1, 1, DXGI_FORMAT_R8_UINT });
+            bool covEyes = false;
+            if (const scene::Scene* src = fc.scene.source())
+                for (const scene::Material& material : src->materials) covEyes = covEyes || material.eyeIrisRadius > 0;
+            covEyes = covEyes && (!fc.quality.has("shading.eye_model") || fc.quality.boolean("shading.eye_model"));
+            const TextureRef covEyeWord = covEyes ? g.createTexture({ "m.ml.cov eye word", W, H, 1, 1, DXGI_FORMAT_R32_UINT }) : TextureRef{};
             std::array<ID3D12PipelineState*, 4> covKernel{};
             for (int mode = 0; mode < 4; ++mode) covKernel[mode] = fc.shaders.compute(("Passes/Shading/MegaLightsCoverage.MODE" + std::to_string(mode)).c_str());
             g.addPass("m.ml.cov.nearest", QueueType::Graphics,
@@ -1366,12 +1371,14 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           b.use(nearest, Use::SrvCompute);
                           b.use(element, Use::SrvCompute);
                           for (TextureRef t : { covGbuffer, covWord, covDepth, covChannels }) b.use(t, Use::UavCompute);
+                          if (covEyeWord.valid()) b.use(covEyeWord, Use::UavCompute);
                       },
                       [=](PassContext& c) {
-                          const uint32_t k[12] = { c.srv(v.coverageRecords), gpu::kNone, c.srv(nearest), c.srv(element), gpu::kNone, c.srv(v.visibleClusters), 0, 0,
-                                                   c.uav(covGbuffer), c.uav(covWord), c.uav(covDepth), c.uav(covChannels) };
+                          const uint32_t k[16] = { c.srv(v.coverageRecords), gpu::kNone, c.srv(nearest), c.srv(element), gpu::kNone, c.srv(v.visibleClusters), 0, 0,
+                                                   c.uav(covGbuffer), c.uav(covWord), c.uav(covDepth), c.uav(covChannels),
+                                                   covEyeWord.valid() ? c.uav(covEyeWord) : gpu::kNone, 0, 0, 0 };
                           c.bindFrameConstants(cb);
-                          c.computeConstants(k, 12);
+                          c.computeConstants(k, 16);
                           c.cmd->SetPipelineState(covKernel[3]);
                           c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
                       });
@@ -1383,6 +1390,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             cview.visId = {};
             MegaLightsOptions covOptions;
             covOptions.channels = covChannels;
+            covOptions.classWord = covEyeWord;
             MegaLightsFrame cml = megaLightsSample(fc, cview, covWord, areaLights, ltcSrv, signature, "coverage", covOptions);
             if (!cml.on) fail("M.shading: the coverage layer's shading.mega_lights instance could not start");
             ID3D12PipelineState* covShade = fc.shaders.compute((std::string("Passes/Shading/MegaLightsShade.AREA") + (areaLights ? "1" : "0") + ".LAYERED0.FULL1").c_str());
@@ -1406,6 +1414,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             g.addPass("m.ml.cov.shade", QueueType::Graphics,
                       [&](PassBuilder& b) {
                           for (TextureRef t : { covGbuffer, covDepth, covWord, samples, keys }) b.use(t, Use::SrvCompute);
+                          if (covEyeWord.valid()) b.use(covEyeWord, Use::SrvCompute);
                           if (r.lightFunctions.valid()) b.use(r.lightFunctions, Use::SrvCompute);
                           b.use(v.froxelLights, Use::SrvCompute);
                           if (r.fxLights.valid()) b.use(r.fxLights, Use::SrvCompute);
@@ -1428,6 +1437,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           k32[20] = c.srv(v.froxelLights);
                           k32[21] = ltcSrv;
                           k32[27] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : gpu::kNone;  // P[6].w (A8)
+                          k32[37] = covEyeWord.valid() ? c.srv(covEyeWord) : gpu::kNone;
                           k32[41] = c.srv(samples);     // P[10].y
                           k32[42] = c.srv(keys);        // P[10].z
                           k32[43] = c.uav(outDiffuse);  // P[10].w

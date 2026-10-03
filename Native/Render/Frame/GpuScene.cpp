@@ -107,6 +107,7 @@ GpuScene::GpuScene(Device& device) : m_device(device)
 
 GpuScene::~GpuScene()
 {
+    release(m_vertexSigns);
     for (Buffer* b : { &m_instanceBuffer, &m_meshBuffer, &m_submeshBuffer, &m_vertexBuffer, &m_indexBuffer, &m_materialBuffer, &m_materialRemapBuffer, &m_lightBuffer,
                        &m_skinBuffer, &m_bonePalette, &m_prevBonePalette, &m_albedoTable, &m_specularTable, &m_coverageTable, &m_clusterBuffer, &m_lodLevelBuffer,
                        &m_lodLevelClusterBuffer,
@@ -194,10 +195,62 @@ GpuScene::Buffer GpuScene::createStructured(const void* data, size_t stride, siz
     return b;
 }
 
+void GpuScene::rawVertexSrv()
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Format = DXGI_FORMAT_R32_TYPELESS;
+    sd.Buffer.NumElements = (UINT)(m_vertexBuffer.resource->GetDesc().Width / 4);
+    sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+    m_device.d3d()->CreateShaderResourceView(m_vertexBuffer.resource.Get(), &sd, m_device.descriptors().resourceCpu(m_vertexBuffer.srv));
+}
+
+void GpuScene::compactSourceVertices()
+{
+    struct CompactVertex { float3 position; uint32_t normalOct, tangentOct; float2 uv; };
+    static_assert(sizeof(CompactVertex) == 28);
+    std::vector<CompactVertex> vertices;
+    std::vector<uint32_t> signs;
+    for (size_t i = 0; i < m_source->meshes.size(); ++i)
+    {
+        const scene::Mesh& m = m_source->meshes[i];
+        if (vertices.size() >= gpu::kCompactVertexOffset) fail("compact source vertices exceed the 31-bit offset");
+        m_meshes[i].vertexOffset = (uint32_t)vertices.size() | gpu::kCompactVertexOffset;
+        for (size_t v = 0; v < m.positions.size(); ++v)
+        {
+            const size_t index = vertices.size();
+            if ((index & 31) == 0) signs.push_back(0);
+            if (!m.tangents.empty() && m.tangents[v].w < 0) signs.back() |= 1u << (index & 31);
+            const float3 t = m.tangents.empty() ? anyTangent(m.normals[v]) : float3{m.tangents[v].x, m.tangents[v].y, m.tangents[v].z};
+            vertices.push_back({m.positions[v], octEncode(m.normals[v]), octEncode(t), m.uv0.empty() ? float2{} : m.uv0[v]});
+        }
+    }
+    const uint64_t staticBytes = (uint64_t)vertices.size() * sizeof(CompactVertex);
+    const uint64_t runtimeStart = (staticBytes + 31) / 32 * 32;
+    const bool pool = m_runtimeCap.meshes > 0;
+    const uint64_t totalBytes = runtimeStart + (pool ? (uint64_t)m_runtimeCap.vertices * sizeof(gpu::Vertex) : 0);
+    std::vector<uint32_t> words((size_t)(totalBytes / 4), 0);
+    if (staticBytes) std::memcpy(words.data(), vertices.data(), (size_t)staticBytes);
+    release(m_vertexBuffer);
+    m_vertexBuffer = createStructured(words.data(), 4, words.size(), L"compact source vertices", pool);
+    m_vertexBuffer.count = (uint32_t)(totalBytes / sizeof(gpu::Vertex));
+    rawVertexSrv();
+    m_vertexSigns = createStructured(signs.data(), 4, signs.size(), L"source vertex handedness");
+    m_rtFirst[RtVertices] = (uint32_t)(runtimeStart / sizeof(gpu::Vertex));
+    if (pool) rawUav(m_rtUav[RtVertices], m_vertexBuffer, totalBytes, true);
+    m_compactSourceVertices = true;
+    logf("source vertex pool: %zu vertices, %llu -> %llu bytes (28-byte lossless records and handedness bits; runtime vertices remain 32 bytes)\n",
+         vertices.size(), (unsigned long long)vertices.size() * sizeof(gpu::Vertex),
+         (unsigned long long)runtimeStart + (unsigned long long)signs.size() * 4);
+}
+
 void GpuScene::upload(const scene::Scene& s)
 {
     scene::validate(s);
     m_source = &s;
+    release(m_vertexSigns);
+    m_compactSourceVertices = false;
     ++m_revision;
 
     // Meshes, submeshes, vertices, indices, skin.
@@ -407,6 +460,7 @@ void GpuScene::upload(const scene::Scene& s)
     m_meshBuffer = createStructured(m_meshes.data(), sizeof(gpu::Mesh), m_meshes.size(), L"scene meshes", pool, pool ? m_rtFirst[RtMeshes] + rc.meshes : 0);
     m_submeshBuffer = createStructured(submeshes.data(), sizeof(gpu::Submesh), submeshes.size(), L"scene submeshes", pool, pool ? m_rtFirst[RtSubmeshes] + rc.submeshes : 0);
     m_vertexBuffer = createStructured(vertices.data(), sizeof(gpu::Vertex), vertices.size(), L"scene vertices", pool, pool ? m_rtFirst[RtVertices] + rc.vertices : 0);
+    rawVertexSrv();
     m_indexBuffer = createStructured(indices.data(), sizeof(uint32_t), indices.size(), L"scene indices", pool, pool ? m_rtFirst[RtIndices] + rc.indices : 0);
     if (!attributes.empty())
     {
@@ -921,6 +975,9 @@ void GpuScene::setClusters(ClusterData data)
 {
     m_clusterData = std::move(data);
     const ClusterData& c = m_clusterData;
+    // Shrink the source pool independently of lossy cluster encoding. Its attributes remain exact for rays,
+    // deformation and coverage; handedness moves to a bitset rather than a 32-bit word per vertex.
+    if (!m_compactSourceVertices) compactSourceVertices();
     m_maxClusterVertices = m_maxClusterTriangles = 0;
     noteClusterSizes(c);
     for (Buffer* b : { &m_clusterBuffer, &m_lodLevelBuffer, &m_lodLevelClusterBuffer, &m_clusterVertexIndexBuffer, &m_clusterTriangleBuffer }) release(*b);
@@ -975,9 +1032,10 @@ void GpuScene::setClusters(ClusterData data)
             m_meshes[i].clusterCount = c.meshes[i].clusterCount;
             m_meshes[i].lodLevelOffset = c.meshes[i].lodLevelOffset;
         }
-        release(m_meshBuffer);
-        m_meshBuffer = createStructured(m_meshes.data(), sizeof(gpu::Mesh), m_meshes.size(), L"scene meshes", pool, pool ? m_rtFirst[RtMeshes] + rc.meshes : 0);
     }
+    // Compaction changes source vertex offsets even without visibility clusters (ray-only consumers).
+    release(m_meshBuffer);
+    m_meshBuffer = createStructured(m_meshes.data(), sizeof(gpu::Mesh), m_meshes.size(), L"scene meshes", pool, pool ? m_rtFirst[RtMeshes] + rc.meshes : 0);
     if (pool)
     {
         rawUav(m_rtUav[RtMeshes], m_meshBuffer, (uint64_t)m_meshBuffer.count * sizeof(gpu::Mesh), true);
@@ -1924,6 +1982,7 @@ void GpuScene::fill(gpu::FrameConstants& f) const
     f.materialInputs = m_materialInputBuffer.resource ? m_materialInputBuffer.srv : gpu::kNone;
     f.meshAttributes = m_meshAttributeTable.resource ? m_meshAttributeTable.srv : gpu::kNone;
     f.vertexAttributes = m_vertexAttributeBuffer.resource ? m_vertexAttributeBuffer.srv : gpu::kNone;
+    f.vertexSigns = m_vertexSigns.resource ? m_vertexSigns.srv : gpu::kNone;
     f.coatTable = m_coatTable.resource ? m_coatTable.srv : gpu::kNone;
     f.fxLightCount = m_fxLightCapacity > 0 && m_fxLightCount.resource ? m_fxLightCount.srv : gpu::kNone;
     f.fxLightCapacity = m_fxLightCapacity;

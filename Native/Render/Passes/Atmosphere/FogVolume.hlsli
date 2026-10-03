@@ -86,7 +86,8 @@ void fogSegment(inout float za, inout float zb, float limit)
 float fogExtinctionAt(FogMedium f, float y)
 {
     float sigma = f.density * min(exp2(-f.falloff * (y - f.height)), 64.0);
-    if (f.density2 > 0) sigma += f.density2 * min(exp2(-f.falloff2 * (y - f.height2)), 64.0);  // (the second layer)
+    if (f.density2 > 0)
+        sigma += f.density2 * (f.falloff2 < 0 ? (y <= f.height2 ? 1.0 : 0.0) : min(exp2(-f.falloff2 * (y - f.height2)), 64.0));
     return sigma;
 }
 

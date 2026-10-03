@@ -72,7 +72,7 @@ int main(int argc, char** argv)
 {
     try
     {
-        bool warp = false, debugLayer = true;
+        bool warp = false, debugLayer = true, gbv = false;
         uint32_t texelsArg = 0;  // --texels N: the deep opacity map's size (attribution runs)
         uint32_t sizeArg[2] = { 96, 54 }, timeRuns = 0, timeMode = 0;  // --size W H (the pixel angle stays 2.1e-3); --time N: N timed frames
         for (int i = 1; i < argc; ++i)
@@ -80,6 +80,7 @@ int main(int argc, char** argv)
             const std::string a = argv[i];
             if (a == "--warp") warp = true;
             else if (a == "--no-debug-layer") debugLayer = false;
+            else if (a == "--gbv") gbv = true;
             else if (a == "--texels" && i + 1 < argc) texelsArg = (uint32_t)std::stoul(argv[++i]);
             else if (a == "--size" && i + 2 < argc) sizeArg[0] = (uint32_t)std::stoul(argv[++i]), sizeArg[1] = (uint32_t)std::stoul(argv[++i]);
             else if (a == "--time" && i + 1 < argc) timeRuns = (uint32_t)std::stoul(argv[++i]);
@@ -94,6 +95,7 @@ int main(int argc, char** argv)
         ComPtr<ID3D12Device> external = warp ? warpDevice() : nullptr;
         DeviceOptions options;
         options.debugLayer = debugLayer && !warp;
+        options.gpuValidation = gbv && !warp;
         options.externalDevice = external.Get();
         Device device(options);
         ShaderLibrary shaders(device, executableDirectory() / "shaders");

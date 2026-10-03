@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: MODE=0,1,2,3,4,5
+// unx-variants: MODE=0,1,2,3,4,5,6
 // FogTests: the fog's functions (Fog.hlsli, FogVolume.hlsli) at query points, one thread per query; FogTests.cpp holds
 // their C++ twins.
 // MODE 0: the closed form. 3 float4 per query: { ray origin, t0 }, { ray direction (unit), t1 }, { a height y, 0, 0, 0 };
@@ -38,6 +38,11 @@ void main(uint id : SV_DispatchThreadID)
     const float4 q0 = queries[3 * id], q1 = queries[3 * id + 1], q2 = queries[3 * id + 2];
     const FogMedium fog = fogMedium(uint4(1, 0, 0, 0), P[2], P[3]);
     output[id] = float4(fogOpticalDepth(fog, q0.xyz, q1.xyz, q0.w, q1.w), fogExtinctionAt(fog, q2.x), 0, 0);
+#elif MODE == 6
+    const float4 q0 = queries[3 * id], q1 = queries[3 * id + 1], q2 = queries[3 * id + 2];
+    FogMedium fog = (FogMedium)0;
+    fog.on = true; fog.density2 = q2.y; fog.falloff2 = -1; fog.height2 = q2.x;
+    output[id] = float4(fogOpticalDepth(fog, q0.xyz, q1.xyz, q0.w, q1.w), fogExtinctionAt(fog, q2.z), fogSunThrough(fog, q0.xyz, q1.xyz), 0);
 #elif MODE == 1
     const float4 q = queries[id];
     const FogGrid g = fogGrid(P[2], P[3].x, P[3].y);

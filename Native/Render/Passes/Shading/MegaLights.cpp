@@ -5,6 +5,7 @@
 // depth (ping-pong), and the tile sets of visible / hidden lights. The history is dropped on a new scene revision, a
 // history discontinuity, an origin shift or a size change.
 #include "unx/shading/MegaLights.h"
+#include "unx/render/HistoryResize.h"
 
 #include "unx/core/Config.h"
 #include "unx/render/Device.h"
@@ -58,13 +59,14 @@ struct MegaLightsState
                 if (*t) device->deferRelease(*t);
         if (sets) device->deferRelease(sets);
     }
-    void ensure(Device& d, uint32_t w, uint32_t h)
+    void ensure(FramePassContext& fc, uint32_t w, uint32_t h)
     {
         if (diffuse[0] && width == w && height == h) return;
-        release();
+        Device& d = fc.device;
         device = &d;
         D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
         auto texture = [&](ComPtr<ID3D12Resource>& out, DXGI_FORMAT format, const wchar_t* name) {
+            const auto old = out;
             D3D12_RESOURCE_DESC1 desc{};
             desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
             desc.Width = w;
@@ -77,6 +79,11 @@ struct MegaLightsState
             check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
                                                     IID_PPV_ARGS(&out)),
                   "M mega lights history");
+            if (old)
+            {
+                if (!fresh) preserveHistoryResize(fc, old, out.Get());
+                else d.deferRelease(old);
+            }
             out->SetName(name);
         };
         for (int k = 0; k < 2; ++k)
@@ -95,13 +102,13 @@ struct MegaLightsState
         bd.SampleDesc.Count = 1;
         bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         bd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        if (sets) d.deferRelease(sets);
         sets.Reset();
         check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &bd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&sets)),
               "M mega lights tile sets");
         sets->SetName(L"M ml tile sets");
         width = w;
         height = h;
-        fresh = true;
     }
 };
 
@@ -195,7 +202,7 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
     if (fullView && instance) ml.stateKey += std::string(".") + instance;  // (a second instance of the view: the coverage layer's)
     ml.transient = !fullView;
     MegaLightsState* st = ml.transient ? nullptr : &fc.state<MegaLightsState>(ml.stateKey);
-    if (st) st->ensure(fc.device, W, H);
+    if (st) st->ensure(fc, W, H);
     const float3 shift = fc.frame.originShift;
     const bool valid = st && !st->fresh && st->revision == fc.scene.revision() && fc.frame.discontinuity == 0 && shift.x == 0 && shift.y == 0 && shift.z == 0;
     const float exposure = 1.0f / (1.2f * std::exp2(view.view.ev100));

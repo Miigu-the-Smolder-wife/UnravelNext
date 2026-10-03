@@ -183,7 +183,7 @@ public:
     Rect planarViewRect(uint32_t view) const { return m_viewRects[view]; }
 
 private:
-    void ensureHistory(uint32_t width, uint32_t height);
+    void ensureHistory(FramePassContext& fc, uint32_t width, uint32_t height);
     struct RefractionInputs  // the frame's reflection constants, kept for recordRefraction
     {
         bool valid = false, atmosphere = false;

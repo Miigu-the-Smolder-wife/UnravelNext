@@ -53,6 +53,7 @@ struct EmissiveNode
     uint32_t plane;
     uint32_t firstChild;  // 4 consecutive children (quadrants -x-y, +x-y, -x+y, +x+y; a missing one = 0xFFFFFFFF), or
                           // 0xFFFFFFFF for a leaf
+    bool uniform = false; // full square covered with one radiance; partial coverage must descend
 };
 
 struct EmissiveCook

@@ -16,6 +16,7 @@
 # The GPU lock's HOLD file (.gpulock\HOLD in the main checkout) must be gone: this script does not remove it.
 param(
     [string]$Scenes = "C:\Users\USER\UnravelNext-refl\Cache\ReflJudge\scenes",
+    [string[]]$ScenePaths = @(),
     [string]$Out = "Cache\Ue6Final",
     [string[]]$Resolutions = @("1080p", "1440p", "4K"),
     [string]$Only = "",
@@ -44,7 +45,14 @@ foreach ($s in $sets) { $setArgs += @("--set", $s) }
 if ($GateArgs -ne "") { $setArgs += @($GateArgs -split " " | Where-Object { $_ }) }
 # the runs' scenes: name (the output folder) and the gate's --scene argument
 $entries = @()
-if (-not $NoGame) {
+if ($ScenePaths.Count -gt 0) {
+    foreach ($path in $ScenePaths) {
+        $f = Get-Item -LiteralPath $path
+        $name = $f.BaseName
+        if ($entries.Name -contains $name) { $name = "scene$($entries.Count)_$name" }
+        $entries += @(@{ Name = $name; Arg = $f.FullName })
+    }
+} elseif (-not $NoGame) {
     $files = Get-ChildItem -Path $Scenes -Filter *.unxscene | Where-Object { $Only -eq "" -or $_.BaseName -like "$Only*" }
     foreach ($f in $files) { $entries += @(@{ Name = ($f.BaseName -replace "_\d{8}_\d{4}$", ""); Arg = $f.FullName }) }
 }
@@ -57,7 +65,7 @@ function Invoke-Gate([string]$kind, [string]$log, [string[]]$gateArgs) {
     $all = @("-File", "Tools\CI\GpuLock.ps1", "-Track", "R", "-Kind", $kind, "--", $exe) + $gateArgs
     # The gate writes notes to stderr: with "Stop" PowerShell 5.1 turns the first such line into a terminating error.
     $ErrorActionPreference = "Continue"
-    & powershell @all 2>&1 | ForEach-Object { "$_" } | Out-File -Encoding utf8 $log
+    & (Get-Process -Id $PID).Path @all 2>&1 | ForEach-Object { "$_" } | Out-File -Encoding utf8 $log
     $code = $LASTEXITCODE
     $ErrorActionPreference = "Stop"
     $text = Get-Content $log -Raw

@@ -28,6 +28,7 @@
 #define GI_SKY_FOG_RETURN  // (GiSky.hlsli: the sky's share of the sun's light the fog scatters - atmosphere.fog.sun_through_fog)
 #define RT_SHADOW_TRANSMITTANCE  // (the hits' shadow rays take what the Glass they cross leaves of the light: RayShaders.hlsli)
 #include "RayTracing/RayShaders.hlsli"
+#define RT_HIT_EYE 1
 #include "RayTracing/HitShading.hlsli"
 #include "RayTracing/HitDecals.hlsli"
 #include "RayTracing/HitLocalLights.hlsli"
@@ -118,7 +119,7 @@ void LumenRadianceCacheTraceGen()
         const float footprint = hit.t * footprintPerMetre;
         if ((P[3].w & 8) == 0)
         {
-            m = rtHitMaterial(m, s, footprint, dot(s.normal, r.Direction));
+            m = rtHitMaterialSeen(m, s, r.Direction, footprint, dot(s.normal, r.Direction));
             rtHitDecals(scene, s, footprint, m);
         }
         if ((m.classFlags & MATERIAL_EMISSIVE_VISIBLE_ONLY) != 0) m.emissive = 0;  // (not light for GI: INTERFACES v1.92)

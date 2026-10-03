@@ -26,6 +26,7 @@
 #include "GBuffer.hlsli"
 #include "Passes/Material/MaterialInternal.hlsli"
 #include "Passes/Material/MaterialSurface.hlsli"
+#include "Passes/Material/MaterialEye.hlsli"
 #include "Passes/Visibility/CoverageTiles.hlsli"
 
 #if MODE == 0
@@ -80,6 +81,11 @@ void main(uint3 id : SV_DispatchThreadID)
     RWTexture2D<uint> words = ResourceDescriptorHeap[P[2].y];
     RWTexture2D<float> depth = ResourceDescriptorHeap[P[2].z];
     RWTexture2D<uint> channels = ResourceDescriptorHeap[P[2].w];
+    if (P[3].x != UNX_NONE)
+    {
+        RWTexture2D<uint> eyeWords = ResourceDescriptorHeap[P[3].x];
+        eyeWords[pixel] = 0;
+    }
     const uint e = element[pixel];
     if (e == 0xFFFFFFFFu)
     {
@@ -97,6 +103,15 @@ void main(uint3 id : SV_DispatchThreadID)
     g.normal = coverageFragmentNormal(f);
     g.baseColor = m.baseColor;
     g.roughness = m.roughness;
+    if ((m.classFlags & MATERIAL_EYE) != 0 && P[3].x != UNX_NONE)
+    {
+        const uint visId = coverageClusterVisId(f.visId);
+        const MVertex v0 = mTriangleVertex(visId, P[1].y, 0), v1 = mTriangleVertex(visId, P[1].y, 1), v2 = mTriangleVertex(visId, P[1].y, 2);
+        const MSurface surface = mSurfaceFromVertices(tid, v0, v1, v2, float2(pixel) + 0.5);
+        const MEye eye = mEyeEvaluate(visId, P[1].y, surface, m, g.normal, v0, v1, v2);
+        RWTexture2D<uint> eyeWords = ResourceDescriptorHeap[P[3].x];
+        eyeWords[pixel] = eye.word;
+    }
     gbuffer[pixel] = encodeGBuffer(g);
     words[pixel] = (tid.material & 0xFFFFu) | (uint(round(saturate(m.metallic) * 255.0)) << 16);
     depth[pixel] = coverageFragmentDepth(f);

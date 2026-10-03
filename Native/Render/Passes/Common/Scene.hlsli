@@ -424,14 +424,25 @@ struct VertexData
 // meshVertex is mesh-relative (0 .. vertexCount-1).
 VertexData loadVertex(GpuMesh mesh, uint meshVertex)
 {
-    StructuredBuffer<GpuVertexRecord> b = ResourceDescriptorHeap[g_vertices];
-    const GpuVertexRecord r = b[mesh.vertexOffset + meshVertex];
+    ByteAddressBuffer b = ResourceDescriptorHeap[g_vertices];
+    const bool compact = (mesh.vertexOffset & 0x80000000u) != 0;
+    const uint index = (mesh.vertexOffset & 0x7FFFFFFFu) + meshVertex;
+    const uint address = index * (compact ? 28u : 32u);
+    const uint4 r0 = b.Load4(address);
+    const uint3 r1 = b.Load3(address + 16);
+    uint sign;
+    if (compact)
+    {
+        StructuredBuffer<uint> signs = ResourceDescriptorHeap[g_vertexSigns];
+        sign = (signs[index >> 5] >> (index & 31u)) & 1u;
+    }
+    else sign = b.Load(address + 28);
     VertexData v;
-    v.position = r.position;
-    v.normal = octDecode(r.normalOct);
-    v.tangent = octDecode(r.tangentOct);
-    v.tangentSign = r.tangentSign ? -1.0 : 1.0;
-    v.uv = r.uv;
+    v.position = asfloat(r0.xyz);
+    v.normal = octDecode(r0.w);
+    v.tangent = octDecode(r1.x);
+    v.tangentSign = sign ? -1.0 : 1.0;
+    v.uv = asfloat(r1.yz);
     return v;
 }
 

@@ -25,6 +25,7 @@ struct EmissiveNodeRec
     float half, luminance;
     float3 radiance;
     uint plane, firstChild;
+    bool fullCoverage;
 };
 EmissiveNodeRec emissiveNode(ByteAddressBuffer b, uint nodesOffset, uint i)
 {
@@ -38,6 +39,7 @@ EmissiveNodeRec emissiveNode(ByteAddressBuffer b, uint nodesOffset, uint i)
     n.radiance = c.xyz;
     n.plane = d.x;
     n.firstChild = d.y;
+    n.fullCoverage = b.Load(o + 36) != 0;
     return n;
 }
 
@@ -63,6 +65,9 @@ float3 emissiveLightsIrradiance(uint buffer, float3 xRel, float3x3 T, float epsA
     if (buffer == 0xFFFFFFFFu) return E;
     ByteAddressBuffer b = ResourceDescriptorHeap[buffer];
     const uint planeCount = b.Load(0), planesOffset = b.Load(8), nodesOffset = b.Load(12);
+    // The absolute omission allowance belongs to the whole query, not every leaf.
+    // Descending a partially filled node must not multiply the allowed omitted energy.
+    const float nodeAllowance = epsAbs / max(b.Load(4), 1u);
     uint stack[EMISSIVE_STACK];
     for (uint p = 0; p < planeCount; ++p)
     {
@@ -86,9 +91,9 @@ float3 emissiveLightsIrradiance(uint buffer, float3 xRel, float3x3 T, float epsA
             const float2 dq = xy - q;
             const float d2 = dot(dq, dq) + height * height, d = sqrt(d2);
             const float area = 4 * n.half * n.half;
-            if (n.luminance * area < epsAbs * d2) continue;  // under the exposure floor at this distance (and farther)
+            if (n.luminance * area < nodeAllowance * d2) continue;
             const float diag = 2.8284271 * n.half;
-            if (n.firstChild != 0xFFFFFFFFu && diag > 0.8 * d)
+            if (n.firstChild != 0xFFFFFFFFu && (!n.fullCoverage || diag > 0.8 * d))
             {
                 if (top + 4 <= EMISSIVE_STACK)
                 {
