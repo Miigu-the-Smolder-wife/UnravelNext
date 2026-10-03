@@ -69,7 +69,7 @@ struct UpscaleState
     // (TrackState::recordSerial) - a frame whose recording failed is recorded again under the same index, and a
     // reference of the failed graph names another resource in the new one.
     TextureRef previous;           // history[last] in the graph of frame 'previousFrame' (upscalePreviousColor)
-    uint64_t previousFrame = ~0ull, previousSerial = ~0ull;
+    RecordKey previousFrame;
     // output.screen_trace_source = 0: the lit opaque scene colour (the view's resolution; before translucency, the air,
     // the upscale and the display transform), kept for the next frame's screen-space traces - the reference's default
     // source (keepSceneColor, UpscaleSceneKeep.hlsl). scene[parity] is the last one written.
@@ -78,9 +78,9 @@ struct UpscaleState
     DXGI_FORMAT sceneFormat = DXGI_FORMAT_UNKNOWN;
     bool sceneFresh = true;
     TextureRef previousScene;
-    uint64_t previousSceneFrame = ~0ull, previousSceneSerial = ~0ull;
+    RecordKey previousSceneFrame;
     UpscaleMotion motion;  // m.upscale.motion's outputs in the graph of frame 'motionFrame' (upscaleMotion)
-    uint64_t motionFrame = ~0ull, motionSerial = ~0ull;
+    RecordKey motionFrame;
     // The internal-resolution textures (the kept scene colour, the guide ring, the flickering and thin-coverage pairs)
     // under dynamic resolution: the internal size is each frame's own, so a slot has the size of the frame that wrote it.
     // The frame that writes a slot next recreates it at its size (the other slots keep theirs); the readers reproject
@@ -297,13 +297,12 @@ TextureRef upscalePreviousColor(FramePassContext& fc, const ViewResources& view)
         // (the size is the texture's own - RenderGraph::desc - neither the output's nor, under dynamic resolution, this
         // frame's internal size: the readers sample it by UV)
         if (!s.scene[0] || s.sceneFresh || u.reset || s.sceneWidth[s.parity] == 0) return TextureRef{};
-        if (s.previousSceneFrame != fc.frame.frameIndex || s.previousSceneSerial != recordSerialOf(fc) || !s.previousScene.valid())
+        if (!(s.previousSceneFrame == RecordKey::of(fc)) || !s.previousScene.valid())
         {
             s.previousScene = fc.graph.importTexture(s.scene[s.parity].Get(),
                                                      { "m.scenecolor (previous)", s.sceneWidth[s.parity], s.sceneHeight[s.parity], 1, 1, s.sceneFormat },
                                                      D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-            s.previousSceneFrame = fc.frame.frameIndex;
-            s.previousSceneSerial = recordSerialOf(fc);
+            s.previousSceneFrame = RecordKey::of(fc);
         }
         return s.previousScene;
     }
@@ -316,12 +315,11 @@ TextureRef upscalePreviousColor(FramePassContext& fc, const ViewResources& view)
     uint32_t hw, hh;
     historySize(fc, u.outputWidth, u.outputHeight, hw, hh);
     if (!s.history[s.last] || s.width != hw || s.height != hh || s.fresh || u.reset) return TextureRef{};
-    if (s.previousFrame != fc.frame.frameIndex || s.previousSerial != recordSerialOf(fc) || !s.previous.valid())
+    if (!(s.previousFrame == RecordKey::of(fc)) || !s.previous.valid())
     {
         s.previous = fc.graph.importTexture(s.history[s.last].Get(), { "m.upscale.history (previous)", hw, hh, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT },
                                             D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-        s.previousFrame = fc.frame.frameIndex;
-        s.previousSerial = recordSerialOf(fc);
+        s.previousFrame = RecordKey::of(fc);
     }
     return s.previous;
 }
@@ -367,7 +365,7 @@ UpscaleMotion upscaleMotion(FramePassContext& fc, const ViewResources& view)
 {
     if (!upscaleActive(fc, view) || !view.depth.valid()) return UpscaleMotion{};
     UpscaleState& s = fc.state<UpscaleState>("M.upscale");
-    if (s.motionFrame == fc.frame.frameIndex && s.motionSerial == recordSerialOf(fc) && s.motion.motion.valid()) return s.motion;
+    if (s.motionFrame == RecordKey::of(fc) && s.motion.motion.valid()) return s.motion;
     const FrameContext::Upscale& u = fc.frame.upscale;
     RenderGraph& g = fc.graph;
     const uint32_t w = view.view.width, h = view.view.height;
@@ -401,9 +399,24 @@ UpscaleMotion upscaleMotion(FramePassContext& fc, const ViewResources& view)
     const TextureRef particleMotion = view.particleMotion, particleRange = view.particleDepthRange;
     const uint32_t coverageTilesX = view.coverageTilesX;
     ID3D12PipelineState* motionPso = fc.shaders.compute("Passes/Shading/UpscaleMotion");
+    // (the coverage records a pixel's layers are read from are bounded - UpscaleMotion.hlsl LAYER_FRAGMENTS: the pixels
+    // past the bound are counted)
+    const BufferRef status = coverage ? g.createBuffer(BufferDesc{ "m.upscale.motion status", 16, 0 }) : BufferRef{};
+    if (coverage)
+    {
+        ID3D12PipelineState* clear = fc.shaders.compute("Passes/Shading/ExposureClear");  // (zeroes a raw buffer)
+        g.addPass("m.upscale.motion.clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(status, Use::UavCompute); },
+                  [=](PassContext& c) {
+                      const uint32_t k[4] = { c.uav(status), 4, 0, 0 };
+                      c.cmd->SetPipelineState(clear);
+                      c.computeConstants(k, 4);
+                      c.cmd->Dispatch(1, 1, 1);
+                  });
+    }
     g.addPass("m.upscale.motion", QueueType::Graphics,
               [&](PassBuilder& b) {
                   b.use(depth, Use::SrvCompute);
+                  if (coverage) b.use(status, Use::UavCompute);
                   if (hasVis)
                   {
                       b.use(vis, Use::SrvCompute);
@@ -437,7 +450,7 @@ UpscaleMotion upscaleMotion(FramePassContext& fc, const ViewResources& view)
               },
               [=](PassContext& c) {
                   const uint32_t none = 0xFFFFFFFFu;
-                  uint32_t k[40] = { hasVis ? c.srv(vis) : none, hasVis ? c.srv(clusters) : none, c.srv(depth), c.uav(motion), w, h, asUint(jx), asUint(jy) };
+                  uint32_t k[44] = { hasVis ? c.srv(vis) : none, hasVis ? c.srv(clusters) : none, c.srv(depth), c.uav(motion), w, h, asUint(jx), asUint(jy) };
                   for (int r = 0; r < 4; ++r)
                       for (int col = 0; col < 4; ++col) k[8 + 4 * r + col] = asUint(prevViewProj.m[r][col]);
                   k[24] = tsr ? c.uav(previousDepth) : none;
@@ -456,9 +469,10 @@ UpscaleMotion upscaleMotion(FramePassContext& fc, const ViewResources& view)
                   k[37] = particles ? c.srv(particleEdges) : none;
                   k[38] = particleVectors ? c.srv(particleMotion) : none;
                   k[39] = particleVectors ? c.srv(particleRange) : none;
+                  k[40] = coverage ? c.uav(status) + 1 : 0;
                   c.cmd->SetPipelineState(motionPso);
                   c.bindFrameConstants(cb);
-                  c.computeConstants(k, 40);
+                  c.computeConstants(k, 44);
                   c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
               });
     // (the surface the vectors are of: the layers' depth where a layer has the pixel)
@@ -468,10 +482,10 @@ UpscaleMotion upscaleMotion(FramePassContext& fc, const ViewResources& view)
     out.depth = motionDepth;
     out.previousDepth = previousDepth;
     out.layers = layers;
+    out.status = status;
     out.layerMotion = layerMotion;
     s.motion = out;
-    s.motionFrame = fc.frame.frameIndex;
-    s.motionSerial = recordSerialOf(fc);
+    s.motionFrame = RecordKey::of(fc);
     return out;
 }
 
@@ -482,7 +496,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
     RenderGraph& g = fc.graph;
     const uint32_t w = view.view.width, h = view.view.height, W = u.outputWidth, H = u.outputHeight;
     const int64_t frames = fc.quality.has("output.upscale_history_frames") ? fc.quality.integer("output.upscale_history_frames") : 64;
-    const int64_t framesMoving = fc.quality.has("output.upscale_history_frames_moving") ? fc.quality.integer("output.upscale_history_frames_moving") : 8;
+    const int64_t framesMoving = fc.quality.has("output.upscale_history_frames_moving") ? fc.quality.integer("output.upscale_history_frames_moving") : 4;
     const double kernel = fc.quality.has("output.upscale_kernel") ? fc.quality.number("output.upscale_kernel") : 60.0;
     if (frames < 1 || frames > 256 || framesMoving < 1 || framesMoving > frames) fail("output.upscale_history_frames(_moving) must be in [1, 256], moving <= still");
     if (!(kernel >= 1 && kernel <= 1000)) fail("output.upscale_kernel must be in [1, 1000]");
@@ -504,7 +518,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
     const bool reset = u.reset || s.fresh || lensChanged;
     // (an earlier pass of this frame may hold the last frame's slot already: upscalePreviousColor - one import of a
     // resource per frame, also on a frame that resets here for a reason upscalePreviousColor does not see - the lens)
-    const bool held = s.previousFrame == fc.frame.frameIndex && s.previousSerial == recordSerialOf(fc) && s.previous.valid();
+    const bool held = s.previousFrame == RecordKey::of(fc) && s.previous.valid();
     const uint32_t heldSlot = s.last;
     s.fresh = false;
     const uint32_t prev = s.parity, next = prev ^ 1u;  // (the two-frame histories: flickering, thin coverage, keepSceneColor's)
@@ -569,7 +583,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                                                                          D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     // (m.upscale.motion: recorded here unless a pass before the upscale asked for the vectors - upscaleMotion)
     const UpscaleMotion vectors = upscaleMotion(fc, view);
-    s.motionFrame = ~0ull;  // (this frame's last reader: a later graph records its own)
+    s.motionFrame = RecordKey{};  // (this frame's last reader: a later graph records its own)
     const TextureRef motion = vectors.motion, previousDepth = vectors.previousDepth, layers = vectors.layers;
     const bool layerMotion = vectors.layerMotion;
     const TextureRef depth = view.depth;
@@ -581,6 +595,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
     {
         products->motion = motion;
         products->depth = motionDepth;
+        products->status = vectors.status;
     }
     if (tsr)
     {
@@ -668,7 +683,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
             if (!(v >= 0 && v <= 1)) fail("%s %g: in [0, 1]", key, v);
             return (float)v;
         };
-        const float lineContrast = thinNumber("output.upscale_tsr_thin_geometry_line_contrast", 0.0);
+        const float lineContrast = thinNumber("output.upscale_tsr_thin_geometry_line_contrast", 0.30);
         const float lineFade = thinNumber("output.upscale_tsr_thin_geometry_line_fade_rate", 0.1);
         const float lineFadeInside = thinNumber("output.upscale_tsr_thin_geometry_line_fade_rate_inside", 0.03);
         const float lineWeight = thinNumber("output.upscale_tsr_thin_geometry_line_weight", 0.6);

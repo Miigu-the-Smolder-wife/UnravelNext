@@ -46,6 +46,9 @@ struct Stats
     // A5 depth of field (DepthOfField.cpp): pixels gathered (a blurred source reaches them), pixels whose circle of
     // confusion was clamped to the 512 px radius bound.
     uint32_t dofPixels = 0, dofClampedPixels = 0;
+    // The upscale's vectors (UpscaleMotion.hlsl): pixels whose coverage records were more than the 16 the layers are read
+    // from (their thin coverage, nearest fragment and opacity come from the first 16 of the pixel's list).
+    uint32_t upscaleLayerTruncated = 0;
 };
 Stats latestStats(TrackState& state);
 } // namespace unx::render::shading

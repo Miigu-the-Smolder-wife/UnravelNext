@@ -1445,6 +1445,10 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     {
         ID3D12PipelineState* pso = sh.compute("Passes/Shadow/VsmMark");
         const bool subtileStats = q.integer("shadow.vsm.subtile_stats") != 0;  // measurement only
+        // (VsmMark.hlsl sets one of the request word's bits 16..31 per sub-tile; bits 30 and 31 are the cache's
+        // VSM_REQ_DYNAMIC and VSM_REQ_KEPT: sub-tiles 14 and 15 would make kept pages redraw and new requests count as kept)
+        if (subtileStats && q.has("shadow.vsm.cache") && q.boolean("shadow.vsm.cache"))
+            fail("shadow.vsm.subtile_stats (a measurement) shares the request word's bits 30 and 31 with shadow.vsm.cache: set shadow.vsm.cache=false with it");
         // shadow.vsm.page_dilation: pixels near a page border also request the page across it (VsmMark.hlsl)
         const float dilation = q.has("shadow.vsm.page_dilation") ? (float)q.number("shadow.vsm.page_dilation") : 0.0f;
         if (!(dilation >= 0 && dilation <= 0.5f)) fail("shadow.vsm.page_dilation = %g: a fraction of a page in [0, 0.5]", dilation);

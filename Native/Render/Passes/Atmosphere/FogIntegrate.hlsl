@@ -45,7 +45,10 @@
 // P[4] = { the air volume's readers SRV (FroxelTileDepth.hlsl: the farthest surface per froxel tile; UNX_NONE: every depth
 //          is read), multi-scatter LUT SRV (the air lookup), bit 0: order, the cloud's stretches (0: no cloud here) }
 // P[5] = { the cloud's lighting word (CloudSystem.cpp cloudSunWord: sun steps | filtered << 8 | ground light << 9), the
-//          air volume SRV for the order and the cloud (UNX_NONE: neither takes the air), bit 0: far_sky_light, 0 }
+//          air volume SRV for the order and the cloud (UNX_NONE: neither takes the air), bit 0: far_sky_light, the cloud's
+//          statistics UAV + 1 (raw; 0: none): word 1 counts the columns whose cloud met a sun path past its step bound
+//          (atmosphere.clouds.sun_steps = 0: CloudShadowCommon.hlsli cloudSunTauMarch; as CloudMarch.hlsl counts its
+//          pixels) }
 // atmosphere.fog.far_sky_light: the far slices' ambient light is the sky's and the ground's (the reference's sky light in
 // the fog; its inscattering colour and cubemap are an authored stand-in for this), not the translucency volume's one
 // sample at farM - a point 80 m ahead, perhaps indoors, does not light kilometres of fog. Per slice, as radiances uniform
@@ -124,6 +127,7 @@ struct FogCloudWalk
     float end;      // where it ends (3e38: no cloud from here on)
     float rho;      // its mean density (1/m)
     float3 source;  // its light toward the camera per metre (nits x exposure / m)
+    bool capped;    // a sun path of the walk reached its step bound (cloudSunTauMarch's negative answer)
 };
 void fogCloudWalkTo(inout FogCloudWalk w, CloudRecord c, CloudFrameLight light, float3 dir, uint sunWord, float at)
 {
@@ -148,7 +152,9 @@ void fogCloudWalkTo(inout FogCloudWalk w, CloudRecord c, CloudFrameLight light, 
         if (rho > 0)
         {
             w.rho = rho;
-            w.source = cloudFrameSource(c, light, x, cloudFrameSunTau(c, x, sunWord & 0xFFu, filtered)) * (rho * g_exposure);
+            const float tauSun = cloudFrameSunTau(c, x, sunWord & 0xFFu, filtered);
+            if (tauSun < 0) w.capped = true;
+            w.source = cloudFrameSource(c, light, x, tauSun) * (rho * g_exposure);
         }
     }
 }
@@ -379,5 +385,12 @@ void main(uint3 id : SV_DispatchThreadID)
         }
         // (the last slice: the sky's column)
         integrated[uint3(id.xy, g.z + i)] = i + 1 == g.zFar ? float4(min(skyL, 65504.0), skyT) : float4(min(L, 65504.0), T);
+    }
+    // (the cloud's sun paths that reached their step bound: counted, one atomic a wave)
+    const uint cappedLanes = WaveActiveCountBits(walk.capped);
+    if (P[5].w != 0 && cappedLanes != 0 && WaveIsFirstLane())
+    {
+        RWByteAddressBuffer cloudStats = ResourceDescriptorHeap[P[5].w - 1];
+        cloudStats.InterlockedAdd(4, cappedLanes);
     }
 }

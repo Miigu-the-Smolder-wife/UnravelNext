@@ -36,6 +36,9 @@
 // moves (0 still .. 1): its own displacement in the world over two pixel radii less one, or its parallax - the screen
 // travel beyond the camera's rotation - over 10 px of a 1920-wide view at 60 Hz, less a half (the flickering
 // heuristic keeps its history only on what stands still: the reference's IsMovingMask); an animated layer moves.
+// P[10].x = status UAV + 1 (raw; 0: none): word 0 counts the pixels whose coverage records were more than
+// LAYER_FRAGMENTS - their layers are read from the first LAYER_FRAGMENTS of the pixel's list, in the list's order (M's
+// statistics show the count: Stats::upscaleLayerTruncated).
 // Frame constants of the (jittered) main view.
 #define UNX_CLUSTER_STREAM 1  // (the triangle's vertices from its cluster's stream when it is compressed: ClusterStream.hlsli)
 #include "Bindless.hlsli"
@@ -102,6 +105,7 @@ void main(uint2 id : SV_DispatchThreadID)
     // the surface the vector is of
     float d = opaque;
     float thin = 0, animated = 0;
+    bool truncated = false;   // (the pixel's coverage records were more than the loop reads)
     bool seeThrough = false;  // (a glass or water surface is tracked)
     bool particleVector = false;
     float2 particleTravel = 0;
@@ -156,6 +160,7 @@ void main(uint2 id : SV_DispatchThreadID)
                     float nearest = 0, see = 0;
                     uint nearestVis = VIS_NONE;
                     const uint count = min(end - min(first, end), LAYER_FRAGMENTS);
+                    truncated = end - min(first, end) > LAYER_FRAGMENTS;
                     [loop] for (uint i = 0; i < count; ++i)
                     {
                         const CoverageFragment f = coverageUnpackRecord(records[header.y + first + i]);
@@ -262,5 +267,12 @@ void main(uint2 id : SV_DispatchThreadID)
         RWTexture2D<float4> layers = ResourceDescriptorHeap[P[6].z];
         trackedDepth[id] = d;
         layers[id] = float4(thin, animated, isfinite(seenThrough) ? seenThrough : 1.0, 0);
+    }
+    // (the bound on the layer loop was reached: counted, one atomic a wave)
+    const uint truncatedLanes = WaveActiveCountBits(truncated);
+    if (P[10].x != 0 && truncatedLanes != 0 && WaveIsFirstLane())
+    {
+        RWByteAddressBuffer status = ResourceDescriptorHeap[P[10].x - 1];
+        status.InterlockedAdd(0, truncatedLanes);
     }
 }

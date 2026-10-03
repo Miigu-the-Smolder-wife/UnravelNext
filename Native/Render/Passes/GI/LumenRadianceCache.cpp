@@ -117,7 +117,7 @@ struct RcState
     uint32_t revision = 0xFFFFFFFFu, frame = 0;
     float prevCornerCell[kMaxClipmaps][4] = {};
     // the frame's record (idempotent Begin / Update)
-    uint64_t recordedFrame = UINT64_MAX;
+    RecordKey recordedFrame;
     LumenRcFrame record;
     BufferRef slotsRef, countersRef;
     Params params{};
@@ -225,7 +225,7 @@ LumenRcFrame lumenRadianceCacheBegin(FramePassContext& fc, const ViewResources& 
     if (!q.has("lumen.radiance_cache") || !q.boolean("lumen.radiance_cache")) return {};
     if (main.view.kind != gpu::ViewKind::Main || !fc.trackState || !main.depth.valid() || !fc.resources.tlasStatic.valid()) return {};
     RcState& st = fc.state<RcState>("R.lumenRadianceCache");
-    if (st.recordedFrame == fc.frame.frameIndex) return st.record;
+    if (st.recordedFrame == RecordKey::of(fc)) return st.record;
     const Settings s = settings(q);
     st.ensure(fc.device, s);
     const float3 shift = fc.frame.originShift;
@@ -285,7 +285,7 @@ LumenRcFrame lumenRadianceCacheBegin(FramePassContext& fc, const ViewResources& 
                                        D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
         f.hitMarks = g.importBuffer(st.hitMarks.Get(), BufferDesc{ "r.gi.rc hit marks", kHitMarkBytes, 0 });
     }
-    st.recordedFrame = fc.frame.frameIndex;
+    st.recordedFrame = RecordKey::of(fc);
     st.record = f;
 
     const BufferRef slots = g.importBuffer(st.slots.Get(), BufferDesc{ "r.gi.rc probe slots", (uint64_t)maxProbes * 16, 0 });

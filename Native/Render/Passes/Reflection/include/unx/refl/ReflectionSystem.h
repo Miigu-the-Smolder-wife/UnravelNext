@@ -227,9 +227,9 @@ private:
     ComPtr<ID3D12Resource> m_surfaceCache;  // SurfaceCache.hlsli: header + cells + probes (raw)
     uint32_t m_surfaceCacheEntries = 0, m_surfaceCacheRevision = 0;
     ScreenTraceInputs m_screenInputs;       // screenTraceInputs of frame m_screenFrame
-    uint64_t m_screenFrame = ~0ull;
+    RecordKey m_screenFrame;
     BufferRef m_surfaceCacheRef;            // its import into the frame's graph (surfaceCacheBuffer)
-    uint64_t m_surfaceCacheFrame = ~0ull;
+    RecordKey m_surfaceCacheFrame;
     uint32_t m_accumParity = 0, m_accumSceneRevision = 0;
     bool m_accumReset = true;
     float3 m_prevCamera{};

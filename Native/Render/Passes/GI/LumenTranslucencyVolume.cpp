@@ -104,10 +104,12 @@ struct TvState
     uint8_t* ringMapped = nullptr;
     bool created = false, history = false;
     uint32_t parity = 0, frame = 0, revision = 0xFFFFFFFFu;
-    uint64_t recordedFrame = UINT64_MAX, markedFrame = UINT64_MAX;
+    RecordKey recordedFrame, markedFrame;  // the recordings (frame and serial) the update and the mark were recorded in
+    uint64_t stateFrame = UINT64_MAX;      // the frame the counter and the jitter were advanced for
     // lumenTranslucencyVolumePrevious: the last volume's textures as imported into frame previousImportFrame's graph, and
     // the ring slot whose parameters describe it
-    uint64_t previousImportFrame = UINT64_MAX, publishedFrame = UINT64_MAX;
+    RecordKey previousImportFrame;
+    uint64_t publishedFrame = UINT64_MAX;
     TextureRef previousAmbient, previousDirectional;
     uint32_t publishedSlot = 0;
     float jitter[3] = { 0.5f, 0.5f, 0.5f };
@@ -216,9 +218,10 @@ TvState& stateOf(FramePassContext& fc, const ViewResources& main, const Settings
     uint32_t x, y, z;
     gridOf(main, s, x, y, z);
     st.ensure(fc.device, x, y, z);
-    if (st.markedFrame != fc.frame.frameIndex && st.recordedFrame != fc.frame.frameIndex)
+    if (st.stateFrame != fc.frame.frameIndex)
     {
-        // a new frame: its counter and jitter
+        // a new frame: its counter and jitter (once a frame, whatever the recordings of it)
+        st.stateFrame = fc.frame.frameIndex;
         ++st.frame;
         const uint32_t k = st.frame % 16u + 1u;
         st.jitter[0] = s.jitter ? halton(k, 2) : 0.5f;
@@ -244,14 +247,14 @@ LumenTvPrevious lumenTranslucencyVolumePrevious(FramePassContext& fc, const View
     uint32_t x, y, z;
     gridOf(main, s, x, y, z);
     if (x != st.gridX || y != st.gridY || z != st.gridZ) return out;
-    if (st.previousImportFrame != fc.frame.frameIndex)
+    if (!(st.previousImportFrame == RecordKey::of(fc)))
     {
         const TextureDesc d{ "R translucency GI ambient (previous)", st.gridX, st.gridY, (uint16_t)st.gridZ, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_DIMENSION_TEXTURE3D };
         TextureDesc dd = d;
         dd.name = "R translucency GI directional (previous)";
         st.previousAmbient = fc.graph.importTexture(st.ambient[st.parity].Get(), d, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
         st.previousDirectional = fc.graph.importTexture(st.directional[st.parity].Get(), dd, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-        st.previousImportFrame = fc.frame.frameIndex;
+        st.previousImportFrame = RecordKey::of(fc);
     }
     out.params = st.ringSrv[st.publishedSlot];
     out.ambient = st.previousAmbient;
@@ -264,8 +267,8 @@ void lumenTranslucencyVolumeMark(FramePassContext& fc, const ViewResources& main
     const Settings s = settingsOf(fc.quality);
     if (!s.enabled || !rc.on || !usable(fc, main)) return;
     TvState& st = stateOf(fc, main, s);
-    if (st.markedFrame == fc.frame.frameIndex) return;
-    st.markedFrame = fc.frame.frameIndex;
+    if (st.markedFrame == RecordKey::of(fc)) return;
+    st.markedFrame = RecordKey::of(fc);
     const TextureRef indirection = rc.indirection, hiz = main.hiz;
     const uint32_t rcParams = rc.params, gridX = st.gridX, gridY = st.gridY, gridZ = st.gridZ, frame = st.frame, bias = s.clipmapBias;
     const uint32_t gridZWord = gridZ | pixelShiftOf(main, s) << 16;  // P[4].z (LumenTranslucencyVolumeGrid.hlsli)
@@ -294,8 +297,8 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
     const Settings s = settingsOf(fc.quality);
     if (!s.enabled || !usable(fc, main)) return;
     TvState& st = stateOf(fc, main, s);
-    if (st.recordedFrame == fc.frame.frameIndex) return;
-    st.recordedFrame = fc.frame.frameIndex;
+    if (st.recordedFrame == RecordKey::of(fc)) return;
+    st.recordedFrame = RecordKey::of(fc);
     RenderGraph& g = fc.graph;
     ShaderLibrary& shaders = fc.shaders;
     const uint32_t gridX = st.gridX, gridY = st.gridY, gridZ = st.gridZ, frame = st.frame;
@@ -315,7 +318,7 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
         return g.importTexture(r.Get(), d, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     };
     // (lumenTranslucencyVolumePrevious may have imported the last volume into this frame's graph already)
-    const bool imported = st.previousImportFrame == fc.frame.frameIndex && st.previousAmbient.valid();
+    const bool imported = st.previousImportFrame == RecordKey::of(fc) && st.previousAmbient.valid();
     const TextureRef prevAmbient = imported ? st.previousAmbient : import(st.ambient[previous], "R translucency GI ambient (previous)");
     const TextureRef prevDirectional = imported ? st.previousDirectional : import(st.directional[previous], "R translucency GI directional (previous)");
     const TextureRef ambient = import(st.ambient[current], "R translucency GI ambient");

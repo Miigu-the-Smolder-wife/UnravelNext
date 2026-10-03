@@ -382,6 +382,10 @@ struct FrameResources
     FogView fog;
     TextureRef fogSecondary[4];    // the planar reflection views' fog volumes of this frame (declareFog declares them too)
     TextureRef fogDebug;  // atmosphere.fog.debug_view: the fog alone per pixel (FogDebug.hlsl; the gate's layer "fog")
+    // The cloud layer's statistics of this frame (raw; word 0: pixels whose march needed more than its steps, word 1: sun
+    // paths past their step bound), cleared by the cloud's own passes: a kernel recorded after them that marches the
+    // frame's cloud elsewhere (the fog volume's columns) adds to it. Invalid: no cloud layer this frame.         [S]
+    BufferRef cloudStats;
     // shading.mega_lights_volume (A; Passes/Atmosphere/MegaLightsVolume.hlsl): the main view's froxel grid, RGBA16F, the
     // local lights' sampled visible fluence (rgb x exposure) and its luminance-weighted direction moment (xyz): lit
     // particles read them (FxLayerSetup.hlsl). Invalid = off.                                                         [A]

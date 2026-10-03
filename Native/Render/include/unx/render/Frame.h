@@ -187,4 +187,15 @@ struct FramePassContext
         return trackState->get<T>(key);
     }
 };
+
+// One recording of one frame, for the guards "this was already recorded into the frame's graph": the frame's index and
+// the recording's serial (TrackState::beginRecord). A recording that failed keeps its frame index; what the failed
+// attempt left behind - graph references above all - belongs to a graph that is gone, and a guard on the frame index
+// alone would hand it to the next attempt.
+struct RecordKey
+{
+    uint64_t frame = UINT64_MAX, serial = UINT64_MAX;
+    bool operator==(const RecordKey&) const = default;
+    static RecordKey of(const FramePassContext& fc) { return { fc.frame.frameIndex, fc.trackState ? fc.trackState->recordSerial() : 0 }; }
+};
 } // namespace unx::render

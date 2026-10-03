@@ -230,7 +230,7 @@ private:
     // (descriptor in m_decalDesc), sized for m_decalCapacity decals.
     Buffer m_decalAabbs, m_decalBlas, m_decalBlasScratch, m_decalTlas, m_decalTlasScratch, m_decalDesc;
     uint32_t m_decalCapacity = 0, m_decalTlasSrv = 0xFFFFFFFFu;
-    uint64_t m_decalFrame = ~0ull;
+    RecordKey m_decalFrame;
     BufferRef m_decalFrames, m_decalTlasRef;
     // Runtime geometry (C2b pool: CARVE fragments, generated meshes; GpuScene::addRuntimeMesh / addRuntimeInstance): one
     // object-space BLAS per runtime mesh generation, built the frame the mesh is first used (the pool m_runtimePool, a
@@ -372,7 +372,7 @@ private:
         TextureRef hairAmbient, hairDirectional;  // the translucency volume the hair hits read (invalid: none)
     };
     Frame m_frame;
-    uint64_t m_hairFrame = ~0ull;    // the frame recordHair ran for
+    RecordKey m_hairFrame;      // the frame recordHair ran for
     bool m_hairEnabled = true;       // raytracing.hair
 
     Device& m_device;

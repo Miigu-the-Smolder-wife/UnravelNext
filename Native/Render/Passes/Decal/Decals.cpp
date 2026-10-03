@@ -104,10 +104,14 @@ public:
         const BufferRef tileDepth = g.createBuffer(BufferDesc{ "decal.tileDepth", (uint64_t)tileCount * 8, 8 });
         const TextureRef depth = view.depth;
         const D3D12_GPU_VIRTUAL_ADDRESS constants = view.frameConstants;
+        // (a step takes the frames and the tile depths by the view it declares them for: STEP 3 opens both as
+        // StructuredBuffer - their SRVs, not the UAVs the earlier steps write through)
         auto dispatch = [&](const char* name, uint32_t step, uint32_t gx, uint32_t gy, std::function<void(PassBuilder&)> uses) {
             ID3D12PipelineState* pso = fc.shaders.compute(std::string("Passes/Decal/DecalSetup.STEP") + std::to_string(step));
+            const bool framesRead = step >= 2, depthRead = step == 3;
             g.addPass(name, QueueType::Graphics, uses, [=](PassContext& c) {
-                const uint32_t k[8] = { c.srv(records), c.uav(frames), c.uav(tiles), count, c.srv(depth), c.uav(tileDepth), tilesX, tilesY };
+                const uint32_t k[8] = { c.srv(records), framesRead ? c.srv(frames) : c.uav(frames), c.uav(tiles), count,
+                                        c.srv(depth), depthRead ? c.srv(tileDepth) : c.uav(tileDepth), tilesX, tilesY };
                 c.cmd->SetPipelineState(pso);
                 c.bindFrameConstants(constants);
                 c.computeConstants(k, 8);

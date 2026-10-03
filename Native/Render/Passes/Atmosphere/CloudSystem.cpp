@@ -381,6 +381,7 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
                   b.keep();
               },
               [stats, zeros](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(stats), 0, zeros, 0, 16); });
+    fc.resources.cloudStats = stats;  // (the fog volume's cloud march counts its capped sun paths into it: FogIntegrate.hlsl)
     g.addPass("s.cloud.record", QueueType::Graphics,
               [&](PassBuilder& b) {
                   b.use(record, Use::CopyDst);

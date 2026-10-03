@@ -527,12 +527,12 @@ ReflectionSystem::~ReflectionSystem()
 BufferRef ReflectionSystem::surfaceCacheBuffer(FramePassContext& fc)
 {
     if (!m_surfaceCache || m_settings.scMeshCards) return BufferRef{};
-    if (m_surfaceCacheFrame != fc.frame.frameIndex || !m_surfaceCacheRef.valid())
+    if (!(m_surfaceCacheFrame == RecordKey::of(fc)) || !m_surfaceCacheRef.valid())
     {
         const uint64_t bytes = kSurfaceCacheHeaderBytes + (uint64_t)m_surfaceCacheEntries * kSurfaceCacheCellBytes +
                                (uint64_t)(m_surfaceCacheEntries / 4) * kSurfaceCacheProbeBytes;
         m_surfaceCacheRef = fc.graph.importBuffer(m_surfaceCache.Get(), { "R surface cache", bytes, 0 });
-        m_surfaceCacheFrame = fc.frame.frameIndex;
+        m_surfaceCacheFrame = RecordKey::of(fc);
     }
     return m_surfaceCacheRef;
 }
@@ -543,8 +543,8 @@ BufferRef ReflectionSystem::surfaceCacheBuffer(FramePassContext& fc)
 // upscale history; invalid without it - the caller then skips its screen traces).
 ScreenTraceInputs ReflectionSystem::screenTraceInputs(FramePassContext& fc, ViewResources& main)
 {
-    if (m_screenFrame == fc.frame.frameIndex) return m_screenInputs;
-    m_screenFrame = fc.frame.frameIndex;
+    if (m_screenFrame == RecordKey::of(fc)) return m_screenInputs;
+    m_screenFrame = RecordKey::of(fc);
     m_screenInputs = ScreenTraceInputs{};
     if (!main.depth.valid()) return m_screenInputs;
 #if UNX_R_HAS_SHADING

@@ -20,6 +20,7 @@
 #include "unx/shading/MotionBlur.h"
 #include "unx/shading/Upscale.h"
 #include "unx/core/Config.h"
+#include "unx/core/Log.h"
 #include "unx/render/GpuScene.h"
 #include "unx/render/RenderGraph.h"
 #include "unx/render/Shaders.h"
@@ -386,9 +387,23 @@ void motionBlurUpscaled(FramePassContext& fc, const ViewResources& view, Texture
     const uint32_t hw = (W + 1) / 2, hh = (H + 1) / 2;
     // velocities in output pixels over half the shutter (the gather goes both ways), at most half the span
     const float scaleX = (float)W * shutter * 0.5f, scaleY = (float)H * shutter * 0.5f;
-    const float maxVelocity = (float)W * 0.5f * (float)maxPercent * 0.01f;
     const float tilesPerPixel = (float)w / (float)W / (float)kFlattenTile;
-    const uint32_t radius = std::clamp((uint32_t)std::ceil(maxVelocity * tilesPerPixel), 1u, 8u);
+    // The tile gather reaches kGatherTiles tiles (MotionFlatten.hlsl STEP 1: (2 r + 1)^2 tiles a thread): a velocity
+    // longer than that would sweep tiles the gather never reads, so the blur's longest velocity is held to the reach -
+    // 8 x 16 internal pixels each way, 13 % of the output's width on a 1920-wide internal view and 6.7 % at a native
+    // 3840 (the default 5 % needs 3 to 6 tiles).
+    constexpr uint32_t kGatherTiles = 8;
+    const float wantedVelocity = (float)W * 0.5f * (float)maxPercent * 0.01f;
+    const float maxVelocity = std::min(wantedVelocity, (float)kGatherTiles / tilesPerPixel);
+    if (maxVelocity < wantedVelocity)
+    {
+        static bool logged = false;
+        if (!logged)
+            logf("M motion blur: shading.motion_blur_max_percent %g asks for %.0f output pixels, the tile gather reaches %.0f at this resolution: held to %.2f %%\n",
+                 maxPercent, wantedVelocity, maxVelocity, 200.0f * maxVelocity / (float)W);
+        logged = true;
+    }
+    const uint32_t radius = std::clamp((uint32_t)std::ceil(maxVelocity * tilesPerPixel), 1u, kGatherTiles);
     const TextureRef flat = g.createTexture(TextureDesc{ "m.motion.flat", w, h, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
     const TextureRef tiles = g.createTexture(TextureDesc{ "m.motion.tile range", tw, th, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
     const TextureRef gathered = g.createTexture(TextureDesc{ "m.motion.tile range gathered", tw, th, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });

@@ -1736,6 +1736,8 @@ int main(int argc, char** argv)
                 logf("  coverage composite: %u light pixels (their walks visited %u records, shaded %u: %.2f per pixel; %u list entries), %u heavy pixels\n",
                      ms.coverageLightPixels, ms.coverageWalked, ms.coverageShaded, ms.coverageLightPixels ? (double)ms.coverageShaded / ms.coverageLightPixels : 0.0,
                      ms.coverageEntries, ms.coverageHeavyPixels);
+                if (ms.upscaleLayerTruncated != 0)
+                    logf("  upscale vectors: %u pixels hold more coverage records than the 16 their layers are read from\n", ms.upscaleLayerTruncated);
 #endif
             }
             if (quality.integer("shadow.vsm.fragment_check") != 0)

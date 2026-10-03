@@ -2689,8 +2689,8 @@ uint8_t* RayScene::lightSlot(FramePassContext& fc)
 
 void RayScene::recordDecals(FramePassContext& fc, const ViewResources& main)
 {
-    if (m_decalFrame == fc.frame.frameIndex) return;
-    m_decalFrame = fc.frame.frameIndex;
+    if (m_decalFrame == RecordKey::of(fc)) return;
+    m_decalFrame = RecordKey::of(fc);
     m_decalFrames = {};
     m_decalTlasRef = {};
     if (!main.decalFrames.valid()) return;  // record() left words 16..19 at "no decals"
@@ -3252,8 +3252,8 @@ void RayScene::declareDecals(PassBuilder& b) const
 // its own writes it into the frame's header slot (word 22) before the ray passes run, as the light functions' (word 20).
 void RayScene::recordHair(FramePassContext& fc)
 {
-    if (m_hairFrame == fc.frame.frameIndex) return;
-    m_hairFrame = fc.frame.frameIndex;
+    if (m_hairFrame == RecordKey::of(fc)) return;
+    m_hairFrame = RecordKey::of(fc);
     m_frame.hairParams = {};
     m_frame.hairFine = m_frame.hairCoarse = m_frame.hairAmbient = m_frame.hairDirectional = {};
     const FrameResources& r = fc.resources;

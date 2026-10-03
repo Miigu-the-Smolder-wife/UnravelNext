@@ -34,6 +34,7 @@ TextureRef upscalePreviousColor(FramePassContext& fc, const ViewResources& view)
 struct UpscaleProducts
 {
     TextureRef motion, depth;
+    BufferRef status;  // UpscaleMotion::status
 };
 TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, TextureRef src, UpscaleProducts* products = nullptr);
 // The upscale's vectors (m.upscale.motion, UpscaleMotion.hlsl) for a pass recorded before temporalUpscale that
@@ -47,6 +48,8 @@ struct UpscaleMotion
     TextureRef depth;          // the device depth of the surface each vector is of (the view's, or the layers')
     TextureRef previousDepth;  // (output.upscale_tsr) the point's view depth in the previous frame, how much it moves
     TextureRef layers;         // (output.upscale_layer_motion) the pixel's layers
+    BufferRef status;          // (with the coverage layer) raw, word 0: pixels whose coverage records were more than the
+                               // kernel reads (UpscaleMotion.hlsl LAYER_FRAGMENTS); invalid: nothing to count
     bool layerMotion = false;
 };
 UpscaleMotion upscaleMotion(FramePassContext& fc, const ViewResources& view);

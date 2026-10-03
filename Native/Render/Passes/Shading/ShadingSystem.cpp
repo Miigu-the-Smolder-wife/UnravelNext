@@ -174,7 +174,7 @@ uint32_t asUint(float f)
 // Readback ring of the main view's tile counts (4 slots: never reused while the harness keeps <= 2 frames in flight).
 struct StatsRing
 {
-    static constexpr uint32_t kSlots = 4, kBytes = 64;
+    static constexpr uint32_t kSlots = 4, kBytes = 80;
     Device* device = nullptr;
     ComPtr<ID3D12Resource> buffer;
     uint8_t* mapped = nullptr;
@@ -183,6 +183,7 @@ struct StatsRing
     bool coverage[kSlots] = {};  // the frame ran the coverage composite (its error word at byte 20 is this frame's)
     bool glass[kSlots] = {};     // the frame ran the glass composite (its counts at bytes 24..35 are this frame's)
     bool dof[kSlots] = {};       // the frame ran the depth of field (its counts at bytes 36..43 are this frame's)
+    bool upscale[kSlots] = {};   // the frame's upscale read the coverage layer (its count at byte 64 is this frame's)
     uint64_t last = UINT64_MAX;
     ~StatsRing()
     {
@@ -226,8 +227,9 @@ Stats latestStats(TrackState& state)
     Stats st;
     if (ring.last == UINT64_MAX || !ring.mapped) return st;
     const uint32_t slot = (uint32_t)(ring.last % StatsRing::kSlots);
-    uint32_t w[16];
+    uint32_t w[20];
     std::memcpy(w, ring.mapped + slot * StatsRing::kBytes, sizeof w);
+    if (ring.upscale[slot]) st.upscaleLayerTruncated = w[16];
     st.frameIndex = ring.frame[slot];
     for (uint32_t c = 0; c < 4; ++c) st.classTiles[c] = w[c];
     st.edgePixels = w[4];
@@ -1233,6 +1235,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         ring.coverage[slot] = coverage;
         ring.glass[slot] = false;  // (set again by the glass composite when it runs)
         ring.dof[slot] = false;    // (and by the depth of field)
+        ring.upscale[slot] = false;  // (and by the upscale)
         ring.last = fc.frame.frameIndex;
         ID3D12Resource* dst = ring.buffer.Get();
         const BufferRef classArgs = o.tileArgs;
@@ -2550,6 +2553,22 @@ void shade(FramePassContext& fc, ViewResources& view)
         UpscaleProducts products;
         image = temporalUpscale(fc, view, image, &products);
         view.upscaled = image;  // (captures of the upscaled image: renderergate --capture-output)
+        if (products.status.valid() && fc.trackState)
+        {
+            // the vectors' count of pixels past the layer bound into the statistics (m.stats claimed the slot)
+            StatsRing& ring = fc.state<StatsRing>("M.statsRing");
+            ring.ensure(fc.device);
+            ID3D12Resource* dst = ring.buffer.Get();
+            const uint32_t slot = (uint32_t)(fc.frame.frameIndex % StatsRing::kSlots);
+            ring.upscale[slot] = true;
+            const BufferRef status = products.status;
+            fc.graph.addPass("m.upscale.stats", QueueType::Graphics,
+                             [&](PassBuilder& b) {
+                                 b.use(status, Use::CopySrc);
+                                 b.keep();
+                             },
+                             [dst, slot, status](PassContext& c) { c.cmd->CopyBufferRegion(dst, slot * StatsRing::kBytes + 64, c.resource(status), 0, 4); });
+        }
         if (blurAfter)
         {
             const TextureDesc upscaled = fc.graph.desc(image);

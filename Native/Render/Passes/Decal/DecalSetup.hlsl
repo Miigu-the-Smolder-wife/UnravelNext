@@ -13,8 +13,8 @@
 //           through the camera, its depth range) meets the box: separating-plane tests with the 4 side planes and the
 //           view-depth slab, no false negatives. Appends the decal to the tile's list (<= DECAL_PER_TILE; more: counted,
 //           DECAL_STATUS_TILE_FULL).
-// P[0] = { records SRV, frames UAV, tiles UAV (raw), decal count }, P[1] = { depth SRV, tile depth UAV (float2 per tile),
-// tilesX, tilesY }; frame constants b1 = the view.
+// P[0] = { records SRV, frames UAV (STEP 3: SRV), tiles UAV (raw), decal count }, P[1] = { depth SRV, tile depth UAV
+// (float2 per tile; STEP 3: SRV), tilesX, tilesY }; frame constants b1 = the view.
 #include "Passes/Decal/Decal.hlsli"
 
 float3 decalRayAt(float2 pixel)  // camera-relative ray through a pixel, unit view depth

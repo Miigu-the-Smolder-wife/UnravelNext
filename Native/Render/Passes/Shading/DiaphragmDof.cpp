@@ -209,7 +209,7 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
     const bool occlusion = scatter && booleanOr(fc, "shading.dof_diaphragm_scatter_occlusion", true);
     // (the diaphragm: the frame's - a game's run-time setting, FrameContext::post - over the quality file's)
     const PostSettingsDesc& frameSettings = fc.frame.post;
-    const int64_t blades = frameSettings.diaphragmBlades >= 0 ? frameSettings.diaphragmBlades : integerOr(fc, "shading.dof_diaphragm_blades", 0);
+    const int64_t blades = frameSettings.diaphragmBlades >= 0 ? frameSettings.diaphragmBlades : integerOr(fc, "shading.dof_diaphragm_blades", 5);
     const float fullAperture = std::isfinite(frameSettings.lensFullAperture) ? frameSettings.lensFullAperture
                                                                              : (float)numberOr(fc, "shading.dof_diaphragm_full_aperture", 0.0);
     const Diaphragm diaphragm = diaphragmOf(blades, fc.frame.lensAperture, fullAperture);

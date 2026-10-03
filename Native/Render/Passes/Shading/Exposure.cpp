@@ -44,7 +44,7 @@ struct ExposureState
     // This frame: its EV is not metered on its view (snap frames, above); the EV and compensation it renders with.
     bool snapping = false;
     float evUsed = 14.0f, compensation = 0;
-    uint64_t importFrame = UINT64_MAX;  // the frame whose graph imported the histogram (one import per graph)
+    RecordKey importFrame;  // the frame whose graph imported the histogram (one import per graph)
     BufferRef imported;
     ~ExposureState()
     {
@@ -226,10 +226,10 @@ ExposureHistogram exposureHistogram(FramePassContext& fc)
     ExposureState& s = fc.state<ExposureState>("M.exposure");
     s.ensure(fc.device);
     ExposureHistogram h;
-    if (s.importFrame != fc.frame.frameIndex)
+    if (!(s.importFrame == RecordKey::of(fc)))
     {
         s.imported = fc.graph.importBuffer(s.histogram.Get(), BufferDesc{ "M exposure histogram", kBins * 4, 0 });
-        s.importFrame = fc.frame.frameIndex;
+        s.importFrame = RecordKey::of(fc);
     }
     h.buffer = s.imported;
     const Params p = params(fc.quality, fc.frame);

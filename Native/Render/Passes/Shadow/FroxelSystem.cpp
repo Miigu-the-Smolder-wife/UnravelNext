@@ -1588,6 +1588,8 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
                       ctx.computeConstants(k, 48);
                       ctx.cmd->Dispatch((f.gridX + 3) / 4, (f.gridY + 3) / 4, (f.gridZ + 3) / 4);
                   });
+    // (the cloud's statistics, where the columns march the frame's cloud: the capped sun paths are counted there)
+    const BufferRef cloudStats = f.cloudSteps != 0 ? fc.resources.cloudStats : BufferRef{};
     g.addPass("s.fog.integrate" + suffix, QueueType::Compute,
               [&](PassBuilder& b) {
                   if (cells) b.use(scatter, Use::SrvCompute);
@@ -1601,6 +1603,7 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
                   if (farShadows || withReaders) b.use(lights, Use::SrvCompute);
                   if (withAir) b.use(msLut, Use::SrvCompute);
                   if (withReaders) b.use(readers, Use::SrvCompute);
+                  if (cloudStats.valid()) b.use(cloudStats, Use::UavCompute);
                   b.use(integrated, Use::UavCompute);
                   if (primary) b.keep();  // (persistent: read through the frame constants' record)
               },
@@ -1611,7 +1614,7 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
                                      bits(f.density), bits(f.falloff), bits(f.height), bits(f.g),
                                      bits(f.albedo[0]), bits(f.albedo[1]), bits(f.albedo[2]), bits(f.start),
                                      withReaders ? ctx.srv(readers) : none, withAir ? ctx.srv(msLut) : none, f.airOrder ? 1u : 0u, f.cloudSteps,
-                                     cloudWord, withAir ? ctx.srv(air) : none, f.farSkyLight ? 1u : 0u, 0,
+                                     cloudWord, withAir ? ctx.srv(air) : none, f.farSkyLight ? 1u : 0u, cloudStats.valid() ? ctx.uav(cloudStats) + 1 : 0,
                                      farShadows ? ctx.srv(air) : none, farShadows || withReaders ? ctx.srv(lights) : none, ambient ? ambientParams : none, ctx.srv(tlut),
                                      bits(f.density2), bits(f.falloff2), bits(f.height2), 0 };
                   ctx.cmd->SetPipelineState(pi);
