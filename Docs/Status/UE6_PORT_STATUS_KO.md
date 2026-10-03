@@ -1,5 +1,41 @@
 # 언리얼 6 렌더러 자체 구현 — 진행 상태
 
+## 2026-10-03 후속 통합과 실제 검증
+
+현재 네이티브 소스는 `cafb3ea4`, Unity 연결 및 배포물은 원본 `C:/Users/USER/Unravel`의 `8162a1d1`에 보존했다. 후속 브랜치와 중단 로그의 상세 해석은 `UE6_WORKPLAN_KO.md` 0절의 현재 상태에 있다. 아래 역사적 ✔ 표시는 빌드 의미를 유지한다. 현재 실행 결과와 혼동하지 않는다.
+
+| 실제로 실행한 경계 | 결과와 증거 (`Logs/Continuation20261003/`) |
+|---|---|
+| 현재 소스 전체 렌더러 빌드 | build 28 통과. GPU ABI `0558fffd17bc7c0a`. 최대 FX DXIL 204,524 B/204,800 B (`build-integrated-28.log`) |
+| 원본 owned native 5개 | 원본 프로젝트의 World/VFX/Animation/Physics/TitanNative 현재 소스를 모두 컴파일·링크했다. 외부 바이너리 대체·실행 정책 변경 없음. `Artifacts/IntegratedEngine/CurrentSource-20261003T065905831517Z/receipt.json`: `compilationPassed=true`, 실행 인수 `passed=false` 유지 |
+| GPU 단위 계약 | 53/53, 디버그 오류 0 (`unit-latest.log`). 추가 실제 eye ray diffuse 소비자 4096점 비교 1/1, 오류 0 (`eye-consumer-current.log`) |
+| RT 정점 풀과 runtime geometry | static/deformed/alpha/exact proxy 및 추가·이동·제거 PASS, GBV 오류 0 (`rayscene-compact-fix.log`) |
+| atmosphere / water / froxel / GI / post | cloud, water track, water/ocean layer, host ocean, rain ceiling, froxel, GI admission, post, 피부 SSS 선택 검증 통과 (`latest-*`, `fog-cpu.log`, `froxel-grid16.log`) |
+| reflection / surface cache | 선택 analytic 통과 및 GBV 오류 0 (`reflection-final-gbv.log`). 정확한 furnace 통과는 legacy Lambert oracle이다. 기본 Lumen 모델의 진단 오차는 미인수로 유지했다 |
+| 해상도 변경·자원 수명 | host resize의 전체 RMS 0.25414 RGB10 code, 지역 bias 조건 통과, 디버그 오류 0 (`latest-unx_test_host_hostresize.log`). Unity에서도 720p→1440p 출력 변경 실행 |
+| Visibility/coverage 소비자 | full geometry 11/11 뒤 테스트 CBV stride 결함을 수정했다. 수정 후 planar mask GBV 오류 0 (`planar-mask-current-gbv.log`). 전체 11건을 다시 돌렸다고 주장하지 않는다 |
+| 눈 실제 프레임 | eye_close 64프레임 및 band B 강제 coverage 8프레임 모두 GBV 오류 0 (`eyes-current-gbv.log`, `eyes-coverage-current-gbv.log`) |
+| 최신 로비 실제 프레임 | build 28, 1080p, 8프레임 및 frame 4 컷, GBV 오류 0 (`lobby-build28-current-gbv.log`). 앞서 잘못 지정한 `lobby_reference.unxscene`의 파일 읽기 실패는 별도 로그에 남아 있고 실제 입력은 `lobby.unxscene`이다 |
+| Unity ABI / saved authoring / 현재 DLL | 실제 DLL의 26 export와 18 layout 확인. 저장·재로드, 64 native 프레임, 이동/1440p resize/컷, 데칼·스프라이트 look 해제, 씬 저장 PASS (`unity-runtime-10.log`, 원본 `Artifacts/UnravelNext/CompileBridge/abi-current.log`, `ContinuationProject/Evidence`) |
+
+Unity는 격리 프로젝트에서 현재 원본 bridge 소스와 build 28 DLL/셰이더를 실행했다. 원본 프로젝트에도 동일 DLL·821개 커널·17개 품질 파일을 설치했으며 DLL SHA256 세 곳이 일치한다. DataWorld UV1/정점 색 연결은 관리 코드 컴파일까지 확인했고 전체 World 플레이를 실행했다고 주장하지 않는다. 스프라이트 look의 ABI 저장·갱신·해제를 검증했으며 Unity VFX 입자 시뮬레이션의 시각 인수는 별도다. run 10 종료 로그와 코드 0 이후 OS 종료 대기가 남아 해당 검증용 Editor만 정리했다.
+
+게임 배치는 품질을 줄이지 않고 기본 TSR/자동 노출/결정적 GI 경로로 정지 600프레임, 컷 뒤 1·2·4프레임 및 회전 캡처, 정지/회전 각 600프레임을 실행한다. raw 캡처·JSON은 `FinalGames`(이전 로비 완료분)와 `FinalGamesBuild28`에 보존한다. 로비의 예전 장기 배치를 build 28의 장기 측정이라고 다시 표기하지 않는다.
+
+build 28의 욕실·라운지·Train 씬 × 1080p/1440p/4K 배치는 **27건, 종료 코드 0**으로 마쳤다. 각 해상도에 7개 final 컷/회전 PNG가 있고 정지/회전 timing JSON 18개가 각각 600프레임을 기록한다. 치명적 V/S 오류·그림자 overflow·device removal 없음. Train에서 visible 용량을 늘린 `0x100`은 성공적으로 처리된 성장 표시이며 치명적 overflow로 세지 않는다. timing JSON의 다른 작업에 의한 GPU contention은 모두 0초다. 사용자 게임 등 background CPU와 첫 PSO 생성 시간은 로그에 보존한다. 원본 native 5모듈 빌드는 로비 GBV와 일부 pictures 실행에 겹쳤으며 이 구간을 성능 인수로 사용하지 않는다.
+
+GPU 프레임 중앙값 (ms, **정지 / 회전**; 기본 품질과 TSR):
+
+| build 28 씬 | 1080p | 1440p | 4K |
+|---|---|---|---|
+| Bathhouse 욕실 | 9.04 / 8.71 | 11.64 / 11.85 | 14.45 / 14.68 |
+| Bathhouse 라운지 | 9.02 / 8.56 | 12.96 / 11.99 | 14.75 / 13.85 |
+| Train 라운지 | 12.85 / 9.04 | 15.72 / 12.02 | 17.42 / 13.74 |
+
+로비의 이전 완료 장기 배치는 1080p 정지 9.52, 1440p 12.45, 4K 14.58 ms였다. 별도 최신 build 28 로비 GBV 8프레임은 위 표의 장기 성능 측정을 대체하지 않는다. 이 값들로 4K 165 FPS 달성을 주장하지 않는다.
+
+**미인수:** 컷 직후 반사 grain, 4K 6.06 ms, 기본 Lumen 카드 모델의 정확한 furnace 에너지 보존. GI 레이어와 반사 레이어를 분리해 grain이 반사에 남는 것을 확인했다. 현재 실행 통과를 이 품질/성능 목표나 전체 엔진/Player 인수로 확대하지 않는다. D3D12 오류 0은 clear 값 불일치 등의 성능 경고까지 0이라는 뜻이 아니다.
+
 사용자 지시(2026-10-02): 렌더러 전체를 언리얼 6(ue6-main)의 구조로 자체 구현한다. Lumen, 가상화 지오메트리, 그림자, 그 밖의 전부. 목표는 "화면만 봐도 예쁜" 품질과 4K 6.06 ms(1440p·1080p는 그보다 훨씬 빠르게). 금지는 하나: "이건가? 아니네 → 검증 → 이건가? 아니네" 반복. 검증은 최소, 코드 작업 위주.
 
 - 브랜치 `lumen-ue6`, 작업 트리 `C:\Users\USER\UnravelNext-ue6`. `redesign-v2` + `redesign-v2-refl` + `redesign-v2-fix` 병합에서 시작.
