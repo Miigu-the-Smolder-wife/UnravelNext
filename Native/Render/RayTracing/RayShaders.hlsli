@@ -9,10 +9,11 @@
 // ignores it for a see-through ray - the trace helpers below mark such a ray in the payload's pad word from its mask -
 // and accepts it for the others (reflection and refraction rays).
 //   RT_NO_SEE_THROUGH (defined before this file): the library's any-hit shader is the alpha test alone and its rays
-//   carry no mark - for a library none of whose rays is see-through (every mask has RT_MASK_REFLECTION) and which sits
-//   at the DXIL size limit (ReflectionTraceInline).
+//   carry no mark - for a library none of whose rays is see-through (every mask has RT_MASK_REFLECTION).
 //   RT_NO_FAR_FIELD (defined before this file): the procedural hit group holds the area lights alone - for a library
-//   none of whose rays asks for RT_MASK_FAR and which sits at the DXIL size limit.
+//   none of whose rays asks for RT_MASK_FAR.
+//   (Neither is defined by a library now: ReflectionTraceInline set both while it stood at the DXIL size limit, and
+//   holds the full shaders since its lookups stand once in it - 179 KB of 200.)
 //   RT_SHADOW_TRANSMITTANCE (defined before this file): rtShadowTransmittance gathers what the Glass on a shadow ray
 //   takes (rtGlassOpticalDepth) in the any-hit shader - no closest-hit shading, no further ray. Without it the function
 //   is rtVisible's answer as 0 or 1.

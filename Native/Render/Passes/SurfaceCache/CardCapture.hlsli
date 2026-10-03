@@ -22,6 +22,8 @@ struct CardVertex
     float4 tangent : TANGENT;   // card space; w = the bitangent's sign in card space (the mesh's sign x the basis' handedness)
     float2 uv : TEXCOORD0;
     float3 scaled : SCALEDPOS;  // the mesh-space point x the instance's scale (metres): triplanar materials
+    float2 uv1 : TEXCOORD1;     // the mesh's second uv set (its first for a mesh without one) and its vertex colour
+    float4 color : COLOR0;      // (white without): the material inputs' streams (Scene.hlsli GpuMaterialInputs)
 };
 
 struct CardPrimitive

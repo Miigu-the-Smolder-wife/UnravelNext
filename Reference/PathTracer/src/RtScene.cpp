@@ -571,10 +571,29 @@ Surface RtScene::surface(const Hit& hit, float3 rayDir) const
         const float2 a = md.src->uv0[tri[0]], b = md.src->uv0[tri[1]], c = md.src->uv0[tri[2]];
         uv = { a.x * w + b.x * u + c.x * v, a.y * w + b.y * u + c.y * v };
     }
-    // Material inputs (scene::Material): the uv transform, the emission's scale and mask and the vertex tint are here; the
-    // second uv set, the detail maps and the height's parallax are the engine's alone (MaterialInputs.hlsli).
+    // Material inputs (scene::Material): the uv transform, the emission's scale and mask, the vertex tint and the detail
+    // colour (on its uv set, weighed by the vertex alpha) are here - what the engine's ray hits and cards carry; the
+    // detail normal and the height's parallax are the engine's direct view alone (MaterialInputs.hlsli).
+    const float2 uvMesh = uv;
     uv = scene::materialUv(mat, uv);
     float3 base = mat.baseColor;
+    if (mat.cls != scene::MaterialClass::Cut && mat.cls != scene::MaterialClass::Terrain && mat.detailColorTexture != scene::kNone)
+    {
+        // base x lerp(1, detail x 2^2.2, w x strength): the detail's uv set x its scale + offset (mip 0: the reference
+        // supersamples the pixel)
+        float2 set = uvMesh;
+        if (mat.detailUvSet == 1 && !md.src->uv1.empty())
+        {
+            const float2 a = md.src->uv1[tri[0]], b = md.src->uv1[tri[1]], c = md.src->uv1[tri[2]];
+            set = { a.x * w + b.x * u + c.x * v, a.y * w + b.y * u + c.y * v };
+        }
+        float weight = mat.detailColorStrength;
+        if (mat.vertexAlphaBlend && !md.src->colors.empty())
+            weight *= std::clamp(((float)(md.src->colors[tri[0]] >> 24) * w + (float)(md.src->colors[tri[1]] >> 24) * u + (float)(md.src->colors[tri[2]] >> 24) * v) / 255.0f, 0.0f, 1.0f);
+        const Texel t = m_textures[mat.detailColorTexture].sample({ set.x * mat.detailScale.x + mat.detailOffset.x, set.y * mat.detailScale.y + mat.detailOffset.y });
+        const float k = 4.59479380f;
+        base = base * float3{ 1 + (t.r * k - 1) * weight, 1 + (t.g * k - 1) * weight, 1 + (t.b * k - 1) * weight };
+    }
     if (mat.vertexColorTint && !md.src->colors.empty())
     {
         float3 tint{ 0, 0, 0 };

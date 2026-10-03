@@ -307,10 +307,53 @@ float3 giProbeAtlasBilinear(Texture2D<float4> atlas, int2 count, uint2 block, ui
 // The K path over a footprint. Probes that read the same cache entry share one map block (GiProbeMapOwners): their
 // weights are merged and each distinct block is looked up once. The second mip is read only when it differs from the
 // first (fractional level below the top mip).
-// In-block maps (no atlas): only from the probes texture.
-float3 giProbeMapBilinearFrom(Texture2D<uint4> t, uint2 probe, uint level, float2 uv) { return giProbeMapBilinear(t, probe, level, uv); }
+// In-block maps (no atlas): only from the probes texture. The sum over the footprint's distinct blocks, before the load
+// scale; frame[k] = probe k's plane word (normal, block), l0 / l1 / fl the two mips and their blend. Loops - the four
+// probes, the two mips: one copy of the bilinear map read in the kernel where the unrolled form held eight (2,200
+// instructions, 11 KB of the reflection libraries at the size limit); the same blocks, weights and sums in the same
+// order. The atlas path is the one the shading kernels take.
+float3 giProbeBlocksRadiance(Texture2D<uint4> t, GiProbeFootprint fp, uint2 frame[4], float3 dir, uint l0, uint l1, float fl)
+{
+    float3 sum = 0;
+    [loop] for (uint k = 0; k < 4; ++k)
+    {
+        if (fp.weight[k] <= 0) continue;
+        bool seen = false;
+        float w = fp.weight[k];
+        [loop] for (uint j = 0; j < 4; ++j)
+        {
+            if (j == k || !(fp.weight[j] > 0 && frame[j].y == frame[k].y)) continue;
+            if (j < k) seen = true;
+            else w += fp.weight[j];
+        }
+        if (seen) continue;
+        // 'precise': the map coordinate must not depend on how the compiler fuses this arithmetic in a given kernel (the
+        // hardware bilinear quantises it to 1/256 of a texel, so an ulp can move a tap): screenProbeGatherTile equals
+        // screenProbeGather bit for bit.
+        precise const float3 n = giProbeOctDecode(frame[k].x);
+        const uint2 block = uint2(frame[k].y & 0xFFFFu, frame[k].y >> 16);
+        const float sgn = n.z >= 0 ? 1.0 : -1.0;  // Duff et al. 2017 basis (GiCache.hlsli giBasis)
+        precise const float a = -1.0 / (sgn + n.z);
+        precise const float c = n.x * n.y * a;
+        precise const float3 tb = float3(1 + sgn * n.x * n.x * a, sgn * c, -sgn * n.x);
+        precise const float3 bb = float3(c, sgn + n.y * n.y * a, -n.y);
+        precise const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
+        precise const float3 v = local / (abs(local.x) + abs(local.y) + local.z);
+        precise const float2 uv = float2(v.x + v.y, v.x - v.y) * 0.5 + 0.5;
+        float3 r = 0;
+        const uint mips = fl > 0 && l1 != l0 ? 2u : 1u;
+        [loop] for (uint mip = 0; mip < mips; ++mip)
+        {
+            const float3 texel = giProbeMapBilinear(t, block, mip == 0 ? l0 : l1, uv);
+            if (mip == 0) r = texel;
+            else r = lerp(r, texel, fl);
+        }
+        sum += w * r;
+    }
+    return sum;
+}
 #ifdef GI_PROBE_TILE_CACHE
-float3 giProbeMapBilinearFrom(GiProbeTile t, uint2 probe, uint level, float2 uv) { return 0; }  // the tile path needs the atlas
+float3 giProbeBlocksRadiance(GiProbeTile t, GiProbeFootprint fp, uint2 frame[4], float3 dir, uint l0, uint l1, float fl) { return 0; }  // the tile path needs the atlas
 #endif
 
 template <typename Src>
@@ -374,34 +417,7 @@ float3 giProbeFootprintRadiance(Src t, GiProbeFootprint fp, int2 count, float3 d
         }
         return total * 64.0;  // GI_LOAD_SCALE
     }
-    float3 sum = 0;
-    [unroll] for (uint k = 0; k < 4; ++k)
-    {
-        if (fp.weight[k] <= 0) continue;
-        bool seen = false;
-        [unroll] for (uint j = 0; j < k; ++j) seen = seen || (fp.weight[j] > 0 && frame[j].y == frame[k].y);
-        if (seen) continue;
-        float w = fp.weight[k];
-        [unroll] for (uint j = k + 1; j < 4; ++j)
-            if (fp.weight[j] > 0 && frame[j].y == frame[k].y) w += fp.weight[j];
-        // 'precise': the map coordinate must not depend on how the compiler fuses this arithmetic in a given kernel (the
-        // hardware bilinear quantises it to 1/256 of a texel, so an ulp can move a tap): screenProbeGatherTile equals
-        // screenProbeGather bit for bit.
-        precise const float3 n = giProbeOctDecode(frame[k].x);
-        const uint2 block = uint2(frame[k].y & 0xFFFFu, frame[k].y >> 16);
-        const float sgn = n.z >= 0 ? 1.0 : -1.0;  // Duff et al. 2017 basis (GiCache.hlsli giBasis)
-        precise const float a = -1.0 / (sgn + n.z);
-        precise const float c = n.x * n.y * a;
-        precise const float3 tb = float3(1 + sgn * n.x * n.x * a, sgn * c, -sgn * n.x);
-        precise const float3 bb = float3(c, sgn + n.y * n.y * a, -n.y);
-        precise const float3 local = float3(dot(dir, tb), dot(dir, bb), max(dot(dir, n), 0.0));
-        precise const float3 v = local / (abs(local.x) + abs(local.y) + local.z);
-        precise const float2 uv = float2(v.x + v.y, v.x - v.y) * 0.5 + 0.5;
-        float3 r = giProbeMapBilinearFrom(t, block, l0, uv);  // in-block maps (the atlas case returned above)
-        if (fl > 0 && l1 != l0) r = lerp(r, giProbeMapBilinearFrom(t, block, l1, uv), fl);
-        sum += w * r;
-    }
-    return sum * 64.0;  // GI_LOAD_SCALE
+    return giProbeBlocksRadiance(t, fp, frame, dir, l0, l1, fl) * 64.0;  // GI_LOAD_SCALE (the atlas case returned above)
 }
 
 // K path by the lobe (INTERFACES 5.6 v1.49, request of A 2026-09-26): the BRDF-weighted mean incident radiance of a GGX

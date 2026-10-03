@@ -32,6 +32,10 @@ CardPixel main(CardVertex i)
     s.uv = i.uv;
     s.uvDx = ddx(i.uv);
     s.uvDy = ddy(i.uv);
+    s.uv1 = i.uv1;
+    s.uv1Dx = ddx(i.uv1);
+    s.uv1Dy = ddy(i.uv1);
+    s.color = i.color;
     s.normal = i.normal;
     s.tangent = i.tangent;
     s.scaled = i.scaled;

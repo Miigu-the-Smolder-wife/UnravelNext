@@ -16,6 +16,8 @@ struct CcSurface
     uint material;       // scene material (instance overrides applied)
     uint tableSrv;       // M's texture table SRV (UNX_NONE: material constants and the published textures only)
     float2 uv, uvDx, uvDy;                // material uv and its steps per capture pixel along x and y
+    float2 uv1, uv1Dx, uv1Dy;             // the mesh's second uv set (its first without one) and its steps
+    float4 color;                         // the vertex colour (white without one)
     float3 normal;       // card space: x, y along the card's face, z toward the side the card is seen from
     float4 tangent;      // card space; w = the bitangent's sign in card space (xyz 0: none - no normal-map slope)
     float3 scaled, scaledDx, scaledDy;    // the mesh-space point x the instance's scale (metres) and its steps: triplanar materials
@@ -166,10 +168,20 @@ CcMaterial ccMaterial(CcSurface i)
     }
     else
     {
-        // (material inputs, Scene.hlsli: the material's uv transform and its emissive mask; no parallax, detail maps or
-        // vertex colour in a card)
+        // Material inputs (Scene.hlsli GpuMaterialInputs; MaterialInputs.hlsli states the rules): the material's uv
+        // transform, its emissive mask, the vertex tint and the detail maps - the colour on its uv set, the normal's mean
+        // slope on set 0 (the mesh's tangent frame; on the second set the card has no frame for it). No parallax: the
+        // card looks along its own axis, where the view ray meets the height field at the surface's uv.
         float2 uv = i.uv, uvDx = i.uvDx, uvDy = i.uvDy;
         materialUvFootprint(m, uv, uvDx, uvDy);
+        GpuMaterialInputs r = (GpuMaterialInputs)0;
+        r.detailColorTexture = r.detailNormalTexture = r.emissiveMaskTexture = UNX_NONE;
+        if (m.inputs != UNX_NONE) r = loadMaterialInputs(m.inputs);
+        const bool detailSet1 = (r.flags & MATERIAL_INPUT_DETAIL_UV1) != 0;
+        const float2 detailScale = float2(r.detailScaleU, r.detailScaleV);
+        const float2 uvDetail = (detailSet1 ? i.uv1 : i.uv) * detailScale + r.detailOffset;
+        const float2 uvDetailDx = (detailSet1 ? i.uv1Dx : i.uvDx) * detailScale, uvDetailDy = (detailSet1 ? i.uv1Dy : i.uvDy) * detailScale;
+        const float detailWeight = (r.flags & MATERIAL_INPUT_VERTEX_BLEND) != 0 ? saturate(i.color.a) : 1.0;
         if (m.baseColorTexture != UNX_NONE)
         {
             const float4 c = ccSample(m.baseColorTexture, (m.textureClamp & M_TEX_BASE_COLOR) != 0, uv, uvDx, uvDy);
@@ -183,15 +195,20 @@ CcMaterial ccMaterial(CcSurface i)
             metallic *= rm.g;
         }
         if (m.emissiveTexture != UNX_NONE) emissive *= ccSample(m.emissiveTexture, (m.textureClamp & M_TEX_EMISSIVE) != 0, uv, uvDx, uvDy).rgb;
-        if (m.inputs != UNX_NONE)
-        {
-            const GpuMaterialInputs r = loadMaterialInputs(m.inputs);
-            if (r.emissiveMaskTexture != UNX_NONE) emissive *= ccSample(r.emissiveMaskTexture, (r.textureClamp & 8u) != 0, uv, uvDx, uvDy).x;
-        }
+        if (r.emissiveMaskTexture != UNX_NONE) emissive *= ccSample(r.emissiveMaskTexture, (r.textureClamp & 8u) != 0, uv, uvDx, uvDy).x;
+        if (r.detailColorTexture != UNX_NONE)
+            baseColor *= lerp(1.0, ccSample(r.detailColorTexture, (r.textureClamp & 1u) != 0, uvDetail, uvDetailDx, uvDetailDy).rgb * 4.59479380, detailWeight * r.detailColor);
+        if ((r.flags & MATERIAL_INPUT_VERTEX_TINT) != 0) baseColor *= i.color.rgb;
         if (tableSrv != UNX_NONE)
         {
             const MTextureSet ts = mLoadTextureSet(tableSrv, material);
             if (ts.moments != UNX_NONE) slope = (ccSample(ts.moments, (ts.flags & M_TEX_NORMAL) != 0, uv, uvDx, uvDy).xy * 2 - 1) * ts.slopeRange;
+        }
+        if (r.detailNormalTexture != UNX_NONE && !detailSet1)
+        {
+            // (the detail map's mean slope at the card texel's footprint, along the mesh's tangent axes: mDetail's term)
+            const float2 mean = (ccSample(r.detailNormalTexture, (r.textureClamp & 2u) != 0, uvDetail, uvDetailDx, uvDetailDy).xy * 2 - 1) * r.detailSlopeRange;
+            slope += mean * sign(detailScale) * (detailWeight * r.detailNormal);
         }
     }
     const bool cutOut = m.alphaCutoff > 0 && alpha < m.alphaCutoff;  // (the kernel discards; the values below stand either way)

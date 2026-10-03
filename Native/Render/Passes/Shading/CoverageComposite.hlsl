@@ -72,7 +72,8 @@ void main(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
         return;
     }
 
-    // Sort in registers (constant indices only).
+    // Sort in registers (constant indices only) by depth, then the equal depths in the stable order (CoverageShade.hlsli
+    // covNearer, COV_SETTLE_TIES: covBefore's order with one covBefore in the kernel).
     uint2 a[COV_LIGHT];
     [unroll] for (uint i = 0; i < COV_LIGHT; ++i) a[i] = i < count ? covKey(records, first + i) : COV_KEY_AFTER_ALL;
     [unroll] for (uint size = 2; size <= COV_LIGHT; size <<= 1)
@@ -82,7 +83,7 @@ void main(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
                 const uint j = k ^ stride;
                 if (j <= k) continue;
                 const bool up = (k & size) == 0;
-                if (up ? covBefore(a[j], a[k], records, P[1].x) : covBefore(a[k], a[j], records, P[1].x))
+                if (up ? covNearer(a[j], a[k]) : covNearer(a[k], a[j]))
                 {
                     const uint2 t = a[k];
                     a[k] = a[j];
@@ -90,6 +91,7 @@ void main(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
                 }
             }
     [unroll] for (uint s = 0; s < COV_LIGHT; ++s) gs_sorted[gi][s] = a[s];
+    COV_SETTLE_TIES(gs_sorted[gi], count, records, P[1].x)
 
     Texture2D<float> bandDepth = ResourceDescriptorHeap[P[1].z];
     const uint bandA = asuint(bandDepth[pixel]);  // non-negative floats order like their bits

@@ -18,9 +18,16 @@
 //              and its slope variance x (w scale)^2 joins the footprint's, as mNormalMoments gives the base map's;
 //              w = 1, or the vertex colour's alpha;
 //   emission   the emissive texture and the mask multiply the material's emissive (which already holds emissiveScale).
-// Coverage fragments (CoverageShade.hlsli) take the uv transform, the emissive mask and the vertex tint; ray hits
-// (HitShading.hlsli) the same; neither marches the height field or reads the detail maps (a fragment is a sliver of a
-// pixel, a hit a cone's footprint: neither shows them).
+// Beyond the resolve - so that a detailed wall is the same wall under a leaf, in a mirror and in the bounce light:
+//   coverage fragments  (CoverageShade.hlsli covFragmentMaterial) everything above but the occlusion map and the
+//                       parallax's own shadow of the sun (a fragment has no class word);
+//   ray hits            (HitShading.hlsli rtHitMaterialAt) the uv transform, the emissive mask, the vertex tint and the
+//                       detail colour on its uv set (the second set from RtSurface::uv1); no detail normal (a hit shades
+//                       its interpolated normal), no parallax;
+//   card capture        (CardCaptureMaterial.hlsli ccMaterial) the same as hits, and the detail normal's slopes on uv
+//                       set 0; no parallax (a card looks along its own axis, close to the surface's normal: the ray
+//                       meets the field where it enters). The capture through the cluster hierarchy has no streams
+//                       (V's raster service gives a pixel one uv): its second set is the first, its colour white.
 #ifndef UNX_M_MATERIAL_INPUTS_HLSLI
 #define UNX_M_MATERIAL_INPUTS_HLSLI
 #include "Passes/Material/MaterialInternal.hlsli"

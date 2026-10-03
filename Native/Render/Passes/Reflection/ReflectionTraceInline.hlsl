@@ -7,23 +7,9 @@
 // the job count; other jobs return at once). JOB = the job mode this library handles (1 REFL_M, 2 REFL_G; a compile
 // constant, so each library holds one mode's code and stays under the kernel size limit); both run every frame. The same value as the split passes (ReflectionHit.hlsli), only slower.
 // Root constants: ReflectionRay.hlsli.
-#define SHADOW_RESIDENCY_LOOP 1  // (the overflow path is at the DXIL limit: ShadowVisibility.hlsli's loop form)
+#define SHADOW_RESIDENCY_LOOP 1  // (ShadowVisibility.hlsli's loop form: the same answer, less code - this path is the slow one)
 #define REFL_OVERFLOW 1  // use the same stored attributes/values as the split passes
-#define REFL_NO_CARDS 1  // (at the DXIL limit: the overflow jobs' hits read no mesh cards - ReflectionShade.hlsli g_reflCardFrame)
-#define REFL_NO_ACCUMULATOR (JOB == 2)  // (the G library is at the DXIL limit: ReflectionShade.hlsli g_reflAccPool)
-#define RT_HIT_EYE 0  // (at the DXIL limit: an overflow job's hit on an eye reads its colour at the surface's uv - HitShading.hlsli)
-#define RT_SURFACE_EXTRAS 0  // (... and its surface carries no triangle edges and no vertex colour: RayScene.hlsli)
-#define UNX_MATERIAL_INPUTS 0  // (... and no material inputs: an overflow job's hit and its alpha test read the mesh's uv, without
-                               // the material's transform, emissive mask or vertex tint - Scene.hlsli)
 #define GI_BATCH_CORNERS CORNERS
-#if SKY == 0
-// (these libraries are at the DXIL limit: the overflow jobs' light samples at hits take the lights without the
-// components of the record's pad word - falloff exponent, draw-distance fade, barn doors, specular scale;
-// HitLocalLights.hlsli)
-#define UNX_RT_LIGHT_COMPONENTS 0
-#endif
-#define RT_NO_SEE_THROUGH  // (at the DXIL limit, and every ray of this library asks for RT_MASK_REFLECTION: RayShaders.hlsli)
-#define RT_NO_FAR_FIELD    // (... and none asks for RT_MASK_FAR)
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/Reflection/ReflectionRay.hlsli"
 #include "Passes/Reflection/ReflectionHit.hlsli"
@@ -46,39 +32,63 @@ void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer
     g_reflHitFlags = reflHitFlags(rays);
     g_reflAccPool = reflAccPoolSrv(rays);
     g_reflSurfaceCache = reflSurfaceCacheUav(rays);
+    g_reflCardFrame = reflCardFrameSrv(rays);  // (as ReflectionShadeRays: an overflow job's hits read their mesh cards too)
     float3 sumS = 0, sumA = 0;
     uint hits = 0, guide = 0, guideInstance = 0, hitsNoData = 0;
-    [loop] for (uint i = 0; i < j.rays; ++i)
+    // One loop over the job's rays and, for a G job, the control variate's lobe points after them (ReflectionRay.hlsli
+    // reflLobeControlPoint): the screen-probe lookup stands once in the library. As three inlined copies (a ray's g, the
+    // control's sixteen points, its K value) it was 8,200 instructions - 40 KB of a library at the size limit. The sums
+    // and their order are ReflectionCombine's: sumL and sumG over the rays, then the control's mean.
+    const uint points = j.mode == REFL_G ? j.rays + REFL_LOBE_CONTROL_POINTS : j.rays;
+    float3 sumC = 0;
+    uint nC = 0;
+    [loop] for (uint i = 0; i < points; ++i)
     {
         float3 dir;
-        if (!reflNextDirection(j, seed, dir)) continue;
-        RayDesc r;
-        r.Origin = reflRayOrigin(j.s);
-        r.Direction = dir;
-        r.TMin = 0;
-        r.TMax = giRayLength();
-        float d;
-        float hitMotion;
-        uint4 l;
-        const float3 L = reflHitRadiance(scene, cache, h, r, j.coneWidth, j.coneSpread, reflLocalSeed(j, i), reflSunSeed(j.seed, i), d, hitMotion, l);
-        motion = max(motion, hitMotion);
-        if (l.w & REFL_LAYER_SURFACE)
+        float coneHalfAngle = 0.1763;
+        const bool ray = i < j.rays;
+        if (ray)
         {
-            sumS += reflLayerRadiance(l.xy);
-            sumA += reflUnpackAlbedo(l.z);
-            guide = l.y >> 16;
-            guideInstance = l.w & 0x00FFFFFFu;
-            ++hits;
-            hitsNoData += (l.w >> 30) & 1u;
+            if (!reflNextDirection(j, seed, dir)) continue;
+            RayDesc r;
+            r.Origin = reflRayOrigin(j.s);
+            r.Direction = dir;
+            r.TMin = 0;
+            r.TMax = giRayLength();
+            float d;
+            float hitMotion;
+            uint4 l;
+            const float3 L = reflHitRadiance(scene, cache, h, r, j.coneWidth, j.coneSpread, reflLocalSeed(j, i), reflSunSeed(j.seed, i), d, hitMotion, l);
+            motion = max(motion, hitMotion);
+            if (l.w & REFL_LAYER_SURFACE)
+            {
+                sumS += reflLayerRadiance(l.xy);
+                sumA += reflUnpackAlbedo(l.z);
+                guide = l.y >> 16;
+                guideInstance = l.w & 0x00FFFFFFu;
+                ++hits;
+                hitsNoData += (l.w >> 30) & 1u;
+            }
+            sumL += L;
+            nearest = min(nearest, d);
+            ++valid;
         }
-        const float3 g = j.mode == REFL_G ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, dir, 0.1763, P[3].w) : 0;
-        sumL += L;
-        sumG += g;
-        nearest = min(nearest, d);
-        ++valid;
+        else if (!reflLobeControlPoint(j, i - j.rays, nC, dir, coneHalfAngle)) continue;
+        if (j.mode == REFL_G)
+        {
+            const float3 g = giProbeFootprintRadiance(probeTexture, footprint, probeCount, dir, coneHalfAngle, P[3].w);
+            if (ray) sumG += g;
+            else
+            {
+                sumC += g;
+                ++nC;
+            }
+        }
     }
-    const float3 gbar = j.mode == REFL_G ? reflLobeControl(j, probeTexture, footprint, probeCount)
-                                         : valid == 0 ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, reflect(-j.s.view, j.s.normal), j.lobe, P[3].w) : 0;
+    // (branches, not selects: the library's mode is a compile constant, and the other mode's lookup then leaves the kernel)
+    float3 gbar = 0;
+    if (j.mode == REFL_G) gbar = sumC / nC;  // (reflLobeControl's mean)
+    else if (valid == 0) gbar = giProbeFootprintRadiance(probeTexture, footprint, probeCount, reflect(-j.s.view, j.s.normal), j.lobe, P[3].w);
     const float3 total = reflLobeEstimate(sumL, sumG, valid, gbar);
     results[job] = reflPackResult(total, valid > 0 ? nearest : 0, motion);
     if (jobLayersUav != UNX_NONE)

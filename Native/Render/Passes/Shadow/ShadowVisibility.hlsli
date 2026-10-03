@@ -182,11 +182,11 @@ float shadowSunTransmittanceAt(ShadowSrvs s, float3 worldPos, float footprint, f
 
 // What S's glass casters let through to a world point, as a luminance (shadow.vsm.translucent_tint, VsmTint.hlsli; 1
 // without them): the factor of a sun lookup that carries no colour. The views' slot 0 and the coverage fragments' sun
-// have it. shadowSunVisibilityAt and shadowSunClassifyAt (ray hits, water, the translucent layer) multiply it only in a
-// kernel compiled with SHADOW_SUN_TINT_AT 1: R's inline trace kernel stands at the DXIL limit without it, so by default
-// those lookups see the light past a glass caster whole.
+// have it, and so have shadowSunVisibilityAt and shadowSunClassifyAt (ray hits, water, the translucent layer): the
+// light past a glass caster is dimmed there as in the view. SHADOW_SUN_TINT_AT 0 before this file leaves the lookup out
+// of those two (no kernel does: it was the default while R's inline trace kernel stood at the DXIL limit).
 #ifndef SHADOW_SUN_TINT_AT
-#define SHADOW_SUN_TINT_AT 0
+#define SHADOW_SUN_TINT_AT 1
 #endif
 float shadowSunTintLuminanceAt(ShadowSrvs s, float3 worldPos, float footprint)
 {
@@ -201,7 +201,8 @@ float shadowSunTintLuminanceAt(ShadowSrvs s, float3 worldPos, float footprint)
 
 // The 3 x 3 pages around 'centre' on level L are all resident: the nine table words read together (a short-circuit loop
 // waited for each read before the next; the answer is the same - shadow.vsm.use_stats counts all nine as read).
-// A kernel at the DXIL limit defines SHADOW_RESIDENCY_LOOP 1 (the short-circuit loop: the same answer, less code).
+// SHADOW_RESIDENCY_LOOP 1 before this file: the short-circuit loop - the same answer in 4 KB less code, for a path where
+// the reads' latency does not matter (the reflections' overflow library, ReflectionTraceInline).
 bool shadowPagesResident3x3(VsmResources r, int2 centre, uint L)
 {
 #if SHADOW_RESIDENCY_LOOP

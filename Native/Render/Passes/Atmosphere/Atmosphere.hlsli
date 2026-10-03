@@ -307,9 +307,7 @@ void atmosphereAerial(AtmosphereSrvs s, float2 uv, float linearDepth, out float3
 {
     float3 sunT;
     airViewLookup(s, uv, linearDepth, false, inscatter, transmittance, sunT);
-#ifndef UNX_AIR_WITHOUT_FOG
     fogOverAir(uv, linearDepth, inscatter, transmittance);
-#endif
 }
 
 // atmosphereAerial plus the unshadowed solar illuminance (lux) at the surface point (main view): the air volume's sun
@@ -320,9 +318,7 @@ void atmosphereAirView(AtmosphereSrvs s, float2 uv, float linearDepth, out float
     float3 sunT;
     airViewLookup(s, uv, linearDepth, true, inscatter, transmittance, sunT);
     sunIlluminance = sunT * (g_sunIlluminance * g_sunColor);
-#ifndef UNX_AIR_WITHOUT_FOG  // (a kernel at the size limit leaves the fog out: FxLayerSetup's ML = 0, GIV = 0 variant)
     fogOverAir(uv, linearDepth, inscatter, transmittance);
-#endif
 }
 
 #endif

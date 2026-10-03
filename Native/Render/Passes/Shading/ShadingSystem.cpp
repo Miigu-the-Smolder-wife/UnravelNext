@@ -1552,6 +1552,14 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           c.cmd->Dispatch((hairW + 7) / 8, (hairH + 7) / 8, 1);
                       });
         }
+        // E's decals of the view (A7; both invalid when none is live): the fragments' material takes them as the resolve's
+        // pixels do (CoverageShade.hlsli covShadeFragment)
+        const bool fragmentDecals = v.decalFrames.valid() && v.decalTiles.valid();
+        // material.parallax_steps for the fragments' material (MaterialInputs.hlsli mParallax, as the resolve's; 0: the
+        // scene has no height map, or the switch is 0)
+        const int64_t parallaxSetting = fc.quality.has("material.parallax_steps") ? fc.quality.integer("material.parallax_steps") : 16;
+        if (parallaxSetting < 0 || parallaxSetting > 64) fail("material.parallax_steps must be in [0, 64] (0: no parallax)");
+        const uint32_t fragmentParallax = fc.scene.anyHeight() ? (uint32_t)parallaxSetting : 0u;
         // The fragment shading kernels' resources (CoverageShade.hlsli: P[1], P[3], P[4], P[5].x).
         auto useShading = [=](PassBuilder& b) {
             b.use(v.coverageRecords, Use::SrvCompute);
@@ -1568,6 +1576,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             if (v.screenProbeMaps.valid()) b.use(v.screenProbeMaps, Use::SrvCompute);
             declareGiSource(b, giSrc, Use::SrvCompute);
             if (r.surfaceConstants.valid()) b.use(r.surfaceConstants, Use::SrvCompute);  // A7 surface layers (one buffer)
+            if (fragmentDecals)
+            {
+                b.use(v.decalFrames, Use::SrvCompute);  // A7 decals on the fragments (P[10].zw)
+                b.use(v.decalTiles, Use::SrvCompute);
+            }
             if (r.lightFunctions.valid()) b.use(r.lightFunctions, Use::SrvCompute);    // A8 light functions
             if (r.rainShadow.valid()) b.use(r.rainShadow, Use::SrvCompute);
             if (covMlDiffuse.valid())
@@ -1598,7 +1611,10 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             k[31] = r.weather != UINT32_MAX ? r.weather : gpu::kNone;                  // P[7].w
             k[32] = r.lightFunctions.valid() ? c.srv(r.lightFunctions) : gpu::kNone;  // P[8].x (A8; the arrays hold 48)
             k[33] = v.coverageRecordRadiance.valid() ? c.srv(v.coverageRecordRadiance) : gpu::kNone;  // P[8].y (v1.75)
+            k[35] = fragmentParallax;  // P[8].w: material.parallax_steps
             waterSunConstants(c, k + 36, 4);  // P[9], P[10].x (v1.77)
+            k[42] = fragmentDecals ? c.srv(v.decalFrames) : gpu::kNone;  // P[10].z: A7 decals
+            k[43] = fragmentDecals ? c.srv(v.decalTiles) : gpu::kNone;   // P[10].w
             k[44] = covMlDiffuse.valid() ? c.srv(covMlDiffuse) : gpu::kNone;   // P[11].x: shading.mega_lights' coverage instance
             k[45] = covMlSpecular.valid() ? c.srv(covMlSpecular) : gpu::kNone;  // P[11].y
             k[46] = hairSun.valid() ? c.srv(hairSun) : gpu::kNone;              // P[11].z: the grooms towards the sun
@@ -1643,7 +1659,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           },
                           [=](PassContext& c) {
                               uint32_t k[8] = { c.srv(v.coverageRecords), c.srv(special), c.srv(v.coverageTileList), c.uav(scratch),
-                                                c.srv(v.visibleClusters), o.textureTableSrv, 0, 0 };
+                                                c.srv(v.visibleClusters), o.textureTableSrv, fragmentParallax, 0 };  // (P[1].z: material.parallax_steps)
                               c.cmd->SetPipelineState(kernel);
                               c.bindFrameConstants(cb);
                               c.computeConstants(k, 8);

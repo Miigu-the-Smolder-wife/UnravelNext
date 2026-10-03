@@ -14,7 +14,7 @@
 //          (COV_PART 1, 2: one lighting kernel is at the DXIL limit; 2026-09-27 the one-kernel MODE 3 is retired).
 // P[0] = { records (StructuredBuffer<uint4>), special list (raw), tile list (raw), MODE 1, 2, 4: material scratch UAV;
 // MODE 6: record radiance UAV; MODE 5: direct scratch UAV (raw) }; MODE 1..6: P[1] (visible clusters, M texture
-// table); MODE 5, 6: P[3], P[4], P[5].x, P[6].zw, P[7], P[8].x (the shading constants, CoverageShade.hlsli), P[5].y the
+// table; MODE 1, 2, 4: P[1].z = material.parallax_steps, 0 none); MODE 5, 6: P[3], P[4], P[5].x, P[6].zw, P[7], P[8].x (the shading constants, CoverageShade.hlsli), P[5].y the
 // material scratch SRV, MODE 6: P[5].z the direct scratch SRV.
 #if MODE == 1 || MODE == 2
 #define COV_PRESHADE_CLASSES MODE
@@ -62,7 +62,7 @@ void main(uint3 id : SV_DispatchThreadID)
 #endif
     const MVertex v0 = mTriangleVertex(visId, P[1].x, 0), v1 = mTriangleVertex(visId, P[1].x, 1), v2 = mTriangleVertex(visId, P[1].x, 2);
     const MSurface sf = mSurfaceFromVertices(tid, v0, v1, v2, covFragmentCentre(v0, v1, v2, pixel));
-    CovMaterial cm = covFragmentMaterial(visId, sf, m, mLoadTextureSet(P[1].y, tid.material), v0, v1, v2);
+    CovMaterial cm = covFragmentMaterial(visId, sf, m, mLoadTextureSet(P[1].y, tid.material), v0, v1, v2, P[1].z);  // P[1].z: material.parallax_steps
 #if MODE == 4
     // the coat's (or the sheen's: one layer kind per material) roughness band-limited by the footprint like the base's
     // (MATERIAL_LAYERS 3.4, 1.4; as the resolve)

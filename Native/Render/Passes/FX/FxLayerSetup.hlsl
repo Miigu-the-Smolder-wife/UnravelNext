@@ -103,7 +103,8 @@ FxLight fxLight(LayerConstants c, float3 offset, float3 D, float g, float footpr
     float3 sunE = E * visibility;
     // indirect (GiSource.hlsli): the Lumen translucency volume's light through the phase function (band 0, and band 1 x
     // g), or R's GI cache, isotropic (the mean irradiance over the six axes / pi = fluence / 4 pi)
-    // (GIV: the source's kind picks the kernel - both reads in one kernel pass the DXIL limit; ParticleLayer.cpp)
+    // (GIV: the source's kind picks the kernel, ParticleLayer.cpp - a variant holds the one read its frame uses; with the
+    // light inlined twice both reads in one kernel passed the DXIL limit)
 #if GIV
     if (giSourceIsVolume(c.giCache) && giSourceVolume(c.giCache) != UNX_NONE)
     {
@@ -135,7 +136,7 @@ FxLight fxLight(LayerConstants c, float3 offset, float3 D, float g, float footpr
         if (n == 6) moment += difference;
     }
 #endif
-    // ML = 1 (its own variant: both paths in one kernel pass the DXIL limit; ParticleLayer.cpp picks it when the volumes exist):
+    // ML = 1 (its own variant, as GIV above; ParticleLayer.cpp picks it when the volumes exist):
     // shading.mega_lights (render A; P[1].xy = the froxel grid's sampled local light, MegaLightsVolume.hlsl - as Unreal's
     // MegaLights lights translucency through its lit volume): the local lights' visible fluence F and luminance-weighted
     // direction moment M at the particle's froxel (trilinear), with the phase function's first two SH bands:

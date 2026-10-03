@@ -23,6 +23,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices C
     const float3 origin = asfloat(P[1].xyz), extent = max(asfloat(P[2].xyz), 1e-6);
     const float scale = asfloat(P[1].w);
     const float4 rect = asfloat(P[3]);
+    const uint attributeBase = meshAttributeBase(inst.mesh);  // the mesh's optional streams (0: none)
     float3 scaled[3];
     [unroll] for (uint j = 0; j < 3; ++j)
     {
@@ -38,6 +39,9 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices C
         o.tangent = float4(dot(v.tangent, ax), dot(v.tangent, ay), dot(v.tangent, az), v.tangentSign * handedness);
         o.uv = v.uv;
         o.scaled = scaled[j];
+        o.uv1 = v.uv;
+        o.color = 1;
+        if (attributeBase != 0) loadVertexAttributes(attributeBase, indices[base + j], o.uv1, o.color);
         verts[3 * lane + j] = o;
     }
     tris[lane] = uint3(3 * lane, 3 * lane + 1, 3 * lane + 2);

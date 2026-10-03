@@ -27,6 +27,9 @@
 // M pre-shaded classes) are read from it (their owners shaded them, CoverageSpecial.hlsli), clusters are shaded here.
 // P[11].z = E's grooms between the fragments and the sun (Passes/Hair/HairShadow.hlsl MODE 2: the hair's transmittance
 // at the 4 depths of S's sun profile, R32_UINT; UNX_NONE: none) - a cluster fragment's sun visibility times its value.
+// P[10].zw = E's decals of the view (ViewResources::decalFrames, decalTiles; UNX_NONE: none live): a fragment's material
+// takes them as the resolve's pixels do (Passes/Decal/Decal.hlsli decalApply), before the surface layers.
+// P[8].w = material.parallax_steps (0: no parallax on fragments; covFragmentMaterial).
 // COV_PRESHADE_CLASSES (CoverageSpecial.hlsl MODE=1, 2): covFragmentMaterial takes the material of its class as the
 // resolve - 1 Cut, 2 Terrain; COV_PRESHADE_LIGHT (MODE=3): covShadeFragment lights the material those kernels stored.
 #ifndef UNX_M_COVERAGE_SHADE_HLSLI
@@ -40,6 +43,7 @@ static uint g_covListed = 0xFFFFFFFFu;
 #include "Passes/Material/MaterialSurface.hlsli"
 #include "Passes/Material/MaterialEye.hlsli"
 #include "Passes/Material/MaterialInputs.hlsli"
+#include "Passes/Decal/Decal.hlsli"
 #include "Passes/Material/SurfaceLayers.hlsli"
 #include "Passes/Lights/LightFunction.hlsli"
 #include "Passes/Shading/ShadingCommon.hlsli"
@@ -166,6 +170,27 @@ bool covBefore(uint2 a, uint2 b, StructuredBuffer<uint4> records, uint visibleSr
     return a.y < b.y;
 }
 uint2 covKey(StructuredBuffer<uint4> records, uint element) { return uint2(records[element].y & ~COV_DEPTH_SEE_THROUGH, element); }
+// covBefore in two steps, for a kernel that sorts in registers with an unrolled network (CoverageComposite): the network
+// compares by covNearer - the depth, then the element: a total order, but not yet the stable one among equal depths -
+// and COV_SETTLE_TIES then puts each run of equal depth into covBefore's order by insertion, on the lane's stored keys
+// (sorted[0 .. count)). The result is covBefore's order (the order is total, so it is the only one), and covBefore
+// stands once in the kernel: in each of the network's 80 comparators it was 9,000 instructions, 40 KB of a kernel at the
+// size limit. Equal depths are rare, so the insertion costs one comparison of depths per key.
+bool covNearer(uint2 a, uint2 b) { return a.x != b.x ? a.x > b.x : a.y < b.y; }
+#define COV_SETTLE_TIES(sorted, count, records, visibleSrv)                                         \
+    [loop] for (uint tieI = 1; tieI < (count); ++tieI)                                              \
+    {                                                                                               \
+        const uint2 tieKey = sorted[tieI];                                                          \
+        uint tieJ = tieI;                                                                           \
+        [loop] while (tieJ > 0)                                                                     \
+        {                                                                                           \
+            const uint2 tiePrev = sorted[tieJ - 1];                                                 \
+            if (tiePrev.x != tieKey.x || !covBefore(tieKey, tiePrev, records, visibleSrv)) break;   \
+            sorted[tieJ] = tiePrev;                                                                 \
+            --tieJ;                                                                                 \
+        }                                                                                           \
+        if (tieJ != tieI) sorted[tieJ] = tieKey;                                                    \
+    }
 static const uint2 COV_KEY_AFTER_ALL = uint2(0, 0xFFFFFFFFu);  // after every key (a record's element is below it)
 
 
@@ -263,9 +288,12 @@ struct CovMaterial
 };
 // v0..v2: the triangle's deformed vertices (the ones sf was made from). An eye's fragment (MATERIAL_EYE) reads its base
 // colour at the iris point seen through the cornea, under the limbal ring (MaterialEye.hlsli); it is shaded as the plain
-// Subsurface model (a fragment has no eye word). Material inputs (MaterialInputs.hlsli): the uv transform and the vertex
-// tint; no parallax and no detail maps on a fragment.
-CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTextureSet ts, MVertex v0, MVertex v1, MVertex v2)
+// Subsurface model (a fragment has no eye word). Material inputs (MaterialInputs.hlsli), as the resolve applies them: the
+// uv transform, the second uv set and the vertex colour (the streams of the fragment's triangle), the parallax through
+// the height field - 'parallax': material.parallax_steps in bits 0..7, 0 none; a fragment has no class word, so the
+// field's own shadow of the sun is the resolve's alone -, the detail colour and normal (with the normal's variance in
+// the footprint's) and the vertex tint. The occlusion map is not read (a fragment's indirect light takes none).
+CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTextureSet ts, MVertex v0, MVertex v1, MVertex v2, uint parallax)
 {
     float3 baseColor = m.baseColor, n;
     float roughness = m.roughness, metallic = m.metallic;
@@ -290,7 +318,23 @@ CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTexture
     else
 #endif
     {
-        const MInputUv iu = mInputUv(m, sf.uv, sf.duvdx, sf.duvdy);
+        MInputUv iu = mInputUv(m, sf.uv, sf.duvdx, sf.duvdy);
+        // the streams the material reads, then the parallax: every texture on uv set 0 moves with it, the detail maps'
+        // set 0 by the same step taken back through the uv transform (Resolve.hlsl)
+        MVertexStreams streams;
+        streams.uv1 = sf.uv, streams.duv1dx = sf.duvdx, streams.duv1dy = sf.duvdy;
+        streams.color = 1;
+        if ((iu.r.flags & (MATERIAL_INPUT_DETAIL_UV1 | MATERIAL_INPUT_VERTEX_TINT | MATERIAL_INPUT_VERTEX_BLEND)) != 0) streams = mVertexStreams(visId, P[1].x, sf);
+        float2 uvDetail = sf.uv;
+        if (iu.r.heightTexture != UNX_NONE && (m.classFlags & MATERIAL_EYE) == 0 && (parallax & 0xFFu) != 0)
+        {
+            const float2 before = iu.uv;
+            float unusedSun;
+            mParallax(iu.r, sf, iu.uv, iu.duvdx, iu.duvdy, parallax & 0xFFu, false, unusedSun);
+            const float2 moved = iu.uv - before;
+            const float det = iu.r.uvU.x * iu.r.uvV.y - iu.r.uvU.y * iu.r.uvV.x;
+            uvDetail += float2(iu.r.uvV.y * moved.x - iu.r.uvU.y * moved.y, iu.r.uvU.x * moved.y - iu.r.uvV.x * moved.x) / det;
+        }
         if (ts.roughMetal != UNX_NONE)
         {
             Texture2D<float4> t = ResourceDescriptorHeap[ts.roughMetal];
@@ -298,16 +342,25 @@ CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTexture
             roughness *= rm.x;
             metallic *= rm.y;
         }
+        const float3 B = sf.tangentSign * cross(sf.normal, sf.tangent);
+        float3 nSum = sf.normal;
         if (ts.moments != UNX_NONE)
         {
             Texture2D<float4> t = ResourceDescriptorHeap[ts.moments];
             const MSlopeMoments mm = mNormalMoments(t, iu.uv, iu.duvdx, iu.duvdy, ts.slopeRange, (ts.flags & M_TEX_NORMAL) != 0);
             const float2 slope = mInputSlope(iu.r, mm.mean);
-            const float3 B = sf.tangentSign * cross(sf.normal, sf.tangent);
-            n = normalize(sf.tangent * slope.x + B * slope.y + sf.normal);
+            nSum = sf.tangent * slope.x + B * slope.y + sf.normal;
             variance += mm.variance;
         }
-        else n = normalize(sf.normal);
+        float3 detailColor = 1;
+        if (iu.r.detailColorTexture != UNX_NONE || iu.r.detailNormalTexture != UNX_NONE)
+        {
+            const MDetail detail = mDetail(iu.r, sf, uvDetail, streams, sf.tangent, B);
+            detailColor = detail.colorFactor;
+            nSum += detail.normalTerm;
+            variance += detail.variance;
+        }
+        n = normalize(nSum);
         float2 uvColor = iu.uv;
         if ((m.classFlags & MATERIAL_EYE) != 0)
         {
@@ -320,7 +373,8 @@ CovMaterial covFragmentMaterial(uint visId, MSurface sf, GpuMaterial m, MTexture
             Texture2D<float4> t = ResourceDescriptorHeap[ts.baseColor];
             baseColor *= mSampleGrad(t, (ts.flags & M_TEX_BASE_COLOR) != 0, uvColor, iu.duvdx, iu.duvdy).rgb;
         }
-        if ((iu.r.flags & MATERIAL_INPUT_VERTEX_TINT) != 0) baseColor *= mVertexStreams(visId, P[1].x, sf).color.rgb;
+        baseColor *= detailColor;
+        if ((iu.r.flags & MATERIAL_INPUT_VERTEX_TINT) != 0) baseColor *= streams.color.rgb;
     }
     CovMaterial o;
     o.baseColor = baseColor;
@@ -378,12 +432,32 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
     ByteAddressBuffer preshaded = ResourceDescriptorHeap[P[5].y];
     const CovMaterial cmat = covLoadMaterial(preshaded, g_covPreshadeSlot);
 #else
-    const CovMaterial cmat = covFragmentMaterial(visId, sf, m, ts, v0, v1, v2);
+    const CovMaterial cmat = covFragmentMaterial(visId, sf, m, ts, v0, v1, v2, P[8].w);  // P[8].w: material.parallax_steps
 #endif
     float3 baseColor = cmat.baseColor, n = cmat.normal;
     float roughness = cmat.roughness, metallic = cmat.metallic, variance = cmat.variance;
     const bool backSide = !sf.front && (m.classFlags & MATERIAL_TWO_SIDED) != 0;
     if (backSide) n = -n;
+    float3 decalEmission = 0;  // what E's emissive decals add to the fragment's emission (Decal.hlsli; the resolve's sum)
+    if (P[10].z != UNX_NONE)
+    {
+        // E's decals of the view as upper layers of the fragment's material, as in the resolve and before the surface
+        // layers (P[10].zw: the view's decal frames and tile lists; the tile is the fragment's pixel's, the footprint
+        // the pixel's on the fragment's plane, the geometric normal the side this fragment shades)
+        DecalMaterial dm;
+        dm.baseColor = baseColor; dm.roughness = roughness; dm.metallic = metallic; dm.normal = n; dm.variance = variance;
+        dm.emissive = 0;
+        DecalSurface ds;
+        ds.position = sf.offset; ds.dpdx = sf.dpdx; ds.dpdy = sf.dpdy;
+        ds.geometricNormal = backSide ? -sf.geometricNormal : sf.geometricNormal;
+        ds.instance = sf.instance;
+        ds.geometricVariance = (dot(sf.dndx, sf.dndx) + dot(sf.dndy, sf.dndy)) / 12.0;
+        DecalContext dc;
+        dc.frames = P[10].z; dc.tiles = P[10].w; dc.materialTable = P[1].y;
+        decalApply(dc, pixel, ds, dm);
+        baseColor = dm.baseColor; roughness = dm.roughness; metallic = dm.metallic; n = dm.normal; variance = dm.variance;
+        decalEmission = dm.emissive;
+    }
     if (P[7].z != UNX_NONE || P[7].w != UNX_NONE)
     {
         // the surface state layers, as in the resolve (a grass blade or leaf gets wet, frost, snow like any surface)
@@ -419,6 +493,7 @@ float3 covShadeFragment(uint visId, uint element, uint2 pixel, uint experiment)
         }
         radiance *= mInputEmissiveMask(eu);
     }
+    radiance += decalEmission;
 #if COV_PART == 2 && COV_PART_EXPOSED
     radiance = 0;  // (the emission is part 1's)
 #elif COV_PART == 2

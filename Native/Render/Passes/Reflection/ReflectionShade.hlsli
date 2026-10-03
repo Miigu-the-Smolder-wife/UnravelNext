@@ -126,23 +126,18 @@ static uint g_reflHitFlags = 0;
 // Read only: the pool's ratio estimator keeps energy for the population that recorded (the GI rays). A ray whose
 // footprint is far below the cell read (a mirror ray near its surface: cell > 4 x footprint) keeps its point value - the
 // cell mean would blur the direct light's edges in the mirror image to the cell's size. Foliage keeps the point value
-// (its transmission has no accumulator term).
-// REFL_NO_ACCUMULATOR (ReflectionTraceInline's G library): the read is compiled out - that kernel has no room for it under
-// the DXIL limit (with it: 207-208 KB of 200). G jobs over the ray capacity (the first frames after a cut, until the
-// capacity has grown) therefore keep the point value: the same expectation, the point value's variance. To remove: the
-// control variate and the job's combination out of that library (the combine pass can finish its jobs), about 20 KB.
+// (its transmission has no accumulator term). The overflow libraries (ReflectionTraceInline) read it too: their size came
+// down by holding the sun's quadrature and the screen-probe lookup once each (ShadingCommon.hlsli, ReflectionRay.hlsli).
 static uint g_reflAccPool = UNX_NONE;
 // The surface cache (Passes/SurfaceCache/SurfaceCache.hlsli; the rays header's word 9), UNX_NONE: not used. With it a hit
 // marks its cell (the cell stays alive and lit every frame from then on) and, where the cell has lighting, takes its
 // local-light and bounce irradiance from the cell: no one-light sample, no cache lookup noise - the hit's light is what
 // the cell accumulated, as a Lumen reflection ray reads the surface cache at its hit. The hit keeps its own material
 // (textures at the ray's footprint), emission and sun term. Until the cell is lit (one frame after its first mark) the
-// hit is shaded as before. Compiled out with REFL_NO_ACCUMULATOR (the inline G library: no room).
+// hit is shaded as before.
 static uint g_reflSurfaceCache = UNX_NONE;
 // surface_cache.mesh_cards: the card frame's SRV (CardLayout.hlsli); the hit reads its irradiance from the mesh cards of
 // its instance (CardLighting.hlsli clReadCards) in place of the hashed cells.
-// REFL_NO_CARDS (the overflow libraries, at the DXIL limit): compiled without the card read - their hits shade as without
-// a surface cache.
 static uint g_reflCardFrame = UNX_NONE;
 
 // Local lights (HitLocalLights.hlsli): one next-event sample drawn with localSeed; its visibility is localVisible (the
@@ -281,8 +276,6 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     }
     bool fromSurfaceCache = false;
     bool fromCards = false;  // (the cards' direct light holds the sun: the hit adds none)
-#if !REFL_NO_ACCUMULATOR
-#if !REFL_NO_CARDS
     if (g_reflCardFrame != UNX_NONE && materialClass(m) != MATERIAL_FOLIAGE)
     {
         const float3 face = dot(s.geometricNormal, direction) > 0 ? -s.geometricNormal : s.geometricNormal;
@@ -310,7 +303,6 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
         }
     }
     else
-#endif
     if (g_reflSurfaceCache != UNX_NONE && materialClass(m) != MATERIAL_FOLIAGE)
     {
         RWByteAddressBuffer surfaceCache = ResourceDescriptorHeap[g_reflSurfaceCache];
@@ -353,7 +345,6 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
             fromSurfaceCache = true;
         }
     }
-#endif
     const float3 v = -direction;
     L.sunIlluminance = 0;
     L.sunVisibility = 0;
@@ -415,7 +406,6 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
     RtHitSplit parts;
     o.radiance = rtHitRadianceSplit(m, s.normal, v, L, coneSpread, split, sunFull, parts);
     if (split) o.sunTerm = sunFull * splitScale;
-#if !REFL_NO_ACCUMULATOR
     if (g_reflAccPool != UNX_NONE && materialClass(m) != MATERIAL_FOLIAGE && !fromSurfaceCache)
     {
         ByteAddressBuffer pool = ResourceDescriptorHeap[g_reflAccPool];
@@ -433,7 +423,6 @@ ReflHitShade reflShadeHit(RtSceneSrvs scene, RWByteAddressBuffer cache, GiHeader
             else o.radiance -= sunShare * L.sunVisibility;
         }
     }
-#endif
     o.stochastic = parts.stochastic;
     o.albedo = parts.albedo;
     o.hitNormal = s.normal;
