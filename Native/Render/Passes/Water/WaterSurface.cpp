@@ -24,7 +24,9 @@ constexpr uint32_t kSecondaryViews = 8;  // views without identity (planar refle
 // Then the calm-water block (WATER_PLANAR_OFFSET): 48 B per candidate plane.
 // Then the sea's block (OceanShading.hlsli, WATER_OCEAN_OFFSET): 96 B.
 constexpr uint32_t kMaxLevels = 15, kPlanarMax = 4, kOceanOffset = kSlots * 16 + 4 * (1 + kMaxLevels) + 48 * kPlanarMax, kOceanBytes = 96;
-constexpr uint32_t kTableBytes = kOceanOffset + kOceanBytes;
+// Then the streams' flow block (WaterFlow.hlsli, WATER_FLOW_OFFSET): 80 B per slot.
+constexpr uint32_t kFlowOffset = kOceanOffset + kOceanBytes, kFlowBytes = 80;
+constexpr uint32_t kTableBytes = kFlowOffset + kSlots * kFlowBytes;
 // The cost rule's terms [measured, RTX 4080, 4K W gate (interior scene, basin 3 m / 12 m: 506,640 / 892,079 water
 // samples), sums of pass medians over 300 frames, camera on vs off, 2026-09-27]:
 //   saved per sample served by the camera (its reflection job in R's ray passes + its share of the surface passes):
@@ -424,6 +426,9 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
     if (!(seaRayReach >= 0) || !(shoreFoam >= 0 && shoreFoam <= 1) || !(shoreFoamDepth > 0))
         fail("shading: water_ocean_ray_distance_m >= 0, water_shore_foam in [0, 1], water_shore_foam_depth_m > 0");
     const TextureRef skyView = r.skyViewLut;
+    // the basins' flow rows of this frame (PoolTrack.cpp)
+    const WaterFlows& flowState = fc.state<WaterFlows>("W.poolFlows");
+    const std::vector<WaterFlowRow> flowRows = flowState.frame == fc.frame.frameIndex ? flowState.rows : std::vector<WaterFlowRow>{};
     // P[0..4] of both kernels (WaterInterior.hlsl, WaterRecords.hlsl); the first execute also fills the slot table.
     auto shadingConstants = [=](PassContext& c, uint32_t k[24], uint32_t first) {
         if (first)
@@ -462,6 +467,10 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                 std::memcpy(&block[8], numbers, sizeof numbers);
             }
             std::memcpy(tableMapped + kOceanOffset, block, sizeof block);
+            // The streams' flow (WaterFlow.hlsli); zero (no wave length): the stream has none.
+            std::memset(tableMapped + kFlowOffset, 0, kSlots * kFlowBytes);
+            for (const WaterFlowRow& row : flowRows)
+                if (row.stream < kSlots) std::memcpy(tableMapped + kFlowOffset + row.stream * kFlowBytes, row.values, kFlowBytes);
         }
         const bool shadows = fr.pageTable.valid() && fr.vsmConstants != UINT32_MAX;
         const uint32_t values[20] = { first, c.srv(source), c.srv(depth), c.uav(stats),

@@ -1956,3 +1956,23 @@ UNX_API int32_t UNX_CALL UnxSceneSetInstanceReceivesDecals(UnxRenderer r, uint32
 {
     return call([&] { find(r)->setInstanceReceivesDecals(instance, receives != 0); });
 }
+UNX_API int32_t UNX_CALL UnxFrameSetPoolFlow(UnxRenderer r, const UnxPoolFlowDesc* pools, uint32_t count)
+{
+    return call([&] {
+        if (count && !pools) fail("UnxFrameSetPoolFlow: no basins");
+        std::vector<HostRenderer::PoolFlow> in(count);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const UnxPoolFlowDesc& d = pools[i];
+            if (d.size != sizeof(UnxPoolFlowDesc) || d.version != 1) fail("UnxFrameSetPoolFlow: UnxPoolFlowDesc %u size %u version %u", i, d.size, d.version);
+            HostRenderer::PoolFlow& f = in[i];
+            f.id = d.pool;
+            f.velocity[0] = d.velocity[0], f.velocity[1] = d.velocity[1];
+            f.map = d.map, f.mapSpeed = d.mapSpeed;
+            f.drain[0] = d.drain[0], f.drain[1] = d.drain[1];
+            f.drainInflow = d.drainInflow, f.drainCirculation = d.drainCirculation;
+            f.waveLength = d.waveLength, f.waveSlope = d.waveSlope;
+        }
+        find(r)->setPoolFlow(in);
+    });
+}

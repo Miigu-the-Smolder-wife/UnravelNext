@@ -118,6 +118,18 @@ struct PoolFrame
     float steamTurbulence = 0.6f;       // [0, 1] (FogVolumeDesc::turbulence)
     float steamTurbulenceScale = 0.4f;  // m
     float rainExposure = 0;             // [0, 1]
+    // Flow (a channel, a drain: Passes/Water/WaterFlow.hlsli - an appearance model): the surface's small waves drift
+    // with a velocity field - a uniform stream (local x / z of the basin), a velocity map over the basin (a scene
+    // texture: RG = velocity / flowMapSpeed, 0.5 = still) and a drain (a sink with a circulation at flowDrain: the water
+    // spirals in, with the vortex's funnel) - their sum. Nothing moves: no flow.
+    float flowVelocity[2] = {};          // m/s
+    uint32_t flowMap = 0xFFFFFFFFu;      // scene texture; none
+    float flowMapSpeed = 0;              // m/s at the map's full scale
+    float flowDrain[2] = {};             // m from the basin's centre (local x, z)
+    float flowDrainInflow = 0;           // Q (m^2/s): the speed toward the drain is Q / (2 pi r)
+    float flowDrainCirculation = 0;      // Gamma (m^2/s): the speed around it is Gamma / (2 pi r); its sign: the turn's sense
+    float flowWaveLength = 0.12f;        // m: the drifting waves' longest
+    float flowWaveSlope = 0.08f;         // their rms slope where the water moves at 0.2 m/s or more
 };
 
 // B5 (render B, INTERFACES v1.77): the frame's cloud layer - weather content (an environment input, not a quality key).

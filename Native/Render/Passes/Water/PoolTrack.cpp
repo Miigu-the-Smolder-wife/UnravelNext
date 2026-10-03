@@ -7,10 +7,12 @@
 #include "unx/water/WaterSurface.h"
 
 #include "unx/render/Frame.h"
+#include "unx/render/GpuScene.h"
 #include "unx/core/Log.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -140,6 +142,32 @@ void poolGeometry(FramePassContext& fc)
     // it; those views are made later, in the shading) and on the reflection rays: with shading.water_secondary_views a
     // basin whose centre is within 30 m of the camera is drawn as a visible one.
     const bool secondary = !fc.quality.has("shading.water_secondary_views") || fc.quality.boolean("shading.water_secondary_views");
+    // The basins' flow (shading.water_flow; WaterFlow.hlsli): a row of the surface pass's slot table per stream that moves.
+    WaterFlows& flows = fc.state<WaterFlows>("W.poolFlows");
+    flows.frame = frame.frameIndex;
+    flows.rows.clear();
+    const bool flowOn = !fc.quality.has("shading.water_flow") || fc.quality.boolean("shading.water_flow");
+    auto addFlow = [&](const PoolFrame& p, uint32_t stream) {
+        const bool mapped = p.flowMap < fc.scene.textureSrvs().size() && p.flowMapSpeed > 0;
+        const bool moves = p.flowVelocity[0] != 0 || p.flowVelocity[1] != 0 || p.flowDrainInflow != 0 || p.flowDrainCirculation != 0 || mapped;
+        if (!flowOn || !moves || !(p.flowWaveLength > 0) || !(p.flowWaveSlope > 0)) return;
+        WaterFlowRow row;
+        row.stream = stream;
+        float* v = row.values;
+        v[0] = (float)p.centre[0], v[1] = (float)p.centre[2], v[2] = std::cos(p.yaw), v[3] = std::sin(p.yaw);
+        v[4] = p.flowVelocity[0], v[5] = p.flowVelocity[1], v[6] = p.flowDrain[0], v[7] = p.flowDrain[1];
+        v[8] = p.flowDrainInflow, v[9] = p.flowDrainCirculation, v[10] = p.flowWaveLength, v[11] = p.flowWaveSlope;
+        const uint32_t map = mapped ? fc.scene.textureSrvs()[p.flowMap] : 0xFFFFFFFFu;
+        std::memcpy(&v[12], &map, 4);
+        v[13] = mapped ? p.flowMapSpeed : 0.0f;
+        // the period: the time the basin's fastest water takes over two wavelengths (the drain's at 25 cm from it)
+        const float fastest = std::max({ std::hypot(p.flowVelocity[0], p.flowVelocity[1]), v[13],
+                                         std::hypot(p.flowDrainInflow, p.flowDrainCirculation) / (6.2831853f * 0.25f) });
+        v[14] = std::clamp(2.0f * p.flowWaveLength / std::max(fastest, 1e-3f), 1.0f, 12.0f);
+        v[15] = (float)(frame.time / v[14] - std::floor(frame.time / v[14]));  // (the two phases' cycle, in double)
+        v[16] = p.sizeX, v[17] = p.shape == 1 ? p.sizeX : p.sizeZ;
+        flows.rows.push_back(row);
+    };
     auto nearCamera = [&](const PoolFrame& p) {
         if (!secondary) return false;
         const double dx = p.centre[0] - frame.mainView.position.x, dy = p.centre[1] - frame.mainView.position.y, dz = p.centre[2] - frame.mainView.position.z;
@@ -195,6 +223,7 @@ void poolGeometry(FramePassContext& fc)
             const float y = float(in.centre[1]);
             rest.corners[0] = { lo.x, y, lo.z }, rest.corners[1] = { hi.x, y, lo.z }, rest.corners[2] = { lo.x, y, hi.z }, rest.corners[3] = { hi.x, y, hi.z };
             addWaterPlane(fc, rest);
+            addFlow(in, uint32_t(fc.resources.triangleStreams.size()));
             streams.push_back((uint64_t)fc.resources.triangleStreams.size() << 32 | in.id);
             fc.resources.triangleStreams.push_back(rout.stream);
             continue;
@@ -259,6 +288,7 @@ void poolGeometry(FramePassContext& fc)
         const float y = float(placement.centre[1]);
         rest.corners[0] = { lo.x, y, lo.z }, rest.corners[1] = { hi.x, y, lo.z }, rest.corners[2] = { lo.x, y, hi.z }, rest.corners[3] = { hi.x, y, hi.z };
         addWaterPlane(fc, rest);
+        addFlow(in, uint32_t(fc.resources.triangleStreams.size()));
         streams.push_back((uint64_t)fc.resources.triangleStreams.size() << 32 | in.id);
         fc.resources.triangleStreams.push_back(out.stream);
     }

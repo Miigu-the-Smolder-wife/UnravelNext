@@ -58,6 +58,7 @@ enum UnxResult
                             //    UnxSpriteLookDefaults, UnxVfxSetSpriteLook (sprite and ribbon looks: texture, flipbook
                             //    blending, blend, facing, per-pixel light, shadow), UnxDecalExtraDefaults, UnxDecalSetExtra
                             //    (a decal's tint, channels, blend, emission and fades), UnxSceneSetInstanceReceivesDecals
+                            //    UnxFrameSetPoolFlow (the basins' flow)
 UNX_API uint32_t UNX_CALL UnxAbiVersion(void);
 // Message of the calling thread's last failure (UTF-8, empty when none). Valid until the next failing call.
 UNX_API const char* UNX_CALL UnxLastError(void);
@@ -1359,6 +1360,34 @@ UNX_API int32_t UNX_CALL UnxDecalSetExtra(UnxRenderer r, uint32_t id, const UnxD
 // (UnxSceneAddInstance, UnxSceneEditInstances), or for an instance already added, before UnxSceneCommit, the call.
 #define UNX_INSTANCE_NO_DECALS (1u << 7)
 UNX_API int32_t UNX_CALL UnxSceneSetInstanceReceivesDecals(UnxRenderer r, uint32_t instance, int32_t receives);
+// The basins' flow (render::PoolFrame::flow*; optional export within ABI 6; held until changed, like the basins): per
+// basin of the set UnxFrameSetPools gave, by its id - a channel's stream, a drain. The surface's small waves drift with
+// the velocity field (an appearance model: the flow map's two-phase drift; the basin's ripples stay its own):
+//   velocity  a uniform stream along the basin's local x and z (m/s);
+//   map       a velocity map over the basin (a scene texture, linear: R, G = the local velocity / mapSpeed, 0.5 = still;
+//             u along local x, v along local z) added to it;
+//   drain     a sink at drain (m from the basin's centre, local x and z): the water moves toward it at drainInflow /
+//             (2 pi r) and around it at drainCirculation / (2 pi r) (m^2/s; the sign: the turn's sense), with the
+//             vortex's funnel on the surface.
+// A basin not named, or one where nothing moves, has no flow. count 0: none.
+typedef struct UnxPoolFlowDesc
+{
+    uint32_t size, version;             // sizeof (56), 1
+    uint32_t pool;                      // UnxPoolDesc::id
+    float velocity[2];                  // m/s
+    uint32_t map;                       // a scene texture or UNX_NONE
+    float mapSpeed;                     // m/s at the map's full scale, >= 0
+    float drain[2];                     // m
+    float drainInflow;                  // m^2/s, >= 0
+    float drainCirculation;             // m^2/s
+    float waveLength;                   // m: the drifting waves' longest, > 0 (0.12)
+    float waveSlope;                    // their rms slope where the water moves at 0.2 m/s or more, [0, 0.5] (0.08)
+    uint32_t reserved;                  // 0
+} UnxPoolFlowDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxPoolFlowDesc) == 56, "UnxPoolFlowDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetPoolFlow(UnxRenderer r, const UnxPoolFlowDesc* pools, uint32_t count);
 
 #ifdef __cplusplus
 }

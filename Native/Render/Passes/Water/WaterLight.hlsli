@@ -17,7 +17,8 @@
 //   (waterCausticFactor; exact at the slice depths for the forward mapping of the map's texels, interpolated between;
 //   the factor's per-photon Fresnel, compression and absorption are X's own surface point's).
 //   Conditions recorded there: (a) S's VSM shadows use the straight sun direction; (b) sky and GI light entering the
-//   water is not attenuated yet (with R).
+//   water: waterIndirectTransmittance below - written, with one marked call site in ShadeOpaque.hlsl's part 2 that
+//   compiles out until that kernel's size work is merged.
 // `ior` > 1 overrides the medium's; otherwise the medium's is used. Returns false (lightDir = sunDir, transmittance = 1)
 // when X is not under water from the sun or the map is absent (constSrv UNX_NONE or its valid word 0).
 #ifndef UNX_WATER_LIGHT_HLSLI
@@ -102,6 +103,42 @@ bool waterSunLight(uint depthSrv, uint normalSrv, uint mediumSrv, uint constSrv,
     transmittance *= waterCausticFactor(causticsSrv, head.y, uv, max(dot(S - X, n), 0.0));
     return true;
 }
+// Sky and GI light under water (condition (b)): what the water over X leaves of the light that entered its surface from
+// every side - the factor on the indirect light M gathers for a surface under water (the probes' irradiance and lobe
+// radiance, the translucency volume, the sky).
+//   surface  a level water surface lets 0.934 of a uniform light through (its diffuse reflectance from outside is 0.066:
+//            SurfaceLayers.hlsli's film has the same number);
+//   path     inside, that light fills the refraction cone (48.6 degrees for water); its flux-weighted mean path to a depth
+//            d is 1.2 d (the integral of sin over that of sin cos up to the critical angle: (1 - cos c) / (sin^2 c / 2)),
+//            so the medium takes T^(1.2 d) of it, T its transmittance over 1 m (one mean path in place of the cone's
+//            spread of paths, 1 .. 1.52 d: against the cone's own mean, by a Simpson rule over it, 0.6 % low at an
+//            optical depth sigma d = 1 and about a fifth low at 5, where 0.3 % of the light is left);
+//   depth    of X under the surface the sun's map shows over it, along that surface's normal: exact under a level surface.
+// The map is the sun's view of the water: X counts as under water when the sun's straight ray to it passes the surface -
+// a point under an overhang of the basin's wall, a night whose light comes from below the horizon, and the sea (it has no
+// stream in the map) take 1. Light that reaches X from under the water (the bed's own bounce) is not this function's.
+float3 waterIndirectTransmittance(uint depthSrv, uint normalSrv, uint mediumSrv, uint constSrv, float3 X)
+{
+    if (constSrv == UNX_NONE) return 1;
+    ByteAddressBuffer c = ResourceDescriptorHeap[constSrv];
+    const uint4 head = c.Load4(0);
+    if (head.x == 0) return 1;
+    const float4 r = asfloat(c.Load4(16)), u = asfloat(c.Load4(32)), s = asfloat(c.Load4(48)), k = asfloat(c.Load4(64));
+    const float2 uv = float2((dot(X, r.xyz) - r.w) * k.x, 1 - (dot(X, u.xyz) - u.w) * k.y);
+    if (any(uv < 0) || any(uv >= 1)) return 1;
+    const int2 texel = int2(uv * float(head.y));
+    Texture2D<float> depth = ResourceDescriptorHeap[depthSrv];
+    const float d = depth[texel];
+    const float alongX = dot(X, s.xyz), alongS = s.w + d * k.z;
+    if (d <= 0 || alongS <= alongX) return 1;
+    Texture2D<float2> normals = ResourceDescriptorHeap[normalSrv];
+    Texture2D<float4> media = ResourceDescriptorHeap[mediumSrv];
+    float3 n = waterOctDecode(normals[texel]);
+    if (dot(n, s.xyz) < 0) n = -n;
+    const float below = max(dot(s.xyz, n) * (alongS - alongX), 0.0);
+    return 0.934 * pow(clamp(media[texel].rgb, 1e-6, 1.0), 1.2 * below);
+}
+
 // Without caustics (the first form of the join; INTERFACES v1.77).
 bool waterSunLight(uint depthSrv, uint normalSrv, uint mediumSrv, uint constSrv, float3 X, float3 sunDir, float ior, out float3 lightDir, out float3 transmittance)
 {

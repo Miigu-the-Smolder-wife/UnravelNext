@@ -1570,6 +1570,15 @@ void HostRenderer::poolsLocked(FramePacket& packet)
                 f.steamTurbulence = w.steamTurbulence;
                 f.rainExposure = w.rainExposure;
             }
+        for (const PoolFlow& w : m_poolFlow)
+            if (w.id == p.id)
+            {
+                f.flowVelocity[0] = w.velocity[0], f.flowVelocity[1] = w.velocity[1];
+                f.flowMap = w.map, f.flowMapSpeed = w.mapSpeed;
+                f.flowDrain[0] = w.drain[0], f.flowDrain[1] = w.drain[1];
+                f.flowDrainInflow = w.drainInflow, f.flowDrainCirculation = w.drainCirculation;
+                f.flowWaveLength = w.waveLength, f.flowWaveSlope = w.waveSlope;
+            }
         packet.pools.push_back(f);
     }
     for (FramePacket::PoolSource& s : m_pendingPoolSources)
@@ -1598,6 +1607,25 @@ void HostRenderer::setPoolWeather(std::span<const PoolWeather> pools)
     }
     std::lock_guard lock(m_mutex);
     m_poolWeather.assign(pools.begin(), pools.end());
+}
+
+void HostRenderer::setPoolFlow(std::span<const PoolFlow> pools)
+{
+    requireCommitted();
+    for (size_t i = 0; i < pools.size(); ++i)
+    {
+        const PoolFlow& w = pools[i];
+        const bool finite = std::isfinite(w.velocity[0]) && std::isfinite(w.velocity[1]) && std::isfinite(w.mapSpeed) && std::isfinite(w.drain[0]) &&
+                            std::isfinite(w.drain[1]) && std::isfinite(w.drainInflow) && std::isfinite(w.drainCirculation) && std::isfinite(w.waveLength) &&
+                            std::isfinite(w.waveSlope);
+        if (!w.id || !finite || w.mapSpeed < 0 || w.drainInflow < 0 || !(w.waveLength > 0) || w.waveSlope < 0 || w.waveSlope > 0.5f)
+            fail("pool flow %zu (id %u): id nonzero, map speed %g >= 0, drain inflow %g >= 0, wave length %g > 0, wave slope %g in [0, 0.5]", i, w.id, w.mapSpeed,
+                 w.drainInflow, w.waveLength, w.waveSlope);
+        for (size_t j = 0; j < i; ++j)
+            if (pools[j].id == w.id) fail("pool flow: id %u appears twice", w.id);
+    }
+    std::lock_guard lock(m_mutex);
+    m_poolFlow.assign(pools.begin(), pools.end());
 }
 
 std::pair<std::vector<render::PoolFrame>, std::vector<FramePacket::PoolSource>> HostRenderer::queuedPools()

@@ -80,6 +80,19 @@ struct OceanSurfaceFrame
     float alpha = 0, peakWavenumber = 0, finestWavenumber = 0, windSpeed = 0;
 };
 
+// Flow on the basins' surfaces (PoolFrame::flow*; Passes/Water/WaterFlow.hlsli): this frame's rows of the slot table's
+// flow block, by stream slot (W's poolGeometry fills the track state "W.poolFlows"; a record of another frame is stale).
+struct WaterFlowRow
+{
+    uint32_t stream = 0;
+    float values[20] = {};  // WaterFlow.hlsli's 80 B (word 12: the velocity map's SRV)
+};
+struct WaterFlows
+{
+    uint64_t frame = UINT64_MAX;
+    std::vector<WaterFlowRow> rows;
+};
+
 void waterSurface(render::FramePassContext& fc, render::ViewResources& view);
 WaterSurfaceStats latestWaterSurfaceStats(render::TrackState& state);
 } // namespace unx::water

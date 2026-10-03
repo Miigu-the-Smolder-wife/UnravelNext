@@ -47,6 +47,8 @@
 //        clearest channel through (the open sea is its own light); that light is the water's single scattering under
 //        the sun and the sky and, of the light scattered many times, the diffusion limit's closed form (WaterShading.hlsli
 //        waterDiffuseSource); foam (the clipmap's and the shore's) covers the surface as a white Lambert layer.
+//   Flow (a basin with a stream, a velocity map or a drain: WaterFlow.hlsli): the drifting waves' slope and the
+//        drain's funnel are added to the sample's normal, and the waves the pixel does not resolve to the lobes.
 #ifndef UNX_WATER_SURFACE_HLSLI
 #define UNX_WATER_SURFACE_HLSLI
 #include "Bindless.hlsli"
@@ -64,6 +66,8 @@
 #include "WaterFootprint.hlsli"
 #ifdef WATER_OCEAN
 #include "OceanShading.hlsli"
+#else
+#include "WaterFlow.hlsli"
 #endif
 
 #define WATER_STAT_SHADED 0u     // samples whose refracted ray met band A inside the water (exact path)
@@ -205,6 +209,7 @@ float waterBandADepth(Texture2D<float> depth, int2 q) { return g_nearPlane / max
 #define WATER_PLANAR_OFFSET (WATER_LEVELS_OFFSET + 64u)
 #define WATER_PLANAR_MAX 4u
 #define WATER_OCEAN_OFFSET (WATER_PLANAR_OFFSET + 48u * WATER_PLANAR_MAX)  // the sea's block (OceanShading.hlsli), 96 B
+#define WATER_FLOW_OFFSET (WATER_OCEAN_OFFSET + 96u)  // the streams' flow block (WaterFlow.hlsli), 80 B per slot
 #define WATER_PLANAR_SHIFT 0.1  // px: the reflection camera's image offset allowed against the exact mirror ray
 float waterPlanarShift(float4 plane, float3 P, float3 n, float d, float pixelAngle)
 {
@@ -495,6 +500,14 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
 #else
     waterTriangleHitFull(ws.vertices, tri, g_cameraPosition, D, P, n, sHit, e1, e2, na, nb, nc, mRaw);
     const GpuMaterial m = loadMaterial(ws.material);
+    // the stream's flow on its normal (the pixel's footprint on the surface: its angle x the distance over the view's
+    // cosine, not under a tenth)
+    float flowVariance = 0;
+    {
+        WaterFlow flow;
+        if (n.y > 0.1 && waterFlowLoad(s.slots, WATER_FLOW_OFFSET + WATER_FLOW_BYTES * slot, flow))
+            n = waterFlowNormal(flow, P, n, sHit * length(Dx) / max(abs(dot(normalize(D), n)), 0.1), flowVariance);
+    }
 #endif
     const float3 v = normalize(g_cameraPosition - P);
     const float ior = m.ior > 1.0001 ? m.ior : kWaterIor;
@@ -527,9 +540,10 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
     // direction sweeps `spread` over the pixel: the mirror cone and the sun lobe are integrated over it.
     const WaterDifferentials dif = waterDifferentials(D, Dx, Dy, sHit, e1, e2, na, nb, nc, mRaw, fromAir ? 1.0 : -1.0);
     const float spread = waterReflectionSpread(-v, nv, dif);
-    const float alphaPixel = sqrt(max(r * r, 1e-4) * max(r * r, 1e-4) + spread * spread / 6.0);  // GGX alpha^2 + the normals' variance x 2
+    // GGX alpha^2 + the normals' variance x 2 (+ the flow's waves the pixel does not resolve: their slope variance)
+    const float alphaPixel = sqrt(max(r * r, 1e-4) * max(r * r, 1e-4) + spread * spread / 6.0 + flowVariance);
     const float rPixel = min(sqrt(alphaPixel), 1.0);
-    const float lobePixel = max(reflectionLobeHalfAngle(r, NoV), spread);
+    const float lobePixel = max(reflectionLobeHalfAngle(r, NoV), max(spread, sqrt(flowVariance)));
 #endif
     stat = fromAir ? WATER_STAT_SHADED : WATER_STAT_INSIDE;
     rays = (WaterRayTerms)0;

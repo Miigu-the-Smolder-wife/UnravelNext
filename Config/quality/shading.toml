@@ -293,6 +293,8 @@ water_shore_margin_m = 0.25          # ... this far beyond the body's outline
 water_waterline = true               # with the camera half under a basin's water, the meniscus line where the surface meets the lens
 water_waterline_mm = 1.0             # (WaterLine.hlsl): the dark line's e-fold width at the near plane ...
 water_waterline_strength = 0.6       # ... and how much of the light it takes at its middle
+water_flow = true                    # a basin's flow (the frame's PoolFrame::flow*: a stream, a velocity map, a drain) moves its surface's
+                                     # small waves (WaterFlow.hlsli: the flow map's two-phase drift, the drain's funnel). false: still basins
 water_secondary_views = true         # the water layer is shaded in the frame's other views too - A14 views and planar reflection views:
                                      # a pool in a mirror is water (stage 1 terms: no reflection camera or ray jobs of their own); a
                                      # basin within 30 m of the camera is kept drawn for them. false: the main view alone, as before
