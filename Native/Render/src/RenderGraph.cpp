@@ -263,12 +263,17 @@ struct RenderGraph::Impl
         std::vector<Segment> segments;
         std::vector<Physical> physical;  // per resource id (imported entries unused)
         std::vector<bool> live;
+        // Compiled once, rather than re-walking every pass use on every frame.
+        struct ImportViews { uint32_t resource; bool srv, uav, rt, ds, dsRead; };
+        std::vector<ImportViews> importViews;
         RenderGraphStats stats;
     };
 
     Device& device;
     std::vector<ResourceNode> resources;
     std::vector<PassNode> passes;
+    std::vector<PassNode> recycledPasses;
+    uint64_t framePassKey = 0;
     uint64_t externalReady[kQueueTypeCount] = {};
     std::vector<std::function<void(Queue&, uint64_t)>> externalConsumers;
     std::unique_ptr<Plan> plan;
@@ -283,8 +288,8 @@ struct RenderGraph::Impl
     // Views of imported resources, reused across frames. An entry holds a reference to its resource, so while it is
     // cached no other resource can take its address (a raw-pointer key alone handed a new resource at a destroyed one's
     // address that resource's stale descriptors: GBV "invalid resource pointed to by descriptor", DEVICE_HUNG [M]).
-    // An entry whose view description changed gets new views; one not imported in a frame is dropped after the GPU is
-    // past it (descriptors and reference released by the device's deferred calls).
+    // An entry whose view description changed gets new views; an entry absent for
+    // kPlanCache frames is retired through the device's GPU-deferred calls.
     struct Imported
     {
         ComPtr<ID3D12Resource> resource;
@@ -295,6 +300,7 @@ struct RenderGraph::Impl
     std::unordered_map<ID3D12Resource*, Imported> importedViews;
     uint64_t executeCount = 0;
     std::vector<ID3D12Resource*> framePointers;  // per resource id, this frame
+    std::vector<const Views*> frameViews;  // direct descriptor lookup during recording
     uint64_t prevFrameFence[kQueueTypeCount] = {};
 
     explicit Impl(Device& d) : device(d) {}
@@ -385,8 +391,7 @@ struct RenderGraph::Impl
     {
         uint64_t h = 1469598103934665603ull;
         for (const ResourceNode& r : resources) h = mix(h, resourceHash(r));
-        for (const PassNode& p : passes) h = mix(h, passHash(p));
-        return h;
+        return mix(h, framePassKey);
     }
 
     // Transient buffer capacities for this frame (before the key): the previous plan's capacity for the same buffer
@@ -609,6 +614,13 @@ struct RenderGraph::Impl
                 }
             }
         }
+
+        for (uint32_t r = 0; r < resourceCount; ++r)
+            if (resources[r].imported && sum[r].used)
+            {
+                const Summary& s = sum[r];
+                pl.importViews.push_back({r, s.srv, s.uav, s.rt, s.ds, s.dsRead});
+            }
 
         // 3. Placement: graphics-only transients alias by lifetime; async-touched transients get their own range.
         pl.physical.resize(resourceCount);
@@ -1210,9 +1222,7 @@ struct RenderGraph::Impl
 
     const Views& viewsOf(uint32_t r) const
     {
-        const ResourceNode& n = resources[r];
-        if (n.imported) return importedViews.at(n.importedResource).views;
-        return plan->physical[r].views;
+        return *frameViews[r];
     }
 
     // View formats a texture is created castable to (TextureDesc::srvFormat/uavFormat); empty when it has none.
@@ -1476,7 +1486,15 @@ void RenderGraph::addPass(std::string_view name, QueueType queue, const SetupFn&
 {
     if (queue == QueueType::Copy) fail("render graph: copy-queue passes are not supported yet");
     Impl::PassNode p;
-    p.name = std::string(name);
+    const size_t index = m_impl->passes.size();
+    if (index < m_impl->recycledPasses.size()) p = std::move(m_impl->recycledPasses[index]);
+    p.name.assign(name);
+    p.uses.clear();
+    p.keep = p.fenceAfter = false;
+    p.onFence = {};
+    p.band = {};
+    p.scope = UINT32_MAX;
+    p.scopeName.clear();
     p.queue = m_asyncCompute || (queue == QueueType::Compute && isAsyncPass(name)) ? queue : QueueType::Graphics;
     p.execute = std::move(execute);
     m_impl->passes.push_back(std::move(p));
@@ -1587,6 +1605,10 @@ void RenderGraph::execute(GpuProfiler* profiler)
 {
     Impl& impl = *m_impl;
     const auto planLookupStart = std::chrono::steady_clock::now();
+    // Pass declarations do not change while looking through cached capacities.
+    // Hash their uses once; a cache miss must not rescan every edge eight times.
+    impl.framePassKey = 1469598103934665603ull;
+    for (const auto& pass : impl.passes) impl.framePassKey = mix(impl.framePassKey, impl.passHash(pass));
     // The current plan, then the cached ones: the capacities follow the candidate (a buffer keeps its capacity there), and
     // the first whose key matches is this frame's plan.
     bool reuse = false;
@@ -1638,6 +1660,7 @@ void RenderGraph::execute(GpuProfiler* profiler)
     const auto viewsStart = std::chrono::steady_clock::now();
     ++impl.executeCount;
     impl.framePointers.assign(impl.resources.size(), nullptr);
+    impl.frameViews.resize(impl.resources.size());
     for (uint32_t r = 0; r < impl.resources.size(); ++r)
     {
         const auto& n = impl.resources[r];
@@ -1654,14 +1677,21 @@ void RenderGraph::execute(GpuProfiler* profiler)
                 impl.releaseViews(e.views);  // same resource, new description: new views
             e.viewKey = viewKey;
             e.frame = impl.executeCount;
+            // unordered_map rehash preserves references to its elements.
+            impl.frameViews[r] = &e.views;
         }
-        else if (plan.physical[r].resource)
+        else
+        {
             impl.framePointers[r] = plan.physical[r].resource.Get();
+            impl.frameViews[r] = &plan.physical[r].views;
+        }
     }
-    // Imported resources not imported this frame leave the cache once the GPU is past their last use.
+    // Keep rotating history/readback imports across a bounded window. Evicting
+    // every absent slot recreated its descriptors on its next frame. COM
+    // ownership prevents address reuse; eviction still uses deferred release.
     for (auto it = impl.importedViews.begin(); it != impl.importedViews.end();)
     {
-        if (it->second.frame == impl.executeCount)
+        if (impl.executeCount - it->second.frame < Impl::kPlanCache)
         {
             ++it;
             continue;
@@ -1670,19 +1700,12 @@ void RenderGraph::execute(GpuProfiler* profiler)
         impl.device.deferRelease(it->second.resource);
         it = impl.importedViews.erase(it);
     }
-    // Views for imported resources: created on first sight with the uses seen this frame.
-    for (uint32_t p = 0; p < impl.passes.size(); ++p)
+    // Resolve each imported resource once using the cached plan's use union.
+    for (const auto& request : plan.importViews)
     {
-        if (!plan.live[p]) continue;
-        for (const auto& u : impl.passes[p].uses)
-        {
-            const auto& n = impl.resources[u.resource];
-            if (!n.imported) continue;
-            Impl::Views& v = impl.importedViews.at(n.importedResource).views;
-            bool srv = u.use == Use::SrvCompute || u.use == Use::SrvGraphics;
-            bool uav = u.use == Use::UavCompute || u.use == Use::UavComputeDisjoint || u.use == Use::UavGraphics;
-            impl.createViews(u.resource, n.importedResource, srv, uav, u.use == Use::RenderTarget, u.use == Use::DepthWrite, u.use == Use::DepthRead, v);
-        }
+        const auto& n = impl.resources[request.resource];
+        Impl::Views& v = impl.importedViews.at(n.importedResource).views;
+        impl.createViews(request.resource, n.importedResource, request.srv, request.uav, request.rt, request.ds, request.dsRead, v);
     }
 
     if (Impl::dumpPlans())
@@ -1789,7 +1812,15 @@ void RenderGraph::execute(GpuProfiler* profiler)
             if ((uint32_t)plan.segments[s].queue == q) impl.prevFrameFence[q] = segmentFence[s];
     m_stats.cpuSubmitMs = msSince(t0);
 
-    impl.passes.clear();
+    // Retain the per-pass use-list and name allocations. Release captures now:
+    // they may hold frame-owned resources and must not survive until reuse.
+    for (auto& pass : impl.passes)
+    {
+        pass.execute = {};
+        pass.onFence = {};
+    }
+    impl.recycledPasses.clear();
+    impl.passes.swap(impl.recycledPasses);
     impl.resources.clear();
     std::fill(std::begin(impl.externalReady), std::end(impl.externalReady), uint64_t(0));
     impl.externalConsumers.clear();

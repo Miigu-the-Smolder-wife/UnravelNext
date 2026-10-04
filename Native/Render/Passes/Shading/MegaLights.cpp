@@ -324,24 +324,19 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
     // samples that ask for none - no light, no shadow, merged, no surface - are not launched.
     const bool compactTraces = s.compactTraces;
     const uint32_t sampleW = dsW * gridX, sampleH = dsH * gridY;
-    const uint32_t traceCapacity = sampleW * sampleH, traceChunks = (traceCapacity + kRaysPerDispatch - 1) / kRaysPerDispatch;
-    constexpr uint32_t kTraceDesc = rt::RayPipeline::kDispatchDescStride;
+    const uint32_t traceCapacity = sampleW * sampleH;
     BufferRef traceList, traceArgs;
+    rt::RayPipeline::IndirectBatch traceBatch;
     if (compactTraces)
     {
         traceList = g.createBuffer(BufferDesc{ "m.ml.trace list", 16 + (uint64_t)traceCapacity * 4, 0 });
-        traceArgs = g.createBuffer(BufferDesc{ "m.ml.trace dispatch", (uint64_t)traceChunks * kTraceDesc, 0 });
-        ID3D12Resource* descTemplate = pipeline.dispatchTemplate();
         ID3D12PipelineState* resetPso = fc.shaders.compute("RayTracing/CompactDispatch.MODE0");
-        ID3D12PipelineState* sizesPso = fc.shaders.compute("RayTracing/CompactDispatch.MODE1");
         ID3D12PipelineState* compactPso = fc.shaders.compute("Passes/Shading/MegaLightsCompact");
         g.addPass("m.ml.compact.begin", QueueType::Compute,
                   [&](PassBuilder& b) {
-                      b.use(traceArgs, Use::CopyDst);
                       b.use(traceList, Use::UavCompute);
                   },
                   [=](PassContext& c) {
-                      for (uint32_t chunk = 0; chunk < traceChunks; ++chunk) c.cmd->CopyBufferRegion(c.resource(traceArgs), (uint64_t)chunk * kTraceDesc, descTemplate, 0, kTraceDesc);
                       const uint32_t k[4] = { c.uav(traceList), 0, 0, 0 };
                       c.cmd->SetPipelineState(resetPso);
                       c.computeConstants(k, 4);
@@ -360,18 +355,8 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
                       c.computeConstants(k, 8);
                       c.cmd->Dispatch((sampleW + 7) / 8, (sampleH + 7) / 8, 1);
                   });
-        g.addPass("m.ml.compact.args", QueueType::Compute,
-                  [&](PassBuilder& b) {
-                      b.use(traceList, Use::UavCompute);
-                      b.use(traceArgs, Use::UavCompute);
-                  },
-                  [=](PassContext& c) {
-                      const uint32_t k[12] = { c.uav(traceList), traceCapacity, c.uav(traceArgs), (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width),
-                                               kTraceDesc, kRaysPerDispatch, traceChunks, 1, kTraceDesc, 0, 0, 0 };
-                      c.cmd->SetPipelineState(sizesPso);
-                      c.computeConstants(k, 12);
-                      c.cmd->Dispatch(1, 1, 1);
-                  });
+        traceBatch = pipeline.prepareBatch(g, fc.shaders, "m.ml.compact.args", traceList, traceCapacity, kRaysPerDispatch, 2);
+        traceArgs = traceBatch.arguments;
     }
     g.addPass("m.ml.trace", QueueType::Compute,
               [&](PassBuilder& b) {
@@ -406,11 +391,10 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
                       pipeline.dispatch(c.cmd, 0, width, std::min(bandRows, height - row));
                   }
                   // (compacted: the list in chunks, each an indirect dispatch of the entries it holds - none: nothing)
-                  for (uint32_t chunk = 0; chunk < traceChunks && compactTraces; ++chunk)
+                  if (compactTraces)
                   {
-                      k[2] = chunk * kRaysPerDispatch;  // P[0].z: the dispatch's first entry
                       c.computeConstants(k, 32);
-                      pipeline.dispatchIndirect(c.cmd, c.resource(traceArgs), (uint64_t)chunk * kTraceDesc);
+                      pipeline.dispatchBatch(c, traceBatch);
                   }
               });
     // m.ml.hair (shading.hair_shadows; Passes/Hair/HairShadow.hlsl MODE 1): the hair between a sample's surface point and

@@ -1427,6 +1427,10 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         const bool compactTraces = screenTraces && s.lumenCompactTraces;
         const uint32_t jobCapacity = width * height;
         const BufferRef traceList = compactTraces ? g.createBuffer({ "R reflection trace list", 16 + (uint64_t)jobCapacity * 4, 0 }) : BufferRef{};
+        const uint32_t cosThreshold = (uint32_t)(int32_t)std::lround(
+            std::cos(std::clamp(s.lumenSceneColorNormalDegrees, 0.0f, 180.0f) * 0.01745329252f) * 127.0f) & 0xFFu;
+        const uint32_t traceRootBits = (cosThreshold << 8) | (samplingBias16 << 16);
+        rt::RayPipeline::IndirectBatch traceBatch;
         if (compactTraces)
         {
             g.addPass("r.refl.lumen.compact.begin", QueueType::Compute, [&](PassBuilder& b) { b.use(traceList, Use::UavCompute); },
@@ -1449,19 +1453,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           c.computeConstants(k, 8);
                           c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
                       });
-            // (the bands' description widths from the list's count: band b takes its entries [b x kLumenBand, ...))
-            g.addPass("r.refl.lumen.args", QueueType::Compute,
-                      [&](PassBuilder& b) {
-                          b.use(traceList, Use::UavCompute);
-                          b.use(args, Use::UavCompute);
-                      },
-                      [&shaders, args, traceList, lumenBands, jobCapacity](PassContext& c) {
-                          const uint32_t k[12] = { c.uav(traceList), jobCapacity, c.uav(args), kLumenDescOffset + (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width),
-                                                   kArgumentsBytes, kLumenBand, lumenBands, 2, kDescStride, 0, 0, 0 };
-                          c.cmd->SetPipelineState(shaders.compute("RayTracing/CompactDispatch.MODE1"));
-                          c.computeConstants(k, 12);
-                          c.cmd->Dispatch(1, 1, 1);
-                      });
+            traceBatch = pipeline.prepareBatch(g, shaders, "r.refl.lumen.args", traceList, jobCapacity,
+                kLumenBand, 19, 1, 0, 0, 0, traceRootBits, kLumenBand);
         }
         else
             g.addPass("r.refl.lumen.args", QueueType::Compute, [&](PassBuilder& b) { b.use(args, Use::UavCompute); },
@@ -1486,7 +1479,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         const uint32_t streamTableSrv = streams.empty() ? 0xFFFFFFFFu : m_streamTableSrv[fc.frame.frameIndex % 4];
         g.addPass("r.refl.lumen.trace", QueueType::Compute,
                   [&](PassBuilder& b) {
-                      b.use(args, Use::IndirectArgs);
+                      b.use(compactTraces ? traceBatch.arguments : args, Use::IndirectArgs);
                       b.use(jobs, Use::SrvGraphics);
                       if (compactTraces) b.use(traceList, Use::SrvGraphics);
                       b.use(results, Use::UavGraphics);
@@ -1504,7 +1497,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       if (atmosphere)
                           for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
                   },
-                  [&pipeline, traceList, compactTraces, streams, materials, streamTable, streamTableSrv, jobs, results, depth, gbuffer, cardFrame, hitsUseCards, prevColor, prevW, prevH, sceneColour, screenContinue, exactCounts, luts, atmosphere, sky, sun,
+                  [&pipeline, traceList, traceBatch, traceRootBits, compactTraces, streams, materials, streamTable, streamTableSrv, jobs, results, depth, gbuffer, cardFrame, hitsUseCards, prevColor, prevW, prevH, sceneColour, screenContinue, exactCounts, luts, atmosphere, sky, sun,
                    rayLength, frame, scene, samplingBias16, s, frameConstants, argumentResource, variant, timestamps, firstTick, lumenBands, words, historyDepth, ratio = up.exposureRatio,
                    prevViewProj = up.prevViewProj](PassContext& c) {
                       c.bindFrameConstants(frameConstants);
@@ -1533,15 +1526,18 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       k[21] = (prevW & 0xFFFFu) | (prevH << 16);
                       k[22] = asU(s.lumenSceneColorThickness);
                       k[23] = words.valid() ? c.srv(words) : 0xFFFFFFFFu;
-                      // (the scene colour's normal threshold: its cosine as snorm8 beside the band)
-                      const uint32_t cosThreshold =
-                          (uint32_t)(int32_t)std::lround(std::cos(std::clamp(s.lumenSceneColorNormalDegrees, 0.0f, 180.0f) * 0.01745329252f) * 127.0f) & 0xFFu;
                       std::memcpy(&k[24], scene, sizeof scene);
                       for (int r = 0; r < 4; ++r)
                           for (int col = 0; col < 4; ++col) k[32 + 4 * r + col] = asU(prevViewProj.m[r][col]);
-                      for (uint32_t band = 0; band < lumenBands; ++band)
+                      if (compactTraces)
                       {
-                          k[19] = (band & 0xFFu) | (cosThreshold << 8) | (samplingBias16 << 16);
+                          k[19] = traceRootBits;
+                          c.computeConstants(k, 48);
+                          pipeline.dispatchBatch(c, traceBatch);
+                      }
+                      else for (uint32_t band = 0; band < lumenBands; ++band)
+                      {
+                          k[19] = (band & 0xFFu) | traceRootBits;
                           c.computeConstants(k, 48);
                           pipeline.dispatchIndirect(c.cmd, argumentResource, (uint64_t)band * kArgumentsBytes + kLumenDescOffset + variant * kDescStride);
                       }

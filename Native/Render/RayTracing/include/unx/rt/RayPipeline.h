@@ -4,6 +4,7 @@
 // bindless, passed in root constants), and a shader table uploaded once to default memory.
 #include "unx/render/Device.h"
 #include "unx/render/Shaders.h"
+#include "unx/render/RenderGraph.h"
 
 #include <string>
 #include <vector>
@@ -35,6 +36,12 @@ RayPipelineDesc standardRayPipeline(std::string library, std::vector<std::string
 class RayPipeline
 {
 public:
+    struct IndirectBatch
+    {
+        BufferRef arguments;
+        uint32_t capacity = 0;
+        ID3D12CommandSignature* signature = nullptr; // owned by this pipeline
+    };
     RayPipeline(Device& device, ShaderLibrary& shaders, const RayPipelineDesc& desc);
     ~RayPipeline();
     RayPipeline(const RayPipeline&) = delete;
@@ -48,6 +55,19 @@ public:
     D3D12_DISPATCH_RAYS_DESC dispatchDesc(uint32_t rayGen, uint32_t width, uint32_t height, uint32_t depth) const;
     // ExecuteIndirect of one D3D12_DISPATCH_RAYS_DESC at 'offset' of 'arguments' (the pass declares it IndirectArgs).
     void dispatchIndirect(ID3D12GraphicsCommandList7* cmd, ID3D12Resource* arguments, uint64_t offset) const;
+    // GPU-sized command stream: one root constant (first thread) and one ray
+    // dispatch per nonempty chunk. No CPU capacity loop, empty commands, or
+    // per-chunk template copies. The consumer declares arguments IndirectArgs.
+    // counter contains an item count; multiplier expands each item to threads.
+    // rowWidth preserves a 2D ray grid (root constant = first row). Otherwise
+    // rootDivisor converts the first thread to a packed band/index, with
+    // rootBits ORed in; callers keep flag bits disjoint from the index bits.
+    IndirectBatch prepareBatch(RenderGraph& graph, ShaderLibrary& shaders, std::string_view name,
+                               BufferRef counter, uint32_t capacity, uint32_t threadsPerCommand,
+                               uint32_t firstThreadConstant, uint32_t multiplier = 1,
+                               uint32_t counterOffset = 0, uint32_t rayGen = 0, uint32_t rowWidth = 0,
+                               uint32_t rootBits = 0, uint32_t rootDivisor = 1);
+    void dispatchBatch(PassContext& context, const IndirectBatch& batch) const;
     // The descriptions of the ray generation shaders with Width = Height = Depth = 0, kDispatchDescStride apart (shader i
     // at i x kDispatchDescStride), in an upload buffer that lives as long as the pipeline: a pass whose dispatch sizes a
     // kernel writes copies one per chunk into its argument buffer (CopyBufferRegion; RayTracing/CompactDispatch.hlsl
@@ -65,6 +85,7 @@ private:
     Device& m_device;
     ComPtr<ID3D12StateObject> m_state;
     ComPtr<ID3D12CommandSignature> m_indirect;
+    std::array<ComPtr<ID3D12CommandSignature>, Device::kRootConstantCount> m_batchSignatures;
     ComPtr<ID3D12Resource> m_table;
     ComPtr<ID3D12Resource> m_template;
     std::vector<D3D12_GPU_VIRTUAL_ADDRESS> m_rayGen;

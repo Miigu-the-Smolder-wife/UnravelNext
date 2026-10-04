@@ -647,6 +647,11 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
         const TextureRef updateMotion = holeFilling ? g.createTexture(TextureDesc{ "m.tsr.hole filled motion", w, h, 1, 1, DXGI_FORMAT_R32G32_FLOAT }) : dilated;
         // output.upscale_tsr_flickering (the reference's r.TSR.ShadingRejection.Flickering, default on)
         const bool flickering = !fc.quality.has("output.upscale_tsr_flickering") || fc.quality.boolean("output.upscale_tsr_flickering");
+        // Analyse RGB and luminance together. Flicker-to-rejection communication
+        // stays inside a workgroup; there is no full-screen moire intermediate.
+        // Overscan is real neighbourhood data, including at viewport edges.
+        const bool combinedAnalysis = flickering && w <= D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION - 18 &&
+                                      h <= D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION - 18;
         TextureRef previousFlicker, nextFlicker, reprojectedFlicker, moireError;
         if (flickering)
         {
@@ -654,9 +659,9 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                                               D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
             nextFlicker = g.importTexture(s.flicker[next].Get(), { "m.tsr.flicker", w, h, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM }, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
             reprojectedFlicker = g.createTexture(TextureDesc{ "m.tsr.reprojected flicker", w, h, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM });
-            moireError = g.createTexture(TextureDesc{ "m.tsr.moire error", w, h, 1, 1, DXGI_FORMAT_R16_FLOAT });
+            if (!combinedAnalysis) moireError = g.createTexture(TextureDesc{ "m.tsr.moire error", w, h, 1, 1, DXGI_FORMAT_R16_FLOAT });
         }
-        ID3D12PipelineState* flickerPso = flickering ? fc.shaders.compute("Passes/Shading/TsrFlicker") : nullptr;
+        ID3D12PipelineState* flickerPso = flickering && !combinedAnalysis ? fc.shaders.compute("Passes/Shading/TsrFlicker") : nullptr;
         // output.upscale_tsr_thin_geometry (the reference's r.TSR.ThinGeometryDetection): TsrThin.hlsl - the coverage
         // layer's thin fragments and pixel-wide lines of depth relax the shading rejection
         const bool thinGeometry = fc.quality.has("output.upscale_tsr_thin_geometry") && fc.quality.boolean("output.upscale_tsr_thin_geometry");
@@ -704,9 +709,13 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
             (thinGeometry && relaxation.valid() ? detail::TsrRejectThin : 0u) |
             (layerMotion && layers.valid() ? detail::TsrRejectLayers : 0u) |
             (canResurrect && resurrectionMeasure.valid() && resurrectedGuide.valid() ? detail::TsrRejectResurrection : 0u);
-        const bool fusedRejection = detail::useFusedTsrRejection(w, h, rejectionOptionals);
-        ID3D12PipelineState* rejectPrefixPso = fusedRejection ? shaders.compute("Passes/Shading/TsrRejectPrefix") : nullptr;
-        ID3D12PipelineState* rejectPso = shaders.compute(fusedRejection ? "Passes/Shading/TsrRejectFromPrefix" : "Passes/Shading/TsrReject");
+        const bool fusedRejection = combinedAnalysis ||
+            (w <= D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION - 10 && h <= D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION - 10 &&
+             detail::useFusedTsrRejection(w, h, rejectionOptionals));
+        ID3D12PipelineState* rejectPrefixPso = fusedRejection
+            ? shaders.compute(combinedAnalysis ? "Passes/Shading/TsrAnalysisPrepare" : "Passes/Shading/TsrRejectPrefix") : nullptr;
+        ID3D12PipelineState* rejectPso = shaders.compute(combinedAnalysis ? "Passes/Shading/TsrAnalysis" :
+            fusedRejection ? "Passes/Shading/TsrRejectFromPrefix" : "Passes/Shading/TsrReject");
         ID3D12PipelineState* aaPso = shaders.compute("Passes/Shading/TsrAntiAlias");
         ID3D12PipelineState* updatePso = shaders.compute("Passes/Shading/TsrUpdate");
         const uint32_t updateFlags = (fc.quality.has("output.upscale_tsr_kernel_by_samples") && fc.quality.boolean("output.upscale_tsr_kernel_by_samples") ? 2u : 0u) |
@@ -823,7 +832,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                           c.computeConstants(k, 20);
                           c.cmd->Dispatch((w + 15) / 16, (h + 15) / 16, 1);
                       });
-        if (flickering)
+        if (flickering && !combinedAnalysis)
             g.addPass("m.tsr.flicker", QueueType::Graphics,
                       [&](PassBuilder& b) {
                           b.use(src, Use::SrvCompute);
@@ -845,20 +854,29 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
         const uint32_t rejectionBegin = g.passCount();
         const TextureRef rejectionPrefix = fusedRejection
             ? g.createTexture({ "m.tsr.rejection prefix", w + 10, h + 10, 1, 1, DXGI_FORMAT_R32G32B32A32_UINT }) : TextureRef{};
+        const TextureRef lumaPrefix = combinedAnalysis
+            ? g.createTexture({ "m.tsr.luma prefix", w + 18, h + 18, 1, 1, DXGI_FORMAT_R32G32_UINT }) : TextureRef{};
         if (fusedRejection)
             g.addPass("m.tsr.reject.prepare", QueueType::Graphics,
                       [&](PassBuilder& b) {
                           b.use(src, Use::SrvCompute);
                           b.use(reprojected, Use::SrvCompute);
                           b.use(rejectionPrefix, Use::UavCompute);
+                          if (combinedAnalysis)
+                          {
+                              b.use(reprojectedFlicker, Use::SrvCompute);
+                              b.use(lumaPrefix, Use::UavCompute);
+                          }
                       },
                       [=](PassContext& c) {
-                          const uint32_t k[8] = { c.srv(src), c.srv(reprojected), c.uav(rejectionPrefix), w, h, 0, 0, 0 };
+                          const uint32_t k[8] = { c.srv(src), c.srv(reprojected), c.uav(rejectionPrefix), w, h,
+                              combinedAnalysis ? c.srv(reprojectedFlicker) : 0u, combinedAnalysis ? c.uav(lumaPrefix) : 0u, 0 };
                           c.cmd->SetPipelineState(rejectPrefixPso);
                           c.computeConstants(k, 8);
-                          c.cmd->Dispatch((w + 25) / 16, (h + 25) / 16, 1);
+                          const uint32_t halo = combinedAnalysis ? 33u : 25u;
+                          c.cmd->Dispatch((w + halo) / 16, (h + halo) / 16, 1);
                       });
-        g.addPass("m.tsr.reject", QueueType::Graphics,
+        g.addPass(combinedAnalysis ? "m.tsr.analysis" : "m.tsr.reject", QueueType::Graphics,
                   [&](PassBuilder& b) {
                       b.use(src, Use::SrvCompute);
                       b.use(reprojected, Use::SrvCompute);
@@ -867,7 +885,14 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       b.use(nextGuide, Use::UavCompute);
                       b.use(aaInput, Use::UavCompute);
                       if (fusedRejection) b.use(rejectionPrefix, Use::SrvCompute);
-                      if (flickering) b.use(moireError, Use::SrvCompute);
+                      if (combinedAnalysis)
+                      {
+                          b.use(lumaPrefix, Use::SrvCompute);
+                          b.use(reprojectedFlicker, Use::SrvCompute);
+                          b.use(info, Use::SrvCompute);
+                          b.use(nextFlicker, Use::UavCompute);
+                      }
+                      else if (flickering) b.use(moireError, Use::SrvCompute);
                       if (layerMotion) b.use(layers, Use::SrvCompute);
                       if (thinGeometry) b.use(relaxation, Use::SrvCompute);
                       if (canResurrect)
@@ -878,18 +903,24 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                   },
                   [=](PassContext& c) {
                       const uint32_t none = 0xFFFFFFFFu;
-                      const uint32_t k[16] = { c.srv(src), c.srv(reprojected), c.srv(decimateMask), c.uav(rejection), c.uav(nextGuide), c.uav(aaInput), w, h,
-                                               asUint(theoreticBlend), flickering ? c.srv(moireError) : none,
+                      const uint32_t k[24] = { c.srv(src), c.srv(reprojected), c.srv(decimateMask), c.uav(rejection), c.uav(nextGuide), c.uav(aaInput), w, h,
+                                               asUint(theoreticBlend), combinedAnalysis ? 0u : flickering ? c.srv(moireError) : none,
                                                thinGeometry ? c.srv(relaxation) : none, layerMotion ? c.srv(layers) : none,
                                                canResurrect ? c.srv(resurrectionMeasure) : none, canResurrect ? c.srv(resurrectedGuide) : none,
-                                               fusedRejection ? c.srv(rejectionPrefix) : none, 0 };
+                                               fusedRejection ? c.srv(rejectionPrefix) : none, 0,
+                                               combinedAnalysis ? c.srv(lumaPrefix) : none,
+                                               combinedAnalysis ? c.srv(reprojectedFlicker) : none,
+                                               combinedAnalysis ? c.srv(info) : none, guideReset ? 1u : 0u,
+                                               0, combinedAnalysis ? c.uav(nextFlicker) : none,
+                                               thinInFlicker ? c.srv(relaxation) : none, 0 };
                       c.cmd->SetPipelineState(rejectPso);
-                      c.computeConstants(k, 16);
+                      c.bindFrameConstants(cb);
+                      c.computeConstants(k, 24);
                       c.cmd->Dispatch((w + 15) / 16, (h + 15) / 16, 1);
                   });
         // Preserve the existing profiler meaning: rejection includes preparation
         // and its barrier, not merely the shorter tail kernel.
-        if (fusedRejection) g.joinPasses(rejectionBegin, 2, "m.tsr.reject");
+        if (fusedRejection) g.joinPasses(rejectionBegin, 2, combinedAnalysis ? "m.tsr.analysis" : "m.tsr.reject");
         g.addPass("m.tsr.aa", QueueType::Graphics,
                   [&](PassBuilder& b) {
                       b.use(aaInput, Use::SrvCompute);

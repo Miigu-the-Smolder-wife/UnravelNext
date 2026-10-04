@@ -233,14 +233,19 @@ void main()
     RWByteAddressBuffer state = ResourceDescriptorHeap[P[0].w];
     const uint count = min(state.Load(8), p.traceCapacity);
     state.Store(8, count);
-    RWByteAddressBuffer rayDesc = ResourceDescriptorHeap[P[2].x];
     RWByteAddressBuffer filterArgs = ResourceDescriptorHeap[P[2].z];
     const uint perDispatch = max(P[2].w, 1u);
     for (uint c = 0; c < P[3].x; ++c)
     {
         const uint n = count > c * perDispatch ? min(count - c * perDispatch, perDispatch) : 0;
         // (an empty chunk: every dimension 0, a dispatch that launches nothing)
-        rayDesc.Store3(c * P[3].y + P[2].y, n > 0 ? uint3(p.probeResolution * p.probeResolution, n, 1) : uint3(0, 0, 0));  // Width, Height, Depth
+        // Legacy standalone callers may still request ray descriptions. The
+        // frame renderer uses a GPU-counted stream with its own ray chunk size.
+        if (P[2].x != 0xFFFFFFFFu)
+        {
+            RWByteAddressBuffer rayDesc = ResourceDescriptorHeap[P[2].x];
+            rayDesc.Store3(c * P[3].y + P[2].y, n > 0 ? uint3(p.probeResolution * p.probeResolution, n, 1) : uint3(0, 0, 0));
+        }
         const uint computeBase = LRC_COMPUTE_ARGS_STRIDE * c;
         filterArgs.Store3(computeBase + LRC_FILTER_ARGS_OFFSET, n > 0 ? uint3((p.probeResolution + 7) / 8, (p.probeResolution + 7) / 8, n) : uint3(0, 0, 0));
         filterArgs.Store3(computeBase + LRC_STORE_ARGS_OFFSET, n > 0 ? uint3((p.finalResolution + 7) / 8, (p.finalResolution + 7) / 8, n) : uint3(0, 0, 0));

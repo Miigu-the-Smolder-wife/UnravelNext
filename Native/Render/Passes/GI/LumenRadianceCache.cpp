@@ -26,7 +26,6 @@ namespace unx::render::gi
 namespace
 {
 constexpr uint32_t kMaxClipmaps = 6, kRing = 4, kParamBytes = 256;
-constexpr uint32_t kDescStride = (uint32_t)((sizeof(D3D12_DISPATCH_RAYS_DESC) + 7) / 8 * 8);
 // The structural bound of one dispatch (2026-10-01, the bath lounge's device-hung report): the probe rays, the filter and
 // the store run in chunks of probes, each at most this many rays (probe texels); the chunks past the frame's trace count
 // launch nothing.
@@ -110,7 +109,7 @@ struct RcState
 {
     Device* device = nullptr;
     Settings settings{};
-    ComPtr<ID3D12Resource> indirection, atlas, depth, slots, counters, freeList, ring, descTemplate, irradiance, hitMarks;
+    ComPtr<ID3D12Resource> indirection, atlas, depth, slots, counters, freeList, ring, irradiance, hitMarks;
     ComPtr<ID3D12CommandSignature> dispatchSignature;
     uint8_t* ringMapped = nullptr;
     uint32_t ringSrv[kRing] = {};
@@ -127,7 +126,7 @@ struct RcState
     {
         if (!device) return;
         for (ComPtr<ID3D12Resource>* r : { std::addressof(indirection), std::addressof(atlas), std::addressof(depth), std::addressof(slots), std::addressof(counters),
-                                           std::addressof(freeList), std::addressof(ring), std::addressof(descTemplate), std::addressof(irradiance), std::addressof(hitMarks) })
+                                           std::addressof(freeList), std::addressof(ring), std::addressof(irradiance), std::addressof(hitMarks) })
             if (*r) device->deferRelease(*r);
         irradiance.Reset();
         hitMarks.Reset();
@@ -181,7 +180,6 @@ struct RcState
         buffer(counters, 128, false, L"R rc counters");
         buffer(freeList, (uint64_t)maxProbes * 4, false, L"R rc free list");
         buffer(ring, (uint64_t)kRing * kParamBytes, true, L"R rc parameters ring");
-        buffer(descTemplate, 2 * kDescStride, true, L"R rc ray dispatch template");
         if (s.irradiance)
         {
             texture(irradiance, D3D12_RESOURCE_DIMENSION_TEXTURE2D, s.atlasProbes * kIrradianceBordered, s.atlasProbes * kIrradianceBordered, 1, DXGI_FORMAT_R16G16B16A16_FLOAT,
@@ -387,8 +385,10 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
     const BufferRef freeList = g.importBuffer(st.freeList.Get(), BufferDesc{ "r.gi.rc free list", (uint64_t)maxProbes * 4, 0 });
     const BufferRef traces = g.createBuffer({ "r.gi.rc traces", (uint64_t)s.traceCapacity * 16, 0 });
     const uint32_t probesPerDispatch = std::max(1u, kMaxRaysPerDispatch / (s.probeResolution * s.probeResolution * kRaysPerTexel));
-    const uint32_t chunks = (s.traceCapacity + probesPerDispatch - 1) / probesPerDispatch;
-    const BufferRef rayArgs = g.createBuffer({ "r.gi.rc ray dispatch", (uint64_t)chunks * kDescStride, 0 });
+    // Compute filters are not ray dispatches: they need no ray-work bound. A
+    // whole probe list fits one Z grid unless it exceeds D3D12's axis limit.
+    constexpr uint32_t computeProbesPerDispatch = 65535;
+    const uint32_t chunks = (s.traceCapacity + computeProbesPerDispatch - 1) / computeProbesPerDispatch;
     const BufferRef filterArgs = g.createBuffer({ "r.gi.rc filter dispatch", (uint64_t)chunks * LRC_COMPUTE_ARGS_STRIDE, 0 });
     const uint32_t tempSize = p.tempProbes * s.probeResolution;
     const TextureRef traced = g.createTexture({ "r.gi.rc traced", tempSize, tempSize, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
@@ -429,38 +429,26 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
     const TextureRef luts[4] = { fr.transmittanceLut, fr.multiScatterLut, fr.skyViewLut, fr.aerialPerspective };
     const uint32_t variant = atmosphere ? 0u : 1u;
     rt::RayPipeline& pipeline = rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline(kTraceLibrary[variant], { "LumenRadianceCacheTraceGen" }));
-    {
-        // the description's shader tables, per variant, in the template the frame's buffer is copied from
-        uint8_t* m = nullptr;
-        D3D12_RANGE none{ 0, 0 };
-        check(st.descTemplate->Map(0, &none, reinterpret_cast<void**>(&m)), "map R rc ray dispatch template");
-        const D3D12_DISPATCH_RAYS_DESC desc = pipeline.dispatchDesc(0, 0, 1, 1);
-        std::memcpy(m + variant * kDescStride, &desc, sizeof desc);
-        st.descTemplate->Unmap(0, nullptr);
-    }
-    ID3D12Resource* descTemplate = st.descTemplate.Get();
-    chain.add("r.gi.rc.args", [&](PassBuilder& b) { b.use(rayArgs, Use::CopyDst); },
-              [=](PassContext& c) {
-                  for (uint32_t chunk = 0; chunk < chunks; ++chunk)
-                      c.cmd->CopyBufferRegion(c.resource(rayArgs), (uint64_t)chunk * kDescStride, descTemplate, variant * kDescStride, kDescStride);
-              });
     chain.add("r.gi.rc.finish",
               [&](PassBuilder& b) {
                   b.use(counters, Use::UavCompute);
-                  b.use(rayArgs, Use::UavCompute);
                   b.use(filterArgs, Use::UavCompute);
                   b.keep();
               },
               [=, &shaders](PassContext& c) {
                   const uint32_t k[16] = { paramsSrv, 0xFFFFFFFFu, 0xFFFFFFFFu, c.uav(counters), 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0,
-                                           c.uav(rayArgs), (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), c.uav(filterArgs), probesPerDispatch,
-                                           chunks, kDescStride, 0, 0 };
+                                           0xFFFFFFFFu, 0, c.uav(filterArgs), computeProbesPerDispatch,
+                                           chunks, 0, 0, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenRadianceCacheUpdate.MODE6"));
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 16);
                   c.cmd->Dispatch(1, 1, 1);
               });
     chain.flush("r.gi.rc.bookkeeping");
+    const uint32_t probeTexels = s.probeResolution * s.probeResolution;
+    const auto rayBatch = pipeline.prepareBatch(g, shaders, "r.gi.rc.args", counters,
+        s.traceCapacity, probesPerDispatch * probeTexels, 18, probeTexels, 8, 0, probeTexels);
+    const BufferRef rayArgs = rayBatch.arguments;
     const BufferRef worldCache = in.worldCache;
     const SurfaceCacheCardRefs cards = in.cards;
     const float3 sky = in.skyRadiance, sun = in.sunIlluminance;
@@ -510,12 +498,8 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   k[20] = cards.valid() ? c.srv(cards.frame) : 0xFFFFFFFFu;
                   std::memcpy(&k[24], sceneSrvs.data(), 32);
                   c.bindFrameConstants(cb);
-                  for (uint32_t chunk = 0; chunk < chunks; ++chunk)
-                  {
-                      k[18] = chunk * probesPerDispatch;  // P[4].z: the dispatch's first trace record
-                      c.computeConstants(k, 32);
-                      pipeline.dispatchIndirect(c.cmd, c.resource(rayArgs), (uint64_t)chunk * kDescStride);
-                  }
+                  c.computeConstants(k, 32);
+                  pipeline.dispatchBatch(c, rayBatch);
               });
 
     // ---- filter, then store with the border
@@ -536,7 +520,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   c.bindFrameConstants(cb);
                   for (uint32_t chunk = 0; chunk < chunks; ++chunk)
                   {
-                      k[10] = chunk * probesPerDispatch;  // P[2].z: the dispatch's first trace record
+                      k[10] = chunk * computeProbesPerDispatch;  // P[2].z: the dispatch's first trace record
                       c.computeConstants(k, 12);
                       c.cmd->ExecuteIndirect(signature, 1, c.resource(filterArgs), (uint64_t)chunk * LRC_COMPUTE_ARGS_STRIDE + LRC_FILTER_ARGS_OFFSET, nullptr, 0);
                   }
@@ -555,7 +539,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   c.bindFrameConstants(cb);
                   for (uint32_t chunk = 0; chunk < chunks; ++chunk)
                   {
-                      k[10] = chunk * probesPerDispatch;
+                      k[10] = chunk * computeProbesPerDispatch;
                       c.computeConstants(k, 12);
                       c.cmd->ExecuteIndirect(signature, 1, c.resource(filterArgs), (uint64_t)chunk * LRC_COMPUTE_ARGS_STRIDE + LRC_STORE_ARGS_OFFSET, nullptr, 0);
                   }
@@ -580,7 +564,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                       c.bindFrameConstants(cb);
                       for (uint32_t chunk = 0; chunk < chunks; ++chunk)
                       {
-                          k[5] = chunk * probesPerDispatch;  // P[1].y: the dispatch's first trace record
+                          k[5] = chunk * computeProbesPerDispatch;  // P[1].y: the dispatch's first trace record
                           c.computeConstants(k, 8);
                           c.cmd->ExecuteIndirect(signature, 1, c.resource(filterArgs), (uint64_t)chunk * LRC_COMPUTE_ARGS_STRIDE + LRC_IRRADIANCE_ARGS_OFFSET, nullptr, 0);
                       }

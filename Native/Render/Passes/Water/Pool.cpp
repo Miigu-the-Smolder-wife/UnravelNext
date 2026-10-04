@@ -221,11 +221,10 @@ void Pool::evolve(RenderGraph& g, const Refs& r, float dt, uint32_t sourceSrv, u
     if (sourceCount) pass("pool sources", "Passes/Water/PoolSplat", sourceCount);
     if (increment)
     {
-        pass("pool forward rows", "Passes/Water/PoolRows", kN);
-        pass("pool forward columns", "Passes/Water/RippleForwardColumns", kN);  // same slots: spectrum P[0].y, twiddles P[1].z
+        pass("pool forward rows", "Passes/Water/PoolRows", kQ);
+        pass("pool forward columns", "Passes/Water/RippleForwardColumns", kQ);  // only canonical columns enter the modes
     }
-    pass("pool evolve", "Passes/Water/PoolEvolve", uint32_t((kSamples + 255) / 256));
-    pass("pool inverse rows", "Passes/Water/RippleInverseRows", kN);
+    pass("pool evolve rows", "Passes/Water/PoolEvolveRows", kQ);
     pass("pool inverse columns", "Passes/Water/PoolColumns", kQ);
 }
 
