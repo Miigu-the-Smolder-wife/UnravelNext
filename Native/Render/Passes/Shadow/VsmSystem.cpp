@@ -377,53 +377,6 @@ struct CasterBounds
     float minTexels = 0;
 };
 
-template<class T> bool sameBoundVector(const std::vector<T>& a, const std::vector<T>& b)
-{
-    return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(T)) == 0);
-}
-
-struct SunLevelBounds
-{
-    float4x4 viewProj;
-    float pixelsPerMetre = 0;
-    std::array<uint64_t, 3> sets{};
-    bool valid = false;
-};
-
-// These are capacity proofs, not shadow images. Reusing an identical proof does
-// not defer a shadow update. Compare all its actual inputs (not just mobility
-// flags or camera identity), so moved casters, wind and LOD changes invalidate it.
-struct CasterBoundCache
-{
-    CasterBounds previous;
-    uint32_t revision = UINT32_MAX;
-    std::array<SunLevelBounds, kLevels> sun;
-    struct Local
-    {
-        VsmLocalLightCpu light{};
-        uint64_t faces[6][kLocalMips]{};
-        bool valid = false;
-    };
-    std::array<Local, kLocalLights * 3> local;
-
-    void update(const CasterBounds& b, uint32_t nextRevision)
-    {
-        const auto& p = previous;
-        const bool same = revision == nextRevision && p.ranges == b.ranges && p.lod == b.lod &&
-            p.thresholdPx == b.thresholdPx && p.minTexels == b.minTexels && p.everywhere == b.everywhere &&
-            p.everywhereFixed == b.everywhereFixed && sameBoundVector(p.spheres, b.spheres) &&
-            sameBoundVector(p.instance, b.instance) && sameBoundVector(p.clusters, b.clusters) &&
-            sameBoundVector(p.mesh, b.mesh) && sameBoundVector(p.errorScale, b.errorScale) &&
-            sameBoundVector(p.lodSpheres, b.lodSpheres) && sameBoundVector(p.movable, b.movable) &&
-            sameBoundVector(p.everywhereMeshes, b.everywhereMeshes);
-        if (same) return;
-        previous = b;
-        revision = nextRevision;
-        for (auto& entry : sun) entry.valid = false;
-        for (auto& entry : local) entry.valid = false;
-    }
-};
-
 // windSpeed: the frame's (m/s). A wind-moved caster stays within its sphere grown by the wind's bound
 // (Deformation.hlsli windOffsetBound, as V's culling takes it): it counts in the views it reaches, not in every view -
 // a forest of 1.1 M such trees stood at 4e8 cluster entries in level 0's 16 m window.
@@ -1978,19 +1931,14 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                                                    fc.scene.source() ? fc.scene.source()->windSpeed : 0.0f, minCasterTexels, fc.resources.gpuInstanceClusterBound)
                                     : CasterBounds{};
     cpuTrace.mark("vsm.caster_bounds");
-    auto& boundCache = fc.state<CasterBoundCache>("s.vsm.casterBoundCache");
-    boundCache.update(bounds, fc.scene.revision());
-    auto& sunLevelBounds = boundCache.sun;
-    auto cachedLocalBounds = [&](uint32_t slot, const VsmLocalLightCpu& light, uint64_t (&faces)[6][kLocalMips], uint32_t set) {
-        auto& entry = boundCache.local[slot * 3 + set];
-        if (!entry.valid || std::memcmp(&entry.light, &light, sizeof light) != 0)
-        {
-            localBounds(bounds, light, entry.faces, set);
-            entry.light = light;
-            entry.valid = true;
-        }
-        std::memcpy(faces, entry.faces, sizeof entry.faces);
+    struct SunLevelBounds
+    {
+        float4x4 viewProj;
+        float pixelsPerMetre = 0;
+        std::array<uint64_t, 3> sets{};
+        bool valid = false;
     };
+    std::array<SunLevelBounds, kLevels> sunLevelBounds{};
     SunCutMemo sunCutMemo(bounds.ranges ? bounds.ranges->size() : 0);
     static const bool referenceSunBounds = sunBoundDiagnostic("UNX_VSM_BOUND_REFERENCE");
     static const bool verifySunBounds = sunBoundDiagnostic("UNX_VSM_BOUND_VERIFY");
@@ -2178,7 +2126,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                 const uint32_t slot = s.localActive[a];
                 const VsmLocalLightCpu& l = s.localData[slot];
                 uint64_t faceBounds[6][kLocalMips] = {};
-                if (split) cachedLocalBounds(slot, l, faceBounds, instanceSet);
+                if (split) localBounds(bounds, l, faceBounds, instanceSet);
                 for (uint32_t face = 0; face < 6; ++face)
                     for (uint32_t mip = 0; mip < kLocalMips; ++mip)
                         if (faceBounds[face][mip] > listCapacity)
@@ -2391,7 +2339,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                 const uint32_t slot = s.localActive[a];
                 const VsmLocalLightCpu& l = s.localData[slot];
                 uint64_t faceBounds[6][kLocalMips] = {};
-                if (split) cachedLocalBounds(slot, l, faceBounds, 0);
+                if (split) localBounds(bounds, l, faceBounds, 0);
                 for (uint32_t face = 0; face < 6; ++face)
                 {
                     const uint64_t bound = faceBounds[face][0];

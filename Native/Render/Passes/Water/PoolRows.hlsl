@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// Closed basins, frames with sources (or setState): one group per canonical row z (0..256): the increment
+// Closed basins, frames with sources (or setState): one group per row z of the mirrored 512 x 512 domain: the increment
 // at the folded position (x, z) (Pool.hlsli: the even mirror across both walls) - the accumulated sources plus their
 // mean-level term (P[3].w), plus the uploaded field when it replaces the state (P[4].w bit 1) - and the forward FFT
 // along x as conj(IFFT(conj(.))) (RippleForwardColumns conjugates back and normalises; PoolEvolve adds the result).
@@ -30,9 +30,5 @@ void main(uint t : SV_GroupThreadID, uint z : SV_GroupID)
     {
         const uint x = t + part2 * 256u;
         spectrum.Store2(16 * (z * POOL_PITCH + x), asuint(g_fft[0][x]));
-        // An even wall extension has identical rows at z and N-z. Publish both
-        // from the same FFT instead of dispatching the mirrored row again.
-        if (z != 0 && z != POOL_N / 2u)
-            spectrum.Store2(16 * ((POOL_N - z) * POOL_PITCH + x), asuint(g_fft[0][x]));
     }
 }

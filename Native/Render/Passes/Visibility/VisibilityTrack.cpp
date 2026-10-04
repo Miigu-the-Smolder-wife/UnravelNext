@@ -919,7 +919,7 @@ void ensureHiz(Device& device, Hiz& h, uint32_t width, uint32_t height)
 // Transient buffers of one cull run and everything its kernels need in root constants.
 struct Run
 {
-    BufferRef state, args, nodeItems, nodeReady, nodeDispatch, groupItems, visible, lists, deferInstances, deferNodes, deferClusters, tileMask;
+    BufferRef state, args, nodeItems, groupItems, visible, lists, deferInstances, deferNodes, deferClusters, tileMask;
     BufferRef tilePairs;  // tile-local raster runs: uint2 tile rectangle per visible entry (DepthRaster.as expands the pairs)
     BufferRef tileCoarse;  // runs with a tile mask: bit per 8 x 8 tiles (TileMaskCoarse.hlsl)
     BufferRef chunkWork;   // C3: visible chunk items [0, capDeferred), deferred chunks [capDeferred, 2 capDeferred)
@@ -953,8 +953,6 @@ Run createRun(FramePassContext& fc, const Settings& cfg, const std::string& pref
     r.state = g.createBuffer({ "v.cull.state", kStateWords * 4, 0 });
     r.args = g.createBuffer({ "v.cull.args", kArgWords * 4, 0 });
     r.nodeItems = g.createBuffer({ "v.cull.nodes", (uint64_t)cfg.capNodes * 8, 8 });
-    if (cfg.workQueue) r.nodeReady = g.createBuffer({ "v.cull.nodeReady", ((uint64_t(cfg.capNodes) + 31) / 32) * 4, 0 });
-    if (cfg.workQueue) r.nodeDispatch = g.createBuffer({ "v.cull.nodeDispatch", 16, 0 });
     r.groupItems = g.createBuffer({ "v.cull.groups", (uint64_t)cfg.capGroups * 8, 8 });
     r.visible = g.createBuffer({ "v.visibleClusters", (uint64_t)cfg.capVisible * 8, 8 });
     r.lists = g.createBuffer({ "v.lists", (uint64_t)cfg.capVisible * 4 * kLists, 0 });
@@ -979,7 +977,6 @@ Run createRun(FramePassContext& fc, const Settings& cfg, const std::string& pref
 void declareCull(PassBuilder& b, const Run& r, Use argsUse)
 {
     for (BufferRef x : { r.state, r.nodeItems, r.groupItems, r.visible, r.lists, r.deferInstances, r.deferNodes, r.deferClusters, r.chunkWork }) b.use(x, Use::UavCompute);
-    if (r.nodeReady.valid()) b.use(r.nodeReady, Use::UavCompute);
     for (BufferRef x : { r.chunks, r.skinBounds })
         if (x.valid()) b.use(x, Use::SrvCompute);
     b.use(r.args, argsUse);
@@ -997,7 +994,7 @@ void declareCull(PassBuilder& b, const Run& r, Use argsUse)
     if (r.pageFeedback.valid()) b.use(r.pageFeedback, Use::UavCompute);
 }
 
-constexpr uint32_t kCullConstants = 40;  // CullShared.hlsli P[0 .. 9]
+constexpr uint32_t kCullConstants = 36;  // CullShared.hlsli P[0 .. 8]
 
 void cullConstants(const PassContext& c, const Run& r, uint32_t phase, uint32_t k[kCullConstants], uint32_t instanceCount)
 {
@@ -1039,9 +1036,6 @@ void cullConstants(const PassContext& c, const Run& r, uint32_t phase, uint32_t 
     std::memcpy(&k[33], &r.swLimitPx, 4);
     k[34] = r.pageTable;
     k[35] = r.pageFeedback.valid() ? c.uav(r.pageFeedback) + 1 : 0;
-    k[36] = r.nodeReady.valid() ? c.uav(r.nodeReady) : kNone;
-    k[37] = r.nodeDispatch.valid() ? c.uav(r.nodeDispatch) : kNone;
-    k[38] = r.cfg.workerGroups;
 }
 
 // One dispatch of a cull pass: direct (groupsX > 0) or indirect through the run's args at 'argWord'. 'after': it reads
@@ -1051,7 +1045,6 @@ struct CullStep
     std::string kernel;
     uint32_t groupsX = 0, groupsY = 0, argWord = 0;
     bool after = false;
-    bool nodeQueue = false;
 };
 
 // A cull pass of one or more dispatches: all direct (prepare and direct dispatches write the args: UAV) or all indirect
@@ -1060,23 +1053,15 @@ struct CullStep
 void cullPass(FramePassContext& fc, State& s, const Run& r, const std::string& name, uint32_t phase, const std::vector<CullStep>& steps)
 {
     const bool direct = steps.front().groupsX > 0;
-    const bool nodeQueue = steps.front().nodeQueue;
-    bool seeds = false;
     std::vector<ID3D12PipelineState*> pso;
     for (const CullStep& st : steps)
     {
         if ((st.groupsX > 0) != direct) fail("V: cull pass '%s' mixes direct and indirect dispatches", name.c_str());
         pso.push_back(fc.shaders.compute(st.kernel));
-        seeds = seeds || st.kernel == "Passes/Visibility/CullReset" || st.kernel == "Passes/Visibility/CullSeed" ||
-            st.kernel.starts_with("Passes/Visibility/CullInstances.") || st.kernel == "Passes/Visibility/CullPrepare.MODE3";
     }
     const uint32_t instanceCount = (uint32_t)fc.scene.instances().size();
     ID3D12CommandSignature* sig = s.dispatchSignature.Get();
-    fc.graph.addPass(r.prefix + name, QueueType::Graphics, [&](PassBuilder& b) {
-                         declareCull(b, r, direct || nodeQueue ? Use::UavCompute : Use::IndirectArgs);
-                         if (r.nodeDispatch.valid() && (seeds || nodeQueue))
-                             b.use(r.nodeDispatch, nodeQueue ? Use::IndirectArgs : Use::UavCompute);
-                     },
+    fc.graph.addPass(r.prefix + name, QueueType::Graphics, [&](PassBuilder& b) { declareCull(b, r, direct ? Use::UavCompute : Use::IndirectArgs); },
                      [=](PassContext& c) {
                          uint32_t k[kCullConstants];
                          cullConstants(c, r, phase, k, instanceCount);
@@ -1096,8 +1081,7 @@ void cullPass(FramePassContext& fc, State& s, const Run& r, const std::string& n
                                  c.bindFrameConstants(r.frameConstants);
                                  c.computeConstants(k, kCullConstants);
                              }
-                             if (nodeQueue) c.cmd->ExecuteIndirect(sig, 1, c.resource(r.nodeDispatch), 0, c.resource(r.nodeDispatch), 0);
-                             else if (direct) c.cmd->Dispatch(steps[i].groupsX, steps[i].groupsY, 1);
+                             if (direct) c.cmd->Dispatch(steps[i].groupsX, steps[i].groupsY, 1);
                              else c.cmd->ExecuteIndirect(sig, 1, c.resource(r.args), steps[i].argWord * 4, nullptr, 0);
                          }
                      });
@@ -1184,8 +1168,7 @@ void cullPhase(FramePassContext& fc, State& s, const Run& r, uint32_t phase)
     {
         const uint32_t runtime = (uint32_t)fc.scene.instances().size() - fc.scene.staticInstanceCount();  // C2b
         const uint32_t gpuCapacity = fc.scene.gpuInstanceRange().capacity;  // A3 mesh particles (count on the GPU)
-        const uint32_t resetGroups = r.cfg.workQueue ? std::max(1u, uint32_t((uint64_t(r.cfg.capNodes) + 4095) / 4096)) : 1u;
-        const CullStep reset{ "Passes/Visibility/CullReset", resetGroups, 1, 0, false };
+        const CullStep reset{ "Passes/Visibility/CullReset", 1, 1, 0, false };
         const CullStep chunks{ "Passes/Visibility/CullChunks.PHASE1", (r.chunkCount + 63) / 64, r.viewCount, 0, false };
         const CullStep flat{ "Passes/Visibility/CullInstances.PHASE1.SOURCE0", std::max((r.flatCount + runtime + 63) / 64, 1u), r.viewCount, 0, false };
         // (the GPU-written instances' live count sizes their dispatch: CullReset's VA_GPU_INSTANCES)
@@ -1234,7 +1217,7 @@ void cullPhase(FramePassContext& fc, State& s, const Run& r, uint32_t phase)
         }
     }
     if (r.cfg.workQueue)
-        cullPass(fc, s, r, "nodes.p" + p, phase, { CullStep{ "Passes/Visibility/CullNodes.PHASE" + p + ".QUEUE1", 0, 0, 0, false, true } });
+        cullPass(fc, s, r, "nodes.p" + p, "Passes/Visibility/CullNodes.PHASE" + p + ".QUEUE1", phase, r.cfg.workerGroups, 1, 0);
     else
         for (uint32_t level = 0; level < s.traversalLevels; ++level)
         {

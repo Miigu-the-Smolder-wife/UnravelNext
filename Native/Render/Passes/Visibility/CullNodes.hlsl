@@ -9,11 +9,22 @@
 // the clusters simplified from it in its place) and notes the page as wanted; a resident one is noted too (its use).
 //   QUEUE=0: one level of the traversal, node items [VS_NODE_BEGIN, VS_NODE_END): a pass per tree level, each after a
 //            CullPrepare pass (visibility.traversal_work_queue false).
-//   QUEUE=1: persistent workers consume a per-entry-ready queue. A reservation
-//            is not a publication: its bit becomes visible only after its data.
-//            Pending counts include reserved and locally held work, so an empty
-//            published prefix cannot end the traversal. Producers never spin on
-//            a global commit cursor. Exhausted bounds report incomplete work.
+//   QUEUE=1: the whole traversal in one dispatch of a fixed number of groups (visibility.traversal_worker_groups), the
+//            node items a work queue (the reference's persistent cull: NaniteHierarchyTraversal.ush). Each wave of a
+//            group is a worker: it claims up to a wave of published items (compare-exchange on VS_NODE_READ, below
+//            VS_NODE_COMMIT), tests them, appends the children (nodeReserve: VS_NODE_WRITE, and VS_NODE_PENDING before
+//            they are stored) and publishes them in reservation order (compare-exchange on VS_NODE_COMMIT from the
+//            wave's first entry to its end, after the entries are in memory), so every item below VS_NODE_COMMIT is
+//            stored when a worker reads it. A worker with nothing to claim waits while VS_NODE_PENDING is not 0 (items
+//            another worker holds or is about to publish) and leaves when it is 0: no item is left and none can come.
+//            Bounds (INTERFACES 3.6): a worker runs at most CAP_NODES + TRAVERSE_IDLE_ROUNDS rounds - a round claims at
+//            least one of at most CAP_NODES items, loses its claim to another worker, or finds nothing published (at
+//            most TRAVERSE_IDLE_ROUNDS times) - and a publish waits at most TRAVERSE_PUBLISH_SPINS exchanges for the
+//            waves that reserved before it (each stores at most a wave of nodes' children first). A worker at its round
+//            bound leaves without holding an item: the others go on, and one that pushed children claims them itself,
+//            so the queue still empties; a publish at its bound sets OVERFLOW_ITERATION_LIMIT and its items stay
+//            pending. Items left when every worker has gone show as VS_NODE_PENDING != 0 (CullPrepare MODE=3:
+//            OVERFLOW_NODE_DEPTH).
 #include "Passes/Visibility/CullShared.hlsli"
 
 struct NodeResult
@@ -128,95 +139,88 @@ void main(uint i : SV_DispatchThreadID)
     emitNodes(state, r, WaveActiveCountBits(item < end), 0);
 }
 #else
-// A worker claims a range of reserved entries, then consumes the ready lanes in
-// that range. Producers never wait for unrelated earlier reservations. Each
-// lane's ready bit is published after its payload's device-memory barrier.
-#define TRAVERSE_IDLE_ROUNDS 65536u
-#define TRAVERSE_CLAIM_TRIES 4u
-#define ROUND_CLAIMED 0u
-#define ROUND_LOST 1u
-#define ROUND_IDLE 2u
-#define ROUND_DONE 3u
+#define TRAVERSE_IDLE_ROUNDS 65536u    // rounds a worker may find nothing published before it leaves
+#define TRAVERSE_CLAIM_TRIES 4u        // compare-exchanges of one round's claim
+#define TRAVERSE_PUBLISH_SPINS 65536u  // compare-exchanges a publish waits for the waves that reserved before it
+
+#define ROUND_CLAIMED 0u   // the wave holds [start, start + count)
+#define ROUND_LOST 1u      // items were published, other workers took them
+#define ROUND_IDLE 2u      // nothing published; items are pending
+#define ROUND_DONE 3u      // nothing published and nothing pending (or a publish failed: the queue cannot empty)
 
 [numthreads(64, 1, 1)]
 void main()
 {
     RWByteAddressBuffer state = ResourceDescriptorHeap[STATE_UAV];
+    // The queue's words and items as other waves of the dispatch write them while this one reads: coherent views of the
+    // same buffers (with the barrier before a publish).
     globallycoherent RWByteAddressBuffer queue = ResourceDescriptorHeap[STATE_UAV];
     globallycoherent RWStructuredBuffer<uint2> items = ResourceDescriptorHeap[NODE_ITEMS_UAV];
-    globallycoherent RWByteAddressBuffer readyBits = ResourceDescriptorHeap[NODE_READY_UAV];
-    const uint lanes = WaveActiveCountBits(true), lane = WavePrefixCountBits(true);
-    const uint groupBegin = state.Load(4 * VS_GROUP_BEGIN);
-    uint item = 0, idle = 0;
-    bool pending = false;
+    const uint lanes = WaveActiveCountBits(true), lane = WavePrefixCountBits(true);  // every exit below is uniform over the wave
+    const uint groupBegin = state.Load(4 * VS_GROUP_BEGIN);  // (the phase's first group item: fixed while the traversal runs)
+    uint idle = 0;
     [loop] for (uint round = 0; round < CAP_NODES + TRAVERSE_IDLE_ROUNDS; ++round)
     {
-        if (!WaveActiveAnyTrue(pending))
+        uint start = 0, count = 0, outcome = ROUND_LOST;
+        if (WaveIsFirstLane())
         {
-            uint start = 0, count = 0, outcome = ROUND_LOST;
+            [loop] for (uint attempt = 0; attempt < TRAVERSE_CLAIM_TRIES && outcome == ROUND_LOST; ++attempt)
+            {
+                const uint read = queue.Load(4 * VS_NODE_READ);
+                const uint ready = min(queue.Load(4 * VS_NODE_COMMIT), CAP_NODES);
+                if (read >= ready)
+                {
+                    const bool failed = (queue.Load(4 * VS_OVERFLOW) & OVERFLOW_ITERATION_LIMIT) != 0;
+                    outcome = queue.Load(4 * VS_NODE_PENDING) == 0 || failed ? ROUND_DONE : ROUND_IDLE;
+                }
+                else
+                {
+                    const uint n = min(lanes, ready - read);
+                    uint seen;
+                    queue.InterlockedCompareExchange(4 * VS_NODE_READ, read, read + n, seen);
+                    if (seen == read)
+                    {
+                        start = read;
+                        count = n;
+                        outcome = ROUND_CLAIMED;
+                    }
+                }
+            }
+        }
+        start = WaveReadLaneFirst(start);
+        count = WaveReadLaneFirst(count);
+        outcome = WaveReadLaneFirst(outcome);
+        if (outcome == ROUND_DONE) break;
+        if (outcome == ROUND_IDLE && ++idle >= TRAVERSE_IDLE_ROUNDS) break;
+        if (outcome != ROUND_CLAIMED) continue;
+
+        NodeResult r = (NodeResult)0;
+        if (lane < count) r = testNode(items[start + lane]);
+        // The children: reserved and counted as pending in the step that retires this wave's 'count' items, then stored,
+        // then published in reservation order.
+        uint first, total;
+        const uint childBase = nodeReserve(state, r.pushChildren ? r.node.count : 0, CAP_NODES, count, first, total);
+        if (r.pushChildren)
+        {
+            for (uint k = 0; k < r.node.count; ++k)
+                if (childBase + k < CAP_NODES) items[childBase + k] = packItem(itemInstance(r.item), r.node.first + k, itemView(r.item));
+        }
+        if (total > 0)
+        {
+            DeviceMemoryBarrier();
             if (WaveIsFirstLane())
             {
-                [loop] for (uint attempt = 0; attempt < TRAVERSE_CLAIM_TRIES && outcome == ROUND_LOST; ++attempt)
+                bool published = false;
+                [loop] for (uint spin = 0; spin < TRAVERSE_PUBLISH_SPINS && !published; ++spin)
                 {
-                    const uint read = queue.Load(4 * VS_NODE_READ);
-                    const uint reserved = min(queue.Load(4 * VS_NODE_WRITE), CAP_NODES);
-                    if (read >= reserved)
-                    {
-                        const bool failed = (queue.Load(4 * VS_OVERFLOW) & OVERFLOW_ITERATION_LIMIT) != 0;
-                        outcome = queue.Load(4 * VS_NODE_PENDING) == 0 || failed ? ROUND_DONE : ROUND_IDLE;
-                    }
-                    else
-                    {
-                        const uint n = min(lanes, reserved - read);
-                        uint seen;
-                        queue.InterlockedCompareExchange(4 * VS_NODE_READ, read, read + n, seen);
-                        if (seen == read) { start = read; count = n; outcome = ROUND_CLAIMED; }
-                    }
+                    uint seen;
+                    queue.InterlockedCompareExchange(4 * VS_NODE_COMMIT, first, first + total, seen);
+                    published = seen == first;
                 }
+                if (!published) queue.InterlockedOr(4 * VS_OVERFLOW, OVERFLOW_ITERATION_LIMIT | OVERFLOW_NODE_PUBLICATION);
             }
-            outcome = WaveReadLaneFirst(outcome);
-            if (outcome == ROUND_DONE) break;
-            if (outcome != ROUND_CLAIMED)
-            {
-                if (outcome == ROUND_IDLE && ++idle >= TRAVERSE_IDLE_ROUNDS)
-                {
-                    if (WaveIsFirstLane()) queue.InterlockedOr(4 * VS_OVERFLOW, OVERFLOW_ITERATION_LIMIT);
-                    break;
-                }
-                continue;
-            }
-            item = WaveReadLaneFirst(start) + lane;
-            pending = lane < WaveReadLaneFirst(count);
         }
-        bool ready = false;
-        if (pending) ready = (readyBits.Load((item >> 5) * 4) & (1u << (item & 31u))) != 0;
-        const uint processed = WaveActiveCountBits(ready);
-        if (processed == 0)
-        {
-            if (++idle >= TRAVERSE_IDLE_ROUNDS)
-            {
-                if (WaveIsFirstLane()) queue.InterlockedOr(4 * VS_OVERFLOW, OVERFLOW_ITERATION_LIMIT | OVERFLOW_NODE_PUBLICATION);
-                break;
-            }
-            continue;
-        }
-        idle = 0;
-        // Acquire payloads only after observing their publication bits.
-        DeviceMemoryBarrier();
-        NodeResult result = (NodeResult)0;
-        if (ready) result = testNode(items[item]);
-        pending = pending && !ready;
-        uint first, total;
-        const uint children = result.pushChildren ? result.node.count : 0u;
-        const uint childBase = nodeReserve(state, children, CAP_NODES, processed, first, total);
-        if (result.pushChildren)
-        {
-            for (uint child = 0; child < children; ++child)
-                if (childBase + child < CAP_NODES)
-                    items[childBase + child] = packItem(itemInstance(result.item), result.node.first + child, itemView(result.item));
-        }
-        nodePublishRange(childBase, children, false);
-        emitNodes(state, result, processed, groupBegin);
+        emitNodes(state, r, count, groupBegin);
     }
 }
 #endif

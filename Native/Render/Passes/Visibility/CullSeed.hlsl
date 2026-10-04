@@ -18,5 +18,4 @@ void main(uint i : SV_DispatchThreadID)
         items[base] = deferred[i];
     }
     nodePublish(state, first, total);
-    nodePublishRange(base, valid ? 1u : 0u, true);
 }

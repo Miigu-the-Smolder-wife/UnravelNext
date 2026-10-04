@@ -211,10 +211,6 @@ struct TriangleStream
     // Both vertices and velocities use this shared index. A topology ID must change if index contents change.
     BufferRef indices;
     uint32_t vertexCount = 0; // required for indexed streams; nonindexed streams store maxTriangles * 3 vertices
-    // Nonzero producer revision of world-space positions AND indices. It stays
-    // unchanged only when those bytes describe identical geometry. Paired with
-    // fixedTopologyId, this permits exact BLAS reuse; 0 always updates.
-    uint64_t geometryRevision = 0;
 };
 constexpr uint32_t kMaxTriangleStreams = 63;  // slot 63 is the view-grid ocean's (v1.73, COV_OCEAN_ID)  // vis id slot bits (CoverageTiles.hlsli COV_STREAM_ID)
 

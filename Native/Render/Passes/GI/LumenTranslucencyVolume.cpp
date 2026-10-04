@@ -362,10 +362,17 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
     // Compact at the cell boundary. HiZ visibility and the depth-constrained
     // origin are identical for all nine rays; compute them once and retain the
     // original cell identity for ray seeds and atlas addressing.
+    constexpr uint32_t descStride = rt::RayPipeline::kDispatchDescStride;
+    const uint32_t rayCapacity = gridX * gridY * gridZ * kTraceRes * kTraceRes;
+    const uint32_t traceChunks = (rayCapacity + kMaxRaysPerDispatch - 1) / kMaxRaysPerDispatch;
     const BufferRef cells = g.createBuffer({ "r.gi.ltv visible cells", 16 + (uint64_t)gridX * gridY * gridZ * 16, 0 });
+    const BufferRef traceArgs = g.createBuffer({ "r.gi.ltv trace arguments", (uint64_t)traceChunks * descStride, 0 });
+    ID3D12Resource* rayTemplate = pipeline.dispatchTemplate();
     g.addPass("r.gi.ltv.compact.begin", QueueType::Compute,
-              [&](PassBuilder& b) { b.use(cells, Use::UavCompute); },
+              [&](PassBuilder& b) { b.use(cells, Use::UavCompute); b.use(traceArgs, Use::CopyDst); },
               [=, &shaders](PassContext& c) {
+                  for (uint32_t chunk = 0; chunk < traceChunks; ++chunk)
+                      c.cmd->CopyBufferRegion(c.resource(traceArgs), (uint64_t)chunk * descStride, rayTemplate, 0, descStride);
                   const uint32_t k[4] = { c.uav(cells), 0, 0, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenTranslucencyVolumeCompact.MODE0"));
                   c.computeConstants(k, 4); c.cmd->Dispatch(1, 1, 1);
@@ -384,9 +391,15 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
                   c.bindFrameConstants(cb); c.computeConstants(k, 40);
                   c.cmd->Dispatch((gridX + 3) / 4, (gridY + 3) / 4, (gridZ + 3) / 4);
               });
-    const auto traceBatch = pipeline.prepareBatch(g, shaders, "r.gi.ltv.compact.args", cells,
-        gridX * gridY * gridZ, kMaxRaysPerDispatch, 19, kTraceRes * kTraceRes);
-    const BufferRef traceArgs = traceBatch.arguments;
+    g.addPass("r.gi.ltv.compact.args", QueueType::Compute,
+              [&](PassBuilder& b) { b.use(cells, Use::UavCompute); b.use(traceArgs, Use::UavCompute); },
+              [=, &shaders](PassContext& c) {
+                  uint32_t k[20] = { c.uav(cells), 0, 0, 0, c.uav(traceArgs), descStride,
+                      (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), traceChunks, kMaxRaysPerDispatch };
+                  k[16] = gridX, k[17] = gridY, k[18] = gridZWord;
+                  c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenTranslucencyVolumeCompact.MODE2"));
+                  c.computeConstants(k, 20); c.cmd->Dispatch(1, 1, 1);
+              });
     g.addPass("r.gi.ltv.trace", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(cells, Use::SrvGraphics);
@@ -425,8 +438,12 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
                   c.bindFrameConstants(cb);
                   // The same upper bound per dispatch, including partial cells
                   // at a chunk boundary; ltvCompactRay restores sample identity.
-                  c.computeConstants(k, 44);
-                  pipeline.dispatchBatch(c, traceBatch);
+                  for (uint32_t chunk = 0; chunk < traceChunks; ++chunk)
+                  {
+                      k[19] = chunk * kMaxRaysPerDispatch;
+                      c.computeConstants(k, 44);
+                      pipeline.dispatchIndirect(c.cmd, c.resource(traceArgs), (uint64_t)chunk * descStride);
+                  }
               });
     if (s.filter && s.filterSamples > 0)
     {

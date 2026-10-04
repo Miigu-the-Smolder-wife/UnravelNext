@@ -25,7 +25,7 @@ struct FluidSurfaceDesc
     uint32_t maxParticles = 0;
     uint32_t maxBlocks = 0;      // active block pool (0 = every block of the grid)
     uint32_t maxTriangles = 0;
-    bool smooth = true;          // the node field's low-pass before the level set (FluidSmoothBlock.hlsl); false only for the
+    bool smooth = true;          // the node field's low-pass before the level set (FluidSmooth.hlsl); false only for the
                                  // tests' comparison with the raw particle density
     bool refittableTail = false; // retire unused triangle slots as finite points: DXR-active degenerates, safe to reactivate on update
 };

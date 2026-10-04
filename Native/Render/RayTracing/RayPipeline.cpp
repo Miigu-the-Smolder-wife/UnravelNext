@@ -198,63 +198,6 @@ void RayPipeline::dispatchIndirect(ID3D12GraphicsCommandList7* cmd, ID3D12Resour
     cmd->ExecuteIndirect(m_indirect.Get(), 1, arguments, offset, nullptr, 0);
 }
 
-RayPipeline::IndirectBatch RayPipeline::prepareBatch(RenderGraph& graph, ShaderLibrary& shaders, std::string_view name,
-    BufferRef counter, uint32_t capacity, uint32_t threadsPerCommand, uint32_t firstThreadConstant,
-    uint32_t multiplier, uint32_t counterOffset, uint32_t rayGen, uint32_t rowWidth, uint32_t rootBits, uint32_t rootDivisor)
-{
-    constexpr uint32_t stride = (uint32_t)((4 + sizeof(D3D12_DISPATCH_RAYS_DESC) + 7) / 8 * 8);
-    const uint64_t threads = uint64_t(capacity) * multiplier;
-    if (!counter.valid() || !threadsPerCommand || threadsPerCommand > (1u << 30) || !multiplier || !rootDivisor ||
-        threads > UINT32_MAX || firstThreadConstant >= Device::kRootConstantCount || rayGen >= m_rayGen.size() ||
-        (counterOffset & 3u) != 0 || uint64_t(counterOffset) + 4 > graph.desc(counter).size ||
-        (rowWidth && (multiplier % rowWidth != 0 || threadsPerCommand % rowWidth != 0)))
-        fail("ray batch: invalid counter, dimensions or root constant");
-    const uint32_t commands = (uint32_t)((threads + threadsPerCommand - 1) / threadsPerCommand);
-    if (commands > 65535u * 64u) fail("ray batch: too many command records");
-    auto& signature = m_batchSignatures[firstThreadConstant];
-    if (!signature)
-    {
-        D3D12_INDIRECT_ARGUMENT_DESC entries[2]{};
-        entries[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-        entries[0].Constant.RootParameterIndex = 0;
-        entries[0].Constant.DestOffsetIn32BitValues = firstThreadConstant;
-        entries[0].Constant.Num32BitValuesToSet = 1;
-        entries[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_RAYS;
-        const D3D12_COMMAND_SIGNATURE_DESC desc{ stride, 2, entries, 0 };
-        check(m_device.d3d()->CreateCommandSignature(&desc, m_device.rootSignature(), IID_PPV_ARGS(&signature)), "ray batch command signature");
-    }
-    const BufferRef source = graph.importBuffer(m_template.Get(),
-        {"ray dispatch template", uint64_t(m_rayGen.size()) * kDispatchDescStride, 0});
-    const BufferRef arguments = graph.createBuffer({"ray command stream", 16 + uint64_t(commands) * stride, 0});
-    ID3D12PipelineState* prepare = shaders.compute("RayTracing/BatchDispatch");
-    graph.addPass(name, QueueType::Compute,
-        [=](PassBuilder& b) {
-            b.use(counter, Use::SrvCompute);
-            b.use(source, Use::SrvCompute);
-            b.use(arguments, Use::UavCompute);
-        },
-        [=](PassContext& c) {
-            const uint32_t k[16] = {c.srv(counter), c.uav(arguments), c.srv(source), capacity,
-                multiplier, threadsPerCommand, commands, counterOffset,
-                rayGen * kDispatchDescStride, stride, sizeof(D3D12_DISPATCH_RAYS_DESC), offsetof(D3D12_DISPATCH_RAYS_DESC, Width),
-                rowWidth, rootBits, rootDivisor, 0};
-            c.cmd->SetPipelineState(prepare);
-            c.computeConstants(k, 16);
-            c.cmd->Dispatch(std::max(1u, (commands + 63) / 64), 1, 1);
-        });
-    return {arguments, commands, signature.Get()};
-}
-
-void RayPipeline::dispatchBatch(PassContext& context, const IndirectBatch& batch) const
-{
-    if (!batch.capacity) return;
-    ID3D12Resource* arguments = context.resource(batch.arguments);
-    context.cmd->SetPipelineState1(m_state.Get());
-    context.cmd->ExecuteIndirect(batch.signature, batch.capacity, arguments, 16, arguments, 0);
-    // D3D12 resets the root constant written by this signature. Every subsequent
-    // consumer binds its own constants, just as the former chunk loop did.
-}
-
 namespace
 {
 std::mutex g_pipelineMutex;

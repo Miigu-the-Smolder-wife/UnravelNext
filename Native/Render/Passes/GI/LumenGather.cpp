@@ -571,16 +571,21 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     // threads that would return at once - dead slots, screen hits - are not launched.
     const bool compactTraces = L.compactTraces;
     const uint32_t traceCapacity = traceX * traceY, traceChunk = std::max(1u, raysPerDispatch / 3u);
+    const uint32_t traceChunks = (traceCapacity + traceChunk - 1) / traceChunk;
+    constexpr uint32_t kTraceDesc = rt::RayPipeline::kDispatchDescStride;
     BufferRef traceList, traceArgs;
-    rt::RayPipeline::IndirectBatch traceBatch;
     if (compactTraces)
     {
         traceList = g.createBuffer({ "lumen trace list", 16 + (uint64_t)traceCapacity * 4, 0 });
+        traceArgs = g.createBuffer({ "lumen trace dispatch", (uint64_t)traceChunks * kTraceDesc, 0 });
+        ID3D12Resource* descTemplate = pipeline.dispatchTemplate();
         g.addPass("r.gi.lg.compact.begin", QueueType::Compute,
                   [&](PassBuilder& b) {
+                      b.use(traceArgs, Use::CopyDst);
                       b.use(traceList, Use::UavCompute);
                   },
                   [=, &shaders](PassContext& c) {
+                      for (uint32_t chunk = 0; chunk < traceChunks; ++chunk) c.cmd->CopyBufferRegion(c.resource(traceArgs), (uint64_t)chunk * kTraceDesc, descTemplate, 0, kTraceDesc);
                       const uint32_t k[4] = { c.uav(traceList), 0, 0, 0 };
                       c.cmd->SetPipelineState(shaders.compute("RayTracing/CompactDispatch.MODE0"));
                       c.computeConstants(k, 4);
@@ -608,8 +613,18 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                       c.computeConstants(k, 48);
                       c.cmd->Dispatch(traceX / 8, traceY / 8, 1);
                   });
-        traceBatch = pipeline.prepareBatch(g, shaders, "r.gi.lg.compact.args", traceList, traceCapacity, traceChunk, 47);
-        traceArgs = traceBatch.arguments;
+        g.addPass("r.gi.lg.compact.args", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(traceList, Use::UavCompute);
+                      b.use(traceArgs, Use::UavCompute);
+                  },
+                  [=, &shaders](PassContext& c) {
+                      const uint32_t k[12] = { c.uav(traceList), traceCapacity, c.uav(traceArgs), (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width),
+                                               kTraceDesc, traceChunk, traceChunks, 1, kTraceDesc, 0, 0, 0 };
+                      c.cmd->SetPipelineState(shaders.compute("RayTracing/CompactDispatch.MODE1"));
+                      c.computeConstants(k, 12);
+                      c.cmd->Dispatch(1, 1, 1);
+                  });
     }
     g.addPass("r.gi.lg.trace", QueueType::Compute,
               [&](PassBuilder& b) {
@@ -686,10 +701,11 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                       pipeline.dispatch(c.cmd, 0, traceX, std::min(bandRows, traceY - row), 1);
                   }
                   // (compacted: the list in chunks, each an indirect dispatch of the entries it holds - none: nothing)
-                  if (compactTraces)
+                  for (uint32_t chunk = 0; chunk < traceChunks && compactTraces; ++chunk)
                   {
+                      k[47] = chunk * traceChunk;
                       c.computeConstants(k, 48);
-                      pipeline.dispatchBatch(c, traceBatch);
+                      pipeline.dispatchIndirect(c.cmd, c.resource(traceArgs), (uint64_t)chunk * kTraceDesc);
                   }
               });
     // Probe radiance stages after the composite: the optional probe-space temporal blend, then the spatial filter passes.

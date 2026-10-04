@@ -84,7 +84,6 @@ void cullInstance(RWByteAddressBuffer state, uint instance, uint view, bool vali
             if (base + k < CAP_NODES) items[base + k] = packItem(instance, roots.nodeOffset + k, view);
     }
     nodePublish(state, first, total);
-    nodePublishRange(base, visible ? roots.rootCount : 0u, true);
     const uint d = waveAppend(state, VS_DEFER_INSTANCES, defer ? 1 : 0, CAP_DEFERRED, OVERFLOW_DEFER_INSTANCES);
     if (defer && d < CAP_DEFERRED)
     {

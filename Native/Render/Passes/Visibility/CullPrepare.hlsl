@@ -57,11 +57,6 @@ void main()
     }
     if (CULL_PHASE == 1)
     {
-        if (NODE_WORK_QUEUE != 0)
-        {
-            RWByteAddressBuffer nodeDispatch = ResourceDescriptorHeap[NODE_DISPATCH_UAV];
-            nodeDispatch.Store3(0, uint3(0, 1, 1));
-        }
         state.Store(4 * VS_GROUP_BEGIN, min(state.Load(4 * VS_GROUP_WRITE), CAP_GROUPS));
         args.Store3(4 * VA_GROUPS, uint3(0, 0, 1));
         args.Store3(4 * VA_DEFERRED_CHUNKS, uint3((min(state.Load(4 * VS_DEFER_CHUNKS), CAP_DEFERRED) + 63) / 64, 1, 1));

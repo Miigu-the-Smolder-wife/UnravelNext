@@ -263,9 +263,9 @@ FluidSurfaceOutput FluidSurface::record(RenderGraph& g, const FluidSurfaceInput&
     const bool first = !m_recorded;
     enum Access : uint32_t { Table=1u, Scan=2u, Density=4u, Counters=8u, Info=16u, BlockTris=32u,
         Vertices=64u, Velocities=128u, Draw=256u, Dispatch=512u, Smooth=1024u, Particles=2048u, Surface=4096u };
-    // The level set reads the splat or the fully filtered field. The block
-    // kernel uses pass 1's density -> smooth bindings for all three axes;
-    // pass 4 selects its published result for count/emit.
+    // The node field the level set reads (P[4].z): the splat's, or its low-pass (FluidSmooth.hlsl: x density -> smooth,
+    // y smooth -> density, z density -> smooth). `pass` 1..3 is a smoothing axis pass (P[8].z source, P[8].w destination |
+    // axis << 30), 4 a pass after the smoothing.
     auto constants = [this, first, in, table, scan, density, smooth, counters, info, blockTris, vertices, velocities, cases, dispatch, draw, basinTable, basinCount](const PassContext& c, uint32_t access, uint32_t pass = 0) {
         Constants k{};
         auto uav = [&](BufferRef b, uint32_t bit) { return (access & bit) ? c.uav(b) : 0xFFFFFFFFu; };
@@ -280,10 +280,10 @@ FluidSurfaceOutput FluidSurface::record(RenderGraph& g, const FluidSurfaceInput&
         k.p[7][0] = in.velocityOffset; std::memcpy(&k.p[7][1], &in.velocityScale, 4); k.p[7][2] = in.previousSlotOffset; k.p[7][3] = (first ? 1u : 0u) | (m_desc.refittableTail ? 2u : 0u);
         k.p[8][0] = (access & Surface) && basinCount ? c.srv(basinTable) : 0xFFFFFFFFu; k.p[8][1] = basinCount;  // W3 seam: the basin table (FluidBasin.hlsl)
         std::memcpy(&k.p[9][0], in.frameVelocity, 12);           // the particles' frame velocity (m/s)
-        if (pass == 1)
+        if (pass >= 1 && pass <= 3)
         {
-            k.p[8][2] = c.uav(density);
-            k.p[8][3] = c.uav(smooth);
+            k.p[8][2] = c.uav(pass == 2 ? smooth : density);
+            k.p[8][3] = c.uav(pass == 2 ? density : smooth) | ((pass - 1) << 30);
         }
         c.computeConstants(&k, 48);
     };
@@ -341,7 +341,7 @@ FluidSurfaceOutput FluidSurface::record(RenderGraph& g, const FluidSurfaceInput&
     direct("fluid splat", "Passes/Water/FluidSplat", groups(in.count), Table | Density | Particles);
     const uint32_t field = m_desc.smooth ? 4 : 0;
     if (m_desc.smooth)
-        indirectPass("fluid smooth block", "Passes/Water/FluidSmoothBlock", 1, Table | Scan | Counters | Density | Smooth, 1);
+        for (uint32_t axis = 1; axis <= 3; ++axis) indirectPass("fluid smooth", "Passes/Water/FluidSmooth", 1, Table | Scan | Counters | Density | Smooth, axis);
     indirectPass("fluid count", "Passes/Water/FluidCount", 1, Table | Scan | Counters | Density | Info | BlockTris | Surface, field);
     direct("fluid block scan", "Passes/Water/FluidBlockScan", 1, Counters | BlockTris | Draw | Dispatch, field);
     indirectPass("fluid emit", "Passes/Water/FluidEmit", 1, Table | Scan | Counters | Density | Info | BlockTris | Vertices | Velocities | Surface, field);

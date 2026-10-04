@@ -117,10 +117,6 @@ private:
     render::ShaderLibrary& m_shaders;
     PoolDesc m_desc;
     uint64_t m_topologyId = 0;
-    uint64_t m_flatTopologyId = 0, m_flatRevision = 0;
-    bool m_calm = true, m_flatReady = false;
-    PoolPlacement m_flatPlacement;
-    render::ComPtr<ID3D12Resource> m_flatVertices, m_flatVelocities, m_flatIndices, m_flatDraw;
     render::ComPtr<ID3D12Resource> m_modes, m_input, m_accum, m_previous, m_twiddles, m_table, m_tableUpload, m_output, m_stateUpload;
     render::ComPtr<ID3D12Resource> m_indices;
     bool m_indicesReady = false;
@@ -130,9 +126,6 @@ private:
     std::vector<double> m_statsTime;
     uint64_t m_records = 0;
     PoolStats m_latestStats;
-    PoolStats m_flatStatsPending;
-    uint64_t m_flatStatsFence = 0;
-    render::QueueType m_flatStatsQueue = render::QueueType::Graphics;
     std::vector<render::ComPtr<ID3D12Resource>> m_sourceUpload;
     std::vector<uint8_t*> m_sourceMapped;
     std::vector<uint32_t> m_sourceSrv;

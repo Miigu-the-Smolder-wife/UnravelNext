@@ -279,10 +279,6 @@ RoundTables roundTables(const RoundPoolDesc& d)
 RoundPool::RoundPool(Device& device, ShaderLibrary& shaders, const RoundPoolDesc& desc) : m_device(device), m_shaders(shaders), m_desc(desc)
 {
     m_topologyId = allocateTriangleStreamTopologyId();
-    m_flatTopologyId = allocateTriangleStreamTopologyId();
-    m_flatVertices = makeBuffer(device, uint64_t(kTheta) * 3 * 32, D3D12_HEAP_TYPE_DEFAULT, L"calm round pool vertices");
-    m_flatVelocities = makeBuffer(device, uint64_t(kTheta) * 3 * 16, D3D12_HEAP_TYPE_DEFAULT, L"calm round pool velocities");
-    m_flatDraw = makeBuffer(device, 16, D3D12_HEAP_TYPE_DEFAULT, L"calm round pool draw");
     if (!desc.maxSources || !desc.framesInFlight) fail("round pool: invalid description");
     m_tables = roundTables(desc);
     const RoundTables& t = m_tables;
@@ -358,7 +354,7 @@ RoundPool::~RoundPool()
 {
     for (auto& u : m_sourceUpload) u->Unmap(0, nullptr);
     for (const ComPtr<ID3D12Resource>& r : { m_modes, m_increments, m_accum, m_spectrum, m_previous, m_twiddles, m_table, m_analysis, m_synthesis, m_slope, m_orders,
-                                              m_centre, m_output, m_tableUpload, m_flatVertices, m_flatVelocities, m_flatDraw })
+                                              m_centre, m_output, m_tableUpload })
         if (r) m_device.deferRelease(r);
     for (auto& u : m_sourceUpload) m_device.deferRelease(u);
     for (uint32_t srv : m_sourceSrv) m_device.descriptors().freeResource(srv);
@@ -443,8 +439,6 @@ RoundPoolOutput RoundPool::record(RenderGraph& g, uint64_t frame, const RoundPoo
     refs.centre = import(m_centre.Get(), "round pool centre");
     refs.field = g.importTexture(m_output.Get(), TextureDesc{ "round pool field", kTheta, kRings, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT }, D3D12_BARRIER_LAYOUT_COMMON);
     const Refs r = refs;
-    const bool calm = m_calm && sources.empty();
-    m_calm = calm;
     if (!m_initialised)
     {
         const RoundTables& t = m_tables;
@@ -474,7 +468,6 @@ RoundPoolOutput RoundPool::record(RenderGraph& g, uint64_t frame, const RoundPoo
                       pb.use(r.orders, Use::SrvCompute);
                       pb.use(r.field, Use::UavCompute);
                       pb.keep();
-                      pb.onSubmitted([this](Queue&, uint64_t) { m_initialised = true; });
                   },
                   [=](PassContext& c) {
                       uint32_t k[20] = { c.uav(r.modes), 0, 0, c.uav(r.accum), 0, c.uav(r.previous), 0, c.srv(r.orders), 0, 0, 0, 0, 0, 0, 0, 0, c.uav(r.field), c.uav(r.centre), 0, 0 };
@@ -483,40 +476,32 @@ RoundPoolOutput RoundPool::record(RenderGraph& g, uint64_t frame, const RoundPoo
                       c.computeConstants(k, 20);
                       c.cmd->Dispatch(groups, 1, 1);
                   });
+        m_initialised = true;
     }
     const double area = kPi * double(m_desc.radius) * m_desc.radius;
     double gap = m_started ? time - m_time : 0.0;
-    if (!calm && gap > double(frameDt) * (1 + 1e-6) + 1e-9)
+    if (gap > double(frameDt) * (1 + 1e-6) + 1e-9)
     {
         evolve(g, refs, float(gap - double(frameDt)), 0, 0, 0.0f);
         evolve(g, refs, float(frameDt), m_sourceSrv[slot], uint32_t(sources.size()), float(volume / area));
     }
-    else if (!calm) evolve(g, refs, float(gap), m_sourceSrv[slot], uint32_t(sources.size()), float(volume / area));
+    else evolve(g, refs, float(gap), m_sourceSrv[slot], uint32_t(sources.size()), float(volume / area));
     m_time = time;
     m_started = true;
 
-    const BufferRef vertices = calm ? import(m_flatVertices.Get(), "calm round pool vertices") : g.createBuffer({ "round pool surface vertices", kVertices * 32, 0 });
-    const BufferRef velocities = calm ? import(m_flatVelocities.Get(), "calm round pool velocities") : g.createBuffer({ "round pool surface velocities", kVertices * 16, 0 });
-    const BufferRef draw = calm ? import(m_flatDraw.Get(), "calm round pool draw") : g.createBuffer({ "round pool surface draw", 16, 0 });
+    const BufferRef vertices = g.createBuffer({ "round pool surface vertices", kVertices * 32, 0 }), velocities = g.createBuffer({ "round pool surface velocities", kVertices * 16, 0 }),
+                    draw = g.createBuffer({ "round pool surface draw", 16, 0 });
     const float centreXZ[2] = { float(placement.centre[0]), float(placement.centre[2]) }, level = float(placement.centre[1]), invDt = frameDt > 0 ? 1.0f / frameDt : 0.0f;
     const float axis[4] = { float(c), float(-s), float(s), float(c) };  // ax = (cos, -sin), az = (sin, cos) in world (x, z)
     const float radius = m_desc.radius;
-    const bool flatChanged = !m_flatReady || placement.yaw != m_flatPlacement.yaw ||
-        placement.centre[0] != m_flatPlacement.centre[0] || placement.centre[1] != m_flatPlacement.centre[1] ||
-        placement.centre[2] != m_flatPlacement.centre[2];
-    const uint64_t flatRevision = m_flatRevision + (flatChanged ? 1 : 0);
-    ID3D12PipelineState* mesh = !calm || flatChanged ? m_shaders.compute(calm ? "Passes/Water/RoundFlatMesh" : "Passes/Water/RoundMesh") : nullptr;
-    if (!calm || flatChanged)
+    ID3D12PipelineState* mesh = m_shaders.compute("Passes/Water/RoundMesh");
     g.addPass("round surface", QueueType::Graphics,
               [&](PassBuilder& pb) {
-                  if (!calm) { pb.use(r.field, Use::SrvCompute); pb.use(r.previous, Use::SrvCompute); pb.use(r.centre, Use::SrvCompute); }
-                  else pb.onSubmitted([this, placement, flatRevision](Queue&, uint64_t) {
-                      m_flatReady = true; m_flatPlacement = placement; m_flatRevision = flatRevision;
-                  });
+                  pb.use(r.field, Use::SrvCompute); pb.use(r.previous, Use::SrvCompute); pb.use(r.centre, Use::SrvCompute);
                   pb.use(vertices, Use::UavCompute); pb.use(velocities, Use::UavCompute); pb.use(draw, Use::UavCompute);
               },
               [=](PassContext& c2) {
-                  uint32_t k[16] = { calm ? 0u : c2.srv(r.field), calm ? 0u : c2.srv(r.previous), c2.uav(vertices), c2.uav(velocities), c2.uav(draw), 0, 0, calm ? 0u : c2.srv(r.centre), 0, 0, 0, 0 };
+                  uint32_t k[16] = { c2.srv(r.field), c2.srv(r.previous), c2.uav(vertices), c2.uav(velocities), c2.uav(draw), 0, 0, c2.srv(r.centre), 0, 0, 0, 0 };
                   std::memcpy(&k[5], &invDt, 4);
                   std::memcpy(&k[6], &level, 4);
                   std::memcpy(&k[8], centreXZ, 8);
@@ -524,8 +509,7 @@ RoundPoolOutput RoundPool::record(RenderGraph& g, uint64_t frame, const RoundPoo
                   std::memcpy(&k[12], axis, 16);
                   c2.cmd->SetPipelineState(mesh);
                   c2.computeConstants(k, 16);
-                  if (calm) c2.cmd->Dispatch((kTheta * 3 + 63) / 64, 1, 1);
-                  else c2.cmd->Dispatch(kTheta / 8, (kRings - 1 + 7) / 8, 1);
+                  c2.cmd->Dispatch(kTheta / 8, (kRings - 1 + 7) / 8, 1);
               });
     RoundPoolOutput out;
     out.field = refs.field;
@@ -534,10 +518,9 @@ RoundPoolOutput RoundPool::record(RenderGraph& g, uint64_t frame, const RoundPoo
     st.vertices = vertices;
     st.velocities = velocities;
     st.drawArgs = draw;
-    st.maxTriangles = calm ? kTheta : uint32_t(kTriangles);
+    st.maxTriangles = uint32_t(kTriangles);
     st.layer = 1;
-    st.fixedTopologyId = calm ? m_flatTopologyId : m_topologyId;
-    st.geometryRevision = calm ? flatRevision : 0;
+    st.fixedTopologyId = m_topologyId; // RoundMesh's fixed fan and ring quads are always active
     st.knownTriangleCount = st.maxTriangles;
     const double vertical = m_desc.depth > 0 ? m_desc.depth : 1.0;
     st.boundsMin = { float(placement.centre[0] - radius), float(placement.centre[1] - vertical), float(placement.centre[2] - radius) };
