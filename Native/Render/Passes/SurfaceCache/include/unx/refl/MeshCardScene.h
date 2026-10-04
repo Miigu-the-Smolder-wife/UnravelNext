@@ -214,6 +214,7 @@ private:
         bool live = false;                    // the slot holds a card of an instance
         float distance = 0;                   // from the nearest view origin, at the last update
         bool visible = false;
+        bool projectedVisible = false;        // requested visibility, independent of current atlas allocation
         uint8_t desiredLockedResLevel = 0, desiredLockedResLevelOnLastAlloc = 0;
         uint8_t minAllocatedResLevel = 0xFF, maxAllocatedResLevel = 0;
         MipMap mips[mc::kResLevels];
@@ -228,6 +229,7 @@ private:
         bool mostlyTwoSided = false;
         uint32_t lightingChannels = 1;
         bool emissiveLightSource = false;
+        bool projectionDirty = true;
     };
     struct PageEntry  // FLumenPageTableEntry
     {
@@ -304,6 +306,8 @@ private:
 
     McSettings m_settings;
     uint32_t m_frame = 0;
+    bool m_projectionValid = false;
+    std::vector<float3> m_projectionOrigins;
     uint32_t m_captureAtlasPages = 4;
     std::vector<MeshCardsEntry> m_meshCards;
     std::vector<Card> m_cards;

@@ -109,7 +109,8 @@ struct RcState
 {
     Device* device = nullptr;
     Settings settings{};
-    ComPtr<ID3D12Resource> indirection, atlas, depth, slots, counters, freeList, ring, irradiance, hitMarks;
+    ComPtr<ID3D12Resource> indirection, atlas, depth, slots, counters, freeList, ring, irradiance, hitMarks, irradianceWeights;
+    bool irradianceWeightsReady = false;
     ComPtr<ID3D12CommandSignature> dispatchSignature;
     uint8_t* ringMapped = nullptr;
     uint32_t ringSrv[kRing] = {};
@@ -126,10 +127,12 @@ struct RcState
     {
         if (!device) return;
         for (ComPtr<ID3D12Resource>* r : { std::addressof(indirection), std::addressof(atlas), std::addressof(depth), std::addressof(slots), std::addressof(counters),
-                                           std::addressof(freeList), std::addressof(ring), std::addressof(irradiance), std::addressof(hitMarks) })
+                                           std::addressof(freeList), std::addressof(ring), std::addressof(irradiance), std::addressof(hitMarks), std::addressof(irradianceWeights) })
             if (*r) device->deferRelease(*r);
         irradiance.Reset();
         hitMarks.Reset();
+        irradianceWeights.Reset();
+        irradianceWeightsReady = false;
         if (created)
         {
             DescriptorHeaps* h = &device->descriptors();
@@ -185,6 +188,7 @@ struct RcState
             texture(irradiance, D3D12_RESOURCE_DIMENSION_TEXTURE2D, s.atlasProbes * kIrradianceBordered, s.atlasProbes * kIrradianceBordered, 1, DXGI_FORMAT_R16G16B16A16_FLOAT,
                     L"R rc irradiance atlas");
             buffer(hitMarks, kHitMarkBytes, false, L"R rc hit marks");
+            buffer(irradianceWeights, uint64_t(s.probeResolution) * s.probeResolution * 36 * 4, false, L"R rc angular quadrature");
         }
         D3D12_RANGE none{ 0, 0 };
         check(ring->Map(0, &none, reinterpret_cast<void**>(&ringMapped)), "map R rc parameters ring");
@@ -525,7 +529,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                       c.cmd->ExecuteIndirect(signature, 1, c.resource(filterArgs), (uint64_t)chunk * LRC_COMPUTE_ARGS_STRIDE + LRC_FILTER_ARGS_OFFSET, nullptr, 0);
                   }
               });
-    g.addPass("r.gi.rc.store", QueueType::Compute,
+    if (!frame.irradiance.valid()) g.addPass("r.gi.rc.store", QueueType::Compute,
               [&](PassBuilder& b) {
                   for (BufferRef r : { counters, traces }) b.use(r, Use::SrvCompute);
                   b.use(filtered, Use::SrvCompute);
@@ -546,25 +550,41 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
               });
     if (frame.irradiance.valid())
     {
-        // The traced probes' irradiance maps, from the radiance the store left in the atlas.
-        // Dedicated arguments launch one group per probe; the store's atlas-sized
-        // XY grid would launch 25 groups at resolution 32, of which 24 are idle.
         const TextureRef irradiance = frame.irradiance;
-        g.addPass("r.gi.rc.irradiance", QueueType::Compute,
+        const uint32_t weightCount = s.probeResolution * s.probeResolution * 36;
+        const BufferRef weights = g.importBuffer(st.irradianceWeights.Get(), {"r.gi.rc angular weights", uint64_t(weightCount) * 4, 0});
+        if (!st.irradianceWeightsReady)
+        {
+            ID3D12PipelineState* prepareWeights = shaders.compute("Passes/GI/LumenIrradianceWeights");
+            g.addPass("r.gi.rc.angular.weights", QueueType::Compute,
+                [&](PassBuilder& b) {
+                    b.use(weights, Use::UavCompute);
+                    b.onSubmitted([&st](Queue&, uint64_t) { st.irradianceWeightsReady = true; });
+                },
+                [=](PassContext& c) {
+                    const uint32_t k[4] = {c.uav(weights), s.probeResolution, 0, 0};
+                    c.cmd->SetPipelineState(prepareWeights);
+                    c.computeConstants(k, 4);
+                    c.cmd->Dispatch((weightCount + 63) / 64, 1, 1);
+                });
+        }
+        g.addPass("r.gi.rc.store.irradiance", QueueType::Compute,
                   [&](PassBuilder& b) {
                       for (BufferRef r : { counters, traces }) b.use(r, Use::SrvCompute);
-                      b.use(atlas, Use::SrvCompute);
+                      b.use(filtered, Use::SrvCompute);
+                      b.use(weights, Use::SrvCompute);
+                      b.use(atlas, Use::UavCompute);
                       b.use(irradiance, Use::UavCompute);
                       b.use(filterArgs, Use::IndirectArgs);
                       b.keep();
                   },
                   [=, &shaders](PassContext& c) {
-                      uint32_t k[8] = { paramsSrv, c.srv(counters), c.srv(traces), c.srv(atlas), c.uav(irradiance), 0, 0, 0 };
-                      c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenRadianceCacheIrradiance"));
+                      uint32_t k[8] = { paramsSrv, c.srv(counters), c.srv(traces), c.srv(filtered), c.uav(atlas), c.uav(irradiance), c.srv(weights), 0 };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenRadianceCacheStore"));
                       c.bindFrameConstants(cb);
                       for (uint32_t chunk = 0; chunk < chunks; ++chunk)
                       {
-                          k[5] = chunk * computeProbesPerDispatch;  // P[1].y: the dispatch's first trace record
+                          k[7] = chunk * computeProbesPerDispatch;
                           c.computeConstants(k, 8);
                           c.cmd->ExecuteIndirect(signature, 1, c.resource(filterArgs), (uint64_t)chunk * LRC_COMPUTE_ARGS_STRIDE + LRC_IRRADIANCE_ARGS_OFFSET, nullptr, 0);
                       }

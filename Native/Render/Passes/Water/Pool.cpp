@@ -66,6 +66,11 @@ void axes(float yaw, double ax[2], double az[2])
 Pool::Pool(Device& device, ShaderLibrary& shaders, const PoolDesc& desc) : m_device(device), m_shaders(shaders), m_desc(desc)
 {
     m_topologyId = allocateTriangleStreamTopologyId();
+    m_flatTopologyId = allocateTriangleStreamTopologyId();
+    m_flatVertices = makeBuffer(device, 4 * 32, D3D12_HEAP_TYPE_DEFAULT, L"calm pool vertices");
+    m_flatVelocities = makeBuffer(device, 4 * 16, D3D12_HEAP_TYPE_DEFAULT, L"calm pool velocities");
+    m_flatIndices = makeBuffer(device, 6 * 4, D3D12_HEAP_TYPE_DEFAULT, L"calm pool indices");
+    m_flatDraw = makeBuffer(device, 16, D3D12_HEAP_TYPE_DEFAULT, L"calm pool draw");
     m_indices = makeBuffer(device, kVertices * 4, D3D12_HEAP_TYPE_DEFAULT, L"pool grid indices");
     if (!(desc.sizeX > 0) || !(desc.sizeZ > 0) || !(desc.depth >= 0) || !(desc.gravity > 0) || !(desc.tensionOverDensity >= 0) || !(desc.viscosity >= 0) || !(desc.surfaceFilm == 0 || desc.surfaceFilm == 1) ||
         !desc.maxSources || !desc.framesInFlight)
@@ -122,7 +127,8 @@ Pool::Pool(Device& device, ShaderLibrary& shaders, const PoolDesc& desc) : m_dev
 Pool::~Pool()
 {
     for (auto& u : m_sourceUpload) u->Unmap(0, nullptr);
-    for (const ComPtr<ID3D12Resource>& r : { m_modes, m_input, m_accum, m_previous, m_twiddles, m_table, m_tableUpload, m_output, m_stateUpload, m_stats, m_indices })
+    for (const ComPtr<ID3D12Resource>& r : { m_modes, m_input, m_accum, m_previous, m_twiddles, m_table, m_tableUpload, m_output, m_stateUpload, m_stats, m_indices,
+                                          m_flatVertices, m_flatVelocities, m_flatIndices, m_flatDraw })
         if (r) m_device.deferRelease(r);
     for (auto& u : m_sourceUpload) m_device.deferRelease(u);
     for (auto& u : m_statsReadback) m_device.deferRelease(u);
@@ -171,6 +177,7 @@ bool Pool::contains(const PoolDesc& desc, const PoolPlacement& placement, double
 void Pool::setState(const std::vector<float>& etaPhi)
 {
     if (etaPhi.size() != kSamples * 2) fail("pool: a state has %llu floats, expected %llu", (unsigned long long)etaPhi.size(), (unsigned long long)(kSamples * 2));
+    m_calm = false; // authored data always takes the full field path
     if (m_stateUpload) m_device.deferRelease(m_stateUpload);
     m_stateUpload = makeBuffer(m_device, kSamples * 8, D3D12_HEAP_TYPE_UPLOAD, L"pool state upload");
     void* mapped = nullptr;
@@ -233,6 +240,11 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
     if (!(frameDt >= 0)) fail("pool: negative frame time");
     if (sources.size() > m_desc.maxSources) fail("pool: %zu sources exceed the capacity %u", sources.size(), m_desc.maxSources);
     if (m_started && !(time >= m_time)) fail("pool: time went back (%.9g after %.9g)", time, m_time);
+    if (m_flatStatsFence && m_device.queue(m_flatStatsQueue).completed() >= m_flatStatsFence)
+    {
+        m_latestStats = m_flatStatsPending;
+        m_flatStatsFence = 0;
+    }
     const uint32_t slot = uint32_t(frame % m_desc.framesInFlight);
     uint8_t* mapped = m_sourceMapped[slot];
     for (size_t i = 0; i < sources.size(); ++i)
@@ -274,6 +286,7 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
                   [&](PassBuilder& pb) {
                       pb.use(accum, Use::UavCompute); pb.use(modes, Use::UavCompute); pb.use(previous, Use::UavCompute); pb.use(field, Use::UavCompute);
                       pb.keep();
+                      pb.onSubmitted([this](Queue&, uint64_t) { m_initialised = true; });
                   },
                   [=](PassContext& c) {
                       const uint32_t k[8] = { c.uav(modes), 0, c.uav(field), c.uav(accum), 0, c.uav(previous), 0, 0 };
@@ -281,9 +294,10 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
                       c.computeConstants(k, 8);
                       c.cmd->Dispatch(uint32_t((kSamples + 255) / 256), 1, 1);
                   });
-        m_initialised = true;
     }
     const bool replace = m_stateDirty;  // setState: the first evolution replaces the state by the uploaded field
+    const bool calm = m_calm && sources.empty() && !replace;
+    m_calm = calm;
     if (m_stateDirty)
     {
         ID3D12Resource* source = m_stateUpload.Get();
@@ -293,7 +307,7 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
     }
     // The interval since the last evolution: beyond one frame (the basin was not recorded), first to time - frameDt.
     double gap = m_started ? time - m_time : 0.0;
-    if (gap > double(frameDt) * (1 + 1e-6) + 1e-9)
+    if (!calm && gap > double(frameDt) * (1 + 1e-6) + 1e-9)
     {
         evolve(g, refs, float(gap - double(frameDt)), 0, 0, 0.0f, replace);
         gap = frameDt;
@@ -301,7 +315,7 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
         for (const PoolSource& s : sources) volume += s.volume;
         evolve(g, refs, float(gap), m_sourceSrv[slot], uint32_t(sources.size()), float(volume / (double(m_desc.sizeX) * m_desc.sizeZ)), false);
     }
-    else
+    else if (!calm)
     {
         double volume = 0;
         for (const PoolSource& s : sources) volume += s.volume;
@@ -314,6 +328,7 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
     // eta, then one group reduces the rows in order (mean, RMS about the mean, max |eta - mean|), copied to this record's
     // readback slot. Read back: the slot written framesInFlight records ago (the host waited for that frame; a record
     // is at most one per frame).
+    if (!calm)
     {
         const BufferRef stats = import(m_stats.Get(), "pool statistics");
         ID3D12PipelineState* rows = m_shaders.compute("Passes/Water/PoolStats.MODE0");
@@ -358,16 +373,17 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
     }
 
     // The surface's triangle stream: frame buffers (the graph's transient memory; only the drawn basins hold any).
-    const BufferRef indices = import(m_indices.Get(), "pool grid indices");
-    if (!m_indicesReady)
+    const BufferRef indices = import(calm ? m_flatIndices.Get() : m_indices.Get(), "pool indices");
+    if (!calm && !m_indicesReady)
     {
         ID3D12PipelineState* grid = m_shaders.compute("Passes/Water/PoolIndices");
         g.addPass("pool grid indices", QueueType::Graphics,
                   [&](PassBuilder& pb) { pb.use(indices, Use::UavCompute); pb.onSubmitted([this](Queue&, uint64_t) { m_indicesReady = true; }); },
                   [=](PassContext& c) { const uint32_t k[4] = {c.uav(indices), 0, 0, 0}; c.computeConstants(k, 4); c.cmd->SetPipelineState(grid); c.cmd->Dispatch(uint32_t((kVertices + 255) / 256), 1, 1); });
     }
-    const BufferRef vertices = g.createBuffer({ "pool surface vertices", kSamples * 32, 0 }), velocities = g.createBuffer({ "pool surface velocities", kSamples * 16, 0 }),
-                    draw = g.createBuffer({ "pool surface draw", 16, 0 });
+    const BufferRef vertices = calm ? import(m_flatVertices.Get(), "calm pool vertices") : g.createBuffer({ "pool surface vertices", kSamples * 32, 0 });
+    const BufferRef velocities = calm ? import(m_flatVelocities.Get(), "calm pool velocities") : g.createBuffer({ "pool surface velocities", kSamples * 16, 0 });
+    const BufferRef draw = calm ? import(m_flatDraw.Get(), "calm pool draw") : g.createBuffer({ "pool surface draw", 16, 0 });
     double ax[2], az[2];
     axes(placement.yaw, ax, az);
     const float hx = m_desc.sizeX / kCells, hz = m_desc.sizeZ / kCells;
@@ -375,14 +391,28 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
                               float(placement.centre[2] - 0.5 * m_desc.sizeX * ax[1] - 0.5 * m_desc.sizeZ * az[1]) };
     const float level = float(placement.centre[1]), invDt = frameDt > 0 ? 1.0f / frameDt : 0.0f;
     const float axis[4] = { float(ax[0]), float(ax[1]), float(az[0]), float(az[1]) };
-    ID3D12PipelineState* mesh = m_shaders.compute("Passes/Water/PoolMesh");
+    const bool flatChanged = !m_flatReady || placement.yaw != m_flatPlacement.yaw ||
+        placement.centre[0] != m_flatPlacement.centre[0] || placement.centre[1] != m_flatPlacement.centre[1] ||
+        placement.centre[2] != m_flatPlacement.centre[2];
+    const uint64_t flatRevision = m_flatRevision + (flatChanged ? 1 : 0);
+    ID3D12PipelineState* mesh = !calm || flatChanged ? m_shaders.compute(calm ? "Passes/Water/PoolFlatMesh" : "Passes/Water/PoolMesh") : nullptr;
+    if (!calm || flatChanged)
     g.addPass("pool surface", QueueType::Graphics,
               [&](PassBuilder& pb) {
-                  pb.use(field, Use::SrvCompute); pb.use(previous, Use::SrvCompute);
+                  if (!calm) { pb.use(field, Use::SrvCompute); pb.use(previous, Use::SrvCompute); }
+                  else
+                  {
+                      pb.use(indices, Use::UavCompute);
+                      pb.onSubmitted([this, placement, flatRevision, frame, time](Queue& queue, uint64_t fence) {
+                          m_flatReady = true; m_flatPlacement = placement; m_flatRevision = flatRevision;
+                          m_flatStatsPending = {true, frame, time, 0, 0, 0};
+                          m_flatStatsQueue = queue.type(); m_flatStatsFence = fence;
+                      });
+                  }
                   pb.use(vertices, Use::UavCompute); pb.use(velocities, Use::UavCompute); pb.use(draw, Use::UavCompute);
               },
               [=](PassContext& c) {
-                  uint32_t k[20] = { c.srv(field), c.srv(previous), c.uav(vertices), c.uav(velocities), c.uav(draw) };
+                  uint32_t k[20] = { calm ? 0u : c.srv(field), calm ? 0u : c.srv(previous), c.uav(vertices), c.uav(velocities), c.uav(draw) };
                   std::memcpy(&k[5], &invDt, 4);
                   std::memcpy(&k[6], &level, 4);
                   std::memcpy(&k[8], &origin[0], 4);
@@ -390,9 +420,10 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
                   std::memcpy(&k[11], &hx, 4);
                   std::memcpy(&k[12], axis, 16);
                   std::memcpy(&k[16], &hz, 4);
+                  k[17] = calm ? c.uav(indices) : 0u;
                   c.cmd->SetPipelineState(mesh);
                   c.computeConstants(k, 20);
-                  c.cmd->Dispatch(uint32_t((kSamples + 63) / 64), 1, 1);
+                  c.cmd->Dispatch(calm ? 1u : uint32_t((kSamples + 63) / 64), 1, 1);
               });
 
     PoolOutput out;
@@ -402,10 +433,11 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
     s.velocities = velocities;
     s.drawArgs = draw;
     s.indices = indices;
-    s.vertexCount = uint32_t(kSamples);
-    s.maxTriangles = uint32_t(kVertices / 3);
+    s.vertexCount = calm ? 4u : uint32_t(kSamples);
+    s.maxTriangles = calm ? 2u : uint32_t(kVertices / 3);
     s.layer = 1;
-    s.fixedTopologyId = m_topologyId; // PoolMesh writes every cell, without inactive triangles
+    s.fixedTopologyId = calm ? m_flatTopologyId : m_topologyId;
+    s.geometryRevision = calm ? flatRevision : 0;
     s.knownTriangleCount = s.maxTriangles;
     // Bounds: the rectangle's corners, the surface within +-d of the still level (the linear model's validity: the waves'
     // height stays well below the depth; deep water: 1 m).

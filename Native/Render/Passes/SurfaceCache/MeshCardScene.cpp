@@ -194,6 +194,8 @@ void MeshCardScene::clear()
         throw Error("mesh cards: the atlas size must be a multiple of " + std::to_string(mc::kPhysicalPage) + " and at most 32768 (" +
                     std::to_string(m_settings.atlasSize) + ")");
     m_frame = 0;
+    m_projectionValid = false;
+    m_projectionOrigins.clear();
     m_meshCards.clear();
     m_cards.clear();
     m_pages.clear();
@@ -434,6 +436,7 @@ void MeshCardScene::setTransform(uint32_t sceneInstance, const float3x4& objectT
     if (sceneInstance >= m_instanceMap.size() || m_instanceMap[sceneInstance] == mc::kNone) return;
     const uint32_t index = m_instanceMap[sceneInstance];
     MeshCardsEntry& e = m_meshCards[index];
+    e.projectionDirty = true;
     e.objectToWorld = objectToWorld;
     const float3 column0{ objectToWorld.m[0][0], objectToWorld.m[1][0], objectToWorld.m[2][0] };
     e.scale = length(column0);
@@ -702,15 +705,24 @@ void MeshCardScene::update(std::span<const float3> viewOrigins)
     uint32_t histogram[mc::kDistanceBuckets] = {};
     std::vector<uint32_t> hide;
 
+    const size_t views = std::min<size_t>(viewOrigins.size(), 8);
+    const bool viewChanged = !m_projectionValid || m_projectionOrigins.size() != views ||
+        (views && std::memcmp(m_projectionOrigins.data(), viewOrigins.data(), views * sizeof(float3)) != 0);
+    if (viewChanged)
+    {
+        m_projectionOrigins.assign(viewOrigins.begin(), viewOrigins.begin() + views);
+        m_projectionValid = true;
+    }
+
     // FLumenSurfaceCacheUpdateMeshCardsTask: every card's distance and the level it asks for
     for (uint32_t mcIndex = 0; mcIndex < m_meshCards.size(); ++mcIndex)
     {
-        const MeshCardsEntry& e = m_meshCards[mcIndex];
+        MeshCardsEntry& e = m_meshCards[mcIndex];
         if (e.cardCount == 0) continue;  // (a removed entry)
         const float3 translation{ e.objectToWorld.m[0][3], e.objectToWorld.m[1][3], e.objectToWorld.m[2][3] };
         float3 local[8];
-        const size_t views = std::min<size_t>(viewOrigins.size(), 8);
-        for (size_t v = 0; v < views; ++v)
+        const bool project = viewChanged || e.projectionDirty;
+        for (size_t v = 0; project && v < views; ++v)
         {
             const float3 r = viewOrigins[v] - translation;
             local[v] = { e.rotation[0][0] * r.x + e.rotation[1][0] * r.y + e.rotation[2][0] * r.z,
@@ -721,24 +733,30 @@ void MeshCardScene::update(std::span<const float3> viewOrigins)
         {
             const uint32_t cardIndex = e.firstCard + c;
             Card& card = m_cards[cardIndex];
-            float distance = 3.4e38f;
-            for (size_t v = 0; v < views; ++v)
+            float distance = card.distance;
+            bool visible = card.projectedVisible;
+            uint32_t resLevel = card.desiredLockedResLevel;
+            if (project)
             {
-                float sq = 0;
-                for (int a = 0; a < 3; ++a)
+                distance = 3.4e38f;
+                for (size_t v = 0; v < views; ++v)
                 {
-                    const float d = std::max(0.0f, std::fabs(comp(local[v], a) - comp(card.origin, a)) - comp(card.boxExtent, a));
-                    sq += d * d;
+                    float sq = 0;
+                    for (int a = 0; a < 3; ++a)
+                    {
+                        const float d = std::max(0.0f, std::fabs(comp(local[v], a) - comp(card.origin, a)) - comp(card.boxExtent, a));
+                        sq += d * d;
+                    }
+                    distance = std::min(distance, std::max(std::sqrt(sq), 1.0f));
                 }
-                distance = std::min(distance, std::max(std::sqrt(sq), 1.0f));
+                card.distance = distance;
+                const float maxExtent = std::max(card.extent.x, card.extent.y);
+                const float projected = std::min(m_settings.texelDensityScale * maxExtent / distance, m_settings.maxTexelDensity * maxExtent);
+                const uint32_t snapped = roundUpPow2(std::min((uint32_t)std::max(projected, 0.0f), m_settings.maxResolution));
+                visible = distance < m_settings.maxDistance && snapped >= (e.emissiveLightSource ? 1u : m_settings.minResolution);
+                resLevel = floorLog2(std::max(snapped, 1u << mc::kMinResLevel));
+                card.projectedVisible = visible;
             }
-            card.distance = distance;
-            const float maxExtent = std::max(card.extent.x, card.extent.y);
-            const float projected = std::min(m_settings.texelDensityScale * maxExtent / distance, m_settings.maxTexelDensity * maxExtent);
-            const uint32_t snapped = roundUpPow2(std::min((uint32_t)std::max(projected, 0.0f), m_settings.maxResolution));
-            // (an emissive light source: down to a resolution of 1 - the reference's MinCardResolution for it)
-            const bool visible = distance < m_settings.maxDistance && snapped >= (e.emissiveLightSource ? 1u : m_settings.minResolution);
-            const uint32_t resLevel = floorLog2(std::max(snapped, 1u << mc::kMinResLevel));
             if (!visible)
             {
                 if (card.visible) hide.push_back(cardIndex);
@@ -762,6 +780,7 @@ void MeshCardScene::update(std::span<const float3> viewOrigins)
             ++histogram[r.distanceBin];
             m_requests.push_back(r);
         }
+        e.projectionDirty = false;
     }
     m_stats.requests = (uint32_t)m_requests.size();
 

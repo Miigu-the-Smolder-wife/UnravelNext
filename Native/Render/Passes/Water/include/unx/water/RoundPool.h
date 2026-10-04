@@ -98,6 +98,10 @@ private:
     render::ShaderLibrary& m_shaders;
     RoundPoolDesc m_desc;
     uint64_t m_topologyId = 0;
+    uint64_t m_flatTopologyId = 0, m_flatRevision = 0;
+    bool m_calm = true, m_flatReady = false;
+    RoundPoolPlacement m_flatPlacement;
+    render::ComPtr<ID3D12Resource> m_flatVertices, m_flatVelocities, m_flatDraw;
     RoundTables m_tables;
     render::ComPtr<ID3D12Resource> m_modes, m_increments, m_accum, m_spectrum, m_previous, m_twiddles, m_table, m_analysis, m_synthesis, m_slope, m_orders,
         m_centre, m_output, m_tableUpload;

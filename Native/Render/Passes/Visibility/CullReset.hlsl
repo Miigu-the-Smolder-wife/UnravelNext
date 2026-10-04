@@ -12,6 +12,16 @@ void main(uint i : SV_DispatchThreadID)
 {
     RWByteAddressBuffer state = ResourceDescriptorHeap[STATE_UAV];
     RWByteAddressBuffer args = ResourceDescriptorHeap[ARGS_UAV];
+    if (NODE_WORK_QUEUE != 0 && i == 0)
+    {
+        RWByteAddressBuffer nodeDispatch = ResourceDescriptorHeap[NODE_DISPATCH_UAV];
+        nodeDispatch.Store3(0, uint3(0, 1, 1));
+    }
+    if (NODE_WORK_QUEUE != 0 && i < (CAP_NODES + 31u) / 32u)
+    {
+        RWByteAddressBuffer ready = ResourceDescriptorHeap[NODE_READY_UAV];
+        ready.Store(4 * i, 0);
+    }
     if (i < VS_WORDS) state.Store(4 * i, 0);
     if (i < VA_WORDS)
     {

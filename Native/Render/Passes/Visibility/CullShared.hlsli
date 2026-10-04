@@ -61,6 +61,32 @@
 #define SW_REQUEST_LIMIT_PX asfloat(P[8].y)
 #define PAGE_TABLE P[8].z
 #define PAGE_FEEDBACK P[8].w
+#define NODE_READY_UAV P[9].x
+#define NODE_DISPATCH_UAV P[9].y
+#define NODE_WORKERS P[9].z
+
+// Every producer publishes only the entries it has itself finished storing.
+// One bit per node replaces the serial, reservation-ordered commit cursor.
+// The run clears these bits once; phase two appends beyond phase one's range.
+void nodePublishRange(uint first, uint count, bool seed)
+{
+    if (NODE_WORK_QUEUE == 0 || count == 0 || first >= CAP_NODES) return;
+    const uint end = first + min(count, CAP_NODES - first);
+    DeviceMemoryBarrier();
+    globallycoherent RWByteAddressBuffer ready = ResourceDescriptorHeap[NODE_READY_UAV];
+    while (first < end)
+    {
+        const uint bit = first & 31u, bits = min(32u - bit, end - first);
+        const uint mask = bits == 32u ? 0xFFFFFFFFu : ((1u << bits) - 1u) << bit;
+        ready.InterlockedOr((first >> 5) * 4, mask);
+        first += bits;
+    }
+    if (seed)
+    {
+        RWByteAddressBuffer arguments = ResourceDescriptorHeap[NODE_DISPATCH_UAV];
+        arguments.InterlockedMax(0, NODE_WORKERS);
+    }
+}
 
 // Band modes of a cull run: which list a cluster of each band is drawn from.
 #define BAND_MODE_A 0u         // every band in the band A lists (raster service, secondary views)

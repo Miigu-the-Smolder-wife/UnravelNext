@@ -293,6 +293,7 @@ private:
         uint32_t triangles = 0;
         uint32_t vertices = 0;
         bool indexed = false;
+        uint64_t geometryRevision = 0;
     };
     StreamBuilt m_streamBuilt[64] = {}; // committed only after the owning command list was submitted
     std::vector<Stream> m_streamsNow;

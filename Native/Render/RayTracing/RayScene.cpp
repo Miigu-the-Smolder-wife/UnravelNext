@@ -2966,6 +2966,8 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
         bool update = false;
         BufferRef indices;
         uint32_t vertexCount = 0;
+        uint64_t geometryRevision = 0;
+        bool reuse = false;
     };
     std::vector<StreamBuild> builds;
     // FrameResources::triangleStreams is the list the producers append to (slot = index, at most kMaxTriangleStreams).
@@ -2978,7 +2980,7 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
         if (!vertices || fc.graph.desc(ts.vertices).size < uint64_t(vertices) * 32 ||
             (ts.indices.valid() && fc.graph.desc(ts.indices).size < uint64_t(ts.maxTriangles) * 12))
             fail("RT stream %u has an invalid vertex/index layout", k);
-        builds.push_back({ k, ts.vertices, ts.maxTriangles, 0, refitEnabled ? ts.fixedTopologyId : 0, false, ts.indices, vertices });
+        builds.push_back({ k, ts.vertices, ts.maxTriangles, 0, refitEnabled ? ts.fixedTopologyId : 0, false, ts.indices, vertices, ts.geometryRevision });
     }
     if (builds.empty())
     {
@@ -3035,6 +3037,8 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
         const StreamBuilt& old = m_streamBuilt[b.slot];
         b.update = b.topologyId && old.topologyId == b.topologyId && old.poolGeneration == poolGeneration &&
                    old.offset == b.offset && old.triangles == b.triangles && old.vertices == b.vertexCount && old.indexed == b.indices.valid();
+        b.reuse = b.update && b.geometryRevision && old.geometryRevision == b.geometryRevision;
+        if (b.reuse) continue;
         if (b.update) ++m_stats.streamRefits;
         else ++m_stats.streamBuilds;
     }
@@ -3059,11 +3063,12 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
     m_dynamicCountNow += (uint32_t)builds.size();
     RenderGraph& g = fc.graph;
     const BufferRef pool = g.importBuffer(m_streamPool.resource.Get(), { "RT stream BLAS pool", m_streamPool.bytes, 0 });
-    const BufferRef scratch = g.importBuffer(m_streamScratch.resource.Get(), { "RT stream BLAS scratch", m_streamScratch.bytes, 0 });
     m_frame.streamPool = pool;
+    if (std::all_of(builds.begin(), builds.end(), [](const StreamBuild& b) { return b.reuse; })) return;
+    const BufferRef scratch = g.importBuffer(m_streamScratch.resource.Get(), { "RT stream BLAS scratch", m_streamScratch.bytes, 0 });
     g.addPass("r.as.streams", QueueType::Compute,
               [&](PassBuilder& b) {
-                  for (const StreamBuild& s : builds) { b.use(s.vertices, Use::AccelerationStructureInput); if (s.indices.valid()) b.use(s.indices, Use::AccelerationStructureInput); }
+                  for (const StreamBuild& s : builds) if (!s.reuse) { b.use(s.vertices, Use::AccelerationStructureInput); if (s.indices.valid()) b.use(s.indices, Use::AccelerationStructureInput); }
                   b.use(pool, Use::AccelerationStructureWrite);
                   if (std::any_of(builds.begin(), builds.end(), [](const StreamBuild& s) { return s.update; }))
                       b.use(pool, Use::AccelerationStructureRead); // in-place refit's source and destination
@@ -3071,13 +3076,14 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
                   b.onSubmitted([this, builds, poolGeneration](Queue&, uint64_t) {
                       std::fill(std::begin(m_streamBuilt), std::end(m_streamBuilt), StreamBuilt{});
                       for (const StreamBuild& s : builds)
-                          m_streamBuilt[s.slot] = {s.topologyId, poolGeneration, s.offset, s.triangles, s.vertexCount, s.indices.valid()};
+                          m_streamBuilt[s.slot] = {s.topologyId, poolGeneration, s.offset, s.triangles, s.vertexCount, s.indices.valid(), s.geometryRevision};
                   });
               },
               [builds, pool, scratch, scratchStride](PassContext& c) {
                   const D3D12_GPU_VIRTUAL_ADDRESS poolAddress = c.resource(pool)->GetGPUVirtualAddress(), scratchAddress = c.resource(scratch)->GetGPUVirtualAddress();
                   for (size_t j = 0; j < builds.size(); ++j)
                   {
+                      if (builds[j].reuse) continue;
                       D3D12_RAYTRACING_GEOMETRY_DESC gd{};
                       gd.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
                       gd.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
