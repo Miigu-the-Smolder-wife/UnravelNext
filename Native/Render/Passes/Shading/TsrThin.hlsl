@@ -37,7 +37,11 @@
 #include "Passes/Shading/Tsr.hlsli"
 #include "Passes/Common/Frame.hlsli"
 
-#define TILE 16
+#include "Passes/Shading/TsrTiles.h"
+#ifndef TSR_TILE
+#define TSR_TILE UNX_TSR_THIN_TILE
+#endif
+#define TILE TSR_TILE
 #define BORDER 8
 #define SIDE (TILE + 2 * BORDER)
 #define CELLS (SIDE * SIDE)
@@ -187,7 +191,7 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
         const bool accept = thinRegion && notAbsoluteMatch && (own & CELL_SAME) != 0 && (own & CELL_ANIMATED) == 0;
         const float2 xh = unpack2(gXH[i]);
         const float updated = lerp(xh.y, xh.x, accept ? NEW_SAMPLE_WEIGHT : 1.0);
-        gXH[i] = pack2(xh.x, updated);
+        gXH[i] = (gXH[i] & 0xFFFFu) | (pack2(0, updated) & 0xFFFF0000u);
         // the kept luma line: a frame without the line drops it with the fade rate's probability
         const bool lumaLine = unpack2(gEW[i]).y > 0.5;
         bool keptLine = lumaLine || (gL[i] & 0x10000u) != 0;
@@ -202,29 +206,31 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     {
         const int2 c = int2(i % SIDE, i / SIDE);
         if (!inMargin(c, 4)) continue;
-        float lo = 1;
+        uint lo = 0xFFFFu;
         uint kept = 0;
         [unroll] for (int k = 0; k < 9; ++k)
         {
             const uint ni = cellIndex(c + int2(k % 3, k / 3) - 1);
-            lo = min(lo, unpack2(gXH[ni]).y);
+            lo = min(lo, gXH[ni] >> 16);
             kept |= gP[ni] & CELL_KEPT_LINE;
         }
-        gZ[i] = lo;
-        gAny[i] = kept;
+        // The next stage needs only whether the minimum is nonzero and a line bit.
+        // Both fit losslessly in one word; no second array or float decode is needed.
+        gAny[i] = lo | (kept != 0 ? 0x10000u : 0u);
     }
     GroupMemoryBarrierWithGroupSync();
     for (i = lane; i < CELLS; i += TILE * TILE)
     {
         const int2 c = int2(i % SIDE, i / SIDE);
         if (!inMargin(c, 5)) continue;
-        float lo = 1;
+        uint lo = 0xFFFFu;
         uint kept = 0;
         [unroll] for (int k = 0; k < 9; ++k)
         {
             const uint ni = cellIndex(c + int2(k % 3, k / 3) - 1);
-            lo = min(lo, gZ[ni]);
-            kept |= gAny[ni];
+            const uint packed = gAny[ni];
+            lo = min(lo, packed & 0xFFFFu);
+            kept |= packed >> 16;
         }
         // x exp(-20 x) (10 / 0.184) with x = the coverage's distance from a half + 0.02: 1 at x = 0.05
         const uint own = gP[i] | (kept != 0 ? CELL_NEAR_LINE : 0u);
@@ -232,7 +238,7 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
         const float2 xh = unpack2(gXH[i]);
         const float x = abs(xh.y - 0.5) + 0.02;
         const bool relax = (lo > 0 || xh.x > 0) && (own & (CELL_THIN_REGION | CELL_SAME | CELL_ANIMATED)) == (CELL_THIN_REGION | CELL_SAME);
-        gEW[i] = pack2(unpack2(gEW[i]).x, relax ? x * exp(-20.0 * x) * (10.0 / 0.184) : 0.0);
+        gEW[i] = (gEW[i] & 0xFFFFu) | (pack2(0, relax ? x * exp(-20.0 * x) * (10.0 / 0.184) : 0.0) & 0xFFFF0000u);
     }
     GroupMemoryBarrierWithGroupSync();
 

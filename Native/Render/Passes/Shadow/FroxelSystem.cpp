@@ -524,7 +524,7 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
     ID3D12PipelineState* pc = sh.compute("Passes/Atmosphere/FroxelLists.MODE0");
     ID3D12PipelineState* ps0 = sh.compute("Passes/Atmosphere/FroxelScan.MODE0");
     ID3D12PipelineState* ps1 = sh.compute("Passes/Atmosphere/FroxelScan.MODE1");
-    ID3D12PipelineState* pl = sh.compute("Passes/Atmosphere/FroxelLists.MODE1");
+    ID3D12PipelineState* pl = sh.compute(listFlags & 1u ? "Passes/Atmosphere/FroxelListsUnordered" : "Passes/Atmosphere/FroxelLists.MODE1");
     uint32_t nearBits, farBits;
     std::memcpy(&nearBits, &grid.nearM, 4);
     std::memcpy(&farBits, &grid.farM, 4);

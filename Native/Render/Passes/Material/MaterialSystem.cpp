@@ -13,11 +13,11 @@ namespace unx::render::material
 {
 namespace
 {
-// Resolve outputs of the views of the current frame, keyed by the view's frame-constant slot (unique per view and
-// frame). Shading of the same view finds them here.
+// Resolve outputs belong to one recording, then to a view's constant slot.
+// A retry can reuse both frame index and GPU address after discarding its graph.
 struct ViewTable
 {
-    uint64_t frame = UINT64_MAX;
+    RecordKey frame;
     std::vector<std::pair<D3D12_GPU_VIRTUAL_ADDRESS, ResolveOutputs>> views;
 };
 
@@ -291,9 +291,9 @@ void resolve(FramePassContext& fc, ViewResources& view)
                      });
 
     ViewTable& table = fc.state<ViewTable>("M.views");
-    if (table.frame != fc.frame.frameIndex)
+    if (table.frame != RecordKey::of(fc))
     {
-        table.frame = fc.frame.frameIndex;
+        table.frame = RecordKey::of(fc);
         table.views.clear();
     }
     table.views.push_back({ view.frameConstants, o });
@@ -302,7 +302,7 @@ void resolve(FramePassContext& fc, ViewResources& view)
 const ResolveOutputs& resolveOutputs(FramePassContext& fc, const ViewResources& view)
 {
     ViewTable& table = fc.state<ViewTable>("M.views");
-    if (table.frame == fc.frame.frameIndex)
+    if (table.frame == RecordKey::of(fc))
         for (const auto& [key, o] : table.views)
             if (key == view.frameConstants) return o;
     fail("M: no material resolve recorded for this view in frame %llu", (unsigned long long)fc.frame.frameIndex);

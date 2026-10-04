@@ -1,7 +1,7 @@
 // unx-kernel: cs_6_6 main
 // r.gi.rc.irradiance (LumenRadianceCache.hlsli, lumen.hit_indirect_radiance_cache): the irradiance map of every probe
 // traced this frame, from the probe's radiance as the store left it in the cache's atlas. One group of 8 x 8 threads per
-// traced probe (the pass runs on the store's dispatch arguments: of each probe's groups only the first works). The 36
+// traced probe (dedicated indirect arguments: X=Y=1, Z=traced probes in this chunk). The 36
 // interior texels each stand for a normal of the 6 x 6 equal-area map and sum the probe's radiance texels (at most
 // 64 x 64: lumen.radiance_cache_probe_resolution) over that normal's hemisphere with the cosine; the equal-area map gives
 // every radiance texel the same solid angle, so

@@ -36,10 +36,22 @@
 //          decrease (a short history: the layer's own change shows at once)
 // P[3] = { resurrection measure SRV (RGBA8, TsrResurrect.hlsl; UNX_NONE: no resurrection this frame), resurrected
 //          guide SRV (R10G10B10A2), 0, 0 }
+// TsrRejectFromPrefix shares Stage3–6 below and uses P[3].z for the packed
+// Stage0–2 prefix. Its group halo is five pixels; the reference/fallback keeps
+// the original seven-pixel halo. Packing and all filter arithmetic are shared.
 #include "Passes/Shading/Tsr.hlsli"
+#include "Passes/Shading/TsrRejectCodes.hlsli"
 
-#define TILE 16
-#define BORDER 7
+#include "Passes/Shading/TsrTiles.h"
+#ifndef TSR_TILE
+#define TSR_TILE UNX_TSR_REJECT_TILE
+#endif
+#define TILE TSR_TILE
+#ifndef TSR_REJECT_FROM_PREFIX
+#define TSR_REJECT_FROM_PREFIX 0
+#endif
+#define PREFIX_STAGES (2 * TSR_REJECT_FROM_PREFIX)
+#define BORDER (7 - PREFIX_STAGES)
 #define SIDE (TILE + 2 * BORDER)
 #define CELLS (SIDE * SIDE)
 
@@ -52,16 +64,6 @@ groupshared uint gF[CELLS];
 groupshared uint gG[CELLS];
 groupshared uint gAlias[TILE * TILE];
 
-uint pack(float3 c)
-{
-    const float3 s = sqrt(saturate(c));
-    return (uint)(s.r * 2047.0 + 0.5) | ((uint)(s.g * 2047.0 + 0.5) << 11) | ((uint)(s.b * 1023.0 + 0.5) << 22);
-}
-float3 unpack(uint v)
-{
-    const float3 s = float3(v & 2047u, (v >> 11) & 2047u, v >> 22) * float3(1.0 / 2047.0, 1.0 / 2047.0, 1.0 / 1023.0);
-    return s * s;
-}
 uint cellIndex(int2 c) { return (uint)(c.y * SIDE + c.x); }
 bool inMargin(int2 c, int margin) { return all(c >= margin) && all(c < SIDE - margin); }
 float min3(float3 v) { return min(v.x, min(v.y, v.z)); }
@@ -96,6 +98,21 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     Texture2D<float4> guide = ResourceDescriptorHeap[P[0].y];
     uint i;
 
+#if TSR_REJECT_FROM_PREFIX
+    // P[3].z: production TsrRejectPrefix output {clamped input, clamped
+    // guide, original input, alias}. Its five pixels of real overscan and
+    // two-pixel input halo retain the original seven-pixel support.
+    Texture2D<uint4> prepared = ResourceDescriptorHeap[P[3].z];
+    for (i = lane; i < CELLS; i += TILE * TILE)
+    {
+        const int2 c = int2(i % SIDE, i / SIDE);
+        const uint4 value = prepared.Load(int3(clamp(origin + c + 5, 0, size + 9), 0));
+        gE[i] = value.x; gF[i] = value.y; gA[i] = value.z;
+        if (all(c >= BORDER) && all(c < BORDER + TILE))
+            gAlias[(c.y - BORDER) * TILE + c.x - BORDER] = value.w;
+    }
+    GroupMemoryBarrierWithGroupSync();
+#else
     // 0: the region's input and guide in the measurement space
     for (i = lane; i < CELLS; i += TILE * TILE)
     {
@@ -112,17 +129,18 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     {
         const int2 c = int2(i % SIDE, i / SIDE);
         if (!inMargin(c, 1)) continue;
-        float3 inputMin = 1, inputMax = 0, guideMin = 1, guideMax = 0;
+        uint3 inputLo = uint3(2047, 2047, 1023), inputHi = 0, guideLo = inputLo, guideHi = 0;
         FOR_3X3(c, {
-            const float3 a = unpack(gA[ni]);
-            const float3 b = unpack(gB[ni]);
-            inputMin = min(inputMin, a);
-            inputMax = max(inputMax, a);
-            guideMin = min(guideMin, b);
-            guideMax = max(guideMax, b);
+            const uint3 a = colourCodes(gA[ni]);
+            const uint3 b = colourCodes(gB[ni]);
+            inputLo = min(inputLo, a);
+            inputHi = max(inputHi, a);
+            guideLo = min(guideLo, b);
+            guideHi = max(guideHi, b);
         })
-        gC[i] = pack(clamp(unpack(gB[i]), inputMin, inputMax));
-        gD[i] = pack(clamp(unpack(gA[i]), guideMin, guideMax));
+        gC[i] = packCodes(clamp(colourCodes(gB[i]), inputLo, inputHi));
+        gD[i] = packCodes(clamp(colourCodes(gA[i]), guideLo, guideHi));
+        const float3 inputMin = unpack(packCodes(inputLo)), inputMax = unpack(packCodes(inputHi));
         if (all(c >= BORDER) && all(c < BORDER + TILE))
             gAlias[(c.y - BORDER) * TILE + (c.x - BORDER)] = dot(inputMax - inputMin, float3(0.299, 0.587, 0.114)) > TSR_AA_MIN_LUMINANCE ? 1u : 0u;
     }
@@ -133,25 +151,26 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     {
         const int2 c = int2(i % SIDE, i / SIDE);
         if (!inMargin(c, 2)) continue;
-        float3 aMin = 1, aMax = 0, bMin = 1, bMax = 0;
+        uint3 aMin = uint3(2047, 2047, 1023), aMax = 0, bMin = aMin, bMax = 0;
         FOR_3X3(c, {
-            const float3 a = unpack(gC[ni]);
-            const float3 b = unpack(gD[ni]);
+            const uint3 a = colourCodes(gC[ni]);
+            const uint3 b = colourCodes(gD[ni]);
             aMin = min(aMin, a);
             aMax = max(aMax, a);
             bMin = min(bMin, b);
             bMax = max(bMax, b);
         })
-        gE[i] = pack(clamp(unpack(gA[i]), aMin, aMax));  // C: the clamped input
-        gF[i] = pack(clamp(unpack(gB[i]), bMin, bMax));  // G: the clamped guide
+        gE[i] = packCodes(clamp(colourCodes(gA[i]), aMin, aMax));  // C: the clamped input
+        gF[i] = packCodes(clamp(colourCodes(gB[i]), bMin, bMax));  // G: the clamped guide
     }
     GroupMemoryBarrierWithGroupSync();
 
+#endif
     // 3: the filtered signals, the input's variation and range
     for (i = lane; i < CELLS; i += TILE * TILE)
     {
         const int2 c = int2(i % SIDE, i / SIDE);
-        if (!inMargin(c, 3)) continue;
+        if (!inMargin(c, 3 - PREFIX_STAGES)) continue;
         float3 filteredInput = 0, filteredGuide = 0, sumC = 0, sumD = 0, cMin = 1, cMax = 0;
         FOR_3X3(c, {
             const float3 cc = unpack(gE[ni]);
@@ -182,7 +201,7 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
         for (i = lane; i < CELLS; i += TILE * TILE)
         {
             const int2 c = int2(i % SIDE, i / SIDE);
-            if (!inMargin(c, 4)) continue;
+            if (!inMargin(c, 4 - PREFIX_STAGES)) continue;
             float3 inputMin = 1, inputMax = 0, guideMin = 1, guideMax = 0;
             FOR_3X3(c, {
                 const float3 a = unpack(gC[ni]);
@@ -205,7 +224,7 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     for (i = lane; i < CELLS; i += TILE * TILE)
     {
         const int2 c = int2(i % SIDE, i / SIDE);
-        if (!inMargin(c, 5)) continue;
+        if (!inMargin(c, 5 - PREFIX_STAGES)) continue;
         float3 blurredVariation = 0, boxMin = 1, boxMax = 0, relaxedMin = 1, relaxedMax = 0;
         FOR_3X3(c, {
             blurredVariation += unpack(gB[ni]) * nw;
@@ -257,7 +276,7 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     for (i = lane; i < CELLS; i += TILE * TILE)
     {
         const int2 c = int2(i % SIDE, i / SIDE);
-        if (!inMargin(c, 6)) continue;
+        if (!inMargin(c, 6 - PREFIX_STAGES)) continue;
         float4 lows[3], mids[3], highs[3];
         [unroll] for (int x = -1; x <= 1; ++x)
         {

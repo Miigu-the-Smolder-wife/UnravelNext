@@ -7,6 +7,7 @@
 //   P[0].x vertices SRV (raw, 32 B per vertex), P[0].y draw arguments SRV (raw), P[0].z capacity, P[0].w stream slot;
 //   P[1].x views SRV (the main view is element 0).
 #include "Passes/Visibility/CoverageLayer.hlsli"
+#include "Passes/Common/TriangleStream.hlsli"
 
 struct VertexOut
 {
@@ -33,8 +34,9 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     StructuredBuffer<CullView> views = ResourceDescriptorHeap[P[1].x];
     const CullView v = views[0];
     ByteAddressBuffer vertexData = ResourceDescriptorHeap[P[0].x];
+    const uint3 vertexIds = triangleStreamVertexIds(P[1].y, t);
     [unroll] for (uint k = 0; k < 3; ++k)
-        verts[3 * lane + k].position = mul(v.viewProj, float4(asfloat(vertexData.Load3(32 * (3 * t + k))), 1));
+        verts[3 * lane + k].position = mul(v.viewProj, float4(asfloat(vertexData.Load3(32 * vertexIds[k])), 1));
     tris[lane] = uint3(3 * lane, 3 * lane + 1, 3 * lane + 2);
     prims[lane].visId = COV_STREAM_ID | (P[0].w << 24) | t;
 }

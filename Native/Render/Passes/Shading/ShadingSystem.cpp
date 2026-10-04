@@ -268,7 +268,7 @@ struct ShadingResources
 };
 struct ShadingTable
 {
-    uint64_t frame = UINT64_MAX;
+    RecordKey frame;  // graph-local resources must not survive a discarded recording
     std::vector<std::pair<D3D12_GPU_VIRTUAL_ADDRESS, ShadingResources>> views;
 };
 
@@ -488,9 +488,9 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     // Edge pixels' exposed linear radiance, the edge tile masks, the edge pixel list and its dispatch arguments, and the
     // fallback kernel's dispatch arguments (M internal, this view): made by the banded part, used by both.
     ShadingTable& table = fc.state<ShadingTable>("M.shadingViews");
-    if (table.frame != fc.frame.frameIndex)
+    if (table.frame != RecordKey::of(fc))
     {
-        table.frame = fc.frame.frameIndex;
+        table.frame = RecordKey::of(fc);
         table.views.clear();
     }
     ShadingResources res;

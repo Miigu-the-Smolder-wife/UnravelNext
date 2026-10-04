@@ -27,6 +27,7 @@ struct FluidSurfaceDesc
     uint32_t maxTriangles = 0;
     bool smooth = true;          // the node field's low-pass before the level set (FluidSmooth.hlsl); false only for the
                                  // tests' comparison with the raw particle density
+    bool refittableTail = false; // retire unused triangle slots as finite points: DXR-active degenerates, safe to reactivate on update
 };
 struct FluidSurfaceInput
 {
@@ -57,7 +58,7 @@ struct FluidSurfaceInput
 struct FluidSurfaceOutput
 {
     render::BufferRef vertices;  // 32 B per vertex: world position (w = 1), normal (w = 0); 3 per triangle, CCW outside;
-                                 // triangles past the drawn count have NaN positions (inactive in a BLAS over the capacity)
+                                 // tail: NaN/inactive by default, finite degenerate points with refittableTail
     render::BufferRef velocities;  // 16 B per vertex: world velocity m/s (w = 0); zero without particle velocities
     render::BufferRef draw;      // D3D12_DRAW_ARGUMENTS
     render::BufferRef counters;  // uint: active blocks, triangles, overflow (pool or triangle capacity)

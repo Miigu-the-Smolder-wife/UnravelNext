@@ -97,6 +97,7 @@ private:
     render::Device& m_device;
     render::ShaderLibrary& m_shaders;
     RoundPoolDesc m_desc;
+    uint64_t m_topologyId = 0;
     RoundTables m_tables;
     render::ComPtr<ID3D12Resource> m_modes, m_increments, m_accum, m_spectrum, m_previous, m_twiddles, m_table, m_analysis, m_synthesis, m_slope, m_orders,
         m_centre, m_output, m_tableUpload;

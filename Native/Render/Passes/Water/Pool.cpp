@@ -2,6 +2,7 @@
 #include "unx/water/Pool.h"
 
 #include "unx/core/Log.h"
+#include "unx/render/Frame.h"
 
 #include <algorithm>
 #include <cmath>
@@ -64,6 +65,8 @@ void axes(float yaw, double ax[2], double az[2])
 
 Pool::Pool(Device& device, ShaderLibrary& shaders, const PoolDesc& desc) : m_device(device), m_shaders(shaders), m_desc(desc)
 {
+    m_topologyId = allocateTriangleStreamTopologyId();
+    m_indices = makeBuffer(device, kVertices * 4, D3D12_HEAP_TYPE_DEFAULT, L"pool grid indices");
     if (!(desc.sizeX > 0) || !(desc.sizeZ > 0) || !(desc.depth >= 0) || !(desc.gravity > 0) || !(desc.tensionOverDensity >= 0) || !(desc.viscosity >= 0) || !(desc.surfaceFilm == 0 || desc.surfaceFilm == 1) ||
         !desc.maxSources || !desc.framesInFlight)
         fail("pool: invalid description");
@@ -119,7 +122,7 @@ Pool::Pool(Device& device, ShaderLibrary& shaders, const PoolDesc& desc) : m_dev
 Pool::~Pool()
 {
     for (auto& u : m_sourceUpload) u->Unmap(0, nullptr);
-    for (const ComPtr<ID3D12Resource>& r : { m_modes, m_input, m_accum, m_previous, m_twiddles, m_table, m_tableUpload, m_output, m_stateUpload, m_stats })
+    for (const ComPtr<ID3D12Resource>& r : { m_modes, m_input, m_accum, m_previous, m_twiddles, m_table, m_tableUpload, m_output, m_stateUpload, m_stats, m_indices })
         if (r) m_device.deferRelease(r);
     for (auto& u : m_sourceUpload) m_device.deferRelease(u);
     for (auto& u : m_statsReadback) m_device.deferRelease(u);
@@ -356,7 +359,15 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
     }
 
     // The surface's triangle stream: frame buffers (the graph's transient memory; only the drawn basins hold any).
-    const BufferRef vertices = g.createBuffer({ "pool surface vertices", kVertices * 32, 0 }), velocities = g.createBuffer({ "pool surface velocities", kVertices * 16, 0 }),
+    const BufferRef indices = import(m_indices.Get(), "pool grid indices");
+    if (!m_indicesReady)
+    {
+        ID3D12PipelineState* grid = m_shaders.compute("Passes/Water/PoolIndices");
+        g.addPass("pool grid indices", QueueType::Graphics,
+                  [&](PassBuilder& pb) { pb.use(indices, Use::UavCompute); pb.onSubmitted([this](Queue&, uint64_t) { m_indicesReady = true; }); },
+                  [=](PassContext& c) { const uint32_t k[4] = {c.uav(indices), 0, 0, 0}; c.computeConstants(k, 4); c.cmd->SetPipelineState(grid); c.cmd->Dispatch(uint32_t((kVertices + 255) / 256), 1, 1); });
+    }
+    const BufferRef vertices = g.createBuffer({ "pool surface vertices", kSamples * 32, 0 }), velocities = g.createBuffer({ "pool surface velocities", kSamples * 16, 0 }),
                     draw = g.createBuffer({ "pool surface draw", 16, 0 });
     double ax[2], az[2];
     axes(placement.yaw, ax, az);
@@ -382,7 +393,7 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
                   std::memcpy(&k[16], &hz, 4);
                   c.cmd->SetPipelineState(mesh);
                   c.computeConstants(k, 20);
-                  c.cmd->Dispatch(uint32_t(kVertices / 64), 1, 1);
+                  c.cmd->Dispatch(uint32_t((kSamples + 63) / 64), 1, 1);
               });
 
     PoolOutput out;
@@ -391,8 +402,12 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
     s.vertices = vertices;
     s.velocities = velocities;
     s.drawArgs = draw;
+    s.indices = indices;
+    s.vertexCount = uint32_t(kSamples);
     s.maxTriangles = uint32_t(kVertices / 3);
     s.layer = 1;
+    s.fixedTopologyId = m_topologyId; // PoolMesh writes every cell, without inactive triangles
+    s.knownTriangleCount = s.maxTriangles;
     // Bounds: the rectangle's corners, the surface within +-d of the still level (the linear model's validity: the waves'
     // height stays well below the depth; deep water: 1 m).
     const double vertical = m_desc.depth > 0 ? m_desc.depth : 1.0;

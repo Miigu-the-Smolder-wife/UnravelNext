@@ -29,7 +29,7 @@ void main(uint3 id : SV_DispatchThreadID)
             float3 D, Dx, Dy;
             mPixelRay(float2(pixel) + 0.5, D, Dx, Dy);
             float3 p, n;
-            if (waterTriangleHit(P[0].y, v & 0xFFFFFFu, g_cameraPosition, D, p, n))
+            if (waterTriangleHit(P[0].y, P[3].z, v & 0xFFFFFFu, g_cameraPosition, D, p, n))
                 pass = waterPlanarCandidate(asfloat(P[1]), p, normalize(n), normalize(g_cameraPosition - p), shPixelAngle(D, Dx)) ? 1u : 0u;
         }
         RWTexture2D<uint> scratch = ResourceDescriptorHeap[P[0].z];

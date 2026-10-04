@@ -181,9 +181,9 @@ struct ViewResources
 
 // A triangle stream the GPU makes in the frame (INTERFACES v1.60; W's water surface and fluid surface, request
 // 20260926_W_gpu_triangle_stream): V draws it into the main view's coverage layer as see-through records (band A keeps
-// what lies beneath). Non-indexed triangles, 32 B per vertex: (world position, 1), (normal, 0), counter-clockwise seen
-// from outside; the triangle count is 1/3 of drawArgs' vertex count (D3D12_DRAW_ARGUMENTS, written on the GPU), at most
-// maxTriangles (the vertex buffer's capacity: V's dispatch covers it). velocities (optional, float4 per vertex, world m/s):
+// what lies beneath). Optional indexed triangles, 32 B per vertex: (world position, 1), (normal, 0), counter-clockwise seen
+// from outside; the triangle count is 1/3 of drawArgs' corner count (D3D12_DRAW_ARGUMENTS, written on the GPU), at most
+// maxTriangles (the triangle capacity: V's dispatch covers it). velocities (optional, float4 per vertex, world m/s):
 // M's motion (previous position = position - velocity x delta time).
 struct TriangleStream
 {
@@ -195,6 +195,22 @@ struct TriangleStream
     // v1.61: 0 = coverage-layer see-through records (small surfaces: B8 fluid); 1 = the water layer (wide surfaces: B7
     // ocean and lakes; FrameResources::waterVis / waterDepth, one sample per pixel over band A).
     uint32_t layer = 0;
+    // Optional current-record dispatch (12 bytes at meshArgsOffset): produced once
+    // from drawArgs, shared by coverage, water-layer and sun-map mesh consumers.
+    // Invalid retains the bounded-capacity path for external/test producers.
+    BufferRef meshArgs;
+    uint32_t meshArgsOffset = 0;
+    // Nonzero opt-in: unique producer/topology identity, every triangle permanently
+    // active (finite degenerate triangles allowed), only vertex positions changing (DXR update contract).
+    uint64_t fixedTopologyId = 0;
+    // CPU-known draw count, or UINT32_MAX when the producer determines it on the GPU.
+    // When present it must match drawArgs, bounded by maxTriangles.
+    uint32_t knownTriangleCount = UINT32_MAX;
+    // Optional immutable R32_UINT corner-to-vertex mapping, maxTriangles * 3 entries.
+    // drawArgs still counts corners (three per triangle), preserving primitive identity.
+    // Both vertices and velocities use this shared index. A topology ID must change if index contents change.
+    BufferRef indices;
+    uint32_t vertexCount = 0; // required for indexed streams; nonindexed streams store maxTriangles * 3 vertices
 };
 constexpr uint32_t kMaxTriangleStreams = 63;  // slot 63 is the view-grid ocean's (v1.73, COV_OCEAN_ID)  // vis id slot bits (CoverageTiles.hlsli COV_STREAM_ID)
 
@@ -321,6 +337,9 @@ struct FrameResources
     // instance range, outside the graph): a reader of those instances declares it to run after that pass (invalid: no
     // mesh particles this frame).
     BufferRef particleMeshCounters;
+    // Cluster-entry upper bound supplied by this frame's GPU instance producer. UINT64_MAX means unknown:
+    // consumers retain the capacity-based fallback. Zero is valid even when the reserved GPU pool is large.
+    uint64_t gpuInstanceClusterBound = UINT64_MAX;
     float3 hairOrigin{};
     // A3 FX particle lights (v1.81, render B's request): the whole scene light buffer (gpu::Light, stride 80; the FX tail at
     // [lightCount, lightCount + F)) and the count word (StructuredBuffer<uint>, element 0 = F), imported once per frame by

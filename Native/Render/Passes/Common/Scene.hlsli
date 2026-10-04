@@ -231,6 +231,20 @@ struct GpuVisibleCluster
 // instance past the scene's uploaded ones (run-time and GPU-written instances) as movable. The others keep their place
 // and shape while their transform revision holds.
 #define INSTANCE_MOVABLE_FLAGS (INSTANCE_DYNAMIC | INSTANCE_SKINNED | INSTANCE_WIND | INSTANCE_VIEW_MODEL)
+// Shadow static-copy membership follows observed rigid motion, not the
+// authoring Dynamic permission. Intrinsic deformation and runtime/GPU slots
+// remain movable. Set transitions are full VSM invalidations before raster.
+// Mirror gpu::instanceShadowMovable in GpuScene.h exactly; other uses of
+// INSTANCE_MOVABLE_FLAGS retain their original authoring semantics.
+bool instanceShadowMovable(GpuInstance inst, uint instance, uint runtimeFirst)
+{
+    if (instance >= runtimeFirst ||
+        (inst.flags & (INSTANCE_SKINNED | INSTANCE_WIND | INSTANCE_VIEW_MODEL | INSTANCE_MOTION_BREAK)) != 0 ||
+        inst.bonePalette != UNX_NONE || inst.morph != UNX_NONE || inst.patch != UNX_NONE) return true;
+    [unroll] for (uint row = 0; row < 3; ++row)
+        if (any(asuint(inst.objectToWorld[row]) != asuint(inst.prevObjectToWorld[row]))) return true;
+    return false;
+}
 // scene::MaterialClass
 #define MATERIAL_STANDARD 0u
 #define MATERIAL_FOLIAGE 1u

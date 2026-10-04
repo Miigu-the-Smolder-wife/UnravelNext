@@ -50,7 +50,7 @@ public:
         const std::vector<uint4> ch = chunks(r.instanceMask);
         if (ch.empty() || r.pixelKernel.empty()) return;
         std::vector<TestView> views;
-        for (const RasterView& v : r.views) views.push_back({ v.viewProj, v.userData, { 0, 0, 0 } });
+        for (const RasterView& v : r.views) views.push_back({ v.viewProj, v.userData, { v.instanceSet, fc.scene.staticInstanceCount(), 0 } });
         const BufferRef chunkBuf = m_tf.uploadBuffer(fc, ch.data(), ch.size() * 16, 16, "test raster chunks");
         const BufferRef viewBuf = m_tf.uploadBuffer(fc, views.data(), views.size() * sizeof(TestView), sizeof(TestView), "test raster views");
         MeshPipelineDesc d;
@@ -119,7 +119,7 @@ public:
         if (!ch.empty())
         {
             std::vector<TestView> views;
-            for (const RasterView& v : r.views) views.push_back({ v.viewProj, v.userData, { 0, 0, 0 } });
+            for (const RasterView& v : r.views) views.push_back({ v.viewProj, v.userData, { v.instanceSet, fc.scene.staticInstanceCount(), 0 } });
             const BufferRef chunkBuf = m_tf.uploadBuffer(fc, ch.data(), ch.size() * 16, 16, "test atlas chunks");
             const BufferRef viewBuf = m_tf.uploadBuffer(fc, views.data(), views.size() * sizeof(TestView), sizeof(TestView), "test atlas views");
             MeshPipelineDesc d;
@@ -158,6 +158,9 @@ public:
                                      k[20] = v.viewportWidth / req.cullTilePx;
                                      k[21] = req.atlasTilesPerRow;
                                      k[22] = req.cullTilePx;
+                                     // Local static/dynamic sets have two mask
+                                     // banks but share one atlas-slot bank.
+                                     k[23] = v.atlasSlotOffset != UINT32_MAX ? v.atlasSlotOffset : v.cullMaskOffset * 32;
                                      c.graphicsConstants(k, 32);
                                      D3D12_VIEWPORT vp{ 0, 0, (float)v.viewportWidth, (float)v.viewportHeight, 0, 1 };
                                      D3D12_RECT sc{ 0, 0, (LONG)v.viewportWidth, (LONG)v.viewportHeight };

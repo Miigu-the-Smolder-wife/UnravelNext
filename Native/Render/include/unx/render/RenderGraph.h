@@ -32,6 +32,8 @@ public:
     // before it on that queue). A CPU that waits for this pass's results (readbacks) then waits for this point of the
     // frame, not for the whole frame's queue. Implies keep(). Cost: one more ExecuteCommandLists on that queue.
     void fenceAfter(std::function<void(Queue& queue, uint64_t fence)> onSubmitted);
+    // Only after this live pass's command list was submitted. No extra keep, fence or list split.
+    void onSubmitted(std::function<void(Queue& queue, uint64_t fence)> callback);
 
 private:
     friend class RenderGraph;
@@ -106,7 +108,9 @@ struct RenderGraphStats
     uint64_t transientBytesAliased = 0;  // heap size actually used
     uint64_t transientBytesUnaliased = 0;  // sum of resource sizes
     bool planReused = false;
+    double cpuPlanLookupMs = 0;
     double cpuCompileMs = 0;  // plan build (0 when reused)
+    double cpuViewsMs = 0;
     double cpuRecordMs = 0;
     double cpuSubmitMs = 0;
 };
@@ -145,6 +149,25 @@ public:
     // are culled, or end up on another queue or command list, split the scope where they fall (PassChain.h).
     void joinPasses(uint32_t first, uint32_t count, std::string_view name);
 
+    // After ALL passes have been declared, fence the last declared graphics
+    // read of these imported buffers. It does not keep dead passes alive: a
+    // culled last reader produces no callback, so the caller must retain its
+    // whole-frame fallback. Refuses writes or reads on another queue.
+    bool fenceAfterImportedReads(const std::vector<ID3D12Resource*>& resources,
+                                 std::function<void(Queue&, uint64_t)> onSubmitted);
+
+    // Same completion boundary for an owner that also recorded writes before
+    // publishing its presentation copy. Still refuses another queue.
+    bool fenceAfterImportedAccesses(const std::vector<ID3D12Resource*>& resources,
+                                    std::function<void(Queue&, uint64_t)> onSubmitted);
+
+    // This graph consumes an externally updated owner (for example bindless scene buffers, whose reads are not all
+    // individual graph imports). Only queues with live submitted work wait for its ready fence, immediately before
+    // their first submission. Each actually submitted segment reports its consumer fence; declaration/cancellation
+    // reports nothing. No global queue wait is inserted while recording. The owner must outlive this recording and
+    // must submit or discard it before overwriting the owner's mutable source again. Declarations reset after execute.
+    void consumeExternal(QueueType producer, uint64_t readyFence, std::function<void(Queue&, uint64_t)> onSubmitted);
+
     // A group of per-pixel passes recorded band by band (design revision 1, 4.8; INTERFACES 4): pass A on band 0, pass B
     // on band 0, ..., pass A on band 1, ..., so a band's intermediate data stays in L2 between producer and consumer
     // [measured, design bench --only-bands: resolve -> shade 0.740 -> 0.470 ms at 4K with 8 bands, UAV/SRV transitions
@@ -176,6 +199,9 @@ public:
     // Compiles (or reuses) the plan, records all passes, submits them with the queue synchronisation, and resets
     // the declarations for the next frame. 'profiler' (optional) timestamps every pass.
     void execute(GpuProfiler* profiler);
+    // Process-unique identity of the current declarations. Stable during recording and submission callbacks;
+    // renewed only when execute clears them. A reconstructed graph never inherits handles from the old address.
+    uint64_t recordKey() const { return m_recordKey; }
     const RenderGraphStats& stats() const { return m_stats; }
     // Last fence value submitted on each queue by execute().
     uint64_t lastFence(QueueType q) const { return m_lastFence[(size_t)q]; }
@@ -190,10 +216,13 @@ private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;
     Device& m_device;
+    uint64_t m_recordKey;
     RenderGraphStats m_stats;
     uint64_t m_lastFence[kQueueTypeCount] = {};
     bool m_asyncCompute = false;
     std::vector<std::string> m_asyncPasses;
     bool isAsyncPass(std::string_view name) const;
+    bool fenceAfterImportedUses(const std::vector<ID3D12Resource*>& resources,
+                                std::function<void(Queue&, uint64_t)> onSubmitted, bool readOnly);
 };
 } // namespace unx::render

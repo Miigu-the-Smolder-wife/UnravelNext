@@ -4591,12 +4591,13 @@ int main(int argc, char** argv)
     try
     {
         bool debugLayer = true, gpuValidation = false, growth = false, glassOnly = false, glassJobsOnly = false, preshadeOnly = false, coatOnly = false, sheenOnly = false, anisoOnly = false, filmOnly = false, areaQuadOnly = false, emissiveOnly = false, warp = false;
-        bool subsurfaceOnly = false;
+        bool subsurfaceOnly = false, coverageAndTilesOnly = false;
         std::vector<std::string> overrides;
         for (int i = 1; i < argc; ++i)
         {
             if (std::string(argv[i]) == "--no-debug-layer") debugLayer = false;
             if (std::string(argv[i]) == "--gbv") gpuValidation = true;
+            if (std::string(argv[i]) == "--coverage-tiles") coverageAndTilesOnly = true;
             if (std::string(argv[i]) == "--area-dump") g_areaDump = true;
             if (std::string(argv[i]) == "--set" && i + 1 < argc) overrides.push_back(argv[++i]);
             if (std::string(argv[i]) == "--coverage-growth") growth = true;
@@ -4681,6 +4682,13 @@ int main(int argc, char** argv)
             return report.failures ? 1 : 0;
         }
         for (const std::string& o : overrides) tf.quality.applyOverride(o);
+        if (coverageAndTilesOnly)
+        {
+            testCoverageComposite(tf, report);
+            testTileLights(tf, report);
+            logf("%s: %d failure(s)\n", report.failures ? "FAILED" : "passed", report.failures);
+            return report.failures ? 1 : 0;
+        }
         if (growth)
         {
             const int failures = testCoverageGrowth(tf);

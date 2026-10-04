@@ -1,5 +1,11 @@
 # 언리얼 6 렌더러 자체 구현 — 진행 상태
 
+## 2026-10-03 실제 Editor 크래시 후속
+
+Bathhouse Editor의 graphics shutdown 뒤 VFX checkpoint가 삭제된 renderer를 읽던 수명 결함을 수정했다. 실제 DLL export 회귀 검사 PASS, 현재 소스 6모듈이 로드된 saved World/D3D12 실행에서 1080p native frame 120개를 기록하고 정상 종료(코드 0)했다. 종료 crash·VFX/물리 exception·unknown renderer 경고는 없었다. stock 모델 두 개의 기존 콘텐츠 참조 오류는 별도로 보존했다. 이는 원본 전체 World의 모든 기능/화질 인수를 의미하지 않는다.
+
+실제 Editor GPU 중앙값 18.314 ms의 우선 병목은 동적 stream BLAS 2.580 ms, stream coverage 1.822 ms였다. 정지 Train current-source A/B에서 기존 small-triangle compute는 scope 합을 0.407 ms 늘렸다. 전체 몇 배 개선은 아직 달성하지 않았다. 수정·실행 증거와 소스 기반 최적화 분석은 [EDITOR_CRASH_OPTIMIZATION_20261003_KO.md](EDITOR_CRASH_OPTIMIZATION_20261003_KO.md)에 있다.
+
 ## 2026-10-03 후속 통합과 실제 검증
 
 현재 네이티브 소스는 `cafb3ea4`, Unity 연결 및 배포물은 원본 `C:/Users/USER/Unravel`의 `8162a1d1`에 보존했다. 후속 브랜치와 중단 로그의 상세 해석은 `UE6_WORKPLAN_KO.md` 0절의 현재 상태에 있다. 아래 역사적 ✔ 표시는 빌드 의미를 유지한다. 현재 실행 결과와 혼동하지 않는다.

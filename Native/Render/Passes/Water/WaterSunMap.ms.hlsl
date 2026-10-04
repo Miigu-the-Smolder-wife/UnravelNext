@@ -6,6 +6,7 @@
 //   P[0].x vertices SRV (raw, 32 B per vertex: (xyz, 1), (normal, 0)), P[0].y draw arguments SRV (raw), P[0].z capacity
 //   (triangles), P[0].w constants SRV (waterSunConstants); P[1] the medium: 1 m transmittance RGB (float), IOR (float)
 #include "Bindless.hlsli"
+#include "Passes/Common/TriangleStream.hlsli"
 
 struct VertexOut
 {
@@ -29,7 +30,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     ByteAddressBuffer vertexData = ResourceDescriptorHeap[P[0].x];
     [unroll] for (uint j = 0; j < 3; ++j)
     {
-        const uint at = 32 * (3 * t + j);
+        const uint at = 32 * triangleStreamVertexIds(P[2].x, t)[j];
         const float3 p = asfloat(vertexData.Load3(at));
         VertexOut o;
         o.position = float4(((dot(p, r.xyz) - r.w) * k.x) * 2 - 1, ((dot(p, u.xyz) - u.w) * k.y) * 2 - 1, saturate((dot(p, s.xyz) - s.w) / k.z), 1);

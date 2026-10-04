@@ -34,7 +34,7 @@ if(unity_sources)
   set_target_properties(unx_host PROPERTIES OUTPUT_NAME UnravelNext)
   target_include_directories(unx_host PRIVATE "${UNX_UNITY_PLUGIN_API}")
   target_link_libraries(unx_host PRIVATE unx_host_core shell32)  # shell32: CommandLineToArgvW (-unxLogFile)
-  add_dependencies(unx_host unx_render_shaders unx_host_shaders unx_build_identity)
+  add_dependencies(unx_host unx_render_shader_abi unx_host_shaders unx_build_identity)
   # The identity of the source this DLL was linked from travels with it (Deploy.ps1 records it next to the plugin):
   # copied after a successful link only, so a later failed build cannot relabel an older DLL.
   add_custom_command(TARGET unx_host POST_BUILD
@@ -53,5 +53,8 @@ foreach(kind Tests Gates)
     target_link_libraries(unx_${prefix}_host_${stem} PRIVATE unx_host_core)
     target_compile_definitions(unx_${prefix}_host_${stem} PRIVATE UNX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
     add_dependencies(unx_${prefix}_host_${stem} unx_host_shaders)
+    if(stem STREQUAL "hostvfxlifetime")
+      add_dependencies(unx_${prefix}_host_${stem} unx_host)
+    endif()
   endforeach()
 endforeach()

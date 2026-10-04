@@ -116,7 +116,10 @@ private:
     render::Device& m_device;
     render::ShaderLibrary& m_shaders;
     PoolDesc m_desc;
+    uint64_t m_topologyId = 0;
     render::ComPtr<ID3D12Resource> m_modes, m_input, m_accum, m_previous, m_twiddles, m_table, m_tableUpload, m_output, m_stateUpload;
+    render::ComPtr<ID3D12Resource> m_indices;
+    bool m_indicesReady = false;
     render::ComPtr<ID3D12Resource> m_stats;                            // PoolStats.hlsl: 257 row partials + the result
     std::vector<render::ComPtr<ID3D12Resource>> m_statsReadback;       // framesInFlight + 1 slots of the result (16 B)
     std::vector<uint64_t> m_statsFrame;

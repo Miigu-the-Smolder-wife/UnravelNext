@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <memory>
 
@@ -358,11 +359,52 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
     const std::array<float, 3> jitter = { st.jitter[0], st.jitter[1], st.jitter[2] };
     const D3D12_GPU_VIRTUAL_ADDRESS cb = main.frameConstants;
 
+    // Compact at the cell boundary. HiZ visibility and the depth-constrained
+    // origin are identical for all nine rays; compute them once and retain the
+    // original cell identity for ray seeds and atlas addressing.
+    constexpr uint32_t descStride = rt::RayPipeline::kDispatchDescStride;
+    const uint32_t rayCapacity = gridX * gridY * gridZ * kTraceRes * kTraceRes;
+    const uint32_t traceChunks = (rayCapacity + kMaxRaysPerDispatch - 1) / kMaxRaysPerDispatch;
+    const BufferRef cells = g.createBuffer({ "r.gi.ltv visible cells", 16 + (uint64_t)gridX * gridY * gridZ * 16, 0 });
+    const BufferRef traceArgs = g.createBuffer({ "r.gi.ltv trace arguments", (uint64_t)traceChunks * descStride, 0 });
+    ID3D12Resource* rayTemplate = pipeline.dispatchTemplate();
+    g.addPass("r.gi.ltv.compact.begin", QueueType::Compute,
+              [&](PassBuilder& b) { b.use(cells, Use::UavCompute); b.use(traceArgs, Use::CopyDst); },
+              [=, &shaders](PassContext& c) {
+                  for (uint32_t chunk = 0; chunk < traceChunks; ++chunk)
+                      c.cmd->CopyBufferRegion(c.resource(traceArgs), (uint64_t)chunk * descStride, rayTemplate, 0, descStride);
+                  const uint32_t k[4] = { c.uav(cells), 0, 0, 0 };
+                  c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenTranslucencyVolumeCompact.MODE0"));
+                  c.computeConstants(k, 4); c.cmd->Dispatch(1, 1, 1);
+              });
+    g.addPass("r.gi.ltv.compact", QueueType::Compute,
+              [&](PassBuilder& b) {
+                  b.use(cells, Use::UavCompute); b.use(depth, Use::SrvCompute); b.use(hiz, Use::SrvCompute); b.use(trace, Use::UavCompute);
+              },
+              [=, &shaders](PassContext& c) {
+                  uint32_t k[40] = {};
+                  k[0] = c.uav(cells), k[1] = c.srv(depth), k[2] = c.srv(hiz), k[3] = c.uav(trace);
+                  k[16] = gridX, k[17] = gridY, k[18] = gridZWord;
+                  k[32] = bits(jitter[0]), k[33] = bits(jitter[1]), k[34] = bits(jitter[2]), k[35] = frame;
+                  k[38] = bits(s.depthThreshold);
+                  c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenTranslucencyVolumeCompact.MODE1"));
+                  c.bindFrameConstants(cb); c.computeConstants(k, 40);
+                  c.cmd->Dispatch((gridX + 3) / 4, (gridY + 3) / 4, (gridZ + 3) / 4);
+              });
+    g.addPass("r.gi.ltv.compact.args", QueueType::Compute,
+              [&](PassBuilder& b) { b.use(cells, Use::UavCompute); b.use(traceArgs, Use::UavCompute); },
+              [=, &shaders](PassContext& c) {
+                  uint32_t k[20] = { c.uav(cells), 0, 0, 0, c.uav(traceArgs), descStride,
+                      (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), traceChunks, kMaxRaysPerDispatch };
+                  k[16] = gridX, k[17] = gridY, k[18] = gridZWord;
+                  c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenTranslucencyVolumeCompact.MODE2"));
+                  c.computeConstants(k, 20); c.cmd->Dispatch(1, 1, 1);
+              });
     g.addPass("r.gi.ltv.trace", QueueType::Compute,
               [&](PassBuilder& b) {
+                  b.use(cells, Use::SrvGraphics);
+                  b.use(traceArgs, Use::IndirectArgs);
                   b.use(trace, Use::UavGraphics);
-                  b.use(depth, Use::SrvGraphics);
-                  b.use(hiz, Use::SrvGraphics);
                   declareSurfaceCacheCards(b, cards, Use::SrvGraphics);
                   if (cache)
                   {
@@ -376,8 +418,8 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
               },
               [=, &pipeline](PassContext& c) {
-                  uint32_t k[40] = {};
-                  k[0] = c.uav(trace), k[1] = c.srv(depth), k[2] = c.srv(hiz), k[3] = s.clipmapBias;
+                  uint32_t k[44] = {};
+                  k[0] = c.uav(trace), k[3] = s.clipmapBias;
                   k[4] = bits(sky.x), k[5] = bits(sky.y), k[6] = bits(sky.z), k[7] = bits(s.traceDistance);
                   for (int i = 0; i < 4; ++i) k[8 + i] = atmosphere ? c.srv(luts[i]) : 0xFFFFFFFFu;
                   k[12] = bits(sun.x), k[13] = bits(sun.y), k[14] = bits(sun.z);
@@ -392,15 +434,15 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
                   k[37] = cache ? c.srv(rcDepth) : 0xFFFFFFFFu;
                   k[38] = bits(s.depthThreshold);
                   k[39] = bits(s.farStart);
+                  k[40] = c.srv(cells);
                   c.bindFrameConstants(cb);
-                  // bands of whole slices, each at most kMaxRaysPerDispatch rays
-                  const uint32_t perSlice = gridX * kTraceRes * gridY * kTraceRes;
-                  const uint32_t slices = std::max(kMaxRaysPerDispatch / std::max(perSlice, 1u), 1u);
-                  for (uint32_t first = 0; first < gridZ; first += slices)
+                  // The same upper bound per dispatch, including partial cells
+                  // at a chunk boundary; ltvCompactRay restores sample identity.
+                  for (uint32_t chunk = 0; chunk < traceChunks; ++chunk)
                   {
-                      k[19] = first;
-                      c.computeConstants(k, 40);
-                      pipeline.dispatch(c.cmd, 0, gridX * kTraceRes, gridY * kTraceRes, std::min(slices, gridZ - first));
+                      k[19] = chunk * kMaxRaysPerDispatch;
+                      c.computeConstants(k, 44);
+                      pipeline.dispatchIndirect(c.cmd, c.resource(traceArgs), (uint64_t)chunk * descStride);
                   }
               });
     if (s.filter && s.filterSamples > 0)

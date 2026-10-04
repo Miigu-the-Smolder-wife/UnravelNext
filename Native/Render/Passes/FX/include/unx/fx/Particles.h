@@ -68,8 +68,15 @@ struct TickReadback
     uint32_t dying = 0;                  // particles that died in the tick by their row's dying range (module statistic)
 };
 
-// Render input of the latest recorded tick (the particle render pass, ParticleLayer.h): graph imports of both ticks' state,
-// dynamic rows and the render ranges (ParticleLayerPass.hlsli RenderRange), and the CPU values of the interpolation.
+struct ParticleLightChunk { uint32_t range, offset, count, slot; };
+struct ParticleLightTables
+{
+    std::vector<ParticleLightChunk> chunks;
+    std::vector<std::array<uint32_t, 2>> slotChunks;
+};
+
+// Immutable presentation of the latest recorded tick: graph-owned GPU snapshots of both ticks' state, dynamic rows
+// and render ranges, and the CPU values of interpolation. Further simulation cannot change a frame's presentation.
 struct ParticleRenderInputs
 {
     render::BufferRef posAge[2], velocity[2], dynamic[2];  // [0] previous tick, [1] latest tick
@@ -87,6 +94,9 @@ struct ParticleRenderInputs
     // per recorded tick) and whether its input was a RESET's restore records instead of the tick before it.
     render::BufferRef orientation[2];
     uint64_t tickSerial = 0;
+    uint64_t stream = 0, generation = 0, tick = 0;          // identity of the copied latest tick, including RESET
+    uint32_t capacity = 0;                                // history/layout allocation size of this presentation
+    std::shared_ptr<const ParticleLightTables> lights;     // chunks index this snapshot's render ranges
     bool reset = false;
     bool valid = false;                                    // a tick was recorded
 };
@@ -102,6 +112,8 @@ public:
 
     // NV_StreamExecutor::submit: validates and copies a committed packet; the tick runs in the next record().
     void submit(const uint8_t* packet, uint64_t bytes);
+    // Host-owned committed packet: same validation and ordering as submit, without another whole-packet copy.
+    void submitOwned(std::vector<uint8_t>&& packet);
     // Ticks submitted and not yet recorded.
     size_t pendingTicks() const { return m_pending.size(); }
     // Readback ring slots: at most this many ticks may be recorded into one graph (a later tick reuses the slot of the
@@ -138,8 +150,14 @@ public:
     // restore records' after RESET): the renderer's interpolation pair (render rules request 2).
     const std::vector<LayoutRange>& layout() const;
     const std::vector<LayoutRange>& layoutPrevious() const;
-    // The render pass's inputs, imported into 'graph' (frame 'importIndex'); valid = false before the first tick.
+    // Copy render input to graph-owned buffers once per graph/frame (no CPU readback). All views and consumers of that
+    // frame receive the same interpolation pair and identity, even if a later tick has been recorded in the meantime.
+    // The host orders this graph after the producer tick and protects the source until its last GPU copy/read completes.
     ParticleRenderInputs renderInputs(render::RenderGraph& graph, uint64_t importIndex);
+    // Authoritative resources read by this graph/frame's presentation copy; empty if it has no snapshot. After all
+    // passes are declared the host fences their last access, so the next simulation need not wait for render consumers
+    // of the copies. A missing/culled callback requires the host's conservative whole-frame fence fallback.
+    std::vector<ID3D12Resource*> presentationSources(const render::RenderGraph& graph, uint64_t importIndex) const;
     // Whether the stream's program table (the last NV_STREAM_PROGRAMS) has a program with this output (NV_SPRITE.., e.g. 5 =
     // distortion): passes that only draw one output skip themselves when no program has it.
     bool hasProgramOutput(uint32_t output) const;
@@ -148,12 +166,8 @@ public:
     // particles in the render ranges (range index, offset in the range, count <= kLightChunk, slot), ordered by slot then
     // range; slotChunks[s] = (first chunk, chunk count). FxLights (tracks::particleLights) reduces them per frame.
     static constexpr uint32_t kLightChunk = 2048;
-    struct LightChunk { uint32_t range, offset, count, slot; };
-    struct LightTables
-    {
-        std::vector<LightChunk> chunks;
-        std::vector<std::array<uint32_t, 2>> slotChunks;
-    };
+    using LightChunk = ParticleLightChunk;
+    using LightTables = ParticleLightTables;
     const LightTables& lightTables() const;
 
     uint32_t capacity() const { return m_capacity; }
@@ -166,6 +180,7 @@ public:
     void setTrace(uint32_t row, uint32_t birth) { m_traceRow = row; m_traceBirth = birth; }
 
 private:
+    void acceptPacket(const uint8_t* packet, uint64_t bytes);
     void recordPending(render::Device& device, render::RenderGraph& graph, render::ShaderLibrary& shaders, uint64_t importIndex, render::QueueType queue);
     struct Impl;
     std::unique_ptr<Impl> m_impl;

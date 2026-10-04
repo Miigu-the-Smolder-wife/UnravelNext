@@ -19,6 +19,7 @@
 // The includer is a ray library with LumenHitIndirect.hlsli and GiSky.hlsli (ReflectionLumenHit.hlsli brings them).
 #ifndef UNX_RT_HIT_WATER_HLSLI
 #define UNX_RT_HIT_WATER_HLSLI
+#include "Passes/Common/TriangleStream.hlsli"
 #include "RayTracing/HitShading.hlsli"
 #include "Passes/Water/WaterShading.hlsli"
 
@@ -54,10 +55,10 @@ bool rtWaterSurface(RtSceneSrvs scene, RtHit hit, float3 origin, float3 directio
         ByteAddressBuffer table = ResourceDescriptorHeap[streamTable];
         ByteAddressBuffer v = ResourceDescriptorHeap[table.Load(slot * 4)];
         material = table.Load((64 + slot) * 4);
-        const uint base = hit.primitive * 96;  // (32 B vertices, normals at +16)
+        const uint3 vertexIds = triangleStreamVertexIds(table.Load((128u + slot) * 4u), hit.primitive);  // (32 B vertices, normals at +16)
         const float3 b = rtBary(hit.barycentrics);
         // (the stream's normals point out of the water)
-        const float3 n = normalize(asfloat(v.Load3(base + 16)) * b.x + asfloat(v.Load3(base + 48)) * b.y + asfloat(v.Load3(base + 80)) * b.z);
+        const float3 n = normalize(asfloat(v.Load3(32 * vertexIds.x + 16)) * b.x + asfloat(v.Load3(32 * vertexIds.y + 16)) * b.y + asfloat(v.Load3(32 * vertexIds.z + 16)) * b.z);
         w.fromAir = dot(n, direction) < 0;
         w.normal = w.fromAir ? n : -n;
     }

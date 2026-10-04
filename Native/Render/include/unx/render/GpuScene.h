@@ -3,10 +3,12 @@
 // (Scene.hlsli accessors) and the C++ accessors below; V's cluster builder output is installed with setClusters().
 #include "unx/render/Device.h"
 #include "unx/render/GpuSceneLayout.h"
+#include "unx/render/RuntimeDirtyRanges.h"
 #include "unx/scene/SceneData.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <span>
 #include <string>
@@ -15,6 +17,7 @@
 
 namespace unx::render
 {
+class RenderGraph;
 // Edge half-plane masks of the coverage mask LUT (Coverage.hlsli coverageTriangleMaskLut, INTERFACES 5.5.1; design
 // revision 1, 11 b): kCoverageLutAngles x kCoverageLutDistances entries of two uint32 masks (sure inside, sure outside),
 // row-major by angle bin. The inward normal n (upper half plane) is binned by its pseudo-angle pa = n.x / (|n.x| + n.y)
@@ -122,6 +125,17 @@ inline bool instanceMovable(const Instance& in)
 {
     return (in.flags & (scene::InstanceDynamic | scene::InstanceSkinned | scene::InstanceWind | kInstanceViewModel)) != 0 || in.bonePalette != kNone ||
            in.morph != kNone || in.patch != kNone;
+}
+// Shadow cache/raster partition only. Authoring Dynamic grants permission to
+// move; it does not invalidate a rigid caster whose actual rendered transforms
+// agree. Runtime/GPU slots and intrinsic deformation remain conservatively
+// movable. Mirror instanceShadowMovable in Scene.hlsli exactly.
+inline bool instanceShadowMovable(const Instance& in, uint32_t instance, uint32_t runtimeFirst)
+{
+    return instance >= runtimeFirst ||
+           (in.flags & (scene::InstanceSkinned | scene::InstanceWind | kInstanceViewModel | kInstanceMotionBreak)) != 0 ||
+           in.bonePalette != kNone || in.morph != kNone || in.patch != kNone ||
+           std::memcmp(in.objectToWorld, in.prevObjectToWorld, sizeof in.objectToWorld) != 0;
 }
 } // namespace gpu
 
@@ -286,9 +300,12 @@ public:
     void setInstances(std::span<const uint32_t> indices);
     void setMaterials(std::span<const uint32_t> indices);
     const std::vector<gpu::Material>& materials() const { return m_materials; }
-    // Uploads the changes for 'frameIndex': a scatter kernel on the graphics queue, submitted before the frame's graph;
-    // the other queues wait for it. Upload slot frameIndex % framesInFlight (the caller waited for that slot's frame).
-    void flushUpdates(uint64_t frameIndex, uint32_t framesInFlight, ShaderLibrary& shaders);
+    // Uploads changes on graphics before the consuming graph. With consumerGraph, bindless readers belong to that
+    // graph: writes wait for its previous submitted readers, and only its actual consumer submissions wait for writes.
+    // Independent simulation queues acquire no scene dependency. Submit or discard the recording before another flush.
+    // Legacy/manual callers without a graph retain conservative all-queue ordering. The caller waits for the reused
+    // upload slot's frame (frameIndex % framesInFlight); this scene outlives any registered graph recording.
+    void flushUpdates(uint64_t frameIndex, uint32_t framesInFlight, ShaderLibrary& shaders, RenderGraph* consumerGraph = nullptr);
 
     const scene::Scene* source() const { return m_source; }
     const std::vector<gpu::Instance>& instances() const { return m_instances; }
@@ -336,10 +353,14 @@ private:
         ComPtr<ID3D12Resource> buffer;
         uint8_t* mapped = nullptr;
         uint64_t bytes = 0;
+        uint64_t fence = 0; // submitted scatter still owns both mapped bytes and the descriptor
         uint32_t srv = gpu::kNone;
     };
 
     Device& m_device;
+    uint64_t m_sceneUpdateFence = 0;
+    uint64_t m_sceneConsumerFence[kQueueTypeCount] = {};
+    bool m_sceneConsumersUntracked = true; // first tracked flush also covers earlier legacy/manual readers
     const scene::Scene* m_source = nullptr;
     std::vector<gpu::Instance> m_instances;
     std::vector<gpu::Light> m_lights;
@@ -387,6 +408,7 @@ private:
     // in this frame and in the previous flushed one (they settle: prev = current), records to upload.
     std::vector<float4> m_palette, m_prevPalette;
     std::vector<scene::Skeleton> m_poses;  // current joint-to-model per skeleton
+    std::vector<std::vector<uint32_t>> m_skeletonInstances;  // fixed palette membership, rebuilt by upload
     std::vector<uint64_t> m_transformFrame, m_paletteFrame;
     std::vector<uint32_t> m_movedNow, m_movedBefore, m_posedNow, m_posedBefore;
     uint32_t m_windInstances = 0;  // instances with the wind flag (hasMotion)
@@ -417,7 +439,7 @@ private:
     uint32_t m_rtFirst[RtTargetEnd] = {};             // first element of the runtime region (target element size)
     uint32_t m_rtStride[RtTargetEnd] = {};
     uint32_t m_rtUav[RtTargetEnd];
-    std::vector<std::pair<uint32_t, uint32_t>> m_rtDirty;  // (target, 16-byte element within the whole buffer)
+    std::vector<detail::RuntimeDirtyRange> m_rtDirty;
     struct RuntimeMesh
     {
         bool live = false;
@@ -429,6 +451,7 @@ private:
     std::vector<uint8_t> m_runtimeInstanceLive;
     std::vector<std::pair<uint64_t, std::function<void()>>> m_rtReleases;  // (flush count at which it is safe, release)
     uint64_t m_flushes = 0;
+    uint64_t m_lastFlushFrame = UINT64_MAX;
     uint32_t m_framesInFlightSeen = 2;
     void writeRuntime(uint32_t target, uint32_t element, const void* data, uint32_t count);  // element in target units
     Buffer* runtimeBuffer(uint32_t target);

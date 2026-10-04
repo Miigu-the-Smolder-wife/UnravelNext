@@ -59,7 +59,7 @@ struct Buf
     uint64_t bytes = 0;
     ComPtr<ID3D12Resource> resource;
     BufferRef ref;
-    const RenderGraph* importedGraph = nullptr;  // imported once per frame: every tick of the frame uses the same ref
+    uint64_t importedRecord = 0; // refs belong to one recording, not an application frame or graph address
     uint64_t importedFrame = UINT64_MAX;
     ID3D12Resource* importedResource = nullptr;
 
@@ -87,9 +87,9 @@ struct Buf
     }
     BufferRef import(RenderGraph& graph, uint64_t frame)
     {
-        if (importedGraph == &graph && importedFrame == frame && importedResource == resource.Get()) return ref;
+        if (importedRecord == graph.recordKey() && importedFrame == frame && importedResource == resource.Get()) return ref;
         ref = graph.importBuffer(resource.Get(), BufferDesc{ name, bytes, stride });
-        importedGraph = &graph;
+        importedRecord = graph.recordKey();
         importedFrame = frame;
         importedResource = resource.Get();
         return ref;
@@ -269,6 +269,10 @@ struct ParticleSystem::Impl
     bool orientationSized[2] = { false, false }, oriented = false;
     bool latestReset = false;  // the latest tick's input was not the tick before it (RESET): render continuity breaks
     uint64_t tickSerial = 0;   // recorded ticks (the render passes' continuity check)
+    uint64_t presentationRecord = 0;
+    uint64_t presentationFrame = UINT64_MAX;
+    ParticleRenderInputs presentation;
+    std::vector<ID3D12Resource*> presentationSources;
     Buf restoreOrientations{ "fx.restoreOrientations", sizeof(NV_StreamParticleOrientation) };
     std::vector<uint8_t> programOriented;  // per program: NV_STREAM_PROGRAM_ORIENTATION
     std::vector<uint8_t> programLight;     // per program: NV_STREAM_PROGRAM_LIGHT on an emissive sprite (A3 FX lights)
@@ -300,6 +304,7 @@ struct ParticleSystem::Impl
     Buf counters{ "fx.counters", 4 };
     // inputs
     Buf programs{ "fx.programs", sizeof(NV_StreamProgram) }, curveKeys{ "fx.curveKeys", 16 };
+    uint32_t curveKeyCount = 0;
     Buf spawns{ "fx.spawns", sizeof(NV_StreamSpawn) }, explicitBirths{ "fx.explicitBirths", sizeof(NV_StreamExplicitBirth) };
     Buf fields{ "fx.fields", sizeof(NV_StreamField) }, worldFields{ "fx.worldFields", 16 };  // rows of 16 B (4 or 5 per record)
     Buf surfaces{ "fx.surfaces", sizeof(NV_StreamSurface) }, restore{ "fx.restore", sizeof(NV_StreamParticle) }, birthIndex{ "fx.birthIndex", 4 };
@@ -330,14 +335,15 @@ struct ParticleSystem::Impl
     std::vector<NV_StreamHeightField> heightTable;
     Buf heightTiles{ "fx.heightTiles", 4 }, heightFields{ "fx.heightFields", 112 };
     uint32_t submittedPrograms = 0, submittedBodyMax = 0;  // tables as of the last submitted packet (validation)
-    // Every persistent buffer in a fixed order (declaration order): imported at the start of a frame's ticks so the render
-    // graph's resource order does not follow the tick parity or the sections a tick carries (the plan key: the ping-pong
-    // pairs and optional inputs imported at first use gave the same passes a different resource order on every other
-    // frame, and the plan was compiled anew - Unity level logs, game request 10-01).
-    std::vector<Buf*> persistent()
+    // Stable logical roles for the first tick in this graph, independent of the physical ping-pong parity. The passes use
+    // these same output/input roles below. Physical-index imports made dynamic[cur] change the graph topology every
+    // tick, multiplying whole-frame plans by parity even when only the imported resource pointers changed.
+    // All ticks in this graph retain these imports, so a later tick still depends on the earlier tick's actual buffers.
+    std::vector<Buf*> persistent(uint32_t out)
     {
-        return { &posAge[0], &posAge[1], &velocity[0], &velocity[1], &orientation[0], &orientation[1], &restoreOrientations, &inRanges, &inBlocks,
-                 &renderRanges, &renderBlocks, &emitterTable, &emitterStamp, &emitterUpdates, &emitterUpdateRows, &emitterPatches, &dynamic[0], &dynamic[1],
+        const uint32_t in = out ^ 1u;
+        return { &posAge[out], &posAge[in], &velocity[out], &velocity[in], &orientation[out], &orientation[in], &restoreOrientations, &inRanges, &inBlocks,
+                 &renderRanges, &renderBlocks, &emitterTable, &emitterStamp, &emitterUpdates, &emitterUpdateRows, &emitterPatches, &dynamic[out], &dynamic[in],
                  &counters, &programs, &curveKeys, &spawns, &explicitBirths, &fields, &worldFields, &surfaces, &restore, &birthIndex, &dynamicSurfaces,
                  &bodies, &tickSurfaces, &ribbonPoints, &ribbonLinks, &ribbonVertices, &ribbonRanges, &ribbonRunStart, &ribbonTangents, &ribbonDrawRanges,
                  &ribbonDrawRows, &surfaceBoxes, &colliders, &trace, &rowMotion, &overflowRecords, &volumeRecords, &volumeSide, &volumeRanges, &gridBlocks,
@@ -426,6 +432,18 @@ ParticleSystem::~ParticleSystem()
 
 void ParticleSystem::submit(const uint8_t* packet, uint64_t bytes)
 {
+    acceptPacket(packet, bytes);
+    m_pending.emplace_back(packet, packet + bytes);
+}
+
+void ParticleSystem::submitOwned(std::vector<uint8_t>&& packet)
+{
+    acceptPacket(packet.data(), packet.size());
+    m_pending.push_back(std::move(packet));
+}
+
+void ParticleSystem::acceptPacket(const uint8_t* packet, uint64_t bytes)
+{
     Impl& m = *m_impl;
     validate(packet, bytes, m_chainDepthMax, m.submittedPrograms, m.submittedBodyMax);
     const NV_StreamHeader& h = *reinterpret_cast<const NV_StreamHeader*>(packet);
@@ -439,7 +457,6 @@ void ParticleSystem::submit(const uint8_t* packet, uint64_t bytes)
         const auto* heightRows = reinterpret_cast<const NV_StreamHeightField*>(packet + h.height_fields);
         for (uint32_t k = 0; k < h.height_field_count; ++k) m.submittedBodyMax = std::max(m.submittedBodyMax, heightRows[k].body + 1);
     }
-    m_pending.emplace_back(packet, packet + bytes);
 }
 
 void ParticleSystem::record(FramePassContext& fc)
@@ -457,13 +474,6 @@ void ParticleSystem::record(RenderGraph& graph, ShaderLibrary& shaders, uint64_t
 void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary& shaders, uint64_t importIndex, QueueType queueType)
 {
     Impl& m = *m_impl;
-    if (!m_pending.empty())
-    {
-        for (Buf* b : m.persistent())
-            if (b->resource) b->import(g, importIndex);
-        for (auto& x : m.slots)  // the tick ring's event buffers, slot order
-            if (x.events.resource) x.events.import(g, importIndex);
-    }
     while (!m_pending.empty())
     {
         std::vector<uint8_t> packet = std::move(m_pending.front());
@@ -512,6 +522,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
             }
             m.programs.ensure(device, (uint64_t)h.program_count * sizeof(NV_StreamProgram));
             m.curveKeys.ensure(device, (uint64_t)h.curve_key_count * 16);
+            m.curveKeyCount = h.curve_key_count;
             m.programsValid = true;
         }
         if (!m.programsValid) fail("FX particles: the first packet of a stream must carry the program table (NV_STREAM_PROGRAMS)");
@@ -1143,12 +1154,18 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         if (reset) std::memcpy(m.anchor[cur ^ 1u], h.anchor, sizeof h.anchor);  // the restore set is in this tick's anchor
         m.layout = std::move(out);
 
-        // Graph imports of this frame.
-        std::vector<Buf*> state = { &m.posAge[0], &m.posAge[1], &m.velocity[0], &m.velocity[1], &m.dynamic[cur], &m.counters, &slot.events, &m.tickSurfaces, &m.gridCount, &m.gridStart, &m.gridFill, &m.gridEntries, &m.gridLarge,
+        // Import only after all sizing above: preimporting before ensure()/exact() added both the unused old
+        // allocation and its replacement on growth ticks (notably collider scratch), changing the whole-frame plan.
+        // Existing imports from earlier ticks/snapshots in this recording are still reused by physical identity.
+        for (Buf* b : m.persistent(cur))
+            if (b->resource) b->import(g, importIndex);
+        // Event slots are imported only when their tick uses them. Importing the entire physical ring made the
+        // selected slot's resource id rotate, invalidating every FX pass and the containing frame's plan.
+        std::vector<Buf*> state = { &m.posAge[cur], &m.posAge[cur ^ 1u], &m.velocity[cur], &m.velocity[cur ^ 1u], &m.dynamic[cur], &m.counters, &slot.events, &m.tickSurfaces, &m.gridCount, &m.gridStart, &m.gridFill, &m.gridEntries, &m.gridLarge,
                                     &m.ribbonPoints, &m.ribbonLinks, &m.ribbonVertices, &m.volumeRecords, &m.volumeSide,
                                     &m.ribbonRunStart, &m.ribbonTangents, &m.gridBlocks, &m.surfaceBoxes, &m.overflowRecords, &m.colliders, &m.trace, &m.rowMotion,
                                     &m.emitterTable, &m.emitterStamp };
-        if (m.oriented) state.insert(state.end(), { &m.orientation[0], &m.orientation[1] });
+        if (m.oriented) state.insert(state.end(), { &m.orientation[cur], &m.orientation[cur ^ 1u] });
         std::vector<Buf*> inputs = { &m.programs, &m.curveKeys, &m.emitterUpdates, &m.emitterUpdateRows, &m.emitterPatches, &m.spawns, &m.explicitBirths, &m.fields, &m.worldFields, &m.surfaces,
                                      &m.restore, &m.birthIndex, &m.inRanges, &m.inBlocks, &m.renderRanges, &m.renderBlocks, &m.bodies, &m.dynamicSurfaces, &m.ribbonRanges, &m.volumeRanges,
                                      &m.ribbonDrawRanges, &m.ribbonDrawRows, &m.heightTiles, &m.heightFields, &m.restoreOrientations };
@@ -1614,6 +1631,7 @@ const ParticleSystem::LightTables& ParticleSystem::lightTables() const { return 
 ParticleRenderInputs ParticleSystem::renderInputs(RenderGraph& graph, uint64_t importIndex)
 {
     Impl& m = *m_impl;
+    if (m.presentationRecord == graph.recordKey() && m.presentationFrame == importIndex) return m.presentation;
     ParticleRenderInputs r;
     if (m.latestSlot < 0 || !m.renderRanges.resource) return r;
     const uint32_t last = m.parity ^ 1u, prev = m.parity;  // output parity of the latest tick; its input
@@ -1621,21 +1639,46 @@ ParticleRenderInputs ParticleSystem::renderInputs(RenderGraph& graph, uint64_t i
                     &m.programs, &m.curveKeys, &m.renderRanges, &m.renderBlocks };
     for (Buf* b : bufs)
         if (!b->resource) return r;  // (a previous tick's dynamic rows exist from the second tick on)
-    r.posAge[0] = m.posAge[prev].import(graph, importIndex);
-    r.posAge[1] = m.posAge[last].import(graph, importIndex);
-    r.velocity[0] = m.velocity[prev].import(graph, importIndex);
-    r.velocity[1] = m.velocity[last].import(graph, importIndex);
-    r.dynamic[0] = m.dynamic[prev].import(graph, importIndex);
-    r.dynamic[1] = m.dynamic[last].import(graph, importIndex);
-    r.emitters = m.emitterTable.import(graph, importIndex);
-    r.programs = m.programs.import(graph, importIndex);
-    r.curveKeys = m.curveKeys.import(graph, importIndex);
-    r.renderRanges = m.renderRanges.import(graph, importIndex);
-    r.renderBlocks = m.renderBlocks.import(graph, importIndex);
+    // Only the simulation's copy source is shared with later ticks. Every shader, including volume and ribbon
+    // consumers, receives a transient destination. Capture handles/lengths by value: a subsequent tick can grow or
+    // swap Buf resources before this graph records its command lists. Graph imports are non-owning: retain a source
+    // lease through recording and retire it only after submission, when Device can capture the actual copy fence.
+    struct Copy { BufferRef source, destination; uint64_t bytes; };
+    std::vector<Copy> copies;
+    std::vector<ID3D12Resource*> sources;
+    auto sourceLease = std::make_shared<std::vector<ComPtr<ID3D12Resource>>>();
+    auto snapshot = [&](Buf& source, uint64_t bytes) {
+        // Keep a valid view for empty optional tables. No shader accesses their unused element.
+        bytes = std::max<uint64_t>(bytes, source.stride ? source.stride : 4);
+        if (bytes > source.bytes) fail("FX presentation: %s needs %llu bytes, has %llu", source.name,
+                                      (unsigned long long)bytes, (unsigned long long)source.bytes);
+        const BufferRef input = source.import(graph, importIndex);
+        const BufferRef output = graph.createBuffer({ source.name, bytes, source.stride });
+        copies.push_back({ input, output, bytes });
+        sources.push_back(source.resource.Get());
+        sourceLease->push_back(source.resource);
+        return output;
+    };
+    auto count = [](const std::vector<LayoutRange>& ranges) {
+        return ranges.empty() ? 0ull : (uint64_t)ranges.back().base + ranges.back().count;
+    };
+    const uint64_t previousCount = count(m.layoutPrev), currentCount = count(m.layout);
+    r.posAge[0] = snapshot(m.posAge[prev], previousCount * 16);
+    r.posAge[1] = snapshot(m.posAge[last], currentCount * 16);
+    r.velocity[0] = snapshot(m.velocity[prev], previousCount * 16);
+    r.velocity[1] = snapshot(m.velocity[last], currentCount * 16);
+    // Dynamic rows can be addressed by a dying row of the previous table as well as by a current row.
+    r.dynamic[0] = snapshot(m.dynamic[prev], m.dynamic[prev].bytes);
+    r.dynamic[1] = snapshot(m.dynamic[last], (uint64_t)m.tableRows * sizeof(EmitterDynamic));
+    r.emitters = snapshot(m.emitterTable, (uint64_t)m.tableRows * sizeof(NV_StreamEmitter));
+    r.programs = snapshot(m.programs, (uint64_t)m.programOutput.size() * sizeof(NV_StreamProgram));
+    r.curveKeys = snapshot(m.curveKeys, (uint64_t)m.curveKeyCount * 16);
+    r.renderRanges = snapshot(m.renderRanges, (uint64_t)m.renderRangeCount * 32);
+    r.renderBlocks = snapshot(m.renderBlocks, ((uint64_t)groups(m.renderThreads, 256) + 1) * 4);
     if (m.ribbonRangeCount && m.ribbonDrawRanges.resource && m.ribbonDrawRows.resource)
     {
-        r.ribbonRanges = m.ribbonDrawRanges.import(graph, importIndex);
-        r.ribbonRows = m.ribbonDrawRows.import(graph, importIndex);
+        r.ribbonRanges = snapshot(m.ribbonDrawRanges, (uint64_t)m.ribbonRangeCount * 16);
+        r.ribbonRows = snapshot(m.ribbonDrawRows, (uint64_t)m.tableRows * 8);
         r.ribbonRangeCount = m.ribbonRangeCount;
         r.ribbonCapacity = m.ribbonCapacity;
     }
@@ -1646,15 +1689,48 @@ ParticleRenderInputs ParticleSystem::renderInputs(RenderGraph& graph, uint64_t i
     std::memcpy(r.anchor[1], m.anchor[last], sizeof r.anchor[1]);
     if (m.oriented && m.orientation[prev].resource && m.orientation[last].resource)
     {
-        r.orientation[0] = m.orientation[prev].import(graph, importIndex);
-        r.orientation[1] = m.orientation[last].import(graph, importIndex);
+        r.orientation[0] = snapshot(m.orientation[prev], previousCount * sizeof(NV_StreamParticleOrientation));
+        r.orientation[1] = snapshot(m.orientation[last], currentCount * sizeof(NV_StreamParticleOrientation));
     }
     r.tickSerial = m.tickSerial;
+    const auto& slot = m.slots[(size_t)m.latestSlot];
+    r.stream = slot.stream;
+    r.generation = slot.generation;
+    r.tick = slot.tick;
+    r.capacity = m_capacity;
+    r.lights = std::make_shared<const ParticleLightTables>(m.lights);
     r.reset = m.latestReset;
     r.dt = m.tickDt;
     r.tickTime = m.tickTime;
     r.valid = true;
+    Device* device = &m_device;
+    graph.addPass("fx.presentation", QueueType::Graphics,
+                  [copies, sourceLease, device](PassBuilder& b) {
+                      for (const Copy& copy : copies)
+                      {
+                          b.use(copy.source, Use::CopySrc);
+                          b.use(copy.destination, Use::CopyDst);
+                      }
+                      b.onSubmitted([sourceLease, device](Queue&, uint64_t) {
+                          device->deferCall([sourceLease] {});
+                      });
+                  },
+                  [copies](PassContext& c) {
+                      for (const Copy& copy : copies)
+                          c.cmd->CopyBufferRegion(c.resource(copy.destination), 0, c.resource(copy.source), 0, copy.bytes);
+                  });
+    m.presentationRecord = graph.recordKey();
+    m.presentationFrame = importIndex;
+    m.presentation = r;
+    m.presentationSources = std::move(sources);
     return r;
+}
+
+std::vector<ID3D12Resource*> ParticleSystem::presentationSources(const RenderGraph& graph, uint64_t importIndex) const
+{
+    const Impl& m = *m_impl;
+    if (m.presentationRecord != graph.recordKey() || m.presentationFrame != importIndex) return {};
+    return m.presentationSources;
 }
 
 const std::vector<LayoutRange>& ParticleSystem::layout() const { return m_impl->layout; }

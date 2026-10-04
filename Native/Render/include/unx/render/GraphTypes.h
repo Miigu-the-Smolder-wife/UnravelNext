@@ -51,6 +51,10 @@ struct TextureDesc
     // R9G9B9E5_SHAREDEXP through its SRV. UNKNOWN = 'format'.
     DXGI_FORMAT srvFormat = DXGI_FORMAT_UNKNOWN;
     DXGI_FORMAT uavFormat = DXGI_FORMAT_UNKNOWN;
+    // Creation-time optimization for transient render targets; this does NOT
+    // initialize the texture. Passes still clear it explicitly.
+    float clearColor[4] = {};
+    float clearDepth = 0;  // reversed-Z default; source-triangle card captures use 1
 };
 
 struct BufferDesc

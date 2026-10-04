@@ -12,6 +12,7 @@
 #include "unx/rt/RayScene.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 
 namespace unx::render::refl
@@ -25,6 +26,8 @@ constexpr uint32_t kSelectHead = 64, kPageTiles = 256;  // (a page of 128 x 128 
 constexpr uint32_t kFrameBytes = 160;  // (CardLayout.hlsli: 40 words, 38 in use)
 // The structural bound of one dispatch (Docs/Status/DISPATCH_BOUNDS_KO.md): a thread traces at most one ray.
 constexpr uint32_t kThreadsPerDispatch = 262144;
+constexpr uint32_t kDirectWorkBlocksPerTile = 36; // nine light slots, four 16-thread blocks each
+static_assert(kThreadsPerDispatch % 16 == 0);
 const char* const kStore[2] = { "Passes/SurfaceCache/CardDirectStore.SKY0", "Passes/SurfaceCache/CardDirectStore.SKY1" };
 const char* const kRadiosityTrace[2] = { "Passes/SurfaceCache/CardRadiosityTrace.SKY0", "Passes/SurfaceCache/CardRadiosityTrace.SKY1" };
 const char* const kSelect[3] = { "Passes/SurfaceCache/CardSelect.STAGE0", "Passes/SurfaceCache/CardSelect.STAGE1", "Passes/SurfaceCache/CardSelect.STAGE2" };
@@ -42,13 +45,19 @@ struct CardLighting::Impl
     Device& device;
     uint32_t atlasSize = 0, pageCapacity = 0;
     ComPtr<ID3D12Resource> direct, indirect, final, trace, sh[3], frames, pageLight, uniformBits, frameBuffer, lastUsed;
+    ComPtr<ID3D12CommandSignature> dispatchSignature;
     // this frame's references
     uint64_t frameIndex = UINT64_MAX, recordSerial = UINT64_MAX;
     CardSet set;
     CardLightingRefs refs;
     bool cleared = false;  // r.card.clear ran since the resources were made
 
-    explicit Impl(Device& d) : device(d) {}
+    explicit Impl(Device& d) : device(d)
+    {
+        const D3D12_INDIRECT_ARGUMENT_DESC argument{ D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH };
+        const D3D12_COMMAND_SIGNATURE_DESC desc{ sizeof(D3D12_DISPATCH_ARGUMENTS), 1, &argument, 0 };
+        check(device.d3d()->CreateCommandSignature(&desc, nullptr, IID_PPV_ARGS(&dispatchSignature)), "card lighting dispatch signature");
+    }
 
     ComPtr<ID3D12Resource> texture(uint32_t size, DXGI_FORMAT format, const wchar_t* name)
     {
@@ -114,6 +123,7 @@ CardLighting::~CardLighting()
     s.release(s.direct), s.release(s.indirect), s.release(s.final), s.release(s.trace), s.release(s.frames), s.release(s.uniformBits);
     s.release(s.pageLight), s.release(s.frameBuffer), s.release(s.lastUsed);
     for (auto& t : s.sh) s.release(t);
+    s.device.deferRelease(s.dispatchSignature);
 }
 
 BufferRef CardLighting::frame(const FramePassContext& fc) const { return m->frameIndex == fc.frame.frameIndex ? m->refs.frame : BufferRef{}; }
@@ -266,10 +276,26 @@ void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs
     const BufferRef select = g.createBuffer({ "r.card select", (selectBytes + 15) & ~15ull, 0 });
     const BufferRef tileLights = g.createBuffer({ "r.card tile lights", (uint64_t)directCapacity * kTileLightBytes, 0 });
     const BufferRef tileShadow = g.createBuffer({ "r.card tile shadow", (uint64_t)directCapacity * kTileShadowBytes, 0 });
+    const uint32_t directWorkCapacity = directCapacity * kDirectWorkBlocksPerTile;
+    const BufferRef directWork = in.direct ? g.createBuffer({ "r.card direct work", 16 + (uint64_t)directWorkCapacity * 4, 0 }) : BufferRef{};
     // The tint words (CardLighting.hlsli): 64 words a tinted slot of a listed tile - 256 B a tile for the sun alone, 2,304 B
     // for every slot. A FORCE_OPAQUE shadow ray runs no any-hit shader and gathers nothing: no tint with shadow_rays_opaque.
     const uint32_t tintSlots = in.direct && !in.shadowRaysOpaque ? (in.directTintSlots >= 9 ? 9u : in.directTintSlots >= 1 ? 1u : 0u) : 0u;
     const BufferRef tileTint = tintSlots != 0 ? g.createBuffer({ "r.card tile tint", (uint64_t)directCapacity * tintSlots * 256, 0 }) : BufferRef{};
+
+    // UE6 LumenRadiosity's allocator -> indirect-arguments -> trace/integrate
+    // boundary: preserve every selected tile, but launch no idle budget slots.
+    constexpr uint32_t rayStride = rt::RayPipeline::kDispatchDescStride;
+    constexpr uint32_t radiosityChunk = kThreadsPerDispatch / 4;
+    const uint32_t directChunks = in.direct ? (directCapacity * kTraceThreads + kThreadsPerDispatch - 1) / kThreadsPerDispatch : 0;
+    const uint32_t radiosityChunks = in.radiosity ? (radiosityCapacity * 64 + radiosityChunk - 1) / radiosityChunk : 0;
+    const uint32_t directOffset = 64, radiosityOffset = directOffset + directChunks * rayStride;
+    const BufferRef dispatchArgs = g.createBuffer({ "r.card dispatch arguments", radiosityOffset + (uint64_t)radiosityChunks * rayStride, 0 });
+    rt::RayPipeline* directPipeline = in.direct ? &rt::RayPipeline::get(fc.device, shaders,
+        rt::standardRayPipeline("Passes/SurfaceCache/CardDirectTrace", { "CardDirectTraceGen" })) : nullptr;
+    rt::RayPipeline* radiosityPipeline = in.radiosity ? &rt::RayPipeline::get(fc.device, shaders,
+        rt::standardRayPipeline(kRadiosityTrace[in.skyVariant & 1u], { "CardRadiosityTraceGen" })) : nullptr;
+    ID3D12CommandSignature* dispatchSignature = s.dispatchSignature.Get();
 
     const D3D12_GPU_VIRTUAL_ADDRESS cb = in.frameConstants;
     const uint32_t frame = in.frame, pageCount = std::min(set.cardPageCount, capacity);
@@ -300,12 +326,20 @@ void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs
               [&](PassBuilder& b) {
                   b.use(frameBuffer, Use::UavCompute);
                   b.use(select, Use::UavCompute);
+                  b.use(dispatchArgs, Use::CopyDst);
+                  if (directWork.valid()) b.use(directWork, Use::UavCompute);
                   b.keep();
               },
-              [this, &shaders, set, r, select, pageCount, frame, depthBias = in.depthBias](PassContext& c) {
+              [this, &shaders, set, r, select, pageCount, frame, dispatchArgs, directWork, directPipeline, radiosityPipeline,
+               directChunks, radiosityChunks, directOffset, radiosityOffset, depthBias = in.depthBias](PassContext& c) {
+                  for (uint32_t chunk = 0; chunk < directChunks; ++chunk)
+                      c.cmd->CopyBufferRegion(c.resource(dispatchArgs), directOffset + (uint64_t)chunk * rayStride, directPipeline->dispatchTemplate(), 0, rayStride);
+                  for (uint32_t chunk = 0; chunk < radiosityChunks; ++chunk)
+                      c.cmd->CopyBufferRegion(c.resource(dispatchArgs), radiosityOffset + (uint64_t)chunk * rayStride, radiosityPipeline->dispatchTemplate(), 0, rayStride);
                   uint32_t k[48];
                   m->frameWords(c, set, r, pageCount, frame, depthBias, c.uav(select), k);
-                  c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardFrame"));
+                  k[22] = directWork.valid() ? c.uav(directWork) : 0xFFFFFFFFu;
+                  c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardFrameDirect"));
                   c.computeConstants(k, 48);
                   c.cmd->Dispatch(1, 1, 1);
               });
@@ -331,6 +365,19 @@ void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs
                       c.cmd->Dispatch(stage == 1 ? 1 : (std::max(pageCount, 1u) + 63) / 64, 1, 1);
                   });
     }
+    chain.add("r.card.dispatch.args",
+              [&](PassBuilder& b) {
+                  b.use(select, Use::SrvCompute);
+                  b.use(dispatchArgs, Use::UavCompute);
+              },
+              [=, &shaders](PassContext& c) {
+                  const uint32_t k[12] = { c.srv(select), c.uav(dispatchArgs), directCapacity, radiosityCapacity,
+                      directOffset, directChunks, radiosityOffset, radiosityChunks, rayStride,
+                      (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), kThreadsPerDispatch, radiosityChunk };
+                  c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardDispatchArgs"));
+                  c.computeConstants(k, 12);
+                  c.cmd->Dispatch(1, 1, 1);
+              });
     chain.flush("r.card.select");
 
     if (in.direct)
@@ -338,55 +385,75 @@ void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs
         const uint32_t lightFlags = (in.shadowRaysOpaque ? 2048u : 0u);
         g.addPass("r.card.direct.cull", QueueType::Compute,
                   [&](PassBuilder& b) {
+                      b.use(dispatchArgs, Use::IndirectArgs);
                       declareShared(b);  // (the light grid)
                       declareSet(b, true, false);
                       b.use(select, Use::SrvGraphics);
                       b.use(uniformBits, Use::SrvGraphics);
                       b.use(tileLights, Use::UavGraphics);
                       b.use(tileShadow, Use::UavGraphics);
+                      b.use(directWork, Use::UavCompute);
                       b.use(pageLight, Use::UavGraphics);  // (CL_PAGE_ANIMATED: a light whose function changes with time)
                   },
                   [&shaders, cb, sharedConstants, frameBuffer, select, uniformBits, tileLights, tileShadow, pageLight, frame, lightFlags, capacity,
-                   directCapacity](PassContext& c) {
+                   directCapacity, dispatchArgs, dispatchSignature, directWork](PassContext& c) {
                       uint32_t k[32] = {};
                       sharedConstants(c, k);
                       k[0] = c.srv(frameBuffer), k[1] = c.srv(select), k[2] = frame, k[3] = lightFlags;
                       k[16] = c.uav(tileLights), k[17] = c.uav(tileShadow), k[18] = c.srv(uniformBits), k[19] = capacity;
-                      k[20] = directCapacity, k[21] = c.uav(pageLight), k[22] = 0, k[23] = 0;
+                      k[20] = directCapacity, k[21] = c.uav(pageLight), k[22] = c.uav(directWork), k[23] = 0;
                       c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardDirectCull"));
                       c.bindFrameConstants(cb);
                       c.computeConstants(k, 32);
-                      c.cmd->Dispatch((directCapacity + 63) / 64, 1, 1);
+                      c.cmd->ExecuteIndirect(dispatchSignature, 1, c.resource(dispatchArgs), 0, nullptr, 0);
                   });
-        rt::RayPipeline& directTrace = rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline("Passes/SurfaceCache/CardDirectTrace", { "CardDirectTraceGen" }));
+        // Cull already selected the active lights and the existing 2x2 uniform
+        // visibility sampling. Convert its compact work blocks into ray counts.
+        g.addPass("r.card.direct.args", QueueType::Compute,
+                  [&](PassBuilder& b) {
+                      b.use(directWork, Use::SrvCompute);
+                      b.use(dispatchArgs, Use::UavCompute);
+                  },
+                  [=, &shaders](PassContext& c) {
+                      const uint32_t k[8] = { c.srv(directWork), c.uav(dispatchArgs), directWorkCapacity, directOffset,
+                          rayStride, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), kThreadsPerDispatch, directChunks };
+                      c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardDirectArgs"));
+                      c.computeConstants(k, 8);
+                      c.cmd->Dispatch(1, 1, 1);
+                  });
+        rt::RayPipeline& directTrace = *directPipeline;
         g.addPass("r.card.direct.trace", QueueType::Compute,
                   [&](PassBuilder& b) {
+                      b.use(dispatchArgs, Use::IndirectArgs);
                       declareShared(b);
                       declareSet(b, true, false);
                       b.use(select, Use::SrvGraphics);
                       b.use(tileLights, Use::SrvGraphics);
+                      b.use(directWork, Use::SrvGraphics);
                       b.use(tileShadow, Use::UavGraphics);
                       if (tileTint.valid()) b.use(tileTint, Use::UavGraphics);
                   },
                   [&directTrace, cb, sharedConstants, frameBuffer, select, tileLights, tileShadow, tileTint, tintSlots, frame, lightFlags, capacity, directCapacity,
-                   endBias](PassContext& c) {
-                      uint32_t k[32] = {};
+                   endBias, dispatchArgs, directOffset, directWork](PassContext& c) {
+                      uint32_t k[36] = {};
                       sharedConstants(c, k);
                       k[0] = c.srv(frameBuffer), k[1] = c.srv(select), k[2] = frame, k[3] = lightFlags;
                       k[16] = c.srv(tileLights), k[17] = c.uav(tileShadow), k[19] = capacity;
                       k[20] = directCapacity, k[21] = bits(endBias), k[22] = tileTint.valid() ? c.uav(tileTint) : 0xFFFFFFFFu, k[23] = tintSlots;
+                      k[32] = c.srv(directWork);
                       c.bindFrameConstants(cb);
                       const uint64_t threads = (uint64_t)directCapacity * kTraceThreads;
                       for (uint64_t first = 0; first < threads; first += kThreadsPerDispatch)
                       {
                           k[18] = (uint32_t)first;
-                          c.computeConstants(k, 32);
-                          directTrace.dispatch(c.cmd, 0, (uint32_t)std::min<uint64_t>(kThreadsPerDispatch, threads - first), 1);
+                          c.computeConstants(k, 36);
+                          directTrace.dispatchIndirect(c.cmd, c.resource(dispatchArgs), directOffset + (first / kThreadsPerDispatch) * rayStride);
                       }
                   });
         ID3D12PipelineState* store = shaders.compute(kStore[in.skyVariant & 1u]);
         g.addPass("r.card.direct.store", QueueType::Compute,
                   [&](PassBuilder& b) {
+                      b.use(dispatchArgs, Use::IndirectArgs);
                       declareShared(b);  // (the sky's tables, the lights)
                       declareSet(b, true, true);
                       b.use(select, Use::SrvGraphics);
@@ -400,7 +467,7 @@ void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs
                       b.keep();
                   },
                   [store, cb, sharedConstants, frameBuffer, select, uniformBits, tileLights, tileShadow, tileTint, tintSlots, direct, indirect, final, frame, lightFlags,
-                   capacity, directCapacity](PassContext& c) {
+                   capacity, directCapacity, dispatchArgs, dispatchSignature](PassContext& c) {
                       uint32_t k[32] = {};
                       sharedConstants(c, k);
                       k[0] = c.srv(frameBuffer), k[1] = c.srv(select), k[2] = frame, k[3] = lightFlags | (tintSlots > 1 ? 4096u : 0u);
@@ -410,15 +477,16 @@ void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs
                       c.cmd->SetPipelineState(store);
                       c.bindFrameConstants(cb);
                       c.computeConstants(k, 32);
-                      c.cmd->Dispatch(directCapacity, 1, 1);
+                      c.cmd->ExecuteIndirect(dispatchSignature, 1, c.resource(dispatchArgs), 16, nullptr, 0);
                   });
     }
 
     if (in.radiosity)
     {
-        rt::RayPipeline& radiosityTrace = rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline(kRadiosityTrace[in.skyVariant & 1u], { "CardRadiosityTraceGen" }));
+        rt::RayPipeline& radiosityTrace = *radiosityPipeline;
         g.addPass("r.card.radiosity.trace", QueueType::Compute,
                   [&](PassBuilder& b) {
+                      b.use(dispatchArgs, Use::IndirectArgs);
                       declareShared(b);
                       declareSet(b, true, false);
                       b.use(select, Use::SrvGraphics);
@@ -437,7 +505,7 @@ void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs
                   },
                   [&radiosityTrace, cb, sharedConstants, frameBuffer, select, pageLight, trace, frame, capacity, directCapacity, radiosityCapacity,
                    cap = in.radiosityCap, skipBackFace = in.radiositySkipBackFace, skipTwoSided = in.radiositySkipTwoSided,
-                   minTraceDistance = in.radiosityMinTraceDistance](PassContext& c) {
+                   dispatchArgs, radiosityOffset, minTraceDistance = in.radiosityMinTraceDistance](PassContext& c) {
                       uint32_t k[32] = {};
                       sharedConstants(c, k);
                       k[0] = c.srv(frameBuffer), k[1] = c.srv(select), k[2] = frame, k[3] = bits(skipBackFace);
@@ -453,27 +521,30 @@ void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs
                       {
                           k[18] = (uint32_t)first;
                           c.computeConstants(k, 32);
-                          radiosityTrace.dispatch(c.cmd, 0, (uint32_t)std::min<uint64_t>(perDispatch, threads - first), 1);
+                          radiosityTrace.dispatchIndirect(c.cmd, c.resource(dispatchArgs), radiosityOffset + (first / perDispatch) * rayStride);
                       }
                   });
         g.addPass("r.card.radiosity.probe", QueueType::Compute,
                   [&](PassBuilder& b) {
+                      b.use(dispatchArgs, Use::IndirectArgs);
                       declareSet(b, false, false);
                       b.use(select, Use::SrvCompute);
                       b.use(pageLight, Use::SrvCompute);
                       b.use(trace, Use::SrvCompute);
                       for (const TextureRef& t : sh) b.use(t, Use::UavCompute);
                   },
-                  [&shaders, cb, frameBuffer, select, pageLight, trace, sh0 = sh[0], sh1 = sh[1], sh2 = sh[2], frame, capacity, directCapacity, radiosityCapacity](PassContext& c) {
+                  [&shaders, cb, frameBuffer, select, pageLight, trace, sh0 = sh[0], sh1 = sh[1], sh2 = sh[2], frame, capacity, directCapacity, radiosityCapacity,
+                   dispatchArgs, dispatchSignature](PassContext& c) {
                       const uint32_t k[28] = { c.srv(frameBuffer), c.srv(select), frame, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                                                c.srv(trace), c.srv(pageLight), 0, capacity, directCapacity, radiosityCapacity, 0, 0, c.uav(sh0), c.uav(sh1), c.uav(sh2), 0 };
                       c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardRadiosityProbe"));
                       c.bindFrameConstants(cb);
                       c.computeConstants(k, 28);
-                      c.cmd->Dispatch((radiosityCapacity * 4 + 63) / 64, 1, 1);
+                      c.cmd->ExecuteIndirect(dispatchSignature, 1, c.resource(dispatchArgs), 32, nullptr, 0);
                   });
         g.addPass("r.card.radiosity.integrate", QueueType::Compute,
                   [&](PassBuilder& b) {
+                      b.use(dispatchArgs, Use::IndirectArgs);
                       declareSet(b, false, true);
                       b.use(select, Use::SrvCompute);
                       b.use(pageLight, Use::SrvCompute);
@@ -485,14 +556,14 @@ void CardLighting::recordLighting(FramePassContext& fc, const CardLightingInputs
                       b.keep();
                   },
                   [&shaders, cb, frameBuffer, select, pageLight, sh0 = sh[0], sh1 = sh[1], sh2 = sh[2], direct, indirect, final, frames, frame, capacity, directCapacity,
-                   radiosityCapacity, maxFrames = in.radiosityFrames](PassContext& c) {
+                   radiosityCapacity, dispatchArgs, dispatchSignature, maxFrames = in.radiosityFrames](PassContext& c) {
                       const uint32_t k[28] = { c.srv(frameBuffer), c.srv(select), frame, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                                                c.srv(pageLight), bits(maxFrames), c.uav(frames), capacity, directCapacity, radiosityCapacity, c.uav(indirect), c.uav(final),
                                                c.srv(sh0), c.srv(sh1), c.srv(sh2), c.srv(direct) };
                       c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardRadiosityIntegrate"));
                       c.bindFrameConstants(cb);
                       c.computeConstants(k, 28);
-                      c.cmd->Dispatch(radiosityCapacity, 1, 1);
+                      c.cmd->ExecuteIndirect(dispatchSignature, 1, c.resource(dispatchArgs), 48, nullptr, 0);
                   });
     }
 }

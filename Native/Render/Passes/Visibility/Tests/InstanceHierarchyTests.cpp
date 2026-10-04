@@ -165,9 +165,11 @@ struct FrameOut
 
 // Renders the cameras; stats are those of the last frame read back (latestStats lags by the frames in flight), so the
 // last frames repeat the camera.
-std::vector<FrameOut> run(const scene::Scene& s, const std::vector<scene::Camera>& cams, uint32_t width, uint32_t height)
+std::vector<FrameOut> run(const scene::Scene& s, const std::vector<scene::Camera>& cams, uint32_t width, uint32_t height,
+                         bool cachedRigid = true, const std::function<void(uint32_t, GpuScene&, FrameContext&)>& edit = {}, int discardedFrame = -1)
 {
-    const QualityConfig q = quality();
+    QualityConfig q = quality();
+    if (!cachedRigid) q = QualityConfig::parse(q.canonical() + "\nvisibility.cache_unchanged_rigid = false\n", "flat hierarchy reference");
     const ClusterData cd = clusterbuilder::build(s, clusterbuilder::Settings::fromQuality(q));
     GpuScene gs(device());
     gs.upload(s);
@@ -184,6 +186,13 @@ std::vector<FrameOut> run(const scene::Scene& s, const std::vector<scene::Camera
         fr.time = f / 60.0;
         fr.deltaTime = 1.0f / 60;
         fr.mainView = ViewDesc::fromCamera(cams[f], width, height, prev);
+        if (edit) edit(f, gs, fr);
+        if ((int)f == discardedFrame)
+        {
+            RenderGraph discarded(device());
+            TextureRef discardedOutput = discarded.createTexture({ "discarded output", width, height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
+            renderer.record(discarded, fr, discardedOutput);
+        }
         TextureRef output = graph.createTexture({ "test output", width, height, 1, 1, DXGI_FORMAT_R10G10B10A2_UNORM });
         const ViewResources main = renderer.record(graph, fr, output);
         ID3D12Resource *d = depthRb.Get(), *v = visRb.Get();
@@ -240,7 +249,7 @@ UNX_TEST(chunks_are_conservative)
     cams.push_back(cams.back());
     cams.push_back(cams.back());
     const uint32_t width = 1920, height = 1080;
-    const auto chunked = run(s, cams, width, height), reference = run(flat, cams, width, height);
+    const auto chunked = run(s, cams, width, height), reference = run(flat, cams, width, height, false);
     size_t differing = 0, covered = 0;
     for (size_t f = 0; f < cams.size(); ++f)
         for (size_t i = 0; i < chunked[f].depth.size(); ++i)
@@ -254,7 +263,49 @@ UNX_TEST(chunks_are_conservative)
          cams.size(), covered, differing, a.chunkItems, a.deferredChunks, a.instancesVisible, a.nodesTested, b.instancesVisible, b.nodesTested, a.overflow, b.overflow);
     CHECK(covered > 1000000);
     CHECK(differing == 0);
-    CHECK(a.chunkItems > 0 && a.overflow == 0 && b.overflow == 0);
+    CHECK(a.chunkItems > 0 && b.chunkItems == 0 && a.overflow == 0 && b.overflow == 0);
+}
+
+UNX_TEST(rigid_mobility_preserves_current_bounds)
+{
+    scene::Scene s;
+    s.name = "movable authoring, mostly unchanged level";
+    s.materials.resize(1);
+    s.meshes.push_back(box({0.4f, 0.4f, 0.4f}, 2, "rigid"));
+    for (uint32_t i = 0; i < 160; ++i)
+    {
+        auto in = at(0, {float(int(i % 16) - 8) * 2, 0.4f, 5 + float(i / 16) * 3});
+        in.flags |= scene::InstanceDynamic; s.instances.push_back(in);
+    }
+    const auto cam = camera({0, 2, -4}, {0, 1, 20}); s.cameras.push_back(cam);
+    const std::vector<scene::Camera> cams(13, cam);
+    auto edits = [=]() {
+        return [=, origin = float3{}](uint32_t frame, GpuScene& gs, FrameContext& fr) mutable {
+            if (frame == 1 || frame == 2 || frame == 8)
+            {
+                const uint32_t index = frame == 2 ? 1 : 0;
+                auto transform = s.instances[index].transform;
+                const float3 p = frame == 8 ? float3{0, 0.4f, 4} : frame == 1 ? float3{0, 0.4f, 5} : float3{2, 0.4f, 6};
+                transform.m[0][3] = p.x - origin.x; transform.m[1][3] = p.y - origin.y; transform.m[2][3] = p.z - origin.z;
+                const InstanceTransformUpdate update{index, transform, 0}; gs.updateTransforms(frame, {&update, 1});
+            }
+            if (frame == 3 || frame == 4) gs.setInstanceVisible(2, frame == 4);
+            if (frame == 5) { origin = {1024, 0, 0}; gs.rebase(origin); fr.originShift = origin; }
+            auto shifted = cam; shifted.position = shifted.position - origin;
+            fr.mainView = ViewDesc::fromCamera(shifted, fr.mainView.width, fr.mainView.height, fr.mainView.prevViewProj);
+        };
+    };
+    const auto cached = run(s, cams, 160, 96, true, edits(), 2);
+    const auto flat = run(s, cams, 160, 96, false, edits(), 2);
+    for (size_t frame = 0; frame < cams.size(); ++frame)
+    {
+        CHECK(cached[frame].depth == flat[frame].depth);
+        for (size_t i = 0; i < cached[frame].visId.size(); ++i)
+            CHECK((cached[frame].visId[i] == kVisNone) == (flat[frame].visId[i] == kVisNone));
+    }
+    CHECK(cached.back().stats.chunkItems > 0 && flat.back().stats.chunkItems == 0);
+    CHECK(cached.back().stats.overflow == 0 && flat.back().stats.overflow == 0);
+    logf("rigid mobility: 160 authoring-dynamic instances, 13 frames exactly match forced flat depth/coverage after first moves, hide/show, rebase and discarded record\n");
 }
 
 UNX_TEST(skinned_bounds)
@@ -307,6 +358,8 @@ UNX_TEST(skinned_bounds)
 
 int main(int argc, char** argv)
 {
+    try
+    {
     const char* filter = argc > 1 ? argv[1] : nullptr;
     uint32_t passed = 0, runCount = 0;
     for (const TestCase& t : registry())
@@ -319,4 +372,10 @@ int main(int argc, char** argv)
     }
     logf("%u/%u passed\n", passed, runCount);
     return passed == runCount ? 0 : 1;
+    }
+    catch (const std::exception& e)
+    {
+        std::fprintf(stderr, "FAIL %s\n", e.what());
+        return 1;
+    }
 }

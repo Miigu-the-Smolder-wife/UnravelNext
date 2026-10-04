@@ -3,6 +3,7 @@
 // free list and counters. The cache is emptied on a new scene revision, an origin shift or a change of its sizes; a
 // history discontinuity (a camera cut) keeps it: the probes are world-space.
 #include "unx/gi/LumenRadianceCache.h"
+#include "LumenRadianceCacheDispatch.h"
 
 #include "unx/core/Config.h"
 #include "unx/render/Device.h"
@@ -388,7 +389,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
     const uint32_t probesPerDispatch = std::max(1u, kMaxRaysPerDispatch / (s.probeResolution * s.probeResolution * kRaysPerTexel));
     const uint32_t chunks = (s.traceCapacity + probesPerDispatch - 1) / probesPerDispatch;
     const BufferRef rayArgs = g.createBuffer({ "r.gi.rc ray dispatch", (uint64_t)chunks * kDescStride, 0 });
-    const BufferRef filterArgs = g.createBuffer({ "r.gi.rc filter dispatch", (uint64_t)chunks * 32, 0 });
+    const BufferRef filterArgs = g.createBuffer({ "r.gi.rc filter dispatch", (uint64_t)chunks * LRC_COMPUTE_ARGS_STRIDE, 0 });
     const uint32_t tempSize = p.tempProbes * s.probeResolution;
     const TextureRef traced = g.createTexture({ "r.gi.rc traced", tempSize, tempSize, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
     const TextureRef filtered = g.createTexture({ "r.gi.rc filtered", tempSize, tempSize, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
@@ -537,7 +538,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   {
                       k[10] = chunk * probesPerDispatch;  // P[2].z: the dispatch's first trace record
                       c.computeConstants(k, 12);
-                      c.cmd->ExecuteIndirect(signature, 1, c.resource(filterArgs), (uint64_t)chunk * 32, nullptr, 0);
+                      c.cmd->ExecuteIndirect(signature, 1, c.resource(filterArgs), (uint64_t)chunk * LRC_COMPUTE_ARGS_STRIDE + LRC_FILTER_ARGS_OFFSET, nullptr, 0);
                   }
               });
     g.addPass("r.gi.rc.store", QueueType::Compute,
@@ -556,13 +557,14 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   {
                       k[10] = chunk * probesPerDispatch;
                       c.computeConstants(k, 12);
-                      c.cmd->ExecuteIndirect(signature, 1, c.resource(filterArgs), (uint64_t)chunk * 32 + 16, nullptr, 0);
+                      c.cmd->ExecuteIndirect(signature, 1, c.resource(filterArgs), (uint64_t)chunk * LRC_COMPUTE_ARGS_STRIDE + LRC_STORE_ARGS_OFFSET, nullptr, 0);
                   }
               });
     if (frame.irradiance.valid())
     {
-        // the traced probes' irradiance maps, from the radiance the store left in the atlas (on the store's dispatch
-        // arguments: one group layer per traced probe, of which the first group works)
+        // The traced probes' irradiance maps, from the radiance the store left in the atlas.
+        // Dedicated arguments launch one group per probe; the store's atlas-sized
+        // XY grid would launch 25 groups at resolution 32, of which 24 are idle.
         const TextureRef irradiance = frame.irradiance;
         g.addPass("r.gi.rc.irradiance", QueueType::Compute,
                   [&](PassBuilder& b) {
@@ -580,7 +582,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                       {
                           k[5] = chunk * probesPerDispatch;  // P[1].y: the dispatch's first trace record
                           c.computeConstants(k, 8);
-                          c.cmd->ExecuteIndirect(signature, 1, c.resource(filterArgs), (uint64_t)chunk * 32 + 16, nullptr, 0);
+                          c.cmd->ExecuteIndirect(signature, 1, c.resource(filterArgs), (uint64_t)chunk * LRC_COMPUTE_ARGS_STRIDE + LRC_IRRADIANCE_ARGS_OFFSET, nullptr, 0);
                       }
                   });
     }

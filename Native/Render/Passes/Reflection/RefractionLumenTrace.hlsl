@@ -40,6 +40,7 @@
 // P[5] = { previous colour SRV, its width | height << 16, asuint(relative depth thickness), depth SRV }
 // P[6], P[7] = RtSceneSrvs; P[8..11] = the previous colour's view-projection (rows). b1 = the main view.
 #define RT_SHADOW_TRANSMITTANCE  // (the hits' shadow rays take what the Glass they cross leaves of the light: RayShaders.hlsli)
+#include "Passes/Common/TriangleStream.hlsli"
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/GI/GiSky.hlsli"
 #include "Passes/Reflection/ScreenTrace.hlsli"
@@ -57,9 +58,9 @@ float3 refractStreamNormal(uint slot, RtHit hit)
 {
     ByteAddressBuffer table = ResourceDescriptorHeap[P[0].w];
     ByteAddressBuffer v = ResourceDescriptorHeap[table.Load(slot * 4)];
-    const uint base = hit.primitive * 96;
+    const uint3 vertexIds = triangleStreamVertexIds(table.Load((128u + slot) * 4u), hit.primitive);
     const float3 w = rtBary(hit.barycentrics);
-    return normalize(asfloat(v.Load3(base + 16)) * w.x + asfloat(v.Load3(base + 48)) * w.y + asfloat(v.Load3(base + 80)) * w.z);
+    return normalize(asfloat(v.Load3(32 * vertexIds.x + 16)) * w.x + asfloat(v.Load3(32 * vertexIds.y + 16)) * w.y + asfloat(v.Load3(32 * vertexIds.z + 16)) * w.z);
 }
 
 // Unpolarized Fresnel reflectance of a dielectric interface for cosine cosI (> 0) on the incident side and

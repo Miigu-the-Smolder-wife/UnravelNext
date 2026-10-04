@@ -21,6 +21,7 @@
 // stream slot its vertex buffer SRV) }; P[5].y (the other passes' rays buffer: none here) = the surface cache UAV
 // (reflection.lumen_refraction_hit_surface_cache; UNX_NONE: the hits are lit as before): a hit's light is its surface cache cell's, as the main view's reflection hits
 // (ReflectionShade.hlsli g_reflSurfaceCache).
+#include "Passes/Common/TriangleStream.hlsli"
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/Reflection/ReflectionRay.hlsli"
 #include "Passes/Reflection/ReflectionHit.hlsli"
@@ -34,9 +35,9 @@ float3 refractStreamNormal(uint slot, RtHit hit)
 {
     ByteAddressBuffer table = ResourceDescriptorHeap[P[0].w];
     ByteAddressBuffer v = ResourceDescriptorHeap[table.Load(slot * 4)];
-    const uint base = hit.primitive * 96;
+    const uint3 vertexIds = triangleStreamVertexIds(table.Load((128u + slot) * 4u), hit.primitive);
     const float3 w = rtBary(hit.barycentrics);
-    const float3 n = asfloat(v.Load3(base + 16)) * w.x + asfloat(v.Load3(base + 48)) * w.y + asfloat(v.Load3(base + 80)) * w.z;
+    const float3 n = asfloat(v.Load3(32 * vertexIds.x + 16)) * w.x + asfloat(v.Load3(32 * vertexIds.y + 16)) * w.y + asfloat(v.Load3(32 * vertexIds.z + 16)) * w.z;
     return normalize(n);
 }
 

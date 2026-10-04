@@ -260,6 +260,7 @@ private:
             int32_t x, y;
             std::vector<uint8_t> used;
             uint32_t usedCount = 0;
+            uint32_t firstFree = 0;  // every earlier element is occupied; lowered on free
         };
         struct Bin
         {
@@ -268,7 +269,7 @@ private:
         };
         bool allocatePage(int32_t& x, int32_t& y);
         void freePage(int32_t x, int32_t y);
-        uint32_t m_side = 0, m_free = 0;
+        uint32_t m_side = 0, m_free = 0, m_firstFree = 0;
         std::vector<uint8_t> m_pages;
         std::map<uint32_t, Bin> m_bins;  // key = elementX | elementY << 16
     };

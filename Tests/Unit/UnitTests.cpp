@@ -4,6 +4,7 @@
 #include "EmptyFrameScene.h"
 
 #include <dxgi1_6.h>
+#include <d3d12sdklayers.h>
 
 #include "unx/core/Config.h"
 #include "unx/core/File.h"
@@ -288,6 +289,158 @@ UNX_TEST(graph_views_of_reused_transients)
         for (uint32_t q = 0; q < kQueueTypeCount; ++q) testDevice().queue((QueueType)q).waitCpu(g.lastFence((QueueType)q));
     }
     CHECK(bufferSrv != gpu::kNone && textureSrv != gpu::kNone);
+}
+
+UNX_TEST(graph_imported_read_release)
+{
+    auto buffer = [&](D3D12_HEAP_TYPE heap) {
+        D3D12_HEAP_PROPERTIES hp{ heap };
+        D3D12_RESOURCE_DESC1 d{};
+        d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; d.Width = 1024;
+        d.Height = d.DepthOrArraySize = d.MipLevels = 1; d.SampleDesc.Count = 1;
+        d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> r;
+        check(testDevice().d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED,
+              nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&r)), "release test buffer");
+        return r;
+    };
+    auto source = buffer(D3D12_HEAP_TYPE_DEFAULT), upload = buffer(D3D12_HEAP_TYPE_UPLOAD), readback = buffer(D3D12_HEAP_TYPE_READBACK);
+    uint32_t* mapped = nullptr;
+    check(upload->Map(0, nullptr, (void**)&mapped), "release upload");
+    mapped[0] = 123; mapped[1] = 987;
+    upload->Unmap(0, nullptr);
+    auto init = testDevice().acquireCommandList(QueueType::Graphics);
+    init.list->CopyBufferRegion(source.Get(), 0, upload.Get(), 0, 4);
+    testDevice().queue(QueueType::Graphics).waitCpu(testDevice().submit(init));
+    ComPtr<ID3D12Fence> gate;
+    check(testDevice().d3d()->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate)), "release gate");
+    RenderGraph g(testDevice());
+    // Unblock even when an assertion fails, before g's destructor waits idle.
+    struct OpenGate { ID3D12Fence* fence; ~OpenGate() { fence->Signal(1); } } open{ gate.Get() };
+    uint64_t release = 0;
+    uint32_t existingCallback = 0;
+    for (uint32_t alias = 0; alias < 2; ++alias)
+    {
+        const BufferRef src = g.importBuffer(source.Get(), { "external source alias", 1024 });
+        g.addPass("read source", QueueType::Graphics,
+                  [&](PassBuilder& b) {
+                      b.use(src, Use::CopySrc); b.keep();
+                      if (alias) b.onSubmitted([&](Queue&, uint64_t) { ++existingCallback; });
+                  },
+                  [=](PassContext& c) { c.cmd->CopyBufferRegion(readback.Get(), alias * 4, c.resource(src), 0, 4); });
+    }
+    g.addPass("unrelated frame tail", QueueType::Graphics, [](PassBuilder& b) { b.keep(); }, [](PassContext&) {});
+    CHECK(g.fenceAfterImportedReads({ source.Get() }, [&](Queue& q, uint64_t fence) {
+        release = fence;
+        // Hold only the unrelated tail on the GPU, without a busy shader loop.
+        check(q.get()->Wait(gate.Get(), 1), "hold frame tail");
+    }));
+    g.execute(nullptr);
+    Queue& graphics = testDevice().queue(QueueType::Graphics);
+    CHECK(release > 0 && release < g.lastFence(QueueType::Graphics) && existingCallback == 1);
+    graphics.waitCpu(release);
+    CHECK(graphics.completed() < g.lastFence(QueueType::Graphics));
+    // The producer overwrites its source while the rest of the render frame is
+    // still blocked. Earlier readers must keep 123; the new producer sees 987.
+    Queue& compute = testDevice().queue(QueueType::Compute);
+    compute.waitGpu(graphics, release);
+    auto produce = testDevice().acquireCommandList(QueueType::Compute);
+    produce.list->CopyBufferRegion(source.Get(), 0, upload.Get(), 4, 4);
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition = { source.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE };
+    produce.list->ResourceBarrier(1, &barrier);
+    produce.list->CopyBufferRegion(readback.Get(), 8, source.Get(), 0, 4);
+    compute.waitCpu(testDevice().submit(produce));
+    CHECK(graphics.completed() < g.lastFence(QueueType::Graphics));
+    check(gate->Signal(1), "release frame tail");
+    graphics.waitCpu(g.lastFence(QueueType::Graphics));
+    check(readback->Map(0, nullptr, (void**)&mapped), "release readback");
+    CHECK(mapped[0] == 123 && mapped[1] == 123 && mapped[2] == 987);
+    readback->Unmap(0, nullptr);
+
+    // A dead last reader does not become live to obtain a completion marker.
+    bool called = false;
+    auto src = g.importBuffer(source.Get(), { "dead source", 1024 });
+    g.addPass("dead read", QueueType::Graphics, [&](PassBuilder& b) { b.use(src, Use::SrvCompute); }, [](PassContext&) {});
+    g.addPass("live tail", QueueType::Graphics, [](PassBuilder& b) { b.keep(); }, [](PassContext&) {});
+    CHECK(g.fenceAfterImportedReads({ source.Get() }, [&](Queue&, uint64_t) { called = true; }));
+    g.execute(nullptr); testDevice().waitIdle();
+    CHECK(!called && g.stats().livePasses == 1);
+    // Mixed-queue readers and writers require the caller's conservative fallback.
+    for (bool write : { false, true })
+    {
+        RenderGraph other(testDevice()); other.setAsyncCompute(true);
+        src = other.importBuffer(source.Get(), { "other source", 1024 });
+        other.addPass("other use", write ? QueueType::Graphics : QueueType::Compute,
+                      [&](PassBuilder& b) { b.use(src, write ? Use::UavCompute : Use::SrvCompute); }, [](PassContext&) {});
+        CHECK(!other.fenceAfterImportedReads({ source.Get() }, [](Queue&, uint64_t) {}));
+    }
+}
+
+UNX_TEST(graph_optimized_clear_identity)
+{
+    // Alternate only the creation-time clear colour. Both the plan key and the
+    // previous plan's placed-resource reuse must observe it. Include infinity,
+    // the empty value used by water/translucency linear depth.
+    for (const bool depth : { false, true })
+    {
+        RenderGraph g(testDevice());
+        ComPtr<ID3D12InfoQueue> info;
+        testDevice().d3d()->QueryInterface(IID_PPV_ARGS(&info));
+        const UINT64 firstMessage = info ? info->GetNumStoredMessagesAllowedByRetrievalFilter() : 0;
+        ComPtr<ID3D12Resource> rb;
+        D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_READBACK };
+        D3D12_RESOURCE_DESC1 rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = 1024;
+        rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        check(testDevice().d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED,
+              nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&rb)), "clear readback");
+        const float colours[] = { 0, 0, INFINITY, INFINITY, 0.25f, 0.25f, 0 };
+        const float depths[] = { 0, 0, 1, 1, 0.25f, 0.25f, 0 };
+        const float* values = depth ? depths : colours;
+        for (uint32_t f = 0; f < 7; ++f)
+        {
+            TextureDesc d{ "clear", 8, 4, 1, 1, depth ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_R32G32B32A32_FLOAT };
+            std::fill(std::begin(d.clearColor), std::end(d.clearColor), values[f]);
+            d.clearDepth = depth ? values[f] : 0;
+            const TextureRef t = g.createTexture(d);
+            g.addPass("clear", QueueType::Graphics, [=](PassBuilder& b) { b.use(t, depth ? Use::DepthWrite : Use::RenderTarget); },
+                      [=](PassContext& c) {
+                          if (depth) c.cmd->ClearDepthStencilView(c.dsv(t), D3D12_CLEAR_FLAG_DEPTH, d.clearDepth, 0, 0, nullptr);
+                          else c.cmd->ClearRenderTargetView(c.rtv(t), d.clearColor, 0, nullptr);
+                      });
+            g.addPass("read clear", QueueType::Graphics, [=](PassBuilder& b) { b.use(t, Use::CopySrc); b.keep(); },
+                      [=](PassContext& c) {
+                          D3D12_TEXTURE_COPY_LOCATION dst{ rb.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
+                          dst.PlacedFootprint.Footprint = { d.format, d.width, d.height, 1, 256 };
+                          D3D12_TEXTURE_COPY_LOCATION src{ c.resource(t), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX };
+                          c.cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                      });
+            g.execute(nullptr);
+            testDevice().waitIdle();
+            if (f < 6) CHECK(g.stats().planReused == (f % 2 == 1));
+            const uint8_t* mapped = nullptr;
+            check(rb->Map(0, nullptr, (void**)&mapped), "read clear");
+            for (uint32_t y = 0; y < 4; ++y)
+                for (uint32_t x = 0; x < 8; ++x) CHECK(std::memcmp(mapped + y * 256 + x * (depth ? 4 : 16), depth ? &d.clearDepth : d.clearColor, depth ? 4 : 16) == 0);
+            rb->Unmap(0, nullptr);
+        }
+        if (info)
+            for (UINT64 i = firstMessage; i < info->GetNumStoredMessagesAllowedByRetrievalFilter(); ++i)
+            {
+                SIZE_T bytes = 0;
+                info->GetMessage(i, nullptr, &bytes);
+                std::vector<uint8_t> storage(bytes);
+                auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+                check(info->GetMessage(i, message, &bytes), "clear debug message");
+                CHECK(message->ID != D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE);
+                CHECK(message->ID != D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE);
+            }
+    }
 }
 
 UNX_TEST(graph_depth_memory_not_shared)

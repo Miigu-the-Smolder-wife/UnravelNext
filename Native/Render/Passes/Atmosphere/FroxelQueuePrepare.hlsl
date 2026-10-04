@@ -3,7 +3,6 @@
 // capacity equals gridX*gridY*slices. P4.z = queue UAV, P4.w = air scratch UAV.
 #include "Passes/Atmosphere/FroxelSlice.hlsli"
 #include "Passes/Atmosphere/Fog.hlsli"
-groupshared float3 gs_tau[64];
 groupshared uint gs_lastSky;
 [numthreads(64, 1, 1)]
 void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
@@ -44,10 +43,11 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             }
     }
     if (s == 0) gs_lastSky = 0;
-    // Particle media of this slice (P[4].x) and their optical depth before it and to far_m (inclusive scan in gs_tau,
-    // reused below).
+    // Only this slice's optical depth determines whether it extends the sky's
+    // active range. The prefix/total optical depths belong to FroxelIntegrate;
+    // computing them here had no consumer and retained 13 needless LDS barriers.
     const FogMedium fog = fogMedium(P[6], P[7], P[8], P[9]);  // (as FroxelIntegrate.hlsl: the fog is a medium of every slice)
-    const bool particleMedia = P[4].x != 0xFFFFFFFFu, media = particleMedia || fog.on;
+    const bool particleMedia = P[4].x != 0xFFFFFFFFu;
     float3 mediaTau = 0, mediaSource = 0;
     if (particleMedia && s < g.slices)
     {
@@ -56,21 +56,6 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
         mediaSource = slices.Load(int4(tile, g.slices + s, 0)).rgb;
     }
     if (fog.on && hasAir) mediaTau += fogOpticalDepth(fog, g_cameraPosition, dir, max(zs0 * toRay, tStart), zs1 * toRay);
-    float3 mediaBefore = 0, mediaTotal = 0;
-    if (media)
-    {
-        gs_tau[s] = mediaTau;
-        GroupMemoryBarrierWithGroupSync();
-        [unroll] for (uint dm = 1; dm < 64; dm <<= 1)
-        {
-            const float3 add = s >= dm ? gs_tau[s - dm] : 0;
-            GroupMemoryBarrierWithGroupSync();
-            gs_tau[s] += add;
-            GroupMemoryBarrierWithGroupSync();
-        }
-        mediaBefore = gs_tau[s] - mediaTau;
-        mediaTotal = gs_tau[63];
-    }
     GroupMemoryBarrierWithGroupSync();
     if (skyRead && hasAir)
     {

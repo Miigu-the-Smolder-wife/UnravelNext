@@ -4,7 +4,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <bit>
 #include <chrono>
+#include <cstdlib>
 #include <unordered_map>
 
 namespace unx::render
@@ -12,6 +15,12 @@ namespace unx::render
 namespace
 {
 constexpr D3D12_BARRIER_SUBRESOURCE_RANGE kAllSubresources = { 0xffffffffu, 0, 0, 0, 0, 0 };
+
+uint64_t nextRecordKey()
+{
+    static std::atomic<uint64_t> next{ 1 }; // zero is the uninitialized value in recording-local caches
+    return next.fetch_add(1, std::memory_order_relaxed);
+}
 
 // A view the graph is about to create needs its flag on the resource. Imported resources come from outside the graph
 // (the host's output, a module's persistent buffer); without the flag the view is invalid, which the debug layer reports
@@ -260,6 +269,8 @@ struct RenderGraph::Impl
     Device& device;
     std::vector<ResourceNode> resources;
     std::vector<PassNode> passes;
+    uint64_t externalReady[kQueueTypeCount] = {};
+    std::vector<std::function<void(Queue&, uint64_t)>> externalConsumers;
     std::unique_ptr<Plan> plan;
     // Recently executed plans besides the current one, most recent first (kPlanCache - 1 at most). Frames alternate
     // between a few structures (VFX ticks per frame: 0, 1 or 2 packets; ring slots; conditional passes that flip): each
@@ -341,6 +352,11 @@ struct RenderGraph::Impl
             h = mix(h, r.tdesc.dimension);
             h = mix(h, r.tdesc.srvFormat);
             h = mix(h, r.tdesc.uavFormat);
+            if (!r.imported)
+            {
+                for (float c : r.tdesc.clearColor) h = mix(h, std::bit_cast<uint32_t>(c));
+                h = mix(h, std::bit_cast<uint32_t>(r.tdesc.clearDepth));
+            }
         }
         else
         {
@@ -739,6 +755,10 @@ struct RenderGraph::Impl
             ph.descKey = mix(mix(mix(std::hash<std::string_view>{}(std::string_view(reinterpret_cast<const char*>(&descs[r]), sizeof(D3D12_RESOURCE_DESC1))), ph.offset),
                                  heapSize),
                              n.texture ? ((uint64_t)n.tdesc.srvFormat << 32 | n.tdesc.uavFormat) : n.bdesc.stride);
+            // The optimized clear is part of resource identity, not a view.
+            if (n.texture && sum[r].rt)
+                for (float c : n.tdesc.clearColor) ph.descKey = mix(ph.descKey, std::bit_cast<uint32_t>(c));
+            if (n.texture && sum[r].ds) ph.descKey = mix(ph.descKey, std::bit_cast<uint32_t>(n.tdesc.clearDepth));
             // Share an identical placed resource with the previous plan (same memory, same description); the views are
             // this plan's own (each plan releases its own descriptors).
             if (prev && r < prev->physical.size() && prev->physical[r].resource && prev->physical[r].descKey == ph.descKey)
@@ -752,7 +772,9 @@ struct RenderGraph::Impl
             if (n.texture && (sum[r].rt || sum[r].ds))
             {
                 clear.Format = n.tdesc.format;
-                clearPtr = &clear;  // zero colour / reversed-Z far plane
+                if (sum[r].rt) std::copy(std::begin(n.tdesc.clearColor), std::end(n.tdesc.clearColor), clear.Color);
+                else clear.DepthStencil.Depth = n.tdesc.clearDepth;
+                clearPtr = &clear;  // declared colour / depth convention
             }
             check(device.d3d()->CreatePlacedResource2(heap.Get(), ph.offset, &descs[r], D3D12_BARRIER_LAYOUT_UNDEFINED, clearPtr, (UINT32)castable[r].size(),
                                                       castable[r].empty() ? nullptr : castable[r].data(), IID_PPV_ARGS(&ph.resource)),
@@ -1345,6 +1367,11 @@ void PassBuilder::fenceAfter(std::function<void(Queue&, uint64_t)> onSubmitted)
     p.onFence = std::move(onSubmitted);
 }
 
+void PassBuilder::onSubmitted(std::function<void(Queue&, uint64_t)> callback)
+{
+    m_graph.m_impl->passes[m_pass].onFence = std::move(callback);
+}
+
 // ------------------------------------------------------------------------------------------------ PassContext
 
 uint32_t PassContext::srv(TextureRef t) const { return m_graph->m_impl->viewsOf(t.id).srv; }
@@ -1370,7 +1397,7 @@ void PassContext::bindFrameConstants(D3D12_GPU_VIRTUAL_ADDRESS address) const
 
 // ------------------------------------------------------------------------------------------------ RenderGraph
 
-RenderGraph::RenderGraph(Device& device) : m_impl(std::make_unique<Impl>(device)), m_device(device) {}
+RenderGraph::RenderGraph(Device& device) : m_impl(std::make_unique<Impl>(device)), m_device(device), m_recordKey(nextRecordKey()) {}
 
 RenderGraph::~RenderGraph()
 {
@@ -1482,6 +1509,56 @@ PassBand passBand(uint32_t height, uint32_t count, uint32_t index)
     return band;
 }
 
+bool RenderGraph::fenceAfterImportedReads(const std::vector<ID3D12Resource*>& resources,
+                                          std::function<void(Queue&, uint64_t)> onSubmitted)
+{
+    return fenceAfterImportedUses(resources, std::move(onSubmitted), true);
+}
+
+bool RenderGraph::fenceAfterImportedAccesses(const std::vector<ID3D12Resource*>& resources,
+                                             std::function<void(Queue&, uint64_t)> onSubmitted)
+{
+    return fenceAfterImportedUses(resources, std::move(onSubmitted), false);
+}
+
+bool RenderGraph::fenceAfterImportedUses(const std::vector<ID3D12Resource*>& resources,
+                                         std::function<void(Queue&, uint64_t)> onSubmitted, bool readOnly)
+{
+    if (resources.empty() || !onSubmitted) return false;
+    std::vector<bool> selected(m_impl->resources.size(), false);
+    for (size_t r = 0; r < selected.size(); ++r)
+    {
+        const auto& n = m_impl->resources[r];
+        selected[r] = n.imported && !n.texture &&
+                      std::find(resources.begin(), resources.end(), n.importedResource) != resources.end();
+    }
+    uint32_t last = UINT32_MAX;
+    for (uint32_t p = 0; p < m_impl->passes.size(); ++p)
+        for (const auto& u : m_impl->passes[p].uses)
+        {
+            if (!selected[u.resource]) continue;
+            if (m_impl->passes[p].queue != QueueType::Graphics || (readOnly && useInfo(u.use).write)) return false;
+            last = p;
+        }
+    if (last == UINT32_MAX) return false;
+    auto& pass = m_impl->passes[last];
+    pass.fenceAfter = true;  // part of the plan key; keep remains unchanged
+    auto previous = std::move(pass.onFence);
+    pass.onFence = [previous = std::move(previous), callback = std::move(onSubmitted)](Queue& q, uint64_t fence) {
+        if (previous) previous(q, fence);
+        callback(q, fence);
+    };
+    return true;
+}
+
+void RenderGraph::consumeExternal(QueueType producer, uint64_t readyFence, std::function<void(Queue&, uint64_t)> onSubmitted)
+{
+    if ((uint32_t)producer >= kQueueTypeCount || !onSubmitted) fail("render graph: invalid external consumer contract");
+    auto& ready = m_impl->externalReady[(size_t)producer];
+    ready = std::max(ready, readyFence);
+    m_impl->externalConsumers.push_back(std::move(onSubmitted));
+}
+
 void RenderGraph::addBandedGroup(std::string_view group, uint32_t height, uint32_t bands, const std::vector<BandedPass>& passes)
 {
     if (bands == 0 || height == 0) fail("render graph: banded group '%.*s' with %u bands over %u rows", (int)group.size(), group.data(), bands, height);
@@ -1509,6 +1586,7 @@ bool RenderGraph::sharesMemory(uint32_t a, uint32_t b) const
 void RenderGraph::execute(GpuProfiler* profiler)
 {
     Impl& impl = *m_impl;
+    const auto planLookupStart = std::chrono::steady_clock::now();
     // The current plan, then the cached ones: the capacities follow the candidate (a buffer keeps its capacity there), and
     // the first whose key matches is this frame's plan.
     bool reuse = false;
@@ -1527,6 +1605,7 @@ void RenderGraph::execute(GpuProfiler* profiler)
         impl.plan = std::move(hit);
         reuse = true;
     }
+    const double planLookupMs = msSince(planLookupStart);
     if (!reuse)
     {
         impl.bufferCapacities(impl.plan.get());
@@ -1552,9 +1631,11 @@ void RenderGraph::execute(GpuProfiler* profiler)
         m_stats.cpuCompileMs = 0;
     }
     m_stats.planReused = reuse;
+    m_stats.cpuPlanLookupMs = planLookupMs;
     Impl::Plan& plan = *impl.plan;
 
     // This frame's resource pointers and imported views.
+    const auto viewsStart = std::chrono::steady_clock::now();
     ++impl.executeCount;
     impl.framePointers.assign(impl.resources.size(), nullptr);
     for (uint32_t r = 0; r < impl.resources.size(); ++r)
@@ -1613,11 +1694,20 @@ void RenderGraph::execute(GpuProfiler* profiler)
         }
 
     // Record every segment.
+    m_stats.cpuViewsMs = msSince(viewsStart);
     auto t0 = std::chrono::steady_clock::now();
     std::vector<CommandList> lists(plan.segments.size());
     PassContext ctx;
     ctx.m_graph = this;
-    const bool passMarkers = dredEnabled();  // (UNX_DRED: each pass in a BeginEvent / EndEvent pair, the breadcrumbs' pass names)
+    // External profilers can name GPU passes without enabling DRED's additional
+    // breadcrumb/page-fault diagnostics. Opt in before the first graph executes.
+    static const bool gpuMarkers = [] {
+        char value[2]{};
+        size_t length = 0;
+        return getenv_s(&length, value, sizeof(value), "UNX_GPU_MARKERS") == 0 && length == 2 && value[0] == '1';
+    }();
+    const bool passMarkers = gpuMarkers || dredEnabled();
+    const bool passTimestamps = profiler && profiler->enabled();
     uint32_t scopes = 0;
     for (size_t s = 0; s < plan.segments.size(); ++s)
     {
@@ -1628,6 +1718,10 @@ void RenderGraph::execute(GpuProfiler* profiler)
         // A joined run (joinPasses) is one scope while its passes follow each other in this command list: the scope opens
         // at the first of them recorded here and closes after the last (the barriers between them are inside it).
         uint32_t openScope = UINT32_MAX;
+        size_t finalWork = seg.passes.size();
+        if (profiler && !passTimestamps)
+            for (size_t k = seg.passes.size(); k > 0; --k)
+                if (seg.passes[k - 1].pass != UINT32_MAX) { finalWork = k - 1; break; }
         for (size_t k = 0; k < seg.passes.size(); ++k)
         {
             Impl::PlanPass& pp = seg.passes[k];
@@ -1637,10 +1731,10 @@ void RenderGraph::execute(GpuProfiler* profiler)
                 Impl::PassNode& pass = impl.passes[pp.pass];
                 if (pass.scope == UINT32_MAX || pass.scope != openScope)
                 {
-                    const std::string& name = pass.scope == UINT32_MAX ? pass.name : pass.scopeName;
-                    if (profiler) profiler->passBegin(cmd, seg.queue, name);
+                    if (passTimestamps) profiler->passBegin(cmd, seg.queue, pass.scope == UINT32_MAX ? pass.name : pass.scopeName);
                     if (passMarkers)
                     {
+                        const std::string& name = pass.scope == UINT32_MAX ? pass.name : pass.scopeName;
                         const std::wstring wide(name.begin(), name.end());
                         cmd->BeginEvent(0, wide.c_str(), (UINT)((wide.size() + 1) * sizeof(wchar_t)));  // (0: a UTF-16 string)
                     }
@@ -1655,9 +1749,10 @@ void RenderGraph::execute(GpuProfiler* profiler)
                 if (pass.scope == UINT32_MAX || next == UINT32_MAX || impl.passes[next].scope != pass.scope)
                 {
                     if (passMarkers) cmd->EndEvent();
-                    if (profiler) profiler->passEnd(cmd, seg.queue);
+                    if (passTimestamps) profiler->passEnd(cmd, seg.queue);
                     openScope = UINT32_MAX;
                 }
+                if (k == finalWork) profiler->listWorkEnd(cmd, seg.queue);
             }
             impl.emit(cmd, pp.after);
         }
@@ -1677,10 +1772,15 @@ void RenderGraph::execute(GpuProfiler* profiler)
         Queue& q = m_device.queue(seg.queue);
         if (seg.firstOfQueue)
             for (uint32_t o = 0; o < kQueueTypeCount; ++o)
-                if (o != (uint32_t)seg.queue && impl.prevFrameFence[o]) q.waitGpu(m_device.queue((QueueType)o), impl.prevFrameFence[o]);
+                if (o != (uint32_t)seg.queue)
+                {
+                    const uint64_t ready = std::max(impl.prevFrameFence[o], impl.externalReady[o]);
+                    if (ready) q.waitGpu(m_device.queue((QueueType)o), ready);
+                }
         for (uint32_t w : seg.waitSegments) q.waitGpu(m_device.queue(plan.segments[w].queue), segmentFence[w]);
         segmentFence[s] = m_device.submit(lists[s]);
         m_lastFence[(size_t)seg.queue] = segmentFence[s];
+        for (const auto& consumer : impl.externalConsumers) consumer(q, segmentFence[s]);
         for (const Impl::PlanPass& pp : seg.passes)
             if (pp.pass != UINT32_MAX && impl.passes[pp.pass].onFence) impl.passes[pp.pass].onFence(q, segmentFence[s]);  // PassBuilder::fenceAfter
     }
@@ -1691,6 +1791,9 @@ void RenderGraph::execute(GpuProfiler* profiler)
 
     impl.passes.clear();
     impl.resources.clear();
+    std::fill(std::begin(impl.externalReady), std::end(impl.externalReady), uint64_t(0));
+    impl.externalConsumers.clear();
+    m_recordKey = nextRecordKey();
     m_device.collectGarbage();
 }
 } // namespace unx::render

@@ -109,9 +109,11 @@ Frame step(Gpu& gpu, Pool& pool, uint64_t frame, const PoolPlacement& at, double
     RenderGraph g(gpu.device);
     const auto out = pool.record(g, frame, at, time, frameDt, sources);
     const uint64_t pitch = (Q * 16 + 255) / 256 * 256;
-    const uint64_t vertexBytes = uint64_t(out.stream.maxTriangles) * 3 * 32, velocityBytes = uint64_t(out.stream.maxTriangles) * 3 * 16;
+    const uint32_t storedVertices = out.stream.indices.valid() ? out.stream.vertexCount : out.stream.maxTriangles * 3;
+    const uint64_t vertexBytes = uint64_t(storedVertices) * 32, velocityBytes = uint64_t(storedVertices) * 16;
+    const uint64_t indexBytes = out.stream.indices.valid() ? uint64_t(out.stream.maxTriangles) * 12 : 0;
     ComPtr<ID3D12Resource> rb = read ? buffer(gpu.device, pitch * Q, D3D12_HEAP_TYPE_READBACK) : nullptr;
-    ComPtr<ID3D12Resource> rbStream = stream ? buffer(gpu.device, vertexBytes + velocityBytes + 16, D3D12_HEAP_TYPE_READBACK) : nullptr;
+    ComPtr<ID3D12Resource> rbStream = stream ? buffer(gpu.device, vertexBytes + velocityBytes + 16 + indexBytes, D3D12_HEAP_TYPE_READBACK) : nullptr;
     ID3D12Resource* r = rb.Get();
     ID3D12Resource* rs = rbStream.Get();
     const auto field = out.field;
@@ -120,6 +122,7 @@ Frame step(Gpu& gpu, Pool& pool, uint64_t frame, const PoolPlacement& at, double
               [&](PassBuilder& pb) {
                   pb.use(field, read ? Use::CopySrc : Use::SrvCompute);
                   for (BufferRef b : { s.vertices, s.velocities, s.drawArgs }) pb.use(b, stream ? Use::CopySrc : Use::SrvCompute);
+                  if (s.indices.valid()) pb.use(s.indices, stream ? Use::CopySrc : Use::SrvCompute);
                   pb.keep();
               },
               [=](PassContext& c) {
@@ -135,6 +138,7 @@ Frame step(Gpu& gpu, Pool& pool, uint64_t frame, const PoolPlacement& at, double
                       c.cmd->CopyBufferRegion(rs, 0, c.resource(s.vertices), 0, vertexBytes);
                       c.cmd->CopyBufferRegion(rs, vertexBytes, c.resource(s.velocities), 0, velocityBytes);
                       c.cmd->CopyBufferRegion(rs, vertexBytes + velocityBytes, c.resource(s.drawArgs), 0, 16);
+                      if (indexBytes) c.cmd->CopyBufferRegion(rs, vertexBytes + velocityBytes + 16, c.resource(s.indices), 0, indexBytes);
                   }
               });
     if (profiler) profiler->beginFrame(frame);
@@ -153,8 +157,16 @@ Frame step(Gpu& gpu, Pool& pool, uint64_t frame, const PoolPlacement& at, double
     {
         const uint8_t* p = nullptr;
         check(rbStream->Map(0, nullptr, (void**)&p), "map pool stream");
-        f.vertices.assign((const float*)p, (const float*)(p + vertexBytes));
-        f.velocities.assign((const float*)(p + vertexBytes), (const float*)(p + vertexBytes + velocityBytes));
+        const uint32_t corners = s.maxTriangles * 3;
+        f.vertices.resize(size_t(corners) * 8); f.velocities.resize(size_t(corners) * 4);
+        for (uint32_t corner = 0; corner < corners; ++corner)
+        {
+            uint32_t vertex = corner;
+            if (indexBytes) std::memcpy(&vertex, p + vertexBytes + velocityBytes + 16 + size_t(corner) * 4, 4);
+            W_CHECK(vertex < storedVertices, "pool grid index out of bounds");
+            std::memcpy(f.vertices.data() + size_t(corner) * 8, p + size_t(vertex) * 32, 32);
+            std::memcpy(f.velocities.data() + size_t(corner) * 4, p + vertexBytes + size_t(vertex) * 16, 16);
+        }
         std::memcpy(f.drawArgs, p + vertexBytes + velocityBytes, 16);
         rbStream->Unmap(0, nullptr);
     }

@@ -1,5 +1,6 @@
 #include "unx/refl/ReflectionSystem.h"
 #include "unx/render/HistoryResize.h"
+#include "unx/render/SortedPrefix.h"
 #include "unx/refl/SurfaceCacheLightPairs.h"
 
 #include "unx/rt/RayPipeline.h"
@@ -646,9 +647,9 @@ void ReflectionSystem::ensureHistory(FramePassContext& fc, uint32_t width, uint3
 
 namespace
 {
-// The stream table (RayTracing/HitWater.hlsli, RefractionTrace.hlsl): per frame slot of a ring of 4, 128 words - word
-// `slot` the triangle stream's vertex buffer SRV (UNX_NONE: not traced), word 64 + slot its scene material.
-constexpr uint32_t kStreamTableWords = 128;
+// The stream table (RayTracing/HitWater.hlsli, RefractionTrace.hlsl): per frame slot of a ring of 4, 192 words - word
+// `slot` the triangle stream's vertex buffer SRV (UNX_NONE: not traced), word 64 + slot its scene material, word 128 + slot its optional R32 index SRV.
+constexpr uint32_t kStreamTableWords = 192;
 void ensureStreamTable(Device& device, ComPtr<ID3D12Resource>& table, uint8_t*& mapped, uint32_t srv[4])
 {
     if (table) return;
@@ -684,14 +685,15 @@ std::vector<uint32_t> streamMaterials(const FramePassContext& fc)
     return materials;
 }
 // A pass's execute: this frame's table (the SRVs are known only then; every pass that reads it writes the same words).
-void fillStreamTable(PassContext& c, uint8_t* table, const std::vector<std::pair<uint32_t, BufferRef>>& streams, const std::vector<uint32_t>& materials)
+void fillStreamTable(PassContext& c, uint8_t* table, const std::vector<rt::RayScene::Stream>& streams, const std::vector<uint32_t>& materials)
 {
     uint32_t* t = reinterpret_cast<uint32_t*>(table);
     for (uint32_t k = 0; k < kStreamTableWords; ++k) t[k] = 0xFFFFFFFFu;
     for (const auto& st : streams)
     {
-        t[st.first] = c.srv(st.second);
-        t[64 + st.first] = materials[st.first];
+        t[st.slot] = c.srv(st.vertices);
+        t[64 + st.slot] = materials[st.slot];
+        t[128 + st.slot] = st.indices.valid() ? c.srv(st.indices) : 0xFFFFFFFFu;
     }
 }
 } // namespace
@@ -702,7 +704,7 @@ void ReflectionSystem::recordRefraction(FramePassContext& fc, BufferRef jobs, Bu
     const RefractionInputs in = m_refract;
     RenderGraph& g = fc.graph;
     ensureStreamTable(m_device, m_streamTable, m_streamTableMapped, m_streamTableSrv);
-    const std::vector<std::pair<uint32_t, BufferRef>> streams = in.rays->streams();
+    const std::vector<rt::RayScene::Stream> streams = in.rays->streams();
     const std::vector<uint32_t> materials = streamMaterials(fc);
     const bool lumenOnly = m_settings.lumenOnly;
     const char* const* refractLibrary = lumenOnly ? kLumenRefractLibrary : kRefractLibrary;
@@ -774,7 +776,7 @@ void ReflectionSystem::recordRefraction(FramePassContext& fc, BufferRef jobs, Bu
                   }
                   in.rays->declareTraversal(b);
                   in.rays->declareDecals(b);
-                  for (const auto& st : streams) b.use(st.second, Use::SrvGraphics);
+                  for (const auto& st : streams) { b.use(st.vertices, Use::SrvGraphics); if (st.indices.valid()) b.use(st.indices, Use::SrvGraphics); }
                   if (in.atmosphere)
                       for (const TextureRef& t : in.luts) b.use(t, Use::SrvGraphics);
               },
@@ -1018,11 +1020,10 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         // 64 counted planes (a bath's glazed tiles) kept the list for good, and a larger plane that came into view later
         // (the shower mirror) was never counted, so never eligible.
         auto screenSize = [&](const Candidate& c) { return c.current ? (uint64_t)m_planePixels[c.plane] : (uint64_t)c.w * c.h; };
-        std::sort(candidates.begin(), candidates.end(), [&](const Candidate& a, const Candidate& b) {
+        detail::retainSortedPrefix(candidates, kCandidatesMax, [&](const Candidate& a, const Candidate& b) {
             const uint64_t sa = screenSize(a), sb = screenSize(b);
             return sa != sb ? sa > sb : a.plane < b.plane;
         });
-        if (candidates.size() > kCandidatesMax) candidates.resize(kCandidatesMax);
         // Among them: eligible planes by count first (the leading ones get the cameras), then the others by rectangle
         // (they are counted and may qualify framesInFlight later).
         std::stable_sort(candidates.begin(), candidates.end(), [&](const Candidate& a, const Candidate& b) {
@@ -1478,7 +1479,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         // W's streams on the rays (RayTracing/HitWater.hlsli: a ray that meets a basin's or a fluid's surface): the stream
         // table, in the word the atmosphere's variant leaves free (P[3].x; the constant-sky variant keeps its sun there
         // and meets no stream)
-        const std::vector<std::pair<uint32_t, BufferRef>> streams = atmosphere ? rays.streams() : std::vector<std::pair<uint32_t, BufferRef>>{};
+        const std::vector<rt::RayScene::Stream> streams = atmosphere ? rays.streams() : std::vector<rt::RayScene::Stream>{};
         const std::vector<uint32_t> materials = streamMaterials(fc);
         if (!streams.empty()) ensureStreamTable(m_device, m_streamTable, m_streamTableMapped, m_streamTableSrv);
         uint8_t* streamTable = streams.empty() ? nullptr : m_streamTableMapped + (fc.frame.frameIndex % 4) * (kStreamTableWords * 4);
@@ -1499,7 +1500,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       rays.declareTraversal(b);
                       rays.declareDecals(b);
                       rays.declareHair(b);
-                      for (const auto& st : streams) b.use(st.second, Use::SrvGraphics);
+                      for (const auto& st : streams) { b.use(st.vertices, Use::SrvGraphics); if (st.indices.valid()) b.use(st.indices, Use::SrvGraphics); }
                       if (atmosphere)
                           for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
                   },

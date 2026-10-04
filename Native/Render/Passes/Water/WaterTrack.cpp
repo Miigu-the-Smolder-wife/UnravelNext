@@ -30,6 +30,7 @@ struct FluidSlot
     std::unique_ptr<water::FluidSurface> surface;
     uint32_t nodes[3] = {}, particles = 0;
     float h = 0;
+    uint64_t topologyId = 0;
 };
 struct FluidState
 {
@@ -200,7 +201,9 @@ static void waterFluids(FramePassContext& fc)
             d.h = h;
             d.maxParticles = std::max<uint32_t>(4096, std::max(in.count, in.startCount) * 5 / 4);
             d.maxTriangles = 2 * d.maxParticles;  // surface triangles per particle stay near 1 (FEATURES_GAME 0.B: 0.2 M at 250 k)
+            d.refittableTail = true;
             slot.surface = std::make_unique<water::FluidSurface>(fc.device, fc.shaders, d);
+            slot.topologyId = allocateTriangleStreamTopologyId();
             std::copy(nodes, nodes + 3, slot.nodes);
             slot.h = h;
             slot.particles = d.maxParticles;
@@ -248,6 +251,7 @@ static void waterFluids(FramePassContext& fc)
         stream.velocities = out.velocities;
         stream.material = in.material;
         stream.maxTriangles = slot.surface->desc().maxTriangles;
+        stream.fixedTopologyId = slot.topologyId; // unused slots are finite DXR-active points, never NaN-inactive
         float lo[3], hi[3];
         slot.surface->bounds(lo, hi);
         for (int a = 0; a < 3; ++a)
@@ -269,6 +273,7 @@ void waterGeometry(FramePassContext& fc)
 {
     water::poolGeometry(fc);  // W2 closed basins (FEATURES_GAME 1.10): before the sun map, which takes every layer-1 stream
     waterFluids(fc);
+    prepareTriangleStreamDraws(fc);
     waterSunMap(fc);
     waterOcean(fc);  // B7: the sea's surface on the main view's pixels (no stream: the water layer's ocean slot)
 }

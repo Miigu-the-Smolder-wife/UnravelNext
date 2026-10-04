@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <exception>
+#include <random>
 #include <vector>
 
 using namespace unx;
@@ -22,6 +23,41 @@ using namespace unx::render::refl;
 namespace
 {
 uint32_t g_failures = 0;
+uint64_t g_stateHash = 1469598103934665603ull;
+uint32_t g_checkedStates = 0;
+
+void hashBytes(const void* data, size_t bytes)
+{
+    const auto* p = static_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < bytes; ++i) g_stateHash = (g_stateHash ^ p[i]) * 1099511628211ull;
+}
+
+template<class T> void hashVector(const std::vector<T>& values)
+{
+    const uint64_t size = values.size();
+    hashBytes(&size, sizeof(size));
+    if (!values.empty()) hashBytes(values.data(), values.size() * sizeof(T));
+}
+
+void validateAndFingerprint(const MeshCardScene& s)
+{
+    s.validate();
+    ++g_checkedStates;
+    // These packed GPU mirrors have explicit padding fields, initialized by the
+    // producer. Capture fields are hashed separately to exclude C++ bool padding.
+    hashVector(s.instanceMap()); hashVector(s.meshCardsGpu()); hashVector(s.cardsGpu());
+    hashVector(s.pagesGpu()); hashVector(s.pageTableGpu());
+    const uint64_t count = s.captures().size();
+    hashBytes(&count, sizeof(count));
+    for (const auto& c : s.captures())
+    {
+        hashBytes(&c.page, sizeof(c.page)); hashBytes(&c.card, sizeof(c.card));
+        hashBytes(&c.sceneInstance, sizeof(c.sceneInstance));
+        hashBytes(c.captureRect, sizeof(c.captureRect)); hashBytes(c.atlasRect, sizeof(c.atlasRect));
+        hashBytes(c.cardUvRect, sizeof(c.cardUvRect));
+        hashBytes(&c.resample, sizeof(c.resample)); hashBytes(&c.refresh, sizeof(c.refresh));
+    }
+}
 #define CHECK(c) \
     do { if (!(c)) { std::fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #c); ++g_failures; } } while (0)
 
@@ -102,7 +138,7 @@ int sceneReport(const char* path)
                         st.requests, st.captures, st.capturedTexels, st.loweredAllocations, st.visibleCards, st.cards, st.mappedPages, st.freePhysicalPages);
         if (st.captures == 0) break;
     }
-    mcs.validate();
+    validateAndFingerprint(mcs);
     const McStats& st = mcs.stats();
     const double atlas = (double)mcs.settings().atlasSize * mcs.settings().atlasSize;
     std::printf("  settled after %u frames; requests left %u; texels in the atlas %llu (%.1f %% of %u^2), asked for %llu; update %.2f ms first, %.2f ms worst\n", frames + 1,
@@ -121,6 +157,37 @@ int main(int argc, char** argv)
         const scene::MeshCards cube = scene::buildMeshCards(boxMesh({ -0.5f, -0.5f, -0.5f }, { 0.5f, 0.5f, 0.5f }), std::vector<uint8_t>{});
         CHECK(cube.cards.size() == 6);
         {
+            // Reuse holes before and after the allocation cursor, exhaust a small
+            // atlas, change suballocation sizes, and exercise feedback/refresh.
+            McSettings settings;
+            settings.atlasSize = 512;
+            settings.capturesPerFrame = 128;
+            settings.keepUnusedPagesFrames = 3;
+            MeshCardScene s(settings);
+            std::mt19937 random(5821);
+            for (uint32_t frame = 0; frame < 160; ++frame)
+            {
+                if (frame == 80) s.clear();
+                for (uint32_t edit = 0; edit < 8; ++edit)
+                {
+                    const uint32_t instance = random() % 96;
+                    s.removeInstance(instance);
+                    if (random() % 4 != 0)
+                        s.addInstance(instance, cube, translation({float(random() % 21) - 10, 0, float(random() % 21) - 10},
+                                                                0.5f + float(random() % 8)), 1, instance % 7 == 0);
+                }
+                std::vector<McFeedback> feedback;
+                if (!s.cardsGpu().empty())
+                    for (uint32_t hit = 0; hit < 8; ++hit)
+                        feedback.push_back({random() % static_cast<uint32_t>(s.cardsGpu().size()), 8, 0, 0, 64});
+                s.setFeedback(feedback, 1024);
+                const float3 eyes[2] = {{float(frame % 23), 1, 0}, {-8, 2, float(frame % 17)}};
+                s.update(eyes);
+                validateAndFingerprint(s);
+                s.takeDirty();
+            }
+        }
+        {
             // one cube: levels by distance, sub-allocation, reallocation, hiding (no refresh captures: the counts below
             // are those of new pages)
             McSettings quiet;
@@ -131,7 +198,7 @@ int main(int argc, char** argv)
             CHECK(s.instanceMap().size() == 4 && s.instanceMap()[3] == 0 && s.instanceMap()[0] == mc::kNone);
             float3 eye{ 4, 0, 0 };
             s.update(std::span<const float3>(&eye, 1));
-            s.validate();
+            validateAndFingerprint(s);
             // extent 0.51 m: min(100 x 0.51 / d, 20 x 0.51) = 10 texels -> 16 (level 4) while d <= 5.1 m
             CHECK(s.captures().size() == 6);
             for (const McCapture& c : s.captures())
@@ -155,21 +222,21 @@ int main(int argc, char** argv)
             // 10 m away: 5 texels -> 8 (level 3); the cards are captured again, their lighting can be carried over
             eye = { 10.5f, 0, 0 };
             s.update(std::span<const float3>(&eye, 1));
-            s.validate();
+            validateAndFingerprint(s);
             CHECK(s.captures().size() == 6);
             for (const McCapture& c : s.captures()) CHECK(c.atlasRect[2] == 8 && c.atlasRect[3] == 8 && c.resample);
             CHECK(s.stats().allocatedTexels == 6 * 64);
             // 30 m away: 1 texel, below the minimum of 4 -> hidden, nothing left in the atlas
             eye = { 30.5f, 0, 0 };
             s.update(std::span<const float3>(&eye, 1));
-            s.validate();
+            validateAndFingerprint(s);
             CHECK(s.captures().empty() && s.stats().visibleCards == 0 && s.stats().mappedPages == 0);
             CHECK(s.stats().freePhysicalPages == 32 * 32);
             CHECK((s.cardsGpu()[0].packed & (1u << 16)) == 0);
             // and back
             eye = { 4, 0, 0 };
             s.update(std::span<const float3>(&eye, 1));
-            s.validate();
+            validateAndFingerprint(s);
             CHECK(s.captures().size() == 6 && !s.captures()[0].resample);
             // a rigid move: the records follow, no capture
             s.takeDirty();
@@ -193,7 +260,7 @@ int main(int argc, char** argv)
             do
             {
                 s.update(std::span<const float3>(&eye, 1));
-                s.validate();
+                validateAndFingerprint(s);
                 CHECK(s.stats().capturedTexels <= 512u * 512u);
                 for (const McCapture& c : s.captures())
                 {
@@ -221,7 +288,7 @@ int main(int argc, char** argv)
             do
             {
                 s.update(std::span<const float3>(&eye, 1));
-                s.validate();
+                validateAndFingerprint(s);
                 captures += s.stats().captures;
                 worst = std::max(worst, s.stats().captures);
                 CHECK(s.stats().captures <= s.settings().capturesPerFrame);
@@ -240,7 +307,7 @@ int main(int argc, char** argv)
             for (uint32_t i = 0; i < 20; ++i) s.addInstance(i, cube, translation({ (float)i * 1.5f, 0, 0 }));
             const float3 eye{ 14, 0, 3 };
             s.update(std::span<const float3>(&eye, 1));
-            s.validate();
+            validateAndFingerprint(s);
             const uint32_t pages = s.stats().mappedPages;
             CHECK(pages == 120 && s.stats().refreshed == 0);  // (every page was captured in this frame)
             // the resident pages come round: 37 a frame, each once before any twice
@@ -249,7 +316,7 @@ int main(int argc, char** argv)
             for (uint32_t frame = 0; frame < 4; ++frame)
             {
                 s.update(std::span<const float3>(&eye, 1));
-                s.validate();
+                validateAndFingerprint(s);
                 CHECK(s.stats().refreshed == s.captures().size() && s.stats().refreshed <= 37);
                 for (const McCapture& c : s.captures())
                 {
@@ -274,11 +341,11 @@ int main(int argc, char** argv)
             s.removeInstance(7);
             CHECK(!s.hasInstance(7) && s.instanceMap()[7] == mc::kNone);
             s.update(std::span<const float3>(&eye, 1));
-            s.validate();
+            validateAndFingerprint(s);
             CHECK(s.stats().mappedPages == pages - 6);
             CHECK(s.addInstance(40, cube, translation({ 7 * 1.5f, 0, 0 })) != mc::kNone);
             s.update(std::span<const float3>(&eye, 1));
-            s.validate();
+            validateAndFingerprint(s);
             CHECK(s.stats().mappedPages == pages && s.stats().cards == cards && s.stats().meshCards == sets);
             uint32_t ofForty = 0;
             for (const McCapture& c : s.captures()) ofForty += c.sceneInstance == 40 && !c.refresh ? 1u : 0u;
@@ -301,7 +368,7 @@ int main(int argc, char** argv)
             {
                 s.update(std::span<const float3>(&eye, 1));
             } while (!s.captures().empty() && ++frames < 20);
-            s.validate();
+            validateAndFingerprint(s);
             uint32_t face = mc::kNone;
             for (uint32_t i = 0; i < s.cardsGpu().size() && face == mc::kNone; ++i)
                 if (s.cardsGpu()[i].extent[0] > 19 && s.cardsGpu()[i].extent[1] > 19 && (s.cardsGpu()[i].packed & (1u << 16)) != 0) face = i;
@@ -323,7 +390,7 @@ int main(int argc, char** argv)
                 f.hits = 100;
                 s.setFeedback(std::span<const McFeedback>(&f, 1), 8100);
                 s.update(std::span<const float3>(&eye, 1));
-                s.validate();
+                validateAndFingerprint(s);
                 CHECK(s.stats().hiResRequests == 1 && s.stats().hiResMapped == 1 && s.stats().hiResPages == 1 && s.captures().size() == 1);
                 if (!s.captures().empty())
                     CHECK(s.captures()[0].resample && !s.captures()[0].refresh && s.captures()[0].atlasRect[2] == 128 && s.captures()[0].card == face);
@@ -346,7 +413,7 @@ int main(int argc, char** argv)
                 {
                     s.setFeedback(std::span<const McFeedback>(), 8100);
                     s.update(std::span<const float3>(&eye, 1));
-                    s.validate();
+                    validateAndFingerprint(s);
                 }
                 CHECK(s.stats().hiResPages == 0 && s.stats().mappedPages == residentPages);
                 CHECK(s.cardsGpu()[face].hiResPageTableOffset == s.cardsGpu()[face].pageTableOffset);
@@ -359,7 +426,7 @@ int main(int argc, char** argv)
                 {
                     s.setFeedback(std::span<const McFeedback>(), 8100);
                     s.update(std::span<const float3>(&near, 1));
-                    s.validate();
+                    validateAndFingerprint(s);
                     if (s.captures().empty()) break;
                 }
                 CHECK(s.stats().hiResPages == 0 && s.stats().requests == 0);
@@ -389,11 +456,14 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "FAIL %s\n", e.what());
         return 1;
     }
+    // Recorded by this exact fixture against the original scan-from-zero
+    // allocator before changing its search cursors (2026-10-04, MSVC Release).
+    CHECK(g_checkedStates == 200 && g_stateHash == 0x57d42175954994beull);
     if (g_failures != 0)
     {
         std::fprintf(stderr, "FAIL %u checks\n", g_failures);
         return 1;
     }
-    std::printf("PASS\n");
+    std::printf("PASS states=%u gpu_records_and_captures=%016llx\n", g_checkedStates, (unsigned long long)g_stateHash);
     return 0;
 }

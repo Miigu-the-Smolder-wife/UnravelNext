@@ -15,6 +15,15 @@ void main()
     frame.Store4(MC_FRAME_RULES, P[8]);
     frame.Store4(MC_FRAME_RULES + 16, P[9]);
     frame.Store4(MC_FRAME_RULES + 32, P[10]);
+#if CL_DIRECT_WORK
+    // P[5].z is private to the lighting-update variant. Other frame publishers
+    // retain their original root constants and do not touch the work list.
+    if (P[5].z != MC_NONE)
+    {
+        RWByteAddressBuffer work = ResourceDescriptorHeap[P[5].z];
+        work.Store4(0, uint4(0, 0, 0, 0));
+    }
+#endif
     if (P[5].y == 0xFFFFFFFFu) return;
     RWByteAddressBuffer select = ResourceDescriptorHeap[P[5].y];
     for (uint k = 0; k < CL_SELECT_HEAD + 2u * CL_BUCKETS * 4u; k += 16) select.Store4(k, uint4(0, 0, 0, 0));

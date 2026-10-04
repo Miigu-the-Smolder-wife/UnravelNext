@@ -5,6 +5,7 @@
 #include "unx/core/Config.h"
 #include "unx/core/Log.h"
 #include "unx/render/Device.h"
+#include "unx/render/CpuFrameTrace.h"
 #include "unx/render/GpuScene.h"
 #include "unx/render/PassChain.h"
 #include "unx/render/RenderGraph.h"
@@ -730,6 +731,7 @@ void SurfaceCacheCards::declareRead(const FramePassContext& fc, PassBuilder& b, 
 
 void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::RayScene& rays)
 {
+    CpuFrameTrace cpuTrace(fc.frame.frameIndex);
     Impl& s = *m;
     const uint64_t serial = fc.trackState ? fc.trackState->recordSerial() : 0;
     if (s.frameIndex == fc.frame.frameIndex && s.recordSerial == serial)
@@ -767,7 +769,9 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
     // a restore moves anything anywhere: the cache catches up at the load's pace
     if (fc.frame.discontinuity & kDiscontinuityRestore) s.loadingState = true;
 
+    cpuTrace.mark("card.settings");
     s.sync(fc);
+    cpuTrace.mark("card.sync");
     s.ensureBuffers();
     // the readers' feedback of the newest completed frame, before the frame's updates (a set that starts from nothing
     // takes none: the copies in flight speak of the cards before it)
@@ -794,7 +798,9 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
     s.staging.clear();
     // surface_cache.mesh_cards_capture_clusters: through V's raster service, when the frame has it
     const bool clusters = s.settings.captureClusters && fc.services.rasterizeDepth;
+    cpuTrace.mark("card.feedback_buffers");
     for (Round& round : *staged) s.stageRound(fc, round, tableSrv, clusters);
+    cpuTrace.mark("card.stage_rounds");
     s.lastStats = s.scene->stats();
     s.lastStats.feedbackDropped = s.feedbackDropped;
     if (clusters && fc.trackState)
@@ -977,9 +983,13 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
         s.lighting->recordFrame(fc, set, restart && r == 0, depthBias, counter);
 
         const TextureRef captureAlbedo = g.createTexture({ "r.card capture albedo", captureSize, captureSize, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM });
-        const TextureRef captureNormal = g.createTexture({ "r.card capture normal", captureSize, captureSize, 1, 1, DXGI_FORMAT_R8G8_UNORM });
+        TextureDesc normalDesc{ "r.card capture normal", captureSize, captureSize, 1, 1, DXGI_FORMAT_R8G8_UNORM };
+        normalDesc.clearColor[0] = normalDesc.clearColor[1] = 0.5f;
+        const TextureRef captureNormal = g.createTexture(normalDesc);
         const TextureRef captureEmissive = g.createTexture({ "r.card capture emissive", captureSize, captureSize, 1, 1, DXGI_FORMAT_R11G11B10_FLOAT });
-        const TextureRef captureDepth = g.createTexture({ "r.card capture depth", captureSize, captureSize, 1, 1, DXGI_FORMAT_D32_FLOAT });
+        TextureDesc depthDesc{ "r.card capture depth", captureSize, captureSize, 1, 1, DXGI_FORMAT_D32_FLOAT };
+        depthDesc.clearDepth = clusters ? 0.0f : 1.0f;
+        const TextureRef captureDepth = g.createTexture(depthDesc);
         const TextureRef resampledDirect = g.createTexture({ "r.card resampled direct", captureSize, captureSize, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
         const TextureRef resampledIndirect = g.createTexture({ "r.card resampled indirect", captureSize, captureSize, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
         const BufferRef captureList = g.createBuffer({ "r.card captures", (uint64_t)std::max(round.captures, 1u) * kCaptureBytes, 0 });
@@ -1179,5 +1189,6 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
         logf("surface cache: loading - %u instances wait for cards (%u meshes generating), %u cards to capture, %u pages, %u rounds a frame\n", s.waiting,
              s.cache->pending(), s.lastStats.pending, s.lastStats.mappedPages, rounds);
     }
+    cpuTrace.mark("card.declare_and_lighting");
 }
 } // namespace unx::render::refl

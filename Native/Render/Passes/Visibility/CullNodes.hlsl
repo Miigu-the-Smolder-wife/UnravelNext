@@ -217,7 +217,7 @@ void main()
                     queue.InterlockedCompareExchange(4 * VS_NODE_COMMIT, first, first + total, seen);
                     published = seen == first;
                 }
-                if (!published) queue.InterlockedOr(4 * VS_OVERFLOW, OVERFLOW_ITERATION_LIMIT);
+                if (!published) queue.InterlockedOr(4 * VS_OVERFLOW, OVERFLOW_ITERATION_LIMIT | OVERFLOW_NODE_PUBLICATION);
             }
         }
         emitNodes(state, r, count, groupBegin);

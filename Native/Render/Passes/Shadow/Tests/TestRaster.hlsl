@@ -42,9 +42,11 @@ void main(uint3 groupId : SV_GroupID, uint lane : SV_GroupThreadID, out vertices
     const uint group = groupId.y * 65535 + groupId.x;
     const uint4 chunk = group < P[0].w ? chunks[group] : uint4(0, 0, 0, 0);
     const TestView view = views[P[0].z];
-    SetMeshOutputCounts(chunk.z * 3, chunk.z);
-    if (lane >= chunk.z) return;
     const GpuInstance inst = loadInstance(chunk.x);
+    const bool inSet = view.pad.x == 0 || (view.pad.x == 2) == instanceShadowMovable(inst, chunk.x, view.pad.y);
+    const uint triangles = inSet && (inst.flags & INSTANCE_HIDDEN) == 0 ? chunk.z : 0;
+    SetMeshOutputCounts(triangles * 3, triangles);
+    if (lane >= triangles) return;
     const GpuMesh mesh = loadMesh(inst.mesh);
     const uint t = chunk.y + lane;
     const uint3 idx = loadTriangle(mesh, t);

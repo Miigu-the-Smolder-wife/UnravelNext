@@ -1,4 +1,5 @@
 #include "unx/render/FrameRenderer.h"
+#include "unx/render/CpuFrameTrace.h"
 
 #include "unx/render/Tracks.h"
 #include "unx/scene/SceneData.h"
@@ -321,6 +322,7 @@ void FrameRenderer::setupUpscale(FrameContext& frame)
 
 ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, TextureRef output)
 {
+    CpuFrameTrace cpuTrace(in.frameIndex);
     // History discontinuity (v1.35): no previous view in this frame; a restore also has no previous transforms or
     // palettes. The tracks reset their own temporal state from frame.discontinuity.
     FrameContext frame = in;
@@ -445,7 +447,9 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
             frame.fogVolumes.push_back(d);
         }
     }
-    m_scene.flushUpdates(frame.frameIndex, m_framesInFlight, m_shaders);  // transforms, palettes, visibility of this frame
+    cpuTrace.mark("frame_setup");
+    m_scene.flushUpdates(frame.frameIndex, m_framesInFlight, m_shaders, &graph);  // only this graph consumes the scene update
+    cpuTrace.mark("scene_flush");
     tracks::particleLightCapacity(m_trackState, m_scene);  // A3: before the imports and every frame constants
     FrameResources resources;
     // output.async_compute_passes: the named passes on the async compute queue (RenderGraph::setAsyncPasses).
@@ -457,6 +461,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     m_debugDraw = tracks::debugBegin(fc);  // E (A15): before any frame constants, which carry its buffer
     // Scene textures into the material records before any frame constants (they carry the material buffer's SRV).
     tracks::prepareScene(fc);
+    cpuTrace.mark("prepare_scene");
     // (after prepareScene: a rect light's image that changed makes the scene's light buffer anew there -
     // GpuScene::setLightSourceTextures - and an import taken before it would name the buffer just released, so the FX
     // lights written this frame would land in it while every reader loads the new one)
@@ -490,6 +495,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     main.frameConstants = fc.frameConstantsFor(main.view);
     main.color = output;
     std::vector<ViewResources> aux = auxiliaryViews(fc, frame);  // A14: in drawing order
+    cpuTrace.mark("view_setup");
 
     // ARCHITECTURE 4.1, one graphics queue (4.3) except the passes output.async_compute_passes names (GI's block on the
     // async queue). Order matters only through declared dependencies; it follows the design so the reader can map passes
@@ -500,13 +506,19 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     tracks::particleMeshes(fc);  // A3 (render C): mesh particle instances, before V's culling
     tracks::particleLights(fc, main);  // A3: FX particle lights into the scene light tail, before S's lists
     tracks::particleShadows(fc, main);  // the sprites' shadow under the sun (S's screen visibility and the particles read it)
+    cpuTrace.mark("simulation_particles");
     tracks::waterGeometry(fc);  // W (B7/B8): ocean FFT and fluid surface into V's triangle streams
+    cpuTrace.mark("water_geometry");
     tracks::atmosphere(fc);
+    cpuTrace.mark("atmosphere");
     tracks::accelerationStructures(fc);
+    cpuTrace.mark("acceleration_structures");
     tracks::hair(fc, main);  // E (B10): guide ticks and the frame's strand segments, before V
     for (ViewResources& v : aux) tracks::visibility(fc, v);
     tracks::visibility(fc, main);
+    cpuTrace.mark("visibility");
     tracks::shadowPages(fc, main);  // reads V's products only (S, 2026-09-26); per-view marking: S (shadowMarkView)
+    cpuTrace.mark("shadow_pages");
     // R: last frame's translucency volume, for the fog's indirect light - before the auxiliary views, whose own fog is
     // recorded with their shadow visibility below (after them, their fog had no indirect light); it reads the main
     // view's size and its own state only
@@ -523,20 +535,29 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     tracks::decals(fc, main);  // E (A7): decal records and tile lists for the resolve
     tracks::surfaceState(fc);  // E (A7): the surface state field's changes
     tracks::materialResolve(fc, main);
+    cpuTrace.mark("auxiliary_material");
     tracks::froxels(fc, main);
+    cpuTrace.mark("froxels");
     main.froxelLights = resources.froxelLights;  // the main view's per-view S products (v1.22)
     main.airVolume = resources.aerialPerspective;
     tracks::surfaceCache(fc, main);
+    cpuTrace.mark("surface_cache");
     tracks::screenTraceInputs(fc, main);
+    cpuTrace.mark("screen_inputs");
     tracks::globalIllumination(fc, main);
+    cpuTrace.mark("global_illumination");
     // S's screen visibility reads the resolve and the shadow pages only and is read only by M's shading: declared right
     // after GI, the graphics queue runs it while GI's passes run on the async queue (output.async_compute_passes), before
     // the reflections wait for GI's cache.
     tracks::shadowVisibility(fc, main);
+    cpuTrace.mark("shadow_visibility");
     tracks::reflections(fc, main);
+    cpuTrace.mark("reflections");
     tracks::particles(fc, main);
     tracks::distortion(fc, main);
+    cpuTrace.mark("particles_distortion");
     tracks::shading(fc, main);
+    cpuTrace.mark("shading");
     if (frame.upscale.outputWidth != 0 && m_debugDraw != 0xFFFFFFFFu)
     {
         // the overlay draws over the upscaled output: the output-size view (unjittered) and its own frame constants
@@ -548,6 +569,7 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     else
         tracks::debugOverlay(fc, main);  // E (A15): buffer visualization, debug primitives, HUD over the final colour
     m_lastResources = resources;
+    cpuTrace.mark("debug_finish");
     return main;
 }
 
@@ -555,7 +577,7 @@ void FrameRenderer::recordImage(RenderGraph& graph, const FrameContext& in, Text
 {
     FrameContext frame = in;
     if (frame.discontinuity & kDiscontinuityRestore) m_scene.resetMotion();
-    m_scene.flushUpdates(frame.frameIndex, m_framesInFlight, m_shaders);
+    m_scene.flushUpdates(frame.frameIndex, m_framesInFlight, m_shaders, &graph);
     m_debugDraw = 0xFFFFFFFFu;
     m_viewModelScale = 1.0f;
     m_trackState.beginRecord();  // (a recording of its own: what the tracks import once a recording is keyed on it)

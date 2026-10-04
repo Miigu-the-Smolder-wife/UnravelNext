@@ -1,7 +1,7 @@
 // unx-kernel: lib_6_6 main
 // unx-variants: SKY=0,1
-// r.gi.ltv.trace (LumenTranslucencyVolume.hlsli): the cells' rays. DispatchRays over (grid x * 3, grid y * 3, slices of
-// the band): thread = the cell's ray texel; ONE ray a thread, bands of at most 262,144 threads. The ray: from the cell's
+// r.gi.ltv.trace (LumenTranslucencyVolume.hlsli): the visible cells' rays. Indirect DispatchRays over compact cell records,
+// with nine consecutive threads per cell; the original ray texel and full-precision origin come from the record. The ray: from the cell's
 // sample point (the frame's jitter, kept in front of the depth buffer), direction = its texel of the 3 x 3 equal-area
 // sphere map, the point inside the texel jittered per cell column and frame; no face culling (a sample inside a wall
 // then sees the wall's back and takes 0 instead of the room behind). It runs to the radiance cache's coverage distance
@@ -17,14 +17,15 @@
 //          light through their own body's hair themselves (CoverageHair.hlsl hairIndirect);
 //   miss   inside the cache's coverage: the cache's radiance in the ray's direction (all 8 probes, weighted); else the sky.
 // The radiance is held to P[9].x exposed units (MaxRayIntensity 20) and stored as nits x LTV_SCALE.
-// P[0] = { trace UAV (Texture3D R11G11B10F, grid xy * 3), depth SRV, depth pyramid SRV, clipmap bias }
+// P[0] = { trace UAV (Texture3D R11G11B10F, grid xy * 3), unused, unused, clipmap bias }
 // P[1], P[2], P[3] = sky and sun (GiSky.hlsli; P[1].w = the trace distance)
-// P[4] = { grid x, grid y, grid z, the band's first slice }
+// P[4] = { grid x, grid y, grid z, the band's first compact ray }
 // P[5] = { card frame SRV (UNX_NONE: none), radiance cache params SRV (UNX_NONE: none), indirection SRV, atlas SRV }
 // P[6], P[7] = RtSceneSrvs
 // P[8] = { asuint(cell jitter xyz), frame }, P[9] = { asuint(ray intensity cap, exposed units; 0: none), the radiance
 // cache's depth atlas SRV (UNX_NONE: no probe visibility test), asuint(the depth constraint's threshold, slices),
 // asuint(far-field start, m; 0: none - GiSky.hlsli giFarSkyIrradiance) }
+// P[10].x = compact cell list SRV (LumenTranslucencyVolumeCompact.hlsli).
 #define GI_SKY_FOG_RETURN  // (GiSky.hlsli: the sky's share of the sun's light the fog scatters - atmosphere.fog.sun_through_fog)
 #define RT_SHADOW_TRANSMITTANCE  // (the hits' shadow rays take what the Glass they cross leaves of the light: RayShaders.hlsli)
 #include "RayTracing/RayShaders.hlsli"
@@ -34,6 +35,7 @@
 #include "Passes/SurfaceCache/CardLighting.hlsli"
 #include "Passes/GI/LumenRadianceCache.hlsli"
 #include "Passes/GI/LumenTranslucencyVolumeGrid.hlsli"
+#include "Passes/GI/LumenTranslucencyVolumeCompact.hlsli"
 #include "Passes/GI/LumenHitIndirect.hlsli"
 #include "RayTracing/HitLocalSample.hlsli"
 #include "RayTracing/HitHair.hlsli"
@@ -42,16 +44,11 @@
 [shader("raygeneration")]
 void LumenTranslucencyVolumeTraceGen()
 {
-    const uint3 id = DispatchRaysIndex().xyz + uint3(0, 0, P[4].w);
-    const uint3 cell = uint3(id.xy / LTV_TRACE_RES, id.z);
+    uint3 id, cell;
+    float3 origin;
+    ltvCompactRay(P[10].x, DispatchRaysIndex().x + P[4].w, id, cell, origin);
     const uint2 texel = id.xy - cell.xy * LTV_TRACE_RES;
     RWTexture3D<float3> trace = ResourceDescriptorHeap[P[0].x];
-    if (any(cell >= ltvGridSize())) return;
-    trace[id] = 0;
-    if (!ltvCellVisible(cell, P[0].z)) return;
-    float3 offset = ltvFrameJitter();
-    ltvDepthConstraint(cell, offset, P[0].y, asfloat(P[9].z));
-    const float3 origin = ltvCellPosition(float3(cell) + offset);
     const uint seed = ltvHash(cell.x + cell.y * 8191u + ltvFrame() * 26699u);
     const float2 uv = (float2(texel) + float2(ltvUnit(seed), ltvUnit(seed ^ 0x9e3779b9u))) / float(LTV_TRACE_RES);
     RayDesc ray;

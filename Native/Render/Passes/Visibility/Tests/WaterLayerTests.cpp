@@ -182,6 +182,7 @@ int main()
             st.boundsMin = { -0.5f, -0.3f, 1.8f }, st.boundsMax = { 0.5f, 0.3f, 2.4f };
             resources.triangleStreams.push_back(st);
             FramePassContext fc{ device(), graph, shaders(), q, gs, frame, resources, services, [=](const ViewDesc&) { return address; }, &trackState, 2 };
+            prepareTriangleStreamDraws(fc);
             ViewResources main;
             main.view = mainView;
             main.frameConstants = address;

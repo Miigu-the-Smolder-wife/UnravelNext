@@ -188,6 +188,10 @@ struct FramePassContext
     }
 };
 
+// Call after the frame's triangle-stream producers, before any raster consumer.
+void prepareTriangleStreamDraws(FramePassContext& fc);
+uint64_t allocateTriangleStreamTopologyId();
+
 // One recording of one frame, for the guards "this was already recorded into the frame's graph": the frame's index and
 // the recording's serial (TrackState::beginRecord). A recording that failed keeps its frame index; what the failed
 // attempt left behind - graph references above all - belongs to a graph that is gone, and a guard on the frame index

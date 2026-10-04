@@ -108,7 +108,7 @@ struct Settings
         s.workQueue = q.has("visibility.traversal_work_queue") ? q.boolean("visibility.traversal_work_queue") : true;
         s.passMerge = q.has("visibility.cull_pass_merge") ? q.boolean("visibility.cull_pass_merge") : true;
         s.foldSmall = q.has("visibility.fold_small_passes") ? q.boolean("visibility.fold_small_passes") : true;
-        const int64_t workers = q.has("visibility.traversal_worker_groups") ? q.integer("visibility.traversal_worker_groups") : 1024;
+        const int64_t workers = q.has("visibility.traversal_worker_groups") ? q.integer("visibility.traversal_worker_groups") : 64;
         if (workers < 1 || workers > 65535) fail("visibility.traversal_worker_groups = %lld: 1 .. 65535 (one dispatch row)", (long long)workers);
         s.workerGroups = (uint32_t)workers;
         const int64_t stage = q.integer("visibility.coverage_debug_stage");
@@ -255,8 +255,12 @@ struct State
     VBuffer cullScene, chunks, chunkInstances, flat, skinList, skinSlots, jointSpheres, skinBounds;
     uint32_t chunkCount = 0, flatCount = 0, skinCount = 0;
     bool chunkBoundsPending = false;
+    uint64_t chunkBoundsEpoch = 0;
     std::vector<uint8_t> chunked;  // per instance: a member of a chunk (its moves invalidate the chunk spheres)
-    uint64_t preparedFrame = UINT64_MAX;  // frame whose graph has the imports and the bounds passes below
+    std::vector<uint8_t> rigidMoved;  // authoring mobility becomes flat traversal only after an observed move
+    std::vector<uint32_t> rigidRevisions;
+    std::vector<std::array<float4, 3>> rigidTransforms;
+    RecordKey preparedFrame;  // discarded recordings must not consume bounds initialization
     BufferRef chunksRef, skinBoundsRef;
 
     ~State()
@@ -414,6 +418,15 @@ void buildCullScene(State& s, FramePassContext& fc)
     const std::vector<gpu::Instance>& instances = fc.scene.instances();
     const std::vector<gpu::Mesh>& meshes = fc.scene.meshes();
     const scene::Scene* src = fc.scene.source();
+    const bool cacheRigid = !fc.quality.has("visibility.cache_unchanged_rigid") || fc.quality.boolean("visibility.cache_unchanged_rigid");
+    s.rigidMoved.resize(instances.size(), 0);
+    s.rigidRevisions.resize(instances.size());
+    s.rigidTransforms.resize(instances.size());
+    for (size_t i = 0; i < instances.size(); ++i)
+    {
+        s.rigidRevisions[i] = instances[i].transformRevision;
+        std::copy_n(instances[i].objectToWorld, 3, s.rigidTransforms[i].begin());
+    }
     struct Item
     {
         int32_t cx, cy, cz;
@@ -426,9 +439,10 @@ void buildCullScene(State& s, FramePassContext& fc)
         const gpu::Instance& in = instances[i];
         const bool skin = (in.flags & scene::InstanceSkinned) != 0;
         if (skin && in.bonePalette != kNone && meshes[in.mesh].skinOffset != kNone) skinned.push_back(i);
-        // Dynamic, skinned and view-model instances (A12: moved with the camera every frame, after V's preparation) are
-        // tested one by one.
-        if ((in.flags & (scene::InstanceDynamic | scene::InstanceSkinned | gpu::kInstanceViewModel)) != 0)
+        // Unchanged rigid instances can share spatial chunks even when authoring
+        // permits motion. First real motion promotes them to flat traversal.
+        if ((in.flags & (scene::InstanceSkinned | gpu::kInstanceViewModel)) != 0 ||
+            ((in.flags & scene::InstanceDynamic) && (!cacheRigid || s.rigidMoved[i])))
         {
             flat.push_back(i);
             continue;
@@ -527,8 +541,9 @@ void buildCullScene(State& s, FramePassContext& fc)
     const CullScene cs{ s.chunks.srv, s.chunkInstances.srv, s.chunkCount, s.flat.srv, s.flatCount, s.skinBounds.srv, s.skinList.srv, s.skinCount };
     s.cullScene = structuredBuffer(d, &cs, sizeof(CullScene), 1, false, L"V cull scene");
     s.chunkBoundsPending = s.chunkCount > 0;
-    s.preparedFrame = UINT64_MAX;
-    logf("V: instance hierarchy: %u static instances in %u chunks (64 m cells, <= %u each), %u flat instances, %u skinned (%zu joint spheres)\n",
+    ++s.chunkBoundsEpoch;
+    s.preparedFrame = {};
+    logf("V: instance hierarchy: %u cached rigid instances in %u chunks (64 m cells, <= %u each), %u flat instances, %u skinned (%zu joint spheres)\n",
          (uint32_t)members.size(), s.chunkCount, kChunkInstances, s.flatCount, s.skinCount, spheres.size());
 }
 
@@ -536,16 +551,21 @@ void buildCullScene(State& s, FramePassContext& fc)
 // chunk bounds after a scene revision and the skinned bounds of this frame (current and previous palettes).
 void prepareCullScene(FramePassContext& fc, State& s, D3D12_GPU_VIRTUAL_ADDRESS frameConstants)
 {
-    if (s.preparedFrame == fc.frame.frameIndex) return;
-    s.preparedFrame = fc.frame.frameIndex;
+    if (s.preparedFrame == RecordKey::of(fc)) return;
+    s.preparedFrame = RecordKey::of(fc);
     // C9: an origin shift moved every instance; the chunk spheres (world space) follow from the shifted table.
-    if (fc.frame.originShift.x != 0 || fc.frame.originShift.y != 0 || fc.frame.originShift.z != 0) s.chunkBoundsPending = s.chunkCount > 0;
+    if (fc.frame.originShift.x != 0 || fc.frame.originShift.y != 0 || fc.frame.originShift.z != 0)
+    {
+        s.chunkBoundsPending = s.chunkCount > 0;
+        ++s.chunkBoundsEpoch;
+    }
     // A chunked (static) instance moved by a transform update in this frame (no scene revision: an editor move, a view
     // model, E's A12 pose): the chunk spheres are recomputed from the moved table (one ChunkBounds pass, all chunks).
     for (uint32_t i : fc.scene.movedInstances())
         if (i < s.chunked.size() && s.chunked[i])
         {
             s.chunkBoundsPending = s.chunkCount > 0;
+            ++s.chunkBoundsEpoch;
             break;
         }
     RenderGraph& g = fc.graph;
@@ -560,12 +580,15 @@ void prepareCullScene(FramePassContext& fc, State& s, D3D12_GPU_VIRTUAL_ADDRESS 
     }
     if (s.chunkBoundsPending)
     {
-        s.chunkBoundsPending = false;
         ID3D12PipelineState* pso = fc.shaders.compute("Passes/Visibility/ChunkBounds");
         const BufferRef chunks = s.chunksRef;
         const uint32_t k[4] = { s.chunks.uav, s.chunkInstances.srv, s.chunkCount, 0 };
         const uint32_t groups = (s.chunkCount + 63) / 64;
-        g.addPass("v.cull.chunkBounds", QueueType::Graphics, [&](PassBuilder& b) { b.use(chunks, Use::UavCompute); },
+        g.addPass("v.cull.chunkBounds", QueueType::Graphics, [&](PassBuilder& b) {
+                      b.use(chunks, Use::UavCompute);
+                      const uint64_t epoch = s.chunkBoundsEpoch;
+                      b.onSubmitted([&s, epoch](Queue&, uint64_t) { if (s.chunkBoundsEpoch == epoch) s.chunkBoundsPending = false; });
+                  },
                   [=](PassContext& c) {
                       c.cmd->SetPipelineState(pso);
                       c.bindFrameConstants(frameConstants);
@@ -594,8 +617,24 @@ void refreshScene(State& s, FramePassContext& fc)
 {
     if (s.sceneRevision == fc.scene.revision())
     {
+        bool promoted = false;
+        const auto& instances = fc.scene.instances();
+        const float3 shift = fc.frame.originShift;
+        const bool rebase = shift.x != 0 || shift.y != 0 || shift.z != 0;
+        for (size_t i = 0; i < s.chunked.size() && i < instances.size(); ++i)
+        {
+            if (!s.chunked[i] || !(instances[i].flags & scene::InstanceDynamic)) continue;
+            if (!rebase && s.rigidRevisions[i] == instances[i].transformRevision) continue;
+            s.rigidRevisions[i] = instances[i].transformRevision;
+            if (!rebase && std::memcmp(s.rigidTransforms[i].data(), instances[i].objectToWorld, sizeof instances[i].objectToWorld) != 0)
+            {
+                s.rigidMoved[i] = 1;
+                promoted = true;
+            }
+            std::copy_n(instances[i].objectToWorld, 3, s.rigidTransforms[i].begin());
+        }
         // A view model was marked or unmarked (no scene revision): only the instance hierarchy changes.
-        if (s.viewModelRevision != fc.scene.viewModelRevision())
+        if (promoted || s.viewModelRevision != fc.scene.viewModelRevision())
         {
             s.viewModelRevision = fc.scene.viewModelRevision();
             buildCullScene(s, fc);
@@ -2228,15 +2267,19 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
         const TextureRef waterVis = view.waterVis, waterDepth = view.waterDepth, bandADepth = view.depth;
         if (edgeOnly && !waterVis.valid()) continue;
         if (st.maxTriangles > (1u << 24)) fail("V: triangle stream %u holds %u triangles (at most 2^24)", slot, st.maxTriangles);
-        if (g.desc(st.vertices).size < (uint64_t)st.maxTriangles * 96) fail("V: triangle stream %u: vertex buffer below %u triangles", slot, st.maxTriangles);
-        const uint32_t groups = (st.maxTriangles + 31) / 32;
+        const uint64_t vertexCount = st.indices.valid() ? st.vertexCount : uint64_t(st.maxTriangles) * 3;
+        if (!vertexCount || g.desc(st.vertices).size < vertexCount * 32 ||
+            (st.indices.valid() && g.desc(st.indices).size < uint64_t(st.maxTriangles) * 12)) fail("V: triangle stream %u has an invalid vertex/index layout", slot);
+        const uint32_t groups = (std::min(st.maxTriangles, st.knownTriangleCount) + 31) / 32;
         MeshPipelineDesc sd = d;
         sd.meshShader = "Passes/Visibility/StreamRaster.ms";
         ID3D12PipelineState* streamPso = fc.shaders.mesh("v.coverage.stream." + psoVariant, sd);
         g.addPass("v.coverage.stream", QueueType::Graphics,
                   [&](PassBuilder& b) {
                       b.use(st.vertices, Use::SrvGraphics);
+                      if (st.indices.valid()) b.use(st.indices, Use::SrvGraphics);
                       b.use(st.drawArgs, Use::SrvGraphics);
+                      if (st.meshArgs.valid()) b.use(st.meshArgs, Use::IndirectArgs);
                       if (edgeOnly)
                       {
                           b.use(waterVis, Use::SrvGraphics);
@@ -2249,11 +2292,11 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       if (hiz.valid()) b.use(hiz, Use::SrvGraphics);
                   },
                   [=](PassContext& c) {
-                      uint32_t k[30];
+                      uint32_t k[31];
                       constants(c, k, 0, false);  // the stream inputs take P[3].xyz
                       k[3] = c.uav(stream);
                       k[4] = c.uav(keys);
-                      k[7] = 0;  // (the pixel kernel's switches, COV_RASTER_*: none)
+                      k[7] = triangleCull ? 0x100u : 0u;  // same conservative band A test as ordinary coverage triangles
                       if (!hiz.valid()) k[8] = kNone;
                       k[12] = c.srv(st.vertices);
                       k[13] = c.srv(st.drawArgs);
@@ -2264,6 +2307,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       k[27] = edgeOnly ? c.srv(waterDepth) : kNone;
                       k[28] = edgeOnly ? c.srv(bandADepth) : kNone;
                       k[29] = slot;
+                      k[30] = st.indices.valid() ? c.srv(st.indices) : kNone;
                       c.cmd->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
                       const D3D12_VIEWPORT vp{ 0, 0, (float)width, (float)height, 0, 1 };
                       const D3D12_RECT sc{ 0, 0, (LONG)width, (LONG)height };
@@ -2271,8 +2315,9 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       c.cmd->RSSetScissorRects(1, &sc);
                       c.bindFrameConstants(frameConstants);
                       c.cmd->SetPipelineState(streamPso);
-                      c.graphicsConstants(k, 30);
-                      c.cmd->DispatchMesh(std::min(groups, 65535u), (groups + 65534) / 65535, 1);
+                      c.graphicsConstants(k, 31);
+                      if (st.meshArgs.valid()) c.cmd->ExecuteIndirect(meshSig, 1, c.resource(st.meshArgs), st.meshArgsOffset, nullptr, 0);
+                      else c.cmd->DispatchMesh(std::min(groups, 65535u), (groups + 65534) / 65535, 1);
                   });
     }
     // v1.73: other tracks append coverage records here (W's ocean edges), before the count.
@@ -2608,7 +2653,9 @@ void translucentLayer(FramePassContext& fc, State& s, const Run& r, ViewResource
     const TextureRef depth = g.createTexture({ "v.translucent.depth.test", width, height, 1, 1, DXGI_FORMAT_D32_FLOAT });
     const TextureRef count = g.createTexture({ "v.translucent.count", width, height, 1, 1, DXGI_FORMAT_R32_UINT });
     const TextureRef vis = g.createTexture({ "v.translucent.vis", width, height, 1, 1, DXGI_FORMAT_R32_UINT });
-    const TextureRef linear = g.createTexture({ "v.translucent.depth", width, height, 1, 1, DXGI_FORMAT_R32_FLOAT });
+    TextureDesc linearDesc{ "v.translucent.depth", width, height, 1, 1, DXGI_FORMAT_R32_FLOAT };
+    std::fill(std::begin(linearDesc.clearColor), std::end(linearDesc.clearColor), INFINITY);
+    const TextureRef linear = g.createTexture(linearDesc);
     const TextureRef cls = g.createTexture({ "v.translucent.class", width, height, 1, 1, DXGI_FORMAT_R8_UINT });
     // (visibility.fold_small_passes: the depth copy and the count's clear are one pass - they touch different textures)
     PassChain chain(g, QueueType::Graphics, r.cfg.foldSmall);
@@ -2750,7 +2797,9 @@ void waterLayer(FramePassContext& fc, State& s, const Run& r, ViewResources& vie
     const TextureRef depthA = view.depth;
     const TextureRef depth = g.createTexture({ "v.water.depth.test", width, height, 1, 1, DXGI_FORMAT_D32_FLOAT });
     const TextureRef vis = g.createTexture({ "v.water.vis", width, height, 1, 1, DXGI_FORMAT_R32_UINT });
-    const TextureRef linear = g.createTexture({ "v.water.depth", width, height, 1, 1, DXGI_FORMAT_R32_FLOAT });
+    TextureDesc linearDesc{ "v.water.depth", width, height, 1, 1, DXGI_FORMAT_R32_FLOAT };
+    std::fill(std::begin(linearDesc.clearColor), std::end(linearDesc.clearColor), INFINITY);
+    const TextureRef linear = g.createTexture(linearDesc);
     g.addPass("v.water.copy", QueueType::Graphics,
               [&](PassBuilder& b) {
                   b.use(depthA, Use::CopySrc);
@@ -2777,6 +2826,7 @@ void waterLayer(FramePassContext& fc, State& s, const Run& r, ViewResources& vie
     const uint32_t viewsSrv = r.viewsSrv;
     std::vector<TriangleStream> drawn;
     for (uint32_t slot : slots) drawn.push_back(streams[slot]);
+    ID3D12CommandSignature* meshSig = s.meshSignature.Get();
     g.addPass("v.water.raster", QueueType::Graphics,
               [&](PassBuilder& b) {
                   b.use(depth, Use::DepthWrite);
@@ -2785,7 +2835,9 @@ void waterLayer(FramePassContext& fc, State& s, const Run& r, ViewResources& vie
                   for (const TriangleStream& st : drawn)
                   {
                       b.use(st.vertices, Use::SrvGraphics);
+                      if (st.indices.valid()) b.use(st.indices, Use::SrvGraphics);
                       b.use(st.drawArgs, Use::SrvGraphics);
+                      if (st.meshArgs.valid()) b.use(st.meshArgs, Use::IndirectArgs);
                   }
                   if (oceanDepth.valid()) b.use(oceanDepth, Use::SrvGraphics);
               },
@@ -2804,10 +2856,11 @@ void waterLayer(FramePassContext& fc, State& s, const Run& r, ViewResources& vie
                   for (size_t k = 0; k < drawn.size(); ++k)
                   {
                       const TriangleStream& st = drawn[k];
-                      const uint32_t groups = (st.maxTriangles + 31) / 32;
-                      const uint32_t kc[8] = { c.srv(st.vertices), c.srv(st.drawArgs), st.maxTriangles, slots[k], viewsSrv, 0, 0, 0 };
+                      const uint32_t groups = (std::min(st.maxTriangles, st.knownTriangleCount) + 31) / 32;
+                      const uint32_t kc[8] = { c.srv(st.vertices), c.srv(st.drawArgs), st.maxTriangles, slots[k], viewsSrv, st.indices.valid() ? c.srv(st.indices) : kNone, 0, 0 };
                       c.graphicsConstants(kc, 8);
-                      c.cmd->DispatchMesh(std::min(groups, 65535u), (groups + 65534) / 65535, 1);
+                      if (st.meshArgs.valid()) c.cmd->ExecuteIndirect(meshSig, 1, c.resource(st.meshArgs), st.meshArgsOffset, nullptr, 0);
+                      else c.cmd->DispatchMesh(std::min(groups, 65535u), (groups + 65534) / 65535, 1);
                   }
                   if (oceanPso)
                   {

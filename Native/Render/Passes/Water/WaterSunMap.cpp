@@ -13,6 +13,13 @@ using namespace unx::render;
 
 WaterSunMap::WaterSunMap(Device& device) : m_device(device)
 {
+    D3D12_INDIRECT_ARGUMENT_DESC argument{};
+    argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
+    D3D12_COMMAND_SIGNATURE_DESC signature{};
+    signature.ByteStride = sizeof(D3D12_DISPATCH_MESH_ARGUMENTS);
+    signature.NumArgumentDescs = 1;
+    signature.pArgumentDescs = &argument;
+    check(device.d3d()->CreateCommandSignature(&signature, nullptr, IID_PPV_ARGS(&m_meshSignature)), "water sun mesh signature");
     for (uint32_t i = 0; i < kRing; ++i)
     {
         D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_UPLOAD };
@@ -111,10 +118,16 @@ WaterSunMapOutput WaterSunMap::record(RenderGraph& g, ShaderLibrary& shaders, ui
         BufferRef vertices, args;
         uint32_t capacity;
         float medium[4];
+        BufferRef meshArgs;
+        uint32_t meshArgsOffset;
+        uint32_t knownTriangles;
+        BufferRef indices;
     };
     std::vector<Draw> draws;
     for (const WaterSunStream* w : drawn)
-        draws.push_back({ w->stream.vertices, w->stream.drawArgs, w->stream.maxTriangles, { w->transmittance[0], w->transmittance[1], w->transmittance[2], w->ior } });
+        draws.push_back({ w->stream.vertices, w->stream.drawArgs, w->stream.maxTriangles, { w->transmittance[0], w->transmittance[1], w->transmittance[2], w->ior },
+            w->stream.meshArgs, w->stream.meshArgsOffset, w->stream.knownTriangleCount, w->stream.indices });
+    ID3D12CommandSignature* meshSignature = m_meshSignature.Get();
     g.addPass("w.sun map raster", QueueType::Graphics,
               [&](PassBuilder& b) {
                   b.use(normal, Use::RenderTarget);
@@ -124,7 +137,9 @@ WaterSunMapOutput WaterSunMap::record(RenderGraph& g, ShaderLibrary& shaders, ui
                   for (const Draw& dr : draws)
                   {
                       b.use(dr.vertices, Use::SrvGraphics);
+                      if (dr.indices.valid()) b.use(dr.indices, Use::SrvGraphics);
                       b.use(dr.args, Use::SrvGraphics);
+                      if (dr.meshArgs.valid()) b.use(dr.meshArgs, Use::IndirectArgs);
                   }
               },
               [=](PassContext& c) {
@@ -141,11 +156,13 @@ WaterSunMapOutput WaterSunMap::record(RenderGraph& g, ShaderLibrary& shaders, ui
                   c.cmd->SetPipelineState(pso);
                   for (const Draw& dr : draws)
                   {
-                      uint32_t k[8] = { c.srv(dr.vertices), c.srv(dr.args), dr.capacity, c.srv(constants) };
+                      uint32_t k[9] = { c.srv(dr.vertices), c.srv(dr.args), dr.capacity, c.srv(constants) };
+                      k[8] = dr.indices.valid() ? c.srv(dr.indices) : 0xFFFFFFFFu;
                       std::memcpy(&k[4], dr.medium, 16);
-                      c.graphicsConstants(k, 8);
-                      const uint32_t groups = (dr.capacity + 31) / 32;
-                      c.cmd->DispatchMesh(std::min(65535u, groups), (groups + 65534) / 65535, 1);
+                      c.graphicsConstants(k, 9);
+                      const uint32_t groups = (std::min(dr.capacity, dr.knownTriangles) + 31) / 32;
+                      if (dr.meshArgs.valid()) c.cmd->ExecuteIndirect(meshSignature, 1, c.resource(dr.meshArgs), dr.meshArgsOffset, nullptr, 0);
+                      else c.cmd->DispatchMesh(std::min(65535u, groups), (groups + 65534) / 65535, 1);
                   }
               });
     // Caustics (WaterCaustics.hlsl): the map's texels' refracted sunlight splatted onto the slices.

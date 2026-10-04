@@ -100,7 +100,9 @@ bool coverageRectBehindBandA(float2 lo, float2 hi, float nearest)
     hiz.GetDimensions(0, w, h, levels);
     // texels of mip m are 2^(m+1) pixels wide: pixels p0..p1 lie in at most two of them per axis when p1 - p0 <= 2^(m+1)
     const uint extent = (uint)max(max(p1.x - p0.x, p1.y - p0.y), 1);
-    const uint mip = min((uint)max(0.0, ceil(log2((float)extent)) - 1.0), levels - 1);
+    // ceil(log2(extent)) - 1, clamped to zero, without a float round-trip.
+    // Subtract before firstbithigh so exact powers of two keep the finer level.
+    const uint mip = min((uint)firstbithigh(max(extent, 2u) - 1u), levels - 1);
     const uint shift = mip + 1;
     if (extent > (1u << shift)) return false;  // (the chain's last level is finer than the rectangle needs: no answer)
     const uint2 a = uint2(p0) >> shift, b = uint2(p1) >> shift;

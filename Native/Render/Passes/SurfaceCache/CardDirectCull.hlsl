@@ -7,11 +7,12 @@
 // CL_PAGE_ANIMATED in its page's light state: the selection refreshes the page's direct light at the highest speed.
 // P[0] = { card frame SRV, select SRV, frame index, flags (bit 7: no local lights, bit 8: no sun) }
 // P[4] = { tile lights UAV (raw), tile shadow UAV (raw), uniform bits SRV (raw), page capacity }
-// P[5] = { direct list capacity, page light UAV (raw), 0, 0 }
+// P[5] = { direct list capacity, page light UAV (raw), compact work-list UAV, 0 }
 // P[6], P[7] = RtSceneSrvs (the light grid: word 7)
 #include "RayTracing/HitLocalLights.hlsli"
 #include "Passes/SurfaceCache/CardLighting.hlsli"
 #include "Passes/SurfaceCache/SurfaceCacheLightFunction.hlsli"
+#include "Passes/SurfaceCache/CardDirectWork.h"
 
 [numthreads(64, 1, 1)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -133,4 +134,44 @@ void main(uint3 id : SV_DispatchThreadID)
     const bool sun = (P[0].w & 256u) == 0 && dot(normal, normalize(g_sunDirection)) > -slack;
     if (sun && ((uniformBits.Load(uniformBase + (CL_SUN_BIT >> 5) * 4) >> (CL_SUN_BIT & 31u)) & 1u) != 0) uniformSlots |= 1u << CL_SUN_SLOT;
     tileLights.Store2(base + 40, uint2(uniformSlots, sun ? 1u : 0u));
+
+    // Schedule shadow work from the selection we just produced, instead of
+    // launching all 9*64 raygen threads and rejecting empty slots in DXR.
+    // Retain all per-texel geometry/horizon tests in CardDirectTrace.
+    uint2 blocks = 0; // 36 possible records, kept as bits rather than a per-thread array
+    for (uint slot = 0; slot < CL_SLOTS; ++slot)
+    {
+        if (slot == CL_SUN_SLOT)
+        {
+            if (!sun) continue;
+        }
+        else
+        {
+            if (slot >= held || (P[0].w & 1024u) != 0) continue;
+            if (!lightCastsShadow(loadLight(chosen[slot]))) continue;
+        }
+        const bool coarse = ((uniformSlots >> slot) & 1u) != 0;
+        for (uint quarter = 0; quarter < (coarse ? 1u : 4u); ++quarter)
+            if (clDirectWorkPresent(valid.x, valid.y, quarter, coarse))
+            {
+                const uint bit = slot * 4 + quarter;
+                if (bit < 32) blocks.x |= 1u << bit;
+                else blocks.y |= 1u << (bit - 32);
+            }
+    }
+    const uint recordCount = countbits(blocks.x) + countbits(blocks.y);
+    if (recordCount != 0)
+    {
+        RWByteAddressBuffer work = ResourceDescriptorHeap[P[5].z];
+        uint first;
+        work.InterlockedAdd(0, recordCount, first);
+        for (uint record = 0; record < recordCount; ++record)
+        {
+            const uint bit = blocks.x != 0 ? firstbitlow(blocks.x) : 32u + firstbitlow(blocks.y);
+            if (bit < 32) blocks.x &= blocks.x - 1u;
+            else blocks.y &= blocks.y - 1u;
+            const uint slot = bit >> 2;
+            work.Store(16 + 4 * (first + record), clDirectWorkPack(index, slot, bit & 3u, ((uniformSlots >> slot) & 1u) != 0));
+        }
+    }
 }

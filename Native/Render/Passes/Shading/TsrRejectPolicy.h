@@ -1,0 +1,21 @@
+#pragma once
+#include <cstdint>
+
+namespace unx::render::shading::detail
+{
+// Same optional-input classes as the rejection A/B fixture: P[2].y/z/w,
+// then the resurrection measure + guide pair in P[3].x/y.
+enum TsrRejectOptional : uint32_t
+{
+    TsrRejectMoire = 1u,
+    TsrRejectThin = 2u,
+    TsrRejectLayers = 4u,
+    TsrRejectResurrection = 8u,
+    TsrRejectAll = 15u
+};
+constexpr bool useFusedTsrRejection(uint32_t width, uint32_t height, uint32_t validOptionalInputs)
+{
+    return (width >= 1920 && height >= 1080) ||
+           (width >= 1280 && height >= 720 && (validOptionalInputs & TsrRejectAll) == TsrRejectAll);
+}
+} // namespace unx::render::shading::detail

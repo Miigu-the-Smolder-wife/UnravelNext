@@ -319,6 +319,10 @@ struct GpuBridgeHost::Impl
     NRC_GpuFence submit(const NRC_GpuSubmission& request)
     {
         std::lock_guard lock(mutex);
+        return submitLocked(request);
+    }
+    NRC_GpuFence submitLocked(const NRC_GpuSubmission& request)
+    {
         healthy();
         collectUnlocked();
         gpuRequire(request.size == sizeof(request) && request.version == 1 && request.queue > 0 && request.queue < 3 && request.stage <= NRC_GPU_PRESENTATION && request.source.world &&
@@ -617,4 +621,48 @@ uint64_t GpuBridgeHost::resourceId(ID3D12Resource* resource)
     auto at = m_impl->pointers.find(resource);
     return at == m_impl->pointers.end() ? 0 : at->second;
 }
+NRC_GpuFence GpuBridgeHost::submitPresentationCopy(ID3D12GraphicsCommandList* commands, ID3D12CommandAllocator* allocator,
+                                                     const std::vector<BufferCopy>& copies, const NRC_GpuWorldStamp& source)
+{
+    std::lock_guard lock(m_impl->mutex);
+    m_impl->healthy();
+    std::map<uint64_t, NRC_GpuAccess> byId;
+    for (const BufferCopy& copy : copies)
+    {
+        gpuRequire(copy.source && copy.destination && copy.source != copy.destination && copy.bytes,
+                   NRC_GPU_INVALID, "Invalid presentation copy");
+        for (const auto [id, write] : { std::pair{ copy.source, false }, std::pair{ copy.destination, true } })
+        {
+            const auto found = m_impl->resources.find(id);
+            gpuRequire(found != m_impl->resources.end() && found->second.references && found->second.value && found->second.buffer,
+                       NRC_GPU_STALE, "Presentation copy of an unbound or retired buffer");
+            const auto& resource = found->second;
+            gpuRequire(copy.bytes <= resource.value->GetDesc().Width && (!write || resource.version < UINT64_MAX),
+                       NRC_GPU_INVALID, "Presentation copy exceeds its resource or version range");
+            const uint32_t state = Impl::boundaryState(resource, 0);
+            NRC_GpuAccess access{ id, resource.version + (write ? 1 : 0), state, state, uint32_t(write ? NRC_GPU_WRITE : NRC_GPU_READ), 0 };
+            auto [at, added] = byId.emplace(id, access);
+            gpuRequire(added || (at->second.mode == access.mode && !write), NRC_GPU_INVALID, "Aliased presentation copy target");
+        }
+    }
+    std::vector<NRC_GpuAccess> accesses;
+    for (const auto& [id, access] : byId) { (void)id; accesses.push_back(access); }
+    NRC_GpuSubmission request{};
+    request.size = sizeof request; request.version = 1;
+    request.queue = NRC_GPU_COPY; request.stage = NRC_GPU_PRESENTATION; request.source = source;
+    request.commands = commands; request.command_allocator = allocator;
+    request.accesses = accesses.data(); request.access_count = accesses.size();
+    return m_impl->submitLocked(request);
+}
+
+bool GpuBridgeHost::resourcesIdle(const std::vector<uint64_t>& resources)
+{
+    std::lock_guard lock(m_impl->mutex);
+    m_impl->healthy();
+    m_impl->collectUnlocked();
+    for (uint64_t id : resources)
+        if (id && (m_impl->resources.find(id) == m_impl->resources.end() || !m_impl->graph.retired(id))) return false;
+    return true;
+}
+
 } // namespace unx::host

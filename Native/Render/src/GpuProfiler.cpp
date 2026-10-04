@@ -15,13 +15,17 @@ GpuProfiler::GpuProfiler(Device& device, uint32_t framesInFlight, uint32_t maxPa
     D3D12_HEAP_PROPERTIES hp{ D3D12_HEAP_TYPE_READBACK };
     D3D12_RESOURCE_DESC1 rd{};
     rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    rd.Width = (UINT64)qd.Count * sizeof(uint64_t);
+    rd.Width = (UINT64)m_perQueue * framesInFlight * sizeof(uint64_t);
     rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
     rd.SampleDesc.Count = 1;
     rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    check(device.d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_readback)), "timestamp readback buffer");
     D3D12_RANGE none{ 0, 0 };
-    check(m_readback->Map(0, &none, reinterpret_cast<void**>(&m_mapped)), "Map timestamp readback");
+    for (uint32_t q = 0; q < queues; ++q)
+    {
+        check(device.d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_readback[q])), "timestamp readback buffer");
+        m_readback[q]->SetName(q == 0 ? L"unx graphics timestamp readback" : L"unx compute timestamp readback");
+        check(m_readback[q]->Map(0, &none, reinterpret_cast<void**>(&m_mapped[q])), "Map timestamp readback");
+    }
     m_slots.resize(framesInFlight);
 
     LARGE_INTEGER qpcFrequency;
@@ -38,7 +42,7 @@ GpuProfiler::GpuProfiler(Device& device, uint32_t framesInFlight, uint32_t maxPa
 
 GpuProfiler::~GpuProfiler()
 {
-    if (m_readback) m_readback->Unmap(0, nullptr);
+    for (auto& readback : m_readback) if (readback) readback->Unmap(0, nullptr);
 }
 
 void GpuProfiler::beginFrame(uint64_t frame)
@@ -46,6 +50,7 @@ void GpuProfiler::beginFrame(uint64_t frame)
     Slot& slot = m_slots[frame % m_framesInFlight];
     if (slot.frame != UINT64_MAX) read(slot);
     slot.frame = frame;
+    slot.detailed = m_passTimestamps;
     slot.events.clear();
     for (uint32_t q = 0; q < kQueueTypeCount; ++q)
     {
@@ -88,7 +93,7 @@ void GpuProfiler::listEnd(ID3D12GraphicsCommandList* cmd, QueueType queue)
 
 void GpuProfiler::passBegin(ID3D12GraphicsCommandList* cmd, QueueType queue, std::string_view name)
 {
-    if (!m_passTimestamps) return;
+    if (!enabled()) return;
     uint32_t begin = m_lastMark[(size_t)queue];
     if (begin == UINT32_MAX)
     {
@@ -101,13 +106,21 @@ void GpuProfiler::passBegin(ID3D12GraphicsCommandList* cmd, QueueType queue, std
 
 void GpuProfiler::passEnd(ID3D12GraphicsCommandList* cmd, QueueType queue)
 {
-    if (!m_passTimestamps) return;
+    if (!enabled()) return;
     auto& open = m_open[(size_t)queue];
     if (open.empty()) fail("GpuProfiler::passEnd without passBegin");
     uint32_t i = allocate(queue);
     cmd->EndQuery(m_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, i);
     m_current->events[open.back()].end = i;
     open.pop_back();
+    m_lastMark[(size_t)queue] = i;
+}
+
+void GpuProfiler::listWorkEnd(ID3D12GraphicsCommandList* cmd, QueueType queue)
+{
+    if (enabled()) return;
+    const uint32_t i = allocate(queue);
+    cmd->EndQuery(m_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, i);
     m_lastMark[(size_t)queue] = i;
 }
 
@@ -118,12 +131,19 @@ void GpuProfiler::resolve(ID3D12GraphicsCommandList* cmd, QueueType queue)
     if (count == 0) return;
     uint32_t slotIndex = (uint32_t)(m_current - m_slots.data());
     uint32_t first = (slotIndex * 2 + q) * m_perQueue;
-    cmd->ResolveQueryData(m_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, first, count, m_readback.Get(), (UINT64)first * sizeof(uint64_t));
+    // Query heap indices remain interleaved by slot/queue. Each queue's distinct readback packs only its own slots.
+    const uint64_t destination = (uint64_t)slotIndex * m_perQueue * sizeof(uint64_t);
+    cmd->ResolveQueryData(m_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, first, count, m_readback[q].Get(), destination);
 }
 
 void GpuProfiler::read(Slot& slot)
 {
-    auto toMs = [&](QueueType q, uint32_t index) { return (double)m_mapped[index] * m_msPerTick[(size_t)q] + m_calibrationOffsetMs[(size_t)q]; };
+    const uint32_t slotIndex = (uint32_t)(&slot - m_slots.data());
+    auto toMs = [&](QueueType q, uint32_t index) {
+        const uint32_t queryBase = (slotIndex * 2 + (uint32_t)q) * m_perQueue;
+        const uint32_t readbackIndex = slotIndex * m_perQueue + index - queryBase;
+        return (double)m_mapped[(size_t)q][readbackIndex] * m_msPerTick[(size_t)q] + m_calibrationOffsetMs[(size_t)q];
+    };
     double first = 1e300, last = -1e300;
     for (uint32_t q = 0; q < 2; ++q)
         for (const ListMarks& l : slot.lists[q])
@@ -141,6 +161,8 @@ void GpuProfiler::read(Slot& slot)
         last = std::max(last, toMs(e.queue, e.end));
     }
     m_completed.frame = slot.frame;
+    m_completed.detailedPassTimings = slot.detailed;
+    m_completed.timestampCount = slot.used[0] + slot.used[1];
     m_completed.gpuFrameMs = last > first ? last - first : 0;
     m_completed.passes.clear();
     for (const Event& e : slot.events)
@@ -159,6 +181,7 @@ void GpuProfiler::read(Slot& slot)
             const ListMarks& l = lists[k];
             if (l.end == UINT32_MAX) continue;
             if (k == 0) qt.headMs = std::max(toMs((QueueType)q, l.begin) - first, 0.0);
+            qt.workMs += std::max(toMs((QueueType)q, l.lastPassEnd) - toMs((QueueType)q, l.begin), 0.0);
             qt.tailMs += std::max(toMs((QueueType)q, l.end) - toMs((QueueType)q, l.lastPassEnd), 0.0);
             if (k > 0 && lists[k - 1].end != UINT32_MAX) qt.gapMs += std::max(toMs((QueueType)q, l.begin) - toMs((QueueType)q, lists[k - 1].end), 0.0);
         }

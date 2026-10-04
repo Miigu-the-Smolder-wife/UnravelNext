@@ -41,6 +41,9 @@ float3 unpack(uint v)
     return s * s;
 }
 uint cellIndex(int2 c) { return (uint)(c.y * SIDE + c.x); }
+// Min/max/clamp only select already quantized values. Preserve their channel codes.
+uint3 colourCodes(uint v) { return uint3(v & 2047u, (v >> 11) & 2047u, v >> 22); }
+uint packCodes(uint3 v) { return v.x | (v.y << 11) | (v.z << 22); }
 bool inMargin(int2 c, int margin) { return all(c >= margin) && all(c < SIDE - margin); }
 float min3(float3 v) { return min(v.x, min(v.y, v.z)); }
 
@@ -99,19 +102,19 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     {
         const int2 c = int2(i % SIDE, i / SIDE);
         if (!inMargin(c, 1)) continue;
-        float3 inputMin = 1, inputMax = 0, guideMin = 1, guideMax = 0;
+        uint3 inputMin = uint3(2047, 2047, 1023), inputMax = 0, guideMin = inputMin, guideMax = 0;
         float match = 0;
         FOR_3X3(c, {
-            const float3 a = unpack(gA[ni]);
-            const float3 b = unpack(gB[ni]);
+            const uint3 a = colourCodes(gA[ni]);
+            const uint3 b = colourCodes(gB[ni]);
             inputMin = min(inputMin, a);
             inputMax = max(inputMax, a);
             guideMin = min(guideMin, b);
             guideMax = max(guideMax, b);
             match += gMatch[ni];
         })
-        gC[i] = pack(clamp(unpack(gB[i]), inputMin, inputMax));
-        gD[i] = pack(clamp(unpack(gA[i]), guideMin, guideMax));
+        gC[i] = packCodes(clamp(colourCodes(gB[i]), inputMin, inputMax));
+        gD[i] = packCodes(clamp(colourCodes(gA[i]), guideMin, guideMax));
         gCloser[i] = match > 0.05 * 3.0 * 9.0 ? 1u : 0u;
     }
     GroupMemoryBarrierWithGroupSync();
@@ -139,17 +142,17 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     {
         const int2 c = int2(i % SIDE, i / SIDE);
         if (!inMargin(c, 2)) continue;
-        float3 aMin = 1, aMax = 0, bMin = 1, bMax = 0;
+        uint3 aMin = uint3(2047, 2047, 1023), aMax = 0, bMin = aMin, bMax = 0;
         FOR_3X3(c, {
-            const float3 a = unpack(gC[ni]);
-            const float3 b = unpack(gD[ni]);
+            const uint3 a = colourCodes(gC[ni]);
+            const uint3 b = colourCodes(gD[ni]);
             aMin = min(aMin, a);
             aMax = max(aMax, a);
             bMin = min(bMin, b);
             bMax = max(bMax, b);
         })
-        gE[i] = pack(clamp(unpack(gA[i]), aMin, aMax));  // C: the clamped input
-        gF[i] = pack(clamp(unpack(gB[i]), bMin, bMax));  // G: the clamped guide
+        gE[i] = packCodes(clamp(colourCodes(gA[i]), aMin, aMax));  // C: the clamped input
+        gF[i] = packCodes(clamp(colourCodes(gB[i]), bMin, bMax));  // G: the clamped guide
     }
     GroupMemoryBarrierWithGroupSync();
 

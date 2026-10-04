@@ -9,8 +9,9 @@
 //   P[3].w views SRV (the main view is element 0); P[6].x stream slot, P[6].y material; P[6].z waterVis SRV (UNX_NONE: a
 //   coverage-layer stream; else a water-layer stream: records only in the layer's edge pixels, COV_FLAG_WATER_EDGE),
 //   P[6].w waterDepth SRV, P[7].x band A depth SRV, P[7].y slot again (the pixel kernel's test); the rest as CoverageRaster.ms.
-#include "Passes/Visibility/CoverageLayer.hlsli"
+#include "Passes/Visibility/CoverageBuckets.hlsli"
 #include "VisBuffer.hlsli"
+#include "Passes/Common/TriangleStream.hlsli"
 
 #define STREAM_VERTICES P[3].x
 #define STREAM_ARGS P[3].y
@@ -63,7 +64,7 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
     float3 n[3];
     [unroll] for (uint k = 0; k < 3; ++k)
     {
-        const uint at = 32 * (3 * t + k);
+        const uint at = 32 * triangleStreamVertexIds(P[7].z, t)[k];
         p[k] = mul(v.viewProj, float4(asfloat(vertexData.Load3(at)), 1));
         n[k] = asfloat(vertexData.Load3(at + 16));
         verts[3 * lane + k].position = p[k];
@@ -106,10 +107,21 @@ void main(uint lane : SV_GroupThreadID, uint3 group : SV_GroupID, out vertices V
         o.b = toScreen(q[1], v.viewportSize);
         o.c = toScreen(q[2], v.viewportSize);
         o.d = toScreen(q[3], v.viewportSize);
-        o.normals = uint4(coverageOct32(nq[0]), coverageOct32(nq[1]), coverageOct32(nq[2]), coverageOct32(nq[3]));
         const float area2 = (o.a.x * o.b.y - o.b.x * o.a.y) + (o.b.x * o.c.y - o.c.x * o.b.y) + (o.c.x * o.d.y - o.d.x * o.c.y) + (o.d.x * o.a.y - o.a.x * o.d.y);
         o.flags = (m == 4 ? COV_FLAG_QUAD : 0u) | (P[6].z != UNX_NONE ? COV_FLAG_WATER_EDGE : 0u);  // see-through: no COV_FLAG_OPAQUE
         cull = area2 == 0;
+        if (!cull && COV_RASTER_TRIANGLE_CULL)
+        {
+            // Reuse band A's existing HiZ. The pixel kernel clamps depth to this
+            // polygon's vertex range and tests the same one-pixel neighbourhood,
+            // so these triangles could not have produced a surviving record.
+            const float2 lo = min(min(o.a.xy, o.b.xy), min(o.c.xy, o.d.xy));
+            const float2 hi = max(max(o.a.xy, o.b.xy), max(o.c.xy, o.d.xy));
+            const float nearest = max(max(o.a.z, o.b.z), max(o.c.z, o.d.z));
+            cull = hi.x <= 0 || hi.y <= 0 || lo.x >= (float)COV_WIDTH || lo.y >= (float)COV_HEIGHT;
+            if (!cull) cull = coverageRectBehindBandA(lo, hi, nearest);
+        }
+        if (!cull) o.normals = uint4(coverageOct32(nq[0]), coverageOct32(nq[1]), coverageOct32(nq[2]), coverageOct32(nq[3]));
     }
     o.cull = cull;
     prims[lane] = o;

@@ -53,5 +53,11 @@ public:
     void commitGraphics(uint64_t ticket, uint64_t fenceValue);
     // The module-side id of a bound resource (0 if the bridge does not know it).
     uint64_t resourceId(ID3D12Resource* resource);
+    // Host-owned presentation copies use the same resource-version admission
+    // as modules, atomically reading their versions under the bridge mutex.
+    struct BufferCopy { uint64_t source = 0, destination = 0, bytes = 0; };
+    NRC_GpuFence submitPresentationCopy(ID3D12GraphicsCommandList* commands, ID3D12CommandAllocator* allocator,
+                                        const std::vector<BufferCopy>& copies, const NRC_GpuWorldStamp& source);
+    bool resourcesIdle(const std::vector<uint64_t>& resources);  // no CPU GPU wait
 };
 } // namespace unx::host

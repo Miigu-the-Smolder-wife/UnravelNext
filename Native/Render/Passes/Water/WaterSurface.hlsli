@@ -96,7 +96,9 @@ static float4 g_waterMarchDebug = float4(-1, -1, -1, -1);
 
 // The frame's water slot table (raw, 16 B per stream slot): vertices SRV (UNX_NONE: not a W stream), material, 0, 0
 // (W's upload ring).
-struct WaterSlot { uint vertices, material; };
+#include "Passes/Common/TriangleStream.hlsli"
+#define WATER_INDICES_OFFSET (16u * 64u + 4u * 16u + 48u * 4u + 96u + 80u * 64u)
+struct WaterSlot { uint vertices, material, indices; };
 // After the 64 slots: the refraction source's box pyramid (WaterFootprint.hlsli): level count, then the SRV of each level
 // (level 0 = the source copy itself; WaterSurface.cpp, at most 15 levels).
 #define WATER_LEVELS_OFFSET (16u * 64u)
@@ -107,6 +109,7 @@ WaterSlot waterSlot(uint table, uint slot)
     WaterSlot s;
     s.vertices = v.x;
     s.material = v.y;
+    s.indices = b.Load(WATER_INDICES_OFFSET + 4u * slot);
     return s;
 }
 // Slot row word 3 = 1: the stream's water is a medium of the view's air volume this frame (WaterMedia.hlsl; W's surface
@@ -135,11 +138,12 @@ struct WaterShadeSrvs
 
 // The pixel ray's hit with triangle `tri` of a stream (32 B vertices: (xyz, 1), (normal, 0), three per triangle): the
 // point (world), the interpolated normal and whether the ray meets the triangle's plane in front of the camera.
-bool waterTriangleHit(uint vertices, uint tri, float3 origin, float3 dir, out float3 p, out float3 n)
+bool waterTriangleHit(uint vertices, uint indices, uint tri, float3 origin, float3 dir, out float3 p, out float3 n)
 {
     ByteAddressBuffer v = ResourceDescriptorHeap[vertices];
-    const float3 a = asfloat(v.Load3(96 * tri)), b = asfloat(v.Load3(96 * tri + 32)), c = asfloat(v.Load3(96 * tri + 64));
-    const float3 na = asfloat(v.Load3(96 * tri + 16)), nb = asfloat(v.Load3(96 * tri + 48)), nc = asfloat(v.Load3(96 * tri + 80));
+    const uint3 vertexIds = triangleStreamVertexIds(indices, tri);
+    const float3 a = asfloat(v.Load3(32 * vertexIds.x)), b = asfloat(v.Load3(32 * vertexIds.y)), c = asfloat(v.Load3(32 * vertexIds.z));
+    const float3 na = asfloat(v.Load3(32 * vertexIds.x + 16)), nb = asfloat(v.Load3(32 * vertexIds.y + 16)), nc = asfloat(v.Load3(32 * vertexIds.z + 16));
     const float3 e1 = b - a, e2 = c - a, g = cross(e1, e2);
     const float denom = dot(g, dir);
     p = origin;
@@ -157,14 +161,15 @@ bool waterTriangleHit(uint vertices, uint tri, float3 origin, float3 dir, out fl
 
 // waterTriangleHit plus what the pixel footprint needs (WaterFootprint.hlsli): the ray parameter s (P = origin + s dir),
 // the edges, the vertex normals and the unnormalised interpolated normal m.
-bool waterTriangleHitFull(uint vertices, uint tri, float3 origin, float3 dir, out float3 p, out float3 n, out float s, out float3 e1, out float3 e2,
+bool waterTriangleHitFull(uint vertices, uint indices, uint tri, float3 origin, float3 dir, out float3 p, out float3 n, out float s, out float3 e1, out float3 e2,
                           out float3 na, out float3 nb, out float3 nc, out float3 m)
 {
     ByteAddressBuffer v = ResourceDescriptorHeap[vertices];
-    const float3 a = asfloat(v.Load3(96 * tri)), b = asfloat(v.Load3(96 * tri + 32)), c = asfloat(v.Load3(96 * tri + 64));
-    na = asfloat(v.Load3(96 * tri + 16));
-    nb = asfloat(v.Load3(96 * tri + 48));
-    nc = asfloat(v.Load3(96 * tri + 80));
+    const uint3 vertexIds = triangleStreamVertexIds(indices, tri);
+    const float3 a = asfloat(v.Load3(32 * vertexIds.x)), b = asfloat(v.Load3(32 * vertexIds.y)), c = asfloat(v.Load3(32 * vertexIds.z));
+    na = asfloat(v.Load3(32 * vertexIds.x + 16));
+    nb = asfloat(v.Load3(32 * vertexIds.y + 16));
+    nc = asfloat(v.Load3(32 * vertexIds.z + 16));
     e1 = b - a;
     e2 = c - a;
     const float3 g = cross(e1, e2);
@@ -498,7 +503,7 @@ float3 waterSurfaceShade(WaterShadeSrvs s, uint2 pixel, uint slot, uint tri, out
         m.hairBetaN = seaG;
     }
 #else
-    waterTriangleHitFull(ws.vertices, tri, g_cameraPosition, D, P, n, sHit, e1, e2, na, nb, nc, mRaw);
+    waterTriangleHitFull(ws.vertices, ws.indices, tri, g_cameraPosition, D, P, n, sHit, e1, e2, na, nb, nc, mRaw);
     const GpuMaterial m = loadMaterial(ws.material);
     // the stream's flow on its normal (the pixel's footprint on the surface: its angle x the distance over the view's
     // cosine, not under a tenth)

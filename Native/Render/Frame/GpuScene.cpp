@@ -1,7 +1,10 @@
 #include "unx/render/GpuScene.h"
 #include "unx/render/FrameContext.h"
+#include "SkeletonInstances.h"
+#include "SceneUpdateWriter.h"
 
 #include "unx/render/Shaders.h"
+#include "unx/render/RenderGraph.h"
 #include "unx/scene/MaterialModel.h"
 
 #include <algorithm>
@@ -512,6 +515,7 @@ void GpuScene::upload(const scene::Scene& s)
     m_palette = palette;
     m_prevPalette = palette;
     m_poses = s.skeletons;
+    m_skeletonInstances = detail::skeletonInstances(s.skeletons.size(), s.instances, m_instances);
     m_transformFrame.assign(m_instances.size(), UINT64_MAX);
     m_paletteFrame.assign(m_instances.size(), UINT64_MAX);
     m_movedNow.clear();
@@ -1179,10 +1183,9 @@ void GpuScene::updateSkeleton(uint64_t frameIndex, uint32_t skeleton, std::span<
     if (jointToModel.size() != m_poses[skeleton].jointToModel.size())
         fail("GpuScene::updateSkeleton: %zu joints for skeleton '%s' with %zu", jointToModel.size(), m_poses[skeleton].name.c_str(), m_poses[skeleton].jointToModel.size());
     m_poses[skeleton].jointToModel.assign(jointToModel.begin(), jointToModel.end());
-    for (uint32_t i = 0; i < m_instances.size(); ++i)
+    for (uint32_t i : m_skeletonInstances[skeleton])
     {
         gpu::Instance& g = m_instances[i];
-        if (g.bonePalette == gpu::kNone || m_source->instances[i].skeleton != skeleton) continue;
         if (m_paletteFrame[i] != frameIndex)
         {
             const uint32_t first = g.bonePalette * 3, n = paletteJoints(i) * 3;
@@ -1479,7 +1482,8 @@ void GpuScene::writeRuntime(uint32_t target, uint32_t element, const void* data,
     if (at + bytes > m_rtBytes[target].size()) fail("GpuScene: runtime write past the pool of target %u", target);
     std::memcpy(m_rtBytes[target].data() + at, data, bytes);
     const uint64_t base = (uint64_t)m_rtFirst[target] * stride;  // 16-byte aligned
-    for (uint64_t b = (base + at) / 16; b < (base + at + bytes + 15) / 16; ++b) m_rtDirty.push_back({ target, (uint32_t)b });
+    const uint64_t first = (base + at) / 16, end = (base + at + bytes + 15) / 16;
+    if (first < end) m_rtDirty.push_back({ target, first, end });
 }
 
 void GpuScene::setPatchRegion(uint32_t instance, const PatchRegion& region)
@@ -1742,10 +1746,41 @@ void GpuScene::removeRuntimeInstance(uint32_t instance)
     m_rtReleases.push_back({ m_flushes + m_framesInFlightSeen + 1, [this, instance] { m_runtimeInstanceLive[instance - m_staticInstances] = 2; } });
 }
 
-void GpuScene::flushUpdates(uint64_t frameIndex, uint32_t framesInFlight, ShaderLibrary& shaders)
+void GpuScene::flushUpdates(uint64_t frameIndex, uint32_t framesInFlight, ShaderLibrary& shaders, RenderGraph* consumerGraph)
 {
+    const bool untracked = !consumerGraph || m_sceneConsumersUntracked;
+    if (consumerGraph && m_sceneConsumersUntracked)
+        for (uint32_t q = 0; q < kQueueTypeCount; ++q)
+            m_sceneConsumerFence[q] = std::max(m_sceneConsumerFence[q], m_device.queue((QueueType)q).lastSignaled());
+    auto waitReaders = [&] {
+        Queue& graphics = m_device.queue(QueueType::Graphics);
+        for (uint32_t q = 0; q < kQueueTypeCount; ++q)
+            if (q != (uint32_t)QueueType::Graphics)
+            {
+                const uint64_t fence = untracked ? m_device.queue((QueueType)q).lastSignaled() : m_sceneConsumerFence[q];
+                if (fence) graphics.waitGpu(m_device.queue((QueueType)q), fence);
+            }
+    };
+    auto updateSubmitted = [&](uint64_t fence) {
+        m_sceneUpdateFence = fence;
+        if (!consumerGraph) // preserve the explicit legacy/manual contract, not the production graph path
+            for (uint32_t q = 0; q < kQueueTypeCount; ++q)
+                if (q != (uint32_t)QueueType::Graphics) m_device.queue((QueueType)q).waitGpu(m_device.queue(QueueType::Graphics), fence);
+    };
+    auto registerConsumers = [&] {
+        if (consumerGraph)
+            consumerGraph->consumeExternal(QueueType::Graphics, m_sceneUpdateFence, [this](Queue& queue, uint64_t fence) {
+                auto& consumed = m_sceneConsumerFence[(size_t)queue.type()];
+                consumed = std::max(consumed, fence);
+            });
+        m_sceneConsumersUntracked = consumerGraph == nullptr;
+    };
     // C2b: releases whose frames can no longer be in flight.
-    ++m_flushes;
+    if (m_lastFlushFrame != frameIndex)
+    {
+        ++m_flushes;
+        m_lastFlushFrame = frameIndex;
+    }
     m_framesInFlightSeen = framesInFlight;
     for (size_t k = 0; k < m_rtReleases.size();)
         if (m_rtReleases[k].first <= m_flushes)
@@ -1768,10 +1803,7 @@ void GpuScene::flushUpdates(uint64_t frameIndex, uint32_t framesInFlight, Shader
     // C9: a pending origin shift moves every instance on the GPU first (the records below carry already-shifted values).
     if (m_pendingShift.x != 0 || m_pendingShift.y != 0 || m_pendingShift.z != 0)
     {
-        Queue& graphics = m_device.queue(QueueType::Graphics);
-        for (uint32_t q = 0; q < kQueueTypeCount; ++q)
-            if (q != (uint32_t)QueueType::Graphics && m_device.queue((QueueType)q).lastSignaled())
-                graphics.waitGpu(m_device.queue((QueueType)q), m_device.queue((QueueType)q).lastSignaled());
+        waitReaders();
         CommandList cl = m_device.acquireCommandList(QueueType::Graphics);
         ID3D12GraphicsCommandList7* cmd = cl.list.Get();
         D3D12_BUFFER_BARRIER b{ D3D12_BARRIER_SYNC_NONE, D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_NO_ACCESS, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
@@ -1788,8 +1820,7 @@ void GpuScene::flushUpdates(uint64_t frameIndex, uint32_t framesInFlight, Shader
               m_instanceBuffer.resource.Get(), 0, UINT64_MAX };
         cmd->Barrier(1, &group);
         const uint64_t fence = m_device.submit(cl);
-        for (uint32_t q = 0; q < kQueueTypeCount; ++q)
-            if (q != (uint32_t)QueueType::Graphics) m_device.queue((QueueType)q).waitGpu(graphics, fence);
+        updateSubmitted(fence);
         m_pendingShift = {};
     }
     // Instances changed in the previous frame and not in this one settle: previous = current.
@@ -1822,68 +1853,40 @@ void GpuScene::flushUpdates(uint64_t frameIndex, uint32_t framesInFlight, Shader
     m_brokenBefore.swap(m_brokenNow);
     m_brokenNow.clear();
 
-    // 16-byte elements: (target << 28 | element) headers, then payloads (SceneUpdate.hlsl).
-    std::vector<uint32_t> headers;
-    std::vector<float4> payload;
+    // Count the existing update stream before acquiring its upload slot. The
+    // source mirrors stay valid throughout this synchronous CPU packing step.
     constexpr uint32_t kRecordElements = sizeof(gpu::Instance) / 16;
     static_assert(sizeof(gpu::Instance) % 16 == 0);
-    for (uint32_t i : m_records)
-    {
-        const float4* src = reinterpret_cast<const float4*>(&m_instances[i]);
-        for (uint32_t k = 0; k < kRecordElements; ++k)
-        {
-            headers.push_back(i * kRecordElements + k);
-            payload.push_back(src[k]);
-        }
-        m_recordMarked[i] = 0;
-    }
-    auto addRows = [&](uint32_t target, const std::vector<float4>& rowsOf, uint32_t instance) {
-        const uint32_t first = m_instances[instance].bonePalette * 3, n = paletteJoints(instance) * 3;
-        for (uint32_t k = 0; k < n; ++k)
-        {
-            headers.push_back(target << 28 | (first + k));
-            payload.push_back(rowsOf[first + k]);
-        }
-    };
-    for (uint32_t i : m_posedBefore)  // posed in this frame (swapped above)
-    {
-        addRows(1, m_palette, i);
-        addRows(2, m_prevPalette, i);
-    }
-    for (uint32_t i : settledPalettes) addRows(2, m_prevPalette, i);
     std::sort(m_morphRowsDirty.begin(), m_morphRowsDirty.end());
     m_morphRowsDirty.erase(std::unique(m_morphRowsDirty.begin(), m_morphRowsDirty.end()), m_morphRowsDirty.end());
-    for (uint32_t row : m_morphRowsDirty)
-    {
-        headers.push_back(3u << 28 | row);
-        payload.push_back(m_morphRows[row]);
-    }
-    m_morphRowsDirty.clear();
     // GPU-written instances: this frame's count starts at 0 (the writer runs after this update).
-    if (m_runtimeCap.gpuInstances > 0 && m_patchData.resource) m_rtDirty.push_back({ RtPatch, gpu::kGpuInstanceCountElement });
+    if (m_runtimeCap.gpuInstances > 0 && m_patchData.resource)
+        m_rtDirty.push_back({ RtPatch, gpu::kGpuInstanceCountElement, uint64_t(gpu::kGpuInstanceCountElement) + 1 });
     // C2b runtime pool writes: 16-byte elements from the mirrors.
-    std::sort(m_rtDirty.begin(), m_rtDirty.end());
-    m_rtDirty.erase(std::unique(m_rtDirty.begin(), m_rtDirty.end()), m_rtDirty.end());
-    for (const auto& [target, element] : m_rtDirty)
-    {
-        const uint64_t base = (uint64_t)m_rtFirst[target] * m_rtStride[target];
-        const uint64_t at = (uint64_t)element * 16 - base;
-        float4 v{};
-        std::memcpy(&v, m_rtBytes[target].data() + at, std::min<uint64_t>(16, m_rtBytes[target].size() - at));
-        headers.push_back(target << 28 | element);
-        payload.push_back(v);
-    }
-    m_rtDirty.clear();
-    m_records.clear();
-    if (headers.empty()) return;
-    if (headers.size() >= (1u << 28) || m_instances.size() * kRecordElements >= (1u << 28)) fail("GpuScene::flushUpdates: element index beyond 28 bits");
+    const uint64_t runtimeElements = detail::normalizeRuntimeDirtyRanges(m_rtDirty);
+    uint64_t elementCount = uint64_t(m_records.size()) * kRecordElements + m_morphRowsDirty.size() + runtimeElements;
+    for (uint32_t i : m_posedBefore) elementCount += uint64_t(paletteJoints(i)) * 6;
+    for (uint32_t i : settledPalettes) elementCount += uint64_t(paletteJoints(i)) * 3;
+    if (elementCount == 0) { registerConsumers(); return; }
+    if (elementCount >= (1u << 28) || m_instances.size() * kRecordElements >= (1u << 28)) fail("GpuScene::flushUpdates: element index beyond 28 bits");
 
-    // Upload slot of this frame (grown when needed; the caller waited for the frame that used it last).
+    // A discarded recording can retry this frame before its separately submitted scatter completes.
+    // Keep the old bytes and descriptor immutable until that submission finishes; ordinary slot reuse
+    // is already complete after the caller's frame-slot wait and needs no replacement.
     if (m_uploads.size() < framesInFlight) m_uploads.resize(framesInFlight);
     Upload& u = m_uploads[frameIndex % framesInFlight];
-    const uint64_t headerBytes = (headers.size() * 4 + 15) & ~uint64_t(15);
-    const uint64_t bytes = headerBytes + payload.size() * 16;
+    const uint64_t bytes = detail::SceneUpdateWriter::bytes(elementCount);
     DescriptorHeaps& h = m_device.descriptors();
+    if (u.fence && m_device.queue(QueueType::Graphics).completed() < u.fence)
+    {
+        auto buffer = std::move(u.buffer);
+        const uint32_t srv = u.srv;
+        m_device.deferCall([buffer, srv, descriptors = &h] {
+            buffer->Unmap(0, nullptr);
+            if (srv != gpu::kNone) descriptors->freeResource(srv);
+        });
+        u = Upload{};
+    }
     if (u.bytes < bytes)
     {
         if (u.buffer) m_device.deferRelease(u.buffer);
@@ -1909,21 +1912,44 @@ void GpuScene::flushUpdates(uint64_t frameIndex, uint32_t framesInFlight, Shader
         sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
         m_device.d3d()->CreateShaderResourceView(u.buffer.Get(), &sd, h.resourceCpu(u.srv));
     }
-    std::memcpy(u.mapped, headers.data(), headers.size() * 4);
-    std::memcpy(u.mapped + headerBytes, payload.data(), payload.size() * 16);
+    detail::SceneUpdateWriter writer(u.mapped, (uint32_t)elementCount);
+    for (uint32_t i : m_records)
+    {
+        writer.append(0, i * kRecordElements, &m_instances[i], kRecordElements);
+        m_recordMarked[i] = 0;
+    }
+    auto addRows = [&](uint32_t target, const std::vector<float4>& rowsOf, uint32_t instance) {
+        const uint32_t first = m_instances[instance].bonePalette * 3, n = paletteJoints(instance) * 3;
+        if (n != 0) writer.append(target, first, rowsOf.data() + first, n);
+    };
+    for (uint32_t i : m_posedBefore)  // posed in this frame (swapped above)
+    {
+        addRows(1, m_palette, i);
+        addRows(2, m_prevPalette, i);
+    }
+    for (uint32_t i : settledPalettes) addRows(2, m_prevPalette, i);
+    for (uint32_t row : m_morphRowsDirty) writer.append(3, row, &m_morphRows[row], 1);
+    for (const auto& range : m_rtDirty)
+    {
+        const uint32_t target = range.target;
+        const uint64_t base = (uint64_t)m_rtFirst[target] * m_rtStride[target];
+        const uint64_t at = range.first * 16 - base;
+        const uint64_t rangeBytes = std::min<uint64_t>((range.end - range.first) * 16, m_rtBytes[target].size() - at);
+        writer.appendBytes(target, (uint32_t)range.first, m_rtBytes[target].data() + at, (size_t)rangeBytes);
+    }
+    if (writer.count() != elementCount) fail("GpuScene::flushUpdates: update count differs from packed stream");
+    m_morphRowsDirty.clear();
+    m_rtDirty.clear();
+    m_records.clear();
 
-    // Graphics queue, after every queue's earlier work (the previous frame may still read the scene on another queue);
-    // every other queue then waits for the update before this frame's work.
-    Queue& graphics = m_device.queue(QueueType::Graphics);
-    for (uint32_t q = 0; q < kQueueTypeCount; ++q)
-        if (q != (uint32_t)QueueType::Graphics && m_device.queue((QueueType)q).lastSignaled())
-            graphics.waitGpu(m_device.queue((QueueType)q), m_device.queue((QueueType)q).lastSignaled());
+    // Only earlier scene consumers own these bytes; unrelated FX/compute work does not.
+    waitReaders();
     ID3D12PipelineState* pso = shaders.compute("Passes/Common/SceneUpdate");
     CommandList cl = m_device.acquireCommandList(QueueType::Graphics);
     ID3D12GraphicsCommandList7* cmd = cl.list.Get();
     // Targets 0-3 always; the C2b runtime pool buffers when the pool exists (SceneUpdate.hlsl target table).
     std::vector<ID3D12Resource*> targets = { m_instanceBuffer.resource.Get(), m_bonePalette.resource.Get(), m_prevBonePalette.resource.Get(), m_morphRecords.resource.Get() };
-    uint32_t k[20] = { u.srv, (uint32_t)headers.size(), m_instanceUav, m_paletteUav, m_prevPaletteUav, m_morphUav };
+    uint32_t k[20] = { u.srv, (uint32_t)elementCount, m_instanceUav, m_paletteUav, m_prevPaletteUav, m_morphUav };
     for (uint32_t t = RtMeshes; t < RtTargetEnd; ++t)
         if (m_runtimeCap.meshes > 0 || (t == RtPatch && m_patchData.resource))
         {
@@ -1942,12 +1968,13 @@ void GpuScene::flushUpdates(uint64_t frameIndex, uint32_t framesInFlight, Shader
     cmd->Barrier(1, &group);
     cmd->SetPipelineState(pso);  // heaps and root signature: bound by acquireCommandList
     cmd->SetComputeRoot32BitConstants(0, 20, k, 0);
-    cmd->Dispatch((uint32_t)((headers.size() + 63) / 64), 1, 1);
+    cmd->Dispatch((uint32_t)((elementCount + 63) / 64), 1, 1);
     group.pBufferBarriers = after.data();
     cmd->Barrier(1, &group);
     const uint64_t fence = m_device.submit(cl);
-    for (uint32_t q = 0; q < kQueueTypeCount; ++q)
-        if (q != (uint32_t)QueueType::Graphics) m_device.queue((QueueType)q).waitGpu(graphics, fence);
+    u.fence = fence;
+    updateSubmitted(fence);
+    registerConsumers();
 }
 
 void GpuScene::fill(gpu::FrameConstants& f) const

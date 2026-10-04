@@ -57,16 +57,20 @@ void MeshCardScene::Allocator::init(uint32_t pagesPerSide)
 {
     m_side = pagesPerSide;
     m_free = pagesPerSide * pagesPerSide;
+    m_firstFree = 0;
     m_pages.assign(m_free, 0);
     m_bins.clear();
 }
 
 bool MeshCardScene::Allocator::allocatePage(int32_t& x, int32_t& y)
 {
-    for (uint32_t i = 0; i < m_pages.size(); ++i)
+    // Keep the original lowest-free-page policy. Only skip the prefix already
+    // known occupied; freePage lowers the cursor whenever it opens a hole.
+    for (uint32_t i = m_firstFree; i < m_pages.size(); ++i)
         if (m_pages[i] == 0)
         {
             m_pages[i] = 1;
+            m_firstFree = i + 1;
             --m_free;
             x = (int32_t)(i % m_side);
             y = (int32_t)(i / m_side);
@@ -78,6 +82,7 @@ bool MeshCardScene::Allocator::allocatePage(int32_t& x, int32_t& y)
 void MeshCardScene::Allocator::freePage(int32_t x, int32_t y)
 {
     m_pages[(size_t)y * m_side + (size_t)x] = 0;
+    m_firstFree = std::min(m_firstFree, (uint32_t)y * m_side + (uint32_t)x);
     ++m_free;
 }
 
@@ -123,10 +128,11 @@ void MeshCardScene::Allocator::allocate(PageEntry& page)
             bin.pages.push_back(std::move(p));
             target = &bin.pages.back();
         }
-        for (uint32_t e = 0; e < target->used.size(); ++e)
+        for (uint32_t e = target->firstFree; e < target->used.size(); ++e)
             if (target->used[e] == 0)
             {
                 target->used[e] = 1;
+                target->firstFree = e + 1;
                 ++target->usedCount;
                 page.pageCoordX = target->x;
                 page.pageCoordY = target->y;
@@ -164,6 +170,7 @@ void MeshCardScene::Allocator::free(PageEntry& page)
             const uint32_t ex = (page.rect[0] - (uint32_t)p.x * mc::kPhysicalPage) / bin.elementX;
             const uint32_t ey = (page.rect[1] - (uint32_t)p.y * mc::kPhysicalPage) / bin.elementY;
             p.used[(size_t)ey * bin.perSideX + ex] = 0;
+            p.firstFree = std::min(p.firstFree, ey * bin.perSideX + ex);
             if (--p.usedCount == 0)
             {
                 freePage(p.x, p.y);

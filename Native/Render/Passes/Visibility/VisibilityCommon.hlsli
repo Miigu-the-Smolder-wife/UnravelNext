@@ -49,16 +49,15 @@ struct CullView
     uint pad1, pad2;
 };
 
-// The view's instance set (RasterView::instanceSet): movable = INSTANCE_MOVABLE_FLAGS, a bone palette, morph or terrain
-// patch, or an instance past the scene's uploaded ones (run-time and GPU-written: v.runtimeFirst on). Judged per
+// The shadow view's instance set (RasterView::instanceSet): observed rigid motion
+// or intrinsic deformation, plus every runtime/GPU slot. Judged per
 // instance from its record of this frame; chunks are not skipped by set (a member can become movable - a terrain patch
 // set at run time - without its chunk being rebuilt), so a view of the movable set tests the members of every chunk it
 // sees.
 bool instanceInSet(CullView v, GpuInstance inst, uint instance)
 {
     if (v.instanceSet == 0) return true;
-    const bool movable = (inst.flags & INSTANCE_MOVABLE_FLAGS) != 0 || inst.bonePalette != UNX_NONE || inst.morph != UNX_NONE || inst.patch != UNX_NONE ||
-                         instance >= v.runtimeFirst;
+    const bool movable = instanceShadowMovable(inst, instance, v.runtimeFirst);
     return (v.instanceSet == 2) == movable;
 }
 
@@ -252,6 +251,7 @@ bool instanceInRun(GpuInstance inst, uint mask)
 #define OVERFLOW_DEFER_CHUNKS 4096u    // deferred chunks past the capacity
 #define OVERFLOW_COVERAGE_SPECIAL 8192u // special record list past its capacity (entries lost; the capacity grows)
 #define OVERFLOW_OCEAN_EDGES 16384u    // ocean edge pixel list past its capacity (pixels lost; the capacity grows)
+#define OVERFLOW_NODE_PUBLICATION 32768u // ordered traversal publication timed out (also sets ITERATION_LIMIT)
 
 // Wave-aggregated append of 'n' entries per lane to a counter word; returns this lane's first index. Must be called
 // from uniform control flow (every active lane of the wave). Entries at or beyond 'capacity' set 'overflowBit'.

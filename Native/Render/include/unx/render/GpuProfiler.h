@@ -25,17 +25,20 @@ struct QueueTiming
     double tailMs = 0;    // sum over lists of last pass end to list end: the barriers closing each list (the frame's
                           // final layout transitions on the last list)
     double gapMs = 0;     // sum of list end to next list begin: time the queue ran other work or idled between lists
+    double workMs = 0;    // sum of list begin to final work end, available without detailed pass timestamps
 };
 
 struct FrameTiming
 {
     uint64_t frame = 0;
     double gpuFrameMs = 0;  // first to last timestamp over all queues
+    uint32_t timestampCount = 0;
+    bool detailedPassTimings = true;
     std::vector<PassTiming> passes;
     QueueTiming queues[2];  // graphics, compute
 };
 
-// GPU timestamps for every pass, on by default (ARCHITECTURE_KO.md 6, 7.0). One timestamp per pass boundary: a pass
+// GPU timestamps for every pass, on by default for direct users/Harness (the production Host opts out). One timestamp per pass boundary: a pass
 // spans from the previous mark on its queue (frame begin or the previous pass's end) to its own end mark, so its
 // time includes the barriers that prepare its inputs. (A begin/end pair per pass cost 0.26 us per pass [measured].)
 // Each queue owns its own query index range per frame slot and resolves it at the end of its last command list;
@@ -56,12 +59,15 @@ public:
     // (after its last barriers); passes chain from the list's begin mark.
     void listBegin(ID3D12GraphicsCommandList* cmd, QueueType queue);
     void listEnd(ID3D12GraphicsCommandList* cmd, QueueType queue);
+    // Frame/queue-only mode: one mark after the final actual pass, before list-closing barriers. Detailed mode already
+    // has that mark from passEnd. This preserves tail/work attribution without recording every pass boundary.
+    void listWorkEnd(ID3D12GraphicsCommandList* cmd, QueueType queue);
     void passBegin(ID3D12GraphicsCommandList* cmd, QueueType queue, std::string_view name);
     void passEnd(ID3D12GraphicsCommandList* cmd, QueueType queue);
     void resolve(ID3D12GraphicsCommandList* cmd, QueueType queue);  // once per queue per frame, last
 
-    bool enabled() const { return m_passTimestamps; }
-    // Per-pass timestamps can be switched off to measure their own cost (frame markers stay).
+    bool enabled() const { return m_current ? m_current->detailed : m_passTimestamps; }
+    // Applies at the next beginFrame; already-recorded slots retain their own mode. Frame and queue markers stay.
     void setPassTimestamps(bool on) { m_passTimestamps = on; }
 
 private:
@@ -78,6 +84,7 @@ private:
     struct Slot
     {
         uint64_t frame = UINT64_MAX;
+        bool detailed = true;
         std::vector<Event> events;
         uint32_t used[kQueueTypeCount] = {};
         std::vector<ListMarks> lists[kQueueTypeCount];
@@ -89,8 +96,9 @@ private:
     uint32_t m_framesInFlight;
     uint32_t m_perQueue;  // query indices per queue per slot
     ComPtr<ID3D12QueryHeap> m_heap;
-    ComPtr<ID3D12Resource> m_readback;
-    uint64_t* m_mapped = nullptr;
+    // D3D12 tracks cross-queue writes at resource granularity, even for disjoint byte ranges.
+    ComPtr<ID3D12Resource> m_readback[2];
+    uint64_t* m_mapped[2] = {};
     std::vector<Slot> m_slots;
     Slot* m_current = nullptr;
     std::vector<uint32_t> m_open[kQueueTypeCount];  // stack of open events per queue

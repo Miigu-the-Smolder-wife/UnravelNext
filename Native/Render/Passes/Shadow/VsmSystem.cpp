@@ -5,12 +5,15 @@
 #include "../Atmosphere/AtmosphereSystem.h"
 
 #include "unx/render/GpuScene.h"
+#include "unx/render/CpuFrameTrace.h"
 #include "unx/render/PassChain.h"
 #include "unx/render/Tracks.h"
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -354,7 +357,7 @@ struct CasterBounds
     std::vector<uint32_t> mesh;       // per placed caster: its mesh (kNone: no per-view bound, 'clusters' in every view it reaches),
     std::vector<float> errorScale;    // V's instanceScale (the error's object-to-world factor),
     std::vector<float4> lodSpheres;   // and the world sphere holding its LOD spheres (the distances V projects errors at)
-    std::vector<uint8_t> movable;     // per placed caster: gpu::instanceMovable or a run-time instance (V's instance sets)
+    std::vector<uint8_t> movable;     // per placed caster: gpu::instanceShadowMovable (same predicate as V's raster and VSM cache)
     uint64_t everywhere = 0;  // casters whose geometry moves past its bind-pose sphere (skinned, morphs, wind) and the
                               // GPU-written instances' capacity (any mesh): counted in every view
     struct Moving
@@ -377,7 +380,7 @@ struct CasterBounds
 // windSpeed: the frame's (m/s). A wind-moved caster stays within its sphere grown by the wind's bound
 // (Deformation.hlsli windOffsetBound, as V's culling takes it): it counts in the views it reaches, not in every view -
 // a forest of 1.1 M such trees stood at 4e8 cluster entries in level 0's 16 m window.
-CasterBounds casterBounds(const GpuScene& scene, bool lod, float thresholdPx, float windSpeed, float minTexels)
+CasterBounds casterBounds(const GpuScene& scene, bool lod, float thresholdPx, float windSpeed, float minTexels, uint64_t gpuClusterBound)
 {
     CasterBounds b;
     b.ranges = &scene.clusters().meshes;
@@ -414,7 +417,7 @@ CasterBounds casterBounds(const GpuScene& scene, bool lod, float thresholdPx, fl
         }
         b.spheres.push_back({ w.x, w.y, w.z, radius * scale * 1.001f + 1e-3f });
         b.instance.push_back((uint32_t)(&inst - scene.instances().data()));
-        b.movable.push_back(gpu::instanceMovable(inst) || b.instance.back() >= scene.staticInstanceCount() ? 1 : 0);
+        b.movable.push_back(gpu::instanceShadowMovable(inst, b.instance.back(), scene.staticInstanceCount()) ? 1 : 0);
         b.clusters.push_back(cut(inst.mesh));
         // per-view bound: not for terrain patches (C5: their replaced rectangles force the source clusters)
         const bool table = lod && inst.patch == gpu::kNone && inst.mesh < ranges.size() && ranges[inst.mesh].cutErrorBase > 0;
@@ -429,7 +432,7 @@ CasterBounds casterBounds(const GpuScene& scene, bool lod, float thresholdPx, fl
         }
         b.lodSpheres.push_back(ls);
     }
-    b.everywhereFixed = (uint64_t)scene.gpuInstanceRange().capacity * largest;
+    b.everywhereFixed = std::min(gpuClusterBound, (uint64_t)scene.gpuInstanceRange().capacity * largest);
     b.everywhere += b.everywhereFixed;
     return b;
 }
@@ -523,6 +526,62 @@ uint64_t levelBound(const CasterBounds& b, const float4x4& vp, float pixelsPerMe
         n += b.lod ? casterCut(b, i, t, t) : b.clusters[i];
     }
     return n;
+}
+
+// Orthographic LOD thresholds depend on the mesh and scale, not the instance's
+// position. Repeated placements can share the exact cutBoundAt result. The memo
+// lives only for this record, so scene edits, wind and origin shifts need no
+// persistent invalidation policy. Different scales always replace the entry.
+struct SunCutMemo
+{
+    struct Entry { uint32_t threshold = 0, bound = 0; bool valid = false; };
+    std::vector<Entry> meshes;
+    uint64_t hits = 0, misses = 0;
+    explicit SunCutMemo(size_t count) : meshes(count) {}
+    uint32_t cut(const CasterBounds& b, size_t i, float threshold)
+    {
+        if (b.mesh[i] == gpu::kNone) return b.clusters[i];
+        Entry& e = meshes[b.mesh[i]];
+        const uint32_t key = std::bit_cast<uint32_t>(threshold);
+        if (!e.valid || e.threshold != key)
+        {
+            e.bound = (*b.ranges)[b.mesh[i]].cutBoundAt(threshold * (1 - 1e-4f), threshold * (1 + 1e-4f));
+            e.threshold = key;
+            e.valid = true;
+            ++misses;
+        }
+        else ++hits;
+        return std::min(e.bound, b.clusters[i]);
+    }
+};
+
+// The static and movable sets partition placed casters. Evaluate the view once
+// and accumulate both exact integer sums; set 0 is their sum. Every-view casters
+// belong to the movable set, as in everywhereBound/levelBound.
+std::array<uint64_t, 3> levelBoundsBySet(const CasterBounds& b, const float4x4& vp, float pixelsPerMetre, SunCutMemo& memo)
+{
+    std::array<uint64_t, 3> n{ 0, 0, everywhereBound(b, pixelsPerMetre, 0) };
+    const float threshold = b.thresholdPx / pixelsPerMetre;
+    const float sx = std::sqrt(vp.m[0][0] * vp.m[0][0] + vp.m[0][1] * vp.m[0][1] + vp.m[0][2] * vp.m[0][2]);
+    const float sy = std::sqrt(vp.m[1][0] * vp.m[1][0] + vp.m[1][1] * vp.m[1][1] + vp.m[1][2] * vp.m[1][2]);
+    for (size_t i = 0; i < b.spheres.size(); ++i)
+    {
+        const float4& q = b.spheres[i];
+        const float x = vp.m[0][0] * q.x + vp.m[0][1] * q.y + vp.m[0][2] * q.z + vp.m[0][3];
+        const float y = vp.m[1][0] * q.x + vp.m[1][1] * q.y + vp.m[1][2] * q.z + vp.m[1][3];
+        if (!(std::abs(x) <= 1 + q.w * sx && std::abs(y) <= 1 + q.w * sy)) continue;
+        if (b.minTexels > 0 && q.w * pixelsPerMetre < b.minTexels) continue;
+        const float t = threshold / std::max(b.errorScale[i], 1e-12f);
+        n[b.movable[i] ? 2 : 1] += b.lod ? memo.cut(b, i, t) : b.clusters[i];
+    }
+    n[0] = n[1] + n[2];
+    return n;
+}
+
+bool sunBoundDiagnostic(const char* name)
+{
+    char value[2]{}; size_t length = 0;
+    return getenv_s(&length, value, sizeof(value), name) == 0 && length == 2 && value[0] == '1';
 }
 
 // The bounds of a local light's six cube faces (each shared by the face's mip views): the casters its reach sphere (range +
@@ -689,6 +748,9 @@ void updateLocalLights(FramePassContext& fc, State& s, const ViewResources& main
     const scene::Scene* src = fc.scene.source();
     const std::vector<scene::Light> none;
     const std::vector<scene::Light>& lights = src ? src->lights : none;
+    // Source lights retain their authoring coordinates across an origin rebase;
+    // GPU light records, caster transforms and this view use the rebased frame.
+    const float3 origin = fc.scene.originOffset();
     const uint32_t n = (uint32_t)lights.size();
     if (fc.scene.revision() != s.localSceneRevision)
     {
@@ -723,8 +785,9 @@ void updateLocalLights(FramePassContext& fc, State& s, const ViewResources& main
     };
     auto priority = [&](uint32_t li) {
         const scene::Light& l = lights[li];
+        const float3 position = l.position - origin;
         const float3 eye = main.view.position;
-        const float3 d = { l.position.x - eye.x, l.position.y - eye.y, l.position.z - eye.z };
+        const float3 d = position - eye;
         const float dist2 = dot(d, d), reach = l.range + emitterRadius(l);
         // (the view's fade of a light toward its draw distance - scene::Light::maxDrawDistance, Scene.hlsli
         // lightViewFade: a light faded out lights nothing and waits behind every other)
@@ -735,7 +798,7 @@ void updateLocalLights(FramePassContext& fc, State& s, const ViewResources& main
             fade = l.maxDistanceFadeRange > 0 ? std::min(std::max((l.maxDrawDistance - dist) / l.maxDistanceFadeRange, 0.0f), 1.0f) : (dist < l.maxDrawDistance ? 1.0f : 0.0f);
         }
         Priority p;
-        p.inView = fade > 0 && (dist2 <= reach * reach || sphereInView(main.view.viewProj, l.position, reach));
+        p.inView = fade > 0 && (dist2 <= reach * reach || sphereInView(main.view.viewProj, position, reach));
         const float lum = std::max(0.2126f * l.color.x + 0.7152f * l.color.y + 0.0722f * l.color.z, 1e-6f);
         p.value = std::max(l.intensity, 0.0f) * lum * fade * reach * reach / std::max(std::max(dist2, reach * reach), 1e-6f);
         return p;
@@ -790,13 +853,14 @@ void updateLocalLights(FramePassContext& fc, State& s, const ViewResources& main
         if (s.localLight[i] == 0) continue;
         const scene::Light& l = lights[s.localLight[i] - 1];
         const float radius = emitterRadius(l);
-        const float sig[6] = { l.position.x, l.position.y, l.position.z, l.range, radius, (float)l.type };
+        const float3 position = l.position - origin;
+        const float sig[6] = { position.x, position.y, position.z, l.range, radius, (float)l.type };
         if (std::memcmp(sig, s.localSig[i], sizeof sig) != 0)
         {
             ++s.localGen[i];  // moved or reshaped: its pages are released and rendered anew
             std::memcpy(s.localSig[i], sig, sizeof sig);
         }
-        d.position = l.position;
+        d.position = position;
         d.radius = radius;
         d.nearM = std::max(0.05f, radius);
         d.farM = l.range + radius;
@@ -876,6 +940,8 @@ void updateLocalLights(FramePassContext& fc, State& s, const ViewResources& main
 
 void recordPages(FramePassContext& fc, const ViewResources& main)
 {
+    CpuFrameTrace cpuTrace(fc.frame.frameIndex);
+    double sunBoundsMs = 0;
     State& s = fc.state<State>(kStateKey);
     const QualityConfig& q = fc.quality;
 
@@ -992,7 +1058,9 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
         }
     }
     // Local lights first: their count sizes the atlas's initial budget with the view's pixels.
+    cpuTrace.mark("vsm.state");
     updateLocalLights(fc, s, main);
+    cpuTrace.mark("vsm.local_lights");
     const double mpixels = (double)main.view.width * main.view.height / 1e6;
     const double budget = mpixels * q.number("shadow.vsm.pool_pages_per_mpixel") + s.latest.localAssigned * q.number("shadow.vsm.pool_pages_per_local_light");
     uint32_t pages = std::max((uint32_t)q.integer("shadow.vsm.pool_pages"), (uint32_t)budget);
@@ -1857,10 +1925,39 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
     const bool aggregate = minCasterTexels > 0 && q.has("shadow.vsm.aggregate_small_casters") && q.boolean("shadow.vsm.aggregate_small_casters");
     const float aggregateCoverage = q.has("shadow.vsm.aggregate_coverage") ? (float)q.number("shadow.vsm.aggregate_coverage") : 0.5f;
     if (aggregate && !(aggregateCoverage > 0 && aggregateCoverage <= 1)) fail("shadow.vsm.aggregate_coverage = %g: a share in (0, 1]", aggregateCoverage);
+    cpuTrace.mark("vsm.declare_before_bounds");
     const CasterBounds bounds = fc.services.rasterizeDepth && split
                                     ? casterBounds(fc.scene, lodBound, (float)q.number("visibility.lod_error_px"),
-                                                   fc.scene.source() ? fc.scene.source()->windSpeed : 0.0f, minCasterTexels)
+                                                   fc.scene.source() ? fc.scene.source()->windSpeed : 0.0f, minCasterTexels, fc.resources.gpuInstanceClusterBound)
                                     : CasterBounds{};
+    cpuTrace.mark("vsm.caster_bounds");
+    struct SunLevelBounds
+    {
+        float4x4 viewProj;
+        float pixelsPerMetre = 0;
+        std::array<uint64_t, 3> sets{};
+        bool valid = false;
+    };
+    std::array<SunLevelBounds, kLevels> sunLevelBounds{};
+    SunCutMemo sunCutMemo(bounds.ranges ? bounds.ranges->size() : 0);
+    static const bool referenceSunBounds = sunBoundDiagnostic("UNX_VSM_BOUND_REFERENCE");
+    static const bool verifySunBounds = sunBoundDiagnostic("UNX_VSM_BOUND_VERIFY");
+    auto sunBound = [&](uint32_t level, const RasterView& view, uint32_t set) {
+        if (referenceSunBounds) return levelBound(bounds, view.viewProj, view.lodPixelsPerMetre, set);
+        SunLevelBounds& cached = sunLevelBounds[level];
+        if (!cached.valid || cached.pixelsPerMetre != view.lodPixelsPerMetre || std::memcmp(&cached.viewProj, &view.viewProj, sizeof(float4x4)) != 0)
+        {
+            cached.sets = levelBoundsBySet(bounds, view.viewProj, view.lodPixelsPerMetre, sunCutMemo);
+            cached.viewProj = view.viewProj;
+            cached.pixelsPerMetre = view.lodPixelsPerMetre;
+            cached.valid = true;
+            if (verifySunBounds)
+                for (uint32_t kind = 0; kind < 3; ++kind)
+                    if (cached.sets[kind] != levelBound(bounds, view.viewProj, view.lodPixelsPerMetre, kind))
+                        fail("VSM sun bound mismatch: frame %llu level %u set %u", (unsigned long long)fc.frame.frameIndex, level, kind);
+        }
+        return cached.sets[set];
+    };
     uint32_t sunRequests = 0, localRequests = 0;
     // The sun levels' requests of one instance set into one atlas ('base' names them: base, base1, ..; maskWords: the set's
     // first word of the tile mask and slots). shadow.vsm.static_separate: the casters that are not movable into the static
@@ -1934,7 +2031,9 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
             v.tileTwoPhase = occlusion == 2;
             v.materialFilter = tintOn ? 1u : 0u;  // (the glass casters: s.vsm.tint below)
             v.cullMaskOffset = maskWords + k * (kTable * kTable / 32);
-            const uint64_t bound = split ? levelBound(bounds, v.viewProj, v.lodPixelsPerMetre, instanceSet) : 0;
+            const auto boundStart = cpuTrace.active() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+            const uint64_t bound = split ? sunBound(k, v, instanceSet) : 0;
+            if (cpuTrace.active()) sunBoundsMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-boundStart).count();
             if (bound > listCapacity)
             {
                 // The level alone is over a run's lists: one request per instance batch of its casters - while a few
@@ -2398,6 +2497,12 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.cmd->Dispatch(groups(kSlots, 256), 1, 1);
                   });
     }
+    cpuTrace.mark("vsm.raster_and_tail");
+    cpuTrace.value("vsm.sun_bounds_subset", sunBoundsMs);
+    if (cpuTrace.active() && fc.frame.frameIndex % 120 == 0)
+        logf("VSM CPU bounds frame %llu: %zu placed casters, %llu reused cuts, %llu cut evaluations (reference=%u verify=%u)\n",
+             (unsigned long long)fc.frame.frameIndex, bounds.spheres.size(), (unsigned long long)sunCutMemo.hits,
+             (unsigned long long)sunCutMemo.misses, referenceSunBounds ? 1u : 0u, verifySunBounds ? 1u : 0u);
 }
 
 void recordVisibility(FramePassContext& fc, ViewResources& view)

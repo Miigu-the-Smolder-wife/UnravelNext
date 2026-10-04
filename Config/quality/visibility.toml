@@ -63,8 +63,9 @@ traversal_work_queue = true       # the hierarchy traversal of a cull run (main 
                                   # is empty (CullNodes QUEUE=1, the reference's persistent cull) - a pass for the whole
                                   # tree where each level took a prepare pass and a node pass (10 passes a phase at depth
                                   # 5). The same nodes, groups and deferrals as the level passes. false: the level passes (A/B)
-traversal_worker_groups = 1024    # its dispatch: groups of 64 threads, each wave a worker (a size, as the reference's
-                                  # persistent thread group count; an empty queue ends every worker after one read)
+traversal_worker_groups = 64      # groups of 64 threads, each wave drains the same persistent node queue. More workers
+                                  # also contend on its global claim/publish counters; this is not a node-work limit.
+                                  # Bathhouse/RTX 4080: 1024 -> 64 reduced main node P1 from 0.345 to 0.037 ms.
 cull_pass_merge = true            # a cull run takes fewer passes: the kernel that appends a pass's items keeps that pass's
                                   # dispatch arguments current, so the argument passes between them go (chunk items, deferred
                                   # chunks, and with traversal_work_queue the groups), and dispatches that do not read each

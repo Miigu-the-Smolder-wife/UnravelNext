@@ -22,6 +22,7 @@
 #include "unx/core/File.h"
 #include "unx/core/Log.h"
 #include "unx/fx/MeshParticles.h"
+#include "unx/clusterbuilder/ClusterBuilder.h"
 #include "unx/fx/Particles.h"
 #include "unx/render/Frame.h"
 #include "unx/render/FrameRenderer.h"
@@ -390,6 +391,8 @@ int main(int argc, char** argv)
         rc.gpuInstances = (uint32_t)quality.integer("fx.particles.mesh_instances_max");
         scene.reserveRuntime(rc);
         scene.upload(s);
+        scene.setClusters(clusterbuilder::build(s,clusterbuilder::Settings::fromQuality(quality)));
+        MP_CHECK(scene.meshes()[0].clusterCount>0,"producer-bound fixture has no real mesh clusters");
         const GpuScene::GpuInstanceRange range = scene.gpuInstanceRange();
         MP_CHECK(range.capacity == rc.gpuInstances && range.capacity > 0, "GPU instance range %u", range.capacity);
 
@@ -430,6 +433,7 @@ int main(int argc, char** argv)
         GpuProfiler profiler(device, 1, 256);
         std::vector<double> writerMs;
         uint32_t lastInstances = 0, lastThreads = 0;
+        uint64_t lastClusterBound = UINT64_MAX;
         for (uint32_t t = 1; t <= ticks; ++t)
         {
             std::vector<uint8_t> packet = stream.next(t == 1 ? nullptr : &previous);
@@ -491,6 +495,7 @@ int main(int argc, char** argv)
                     FramePassContext fc{ device, graph, shaders, quality, scene, frame, resources, services, [](const ViewDesc&) -> D3D12_GPU_VIRTUAL_ADDRESS { return 0; }, &state };
                     rangeCopy(graph, range, zero.Get(), readback.Get(), true);
                     tracks::particleMeshes(fc);
+                    lastClusterBound = resources.gpuInstanceClusterBound;
                     rangeCopy(graph, range, zero.Get(), readback.Get(), false);
                     profiler.beginFrame(frame.frameIndex);
                     graph.execute(&profiler);
@@ -506,10 +511,14 @@ int main(int argc, char** argv)
                 {
                     // the render inputs start with the second tick (a previous tick's state): nothing is drawn yet
                     MP_CHECK(!st.recorded, "tick 1: mesh particles recorded before a tick pair exists");
+                    MP_CHECK(lastClusterBound == 0, "tick 1: an absent mesh writer retained reserved-pool shadow work");
                     continue;
                 }
                 MP_CHECK(st.recorded && st.status == 0 && st.overflow == 0, "tick %u frame %d: recorded %d status %u overflow %u", t, f, st.recorded, st.status, st.overflow);
                 lastInstances = st.instances;
+                MP_CHECK(lastClusterBound != UINT64_MAX && lastClusterBound >= uint64_t(st.instances) * scene.meshes()[0].clusterCount,
+                         "tick %u frame %d: producer bound %llu excludes %u live/interpolated mesh instances", t, f,
+                         (unsigned long long)lastClusterBound, st.instances);
                 if (timing) continue;
                 const uint32_t expectMode = t == 2 && f == 0 ? 0u : f == 0 ? 2u : 1u;
                 MP_CHECK(st.mode == expectMode, "tick %u frame %d: previous-transform mode %u, expected %u", t, f, st.mode, expectMode);

@@ -32,10 +32,12 @@
 //          bias (MODE 9) }
 // P[2] = { ray dispatch descriptions UAV, offset of a description's Width, filter dispatch arguments UAV, probes per
 //          dispatch } (MODE 6), P[3] = { chunks, stride of a ray dispatch description (bytes), 0, 0 }: chunk c's
-//          description at c x stride; its filter arguments at 32 c (filter) and 32 c + 16 (store).
+//          description at c x stride; three compute records per chunk (filter,
+//          store, irradiance), with the shared LumenRadianceCacheDispatch.h layout.
 #include "Bindless.hlsli"
 #include "Frame.hlsli"
 #include "Passes/GI/LumenRadianceCacheMark.hlsli"
+#include "Passes/GI/LumenRadianceCacheDispatch.h"
 
 #define LRC_COST_DOWN 1u
 #define LRC_COST_NORMAL 4u
@@ -239,8 +241,10 @@ void main()
         const uint n = count > c * perDispatch ? min(count - c * perDispatch, perDispatch) : 0;
         // (an empty chunk: every dimension 0, a dispatch that launches nothing)
         rayDesc.Store3(c * P[3].y + P[2].y, n > 0 ? uint3(p.probeResolution * p.probeResolution, n, 1) : uint3(0, 0, 0));  // Width, Height, Depth
-        filterArgs.Store3(32 * c, n > 0 ? uint3((p.probeResolution + 7) / 8, (p.probeResolution + 7) / 8, n) : uint3(0, 0, 0));
-        filterArgs.Store3(32 * c + 16, n > 0 ? uint3((p.finalResolution + 7) / 8, (p.finalResolution + 7) / 8, n) : uint3(0, 0, 0));
+        const uint computeBase = LRC_COMPUTE_ARGS_STRIDE * c;
+        filterArgs.Store3(computeBase + LRC_FILTER_ARGS_OFFSET, n > 0 ? uint3((p.probeResolution + 7) / 8, (p.probeResolution + 7) / 8, n) : uint3(0, 0, 0));
+        filterArgs.Store3(computeBase + LRC_STORE_ARGS_OFFSET, n > 0 ? uint3((p.finalResolution + 7) / 8, (p.finalResolution + 7) / 8, n) : uint3(0, 0, 0));
+        filterArgs.Store3(computeBase + LRC_IRRADIANCE_ARGS_OFFSET, uint3(LRC_IRRADIANCE_GROUP_AXIS(n), LRC_IRRADIANCE_GROUP_AXIS(n), n));
     }
 }
 #elif MODE == 9

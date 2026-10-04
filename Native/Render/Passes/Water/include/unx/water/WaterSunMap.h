@@ -42,6 +42,7 @@ public:
 
 private:
     render::Device& m_device;
+    render::ComPtr<ID3D12CommandSignature> m_meshSignature;
     render::ComPtr<ID3D12Resource> m_upload[kRing];
     uint8_t* m_mapped[kRing] = {};
 };

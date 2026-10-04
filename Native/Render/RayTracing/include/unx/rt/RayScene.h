@@ -94,10 +94,13 @@ struct RaySceneStats
     uint64_t meshBlasTriangles = 0;        // unique triangles in mesh BLASes
     uint64_t deformedTriangles = 0;        // triangles refit per frame (the proxies' current cuts)
     uint64_t deformedVertices = 0;         // vertices deformed per frame
+    uint32_t streamBuilds = 0, streamRefits = 0;
+    uint64_t streamBlasBytes = 0;
     uint64_t meshBlasBytes = 0, meshBlasBytesBeforeCompaction = 0;
     uint64_t deformedBlasBytes = 0, tlasStaticBytes = 0, tlasDynamicBytes = 0;
     double loadMs = 0;                     // CPU wall time of the load-time build (includes GPU waits)
     uint32_t staticTlasInherited = 0;      // B3: this build kept the previous object's static TLAS (an instance edit)
+    uint64_t staticTlasBuildsTotal = 0;    // successfully submitted cached-TLAS updates (excludes initial construction)
     uint32_t deformedAboveProxyBudget = 0; // deformed meshes with more triangles than raytracing.character_proxy_triangles
     uint32_t exactSlots = 0;               // reflection exact set capacity (original BLAS)
     uint32_t exactOccupied = 0, exactBuilds = 0;  // last frame: slots in use, slots (re)built
@@ -147,7 +150,8 @@ public:
     void declareTraversal(PassBuilder& b) const;
     // W's triangle streams traced this frame (FrameResources::triangleStreams slot, vertex buffer): refraction rays see
     // them (mask kRtMaskFluid, instance id kRtInstanceStreamBase + slot; R-W2).
-    const std::vector<std::pair<uint32_t, BufferRef>>& streams() const { return m_streamsNow; }
+    struct Stream { uint32_t slot; BufferRef vertices, indices; };
+    const std::vector<Stream>& streams() const { return m_streamsNow; }
     // Bindless indices for ray libraries: root constants P[6], P[7] (RtSceneSrvs; word 7 = this frame's local-light grid,
     // HitLocalLights.hlsli).
     void rootConstants(uint32_t out[8]) const;
@@ -273,13 +277,25 @@ private:
     // Writes the runtime instances' descriptors after the load-time dynamic ones (slot) and records the frame's BLAS
     // builds and record copy.
     void recordRuntime(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DESC* slot);
-    // W's triangle streams (R-W2): one BLAS per active stream, rebuilt every frame at the stream's capacity (unused
-    // vertices are degenerate: no hit) into m_streamPool, and a dynamic TLAS instance each after the runtime ones.
+    // One BLAS per stream. Explicit fixed-topology producers may refit; streams
+    // with changing NaN inactivity are rebuilt. The dynamic TLAS is rebuilt afterwards.
     void recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DESC* slot);
     Buffer m_streamPool, m_streamScratch;
     uint64_t m_streamOffset[64] = {}, m_streamBytes[64] = {}, m_streamScratchBytes = 0;
     uint32_t m_streamTriangles[64] = {};
-    std::vector<std::pair<uint32_t, BufferRef>> m_streamsNow;
+    uint32_t m_streamVertices[64] = {};
+    bool m_streamIndexed[64] = {};
+    bool m_streamAllowsUpdate[64] = {};
+    uint64_t m_streamPoolGeneration = 0;
+    struct StreamBuilt
+    {
+        uint64_t topologyId = 0, poolGeneration = 0, offset = 0;
+        uint32_t triangles = 0;
+        uint32_t vertices = 0;
+        bool indexed = false;
+    };
+    StreamBuilt m_streamBuilt[64] = {}; // committed only after the owning command list was submitted
+    std::vector<Stream> m_streamsNow;
     // The frame's light-grid slot for the header words written after record() (decals); publishes an empty grid when
     // record() had nothing to publish.
     uint8_t* lightSlot(FramePassContext& fc);
@@ -522,6 +538,14 @@ private:
     std::vector<RtInstance> m_instances;
     std::vector<RtGeometry> m_geometries;
     std::vector<D3D12_RAYTRACING_INSTANCE_DESC> m_staticDescs, m_dynamicDescs;
+    // Mobility is permission to move, not evidence that a rigid instance moved.
+    // Unchanged rigid instances use the cached TLAS until their first real edit.
+    std::vector<uint8_t> m_staticMobility;  // 0: authored static, 1: cached movable, 2: promoted (masked in cached TLAS)
+    std::vector<uint8_t> m_observedMovers;  // scene-instance indexed, retained over incremental scene revisions
+    uint32_t m_dynamicDescCapacity = 0;    // reserves all possible promotions once
+    uint64_t m_staticEpoch = 0, m_staticSubmittedEpoch = 0;
+    float3 m_cachedOrigin{};
+    std::vector<std::pair<float3, float3>> m_pendingStaticChanges;
     std::vector<uint32_t> m_dynamicRecord;  // RtInstance index of each dynamic TLAS instance
     Buffer m_instanceBuffer, m_geometryBuffer, m_indexPool, m_vertexMap;
     Buffer m_tlasStatic, m_tlasDynamic, m_tlasScratch, m_staticDescBuffer, m_dynamicDescBuffer, m_staticScratch;

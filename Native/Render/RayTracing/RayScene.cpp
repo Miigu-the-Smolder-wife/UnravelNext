@@ -1,6 +1,7 @@
 #include "unx/rt/RayScene.h"
 
 #include "unx/core/Log.h"
+#include "unx/render/SortedPrefix.h"
 #if defined(UNX_HAS_MATERIAL)
 #include "unx/material/MaterialSystem.h"  // M's texture table for decals at hits (recordDecals)
 #endif
@@ -299,6 +300,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
     const scene::Scene* src = scene.source();
     if (!src) fail("RayScene: GpuScene has no uploaded scene");
     m_sceneRevision = scene.revision();
+    m_cachedOrigin = scene.originOffset();
     const uint32_t proxyBudget = (uint32_t)quality.integer("raytracing.character_proxy_triangles");
     m_proxyErrorPx = (float)quality.number("raytracing.proxy_error_px");
     m_proxySkinWeight = (float)quality.number("raytracing.proxy_skin_weight");
@@ -354,23 +356,32 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         for (uint32_t m = 0; m < (uint32_t)std::min(meshes.size(), src->meshes.size()); ++m)
             if (meshes[m].triangleCount > 0) m_meshBlas[m].geometryBase = geometryBase(m);
 
-    // Classify instances (INTERFACES 6.2 flags): deformed = skinned with a palette and skin stream; dynamic rigid =
-    // InstanceDynamic; the rest is static (wind-affected foliage uses its rest pose in RT, ARCHITECTURE 2.7).
+    // Cache unchanged rigid instances independently of authoring mobility. A
+    // movable instance migrates to the dynamic TLAS on its first real transform
+    // edit, with same-frame removal from this cached TLAS. Far-field proxies keep
+    // their existing authored-static policy; runtime additions remain dynamic.
     // The uploaded instances only: runtime instances (GpuScene::addRuntimeInstance, slots after staticInstanceCount()) and
     // their meshes are recordRuntime's, and the source scene holds neither (src->instances, src->meshes end before them).
     std::vector<uint32_t> staticList, dynamicRigid, deformed;
     const uint32_t uploadedInstances = std::min((uint32_t)instances.size(), scene.staticInstanceCount());
+    m_observedMovers.assign(uploadedInstances, 0);
+    if (previous) std::copy_n(previous->m_observedMovers.begin(), std::min(previous->m_observedMovers.size(), m_observedMovers.size()), m_observedMovers.begin());
+    const bool cacheRigid = !m_far.on &&
+        (!quality.has("raytracing.cache_unchanged_rigid") || quality.boolean("raytracing.cache_unchanged_rigid"));
+    uint32_t cachedMovable = 0;
     for (uint32_t i = 0; i < uploadedInstances; ++i)
     {
         const gpu::Instance& in = instances[i];
         const gpu::Mesh& m = meshes[in.mesh];
         if (m.triangleCount == 0) continue;
         if ((in.flags & scene::InstanceSkinned) && in.bonePalette != gpu::kNone && m.skinOffset != gpu::kNone) deformed.push_back(i);
-        else if (in.flags & scene::InstanceDynamic) dynamicRigid.push_back(i);
+        else if ((in.flags & gpu::kInstanceViewModel) || ((in.flags & scene::InstanceDynamic) &&
+            (!cacheRigid || m_observedMovers[i] || (previous && i >= previous->m_instanceRecords.size())))) dynamicRigid.push_back(i);
+        else if (in.flags & scene::InstanceDynamic) { staticList.push_back(i); ++cachedMovable; }
         else staticList.push_back(i);
     }
-    if (dynamicRigid.size() + deformed.size() > dynamicMax)
-        fail("RayScene: %zu dynamic instances exceed raytracing.dynamic_tlas_instances_max %llu", dynamicRigid.size() + deformed.size(), (unsigned long long)dynamicMax);
+    if (dynamicRigid.size() + cachedMovable + deformed.size() > dynamicMax)
+        fail("RayScene: %zu movable instances exceed raytracing.dynamic_tlas_instances_max %llu", dynamicRigid.size() + cachedMovable + deformed.size(), (unsigned long long)dynamicMax);
 
     // Instances made of Glass / Water alone (their overrides first): GI and shadow rays pass them (RayScene.h rtInstanceMask).
     // A pane inside a mesh with opaque submeshes is the any-hit shader's (geometryFlags; RayScene.hlsli).
@@ -478,6 +489,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         m_staticDescs.push_back(rigidDesc(i));
         m_staticScene.push_back(i);
         m_staticKeys.push_back(staticKey(instances[i]));
+        m_staticMobility.push_back((instances[i].flags & scene::InstanceDynamic) ? 1u : 0u);
     }
     for (uint32_t i : dynamicRigid)
     {
@@ -555,6 +567,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
                             (m_staticDescs.empty() ||
                              std::memcmp(previous->m_staticDescs.data(), m_staticDescs.data(), m_staticDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC)) == 0);
     buildFarField(previous, sameStatic);
+    m_dynamicDescCapacity = (uint32_t)m_dynamicDescs.size() + cachedMovable;
     m_stats.staticInstances = (uint32_t)m_staticDescs.size();
     m_stats.dynamicInstances = (uint32_t)m_dynamicDescs.size();
     m_stats.deformedInstances = (uint32_t)m_deformed.size();
@@ -625,7 +638,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
             table[4 * m + 3] = 1;
         }
         m_particleMeshes = createStructured(table.data(), 16, (uint32_t)(table.size() / 4), L"RT particle mesh table");
-        m_particleDescs = createBuffer((uint64_t)(m_dynamicDescs.size() + m_runtimeInstanceCap + kMaxTriangleStreams + m_particleCap) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC),
+        m_particleDescs = createBuffer((uint64_t)(m_dynamicDescCapacity + m_runtimeInstanceCap + kMaxTriangleStreams + m_particleCap) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC),
                                        true, false, L"RT dynamic instance descs with mesh particles");
         m_particleRecords = createBuffer((uint64_t)m_particleCap * sizeof(RtInstance), true, false, L"RT mesh particle records");
     }
@@ -644,7 +657,7 @@ RayScene::RayScene(Device& device, ShaderLibrary& shaders, GpuScene& scene, cons
         buildStaticTlas();
     {
         // (the static region: every static descriptor, or the near set's bound with the far field)
-        m_descSlotBytes = (uint64_t)(m_dynamicDescs.size() + m_runtimeInstanceCap + kMaxTriangleStreams + staticCapacity() + 1) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+        m_descSlotBytes = (uint64_t)(m_dynamicDescCapacity + m_runtimeInstanceCap + kMaxTriangleStreams + staticCapacity() + 1) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
         m_descSlotBytes = (m_descSlotBytes + 255) / 256 * 256;
         D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_UPLOAD };
         D3D12_RESOURCE_DESC1 d{};
@@ -1715,8 +1728,7 @@ void RayScene::selectExactSet(FramePassContext& fc)
             else ++m_stats.exactWithinBoundTotal;
         }
         m_stats.exactWantedTotal += wanted.size();
-        std::sort(wanted.begin(), wanted.end(), [&](uint32_t a, uint32_t b) { return counts[a] != counts[b] ? counts[a] > counts[b] : a < b; });
-        if (wanted.size() > m_exact.size()) wanted.resize(m_exact.size());
+        detail::retainSortedPrefix(wanted, m_exact.size(), [&](uint32_t a, uint32_t b) { return counts[a] != counts[b] ? counts[a] > counts[b] : a < b; });
     }
     else
         for (const ExactSlot& e : m_exact)
@@ -2045,6 +2057,46 @@ void RayScene::record(FramePassContext& fc)
     const uint64_t slotOffset = (fc.frame.frameIndex % kDescSlots) * m_descSlotBytes;
     auto* slotDescs = reinterpret_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(m_descRingMapped + slotOffset);
     const auto& sceneInstances = m_scene.instances();
+    const float3 cachedOriginNow = m_scene.originOffset();
+    const float3 shift = cachedOriginNow - m_cachedOrigin;
+    const bool rebase = shift.x != 0 || shift.y != 0 || shift.z != 0;
+    if (rebase)
+    {
+        // Pending invalidation may belong to a discarded recording before this
+        // rebase. Keep it in the same coordinate system as this frame's cache.
+        for (auto& bounds : m_pendingStaticChanges) { bounds.first = bounds.first - shift; bounds.second = bounds.second - shift; }
+        m_cachedOrigin = cachedOriginNow;
+    }
+    for (size_t k = 0; k < m_staticDescs.size(); ++k)
+    {
+        if (m_staticMobility[k] == 2) continue;
+        const uint32_t sceneIndex = m_staticScene[k];
+        const gpu::Instance& in = sceneInstances[sceneIndex];
+        const bool viewModel = (in.flags & gpu::kInstanceViewModel) != 0;
+        if (staticKey(in) == m_staticKeys[k] && !rebase && !viewModel) continue;
+        m_staticKeys[k] = staticKey(in);
+        const float4 sphere = m_scene.meshes()[in.mesh].boundsSphere;
+        auto& cached = m_staticDescs[k];
+        const bool moved = !rebase && std::memcmp(cached.Transform, in.objectToWorld, sizeof cached.Transform) != 0;
+        if (!rebase && cached.InstanceMask != 0) m_pendingStaticChanges.push_back(descBounds(cached, sphere));
+        refreshDesc(cached, in, false, sceneIndex);
+        if (!rebase && cached.InstanceMask != 0) m_pendingStaticChanges.push_back(descBounds(cached, sphere));
+        if (m_staticMobility[k] == 1 && (moved || viewModel))
+        {
+            if (m_dynamicDescs.size() >= m_dynamicDescCapacity) fail("RayScene: rigid promotion exceeds reserved descriptor capacity");
+            m_dynamicRecord.push_back(cached.InstanceID);
+            m_dynamicDescs.push_back(cached);
+            m_staticMobility[k] = 2;
+            m_observedMovers[sceneIndex] = 1;
+            cached.InstanceMask = 0;  // this frame's cached-TLAS rebuild removes the old owner
+            --m_stats.staticInstances;
+            ++m_stats.dynamicInstances;
+        }
+        ++m_staticEpoch;
+    }
+    if (nearRebuild) ++m_staticEpoch;
+    const bool staticChanged = m_staticEpoch != m_staticSubmittedEpoch;
+    m_changes.insert(m_changes.end(), m_pendingStaticChanges.begin(), m_pendingStaticChanges.end());
     for (size_t k = 0; k < m_dynamicDescs.size(); ++k)
     {
         // the emitter instance: boxes at the lights' source positions; the far field's proxies (0xFFFFFFFE): the same
@@ -2164,25 +2216,6 @@ void RayScene::record(FramePassContext& fc)
         dynamicDescs = m_particleDescs.address();
         m_particleCountNow = m_particleCap;
     }
-    bool staticChanged = false;
-    const float3 shift = fc.frame.originShift;
-    const bool rebase = shift.x != 0 || shift.y != 0 || shift.z != 0;
-    for (size_t k = 0; k < m_staticDescs.size(); ++k)
-    {
-        const gpu::Instance& in = sceneInstances[m_staticScene[k]];
-        // A rebase moves every transform without a revision (GpuScene::rebase): all static instances are refreshed.
-        if (staticKey(in) == m_staticKeys[k] && !rebase) continue;
-        m_staticKeys[k] = staticKey(in);
-        const float4 sphere = m_scene.meshes()[in.mesh].boundsSphere;
-        // An origin rebase (C9) moves every instance by -delta with the frame: nothing changed in the world, so GI keeps
-        // its cells (GiShift moves them) and only the TLAS is rebuilt.
-        const bool change = !rebase;
-        if (change && m_staticDescs[k].InstanceMask != 0) m_changes.push_back(descBounds(m_staticDescs[k], sphere));  // where it was (B3)
-        refreshDesc(m_staticDescs[k], in, false, m_staticScene[k]);
-        if (change && m_staticDescs[k].InstanceMask != 0) m_changes.push_back(descBounds(m_staticDescs[k], sphere));  // where it is now
-        staticChanged = true;
-    }
-    if (nearRebuild) staticChanged = true;  // (the far field: the near set is chosen again)
     if (!m_deformed.empty())
     {
         const BufferRef pool = g.importBuffer(m_deformedPool.resource.Get(), { "RT deformed vertices", m_deformedPool.bytes, 0 });
@@ -2217,7 +2250,7 @@ void RayScene::record(FramePassContext& fc)
     if (staticChanged)
     {
         // After the dynamic region (load-time dynamic, runtime and stream instances), which the same slot holds.
-        const uint64_t staticOffset = slotOffset + (m_dynamicDescs.size() + m_runtimeInstanceCap + kMaxTriangleStreams) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+        const uint64_t staticOffset = slotOffset + (m_dynamicDescCapacity + m_runtimeInstanceCap + kMaxTriangleStreams) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
         uint32_t staticCount = (uint32_t)m_staticDescs.size();
         if (m_far.on)
             staticCount = m_nearCount = selectNear(reinterpret_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(m_descRingMapped + staticOffset));
@@ -2229,6 +2262,12 @@ void RayScene::record(FramePassContext& fc)
                   [&](PassBuilder& b) {
                       b.use(frame.tlasStatic, Use::AccelerationStructureWrite);
                       b.use(staticScratch, Use::AccelerationStructureScratch);
+                      const uint64_t epoch = m_staticEpoch;
+                      b.onSubmitted([this, epoch](Queue&, uint64_t) {
+                          ++m_stats.staticTlasBuildsTotal;
+                          m_staticSubmittedEpoch = std::max(m_staticSubmittedEpoch, epoch);
+                          if (m_staticEpoch == epoch) m_pendingStaticChanges.clear();
+                      });
                   },
                   [this, staticDescs, staticCount](PassContext& c) { recordStaticTlas(c.cmd, staticDescs, staticCount); });
     }
@@ -2294,11 +2333,11 @@ void RayScene::recordDynamicTlas(ID3D12GraphicsCommandList7* cmd, D3D12_GPU_VIRT
         D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO sizes{};
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS capacity = inputs;
         // room for every runtime instance and stream, and for the mesh particles' slots
-        capacity.NumDescs = (UINT)(m_dynamicDescs.size() + m_runtimeInstanceCap + kMaxTriangleStreams + m_particleCap);
+        capacity.NumDescs = (UINT)(m_dynamicDescCapacity + m_runtimeInstanceCap + kMaxTriangleStreams + m_particleCap);
         m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&capacity, &sizes);
         m_tlasDynamic = createBuffer(sizes.ResultDataMaxSizeInBytes, false, true, L"RT dynamic TLAS");
         m_tlasScratch = createBuffer(sizes.ScratchDataSizeInBytes, true, false, L"RT dynamic TLAS scratch");
-        m_dynamicDescBuffer = createBuffer(std::max<size_t>(m_dynamicDescs.size(), 1) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), false, false, L"RT dynamic instance descs");
+        m_dynamicDescBuffer = createBuffer(std::max<uint32_t>(m_dynamicDescCapacity, 1) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), false, false, L"RT dynamic instance descs");
         m_stats.tlasDynamicBytes = m_tlasDynamic.bytes;
         // Load-time descriptors for the out-of-graph path (tests); frames use the per-frame ring (record).
         upload(m_dynamicDescBuffer, m_dynamicDescs.data(), m_dynamicDescs.size() * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
@@ -2914,12 +2953,19 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
 {
     m_streamsNow.clear();
     m_frame.streamPool = {};
+    m_stats.streamBuilds = m_stats.streamRefits = 0;
+    m_stats.streamBlasBytes = 0;
+    const bool refitEnabled = !fc.quality.has("raytracing.stream_refit") || fc.quality.boolean("raytracing.stream_refit");
     struct StreamBuild
     {
         uint32_t slot;
         BufferRef vertices;
         uint32_t triangles;
         uint64_t offset;
+        uint64_t topologyId;
+        bool update = false;
+        BufferRef indices;
+        uint32_t vertexCount = 0;
     };
     std::vector<StreamBuild> builds;
     // FrameResources::triangleStreams is the list the producers append to (slot = index, at most kMaxTriangleStreams).
@@ -2928,24 +2974,37 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
     {
         const TriangleStream& ts = fc.resources.triangleStreams[k];
         if (!ts.vertices.valid() || ts.maxTriangles == 0) continue;
-        builds.push_back({ k, ts.vertices, ts.maxTriangles, 0 });
+        const uint32_t vertices = ts.indices.valid() ? ts.vertexCount : ts.maxTriangles * 3;
+        if (!vertices || fc.graph.desc(ts.vertices).size < uint64_t(vertices) * 32 ||
+            (ts.indices.valid() && fc.graph.desc(ts.indices).size < uint64_t(ts.maxTriangles) * 12))
+            fail("RT stream %u has an invalid vertex/index layout", k);
+        builds.push_back({ k, ts.vertices, ts.maxTriangles, 0, refitEnabled ? ts.fixedTopologyId : 0, false, ts.indices, vertices });
     }
-    if (builds.empty()) return;
+    if (builds.empty())
+    {
+        std::fill(std::begin(m_streamBuilt), std::end(m_streamBuilt), StreamBuilt{});
+        return;
+    }
     // One pool for every stream's capacity (it grows with the streams; the old pool is released after its frames).
     uint64_t total = 0;
     for (StreamBuild& b : builds)
     {
-        if (m_streamTriangles[b.slot] != b.triangles)
+        const bool allowUpdate = b.topologyId != 0;
+        if (m_streamTriangles[b.slot] != b.triangles || m_streamAllowsUpdate[b.slot] != allowUpdate ||
+            m_streamVertices[b.slot] != b.vertexCount || m_streamIndexed[b.slot] != b.indices.valid())
         {
             D3D12_RAYTRACING_GEOMETRY_DESC gd{};
             gd.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
             gd.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
             gd.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
-            gd.Triangles.VertexCount = b.triangles * 3;
+            gd.Triangles.VertexCount = b.vertexCount;
+            gd.Triangles.IndexFormat = b.indices.valid() ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_UNKNOWN;
+            gd.Triangles.IndexCount = b.indices.valid() ? b.triangles * 3 : 0;
             gd.Triangles.VertexBuffer.StrideInBytes = 32;
             D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
             in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
             in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+            if (allowUpdate) in.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
             in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
             in.NumDescs = 1;
             in.pGeometryDescs = &gd;
@@ -2953,7 +3012,11 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
             m_device.d3d()->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
             m_streamBytes[b.slot] = (info.ResultDataMaxSizeInBytes + 255) / 256 * 256;
             m_streamTriangles[b.slot] = b.triangles;
-            m_streamScratchBytes = std::max<uint64_t>(m_streamScratchBytes, (info.ScratchDataSizeInBytes + 255) / 256 * 256);
+            m_streamVertices[b.slot] = b.vertexCount;
+            m_streamIndexed[b.slot] = b.indices.valid();
+            m_streamAllowsUpdate[b.slot] = allowUpdate;
+            m_streamScratchBytes = std::max<uint64_t>(m_streamScratchBytes,
+                (std::max(info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes) + 255) / 256 * 256);
         }
         b.offset = total;
         m_streamOffset[b.slot] = total;
@@ -2963,6 +3026,17 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
     {
         if (m_streamPool.resource) m_device.deferRelease(m_streamPool.resource);
         m_streamPool = createBuffer(total, true, true, L"RT stream BLAS pool");
+        ++m_streamPoolGeneration;
+    }
+    m_stats.streamBlasBytes = total;
+    const uint64_t poolGeneration = m_streamPoolGeneration;
+    for (StreamBuild& b : builds)
+    {
+        const StreamBuilt& old = m_streamBuilt[b.slot];
+        b.update = b.topologyId && old.topologyId == b.topologyId && old.poolGeneration == poolGeneration &&
+                   old.offset == b.offset && old.triangles == b.triangles && old.vertices == b.vertexCount && old.indexed == b.indices.valid();
+        if (b.update) ++m_stats.streamRefits;
+        else ++m_stats.streamBuilds;
     }
     const uint64_t scratchStride = std::max<uint64_t>(m_streamScratchBytes, 256);
     if (m_streamScratch.bytes < scratchStride * builds.size())
@@ -2980,7 +3054,7 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
         d.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE | D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE;
         d.AccelerationStructure = m_streamPool.address() + builds[j].offset;
         slot[m_dynamicCountNow + j] = d;
-        m_streamsNow.push_back({ builds[j].slot, builds[j].vertices });
+        m_streamsNow.push_back({ builds[j].slot, builds[j].vertices, builds[j].indices });
     }
     m_dynamicCountNow += (uint32_t)builds.size();
     RenderGraph& g = fc.graph;
@@ -2989,9 +3063,16 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
     m_frame.streamPool = pool;
     g.addPass("r.as.streams", QueueType::Compute,
               [&](PassBuilder& b) {
-                  for (const StreamBuild& s : builds) b.use(s.vertices, Use::AccelerationStructureInput);
+                  for (const StreamBuild& s : builds) { b.use(s.vertices, Use::AccelerationStructureInput); if (s.indices.valid()) b.use(s.indices, Use::AccelerationStructureInput); }
                   b.use(pool, Use::AccelerationStructureWrite);
+                  if (std::any_of(builds.begin(), builds.end(), [](const StreamBuild& s) { return s.update; }))
+                      b.use(pool, Use::AccelerationStructureRead); // in-place refit's source and destination
                   b.use(scratch, Use::AccelerationStructureScratch);
+                  b.onSubmitted([this, builds, poolGeneration](Queue&, uint64_t) {
+                      std::fill(std::begin(m_streamBuilt), std::end(m_streamBuilt), StreamBuilt{});
+                      for (const StreamBuild& s : builds)
+                          m_streamBuilt[s.slot] = {s.topologyId, poolGeneration, s.offset, s.triangles, s.vertexCount, s.indices.valid()};
+                  });
               },
               [builds, pool, scratch, scratchStride](PassContext& c) {
                   const D3D12_GPU_VIRTUAL_ADDRESS poolAddress = c.resource(pool)->GetGPUVirtualAddress(), scratchAddress = c.resource(scratch)->GetGPUVirtualAddress();
@@ -3001,16 +3082,25 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
                       gd.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
                       gd.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
                       gd.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
-                      gd.Triangles.VertexCount = builds[j].triangles * 3;
+                      gd.Triangles.VertexCount = builds[j].vertexCount;
+                      gd.Triangles.IndexFormat = builds[j].indices.valid() ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_UNKNOWN;
+                      gd.Triangles.IndexCount = builds[j].indices.valid() ? builds[j].triangles * 3 : 0;
+                      gd.Triangles.IndexBuffer = builds[j].indices.valid() ? c.resource(builds[j].indices)->GetGPUVirtualAddress() : 0;
                       gd.Triangles.VertexBuffer.StartAddress = c.resource(builds[j].vertices)->GetGPUVirtualAddress();
                       gd.Triangles.VertexBuffer.StrideInBytes = 32;
                       D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
                       d.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
                       d.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+                      if (builds[j].topologyId) d.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
                       d.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
                       d.Inputs.NumDescs = 1;
                       d.Inputs.pGeometryDescs = &gd;
                       d.DestAccelerationStructureData = poolAddress + builds[j].offset;
+                      if (builds[j].update)
+                      {
+                          d.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
+                          d.SourceAccelerationStructureData = d.DestAccelerationStructureData;
+                      }
                       d.ScratchAccelerationStructureData = scratchAddress + j * scratchStride;
                       c.cmd->BuildRaytracingAccelerationStructure(&d, 0, nullptr);
                   }

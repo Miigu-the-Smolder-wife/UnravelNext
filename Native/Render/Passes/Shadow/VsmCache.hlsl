@@ -38,8 +38,8 @@
 //           N = floor(e texel / (B x windChangeFactor(dt))) frames (1..64), each page on its own frame of the N (a hash
 //           of its slot): the shadow of a wind-moved caster is never more than e texels behind its geometry.
 // Static / dynamic pages (shadow.vsm.static_separate, P[4].w bit 0; the reference's r.Shadow.Virtual.Cache.StaticSeparate).
-// Every caster is in one of two sets: movable (Scene.hlsli INSTANCE_MOVABLE_FLAGS, a bone palette, morph or terrain patch,
-// or an instance past the scene's uploaded ones) or not. A sun page has a static copy (the casters that are not movable,
+// Every caster is in one of two sets: movable (Scene.hlsli instanceShadowMovable:
+// actual rigid motion, intrinsic deformation, or runtime/GPU slot) or not. A sun page has a static copy (the casters that are not movable,
 // in the static atlas) and its sampled page = that copy merged with the movable casters' raster. A changed caster that
 // is movable now and was when the page was drawn touches only the second part: its sphere carries bit 6 beside the
 // change code, MODE 2 marks the pages under it VSM_FLAG_STALE_DYNAMIC, and MODE 3 keeps such a page (its physical page
@@ -112,8 +112,7 @@ void main(uint i : SV_DispatchThreadID)
     const uint castMask = INSTANCE_CAST_SHADOW | INSTANCE_HIDDEN, castFlags = inst.flags & castMask;
     // static_separate: the caster's set (V draws the same sets: VisibilityCommon.hlsli instanceInSet)
     const bool separate = (P[4].w & 1u) != 0;
-    const bool movable = separate && ((inst.flags & INSTANCE_MOVABLE_FLAGS) != 0 || inst.bonePalette != UNX_NONE || inst.morph != UNX_NONE ||
-                                      inst.patch != UNX_NONE || i >= P[5].w);
+    const bool movable = separate && instanceShadowMovable(inst, i, P[5].w);
     const uint4 now = uint4(inst.transformRevision, inst.deformRevision, castFlags | (movable ? VSM_CASTER_MOVABLE : 0u), 1);
     const uint4 last = state[i];
     state[i] = now;

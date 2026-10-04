@@ -135,6 +135,7 @@ typedef struct UnxRendererDesc
 } UnxRendererDesc;
 
 UNX_API int32_t UNX_CALL UnxRendererCreate(const UnxRendererDesc* desc, UnxRenderer* renderer);
+// An issued handle already retired by device shutdown or another destroy is a successful no-op.
 UNX_API int32_t UNX_CALL UnxRendererDestroy(UnxRenderer renderer);
 
 // Scene content (before UnxSceneCommit). Indices returned through *index are dense and in call order per kind.
@@ -998,7 +999,11 @@ typedef struct UnxPassTiming
     char name[48];              // UTF-8, truncated to 47 bytes
     double ms;
 } UnxPassTiming;
-// Writes min(capacity, passes) entries; *count receives the frame's pass count.
+// Production hosts measure frame/queue time by default. Detailed pass recording is opt-in and starts with the next
+// recorded frame; completed detailed results become available after the in-flight slots retire. Reading pass timings
+// also opts in, so existing inspectors continue to collect future detailed frames. Zero entries means no detailed data.
+UNX_API int32_t UNX_CALL UnxFrameSetPassTimingEnabled(UnxRenderer r, uint32_t enabled);
+// Writes min(capacity, passes) entries; *count receives the completed frame's detailed sample count.
 UNX_API int32_t UNX_CALL UnxFramePassTimingsLatest(UnxRenderer r, UnxPassTiming* passes, uint32_t capacity, uint32_t* count);
 
 // ---- The picture's settings a game changes while it runs (optional exports within ABI 6; after commit, any time). Each

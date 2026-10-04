@@ -3,6 +3,7 @@
 // the total and the draw arguments (vertices = 3 x triangles, capped at the capacity; a cut is counted), and the range of
 // triangles drawn before but not now, which FluidTail.hlsl retires.
 #include "FluidSurface.hlsli"
+#include "WaterLinear.hlsli"
 
 groupshared uint g_scan[1024];
 [numthreads(1024, 1, 1)]
@@ -28,9 +29,15 @@ void main(uint t : SV_GroupThreadID)
         if (carry > fsMaxTriangles()) counters.InterlockedAdd(4 * FS_COUNTER_OVERFLOW, 1);
         const uint drawn = min(carry, fsMaxTriangles());
         draw.Store4(0, uint4(drawn * 3, 1, 0, 0));
-        const uint before = fsFirstRecord() ? fsMaxTriangles() : counters.Load(4 * FS_COUNTER_DRAWN);
+        // Finite tail points follow the fluid even after an origin rebase; never
+        // leave an old point far from the current geometry in a refitted BLAS.
+        const uint before = fsFirstRecord() || fsRefittableTail() ? fsMaxTriangles() : counters.Load(4 * FS_COUNTER_DRAWN);
         counters.Store(4 * FS_COUNTER_TAIL_FROM, drawn);
         counters.Store(4 * FS_COUNTER_TAIL_TO, max(before, drawn));
         counters.Store(4 * FS_COUNTER_DRAWN, drawn);
+        const uint retire = max(before, drawn) - drawn;
+        const uint groups = retire / 256 + (retire % 256 != 0 ? 1u : 0u);
+        RWByteAddressBuffer dispatch = ResourceDescriptorHeap[P[6].x];
+        dispatch.Store3(24, uint3(min(groups, WATER_LINEAR_ROW), max(1u, (groups + WATER_LINEAR_ROW - 1) / WATER_LINEAR_ROW), 1));
     }
 }

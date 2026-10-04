@@ -92,7 +92,7 @@ void particleLights(FramePassContext& fc, const ViewResources& main)
     fx::ParticleSystem* system = fx::findParticles(*fc.trackState);
     fx::ParticleRenderInputs in;
     if (system) in = system->renderInputs(fc.graph, fc.frame.frameIndex);
-    const fx::ParticleSystem::LightTables* t = system && in.valid ? &system->lightTables() : nullptr;
+    const fx::ParticleSystem::LightTables* t = in.valid ? in.lights.get() : nullptr;
     uint32_t slots = t ? (uint32_t)t->slotChunks.size() : 0;
     s.particleLights = fc.quality.has("fx.particles.particle_lights_max") ? (uint32_t)std::clamp<int64_t>(fc.quality.integer("fx.particles.particle_lights_max"), 0, 4096) : 0u;
     if (slots > range.capacity)

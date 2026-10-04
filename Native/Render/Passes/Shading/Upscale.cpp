@@ -13,6 +13,7 @@
 // history. Cost per output pixel is fixed (9 colour + 9 depth loads, 1 motion load, 5 bilinear history taps); the
 // shading, reflections, GI screen passes, shadows' projections and resolve run on 0.44 of the output pixels (2/3 height).
 #include "unx/shading/Upscale.h"
+#include "TsrRejectPolicy.h"
 
 #include "unx/core/Config.h"
 #include "unx/render/Device.h"
@@ -695,7 +696,17 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
         ID3D12PipelineState* clearPso = shaders.compute("Passes/Shading/TsrClear");
         ID3D12PipelineState* dilatePso = shaders.compute("Passes/Shading/TsrDilate");
         ID3D12PipelineState* decimatePso = shaders.compute("Passes/Shading/TsrDecimate");
-        ID3D12PipelineState* rejectPso = shaders.compute("Passes/Shading/TsrReject");
+        // At 720p/960p retain the original path unless every optional input
+        // matches the measured all-input class. Availability follows the exact
+        // bindings below, including both textures of resurrection.
+        const uint32_t rejectionOptionals =
+            (flickering && moireError.valid() ? detail::TsrRejectMoire : 0u) |
+            (thinGeometry && relaxation.valid() ? detail::TsrRejectThin : 0u) |
+            (layerMotion && layers.valid() ? detail::TsrRejectLayers : 0u) |
+            (canResurrect && resurrectionMeasure.valid() && resurrectedGuide.valid() ? detail::TsrRejectResurrection : 0u);
+        const bool fusedRejection = detail::useFusedTsrRejection(w, h, rejectionOptionals);
+        ID3D12PipelineState* rejectPrefixPso = fusedRejection ? shaders.compute("Passes/Shading/TsrRejectPrefix") : nullptr;
+        ID3D12PipelineState* rejectPso = shaders.compute(fusedRejection ? "Passes/Shading/TsrRejectFromPrefix" : "Passes/Shading/TsrReject");
         ID3D12PipelineState* aaPso = shaders.compute("Passes/Shading/TsrAntiAlias");
         ID3D12PipelineState* updatePso = shaders.compute("Passes/Shading/TsrUpdate");
         const uint32_t updateFlags = (fc.quality.has("output.upscale_tsr_kernel_by_samples") && fc.quality.boolean("output.upscale_tsr_kernel_by_samples") ? 2u : 0u) |
@@ -831,6 +842,22 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                           c.computeConstants(k, 12);
                           c.cmd->Dispatch((w + 15) / 16, (h + 15) / 16, 1);
                       });
+        const uint32_t rejectionBegin = g.passCount();
+        const TextureRef rejectionPrefix = fusedRejection
+            ? g.createTexture({ "m.tsr.rejection prefix", w + 10, h + 10, 1, 1, DXGI_FORMAT_R32G32B32A32_UINT }) : TextureRef{};
+        if (fusedRejection)
+            g.addPass("m.tsr.reject.prepare", QueueType::Graphics,
+                      [&](PassBuilder& b) {
+                          b.use(src, Use::SrvCompute);
+                          b.use(reprojected, Use::SrvCompute);
+                          b.use(rejectionPrefix, Use::UavCompute);
+                      },
+                      [=](PassContext& c) {
+                          const uint32_t k[8] = { c.srv(src), c.srv(reprojected), c.uav(rejectionPrefix), w, h, 0, 0, 0 };
+                          c.cmd->SetPipelineState(rejectPrefixPso);
+                          c.computeConstants(k, 8);
+                          c.cmd->Dispatch((w + 25) / 16, (h + 25) / 16, 1);
+                      });
         g.addPass("m.tsr.reject", QueueType::Graphics,
                   [&](PassBuilder& b) {
                       b.use(src, Use::SrvCompute);
@@ -839,6 +866,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       b.use(rejection, Use::UavCompute);
                       b.use(nextGuide, Use::UavCompute);
                       b.use(aaInput, Use::UavCompute);
+                      if (fusedRejection) b.use(rejectionPrefix, Use::SrvCompute);
                       if (flickering) b.use(moireError, Use::SrvCompute);
                       if (layerMotion) b.use(layers, Use::SrvCompute);
                       if (thinGeometry) b.use(relaxation, Use::SrvCompute);
@@ -853,11 +881,15 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       const uint32_t k[16] = { c.srv(src), c.srv(reprojected), c.srv(decimateMask), c.uav(rejection), c.uav(nextGuide), c.uav(aaInput), w, h,
                                                asUint(theoreticBlend), flickering ? c.srv(moireError) : none,
                                                thinGeometry ? c.srv(relaxation) : none, layerMotion ? c.srv(layers) : none,
-                                               canResurrect ? c.srv(resurrectionMeasure) : none, canResurrect ? c.srv(resurrectedGuide) : none, 0, 0 };
+                                               canResurrect ? c.srv(resurrectionMeasure) : none, canResurrect ? c.srv(resurrectedGuide) : none,
+                                               fusedRejection ? c.srv(rejectionPrefix) : none, 0 };
                       c.cmd->SetPipelineState(rejectPso);
                       c.computeConstants(k, 16);
                       c.cmd->Dispatch((w + 15) / 16, (h + 15) / 16, 1);
                   });
+        // Preserve the existing profiler meaning: rejection includes preparation
+        // and its barrier, not merely the shorter tail kernel.
+        if (fusedRejection) g.joinPasses(rejectionBegin, 2, "m.tsr.reject");
         g.addPass("m.tsr.aa", QueueType::Graphics,
                   [&](PassBuilder& b) {
                       b.use(aaInput, Use::SrvCompute);

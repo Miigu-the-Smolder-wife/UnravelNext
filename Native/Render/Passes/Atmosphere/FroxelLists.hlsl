@@ -50,8 +50,11 @@
 groupshared uint gs_candidates[FROXEL_CANDIDATES];
 groupshared uint gs_candidateCount;
 groupshared uint gs_batchBits[2];
-#if MODE == 1
+#if MODE == 1 && !defined(FROXEL_UNORDERED)
 groupshared uint gs_keys[64 * FROXEL_SORTED_MAX];  // per slice, descending: importance code << 16 | (0xFFFF - light)
+// Adjacent lanes own adjacent slices. Interleave them at each sorted position;
+// a slice-major stride of 96 words put all 32 lanes on one shared-memory bank.
+#define FROXEL_KEY(slice, entry) gs_keys[(entry) * 64u + (slice)]
 #endif
 groupshared uint gs_listed;
 groupshared uint gs_cut, gs_dropped, gs_max;
@@ -84,10 +87,14 @@ bool froxelReaches(GpuLight l, uint li, bool last, float z0, float z1, float3 ce
         }
     }
     if (!last && (type == LIGHT_RECT || type == LIGHT_DISK) && dot(v, l.forward) < -radius) return false;
+#if defined(FROXEL_UNORDERED)
+    key = 0xFFFFu - li;  // only the light-index bits are consumed
+#else
     const float dn = max(dist - radius, 0.0);
     const float extent = max(l.size.x, l.size.y);
     const float importance = froxelPeakIntensity(l) * froxelWindow(l, dn) / (dn * dn + 0.25 * radius * radius + extent * extent);
     key = importanceCode(importance) << 16 | (0xFFFFu - li);
+#endif
     return true;
 }
 
@@ -242,7 +249,13 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             ByteAddressBuffer blocks = ResourceDescriptorHeap[P[1].x];
             first = buffer.Load(g.headerBase + froxel * 8) + blocks.Load((froxel >> 11) * 4);
         }
+#if defined(FROXEL_UNORDERED)
+        // No consumer reads the sorted head. Specialize before compilation so the
+        // 24 KB sort array and importance calculations do not occupy this path.
+        unordered = true;
+#else
         unordered = (P[2].x & 1u) != 0;
+#endif
         fallback = buffer.Load(28) > g.capacity || P[1].y != 0;  // P[1].y: tests force the fallback
         if (fallback)
         {
@@ -257,7 +270,6 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             first = sceneAlloc.Load(froxel * 4) + blocks.Load(8192 + (froxel >> 11) * 4);
         }
         limit = first < g.capacity ? g.capacity - first : 0u;
-        const uint keys = s * FROXEL_SORTED_MAX;
 #endif
         for (uint j = 0; j < candidates; ++j)
         {
@@ -274,18 +286,20 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
             // 'first' and listMax is even, so no word is shared with another thread or with the head).
             uint leaving = 0xFFFFFFFFu;  // key leaving the head this step (none)
             if (unordered) leaving = key & 0xFFFFu;  // no head: every light goes straight into the run, in candidate order
-            else if (sorted == listMax && key <= gs_keys[keys + sorted - 1]) leaving = key;
+#if !defined(FROXEL_UNORDERED)
+            else if (sorted == listMax && key <= FROXEL_KEY(s, sorted - 1)) leaving = key;
             else
             {
-                if (sorted == listMax) leaving = gs_keys[keys + sorted - 1];
+                if (sorted == listMax) leaving = FROXEL_KEY(s, sorted - 1);
                 uint at = sorted < listMax ? sorted++ : listMax - 1;
-                while (at > 0 && gs_keys[keys + at - 1] < key)
+                while (at > 0 && FROXEL_KEY(s, at - 1) < key)
                 {
-                    gs_keys[keys + at] = gs_keys[keys + at - 1];
+                    FROXEL_KEY(s, at) = FROXEL_KEY(s, at - 1);
                     --at;
                 }
-                gs_keys[keys + at] = key;
+                FROXEL_KEY(s, at) = key;
             }
+#endif
             if (leaving != 0xFFFFFFFFu)
             {
                 const uint pos = sorted + stored;  // tail position within the run (sorted == listMax here; no head: 0)
@@ -335,13 +349,15 @@ void main(uint3 gid : SV_GroupID, uint s : SV_GroupIndex)
     const uint storedCount = min(listed, limit);
     buffer.Store2(g.headerBase + froxel * 8, uint2(first, storedCount));
     // The head from groupshared memory (its words are not shared with the tail: listMax is even).
-    const uint headCount = min(sorted, limit), keys = s * FROXEL_SORTED_MAX;
+#if !defined(FROXEL_UNORDERED)
+    const uint headCount = min(sorted, limit);
     for (uint e = 0; e < headCount; e += 2)
     {
-        const uint a = froxelEntryOf(0xFFFFu - (gs_keys[keys + e] & 0xFFFFu));
-        const uint b = e + 1 < headCount ? froxelEntryOf(0xFFFFu - (gs_keys[keys + e + 1] & 0xFFFFu)) : 0u;
+        const uint a = froxelEntryOf(0xFFFFu - (FROXEL_KEY(s, e) & 0xFFFFu));
+        const uint b = e + 1 < headCount ? froxelEntryOf(0xFFFFu - (FROXEL_KEY(s, e + 1) & 0xFFFFu)) : 0u;
         buffer.Store(g.indexBase + (first + e) * 2, a | b << 16);
     }
+#endif
     // The tail's last entry when its word is half full.
     if (stored != 0 && (stored & 1) != 0) buffer.Store(g.indexBase + (first + sorted + stored - 1) * 2, pendingEntry);
 #endif

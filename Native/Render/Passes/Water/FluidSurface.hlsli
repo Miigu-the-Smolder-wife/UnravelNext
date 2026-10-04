@@ -16,7 +16,7 @@
 //        negated in the output's; an odd count also reverses each triangle's winding: CCW outside stays CCW outside)
 //   P[7] particle velocity offset (bytes; 0xFFFFFFFF = none), velocity scale (particle units -> m/s), previous slot
 //        offset (bytes to the uint index of the particle in the previous buffer; 0xFFFFFFFF = the same index), first
-//        record (1: every triangle past the drawn ones is retired, FluidTail.hlsl)
+//        flags (bit 0: first submitted record; bit 1: finite degenerate tail for DXR refits)
 //   P[9] xyz: the frame velocity (m/s) the particle velocities are relative to (an anchored physics domain; 0 otherwise)
 // Nodes hold 4 uints: density (fixed point 2^20) and the density-weighted velocity (signed, m/s x 2^16) for the surface
 // velocities (motion vectors: V's triangle stream, request 20260926_W_gpu_triangle_stream.md).
@@ -50,7 +50,8 @@ uint3 fsBlocks() { return P[2].xyz; }
 uint fsMaxBlocks() { return P[2].w; }
 float3 fsOrigin() { return asfloat(P[3].xyz); }
 uint fsMaxTriangles() { return P[3].w; }
-bool fsFirstRecord() { return P[7].w != 0; }
+bool fsFirstRecord() { return (P[7].w & 1u) != 0; }
+bool fsRefittableTail() { return (P[7].w & 2u) != 0; }
 float3 fsAxes() { return float3((P[6].w & 1u) ? -1.0 : 1.0, (P[6].w & 2u) ? -1.0 : 1.0, (P[6].w & 4u) ? -1.0 : 1.0); }
 bool fsMirrored() { return (countbits(P[6].w & 7u) & 1u) != 0; }
 

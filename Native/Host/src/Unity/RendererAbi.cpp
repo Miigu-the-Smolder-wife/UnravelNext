@@ -157,7 +157,13 @@ UNX_API int32_t UNX_CALL UnxRendererDestroy(UnxRenderer renderer)
         {
             std::lock_guard lock(g_renderersMutex);
             auto it = g_renderers.find(renderer);
-            if (it == g_renderers.end()) fail("unknown renderer handle %llu", (unsigned long long)renderer);
+            if (it == g_renderers.end())
+            {
+                // Unity's device callback may have already retired this owner
+                // before managed Dispose. Issued identities are never reused.
+                if (renderer != 0 && renderer < g_nextRenderer) return;
+                fail("unknown renderer handle %llu", (unsigned long long)renderer);
+            }
             r = std::move(it->second);
             g_renderers.erase(it);
         }
@@ -363,12 +369,31 @@ static scene::Instance toInstance(const UnxInstanceDesc* d)
 
 namespace
 {
-// V3: NV_StreamExecutor callbacks on a renderer (user = its HostRenderer; the bridge detaches before destroying it).
+// Unity can destroy the device before managed OnDisable detaches NativeVfx. The
+// callback identity is a never-reused renderer handle, not a borrowed HostRenderer
+// address. Each call acquires the registered owner or reports a closed executor.
+// Returned CPU arrays outlive that owner: NativeVfx copies them after we return.
+std::shared_ptr<HostRenderer> vfxOwner(void* user) { return find(static_cast<UnxRenderer>(reinterpret_cast<uintptr_t>(user))); }
+struct VfxCpuSnapshot
+{
+    fx::TickReadback readback;
+    std::vector<NV_StreamParticle> particles;
+    std::vector<NV_StreamParticleOrientation> orientations;
+};
+std::mutex g_vfxSnapshotsMutex;
+std::map<std::pair<UnxRenderer, uint64_t>, std::shared_ptr<VfxCpuSnapshot>> g_vfxSnapshots;
+std::shared_ptr<VfxCpuSnapshot> vfxSnapshot(void* user, uint64_t stream)
+{
+    std::lock_guard lock(g_vfxSnapshotsMutex);
+    auto& snapshot = g_vfxSnapshots[{ static_cast<UnxRenderer>(reinterpret_cast<uintptr_t>(user)), stream }];
+    if (!snapshot) snapshot = std::make_shared<VfxCpuSnapshot>();
+    return snapshot;
+}
 // Result codes of NativeVfx.h (NV_OK, NV_ARGUMENT, NV_INTERNAL; the stream header does not carry them).
 constexpr int32_t NV_OK = 0, NV_ARGUMENT = 1, NV_INTERNAL = 10;
 int32_t vfxSubmitCallback(void* user, const uint8_t* packet, uint64_t bytes)
 {
-    try { static_cast<HostRenderer*>(user)->vfxSubmit(packet, bytes); }
+    try { vfxOwner(user)->vfxSubmit(packet, bytes); }
     catch (const std::exception& e) { logf("UnravelNext FX executor submit: %s\n", e.what()); }
     return NV_OK;  // a failure is reported by the next readback (the commit must not fail)
 }
@@ -377,7 +402,13 @@ int32_t vfxReadbackCallback(void* user, uint64_t stream, uint64_t generation, ui
     try
     {
         if (!output || output->size < sizeof(NV_StreamReadback)) return NV_ARGUMENT;
-        const fx::TickReadback& r = static_cast<HostRenderer*>(user)->vfxReadback(stream, generation, tick);
+        output->events = nullptr;
+        output->event_count = 0;
+        output->counters = {};
+        auto owner = vfxOwner(user);
+        auto snapshot = vfxSnapshot(user, stream);
+        snapshot->readback = owner->vfxReadback(stream, generation, tick);
+        const fx::TickReadback& r = snapshot->readback;
         output->counters = r.counters;
         output->events = r.events.data();
         output->event_count = r.events.size();
@@ -394,7 +425,12 @@ int32_t vfxCheckpointOrientationsCallback(void* user, uint64_t stream, uint64_t 
     try
     {
         if (!records || !count) return NV_ARGUMENT;
-        const std::vector<NV_StreamParticleOrientation>& r = static_cast<HostRenderer*>(user)->vfxCheckpointOrientations(stream, generation, tick);
+        *records = nullptr;
+        *count = 0;
+        auto owner = vfxOwner(user);
+        auto snapshot = vfxSnapshot(user, stream);
+        snapshot->orientations = owner->vfxCheckpointOrientations(stream, generation, tick);
+        const auto& r = snapshot->orientations;
         *records = r.data();
         *count = r.size();
         return NV_OK;
@@ -411,7 +447,12 @@ int32_t vfxCheckpointCallback(void* user, uint64_t stream, uint64_t generation, 
     try
     {
         if (!records || !count) return NV_ARGUMENT;
-        const std::vector<NV_StreamParticle>& r = static_cast<HostRenderer*>(user)->vfxCheckpoint(stream, generation, tick);
+        *records = nullptr;
+        *count = 0;
+        auto owner = vfxOwner(user);
+        auto snapshot = vfxSnapshot(user, stream);
+        snapshot->particles = owner->vfxCheckpoint(stream, generation, tick);
+        const auto& r = snapshot->particles;
         *records = r.data();
         *count = r.size();
         return NV_OK;
@@ -422,7 +463,13 @@ int32_t vfxCheckpointCallback(void* user, uint64_t stream, uint64_t generation, 
         return NV_INTERNAL;
     }
 }
-void vfxDetachCallback(void*, uint64_t) {}
+void vfxDetachCallback(void* user, uint64_t stream)
+{
+    // NativeVfx's StreamLink calls detach when its last retained view releases it.
+    // Only CPU arrays live here: this must never keep Unity's device alive.
+    std::lock_guard lock(g_vfxSnapshotsMutex);
+    g_vfxSnapshots.erase({ static_cast<UnxRenderer>(reinterpret_cast<uintptr_t>(user)), stream });
+}
 } // namespace
 
 UNX_API int32_t UNX_CALL UnxRendererQualityOverride(UnxRenderer r, const char* utf8Assignment)
@@ -1005,7 +1052,7 @@ UNX_API int32_t UNX_CALL UnxVfxStreamExecutor(UnxRenderer r, void* executor)
         e.size = sizeof(NV_StreamExecutor);
         e.version = NV_STREAM_EXECUTOR_MESH_ORIENTATION;  // heightfield sections, World wind turbulence and mesh particle
                                                           // orientation (FX ParticleSystem, Particles.hlsli / MeshOrientation.hlsli)
-        e.user = h.get();
+        e.user = reinterpret_cast<void*>(static_cast<uintptr_t>(r));
         e.submit = vfxSubmitCallback;
         e.readback = vfxReadbackCallback;
         e.checkpoint = vfxCheckpointCallback;
@@ -1291,11 +1338,18 @@ UNX_API int32_t UNX_CALL UnxFrameRenderStandalone(UnxRenderer r, uint64_t ticket
     });
 }
 
+UNX_API int32_t UNX_CALL UnxFrameSetPassTimingEnabled(UnxRenderer r, uint32_t enabled)
+{
+    return call([&] { if (enabled > 1) fail("pass timing enabled must be 0 or 1"); find(r)->setPassTimingEnabled(enabled != 0); });
+}
+
 UNX_API int32_t UNX_CALL UnxFramePassTimingsLatest(UnxRenderer r, UnxPassTiming* passes, uint32_t capacity, uint32_t* count)
 {
     return call([&] {
         if (!count || (capacity && !passes)) fail("pass timing output is null");
-        const FrameStats s = find(r)->latestStats();
+        const auto renderer = find(r);
+        renderer->setPassTimingEnabled(true);
+        const FrameStats s = renderer->latestStats();
         *count = (uint32_t)s.passMs.size();
         for (uint32_t i = 0; i < capacity && i < s.passMs.size(); ++i)
         {
@@ -1563,7 +1617,7 @@ UNX_API int32_t UNX_CALL UnxFrameGraphStatsLatest(UnxRenderer r, UnxFrameGraphSt
         if (!v2 && !(stats->size == offsetof(UnxFrameGraphStats, queues) && stats->version == 1))
             fail("UnxFrameGraphStats ABI mismatch: size %u version %u, native %zu version 2 (or %zu version 1)", stats->size, stats->version, sizeof(UnxFrameGraphStats),
                  offsetof(UnxFrameGraphStats, queues));
-        const FrameStats s = find(r)->latestStats();
+        const FrameStats s = find(r)->latestStats(false);
         const GraphFrameStats& g = s.graph;
         if (v2)
             for (uint32_t q = 0; q < 2; ++q)
@@ -1614,7 +1668,7 @@ UNX_API int32_t UNX_CALL UnxFrameStatsLatest(UnxRenderer r, UnxFrameStats* stats
 {
     return call([&] {
         requireStruct(stats, "UnxFrameStats");
-        const FrameStats s = find(r)->latestStats();
+        const FrameStats s = find(r)->latestStats(false);
         stats->frameIndex = s.frameIndex;
         stats->gpuMs = s.gpuMs;
         stats->cpuRecordMs = s.cpuRecordMs;

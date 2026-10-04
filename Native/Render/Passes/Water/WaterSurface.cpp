@@ -26,7 +26,8 @@ constexpr uint32_t kSecondaryViews = 8;  // views without identity (planar refle
 constexpr uint32_t kMaxLevels = 15, kPlanarMax = 4, kOceanOffset = kSlots * 16 + 4 * (1 + kMaxLevels) + 48 * kPlanarMax, kOceanBytes = 96;
 // Then the streams' flow block (WaterFlow.hlsli, WATER_FLOW_OFFSET): 80 B per slot.
 constexpr uint32_t kFlowOffset = kOceanOffset + kOceanBytes, kFlowBytes = 80;
-constexpr uint32_t kTableBytes = kFlowOffset + kSlots * kFlowBytes;
+constexpr uint32_t kIndicesOffset = kFlowOffset + kSlots * kFlowBytes;
+constexpr uint32_t kTableBytes = kIndicesOffset + kSlots * 4;
 // The cost rule's terms [measured, RTX 4080, 4K W gate (interior scene, basin 3 m / 12 m: 506,640 / 892,079 water
 // samples), sums of pass medians over 300 frames, camera on vs off, 2026-09-27]:
 //   saved per sample served by the camera (its reflection job in R's ray passes + its share of the surface passes):
@@ -244,11 +245,12 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                   });
         debug.status = false;
     }
-    std::vector<BufferRef> vertices;
+    std::vector<BufferRef> vertices, indices;
     std::vector<uint32_t> materials;
     for (uint32_t s : slots)
     {
         vertices.push_back(r.triangleStreams[s].vertices);
+        indices.push_back(r.triangleStreams[s].indices);
         materials.push_back(r.triangleStreams[s].material);
     }
     const TextureRef vis = view.waterVis, waterDepth = view.waterDepth, depth = view.depth;
@@ -282,7 +284,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
         for (const WaterPlane& p : wp.list)
         {
             if (std::find(slots.begin(), slots.end(), p.stream) == slots.end() || planar.size() == kPlanarMax) continue;
-            const BufferRef streamVertices = r.triangleStreams[p.stream].vertices;
+            const BufferRef streamVertices = r.triangleStreams[p.stream].vertices, streamIndices = r.triangleStreams[p.stream].indices;
             // The plane's normal is the air side's: a camera under it sees the water from inside (not this path).
             const float len = length(float3{ p.plane.x, p.plane.y, p.plane.z });
             const float4 plane{ p.plane.x / len, p.plane.y / len, p.plane.z / len, p.plane.w / len };
@@ -303,13 +305,19 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                 x0 = std::min(x0, px), x1 = std::max(x1, px), y0 = std::min(y0, py), y1 = std::max(y1, py);
             }
             if (behind) x0 = 0, y0 = 0, x1 = (float)W, y1 = (float)H;
-            const int ix0 = std::max(0, (int)std::floor(x0) - 1), iy0 = std::max(0, (int)std::floor(y0) - 1);
+            int ix0 = std::max(0, (int)std::floor(x0) - 1), iy0 = std::max(0, (int)std::floor(y0) - 1);
             int ix1 = std::min((int)W, (int)std::ceil(x1) + 1), iy1 = std::min((int)H, (int)std::ceil(y1) + 1);
             if (ix1 <= ix0 || iy1 <= iy0) continue;
-            // The size in 64-pixel steps (within the view): the reflection camera's chain takes it, and the render graph's
-            // plan key its textures' sizes (the mask keeps the camera to the water's pixels).
-            ix1 = std::min((int)W, ix0 + (ix1 - ix0 + 63) / 64 * 64);
-            iy1 = std::min((int)H, iy0 + (iy1 - iy0 + 63) / 64 * 64);
+            // Snap both edges outwards. Rounding only the extent relative to an
+            // unsnapped origin still changes the texture size by a pixel whenever
+            // jitter moves that origin and the far edge is clipped to the view.
+            // That needlessly invalidates the graph's transient placement plan.
+            // The expanded rectangle remains conservative; the mask selects the
+            // same water pixels inside it.
+            ix0 = ix0 / 64 * 64;
+            iy0 = iy0 / 64 * 64;
+            ix1 = std::min((int)W, (ix1 + 63) / 64 * 64);
+            iy1 = std::min((int)H, (iy1 + 63) / 64 * 64);
             PlanarUse u{ p.stream, (uint32_t)planar.size(), { (uint32_t)ix0, (uint32_t)iy0, (uint32_t)(ix1 - ix0), (uint32_t)(iy1 - iy0) }, plane };
             const uint32_t rw = u.rect[2], rh = u.rect[3], k = u.k;
             const TextureRef scratch = g.createTexture(TextureDesc{ "w.planar scratch", rw, rh, 1, 1, DXGI_FORMAT_R8_UINT });
@@ -325,6 +333,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                       [&](PassBuilder& b) {
                           b.use(vis, Use::SrvCompute);
                           b.use(streamVertices, Use::SrvCompute);
+                          if (streamIndices.valid()) b.use(streamIndices, Use::SrvCompute);
                           b.use(scratch, Use::UavCompute);
                           b.use(stats, Use::UavCompute);
                       },
@@ -332,6 +341,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                           uint32_t kk[16];
                           std::memcpy(kk, k0, sizeof kk);
                           kk[0] = c.srv(vis), kk[1] = c.srv(streamVertices), kk[2] = c.uav(scratch), kk[3] = c.uav(stats);
+                          kk[14] = streamIndices.valid() ? c.srv(streamIndices) : gpu::kNone;
                           c.cmd->SetPipelineState(pass0);
                           c.bindFrameConstants(mainCb);
                           c.computeConstants(kk, 16);
@@ -396,6 +406,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
         if (waterDepth.valid()) b.use(waterDepth, Use::SrvCompute);
         b.use(stats, Use::UavCompute);
         for (const BufferRef& v : vertices) b.use(v, Use::SrvCompute);
+        for (const BufferRef& index : indices) if (index.valid()) b.use(index, Use::SrvCompute);
         declareGiSource(b, giSource(r), Use::SrvCompute);
         for (const TextureRef& t : { r.transmittanceLut, r.multiScatterLut, view.airVolume })
             if (t.valid()) b.use(t, Use::SrvCompute);
@@ -433,9 +444,12 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
     auto shadingConstants = [=](PassContext& c, uint32_t k[24], uint32_t first) {
         if (first)
         {
+            std::memset(tableMapped + kIndicesOffset, 0xFF, kSlots * 4);
             std::memset(tableMapped, 0xFF, kSlots * 16);  // UNX_NONE: not a W stream
             for (size_t i = 0; i < slots.size(); ++i)
             {
+                const uint32_t indexSrv = indices[i].valid() ? c.srv(indices[i]) : gpu::kNone;
+                std::memcpy(tableMapped + kIndicesOffset + 4 * slots[i], &indexSrv, 4);
                 const uint32_t row[2] = { c.srv(vertices[i]), materials[i] };
                 std::memcpy(tableMapped + 16 * slots[i], row, 8);
                 const uint32_t medium = (mediumSlots >> slots[i] & 1ull) != 0 ? 1u : gpu::kNone;

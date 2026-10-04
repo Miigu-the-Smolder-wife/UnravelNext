@@ -15,6 +15,8 @@
 #include "unx/render/Tracks.h"
 
 #include <cmath>
+#include <algorithm>
+#include <array>
 #include <cstring>
 #include <exception>
 #include <string>
@@ -101,7 +103,7 @@ int main()
     {
         const uint32_t width = 640, height = 360, capacity = 64;
         QualityConfig q = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
-        for (const char* o : { "visibility.coverage_layer = true", "visibility.occlusion_culling = false" }) q.applyOverride(o);
+        for (const char* o : { "visibility.coverage_layer = true", "visibility.occlusion_culling = true" }) q.applyOverride(o);
         // A far box (band A behind the water) and a camera looking at a tilted quad 2 m ahead.
         scene::Scene s;
         s.name = "stream coverage";
@@ -135,7 +137,15 @@ int main()
         for (const auto& t : tri)
             for (uint32_t k : t)
                 vertexData.insert(vertexData.end(), { corners[k].x, corners[k].y, corners[k].z, 1, normal.x, normal.y, normal.z, 0 });
-        const uint32_t args[4] = { 6, 1, 0, 0 };
+        // Identical quads fully behind band A and outside the view. Early stream
+        // culling must preserve precisely the records the pixel path kept.
+        for (uint32_t hidden = 0; hidden < 2; ++hidden)
+            for (const auto& t : tri)
+                for (uint32_t k : t)
+                    vertexData.insert(vertexData.end(), { corners[k].x + (hidden ? 100.0f : 0.0f), corners[k].y,
+                                                         corners[k].z + (hidden ? 0.0f : 24.0f), 1,
+                                                         normal.x, normal.y, normal.z, 0 });
+        const uint32_t args[4] = { 18, 1, 0, 0 };
         ComPtr<ID3D12Resource> vertices = filled(vertexData.data(), vertexData.size() * 4, (uint64_t)capacity * 96, L"test stream vertices");
         ComPtr<ID3D12Resource> drawArgs = filled(args, sizeof args, 16, L"test stream args");
 
@@ -152,8 +162,10 @@ int main()
         ComPtr<ID3D12Resource> tilesRb = buffer(tileCount * 32, D3D12_HEAP_TYPE_READBACK, L"test tiles"), recordsRb;
         uint64_t recordBytes = 0;
         std::vector<uint32_t> tiles, records;
-        for (uint32_t f = 0; f < 3; ++f)
+        std::vector<std::array<uint32_t, 5>> reference;
+        for (uint32_t f = 0; f < 6; ++f)
         {
+            q.applyOverride(f < 3 ? "visibility.coverage_triangle_cull = false" : "visibility.coverage_triangle_cull = true");
             FrameContext frame;
             frame.frameIndex = f;
             frame.mainView = mainView;
@@ -166,9 +178,10 @@ int main()
             st.drawArgs = graph.importBuffer(drawArgs.Get(), { "test.stream.args", 256, 0 });
             st.material = 1;
             st.maxTriangles = capacity;
-            st.boundsMin = { -0.5f, -0.3f, 1.8f }, st.boundsMax = { 0.5f, 0.3f, 2.4f };
+            st.boundsMin = { -0.5f, -0.3f, 1.8f }, st.boundsMax = { 100.5f, 0.3f, 26.4f };
             resources.triangleStreams.push_back(st);
             FramePassContext fc{ device(), graph, shaders(), q, gs, frame, resources, services, [=](const ViewDesc&) { return address; }, &trackState, 2 };
+            if (f != 0) prepareTriangleStreamDraws(fc); // direct first, GPU-count consumers on subsequent frames
             ViewResources main;
             main.view = mainView;
             main.frameConstants = address;
@@ -196,6 +209,22 @@ int main()
             device().waitIdle();
             tiles = readWords(tl, tileCount * 8);
             records = readWords(rc, poolBytes / 4);
+            if (f == 2 || f == 5)
+            {
+                std::vector<std::array<uint32_t, 5>> canonical;
+                for (uint64_t t = 0; t < tileCount; ++t)
+                {
+                    if (!tiles[8 * t + 2]) continue;
+                    for (uint32_t r = 0; r < tiles[8 * t]; ++r)
+                    {
+                        const uint32_t* rec = &records[4 * (size_t)(tiles[8 * t + 1] + r)];
+                        if ((rec[0] >> 30) == 3u) canonical.push_back({ (uint32_t)t, rec[0], rec[1], rec[2], rec[3] });
+                    }
+                }
+                std::sort(canonical.begin(), canonical.end());
+                if (f == 2) reference = std::move(canonical);
+                else CHECK(canonical == reference);
+            }
         }
 
         double expected = 0;
@@ -226,7 +255,7 @@ int main()
              (unsigned long long)streamRecords, area, expected, rounding, (unsigned long long)opaqueStream, (unsigned long long)badId);
         CHECK(streamRecords > 1000 && opaqueStream == 0 && badId == 0);
         CHECK(std::fabs(area - expected) <= rounding + 1e-4 * expected);
-        logf("PASS stream_records_are_exact\n1/1 passed\n");
+        logf("PASS stream_records_are_exact; early HiZ/frustum culling preserves every retained record bit-for-bit\n1/1 passed\n");
         return 0;
     }
     catch (const std::exception& e)

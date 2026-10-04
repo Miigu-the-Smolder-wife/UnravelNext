@@ -19,15 +19,18 @@
 // P[4] = { tile lights SRV (raw), tile shadow UAV (raw), the dispatch's first thread, page capacity }
 // P[5] = { direct list capacity, asuint(default ray end bias, m), tile tint UAV (raw; UNX_NONE: none), tinted slots of a
 //          tile (1: the sun's; CL_SLOTS: every slot's) }
-// P[6], P[7] = RtSceneSrvs
+// P[6], P[7] = RtSceneSrvs; P[8].x = compact work-list SRV (CardDirectWork.h).
 #define RT_SHADOW_TRANSMITTANCE  // (the tinted slots' rays: RayShaders.hlsli)
 #include "RayTracing/RayShaders.hlsli"
 #include "Passes/SurfaceCache/CardLighting.hlsli"
+#include "Passes/SurfaceCache/CardDirectWork.h"
 
 [shader("raygeneration")]
 void CardDirectTraceGen()
 {
-    const uint thread = DispatchRaysIndex().x + P[4].z;
+    const uint compactThread = DispatchRaysIndex().x + P[4].z;
+    ByteAddressBuffer work = ResourceDescriptorHeap[P[8].x];
+    const uint thread = clDirectWorkThread(work.Load(16 + 4 * (compactThread >> 4)), compactThread & 15u);
     const uint index = thread / CL_TRACE_THREADS, rest = thread % CL_TRACE_THREADS;
     const uint slot = rest >> 6, t = rest & 63u;
     ByteAddressBuffer select = ResourceDescriptorHeap[P[0].y];

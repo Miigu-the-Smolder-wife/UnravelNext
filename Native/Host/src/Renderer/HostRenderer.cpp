@@ -1,4 +1,5 @@
 #include "Renderer/HostRenderer.h"
+#include "Renderer/HostCpuTiming.h"
 
 #include "GpuBridge/GpuBridge.h"
 
@@ -1381,6 +1382,7 @@ void HostRenderer::setFluids(std::span<const FluidInput> fluids, const uint64_t 
         f.startResource = v.startResource;
         list->push_back(f);
     }
+    if (!list->empty()) freezeFluidPresentation(*list, stamp);
     m_fluids = list->empty() ? nullptr : std::shared_ptr<const std::vector<FramePacket::Fluid>>(std::move(list));
     std::copy(std::begin(stamp), std::end(stamp), m_fluidStamp.begin());
 }
@@ -1661,6 +1663,7 @@ std::optional<render::OceanFrame> HostRenderer::queuedOcean()
 void HostRenderer::fluidsBeforeExecute(const FramePacket& p)
 {
     m_fluidTicket = 0;
+    m_fluidReadFence = 0;
     if (!p.fluids || p.fluids->empty()) return;
     std::vector<GpuBridgeHost::GraphicsUse> uses;
     for (const FramePacket::Fluid& f : *p.fluids)
@@ -1671,13 +1674,20 @@ void HostRenderer::fluidsBeforeExecute(const FramePacket& p)
     NRC_GpuWorldStamp stamp{};
     stamp.world = p.fluidStamp[0], stamp.world_generation = p.fluidStamp[1], stamp.epoch = p.fluidStamp[2], stamp.tick = p.fluidStamp[3];
     stamp.branch = p.fluidStamp[4], stamp.phase = (uint32_t)p.fluidStamp[5];
+    // Surface reconstruction is the final reader of the physics particles.
+    // Shading, shadows and presentation read renderer-owned triangles after it.
+    // Release the producer at the graph's actual last read, not at frame end.
+    std::vector<ID3D12Resource*> resources;
+    resources.reserve(uses.size());
+    for (const auto& use : uses) resources.push_back(use.resource);
+    m_graph->fenceAfterImportedReads(resources, [this](Queue&, uint64_t fence) { m_fluidReadFence = fence; });
     m_fluidTicket = gpuBridge().prepareGraphics(uses, stamp);
 }
 
 void HostRenderer::fluidsAfterExecute()
 {
     if (!m_fluidTicket) return;
-    gpuBridge().commitGraphics(m_fluidTicket, m_device->queue(QueueType::Graphics).lastSignaled());
+    gpuBridge().commitGraphics(m_fluidTicket, m_fluidReadFence ? m_fluidReadFence : m_device->queue(QueueType::Graphics).lastSignaled());
     m_fluidTicket = 0;
 }
 
@@ -1953,17 +1963,40 @@ void HostRenderer::removeDeviceForTest()
     device->RemoveDevice();
 }
 
-FrameStats HostRenderer::latestStats() const
+void HostRenderer::setPassTimingEnabled(bool enabled)
 {
     std::lock_guard lock(m_mutex);
-    return m_stats;
+    m_passTimingEnabled = enabled;
+}
+
+FrameStats HostRenderer::latestStats(bool includePasses) const
+{
+    std::lock_guard lock(m_mutex);
+    if (includePasses) return m_stats;
+    FrameStats result;
+    result.frameIndex = m_stats.frameIndex;
+    result.gpuMs = m_stats.gpuMs;
+    result.cpuRecordMs = m_stats.cpuRecordMs;
+    result.cpuSubmitMs = m_stats.cpuSubmitMs;
+    result.passes = m_stats.passes;
+    result.renderWidth = m_stats.renderWidth;
+    result.renderHeight = m_stats.renderHeight;
+    result.graph = m_stats.graph;
+    std::copy(std::begin(m_stats.queues), std::end(m_stats.queues), std::begin(result.queues));
+    return result;
+}
+
+void HostRenderer::waitForFrameSlot()
+{
+    const uint32_t slot = (uint32_t)(m_recordedFrames % m_options.framesInFlight);
+    for (uint32_t q = 0; q < kQueueTypeCount; ++q) m_device->queue((QueueType)q).waitCpu(m_slotFence[slot][q]);
 }
 
 uint32_t HostRenderer::beginFrame(const FramePacket& p)
 {
     const uint64_t frame = m_recordedFrames;
     const uint32_t slot = (uint32_t)(frame % m_options.framesInFlight);
-    for (uint32_t q = 0; q < kQueueTypeCount; ++q) m_device->queue((QueueType)q).waitCpu(m_slotFence[slot][q]);
+    { std::lock_guard lock(m_mutex); m_profiler->setPassTimestamps(m_passTimingEnabled); }
     m_profiler->beginFrame(frame);
     if (const FrameTiming* t = m_profiler->lastCompleted())
     {
@@ -1974,7 +2007,7 @@ uint32_t HostRenderer::beginFrame(const FramePacket& p)
         m_stats.renderHeight = m_slotRenderSize[t->frame % m_options.framesInFlight][1];
         for (uint32_t q = 0; q < 2; ++q) m_stats.queues[q] = { t->queues[q].lists, t->queues[q].headMs, t->queues[q].tailMs, t->queues[q].gapMs };
         m_stats.gpuMs = t->gpuFrameMs;
-        m_stats.passes = (uint32_t)t->passes.size();
+        m_stats.passes = m_stats.graph.livePasses;
         m_stats.passMs.clear();
         for (const PassTiming& pt : t->passes) m_stats.passMs.emplace_back(pt.name, pt.durationMs());
     }
@@ -2577,8 +2610,9 @@ void HostRenderer::fxRunPending()
     if (p.pendingTicks() == 0) return;
     Queue& graphics = m_device->queue(QueueType::Graphics);
     Queue& compute = m_device->queue(QueueType::Compute);
-    // After every frame submitted so far (they read the state these ticks overwrite), before any later frame.
-    compute.waitGpu(graphics, graphics.lastSignaled());
+    // Render consumers use graph-owned snapshots. Wait only for the copy that
+    // last read authoritative state; later shading does not own that state.
+    compute.waitGpu(graphics, m_vfxFrameFence);
     if (!m_simGraph)
     {
         m_simGraph = std::make_unique<RenderGraph>(*m_device);
@@ -2590,6 +2624,22 @@ void HostRenderer::fxRunPending()
     m_simFence = compute.lastSignaled();
 }
 
+void HostRenderer::fxPresentationBeforeExecute()
+{
+    m_vfxNextFrameFence = 0;
+    if (auto* particles = fx::findParticles(m_frameRenderer->trackState()))
+        m_graph->fenceAfterImportedAccesses(particles->presentationSources(*m_graph, m_recordedFrames),
+            [this](Queue&, uint64_t fence) { m_vfxNextFrameFence = fence; });
+}
+
+void HostRenderer::fxPresentationAfterExecute()
+{
+    // No snapshot, a culled last use or an unsupported queue retains the old
+    // conservative lifetime. Failure before submission likewise uses the last
+    // actually signalled value, never an unsubmitted fence.
+    m_vfxFrameFence = m_vfxNextFrameFence ? m_vfxNextFrameFence : m_device->queue(QueueType::Graphics).lastSignaled();
+}
+
 void HostRenderer::fxFrameWait()
 {
     if (m_simFence <= m_simWaited) return;
@@ -2599,7 +2649,30 @@ void HostRenderer::fxFrameWait()
 
 void HostRenderer::vfxSubmit(const uint8_t* packet, uint64_t bytes)
 {
-    std::lock_guard lock(m_fxMutex);
+    // World publication only transfers an immutable packet. It never takes the
+    // renderer/simulation lock or waits for a GPU frame slot.
+    std::lock_guard lock(m_vfxSubmitMutex);
+    try
+    {
+        if (!packet || bytes < sizeof(NV_StreamHeader) || bytes > SIZE_MAX) fail("FX submitted packet is invalid");
+        m_vfxSubmitted.emplace_back(packet, packet + (size_t)bytes);
+    }
+    catch (const std::exception& e)
+    {
+        if (m_vfxSubmitError.empty()) m_vfxSubmitError = e.what();
+    }
+}
+
+void HostRenderer::drainVfxSubmissions()
+{
+    auto& submitted = m_vfxDraining;
+    submitted.clear();
+    {
+        std::lock_guard lock(m_vfxSubmitMutex);
+        submitted.swap(m_vfxSubmitted);
+        if (m_vfxError.empty() && !m_vfxSubmitError.empty()) m_vfxError = m_vfxSubmitError;
+    }
+    for (auto& packet : submitted)
     try
     {
         // A frame records every pending tick into one graph, and a tick reuses the readback slot of the tick one ring
@@ -2617,29 +2690,32 @@ void HostRenderer::vfxSubmit(const uint8_t* packet, uint64_t bytes)
             char name[64];
             std::snprintf(name, sizeof name, "packet_%06llu.bin", (unsigned long long)m_fxRecorded++);
             std::ofstream f(std::filesystem::path(std::string(dir, n)) / name, std::ios::binary);
-            f.write(reinterpret_cast<const char*>(packet), (std::streamsize)bytes);
+            f.write(reinterpret_cast<const char*>(packet.data()), (std::streamsize)packet.size());
         }
-        p.submit(packet, bytes);
+        p.submitOwned(std::move(packet));
     }
     catch (const std::exception& e)
     {
-        // The commit must not fail (NV_StreamExecutor contract): the next readback reports it.
+        // The stream executor reports deferred validation/recording failures at
+        // readback, preserving its existing infallible-commit contract.
         if (m_vfxError.empty()) m_vfxError = e.what();
     }
 }
 
-const fx::TickReadback& HostRenderer::vfxReadback(uint64_t stream, uint64_t generation, uint64_t tick)
+fx::TickReadback HostRenderer::vfxReadback(uint64_t stream, uint64_t generation, uint64_t tick)
 {
     std::lock_guard lock(m_fxMutex);
+    drainVfxSubmissions();
     if (!m_vfxError.empty()) fail("FX stream executor: %s", m_vfxError.c_str());
     fxRunPending();
     m_vfxReadback = fxModule().readback(stream, generation, tick);
     return m_vfxReadback;
 }
 
-const std::vector<NV_StreamParticle>& HostRenderer::vfxCheckpoint(uint64_t stream, uint64_t generation, uint64_t tick)
+std::vector<NV_StreamParticle> HostRenderer::vfxCheckpoint(uint64_t stream, uint64_t generation, uint64_t tick)
 {
     std::lock_guard lock(m_fxMutex);
+    drainVfxSubmissions();
     if (!m_vfxError.empty()) fail("FX stream executor: %s", m_vfxError.c_str());
     fxRunPending();
     fx::ParticleSystem& p = fxModule();
@@ -2650,7 +2726,7 @@ const std::vector<NV_StreamParticle>& HostRenderer::vfxCheckpoint(uint64_t strea
     return m_vfxCheckpoint;
 }
 
-const std::vector<NV_StreamParticleOrientation>& HostRenderer::vfxCheckpointOrientations(uint64_t stream, uint64_t generation, uint64_t tick)
+std::vector<NV_StreamParticleOrientation> HostRenderer::vfxCheckpointOrientations(uint64_t stream, uint64_t generation, uint64_t tick)
 {
     std::lock_guard lock(m_fxMutex);
     if (!m_vfxError.empty()) fail("FX stream executor: %s", m_vfxError.c_str());
@@ -2665,9 +2741,11 @@ const std::vector<NV_StreamParticleOrientation>& HostRenderer::vfxCheckpointOrie
 
 void HostRenderer::renderOnHost(uint64_t ticket, const HostExecute& execute)
 {
+    detail::HostCpuTiming cpuTiming;
     if (m_options.standalone) fail("renderOnHost on a standalone renderer");
     requireCommitted();
-    std::lock_guard fxLock(m_fxMutex);  // the frame's C0 ticks and particle pass use the module
+    std::lock_guard submissionLock(m_renderSubmitMutex);
+    const uint64_t timedNativeFrame = m_recordedFrames;
     std::optional<FramePacket> packet = takePacket(ticket);
     if (!packet) return;  // an older ticket already rendered, or dropped: nothing to draw
     const FramePacket& p = *packet;
@@ -2684,7 +2762,15 @@ void HostRenderer::renderOnHost(uint64_t ticket, const HostExecute& execute)
         !(format == DXGI_FORMAT_R16G16B16A16_FLOAT && od.Format == DXGI_FORMAT_R16G16B16A16_TYPELESS))
         fail("output texture format %u; the frame needs %s", (unsigned)od.Format,
              p.displayPeak > 0 ? "R16G16B16A16 FLOAT (HDR display; R10G10B10A2 UNORM too under the ST 2084 encoding)" : "R10G10B10A2 UNORM");
+    cpuTiming.mark(0);
+    waitForFrameSlot();
+    cpuTiming.mark(1);
+    std::lock_guard fxLock(m_fxMutex);
+    cpuTiming.mark(2);
+    drainVfxSubmissions();
+    cpuTiming.mark(3);
     const uint32_t slot = beginFrame(p);
+    cpuTiming.mark(4);
     TextureDesc desc;
     desc.name = "host output";
     desc.width = p.width;
@@ -2694,25 +2780,34 @@ void HostRenderer::renderOnHost(uint64_t ticket, const HostExecute& execute)
     // that layout at frame start and leaves it there.
     const TextureRef output = m_graph->importTexture(p.output, desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
     recordFrame(p, output);
+    cpuTiming.mark(5);
     Queue& graphics = m_device->queue(QueueType::Graphics);
     ID3D12Resource* hostOutput = p.output;
     graphics.setExecuteHook([&](ID3D12CommandList* list) { execute(list, hostOutput); });
     try
     {
         fxFrameWait();  // on the host's queue, in its render event
+        fxPresentationBeforeExecute();
         fluidsBeforeExecute(p);
+        cpuTiming.mark(6);
         m_graph->execute(m_profiler.get());
+        cpuTiming.mark(7);
+        fxPresentationAfterExecute();
         fluidsAfterExecute();
         photoAfterExecute();
+        cpuTiming.mark(8);
     }
     catch (...)
     {
         graphics.setExecuteHook({});
+        fxPresentationAfterExecute();
         fluidsAfterExecute();  // the admission holds the bridge's lock until committed (what ran is behind the last signal)
         throw;
     }
     graphics.setExecuteHook({});
     endFrame(slot, p.frameIndex);
+    cpuTiming.mark(9);
+    if (cpuTiming.active()) cpuTiming.finish(p.frameIndex, timedNativeFrame, p.width, p.height, m_graph->stats(), latestStats(false));
 }
 
 void HostRenderer::ensureStandaloneOutput(uint32_t width, uint32_t height, DXGI_FORMAT format)
@@ -2754,7 +2849,7 @@ void HostRenderer::ensureStandaloneOutput(uint32_t width, uint32_t height, DXGI_
 
 void HostRenderer::renderStandalone(uint64_t ticket, void* readback, size_t readbackBytes)
 {
-    std::lock_guard fxLock(m_fxMutex);
+    std::lock_guard submissionLock(m_renderSubmitMutex);
     if (!m_options.standalone) fail("renderStandalone on a renderer bound to the host's device");
     requireCommitted();
     std::optional<FramePacket> packet = takePacket(ticket);
@@ -2778,6 +2873,9 @@ void HostRenderer::renderStandalone(uint64_t ticket, void* readback, size_t read
         ++m_outputRecreations;
         if (m_standalone->output.Get() == previousOutput) ++m_outputReuses;
     }
+    waitForFrameSlot();
+    std::lock_guard fxLock(m_fxMutex);
+    drainVfxSubmissions();
     const uint32_t slot = beginFrame(p);
 
     Standalone& s = *m_standalone;
@@ -2814,6 +2912,7 @@ void HostRenderer::renderStandalone(uint64_t ticket, void* readback, size_t read
             });
     }
     fxFrameWait();
+    fxPresentationBeforeExecute();
     fluidsBeforeExecute(p);
     try
     {
@@ -2821,9 +2920,11 @@ void HostRenderer::renderStandalone(uint64_t ticket, void* readback, size_t read
     }
     catch (...)
     {
+        fxPresentationAfterExecute();
         fluidsAfterExecute();
         throw;
     }
+    fxPresentationAfterExecute();
     fluidsAfterExecute();
     photoAfterExecute();
     endFrame(slot, p.frameIndex);

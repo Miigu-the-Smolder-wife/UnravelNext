@@ -203,6 +203,7 @@ int main(int argc, char** argv)
             W_CHECK(resources.triangleStreams.size() == 1, "%zu streams for one fluid", resources.triangleStreams.size());
             const TriangleStream& st = resources.triangleStreams[0];
             maxTriangles = st.maxTriangles;
+            W_CHECK(st.fixedTopologyId != 0, "fluid finite-tail stream did not opt into DXR updates");
             W_CHECK(st.material == 1 && st.layer == 1 && st.instance == 0xFFFFFFFFu, "stream material %u layer %u instance %u", st.material, st.layer, st.instance);
             W_CHECK(maxTriangles == 2 * std::max<uint32_t>(4096, count * 5 / 4), "capacity %u for %u particles", maxTriangles, count);
             const float h = 0.025f;

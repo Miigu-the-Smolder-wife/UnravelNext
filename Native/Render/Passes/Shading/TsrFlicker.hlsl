@@ -25,7 +25,11 @@
 #include "Passes/Shading/Tsr.hlsli"
 #include "Passes/Common/Frame.hlsli"
 
-#define TILE 16
+#include "Passes/Shading/TsrTiles.h"
+#ifndef TSR_TILE
+#define TSR_TILE UNX_TSR_FLICKER_TILE
+#endif
+#define TILE TSR_TILE
 #define BORDER 9
 #define THIN_GRADIENT 0.00007  // (the reference's ValidGeometryGradientThreshold)
 #define SIDE (TILE + 2 * BORDER)
@@ -37,13 +41,14 @@
 groupshared uint gLH[CELLS];   // input luma, history luma
 groupshared uint gGB[CELLS];   // previous gradient (snorm), the clamped input's 3 x 3 range
 groupshared uint gAB[CELLS];   // stage 1 clamps; stage 3b: the history in the relaxed box, the relaxation; later: gradient variation, is-flicker
-groupshared uint gCD[CELLS];   // stage 2 clamps; later: the updated history, the current gradient (snorm)
+groupshared uint gCD[CELLS];   // stage 2 clamps; stage 5: energy/rejection medians
 groupshared uint gF[CELLS];    // filtered input, filtered history
-groupshared uint gE[CELLS];    // raw clamped energy, raw rejection
-groupshared uint gM[CELLS];    // their medians
+groupshared uint gE[CELLS];    // raw energy/rejection; stage 6: updated history/current gradient
 
 uint pack2(float a, float b) { return (uint)(saturate(a) * 65535.0 + 0.5) | ((uint)(saturate(b) * 65535.0 + 0.5) << 16); }
 float2 unpack2(uint v) { return float2(v & 0xFFFFu, v >> 16) * (1.0 / 65535.0); }
+uint2 codes2(uint v) { return uint2(v & 0xFFFFu, v >> 16); }
+uint packCodes2(uint2 v) { return v.x | (v.y << 16); }
 uint cellIndex(int2 c) { return (uint)(c.y * SIDE + c.x); }
 bool inMargin(int2 c, int margin) { return all(c >= margin) && all(c < SIDE - margin); }
 
@@ -84,30 +89,30 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     {
         const int2 c = int2(i % SIDE, i / SIDE);
         if (!inMargin(c, 1)) continue;
-        float2 lo = 1, hi = 0;
+        uint2 lo = 0xFFFFu, hi = 0;
         [unroll] for (int k = 0; k < 9; ++k)
         {
-            const float2 v = unpack2(gLH[cellIndex(c + int2(k % 3, k / 3) - 1)]);
+            const uint2 v = codes2(gLH[cellIndex(c + int2(k % 3, k / 3) - 1)]);
             lo = min(lo, v);
             hi = max(hi, v);
         }
-        const float2 own = unpack2(gLH[i]);
-        gAB[i] = pack2(clamp(own.y, lo.x, hi.x), clamp(own.x, lo.y, hi.y));  // history into the input's range, input into the history's
+        const uint2 own = codes2(gLH[i]);
+        gAB[i] = packCodes2(clamp(own.yx, lo, hi));  // history into the input's range, input into the history's
     }
     GroupMemoryBarrierWithGroupSync();
     for (i = lane; i < CELLS; i += TILE * TILE)
     {
         const int2 c = int2(i % SIDE, i / SIDE);
         if (!inMargin(c, 2)) continue;
-        float2 lo = 1, hi = 0;
+        uint2 lo = 0xFFFFu, hi = 0;
         [unroll] for (int k = 0; k < 9; ++k)
         {
-            const float2 v = unpack2(gAB[cellIndex(c + int2(k % 3, k / 3) - 1)]);
+            const uint2 v = codes2(gAB[cellIndex(c + int2(k % 3, k / 3) - 1)]);
             lo = min(lo, v);
             hi = max(hi, v);
         }
-        const float2 own = unpack2(gLH[i]);
-        gCD[i] = pack2(clamp(own.x, lo.x, hi.x), clamp(own.y, lo.y, hi.y));  // the clamped input, the clamped history
+        const uint2 own = codes2(gLH[i]);
+        gCD[i] = packCodes2(clamp(own, lo, hi));  // the clamped input, the clamped history
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -127,7 +132,7 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
             hi = max(hi, v.x);
         }
         gF[i] = pack2(blurred.x, blurred.y);
-        gGB[i] = pack2(unpack2(gGB[i]).x, hi - lo);
+        gGB[i] = (gGB[i] & 0xFFFFu) | (pack2(0, hi - lo) & 0xFFFF0000u);
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -194,7 +199,8 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
             highs[x + 1] = d;
         }
         const float2 m = median3(max(lows[0], max(lows[1], lows[2])), median3(mids[0], mids[1], mids[2]), min(highs[0], min(highs[1], highs[2])));
-        gM[i] = pack2(m.x, m.y);
+        // Stage 3 consumed the clamps; its barrier precedes this reuse.
+        gCD[i] = pack2(m.x, m.y);
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -208,7 +214,7 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
         float filteredEnergy = 0, clampBlend = 1;
         [unroll] for (int k = 0; k < 9; ++k)
         {
-            const float2 v = unpack2(gM[cellIndex(c + int2(k % 3, k / 3) - 1)]);
+            const float2 v = unpack2(gCD[cellIndex(c + int2(k % 3, k / 3) - 1)]);
             filteredEnergy = max(filteredEnergy, v.x);
             clampBlend = min(clampBlend, v.y);
         }
@@ -233,7 +239,9 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
         if (relaxed && (abs(gradient) > THIN_GRADIENT || abs(previousGradient) > THIN_GRADIENT)) withinError = false;
         const float flicker = sameSign || withinError || cut ? 0.0 : 1.0;
         gAB[i] = pack2(min(abs(previousGradient), abs(gradient)) * flicker, flicker);
-        gCD[i] = pack2(updated, gradient * 0.5 + 0.5);
+        // Stage 5 consumed raw energy/rejection. Keep medians in gCD intact
+        // while adjacent cells still read them in this stage.
+        gE[i] = pack2(updated, gradient * 0.5 + 0.5);
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -245,7 +253,7 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     [unroll] for (int y = -2; y <= 2; ++y)
         [unroll] for (int x = -2; x <= 2; ++x) contribution = max(contribution, unpack2(gAB[cellIndex(cell + int2(x, y))]));
     const uint ci = cellIndex(cell);
-    const float2 state = unpack2(gCD[ci]);
+    const float2 state = unpack2(gE[ci]);
     const float updated = state.x, gradient = state.y * 2.0 - 1.0;
     const float flicker = unpack2(gAB[ci]).y;
     const float4 history = historyTexture.Load(int3(pixel, 0));

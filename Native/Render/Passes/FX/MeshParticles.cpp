@@ -114,6 +114,9 @@ void MeshParticlePass::record(ParticleSystem& particles, FramePassContext& fc, c
     m.lastReadback = kNone;
     const GpuScene::GpuInstanceRange range = fc.scene.gpuInstanceRange();
     const ParticleRenderInputs in = range.capacity ? particles.renderInputs(fc.graph, fc.frame.frameIndex) : ParticleRenderInputs{};
+    // This is the sole GPU-instance writer. The pool's reserved capacity is not a population estimate:
+    // no orientation pair means no mesh instances, irrespective of how many sprite particles exist.
+    fc.resources.gpuInstanceClusterBound = 0;
     if (!in.valid || !in.orientation[0].valid() || !in.orientation[1].valid() || in.threads == 0)
     {
         m.drawnValid = false;  // the next frame has no drawn records of this one
@@ -122,7 +125,7 @@ void MeshParticlePass::record(ParticleSystem& particles, FramePassContext& fc, c
 
     // drawn records: one per slot of the particle capacity; a grown capacity keeps the previous frame's records (the
     // layout indices do not move), copied into the larger buffer
-    const uint32_t slots = std::max<uint32_t>(particles.capacity(), 1);
+    const uint32_t slots = std::max<uint32_t>(in.capacity, 1);
     ComPtr<ID3D12Resource> grownFrom;
     const uint32_t oldSlots = m.drawnSlots;
     if (slots > m.drawnSlots)
@@ -143,6 +146,15 @@ void MeshParticlePass::record(ParticleSystem& particles, FramePassContext& fc, c
         if (a.mesh != kNone) table.push_back({ (uint32_t)a.asset, (uint32_t)(a.asset >> 32), a.mesh, 0u });
     std::sort(table.begin(), table.end(), [](const auto& a, const auto& b) { return a[1] != b[1] ? a[1] < b[1] : a[0] < b[0]; });
     table.erase(std::unique(table.begin(), table.end(), [](const auto& a, const auto& b) { return a[0] == b[0] && a[1] == b[1]; }), table.end());
+    uint32_t maxClusters = 0;
+    for (const auto& asset : table)
+    {
+        if (asset[2] >= fc.scene.meshes().size()) fail("FX mesh asset names a missing scene mesh");
+        maxClusters = std::max(maxClusters, fc.scene.meshes()[asset[2]].clusterCount);
+    }
+    // One render thread can emit at most one instance. Include dying particles because they can remain visible
+    // at intermediate alpha, and use the complete hierarchy size: all LOD cuts fit inside this bound.
+    fc.resources.gpuInstanceClusterBound = uint64_t(std::min(in.threads, range.capacity)) * maxClusters;
     m.sizeUpload((uint32_t)table.size());
 
     // frame fraction between the previous tick's end (0) and the latest's (1), as the particle render pass
@@ -318,6 +330,7 @@ namespace unx::render::tracks
 {
 void particleMeshes(FramePassContext& fc)
 {
+    fc.resources.gpuInstanceClusterBound = 0;
     if (!fc.trackState) return;
     fx::ParticleSystem* particles = fx::findParticles(*fc.trackState);
     if (!particles) return;

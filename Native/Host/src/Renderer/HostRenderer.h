@@ -50,6 +50,7 @@ class GpuProfiler;
 namespace unx::host
 {
 class GpuBridgeHost;
+struct FluidPresentation;
 
 struct HostRendererOptions
 {
@@ -225,7 +226,8 @@ struct FramePacket
     struct Fluid
     {
         render::FluidFrame frame;
-        uint64_t currentResource = 0, startResource = 0;  // bridge resource ids (0: a standalone device)
+        uint64_t currentResource = 0, startResource = 0;  // bridge resource ids
+        std::shared_ptr<FluidPresentation> presentation;  // immutable GPU state, independent of the solver's next tick
     };
     std::shared_ptr<const std::vector<Fluid>> fluids;
     std::array<uint64_t, 6> fluidStamp{};  // NRC_GpuWorldStamp of their tick (world, generation, epoch, tick, branch, phase)
@@ -463,6 +465,9 @@ public:
         uint32_t material = 0;       // the scene material of its surface (Water class)
     };
     void setFluids(std::span<const FluidInput> fluids, const uint64_t (&stamp)[6]);
+    // The immutable publication retained by queued frames (focused lifetime tests).
+    std::shared_ptr<const std::vector<FramePacket::Fluid>> queuedFluids()
+    { std::lock_guard lock(m_mutex); return m_fluids; }
     // B7 the sea for the frames queued from now on until the next call (null: none). World coordinates; each frame takes
     // it in its own coordinates (level and lake centre less the origin shifts applied by then).
     struct OceanInput
@@ -538,7 +543,10 @@ public:
     // Standalone: records and executes on the renderer's own queue into its own output; optional blocking readback of
     // the RGB10A2 pixels.
     void renderStandalone(uint64_t ticket, void* readback, size_t readbackBytes);
-    FrameStats latestStats() const;
+    // Scalar consumers do not allocate/copy the per-pass names under the render mutex.
+    FrameStats latestStats(bool includePasses = true) const;
+    // Detailed pass timing is opt-in; list/frame timestamps remain active. Applied on the submission thread at beginFrame.
+    void setPassTimingEnabled(bool enabled);
     // Test hook: the main view's EV100 of the last recorded frame (automatic exposure's choice when the camera asked).
     float lastEv100ForTest() const;
     // The committed renderer's track state (standalone tests: E's decal set; the host ABI for decals is E's).
@@ -574,10 +582,10 @@ public:
     // submitted frame on the GPU; the next frame waits for them on the GPU. So every tick runs exactly once and the main
     // thread never waits for the render thread. Every use of the module, frames included, holds m_fxMutex.
     void vfxSubmit(const uint8_t* packet, uint64_t bytes);
-    const fx::TickReadback& vfxReadback(uint64_t stream, uint64_t generation, uint64_t tick);  // valid until the next call
-    const std::vector<NV_StreamParticle>& vfxCheckpoint(uint64_t stream, uint64_t generation, uint64_t tick);
+    fx::TickReadback vfxReadback(uint64_t stream, uint64_t generation, uint64_t tick);  // CPU snapshot copied under m_fxMutex
+    std::vector<NV_StreamParticle> vfxCheckpoint(uint64_t stream, uint64_t generation, uint64_t tick);
     // executor version 4: the orientations of the last vfxCheckpoint (same records, same order)
-    const std::vector<NV_StreamParticleOrientation>& vfxCheckpointOrientations(uint64_t stream, uint64_t generation, uint64_t tick);
+    std::vector<NV_StreamParticleOrientation> vfxCheckpointOrientations(uint64_t stream, uint64_t generation, uint64_t tick);
     // Ticks run at once on the compute queue (claimed by a readback or checkpoint) so far (tests, statistics).
     uint64_t vfxImmediateTicks() const { return m_vfxImmediateTicks; }
 
@@ -625,12 +633,17 @@ private:
     static void applyInputs(const MaterialInputs& in, scene::Material& m);
     static void keepInputs(const scene::Material& old, scene::Material& next);
     void ensureStandaloneOutput(uint32_t width, uint32_t height, DXGI_FORMAT format);
-    // Paces the frame slot, applies the packet's scene updates, declares the frame; returns the frame slot.
+    // Submit serialization is separate from producer admission. GPU slot waits
+    // must never hold the VFX simulation state lock.
+    void waitForFrameSlot();
+    // After the slot wait: applies scene updates and declares the frame.
     uint32_t beginFrame(const FramePacket& packet);
     void recordFrame(const FramePacket& packet, render::TextureRef output);
     void endFrame(uint32_t slot, uint64_t hostFrameIndex);
     fx::ParticleSystem& fxModule();  // (m_fxMutex held) created on first use, explicit copies on the compute queue
     void fxRunPending();              // (m_fxMutex held) the claimed ticks on the compute queue
+    void fxPresentationBeforeExecute();
+    void fxPresentationAfterExecute();
     void fxFrameWait();               // (m_fxMutex held, frame submission) the graphics queue waits for them
     scene::Scene snapshot(bool photo) const;
     // Submission thread: photo mode's part of a frame. photoFrame records it (false: no photo, render the scene);
@@ -655,6 +668,7 @@ private:
     std::shared_ptr<GpuBridgeHost> m_gpuBridge;  // quiesced and released before the device
 
     mutable std::mutex m_mutex;  // packets, pending updates, stats
+    bool m_passTimingEnabled = false; // guarded by m_mutex
     std::deque<FramePacket> m_packets;
     FramePacket m_pending;       // updates for the next queued frame
     // C2b: host ids (main thread) and their GPU scene indices (render thread, at apply time).
@@ -720,7 +734,12 @@ private:
     uint64_t m_droppedTransforms = 0, m_droppedPoses = 0;
     uint32_t m_outputReuses = 0, m_outputRecreations = 0;
     // V3 stream executor state.
+    std::mutex m_renderSubmitMutex;
     std::mutex m_fxMutex;
+    std::mutex m_vfxSubmitMutex;
+    std::deque<std::vector<uint8_t>> m_vfxSubmitted, m_vfxDraining;
+    std::string m_vfxSubmitError;
+    void drainVfxSubmissions();  // m_fxMutex held; detaches immutable submitted packets under the short queue lock
     uint64_t m_fxRecorded = 0;  // (m_fxMutex held) packets written under UNX_FX_RECORD
     float m_lensAperture = 0, m_lensFocus = 0;  // (m_mutex) the lens every queued frame takes
     float m_whiteBalanceKelvin = 0, m_whiteBalanceTint = 0;  // (m_mutex) the white balance every queued frame takes (v1.91)
@@ -741,6 +760,8 @@ private:
     viewmodel::ViewModels m_viewModels;         // (m_mutex) the host's mirror (ids, live entries)
     std::vector<uint32_t> m_hairJoints;         // (m_mutex) per hair body id: its joint count (0 = free)
     std::vector<uint32_t> m_hairFree;           // (m_mutex) free ids, reused last-freed first (HairSystem's rule)
+    void freezeFluidPresentation(std::vector<FramePacket::Fluid>& fluids, const uint64_t (&stamp)[6]);
+    std::vector<std::shared_ptr<FluidPresentation>> m_fluidPresentations;
     std::shared_ptr<const std::vector<FramePacket::Fluid>> m_fluids;  // (m_mutex) the fluids every queued frame takes
     std::array<uint64_t, 6> m_fluidStamp{};                          // (m_mutex)
     std::optional<OceanInput> m_ocean;                               // (m_mutex) the sea every queued frame takes
@@ -758,10 +779,12 @@ private:
     void poolsLocked(FramePacket& packet);                           // (m_mutex held) basins and sources into the packet's coordinates
     std::vector<render::PoolFrame> m_poolFrames;                     // submission thread: FrameContext::pools of the frame being recorded
     std::vector<render::PoolSourceFrame> m_poolSourceFrames;         // submission thread: their sources, grouped by basin
+    uint64_t m_fluidReadFence = 0;               // last graphics read of physics particles; 0: whole-frame fallback
     uint64_t m_fluidTicket = 0;                  // submission thread: the frame's bridge admission (0: none)
     std::vector<render::FluidFrame> m_fluidFrames;  // submission thread: FrameContext::fluids of the frame being recorded
     std::unique_ptr<render::RenderGraph> m_simGraph;  // the claimed ticks' graph (compute queue)
     uint64_t m_simIndex = 1ull << 48;                // its import index (apart from frame indices)
+    uint64_t m_vfxFrameFence = 0, m_vfxNextFrameFence = 0;  // authoritative sources released by their presentation copy
     uint64_t m_simFence = 0, m_simWaited = 0;        // compute fence of the last claimed tick; the frames waited up to
     uint64_t m_vfxImmediateTicks = 0;
     std::string m_vfxError;                          // a submit that failed (reported by the next readback/checkpoint)

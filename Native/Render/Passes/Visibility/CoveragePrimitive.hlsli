@@ -139,7 +139,6 @@ CoveragePrimitive coveragePrimitive(CoverageDraw d, uint t, uint3 tri, float4 p[
         o.d = coverageToScreen(q[3], d.v.viewportSize);
         o.tab = float4(tq[0], tq[1]);
         o.tcd = float4(tq[2], tq[3]);
-        o.normals = uint4(coverageOct32(nq[0]), coverageOct32(nq[1]), coverageOct32(nq[2]), coverageOct32(nq[3]));
         // Signed area of the polygon (shoelace), y-down pixels.
         const float area2 = (o.a.x * o.b.y - o.b.x * o.a.y) + (o.b.x * o.c.y - o.c.x * o.b.y) + (o.c.x * o.d.y - o.d.x * o.c.y) + (o.d.x * o.a.y - o.a.x * o.d.y);
         const bool back = COV_FRONT_SIGN * area2 > 0;
@@ -164,6 +163,9 @@ CoveragePrimitive coveragePrimitive(CoverageDraw d, uint t, uint3 tri, float4 p[
                 o.reason = COV_CULL_COVER;
             }
         }
+        // Culled primitives never export a fragment normal; avoid four oct
+        // encodes (divides/rounds) after their visibility has already been decided.
+        if (!cull) o.normals = uint4(coverageOct32(nq[0]), coverageOct32(nq[1]), coverageOct32(nq[2]), coverageOct32(nq[3]));
     }
     o.cull = cull;
     if (!cull) o.reason = COV_CULL_NONE;

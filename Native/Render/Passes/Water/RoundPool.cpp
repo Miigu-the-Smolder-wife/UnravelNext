@@ -2,6 +2,7 @@
 #include "unx/water/RoundPool.h"
 
 #include "unx/core/Log.h"
+#include "unx/render/Frame.h"
 
 #include <algorithm>
 #include <cmath>
@@ -277,6 +278,7 @@ RoundTables roundTables(const RoundPoolDesc& d)
 
 RoundPool::RoundPool(Device& device, ShaderLibrary& shaders, const RoundPoolDesc& desc) : m_device(device), m_shaders(shaders), m_desc(desc)
 {
+    m_topologyId = allocateTriangleStreamTopologyId();
     if (!desc.maxSources || !desc.framesInFlight) fail("round pool: invalid description");
     m_tables = roundTables(desc);
     const RoundTables& t = m_tables;
@@ -507,7 +509,7 @@ RoundPoolOutput RoundPool::record(RenderGraph& g, uint64_t frame, const RoundPoo
                   std::memcpy(&k[12], axis, 16);
                   c2.cmd->SetPipelineState(mesh);
                   c2.computeConstants(k, 16);
-                  c2.cmd->Dispatch(uint32_t((kVertices + 63) / 64), 1, 1);
+                  c2.cmd->Dispatch(kTheta / 8, (kRings - 1 + 7) / 8, 1);
               });
     RoundPoolOutput out;
     out.field = refs.field;
@@ -518,6 +520,8 @@ RoundPoolOutput RoundPool::record(RenderGraph& g, uint64_t frame, const RoundPoo
     st.drawArgs = draw;
     st.maxTriangles = uint32_t(kTriangles);
     st.layer = 1;
+    st.fixedTopologyId = m_topologyId; // RoundMesh's fixed fan and ring quads are always active
+    st.knownTriangleCount = st.maxTriangles;
     const double vertical = m_desc.depth > 0 ? m_desc.depth : 1.0;
     st.boundsMin = { float(placement.centre[0] - radius), float(placement.centre[1] - vertical), float(placement.centre[2] - radius) };
     st.boundsMax = { float(placement.centre[0] + radius), float(placement.centre[1] + vertical), float(placement.centre[2] + radius) };
