@@ -42,8 +42,8 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     }
     if (mode == 1)
     {
-        const uint probe = group.x;
-        const uint2 atlas = lgAtlasCoord(probe);
+        const uint2 atlas = group.xy;
+        const uint probe = lgProbeIndex(atlas);
         ByteAddressBuffer adaptive = ResourceDescriptorHeap[P[10].z];
         Texture2D<float> probeDepth = ResourceDescriptorHeap[P[10].w];
         if (atlas.x >= lgProbeViewSize().x || probe >= lgProbeCount(adaptive) || !(probeDepth[atlas] > 0)) return;

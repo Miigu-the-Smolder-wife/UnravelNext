@@ -27,11 +27,11 @@
 #include "Passes/Atmosphere/FogVolume.hlsli"  // (atmosphere.fog.on_gi_rays: the fog along a screen hit's ray)
 
 [numthreads(8, 8, 1)]
-void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
+void main(uint3 id : SV_DispatchThreadID)
 {
-    const uint probe = group.x;
-    const uint2 atlas = lgAtlasCoord(probe);
-    const uint2 coord = atlas * LG_TRACE_RES + thread.xy;
+    const uint2 coord = id.xy;
+    const uint2 atlas = coord / LG_TRACE_RES;
+    const uint probe = lgProbeIndex(atlas);
     ByteAddressBuffer adaptive = ResourceDescriptorHeap[P[10].z];
     Texture2D<float> probeDepth = ResourceDescriptorHeap[P[10].w];
     if (atlas.x >= lgProbeViewSize().x || probe >= lgProbeCount(adaptive)) return;

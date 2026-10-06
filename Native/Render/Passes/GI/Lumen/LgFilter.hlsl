@@ -42,11 +42,10 @@ void lgGather(int2 neighbourTile, uint2 texel, float3 position, float3 direction
 }
 
 [numthreads(8, 8, 1)]
-void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
+void main(uint3 id : SV_DispatchThreadID)
 {
-    const uint probe = group.x;
-    const uint2 atlas = lgAtlasCoord(probe), texel = thread.xy;
-    const uint2 coord = atlas * LG_GATHER_RES + texel;
+    const uint2 atlas = id.xy / LG_GATHER_RES, texel = id.xy % LG_GATHER_RES;
+    const uint probe = lgProbeIndex(atlas);
     ByteAddressBuffer adaptive = ResourceDescriptorHeap[P[10].z];
     if (atlas.x >= lgProbeViewSize().x || probe >= lgProbeCount(adaptive)) return;
     Texture2D<float> probeDepth = ResourceDescriptorHeap[P[10].w];
@@ -57,10 +56,10 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     ByteAddressBuffer flags = ResourceDescriptorHeap[P[0].w];
     RWTexture2D<float4> output = ResourceDescriptorHeap[P[1].x];
     const float depth = probeDepth[atlas];
-    const float4 own = radiance[coord];
+    const float4 own = radiance[id.xy];
     if (!(depth > 0))
     {
-        output[coord] = float4(0, 0, 0, own.a);
+        output[id.xy] = float4(0, 0, 0, own.a);
         return;
     }
     const bool strong = probeMoving[atlas] > 0.01;
@@ -68,7 +67,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     const int2 tile = (int2)lgTileOfPixel(lgProbePixel(adaptive, probe));
     const float3 position = probePosition[atlas].xyz;
     const float3 direction = lgSphere((float2(texel) + lgTexelCentre((uint2)tile)) / (float)LG_GATHER_RES);
-    const float hitDistance = lgDecodeHitDistance(hitDistances[coord]);
+    const float hitDistance = lgDecodeHitDistance(hitDistances[id.xy]);
     float3 sum = 0;
     float weightSum = 0;
     if (hitDistance >= 0)
@@ -83,5 +82,5 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         static const int2 kFar[8] = { int2(-2, 0), int2(2, 0), int2(0, -2), int2(0, 2), int2(-1, 1), int2(1, 1), int2(-1, -1), int2(1, -1) };
         [unroll] for (uint j = 0; j < 8; ++j) lgGather(tile + kFar[j], texel, position, direction, depth, hitDistance, relaxed, sum, weightSum);
     }
-    output[coord] = float4(weightSum > 0 ? sum / weightSum : float3(0, 0, 0), own.a);
+    output[id.xy] = float4(weightSum > 0 ? sum / weightSum : float3(0, 0, 0), own.a);
 }

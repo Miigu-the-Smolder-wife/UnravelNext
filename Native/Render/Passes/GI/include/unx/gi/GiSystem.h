@@ -247,7 +247,6 @@ private:
     struct LumenState
     {
         ComPtr<ID3D12Resource> probeDepth[2], probePosition[2], probeRadiance[2], diffuse[2], specular[2], keys[2];
-        ComPtr<ID3D12CommandSignature> probeDispatchSignature;  // one compute group per live screen probe
         ComPtr<ID3D12Resource> backface[2];  // Foliage back-side irradiance and its history (made when the scene has Foliage)
         uint32_t backfaceWidth = 0, backfaceHeight = 0;
         bool backfaceHistory = false;

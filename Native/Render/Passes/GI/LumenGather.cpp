@@ -29,8 +29,6 @@ namespace
 {
 struct ProbeCachePolicy
 {
-    // Prepared lookup removes repeated 8-corner indirection work. Keep near-first opt-in
-    // until a production timing A/B proves its saved lookup beats the possible second BVH traversal.
     uint32_t mode = 2;
     ProbeCachePolicy()
     {
@@ -53,17 +51,6 @@ uint32_t bits(float f)
 void GiSystem::ensureLumen(FramePassContext& fc, uint32_t width, uint32_t height, uint32_t atlasX, uint32_t atlasY)
 {
     LumenState& st = m_lumen;
-    if (!st.probeDispatchSignature)
-    {
-        D3D12_INDIRECT_ARGUMENT_DESC arg{};
-        arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
-        D3D12_COMMAND_SIGNATURE_DESC desc{};
-        desc.ByteStride = sizeof(D3D12_DISPATCH_ARGUMENTS);
-        desc.NumArgumentDescs = 1;
-        desc.pArgumentDescs = &arg;
-        check(m_device.d3d()->CreateCommandSignature(&desc, nullptr, IID_PPV_ARGS(&st.probeDispatchSignature)),
-              "GI lumen live-probe dispatch signature");
-    }
     if (st.diffuse[0] && st.width == width && st.height == height) return;
     D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
     const auto create = [&](ComPtr<ID3D12Resource>& t, DXGI_FORMAT format, uint32_t w, uint32_t h, const wchar_t* name, bool probe = false) {
@@ -333,29 +320,8 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                       gpuDispatch(c.cmd, tilesGx, tilesGy, 1);
                   });
     }
-    // Adaptive allocation is GPU-owned. Convert its exact live count to one-group-per-probe
-    // DispatchIndirect arguments; the capacity-sized atlas remains storage only.
-    const BufferRef probeDispatchArgs = g.createBuffer({ "lumen live probe dispatch", sizeof(D3D12_DISPATCH_ARGUMENTS), 0 });
-    g.addPass("r.gi.lg.probe.args", QueueType::Compute,
-              [&](PassBuilder& b) {
-                  b.use(adaptive, Use::SrvCompute);
-                  b.use(probeDispatchArgs, Use::UavCompute);
-              },
-              [=, &shaders](PassContext& c) {
-                  const uint32_t k[4] = { c.srv(adaptive), c.uav(probeDispatchArgs), uniform, maxAdaptive };
-                  c.cmd->SetPipelineState(shaders.compute("Passes/GI/Lumen/LgProbeDispatchArgs"));
-                  c.computeConstants(k, 4);
-                  gpuDispatch(c.cmd, 1, 1, 1);
-              });
-    ID3D12CommandSignature* const probeDispatchSignature = st.probeDispatchSignature.Get();
-    const auto dispatchLiveProbes = [=](PassContext& c) {
-        gpuExecuteIndirect(c.cmd, probeDispatchSignature, 1, c.resource(probeDispatchArgs), 0, nullptr, 0);
-    };
-
-    // The words every later pass reads the probes through. The indirect argument is read-only and
-    // shared by all later probe scopes; passes that do not execute it incur no extra probe work.
+    // The words every later pass reads the probes through.
     const auto probes = [=](PassBuilder& b) {
-        b.use(probeDispatchArgs, Use::IndirectArgs);
         b.use(adaptive, Use::SrvCompute);
         b.use(probeDepth, Use::SrvCompute);
         b.use(probeNormal, Use::SrvCompute);
@@ -512,7 +478,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/Lumen/LgScreenData"));
                   c.computeConstants(k, 48);
                   c.bindFrameConstants(frameConstants);
-                  dispatchLiveProbes(c);
+                  gpuDispatch(c.cmd, probesX, atlasRows, 1);
               });
     if (L.importanceSampleLighting)
         g.addPass("r.gi.lg.lightingpdf", QueueType::Compute,
@@ -546,7 +512,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                       c.cmd->SetPipelineState(shaders.compute("Passes/GI/Lumen/LgLightingPdf"));
                       c.computeConstants(k, 48);
                       c.bindFrameConstants(frameConstants);
-                      dispatchLiveProbes(c);
+                      gpuDispatch(c.cmd, probesX, atlasRows, 1);
                   });
     const bool lightingDensity = L.importanceSampleLighting;
     g.addPass("r.gi.lg.rays", QueueType::Compute,
@@ -565,7 +531,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   probeWords(c, k);
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/Lumen/LgGenerateRays"));
                   c.computeConstants(k, 48);
-                  dispatchLiveProbes(c);
+                  gpuDispatch(c.cmd, probesX, atlasRows, 1);
               });
 
     // Trace: the GI cache rays' sky and sun (record()), the ray scene, hit lighting from the world cache.
@@ -660,7 +626,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                       c.cmd->SetPipelineState(shaders.compute("Passes/GI/Lumen/LgScreenTrace"));
                       c.computeConstants(k, 48);
                       c.bindFrameConstants(frameConstants);
-                      dispatchLiveProbes(c);
+                      gpuDispatch(c.cmd, probesX, atlasRows, 1);
                   });
     }
     // gi.lumen_compact_traces (the reference's CompactTraces before its hardware ray tracing): the world rays are
@@ -871,7 +837,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                           c.cmd->SetPipelineState(shaders.compute("Passes/GI/Lumen/LgMeter"));
                           c.computeConstants(k, 48);
                           c.bindFrameConstants(frameConstants);
-                          if (mode == 1) dispatchLiveProbes(c);
+                          if (mode == 1) gpuDispatch(c.cmd, probesX, atlasRows, 1);
                           else gpuDispatch(c.cmd, 1, 1, 1);
                       });
     }
@@ -901,7 +867,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/Lumen/LgComposite"));
                   c.computeConstants(k, 48);
                   c.bindFrameConstants(frameConstants);
-                  dispatchLiveProbes(c);
+                  gpuDispatch(c.cmd, probesX, atlasRows, 1);
               });
     // Spatial filter: A -> B -> A ..., the last pass into the persistent texture (next frame's lighting density).
     static const char* const filterNames[4] = { "r.gi.lg.filter0", "r.gi.lg.filter1", "r.gi.lg.filter2", "r.gi.lg.filter3" };
@@ -940,7 +906,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                       c.cmd->SetPipelineState(shaders.compute("Passes/GI/Lumen/LgProbeTemporal"));
                       c.computeConstants(k, 48);
                       c.bindFrameConstants(frameConstants);
-                      dispatchLiveProbes(c);
+                      gpuDispatch(c.cmd, probesX, atlasRows, 1);
                   });
         filterIn = blended;
     }
@@ -970,7 +936,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                       c.cmd->SetPipelineState(shaders.compute("Passes/GI/Lumen/LgFilter"));
                       c.computeConstants(k, 48);
                       c.bindFrameConstants(frameConstants);
-                      dispatchLiveProbes(c);
+                      gpuDispatch(c.cmd, probesX, atlasRows, 1);
                   });
         filterIn = filterOut;
     }
@@ -989,7 +955,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
                   probeWords(c, k);
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/Lumen/LgIrradiance"));
                   c.computeConstants(k, 48);
-                  dispatchLiveProbes(c);
+                  gpuDispatch(c.cmd, probesX, atlasRows, 1);
               });
     // A's short-range AO and bent normal (lumen.short_range_ao; recorded before GI's record by the track: invalid = off).
     const float aoMaxAlbedo = fc.quality.has("lumen.short_range_ao_max_multibounce_albedo") ? (float)fc.quality.number("lumen.short_range_ao_max_multibounce_albedo") : 0.5f;
