@@ -543,26 +543,30 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     const bool atmosphere = fr.transmittanceLut.valid() && fr.multiScatterLut.valid() && fr.skyViewLut.valid() && fr.aerialPerspective.valid();
     const TextureRef luts[4] = { fr.transmittanceLut, fr.multiScatterLut, fr.skyViewLut, fr.aerialPerspective };
     const uint32_t traceCapacity = traceX * traceY;
-    uint32_t traceChunk = std::max(1u, L.raysPerDispatch / 3u);
-    uint32_t traceChunks = (traceCapacity + traceChunk - 1) / traceChunk;
-    // The full-resolution trace atlas includes unused adaptive slots. Reserving
-    // a continuation for every slot disabled split tracing at quality 5/1440p
-    // (> 256 MiB). Consume bounded batches and reuse their exact hit records.
-    // This is storage/work partitioning; every source ray and seed is preserved.
-    const uint32_t batchChunks = L.compactTraces ? std::max(1u, std::min(traceChunks, (1u << 20) / traceChunk)) : traceChunks;
-    const uint32_t hitCapacity = std::min(traceCapacity, batchChunks * traceChunk);
+    // Hit lighting is its own ray stage when deferred. Keep its chunk at the
+    // monolithic worst-case budget: one surface hit can still launch the sun
+    // and local-light shadow rays. The traversal stage must not inherit that
+    // factor after those rays have been split out.
+    const uint32_t lightingChunk = std::max(1u, L.raysPerDispatch / 3u);
+    const uint32_t deferredCapacity = L.compactTraces ? std::min(traceCapacity, 1u << 20) : traceCapacity;
     const bool deferred = L.hitSurfaceCache && fc.resources.cards.valid() && !hairParams.valid() &&
-        rt::hitLightingStorageFits(hitCapacity) &&
+        rt::hitLightingStorageFits(deferredCapacity) &&
         (!fc.quality.has("gi.defer_hit_lighting") || fc.quality.boolean("gi.defer_hit_lighting"));
-    // A monolithic near-first invocation can trace near + continuation + sun +
-    // local light. Deferred traversal and lighting each stay below three. Keep
-    // the configured work bound without dropping any source ray in either path.
-    const uint32_t raysPerTrace = (probeCacheMode & 1u) && !deferred ? 4u : 3u;
-    if (raysPerTrace == 4u)
-    {
-        traceChunk = std::max(1u, L.raysPerDispatch / raysPerTrace);
-        traceChunks = (traceCapacity + traceChunk - 1) / traceChunk;
-    }
+    // Monolithic mode can execute the primary traversal, an optional near-first
+    // continuation, then sun and local-light shadow rays in one invocation.
+    // Deferred traversal only does the primary traversal (plus the optional
+    // near-first continuation); a surface hit is enqueued and returns before
+    // lighting. Size each DispatchRays from the work that its actual stage can
+    // perform instead of charging traversal for rays executed by another pass.
+    const uint32_t traversalRaysPerThread = deferred ? ((probeCacheMode & 1u) ? 2u : 1u) : ((probeCacheMode & 1u) ? 4u : 3u);
+    const uint32_t traceChunk = std::max(1u, L.raysPerDispatch / traversalRaysPerThread);
+    const uint32_t traceChunks = (traceCapacity + traceChunk - 1) / traceChunk;
+    // The full-resolution trace atlas includes unused adaptive slots. Keep the
+    // continuation records bounded to about one million source rays and consume
+    // further traversal chunks in another batch. Every source ray and seed is
+    // preserved; only the command granularity changes.
+    const uint32_t batchChunks = deferred && L.compactTraces ? std::max(1u, std::min(traceChunks, (1u << 20) / traceChunk)) : traceChunks;
+    const uint32_t hitCapacity = deferred ? std::min(traceCapacity, batchChunks * traceChunk) : 0u;
     const std::string skyVariant = atmosphere ? "0" : "1";
     const std::string traceKernel = deferred ? "Passes/GI/Lumen/LgTraceMinimal.SKY" + skyVariant :
         std::string("Passes/GI/Lumen/LgTrace.SKY") + skyVariant + (hairParams.valid() ? ".HAIR1" : ".HAIR0");
@@ -638,7 +642,7 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     rt::RayPipeline* lightingPipeline = deferred ? &rt::RayPipeline::get(fc.device, shaders,
         rt::standardRayPipeline("Passes/GI/Lumen/LgTraceLighting.SKY" + skyVariant, { "LgTraceGen" })) : nullptr;
     const rt::HitLightingQueue hitLighting = deferred ?
-        rt::beginHitLightingQueue(fc, "r.gi.lg.hitlighting", hitCapacity, traceChunk, *lightingPipeline) : rt::HitLightingQueue{};
+        rt::beginHitLightingQueue(fc, "r.gi.lg.hitlighting", hitCapacity, lightingChunk, *lightingPipeline) : rt::HitLightingQueue{};
     constexpr uint32_t kTraceDesc = rt::RayPipeline::kDispatchDescStride;
     BufferRef traceList, traceArgs;
     if (compactTraces)
