@@ -11,20 +11,21 @@
 #include "Passes/GI/Lumen/LgInterpolate.hlsli"
 
 [numthreads(8, 8, 1)]
-void main(uint3 id : SV_DispatchThreadID)
+void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
-    const uint2 atlas = id.xy / LG_GATHER_RES, texel = id.xy % LG_GATHER_RES;
-    const uint probe = lgProbeIndex(atlas);
+    const uint probe = group.x;
+    const uint2 atlas = lgAtlasCoord(probe), texel = thread.xy;
+    const uint2 coord = atlas * LG_GATHER_RES + texel;
     ByteAddressBuffer adaptive = ResourceDescriptorHeap[P[10].z];
     if (atlas.x >= lgProbeViewSize().x || probe >= lgProbeCount(adaptive)) return;
     Texture2D<float> probeDepth = ResourceDescriptorHeap[P[10].w];
     Texture2D<float4> current = ResourceDescriptorHeap[P[1].x];
     RWTexture2D<float4> output = ResourceDescriptorHeap[P[1].y];
-    const float4 fresh = current[id.xy];
+    const float4 fresh = current[coord];
     const float depth = probeDepth[atlas];
     if (!(depth > 0))
     {
-        output[id.xy] = float4(0, 0, 0, fresh.a);
+        output[coord] = float4(0, 0, 0, fresh.a);
         return;
     }
     float3 history = 0;
@@ -58,5 +59,5 @@ void main(uint3 id : SV_DispatchThreadID)
             if (weight > 0) history = history / weight * asfloat(P[2].w);
         }
     }
-    output[id.xy] = float4(lerp(fresh.rgb, history, weight > 0 ? asfloat(P[2].z) : 0.0), fresh.a);
+    output[coord] = float4(lerp(fresh.rgb, history, weight > 0 ? asfloat(P[2].z) : 0.0), fresh.a);
 }
