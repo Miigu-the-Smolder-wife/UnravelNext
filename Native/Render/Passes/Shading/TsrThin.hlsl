@@ -58,13 +58,16 @@
 #define CELL_KEPT_LINE 0x2000u     // a luma line now or kept from the history
 #define CELL_NEAR_LINE 0x4000u     // a kept line within 5 x 5
 
-groupshared uint gXH[CELLS];    // the observation and the history (from stage 3: the updated history), 16 bits each
-groupshared float gZ[CELLS];    // device depth; from stage 4 the updated history's 3 x 3 minimum
-groupshared uint gP[CELLS];     // the CELL_ bits
-groupshared uint gAny[CELLS];   // 1: the t value is above 0, 2: the observation is; then their 3 x 3 unions
-groupshared uint gSpread[CELLS];
-groupshared uint gEW[CELLS];    // the line's edge and the cluster's weight, 16 bits each; stage 6: both spread
-groupshared uint gL[CELLS];     // the luma (guide space, 16 bits), bit 16: the history's kept line
+// Four exact-width scratch buffers (15,888 bytes for a 16x16 tile).
+// Depth is dead after stage 1; luma is dead after stage 1 once its kept-line
+// flag is carried by gP. Later stages reuse these buffers only after a barrier.
+groupshared uint gXH[CELLS];
+groupshared uint gWork[CELLS];
+groupshared uint gP[(SIDE - 2) * (SIDE - 2)];
+groupshared uint gL[CELLS];
+uint propertyCell(uint i) { return (i / SIDE - 1) * (SIDE - 2) + i % SIDE - 1; }
+#define PROPERTY(i) gP[propertyCell(i)]
+#define CELL_UNION_SHIFT 24u
 
 uint pack2(float a, float b) { return (uint)(saturate(a) * 65535.0 + 0.5) | ((uint)(saturate(b) * 65535.0 + 0.5) << 16); }
 float2 unpack2(uint v) { return float2(v & 0xFFFFu, v >> 16) * (1.0 / 65535.0); }
@@ -118,8 +121,9 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
         const uint stored = cut ? 0u : (uint)round(history.Load(int3(p, 0)) * 255.0);
         gXH[i] = pack2(observed, (float)(stored >> 1) / 127.0);
         gL[i] = (uint)(saturate(luma) * 65535.0 + 0.5) | ((stored & 1u) << 16);
-        gZ[i] = depth.Load(int3(p, 0));
-        gP[i] = animated > 0.25 ? CELL_ANIMATED : 0u;
+        gWork[i] = asuint(depth.Load(int3(p, 0)));
+        if (inMargin(int2(i % SIDE, i / SIDE), 1))
+            PROPERTY(i) = animated > 0.25 ? CELL_ANIMATED : 0u;
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -129,9 +133,9 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     {
         const int2 c = int2(i % SIDE, i / SIDE);
         if (!inMargin(c, 1)) continue;
-        const float z = gZ[i], threshold = pixelDeviceZError(z) * errorMultiplier;
-        const uint above = z - gZ[cellIndex(c + int2(0, -1))] > threshold ? 1u : 0u, below = z - gZ[cellIndex(c + int2(0, 1))] > threshold ? 1u : 0u;
-        const uint left = z - gZ[cellIndex(c + int2(-1, 0))] > threshold ? 1u : 0u, right = z - gZ[cellIndex(c + int2(1, 0))] > threshold ? 1u : 0u;
+        const float z = asfloat(gWork[i]), threshold = pixelDeviceZError(z) * errorMultiplier;
+        const uint above = z - asfloat(gWork[cellIndex(c + int2(0, -1))]) > threshold ? 1u : 0u, below = z - asfloat(gWork[cellIndex(c + int2(0, 1))]) > threshold ? 1u : 0u;
+        const uint left = z - asfloat(gWork[cellIndex(c + int2(-1, 0))]) > threshold ? 1u : 0u, right = z - asfloat(gWork[cellIndex(c + int2(1, 0))]) > threshold ? 1u : 0u;
         float sumObserved = 0, sumHistory = 0, sumVariance = 0;
         [unroll] for (int k = 0; k < 9; ++k)
         {
@@ -150,8 +154,9 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
                                (l - (float)(gL[cellIndex(c + int2(0, 1))] & 0xFFFFu) / 65535.0 > lineContrast ? 1u : 0u);
         const uint brighterX = (l - (float)(gL[cellIndex(c + int2(-1, 0))] & 0xFFFFu) / 65535.0 > lineContrast ? 1u : 0u) +
                                (l - (float)(gL[cellIndex(c + int2(1, 0))] & 0xFFFFu) / 65535.0 > lineContrast ? 1u : 0u);
-        gP[i] = (gP[i] & CELL_ANIMATED) | (above + below) | ((left + right) << 2) | (same ? CELL_SAME : 0u) | (brighterY << 8) | (brighterX << 10);
-        gAny[i] = (tValue > 0 ? 1u : 0u) | (unpack2(gXH[i]).x > 0 ? 2u : 0u);
+        const uint unionBits = (tValue > 0 ? 1u : 0u) | (unpack2(gXH[i]).x > 0 ? 2u : 0u);
+        PROPERTY(i) = (PROPERTY(i) & CELL_ANIMATED) | (above + below) | ((left + right) << 2) | (same ? CELL_SAME : 0u) |
+                      (brighterY << 8) | (brighterX << 10) | ((gL[i] & 0x10000u) != 0 ? CELL_KEPT_LINE : 0u) | (unionBits << CELL_UNION_SHIFT);
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -160,22 +165,22 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     {
         const int2 c = int2(i % SIDE, i / SIDE);
         if (!inMargin(c, 2)) continue;
-        const uint own = gP[i];
-        const float alongX = (float)((gP[cellIndex(c + int2(-1, 0))] & CELL_ACROSS_Y) + (gP[cellIndex(c + int2(1, 0))] & CELL_ACROSS_Y));
-        const float alongY = (float)(((gP[cellIndex(c + int2(0, -1))] & CELL_ACROSS_X) + (gP[cellIndex(c + int2(0, 1))] & CELL_ACROSS_X)) >> 2);
+        const uint own = PROPERTY(i);
+        const float alongX = (float)((PROPERTY(cellIndex(c + int2(-1, 0))) & CELL_ACROSS_Y) + (PROPERTY(cellIndex(c + int2(1, 0))) & CELL_ACROSS_Y));
+        const float alongY = (float)(((PROPERTY(cellIndex(c + int2(0, -1))) & CELL_ACROSS_X) + (PROPERTY(cellIndex(c + int2(0, 1))) & CELL_ACROSS_X)) >> 2);
         // (a horizontal line: the pixel is nearer than above and below, its left and right neighbours by 3 of their 4 steps)
         float lineEdge = 0;
         if ((own & CELL_ACROSS_Y) == 2u) lineEdge += saturate((alongX - 2.0) * 0.5);
         if ((own & CELL_ACROSS_X) == 8u) lineEdge += saturate((alongY - 2.0) * 0.5);
         if ((own & CELL_ANIMATED) != 0) lineEdge = 0;
         // (the luma line by the same rule; stage 3 takes it from the second half)
-        const uint lumaAlongX = ((gP[cellIndex(c + int2(-1, 0))] & CELL_LUMA_ACROSS_Y) + (gP[cellIndex(c + int2(1, 0))] & CELL_LUMA_ACROSS_Y)) >> 8;
-        const uint lumaAlongY = ((gP[cellIndex(c + int2(0, -1))] & CELL_LUMA_ACROSS_X) + (gP[cellIndex(c + int2(0, 1))] & CELL_LUMA_ACROSS_X)) >> 10;
+        const uint lumaAlongX = ((PROPERTY(cellIndex(c + int2(-1, 0))) & CELL_LUMA_ACROSS_Y) + (PROPERTY(cellIndex(c + int2(1, 0))) & CELL_LUMA_ACROSS_Y)) >> 8;
+        const uint lumaAlongY = ((PROPERTY(cellIndex(c + int2(0, -1))) & CELL_LUMA_ACROSS_X) + (PROPERTY(cellIndex(c + int2(0, 1))) & CELL_LUMA_ACROSS_X)) >> 10;
         const bool lumaLine = ((own & CELL_LUMA_ACROSS_Y) == 0x200u && lumaAlongX > 2u) || ((own & CELL_LUMA_ACROSS_X) == 0x800u && lumaAlongY > 2u);
         uint both = 0;
-        [unroll] for (int k = 0; k < 9; ++k) both |= gAny[cellIndex(c + int2(k % 3, k / 3) - 1)];
-        gEW[i] = pack2(lineEdge, lumaLine ? 1.0 : 0.0);
-        gSpread[i] = both;
+        [unroll] for (int k = 0; k < 9; ++k) both |= PROPERTY(cellIndex(c + int2(k % 3, k / 3) - 1)) >> CELL_UNION_SHIFT;
+        gL[i] = pack2(lineEdge, lumaLine ? 1.0 : 0.0);
+        gWork[i] = both;
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -185,19 +190,19 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
         const int2 c = int2(i % SIDE, i / SIDE);
         if (!inMargin(c, 3)) continue;
         uint both = 0;
-        [unroll] for (int k = 0; k < 9; ++k) both |= gSpread[cellIndex(c + int2(k % 3, k / 3) - 1)];
+        [unroll] for (int k = 0; k < 9; ++k) both |= gWork[cellIndex(c + int2(k % 3, k / 3) - 1)];
         const bool notAbsoluteMatch = (both & 1u) != 0, thinRegion = (both & 2u) != 0;
-        const uint own = gP[i];
+        const uint own = PROPERTY(i);
         const bool accept = thinRegion && notAbsoluteMatch && (own & CELL_SAME) != 0 && (own & CELL_ANIMATED) == 0;
         const float2 xh = unpack2(gXH[i]);
         const float updated = lerp(xh.y, xh.x, accept ? NEW_SAMPLE_WEIGHT : 1.0);
         gXH[i] = (gXH[i] & 0xFFFFu) | (pack2(0, updated) & 0xFFFF0000u);
         // the kept luma line: a frame without the line drops it with the fade rate's probability
-        const bool lumaLine = unpack2(gEW[i]).y > 0.5;
-        bool keptLine = lumaLine || (gL[i] & 0x10000u) != 0;
+        const bool lumaLine = unpack2(gL[i]).y > 0.5;
+        bool keptLine = lumaLine || (own & CELL_KEPT_LINE) != 0;
         if (keptLine && !lumaLine)
             keptLine = gradientNoise(float2(origin + c), (float)(P[2].z & 1023u)) >= asfloat(updated > 0.99 / 127.0 ? P[3].w : P[3].z);
-        gP[i] = own | (thinRegion ? CELL_THIN_REGION : 0u) | (lumaLine ? CELL_LUMA_LINE : 0u) | (keptLine && lumaLines ? CELL_KEPT_LINE : 0u);
+        PROPERTY(i) = (own & ~CELL_KEPT_LINE) | (thinRegion ? CELL_THIN_REGION : 0u) | (lumaLine ? CELL_LUMA_LINE : 0u) | (keptLine && lumaLines ? CELL_KEPT_LINE : 0u);
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -212,11 +217,11 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
         {
             const uint ni = cellIndex(c + int2(k % 3, k / 3) - 1);
             lo = min(lo, gXH[ni] >> 16);
-            kept |= gP[ni] & CELL_KEPT_LINE;
+            kept |= PROPERTY(ni) & CELL_KEPT_LINE;
         }
         // The next stage needs only whether the minimum is nonzero and a line bit.
         // Both fit losslessly in one word; no second array or float decode is needed.
-        gAny[i] = lo | (kept != 0 ? 0x10000u : 0u);
+        gWork[i] = lo | (kept != 0 ? 0x10000u : 0u);
     }
     GroupMemoryBarrierWithGroupSync();
     for (i = lane; i < CELLS; i += TILE * TILE)
@@ -228,17 +233,17 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
         [unroll] for (int k = 0; k < 9; ++k)
         {
             const uint ni = cellIndex(c + int2(k % 3, k / 3) - 1);
-            const uint packed = gAny[ni];
+            const uint packed = gWork[ni];
             lo = min(lo, packed & 0xFFFFu);
             kept |= packed >> 16;
         }
         // x exp(-20 x) (10 / 0.184) with x = the coverage's distance from a half + 0.02: 1 at x = 0.05
-        const uint own = gP[i] | (kept != 0 ? CELL_NEAR_LINE : 0u);
-        gP[i] = own;
+        const uint own = PROPERTY(i) | (kept != 0 ? CELL_NEAR_LINE : 0u);
+        PROPERTY(i) = own;
         const float2 xh = unpack2(gXH[i]);
         const float x = abs(xh.y - 0.5) + 0.02;
         const bool relax = (lo > 0 || xh.x > 0) && (own & (CELL_THIN_REGION | CELL_SAME | CELL_ANIMATED)) == (CELL_THIN_REGION | CELL_SAME);
-        gEW[i] = (gEW[i] & 0xFFFFu) | (pack2(0, relax ? x * exp(-20.0 * x) * (10.0 / 0.184) : 0.0) & 0xFFFF0000u);
+        gL[i] = (gL[i] & 0xFFFFu) | (pack2(0, relax ? x * exp(-20.0 * x) * (10.0 / 0.184) : 0.0) & 0xFFFF0000u);
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -252,9 +257,9 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
         [unroll] for (int k = 0; k < 9; ++k)
         {
             const int2 o = int2(k % 3, k / 3) - 1;
-            sum += unpack2(gEW[cellIndex(c + o)]) * ((o.x == 0 ? 1.0 : 0.8) * (o.y == 0 ? 1.0 : 0.8));
+            sum += unpack2(gL[cellIndex(c + o)]) * ((o.x == 0 ? 1.0 : 0.8) * (o.y == 0 ? 1.0 : 0.8));
         }
-        gSpread[i] = pack2(sum.x, sum.y * maxRelaxation);
+        gWork[i] = pack2(sum.x, sum.y * maxRelaxation);
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -266,15 +271,15 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     [unroll] for (int k = 0; k < 9; ++k)
     {
         const int2 o = int2(k % 3, k / 3) - 1;
-        cluster += unpack2(gSpread[cellIndex(cell + o)]).y * ((o.x == 0 ? 1.0 : 0.5) * (o.y == 0 ? 1.0 : 0.5));
+        cluster += unpack2(gWork[cellIndex(cell + o)]).y * ((o.x == 0 ? 1.0 : 0.5) * (o.y == 0 ? 1.0 : 0.5));
     }
     const uint ci = cellIndex(cell);
-    const float lineEdge = unpack2(gSpread[ci]).x, coverage = unpack2(gXH[ci]).y;
+    const float lineEdge = unpack2(gWork[ci]).x, coverage = unpack2(gXH[ci]).y;
     Texture2D<float2> decimateMask = ResourceDescriptorHeap[P[0].w];
     const bool disoccluded = ((uint)round(decimateMask.Load(int3(pixel, 0)).r * 255.0) & 3u) != 0;
     // (a line's weight first; the cluster's only where the pixel has coverage itself; then a kept luma line's
     // surroundings, where the pixel is not the line this frame and its neighbourhood is the history's)
-    const uint bits = gP[ci];
+    const uint bits = PROPERTY(ci);
     const float clusterWeight = coverage > 0.99 / 127.0 ? saturate(cluster) : 0.0;
     const bool nearLine = (bits & (CELL_NEAR_LINE | CELL_LUMA_LINE | CELL_SAME)) == (CELL_NEAR_LINE | CELL_SAME);
     float weight = lineEdge > 0 ? lineEdge : (clusterWeight > 0 ? clusterWeight : (nearLine ? saturate(asfloat(P[4].x)) : 0.0));

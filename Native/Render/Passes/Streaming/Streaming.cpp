@@ -150,6 +150,7 @@ struct Streamer::Impl
     };
     std::unordered_map<uint64_t, Page> pages;
     std::unordered_map<uint64_t, float> requests;
+    std::vector<std::pair<float, uint64_t>> requestOrder;
     uint64_t overrideBudget = 0;
     uint64_t frame = 0;
 
@@ -348,19 +349,24 @@ struct Streamer::Impl
     void complete()
     {
         const uint64_t reads = readFence->GetCompletedValue(), uploads = uploadFence->GetCompletedValue();
-        std::vector<uint64_t> bad;
-        for (auto& [key, r] : ram)
+        for (auto it = ram.begin(); it != ram.end();)
+        {
+            auto& [key, r] = *it;
             if (!r.ready && r.readValue <= reads)
             {
                 r.ready = true;
-                if (cfg.verifyPages && fnv1a(r.bytes.data(), r.bytes.size()) != files[key >> 32].table[(uint32_t)key].fnv) bad.push_back(key);
+                if (cfg.verifyPages && fnv1a(r.bytes.data(), r.bytes.size()) != files[key >> 32].table[(uint32_t)key].fnv)
+                {
+                    // A failed read has never been uploaded or pinned. Remove it
+                    // here; a later request reads it again.
+                    ++stats.hashFailures;
+                    ramUsed -= r.bytes.size();
+                    ramOrder.erase(r.order);
+                    it = ram.erase(it);
+                    continue;
+                }
             }
-        for (uint64_t key : bad)  // never made resident; a later request reads it again
-        {
-            ++stats.hashFailures;
-            ramUsed -= ram[key].bytes.size();
-            ramOrder.erase(ram[key].order);
-            ram.erase(key);
+            ++it;
         }
         for (auto& [key, p] : pages)
             if (p.pendingSlot != kNone && p.uploadValue <= uploads)
@@ -381,7 +387,8 @@ struct Streamer::Impl
         stats = reset;
         complete();
         applyBudget();
-        std::vector<std::pair<float, uint64_t>> order;
+        auto& order = requestOrder;
+        order.clear();
         order.reserve(requests.size());
         for (const auto& [key, priority] : requests) order.push_back({ priority, key });
         std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first > b.first || (a.first == b.first && a.second < b.second); });

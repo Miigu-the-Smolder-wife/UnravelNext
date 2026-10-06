@@ -13,7 +13,8 @@ static_assert(shading::detail::useFusedTsrRejection(1706, 960, 15));
 static_assert(!shading::detail::useFusedTsrRejection(1280, 720, 14)); // missing moire
 static_assert(!shading::detail::useFusedTsrRejection(1280, 720, 13)); // missing thin geometry
 static_assert(!shading::detail::useFusedTsrRejection(1280, 720, 11)); // missing layers
-static_assert(!shading::detail::useFusedTsrRejection(1280, 720, 7));  // missing resurrection pair
+static_assert(shading::detail::useFusedTsrRejection(1280, 720, 7));  // production inputs, resurrection disabled
+static_assert(shading::detail::useFusedTsrRejection(1706, 960, 7));
 static_assert(!shading::detail::useFusedTsrRejection(1706, 960, 0));
 static_assert(!shading::detail::useFusedTsrRejection(1279, 720, 15));
 static_assert(!shading::detail::useFusedTsrRejection(1280, 719, 15));
@@ -25,17 +26,19 @@ int main(int argc, char **argv)
     {
         bool timing = false, quick = false, fused = false;
         std::string evidencePath;
-        uint32_t requestedWidth = 0, requestedHeight = 0;
+        uint32_t requestedWidth = 0, requestedHeight = 0, requestedOptions = UINT32_MAX;
         for (int i = 1; i < argc; ++i)
         {
             if (std::strcmp(argv[i], "--timing") == 0) timing = true;
             else if (std::strcmp(argv[i], "--quick") == 0) quick = true;
             else if (std::strcmp(argv[i], "--fused") == 0) fused = true;
             else if (std::strcmp(argv[i], "--evidence") == 0 && i + 1 < argc) evidencePath = argv[++i];
+            else if (std::strcmp(argv[i], "--options") == 0 && i + 1 < argc) requestedOptions = (uint32_t)std::stoul(argv[++i]);
             else if (std::strcmp(argv[i], "--width") == 0 && i + 1 < argc) requestedWidth = (uint32_t)std::stoul(argv[++i]);
             else if (std::strcmp(argv[i], "--height") == 0 && i + 1 < argc) requestedHeight = (uint32_t)std::stoul(argv[++i]);
             else fail("unknown argument %s", argv[i]);
         }
+        if (requestedOptions != UINT32_MAX && requestedOptions > 15) fail("--options must be in [0,15]");
         if ((requestedWidth == 0) != (requestedHeight == 0) || requestedWidth > 16374 || requestedHeight > 16374)
             fail("--width and --height must both be supplied and fit the texture including its halo");
         if (timing)
@@ -145,7 +148,7 @@ int main(int argc, char **argv)
                                         c.srv(in[0]), c.srv(in[1]), c.srv(in[2]), c.uav(out[0]), c.uav(out[1]), c.uav(out[2]), W, H};
                                     float blend = 0.03f;
                                     std::memcpy(k + 8, &blend, 4);
-                                    const uint32_t options = timing ? ((seed / 2) & 1u ? 15u : 0u) : W >= 1280 ? (seed ? 15u : 0u) : seed;
+                                    const uint32_t options = requestedOptions != UINT32_MAX ? requestedOptions : timing ? ((seed / 2) & 1u ? 15u : 0u) : W >= 1280 ? (seed ? 15u : 0u) : seed;
                                     for (uint32_t i = 3; i < 8; ++i)
                                         k[i + 6] = (options & (1u << std::min(i - 3, 3u))) ? c.srv(in[i]) : UINT32_MAX;
                                     if (variant) { k[14] = c.srv(prefix[fused ? 0 : 3]); k[15] = fused ? 0 : c.srv(prefix[2]); }
@@ -170,7 +173,7 @@ int main(int argc, char **argv)
                         M_CHECK(sums[0] > 0 && sums[1] > 0, "detailed pipeline timings unavailable");
                         for (uint32_t v = 0; v < 2; ++v) times[2 * ((seed / 2) & 1u) + v].push_back(sums[v]);
                         if (sums[0] > 0) ratios[(seed / 2) & 1u].push_back(sums[1] / sums[0]);
-                        pairs.push_back({W, H, ((seed / 2) & 1u) ? 15u : 0u, seed & 1u, sums[0], sums[1]});
+                        pairs.push_back({W, H, requestedOptions != UINT32_MAX ? requestedOptions : ((seed / 2) & 1u) ? 15u : 0u, seed & 1u, sums[0], sums[1]});
                     }
                     continue;
                 }
@@ -192,10 +195,10 @@ int main(int argc, char **argv)
                     std::sort(optimized.begin(), optimized.end());
                     auto& ratio = ratios[options];
                     std::sort(ratio.begin(), ratio.end());
-                    logf("TSR %s GPU %ux%u options=%s samples=%zu "
+                    logf("TSR %s GPU %ux%u options=%u samples=%zu "
                          "reference_median_ms=%.6f optimized_median_ms=%.6f "
                          "reduction=%.2f%%\n",
-                         fused ? "fused2pass" : "split5pass", W, H, options ? "all" : "none", reference.size(), reference[reference.size() / 2], optimized[optimized.size() / 2],
+                         fused ? "fused2pass" : "split5pass", W, H, requestedOptions != UINT32_MAX ? requestedOptions : options ? 15u : 0u, reference.size(), reference[reference.size() / 2], optimized[optimized.size() / 2],
                          100.0 * (1.0 - optimized[optimized.size() / 2] / reference[reference.size() / 2]));
                     logf("  same-input paired split/reference ratio median=%.4f range=[%.4f,%.4f] n=%zu; order alternated; all prefix+tail costs included\n",
                          ratio[ratio.size() / 2], ratio.front(), ratio.back(), ratio.size());

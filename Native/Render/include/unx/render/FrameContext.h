@@ -258,6 +258,45 @@ struct PostSettingsDesc
     int32_t diaphragmBlades = -1;                                      // shading.dof_diaphragm_blades (0: a disc; 4 .. 16)
     float lensFullAperture = std::numeric_limits<float>::quiet_NaN();  // shading.dof_diaphragm_full_aperture (m)
 };
+// Snapshot of the extended live look. Disabled leaves every value to quality.
+struct PostExtendedSettings
+{
+    bool enabled = false;
+    int32_t toneCurve = 0;
+    int32_t bloomLevels = 6;
+    int32_t gradingLutSize = 32;
+    int32_t localExposure = 1;
+    float exposureBrighterSeconds = 0.6f;
+    float exposureDarkerSeconds = 2.5f;
+    float grain = 0;
+    float sharpen = 0;
+    float localHighlight = 0.8f;
+    float localShadow = 0.8f;
+    float localDetail = 1;
+    float localBlend = 0.6f;
+    float localMiddleGreyBias = 0;
+    float localKernelPercent = 50;
+    float fringe = 0;
+    float fringeStart = 0;
+    int32_t lensFlare = 0;
+    float flareIntensity = 1;
+    float flareBokehSize = 3;
+    float flareThreshold = 8;
+    float flareHalo = 0;
+    int32_t flareBlades = 0;
+    float flareTintR = 1;
+    float flareTintG = 1;
+    float flareTintB = 1;
+    float paniniD = 0;
+    float paniniS = 0;
+    int32_t motionSamples = 16;
+    float motionMaxPercent = 5;
+    int32_t diaphragmRings = 5;
+    float renderScale = 1;
+    int32_t renderHeightMax = 0;
+    int32_t renderScaleMinHeight = 0;
+    float tsrHistoryPercent = 100;
+};
 // The scene description's weather (scene::Scene::clouds, fog, fogVolumes): FrameRenderer gives a frame the scene's cloud
 // layer, fog or fog volumes where the frame brings none of its own (coverage 0, enabled false, no volumes) while that
 // item's bit is set in FrameContext::sceneWeather. A producer that decides an item itself clears its bit, and its "none"
@@ -289,6 +328,7 @@ struct FrameContext
     std::vector<FogVolumeDesc> fogVolumes;  // local fog volumes (at most kMaxFogVolumes take effect)
     ColorGradingDesc grading;  // the colour grading before the tone curve (enabled false: the quality file's)
     PostSettingsDesc post;     // the game's run-time post settings (unset values: the quality file's)
+    PostExtendedSettings postExtended;
     uint32_t sceneWeather = kSceneClouds | kSceneFog | kSceneFogVolumes;  // the scene's weather fills the items above that are empty
     // Validation runs: the main view's colour is linear radiance x exposure in RGBA32F (metrics, INTERFACES 9)
     // instead of the display-encoded RGB10A2.

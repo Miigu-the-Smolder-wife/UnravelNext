@@ -1,5 +1,5 @@
 // unx-kernel: lib_6_6 main
-// unx-variants: SKY=0,1
+// unx-variants: SKY=0,1 HAIR=0,1 REORDER=0,1,2
 // r.gi.rc.trace (LumenRadianceCache.hlsli): the probes' rays. DispatchRays over (probe texels, queued traces): thread x =
 // the texel of the probe's 32 x 32 equal-area map, y = the trace record. A probe far from the camera, or one forced by
 // the budget, is traced at half the resolution (one ray per 2 x 2 texels, the block's value). The ray starts one cell
@@ -43,11 +43,114 @@
 
 float lrcBias(float3 p) { return 1e-3 + 2e-4 * distance(p, g_cameraPosition); }
 
+#ifndef HIT_LIGHTING_STAGE
+#define HIT_LIGHTING_STAGE 0
+#endif
+#include "RayTracing/HitLightingQueue.hlsli"
+#if HIT_LIGHTING_STAGE != 1
+float3 lrcSurfaceLighting(RtSceneSrvs scene, RtHit hit, RayDesc r, float footprintPerMetre, uint seed, out uint depthWord)
+{
+    float3 radiance = 0;
+    const RtSurface s = rtSurface(scene, hit, r.Origin, r.Direction);
+    GpuMaterial m = loadMaterial(s.material);
+    const float footprint = hit.t * footprintPerMetre;
+    if ((P[3].w & 8) == 0)
+    {
+        m = rtHitMaterialSeen(m, s, r.Direction, footprint, dot(s.normal, r.Direction));
+        rtHitDecals(scene, s, footprint, m);
+    }
+    if ((m.classFlags & MATERIAL_EMISSIVE_VISIBLE_ONLY) != 0) m.emissive = 0;  // (not light for GI: INTERFACES v1.92)
+    const bool twoSided = (m.classFlags & MATERIAL_TWO_SIDED) != 0;
+    depthWord = lrcEncodeDepth(hit.t, true, s.frontFace, twoSided);
+    if (s.frontFace || twoSided)
+    {
+        RtHitLighting L = (RtHitLighting)0;
+        bool fromSurfaceCache = false;  // (the cards' direct light holds the sun and the local lights)
+        if (P[5].x != UNX_NONE)
+        {
+            const float3 face = dot(s.geometricNormal, r.Direction) > 0 ? -s.geometricNormal : s.geometricNormal;
+            const ClSample cards = clReadCards(mcFrame(P[5].x), s.sceneInstance, s.position, face, CL_READ_IRRADIANCE);
+            if (cards.valid)
+            {
+                L.irradiance = cards.direct + cards.indirect;
+                L.specularRadiance = L.irradiance / LRC_PI;
+                fromSurfaceCache = true;
+            }
+        }
+        if (!fromSurfaceCache && P[0].x != UNX_NONE)
+        {
+            ByteAddressBuffer cache = ResourceDescriptorHeap[P[0].x];
+            const GiHeader h = giHeader(cache);
+            giCacheLightingAt(cache, h, s.position, s.normal, reflect(r.Direction, s.normal), giLevelForSize(h, footprint), L.irradiance, L.specularRadiance);
+        }
+        bool indirectFound = false;
+        if (!fromSurfaceCache && P[0].x == UNX_NONE)
+        {
+            const float4 e = lhiIrradiance(lhiSources(P[5].x), s.position, s.normal, seed);
+            L.irradiance += e.rgb;
+            L.specularRadiance += e.rgb / LRC_PI;
+            indirectFound = e.a > 0;
+        }
+        if (!fromSurfaceCache && !indirectFound) L.irradiance += giFarSkyIrradiance(s.position, s.normal, asfloat(P[5].y));
+        const float3 l = normalize(g_sunDirection);
+        if (!fromSurfaceCache && (dot(s.normal, l) > 0 || rtHitTransmits(m)) && (P[3].w & 16) == 0)
+        {
+            const float3 e0 = giSunIlluminance(s.position);
+            if (any(e0 > 0))
+            {
+                RayDesc sr;
+                sr.Origin = s.position + (dot(s.geometricNormal, l) > 0 ? 1.0 : -1.0) * s.geometricNormal * lrcBias(s.position);
+                sr.Direction = l;  // (the disk's centre: deterministic, as Lumen/LgTrace.hlsl)
+                sr.TMin = 0;
+                sr.TMax = giRayLength();
+                // (the sun through the Glass on the way: what the panes leave of it - RayShaders.hlsli rtShadowTransmittance)
+                const float3 through = rtShadowTransmittance(scene, sr, RT_MASK_HIT_SHADOW | RT_MASK_FAR);
+                L.sunIlluminance = e0 * through;
+                L.sunVisibility = any(through > 0) ? 1.0 : 0.0;
+            }
+        }
+        // a hit without cards: one local-light sample, as Lumen/LgTrace.hlsl (experiment 128: none)
+        if (!fromSurfaceCache && (P[3].w & 128) == 0) L.local = rtHitLocalSample(scene, s, m, -r.Direction, footprint, lrcBias(s.position), seed);
+        radiance = rtHitRadiance(m, s.normal, -r.Direction, L, footprintPerMetre);
+        // a leaf lit from its cards: the other side's light through it (LumenHitIndirect.hlsli)
+        if (fromSurfaceCache)
+            radiance += lhiFoliageThrough(lhiRules(P[5].x), mcFrame(P[5].x), m, s.sceneInstance, s.position,
+                                          dot(s.geometricNormal, r.Direction) > 0 ? -s.geometricNormal : s.geometricNormal);
+    }
+    return radiance;
+}
+#endif
+void lrcStoreTrace(uint2 id, LrcParams p, uint slot, uint2 texel, bool down, bool blocked, uint depthWord, float3 radiance)
+{
+    const uint res = p.probeResolution;
+    if (!all(radiance == radiance) || any(radiance < 0)) radiance = 0;
+    const float4 value = blocked ? float4(0, 0, 0, 0) : float4(min(radiance * LRC_RADIANCE_SCALE, 60000.0), 1);
+    RWTexture2D<float4> temporary = ResourceDescriptorHeap[P[0].z];
+    RWTexture2D<uint> depthAtlas = ResourceDescriptorHeap[P[0].w];
+    const uint2 temporaryBase = uint2(id.y % p.tempProbes, id.y / p.tempProbes) * res, depthBase = lrcAtlasCoord(p, slot) * res;
+    const uint block = down ? 2 : 1;
+    for (uint by = 0; by < block; ++by)
+        for (uint bx = 0; bx < block; ++bx)
+        {
+            temporary[temporaryBase + texel + uint2(bx, by)] = value;
+            depthAtlas[depthBase + texel + uint2(bx, by)] = depthWord;
+        }
+}
+
 [shader("raygeneration")]
 void LumenRadianceCacheTraceGen()
 {
-    const uint2 id = uint2(DispatchRaysIndex().x, DispatchRaysIndex().y + P[4].z);
     const LrcParams p = lrcParams(P[4].x);
+#if HIT_LIGHTING_STAGE == 2
+    uint sourceRay;
+    RtHit queuedHit;
+    RayDesc queuedRay;
+    hitLightingLoad(P[5].z, DispatchRaysIndex().x + P[5].w, sourceRay, queuedHit, queuedRay);
+    const uint raysPerProbe = p.probeResolution * p.probeResolution;
+    const uint2 id = uint2(sourceRay % raysPerProbe, sourceRay / raysPerProbe);
+#else
+    const uint2 id = uint2(DispatchRaysIndex().x, DispatchRaysIndex().y + P[4].z);
+#endif
     ByteAddressBuffer state = ResourceDescriptorHeap[P[4].y];
     if (id.y >= state.Load(8)) return;
     ByteAddressBuffer traces = ResourceDescriptorHeap[P[0].y];
@@ -65,6 +168,12 @@ void LumenRadianceCacheTraceGen()
     g_rtHitCone = tan(coneHalfAngle);
 
     const RtSceneSrvs scene = rtScene();
+#if HIT_LIGHTING_STAGE == 2
+    const uint seed = giRandom(id.x * 9781u + id.y * 6271u + p.frame * 26699u);
+    uint depthWord;
+    const float3 radiance = lrcSurfaceLighting(scene, queuedHit, queuedRay, footprintPerMetre, seed, depthWord);
+    lrcStoreTrace(id, p, slot, texel, down, false, depthWord, radiance);
+#else
     RayDesc r;
     r.Direction = lrcUvToDirection(uv);
     r.Origin = centre;
@@ -114,83 +223,13 @@ void LumenRadianceCacheTraceGen()
     }
     else
     {
-        const RtSurface s = rtSurface(scene, hit, r.Origin, r.Direction);
-        GpuMaterial m = loadMaterial(s.material);
-        const float footprint = hit.t * footprintPerMetre;
-        if ((P[3].w & 8) == 0)
-        {
-            m = rtHitMaterialSeen(m, s, r.Direction, footprint, dot(s.normal, r.Direction));
-            rtHitDecals(scene, s, footprint, m);
-        }
-        if ((m.classFlags & MATERIAL_EMISSIVE_VISIBLE_ONLY) != 0) m.emissive = 0;  // (not light for GI: INTERFACES v1.92)
-        const bool twoSided = (m.classFlags & MATERIAL_TWO_SIDED) != 0;
-        depthWord = lrcEncodeDepth(hit.t, true, s.frontFace, twoSided);
-        if (s.frontFace || twoSided)
-        {
-            RtHitLighting L = (RtHitLighting)0;
-            bool fromSurfaceCache = false;  // (the cards' direct light holds the sun and the local lights)
-            if (P[5].x != UNX_NONE)
-            {
-                const float3 face = dot(s.geometricNormal, r.Direction) > 0 ? -s.geometricNormal : s.geometricNormal;
-                const ClSample cards = clReadCards(mcFrame(P[5].x), s.sceneInstance, s.position, face, CL_READ_IRRADIANCE);
-                if (cards.valid)
-                {
-                    L.irradiance = cards.direct + cards.indirect;
-                    L.specularRadiance = L.irradiance / LRC_PI;
-                    fromSurfaceCache = true;
-                }
-            }
-            if (!fromSurfaceCache && P[0].x != UNX_NONE)
-            {
-                ByteAddressBuffer cache = ResourceDescriptorHeap[P[0].x];
-                const GiHeader h = giHeader(cache);
-                giCacheLightingAt(cache, h, s.position, s.normal, reflect(r.Direction, s.normal), giLevelForSize(h, footprint), L.irradiance, L.specularRadiance);
-            }
-            bool indirectFound = false;
-            if (!fromSurfaceCache && P[0].x == UNX_NONE)
-            {
-                const float4 e = lhiIrradiance(lhiSources(P[5].x), s.position, s.normal, seed);
-                L.irradiance += e.rgb;
-                L.specularRadiance += e.rgb / LRC_PI;
-                indirectFound = e.a > 0;
-            }
-            if (!fromSurfaceCache && !indirectFound) L.irradiance += giFarSkyIrradiance(s.position, s.normal, asfloat(P[5].y));
-            const float3 l = normalize(g_sunDirection);
-            if (!fromSurfaceCache && (dot(s.normal, l) > 0 || rtHitTransmits(m)) && (P[3].w & 16) == 0)
-            {
-                const float3 e0 = giSunIlluminance(s.position);
-                if (any(e0 > 0))
-                {
-                    RayDesc sr;
-                    sr.Origin = s.position + (dot(s.geometricNormal, l) > 0 ? 1.0 : -1.0) * s.geometricNormal * lrcBias(s.position);
-                    sr.Direction = l;  // (the disk's centre: deterministic, as Lumen/LgTrace.hlsl)
-                    sr.TMin = 0;
-                    sr.TMax = giRayLength();
-                    // (the sun through the Glass on the way: what the panes leave of it - RayShaders.hlsli rtShadowTransmittance)
-                    const float3 through = rtShadowTransmittance(scene, sr, RT_MASK_HIT_SHADOW | RT_MASK_FAR);
-                    L.sunIlluminance = e0 * through;
-                    L.sunVisibility = any(through > 0) ? 1.0 : 0.0;
-                }
-            }
-            // a hit without cards: one local-light sample, as Lumen/LgTrace.hlsl (experiment 128: none)
-            if (!fromSurfaceCache && (P[3].w & 128) == 0) L.local = rtHitLocalSample(scene, s, m, -r.Direction, footprint, lrcBias(s.position), seed);
-            radiance = rtHitRadiance(m, s.normal, -r.Direction, L, footprintPerMetre);
-            // a leaf lit from its cards: the other side's light through it (LumenHitIndirect.hlsli)
-            if (fromSurfaceCache)
-                radiance += lhiFoliageThrough(lhiRules(P[5].x), mcFrame(P[5].x), m, s.sceneInstance, s.position,
-                                              dot(s.geometricNormal, r.Direction) > 0 ? -s.geometricNormal : s.geometricNormal);
-        }
+#if HIT_LIGHTING_STAGE == 1
+        hitLightingEnqueue(P[5].z, id.y * res * res + id.x, hit, r);
+        return;
+#else
+        radiance = lrcSurfaceLighting(scene, hit, r, footprintPerMetre, seed, depthWord);
+#endif
     }
-    if (!all(radiance == radiance) || any(radiance < 0)) radiance = 0;
-    const float4 value = blocked ? float4(0, 0, 0, 0) : float4(min(radiance * LRC_RADIANCE_SCALE, 60000.0), 1);
-    RWTexture2D<float4> temporary = ResourceDescriptorHeap[P[0].z];
-    RWTexture2D<uint> depthAtlas = ResourceDescriptorHeap[P[0].w];
-    const uint2 temporaryBase = uint2(id.y % p.tempProbes, id.y / p.tempProbes) * res, depthBase = lrcAtlasCoord(p, slot) * res;
-    const uint block = down ? 2 : 1;
-    for (uint by = 0; by < block; ++by)
-        for (uint bx = 0; bx < block; ++bx)
-        {
-            temporary[temporaryBase + texel + uint2(bx, by)] = value;
-            depthAtlas[depthBase + texel + uint2(bx, by)] = depthWord;
-        }
+    lrcStoreTrace(id, p, slot, texel, down, blocked, depthWord, radiance);
+#endif
 }

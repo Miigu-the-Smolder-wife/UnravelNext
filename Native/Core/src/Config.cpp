@@ -268,7 +268,7 @@ void QualityConfig::applyOverride(std::string_view assignment)
 
 const QualityConfig::Value& QualityConfig::get(std::string_view key, Value::Kind kind) const
 {
-    auto it = m_values.find(std::string(key));
+    auto it = m_values.find(key);
     if (it == m_values.end()) fail("quality parameter '%.*s' is missing from %s (no code default exists)", (int)key.size(), key.data(), m_origin.c_str());
     const Value& v = it->second;
     bool ok = v.kind == kind || (kind == Value::Kind::Float && v.kind == Value::Kind::Integer);
@@ -287,8 +287,10 @@ std::string QualityConfig::string(std::string_view key) const { return get(key, 
 
 std::vector<std::string> QualityConfig::strings(std::string_view key) const
 {
+    const auto& items = get(key, Value::Kind::Array).items;
     std::vector<std::string> out;
-    for (const Value& v : get(key, Value::Kind::Array).items)
+    out.reserve(items.size());
+    for (const Value& v : items)
     {
         if (v.kind != Value::Kind::String) fail("quality parameter '%.*s' must be an array of strings", (int)key.size(), key.data());
         out.push_back(v.text);
@@ -298,8 +300,10 @@ std::vector<std::string> QualityConfig::strings(std::string_view key) const
 
 std::vector<double> QualityConfig::numbers(std::string_view key) const
 {
+    const auto& items = get(key, Value::Kind::Array).items;
     std::vector<double> out;
-    for (const Value& v : get(key, Value::Kind::Array).items)
+    out.reserve(items.size());
+    for (const Value& v : items)
     {
         if (v.kind != Value::Kind::Integer && v.kind != Value::Kind::Float) fail("quality parameter '%.*s' must be an array of numbers", (int)key.size(), key.data());
         out.push_back(v.number);

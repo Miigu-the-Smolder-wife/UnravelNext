@@ -58,7 +58,7 @@ GpuMaterial rtHitMaterialAt(GpuMaterial m, RtSurface s, float2 uvColor, float co
             const bool set1 = (r.flags & MATERIAL_INPUT_DETAIL_UV1) != 0;
             const float2 scale = float2(r.detailScaleU, r.detailScaleV);
             const float2 uvDetail = (set1 ? s.uv1 : s.uv) * scale + r.detailOffset;
-            Texture2D t = ResourceDescriptorHeap[r.detailColorTexture];
+            Texture2D t = ResourceDescriptorHeap[NonUniformResourceIndex(r.detailColorTexture)];
             const float lod = rtTextureLod(t, (set1 ? s.uv1PerWorldArea : s.uvPerWorldArea) * abs(scale.x * scale.y), footprint);
             const float3 detail = (r.textureClamp & 1u) ? t.SampleLevel(g_anisoClamp, uvDetail, lod).rgb : t.SampleLevel(g_anisoWrap, uvDetail, lod).rgb;
             const float weight = (r.flags & MATERIAL_INPUT_VERTEX_BLEND) != 0 ? saturate(s.color.a) : 1.0;
@@ -66,19 +66,19 @@ GpuMaterial rtHitMaterialAt(GpuMaterial m, RtSurface s, float2 uvColor, float co
         }
         if (r.emissiveMaskTexture != UNX_NONE)
         {
-            Texture2D t = ResourceDescriptorHeap[r.emissiveMaskTexture];
+            Texture2D t = ResourceDescriptorHeap[NonUniformResourceIndex(r.emissiveMaskTexture)];
             const float lod = rtTextureLod(t, uvPerWorldArea, footprint);
             m.emissive *= (r.textureClamp & 8u) ? t.SampleLevel(g_anisoClamp, uv, lod).x : t.SampleLevel(g_anisoWrap, uv, lod).x;
         }
     }
     if (m.baseColorTexture != UNX_NONE)
     {
-        Texture2D t = ResourceDescriptorHeap[m.baseColorTexture];
+        Texture2D t = ResourceDescriptorHeap[NonUniformResourceIndex(m.baseColorTexture)];
         m.baseColor *= materialBaseColorLevelAt(m, uvColor, rtTextureLod(t, uvPerWorldArea, footprint)).rgb;
     }
     if (m.roughMetalTexture != UNX_NONE)
     {
-        Texture2D<float4> t = ResourceDescriptorHeap[m.roughMetalTexture];
+        Texture2D<float4> t = ResourceDescriptorHeap[NonUniformResourceIndex(m.roughMetalTexture)];
         const float lod = rtTextureLod(t, uvPerWorldArea, footprint);
         const float2 rm = (m.textureClamp & MATERIAL_TEXTURE_ROUGH_METAL) ? t.SampleLevel(g_anisoClamp, uv, lod).rg : t.SampleLevel(g_anisoWrap, uv, lod).rg;
         m.roughness *= rm.r;
@@ -86,7 +86,7 @@ GpuMaterial rtHitMaterialAt(GpuMaterial m, RtSurface s, float2 uvColor, float co
     }
     if (m.emissiveTexture != UNX_NONE)
     {
-        Texture2D<float4> t = ResourceDescriptorHeap[m.emissiveTexture];
+        Texture2D<float4> t = ResourceDescriptorHeap[NonUniformResourceIndex(m.emissiveTexture)];
         const float lod = rtTextureLod(t, uvPerWorldArea, footprint);
         m.emissive *= (m.textureClamp & MATERIAL_TEXTURE_EMISSIVE) ? t.SampleLevel(g_anisoClamp, uv, lod).rgb : t.SampleLevel(g_anisoWrap, uv, lod).rgb;
     }

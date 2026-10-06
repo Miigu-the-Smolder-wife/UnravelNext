@@ -1,5 +1,5 @@
 // unx-kernel: lib_6_6 main
-// unx-variants: SKY=0,1
+// unx-variants: SKY=0,1 HAIR=0,1 REORDER=0,1,2
 // r.refl.lumen.trace (reflection.lumen_only): the reflection rays of the Lumen path - the structure of Unreal's
 // LumenReflectionHardwareRayTracing (ue6-main read as a reference; the code is ours). One thread per job (a traced
 // pixel), dispatched indirectly in bands of at most 131,072 jobs; ONE world ray a thread (and, only at a hit that has no
@@ -62,15 +62,38 @@
 #define RL_TRACE_LIST P[2].x
 #endif
 
+#ifndef HIT_LIGHTING_STAGE
+#define HIT_LIGHTING_STAGE 0
+#endif
+#include "RayTracing/HitLightingQueue.hlsli"
+#if SKY == SKY_ATMOSPHERE
+#define RL_HIT_LIGHTING_QUEUE P[1].y
+#define RL_HIT_LIGHTING_FIRST P[1].z
+#else
+#define RL_HIT_LIGHTING_QUEUE P[2].y
+#define RL_HIT_LIGHTING_FIRST P[2].z
+#endif
+
 [shader("raygeneration")]
 void ReflectionLumenTraceGen()
 {
+#if HIT_LIGHTING_STAGE == 2
+    uint originalDispatch;
+    uint3 continuation;
+    RtHit queuedHit;
+    RayDesc queuedRay;
+    hitLightingLoadContext(RL_HIT_LIGHTING_QUEUE, DispatchRaysIndex().x + RL_HIT_LIGHTING_FIRST,
+        originalDispatch, queuedHit, queuedRay, continuation);
+    const uint job = continuation.x;
+    g_rlLightingIdentity = uint2(originalDispatch, continuation.y);
+#else
     uint job = DispatchRaysIndex().x + (P[4].w & 0xFFu) * RL_BAND;
     if (((P[0].w >> 24) & RL_FLAG_COMPACT) != 0)
     {
         ByteAddressBuffer traceList = ResourceDescriptorHeap[RL_TRACE_LIST];
         job = traceList.Load(16 + 4 * job);
     }
+#endif
     g_reflWords = P[5].w;
     StructuredBuffer<uint> jobs = ResourceDescriptorHeap[P[0].x];
     const uint entry = jobs[job];
@@ -82,6 +105,9 @@ void ReflectionLumenTraceGen()
     Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[4].y];
     const ReflSurface s = reflSurface(depth, gbuffer, pixel);
     const uint frame = P[0].w & 0xFFFFFFu, flags = P[0].w >> 24;
+#if HIT_LIGHTING_STAGE == 2
+    const float3 direction = queuedRay.Direction;
+#else
     const float start = (flags & RL_FLAG_SCREEN_START) != 0 ? asfloat(results[job].x) : 0.0;
     float3 direction;
     float pdf;
@@ -90,24 +116,34 @@ void ReflectionLumenTraceGen()
         results[job] = reflPackResult(0, 0, 0);
         return;
     }
+#endif
     const RtSceneSrvs scene = rtScene();
     RayDesc r;
+#if HIT_LIGHTING_STAGE == 2
+    r = queuedRay;
+#else
     r.Origin = s.position + s.normal * (1e-3 + 2e-4 * s.linearDepth);
     r.Direction = direction;
     r.TMin = min(max(start, 0.0), giRayLength());
     r.TMax = giRayLength();
+#endif
 #if SKY == SKY_ATMOSPHERE
     const uint streamTable = P[3].x;
 #else
     const uint streamTable = UNX_NONE;
 #endif
+#if HIT_LIGHTING_STAGE == 2
+    const RtHit hit = queuedHit;
+#else
     const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_REFLECTION | RT_MASK_EMITTER | RT_MASK_FAR | (streamTable != UNX_NONE ? RT_MASK_FLUID : 0u));
+#endif
     // the fog along the ray (FogVolume.hlsli fogOverRay): the surface's place in the view
     const float2 fogUv = (float2(pixel) + 0.5) / float2(size);
     // the ray cone of the pixel after the lobe (the hit's texture footprint)
     const float pixelSpread = 2 * g_tanHalfFovY / g_viewHeight;
     const float coneWidth = pixelSpread * s.linearDepth;
     const float coneSpread = pixelSpread + 2 * tan(reflectionLobeHalfAngle(s.roughness, dot(s.normal, s.view)));
+#if HIT_LIGHTING_STAGE != 2
     // the grooms on the ray (HitHair.hlsli): the ray's first fibre from its surface point - the draw the screen trace made
     // for this pixel and frame - where it lies before the hit
     const uint hairParams = rtHairParams(scene);
@@ -148,6 +184,11 @@ void ReflectionLumenTraceGen()
         results[job] = reflPackResult(reflStorable(fogOverRay(fogUv, s.linearDepth, r.Origin, direction, 65536.0, giSkyRadiance(direction))), giRayLength(), 0);
         return;
     }
+#endif
+#if HIT_LIGHTING_STAGE == 1
+    hitLightingEnqueue(RL_HIT_LIGHTING_QUEUE, DispatchRaysIndex().x, hit, r, uint3(job, DispatchRaysIndex().y, 0));
+    return;
+#else
     // a water surface (HitWater.hlsli): its own part here, and what the refracted ray finds as the hit to shade
     RtHit shaded = hit;
     float3 shadeOrigin = r.Origin, shadeDirection = direction, through = 1, before = 0;
@@ -222,4 +263,5 @@ void ReflectionLumenTraceGen()
     float3 radiance = before + through * shade.radiance;
     if (any(isnan(radiance)) || any(isinf(radiance))) radiance = 0;
     results[job] = reflPackResult(reflStorable(fogOverRay(fogUv, s.linearDepth, r.Origin, direction, hit.t, radiance)), hit.t, waterHit ? 0.0 : shade.motion);
+#endif
 }

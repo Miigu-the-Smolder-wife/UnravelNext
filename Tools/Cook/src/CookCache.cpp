@@ -56,10 +56,13 @@ bool readEntry(const std::string& directory, const char* kind, const Key& key, u
                std::vector<uint8_t>& payload)
 {
     const std::filesystem::path path = entryPath(directory, kind, key);
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) return false;
-    std::vector<uint8_t> file((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    if (file.size() < kHeaderBytes + 32) return false;
+    const auto size = f.tellg();
+    if (size < std::streamoff(kHeaderBytes + 32)) return false;
+    std::vector<uint8_t> file(static_cast<size_t>(size));
+    f.seekg(0);
+    if (!f.read(reinterpret_cast<char*>(file.data()), static_cast<std::streamsize>(file.size()))) return false;
     uint32_t head[2];
     std::memcpy(head, file.data(), 8);
     const std::array<uint8_t, 32> source = bytesOfHex(sourceHashHex);

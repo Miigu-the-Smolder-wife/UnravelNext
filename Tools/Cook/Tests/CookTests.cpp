@@ -211,6 +211,16 @@ UNX_TEST(chain_formats_and_levels)
     CHECK(cook::textureChain(s, 0, 1).levels.empty());
 }
 
+UNX_TEST(unused_coverage_needs_no_cook_or_cache_entry)
+{
+    scene::Scene s = cookScene();
+    cook::clearTextureMemoryCache();
+    cook::resetTextureCookStats();
+    CHECK(cook::textureChain(s, 0, 1).levels.empty());
+    const auto stats = cook::textureCookStats();
+    CHECK(stats.cooked == 0 && stats.fromDisk == 0 && stats.fromMemory == 0);
+}
+
 UNX_TEST(texture_disk_cache_round_trip)
 {
     // A fresh process (memory cache cleared) reads every chain from disk, identical to the cooked one; an edit of one
@@ -256,6 +266,13 @@ UNX_TEST(texture_disk_cache_round_trip)
     for (uint32_t i = 0; i < 6; ++i) CHECK(sameChain(cook::textureChain(s, i, 0), first[i]));
     st = cook::textureCookStats();
     CHECK(st.fromDisk == 0 && st.cooked == 6);
+    // A short file is a cache miss, just like a checksum failure.
+    for (const auto& e : std::filesystem::directory_iterator(dir / "textures"))
+        std::filesystem::resize_file(e.path(), 12);
+    cook::clearTextureMemoryCache();
+    cook::resetTextureCookStats();
+    for (uint32_t i = 0; i < 6; ++i) CHECK(sameChain(cook::textureChain(s, i, 0), first[i]));
+    CHECK(cook::textureCookStats().cooked == 6);
     cook::setTextureCacheDirectory("");
     cook::clearTextureMemoryCache();
     std::filesystem::remove_all(dir, ec);

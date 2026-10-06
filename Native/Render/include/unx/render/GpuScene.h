@@ -411,6 +411,7 @@ private:
     std::vector<std::vector<uint32_t>> m_skeletonInstances;  // fixed palette membership, rebuilt by upload
     std::vector<uint64_t> m_transformFrame, m_paletteFrame;
     std::vector<uint32_t> m_movedNow, m_movedBefore, m_posedNow, m_posedBefore;
+    std::vector<uint32_t> m_settledPalettes;  // flush scratch; no per-frame heap allocation
     uint32_t m_windInstances = 0;  // instances with the wind flag (hasMotion)
     uint32_t m_channelsShared = 7;  // lightingChannelsShared
     std::vector<uint32_t> m_textureSrvs;

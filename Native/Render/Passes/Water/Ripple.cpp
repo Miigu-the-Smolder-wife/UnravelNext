@@ -141,7 +141,7 @@ RippleOutput Ripples::record(RenderGraph& g, uint64_t frame, double focusX, doub
                       const uint32_t k[4] = { c.uav(state), 0, 0, c.uav(accum) };
                       c.cmd->SetPipelineState(clear);
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch(uint32_t((kTexels + 255) / 256), 1, 1);
+                      gpuDispatch(c.cmd, uint32_t((kTexels + 255) / 256), 1, 1);
                   });
         m_twiddlesUploaded = true;
     }
@@ -173,7 +173,7 @@ RippleOutput Ripples::record(RenderGraph& g, uint64_t frame, double focusX, doub
     };
     auto pass = [&](const char* name, const char* kernel, uint32_t groups) {
         ID3D12PipelineState* pso = m_shaders.compute(kernel);
-        g.addPass(name, QueueType::Graphics, uses, [=](PassContext& c) { c.cmd->SetPipelineState(pso); constants(c); c.cmd->Dispatch(groups, 1, 1); });
+        g.addPass(name, QueueType::Graphics, uses, [=](PassContext& c) { c.cmd->SetPipelineState(pso); constants(c); gpuDispatch(c.cmd, groups, 1, 1); });
     };
     if (count) pass("ripple sources", "Passes/Water/RippleSplat", count);
     pass("ripple forward rows", "Passes/Water/RippleForwardRows", kN);

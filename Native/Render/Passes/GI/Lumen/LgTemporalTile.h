@@ -1,0 +1,4 @@
+#ifndef UNX_LG_TEMPORAL_TILE_H
+#define UNX_LG_TEMPORAL_TILE_H
+#define LG_TEMPORAL_TILE 16
+#endif

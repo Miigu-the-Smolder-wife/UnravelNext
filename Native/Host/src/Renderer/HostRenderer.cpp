@@ -175,7 +175,14 @@ SceneCommitInfo HostRenderer::commit()
 {
     requireOpen();
     const auto t0 = std::chrono::steady_clock::now();
+    auto stageStart = t0;
+    const auto stage = [&](const char* label) {
+        const auto now = std::chrono::steady_clock::now();
+        logf("scene startup: %s %.1f ms\n", label, std::chrono::duration<double, std::milli>(now - stageStart).count());
+        stageStart = now;
+    };
     scene::validate(m_scene);
+    stage("validate");
     SceneCommitInfo info;
     for (const scene::Mesh& m : m_scene.meshes) info.triangles += m.indices.size() / 3;
 #if UNX_HOST_HAS_CLUSTERBUILDER
@@ -192,6 +199,7 @@ SceneCommitInfo HostRenderer::commit()
     ClusterData clusters = clusterbuilder::build(m_scene, clusterSettings, nullptr, &lodVertices, &clusterPages);
     lodVertices.appendTo(m_scene);
     info.clusters = clusters.clusters.size();
+    stage("clusters");
 #else
     fail("this build has no cluster builder (track V): build with Tools/CI/Build.ps1 -Track I");
 #endif
@@ -200,6 +208,7 @@ SceneCommitInfo HostRenderer::commit()
     m_runtimeCapacity.gpuInstances = (uint32_t)std::max<int64_t>(0, m_quality.integer("fx.particles.mesh_instances_max"));
     if (m_runtimeCapacity.meshes || m_runtimeCapacity.instances || m_runtimeCapacity.gpuInstances) m_gpuScene->reserveRuntime(m_runtimeCapacity);  // C2b
     m_gpuScene->upload(m_scene);
+    stage("upload");
     m_gpuScene->setClusters(std::move(clusters));
     m_frameRenderer = std::make_unique<FrameRenderer>(*m_device, *m_shaders, m_quality, *m_gpuScene, m_options.framesInFlight);
 #if UNX_HOST_HAS_CLUSTERBUILDER && UNX_HOST_HAS_CLUSTER_PAGES
@@ -208,6 +217,7 @@ SceneCommitInfo HostRenderer::commit()
 #endif
     m_graph = std::make_unique<RenderGraph>(*m_device);
     m_profiler = std::make_unique<GpuProfiler>(*m_device, m_options.framesInFlight, 1024);
+    stage("renderer");
     m_committed = true;
     for (const scene::Instance& i : m_scene.instances) m_applied.transforms.push_back(i.transform);
     for (const scene::Skeleton& k : m_scene.skeletons) m_applied.poses.push_back(std::make_shared<const std::vector<float3x4>>(k.jointToModel));
@@ -222,6 +232,7 @@ SceneCommitInfo HostRenderer::commit()
     for (const scene::Material& m : m_scene.materials) m_hostMaterialClasses.push_back(m.cls);
     for (const scene::Instance& i : m_scene.instances) m_hostSkinned.push_back((i.flags & scene::InstanceSkinned) ? 1 : 0);
     info.contentHash = scene::contentHash(m_scene);
+    stage("identity");
     info.buildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     logf("UnravelNext host: scene committed, %zu meshes, %zu instances, %llu triangles, %llu clusters, %.1f ms, hash %s\n", m_scene.meshes.size(),
          m_scene.instances.size(), (unsigned long long)info.triangles, (unsigned long long)info.clusters, info.buildMs, info.contentHash.substr(0, 16).c_str());
@@ -1772,6 +1783,7 @@ uint64_t HostRenderer::queueFrame(FramePacket packet)
     packet.whiteBalanceTint = m_whiteBalanceTint;
     packet.grading = m_grading;
     packet.post = m_post;
+    packet.postExtended = m_postExtended;
     packet.exposureCompensation = m_exposureCompensation;
     packet.displayEncoding = m_displayEncoding;
     packet.displayPaperWhite = m_displayPaperWhite;
@@ -1967,6 +1979,14 @@ void HostRenderer::setPassTimingEnabled(bool enabled)
 {
     std::lock_guard lock(m_mutex);
     m_passTimingEnabled = enabled;
+    if (!enabled) m_workloadEnabled = false;
+}
+
+void HostRenderer::setGpuProfiling(uint32_t mode)
+{
+    std::lock_guard lock(m_mutex);
+    m_passTimingEnabled = mode != 0;
+    m_workloadEnabled = mode == 2;
 }
 
 FrameStats HostRenderer::latestStats(bool includePasses) const
@@ -1986,6 +2006,18 @@ FrameStats HostRenderer::latestStats(bool includePasses) const
     return result;
 }
 
+bool HostRenderer::frameSlotReady()
+{
+    std::unique_lock lock(m_renderSubmitMutex, std::try_to_lock);
+    if (!lock.owns_lock()) return false; // the render thread owns the slot table
+    requireCommitted();
+    check(m_device->d3d()->GetDeviceRemovedReason(), "Frame-slot device unavailable");
+    const uint32_t slot = (uint32_t)(m_recordedFrames % m_options.framesInFlight);
+    for (uint32_t q = 0; q < kQueueTypeCount; ++q)
+        if (m_device->queue((QueueType)q).completed() < m_slotFence[slot][q]) return false;
+    return true;
+}
+
 void HostRenderer::waitForFrameSlot()
 {
     const uint32_t slot = (uint32_t)(m_recordedFrames % m_options.framesInFlight);
@@ -1996,7 +2028,7 @@ uint32_t HostRenderer::beginFrame(const FramePacket& p)
 {
     const uint64_t frame = m_recordedFrames;
     const uint32_t slot = (uint32_t)(frame % m_options.framesInFlight);
-    { std::lock_guard lock(m_mutex); m_profiler->setPassTimestamps(m_passTimingEnabled); }
+    { std::lock_guard lock(m_mutex); m_profiler->setPassTimestamps(m_passTimingEnabled); m_profiler->setWorkloads(m_workloadEnabled); }
     m_profiler->beginFrame(frame);
     if (const FrameTiming* t = m_profiler->lastCompleted())
     {
@@ -2009,6 +2041,9 @@ uint32_t HostRenderer::beginFrame(const FramePacket& p)
         m_stats.gpuMs = t->gpuFrameMs;
         m_stats.passes = m_stats.graph.livePasses;
         m_stats.passMs.clear();
+        m_stats.profile = t->passes;
+        m_stats.profileFlags = (t->detailedPassTimings ? 1u : 0u) | (t->workloads ? 2u : 0u);
+        m_stats.timestampCount = t->timestampCount;
         for (const PassTiming& pt : t->passes) m_stats.passMs.emplace_back(pt.name, pt.durationMs());
     }
     m_slotHostFrame[slot] = p.frameIndex;
@@ -2027,7 +2062,12 @@ uint32_t HostRenderer::beginFrame(const FramePacket& p)
     // Scene edits (the scene already has them, takePacket): materials first, since new instances may override with them.
     if (!p.materialEdits.empty() || !p.instanceEdits.empty() || !p.characterEdits.empty() || !p.inputEdits.empty())
     {
-        std::vector<uint32_t> materials, instances;
+        auto& materials = m_editedMaterials;
+        auto& instances = m_editedInstances;
+        materials.clear();
+        instances.clear();
+        materials.reserve(p.materialEdits.size() + p.characterEdits.size() + p.inputEdits.size());
+        instances.reserve(p.instanceEdits.size());
         for (const auto& e : p.materialEdits) materials.push_back(e.first);
         for (const auto& e : p.characterEdits) materials.push_back(e.first);  // (character shading: the material's record again)
         for (const auto& e : p.inputEdits) materials.push_back(e.first);      // (material inputs: likewise)
@@ -2083,7 +2123,8 @@ uint32_t HostRenderer::beginFrame(const FramePacket& p)
     for (const auto& [instance, visible] : p.visibility) m_gpuScene->setInstanceVisible(instance, visible);
     for (const FramePacket::Morph& m : p.morphs) m_gpuScene->setMorph(frame, m.instance, m.weights, m.time);  // C4
     // C2b runtime geometry, in call order.
-    std::vector<InstanceTransformUpdate> runtimeMoves;
+    auto& runtimeMoves = m_runtimeMoves;
+    runtimeMoves.clear();
     for (const FramePacket::RuntimeOp& op : p.runtime)
         switch (op.kind)
         {
@@ -2163,6 +2204,7 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     fc.whiteBalanceTint = p.whiteBalanceTint;
     fc.grading = p.grading;
     fc.post = p.post;
+    fc.postExtended = p.postExtended;
     fc.exposureCompensation = p.exposureCompensation;
     fc.displayEncoding = p.displayEncoding;
     fc.displayPaperWhite = p.displayPaperWhite;
@@ -2189,16 +2231,19 @@ void HostRenderer::recordFrame(const FramePacket& p, TextureRef output)
     // W2: the basins with their sources grouped (valid until record() returns); sources of basins no longer present drop.
     m_poolFrames = p.pools;
     m_poolSourceFrames.clear();
-    std::vector<size_t> firstSource(m_poolFrames.size());
     for (size_t i = 0; i < m_poolFrames.size(); ++i)
     {
-        firstSource[i] = m_poolSourceFrames.size();
+        const size_t firstSource = m_poolSourceFrames.size();
         for (const FramePacket::PoolSource& s : p.poolSources)
             if (s.pool == m_poolFrames[i].id) m_poolSourceFrames.push_back(s.source);
-        m_poolFrames[i].sourceCount = uint32_t(m_poolSourceFrames.size() - firstSource[i]);
+        m_poolFrames[i].sourceCount = uint32_t(m_poolSourceFrames.size() - firstSource);
     }
-    for (size_t i = 0; i < m_poolFrames.size(); ++i)
-        m_poolFrames[i].sources = m_poolFrames[i].sourceCount ? m_poolSourceFrames.data() + firstSource[i] : nullptr;
+    size_t sourceOffset = 0;
+    for (auto& pool : m_poolFrames)
+    {
+        pool.sources = pool.sourceCount ? m_poolSourceFrames.data() + sourceOffset : nullptr;
+        sourceOffset += pool.sourceCount;
+    }
     fc.pools = m_poolFrames.empty() ? nullptr : m_poolFrames.data();
     fc.poolCount = uint32_t(m_poolFrames.size());
     m_lastDiscontinuity = p.discontinuity;
@@ -2748,6 +2793,22 @@ void HostRenderer::renderOnHost(uint64_t ticket, const HostExecute& execute)
     const uint64_t timedNativeFrame = m_recordedFrames;
     std::optional<FramePacket> packet = takePacket(ticket);
     if (!packet) return;  // an older ticket already rendered, or dropped: nothing to draw
+    // Optional PIX capture at a settled frame. Uses the documented pix3_win.h
+    // CaptureNextFrame export of an already-injected capturer; never injects or
+    // changes graphics settings, and stays inactive without the environment key.
+    if (timedNativeFrame == 400)
+    {
+        wchar_t captureFile[1024]{};
+        const DWORD count = GetEnvironmentVariableW(L"UNX_PIX_CAPTURE_FILE", captureFile, 1024);
+        if (count > 0 && count < 1024)
+        {
+            HMODULE capturer = GetModuleHandleW(L"WinPixGpuCapturer.dll");
+            using CaptureNextFrameFn = HRESULT(WINAPI*)(PCWSTR, UINT32);
+            auto capture = capturer ? reinterpret_cast<CaptureNextFrameFn>(GetProcAddress(capturer, "CaptureNextFrame")) : nullptr;
+            const HRESULT hr = capture ? capture(captureFile, 1) : HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
+            logf("diagnostic PIX CaptureNextFrame at native frame 400: 0x%08x\n", static_cast<unsigned>(hr));
+        }
+    }
     const FramePacket& p = *packet;
     if (!p.output) fail("frame %llu has no output texture", (unsigned long long)p.frameIndex);
     const D3D12_RESOURCE_DESC od = p.output->GetDesc();
@@ -2977,6 +3038,32 @@ void HostRenderer::setPost(const render::PostSettingsDesc& p, float exposureComp
     std::lock_guard lock(m_mutex);
     m_post = p;
     m_exposureCompensation = exposureCompensation;
+}
+
+void HostRenderer::setPostExtended(const render::PostExtendedSettings& p)
+{
+    if (p.enabled)
+    {
+        for (float value : { p.exposureBrighterSeconds, p.exposureDarkerSeconds, p.grain, p.sharpen, p.localHighlight, p.localShadow, p.localDetail, p.localBlend, p.localMiddleGreyBias, p.localKernelPercent, p.fringe, p.fringeStart, p.flareIntensity, p.flareBokehSize, p.flareThreshold, p.flareHalo, p.flareTintR, p.flareTintG, p.flareTintB, p.paniniD, p.paniniS, p.motionMaxPercent, p.renderScale, p.tsrHistoryPercent })
+            if (!std::isfinite(value)) fail("extended post settings must be finite");
+        auto within = [](float v, float a, float b) { return v >= a && v <= b; };
+        if ((p.toneCurve != 0 && p.toneCurve != 1) || (p.localExposure != 0 && p.localExposure != 1) ||
+            (p.lensFlare != 0 && p.lensFlare != 1) || p.bloomLevels < 1 || p.bloomLevels > 10 || p.gradingLutSize < 8 || p.gradingLutSize > 64 ||
+            !(p.exposureBrighterSeconds > 0) || !(p.exposureDarkerSeconds > 0) || !within(p.grain, 0, 0.399f) ||
+            !within(p.sharpen, 0, 10) || !within(p.localHighlight, 0, 1) || !within(p.localShadow, 0, 1) ||
+            !within(p.localDetail, 0, 4) || !within(p.localBlend, 0, 1) || !(p.localKernelPercent > 0 && p.localKernelPercent <= 100) ||
+            !within(p.fringe, 0, 100) || !(p.fringeStart >= 0 && p.fringeStart < 1) || p.flareIntensity < 0 ||
+            !within(p.flareBokehSize, 0, 32) || p.flareThreshold < 0 || p.flareHalo < 0 ||
+            !(p.flareBlades == 0 || (p.flareBlades >= 3 && p.flareBlades <= 16)) ||
+            p.flareTintR < 0 || p.flareTintG < 0 || p.flareTintB < 0 ||
+            !within(p.paniniD, 0, 4) || !within(p.paniniS, -1, 1) || p.motionSamples < 4 || p.motionSamples > 64 || p.motionSamples % 4 != 0 ||
+            !(p.motionMaxPercent > 0 && p.motionMaxPercent <= 100) || p.diaphragmRings < 3 || p.diaphragmRings > 5 ||
+            !(p.renderScale > 0 && p.renderScale <= 1) || p.renderHeightMax < 0 || p.renderHeightMax > 16384 ||
+            p.renderScaleMinHeight < 0 || p.renderScaleMinHeight > 16384 || !within(p.tsrHistoryPercent, 100, 200))
+            fail("extended post setting is outside its supported range");
+    }
+    std::lock_guard lock(m_mutex);
+    m_postExtended = p;
 }
 
 void HostRenderer::setDisplayEncoding(int32_t encoding, float paperWhiteNits)

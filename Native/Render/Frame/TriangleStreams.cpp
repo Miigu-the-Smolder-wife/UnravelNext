@@ -52,7 +52,7 @@ void prepareTriangleStreamDraws(FramePassContext& fc)
                     k[5 + 2 * i] = inputs[base + i].capacity;
                 }
                 c.computeConstants(k, 48);
-                c.cmd->Dispatch(1, 1, 1); // disjoint output records between chunks
+                gpuDispatch(c.cmd, 1, 1, 1); // disjoint output records between chunks
             }
         });
 }

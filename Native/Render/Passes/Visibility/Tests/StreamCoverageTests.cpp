@@ -148,6 +148,9 @@ int main()
         const uint32_t args[4] = { 18, 1, 0, 0 };
         ComPtr<ID3D12Resource> vertices = filled(vertexData.data(), vertexData.size() * 4, (uint64_t)capacity * 96, L"test stream vertices");
         ComPtr<ID3D12Resource> drawArgs = filled(args, sizeof args, 16, L"test stream args");
+        std::vector<float> offscreenData = vertexData;
+        for (size_t vertex = 0; vertex < offscreenData.size(); vertex += 8) offscreenData[vertex] += 1000.0f;
+        ComPtr<ID3D12Resource> offscreenVertices = filled(offscreenData.data(), offscreenData.size() * 4, (uint64_t)capacity * 96, L"offscreen stream");
 
         RenderGraph graph(device());
         TrackState trackState;
@@ -166,6 +169,7 @@ int main()
         for (uint32_t f = 0; f < 6; ++f)
         {
             q.applyOverride(f < 3 ? "visibility.coverage_triangle_cull = false" : "visibility.coverage_triangle_cull = true");
+            q.applyOverride(f < 3 ? "visibility.stream_frustum_cull = false" : "visibility.stream_frustum_cull = true");
             FrameContext frame;
             frame.frameIndex = f;
             frame.mainView = mainView;
@@ -180,6 +184,11 @@ int main()
             st.maxTriangles = capacity;
             st.boundsMin = { -0.5f, -0.3f, 1.8f }, st.boundsMax = { 100.5f, 0.3f, 26.4f };
             resources.triangleStreams.push_back(st);
+            TriangleStream offscreen = st;
+            offscreen.vertices = graph.importBuffer(offscreenVertices.Get(), { "offscreen.stream.vertices", (uint64_t)capacity * 96, 0 });
+            offscreen.boundsMin.x += 1000.0f;
+            offscreen.boundsMax.x += 1000.0f;
+            resources.triangleStreams.push_back(offscreen);
             FramePassContext fc{ device(), graph, shaders(), q, gs, frame, resources, services, [=](const ViewDesc&) { return address; }, &trackState, 2 };
             if (f != 0) prepareTriangleStreamDraws(fc); // direct first, GPU-count consumers on subsequent frames
             ViewResources main;

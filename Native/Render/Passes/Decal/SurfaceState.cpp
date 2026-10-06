@@ -372,7 +372,7 @@ public:
                           {
                               const uint32_t k[8] = { ctx.srv(staged), ctx.uav(target), count, first, offset, targetOffset, 0, 0 };
                               ctx.computeConstants(k, 8);
-                              ctx.cmd->Dispatch(std::min((count - first + perGroup - 1) / perGroup, 65535u), 1, 1);
+                              gpuDispatch(ctx.cmd, std::min((count - first + perGroup - 1) / perGroup, 65535u), 1, 1);
                           }
                       });
         };

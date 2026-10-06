@@ -939,6 +939,9 @@ UNX_API int32_t UNX_CALL UnxFrameSetEnvironment(UnxRenderer r, const UnxEnvironm
 // Snapshot of one frame's inputs and the changes set since the previous queue; *ticket goes into UNX_EVENT_RENDER's
 // data. A ticket that is never rendered is dropped after framesInFlight + 2 newer ones; its changes move to the next.
 UNX_API int32_t UNX_CALL UnxFrameQueue(UnxRenderer r, const UnxFrameDesc* desc, uint64_t* ticket);
+// Advisory readiness (0 or 1), without waiting, reserving a slot or advancing any GPU lifetime.
+// Hosts may finish requested coordinator work while not ready. Rendering still performs its own fence wait.
+UNX_API int32_t UNX_CALL UnxFrameSlotReady(UnxRenderer r, uint32_t* ready);
 // Standalone renderers only (UNX_RENDERER_STANDALONE): records and executes a queued frame on the renderer's own
 // queue into its own output (desc->output ignored); blocks until the GPU finishes when readback is non-null and then
 // copies the RGB10A2 pixels (width * height * 4 bytes).
@@ -1006,6 +1009,31 @@ UNX_API int32_t UNX_CALL UnxFrameSetPassTimingEnabled(UnxRenderer r, uint32_t en
 // Writes min(capacity, passes) entries; *count receives the completed frame's detailed sample count.
 UNX_API int32_t UNX_CALL UnxFramePassTimingsLatest(UnxRenderer r, UnxPassTiming* passes, uint32_t capacity, uint32_t* count);
 
+// Atomic completed-frame snapshot. No wait, GPU submission or implicit mode change on read.
+// mode: 0 frame/queues only, 1 pass timings, 2 individual passes plus workload diagnostics.
+UNX_API int32_t UNX_CALL UnxFrameSetGpuProfiling(UnxRenderer r, uint32_t mode);
+typedef struct UnxGpuProfile
+{
+    uint32_t size, version; // sizeof, 1
+    uint64_t frameIndex;
+    double gpuMs;
+    uint32_t width, height, count, flags; // flags: 1 detailed, 2 workloads; frameIndex UINT64_MAX: no completed frame
+    uint32_t timestampCount, reserved;
+} UnxGpuProfile;
+typedef struct UnxGpuPass
+{
+    char name[128];
+    uint32_t queue, flags; // queue: 0 graphics, 1 compute; flags: 1 recorded counts valid, 2 hardware stats valid, 4 name truncated
+    double beginMs, endMs; // calibrated frame-relative timeline; async queue durations must not be added as frame time
+    uint64_t dispatches, groups, draws, indirect, rayDispatches, rayLaunches;
+    uint64_t computeInvocations, pixelInvocations, rasterPrimitives;
+} UnxGpuPass;
+// Writes min(capacity, profile->count) rows. Retry with sufficient capacity; header and rows always share one frame.
+// groups/rayLaunches are direct submitted dimensions (not active lanes or inline/recursive rays).
+// indirect counts API calls, not GPU command count. Hardware stats include indirect work on DIRECT lists;
+// unsupported async-compute stats are flagged unavailable. PS invocations are not unique screen pixels.
+UNX_API int32_t UNX_CALL UnxFrameGpuProfileLatest(UnxRenderer r, UnxGpuProfile* profile, UnxGpuPass* passes, uint32_t capacity);
+
 // ---- The picture's settings a game changes while it runs (optional exports within ABI 6; after commit, any time). Each
 // is held until changed: every frame queued afterwards takes the current values. What a run keeps fixed stays in the
 // quality file (UnxRendererQualityOverride before commit); these are for what changes with the scene or the moment.
@@ -1061,6 +1089,53 @@ typedef struct UnxPostSettingsDesc
 static_assert(sizeof(UnxPostSettingsDesc) == 48, "UnxPostSettingsDesc is part of the ABI");
 #endif
 UNX_API int32_t UNX_CALL UnxFrameSetPost(UnxRenderer r, const UnxPostSettingsDesc* post);
+
+// A complete extended look snapshot, held for subsequently queued frames.
+// Null restores quality-file values. Legacy post and colour-grading APIs retain
+// their layout and ownership. Buffer dimensions are explicit-apply settings in
+// the host UI; existing frames keep their resources until their GPU fences pass.
+typedef struct UnxPostExtendedDesc
+{
+    uint32_t size, version; // sizeof, 1
+    int32_t toneCurve;
+    int32_t bloomLevels;
+    int32_t gradingLutSize;
+    int32_t localExposure;
+    float exposureBrighterSeconds;
+    float exposureDarkerSeconds;
+    float grain;
+    float sharpen;
+    float localHighlight;
+    float localShadow;
+    float localDetail;
+    float localBlend;
+    float localMiddleGreyBias;
+    float localKernelPercent;
+    float fringe;
+    float fringeStart;
+    int32_t lensFlare;
+    float flareIntensity;
+    float flareBokehSize;
+    float flareThreshold;
+    float flareHalo;
+    int32_t flareBlades;
+    float flareTintR;
+    float flareTintG;
+    float flareTintB;
+    float paniniD;
+    float paniniS;
+    int32_t motionSamples;
+    float motionMaxPercent;
+    int32_t diaphragmRings;
+    float renderScale;
+    int32_t renderHeightMax;
+    int32_t renderScaleMinHeight;
+    float tsrHistoryPercent;
+} UnxPostExtendedDesc;
+#ifdef __cplusplus
+static_assert(sizeof(UnxPostExtendedDesc) == 144, "UnxPostExtendedDesc is part of the ABI");
+#endif
+UNX_API int32_t UNX_CALL UnxFrameSetPostExtended(UnxRenderer r, const UnxPostExtendedDesc* post);
 
 // How an HDR frame (UnxFrameDesc::displayPeak >= 1) is written for the display (FrameContext::displayEncoding):
 //   -1  the quality file's output.hdr_encoding (the default);

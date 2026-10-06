@@ -1,4 +1,5 @@
 // unx-kernel: cs_6_6 main
+// unx-variants: SPECTRUM=0,1
 // Closed basins, per evolution: one thread per basin mode (m, n), m, n = 0..256. The state is spectral: the mode's height
 // and potential amplitudes (H, Phi), real (the mirrored field is real and even), so no float round trip feeds back into
 // it: each frame rotates it exactly (Ripple's rotation, normalised) and damps it by exp(-delta dt) (Pool.hlsli), and only
@@ -46,6 +47,7 @@ void main(uint i : SV_DispatchThreadID)
     }
     else Phi = 0;
     modes.Store2(8 * i, asuint(float2(H, Phi)));
+#if SPECTRUM
     const float2 ks = select(mode == POOL_N / 2u, float2(0, 0), k);  // slope wavenumbers (Nyquist: zero derivative)
     [unroll] for (uint image = 0; image < 4; ++image)
     {
@@ -56,4 +58,5 @@ void main(uint i : SV_DispatchThreadID)
         const float2 slope = float2(-kz * H, kx * H);  // i kx H - kz H, H real
         spectrum.Store4(16 * (bin.y * POOL_PITCH + bin.x), asuint(float4(H, Phi, slope)));
     }
+#endif
 }

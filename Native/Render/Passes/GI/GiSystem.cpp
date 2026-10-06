@@ -553,7 +553,7 @@ TextureRef GiSystem::recordScreen(FramePassContext& fc, ViewResources& view, Buf
                   c.cmd->SetPipelineState(shaders.compute(split ? "Passes/GI/GiScreenIrradiance.SPLIT1" : "Passes/GI/GiScreenIrradiance.SPLIT0"));
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
-                  c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (width + 7) / 8, (height + 7) / 8, 1);
               });
     // The filter pass always runs: besides the spatial filter (gi.screen_filter_cells, 0 = none) it multiplies the main
     // view's probe near occlusion in (view.giIrradiance = the pixel's whole front diffuse indirect irradiance, which M's
@@ -590,7 +590,7 @@ TextureRef GiSystem::recordScreen(FramePassContext& fc, ViewResources& view, Buf
                           c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiProbeFilter"));
                           c.computeConstants(k, 8);
                           c.bindFrameConstants(frameConstants);
-                          c.cmd->Dispatch((probesX + 7) / 8, (probesY + 7) / 8, 1);
+                          gpuDispatch(c.cmd, (probesX + 7) / 8, (probesY + 7) / 8, 1);
                       });
             source = target;
         }
@@ -614,7 +614,7 @@ TextureRef GiSystem::recordScreen(FramePassContext& fc, ViewResources& view, Buf
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiScreenFilter"));
                   c.computeConstants(k, 16);
                   c.bindFrameConstants(frameConstants);
-                  c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (width + 7) / 8, (height + 7) / 8, 1);
               });
     view.giIrradiance = filtered;
     // L_gi's temporal step (GiLayerTemporal.hlsl, redesign V2 1.2): the main view with V's vis buffer (the surface's exact
@@ -689,7 +689,7 @@ TextureRef GiSystem::recordScreen(FramePassContext& fc, ViewResources& view, Buf
                       c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiLayerTemporal"));
                       c.computeConstants(k, 32);
                       c.bindFrameConstants(frameConstants);
-                      c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (width + 7) / 8, (height + 7) / 8, 1);
                   });
         view.giIrradiance = lv;
     }
@@ -748,7 +748,7 @@ void GiSystem::ensureAdmission(FramePassContext& fc, const ViewResources& main)
                   [&shaders, newCache, capacity, first](PassContext& c) {
                       const uint32_t k[4] = { c.uav(newCache), capacity, first, 0 };
                       c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiAdmissionInit"));
-                      c.computeConstants(k, 4); c.cmd->Dispatch(1, 1, 1);
+                      c.computeConstants(k, 4); gpuDispatch(c.cmd, 1, 1, 1);
                   });
     m_device.deferRelease(m_cache);
     m_cache = std::move(grown);
@@ -769,7 +769,7 @@ void GiSystem::recordAdmission(FramePassContext& fc, BufferRef cache)
                   [&shaders, cache, args, pool, requestCapacity](PassContext& c) {
                       const uint32_t k[4] = { c.uav(cache), c.uav(args), requestCapacity, 0 };
                       c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiAdmissionPrepare"));
-                      c.computeConstants(k, 4); c.cmd->Dispatch((pool + 255) / 256, 1, 1);
+                      c.computeConstants(k, 4); gpuDispatch(c.cmd, (pool + 255) / 256, 1, 1);
                   });
     auto indirect = [&](const char* name, const char* kernel, uint32_t parity, uint32_t span) {
         graph.addPass(name, QueueType::Compute,
@@ -777,7 +777,7 @@ void GiSystem::recordAdmission(FramePassContext& fc, BufferRef cache)
                       [&shaders, cache, args, signature, requestCapacity, kernel, parity, span](PassContext& c) {
                           const uint32_t k[4] = { c.uav(cache), requestCapacity, parity, span };
                           c.cmd->SetPipelineState(shaders.compute(kernel)); c.computeConstants(k, 4);
-                          c.cmd->ExecuteIndirect(signature, 1, c.resource(args), 0, nullptr, 0);
+                          gpuExecuteIndirect(c.cmd, signature, 1, c.resource(args), 0, nullptr, 0);
                       });
     };
     uint32_t parity = 0;
@@ -795,7 +795,7 @@ void GiSystem::recordAdmission(FramePassContext& fc, BufferRef cache)
                       [&shaders, cache, requestCapacity, level, groups](PassContext& c) {
                           const uint32_t k[4] = { c.uav(cache), requestCapacity, level, 0 };
                           c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiAdmissionScan"));
-                          c.computeConstants(k, 4); c.cmd->Dispatch(groups, 1, 1);
+                          c.computeConstants(k, 4); gpuDispatch(c.cmd, groups, 1, 1);
                       });
         if (count <= 256) break;
     }
@@ -858,7 +858,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                       std::memcpy(&k[4], header, sizeof header);
                       c.cmd->SetPipelineState(library.compute("Passes/GI/GiAccFold"));
                       c.computeConstants(k, 12);
-                      c.cmd->Dispatch((slots + 63) / 64, 1, 1);
+                      gpuDispatch(c.cmd, (slots + 63) / 64, 1, 1);
                   });
     }
     // Probes at the tile corners (design revision 12.3): one more column and row than tiles.
@@ -887,7 +887,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                       c.cmd->SetPipelineState(shaders.compute(kernel));
                       c.computeConstants(k, 8);
                       c.bindFrameConstants(frameConstants);
-                      c.cmd->Dispatch(dispatch, 1, 1);
+                      gpuDispatch(c.cmd, dispatch, 1, 1);
                   });
     };
     uint32_t cam[3];
@@ -907,7 +907,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                       [&shaders, cache, dx, dy, dz, count](PassContext& c) {
                           const uint32_t k[4] = { c.uav(cache), dx, dy, dz };
                           c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiAdmissionShift")); c.computeConstants(k, 4);
-                          c.cmd->Dispatch(std::min(count, 65535u), (count + 65534) / 65535, 1);
+                          gpuDispatch(c.cmd, std::min(count, 65535u), (count + 65534) / 65535, 1);
                       });
         }
     }
@@ -931,7 +931,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiProbePlace"));
                   c.computeConstants(k, 8);
                   c.bindFrameConstants(frameConstants);
-                  c.cmd->Dispatch((probesX + 7) / 8, (probesY + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (probesX + 7) / 8, (probesY + 7) / 8, 1);
               });
     }
     if (s.deterministic)
@@ -1020,7 +1020,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                       const uint32_t k[4] = { c.uav(cache), boxesSrv, 0, 0 };
                       c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiInvalidate"));
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch(512, (capacity + 511) / 512, 1);
+                      gpuDispatch(c.cmd, 512, (capacity + 511) / 512, 1);
                   });
     }
     compute("r.gi.carry", "Passes/GI/GiCarry", groups(s.capacity), {});
@@ -1041,7 +1041,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                               const uint32_t k[4] = { c.uav(state), 5 * 1040 / 4, 0, 0 };
                               c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiDetClear"));
                               c.computeConstants(k, 4);
-                              c.cmd->Dispatch((5 * 1040 / 4 + 63) / 64, 1, 1);
+                              gpuDispatch(c.cmd, (5 * 1040 / 4 + 63) / 64, 1, 1);
                           });
             for (const char* kernel : { "Passes/GI/GiDetDigits", "Passes/GI/GiDetResolve" })
             {
@@ -1056,7 +1056,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                               c.cmd->SetPipelineState(shaders.compute(kernel));
                               c.computeConstants(k, 4);
                               c.bindFrameConstants(frameConstants);
-                              c.cmd->Dispatch(digits ? dispatch : 4, 1, 1);  // resolve: tiers 0, 1 and their young ranges (slots 3, 4)
+                              gpuDispatch(c.cmd, digits ? dispatch : 4, 1, 1);  // resolve: tiers 0, 1 and their young ranges (slots 3, 4)
                           });
             }
         }
@@ -1071,7 +1071,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiSelect"));
                   c.computeConstants(k, 4);
                   c.bindFrameConstants(frameConstants);
-                  c.cmd->Dispatch(dispatch, 1, 1);
+                  gpuDispatch(c.cmd, dispatch, 1, 1);
               });
     if (!detState)
     {
@@ -1083,7 +1083,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                           const uint32_t k[4] = { c.uav(cache), mode, 0, 0 };
                           c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiBackgroundList"));
                           c.computeConstants(k, 4);
-                          c.cmd->Dispatch(mode == 0 ? dispatch : 1, 1, 1);
+                          gpuDispatch(c.cmd, mode == 0 ? dispatch : 1, 1, 1);
                       });
     }
     if (detState)
@@ -1101,7 +1101,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                               const uint32_t k[4] = { c.uav(cache), c.uav(state), level, 1 };  // mode 1: tier 2
                               c.cmd->SetPipelineState(shaders.compute(digits ? "Passes/GI/GiDetDigits" : "Passes/GI/GiDetResolve"));
                               c.computeConstants(k, 4);
-                              c.cmd->Dispatch(digits ? dispatch : 1, 1, 1);
+                              gpuDispatch(c.cmd, digits ? dispatch : 1, 1, 1);
                           });
         g.addPass("r.gi.det.bg", QueueType::Compute,
                   [&](PassBuilder& b) {
@@ -1112,14 +1112,14 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                       const uint32_t k[4] = { c.uav(cache), c.uav(state), 0, 0 };
                       c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiDetBackground"));
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch(dispatch, 1, 1);
+                      gpuDispatch(c.cmd, dispatch, 1, 1);
                   });
         g.addPass("r.gi.det.bg.done", QueueType::Compute, [&](PassBuilder& b) { b.use(cache, Use::UavCompute); },
                   [&shaders, cache, state](PassContext& c) {
                       const uint32_t k[4] = { c.uav(cache), 0, 1, 0 };
                       c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiDetBackground"));
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                   });
     }
 
@@ -1152,7 +1152,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                       const uint32_t k[4] = { c.uav(cache), updates, c.uav(guide), shareBits };
                       c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiGuide"));
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch(updates, 1, 1);
+                      gpuDispatch(c.cmd, updates, 1, 1);
                   });
     }
     const float3 sky = m_skyRadiance, sun = m_sunIlluminance;
@@ -1216,7 +1216,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                           const uint32_t k[12] = { c.uav(accPool), 1, list, levels };
                           c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiAccFold"));
                           c.computeConstants(k, 12);
-                          c.cmd->Dispatch((entries + 63) / 64, 1, 1);
+                          gpuDispatch(c.cmd, (entries + 63) / 64, 1, 1);
                       });
         }
     }
@@ -1232,7 +1232,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                       const uint32_t k[4] = { c.uav(cache), w, 0, 0 };
                       c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiAccumulate"));
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch((capacity + 63) / 64, 1, 1);
+                      gpuDispatch(c.cmd, (capacity + 63) / 64, 1, 1);
                   });
         if (accRecords.valid())
             g.addPass("r.gi.accfix", QueueType::Compute,
@@ -1245,7 +1245,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                           const uint32_t k[4] = { c.uav(cache), rayCount, c.uav(samples), c.srv(accRecords) };
                           c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiAccFix"));
                           c.computeConstants(k, 4);
-                          c.cmd->Dispatch((rayCount + 63) / 64, 1, 1);
+                          gpuDispatch(c.cmd, (rayCount + 63) / 64, 1, 1);
                       });
     }
     g.addPass("r.gi.integrate", QueueType::Compute,
@@ -1259,7 +1259,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   c.cmd->SetPipelineState(shaders.compute(split ? "Passes/GI/GiIntegrate.SPLIT1" : "Passes/GI/GiIntegrate.SPLIT0"));
                   c.computeConstants(k, 8);
                   c.bindFrameConstants(frameConstants);
-                  c.cmd->Dispatch(updates, 1, 1);  // one group per update slot
+                  gpuDispatch(c.cmd, updates, 1, 1);  // one group per update slot
               });
 
     // Map owner list (count, then probe indices) and its indirect dispatch arguments, reset by the gather.
@@ -1318,7 +1318,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiProbeGather"));
                   c.computeConstants(k, 20);
                   c.bindFrameConstants(frameConstants);
-                  c.cmd->Dispatch((probesX + 7) / 8, (probesY + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (probesX + 7) / 8, (probesY + 7) / 8, 1);
               });
     g.addPass("r.gi.mapowners", QueueType::Compute,
               [&](PassBuilder& b) {
@@ -1331,7 +1331,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   const uint32_t k[8] = { c.srv(cache), c.uav(probes), probesX, probesY, c.uav(owners), c.uav(mapArgs), 0, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiProbeMapOwners"));
                   c.computeConstants(k, 8);
-                  c.cmd->Dispatch((probesX + 7) / 8, (probesY + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (probesX + 7) / 8, (probesY + 7) / 8, 1);
               });
     ID3D12CommandSignature* signature = dispatchSignature();
     g.addPass("r.gi.maps", QueueType::Compute,
@@ -1346,7 +1346,7 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                   const uint32_t k[8] = { c.srv(cache), c.uav(probes), probesX, probesY, c.srv(owners), c.uav(atlas), 0, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/GiProbeMaps"));
                   c.computeConstants(k, 8);
-                  c.cmd->ExecuteIndirect(signature, 1, c.resource(mapArgs), 0, nullptr, 0);
+                  gpuExecuteIndirect(c.cmd, signature, 1, c.resource(mapArgs), 0, nullptr, 0);
               });
     // M's per-pixel cache irradiance (front side) as a pass of its own (GiScreenIrradiance.hlsl; R_STATUS 0, GI tile path
     // verdict): M reads view.giIrradiance once instead of the lookup inside its shading kernel. Culled while nothing reads it.
@@ -1391,8 +1391,8 @@ void GiSystem::record(FramePassContext& fc, ViewResources& main, rt::RayScene& r
                           c.cmd->SetPipelineState(shaders.compute("Passes/GI/Gates/GiLookupStats"));
                           c.computeConstants(k, 8);
                           c.bindFrameConstants(frameConstants);
-                          if (clear) c.cmd->Dispatch(1, 1, 1);
-                          else c.cmd->Dispatch((main.view.width + 7) / 8, (main.view.height + 7) / 8, 1);
+                          if (clear) gpuDispatch(c.cmd, 1, 1, 1);
+                          else gpuDispatch(c.cmd, (main.view.width + 7) / 8, (main.view.height + 7) / 8, 1);
                       });
     }
 }

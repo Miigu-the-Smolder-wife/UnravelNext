@@ -14,13 +14,14 @@
 #include "Scene.hlsli"
 #include "Passes/Atmosphere/Froxel.hlsli"
 #include "Passes/Shadow/VsmLocal.hlsli"
+#include "Passes/Shadow/VsmRequest.hlsli"
 
 // The request of page 'page' of the face at mip.
 void requestPage(RWByteAddressBuffer requests, uint light, uint face, uint mip, uint2 page)
 {
     const uint at = vsmLocalSlot(light, face, mip, page);
     // Duplicate requests within the wave's active lanes store once (VsmMark): the same word, the same value.
-    if (at != WaveReadLaneFirst(at) || WaveIsFirstLane()) requests.Store(at * 4, VSM_REQ_PIXEL);
+    if (vsmRequestLane(at, VSM_REQ_PIXEL)) requests.Store(at * 4, VSM_REQ_PIXEL);
 }
 // The request of the projected point q at mip; returns the page's continuous coordinates (texel / 128) on its face.
 float2 requestAt(RWByteAddressBuffer requests, uint light, VsmLocalPoint q, uint mip)

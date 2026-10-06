@@ -427,6 +427,17 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
     const bool megaWanted = false;
 #endif
     const bool tileLights = fc.quality.boolean("shading.tile_lights") && froxelLists && view.view.kind == gpu::ViewKind::Main && !megaWanted;
+    static const bool splitOpaque = [] {
+        char value[2]{};
+        return GetEnvironmentVariableA("UNX_SHADE_SPLIT", value, sizeof value) == 1 && value[0] == '1';
+    }();
+    ID3D12PipelineState* combinedOpaque = nullptr;
+    if (megaWanted && !splitOpaque)
+    {
+        const std::string name = std::string("Passes/Shading/ShadeCombined.AREA") + (areaLights ? "1" : "0") +
+            ".PLANAR" + (view.view.kind != gpu::ViewKind::Main ? "1" : "0") + ".OUTPUT" + (linear ? "1" : "0");
+        combinedOpaque = fc.shaders.compute(name.c_str());
+    }
     // Lighting channels in the kernels' own light loop (the froxel lists without shading.mega_lights, whose sampling tests
     // them): part 1 reads the pixel's instance through the vis buffer (ShadeOpaque.hlsl P[11].zw).
     const bool channelVis = froxelLists && !megaWanted && view.visId.valid() && view.visibleClusters.valid();
@@ -452,7 +463,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                       c.cmd->SetPipelineState(kernel);
                       c.bindFrameConstants(cbAddr);
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (W + 7) / 8, (H + 7) / 8, 1);
                   });
     }
     const D3D12_GPU_VIRTUAL_ADDRESS cb = view.frameConstants;
@@ -532,7 +543,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                  const uint32_t k[4] = { gpu::kNone, c.srv(special), gpu::kNone, c.uav(shaded) };
                                  c.cmd->SetPipelineState(defaults);
                                  c.computeConstants(k, 4);
-                                 c.cmd->ExecuteIndirect(signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
+                                 gpuExecuteIndirect(c.cmd, signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
                              });
         }
     }
@@ -641,7 +652,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                  k32[5] = 4;
                                  k32[6] = 0x80000000u | subsurfaceBit;  // P[1].z: the class as a mask
                                  c.computeConstants(k32, 48);
-                                 c.cmd->ExecuteIndirect(signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
+                                 gpuExecuteIndirect(c.cmd, signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
                                  return;
                              }
                              const uint32_t cls = (uint32_t)material::ShadeClass::Subsurface;
@@ -652,7 +663,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                              {
                                  k32[5] = o.firstTile(cls, band);
                                  c.computeConstants(k32, 48);
-                                 c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
+                                 gpuExecuteIndirect(c.cmd, signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
                              }
                          });
     };
@@ -688,7 +699,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                                      fallback ? c.srv(fallbackList) : gpu::kNone, fallback ? c.uav(fallbackArgs) : gpu::kNone, tilesX, height };
                              c.cmd->SetPipelineState(begin);
                              c.computeConstants(k, 8);
-                             c.cmd->Dispatch(1, 1, 1);
+                             gpuDispatch(c.cmd, 1, 1, 1);
                          });
 
         if (scatter)
@@ -700,7 +711,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                  const uint32_t k[4] = { c.uav(scatterDiffuse), w, h, 0 };
                                  c.cmd->SetPipelineState(clear);
                                  c.computeConstants(k, 4);
-                                 c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                                 gpuDispatch(c.cmd, (w + 7) / 8, (h + 7) / 8, 1);
                              });
         }
 
@@ -786,7 +797,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                          std::memcpy(&k32[46], &minWeight, 4);  // P[11].z
                                          k32[47] = mlMode;             // P[11].w
                                          c.computeConstants(k32, 48);
-                                         c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
+                                         gpuExecuteIndirect(c.cmd, signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
                                      }
                                  }
                              });
@@ -856,7 +867,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             c.cmd->SetPipelineState(detect);
             c.bindFrameConstants(cb);
             c.computeConstants(k, 16);
-            c.cmd->Dispatch(o.tilesX, row1 - row0, 1);
+            gpuDispatch(c.cmd, o.tilesX, row1 - row0, 1);
         };
 
         // Planar reflection views are timed apart (their cost is R's reflection budget, ARCHITECTURE 2.6 C_planar).
@@ -884,7 +895,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 c.cmd->SetPipelineState(tileKernel);
                 c.bindFrameConstants(cb);
                 c.computeConstants(k, 12);
-                c.cmd->Dispatch(o.tilesX, row1 - row0, 1);
+                gpuDispatch(c.cmd, o.tilesX, row1 - row0, 1);
             };
         }
         RenderGraph::BandedPass shadePass;
@@ -971,7 +982,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 k[18] = asUint(histogram.centreSigma);                        // P[4].z
                 k[19] = meter ? c.uav(histogram.buffer) : gpu::kNone;          // P[4].w
                 c.computeConstants(k, 32);
-                c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
+                gpuExecuteIndirect(c.cmd, signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
             }
             // Surface classes (Water uses the opaque model until its own is defined; A9 layered materials with the LAYERED
             // variant, Subsurface with its part 1): every class's part 1 (and the A9 lobe kernel before it), one UAV barrier, then
@@ -984,9 +995,12 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 if (shadeClass == material::ShadeClass::Layered && !opaqueLayered) break;
                 if (shadeClass == material::ShadeClass::Sheen && !opaqueSheen) break;
                 if (part == 2 && shadeClass == material::ShadeClass::Opaque && band == firstBand) lobeBarrier(c);  // part 1's writes before part 2's reads
+                const bool combined = combinedOpaque && megaLighting.valid() && shadeClass == material::ShadeClass::Opaque;
+                if (combined && part == 2) continue;
                 c.cmd->SetPipelineState(part == 1 ? (shadeClass == material::ShadeClass::Layered ? opaqueLayered : (shadeClass == material::ShadeClass::Sheen ? opaqueSheen : opaque))
                                                   : (shadeClass == material::ShadeClass::Layered ? indirectLayered : (shadeClass == material::ShadeClass::Sheen ? indirectSheen : indirect)));
                 if (shadeClass == material::ShadeClass::Subsurface) c.cmd->SetPipelineState(part == 1 ? opaqueSubsurface : indirectSubsurface);
+                if (combined) c.cmd->SetPipelineState(combinedOpaque);
                 const uint32_t cls = (uint32_t)shadeClass;
                 const uint32_t k[22] = { c.srv(v.gbuffer), c.srv(v.depth), c.srv(o.materialWord), c.uav(v.color),
                                          c.srv(o.tiles), o.firstTile(cls, band), cls, o.emissive.valid() ? c.srv(o.emissive) : none,
@@ -1016,7 +1030,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                 k32[45] = roughSpecular.valid() ? c.srv(roughSpecular) : none;           // P[11].y: gi.lumen_only's rough specular
                 k32[46] = shortRangeAO.valid() ? c.srv(shortRangeAO) : none;             // P[11].z: ... and short-range AO
                 k32[47] = backfaceIrradiance.valid() ? c.srv(backfaceIrradiance) : none;  // P[11].w: ... and Foliage's back side
-                if (part == 1)
+                if (part == 1 && !combined)
                 {
                     // part 1's own light loop (the froxel lists, without shading.mega_lights): the vis buffer for the pixel's
                     // lighting channels (ShadeOpaque.hlsl P[11].zw; part 2 reads the gather's textures there)
@@ -1036,11 +1050,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                     // the lobe texture is read by part 2 (after the barrier below)
                     c.cmd->SetPipelineState(lobes);
                     c.computeConstants(k32, 48);
-                    c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
+                    gpuExecuteIndirect(c.cmd, signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
                     c.cmd->SetPipelineState(shadeClass == material::ShadeClass::Layered ? opaqueLayered : opaqueSheen);
                 }
                 c.computeConstants(k32, 48);
-                c.cmd->ExecuteIndirect(signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
+                gpuExecuteIndirect(c.cmd, signature, 1, args, o.argsOffset(cls, band), nullptr, 0);
             }
         };
         if (tileLights) return { detectPass, tilePass, shadePass };
@@ -1204,11 +1218,11 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                  {
                                      c.cmd->SetPipelineState(fallbackLobes[run]);
                                      c.computeConstants(k32, 48);
-                                     c.cmd->ExecuteIndirect(signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
+                                     gpuExecuteIndirect(c.cmd, signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
                                  }
                                  c.cmd->SetPipelineState(kernel);
                                  c.computeConstants(k32, 48);
-                                 c.cmd->ExecuteIndirect(signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
+                                 gpuExecuteIndirect(c.cmd, signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
                              }
                              lobeBarrier(c);
                              k32[46] = gatherZ, k32[47] = gatherW;
@@ -1218,7 +1232,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                  runWords(run);
                                  c.cmd->SetPipelineState(fallbackIndirect[run]);
                                  c.computeConstants(k32, 48);
-                                 c.cmd->ExecuteIndirect(signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
+                                 gpuExecuteIndirect(c.cmd, signature, 1, c.resource(fallbackArgs), 0, nullptr, 0);
                              }
                          });
         if (scatter) addScatter(true);
@@ -1263,7 +1277,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                          const uint32_t k[4] = { c.uav(edgeArgs), c.uav(edgePixels), capacity, 0 };
                          c.cmd->SetPipelineState(edgeArgsKernel);
                          c.computeConstants(k, 4);
-                         c.cmd->Dispatch(1, 1, 1);
+                         gpuDispatch(c.cmd, 1, 1, 1);
                      });
 
     // Edge composite over the edge pixels (analytic coverage of the pixel square by the neighbourhood's surfaces). With the
@@ -1296,7 +1310,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                          c.cmd->SetPipelineState(composite);
                          c.bindFrameConstants(cb);
                          c.computeConstants(k, 24);
-                         c.cmd->ExecuteIndirect(signature, 1, c.resource(edgeArgs), 0, nullptr, 0);
+                         gpuExecuteIndirect(c.cmd, signature, 1, c.resource(edgeArgs), 0, nullptr, 0);
                      });
 
     // Coverage composite (design COVERAGE_REDESIGN 4.5; stages in CoverageShade.hlsli): V's fragments (pixel-major ranges,
@@ -1350,7 +1364,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           c.bindFrameConstants(cb);
                           c.computeConstants(k, 8);
                           c.cmd->SetPipelineState(covKernel[0]);
-                          c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                          gpuDispatch(c.cmd, (W + 7) / 8, (H + 7) / 8, 1);
                           // the per-record passes: V's arguments over the record blocks (tile list header words 8..10);
                           // the depths are complete before the elements are chosen (one global UAV barrier between them)
                           D3D12_GLOBAL_BARRIER gb{ D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
@@ -1361,7 +1375,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           {
                               c.cmd->Barrier(1, &group);
                               c.cmd->SetPipelineState(covKernel[mode]);
-                              c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 32, nullptr, 0);
+                              gpuExecuteIndirect(c.cmd, signature, 1, c.resource(v.coverageTileList), 32, nullptr, 0);
                           }
                       });
             g.addPass("m.ml.cov.surface", QueueType::Graphics,
@@ -1380,7 +1394,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           c.bindFrameConstants(cb);
                           c.computeConstants(k, 16);
                           c.cmd->SetPipelineState(covKernel[3]);
-                          c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                          gpuDispatch(c.cmd, (W + 7) / 8, (H + 7) / 8, 1);
                       });
             // the instance: the view with the coverage surface as its depth and G-buffer (no vis buffer: its history is
             // reprojected as static)
@@ -1391,6 +1405,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
             MegaLightsOptions covOptions;
             covOptions.channels = covChannels;
             covOptions.classWord = covEyeWord;
+            covOptions.coverageTiles = v.coverageTiles;
             MegaLightsFrame cml = megaLightsSample(fc, cview, covWord, areaLights, ltcSrv, signature, "coverage", covOptions);
             if (!cml.on) fail("M.shading: the coverage layer's shading.mega_lights instance could not start");
             ID3D12PipelineState* covShade = fc.shaders.compute((std::string("Passes/Shading/MegaLightsShade.AREA") + (areaLights ? "1" : "0") + ".LAYERED0.FULL1").c_str());
@@ -1448,13 +1463,13 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           c.bindFrameConstants(cb);
                           c.cmd->SetPipelineState(covShade);
                           c.computeConstants(k32, 48);
-                          c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                          gpuDispatch(c.cmd, (W + 7) / 8, (H + 7) / 8, 1);
                           if (covShadeSubsurface)
                           {
                               k32[6] = 0x80000000u | subsurfaceBit;  // (the class as a mask; its pixels are the first dispatch's gaps)
                               c.cmd->SetPipelineState(covShadeSubsurface);
                               c.computeConstants(k32, 48);
-                              c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                              gpuDispatch(c.cmd, (W + 7) / 8, (H + 7) / 8, 1);
                           }
                       });
             megaLightsDenoise(fc, cview, covWord, cml, true);
@@ -1500,8 +1515,10 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
         ID3D12PipelineState* heavyReset = fc.shaders.compute("Passes/Shading/CoverageHeavyReset");
         const TextureRef directSum = compact ? TextureRef{} : g.createTexture({ "m.coverage direct", v.view.width, v.view.height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
         ID3D12PipelineState* sort[2] = { fc.shaders.compute("Passes/Shading/CoverageHeavySort.SIZE0"), fc.shaders.compute("Passes/Shading/CoverageHeavySort.SIZE1") };
-        ID3D12PipelineState* heavyRounds[2] = { fc.shaders.compute(("Passes/Shading/CoverageHeavyRound.PART1.AREA" + area).c_str()),
-                                                fc.shaders.compute(("Passes/Shading/CoverageHeavyRound.PART2.AREA" + area).c_str()) };
+        const bool fusedRounds = fc.quality.has("shading.coverage_fused_rounds") && fc.quality.boolean("shading.coverage_fused_rounds");
+        const std::string fused = fusedRounds ? ".FUSED1" : ".FUSED0";
+        ID3D12PipelineState* heavyRounds[2] = { fc.shaders.compute(("Passes/Shading/CoverageHeavyRound.PART1.AREA" + area + fused).c_str()),
+                                                fc.shaders.compute(("Passes/Shading/CoverageHeavyRound.PART2.AREA" + area + fused).c_str()) };
         ID3D12PipelineState* finish = fc.shaders.compute(("Passes/Shading/CoverageHeavyFinish.OUTPUT" + output).c_str());
 
         // CoverageBegin: MODE 0 reset, 1 heavy arguments, 2 round r's arguments.
@@ -1515,7 +1532,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           const uint32_t p[4] = { c.uav(state), hcap, roundIndex, c.uav(args) };
                           c.cmd->SetPipelineState(k);
                           c.computeConstants(p, 4);
-                          c.cmd->Dispatch(1, 1, 1);
+                          gpuDispatch(c.cmd, 1, 1, 1);
                       });
         };
         // E's grooms between the layer's fragments and the sun (shading.hair_shadows; Passes/Hair/HairShadow.hlsl MODE 2):
@@ -1562,7 +1579,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           c.cmd->SetPipelineState(hairProfile);
                           c.bindFrameConstants(cb);
                           c.computeConstants(k, 12);
-                          c.cmd->Dispatch((hairW + 7) / 8, (hairH + 7) / 8, 1);
+                          gpuDispatch(c.cmd, (hairW + 7) / 8, (hairH + 7) / 8, 1);
                       });
         }
         // E's decals of the view (A7; both invalid when none is live): the fragments' material takes them as the resolve's
@@ -1676,7 +1693,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                               c.cmd->SetPipelineState(kernel);
                               c.bindFrameConstants(cb);
                               c.computeConstants(k, 8);
-                              c.cmd->ExecuteIndirect(signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
+                              gpuExecuteIndirect(c.cmd, signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
                           });
             }
             // the lighting of every kind 5 entry in two kernels (DXIL limit):
@@ -1708,7 +1725,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                               c.cmd->SetPipelineState(lit);
                               c.bindFrameConstants(cb);
                               c.computeConstants(k32, 48);
-                              c.cmd->ExecuteIndirect(signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
+                              gpuExecuteIndirect(c.cmd, signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
                           });
             };
             addLight("5");  // every kind 5 entry (MODE 3, one lighting kernel, retired at the DXIL limit)
@@ -1790,7 +1807,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                   c.bindFrameConstants(cb);
                                   c.computeConstants(k, 36);
                                   c.cmd->SetPipelineState(hairKernel[0]);
-                                  c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                                  gpuDispatch(c.cmd, (W + 7) / 8, (H + 7) / 8, 1);
                                   // the depths are complete before the elements are chosen (one global UAV barrier between the steps)
                                   D3D12_GLOBAL_BARRIER gb{ D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
                                                            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS };
@@ -1800,7 +1817,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                   {
                                       c.cmd->Barrier(1, &group);
                                       c.cmd->SetPipelineState(hairKernel[mode]);
-                                      c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 32, nullptr, 0);  // V's arguments over the record blocks
+                                      gpuExecuteIndirect(c.cmd, signature, 1, c.resource(v.coverageTileList), 32, nullptr, 0);  // V's arguments over the record blocks
                                   }
                               });
                     g.addPass("m.hair.surface", QueueType::Graphics,
@@ -1819,7 +1836,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                   c.bindFrameConstants(cb);
                                   c.computeConstants(k, 24);
                                   c.cmd->SetPipelineState(hairKernel[3]);
-                                  c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                                  gpuDispatch(c.cmd, (W + 7) / 8, (H + 7) / 8, 1);
                               });
                     // the instance: the view with the hair surface as its depth and G-buffer (no vis buffer: its history
                     // is reprojected as static); a view that cannot run it keeps the per-record loop
@@ -1853,7 +1870,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                           c.bindFrameConstants(cb);
                                           c.computeConstants(k, 32);
                                           c.cmd->SetPipelineState(hairKernel[6]);
-                                          c.cmd->Dispatch((dsW + 7) / 8, (dsH + 7) / 8, 1);
+                                          gpuDispatch(c.cmd, (dsW + 7) / 8, (dsH + 7) / 8, 1);
                                       });
                             return rayKeys;
                         };
@@ -1891,7 +1908,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                       c.bindFrameConstants(cb);
                                       c.computeConstants(k, 36);
                                       c.cmd->SetPipelineState(hairKernel[4]);
-                                      c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                                      gpuDispatch(c.cmd, (W + 7) / 8, (H + 7) / 8, 1);
                                   });
                         // (shading.hair_lights_spatial: the instance's spatial filter; off as the reference's hair input)
                         megaLightsDenoise(fc, hview, hairWord, hml, true, fc.quality.boolean("shading.hair_lights_spatial"));
@@ -1949,16 +1966,16 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                   D3D12_BARRIER_GROUP group{ D3D12_BARRIER_TYPE_GLOBAL, 1 };
                                   group.pGlobalBarriers = &gb;
                                   c.cmd->SetPipelineState(hairKernel[7]);
-                                  c.cmd->Dispatch((bitWords + 255) / 256, 1, 1);
+                                  gpuDispatch(c.cmd, (bitWords + 255) / 256, 1, 1);
                                   c.cmd->Barrier(1, &group);
                                   c.cmd->SetPipelineState(hairKernel[8]);
-                                  c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 32, nullptr, 0);  // V's arguments over the record blocks
+                                  gpuExecuteIndirect(c.cmd, signature, 1, c.resource(v.coverageTileList), 32, nullptr, 0);  // V's arguments over the record blocks
                                   c.cmd->Barrier(1, &group);
                                   c.cmd->SetPipelineState(hairKernel[9]);
-                                  c.cmd->Dispatch((bitWords + 63) / 64, 1, 1);
+                                  gpuDispatch(c.cmd, (bitWords + 63) / 64, 1, 1);
                                   c.cmd->Barrier(1, &group);
                                   c.cmd->SetPipelineState(hairKernel[10]);
-                                  c.cmd->Dispatch(1, 1, 1);
+                                  gpuDispatch(c.cmd, 1, 1, 1);
                               });
                     g.addPass("m.hair.strands", QueueType::Graphics,
                               [&](PassBuilder& b) {
@@ -1979,7 +1996,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                                   c.bindFrameConstants(cb);
                                   c.computeConstants(k, 40);
                                   c.cmd->SetPipelineState(hairKernel[11]);
-                                  c.cmd->ExecuteIndirect(signature, 1, c.resource(segmentList), 4, nullptr, 0);  // header words 1..3
+                                  gpuExecuteIndirect(c.cmd, signature, 1, c.resource(segmentList), 4, nullptr, 0);  // header words 1..3
                               });
                 }
                 g.addPass("m.hair", QueueType::Graphics,
@@ -2036,7 +2053,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                               c.bindFrameConstants(cb);
                               c.computeConstants(k, 40);
                               c.cmd->SetPipelineState(hairKernel[5]);
-                              c.cmd->ExecuteIndirect(signature, 1, c.resource(visibleRecords.valid() ? visibleRecords : special), 4, nullptr, 0);  // header words 1..3
+                              gpuExecuteIndirect(c.cmd, signature, 1, c.resource(visibleRecords.valid() ? visibleRecords : special), 4, nullptr, 0);  // header words 1..3
                           });
             }
         }
@@ -2063,7 +2080,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           c.cmd->SetPipelineState(tlKernel);
                           c.bindFrameConstants(cb);
                           c.computeConstants(k, 8);
-                          c.cmd->Dispatch(covTlCapacity, 1, 1);  // groups past the list's count return at once
+                          gpuDispatch(c.cmd, covTlCapacity, 1, 1);  // groups past the list's count return at once
                       });
         }
         // E: per listed tile and part, the light pixels' fragments walked and weighted (part 1 records the heavy pixels).
@@ -2110,7 +2127,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           c.cmd->SetPipelineState(stage == 1 ? light1 : light2);
                           c.bindFrameConstants(cb);
                           c.computeConstants(k32, 48);
-                          c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
+                          gpuExecuteIndirect(c.cmd, signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
                       });
         };
         // The compact form's stages (shading.coverage_compact): W the walk, S the list's shading (part 1, part 2), G the gather.
@@ -2145,7 +2162,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           c.cmd->SetPipelineState(walk);
                           c.bindFrameConstants(cb);
                           c.computeConstants(k, 24);
-                          c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
+                          gpuExecuteIndirect(c.cmd, signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
                       });
         };
         auto addShadeList = [&](uint32_t stage) {  // 0: the one kernel, 1 and 2: the two parts
@@ -2175,7 +2192,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           c.cmd->SetPipelineState(shadeList[stage == 2 ? 1 : 0]);
                           c.bindFrameConstants(cb);
                           c.computeConstants(k32, 48);
-                          c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
+                          gpuExecuteIndirect(c.cmd, signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
                       });
         };
         auto addGather = [&] {
@@ -2204,7 +2221,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                           c.cmd->SetPipelineState(gather);
                           c.bindFrameConstants(cb);
                           c.computeConstants(k, 28);
-                          c.cmd->ExecuteIndirect(signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
+                          gpuExecuteIndirect(c.cmd, signature, 1, c.resource(v.coverageTileList), 0, nullptr, 0);
                       });
         };
         if (compact) addWalk();
@@ -2228,7 +2245,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                       for (ID3D12PipelineState* kernel : sort)
                       {
                           c.cmd->SetPipelineState(kernel);
-                          c.cmd->ExecuteIndirect(signature, 1, c.resource(args), 16, nullptr, 0);
+                          gpuExecuteIndirect(c.cmd, signature, 1, c.resource(args), 16, nullptr, 0);
                       }
                   });
         // F2: COV_ROUNDS rounds per stage, each over the heavy pixels the previous one left open; between the parts every
@@ -2249,10 +2266,10 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                               const uint32_t p[4] = { c.uav(state), c.uav(heavy), c.uav(cursors), hcap };
                               c.cmd->SetPipelineState(heavyReset);
                               c.computeConstants(p, 4);
-                              c.cmd->ExecuteIndirect(signature, 1, c.resource(args), 48, nullptr, 0);  // the finish grid: 64 per group
+                              gpuExecuteIndirect(c.cmd, signature, 1, c.resource(args), 48, nullptr, 0);  // the finish grid: 64 per group
                           });
             }
-            for (uint32_t rd = 0; rd < kRounds; ++rd)
+            for (uint32_t rd = 0; rd < (fusedRounds ? 1u : kRounds); ++rd)
             {
                 if (rd > 0) addBegin("m.coverage.round args", 2, rd);
                 g.addPass("m.coverage.round", QueueType::Graphics,
@@ -2280,7 +2297,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                               c.cmd->SetPipelineState(heavyRounds[stage - 1]);
                               c.bindFrameConstants(cb);
                               c.computeConstants(k32, 48);
-                              c.cmd->ExecuteIndirect(signature, 1, c.resource(args), 32, nullptr, 0);
+                              gpuExecuteIndirect(c.cmd, signature, 1, c.resource(args), 32, nullptr, 0);
                           });
             }
         }
@@ -2311,7 +2328,7 @@ std::vector<RenderGraph::BandedPass> record(FramePassContext& fc, ViewResources&
                       c.cmd->SetPipelineState(finish);
                       c.bindFrameConstants(cb);
                       c.computeConstants(p, 12);
-                      c.cmd->ExecuteIndirect(signature, 1, c.resource(args), 48, nullptr, 0);
+                      gpuExecuteIndirect(c.cmd, signature, 1, c.resource(args), 48, nullptr, 0);
                   });
         // Its error bits (INTERFACES 3.6: a data-dependent loop reached its bound) into the statistics: a gate failure.
         if (fc.trackState)
@@ -2375,7 +2392,7 @@ void translucentComposite(FramePassContext& fc, const ViewResources& view, Textu
                   const uint32_t k[4] = { c.uav(stats), 4, 0, 0 };
                   c.cmd->SetPipelineState(clear);
                   c.computeConstants(k, 4);
-                  c.cmd->Dispatch(1, 1, 1);
+                  gpuDispatch(c.cmd, 1, 1, 1);
               });
     constexpr uint32_t kGlassMaxJobs = 1u << 20, kGlassMaxRecords = kGlassMaxJobs / 2;
     const uint32_t bandRows = jobs ? std::max(8u, (kGlassMaxRecords / std::max(w, 1u)) & ~7u) : h;
@@ -2404,9 +2421,9 @@ void translucentComposite(FramePassContext& fc, const ViewResources& view, Textu
                       c.cmd->SetPipelineState(clear);
                       const uint32_t a[4] = { c.uav(glassJobs), 4, 0, 0 }, b[4] = { c.uav(glassRecords), 8, 0, 0 };
                       c.computeConstants(a, 4);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                       c.computeConstants(b, 4);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                   });
     g.addPass("m.glass", QueueType::Graphics,
               [&](PassBuilder& b) {
@@ -2447,7 +2464,7 @@ void translucentComposite(FramePassContext& fc, const ViewResources& view, Textu
                   c.cmd->SetPipelineState(kernel);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 24);
-                  c.cmd->Dispatch((w + 7) / 8, (row1 - row0 + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (w + 7) / 8, (row1 - row0 + 7) / 8, 1);
               });
     if (!jobs) continue;
     g.addPass("m.glass.args", QueueType::Graphics,
@@ -2459,7 +2476,7 @@ void translucentComposite(FramePassContext& fc, const ViewResources& view, Textu
                   const uint32_t k[4] = { c.uav(glassJobs), c.uav(glassRecords), kGlassMaxJobs, kGlassMaxRecords };
                   c.cmd->SetPipelineState(argsKernel);
                   c.computeConstants(k, 4);
-                  c.cmd->Dispatch(1, 1, 1);
+                  gpuDispatch(c.cmd, 1, 1, 1);
               });
     fc.services.traceRefractions(fc, glassJobs, glassResults, kGlassMaxJobs);
     g.addPass("m.glass.apply", QueueType::Graphics,
@@ -2473,7 +2490,7 @@ void translucentComposite(FramePassContext& fc, const ViewResources& view, Textu
                   const uint32_t k[4] = { c.srv(glassRecords), c.srv(glassResults), c.uav(colour), kGlassMaxRecords };
                   c.cmd->SetPipelineState(applyKernel);
                   c.computeConstants(k, 4);
-                  c.cmd->ExecuteIndirect(signature, 1, c.resource(glassRecords), 4, nullptr, 0);
+                  gpuExecuteIndirect(c.cmd, signature, 1, c.resource(glassRecords), 4, nullptr, 0);
               });
     }
     if (fc.trackState)

@@ -46,6 +46,8 @@ private:
         void give(uint32_t index);
     };
     ComPtr<ID3D12DescriptorHeap> m_resource, m_sampler, m_rtvHeap, m_dsvHeap;
+    D3D12_CPU_DESCRIPTOR_HANDLE m_resourceCpuStart{}, m_rtvStart{}, m_dsvStart{};
+    D3D12_GPU_DESCRIPTOR_HANDLE m_resourceGpuStart{};
     uint32_t m_resourceStride = 0, m_rtvStride = 0, m_dsvStride = 0;
     mutable std::mutex m_mutex;
     FreeList m_resourceFree, m_rtvFree, m_dsvFree;

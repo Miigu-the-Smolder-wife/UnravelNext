@@ -74,7 +74,7 @@ void recordSurfaceCacheLightPairs(FramePassContext& fc, const SurfaceCachePairsI
                   c.cmd->SetPipelineState(select);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 32);
-                  c.cmd->Dispatch((budget + 63) / 64, 1, 1);
+                  gpuDispatch(c.cmd, (budget + 63) / 64, 1, 1);
               });
 
     if (inlineQuery)
@@ -95,7 +95,7 @@ void recordSurfaceCacheLightPairs(FramePassContext& fc, const SurfaceCachePairsI
                       {
                           constants(c, k, c.srv(cells), c.uav(pairs), (uint32_t)first);
                           c.computeConstants(k, 32);
-                          c.cmd->Dispatch((uint32_t)((std::min<uint64_t>(kThreadsPerDispatch, pairCount - first) + 63) / 64), 1, 1);
+                          gpuDispatch(c.cmd, (uint32_t)((std::min<uint64_t>(kThreadsPerDispatch, pairCount - first) + 63) / 64), 1, 1);
                       }
                   });
     }
@@ -136,7 +136,7 @@ void recordSurfaceCacheLightPairs(FramePassContext& fc, const SurfaceCachePairsI
                   c.cmd->SetPipelineState(store);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 32);
-                  c.cmd->Dispatch((budget + 63) / 64, 1, 1);
+                  gpuDispatch(c.cmd, (budget + 63) / 64, 1, 1);
               });
 }
 } // namespace unx::render::refl

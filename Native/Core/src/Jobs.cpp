@@ -32,10 +32,17 @@ struct Jobs::Impl
 
     static void run(Loop& l)
     {
+        uint32_t completed = 0;
         for (;;)
         {
             uint32_t i = l.next.fetch_add(1, std::memory_order_relaxed);
-            if (i >= l.count) return;
+            if (i >= l.count)
+            {
+                // Publish this participant's writes once. The caller still waits
+                // for all items and for every worker to leave the loop.
+                l.done.fetch_add(completed, std::memory_order_acq_rel);
+                return;
+            }
             try
             {
                 (*l.fn)(i);
@@ -45,7 +52,7 @@ struct Jobs::Impl
                 std::lock_guard lock(l.errorMutex);
                 if (!l.error) l.error = std::current_exception();
             }
-            l.done.fetch_add(1, std::memory_order_acq_rel);
+            ++completed;
         }
     }
 

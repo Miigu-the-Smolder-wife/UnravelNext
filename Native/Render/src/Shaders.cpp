@@ -67,16 +67,17 @@ ComPtr<ID3D12PipelineState> ShaderLibrary::createCompute(const std::string& kern
     return pso;
 }
 
-ID3D12PipelineState* ShaderLibrary::compute(const std::string& kernel)
+ID3D12PipelineState* ShaderLibrary::compute(std::string_view kernel)
 {
     {
         std::lock_guard lock(m_mutex);
         auto it = m_pipelines.find(kernel);
         if (it != m_pipelines.end()) return it->second.Get();
     }
-    ComPtr<ID3D12PipelineState> pso = createCompute(kernel);
+    const std::string key(kernel);
+    ComPtr<ID3D12PipelineState> pso = createCompute(key);
     std::lock_guard lock(m_mutex);
-    auto& slot = m_pipelines[kernel];
+    auto& slot = m_pipelines[key];
     if (!slot) slot = pso;
     return slot.Get();
 }
@@ -88,13 +89,14 @@ void ShaderLibrary::createAll(const std::vector<std::string>& computeKernels)
     m_stats.wallMs = msSince(t0);
 }
 
-ID3D12PipelineState* ShaderLibrary::mesh(const std::string& name, const MeshPipelineDesc& desc)
+ID3D12PipelineState* ShaderLibrary::mesh(std::string_view name, const MeshPipelineDesc& desc)
 {
     {
         std::lock_guard lock(m_mutex);
         auto it = m_pipelines.find(name);
         if (it != m_pipelines.end()) return it->second.Get();
     }
+    const std::string key(name);
     std::vector<uint8_t> as;
     if (!desc.amplificationShader.empty()) as = load(desc.amplificationShader);
     std::vector<uint8_t> ms = load(desc.meshShader);
@@ -155,12 +157,12 @@ ID3D12PipelineState* ShaderLibrary::mesh(const std::string& name, const MeshPipe
     D3D12_PIPELINE_STATE_STREAM_DESC sd{ sizeof s, &s };
     ComPtr<ID3D12PipelineState> pso;
     auto t0 = std::chrono::steady_clock::now();
-    check(m_device.d3d()->CreatePipelineState(&sd, IID_PPV_ARGS(&pso)), ("CreatePipelineState (mesh) " + name).c_str());
+    check(m_device.d3d()->CreatePipelineState(&sd, IID_PPV_ARGS(&pso)), ("CreatePipelineState (mesh) " + key).c_str());
     double t = msSince(t0);
     std::lock_guard lock(m_mutex);
     ++m_stats.created;
     m_stats.totalCpuMs += t;
-    auto& slot = m_pipelines[name];
+    auto& slot = m_pipelines[key];
     if (!slot) slot = pso;
     return slot.Get();
 }

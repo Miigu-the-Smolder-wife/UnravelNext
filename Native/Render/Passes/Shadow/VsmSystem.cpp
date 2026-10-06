@@ -1345,7 +1345,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       const uint32_t k[8] = { ctx.uav(table), ctx.uav(requests), ctx.uav(meta), 0, kTotalSlots, pagesNow, ctx.uav(layers), 0 };
                       ctx.cmd->SetPipelineState(pso);
                       ctx.computeConstants(k, 8);
-                      ctx.cmd->Dispatch(groups(std::max(kTotalSlots, pagesNow), 256), 1, 1);
+                      gpuDispatch(ctx.cmd, groups(std::max(kTotalSlots, pagesNow), 256), 1, 1);
                   });
         s.needsInit = false;
     }
@@ -1376,7 +1376,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       const uint32_t k[4] = { 0, ctx.uav(statsBuf), 0, 0 };
                       ctx.cmd->SetPipelineState(pso);
                       ctx.computeConstants(k, 4);
-                      ctx.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(ctx.cmd, 1, 1, 1);
                   });
     }
     // Sun page cache (VsmCache.hlsl): the changed casters' spheres (skinned first: MODE 1 reads last frame's caster state
@@ -1426,7 +1426,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       cacheWords(ctx, k);
                       ctx.cmd->SetPipelineState(pso);
                       ctx.computeConstants(k, kCacheWords);
-                      ctx.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(ctx.cmd, 1, 1, 1);
                   });
     }
     chain.flush("s.vsm.begin");
@@ -1447,7 +1447,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                           ctx.cmd->SetPipelineState(pso);
                           ctx.bindFrameConstants(mainConstants);
                           ctx.computeConstants(k, kCacheWords);
-                          ctx.cmd->Dispatch(groups(skinCount, 64), 1, 1);
+                          gpuDispatch(ctx.cmd, groups(skinCount, 64), 1, 1);
                       });
         }
         {
@@ -1464,7 +1464,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                           ctx.cmd->SetPipelineState(pso);
                           ctx.bindFrameConstants(mainConstants);
                           ctx.computeConstants(k, kCacheWords);
-                          ctx.cmd->Dispatch(groups(std::max(instanceCount, 1u), 64), 1, 1);
+                          gpuDispatch(ctx.cmd, groups(std::max(instanceCount, 1u), 64), 1, 1);
                       });
         }
         if (localSlotsUsed > 0)
@@ -1481,7 +1481,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                           cacheWords(ctx, k);
                           ctx.cmd->SetPipelineState(pso);
                           ctx.computeConstants(k, kCacheWords);
-                          ctx.cmd->Dispatch(groups(localSlotsUsed, 64), 1, 1);
+                          gpuDispatch(ctx.cmd, groups(localSlotsUsed, 64), 1, 1);
                       });
         }
         {
@@ -1505,7 +1505,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                           if (hzbFilter) k[18] = ctx.srv(blocks);
                           ctx.cmd->SetPipelineState(pso);
                           ctx.computeConstants(k, kCacheWords);
-                          ctx.cmd->Dispatch(kLevels, 32, 1);  // VsmCache.hlsl STALE_GROUPS_PER_LEVEL
+                          gpuDispatch(ctx.cmd, kLevels, 32, 1);  // VsmCache.hlsl STALE_GROUPS_PER_LEVEL
                       });
         }
     }
@@ -1535,7 +1535,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.cmd->SetPipelineState(pso);
                       ctx.bindFrameConstants(mainConstants);
                       ctx.computeConstants(k, 8);
-                      ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
+                      gpuDispatch(ctx.cmd, groups(w, 8), groups(h, 8), 1);
                   });
         // V's water layer (W's fluid and basin surfaces): the surface's points ask for their pages too (VsmMark.hlsl
         // P[1].y; the reference marks its pages at the water's depth as at the opaque one's).
@@ -1553,7 +1553,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                           ctx.cmd->SetPipelineState(pso);
                           ctx.bindFrameConstants(mainConstants);
                           ctx.computeConstants(k, 8);
-                          ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
+                          gpuDispatch(ctx.cmd, groups(w, 8), groups(h, 8), 1);
                       });
         }
     }
@@ -1582,7 +1582,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.cmd->SetPipelineState(pso);
                       ctx.bindFrameConstants(mainConstants);
                       ctx.computeConstants(k, 12);
-                      ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
+                      gpuDispatch(ctx.cmd, grid.gridX, grid.gridY, 1);
                   });
         // The fog's volume (FogVolume.hlsli): the pages its cells' segments cross (VsmMarkFog.hlsl).
         const FogView fog = fogViewFor(q, fc.frame, main.view.width, main.view.height);
@@ -1609,7 +1609,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                           ctx.cmd->SetPipelineState(pf);
                           ctx.bindFrameConstants(mainConstants);
                           ctx.computeConstants(k, 12);
-                          ctx.cmd->Dispatch((fog.gridX + 3) / 4, (fog.gridY + 3) / 4, (fog.gridZ + 3) / 4);
+                          gpuDispatch(ctx.cmd, (fog.gridX + 3) / 4, (fog.gridY + 3) / 4, (fog.gridZ + 3) / 4);
                       });
         }
     }
@@ -1631,7 +1631,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.cmd->SetPipelineState(pso);
                       ctx.bindFrameConstants(mainConstants);
                       ctx.computeConstants(k, 4);
-                      ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
+                      gpuDispatch(ctx.cmd, groups(w, 8), groups(h, 8), 1);
                   });
     }
     if (s.localUsed > 0 && main.depth.valid())
@@ -1653,7 +1653,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.cmd->SetPipelineState(pso);
                       ctx.bindFrameConstants(mainConstants);
                       ctx.computeConstants(k, 8);
-                      ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
+                      gpuDispatch(ctx.cmd, groups(w, 8), groups(h, 8), 1);
                   });
     }
     if (s.localUsed > 0)
@@ -1675,7 +1675,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.cmd->SetPipelineState(pso);
                       ctx.bindFrameConstants(mainConstants);
                       ctx.computeConstants(k, 8);
-                      ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
+                      gpuDispatch(ctx.cmd, grid.gridX, grid.gridY, 1);
                   });
     }
     // shadow.vsm.coarse_pages: the pages around the camera on the coarse levels are requested every frame (VsmMarkCoarse):
@@ -1698,7 +1698,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       const uint32_t k[4] = { ctx.uav(requests), ring, word, 0 };
                       ctx.cmd->SetPipelineState(pso);
                       ctx.computeConstants(k, 4);
-                      ctx.cmd->Dispatch(groups(threads, 64), 1, 1);
+                      gpuDispatch(ctx.cmd, groups(threads, 64), 1, 1);
                   });
     }
     {
@@ -1712,7 +1712,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       const uint32_t k[4] = { ctx.uav(requests), ring, off, 0 };
                       ctx.cmd->SetPipelineState(pso);
                       ctx.computeConstants(k, 4);
-                      ctx.cmd->Dispatch(groups(kSlots, 256), 1, 1);
+                      gpuDispatch(ctx.cmd, groups(kSlots, 256), 1, 1);
                   });
     }
     {
@@ -1732,7 +1732,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       cacheWords(ctx, k);
                       ctx.cmd->SetPipelineState(keep);
                       ctx.computeConstants(k, kCacheWords);
-                      ctx.cmd->Dispatch(cacheable ? groups(scanSlots, 256) : 1, 1, 1);  // (sun and local slots)
+                      gpuDispatch(ctx.cmd, cacheable ? groups(scanSlots, 256) : 1, 1, 1);  // (sun and local slots)
                   });
         chain.add("s.vsm.cache.free",
                   [&](PassBuilder& b) {
@@ -1744,7 +1744,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       cacheWords(ctx, k);
                       ctx.cmd->SetPipelineState(free);
                       ctx.computeConstants(k, kCacheWords);
-                      ctx.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(ctx.cmd, 1, 1, 1);
                   });
     }
     ID3D12CommandSignature* signature = s.dispatchSignature.Get();
@@ -1771,7 +1771,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       std::memcpy(k, w, sizeof w);
                       ctx.cmd->SetPipelineState(p0);
                       ctx.computeConstants(k, 16);
-                      ctx.cmd->Dispatch(scanGroups, 1, 1);
+                      gpuDispatch(ctx.cmd, scanGroups, 1, 1);
                   });
         chain.add("s.vsm.scan.prefix",
                   [&](PassBuilder& b) {
@@ -1788,7 +1788,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                                                ctx.uav(args), ctx.uav(freePages), separate ? ctx.uav(dynamicList) : 0xFFFFFFFFu, 0, 0 };
                       ctx.cmd->SetPipelineState(p1);
                       ctx.computeConstants(k, 16);
-                      ctx.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(ctx.cmd, 1, 1, 1);
                   });
         chain.add("s.vsm.scan.assign",
                   [&](PassBuilder& b) {
@@ -1811,7 +1811,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       words(ctx, k);
                       ctx.cmd->SetPipelineState(p2);
                       ctx.computeConstants(k, 16);
-                      ctx.cmd->Dispatch(scanGroups, 1, 1);
+                      gpuDispatch(ctx.cmd, scanGroups, 1, 1);
                   });
     }
     chain.flush("s.vsm.scan");
@@ -1829,7 +1829,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       const uint32_t k[8] = { ctx.srv(table), ctx.uav(mask), ring, ctx.uav(atlasSlots), separate ? 1u : 0u, twoPhase ? ctx.uav(occluderGuess) : 0xFFFFFFFFu, 0, 0 };
                       ctx.cmd->SetPipelineState(pm);
                       ctx.computeConstants(k, 8);
-                      ctx.cmd->Dispatch(groups(kSlots / 32, 64), 1, 1);
+                      gpuDispatch(ctx.cmd, groups(kSlots / 32, 64), 1, 1);
                   });
     }
     if (fc.services.rasterizeDepth && activeLocal > 0)
@@ -1846,7 +1846,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       const uint32_t k[8] = { ctx.srv(table), ctx.uav(localMask), activeLocal, activeSrv, ctx.uav(localSlots), localSeparate ? 1u : 0u, 0, 0 };
                       ctx.cmd->SetPipelineState(pm);
                       ctx.computeConstants(k, 8);
-                      ctx.cmd->Dispatch(groups(activeLocal * kLocalLightWords, 64), 1, 1);
+                      gpuDispatch(ctx.cmd, groups(activeLocal * kLocalLightWords, 64), 1, 1);
                   });
     }
     {
@@ -1893,7 +1893,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                           ctx.cmd->OMSetRenderTargets(0, nullptr, FALSE, &dsv);
                           const uint32_t k[8] = { ctx.srv(list), atlasW, atlasH, 0, 0, 0, 0, 0 };
                           ctx.graphicsConstants(k, 8);
-                          ctx.cmd->DispatchMesh(groupCount, 1, 1);
+                          gpuDispatchMesh(ctx.cmd, groupCount, 1, 1);
                       };
                       clearList(atlas, pageList);
                       if (separate)
@@ -1979,7 +1979,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       const uint32_t k[4] = { ctx.srv(pageList), ctx.srv(atlasStatic), ctx.uav(staticHzb), localSeparate ? 1u : 0u };
                       ctx.cmd->SetPipelineState(ph);
                       ctx.computeConstants(k, 4);
-                      ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(args), 0, nullptr, 0);
+                      gpuExecuteIndirect(ctx.cmd, signature, 1, ctx.resource(args), 0, nullptr, 0);
                   });
     };
     // occlusion: its views are culled against the static copies' HZB - 1: as it stands (the movable set's views,
@@ -2228,7 +2228,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       {
                           const uint32_t k[8] = { ctx.srv(which == 0 ? pageList : dynamicList), tintW, tintH, 0, kTintPage, 0, 0, 0 };
                           ctx.graphicsConstants(k, 8);
-                          ctx.cmd->DispatchMesh(groupCount, 1, 1);
+                          gpuDispatchMesh(ctx.cmd, groupCount, 1, 1);
                       }
                   });
         DepthRasterRequest r;
@@ -2310,7 +2310,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                           const uint32_t k[4] = { ctx.uav(target), (uint32_t)clsWords, 0, 0 };
                           ctx.cmd->SetPipelineState(pClear);
                           ctx.computeConstants(k, 4);
-                          ctx.cmd->Dispatch(groups((uint32_t)(clsWords / 4), 256), 1, 1);
+                          gpuDispatch(ctx.cmd, groups((uint32_t)(clsWords / 4), 256), 1, 1);
                       });
         }
         for (int which = 0; which < (twin ? 2 : 1); ++which)
@@ -2369,7 +2369,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                           const uint32_t k[4] = { ctx.srv(pagesIn), ctx.uav(blocksOut), clsWidth, 48 };
                           ctx.cmd->SetPipelineState(pBlocks);
                           ctx.computeConstants(k, 4);
-                          ctx.cmd->Dispatch(clsPages, 1, 1);
+                          gpuDispatch(ctx.cmd, clsPages, 1, 1);
                       });
         }
         ID3D12PipelineState* pClassify = sh.compute("Passes/Shadow/LocalTileClassify");
@@ -2391,7 +2391,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       ctx.cmd->SetPipelineState(pClassify);
                       ctx.bindFrameConstants(mainConstants);
                       ctx.computeConstants(k, 12);
-                      ctx.cmd->Dispatch(tilesX, tilesY, 1);
+                      gpuDispatch(ctx.cmd, tilesX, tilesY, 1);
                   });
         fc.resources.vsmTileLit = tileLit;
         s.clsBlocksRef = clsBlocks;
@@ -2435,7 +2435,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       {
                           const uint32_t k[8] = { ctx.srv(list), atlasW, atlasH, ctx.srv(atlasStatic), 0, 0, 0, 0 };
                           ctx.graphicsConstants(k, 8);
-                          ctx.cmd->DispatchMesh(groupCount, 1, 1);
+                          gpuDispatchMesh(ctx.cmd, groupCount, 1, 1);
                       }
                   });
     }
@@ -2455,13 +2455,13 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       uint32_t k[8] = { ctx.srv(pageList), ctx.srv(atlas), ctx.uav(meta), ring, localLightsSrv, ctx.uav(blocks), 0, 0 };
                       ctx.cmd->SetPipelineState(pso);
                       ctx.computeConstants(k, 8);
-                      ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(args), 0, nullptr, 0);
+                      gpuExecuteIndirect(ctx.cmd, signature, 1, ctx.resource(args), 0, nullptr, 0);
                       if (separate)
                       {
                           // the kept pages whose movable casters were drawn anew (other pages than the list's: no barrier)
                           k[0] = ctx.srv(dynamicList);
                           ctx.computeConstants(k, 8);
-                          ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(args), 12, nullptr, 0);
+                          gpuExecuteIndirect(ctx.cmd, signature, 1, ctx.resource(args), 12, nullptr, 0);
                       }
                   });
     }
@@ -2483,7 +2483,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       const uint32_t k[8] = { ctx.srv(table), ctx.srv(meta), ctx.uav(fill), 0, ring, off, 0, 0 };
                       ctx.cmd->SetPipelineState(pf);
                       ctx.computeConstants(k, 8);
-                      ctx.cmd->Dispatch(groups(kSlots, 256), 1, 1);
+                      gpuDispatch(ctx.cmd, groups(kSlots, 256), 1, 1);
                   });
         g.addPass("s.vsm.searchdilate", QueueType::Compute,
                   [&](PassBuilder& b) {
@@ -2494,7 +2494,7 @@ void recordPages(FramePassContext& fc, const ViewResources& main)
                       const uint32_t k[8] = { 0, 0, ctx.srv(fill), ctx.uav(bound), ring, off, 0, 0 };
                       ctx.cmd->SetPipelineState(pd);
                       ctx.computeConstants(k, 8);
-                      ctx.cmd->Dispatch(groups(kSlots, 256), 1, 1);
+                      gpuDispatch(ctx.cmd, groups(kSlots, 256), 1, 1);
                   });
     }
     cpuTrace.mark("vsm.raster_and_tail");
@@ -2550,7 +2550,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                       ctx.cmd->SetPipelineState(ps);
                       ctx.bindFrameConstants(viewConstants);
                       ctx.computeConstants(k, 4);
-                      ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
+                      gpuDispatch(ctx.cmd, groups(w, 8), groups(h, 8), 1);
                   });
     }
     // Local slots (1-3) and the overflow list from the view's froxel lists (INTERFACES 7.3, 7.4, v1.22): the main view's
@@ -2649,7 +2649,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                                           0xFFFFFFFFu };
                   ctx.cmd->SetPipelineState(pc);
                   ctx.computeConstants(k, 4);
-                  ctx.cmd->Dispatch(1, 1, 1);
+                  gpuDispatch(ctx.cmd, 1, 1, 1);
               });
     chain.add("s.shadow.visibility",
               [&](PassBuilder& b) {
@@ -2689,7 +2689,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   ctx.cmd->SetPipelineState(p1);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 28);
-                  ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
+                  gpuDispatch(ctx.cmd, groups(w, 8), groups(h, 8), 1);
               });
     chain.flush("s.shadow.visibility");
     g.addPass("s.shadow.listargs", QueueType::Compute,
@@ -2702,7 +2702,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   const uint32_t k[4] = { ctx.srv(list), ctx.uav(args), ctx.uav(filterList), 0 };
                   ctx.cmd->SetPipelineState(pa);
                   ctx.computeConstants(k, 4);
-                  ctx.cmd->Dispatch(1, 1, 1);
+                  gpuDispatch(ctx.cmd, 1, 1, 1);
               });
     g.addPass("s.shadow.penumbra", QueueType::Compute,
               [&](PassBuilder& b) {
@@ -2729,7 +2729,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   ctx.cmd->SetPipelineState(p2);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 20);
-                  ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(args), 0, nullptr, 0);
+                  gpuExecuteIndirect(ctx.cmd, signature, 1, ctx.resource(args), 0, nullptr, 0);
               });
     // The penumbra filter over the pixels the search left (ShadowPenumbra STAGE=1, full waves).
     if (p3)
@@ -2743,7 +2743,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                       const uint32_t k[4] = { ctx.srv(filterList), ctx.uav(filterArgs), 0xFFFFFFFFu, 0 };
                       ctx.cmd->SetPipelineState(pa);
                       ctx.computeConstants(k, 4);
-                      ctx.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(ctx.cmd, 1, 1, 1);
                   });
         g.addPass("s.shadow.penumbra.filter", QueueType::Compute,
                   [&](PassBuilder& b) {
@@ -2768,7 +2768,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                       ctx.cmd->SetPipelineState(p3);
                       ctx.bindFrameConstants(constants);
                       ctx.computeConstants(k, 20);
-                      ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(filterArgs), 0, nullptr, 0);
+                      gpuExecuteIndirect(ctx.cmd, signature, 1, ctx.resource(filterArgs), 0, nullptr, 0);
                   });
     }
     // The hair's shadow on the view's surfaces (shading.hair_shadows; Passes/Hair/HairShadow.hlsl MODE 0): the sun slot
@@ -2806,7 +2806,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                           ctx.cmd->SetPipelineState(ph);
                           ctx.bindFrameConstants(constants);
                           ctx.computeConstants(k, 12);
-                          ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
+                          gpuDispatch(ctx.cmd, groups(w, 8), groups(h, 8), 1);
                       });
         }
     }
@@ -2829,7 +2829,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                           ctx.cmd->SetPipelineState(pp);
                           ctx.bindFrameConstants(constants);
                           ctx.computeConstants(k, 4);
-                          ctx.cmd->Dispatch(groups(w, 8), groups(h, 8), 1);
+                          gpuDispatch(ctx.cmd, groups(w, 8), groups(h, 8), 1);
                       });
         }
     }
@@ -2844,8 +2844,12 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
         const BufferRef fragmentSun = g.createBuffer(BufferDesc{ "S shadow fragment sun", std::max<uint64_t>((recordCount + 3) / 4 * 4, 4), 0 });
         view.shadowFragmentVisibility = fragments;
         view.shadowFragmentSun = fragmentSun;
-        ID3D12PipelineState* f0 = fc.shaders.compute("Passes/Shadow/ShadowFragments.MODE0");
-        ID3D12PipelineState* f1 = fc.shaders.compute("Passes/Shadow/ShadowFragments.MODE1");
+        char fragmentReference[2]{};
+        GetEnvironmentVariableA("UNX_FRAGMENT_REUSE_REFERENCE", fragmentReference, sizeof fragmentReference);
+        const std::string fragmentKernel = std::string("Passes/Shadow/ShadowFragments.MODE0.LOCAL") + (localSlots ? "1" : "0") +
+            (fragmentReference[0] == '1' ? ".REUSE0" : ".REUSE1");
+        ID3D12PipelineState* f0 = fc.shaders.compute(fragmentKernel.c_str());
+        ID3D12PipelineState* f1 = fc.shaders.compute("Passes/Shadow/ShadowFragments.MODE1.LOCAL1.REUSE1");
         auto words = [=](PassContext& ctx, bool second) {
             std::array<uint32_t, 20> k = { second ? 0u : ctx.srv(ranges), ctx.srv(tileList), ctx.srv(records), second ? ctx.srv(fragments) : ctx.uav(fragments),
                                            ctx.srv(table), ctx.srv(atlas), ctx.srv(bound), ctx.srv(blocks),
@@ -2877,7 +2881,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                       ctx.cmd->SetPipelineState(f0);
                       ctx.bindFrameConstants(constants);
                       ctx.computeConstants(k.data(), 20);
-                      ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(tileList), 0, nullptr, 0);  // V's args over the listed tiles
+                      gpuExecuteIndirect(ctx.cmd, signature, 1, ctx.resource(tileList), 0, nullptr, 0);  // V's args over the listed tiles
                   });
         g.addPass("s.shadow.fragmentsun", QueueType::Compute,
                   [&](PassBuilder& b) {
@@ -2900,7 +2904,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                       ctx.cmd->SetPipelineState(f1);
                       ctx.bindFrameConstants(constants);
                       ctx.computeConstants(k.data(), 20);
-                      ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(tileList), 32, nullptr, 0);  // V's args over the record blocks
+                      gpuExecuteIndirect(ctx.cmd, signature, 1, ctx.resource(tileList), 32, nullptr, 0);  // V's args over the record blocks
                   });
     }
     if (!overflowList) return;
@@ -2920,7 +2924,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   [&](PassBuilder& b) { b.use(overflowFilter, Use::UavCompute); },
                   [=](PassContext& ctx) {
                       const uint32_t k[4] = { ctx.uav(overflowFilter), 0, filterCapacity, 0 };
-                      ctx.cmd->SetPipelineState(begin); ctx.computeConstants(k, 4); ctx.cmd->Dispatch(1, 1, 1);
+                      ctx.cmd->SetPipelineState(begin); ctx.computeConstants(k, 4); gpuDispatch(ctx.cmd, 1, 1, 1);
                   });
     }
     // Overflow tiles (indirect, one group per listed tile; without local slots the list is empty and the dispatches have
@@ -2949,7 +2953,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   ctx.cmd->SetPipelineState(poCount);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 20);
-                  ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(overflowTiles), 4, nullptr, 0);
+                  gpuExecuteIndirect(ctx.cmd, signature, 1, ctx.resource(overflowTiles), 4, nullptr, 0);
               });
     chain.add("s.shadow.overflow.scan.blocks",
               [&](PassBuilder& b) { b.use(needs, Use::UavCompute); b.use(blockSums, Use::UavCompute); },
@@ -2957,7 +2961,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   const uint32_t k[4] = { ctx.uav(needs), ctx.uav(blockSums), tiles, 0 };
                   ctx.cmd->SetPipelineState(poScan0);
                   ctx.computeConstants(k, 4);
-                  ctx.cmd->Dispatch(scanBlocks, 1, 1);
+                  gpuDispatch(ctx.cmd, scanBlocks, 1, 1);
               });
     chain.add("s.shadow.overflow.scan.top",
               [&](PassBuilder& b) { b.use(needs, Use::UavCompute); b.use(blockSums, Use::UavCompute); },
@@ -2965,7 +2969,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   const uint32_t k[4] = { ctx.uav(needs), ctx.uav(blockSums), scanBlocks, 0 };
                   ctx.cmd->SetPipelineState(poScan1);
                   ctx.computeConstants(k, 4);
-                  ctx.cmd->Dispatch(1, 1, 1);
+                  gpuDispatch(ctx.cmd, 1, 1, 1);
               });
     chain.flush("s.shadow.overflow.scan");
     g.addPass("s.shadow.overflow", QueueType::Compute,
@@ -2997,7 +3001,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   ctx.cmd->SetPipelineState(poFill);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 20);
-                  ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(overflowTiles), 4, nullptr, 0);
+                  gpuExecuteIndirect(ctx.cmd, signature, 1, ctx.resource(overflowTiles), 4, nullptr, 0);
               });
     if (splitOverflow)
     {
@@ -3007,7 +3011,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                   [&](PassBuilder& b) { b.use(overflowFilter, Use::UavCompute); b.use(overflowFilterArgs, Use::UavCompute); },
                   [=](PassContext& ctx) {
                       const uint32_t k[4] = { ctx.uav(overflowFilter), ctx.uav(overflowFilterArgs), 0, 0 };
-                      ctx.cmd->SetPipelineState(makeArgs); ctx.computeConstants(k, 4); ctx.cmd->Dispatch(1, 1, 1);
+                      ctx.cmd->SetPipelineState(makeArgs); ctx.computeConstants(k, 4); gpuDispatch(ctx.cmd, 1, 1, 1);
                   });
         g.addPass("s.shadow.overflow.filter", QueueType::Compute,
                   [&](PassBuilder& b) {
@@ -3019,7 +3023,7 @@ void recordVisibility(FramePassContext& fc, ViewResources& view)
                       const uint32_t k[12] = { ctx.srv(overflowFilter), ctx.uav(overflow), ctx.srv(depth), ctx.srv(gbuffer),
                                                ctx.srv(table), ctx.srv(atlas), ctx.srv(blocks), ring, localLightsSrv, 0, 0, 0 };
                       ctx.cmd->SetPipelineState(filter); ctx.bindFrameConstants(constants); ctx.computeConstants(k, 12);
-                      ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(overflowFilterArgs), 0, nullptr, 0);
+                      gpuExecuteIndirect(ctx.cmd, signature, 1, ctx.resource(overflowFilterArgs), 0, nullptr, 0);
                   });
     }
 }

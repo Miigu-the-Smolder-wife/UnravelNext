@@ -50,6 +50,8 @@ struct ResolveOutputs
 struct ResolveDebug
 {
     BufferRef buffer;
+    bool forceFullKernel = false; // tests: compare the same inputs with the general implementation
+    bool usedSimpleKernel = false; // selected by the last resolve, after feature/revision checks
 };
 
 // Scene preparation (INTERFACES 5.2 v1.10, before any view's frame constants): uploads the scene's textures when the

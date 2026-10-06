@@ -21,6 +21,7 @@
 #include "unx/water/Pool.h"
 #include "unx/render/Frame.h"
 #include "unx/render/GpuScene.h"
+#include "unx/render/GpuProfiler.h"
 #include "unx/scene/SceneData.h"
 
 #include <array>
@@ -130,6 +131,7 @@ struct FramePacket
     float whiteBalanceKelvin = 0, whiteBalanceTint = 0;  // FrameContext::whiteBalance* (v1.91; 0 = D65)
     render::ColorGradingDesc grading;              // FrameContext::grading (the host's current grading)
     render::PostSettingsDesc post;                 // FrameContext::post (the host's current post settings)
+    render::PostExtendedSettings postExtended;
     float exposureCompensation = 0;                // FrameContext::exposureCompensation
     int32_t displayEncoding = -1;                  // FrameContext::displayEncoding / displayPaperWhite (HDR frames)
     float displayPaperWhite = 0;
@@ -273,6 +275,8 @@ struct FrameStats
         double headMs = 0, tailMs = 0, gapMs = 0;
     } queues[2];                                   // graphics, compute: time outside the passes (profiler list marks)
     std::vector<std::pair<std::string, double>> passMs;  // the same frame's passes in graph order
+    std::vector<render::PassTiming> profile;
+    uint32_t profileFlags = 0, timestampCount = 0;
 };
 
 // UnxFrameGetStatistics: the main view's sizes in the newest frame recorded and the dynamic resolution's controller
@@ -411,9 +415,12 @@ public:
     // 1 scRGB, 2 ST 2084) and paper white in cd/m2 (0: the quality file's).
     void setColorGrading(const render::ColorGradingDesc& grading);
     void setPost(const render::PostSettingsDesc& post, float exposureCompensation);
+    void setPostExtended(const render::PostExtendedSettings& post);
     void setDisplayEncoding(int32_t encoding, float paperWhiteNits);
     // UnxFrameGetStatistics (read-only; with latestStats): what a game paces its frames by.
     FramePacing framePacing() const;
+    // Advisory, nonblocking: no slot reservation or resource reuse is performed.
+    bool frameSlotReady();
     // A3 mesh particles (render C): the scene mesh a program's mesh_asset draws (committed mesh index or runtime mesh id;
     // 0xFFFFFFFF removes the mapping: its particles are not drawn and counted unmapped)
     void mapMeshAsset(uint64_t asset, uint32_t mesh);
@@ -547,6 +554,7 @@ public:
     FrameStats latestStats(bool includePasses = true) const;
     // Detailed pass timing is opt-in; list/frame timestamps remain active. Applied on the submission thread at beginFrame.
     void setPassTimingEnabled(bool enabled);
+    void setGpuProfiling(uint32_t mode);
     // Test hook: the main view's EV100 of the last recorded frame (automatic exposure's choice when the camera asked).
     float lastEv100ForTest() const;
     // The committed renderer's track state (standalone tests: E's decal set; the host ABI for decals is E's).
@@ -669,6 +677,7 @@ private:
 
     mutable std::mutex m_mutex;  // packets, pending updates, stats
     bool m_passTimingEnabled = false; // guarded by m_mutex
+    bool m_workloadEnabled = false;
     std::deque<FramePacket> m_packets;
     FramePacket m_pending;       // updates for the next queued frame
     // C2b: host ids (main thread) and their GPU scene indices (render thread, at apply time).
@@ -731,6 +740,9 @@ private:
     std::vector<float3x4> m_gpuTransforms;
     std::vector<std::shared_ptr<const std::vector<float3x4>>> m_gpuPoses;
     std::vector<render::InstanceTransformUpdate> m_changedTransforms;
+    // Submission-thread scratch, consumed synchronously by GpuScene.
+    std::vector<render::InstanceTransformUpdate> m_runtimeMoves;
+    std::vector<uint32_t> m_editedMaterials, m_editedInstances;
     uint64_t m_droppedTransforms = 0, m_droppedPoses = 0;
     uint32_t m_outputReuses = 0, m_outputRecreations = 0;
     // V3 stream executor state.
@@ -745,6 +757,7 @@ private:
     float m_whiteBalanceKelvin = 0, m_whiteBalanceTint = 0;  // (m_mutex) the white balance every queued frame takes (v1.91)
     render::ColorGradingDesc m_grading;         // (m_mutex) the grading every queued frame takes
     render::PostSettingsDesc m_post;            // (m_mutex) the post settings every queued frame takes
+    render::PostExtendedSettings m_postExtended;
     float m_exposureCompensation = 0;           // (m_mutex)
     int32_t m_displayEncoding = -1;             // (m_mutex) the HDR output's encoding every queued frame takes
     float m_displayPaperWhite = 0;              // (m_mutex)

@@ -40,7 +40,11 @@
 // reference's Reflections.DownsampleFactor): one traced pixel per 2 x 2 block - the block's pixel at the frame's
 // offset where that one traces, else the block's first traced-mode pixel - and the others keep mode M with no job
 // (REFL_NO_JOB): the resolve gives them the neighbouring blocks' rays (ReflectionReuseResolve).
+#if REUSE_CACHED_RAYS
+#include "Passes/Reflection/ReflectionReuse.hlsli"
+#else
 #include "Passes/Reflection/ReflectionInternal.hlsli"
+#endif
 
 groupshared uint g_any;
 groupshared uint g_modes[64];
@@ -110,10 +114,11 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : S
 
     uint mode = REFL_K, spacingLog2 = 0;
     bool job = false;
+    ReflSurface s = (ReflSurface)0;
     if (all(pixel < size))
     {
         g_reflWords = P[7].x;
-        const ReflSurface s = reflSurface(depth, gbuffer, pixel);
+        s = reflSurface(depth, gbuffer, pixel);
         const uint smooth = s.valid && s.roughness <= asfloat(P[2].y) ? planar.x : 0;
         [loop] for (uint k = 0; k < smooth; ++k)
         {
@@ -201,6 +206,18 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : S
         if (gPixels) counter.InterlockedAdd(12, gPixels);
     }
     if (job) jobs[index] = reflPackPixel(pixel);
+#if REUSE_CACHED_RAYS
+    // Classification already reconstructed this surface. Keep its exact random
+    // direction and density for all spatial neighbours instead of replaying it.
+    if (job && mode == REFL_M)
+    {
+        float3 dir;
+        float pdf;
+        const bool valid = reuseRay(s, pixel, g_frameIndex, asfloat(P[8].x), dir, pdf);
+        RWByteAddressBuffer rayCache = ResourceDescriptorHeap[P[7].w];
+        rayCache.Store4(index * 16u, asuint(float4(dir, valid ? pdf : 0.0)));
+    }
+#endif
     if (all(pixel < size)) modes[pixel] = reflPackMode(mode, spacingLog2, index);
     if (mode != REFL_K || ((P[4].z & 2u) != 0 && all(pixel < size) && depth.Load(int3(pixel, 0)) > 0)) g_any = 1;
     if (planar.y != 0) writePlanarMasks(tile, pixel, lane, planar.y, mode == REFL_PLANAR ? spacingLog2 : 0xFFFFFFFFu);  // has a barrier

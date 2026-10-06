@@ -1,4 +1,5 @@
 // The Lumen translucency volume (unx/gi/LumenTranslucencyVolume.h; LumenTranslucencyVolume.hlsli).
+#include "unx/rt/HitLightingQueue.h"
 #include "unx/gi/LumenTranslucencyVolume.h"
 
 #include "unx/core/Config.h"
@@ -289,7 +290,7 @@ void lumenTranslucencyVolumeMark(FramePassContext& fc, const ViewResources& main
                          c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenTranslucencyVolumeMark"));
                          c.bindFrameConstants(cb);
                          c.computeConstants(k, 36);
-                         c.cmd->Dispatch((gridX + 3) / 4, (gridY + 3) / 4, (gridZ + 3) / 4);
+                         gpuDispatch(c.cmd, (gridX + 3) / 4, (gridY + 3) / 4, (gridZ + 3) / 4);
                      });
 }
 
@@ -349,7 +350,16 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
     const FrameResources& fr = fc.resources;
     const bool atmosphere = fr.transmittanceLut.valid() && fr.multiScatterLut.valid() && fr.skyViewLut.valid() && fr.aerialPerspective.valid();
     const std::array<TextureRef, 4> luts = { fr.transmittanceLut, fr.multiScatterLut, fr.skyViewLut, fr.aerialPerspective };
-    rt::RayPipeline& pipeline = rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline(kTraceLibrary[atmosphere ? 0 : 1], { "LumenTranslucencyVolumeTraceGen" }));
+    const bool deferred = inputs.cards.valid() && !rays.hairParams().valid() &&
+        rt::hitLightingStorageFits(uint64_t(gridX) * gridY * gridZ * kTraceRes * kTraceRes) &&
+        (!fc.quality.has("gi.defer_hit_lighting") || fc.quality.boolean("gi.defer_hit_lighting"));
+    const std::string skyVariant = atmosphere ? "0" : "1";
+    const std::string traceKernel = deferred ? "Passes/GI/LumenTranslucencyVolumeTraceMinimal.SKY" + skyVariant :
+        std::string(kTraceLibrary[atmosphere ? 0 : 1]) + (rays.hairParams().valid() ? ".HAIR1" : ".HAIR0");
+    rt::RayPipeline& pipeline = rt::RayPipeline::get(fc.device, shaders,
+        rt::standardRayPipeline(traceKernel, { "LumenTranslucencyVolumeTraceGen" }));
+    rt::RayPipeline* lightingPipeline = deferred ? &rt::RayPipeline::get(fc.device, shaders,
+        rt::standardRayPipeline("Passes/GI/LumenTranslucencyVolumeTraceLighting.SKY" + skyVariant, { "LumenTranslucencyVolumeTraceGen" })) : nullptr;
     const TextureRef depth = main.depth, hiz = main.hiz;
     const SurfaceCacheCardRefs cards = inputs.cards;
     const bool cache = rc.on && rc.updated;
@@ -365,6 +375,8 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
     constexpr uint32_t descStride = rt::RayPipeline::kDispatchDescStride;
     const uint32_t rayCapacity = gridX * gridY * gridZ * kTraceRes * kTraceRes;
     const uint32_t traceChunks = (rayCapacity + kMaxRaysPerDispatch - 1) / kMaxRaysPerDispatch;
+    const rt::HitLightingQueue hitLighting = deferred ?
+        rt::beginHitLightingQueue(fc, "r.gi.ltv.hitlighting", rayCapacity, kMaxRaysPerDispatch, *lightingPipeline) : rt::HitLightingQueue{};
     const BufferRef cells = g.createBuffer({ "r.gi.ltv visible cells", 16 + (uint64_t)gridX * gridY * gridZ * 16, 0 });
     const BufferRef traceArgs = g.createBuffer({ "r.gi.ltv trace arguments", (uint64_t)traceChunks * descStride, 0 });
     ID3D12Resource* rayTemplate = pipeline.dispatchTemplate();
@@ -375,7 +387,7 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
                       c.cmd->CopyBufferRegion(c.resource(traceArgs), (uint64_t)chunk * descStride, rayTemplate, 0, descStride);
                   const uint32_t k[4] = { c.uav(cells), 0, 0, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenTranslucencyVolumeCompact.MODE0"));
-                  c.computeConstants(k, 4); c.cmd->Dispatch(1, 1, 1);
+                  c.computeConstants(k, 4); gpuDispatch(c.cmd, 1, 1, 1);
               });
     g.addPass("r.gi.ltv.compact", QueueType::Compute,
               [&](PassBuilder& b) {
@@ -389,7 +401,7 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
                   k[38] = bits(s.depthThreshold);
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenTranslucencyVolumeCompact.MODE1"));
                   c.bindFrameConstants(cb); c.computeConstants(k, 40);
-                  c.cmd->Dispatch((gridX + 3) / 4, (gridY + 3) / 4, (gridZ + 3) / 4);
+                  gpuDispatch(c.cmd, (gridX + 3) / 4, (gridY + 3) / 4, (gridZ + 3) / 4);
               });
     g.addPass("r.gi.ltv.compact.args", QueueType::Compute,
               [&](PassBuilder& b) { b.use(cells, Use::UavCompute); b.use(traceArgs, Use::UavCompute); },
@@ -398,12 +410,14 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
                       (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width), traceChunks, kMaxRaysPerDispatch };
                   k[16] = gridX, k[17] = gridY, k[18] = gridZWord;
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenTranslucencyVolumeCompact.MODE2"));
-                  c.computeConstants(k, 20); c.cmd->Dispatch(1, 1, 1);
+                  c.computeConstants(k, 20); gpuDispatch(c.cmd, 1, 1, 1);
               });
-    g.addPass("r.gi.ltv.trace", QueueType::Compute,
+    auto addTrace = [&](const char* name, rt::RayPipeline* selected, BufferRef dispatch, bool lighting) {
+    g.addPass(name, QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(cells, Use::SrvGraphics);
-                  b.use(traceArgs, Use::IndirectArgs);
+                  b.use(dispatch, Use::IndirectArgs);
+                  if (hitLighting.valid()) b.use(hitLighting.records, lighting ? Use::SrvGraphics : Use::UavGraphics);
                   b.use(trace, Use::UavGraphics);
                   declareSurfaceCacheCards(b, cards, Use::SrvGraphics);
                   if (cache)
@@ -417,7 +431,7 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
                   if (atmosphere)
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
               },
-              [=, &pipeline](PassContext& c) {
+              [=](PassContext& c) {
                   uint32_t k[44] = {};
                   k[0] = c.uav(trace), k[3] = s.clipmapBias;
                   k[4] = bits(sky.x), k[5] = bits(sky.y), k[6] = bits(sky.z), k[7] = bits(s.traceDistance);
@@ -435,6 +449,7 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
                   k[38] = bits(s.depthThreshold);
                   k[39] = bits(s.farStart);
                   k[40] = c.srv(cells);
+                  k[41] = !hitLighting.valid() ? gpu::kNone : lighting ? c.srv(hitLighting.records) : c.uav(hitLighting.records);
                   c.bindFrameConstants(cb);
                   // The same upper bound per dispatch, including partial cells
                   // at a chunk boundary; ltvCompactRay restores sample identity.
@@ -442,9 +457,16 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
                   {
                       k[19] = chunk * kMaxRaysPerDispatch;
                       c.computeConstants(k, 44);
-                      pipeline.dispatchIndirect(c.cmd, c.resource(traceArgs), (uint64_t)chunk * descStride);
+                      selected->dispatchIndirect(c.cmd, c.resource(dispatch), (uint64_t)chunk * descStride);
                   }
               });
+    };
+    addTrace("r.gi.ltv.trace", &pipeline, traceArgs, false);
+    if (deferred)
+    {
+        rt::prepareHitLightingQueue(fc, "r.gi.ltv.hitlighting", hitLighting);
+        addTrace("r.gi.ltv.hitlighting", lightingPipeline, hitLighting.arguments, true);
+    }
     if (s.filter && s.filterSamples > 0)
     {
         static const char* const kNames[3] = { "r.gi.ltv.filter.x", "r.gi.ltv.filter.y", "r.gi.ltv.filter.z" };
@@ -466,7 +488,7 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
                           c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenTranslucencyVolumeFilter"));
                           c.bindFrameConstants(cb);
                           c.computeConstants(k, 40);
-                          c.cmd->Dispatch((gridX * kTraceRes + 7) / 8, (gridY * kTraceRes + 7) / 8, gridZ);
+                          gpuDispatch(c.cmd, (gridX * kTraceRes + 7) / 8, (gridY * kTraceRes + 7) / 8, gridZ);
                       });
             std::swap(from, to);
         }
@@ -494,7 +516,7 @@ void lumenTranslucencyVolume(FramePassContext& fc, const ViewResources& main, rt
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenTranslucencyVolumeIntegrate"));
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 44);
-                  c.cmd->Dispatch((gridX + 3) / 4, (gridY + 3) / 4, (gridZ + 3) / 4);
+                  gpuDispatch(c.cmd, (gridX + 3) / 4, (gridY + 3) / 4, (gridZ + 3) / 4);
               });
     fc.resources.translucencyGiAmbient = ambient;
     fc.resources.translucencyGiDirectional = directional;

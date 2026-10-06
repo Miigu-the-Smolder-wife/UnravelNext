@@ -18,6 +18,7 @@ struct CardLightingInputs
     uint32_t skyVariant = 0;  // 0: atmosphere LUTs, 1: constant sky (the SKY variant of the kernels)
     D3D12_GPU_VIRTUAL_ADDRESS frameConstants = 0;
     bool direct = true, radiosity = true;
+    bool hair = true; // unspecified feature decisions retain the generic ray library
     bool shadowRaysOpaque = false;      // surface_cache.shadow_rays_opaque
     // surface_cache.direct_tint: the slots of a listed tile whose shadow rays carry what the Glass they cross leaves of
     // the light - 0: none, 1: the sun's, 9: every slot's (direct_tint_lights). CardLighting.hlsli.

@@ -20,9 +20,12 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     const uint capacity = rays.Load(4);
     const ReflJob j = reflLoadJob(job);
     Texture2D<uint4> probeTexture = ResourceDescriptorHeap[P[0].w];
-    float probeSpacing;
-    int2 probeCount;
-    const GiProbeFootprint footprint = giProbeFootprint(probeTexture, j.pixel, j.s.normal, j.s.linearDepth, probeSpacing, probeCount);
+    float probeSpacing = 0;
+    int2 probeCount = 0;
+    GiProbeFootprint footprint = (GiProbeFootprint)0;
+    // Mirror samples with a valid ray never consume the screen-probe footprint.
+    [branch] if (j.mode == REFL_G)
+        footprint = giProbeFootprint(probeTexture, j.pixel, j.s.normal, j.s.linearDepth, probeSpacing, probeCount);
     float3 sumL = 0, sumG = 0;
     float nearest = 65000;  // the lobe's nearest hit (ReflectionClassify's blur: the sharpest content the lobe sees)
     uint valid = 0;
@@ -37,7 +40,8 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         if (!reflStoredDirection(j, rays, capacity, marker.x + i, dir)) continue;
         const uint4 v = rays.Load4(reflRaysValueOffset(capacity, marker.x + i));
         const float3 L = reflValueRadiance(v);
-        const float3 g = j.mode == REFL_G ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, dir, 0.1763, P[3].w) : 0;
+        float3 g = 0;
+        [branch] if (j.mode == REFL_G) g = giProbeFootprintRadiance(probeTexture, footprint, probeCount, dir, 0.1763, P[3].w);
         sumL += L;
         sumG += g;
         nearest = min(nearest, f16tof32(v.y >> 16));
@@ -58,8 +62,13 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
             }
         }
     }
-    const float3 gbar = j.mode == REFL_G ? reflLobeControl(j, probeTexture, footprint, probeCount)
-                                         : valid == 0 ? giProbeFootprintRadiance(probeTexture, footprint, probeCount, reflect(-j.s.view, j.s.normal), j.lobe, P[3].w) : 0;
+    float3 gbar = 0;
+    [branch] if (j.mode == REFL_G) gbar = reflLobeControl(j, probeTexture, footprint, probeCount);
+    else if (valid == 0)
+    {
+        footprint = giProbeFootprint(probeTexture, j.pixel, j.s.normal, j.s.linearDepth, probeSpacing, probeCount);
+        gbar = giProbeFootprintRadiance(probeTexture, footprint, probeCount, reflect(-j.s.view, j.s.normal), j.lobe, P[3].w);
+    }
     const float3 total = reflLobeEstimate(sumL, sumG, valid, gbar);
     results[job] = reflPackResult(total, valid > 0 ? nearest : 0, motion);
     if (jobLayersUav != UNX_NONE)

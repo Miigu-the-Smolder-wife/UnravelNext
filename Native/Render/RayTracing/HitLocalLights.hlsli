@@ -35,10 +35,34 @@ bool rtLightBarnDoors(GpuLight g, float3 x, inout RtLight l)
 static float g_rtLightSpecular = 1;
 
 static uint g_rtLightData = 0xFFFFFFFFu;
+static uint g_rtImportanceData = 0;
 RtLight rtLightFetch(uint i)
 {
     ByteAddressBuffer b = ResourceDescriptorHeap[g_rtLightData];
     return b.Load<RtLight>(b.Load(48) + i * 96);
+}
+// Lossless selection-only stream. Header length/version retain compatibility
+// with complete records supplied by independent reference/test producers.
+void rtBindImportance(ByteAddressBuffer b)
+{
+    g_rtImportanceData = 0;
+#if !defined(UNX_RT_IMPORTANCE_REFERENCE) || !UNX_RT_IMPORTANCE_REFERENCE
+    if (b.Load(48) >= 128 && b.Load(100) == 1) g_rtImportanceData = b.Load(96);
+#endif
+}
+RtLight rtLightFetchImportance(uint i)
+{
+    if (g_rtImportanceData == 0) return rtLightFetch(i);
+    ByteAddressBuffer b = ResourceDescriptorHeap[g_rtLightData];
+    const uint at = g_rtImportanceData + i * 64;
+    const uint4 a = b.Load4(at);
+    const float4 f = asfloat(b.Load4(at + 16)), c = asfloat(b.Load4(at + 32)), s = asfloat(b.Load4(at + 48));
+    RtLight l = (RtLight)0;
+    l.position = asfloat(a.xyz); l.type = a.w;
+    l.forward = f.xyz; l.intensity = f.w;
+    l.color = c.xyz; l.range = c.w;
+    l.size = s.xy; l.spotScale = s.z; l.spotOffset = s.w;
+    return l;
 }
 uint rtLightCellStart(uint cell)
 {
@@ -160,42 +184,11 @@ struct RtLocalChoice
     uint li;
     float probability;
 };
+RtLocalChoice rtLocalLightChooseOriented(RtSceneSrvs scene, float3 x, float3 n, bool transmits, float u0);
 RtLocalChoice rtLocalLightChoose(RtSceneSrvs scene, float3 x, float u0)
 {
-    RtLocalChoice c;
-    c.valid = false;
-    c.li = 0;
-    c.probability = 0;
-    if (scene.pad == 0xFFFFFFFFu) return c;
-    g_rtLightData = scene.pad;
-    ByteAddressBuffer b = ResourceDescriptorHeap[scene.pad];
-    const RtLightGrid grid = b.Load<RtLightGrid>(0);
-    const uint cell = rtLightCell(grid, x);
-    const float total = rtLightTotal(cell, x);
-    uint cdf;
-    const float fxW = rtFxWeight(b, x, cdf);
-    if (!(total + fxW > 0)) return c;
-    const float pFx = fxW / (total + fxW);
-    float probability;
-    uint li;
-    if (u0 < pFx)
-    {
-        const uint j = rtFxChoose(cdf, x, fxW, u0 / pFx, probability);
-        if (j == ~0u) return c;
-        probability *= pFx;
-        li = g_lightCount + j;
-    }
-    else
-    {
-        li = rtLightChoose(cell, x, total, pFx > 0 ? (u0 - pFx) / (1 - pFx) : u0, probability);
-        if (li == ~0u) return c;
-        probability *= 1 - pFx;
-    }
-    if (!(probability > 0)) return c;
-    c.valid = true;
-    c.li = li;
-    c.probability = probability;
-    return c;
+    // The transmission branch retains the original importance-only arithmetic.
+    return rtLocalLightChooseOriented(scene, x, float3(0, 0, 0), true, u0);
 }
 // The choice with the hit's orientation in the weights (reflection.hit_oriented_lights): a scene light's weight is its
 // importance (rtLightImportance: intensity x luminance x window / d^2) x the largest cosine any point of the emitter can
@@ -231,6 +224,7 @@ RtLocalChoice rtLocalLightChooseOriented(RtSceneSrvs scene, float3 x, float3 n, 
     if (scene.pad == 0xFFFFFFFFu) return c;
     g_rtLightData = scene.pad;
     ByteAddressBuffer b = ResourceDescriptorHeap[scene.pad];
+    rtBindImportance(b);
     const RtLightGrid grid = b.Load<RtLightGrid>(0);
     const uint cell = rtLightCell(grid, x);
     float total = 0;
@@ -241,7 +235,7 @@ RtLocalChoice rtLocalLightChooseOriented(RtSceneSrvs scene, float3 x, float3 n, 
         k1 = rtLightCellStart(cell + 1);
         [loop] for (uint k = k0; k < k1; ++k)
         {
-            const float w = rtLightOrientedImportance(rtLightFetch(rtLightCellLight(k)), x, n, transmits);
+            const float w = rtLightOrientedImportance(rtLightFetchImportance(rtLightCellLight(k)), x, n, transmits);
             if (w > 0) total += w;
         }
     }
@@ -266,7 +260,7 @@ RtLocalChoice rtLocalLightChooseOriented(RtSceneSrvs scene, float3 x, float3 n, 
         [loop] for (uint k = k0; k < k1; ++k)
         {
             const uint i = rtLightCellLight(k);
-            const float w = rtLightOrientedImportance(rtLightFetch(i), x, n, transmits);
+            const float w = rtLightOrientedImportance(rtLightFetchImportance(i), x, n, transmits);
             if (w <= 0) continue;
             chosenPrev = cum;
             cum += w;

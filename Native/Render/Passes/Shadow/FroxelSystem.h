@@ -35,7 +35,8 @@ struct FroxelStats
 // Upper bound of the entries the scene's lights can take in a view's lists this frame (RENDERER_REDESIGN_V2 14.1): per
 // light and slice, the tiles whose froxel can pass FroxelLists.hlsl's reach test (a sphere of the light's radius against
 // the froxel's bounding sphere), counted from the lateral extent of the slice's froxels. Every GPU-listed (scene light,
-// froxel) pair is inside it, so a lists buffer of this capacity never cuts a scene light's entry. FX particle lights
+// froxel) pair is inside it, with one padding entry per potentially nonempty list for FroxelScan's even starts,
+// so a lists buffer of this capacity never cuts a scene light's entry. FX particle lights
 // (ranges computed on the GPU) are not in it: they get an allowance grown from the measured need.
 uint64_t froxelListBound(const FroxelGridCpu& grid, const ViewDesc& view, const std::vector<gpu::Light>& lights);
 // Size of a view's froxel light list buffer (header, two words per froxel, capacity entries of 16 bits).

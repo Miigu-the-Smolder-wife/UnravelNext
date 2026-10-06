@@ -55,14 +55,23 @@
 #define SIDE (TILE + 2 * BORDER)
 #define CELLS (SIDE * SIDE)
 
-groupshared uint gA[CELLS];
-groupshared uint gB[CELLS];
-groupshared uint gC[CELLS];
-groupshared uint gD[CELLS];
-groupshared uint gE[CELLS];
-groupshared uint gF[CELLS];
-groupshared uint gG[CELLS];
-groupshared uint gAlias[TILE * TILE];
+// Scratch domains shrink with the halo; stage barriers delimit reuse.
+// At TILE=16: 15,440 bytes, with filter precision and support unchanged.
+#define SCRATCH_MARGIN (PREFIX_STAGES > 0 ? 0 : 1)
+#define SCRATCH_SIDE (SIDE - 2 * SCRATCH_MARGIN)
+#define RELAX_MARGIN (4 - PREFIX_STAGES)
+#define RELAX_SIDE (SIDE - 2 * RELAX_MARGIN)
+#define STAGE_SLOTS ((CELLS + TILE * TILE - 1) / (TILE * TILE))
+groupshared uint gA[CELLS], gB[CELLS];
+groupshared uint gC[SCRATCH_SIDE * SCRATCH_SIDE], gD[SCRATCH_SIDE * SCRATCH_SIDE];
+groupshared uint gRelax[RELAX_SIDE * RELAX_SIDE];
+groupshared uint gAlias[(TILE * TILE + 31) / 32];
+uint scratchIndex(uint i) { return (i / SIDE - SCRATCH_MARGIN) * SCRATCH_SIDE + i % SIDE - SCRATCH_MARGIN; }
+uint relaxIndex(uint i) { return (i / SIDE - RELAX_MARGIN) * RELAX_SIDE + i % SIDE - RELAX_MARGIN; }
+#define C(i) gC[scratchIndex(i)]
+#define D(i) gD[scratchIndex(i)]
+#define RELAX(i) gRelax[relaxIndex(i)]
+void markAlias(uint i, bool value) { if (value) InterlockedOr(gAlias[i >> 5], 1u << (i & 31u)); }
 
 uint cellIndex(int2 c) { return (uint)(c.y * SIDE + c.x); }
 bool inMargin(int2 c, int margin) { return all(c >= margin) && all(c < SIDE - margin); }
@@ -97,6 +106,8 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     Texture2D<float4> colour = ResourceDescriptorHeap[P[0].x];
     Texture2D<float4> guide = ResourceDescriptorHeap[P[0].y];
     uint i;
+    if (lane < (TILE * TILE + 31) / 32) gAlias[lane] = 0;
+    GroupMemoryBarrierWithGroupSync();
 
 #if TSR_REJECT_FROM_PREFIX
     // P[3].z: production TsrRejectPrefix output {clamped input, clamped
@@ -107,9 +118,9 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     {
         const int2 c = int2(i % SIDE, i / SIDE);
         const uint4 value = prepared.Load(int3(clamp(origin + c + 5, 0, size + 9), 0));
-        gE[i] = value.x; gF[i] = value.y; gA[i] = value.z;
+        gA[i] = value.x; gB[i] = value.y; C(i) = value.z;
         if (all(c >= BORDER) && all(c < BORDER + TILE))
-            gAlias[(c.y - BORDER) * TILE + c.x - BORDER] = value.w;
+            markAlias((c.y - BORDER) * TILE + c.x - BORDER, value.w != 0);
     }
     GroupMemoryBarrierWithGroupSync();
 #else
@@ -138,11 +149,11 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
             guideLo = min(guideLo, b);
             guideHi = max(guideHi, b);
         })
-        gC[i] = packCodes(clamp(colourCodes(gB[i]), inputLo, inputHi));
-        gD[i] = packCodes(clamp(colourCodes(gA[i]), guideLo, guideHi));
+        C(i) = packCodes(clamp(colourCodes(gB[i]), inputLo, inputHi));
+        D(i) = packCodes(clamp(colourCodes(gA[i]), guideLo, guideHi));
         const float3 inputMin = unpack(packCodes(inputLo)), inputMax = unpack(packCodes(inputHi));
         if (all(c >= BORDER) && all(c < BORDER + TILE))
-            gAlias[(c.y - BORDER) * TILE + (c.x - BORDER)] = dot(inputMax - inputMin, float3(0.299, 0.587, 0.114)) > TSR_AA_MIN_LUMINANCE ? 1u : 0u;
+            markAlias((c.y - BORDER) * TILE + (c.x - BORDER), dot(inputMax - inputMin, float3(0.299, 0.587, 0.114)) > TSR_AA_MIN_LUMINANCE);
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -153,29 +164,43 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
         if (!inMargin(c, 2)) continue;
         uint3 aMin = uint3(2047, 2047, 1023), aMax = 0, bMin = aMin, bMax = 0;
         FOR_3X3(c, {
-            const uint3 a = colourCodes(gC[ni]);
-            const uint3 b = colourCodes(gD[ni]);
+            const uint3 a = colourCodes(C(ni));
+            const uint3 b = colourCodes(D(ni));
             aMin = min(aMin, a);
             aMax = max(aMax, a);
             bMin = min(bMin, b);
             bMax = max(bMax, b);
         })
-        gE[i] = packCodes(clamp(colourCodes(gA[i]), aMin, aMax));  // C: the clamped input
-        gF[i] = packCodes(clamp(colourCodes(gB[i]), bMin, bMax));  // G: the clamped guide
+        gA[i] = packCodes(clamp(colourCodes(gA[i]), aMin, aMax));  // C: the clamped input
+        gB[i] = packCodes(clamp(colourCodes(gB[i]), bMin, bMax));  // G: the clamped guide
     }
     GroupMemoryBarrierWithGroupSync();
 
-#endif
-    // 3: the filtered signals, the input's variation and range
+    // Refill the original input after stage 2 has consumed the first clamps.
     for (i = lane; i < CELLS; i += TILE * TILE)
     {
+        const int2 c = int2(i % SIDE, i / SIDE);
+        if (!inMargin(c, 2)) continue;
+        float3 value = colour.Load(int3(clamp(origin + c, 0, size - 1), 0)).rgb;
+        value = all(isfinite(value)) ? max(value, 0.0) : float3(0, 0, 0);
+        C(i) = pack(tsrLinearToMeasure(value));
+    }
+    GroupMemoryBarrierWithGroupSync();
+#endif
+    // 3: the filtered signals, the input's variation and range
+    uint4 stage3[STAGE_SLOTS];
+    [unroll] for (uint slot = 0; slot < STAGE_SLOTS; ++slot)
+    {
+        i = lane + slot * TILE * TILE;
+        stage3[slot] = 0;
+        if (i >= CELLS) continue;
         const int2 c = int2(i % SIDE, i / SIDE);
         if (!inMargin(c, 3 - PREFIX_STAGES)) continue;
         float3 filteredInput = 0, filteredGuide = 0, sumC = 0, sumD = 0, cMin = 1, cMax = 0;
         FOR_3X3(c, {
-            const float3 cc = unpack(gE[ni]);
-            const float3 gg = unpack(gF[ni]);
-            const float3 dd = abs(unpack(gA[ni]) - cc);
+            const float3 cc = unpack(gA[ni]);
+            const float3 gg = unpack(gB[ni]);
+            const float3 dd = abs(unpack(C(ni)) - cc);
             filteredInput += cc * nw;
             filteredGuide += gg * nw;
             sumC += cc;
@@ -183,13 +208,19 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
             cMin = min(cMin, cc);
             cMax = max(cMax, cc);
         })
-        const float3 centre = unpack(gE[i]);
+        const float3 centre = unpack(gA[i]);
         const float3 variationC = abs(1.125 * centre - 0.125 * sumC);
-        const float3 variationD = abs(1.125 * abs(unpack(gA[i]) - centre) - 0.125 * sumD);
-        gC[i] = pack(filteredInput);
-        gD[i] = pack(filteredGuide);
-        gB[i] = pack(min(variationC, variationD));
-        gG[i] = pack(cMax - cMin);
+        const float3 variationD = abs(1.125 * abs(unpack(C(i)) - centre) - 0.125 * sumD);
+        stage3[slot] = uint4(pack(filteredInput), pack(filteredGuide), pack(min(variationC, variationD)), pack(cMax - cMin));
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    [unroll] for (uint slot = 0; slot < STAGE_SLOTS; ++slot)
+    {
+        i = lane + slot * TILE * TILE;
+        if (i >= CELLS || !inMargin(int2(i % SIDE, i / SIDE), 3 - PREFIX_STAGES)) continue;
+        gA[i] = stage3[slot].x; gB[i] = stage3[slot].y;
+        D(i) = stage3[slot].z; C(i) = stage3[slot].w;
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -204,8 +235,8 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
             if (!inMargin(c, 4 - PREFIX_STAGES)) continue;
             float3 inputMin = 1, inputMax = 0, guideMin = 1, guideMax = 0;
             FOR_3X3(c, {
-                const float3 a = unpack(gC[ni]);
-                const float3 b = unpack(gD[ni]);
+                const float3 a = unpack(gA[ni]);
+                const float3 b = unpack(gB[ni]);
                 inputMin = min(inputMin, a);
                 inputMax = max(inputMax, a);
                 guideMin = min(guideMin, b);
@@ -213,7 +244,7 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
             })
             float weight = relaxationTexture.Load(int3(clamp(origin + c, 0, size - 1), 0));
             weight = weight > 1.0 / 127.0 ? weight : 0.0;
-            gA[i] = pack(clamp(unpack(gD[i]), lerp(inputMin, guideMin, weight), lerp(inputMax, guideMax, weight)));
+            RELAX(i) = pack(clamp(unpack(gB[i]), lerp(inputMin, guideMin, weight), lerp(inputMax, guideMax, weight)));
         }
     }
     GroupMemoryBarrierWithGroupSync();
@@ -221,17 +252,21 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     // 4: the clamp box, what it removes from the filtered guide, the raw rejection
     const float q = TSR_QUANTIZATION_ERROR, filteringWeight = 0.25;
     const bool moire = P[2].y != 0xFFFFFFFFu;
-    for (i = lane; i < CELLS; i += TILE * TILE)
+    uint2 stage4[STAGE_SLOTS];
+    [unroll] for (uint slot = 0; slot < STAGE_SLOTS; ++slot)
     {
+        i = lane + slot * TILE * TILE;
+        stage4[slot] = 0;
+        if (i >= CELLS) continue;
         const int2 c = int2(i % SIDE, i / SIDE);
         if (!inMargin(c, 5 - PREFIX_STAGES)) continue;
         float3 blurredVariation = 0, boxMin = 1, boxMax = 0, relaxedMin = 1, relaxedMax = 0;
         FOR_3X3(c, {
-            blurredVariation += unpack(gB[ni]) * nw;
-            const float3 f = unpack(gC[ni]);
+            blurredVariation += unpack(D(ni)) * nw;
+            const float3 f = unpack(gA[ni]);
             boxMin = min(boxMin, f);
             boxMax = max(boxMax, f);
-            const float3 l = unpack(gA[ni]);
+            const float3 l = thin ? unpack(RELAX(ni)) : float3(0, 0, 0);
             relaxedMin = min(relaxedMin, l);
             relaxedMax = max(relaxedMax, l);
         })
@@ -244,9 +279,9 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
                 boxMax = relaxedMax;
             }
         }
-        const float3 range = unpack(gG[i]);
+        const float3 range = unpack(C(i));
         const float3 clampError = max(max(float3(q, q, q), blurredVariation), range * (filteringWeight * 0.25)) + q;
-        const float3 filteredGuide = unpack(gD[i]), filteredInput = unpack(gC[i]);
+        const float3 filteredGuide = unpack(gB[i]), filteredInput = unpack(gA[i]);
         float3 lo = boxMin - clampError, hi = boxMax + clampError;
         float3 boxSize = range * filteringWeight + q * 2.0 * filteringWeight;
         float moireError = 0;
@@ -267,9 +302,22 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
             boxSize = max(boxSize, (total > 0 ? energy / total : float3(0, 0, 0)) * (filteringWeight * 3.0 * moireError));
         }
         const float3 delta = max(abs(filteredInput - filteredGuide), boxSize);
-        gE[i] = pack(energy);
-        gF[i] = asuint(min3(saturate(1.0 - energy / delta)));
+        stage4[slot].x = pack(energy);
+        stage4[slot].y = asuint(min3(saturate(1.0 - energy / delta)));
     }
+    GroupMemoryBarrierWithGroupSync();
+
+    [unroll] for (uint slot = 0; slot < STAGE_SLOTS; ++slot)
+    {
+        i = lane + slot * TILE * TILE;
+        if (i >= CELLS || !inMargin(int2(i % SIDE, i / SIDE), 5 - PREFIX_STAGES)) continue;
+        D(i) = stage4[slot].x; RELAX(i) = stage4[slot].y;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    // Each final pixel retains its own filtered pair before median writes reuse
+    // the arrays. All lanes finish the reads before any lane starts those writes.
+    const uint centreIndex = cellIndex(int2(local) + BORDER);
+    const uint2 centreFiltered = uint2(gA[centreIndex], gB[centreIndex]);
     GroupMemoryBarrierWithGroupSync();
 
     // 5: 3 x 3 medians (columns sorted, then max of the lows, median of the mids, min of the highs, their median)
@@ -284,7 +332,7 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
             [unroll] for (int y = -1; y <= 1; ++y)
             {
                 const uint ni = cellIndex(c + int2(x, y));
-                column[y + 1] = float4(unpack(gE[ni]), asfloat(gF[ni]));
+                column[y + 1] = float4(unpack(D(ni)), asfloat(RELAX(ni)));
             }
             sortLmh(column[0], column[1], column[2]);
             lows[x + 1] = column[0];
@@ -308,15 +356,15 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
         clampBlend = min(clampBlend, asfloat(gB[ni]));
     })
     const uint ci = cellIndex(cell);
-    float3 boxSize = unpack(gG[ci]) * filteringWeight + q * 2.0 * filteringWeight;
+    float3 boxSize = unpack(C(ci)) * filteringWeight + q * 2.0 * filteringWeight;
     if (moire)
     {
         Texture2D<float> moireTexture = ResourceDescriptorHeap[P[2].y];
-        const float3 energy = unpack(gE[ci]);
+        const float3 energy = unpack(D(ci));
         const float total = energy.r + energy.g + energy.b;
         boxSize = max(boxSize, (total > 0 ? energy / total : float3(0, 0, 0)) * (filteringWeight * 3.0 * moireTexture.Load(int3(pixel, 0))));
     }
-    const float3 delta = max(abs(unpack(gC[ci]) - unpack(gD[ci])), boxSize);
+    const float3 delta = max(abs(unpack(centreFiltered.x) - unpack(centreFiltered.y)), boxSize);
     float rejection = min3(saturate(1.0 - filteredEnergy / delta));
 
     Texture2D<float2> decimateMask = ResourceDescriptorHeap[P[0].z];
@@ -367,7 +415,7 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     }
     const float disableClamp = disoccluded ? 0.0 : min(clampBlend, min(velocityEdge, guideUncertainty)) * (1.0 - max(animated, seenThrough));
     const float increaseValidity = disoccluded ? 0.0 : clampBlend * (1.0 - animated);
-    const bool antiAlias = gAlias[local.y * TILE + local.x] != 0 && (rejection < 0.25 || disoccluded);
+    const bool antiAlias = (gAlias[(local.y * TILE + local.x) >> 5] & (1u << ((local.y * TILE + local.x) & 31u))) != 0 && (rejection < 0.25 || disoccluded);
     RWTexture2D<float4> rejectionOut = ResourceDescriptorHeap[P[0].w];
     // (the stores round down: a value is never raised by its 8 bits)
     rejectionOut[pixel] = float4(floor(float3(rejection, disableClamp, 1.0 - increaseValidity) * float3(255, 255, 255) + float3(0, 0, 0.999)) / 255.0,

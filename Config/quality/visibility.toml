@@ -1,5 +1,6 @@
 # Owner: V (core session). ARCHITECTURE 2.1.
 [visibility]
+stream_frustum_cull = true       # conservative per-view bounds rejection before triangle-stream raster work
 cluster_triangles = 64            # meshlet size (max 128: vis id triangle field is 7 bits)
 cluster_vertices = 64             # meshlet vertex limit (V's mesh shaders output at most 128)
 # Fill of disconnected geometry (v1.36; measured fill per source cluster, 64 max: forest_thin 20.3, forest_card 13.2,

@@ -8,6 +8,8 @@
 #include <bit>
 #include <chrono>
 #include <cstdlib>
+#include <fstream>
+#include <iomanip>
 #include <unordered_map>
 
 namespace unx::render
@@ -269,6 +271,11 @@ struct RenderGraph::Impl
     Device& device;
     std::vector<ResourceNode> resources;
     std::vector<PassNode> passes;
+    // Retain each recording slot's strings/use storage without retaining captured
+    // frame data. Only passes contains the current recording's live nodes.
+    std::vector<PassNode> recycledPasses;
+    std::vector<CommandList> commandLists;
+    std::vector<uint64_t> segmentFences;
     uint64_t externalReady[kQueueTypeCount] = {};
     std::vector<std::function<void(Queue&, uint64_t)>> externalConsumers;
     std::unique_ptr<Plan> plan;
@@ -295,6 +302,7 @@ struct RenderGraph::Impl
     std::unordered_map<ID3D12Resource*, Imported> importedViews;
     uint64_t executeCount = 0;
     std::vector<ID3D12Resource*> framePointers;  // per resource id, this frame
+    std::vector<Views*> frameViews;  // stable plan/map entries, resolved once per execution
     uint64_t prevFrameFence[kQueueTypeCount] = {};
 
     explicit Impl(Device& d) : device(d) {}
@@ -485,6 +493,7 @@ struct RenderGraph::Impl
     std::vector<Access> mergedAccesses(const PassNode& p) const
     {
         std::vector<Access> out;
+        out.reserve(p.uses.size());
         for (const UseRecord& u : p.uses)
         {
             UseInfo info = useInfo(u.use);
@@ -574,8 +583,70 @@ struct RenderGraph::Impl
         std::vector<uint32_t> order;
         for (uint32_t p = 0; p < passCount; ++p)
             if (pl.live[p]) order.push_back(p);
+        // Independent dependency chains can share one barrier frontier. Preserve
+        // RAW/WAR/WAW and texture-layout order, queue changes, and owner fences.
+        // Merely omitting a barrier between unrelated passes is insufficient:
+        // the next chain's barrier otherwise drains all earlier shader work.
+        std::vector<uint32_t> wave(passCount, UINT32_MAX);
+        if (scheduleWaves())
+        {
+            struct Dependency
+            {
+                uint32_t writer = 0, last = 0; // one past the dependency's wave
+                D3D12_BARRIER_LAYOUT layout = D3D12_BARRIER_LAYOUT_UNDEFINED;
+                bool touched = false;
+            };
+            uint32_t waveBase = 0;
+            for (size_t begin = 0; begin < order.size();)
+            {
+                size_t end = begin + 1;
+                while (end < order.size() && passes[order[end]].queue == passes[order[begin]].queue && !passes[order[end - 1]].fenceAfter) ++end;
+                std::vector<Dependency> deps(resourceCount);
+                uint32_t latest = 0, floor = 0;
+                for (size_t i = begin; i < end; ++i)
+                {
+                    const uint32_t p = order[i];
+                    const bool anchor = accesses[p].empty() || passes[p].fenceAfter;
+                    uint32_t level = anchor ? latest : floor;
+                    for (const Access& a : accesses[p])
+                    {
+                        const Dependency& d = deps[a.resource];
+                        const bool transition = d.touched && resources[a.resource].texture && d.layout != a.layout;
+                        level = std::max(level, a.write || transition ? d.last : d.writer);
+                    }
+                    wave[p] = waveBase + level;
+                    latest = std::max(latest, level + 1);
+                    if (anchor) floor = latest;
+                    for (const Access& a : accesses[p])
+                    {
+                        Dependency& d = deps[a.resource];
+                        const bool transition = d.touched && resources[a.resource].texture && d.layout != a.layout;
+                        if (a.write || transition) d.writer = level + 1;
+                        d.last = std::max(d.last, level + 1);
+                        d.layout = a.layout;
+                        d.touched = true;
+                    }
+                }
+                std::stable_sort(order.begin() + begin, order.begin() + end, [&](uint32_t a, uint32_t b) { return wave[a] < wave[b]; });
+                waveBase += latest;
+                begin = end;
+            }
+        }
+        else
+            for (uint32_t i = 0; i < order.size(); ++i) wave[order[i]] = i;
         std::vector<uint32_t> position(passCount, UINT32_MAX);
         for (uint32_t i = 0; i < order.size(); ++i) position[order[i]] = i;
+        // Every member of a frontier can be in flight together. Its transients
+        // must therefore stay live for the whole frontier, including first-use
+        // transitions hoisted ahead of the other members.
+        std::vector<uint32_t> waveBegin(order.size()), waveEnd(order.size());
+        for (uint32_t begin = 0; begin < order.size();)
+        {
+            uint32_t end = begin + 1;
+            while (end < order.size() && wave[order[end]] == wave[order[begin]]) ++end;
+            for (uint32_t i = begin; i < end; ++i) waveBegin[i] = begin, waveEnd[i] = end - 1;
+            begin = end;
+        }
 
         // 2. Resource summaries over live passes.
         struct Summary
@@ -695,7 +766,7 @@ struct RenderGraph::Impl
                 const uint64_t size = infos[r].SizeInBytes, align = infos[r].Alignment;
                 std::vector<std::pair<uint64_t, uint64_t>> busy;
                 for (const Placed& p : placedHere)
-                    if (noAliasing() || !(p.last < sum[r].first || sum[r].last < p.first)) busy.push_back({ p.offset, p.offset + p.size });
+                    if (noAliasing() || !(p.last < waveBegin[sum[r].first] || waveEnd[sum[r].last] < p.first)) busy.push_back({ p.offset, p.offset + p.size });
                 std::sort(busy.begin(), busy.end());
                 uint64_t offset = base;
                 for (auto [b, e] : busy)
@@ -704,7 +775,7 @@ struct RenderGraph::Impl
                     offset = std::max(offset, e);
                 }
                 offset = alignUp(offset, align);
-                placedHere.push_back({ r, offset, size, sum[r].first, sum[r].last });
+                placedHere.push_back({ r, offset, size, waveBegin[sum[r].first], waveEnd[sum[r].last] });
                 pl.physical[r].offset = offset;
                 pl.physical[r].size = size;
                 aliasedEnd = std::max(aliasedEnd, offset + size);
@@ -944,12 +1015,27 @@ struct RenderGraph::Impl
                     }
                     else
                     {
-                        if (layoutChange && directOnlyLayout(t.layout))
+                        // A graphics UAV producer can release directly to the
+                        // common SRV layout at its own fence. Deferring this
+                        // transition to a late compute reader makes independent
+                        // graphics readers wait for that reader (e.g. material
+                        // words: resolve -> GI temporal -> reflection classify).
+                        // Restrict hoisting to the last actual graphics write:
+                        // no earlier reader on another queue may still own the
+                        // old layout. Subsequent WAR/WAW edges remain tracked.
+                        const bool releaseToReaders = layoutChange && !a.write && q == QueueType::Compute &&
+                            t.pendQueue == QueueType::Graphics && t.writeQueue == QueueType::Graphics &&
+                            t.writePos == t.pendPos && t.pendWrite &&
+                            t.layout == D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS && a.layout == D3D12_BARRIER_LAYOUT_SHADER_RESOURCE;
+                        if (layoutChange && (directOnlyLayout(t.layout) || releaseToReaders))
                         {
-                            // Only the graphics queue can leave a direct-only layout: transition after its last use.
+                            // Finish the layout transition with its graphics producer.
                             pushTexture(planPasses[t.pendPos].after, r, t.pendSync, D3D12_BARRIER_SYNC_NONE, t.pendAccess, D3D12_BARRIER_ACCESS_NO_ACCESS, t.layout, a.layout,
                                         D3D12_TEXTURE_BARRIER_FLAG_NONE);
-                            splitAfter[t.pendPos] = true;  // the transition completes at that command list's end
+                            // Reader releases use the normal demanded-fence
+                            // pruning: a later producer fence may already cover
+                            // this transition without another command list.
+                            if (!releaseToReaders) splitAfter[t.pendPos] = true;
                             waitFor(t.pendPos);
                             transitionPos = t.pendPos;
                         }
@@ -1010,6 +1096,8 @@ struct RenderGraph::Impl
         const uint32_t positions = hasTail ? N + 1 : N;
         std::vector<std::array<uint32_t, kQueueTypeCount>> required(positions);
         std::vector<bool> signalAfter(positions, false);
+        std::array<uint32_t, kQueueTypeCount> demanded[kQueueTypeCount];
+        for (auto& d : demanded) d.fill(UINT32_MAX);
         for (uint32_t i = 0; i < positions; ++i)
         {
             required[i].fill(UINT32_MAX);
@@ -1018,8 +1106,18 @@ struct RenderGraph::Impl
                 uint32_t k = (uint32_t)queueOfPos[pos];
                 if (required[i][k] == UINT32_MAX || pos > required[i][k]) required[i][k] = pos;
             }
+            // A queue's earlier wait already covers every older producer on
+            // that queue. Prune dominated waits BEFORE splitting the producer
+            // into command lists, not only when emitting the consumer waits.
+            // Otherwise an unused fence still fragments the graphics stream.
+            auto& previous = demanded[(uint32_t)queueOfPos[i]];
             for (uint32_t k = 0; k < kQueueTypeCount; ++k)
-                if (required[i][k] != UINT32_MAX) signalAfter[required[i][k]] = true;
+            {
+                const uint32_t req = required[i][k];
+                if (req == UINT32_MAX) continue;
+                if (previous[k] != UINT32_MAX && req <= previous[k]) required[i][k] = UINT32_MAX;
+                else { previous[k] = req; signalAfter[req] = true; }
+            }
         }
         for (uint32_t i = 0; i < positions; ++i)
             if (splitAfter[i] || (i < N && passes[order[i]].fenceAfter)) signalAfter[i] = true;
@@ -1070,6 +1168,29 @@ struct RenderGraph::Impl
             if (last >= 0) pl.segments[last].lastOfQueue = true;
         }
 
+        // All hazards of a wave originate in earlier waves. Emit its transitions
+        // together, before any member starts; keep submission/fence boundaries.
+        if (scheduleWaves())
+            for (Segment& sg : pl.segments)
+            {
+                size_t first = 0;
+                for (size_t i = 0; i < sg.passes.size(); ++i)
+                {
+                    PlanPass& pp = sg.passes[i];
+                    if (i == 0 || pp.pass == UINT32_MAX || sg.passes[first].pass == UINT32_MAX || wave[pp.pass] != wave[sg.passes[first].pass])
+                    {
+                        first = i;
+                        continue;
+                    }
+                    Barriers& to = sg.passes[first].before;
+                    auto append = [](auto& dst, auto& src) { dst.insert(dst.end(), src.begin(), src.end()); src.clear(); };
+                    append(to.textures, pp.before.textures);
+                    append(to.textureResources, pp.before.textureResources);
+                    append(to.buffers, pp.before.buffers);
+                    append(to.bufferResources, pp.before.bufferResources);
+                    append(to.globals, pp.before.globals);
+                }
+            }
         uint32_t batches = 0;
         for (const Segment& sg : pl.segments)
             for (const PlanPass& pp : sg.passes) batches += (pp.before.empty() ? 0 : 1) + (pp.after.empty() ? 0 : 1);
@@ -1210,9 +1331,7 @@ struct RenderGraph::Impl
 
     const Views& viewsOf(uint32_t r) const
     {
-        const ResourceNode& n = resources[r];
-        if (n.imported) return importedViews.at(n.importedResource).views;
-        return plan->physical[r].views;
+        return *frameViews[r];
     }
 
     // View formats a texture is created castable to (TextureDesc::srvFormat/uavFormat); empty when it has none.
@@ -1227,6 +1346,18 @@ struct RenderGraph::Impl
         return out;
     }
 
+    static bool scheduleWaves()
+    {
+        static const bool on = [] {
+            char* value = nullptr;
+            size_t length = 0;
+            const bool enabled = _dupenv_s(&value, &length, "UNX_GRAPH_WAVES") == 0 && value && value[0] == '1';
+            free(value);
+            if (enabled) logf("render graph: dependency waves enabled (experimental)\n");
+            return enabled;
+        }();
+        return on;
+    }
     // UNX_GRAPH_NO_ALIAS=1: every transient gets its own memory (diagnosis: aliasing or an undeclared use).
     static bool noAliasing()
     {
@@ -1288,6 +1419,7 @@ struct RenderGraph::Impl
         {
             const Segment& sg = pl.segments[si];
             logf("  segment %zu (%s queue), waits on %zu segments\n", si, queueName(sg.queue), sg.waitSegments.size());
+            for (uint32_t producer : sg.waitSegments) logf("    wait segment %u\n", producer);
             for (const PlanPass& pp : sg.passes)
             {
                 dumpBarriers("before", pp.before);
@@ -1297,6 +1429,57 @@ struct RenderGraph::Impl
         }
         for (uint32_t r : placeOrder)
             logf("  transient '%s': offset %llu size %llu\n", resources[r].name.c_str(), (unsigned long long)pl.physical[r].offset, (unsigned long long)pl.physical[r].size);
+    }
+
+    // One read-only snapshot after warm-up for whole-graph dependency analysis.
+    // No scheduling, resource lifetime, or shader behavior changes.
+    void dumpDependencySnapshot(const Plan& pl)
+    {
+        if (executeCount != 200 || passes.size() < 400) return;
+        char* path = nullptr; size_t bytes = 0;
+        if (_dupenv_s(&path, &bytes, "UNX_GRAPH_DEPENDENCIES") != 0 || !path || !path[0]) { free(path); return; }
+        std::ofstream out(path); free(path);
+        if (!out) return;
+        out << "{\"executeCount\":" << executeCount << ",\"planKey\":" << pl.key << ",\"resources\":[";
+        for (size_t r = 0; r < resources.size(); ++r)
+        {
+            if (r) out << ',';
+            const auto& n = resources[r]; const auto& ph = pl.physical[r];
+            out << "{\"id\":" << r << ",\"name\":" << std::quoted(n.name)
+                << ",\"imported\":" << (n.imported ? "true" : "false")
+                << ",\"pointer\":" << reinterpret_cast<uintptr_t>(framePointers[r])
+                << ",\"offset\":" << ph.offset << ",\"size\":" << ph.size << '}';
+        }
+        out << "],\"passes\":["; bool first = true;
+        for (size_t s = 0; s < pl.segments.size(); ++s)
+            for (const PlanPass& pp : pl.segments[s].passes)
+            {
+                if (pp.pass == UINT32_MAX) continue;
+                if (!first) out << ','; first = false;
+                const auto& p = passes[pp.pass];
+                out << "{\"id\":" << pp.pass << ",\"name\":" << std::quoted(p.name)
+                    << ",\"scope\":" << std::quoted(p.scope == UINT32_MAX ? p.name : p.scopeName)
+                    << ",\"segment\":" << s << ",\"queue\":" << static_cast<unsigned>(p.queue)
+                    << ",\"beforeGlobal\":" << pp.before.globals.size()
+                    << ",\"beforeTexture\":" << pp.before.textures.size()
+                    << ",\"beforeBuffer\":" << pp.before.buffers.size()
+                    << ",\"afterGlobal\":" << pp.after.globals.size()
+                    << ",\"afterTexture\":" << pp.after.textures.size()
+                    << ",\"afterBuffer\":" << pp.after.buffers.size() << ",\"uses\":[";
+                bool firstUse = true;
+                for (const Access& a : mergedAccesses(p))
+                {
+                    if (!firstUse) out << ','; firstUse = false;
+                    out << "{\"r\":" << a.resource << ",\"write\":" << (a.write ? "true" : "false")
+                        << ",\"disjoint\":" << (a.disjoint ? "true" : "false")
+                        << ",\"concurrent\":" << (a.concurrent ? "true" : "false")
+                        << ",\"sync\":" << static_cast<uint64_t>(a.sync)
+                        << ",\"access\":" << static_cast<uint64_t>(a.access)
+                        << ",\"layout\":" << static_cast<unsigned>(a.layout) << '}';
+                }
+                out << "]}";
+            }
+        out << "]}\n";
     }
 
     void emit(ID3D12GraphicsCommandList7* cmd, Barriers& b)
@@ -1476,7 +1659,9 @@ void RenderGraph::addPass(std::string_view name, QueueType queue, const SetupFn&
 {
     if (queue == QueueType::Copy) fail("render graph: copy-queue passes are not supported yet");
     Impl::PassNode p;
-    p.name = std::string(name);
+    if (m_impl->passes.size() < m_impl->recycledPasses.size())
+        p = std::move(m_impl->recycledPasses[m_impl->passes.size()]);
+    p.name.assign(name);
     p.queue = m_asyncCompute || (queue == QueueType::Compute && isAsyncPass(name)) ? queue : QueueType::Graphics;
     p.execute = std::move(execute);
     m_impl->passes.push_back(std::move(p));
@@ -1638,6 +1823,7 @@ void RenderGraph::execute(GpuProfiler* profiler)
     const auto viewsStart = std::chrono::steady_clock::now();
     ++impl.executeCount;
     impl.framePointers.assign(impl.resources.size(), nullptr);
+    impl.frameViews.resize(impl.resources.size());
     for (uint32_t r = 0; r < impl.resources.size(); ++r)
     {
         const auto& n = impl.resources[r];
@@ -1646,6 +1832,9 @@ void RenderGraph::execute(GpuProfiler* profiler)
             impl.framePointers[r] = n.importedResource;
             auto [it, fresh] = impl.importedViews.try_emplace(n.importedResource);
             Impl::Imported& e = it->second;
+            // unordered_map rehash preserves pointers/references to its entries.
+            // Only entries absent from this frame are erased below.
+            impl.frameViews[r] = &e.views;
             const uint64_t viewKey = impl.viewKey(n);
             if (fresh) e.resource = n.importedResource;  // holds a reference while cached
             else if (e.frame == impl.executeCount && e.viewKey != viewKey)
@@ -1655,9 +1844,13 @@ void RenderGraph::execute(GpuProfiler* profiler)
             e.viewKey = viewKey;
             e.frame = impl.executeCount;
         }
-        else if (plan.physical[r].resource)
+        else
+        {
+            impl.frameViews[r] = &plan.physical[r].views;
             impl.framePointers[r] = plan.physical[r].resource.Get();
+        }
     }
+    impl.dumpDependencySnapshot(plan);
     // Imported resources not imported this frame leave the cache once the GPU is past their last use.
     for (auto it = impl.importedViews.begin(); it != impl.importedViews.end();)
     {
@@ -1678,7 +1871,7 @@ void RenderGraph::execute(GpuProfiler* profiler)
         {
             const auto& n = impl.resources[u.resource];
             if (!n.imported) continue;
-            Impl::Views& v = impl.importedViews.at(n.importedResource).views;
+            Impl::Views& v = *impl.frameViews[u.resource];
             bool srv = u.use == Use::SrvCompute || u.use == Use::SrvGraphics;
             bool uav = u.use == Use::UavCompute || u.use == Use::UavComputeDisjoint || u.use == Use::UavGraphics;
             impl.createViews(u.resource, n.importedResource, srv, uav, u.use == Use::RenderTarget, u.use == Use::DepthWrite, u.use == Use::DepthRead, v);
@@ -1696,7 +1889,8 @@ void RenderGraph::execute(GpuProfiler* profiler)
     // Record every segment.
     m_stats.cpuViewsMs = msSince(viewsStart);
     auto t0 = std::chrono::steady_clock::now();
-    std::vector<CommandList> lists(plan.segments.size());
+    auto& lists = impl.commandLists;
+    lists.resize(plan.segments.size());
     PassContext ctx;
     ctx.m_graph = this;
     // External profilers can name GPU passes without enabling DRED's additional
@@ -1729,9 +1923,10 @@ void RenderGraph::execute(GpuProfiler* profiler)
             if (pp.pass != UINT32_MAX)
             {
                 Impl::PassNode& pass = impl.passes[pp.pass];
-                if (pass.scope == UINT32_MAX || pass.scope != openScope)
+                const bool individual = profiler && profiler->workloads();
+                if (individual || pass.scope == UINT32_MAX || pass.scope != openScope)
                 {
-                    if (passTimestamps) profiler->passBegin(cmd, seg.queue, pass.scope == UINT32_MAX ? pass.name : pass.scopeName);
+                    if (passTimestamps) profiler->passBegin(cmd, seg.queue, individual || pass.scope == UINT32_MAX ? pass.name : pass.scopeName);
                     if (passMarkers)
                     {
                         const std::string& name = pass.scope == UINT32_MAX ? pass.name : pass.scopeName;
@@ -1746,7 +1941,7 @@ void RenderGraph::execute(GpuProfiler* profiler)
                 ctx.band = pass.band;
                 pass.execute(ctx);
                 const uint32_t next = k + 1 < seg.passes.size() ? seg.passes[k + 1].pass : UINT32_MAX;
-                if (pass.scope == UINT32_MAX || next == UINT32_MAX || impl.passes[next].scope != pass.scope)
+                if (individual || pass.scope == UINT32_MAX || next == UINT32_MAX || impl.passes[next].scope != pass.scope)
                 {
                     if (passMarkers) cmd->EndEvent();
                     if (passTimestamps) profiler->passEnd(cmd, seg.queue);
@@ -1765,7 +1960,8 @@ void RenderGraph::execute(GpuProfiler* profiler)
     // Submit in plan order: the first segment of each queue waits for the other queues' previous frame (transient
     // memory and views are reused across frames); later segments wait for their producers.
     t0 = std::chrono::steady_clock::now();
-    std::vector<uint64_t> segmentFence(plan.segments.size(), 0);
+    auto& segmentFence = impl.segmentFences;
+    segmentFence.assign(plan.segments.size(), 0);
     for (size_t s = 0; s < plan.segments.size(); ++s)
     {
         Impl::Segment& seg = plan.segments[s];
@@ -1789,7 +1985,22 @@ void RenderGraph::execute(GpuProfiler* profiler)
             if ((uint32_t)plan.segments[s].queue == q) impl.prevFrameFence[q] = segmentFence[s];
     m_stats.cpuSubmitMs = msSince(t0);
 
-    impl.passes.clear();
+    // Release callbacks now: their frame/resource captures must not survive into
+    // the next recording merely because the node's storage is reused.
+    for (auto& pass : impl.passes)
+    {
+        pass.execute = {};
+        pass.onFence = {};
+        pass.uses.clear();
+        pass.keep = false;
+        pass.fenceAfter = false;
+        pass.band = {};
+        pass.scope = UINT32_MAX;
+        pass.scopeName.clear();
+    }
+    impl.recycledPasses.clear();
+    impl.recycledPasses.swap(impl.passes);
+    lists.clear();
     impl.resources.clear();
     std::fill(std::begin(impl.externalReady), std::end(impl.externalReady), uint64_t(0));
     impl.externalConsumers.clear();

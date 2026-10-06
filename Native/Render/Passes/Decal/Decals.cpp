@@ -115,7 +115,7 @@ public:
                 c.cmd->SetPipelineState(pso);
                 c.bindFrameConstants(constants);
                 c.computeConstants(k, 8);
-                c.cmd->Dispatch(gx, gy, 1);
+                gpuDispatch(c.cmd, gx, gy, 1);
             });
         };
         auto all = [=](Use recordsUse, Use framesUse, Use tilesUse, Use depthUse) {

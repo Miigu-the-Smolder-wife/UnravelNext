@@ -62,7 +62,7 @@ BufferRef depthOfField(FramePassContext& fc, const ViewResources& view, TextureR
                   const uint32_t k[4] = { c.uav(stats), 10, 0, 0 };
                   c.cmd->SetPipelineState(clear);
                   c.computeConstants(k, 4);
-                  c.cmd->Dispatch(1, 1, 1);
+                  gpuDispatch(c.cmd, 1, 1, 1);
               });
     g.addPass("m.dof.setup", QueueType::Graphics,
               [&](PassBuilder& b) {
@@ -87,7 +87,7 @@ BufferRef depthOfField(FramePassContext& fc, const ViewResources& view, TextureR
                                            c.uav(S[4]), c.uav(S[5]), 0, 0 };
                   c.cmd->SetPipelineState(setup);
                   c.computeConstants(k, 24);
-                  c.cmd->Dispatch(tilesX, tilesY, 1);
+                  gpuDispatch(c.cmd, tilesX, tilesY, 1);
               });
     const uint32_t w6 = (w + 63) / 64, h6 = (h + 63) / 64;
     g.addPass("m.dof.down", QueueType::Graphics,
@@ -103,7 +103,7 @@ BufferRef depthOfField(FramePassContext& fc, const ViewResources& view, TextureR
                   const uint32_t k[12] = { c.srv(sums), c.uav(A[6]), c.uav(S[6]), c.uav(A[7]), c.uav(S[7]), tilesX, tilesY, 0, w, h, 0, 0 };
                   c.cmd->SetPipelineState(down);
                   c.computeConstants(k, 12);
-                  c.cmd->Dispatch((w6 + 7) / 8, (h6 + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (w6 + 7) / 8, (h6 + 7) / 8, 1);
               });
     g.addPass("m.dof.reach", QueueType::Graphics,
               [&](PassBuilder& b) {
@@ -115,7 +115,7 @@ BufferRef depthOfField(FramePassContext& fc, const ViewResources& view, TextureR
                   const uint32_t k[8] = { c.srv(maxima), c.uav(reach), tilesX, tilesY, c.srv(stats), 0, 0, 0 };
                   c.cmd->SetPipelineState(reachPso);
                   c.computeConstants(k, 8);
-                  c.cmd->Dispatch((tilesX + 7) / 8, (tilesY + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (tilesX + 7) / 8, (tilesY + 7) / 8, 1);
               });
     g.addPass("m.dof.gather", QueueType::Graphics,
               [&](PassBuilder& b) {
@@ -139,7 +139,7 @@ BufferRef depthOfField(FramePassContext& fc, const ViewResources& view, TextureR
                                            c.srv(S[6]), c.srv(S[7]), 0, 0 };
                   c.cmd->SetPipelineState(gather);
                   c.computeConstants(k, 24);
-                  c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (w + 7) / 8, (h + 7) / 8, 1);
               });
     if (products)
     {

@@ -1,5 +1,7 @@
-// Root signature contract shared by every kernel (Device.cpp): 32 root constants at b0, a root CBV at b1,
+// Root signature contract shared by every kernel (Device.cpp): 48 root constants at b0, a root CBV at b1,
 // static samplers s0-s5, CBV/SRV/UAV and sampler heaps directly indexed (SM 6.6 ResourceDescriptorHeap[]).
+// Supported NVIDIA devices additionally expose root table 2: a null UAV at
+// u0, space31 for ray thread reordering. Ordinary shaders never access it.
 #ifndef UNX_BINDLESS_HLSLI
 #define UNX_BINDLESS_HLSLI
 

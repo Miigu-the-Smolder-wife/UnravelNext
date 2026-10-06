@@ -17,7 +17,8 @@
 // P[3] = { previous view depth (R32_FLOAT), vis id, visible clusters, material word }
 // P[4] = { diffuse UAV, specular UAV (a = 1 where the pixel holds lighting), moments UAV (diffuse mean, mean square,
 //          specular mean, mean square), frame counts UAV }
-// P[5] = { view depth UAV (the next frame's key; 0 = no surface), history confidence UAV (R8G8_UNORM: diffuse, specular), 0, 0 }
+// P[5] = { view depth UAV (the next frame's key; 0 = no surface), history confidence UAV (R8G8_UNORM: diffuse, specular),
+//          coverage tile headers SRV (UNX_NONE: no group mask), 0 }
 // P[6] = { max frames, min frames on a history miss, history distance threshold, neighbourhood clamp scale } (floats)
 #include "Bindless.hlsli"
 #include "GBuffer.hlsli"
@@ -25,6 +26,7 @@
 #include "Passes/Material/MaterialSurface.hlsli"
 #include "Passes/GI/GiScreenHistory.hlsli"
 #include "Passes/Shading/MegaLights.hlsli"
+#include "Passes/Visibility/CoverageTiles.hlsli"
 
 // Catmull-Rom of a history texture at continuous pixel position 'pos' (pixel centres at + 0.5) by 5 bilinear taps (the
 // 4 corner taps of the 3 x 3 form are left out and the rest renormalised).
@@ -40,18 +42,53 @@ float3 mlCatmullRom(Texture2D<float4> t, float2 pos, float2 size)
     return max(sum / (a + b + c + d + e), 0.0);
 }
 
+// ue6-main MegaLightsDenoiserTemporal's shared neighbourhood. Keep full float
+// precision and the existing per-pixel summation order; only redundant reads and
+// colour transforms are shared by the 64 output pixels.
+#define ML_TEMPORAL_SIDE 12
+groupshared float4 g_mlTemporalD[ML_TEMPORAL_SIDE * ML_TEMPORAL_SIDE];
+groupshared float4 g_mlTemporalS[ML_TEMPORAL_SIDE * ML_TEMPORAL_SIDE];
+
 [numthreads(8, 8, 1)]
-void main(uint3 id : SV_DispatchThreadID)
+void main(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID, uint lane : SV_GroupIndex)
 {
     const uint2 pixel = id.xy;
     const uint2 size = P[1].xy;
-    if (any(pixel >= size)) return;
     RWTexture2D<float4> outDiffuse = ResourceDescriptorHeap[P[4].x];
     RWTexture2D<float4> outSpecular = ResourceDescriptorHeap[P[4].y];
     RWTexture2D<float4> outMoments = ResourceDescriptorHeap[P[4].z];
     RWTexture2D<uint> outFrames = ResourceDescriptorHeap[P[4].w];
     RWTexture2D<float> outDepth = ResourceDescriptorHeap[P[5].x];
     RWTexture2D<float2> outConfidence = ResourceDescriptorHeap[P[5].y];
+    // V's zero-record tile cannot produce a coverage lighting surface. This
+    // condition is group-uniform; every lane exits before the shared-tile barrier.
+    // Clear the same six outputs, including history validity on disappearing tiles.
+    if (P[5].z != UNX_NONE)
+    {
+        ByteAddressBuffer tiles = ResourceDescriptorHeap[P[5].z];
+        const uint tile = group.y * ((size.x + 7u) / 8u) + group.x;
+        if (tiles.Load(4u * (tile * COV_TILE_WORDS + COV_TILE_COUNT)) == 0)
+        {
+            if (all(pixel < size))
+            {
+                outDiffuse[pixel] = 0; outSpecular[pixel] = 0; outMoments[pixel] = 0;
+                outFrames[pixel] = 0; outDepth[pixel] = 0; outConfidence[pixel] = float2(1,1);
+            }
+            return;
+        }
+    }
+    Texture2D<float4> nowDiffuse = ResourceDescriptorHeap[P[0].x];
+    Texture2D<float4> nowSpecular = ResourceDescriptorHeap[P[0].y];
+    for (uint i = lane; i < ML_TEMPORAL_SIDE * ML_TEMPORAL_SIDE; i += 64)
+    {
+        const int2 p = int2(group.xy * 8) + int2(i % ML_TEMPORAL_SIDE, i / ML_TEMPORAL_SIDE) - 2;
+        float4 d = 0, s = 0;
+        if (all(p >= 0) && all(p < int2(size))) { d = nowDiffuse[p]; s = nowSpecular[p]; }
+        g_mlTemporalD[i] = float4(mlToYCoCg(d.rgb), d.a);
+        g_mlTemporalS[i] = float4(mlToYCoCg(s.rgb), s.a);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (any(pixel >= size)) return;
     Texture2D<uint> words = ResourceDescriptorHeap[P[3].w];
     if (mWordMaterial(words[pixel]) == M_MATERIAL_SKY)
     {
@@ -63,8 +100,6 @@ void main(uint3 id : SV_DispatchThreadID)
         outConfidence[pixel] = float2(1, 1);
         return;
     }
-    Texture2D<float4> nowDiffuse = ResourceDescriptorHeap[P[0].x];
-    Texture2D<float4> nowSpecular = ResourceDescriptorHeap[P[0].y];
     Texture2D<float> depthTex = ResourceDescriptorHeap[P[0].z];
     Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[0].w];
     const float4 centreD = nowDiffuse[pixel], centreS = nowSpecular[pixel];
@@ -175,9 +210,10 @@ void main(uint3 id : SV_DispatchThreadID)
                 if ((ox == 0 && oy == 0) || (abs(ox) == 2 && abs(oy) == 2)) continue;
                 const int2 c = int2(pixel) + int2(ox, oy);
                 if (any(c < 0) || any(c >= int2(size))) continue;
-                const float4 s4 = nowSpecular[c];
+                const uint at = (local.y + 2 + oy) * ML_TEMPORAL_SIDE + local.x + 2 + ox;
+                const float4 s4 = g_mlTemporalS[at];
                 if (!(s4.a > 0)) continue;
-                const float3 yd = mlToYCoCg(nowDiffuse[c].rgb), ys = mlToYCoCg(s4.rgb);
+                const float3 yd = g_mlTemporalD[at].rgb, ys = s4.rgb;
                 sumD += yd;
                 sumS += ys;
                 sqD += (yd - cD) * (yd - cD);

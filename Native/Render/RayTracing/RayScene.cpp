@@ -1647,7 +1647,7 @@ void RayScene::recordDeform(ID3D12GraphicsCommandList7* cmd) const
     const uint32_t width = std::min<uint32_t>(m_deformGroupCount, 65535u);
     const uint32_t constants[8] = { m_deformJobs.srv, m_deformGroups.srv, m_deformedPoolUav, m_deformGroupCount, m_vertexMap.srv, width, 0, 0 };
     cmd->SetComputeRoot32BitConstants(0, 8, constants, 0);
-    cmd->Dispatch(width, (m_deformGroupCount + width - 1) / width, 1);
+    gpuDispatch(cmd, width, (m_deformGroupCount + width - 1) / width, 1);
 }
 
 void RayScene::recordRefit(ID3D12GraphicsCommandList7* cmd, bool refit, const std::vector<uint8_t>* rebuild) const
@@ -1710,7 +1710,12 @@ void RayScene::selectExactSet(FramePassContext& fc)
     if (m_exact.empty()) return;
     const uint32_t n = (uint32_t)m_deformed.size();
     const uint32_t oldSlot = (uint32_t)((fc.frame.frameIndex + kDescSlots - fc.framesInFlight) % kDescSlots);
-    std::vector<uint32_t> wanted;
+    auto& wanted = m_exactWanted;
+    wanted.clear();
+    auto& ownerIndex = m_exactOwnerIndex;
+    ownerIndex.assign(n, UINT32_MAX);
+    for (const ExactSlot& e : m_exact)
+        if (e.owner != UINT32_MAX) ownerIndex[e.owner] = 0;
     if (m_exactSlotFrame[oldSlot] != UINT64_MAX && fc.frame.frameIndex >= m_exactSlotFrame[oldSlot] + fc.framesInFlight)
     {
         const uint32_t* counts = m_exactReadbackMapped + (size_t)oldSlot * n;
@@ -1723,7 +1728,7 @@ void RayScene::selectExactSet(FramePassContext& fc)
         for (uint32_t k = 0; k < n; ++k)
         {
             if (counts[k] < m_exactMinHits) continue;
-            const bool member = std::any_of(m_exact.begin(), m_exact.end(), [&](const ExactSlot& e) { return e.owner == k; });
+            const bool member = ownerIndex[k] != UINT32_MAX;
             if ((m_experiment & 2) != 0 || m_deformed[k].exactNeed > (member ? 0.8f : 1.0f)) wanted.push_back(k);  // 2: hit count alone
             else ++m_stats.exactWithinBoundTotal;
         }
@@ -1734,23 +1739,23 @@ void RayScene::selectExactSet(FramePassContext& fc)
         for (const ExactSlot& e : m_exact)
             if (e.owner != 0xFFFFFFFFu) wanted.push_back(e.owner);  // no new counts yet: keep the set
     // Keep owners still wanted; free the others; give free slots to the new ones.
-    std::vector<uint8_t> placed(wanted.size(), 0);
+    std::fill(ownerIndex.begin(), ownerIndex.end(), UINT32_MAX);
+    for (size_t w = 0; w < wanted.size(); ++w) ownerIndex[wanted[w]] = (uint32_t)w;
+    auto& placed = m_exactPlaced;
+    placed.assign(wanted.size(), 0);
     for (ExactSlot& e : m_exact)
     {
-        const auto it = std::find(wanted.begin(), wanted.end(), e.owner);
-        if (e.owner != 0xFFFFFFFFu && it != wanted.end()) placed[it - wanted.begin()] = 1;
+        if (e.owner != UINT32_MAX && ownerIndex[e.owner] != UINT32_MAX) placed[ownerIndex[e.owner]] = 1;
         else e.owner = 0xFFFFFFFFu;
     }
-    std::vector<std::pair<uint32_t, uint32_t>> changed;  // slot, new owner
+    auto& changed = m_exactChanged;  // slot, new owner
+    changed.clear();
+    size_t freeSlot = 0;
     for (size_t w = 0; w < wanted.size(); ++w)
     {
         if (placed[w]) continue;
-        for (size_t k = 0; k < m_exact.size(); ++k)
-            if (m_exact[k].owner == 0xFFFFFFFFu && std::none_of(changed.begin(), changed.end(), [&](const auto& c) { return c.first == k; }))
-            {
-                changed.push_back({ (uint32_t)k, wanted[w] });
-                break;
-            }
+        while (freeSlot < m_exact.size() && m_exact[freeSlot].owner != UINT32_MAX) ++freeSlot;
+        if (freeSlot < m_exact.size()) changed.push_back({ (uint32_t)freeSlot++, wanted[w] });
     }
     m_stats.exactOccupied = 0;
     m_stats.exactVertices = 0;
@@ -1793,7 +1798,7 @@ void RayScene::selectExactSet(FramePassContext& fc)
                          b.use(instancesRef, Use::CopyDst);
                          b.use(jobsRef, Use::CopyDst);
                      },
-                     [patches, ring, ringOffset, instancesRef, jobsRef](PassContext& c) {
+                     [patches = std::move(patches), ring, ringOffset, instancesRef, jobsRef](PassContext& c) {
                          for (size_t k = 0; k < patches.size(); ++k)
                              c.cmd->CopyBufferRegion(c.resource(patches[k].job ? jobsRef : instancesRef), patches[k].dst, ring, ringOffset + k * 16, 16);
                      });
@@ -1891,7 +1896,7 @@ void RayScene::selectProxyLevels(FramePassContext& fc)
                          b.use(instancesRef, Use::CopyDst);
                          b.use(jobsRef, Use::CopyDst);
                      },
-                     [patches, ring, ringOffset, instancesRef, jobsRef](PassContext& c) {
+                     [patches = std::move(patches), ring, ringOffset, instancesRef, jobsRef](PassContext& c) {
                          for (size_t k = 0; k < patches.size(); ++k)
                              c.cmd->CopyBufferRegion(c.resource(patches[k].job ? jobsRef : instancesRef), patches[k].dst, ring, ringOffset + k * 16, 16);
                      });
@@ -2202,7 +2207,7 @@ void RayScene::record(FramePassContext& fc)
                       c.cmd->SetPipelineState(pso);
                       c.bindFrameConstants(constants);
                       c.computeConstants(k, 12);
-                      c.cmd->Dispatch((cap + 63) / 64, 1, 1);
+                      gpuDispatch(c.cmd, (cap + 63) / 64, 1, 1);
                   });
         g.addPass("r.as.particles.records", QueueType::Graphics,
                   [&](PassBuilder& b) {
@@ -2383,6 +2388,21 @@ struct RtLightRecord
     uint32_t castShadow, pad;
 };
 static_assert(sizeof(RtLightRecord) == 96);
+// Candidate selection never reads the emitter's tangent frame or shadow flags.
+// Keep its exact (unquantized) inputs in four adjacent 16-byte blocks per light.
+// The selected emitter still uses the complete record above.
+struct RtLightImportanceRecord
+{
+    float3 position;
+    uint32_t type;
+    float3 forward;
+    float intensity;
+    float3 color;
+    float range;
+    float size[2];
+    float spotScale, spotOffset;
+};
+static_assert(sizeof(RtLightImportanceRecord) == 64);
 // RtLightGrid (48 B) + offsets of the lights, cell starts and cell lights (HitLocalLights.hlsli).
 struct RtLightHeader
 {
@@ -2396,8 +2416,9 @@ struct RtLightHeader
                             // word 21, per frame: the FX lights' groups (recordFxLights, A3), 0xFFFFFFFF none;
                             // word 22, per frame: E's hair density parameters (recordHair; HitHair.hlsli), 0xFFFFFFFF none;
                             // word 23, per frame: the translucency volume of the hair hits' indirect light, 0xFFFFFFFF none
+    uint32_t importanceOffset, importanceVersion, reserved[6];
 };
-static_assert(sizeof(RtLightHeader) == 96);
+static_assert(sizeof(RtLightHeader) == 128);
 constexpr uint32_t kLightDecalOffset = 64, kLightFunctionOffset = 80, kLightHairOffset = 88;
 constexpr uint32_t kLightCellsMax = 1u << 18;  // the grid's cell size grows past this many cells (262,144 x 4 B starts)
 } // namespace
@@ -2612,7 +2633,24 @@ void RayScene::updateLightGrid(FramePassContext& fc)
                             const float3 q{ std::max(cmin.x, std::min(l.position.x, cmax.x)), std::max(cmin.y, std::min(l.position.y, cmax.y)),
                                             std::max(cmin.z, std::min(l.position.z, cmax.z)) };
                             const float3 dd = q - l.position;
-                            if (dot(dd, dd) <= l.range * l.range) lists[((size_t)z * head.dim[1] + y) * head.dim[0] + x].push_back(i);
+                            if (dot(dd, dd) > l.range * l.range) continue;
+                            if (l.type == (uint32_t)scene::LightType::Rect || l.type == (uint32_t)scene::LightType::Disk)
+                            {
+                                // rtLightImportance is exactly zero behind a one-sided
+                                // emitter. Reject only cells wholly behind its plane;
+                                // retain a floating-point margin around the boundary.
+                                const float3 extreme{ l.forward.x >= 0 ? cmax.x : cmin.x,
+                                                      l.forward.y >= 0 ? cmax.y : cmin.y,
+                                                      l.forward.z >= 0 ? cmax.z : cmin.z };
+                                const double upper = (double(extreme.x) - l.position.x) * l.forward.x +
+                                                     (double(extreme.y) - l.position.y) * l.forward.y +
+                                                     (double(extreme.z) - l.position.z) * l.forward.z;
+                                const double scale = (std::abs(double(extreme.x)) + std::abs(double(l.position.x))) * std::abs(l.forward.x) +
+                                                     (std::abs(double(extreme.y)) + std::abs(double(l.position.y))) * std::abs(l.forward.y) +
+                                                     (std::abs(double(extreme.z)) + std::abs(double(l.position.z))) * std::abs(l.forward.z) + 1;
+                                if (upper < -16 * std::numeric_limits<float>::epsilon() * scale) continue;
+                            }
+                            lists[((size_t)z * head.dim[1] + y) * head.dim[0] + x].push_back(i);
                         }
             }
             cellStart.assign(cells + 1, 0);
@@ -2643,11 +2681,20 @@ void RayScene::updateLightGrid(FramePassContext& fc)
         head.decal[3] = 0;
         head.functions[0] = 0xFFFFFFFFu;
         head.lightsOffset = sizeof(RtLightHeader);
-        head.cellStartOffset = head.lightsOffset + (uint32_t)(std::max<size_t>(n, 1) * sizeof(RtLightRecord));
+        head.importanceOffset = head.lightsOffset + (uint32_t)(std::max<size_t>(n, 1) * sizeof(RtLightRecord));
+        head.importanceVersion = 1;
+        head.cellStartOffset = head.importanceOffset + (uint32_t)(std::max<size_t>(n, 1) * sizeof(RtLightImportanceRecord));
         head.cellLightsOffset = head.cellStartOffset + (uint32_t)(cellStart.size() * 4);
         m_lightImage.assign(head.cellLightsOffset + cellLights.size() * 4, 0);
         std::memcpy(m_lightImage.data(), &head, sizeof head);
         if (n) std::memcpy(m_lightImage.data() + head.lightsOffset, rec.data(), n * sizeof(RtLightRecord));
+        for (size_t i = 0; i < n; ++i)
+        {
+            const auto& r = rec[i];
+            const RtLightImportanceRecord compact{ r.position, r.type, r.forward, r.intensity, r.color, r.range,
+                                                   { r.size[0], r.size[1] }, r.spotScale, r.spotOffset };
+            std::memcpy(m_lightImage.data() + head.importanceOffset + i * sizeof compact, &compact, sizeof compact);
+        }
         std::memcpy(m_lightImage.data() + head.cellStartOffset, cellStart.data(), cellStart.size() * 4);
         std::memcpy(m_lightImage.data() + head.cellLightsOffset, cellLights.data(), cellLights.size() * 4);
     }
@@ -2673,6 +2720,14 @@ void RayScene::publishLightSlot(FramePassContext& fc)
         }
         m_lightSlotBytes = std::max<uint64_t>(need * 2, 65536);
         D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD };
+        wchar_t gpuUpload[8]{};
+        if (GetEnvironmentVariableW(L"UNX_LIGHT_GRID_GPU_UPLOAD", gpuUpload, 8) && gpuUpload[0] == L'1')
+        {
+            D3D12_FEATURE_DATA_D3D12_OPTIONS16 options{};
+            check(m_device.d3d()->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS16, &options, sizeof options), "Query GPU upload heap support");
+            if (!options.GPUUploadHeapSupported) fail("RT light grid diagnostic: GPU upload heaps are not supported on this device");
+            up.Type = D3D12_HEAP_TYPE_GPU_UPLOAD;
+        }
         D3D12_RESOURCE_DESC1 d{};
         d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
         d.Width = kDescSlots * m_lightSlotBytes;
@@ -2683,6 +2738,8 @@ void RayScene::publishLightSlot(FramePassContext& fc)
                                                        IID_PPV_ARGS(&m_lightRing)),
               "RT light grid ring");
         m_lightRing->SetName(L"RT local-light grid ring");
+        logf("RT light grid storage: heap type %u, %llu bytes, %llu bytes per slot\n", (unsigned)up.Type,
+             (unsigned long long)d.Width, (unsigned long long)m_lightSlotBytes);
         D3D12_RANGE nothing{ 0, 0 };
         check(m_lightRing->Map(0, &nothing, reinterpret_cast<void**>(&m_lightRingMapped)), "map RT light grid ring");
         DescriptorHeaps& h = m_device.descriptors();
@@ -2800,7 +2857,7 @@ void RayScene::recordDecals(FramePassContext& fc, const ViewResources& main)
                   c.cmd->SetPipelineState(boxes);
                   c.bindFrameConstants(constants);
                   c.computeConstants(k, 4);
-                  c.cmd->Dispatch((count + 63) / 64, 1, 1);
+                  gpuDispatch(c.cmd, (count + 63) / 64, 1, 1);
               });
     const D3D12_GPU_VIRTUAL_ADDRESS aabbAddress = m_decalAabbs.address(), blasAddress = m_decalBlas.address(), blasScratchAddress = m_decalBlasScratch.address();
     g.addPass("r.decals.blas", QueueType::Compute,
@@ -2956,6 +3013,7 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
     m_stats.streamBuilds = m_stats.streamRefits = 0;
     m_stats.streamBlasBytes = 0;
     const bool refitEnabled = !fc.quality.has("raytracing.stream_refit") || fc.quality.boolean("raytracing.stream_refit");
+    const bool preferFastTrace = fc.quality.has("raytracing.stream_fast_trace") && fc.quality.boolean("raytracing.stream_fast_trace");
     struct StreamBuild
     {
         uint32_t slot;
@@ -2966,6 +3024,7 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
         bool update = false;
         BufferRef indices;
         uint32_t vertexCount = 0;
+        bool fastTrace = false;
     };
     std::vector<StreamBuild> builds;
     // FrameResources::triangleStreams is the list the producers append to (slot = index, at most kMaxTriangleStreams).
@@ -2978,7 +3037,8 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
         if (!vertices || fc.graph.desc(ts.vertices).size < uint64_t(vertices) * 32 ||
             (ts.indices.valid() && fc.graph.desc(ts.indices).size < uint64_t(ts.maxTriangles) * 12))
             fail("RT stream %u has an invalid vertex/index layout", k);
-        builds.push_back({ k, ts.vertices, ts.maxTriangles, 0, refitEnabled ? ts.fixedTopologyId : 0, false, ts.indices, vertices });
+        builds.push_back({ k, ts.vertices, ts.maxTriangles, 0, refitEnabled ? ts.fixedTopologyId : 0, false, ts.indices, vertices,
+                           preferFastTrace && refitEnabled && ts.fixedTopologyId != 0 });
     }
     if (builds.empty())
     {
@@ -2991,7 +3051,7 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
     {
         const bool allowUpdate = b.topologyId != 0;
         if (m_streamTriangles[b.slot] != b.triangles || m_streamAllowsUpdate[b.slot] != allowUpdate ||
-            m_streamVertices[b.slot] != b.vertexCount || m_streamIndexed[b.slot] != b.indices.valid())
+            m_streamVertices[b.slot] != b.vertexCount || m_streamIndexed[b.slot] != b.indices.valid() || m_streamFastTrace[b.slot] != b.fastTrace)
         {
             D3D12_RAYTRACING_GEOMETRY_DESC gd{};
             gd.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
@@ -3003,7 +3063,7 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
             gd.Triangles.VertexBuffer.StrideInBytes = 32;
             D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
             in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-            in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+            in.Flags = b.fastTrace ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
             if (allowUpdate) in.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
             in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
             in.NumDescs = 1;
@@ -3015,6 +3075,7 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
             m_streamVertices[b.slot] = b.vertexCount;
             m_streamIndexed[b.slot] = b.indices.valid();
             m_streamAllowsUpdate[b.slot] = allowUpdate;
+            m_streamFastTrace[b.slot] = b.fastTrace;
             m_streamScratchBytes = std::max<uint64_t>(m_streamScratchBytes,
                 (std::max(info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes) + 255) / 256 * 256);
         }
@@ -3034,7 +3095,7 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
     {
         const StreamBuilt& old = m_streamBuilt[b.slot];
         b.update = b.topologyId && old.topologyId == b.topologyId && old.poolGeneration == poolGeneration &&
-                   old.offset == b.offset && old.triangles == b.triangles && old.vertices == b.vertexCount && old.indexed == b.indices.valid();
+                   old.offset == b.offset && old.triangles == b.triangles && old.vertices == b.vertexCount && old.indexed == b.indices.valid() && old.fastTrace == b.fastTrace;
         if (b.update) ++m_stats.streamRefits;
         else ++m_stats.streamBuilds;
     }
@@ -3071,7 +3132,7 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
                   b.onSubmitted([this, builds, poolGeneration](Queue&, uint64_t) {
                       std::fill(std::begin(m_streamBuilt), std::end(m_streamBuilt), StreamBuilt{});
                       for (const StreamBuild& s : builds)
-                          m_streamBuilt[s.slot] = {s.topologyId, poolGeneration, s.offset, s.triangles, s.vertexCount, s.indices.valid()};
+                          m_streamBuilt[s.slot] = {s.topologyId, poolGeneration, s.offset, s.triangles, s.vertexCount, s.indices.valid(), s.fastTrace};
                   });
               },
               [builds, pool, scratch, scratchStride](PassContext& c) {
@@ -3090,7 +3151,7 @@ void RayScene::recordStreams(FramePassContext& fc, D3D12_RAYTRACING_INSTANCE_DES
                       gd.Triangles.VertexBuffer.StrideInBytes = 32;
                       D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC d{};
                       d.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-                      d.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+                      d.Inputs.Flags = builds[j].fastTrace ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
                       if (builds[j].topologyId) d.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
                       d.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
                       d.Inputs.NumDescs = 1;
@@ -3307,7 +3368,7 @@ void RayScene::recordFxLights(FramePassContext& fc)
                   c.cmd->SetPipelineState(pso);
                   c.computeConstants(k, 8);
                   c.bindFrameConstants(constants);
-                  c.cmd->Dispatch(1, 1, 1);
+                  gpuDispatch(c.cmd, 1, 1, 1);
               });
 }
 

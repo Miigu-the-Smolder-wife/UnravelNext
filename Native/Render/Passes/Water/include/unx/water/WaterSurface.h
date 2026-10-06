@@ -51,6 +51,9 @@ struct WaterSurfaceDebug
 // plane within WaterSurface.hlsli's image-shift bound read
 // it in place of a reflection job; the others keep their jobs. corners: the plane region's corners (the camera's
 // rectangle is their projection; any corner behind the eye takes the whole view).
+// Delayed coverage belongs to the stream's nonzero fixedTopologyId, never its
+// frame-local index. Without valid coverage the full ray-reflection path runs;
+// the cost rule enables a reflection camera only after coverage justifies it.
 struct WaterPlane
 {
     uint32_t stream = 0;

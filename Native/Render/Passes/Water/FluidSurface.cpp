@@ -314,7 +314,7 @@ FluidSurfaceOutput FluidSurface::record(RenderGraph& g, const FluidSurfaceInput&
         ID3D12PipelineState* pso = m_shaders.compute(kernel);
         ID3D12CommandSignature* signature = m_signature.Get();
         g.addPass(name, QueueType::Graphics, [&](PassBuilder& pb) { uses(pb, access, true, pass); if (argument == 2) pb.onSubmitted([this](Queue&, uint64_t) { m_recorded = true; }); },
-                  [=](PassContext& c) { c.cmd->SetPipelineState(pso); constants(c, access, pass); c.cmd->ExecuteIndirect(signature, 1, c.resource(dispatch), argument * 12, nullptr, 0); });
+                  [=](PassContext& c) { c.cmd->SetPipelineState(pso); constants(c, access, pass); gpuExecuteIndirect(c.cmd, signature, 1, c.resource(dispatch), argument * 12, nullptr, 0); });
     };
     // W3 seam: the basin table, one group per basin (the field SRVs are known when the pass runs; the group measures the band)
     for (uint32_t b = 0; b < basinCount; ++b)
@@ -329,7 +329,7 @@ FluidSurfaceOutput FluidSurface::record(RenderGraph& g, const FluidSurfaceInput&
                       std::memcpy(&k[8], &basin.cosYaw, 4); std::memcpy(&k[9], &basin.sinYaw, 4); std::memcpy(&k[10], &basin.sizeX, 4); std::memcpy(&k[11], &basin.sizeZ, 4);
                       c.cmd->SetPipelineState(pso);
                       c.computeConstants(k, 12);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                   });
     }
     direct("fluid clear", "Passes/Water/FluidClear", groups(std::max(m_tableSize, kCounters)), Table | Counters);

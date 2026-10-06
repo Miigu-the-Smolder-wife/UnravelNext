@@ -12,7 +12,12 @@ int main(int argc, char** argv)
 {
     try
     {
-        const bool timing = argc == 2 && std::strcmp(argv[1], "--timing") == 0;
+        bool timing = false, fastTrace = false;
+        for (int i = 1; i < argc; ++i)
+        {
+            timing |= std::strcmp(argv[i], "--timing") == 0;
+            fastTrace |= std::strcmp(argv[i], "--fast-trace") == 0;
+        }
         if (timing) requireGpuLock("fixed-topology stream RT A/B");
         TestFrame test(!timing, !timing);
         GpuProfiler profiler(test.device, 1, 256);
@@ -33,7 +38,8 @@ int main(int argc, char** argv)
             for (uint32_t order = 0; order < 2; ++order)
             {
                 const uint32_t variant = order ^ (frame & 1u);
-                test.quality.applyOverride(variant ? "raytracing.stream_refit=true" : "raytracing.stream_refit=false");
+                test.quality.applyOverride(variant || fastTrace ? "raytracing.stream_refit=true" : "raytracing.stream_refit=false");
+                test.quality.applyOverride(fastTrace && variant ? "raytracing.stream_fast_trace=true" : "raytracing.stream_fast_trace=false");
                 const uint32_t side = timing ? 64 : 32;
                 const uint32_t count = side * side * std::max(1u, streams);
                 if (!timing && frame == 0)
@@ -72,10 +78,10 @@ int main(int argc, char** argv)
                     }
                     rays[variant]->record(fc);
                     const auto& stats = rays[variant]->stats();
-                    if (!variant || fluid || !frame || (!timing && frame == 8))
+                    if ((!variant && !fastTrace) || fluid || !frame || (!timing && frame == 8))
                         M_CHECK(stats.streamRefits == 0, "unsafe refit at frame %u variant %u", frame, variant);
-                    if (variant && !timing && frame == 12) M_CHECK(stats.streamRefits == 0, "reordered owners reused stale slots");
-                    if (variant && (timing ? frame > 0 : frame == 1 || frame == 10))
+                    if ((variant || fastTrace) && !timing && frame == 12) M_CHECK(stats.streamRefits == 0, "reordered owners reused stale slots");
+                    if ((variant || fastTrace) && (timing ? frame > 0 : frame == 1 || frame == 10))
                         M_CHECK(stats.streamRefits == streams, "expected submitted refits at frame %u, got %u/%u", frame, stats.streamRefits, streams);
                     const BufferRef out = fc.graph.createBuffer({"stream ray results", uint64_t(count) * 24, 0});
                     fc.graph.addPass("stream rays", QueueType::Compute,

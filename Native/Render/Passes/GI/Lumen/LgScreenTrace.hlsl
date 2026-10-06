@@ -65,7 +65,7 @@ void main(uint3 id : SV_DispatchThreadID)
     float maxDistance = asfloat(P[3].w);
     if (P[2].z != 0xFFFFFFFFu)
     {
-        const LrcCoverage coverage = lrcCoverageChecked(lrcParams(P[2].z), P[3].z, positionSpeed.xyz, lgRcDither(atlas));
+        const LrcCoverage coverage = lgRcCoverageAt(lrcParams(P[2].z), P[3].z, probe, positionSpeed.xyz, lgRcDither(atlas), lgRcPrepared());
         if (coverage.valid) maxDistance = min(maxDistance, coverage.minTraceDistance);
     }
     const SctResult r = sctTrace(depth, pyramid, lgViewSize(), origin, direction, maxDistance, P[3].x & 0xFFFFu, asfloat(P[3].y), (P[3].x >> 16) & 0x7FFFu);

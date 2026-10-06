@@ -30,7 +30,7 @@
 float4 materialBaseColorGradAt(GpuMaterial m, float2 uv, float2 duvdx, float2 duvdy)
 {
     if (m.baseColorTexture == UNX_NONE) return 1;
-    Texture2D<float4> t = ResourceDescriptorHeap[m.baseColorTexture];
+    Texture2D<float4> t = ResourceDescriptorHeap[NonUniformResourceIndex(m.baseColorTexture)];
     return (m.textureClamp & MATERIAL_TEXTURE_BASE_COLOR) ? t.SampleGrad(g_anisoClamp, uv, duvdx, duvdy) : t.SampleGrad(g_anisoWrap, uv, duvdx, duvdy);
 }
 float4 materialBaseColorGrad(GpuMaterial m, float2 uv, float2 duvdx, float2 duvdy)
@@ -43,7 +43,7 @@ float4 materialBaseColorGrad(GpuMaterial m, float2 uv, float2 duvdx, float2 duvd
 float4 materialBaseColorLevelAt(GpuMaterial m, float2 uv, float lod)
 {
     if (m.baseColorTexture == UNX_NONE) return 1;
-    Texture2D<float4> t = ResourceDescriptorHeap[m.baseColorTexture];
+    Texture2D<float4> t = ResourceDescriptorHeap[NonUniformResourceIndex(m.baseColorTexture)];
     return (m.textureClamp & MATERIAL_TEXTURE_BASE_COLOR) ? t.SampleLevel(g_anisoClamp, uv, lod) : t.SampleLevel(g_anisoWrap, uv, lod);
 }
 float4 materialBaseColorLevel(GpuMaterial m, float2 uv, float lod)

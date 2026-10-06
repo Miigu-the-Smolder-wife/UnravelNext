@@ -685,8 +685,9 @@ int main(int argc, char** argv)
             std::shared_ptr<std::vector<uint8_t>> planarBand;
             water::WaterSurfaceStats planarStats;
             dbg.rayJobCapacity = 2 * W * 64;
-            dbg.planar = 1;
             tf.frame.outputLinearHdr = true;
+            auto planarFrame = [&](bool force) {
+            dbg.planar = force ? 1 : -1;
             tf.run([&](FramePassContext& fc) {
                 ViewResources v = tf.mainView(fc, W, H, 0);
                 v.color = fc.graph.createTexture({ "w.test.color", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
@@ -698,6 +699,7 @@ int main(int argc, char** argv)
                 stream.material = waterIndex;
                 stream.maxTriangles = 2;
                 stream.layer = 1;
+                stream.fixedTopologyId = 0x575445535401ull;
                 water::WaterPlane rest;
                 rest.stream = uint32_t(fc.resources.triangleStreams.size());
                 rest.plane = { 0, 1, 0, -(float)level };
@@ -748,6 +750,12 @@ int main(int argc, char** argv)
                 planarBand = tf.readback(fc, fc.state<water::WaterSurfaceDebug>("W.surface.debug").radiance);
                 fc.resources.triangleStreams.clear();
             });
+            };
+            planarFrame(false);
+            const auto unknownStats = water::latestWaterSurfaceStats(tf.trackState);
+            const bool fallback = unknownStats.planarViews == 0 && unknownStats.planar == 0 && unknownStats.reflectJobs == interior5;
+            report(fallback, "6c. unknown coverage retains every reflection ray without an extra camera", fallback ? 0 : 1, 0);
+            planarFrame(true);
             planarStats = water::latestWaterSurfaceStats(tf.trackState);
             tf.frame.outputLinearHdr = false;
             dbg.rayJobCapacity = 0;

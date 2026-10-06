@@ -283,7 +283,7 @@ void MeshParticlePass::record(ParticleSystem& particles, FramePassContext& fc, c
                   const std::array<uint32_t, 8> p = { c.srv(constants), 0, 0, 0, 0, 0, 0, 0 };
                   c.cmd->SetPipelineState(pso);
                   c.computeConstants(p.data(), 8);
-                  c.cmd->Dispatch(groups, 1, 1);
+                  gpuDispatch(c.cmd, groups, 1, 1);
                   group.pBufferBarriers = toRead;
                   c.cmd->Barrier(1, &group);
               });

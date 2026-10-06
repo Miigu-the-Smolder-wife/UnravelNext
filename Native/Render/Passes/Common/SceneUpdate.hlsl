@@ -9,8 +9,11 @@
 #include "Bindless.hlsli"
 
 [numthreads(64, 1, 1)]
-void main(uint i : SV_DispatchThreadID)
+void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 {
+    // Large scene publications span rows without exceeding D3D12's 65535
+    // groups per dimension. Small updates retain the original one-row layout.
+    const uint i = (group.y * 65535u + group.x) * 64u + lane;
     const uint count = P[0].y;
     if (i >= count) return;
     ByteAddressBuffer upload = ResourceDescriptorHeap[P[0].x];
@@ -20,6 +23,7 @@ void main(uint i : SV_DispatchThreadID)
     // Raw UAV of each target: P[0].zw, P[1], P[2], P[3], P[4].xy = targets 0 .. 15 (4 .. 14: C2b runtime pool buffers,
     // 15: C5 terrain patch slots).
     const uint uavs[16] = { P[0].z, P[0].w, P[1].x, P[1].y, P[1].z, P[1].w, P[2].x, P[2].y, P[2].z, P[2].w, P[3].x, P[3].y, P[3].z, P[3].w, P[4].x, P[4].y };
-    RWByteAddressBuffer destination = ResourceDescriptorHeap[uavs[target]];
+    // Adjacent upload elements can belong to different scene streams.
+    RWByteAddressBuffer destination = ResourceDescriptorHeap[NonUniformResourceIndex(uavs[target])];
     destination.Store4(16 * element, payload);
 }

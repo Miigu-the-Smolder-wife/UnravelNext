@@ -804,7 +804,8 @@ void MeshCardScene::update(std::span<const float3> viewOrigins)
     m_stats.requests = (uint32_t)m_requests.size();  // (with the feedback's)
 
     // the frame's requests: the nearest buckets, up to the capture count
-    std::vector<Request> chosen;
+    auto& chosen = m_chosenRequests;
+    chosen.clear();
     {
         uint32_t count = 0, lastBucket = 0, lastBucketCount = 0;
         for (; lastBucket < mc::kDistanceBuckets; ++lastBucket)
@@ -835,8 +836,10 @@ void MeshCardScene::update(std::span<const float3> viewOrigins)
     // ProcessLumenSurfaceCacheRequests: the locked levels first, the feedback's pages after them
     Allocator captureAllocator;
     captureAllocator.init(m_captureAtlasPages);
-    std::vector<uint32_t> dirtyCards;
-    std::vector<Request> hiRes;
+    auto& dirtyCards = m_dirtyCaptureCards;
+    auto& hiRes = m_hiResRequests;
+    dirtyCards.clear();
+    hiRes.clear();
     uint32_t lockedDone = 0;
     for (const Request& request : chosen)
     {

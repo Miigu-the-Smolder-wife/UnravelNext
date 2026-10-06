@@ -15,6 +15,11 @@
 #include "FluidSurface.hlsli"
 #include "WaterLinear.hlsli"
 
+// One 8x8 slab, extended by three nodes on each end of the filter axis.
+// Every source/table lookup serves up to seven outputs without changing the
+// fixed-point filter or its order of operations.
+groupshared int4 gs_nodes[14 * 8 * 8];
+
 int4 smoothNode(RWByteAddressBuffer table, RWByteAddressBuffer source, int3 j)
 {
     const int3 b = j >> 3;
@@ -36,12 +41,21 @@ void main(uint t : SV_GroupThreadID, uint3 group : SV_GroupID)
     RWByteAddressBuffer source = ResourceDescriptorHeap[P[8].z];
     RWByteAddressBuffer destination = ResourceDescriptorHeap[P[8].w & 0x3FFFFFFFu];
     const uint axis = P[8].w >> 30;
-    const int3 d = int3(axis == 0, axis == 1, axis == 2);
-    const int3 j = fsBlockCoord(scan.Load(4 * (FS_SLOTS(fsTableSize()) + g))) * 8 + int3(t % 8, (t / 8) % 8, t / 64);
-    int4 sum = 44 * smoothNode(table, source, j);
-    sum += 15 * (smoothNode(table, source, j - d) + smoothNode(table, source, j + d));
-    sum -= 6 * (smoothNode(table, source, j - 2 * d) + smoothNode(table, source, j + 2 * d));
-    sum += smoothNode(table, source, j - 3 * d) + smoothNode(table, source, j + 3 * d);
+    const int3 block = fsBlockCoord(scan.Load(4 * (FS_SLOTS(fsTableSize()) + g))) * 8;
+    for (uint i = t; i < 14u * 8u * 8u; i += 512u)
+    {
+        const int along = int(i % 14u) - 3, a = int((i / 14u) % 8u), b = int(i / (14u * 8u));
+        const int3 offset = axis == 0 ? int3(along, a, b) : axis == 1 ? int3(a, along, b) : int3(a, b, along);
+        gs_nodes[i] = smoothNode(table, source, block + offset);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    const uint3 local = uint3(t % 8, (t / 8) % 8, t / 64);
+    const uint a = axis == 0 ? local.y : local.x, b = axis == 2 ? local.y : local.z;
+    const uint centre = (b * 8u + a) * 14u + local[axis] + 3u;
+    int4 sum = 44 * gs_nodes[centre];
+    sum += 15 * (gs_nodes[centre - 1] + gs_nodes[centre + 1]);
+    sum -= 6 * (gs_nodes[centre - 2] + gs_nodes[centre + 2]);
+    sum += gs_nodes[centre - 3] + gs_nodes[centre + 3];
     int4 r = (sum + 32) >> 6;  // arithmetic shift: floor((sum + 32) / 64) for either sign
     if (axis == 2) r.x = max(r.x, 0);
     destination.Store4(16 * (g * FS_BLOCK_NODES + t), asuint(r));

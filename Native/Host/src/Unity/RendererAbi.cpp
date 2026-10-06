@@ -1305,6 +1305,15 @@ UNX_API int32_t UNX_CALL UnxSceneLoad(UnxRenderer r, const char* utf8Path, UnxCa
     });
 }
 
+UNX_API int32_t UNX_CALL UnxFrameSlotReady(UnxRenderer r, uint32_t* ready)
+{
+    return call([&] {
+        if (!ready) fail("frame-slot readiness output is null");
+        *ready = 0;
+        *ready = find(r)->frameSlotReady() ? 1u : 0u;
+    });
+}
+
 UNX_API int32_t UNX_CALL UnxFrameQueue(UnxRenderer r, const UnxFrameDesc* d, uint64_t* ticket)
 {
     return call([&] {
@@ -1356,6 +1365,35 @@ UNX_API int32_t UNX_CALL UnxFramePassTimingsLatest(UnxRenderer r, UnxPassTiming*
             std::memset(passes[i].name, 0, sizeof passes[i].name);
             std::memcpy(passes[i].name, s.passMs[i].first.data(), std::min(s.passMs[i].first.size(), sizeof passes[i].name - 1));
             passes[i].ms = s.passMs[i].second;
+        }
+    });
+}
+
+UNX_API int32_t UNX_CALL UnxFrameSetGpuProfiling(UnxRenderer r, uint32_t mode)
+{
+    return call([&] { if (mode > 2) fail("GPU profiling mode must be 0, 1 or 2"); find(r)->setGpuProfiling(mode); });
+}
+
+UNX_API int32_t UNX_CALL UnxFrameGpuProfileLatest(UnxRenderer r, UnxGpuProfile* profile, UnxGpuPass* passes, uint32_t capacity)
+{
+    static_assert(sizeof(UnxGpuProfile) == 48 && sizeof(UnxGpuPass) == 224);
+    return call([&] {
+        requireStruct(profile, "UnxGpuProfile");
+        if (capacity && !passes) fail("GPU profile output is null");
+        const FrameStats s = find(r)->latestStats();
+        *profile = { sizeof(UnxGpuProfile), 1, s.frameIndex, s.gpuMs, s.renderWidth, s.renderHeight,
+            uint32_t(s.profile.size()), s.profileFlags, s.timestampCount, 0 };
+        for (uint32_t i = 0; i < capacity && i < s.profile.size(); ++i)
+        {
+            const auto& p = s.profile[i]; const auto& w = p.workload;
+            auto& out = passes[i]; out = {};
+            std::memcpy(out.name, p.name.data(), std::min(p.name.size(), sizeof(out.name) - 1));
+            out.queue = uint32_t(p.queue);
+            out.flags = ((s.profileFlags & 2) ? 1u : 0u) | (w.pipelineStatistics ? 2u : 0u) | (p.name.size() >= sizeof(out.name) ? 4u : 0u);
+            out.beginMs = p.beginMs; out.endMs = p.endMs;
+            out.dispatches = w.dispatches; out.groups = w.groups; out.draws = w.draws; out.indirect = w.indirect;
+            out.rayDispatches = w.rayDispatches; out.rayLaunches = w.rayLaunches;
+            out.computeInvocations = w.computeInvocations; out.pixelInvocations = w.pixelInvocations; out.rasterPrimitives = w.rasterPrimitives;
         }
     });
 }
@@ -1733,6 +1771,54 @@ UNX_API int32_t UNX_CALL UnxFrameSetPost(UnxRenderer r, const UnxPostSettingsDes
 UNX_API int32_t UNX_CALL UnxFrameSetDisplayEncoding(UnxRenderer r, int32_t encoding, float paperWhiteNits)
 {
     return call([&] { find(r)->setDisplayEncoding(encoding, paperWhiteNits); });
+}
+
+UNX_API int32_t UNX_CALL UnxFrameSetPostExtended(UnxRenderer r, const UnxPostExtendedDesc* post)
+{
+    return call([&] {
+        render::PostExtendedSettings p;
+        if (post)
+        {
+            if (post->size != sizeof(UnxPostExtendedDesc) || post->version != 1)
+                fail("UnxFrameSetPostExtended: size %u version %u", post->size, post->version);
+            p.enabled = true;
+            p.toneCurve = post->toneCurve;
+            p.bloomLevels = post->bloomLevels;
+            p.gradingLutSize = post->gradingLutSize;
+            p.localExposure = post->localExposure;
+            p.exposureBrighterSeconds = post->exposureBrighterSeconds;
+            p.exposureDarkerSeconds = post->exposureDarkerSeconds;
+            p.grain = post->grain;
+            p.sharpen = post->sharpen;
+            p.localHighlight = post->localHighlight;
+            p.localShadow = post->localShadow;
+            p.localDetail = post->localDetail;
+            p.localBlend = post->localBlend;
+            p.localMiddleGreyBias = post->localMiddleGreyBias;
+            p.localKernelPercent = post->localKernelPercent;
+            p.fringe = post->fringe;
+            p.fringeStart = post->fringeStart;
+            p.lensFlare = post->lensFlare;
+            p.flareIntensity = post->flareIntensity;
+            p.flareBokehSize = post->flareBokehSize;
+            p.flareThreshold = post->flareThreshold;
+            p.flareHalo = post->flareHalo;
+            p.flareBlades = post->flareBlades;
+            p.flareTintR = post->flareTintR;
+            p.flareTintG = post->flareTintG;
+            p.flareTintB = post->flareTintB;
+            p.paniniD = post->paniniD;
+            p.paniniS = post->paniniS;
+            p.motionSamples = post->motionSamples;
+            p.motionMaxPercent = post->motionMaxPercent;
+            p.diaphragmRings = post->diaphragmRings;
+            p.renderScale = post->renderScale;
+            p.renderHeightMax = post->renderHeightMax;
+            p.renderScaleMinHeight = post->renderScaleMinHeight;
+            p.tsrHistoryPercent = post->tsrHistoryPercent;
+        }
+        find(r)->setPostExtended(p);
+    });
 }
 
 // ---- Weather: the frame's fog, fog volumes and clouds with what the renderer's frame gained after their first

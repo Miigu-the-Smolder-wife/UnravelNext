@@ -910,7 +910,7 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
                       const uint32_t k[4] = { c.uav(table), 0, 0, 0 };
                       c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardFeedbackClear"));
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch((kFeedbackHashSlots + 63) / 64, 1, 1);
+                      gpuDispatch(c.cmd, (kFeedbackHashSlots + 63) / 64, 1, 1);
                   });
         chain.flush("r.card.feedback.clear");
         const uint32_t tile = s.settings.cards.feedbackTileSize;
@@ -1078,7 +1078,7 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
                           c.cmd->RSSetViewports(1, &vp);
                           c.cmd->RSSetScissorRects(1, &sc);
                           c.graphicsConstants(d.k, 20);
-                          c.cmd->DispatchMesh(std::min(65535u, d.groups), (d.groups + 65534) / 65535, 1);
+                          gpuDispatchMesh(c.cmd, std::min(65535u, d.groups), (d.groups + 65534) / 65535, 1);
                       }
                       (void)captureSize;
                   });
@@ -1100,7 +1100,7 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
                       const uint32_t k[8] = { c.srv(captureList), round.captures, c.srv(light.frame), c.srv(light.frames), c.uav(resampledDirect), c.uav(resampledIndirect), 0, 0 };
                       c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardResample"));
                       c.computeConstants(k, 8);
-                      c.cmd->Dispatch(kPageGroups, round.captures, 1);
+                      gpuDispatch(c.cmd, kPageGroups, round.captures, 1);
                   });
         const std::array<BufferRef, TCount> bufferRefs = { buffers[0], buffers[1], buffers[2], buffers[3], buffers[4] };
         g.addPass("r.card.upload", QueueType::Graphics,
@@ -1141,7 +1141,7 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
                                                clusters ? 1u : 0u, 0, 0, 0 };  // (the clusters' capture: V's reversed depth)
                       c.cmd->SetPipelineState(shaders.compute("Passes/SurfaceCache/CardCopy"));
                       c.computeConstants(k, 24);
-                      c.cmd->Dispatch(kPageGroups, round.captures, 1);
+                      gpuDispatch(c.cmd, kPageGroups, round.captures, 1);
                   });
 
         if (!set.valid) continue;
@@ -1152,6 +1152,7 @@ void SurfaceCacheCards::record(FramePassContext& fc, ViewResources& main, rt::Ra
         in.frameConstants = frameConstants;
         in.direct = s.settings.direct;
         in.radiosity = s.settings.radiosity;
+        in.hair = fc.resources.hairDensityParams.valid();
         in.shadowRaysOpaque = s.settings.shadowRaysOpaque;
         in.directTintSlots = s.settings.directTintSlots;
         in.radiosityCap = s.settings.radiosityCap;

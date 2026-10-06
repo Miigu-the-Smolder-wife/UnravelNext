@@ -15,6 +15,19 @@
 
 namespace unx::render
 {
+namespace
+{
+void stampTransformState(gpu::Instance& g)
+{
+    bool still = true;
+    for (uint32_t r = 0; r < 3; ++r)
+    {
+        const auto& a = g.objectToWorld[r]; const auto& b = g.prevObjectToWorld[r];
+        still = still && a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
+    }
+    g.morphPad = still ? gpu::kInstanceTransformStill : 0;
+}
+}
 const std::vector<uint32_t>& coverageMaskTable()
 {
     static const std::vector<uint32_t> table = [] {
@@ -459,6 +472,7 @@ void GpuScene::upload(const scene::Scene& s)
     m_rtDirty.clear();
     m_rtReleases.clear();
     const bool pool = rc.meshes > 0;
+    for (auto& instance : m_instances) stampTransformState(instance);
     m_instanceBuffer = createStructured(m_instances.data(), sizeof(gpu::Instance), m_instances.size(), L"scene instances", true, m_instances.size() + rc.instances + rc.gpuInstances);
     m_meshBuffer = createStructured(m_meshes.data(), sizeof(gpu::Mesh), m_meshes.size(), L"scene meshes", pool, pool ? m_rtFirst[RtMeshes] + rc.meshes : 0);
     m_submeshBuffer = createStructured(submeshes.data(), sizeof(gpu::Submesh), submeshes.size(), L"scene submeshes", pool, pool ? m_rtFirst[RtSubmeshes] + rc.submeshes : 0);
@@ -916,6 +930,7 @@ void GpuScene::setInstances(std::span<const uint32_t> indices)
     release(m_instanceBuffer);
     if (m_instances.size() > m_staticInstances && m_runtimeCap.instances) fail("GpuScene::setInstances: runtime instances exist (scene edits come before them)");
     m_staticInstances = (uint32_t)m_instances.size();
+    for (auto& instance : m_instances) stampTransformState(instance);
     m_instanceBuffer = createStructured(m_instances.data(), sizeof(gpu::Instance), m_instances.size(), L"scene instances", true, m_instances.size() + m_runtimeCap.instances + m_runtimeCap.gpuInstances);
     rawUav(m_instanceUav, m_instanceBuffer, (uint64_t)m_instanceBuffer.count * sizeof(gpu::Instance), true);
     if (m_remap.size() != remapBefore)
@@ -1116,6 +1131,11 @@ void GpuScene::updateTransforms(uint64_t frameIndex, std::span<const InstanceTra
     {
         if (u.instance >= m_instances.size()) fail("GpuScene::updateTransforms: instance %u of %zu", u.instance, m_instances.size());
         gpu::Instance& g = m_instances[u.instance];
+        static_assert(sizeof(u.objectToWorld.m) == sizeof(g.objectToWorld));
+        // An unchanged publication needs neither a new revision nor a scatter.
+        // Last frame's motion still settles in flushUpdates; teleports keep
+        // their explicit history break even when the matrix is unchanged.
+        if (!(u.flags & kTransformTeleport) && std::memcmp(u.objectToWorld.m, g.objectToWorld, sizeof g.objectToWorld) == 0) continue;
         if (m_transformFrame[u.instance] != frameIndex)
         {
             std::memcpy(g.prevObjectToWorld, g.objectToWorld, sizeof g.objectToWorld);  // the previous rendered frame's
@@ -1182,6 +1202,7 @@ void GpuScene::updateSkeleton(uint64_t frameIndex, uint32_t skeleton, std::span<
     if (skeleton >= m_poses.size()) fail("GpuScene::updateSkeleton: skeleton %u of %zu", skeleton, m_poses.size());
     if (jointToModel.size() != m_poses[skeleton].jointToModel.size())
         fail("GpuScene::updateSkeleton: %zu joints for skeleton '%s' with %zu", jointToModel.size(), m_poses[skeleton].name.c_str(), m_poses[skeleton].jointToModel.size());
+    if (jointToModel.empty() || std::memcmp(jointToModel.data(), m_poses[skeleton].jointToModel.data(), jointToModel.size_bytes()) == 0) return;
     m_poses[skeleton].jointToModel.assign(jointToModel.begin(), jointToModel.end());
     for (uint32_t i : m_skeletonInstances[skeleton])
     {
@@ -1782,14 +1803,13 @@ void GpuScene::flushUpdates(uint64_t frameIndex, uint32_t framesInFlight, Shader
         m_lastFlushFrame = frameIndex;
     }
     m_framesInFlightSeen = framesInFlight;
-    for (size_t k = 0; k < m_rtReleases.size();)
-        if (m_rtReleases[k].first <= m_flushes)
-        {
-            m_rtReleases[k].second();
-            m_rtReleases.erase(m_rtReleases.begin() + (ptrdiff_t)k);
-        }
-        else
-            ++k;
+    // Stable compaction preserves release order and avoids shifting the entire
+    // remaining callback array once for every retired mesh/instance.
+    m_rtReleases.erase(std::remove_if(m_rtReleases.begin(), m_rtReleases.end(), [this](auto& release) {
+        if (release.first > m_flushes) return false;
+        release.second();
+        return true;
+    }), m_rtReleases.end());
     // C4: morphs changed in the previous frame and not in this one settle (previous = current).
     for (uint32_t i : m_morphedBefore)
         if (m_morphFrame[i] != frameIndex)
@@ -1815,7 +1835,7 @@ void GpuScene::flushUpdates(uint64_t frameIndex, uint32_t framesInFlight, Shader
         uint32_t k[8] = { m_instanceUav, (uint32_t)m_instances.size(), 0, 0, 0, (uint32_t)sizeof(gpu::Instance), (uint32_t)offsetof(gpu::Instance, breakCentre), 0 };
         std::memcpy(&k[2], &m_pendingShift, 12);
         cmd->SetComputeRoot32BitConstants(0, 8, k, 0);
-        cmd->Dispatch((uint32_t)((m_instances.size() + 63) / 64), 1, 1);
+        gpuDispatch(cmd, (uint32_t)((m_instances.size() + 63) / 64), 1, 1);
         b = { D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_SYNC_ALL_SHADING, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS, D3D12_BARRIER_ACCESS_SHADER_RESOURCE,
               m_instanceBuffer.resource.Get(), 0, UINT64_MAX };
         cmd->Barrier(1, &group);
@@ -1830,7 +1850,8 @@ void GpuScene::flushUpdates(uint64_t frameIndex, uint32_t framesInFlight, Shader
             std::memcpy(m_instances[i].prevObjectToWorld, m_instances[i].objectToWorld, sizeof m_instances[i].objectToWorld);
             markRecord(i);
         }
-    std::vector<uint32_t> settledPalettes;
+    auto& settledPalettes = m_settledPalettes;
+    settledPalettes.clear();
     for (uint32_t i : m_posedBefore)
         if (m_paletteFrame[i] != frameIndex)
         {
@@ -1915,6 +1936,10 @@ void GpuScene::flushUpdates(uint64_t frameIndex, uint32_t framesInFlight, Shader
     detail::SceneUpdateWriter writer(u.mapped, (uint32_t)elementCount);
     for (uint32_t i : m_records)
     {
+        // Derive the proof from the final record, after motion settling, teleport
+        // and rebase handling. The scatter publishes it with these same rows;
+        // its completion barrier precedes every consumer.
+        stampTransformState(m_instances[i]);
         writer.append(0, i * kRecordElements, &m_instances[i], kRecordElements);
         m_recordMarked[i] = 0;
     }
@@ -1947,14 +1972,21 @@ void GpuScene::flushUpdates(uint64_t frameIndex, uint32_t framesInFlight, Shader
     ID3D12PipelineState* pso = shaders.compute("Passes/Common/SceneUpdate");
     CommandList cl = m_device.acquireCommandList(QueueType::Graphics);
     ID3D12GraphicsCommandList7* cmd = cl.list.Get();
-    // Targets 0-3 always; the C2b runtime pool buffers when the pool exists (SceneUpdate.hlsl target table).
-    std::vector<ID3D12Resource*> targets = { m_instanceBuffer.resource.Get(), m_bonePalette.resource.Get(), m_prevBonePalette.resource.Get(), m_morphRecords.resource.Get() };
+    // Transition only streams actually present in this scatter. In particular,
+    // transform-only frames leave geometry and skin/morph resources as readers.
+    const uint32_t targetMask = writer.targetMask();
+    ID3D12Resource* baseTargets[] = { m_instanceBuffer.resource.Get(), m_bonePalette.resource.Get(), m_prevBonePalette.resource.Get(), m_morphRecords.resource.Get() };
+    std::vector<ID3D12Resource*> targets;
+    targets.reserve(RtTargetEnd);
+    for (uint32_t t = 0; t < 4; ++t)
+        if (targetMask & (1u << t)) targets.push_back(baseTargets[t]);
     uint32_t k[20] = { u.srv, (uint32_t)elementCount, m_instanceUav, m_paletteUav, m_prevPaletteUav, m_morphUav };
     for (uint32_t t = RtMeshes; t < RtTargetEnd; ++t)
         if (m_runtimeCap.meshes > 0 || (t == RtPatch && m_patchData.resource))
         {
             k[2 + t] = m_rtUav[t];
-            if (Buffer* b = runtimeBuffer(t)) targets.push_back(b->resource.Get());
+            if (targetMask & (1u << t))
+                if (Buffer* b = runtimeBuffer(t)) targets.push_back(b->resource.Get());
         }
     std::vector<D3D12_BUFFER_BARRIER> before(targets.size()), after(targets.size());
     for (size_t t = 0; t < targets.size(); ++t)
@@ -1968,7 +2000,8 @@ void GpuScene::flushUpdates(uint64_t frameIndex, uint32_t framesInFlight, Shader
     cmd->Barrier(1, &group);
     cmd->SetPipelineState(pso);  // heaps and root signature: bound by acquireCommandList
     cmd->SetComputeRoot32BitConstants(0, 20, k, 0);
-    cmd->Dispatch((uint32_t)((elementCount + 63) / 64), 1, 1);
+    const uint32_t groups = (uint32_t)((elementCount + 63) / 64);
+    gpuDispatch(cmd, std::min(groups, 65535u), (groups + 65534u) / 65535u, 1);
     group.pBufferBarriers = after.data();
     cmd->Barrier(1, &group);
     const uint64_t fence = m_device.submit(cl);

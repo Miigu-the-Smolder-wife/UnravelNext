@@ -2,6 +2,7 @@
 // gi.lumen final gather). Persistent state: the indirection volume, the probe atlas and its depth atlas, the probe slots,
 // free list and counters. The cache is emptied on a new scene revision, an origin shift or a change of its sizes; a
 // history discontinuity (a camera cut) keeps it: the probes are world-space.
+#include "unx/rt/HitLightingQueue.h"
 #include "unx/gi/LumenRadianceCache.h"
 #include "LumenRadianceCacheDispatch.h"
 
@@ -110,7 +111,7 @@ struct RcState
 {
     Device* device = nullptr;
     Settings settings{};
-    ComPtr<ID3D12Resource> indirection, atlas, depth, slots, counters, freeList, ring, descTemplate, irradiance, hitMarks;
+    ComPtr<ID3D12Resource> indirection, atlas, depth, slots, counters, freeList, ring, irradiance, hitMarks;
     ComPtr<ID3D12CommandSignature> dispatchSignature;
     uint8_t* ringMapped = nullptr;
     uint32_t ringSrv[kRing] = {};
@@ -127,7 +128,7 @@ struct RcState
     {
         if (!device) return;
         for (ComPtr<ID3D12Resource>* r : { std::addressof(indirection), std::addressof(atlas), std::addressof(depth), std::addressof(slots), std::addressof(counters),
-                                           std::addressof(freeList), std::addressof(ring), std::addressof(descTemplate), std::addressof(irradiance), std::addressof(hitMarks) })
+                                           std::addressof(freeList), std::addressof(ring), std::addressof(irradiance), std::addressof(hitMarks) })
             if (*r) device->deferRelease(*r);
         irradiance.Reset();
         hitMarks.Reset();
@@ -181,7 +182,6 @@ struct RcState
         buffer(counters, 128, false, L"R rc counters");
         buffer(freeList, (uint64_t)maxProbes * 4, false, L"R rc free list");
         buffer(ring, (uint64_t)kRing * kParamBytes, true, L"R rc parameters ring");
-        buffer(descTemplate, 2 * kDescStride, true, L"R rc ray dispatch template");
         if (s.irradiance)
         {
             texture(irradiance, D3D12_RESOURCE_DIMENSION_TEXTURE2D, s.atlasProbes * kIrradianceBordered, s.atlasProbes * kIrradianceBordered, 1, DXGI_FORMAT_R16G16B16A16_FLOAT,
@@ -311,7 +311,7 @@ LumenRcFrame lumenRadianceCacheBegin(FramePassContext& fc, const ViewResources& 
                       c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenRadianceCacheUpdate.MODE7"));
                       c.bindFrameConstants(cb);
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch((maxProbes + 63) / 64, 1, 1);
+                      gpuDispatch(c.cmd, (maxProbes + 63) / 64, 1, 1);
                   });
     chain.add("r.gi.rc.clear",
               [&](PassBuilder& b) {
@@ -324,7 +324,7 @@ LumenRcFrame lumenRadianceCacheBegin(FramePassContext& fc, const ViewResources& 
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenRadianceCacheUpdate.MODE0"));
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 4);
-                  c.cmd->Dispatch(s.grid * s.clipmaps / 4, s.grid / 4, s.grid / 4);
+                  gpuDispatch(c.cmd, s.grid * s.clipmaps / 4, s.grid / 4, s.grid / 4);
               });
     const uint32_t W = main.view.width, H = main.view.height, tile = s.markTile;
     chain.add("r.gi.rc.mark",
@@ -338,7 +338,7 @@ LumenRcFrame lumenRadianceCacheBegin(FramePassContext& fc, const ViewResources& 
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenRadianceCacheUpdate.MODE1"));
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 8);
-                  c.cmd->Dispatch(((W + tile - 1) / tile + 7) / 8, ((H + tile - 1) / tile + 7) / 8, 1);
+                  gpuDispatch(c.cmd, ((W + tile - 1) / tile + 7) / 8, ((H + tile - 1) / tile + 7) / 8, 1);
               });
     if (f.hitMarks.valid())
     {
@@ -360,7 +360,7 @@ LumenRcFrame lumenRadianceCacheBegin(FramePassContext& fc, const ViewResources& 
                           c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenRadianceCacheUpdate.MODE9"));
                           c.bindFrameConstants(cb);
                           c.computeConstants(k, 12);
-                          c.cmd->Dispatch(clear ? 1u : (kHitMarks + 63) / 64, 1, 1);
+                          gpuDispatch(c.cmd, clear ? 1u : (kHitMarks + 63) / 64, 1, 1);
                       });
     }
     chain.flush("r.gi.rc.mark");
@@ -414,7 +414,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                       c.cmd->SetPipelineState(pso);
                       c.bindFrameConstants(cb);
                       c.computeConstants(k, 8);
-                      c.cmd->Dispatch(x, y, z);
+                      gpuDispatch(c.cmd, x, y, z);
                   });
     };
     const uint32_t cellsX = s.grid * s.clipmaps / 4, cellsYZ = s.grid / 4, slotGroups = (maxProbes + 63) / 64;
@@ -428,21 +428,27 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
     const bool atmosphere = fr.transmittanceLut.valid() && fr.multiScatterLut.valid() && fr.skyViewLut.valid() && fr.aerialPerspective.valid();
     const TextureRef luts[4] = { fr.transmittanceLut, fr.multiScatterLut, fr.skyViewLut, fr.aerialPerspective };
     const uint32_t variant = atmosphere ? 0u : 1u;
-    rt::RayPipeline& pipeline = rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline(kTraceLibrary[variant], { "LumenRadianceCacheTraceGen" }));
-    {
-        // the description's shader tables, per variant, in the template the frame's buffer is copied from
-        uint8_t* m = nullptr;
-        D3D12_RANGE none{ 0, 0 };
-        check(st.descTemplate->Map(0, &none, reinterpret_cast<void**>(&m)), "map R rc ray dispatch template");
-        const D3D12_DISPATCH_RAYS_DESC desc = pipeline.dispatchDesc(0, 0, 1, 1);
-        std::memcpy(m + variant * kDescStride, &desc, sizeof desc);
-        st.descTemplate->Unmap(0, nullptr);
-    }
-    ID3D12Resource* descTemplate = st.descTemplate.Get();
+    rays.recordHair(fc);
+    const uint32_t lightingCapacity = s.traceCapacity * s.probeResolution * s.probeResolution;
+    const bool deferred = in.cards.valid() && !rays.hairParams().valid() &&
+        rt::hitLightingStorageFits(lightingCapacity) &&
+        (!fc.quality.has("gi.defer_hit_lighting") || fc.quality.boolean("gi.defer_hit_lighting"));
+    const std::string skyVariant = atmosphere ? "0" : "1";
+    const std::string traceKernel = deferred ? "Passes/GI/LumenRadianceCacheTraceMinimal.SKY" + skyVariant :
+        std::string(kTraceLibrary[variant]) + (rays.hairParams().valid() ? ".HAIR1" : ".HAIR0");
+    rt::RayPipeline& pipeline = rt::RayPipeline::get(fc.device, shaders,
+        rt::standardRayPipeline(traceKernel, { "LumenRadianceCacheTraceGen" }));
+    rt::RayPipeline* lightingPipeline = deferred ? &rt::RayPipeline::get(fc.device, shaders,
+        rt::standardRayPipeline("Passes/GI/LumenRadianceCacheTraceLighting.SKY" + skyVariant, { "LumenRadianceCacheTraceGen" })) : nullptr;
+    const rt::HitLightingQueue hitLighting = deferred ?
+        rt::beginHitLightingQueue(fc, "r.gi.rc.hitlighting", lightingCapacity, kMaxRaysPerDispatch / kRaysPerTexel, *lightingPipeline) : rt::HitLightingQueue{};
+    // The pipeline owns an immutable template. Feature changes select another
+    // template without rewriting shader-table addresses an in-flight frame reads.
+    ID3D12Resource* descTemplate = pipeline.dispatchTemplate();
     chain.add("r.gi.rc.args", [&](PassBuilder& b) { b.use(rayArgs, Use::CopyDst); },
               [=](PassContext& c) {
                   for (uint32_t chunk = 0; chunk < chunks; ++chunk)
-                      c.cmd->CopyBufferRegion(c.resource(rayArgs), (uint64_t)chunk * kDescStride, descTemplate, variant * kDescStride, kDescStride);
+                      c.cmd->CopyBufferRegion(c.resource(rayArgs), (uint64_t)chunk * kDescStride, descTemplate, 0, kDescStride);
               });
     chain.add("r.gi.rc.finish",
               [&](PassBuilder& b) {
@@ -458,7 +464,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   c.cmd->SetPipelineState(shaders.compute("Passes/GI/LumenRadianceCacheUpdate.MODE6"));
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 16);
-                  c.cmd->Dispatch(1, 1, 1);
+                  gpuDispatch(c.cmd, 1, 1, 1);
               });
     chain.flush("r.gi.rc.bookkeeping");
     const BufferRef worldCache = in.worldCache;
@@ -469,10 +475,10 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
     const bool occlusion = s.occlusion;
     const float farStart = s.farStart;
     uint32_t sceneWords[8];
-    rays.recordHair(fc);  // E's grooms on the rays (HitHair.hlsli): the header's words 22, 23, before rootConstants
     rays.rootConstants(sceneWords);
     const std::array<uint32_t, 8> sceneSrvs = std::to_array(sceneWords);
-    g.addPass("r.gi.rc.trace", QueueType::Compute,
+    auto addTrace = [&](const char* name, rt::RayPipeline* selected, BufferRef dispatch, bool lighting) {
+    g.addPass(name, QueueType::Compute,
               [&](PassBuilder& b) {
                   if (worldCache.valid()) b.use(worldCache, Use::SrvGraphics);
                   b.use(traces, Use::SrvGraphics);
@@ -480,7 +486,8 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   b.use(traced, Use::UavGraphics);
                   b.use(depthAtlas, Use::UavGraphics);
                   declareSurfaceCacheCards(b, cards, Use::SrvGraphics);
-                  b.use(rayArgs, Use::IndirectArgs);
+                  b.use(dispatch, Use::IndirectArgs);
+                  if (hitLighting.valid()) b.use(hitLighting.records, lighting ? Use::SrvGraphics : Use::UavGraphics);
                   rays.declareTraversal(b);
                   rays.declareDecals(b);
                   rays.declareHair(b);
@@ -488,7 +495,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                       for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
                   b.keep();
               },
-              [=, &pipeline](PassContext& c) {
+              [=](PassContext& c) {
                   uint32_t k[32] = {};
                   k[0] = worldCache.valid() ? c.srv(worldCache) : 0xFFFFFFFFu;
                   k[1] = c.srv(traces);
@@ -508,15 +515,25 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   k[19] = occlusion ? 1u : 0u;  // P[4].w
                   k[21] = bits(farStart);       // P[5].y
                   k[20] = cards.valid() ? c.srv(cards.frame) : 0xFFFFFFFFu;
+                  k[22] = !hitLighting.valid() ? gpu::kNone : lighting ? c.srv(hitLighting.records) : c.uav(hitLighting.records);
                   std::memcpy(&k[24], sceneSrvs.data(), 32);
                   c.bindFrameConstants(cb);
-                  for (uint32_t chunk = 0; chunk < chunks; ++chunk)
+                  for (uint32_t chunk = 0; chunk < (lighting ? hitLighting.chunks : chunks); ++chunk)
                   {
-                      k[18] = chunk * probesPerDispatch;  // P[4].z: the dispatch's first trace record
+                      k[18] = lighting ? 0u : chunk * probesPerDispatch;
+                      k[23] = lighting ? chunk * hitLighting.chunkRays : 0u;  // P[4].z: the dispatch's first trace record
                       c.computeConstants(k, 32);
-                      pipeline.dispatchIndirect(c.cmd, c.resource(rayArgs), (uint64_t)chunk * kDescStride);
+                      selected->dispatchIndirect(c.cmd, c.resource(dispatch), (uint64_t)chunk * kDescStride);
                   }
               });
+
+    };
+    addTrace("r.gi.rc.trace", &pipeline, rayArgs, false);
+    if (deferred)
+    {
+        rt::prepareHitLightingQueue(fc, "r.gi.rc.hitlighting", hitLighting);
+        addTrace("r.gi.rc.hitlighting", lightingPipeline, hitLighting.arguments, true);
+    }
 
     // ---- filter, then store with the border
     ID3D12CommandSignature* signature = st.dispatchSignature.Get();
@@ -538,7 +555,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   {
                       k[10] = chunk * probesPerDispatch;  // P[2].z: the dispatch's first trace record
                       c.computeConstants(k, 12);
-                      c.cmd->ExecuteIndirect(signature, 1, c.resource(filterArgs), (uint64_t)chunk * LRC_COMPUTE_ARGS_STRIDE + LRC_FILTER_ARGS_OFFSET, nullptr, 0);
+                      gpuExecuteIndirect(c.cmd, signature, 1, c.resource(filterArgs), (uint64_t)chunk * LRC_COMPUTE_ARGS_STRIDE + LRC_FILTER_ARGS_OFFSET, nullptr, 0);
                   }
               });
     g.addPass("r.gi.rc.store", QueueType::Compute,
@@ -557,7 +574,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                   {
                       k[10] = chunk * probesPerDispatch;
                       c.computeConstants(k, 12);
-                      c.cmd->ExecuteIndirect(signature, 1, c.resource(filterArgs), (uint64_t)chunk * LRC_COMPUTE_ARGS_STRIDE + LRC_STORE_ARGS_OFFSET, nullptr, 0);
+                      gpuExecuteIndirect(c.cmd, signature, 1, c.resource(filterArgs), (uint64_t)chunk * LRC_COMPUTE_ARGS_STRIDE + LRC_STORE_ARGS_OFFSET, nullptr, 0);
                   }
               });
     if (frame.irradiance.valid())
@@ -582,7 +599,7 @@ void lumenRadianceCacheUpdate(FramePassContext& fc, const ViewResources& main, r
                       {
                           k[5] = chunk * probesPerDispatch;  // P[1].y: the dispatch's first trace record
                           c.computeConstants(k, 8);
-                          c.cmd->ExecuteIndirect(signature, 1, c.resource(filterArgs), (uint64_t)chunk * LRC_COMPUTE_ARGS_STRIDE + LRC_IRRADIANCE_ARGS_OFFSET, nullptr, 0);
+                          gpuExecuteIndirect(c.cmd, signature, 1, c.resource(filterArgs), (uint64_t)chunk * LRC_COMPUTE_ARGS_STRIDE + LRC_IRRADIANCE_ARGS_OFFSET, nullptr, 0);
                       }
                   });
     }

@@ -170,7 +170,7 @@ void publishWind(FramePassContext& fc, State& s)
                          const uint32_t k[4] = { headerSrv, c.uav(cache), 0, 0 };
                          c.cmd->SetPipelineState(pso);
                          c.computeConstants(k, 4);
-                         c.cmd->Dispatch(kCells / 4, kCells / 4, kCells / 4);
+                         gpuDispatch(c.cmd, kCells / 4, kCells / 4, kCells / 4);
                      });
     fc.resources.wind = headerSrv;
     fc.resources.windCache = cache;
@@ -441,7 +441,7 @@ void recordMultipleScattering(RenderGraph& g, ShaderLibrary& sh, const Atmospher
                       const uint32_t k[8] = { c.srv(params), c.srv(tlut), c.srv(radiance), c.uav(irradiance), first ? 1u : 0u, p.multiScatterDirections, 0, 0 };
                       c.cmd->SetPipelineState(ps);
                       c.computeConstants(k, 8);
-                      c.cmd->Dispatch(ge, 1, 1);
+                      gpuDispatch(c.cmd, ge, 1, 1);
                   });
     };
     g.addPass("s.atmosphere.ms.single", QueueType::Compute,
@@ -456,7 +456,7 @@ void recordMultipleScattering(RenderGraph& g, ShaderLibrary& sh, const Atmospher
                   {
                       const uint32_t k[8] = { c.srv(params), c.srv(tlut), c.uav(radiance), 0, 0, 0, 0, z };
                       c.computeConstants(k, 8);
-                      c.cmd->Dispatch(gx, H, 1);
+                      gpuDispatch(c.cmd, gx, H, 1);
                   }
               });
     irradiancePass(true);
@@ -478,7 +478,7 @@ void recordMultipleScattering(RenderGraph& g, ShaderLibrary& sh, const Atmospher
                       {
                           const uint32_t k[8] = { c.srv(params), c.srv(tlut), c.srv(radiance), c.uav(coefficients), shL, p.multiScatterShGrid[0], p.multiScatterShGrid[1], z };
                           c.computeConstants(k, 8);
-                          c.cmd->Dispatch(nMus, 1, 1);
+                          gpuDispatch(c.cmd, nMus, 1, 1);
                       }
                   });
         g.addPass("s.atmosphere.ms.density", QueueType::Compute,
@@ -495,7 +495,7 @@ void recordMultipleScattering(RenderGraph& g, ShaderLibrary& sh, const Atmospher
                       {
                           const uint32_t k[8] = { c.srv(params), c.srv(tlut), c.srv(coefficients), c.uav(jn), c.uav(acc), shL, n == 2 ? 1u : 0u, z };
                           c.computeConstants(k, 8);
-                          c.cmd->Dispatch(nMus, 1, 1);
+                          gpuDispatch(c.cmd, nMus, 1, 1);
                       }
                   });
         g.addPass("s.atmosphere.ms.radiance", QueueType::Compute,
@@ -512,7 +512,7 @@ void recordMultipleScattering(RenderGraph& g, ShaderLibrary& sh, const Atmospher
                       {
                           const uint32_t k[8] = { c.srv(params), c.srv(tlut), c.srv(jn), c.uav(radiance), c.srv(irradiance), 0, 0, z };
                           c.computeConstants(k, 8);
-                          c.cmd->Dispatch(gx, H, 1);
+                          gpuDispatch(c.cmd, gx, H, 1);
                       }
                   });
         irradiancePass(false);
@@ -536,7 +536,7 @@ void recordMultipleScattering(RenderGraph& g, ShaderLibrary& sh, const Atmospher
                   {
                       const uint32_t k[8] = { c.srv(params), c.uav(tlut), c.srv(acc), c.srv(last), tail ? c.srv(before) : 0xFFFFFFFFu, c.uav(mlut), c.srv(irradiance), z };
                       c.computeConstants(k, 8);
-                      c.cmd->Dispatch(std::max(gx, ge), H, 1);
+                      gpuDispatch(c.cmd, std::max(gx, ge), H, 1);
                   }
               });
 }
@@ -645,7 +645,7 @@ void record(FramePassContext& fc)
                       const uint32_t k[4] = { c.srv(params), c.uav(tlut), 0, 0 };
                       c.cmd->SetPipelineState(pr);
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                   });
     }
     s.recordPending = false;
@@ -662,7 +662,7 @@ void record(FramePassContext& fc)
                       const uint32_t k[4] = { c.srv(params), c.uav(tlut), 0, 0 };
                       c.cmd->SetPipelineState(pt);
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch(groups(p.transmittanceSize[0], 8), groups(p.transmittanceSize[1], 8), 1);
+                      gpuDispatch(c.cmd, groups(p.transmittanceSize[0], 8), groups(p.transmittanceSize[1], 8), 1);
                   });
         recordMultipleScattering(g, sh, p, params, tlut, mlut);
         s.lutPending = false;
@@ -711,7 +711,7 @@ void record(FramePassContext& fc)
                       c.cmd->SetPipelineState(ps);
                       c.bindFrameConstants(cb);
                       c.computeConstants(k, 8);
-                      c.cmd->Dispatch(p.skyViewSize[0], p.skyViewSize[1], 1);  // one group per texel (SkyView.hlsl)
+                      gpuDispatch(c.cmd, p.skyViewSize[0], p.skyViewSize[1], 1);  // one group per texel (SkyView.hlsl)
                   });
         s.skySun = sun;
         s.skyAltitude = altitude;

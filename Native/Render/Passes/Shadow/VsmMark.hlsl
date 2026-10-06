@@ -15,6 +15,7 @@
 // Frame constants of the view.
 #include "Frame.hlsli"
 #include "Passes/Shadow/VsmCommon.hlsli"
+#include "Passes/Shadow/VsmRequest.hlsli"
 
 [numthreads(8, 8, 1)]
 void main(uint2 px : SV_DispatchThreadID)
@@ -45,20 +46,23 @@ void main(uint2 px : SV_DispatchThreadID)
         {
             const int2 across = int2(floor(side == 0 ? at + reach : at - reach));
             if (all(across == page) || !vsmInWindow(c, across, k)) continue;
+            const uint acrossSlot = vsmSlot(across, k);
+            if (!vsmRequestLane(acrossSlot, VSM_REQ_PIXEL)) continue;
             RWByteAddressBuffer requests = ResourceDescriptorHeap[P[0].y];
             // (the same word every pixel mark stores; the statistics mode ORs its bits in)
-            if (P[0].w == 1) requests.InterlockedOr(vsmSlot(across, k) * 4, VSM_REQ_PIXEL);
-            else requests.Store(vsmSlot(across, k) * 4, VSM_REQ_PIXEL);
+            if (P[0].w == 1) requests.InterlockedOr(acrossSlot * 4, VSM_REQ_PIXEL);
+            else requests.Store(acrossSlot * 4, VSM_REQ_PIXEL);
         }
     }
     if (P[0].w == 1)
     {
         const uint2 local = uint2(vsmAbsTexel(c, ls.xy, k) & (int)(VSM_PAGE - 1)) >> 5;
         RWByteAddressBuffer requests = ResourceDescriptorHeap[P[0].y];
-        requests.InterlockedOr(slot * 4, VSM_REQ_PIXEL | (1u << (16 + local.y * 4 + local.x)));
+        const uint bits = VSM_REQ_PIXEL | (1u << (16 + local.y * 4 + local.x));
+        if (vsmRequestLane(slot, bits)) requests.InterlockedOr(slot * 4, bits);
         return;
     }
-    if (slot != WaveReadLaneFirst(slot) || WaveIsFirstLane())
+    if (vsmRequestLane(slot, VSM_REQ_PIXEL))
     {
         RWByteAddressBuffer requests = ResourceDescriptorHeap[P[0].y];
         requests.Store(slot * 4, VSM_REQ_PIXEL);

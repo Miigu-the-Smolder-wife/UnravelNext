@@ -833,9 +833,18 @@ void waterAppendRays(WaterRayTerms rays, uint target, uint statisticsUav)
     RWByteAddressBuffer samples = ResourceDescriptorHeap[P[6].z];
     const uint n = (rays.reflect ? 1u : 0u) + (rays.refract ? 1u : 0u);
     const uint record = (target & WATER_RAY_RECORD) != 0 ? 1u << 31 : 0u;  // job flags bit 31: a coverage record's
-    uint j, k;
-    jobs.InterlockedAdd(0, n, j);
-    samples.InterlockedAdd(0, 1, k);
+    // Reserve contiguous jobs/samples for the active wave, then give every
+    // sample its own disjoint slice. Counts and overflow reporting are retained.
+    const uint jobCount = WaveActiveSum(n), sampleCount = WaveActiveCountBits(true);
+    const uint jobOffset = WavePrefixSum(n), sampleOffset = WavePrefixCountBits(true);
+    uint firstJob = 0, firstSample = 0;
+    if (WaveIsFirstLane())
+    {
+        jobs.InterlockedAdd(0, jobCount, firstJob);
+        samples.InterlockedAdd(0, sampleCount, firstSample);
+    }
+    uint j = WaveReadLaneFirst(firstJob) + jobOffset;
+    const uint k = WaveReadLaneFirst(firstSample) + sampleOffset;
     if (j + n > P[6].w || k >= P[7].z)
     {
         if (statisticsUav != UNX_NONE)
@@ -873,8 +882,12 @@ void waterAppendRays(WaterRayTerms rays, uint target, uint statisticsUav)
     if (statisticsUav != UNX_NONE)
     {
         RWByteAddressBuffer statistics = ResourceDescriptorHeap[statisticsUav];
-        if (rays.reflect) statistics.InterlockedAdd(4 * WATER_STAT_REFLECT_JOBS, 1);
-        if (rays.refract) statistics.InterlockedAdd(4 * WATER_STAT_REFRACT_JOBS, 1);
+        const uint reflected = WaveActiveCountBits(rays.reflect), refracted = WaveActiveCountBits(rays.refract);
+        if (WaveIsFirstLane())
+        {
+            if (reflected) statistics.InterlockedAdd(4 * WATER_STAT_REFLECT_JOBS, reflected);
+            if (refracted) statistics.InterlockedAdd(4 * WATER_STAT_REFRACT_JOBS, refracted);
+        }
     }
 }
 #endif

@@ -167,7 +167,7 @@ OceanOutput Ocean::record(RenderGraph& g, double seconds)
                       std::memcpy(&k[12], d.bands, 8); std::memcpy(&k[14], &norm, 4);
                       c.cmd->SetPipelineState(pso);
                       c.computeConstants(k, 16);
-                      c.cmd->Dispatch((uint32_t)((kBins + 255) / 256), 1, 1);
+                      gpuDispatch(c.cmd, (uint32_t)((kBins + 255) / 256), 1, 1);
                   });
     }
     m_dirty = false;
@@ -191,16 +191,16 @@ OceanOutput Ocean::record(RenderGraph& g, double seconds)
     ID3D12PipelineState* mip = m_shaders.compute("Passes/Water/OceanMip");
     g.addPass("ocean rows", QueueType::Graphics,
               [&](PassBuilder& pb) { pb.use(h0, Use::SrvCompute); pb.use(frequencies, Use::SrvCompute); pb.use(twiddles, Use::SrvCompute); pb.use(spectrum, Use::UavCompute); },
-              [=](PassContext& c) { c.cmd->SetPipelineState(rows); constants(c); c.cmd->Dispatch(kN * kCascades, 1, 1); });
+              [=](PassContext& c) { c.cmd->SetPipelineState(rows); constants(c); gpuDispatch(c.cmd, kN * kCascades, 1, 1); });
     g.addPass("ocean columns", QueueType::Graphics,
               [&](PassBuilder& pb) { pb.use(h0, Use::SrvCompute); pb.use(frequencies, Use::SrvCompute); pb.use(spectrum, Use::UavCompute); pb.use(twiddles, Use::SrvCompute); pb.use(displacement, Use::UavCompute); pb.use(slopes, Use::UavCompute); },
-              [=](PassContext& c) { c.cmd->SetPipelineState(columns); constants(c); c.cmd->Dispatch(kN * kCascades, 1, 1); });
+              [=](PassContext& c) { c.cmd->SetPipelineState(columns); constants(c); gpuDispatch(c.cmd, kN * kCascades, 1, 1); });
     for (uint32_t m = 1; m < kMips; ++m)
     {
         const uint32_t size = kN >> m;
         const uint32_t k[8] = { m_uav[cur][m - 1], m_uav[cur][m], m_uav[2][m - 1], m_uav[2][m], size, 0, 0, 0 };
         g.addPass("ocean mip", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(displacement, Use::UavCompute); pb.use(slopes, Use::UavCompute); },
-                  [=](PassContext& c) { c.cmd->SetPipelineState(mip); c.computeConstants(k, 8); c.cmd->Dispatch((size + 7) / 8, (size + 7) / 8, kCascades); });
+                  [=](PassContext& c) { c.cmd->SetPipelineState(mip); c.computeConstants(k, 8); gpuDispatch(c.cmd, (size + 7) / 8, (size + 7) / 8, kCascades); });
     }
     OceanOutput out{ displacement, slopes, previous, m_previousValid, h0 };
     m_current = prev;

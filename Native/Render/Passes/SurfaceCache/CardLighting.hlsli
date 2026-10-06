@@ -254,6 +254,13 @@ void clFeedback(McFrame f, uint cardIndex, McCard card, float2 localXy, uint pag
 // hiRes (the reference's HighResPages sampling - its reflections and radiosity; the other readers take the resident
 // level, AlwaysResidentPagesWithoutFeedback): the cards' highest level under the hit, and the hit's feedback.
 // sampleRadius: the ray cone's radius at the hit (m); ditherCoord: clFeedback.
+// Read the same four stored depth values in one instruction, as ue6-main's
+// surface-cache sampling does. RGB retains its existing load/accumulation path.
+float4 clGatherDepth(Texture2D<float> atlas, uint2 texel00, uint atlasSize)
+{
+    return atlas.GatherRed(g_pointClamp, (float2(texel00) + 1.0) / float(atlasSize)).wzxy;
+}
+
 ClSample clReadCardsAt(McFrame f, uint sceneInstance, float3 position, float3 normal, uint what, bool hiRes, float sampleRadius, uint2 ditherCoord)
 {
     ClSample o;
@@ -288,7 +295,9 @@ ClSample clReadCardsAt(McFrame f, uint sceneInstance, float3 position, float3 no
         const float hitDepth = mcCardDepth(card, local);
         const float threshold = bias / card.extent.z, falloff = 0.25 * threshold;
         const int3 at = int3(cs.texel00, 0);
-        const float4 depths = float4(depthAtlas.Load(at), depthAtlas.Load(at, int2(1, 0)), depthAtlas.Load(at, int2(0, 1)), depthAtlas.Load(at, int2(1, 1)));
+        // Address the centre of the selected 2x2 footprint; the weights still use
+        // the original full-precision card coordinate, not sampler quantization.
+        const float4 depths = clGatherDepth(depthAtlas, cs.texel00, f.atlasSize);
         float4 w = 1 - saturate((abs(hitDepth - depths) - threshold) / falloff);
         w = select(depths < MC_DEPTH_NONE, w, float4(0, 0, 0, 0)) * cs.weights * axisWeights[mcDirection(card) >> 1];
         const float sum = w.x + w.y + w.z + w.w;

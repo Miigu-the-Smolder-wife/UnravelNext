@@ -14,6 +14,10 @@ namespace unx::render::gpu
 {
 constexpr uint32_t kNone = 0xFFFFFFFFu;
 constexpr uint32_t kInstanceHidden = 1u << 31;  // Instance::flags, GPU scene only (GpuScene::setInstanceVisible): every reader skips it
+// A CPU-published proof that current and previous transforms compare equal.
+// Zero uses the matrix comparison fallback. GPU-owned indices always fall back,
+// even if their producer copied this word from a CPU template.
+constexpr uint32_t kInstanceTransformStill = 0x5354494Cu;
 // Instance::flags, GPU scene only, set for one frame (v1.45): the instance's motion history broke in this frame (a teleport,
 // UNX_TRANSFORM_TELEPORT, or a restore discontinuity: prevObjectToWorld = objectToWorld and the previous palette = the
 // current one, so its motion is zero). Caches keyed by where the instance was drawn before (VSM pages) cannot measure the
@@ -45,7 +49,7 @@ struct Instance  // 160 B
     // slot), kNone when no block of this instance is replaced. Only V reads it (forced source clusters in the replaced
     // rectangle, source triangles of replaced blocks dropped).
     uint32_t patch;
-    uint32_t morphPad;
+    uint32_t morphPad;  // kInstanceTransformStill or 0; no layout change
 };
 static_assert(sizeof(Instance) == 160);
 

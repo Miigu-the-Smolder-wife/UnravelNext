@@ -10,6 +10,7 @@
 
 groupshared float3 gs_radiance[64];
 groupshared float gs_coefficient[27];
+groupshared float gs_basis[9][64];
 
 float lgBasisAt(float3 d, uint k)
 {
@@ -31,13 +32,17 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     const uint index = thread.y * 8 + thread.x;
     const bool live = probeDepth[atlas] > 0;
     gs_radiance[index] = live ? radiance[atlas * LG_GATHER_RES + thread.xy].rgb : float3(0, 0, 0);
+    // Decode each equal-area direction once for all coefficients/channels.
+    const LgSh basis = lgShBasis(lgSphere((float2(thread.xy) + 0.5) / 8.0));
+    [unroll] for (uint k = 0; k < 9; ++k)
+        gs_basis[k][index] = k < 4 ? basis.a[k] : (k < 8 ? basis.b[k - 4] : basis.c);
     GroupMemoryBarrierWithGroupSync();
     if (index < 27)
     {
         const uint k = index / 3, channel = index % 3;
         float sum = 0;
         [loop] for (uint i = 0; i < 64; ++i)
-            sum += gs_radiance[i][channel] * lgBasisAt(lgSphere((float2(i % 8, i / 8) + 0.5) / 8.0), k);
+            sum += gs_radiance[i][channel] * gs_basis[k][i];
         gs_coefficient[index] = sum * (4 * LG_PI / 64.0);
     }
     GroupMemoryBarrierWithGroupSync();

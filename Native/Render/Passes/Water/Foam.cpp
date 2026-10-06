@@ -150,7 +150,7 @@ FoamOutput Foam::record(RenderGraph& g, uint64_t frame, double seconds, const Oc
                       const uint32_t z[4] = { 0, 0, c.uav(variance), 64 };  // ViewGridClear: the accumulators only (256 B)
                       c.cmd->SetPipelineState(clear);
                       c.computeConstants(z, 4);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                   });
         g.addPass("foam variance", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(h0, Use::SrvCompute); pb.use(variance, Use::UavCompute); },
                   [=](PassContext& c) {
@@ -159,7 +159,7 @@ FoamOutput Foam::record(RenderGraph& g, uint64_t frame, double seconds, const Oc
                       std::memcpy(&k[8], cascades, 12);
                       c.cmd->SetPipelineState(reduce);
                       c.computeConstants(k, 12);
-                      c.cmd->Dispatch((Ocean::kN * Ocean::kN * 3 + 255) / 256, 1, 1);
+                      gpuDispatch(c.cmd, (Ocean::kN * Ocean::kN * 3 + 255) / 256, 1, 1);
                   });
         m_varianceValid = true;
         m_calibratedWind = -1;
@@ -176,7 +176,7 @@ FoamOutput Foam::record(RenderGraph& g, uint64_t frame, double seconds, const Oc
                       std::memcpy(&k[3], &tau, 4);
                       c.cmd->SetPipelineState(calibrate);
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                   });
         m_calibratedWind = sea.windSpeed;
     }
@@ -192,7 +192,7 @@ FoamOutput Foam::record(RenderGraph& g, uint64_t frame, double seconds, const Oc
                       std::memcpy(&k[8], cascades, 12);
                       c.cmd->SetPipelineState(kernel);
                       c.computeConstants(k, 12);
-                      c.cmd->Dispatch(kN / 8, kN / 8, 1);
+                      gpuDispatch(c.cmd, kN / 8, kN / 8, 1);
                   });
     }
     return out;

@@ -51,6 +51,9 @@
 #include "Passes/Material/MaterialInputs.hlsli"
 
 #define M_PI 3.14159265358979
+#ifndef RESOLVE_SIMPLE
+#define RESOLVE_SIMPLE 0
+#endif
 
 groupshared uint gs_classMask;
 groupshared uint gs_minLobe;
@@ -121,6 +124,7 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
             MInputUv iu = mInputUv(m, s.uv, s.duvdx, s.duvdy);
             bool parallax = false;
             float parallaxSun = 1;
+#if !RESOLVE_SIMPLE
             if (materialClass(m) == MATERIAL_CUT)
             {
                 // A11 cut faces: textures through three object-space projections, the edge damage band (MaterialCut.hlsli)
@@ -136,6 +140,7 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
                 variance = (dot(s.dndx, s.dndx) + dot(s.dndy, s.dndy)) / 12.0 + tm.variance;
             }
             else
+#endif
             {
                 // Material inputs (MaterialInputs.hlsli): the streams the material reads - the second uv set, the vertex
                 // colour -, then the parallax through its height field: every texture on uv set 0 moves with it (the
@@ -146,6 +151,7 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
                 if ((iu.r.flags & (MATERIAL_INPUT_OCCLUSION_UV1 | MATERIAL_INPUT_DETAIL_UV1 | MATERIAL_INPUT_VERTEX_TINT | MATERIAL_INPUT_VERTEX_BLEND)) != 0)
                     streams = mVertexStreams(visId, P[0].y, s);
                 float2 uvDetail = s.uv;
+#if !RESOLVE_SIMPLE
                 if (iu.r.heightTexture != UNX_NONE && (m.classFlags & MATERIAL_EYE) == 0 && (P[3].y & 1) == 0)
                 {
                     parallax = true;
@@ -155,11 +161,12 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
                     const float det = iu.r.uvU.x * iu.r.uvV.y - iu.r.uvU.y * iu.r.uvV.x;
                     uvDetail += float2(iu.r.uvV.y * moved.x - iu.r.uvU.y * moved.y, iu.r.uvU.x * moved.y - iu.r.uvV.x * moved.x) / det;
                 }
+#endif
 
                 roughness = m.roughness, metallic = m.metallic;
                 if (ts.roughMetal != UNX_NONE && (P[3].y & 1) == 0)
                 {
-                    Texture2D<float4> t = ResourceDescriptorHeap[ts.roughMetal];
+                    Texture2D<float4> t = ResourceDescriptorHeap[NonUniformResourceIndex(ts.roughMetal)];
                     const float2 rm = mSampleGrad(t, (ts.flags & M_TEX_ROUGH_METAL) != 0, iu.uv, iu.duvdx, iu.duvdy).xy;
                     roughness *= rm.x;
                     metallic *= rm.y;
@@ -168,7 +175,7 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
                 // material's uv or on the second set
                 if (ts.occlusion != UNX_NONE && (P[3].y & 1) == 0 && (m.classFlags & MATERIAL_LAYERED) == 0)
                 {
-                    Texture2D<float4> t = ResourceDescriptorHeap[ts.occlusion];
+                    Texture2D<float4> t = ResourceDescriptorHeap[NonUniformResourceIndex(ts.occlusion)];
                     const bool set1 = (iu.r.flags & MATERIAL_INPUT_OCCLUSION_UV1) != 0;
                     occlusion = mSampleGrad(t, (ts.flags & M_TEX_OCCLUSION) != 0, set1 ? streams.uv1 : iu.uv, set1 ? streams.duv1dx : iu.duvdx,
                                             set1 ? streams.duv1dy : iu.duvdy).x;
@@ -182,7 +189,7 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
                 float3 nSum = s.normal;
                 if (ts.moments != UNX_NONE && (P[3].y & 2) == 0)
                 {
-                    Texture2D<float4> t = ResourceDescriptorHeap[ts.moments];
+                    Texture2D<float4> t = ResourceDescriptorHeap[NonUniformResourceIndex(ts.moments)];
                     const MSlopeMoments mm = mNormalMoments(t, iu.uv, iu.duvdx, iu.duvdy, ts.slopeRange, (ts.flags & M_TEX_NORMAL) != 0);
                     const float2 slope = mInputSlope(iu.r, mm.mean);
                     nSum = s.tangent * slope.x + B * slope.y + s.normal;
@@ -202,6 +209,7 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
                 // limbal ring (the footprint stays the surface's); times the detail colour and the vertex colour.
                 baseColor = m.baseColor;
                 float2 uvColor = iu.uv;
+#if !RESOLVE_SIMPLE
                 if ((m.classFlags & MATERIAL_EYE) != 0)
                 {
                     eye = true;
@@ -213,9 +221,10 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
                         baseColor *= e.darkening;
                     }
                 }
+#endif
                 if (ts.baseColor != UNX_NONE && (P[3].y & 1) == 0)
                 {
-                    Texture2D<float4> t = ResourceDescriptorHeap[ts.baseColor];
+                    Texture2D<float4> t = ResourceDescriptorHeap[NonUniformResourceIndex(ts.baseColor)];
                     baseColor *= mSampleGrad(t, (ts.flags & M_TEX_BASE_COLOR) != 0, uvColor, iu.duvdx, iu.duvdy).rgb;
                 }
                 baseColor *= detailColor;
@@ -311,7 +320,7 @@ void main(uint2 gid : SV_GroupID, uint2 tid : SV_GroupThreadID, uint gi : SV_Gro
                 {
                     if (ts.emissive != UNX_NONE)
                     {
-                        Texture2D<float4> t = ResourceDescriptorHeap[ts.emissive];
+                        Texture2D<float4> t = ResourceDescriptorHeap[NonUniformResourceIndex(ts.emissive)];
                         e *= mSampleGrad(t, (ts.flags & M_TEX_EMISSIVE) != 0, iu.uv, iu.duvdx, iu.duvdy).rgb;
                     }
                     e *= mInputEmissiveMask(iu);

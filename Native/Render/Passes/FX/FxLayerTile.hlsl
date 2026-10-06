@@ -209,12 +209,17 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID)
         uint index = FX_PARTICLE_NO_EDGE;  // (an overflowing block keeps the count past the capacity: the reader clamps)
         if (edge)
         {
-            edges.InterlockedAdd(0u, 1u, index);  // word 0: the edge block count (ParticleLayer.hlsli)
+            const uint count = WaveActiveCountBits(true), prefix = WavePrefixCountBits(true);
+            uint first = 0;
+            if (WaveIsFirstLane()) edges.InterlockedAdd(0u, count, first);
+            index = WaveReadLaneFirst(first) + prefix;
             if (index >= c.edgeCapacity) { index = FX_PARTICLE_NO_EDGE; fxLayerStatus(c, FX_LAYER_STATUS_EDGE_OVERFLOW); }
             else
             {
-                uint slot;
-                InterlockedAdd(gs_edgeCount, 1u, slot);
+                const uint accepted = WaveActiveCountBits(true), offset = WavePrefixCountBits(true);
+                uint begin = 0;
+                if (WaveIsFirstLane()) InterlockedAdd(gs_edgeCount, accepted, begin);
+                const uint slot = WaveReadLaneFirst(begin) + offset;
                 gs_edges[slot] = (index << 12) | (t << 6);  // edge block index, layer pixel in the tile
             }
         }

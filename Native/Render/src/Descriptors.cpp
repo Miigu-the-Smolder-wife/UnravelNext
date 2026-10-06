@@ -45,6 +45,11 @@ DescriptorHeaps::DescriptorHeaps(ID3D12Device* device)
     d.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
     d.NumDescriptors = kDsvCapacity;
     check(device->CreateDescriptorHeap(&d, IID_PPV_ARGS(&m_dsvHeap)), "CreateDescriptorHeap(DSV)");
+    // Heap addresses remain fixed for the lifetime of DescriptorHeaps.
+    m_resourceCpuStart = m_resource->GetCPUDescriptorHandleForHeapStart();
+    m_resourceGpuStart = m_resource->GetGPUDescriptorHandleForHeapStart();
+    m_rtvStart = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    m_dsvStart = m_dsvHeap->GetCPUDescriptorHandleForHeapStart();
     m_resourceStride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     m_rtvStride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     m_dsvStride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
@@ -67,14 +72,14 @@ void DescriptorHeaps::freeResource(uint32_t index)
 
 D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeaps::resourceCpu(uint32_t index) const
 {
-    D3D12_CPU_DESCRIPTOR_HANDLE h = m_resource->GetCPUDescriptorHandleForHeapStart();
+    D3D12_CPU_DESCRIPTOR_HANDLE h = m_resourceCpuStart;
     h.ptr += (SIZE_T)index * m_resourceStride;
     return h;
 }
 
 D3D12_GPU_DESCRIPTOR_HANDLE DescriptorHeaps::resourceGpu(uint32_t index) const
 {
-    D3D12_GPU_DESCRIPTOR_HANDLE h = m_resource->GetGPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE h = m_resourceGpuStart;
     h.ptr += (UINT64)index * m_resourceStride;
     return h;
 }
@@ -93,7 +98,7 @@ void DescriptorHeaps::freeRtv(uint32_t index)
 
 D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeaps::rtv(uint32_t index) const
 {
-    D3D12_CPU_DESCRIPTOR_HANDLE h = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    D3D12_CPU_DESCRIPTOR_HANDLE h = m_rtvStart;
     h.ptr += (SIZE_T)index * m_rtvStride;
     return h;
 }
@@ -112,7 +117,7 @@ void DescriptorHeaps::freeDsv(uint32_t index)
 
 D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeaps::dsv(uint32_t index) const
 {
-    D3D12_CPU_DESCRIPTOR_HANDLE h = m_dsvHeap->GetCPUDescriptorHandleForHeapStart();
+    D3D12_CPU_DESCRIPTOR_HANDLE h = m_dsvStart;
     h.ptr += (SIZE_T)index * m_dsvStride;
     return h;
 }

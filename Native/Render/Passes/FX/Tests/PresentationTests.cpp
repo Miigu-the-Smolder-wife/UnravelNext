@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstring>
 #include <optional>
+#include <future>
 #include <string>
 
 using namespace unx;
@@ -242,6 +243,70 @@ void logicalImportPlans(Device& device)
 }
 }
 
+namespace
+{
+void batchedReadbacks(Device& device)
+{
+    const QualityConfig quality = QualityConfig::loadDirectory(std::string(UNX_SOURCE_DIR) + "/Config/quality");
+    ShaderLibrary shaders(device, executableDirectory() / "shaders");
+    fx::test::RppConfig config;
+    config.emitters = 1; config.particles = 64; config.bodies = config.fields = 0;
+    config.features = config.heightfield = config.sheet = config.turbulence = config.mesh = false;
+    fx::test::RppStream stream(config);
+    std::vector<std::vector<uint8_t>> packets;
+    for (int i = 0; i < 3; ++i) packets.push_back(stream.next(nullptr));
+    fx::ParticleSystem serial(device, quality), batch(device, quality);
+    RenderGraph serialGraph(device), batchGraph(device);
+    std::vector<fx::TickReadback> expected;
+    for (uint64_t i = 0; i < packets.size(); ++i)
+    {
+        const auto& h = *reinterpret_cast<const NV_StreamHeader*>(packets[i].data());
+        serial.submit(packets[i].data(), packets[i].size());
+        serial.record(serialGraph, shaders, i, QueueType::Graphics);
+        serialGraph.execute(nullptr);
+        expected.push_back(serial.readback(h.stream, h.generation, h.tick));
+        batch.submit(packets[i].data(), packets[i].size());
+    }
+    batch.record(batchGraph, shaders, 0, QueueType::Graphics);
+    batchGraph.addPass("held later rendering", QueueType::Graphics, [](PassBuilder& b) { b.keep(); }, [](PassContext&) {});
+    ComPtr<ID3D12Fence> gate;
+    check(device.d3d()->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate)), "batch fence gate");
+    struct ReleaseGate { ID3D12Fence* value; ~ReleaseGate() { value->Signal(1); } } release{gate.Get()};
+    auto& queue = device.queue(QueueType::Graphics);
+    uint32_t submitted = 0;
+    queue.setExecuteHook([&](ID3D12CommandList* commands) {
+        if (submitted++ == 1) check(queue.get()->Wait(gate.Get(), 1), "hold later rendering");
+        queue.get()->ExecuteCommandLists(1, &commands);
+    });
+    try { batchGraph.execute(nullptr); }
+    catch (...) { queue.setExecuteHook({}); throw; }
+    queue.setExecuteHook({});
+    auto reads = std::async(std::launch::async, [&] {
+        std::vector<fx::TickReadback> result;
+        for (const auto& packet : packets)
+        {
+            const auto& h = *reinterpret_cast<const NV_StreamHeader*>(packet.data());
+            result.push_back(batch.readback(h.stream, h.generation, h.tick));
+        }
+        return result;
+    });
+    const bool ready = reads.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    check(gate->Signal(1), "release later rendering");
+    const auto actual = reads.get(); device.waitIdle();
+    require(ready, "batched tick readbacks waited for later rendering");
+    require(submitted == 2 && batchGraph.stats().commandLists == 2, "ticks were not submitted as one batch plus later rendering");
+    for (size_t i = 0; i < expected.size(); ++i)
+    {
+        const auto& a = actual[i]; const auto& e = expected[i];
+        require(std::memcmp(&a.counters, &e.counters, sizeof a.counters) == 0, "batch changed a tick's identity or counters");
+        require(a.events.size() == e.events.size() && (a.events.empty() || std::memcmp(a.events.data(), e.events.data(), a.events.size() * sizeof a.events[0]) == 0), "batch changed tick events");
+    }
+    require(batch.readState("posAge") == serial.readState("posAge"), "batch changed particle state");
+    require(device.drainDebugMessages() == 0, "batch fence debug-layer errors");
+    logf("FX batch: three exact tick readbacks complete before held later rendering; one simulation command list.\n");
+}
+}
+
 int main(int argc, char** argv)
 {
     try
@@ -255,6 +320,7 @@ int main(int argc, char** argv)
         Device device(options);
         run(device);
         logicalImportPlans(device);
+        batchedReadbacks(device);
         return 0;
     }
     catch (const std::exception& e) { logf("FAIL: %s\n", e.what()); return 1; }

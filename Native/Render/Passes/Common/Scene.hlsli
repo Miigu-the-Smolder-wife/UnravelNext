@@ -19,7 +19,7 @@ struct GpuInstance
     uint morph;          // C4: first morph record row, UNX_NONE = no blend shapes / vertex animation
     float morphRadius;   // C4: object-space bound of the morph offset (culling inflation)
     uint patch;          // C5: terrain patch slot (g_patchData), UNX_NONE = none
-    uint morphPad;
+    uint morphPad;  // 0x5354494C: CPU-published equal-transform proof; 0: compare matrices
 };
 
 struct GpuMesh
@@ -272,6 +272,18 @@ bool instanceShadowMovable(GpuInstance inst, uint instance, uint runtimeFirst)
 #define LIGHT_TUBE 5u
 
 GpuInstance loadInstance(uint i) { StructuredBuffer<GpuInstance> b = ResourceDescriptorHeap[g_instances]; return b[i]; }
+bool instanceTransformStill(GpuInstance inst)
+{
+    return all(inst.objectToWorld[0] == inst.prevObjectToWorld[0]) && all(inst.objectToWorld[1] == inst.prevObjectToWorld[1]) &&
+           all(inst.objectToWorld[2] == inst.prevObjectToWorld[2]);
+}
+bool instanceTransformStill(uint index, GpuInstance inst)
+{
+    // GPU-range writers may copy a CPU template and then change its matrices.
+    // Only CPU-owned rows carry a proof maintained by the scene publisher.
+    if (index < g_instanceCount && inst.morphPad == 0x5354494Cu) return true;
+    return instanceTransformStill(inst);
+}
 GpuMesh loadMesh(uint i) { StructuredBuffer<GpuMesh> b = ResourceDescriptorHeap[g_meshes]; return b[i]; }
 GpuSubmesh loadSubmesh(uint i) { StructuredBuffer<GpuSubmesh> b = ResourceDescriptorHeap[g_submeshes]; return b[i]; }
 GpuCluster loadCluster(uint i) { StructuredBuffer<GpuCluster> b = ResourceDescriptorHeap[g_clusters]; return b[i]; }

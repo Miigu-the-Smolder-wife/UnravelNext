@@ -175,8 +175,17 @@ void morphVertex(GpuInstance inst, uint meshVertex, bool previous, inout float3 
 bool deformInstanceStill(GpuInstance inst)
 {
     if (inst.morph != UNX_NONE || (inst.flags & (INSTANCE_SKINNED | INSTANCE_WIND)) != 0) return false;
-    return all(inst.objectToWorld[0] == inst.prevObjectToWorld[0]) && all(inst.objectToWorld[1] == inst.prevObjectToWorld[1]) &&
-           all(inst.objectToWorld[2] == inst.prevObjectToWorld[2]);
+    return instanceTransformStill(inst);
+}
+
+// Screen histories usually query a rigid, unchanged surface. Read only its
+// header/proof before loading the two matrices and deformation records.
+bool deformInstanceStillAt(uint index)
+{
+    StructuredBuffer<GpuInstance> instances = ResourceDescriptorHeap[g_instances];
+    if (instances[index].morph != UNX_NONE || (instances[index].flags & (INSTANCE_SKINNED | INSTANCE_WIND)) != 0) return false;
+    if (index < g_instanceCount && instances[index].morphPad == 0x5354494Cu) return true;
+    return instanceTransformStill(instances[index]);
 }
 
 // v: the vertex as loaded; meshVertex: its mesh vertex index (the skin and morph fetches).

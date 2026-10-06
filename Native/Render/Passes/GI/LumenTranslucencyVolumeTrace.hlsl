@@ -1,5 +1,5 @@
 // unx-kernel: lib_6_6 main
-// unx-variants: SKY=0,1
+// unx-variants: SKY=0,1 HAIR=0,1 REORDER=0,1,2
 // r.gi.ltv.trace (LumenTranslucencyVolume.hlsli): the visible cells' rays. Indirect DispatchRays over compact cell records,
 // with nine consecutive threads per cell; the original ray texel and full-precision origin come from the record. The ray: from the cell's
 // sample point (the frame's jitter, kept in front of the depth buffer), direction = its texel of the 3 x 3 equal-area
@@ -41,15 +41,73 @@
 #include "RayTracing/HitHair.hlsli"
 #include "RayTracing/HitFarField.hlsli"
 
+#ifndef HIT_LIGHTING_STAGE
+#define HIT_LIGHTING_STAGE 0
+#endif
+#include "RayTracing/HitLightingQueue.hlsli"
+
+#if HIT_LIGHTING_STAGE != 1
+float3 ltvUncachedLighting(RtSceneSrvs scene, RtHit hit, RayDesc ray, uint3 id, uint2 texel, uint seed)
+{
+    RtSurface s = rtSurface(scene, hit, ray.Origin, ray.Direction);
+    GpuMaterial m = loadMaterial(s.material);
+    if ((m.classFlags & MATERIAL_EMISSIVE_VISIBLE_ONLY) != 0) m.emissive = 0;
+    g_rtHitCone = 0.6;  // (a ray of the 3 x 3 sphere map: a cone of about 39 degrees half angle)
+    const float bias = 1e-3 + 2e-4 * distance(s.position, g_cameraPosition);
+    RtHitLighting L = (RtHitLighting)0;
+    const float4 e = lhiIrradiance(lhiSources(P[5].x), s.position, s.normal, seed + id.z * 7919u + texel.x * 31u + texel.y * 131u);
+    L.irradiance = e.a > 0 ? e.rgb : giFarSkyIrradiance(s.position, s.normal, asfloat(P[9].w));
+    L.specularRadiance = e.rgb / LTV_PI;
+    const float3 l = normalize(g_sunDirection);
+    if (dot(s.normal, l) > 0 || rtHitTransmits(m))
+    {
+        const float3 e0 = giSunIlluminance(s.position);
+        if (any(e0 > 0))
+        {
+            RayDesc sr;
+            sr.Origin = s.position + (dot(s.geometricNormal, l) > 0 ? 1.0 : -1.0) * s.geometricNormal * bias;
+            sr.Direction = l;
+            sr.TMin = 0;
+            sr.TMax = giRayLength();
+            // (the sun through the Glass on the way: what the panes leave of it - RayShaders.hlsli rtShadowTransmittance)
+            const float3 through = rtShadowTransmittance(scene, sr, RT_MASK_HIT_SHADOW | RT_MASK_FAR);
+            L.sunIlluminance = e0 * through;
+            L.sunVisibility = any(through > 0) ? 1.0 : 0.0;
+        }
+    }
+    L.local = rtHitLocalSample(scene, s, m, -ray.Direction, hit.t * 1.2, bias, seed * 3u + id.z * 7919u + texel.x * 31u + texel.y * 131u);
+    return rtHitRadiance(m, s.normal, -ray.Direction, L, 1.2);
+}
+#endif
+void ltvStoreTrace(uint3 id, float3 radiance)
+{
+    const float cap = asfloat(P[9].x);
+    const float brightest = max(radiance.r, max(radiance.g, radiance.b)) * g_exposure;
+    if (cap > 0 && brightest > cap) radiance *= cap / brightest;
+    if (any(isnan(radiance)) || any(isinf(radiance))) radiance = 0;
+    RWTexture3D<float3> trace = ResourceDescriptorHeap[P[0].x];
+    trace[id] = max(radiance, 0.0) * LTV_SCALE;
+}
+
 [shader("raygeneration")]
 void LumenTranslucencyVolumeTraceGen()
 {
+    uint sourceRay = DispatchRaysIndex().x + P[4].w;
+#if HIT_LIGHTING_STAGE == 2
+    RtHit queuedHit;
+    RayDesc queuedRay;
+    hitLightingLoad(P[10].y, sourceRay, sourceRay, queuedHit, queuedRay);
+#endif
     uint3 id, cell;
     float3 origin;
-    ltvCompactRay(P[10].x, DispatchRaysIndex().x + P[4].w, id, cell, origin);
+    ltvCompactRay(P[10].x, sourceRay, id, cell, origin);
     const uint2 texel = id.xy - cell.xy * LTV_TRACE_RES;
-    RWTexture3D<float3> trace = ResourceDescriptorHeap[P[0].x];
     const uint seed = ltvHash(cell.x + cell.y * 8191u + ltvFrame() * 26699u);
+#if HIT_LIGHTING_STAGE == 2
+    float3 radiance = ltvUncachedLighting(rtScene(), queuedHit, queuedRay, id, texel, seed);
+    radiance += lhiSkyLeaking(lhiRules(P[5].x), queuedRay.Direction, queuedHit.t);
+    ltvStoreTrace(id, radiance);
+#else
     const float2 uv = (float2(texel) + float2(ltvUnit(seed), ltvUnit(seed ^ 0x9e3779b9u))) / float(LTV_TRACE_RES);
     RayDesc ray;
     ray.Origin = origin;
@@ -104,7 +162,7 @@ void LumenTranslucencyVolumeTraceGen()
     else if (hit.instance == RT_INSTANCE_FAR) radiance = rtFarRadiance(scene, hit, ray.Origin, ray.Direction, true);  // (raytracing.far_field)
     else if (hit.instance != RT_INSTANCE_EMITTER && P[5].x != UNX_NONE)
     {
-        const RtSurface s = rtSurface(scene, hit, ray.Origin, ray.Direction);
+        RtSurface s = rtSurfaceGeometry(scene, hit, ray.Origin, ray.Direction);
         GpuMaterial m = loadMaterial(s.material);
         if (s.frontFace || (m.classFlags & MATERIAL_TWO_SIDED) != 0)
         {
@@ -113,40 +171,17 @@ void LumenTranslucencyVolumeTraceGen()
             if (cards.valid) radiance = lhiFoliageFinal(lhiRules(P[5].x), mcFrame(P[5].x), m, s.sceneInstance, s.position, s.geometricNormal, cards.final);
             else
             {
-                if ((m.classFlags & MATERIAL_EMISSIVE_VISIBLE_ONLY) != 0) m.emissive = 0;
-                g_rtHitCone = 0.6;  // (a ray of the 3 x 3 sphere map: a cone of about 39 degrees half angle)
-                const float bias = 1e-3 + 2e-4 * distance(s.position, g_cameraPosition);
-                RtHitLighting L = (RtHitLighting)0;
-                const float4 e = lhiIrradiance(lhiSources(P[5].x), s.position, s.normal, seed + id.z * 7919u + texel.x * 31u + texel.y * 131u);
-                L.irradiance = e.a > 0 ? e.rgb : giFarSkyIrradiance(s.position, s.normal, asfloat(P[9].w));
-                L.specularRadiance = e.rgb / LTV_PI;
-                const float3 l = normalize(g_sunDirection);
-                if (dot(s.normal, l) > 0 || rtHitTransmits(m))
-                {
-                    const float3 e0 = giSunIlluminance(s.position);
-                    if (any(e0 > 0))
-                    {
-                        RayDesc sr;
-                        sr.Origin = s.position + (dot(s.geometricNormal, l) > 0 ? 1.0 : -1.0) * s.geometricNormal * bias;
-                        sr.Direction = l;
-                        sr.TMin = 0;
-                        sr.TMax = giRayLength();
-                        // (the sun through the Glass on the way: what the panes leave of it - RayShaders.hlsli rtShadowTransmittance)
-                        const float3 through = rtShadowTransmittance(scene, sr, RT_MASK_HIT_SHADOW | RT_MASK_FAR);
-                        L.sunIlluminance = e0 * through;
-                        L.sunVisibility = any(through > 0) ? 1.0 : 0.0;
-                    }
-                }
-                L.local = rtHitLocalSample(scene, s, m, -ray.Direction, hit.t * 1.2, bias, seed * 3u + id.z * 7919u + texel.x * 31u + texel.y * 131u);
-                radiance = rtHitRadiance(m, s.normal, -ray.Direction, L, 1.2);
+#if HIT_LIGHTING_STAGE == 1
+                hitLightingEnqueue(P[10].y, sourceRay, hit, ray);
+                return;
+#else
+                radiance = ltvUncachedLighting(scene, hit, ray, id, texel, seed);
+#endif
             }
         }
         // lumen.skylight_leaking (LumenHitIndirect.hlsli; 0 by default: nothing)
         radiance += lhiSkyLeaking(lhiRules(P[5].x), ray.Direction, hit.t);
     }
-    const float cap = asfloat(P[9].x);
-    const float brightest = max(radiance.r, max(radiance.g, radiance.b)) * g_exposure;
-    if (cap > 0 && brightest > cap) radiance *= cap / brightest;
-    if (any(isnan(radiance)) || any(isinf(radiance))) radiance = 0;
-    trace[id] = max(radiance, 0.0) * LTV_SCALE;
+    ltvStoreTrace(id, radiance);
+#endif
 }

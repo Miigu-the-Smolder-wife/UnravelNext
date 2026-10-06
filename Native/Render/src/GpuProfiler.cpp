@@ -1,6 +1,7 @@
 #include "unx/render/GpuProfiler.h"
 
 #include <algorithm>
+#include <cstdlib>
 
 namespace unx::render
 {
@@ -28,6 +29,15 @@ GpuProfiler::GpuProfiler(Device& device, uint32_t framesInFlight, uint32_t maxPa
     }
     m_slots.resize(framesInFlight);
 
+    // Pipeline statistics are legal on DIRECT command lists only. Async-compute rows
+    // retain recorded dispatch counts; their hardware invocation counters are unavailable.
+    qd.Type = D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS;
+    qd.Count = m_perQueue * framesInFlight;
+    check(device.d3d()->CreateQueryHeap(&qd, IID_PPV_ARGS(&m_statisticsHeap)), "CreateQueryHeap(PIPELINE_STATISTICS)");
+    rd.Width = UINT64(qd.Count) * sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS);
+    check(device.d3d()->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&m_statisticsReadback)), "pipeline statistics readback");
+    check(m_statisticsReadback->Map(0, &none, reinterpret_cast<void**>(&m_statisticsMapped)), "Map pipeline statistics");
+
     LARGE_INTEGER qpcFrequency;
     QueryPerformanceFrequency(&qpcFrequency);
     for (uint32_t q = 0; q < queues; ++q)
@@ -42,6 +52,8 @@ GpuProfiler::GpuProfiler(Device& device, uint32_t framesInFlight, uint32_t maxPa
 
 GpuProfiler::~GpuProfiler()
 {
+    if (recordingWorkload == &m_recordingWorkload) { recordingWorkload = nullptr; recordingWorkloadCommands = nullptr; }
+    if (m_statisticsReadback) m_statisticsReadback->Unmap(0, nullptr);
     for (auto& readback : m_readback) if (readback) readback->Unmap(0, nullptr);
 }
 
@@ -51,6 +63,8 @@ void GpuProfiler::beginFrame(uint64_t frame)
     if (slot.frame != UINT64_MAX) read(slot);
     slot.frame = frame;
     slot.detailed = m_passTimestamps;
+    slot.workloads = m_workloads && slot.detailed;
+    slot.statisticsUsed = 0;
     slot.events.clear();
     for (uint32_t q = 0; q < kQueueTypeCount; ++q)
     {
@@ -94,14 +108,42 @@ void GpuProfiler::listEnd(ID3D12GraphicsCommandList* cmd, QueueType queue)
 void GpuProfiler::passBegin(ID3D12GraphicsCommandList* cmd, QueueType queue, std::string_view name)
 {
     if (!enabled()) return;
+    // Diagnostic only: distinguish the incoming dependency/barrier interval from
+    // the pass body. Default mode keeps its original one-query-per-pass cost.
+    static const bool splitBoundaries = [] {
+        char value[2]{};
+        size_t length = 0;
+        return getenv_s(&length, value, sizeof(value), "UNX_GPU_SPLIT_BOUNDARIES") == 0 && length == 2 && value[0] == '1';
+    }();
     uint32_t begin = m_lastMark[(size_t)queue];
     if (begin == UINT32_MAX)
     {
         begin = allocate(queue);  // no mark yet on this queue in this command list sequence
         cmd->EndQuery(m_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, begin);
     }
+    if (splitBoundaries)
+    {
+        const uint32_t bodyBegin = allocate(queue);
+        cmd->EndQuery(m_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, bodyBegin);
+        m_current->events.push_back({ "prepare:" + std::string(name), queue, begin, bodyBegin });
+        begin = bodyBegin;
+    }
     m_current->events.push_back({ std::string(name), queue, begin, UINT32_MAX });
     m_open[(size_t)queue].push_back((uint32_t)m_current->events.size() - 1);
+    if (workloads())
+    {
+        if (recordingWorkload) fail("GpuProfiler: nested workload scope");
+        m_recordingWorkload = {};
+        recordingWorkload = &m_recordingWorkload;
+        recordingWorkloadCommands = cmd;
+        if (queue == QueueType::Graphics)
+        {
+            if (m_current->statisticsUsed >= m_perQueue) fail("GpuProfiler: statistics capacity exceeded");
+            auto& event = m_current->events.back();
+            event.statistics = uint32_t(m_current - m_slots.data()) * m_perQueue + m_current->statisticsUsed++;
+            cmd->BeginQuery(m_statisticsHeap.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, event.statistics);
+        }
+    }
 }
 
 void GpuProfiler::passEnd(ID3D12GraphicsCommandList* cmd, QueueType queue)
@@ -109,6 +151,14 @@ void GpuProfiler::passEnd(ID3D12GraphicsCommandList* cmd, QueueType queue)
     if (!enabled()) return;
     auto& open = m_open[(size_t)queue];
     if (open.empty()) fail("GpuProfiler::passEnd without passBegin");
+    auto& event = m_current->events[open.back()];
+    if (workloads())
+    {
+        if (event.statistics != UINT32_MAX) cmd->EndQuery(m_statisticsHeap.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, event.statistics);
+        event.workload = m_recordingWorkload;
+        recordingWorkload = nullptr;
+        recordingWorkloadCommands = nullptr;
+    }
     uint32_t i = allocate(queue);
     cmd->EndQuery(m_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, i);
     m_current->events[open.back()].end = i;
@@ -134,6 +184,12 @@ void GpuProfiler::resolve(ID3D12GraphicsCommandList* cmd, QueueType queue)
     // Query heap indices remain interleaved by slot/queue. Each queue's distinct readback packs only its own slots.
     const uint64_t destination = (uint64_t)slotIndex * m_perQueue * sizeof(uint64_t);
     cmd->ResolveQueryData(m_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, first, count, m_readback[q].Get(), destination);
+    if (queue == QueueType::Graphics && m_current->statisticsUsed)
+    {
+        const uint32_t start = slotIndex * m_perQueue;
+        cmd->ResolveQueryData(m_statisticsHeap.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, start,
+            m_current->statisticsUsed, m_statisticsReadback.Get(), UINT64(start) * sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS));
+    }
 }
 
 void GpuProfiler::read(Slot& slot)
@@ -162,6 +218,7 @@ void GpuProfiler::read(Slot& slot)
     }
     m_completed.frame = slot.frame;
     m_completed.detailedPassTimings = slot.detailed;
+    m_completed.workloads = slot.workloads;
     m_completed.timestampCount = slot.used[0] + slot.used[1];
     m_completed.gpuFrameMs = last > first ? last - first : 0;
     m_completed.passes.clear();
@@ -169,6 +226,16 @@ void GpuProfiler::read(Slot& slot)
     {
         if (e.end == UINT32_MAX) continue;
         m_completed.passes.push_back({ e.name, e.queue, toMs(e.queue, e.begin) - first, toMs(e.queue, e.end) - first });
+        auto& w = m_completed.passes.back().workload;
+        w = e.workload;
+        if (e.statistics != UINT32_MAX)
+        {
+            const auto& s = m_statisticsMapped[e.statistics];
+            w.pipelineStatistics = true;
+            w.computeInvocations = s.CSInvocations;
+            w.pixelInvocations = s.PSInvocations;
+            w.rasterPrimitives = s.CPrimitives;
+        }
     }
     for (uint32_t q = 0; q < 2; ++q)
     {

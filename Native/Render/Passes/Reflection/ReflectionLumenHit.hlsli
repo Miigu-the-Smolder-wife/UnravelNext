@@ -43,6 +43,9 @@ struct RlHit
     float motion;     // the hit point's displacement since the previous frame over the ray's footprint there (0: still)
     bool surface;     // a lit surface (not an emitter proxy, not the back of a one-sided surface)
 };
+// A compacted lighting pass retains the original dispatch identity. Existing
+// monolithic/refraction callers leave this unset and keep their original seed.
+static uint2 g_rlLightingIdentity = uint2(UNX_NONE, UNX_NONE);
 
 RlHit rlShadeHit(RtSceneSrvs scene, RtHit hit, float3 origin, float3 direction, float coneWidth, float coneSpread, uint cardFrame, uint exactCounts,
                  bool localSample = false, bool hiRes = false, uint2 feedbackCoord = uint2(0, 0))
@@ -90,8 +93,7 @@ RlHit rlShadeHit(RtSceneSrvs scene, RtHit hit, float3 origin, float3 direction, 
             delta = float3(f16tof32(a.x), f16tof32(a.x >> 16), f16tof32(a.y)) * w.x + float3(f16tof32(b.x), f16tof32(b.x >> 16), f16tof32(b.y)) * w.y +
                     float3(f16tof32(c.x), f16tof32(c.x >> 16), f16tof32(c.y)) * w.z;
         }
-        else if (any(inst.objectToWorld[0] != inst.prevObjectToWorld[0]) || any(inst.objectToWorld[1] != inst.prevObjectToWorld[1]) ||
-                 any(inst.objectToWorld[2] != inst.prevObjectToWorld[2]))
+        else if (!instanceTransformStill(s.sceneInstance, inst))
         {
             const float3 p = loadVertex(mesh, tri.meshVertex.x).position * w.x + loadVertex(mesh, tri.meshVertex.y).position * w.y +
                              loadVertex(mesh, tri.meshVertex.z).position * w.z;
@@ -121,7 +123,8 @@ RlHit rlShadeHit(RtSceneSrvs scene, RtHit hit, float3 origin, float3 direction, 
     }
     if (!fromCards)
     {
-        const uint hitSeed = DispatchRaysIndex().x * 9781u + DispatchRaysIndex().y * 6271u + g_frameIndex * 26699u;
+        const uint2 identity = g_rlLightingIdentity.x != UNX_NONE ? g_rlLightingIdentity : DispatchRaysIndex().xy;
+        const uint hitSeed = identity.x * 9781u + identity.y * 6271u + g_frameIndex * 26699u;
         const float4 e = lhiIrradiance(lhiSources(cardFrame), s.position, s.normal, hitSeed);
         L.irradiance = e.a > 0 ? e.rgb : giFarSkyIrradiance(s.position, s.normal, rules.farStart);
         L.specularRadiance = e.rgb / MODEL_PI;

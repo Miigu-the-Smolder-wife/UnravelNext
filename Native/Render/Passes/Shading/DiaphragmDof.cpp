@@ -198,7 +198,7 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
     const float tanHalf[2] = { 1.0f / (view.view.proj.m[0][0] * squeeze), 1.0f / view.view.proj.m[1][1] };
     const float focus = fc.frame.lensFocus;
 
-    const uint32_t rings = (uint32_t)std::clamp<int64_t>(integerOr(fc, "shading.dof_diaphragm_rings", 5), 3, 5);
+    const uint32_t rings = (uint32_t)std::clamp<int64_t>(fc.frame.postExtended.enabled ? fc.frame.postExtended.diaphragmRings : integerOr(fc, "shading.dof_diaphragm_rings", 5), 3, 5);
     const int64_t levelLimit = std::clamp<int64_t>(integerOr(fc, "shading.dof_diaphragm_max_levels", 4), 1, kMaxLevels);
     const uint32_t levels = (uint32_t)std::clamp<int64_t>((int64_t)std::ceil(std::log2(std::max(maxBlur * 0.5f / (float)rings, 1e-3f))), 1, levelLimit);
     const int64_t postfilter = integerOr(fc, "shading.dof_diaphragm_postfilter", 1);
@@ -222,7 +222,7 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
                   const uint32_t k[4] = { c.uav(stats), 10, 0, 0 };
                   c.cmd->SetPipelineState(clear);
                   c.computeConstants(k, 4);
-                  c.cmd->Dispatch(1, 1, 1);
+                  gpuDispatch(c.cmd, 1, 1, 1);
               });
 
     // setup
@@ -242,7 +242,7 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
                   k[14] = k[15] = 0;
                   c.cmd->SetPipelineState(setupPso);
                   c.computeConstants(k, 16);
-                  c.cmd->Dispatch((hw + 7) / 8, (hh + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (hw + 7) / 8, (hh + 7) / 8, 1);
               });
 
     // the prefilter (a jittered view; the reference's r.DOF.TemporalAAQuality pass)
@@ -288,7 +288,7 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
                       c.cmd->SetPipelineState(stabilizePso);
                       c.bindFrameConstants(cb);
                       c.computeConstants(k, 32);
-                      c.cmd->Dispatch((hw + 7) / 8, (hh + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (hw + 7) / 8, (hh + 7) / 8, 1);
                   });
         input = stable;
     }
@@ -317,7 +317,7 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
                   const uint32_t k[8] = { c.srv(input), c.uav(flat.foreground), c.uav(flat.background), 0, hw, hh, tilesX, tilesY };
                   c.cmd->SetPipelineState(flattenPso);
                   c.computeConstants(k, 8);
-                  c.cmd->Dispatch(tilesX, tilesY, 1);
+                  gpuDispatch(c.cmd, tilesX, tilesY, 1);
               });
     // (the gather kernel's centre is shifted by up to a ring spacing; a squeeze under 1 widens the bokeh across)
     const float reach = (1.0f + 1.0f / ((float)rings + 0.5f)) * std::max(1.0f, 1.0f / squeeze);
@@ -356,7 +356,7 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
                                                mode, mode == 2 ? c.srv(widestTiles.foreground) : kNone, mode == 2 ? c.srv(widestTiles.background) : kNone, asUint(reach) };
                       c.cmd->SetPipelineState(dilatePso);
                       c.computeConstants(k, 12);
-                      c.cmd->Dispatch((tilesX + 7) / 8, (tilesY + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (tilesX + 7) / 8, (tilesY + 7) / 8, 1);
                   });
         return to;
     };
@@ -394,7 +394,7 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
                       const uint32_t k[8] = { c.srv(input), 0, c.uav(quarter), 0, hw, hh, qw, qh };
                       c.cmd->SetPipelineState(quarterPso);
                       c.computeConstants(k, 8);
-                      c.cmd->Dispatch((qw + 7) / 8, (qh + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (qw + 7) / 8, (qh + 7) / 8, 1);
                   });
         g.addPass("m.dof.d.scatter.clear", QueueType::Graphics,
                   [&](PassBuilder& b) {
@@ -407,7 +407,7 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
                       {
                           const uint32_t k[4] = { c.uav(list), kScatterHeader / 4, 0, 0 };  // (the header: the record count)
                           c.computeConstants(k, 4);
-                          c.cmd->Dispatch(1, 1, 1);
+                          gpuDispatch(c.cmd, 1, 1, 1);
                       }
                   });
     }
@@ -434,7 +434,7 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
                                            qw, qh, 0, 0 };
                   c.cmd->SetPipelineState(reducePso);
                   c.computeConstants(k, 20);
-                  c.cmd->Dispatch(groupsX, groupsY, 1);
+                  gpuDispatch(c.cmd, groupsX, groupsY, 1);
               });
 
     // the diaphragm's tables
@@ -455,7 +455,7 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
                                                asUint(diaphragm.bladeRadius), asUint(diaphragm.bladeOffset), 0, 0 };
                       c.cmd->SetPipelineState(lutPso);
                       c.computeConstants(k, 12);
-                      c.cmd->Dispatch(kLut / 8, kLut / 8, 1);
+                      gpuDispatch(c.cmd, kLut / 8, kLut / 8, 1);
                   });
     }
 
@@ -487,7 +487,7 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
                                                asUint(petzval[0]), asUint(petzval[1]), asUint(petzval[2]), asUint(petzval[3]) };
                       c.cmd->SetPipelineState(pso);
                       c.computeConstants(k, 24);
-                      c.cmd->Dispatch(groupsX, groupsY, 1);
+                      gpuDispatch(c.cmd, groupsX, groupsY, 1);
                   });
         return out;
     };
@@ -513,7 +513,7 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
                           const uint32_t k[8] = { c.srv(from), c.uav(to), c.srv(tiles.foreground), c.srv(tiles.background), hw, hh, layer, postfilter == 2 ? 2u : 1u };
                           c.cmd->SetPipelineState(postfilterPso);
                           c.computeConstants(k, 8);
-                          c.cmd->Dispatch(groupsX, groupsY, 1);
+                          gpuDispatch(c.cmd, groupsX, groupsY, 1);
                       });
             return to;
         };
@@ -560,7 +560,7 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
                                              asUint(petzvalCorner), asUint(aspect), 0, 0 };
                           std::memcpy(&k[24], flags, 48);
                           c.graphicsConstants(k, 36);
-                          c.cmd->DispatchMesh(std::min(65535u, groups), (groups + 65534) / 65535, 1);
+                          gpuDispatchMesh(c.cmd, std::min(65535u, groups), (groups + 65534) / 65535, 1);
                       });
         };
         sprites("m.dof.d.scatter.foreground", foreground, listForeground, false);
@@ -595,7 +595,7 @@ BufferRef diaphragmDepthOfField(FramePassContext& fc, const ViewResources& view,
                   k[23] = asUint(squeeze);
                   c.cmd->SetPipelineState(recombinePso);
                   c.computeConstants(k, 24);
-                  c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (w + 7) / 8, (h + 7) / 8, 1);
               });
     return stats;
 }

@@ -13,6 +13,7 @@ struct PassTiming
     QueueType queue = QueueType::Graphics;
     double beginMs = 0;  // relative to the frame's first timestamp, on a common (CPU-calibrated) timeline
     double endMs = 0;
+    GpuWorkload workload;
     double durationMs() const { return endMs - beginMs; }
 };
 
@@ -34,6 +35,7 @@ struct FrameTiming
     double gpuFrameMs = 0;  // first to last timestamp over all queues
     uint32_t timestampCount = 0;
     bool detailedPassTimings = true;
+    bool workloads = false;
     std::vector<PassTiming> passes;
     QueueTiming queues[2];  // graphics, compute
 };
@@ -69,6 +71,8 @@ public:
     bool enabled() const { return m_current ? m_current->detailed : m_passTimestamps; }
     // Applies at the next beginFrame; already-recorded slots retain their own mode. Frame and queue markers stay.
     void setPassTimestamps(bool on) { m_passTimestamps = on; }
+    void setWorkloads(bool on) { m_workloads = on; }
+    bool workloads() const { return m_current && m_current->workloads; }
 
 private:
     struct Event
@@ -76,6 +80,8 @@ private:
         std::string name;
         QueueType queue;
         uint32_t begin, end;
+        uint32_t statistics = UINT32_MAX;
+        GpuWorkload workload;
     };
     struct ListMarks
     {
@@ -85,6 +91,8 @@ private:
     {
         uint64_t frame = UINT64_MAX;
         bool detailed = true;
+        bool workloads = false;
+        uint32_t statisticsUsed = 0;
         std::vector<Event> events;
         uint32_t used[kQueueTypeCount] = {};
         std::vector<ListMarks> lists[kQueueTypeCount];
@@ -96,6 +104,10 @@ private:
     uint32_t m_framesInFlight;
     uint32_t m_perQueue;  // query indices per queue per slot
     ComPtr<ID3D12QueryHeap> m_heap;
+    ComPtr<ID3D12QueryHeap> m_statisticsHeap;
+    ComPtr<ID3D12Resource> m_statisticsReadback;
+    D3D12_QUERY_DATA_PIPELINE_STATISTICS* m_statisticsMapped = nullptr;
+    GpuWorkload m_recordingWorkload;
     // D3D12 tracks cross-queue writes at resource granularity, even for disjoint byte ranges.
     ComPtr<ID3D12Resource> m_readback[2];
     uint64_t* m_mapped[2] = {};
@@ -106,6 +118,7 @@ private:
     double m_calibrationOffsetMs[kQueueTypeCount] = {};  // gpu tick -> ms on the CPU timeline
     double m_msPerTick[kQueueTypeCount] = {};
     bool m_passTimestamps = true;
+    bool m_workloads = false;
     bool m_hasCompleted = false;
     FrameTiming m_completed;
 };

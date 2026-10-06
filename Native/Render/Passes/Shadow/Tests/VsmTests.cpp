@@ -270,14 +270,26 @@ int main(int argc, char** argv)
         const bool cache = tf.quality.has("shadow.vsm.cache") && tf.quality.boolean("shadow.vsm.cache");
         logf("shadow.vsm.cache = %s\n", cache ? "true" : "false");
         // Some pages drawn, not all (cache) / all (one path).
-        auto partlyDrawn = [&](const shadow::VsmStats& st) { return cache ? st.dirty > 0 && st.dirty < st.requested : st.dirty == st.requested; };
+        // StaticSeparate redraws movable casters over a retained static copy.
+        // Those pages are raster work too, counted separately from full redraws.
+        auto drawnPages = [](const shadow::VsmStats& st) { return st.dirty + st.dynamicPages; };
+        auto partlyDrawn = [&](const shadow::VsmStats& st) { const auto drawn = drawnPages(st); return cache ? drawn > 0 && drawn < st.requested : drawn == st.requested; };
+        auto dynamicFlags = [](const Frame& f) {
+            uint32_t count = 0;
+            for (uint32_t slot = 0; slot < shadow::kSlots; ++slot)
+            {
+                uint32_t entry; std::memcpy(&entry, f.table.data() + slot * 8ull, 4);
+                count += (entry & (1u << 31)) != 0 && (entry & (1u << 27)) != 0;
+            }
+            return count;
+        };
         auto dirtyByLevel = [&](const Frame& f) {
             std::vector<uint32_t> n(shadow::kLevels, 0);
             for (uint32_t s = 0; s < shadow::kSlots; ++s)
             {
                 uint32_t e;
                 std::memcpy(&e, f.table.data() + s * 8ull, 4);
-                if ((e & (1u << 31)) && (e & (1u << 29))) ++n[s / (shadow::kTable * shadow::kTable)];
+                if ((e & (1u << 31)) && (e & ((1u << 29) | (1u << 27)))) ++n[s / (shadow::kTable * shadow::kTable)];
             }
             return n;
         };
@@ -295,7 +307,7 @@ int main(int argc, char** argv)
         Frame f2 = runFrame(true);
         // (the same pages and physical pages; the drawn-this-frame bit differs with the cache)
         auto withoutDrawn = [](std::vector<uint8_t> t) {
-            for (size_t i = 0; i + 8 <= t.size(); i += 8) t[i + 3] = (uint8_t)(t[i + 3] & (0xFFu & ~((1u << 29 | 1u << 30) >> 24)));
+            for (size_t i = 0; i + 8 <= t.size(); i += 8) t[i + 3] = (uint8_t)(t[i + 3] & (0xFFu & ~((1u << 27 | 1u << 29 | 1u << 30) >> 24)));
             return t;
         };
         const bool sameTable = withoutDrawn(f1.table) == withoutDrawn(f2.table);
@@ -603,8 +615,11 @@ int main(int argc, char** argv)
             std::string line;
             for (uint32_t k = 0; k < 10; ++k) line += format(" %u:%u", k, dirty[k]);
             logf("slow drift 6 cm over 30 frames, dirty pages by level:%s\n", line.c_str());
-            const shadow::VsmStats sd = shadow::stats(tf.trackState);
-            report(partlyDrawn(sd), cache ? "slow drift: the pages under the pole drawn each frame" : "slow drift: every requested page drawn each frame", sd.dirty, sd.requested);
+            const shadow::VsmStats sd = statsAfter();
+            const uint32_t driftDynamic = dynamicFlags(last);
+            logf("slow drift draw census: full %u, dynamic %u, dynamic flags in latest table %u\n", sd.dirty, sd.dynamicPages, driftDynamic);
+            report(sd.dynamicPages == driftDynamic, "slow drift: dynamic counter matches the page flags", sd.dynamicPages, driftDynamic);
+            report(partlyDrawn(sd), cache ? "slow drift: the pages under the pole drawn each frame" : "slow drift: every requested page drawn each frame", drawnPages(sd), sd.requested);
             boxes[2].centre = boxes[2].centre + float3{ 0.06f, 0, 0 };
             compare(last, "after slow drift", 2);
         }
@@ -671,10 +686,12 @@ int main(int argc, char** argv)
             runFrame(false);  // scene reload: full re-render
             runFrame(false);
             std::vector<uint32_t> total(shadow::kLevels, 0);
+            uint32_t lastWindDynamic = 0;
             for (int i = 0; i < 20; ++i)
             {
                 Frame f = runFrame(true);
                 const std::vector<uint32_t> n = dirtyByLevel(f);
+                lastWindDynamic = dynamicFlags(f);
                 for (uint32_t k = 0; k < shadow::kLevels; ++k) total[k] += n[k];
             }
             // Largest sway change of the pole's top (Deformation.hlsli v1): amplitude A = v^2 0.002 / stiffness h^2,
@@ -690,8 +707,10 @@ int main(int argc, char** argv)
             }
             logf("wind (sway range %.4f m) dirty pages over 20 frames by level:%s\n", sway, line.c_str());
             const shadow::VsmStats sw = statsAfter();  // (the last wind frame's counters)
-            report((cache ? sw.dirty > 0 : sw.dirty == sw.requested) && fineDirty + coarseDirty > 0,
-                   cache ? "wind: the wind caster's pages drawn each frame" : "wind: every requested page drawn each frame", sw.dirty, sw.requested);
+            logf("wind draw census: full %u, dynamic %u\n", sw.dirty, sw.dynamicPages);
+            report(sw.dynamicPages == lastWindDynamic, "wind: dynamic counter matches the page flags", sw.dynamicPages, lastWindDynamic);
+            report((cache ? drawnPages(sw) > 0 : drawnPages(sw) == sw.requested) && fineDirty + coarseDirty > 0,
+                   cache ? "wind: the wind caster's pages drawn each frame" : "wind: every requested page drawn each frame", drawnPages(sw), sw.requested);
 
             // 6. Wind change after commit (v1.23): the source scene's wind is edited before a frame (the host's path, no
             //    scene reload). (a) The endpoint bound holds for the v1 model over random transitions (C++ twin of

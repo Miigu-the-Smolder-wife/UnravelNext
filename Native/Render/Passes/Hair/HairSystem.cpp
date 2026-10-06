@@ -637,7 +637,7 @@ public:
                           const uint32_t k[2] = { c.srv(constantBuffer), slotIndex * kConstantSlot };
                           c.cmd->SetPipelineState(p);
                           c.computeConstants(k, 2);
-                          c.cmd->Dispatch(groups, 1, 1);
+                          gpuDispatch(c.cmd, groups, 1, 1);
                       });
         }
         fc.resources.hairSegments = segments;
@@ -688,7 +688,7 @@ public:
                           uint32_t k[8] = { c.srv(segments), c.uav(sums), c.srv(params), c.uav(fine), (uint32_t)words, 0, 0, 0 };
                           c.cmd->SetPipelineState(kernel[0]);
                           c.computeConstants(k, 8);
-                          c.cmd->Dispatch((uint32_t)((words + 255) / 256), 1, 1);
+                          gpuDispatch(c.cmd, (uint32_t)((words + 255) / 256), 1, 1);
                           c.cmd->Barrier(1, &group);
                           c.cmd->SetPipelineState(kernel[1]);
                           for (const Splat& sp : splats)
@@ -698,7 +698,7 @@ public:
                               k[6] = sp.count;
                               k[7] = sp.block;
                               c.computeConstants(k, 8);
-                              c.cmd->Dispatch((sp.count + 63) / 64, 1, 1);
+                              gpuDispatch(c.cmd, (sp.count + 63) / 64, 1, 1);
                           }
                           c.cmd->Barrier(1, &group);
                           k[4] = columns;
@@ -706,11 +706,11 @@ public:
                           k[6] = k[7] = 0;
                           c.cmd->SetPipelineState(kernel[2]);
                           c.computeConstants(k, 8);
-                          c.cmd->Dispatch(R * columns / 4, R * rows / 4, R / 4);
+                          gpuDispatch(c.cmd, R * columns / 4, R * rows / 4, R / 4);
                           k[3] = c.uav(low);
                           c.cmd->SetPipelineState(kernel[3]);
                           c.computeConstants(k, 8);
-                          c.cmd->Dispatch((coarse * columns + 3) / 4, (coarse * rows + 3) / 4, (coarse + 3) / 4);
+                          gpuDispatch(c.cmd, (coarse * columns + 3) / 4, (coarse * rows + 3) / 4, (coarse + 3) / 4);
                       });
             fc.resources.hairDensity = fine;
             fc.resources.hairDensityCoarse = low;

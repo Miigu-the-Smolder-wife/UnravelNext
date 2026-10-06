@@ -372,8 +372,8 @@ struct ParticleSystem::Impl
     uint32_t nextSlot = 0;
     int latestSlot = -1;
 
-    // The tick's readback pass ends its command list with a fence of its own (PassBuilder::fenceAfter), which the graph
-    // reports when it submits the frame: the readback waits for the tick's passes only. Before, the fence was resolved
+    // A recorded batch's last tick ends its command list (PassBuilder::fenceAfter). Every tick in that batch receives
+    // that fence: readbacks wait for the batch's passes, not later frame shading. Before, the fence was resolved
     // at wait time as the queue's last signal (conservative: a later signal also covers it) - the end of everything
     // submitted since, i.e. the whole frame that recorded the tick, so the next fixed step's readback held the CPU until
     // the GPU had finished that frame and CPU and GPU ran in series (Player at 4K: frame 28 ms against 21.7 ms of GPU
@@ -474,6 +474,8 @@ void ParticleSystem::record(RenderGraph& graph, ShaderLibrary& shaders, uint64_t
 void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary& shaders, uint64_t importIndex, QueueType queueType)
 {
     Impl& m = *m_impl;
+    std::vector<std::pair<Impl::Slot*, uint64_t>> completed;
+    completed.reserve(m_pending.size());
     while (!m_pending.empty())
     {
         std::vector<uint8_t> packet = std::move(m_pending.front());
@@ -1346,7 +1348,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
                 c.cmd->SetPipelineState(pso);
                 c.bindFrameConstants(constants);
                 c.computeConstants(p.data(), 8);
-                c.cmd->Dispatch(groupCount, 1, 1);
+                gpuDispatch(c.cmd, groupCount, 1, 1);
             });
         };
         // 2. emitter table (grown table keeps its rows; delta blocks), begin (+ the restore records after RESET)
@@ -1412,7 +1414,7 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
                 c.cmd->SetPipelineState(pso);
                 c.bindFrameConstants(constants);
                 c.computeConstants(p.data(), 12);
-                c.cmd->Dispatch(rangeCount, 1, 1);
+                gpuDispatch(c.cmd, rangeCount, 1, 1);
             });
         }
 
@@ -1425,17 +1427,24 @@ void ParticleSystem::recordPending(Device& device, RenderGraph& g, ShaderLibrary
         Buf* eventsBuf = &slot.events;
         Impl::Slot* slotPtr = &slot;
         const uint64_t serial = slot.serial;
+        completed.emplace_back(slotPtr, serial);
+        const bool lastTick = m_pending.empty();
         g.addPass("fx.particles.readback", queueType,
-                  [=](PassBuilder& b) {
+                  [&, reportBuf, eventsBuf, lastTick](PassBuilder& b) {
                       b.use(reportBuf->ref, Use::CopySrc);
                       b.use(eventsBuf->ref, Use::CopySrc);
                       b.keep();
-                      // the tick's own fence (Impl::resolveFence): the readback waits for the tick, not the frame
-                      if (frameFenceOnly()) return;
-                      b.fenceAfter([slotPtr, serial](Queue& queue, uint64_t fence) {
-                          if (slotPtr->serial != serial || !slotPtr->recorded) return;
-                          slotPtr->queue = &queue;
-                          slotPtr->fence = fence;
+                      // Setup runs now; the immutable completion list survives
+                      // submission. All copied tick rows keep their own identity
+                      // and wait for this batch, before presentation and shading.
+                      if (!lastTick || frameFenceOnly()) return;
+                      b.fenceAfter([slots = std::move(completed)](Queue& queue, uint64_t fence) {
+                          for (const auto& [done, version] : slots)
+                          {
+                              if (done->serial != version || !done->recorded) continue;
+                              done->queue = &queue;
+                              done->fence = fence;
+                          }
                       });
                   },
                   [=](PassContext& c) {

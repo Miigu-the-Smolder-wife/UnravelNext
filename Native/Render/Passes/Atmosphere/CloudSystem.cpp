@@ -398,7 +398,7 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
                   const uint32_t k[4] = { recordSrv, c.uav(map), 0, 0 };
                   c.cmd->SetPipelineState(pm);
                   c.computeConstants(k, 4);
-                  c.cmd->Dispatch(groups(kMapTexels, 8), groups(kMapTexels, 8), 1);
+                  gpuDispatch(c.cmd, groups(kMapTexels, 8), groups(kMapTexels, 8), 1);
               });
     ID3D12PipelineState* pc = sh.compute("Passes/Atmosphere/CloudMarch");
     const D3D12_GPU_VIRTUAL_ADDRESS cb = fc.frameConstantsFor(mv);
@@ -432,16 +432,16 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
                       if (!history)
                       {
                           c.computeConstants(k, 16);
-                          c.cmd->Dispatch(groups(w, 8), groups(rows, 8), 1);
+                          gpuDispatch(c.cmd, groups(w, 8), groups(rows, 8), 1);
                           continue;
                       }
                       // (CloudMarch.hlsl P[3].z: the frame's texel of every block in a dispatch of its own, then the others)
                       k[14] = blockTexel | 1u << 8;
                       c.computeConstants(k, 16);
-                      c.cmd->Dispatch(groups((w + 1) / 2, 8), groups((rows + 1) / 2, 8), 1);
+                      gpuDispatch(c.cmd, groups((w + 1) / 2, 8), groups((rows + 1) / 2, 8), 1);
                       k[14] = blockTexel | 2u << 8;
                       c.computeConstants(k, 16);
-                      c.cmd->Dispatch(groups(w, 8), groups(rows, 8), 1);
+                      gpuDispatch(c.cmd, groups(w, 8), groups(rows, 8), 1);
                   }
               });
     // The sky dome for R's escaping rays (GiSky.hlsli: atmosphereSkyRadianceCloudy): mode 3, a dispatch per run of bands
@@ -470,7 +470,7 @@ void cloudsRecord(FramePassContext& fc, TextureRef transmittanceLut)
                           const uint32_t k[16] = { recordSrv, c.uav(dome), 0xFFFFFFFFu, 1, kDomeWidth, kDomeHeight, 3, band * kDomeBandRows, c.srv(transmittanceLut),
                                                    0xFFFFFFFFu, 0xFFFFFFFFu, c.srv(msTable), 0xFFFFFFFFu, 0xFFFFFFFFu, 0, sunSteps };
                           c.computeConstants(k, 16);
-                          c.cmd->Dispatch(groups(kDomeWidth, 8), run, 1);  // (a band is one row of 8 x 8 groups: kDomeBandRows)
+                          gpuDispatch(c.cmd, groups(kDomeWidth, 8), run, 1);  // (a band is one row of 8 x 8 groups: kDomeBandRows)
                           band += run;
                       }
                   });

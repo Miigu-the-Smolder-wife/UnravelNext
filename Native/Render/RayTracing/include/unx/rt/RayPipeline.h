@@ -27,6 +27,7 @@ struct RayPipelineDesc
     uint32_t payloadBytes = 32;          // RtHit
     uint32_t attributeBytes = 8;         // triangle barycentrics
     uint32_t maxRecursion = 1;           // TraceRay only from ray generation
+    bool threadReordering = false;      // resolved by get() for supported shader/device variants
 };
 
 // The shared hit/miss set of RayShaders.hlsli.
@@ -47,6 +48,7 @@ public:
     // size a kernel writes: the caller stores it once in an argument buffer and a kernel rewrites Width/Height/Depth.
     D3D12_DISPATCH_RAYS_DESC dispatchDesc(uint32_t rayGen, uint32_t width, uint32_t height, uint32_t depth) const;
     // ExecuteIndirect of one D3D12_DISPATCH_RAYS_DESC at 'offset' of 'arguments' (the pass declares it IndirectArgs).
+    // Width also supplies the GPU command count (clamped to one); zero-width chunks are not submitted to DXR.
     void dispatchIndirect(ID3D12GraphicsCommandList7* cmd, ID3D12Resource* arguments, uint64_t offset) const;
     // The descriptions of the ray generation shaders with Width = Height = Depth = 0, kDispatchDescStride apart (shader i
     // at i x kDispatchDescStride), in an upload buffer that lives as long as the pipeline: a pass whose dispatch sizes a
@@ -71,5 +73,6 @@ private:
     D3D12_GPU_VIRTUAL_ADDRESS m_miss = 0, m_hit = 0;
     uint64_t m_missStride = 0, m_missBytes = 0, m_hitStride = 0, m_hitBytes = 0;
     double m_createMs = 0;
+    bool m_threadReordering = false;
 };
 } // namespace unx::render::rt

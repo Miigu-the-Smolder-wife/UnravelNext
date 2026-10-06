@@ -171,7 +171,7 @@
 #include "Passes/GI/ScreenProbes.hlsli"
 #include "Passes/GI/GiCache.hlsli"
 #include "Passes/Reflection/Reflection.hlsli"
-#if SHADE_PART == 2 && !AREA_LOBES
+#if (SHADE_PART == 2 || SHADE_PART == 4) && !AREA_LOBES
 #include "Passes/GI/GiSource.hlsli"
 #include "Passes/GI/LumenShortRangeAO.hlsli"
 #endif
@@ -211,7 +211,7 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
     // [measured, city 4K: shading 1.257 -> 1.191 ms against loading the tile, then the pixel]. The probe condition is
     // uniform (root constants), so the whole group reaches the barrier.
     const uint lane = tid.y * M_TILE + tid.x;
-#if SHADE_PART == 2 && !PLANAR
+#if (SHADE_PART == 2 || SHADE_PART == 4) && !PLANAR
     const bool probeTile = !AREA_LOBES && P[2].y != UNX_NONE && (P[4].z & 6) != 6;
     ProbeSrvs probes;
     probes.probes = P[2].y;
@@ -244,7 +244,7 @@ void main(uint3 gid : SV_GroupID, uint2 tid : SV_GroupThreadID)
         if (overflowHead == 0xFFFFFFFFu) return;  // over the list's capacity: the fallback kernel shades this tile
     }
 #endif
-#if SHADE_PART == 2 && !PLANAR
+#if (SHADE_PART == 2 || SHADE_PART == 4) && !PLANAR
     if (probeTile)
     {
         giProbeTileStore(lane, probeRecord);
@@ -477,7 +477,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     // x its texture and mask, + E's emissive decals - Resolve.hlsl, Decal.hlsli)
     if (P[1].w != UNX_NONE)
 #endif
-#if SHADE_PART == 1
+#if (SHADE_PART == 1 || SHADE_PART == 4)
     {
         Texture2D<float4> emissive = ResourceDescriptorHeap[P[1].w];
         radiance = emissive[pixel].rgb;  // material emissive x texture, resolved at the footprint, + emissive decals
@@ -496,7 +496,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
             atmosphereAirView(atm, (float2(pixel) + 0.5) / float2(g_viewWidth, g_viewHeight), linearZ, airInscatter, airTransmittance, E);
         else E = atmosphereSunIlluminance(atm, worldPos);
     }
-#if SHADE_PART == 1 && !MEGA_LIGHTS
+#if (SHADE_PART == 1 || SHADE_PART == 4) && !MEGA_LIGHTS
     float sunVisibility = 1;
     if (P[2].x != UNX_NONE && (P[4].z & 2048) == 0)
     {
@@ -626,8 +626,9 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
         radiance += sun * sunVisibility;
     }
 #endif
-#if SHADE_PART == 1
+#if (SHADE_PART == 1 || SHADE_PART == 4)
 
+#if SHADE_PART != 4
     // ---- local lights (main view: S's froxel lists)
     FroxelSrvs froxels;
     froxels.lights = P[5].x;
@@ -666,7 +667,7 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #else
         const uint2 range = froxelLightRange(froxels, pixel, linearZ);
         const uint indexBase = froxelIndexBase(froxels);
-#if SHADE_PART == 1
+#if (SHADE_PART == 1 || SHADE_PART == 4)
         // lighting channels: the receiver's are its instance's (the pixel's vis id), for every light of the loop below
         if (P[11].z != UNX_NONE)
         {
@@ -1075,6 +1076,8 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
     if (tileFar && NoV > 0) radiance += front * max(0.0, dot(n, tileLightsIrradiance(tileRec, pixel & (M_TILE - 1))));
 #endif
 
+#endif  // SHADE_PART != 4: local lights already supplied by MegaLights
+
     // 14.1b (L2b): the converted emissive surfaces as area lights - their diffuse irradiance on the viewer's side of n
     // (EmissiveDirect.hlsl: quadtree nodes as horizon-clipped Lambert polygons; the specular side is the reflection
     // path's, which sees the emissive geometry: B2). Node shadows: 14.3 (L3). Foliage's back side: not yet.
@@ -1089,14 +1092,20 @@ ShadedPixel shadeSurface(uint2 pixel, uint word, uint materialIndex, GpuMaterial
 #endif
     }
 #endif
-#endif  // SHADE_PART == 1 (the sun, the local lights, the tile term, the emissive irradiance)
+#endif  // direct light
+
+#if SHADE_PART == 4
+    // Same addition boundary as part 2, after part 1's float32 direct radiance.
+    Texture2D<float4> megaLights = ResourceDescriptorHeap[P[10].y];
+    radiance += megaLights[pixel].rgb / g_exposure;
+#endif
 
 #if AREA_LOBES
     {
         RWTexture2D<float4> lobes = ResourceDescriptorHeap[P[9].z];
         lobes[pixel] = float4(radiance * g_exposure, 0);  // (exposed: f16 range)
     }
-#elif SHADE_PART == 2
+#elif SHADE_PART == 2 || SHADE_PART == 4
     // ---- indirect (R): screen probes (main view) or the world cache (planar views). The viewer's side of the shading
     // normal reflects; Foliage also transmits what arrives on the other side.
     const float3 nv = NoV > 0 ? n : -n;

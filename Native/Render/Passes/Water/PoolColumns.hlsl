@@ -1,4 +1,5 @@
 // unx-kernel: cs_6_6 main
+// unx-variants: TRANSPOSE=0,1
 // Closed basins, per evolution, last pass: one group per basin column x (0..256): the inverse FFT along z of both channels
 // (after RippleInverseRows); the basin samples z = 0..256: the previous eta (the output before this evolution: the
 // triangle stream's motion), the output texel (eta, eta_x, eta_z, phi), the source accumulation cleared.
@@ -7,11 +8,14 @@
 [numthreads(256, 1, 1)]
 void main(uint t : SV_GroupThreadID, uint x : SV_GroupID)
 {
-    RWByteAddressBuffer spectrum = ResourceDescriptorHeap[P[0].y];
+    // WaterTranspose stored a basin column as a contiguous row. The FFT's
+    // arithmetic, bit reversal and output coordinates stay unchanged.
+    ByteAddressBuffer spectrum = ResourceDescriptorHeap[P[0].y];
     [unroll] for (uint part = 0; part < 2; ++part)
     {
         const uint z = t + part * 256u;
-        const float4 v = asfloat(spectrum.Load4(16 * (z * POOL_PITCH + x)));
+        const uint at = TRANSPOSE ? x * POOL_PITCH + z : z * POOL_PITCH + x;
+        const float4 v = asfloat(spectrum.Load4(16 * at));
         const uint r = bitReverse9(z);
         g_fft[0][r] = v.xy;
         g_fft[1][r] = v.zw;

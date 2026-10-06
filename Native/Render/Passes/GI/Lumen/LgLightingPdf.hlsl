@@ -70,11 +70,11 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         if (transparency > 0)
         {
             LrcCoverage coverage = (LrcCoverage)0;
-            if (P[3].x != 0xFFFFFFFFu) coverage = lrcCoverageChecked(lrcParams(P[3].x), P[3].y, probePosition[atlas].xyz, lgRcDither(atlas));
+            if (P[3].x != 0xFFFFFFFFu) coverage = lgRcCoverageAt(lrcParams(P[3].x), P[3].y, probe, probePosition[atlas].xyz, lgRcDither(atlas), lgRcPrepared());
             if (coverage.valid)
-                lighting += lrcSample(lrcParams(P[3].x), P[3].y, P[3].z, 0xFFFFFFFFu, coverage, probePosition[atlas].xyz,
+                lighting += lgRcSample(lrcParams(P[3].x), P[3].y, P[3].z, 0xFFFFFFFFu, coverage, probe, probePosition[atlas].xyz,
                                       lgSphere((float2(thread.xy) + lgTexelCentre(lgTileOfPixel(lgProbePixel(adaptive, probe)))) / (float)LG_TRACE_RES),
-                                      probePosition[atlas].xyz).rgb * (g_exposure * transparency);
+                                      probePosition[atlas].xyz, lgRcPrepared()).rgb * (g_exposure * transparency);
             else lighting = 1;
         }
         value = dot(lighting, float3(0.2126, 0.7152, 0.0722));

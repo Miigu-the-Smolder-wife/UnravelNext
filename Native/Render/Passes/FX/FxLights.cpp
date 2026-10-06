@@ -193,7 +193,7 @@ void particleLights(FramePassContext& fc, const ViewResources& main)
                       c.cmd->SetPipelineState(shaders.compute("Passes/FX/FxLights.STEP3"));
                       c.computeConstants(k, 32);
                       c.bindFrameConstants(frameConstants);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                   });
         g.addPass("fx.lights.histogram", QueueType::Graphics,
                   [=](PassBuilder& b) {
@@ -207,7 +207,7 @@ void particleLights(FramePassContext& fc, const ViewResources& main)
                       c.cmd->SetPipelineState(shaders.compute("Passes/FX/FxLights.STEP2"));
                       c.computeConstants(k, 32);
                       c.bindFrameConstants(frameConstants);
-                      c.cmd->Dispatch(chunks, 1, 1);
+                      gpuDispatch(c.cmd, chunks, 1, 1);
                   });
         g.addPass("fx.lights.cut", QueueType::Graphics,
                   [=](PassBuilder& b) {
@@ -221,7 +221,7 @@ void particleLights(FramePassContext& fc, const ViewResources& main)
                       c.cmd->SetPipelineState(shaders.compute("Passes/FX/FxLights.STEP4"));
                       c.computeConstants(k, 32);
                       c.bindFrameConstants(frameConstants);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                   });
     }
     if (chunks)
@@ -242,7 +242,7 @@ void particleLights(FramePassContext& fc, const ViewResources& main)
                       c.cmd->SetPipelineState(shaders.compute("Passes/FX/FxLights.STEP0"));
                       c.computeConstants(k, 32);
                       c.bindFrameConstants(frameConstants);
-                      c.cmd->Dispatch(chunks, 1, 1);
+                      gpuDispatch(c.cmd, chunks, 1, 1);
                   });
     g.addPass("fx.lights.write", QueueType::Graphics,
               [=](PassBuilder& b) {
@@ -258,7 +258,7 @@ void particleLights(FramePassContext& fc, const ViewResources& main)
                   c.cmd->SetPipelineState(shaders.compute("Passes/FX/FxLights.STEP1"));
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
-                  c.cmd->Dispatch((std::max(slots, 1u) + 63) / 64, 1, 1);
+                  gpuDispatch(c.cmd, (std::max(slots, 1u) + 63) / 64, 1, 1);
               });
     if (perParticle)
     {
@@ -276,7 +276,7 @@ void particleLights(FramePassContext& fc, const ViewResources& main)
                       c.cmd->SetPipelineState(shaders.compute("Passes/FX/FxLights.STEP5"));
                       c.computeConstants(k, 32);
                       c.bindFrameConstants(frameConstants);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                   });
         g.addPass("fx.lights.particles", QueueType::Graphics,
                   [=](PassBuilder& b) {
@@ -291,7 +291,7 @@ void particleLights(FramePassContext& fc, const ViewResources& main)
                       c.cmd->SetPipelineState(shaders.compute("Passes/FX/FxLights.STEP6"));
                       c.computeConstants(k, 32);
                       c.bindFrameConstants(frameConstants);
-                      c.cmd->Dispatch(chunks, 1, 1);
+                      gpuDispatch(c.cmd, chunks, 1, 1);
                   });
     }
 }

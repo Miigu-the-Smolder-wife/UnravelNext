@@ -325,12 +325,14 @@ int main(int argc, char** argv)
 {
     try
     {
-        bool debugLayer = true, time = false, warp = false;
+        bool debugLayer = true, time = false, warp = false, spectrumCheck = false, equilibriumCheck = false;
         for (int i = 1; i < argc; ++i)
         {
             if (std::string(argv[i]) == "--no-debug-layer") debugLayer = false;
             if (std::string(argv[i]) == "--time") time = true;
             if (std::string(argv[i]) == "--warp") warp = true;
+            if (std::string(argv[i]) == "--spectrum-check") spectrumCheck = true;
+            if (std::string(argv[i]) == "--equilibrium-check") equilibriumCheck = true;
         }
         if (warp && time) fail("--time measures hardware; WARP runs correctness only");
         Gpu gpu(debugLayer, warp);
@@ -340,6 +342,94 @@ int main(int argc, char** argv)
         at.yaw = float(kPi / 6);
         PoolDesc bath;
         bath.sizeX = 4.0f; bath.sizeZ = 3.0f; bath.depth = 0.6f;
+
+        if (equilibriumCheck)
+        {
+            Pool reference(gpu.device, gpu.shaders, bath), optimized(gpu.device, gpu.shaders, bath);
+            // An explicit zero replacement retains the complete reference
+            // evolution; the newly created basin can keep its exact fixed point.
+            reference.setState(std::vector<float>(kSamples * 2, 0));
+            uint64_t checked = 0;
+            double seconds = 0;
+            for (uint64_t frame = 0; frame < 12; ++frame)
+            {
+                seconds += dt + (frame == 4 ? 10.0 : 0.0);
+                std::vector<PoolSource> source;
+                if (frame == 2 || frame == 5 || frame == 8)
+                {
+                    PoolSource splash;
+                    splash.x = at.centre[0]; splash.z = at.centre[2];
+                    splash.impulse = frame == 2 ? 0.0f : 0.5f;
+                    splash.volume = frame == 8 ? 1e-4f : 0.0f;
+                    source.push_back(splash);
+                }
+                const Frame expected = step(gpu, reference, frame, at, seconds, dt, source, true, true);
+                const Frame actual = step(gpu, optimized, frame, at, seconds, dt, source, true, true);
+                for (const auto pair : {std::pair{&expected.field, &actual.field}, std::pair{&expected.vertices, &actual.vertices},
+                                       std::pair{&expected.velocities, &actual.velocities}})
+                {
+                    W_CHECK(pair.first->size() == pair.second->size(), "equilibrium output size differs");
+                    for (size_t i = 0; i < pair.first->size(); ++i)
+                    {
+                        W_CHECK(std::isfinite((*pair.second)[i]) && (*pair.first)[i] == (*pair.second)[i],
+                            "equilibrium frame %llu value %zu differs: %.9g / %.9g", (unsigned long long)frame, i, (*pair.first)[i], (*pair.second)[i]);
+                        ++checked;
+                    }
+                }
+                W_CHECK(std::memcmp(expected.drawArgs, actual.drawArgs, sizeof expected.drawArgs) == 0, "equilibrium draw count differs");
+            }
+            std::printf("PASS pool exact equilibrium: %llu equal finite values; field, mesh, normals, velocity; ten-second idle gap, zero source, first impulse and displaced volume\n",
+                (unsigned long long)checked);
+            return 0;
+        }
+        if (spectrumCheck)
+        {
+            uint64_t hash = 14695981039346656037ull, values = 0;
+            auto append = [&](const std::vector<float>& data) {
+                for (float v : data)
+                {
+                    W_CHECK(std::isfinite(v), "non-finite compact spectrum output");
+                    uint32_t bits; std::memcpy(&bits, &v, sizeof bits);
+                    for (uint32_t b = 0; b < 4; ++b) { hash ^= (bits >> (8 * b)) & 255u; hash *= 1099511628211ull; }
+                    ++values;
+                }
+            };
+            for (uint32_t fixture = 0; fixture < 3; ++fixture)
+            {
+                PoolDesc d = bath;
+                d.depth = fixture == 2 ? 0.0f : 0.6f;
+                d.surfaceFilm = fixture == 1 ? 1.0f : 0.0f;
+                Pool pool(gpu.device, gpu.shaders, d);
+                std::vector<float> initial(kSamples * 2);
+                for (uint32_t z = 0; z < Q; ++z) for (uint32_t x = 0; x < Q; ++x)
+                {
+                    const size_t i = size_t(z) * Q + x;
+                    initial[2 * i] = float(0.003 * std::cos(37 * kPi * x / C) * std::cos(23 * kPi * z / C) + 0.001 * std::cos(kPi * x));
+                    initial[2 * i + 1] = float(0.001 * std::cos(kPi * z / C));
+                }
+                pool.setState(initial);
+                double seconds = 0;
+                for (uint64_t f = 0; f < 16; ++f)
+                {
+                    const float interval = f == 13 ? 0.0f : float((1.0 + 0.13 * double(f % 3)) / 60.0);
+                    seconds += interval + (f == 10 ? 0.125 : 0.0);
+                    if (f == 7) pool.setState(initial);
+                    std::vector<PoolSource> input;
+                    if (f % 3 == 1)
+                    {
+                        PoolSource source;
+                        source.x = at.centre[0]; source.z = at.centre[2];
+                        source.radius = 0.06f; source.impulse = 0.5f; source.volume = f % 2 ? 1e-4f : -1e-4f;
+                        input.push_back(source);
+                    }
+                    const Frame result = step(gpu, pool, f, at, seconds, interval, input, true, true);
+                    append(result.field); append(result.vertices); append(result.velocities);
+                }
+            }
+            std::printf("pool spectrum fingerprint: %llu finite values %016llx; field, vertices, velocity, sources, state replacement, gap, zero dt, film, deep water\n",
+                        (unsigned long long)values, (unsigned long long)hash);
+            return 0;
+        }
 
         if (time)
         {

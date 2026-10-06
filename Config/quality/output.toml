@@ -19,6 +19,12 @@ band_pixels = 0
 # the rest still slower). The fences (62-80 us each, RenderGraph.h) and the two queues sharing the SMs of latency-bound
 # kernels cost more than the overlap gave. [] = one queue.
 async_compute_passes = []
+# 0: serial; 1: final gather + short-range AO, overlapping shadow/reflection work;
+# 2: also surface cache and radiance volumes. Explicit pass names above take precedence.
+# Integer only. Resource hazards and external producer lifetimes still control all waits.
+async_lighting = 1
+# Exact integer range reductions shared across wave lanes; scalar reference remains selectable.
+upscale_tsr_wave_operations = false
 # Temporal upscale (user decisions 2026-09-28: internal resolution + temporal upscale for the 4K budget, then for 1440p
 # and 1080p as well): outputs of at least render_scale_min_height render the main view at output height x render_scale,
 # at most render_height_max (same aspect), with a sub-pixel jitter, and M's temporal upscale

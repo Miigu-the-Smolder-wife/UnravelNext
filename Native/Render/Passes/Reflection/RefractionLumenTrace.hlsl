@@ -1,5 +1,5 @@
 // unx-kernel: lib_6_6 main
-// unx-variants: SKY=0,1
+// unx-variants: SKY=0,1 HAIR=0,1 REORDER=0,1,2
 // Refraction rays on the Lumen path (reflection.lumen_only; FrameServices::traceRefractions): RefractionTrace.hlsl's
 // job format, media and exits (water's fluid streams, solid glass, total internal reflection, absorption), with the
 // scene hit lit from the surface cache (ReflectionLumenHit.hlsli) - no world GI cache.

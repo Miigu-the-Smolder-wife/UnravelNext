@@ -1,6 +1,7 @@
 #include "unx/rt/RayPipeline.h"
 
 #include "unx/core/File.h"
+#include <nvapi.h>
 
 #include <algorithm>
 #include <chrono>
@@ -15,6 +16,30 @@ namespace
 {
 std::wstring wide(const std::string& s) { return std::wstring(s.begin(), s.end()); }
 uint64_t alignUp(uint64_t v, uint64_t a) { return (v + a - 1) / a * a; }
+// Match UE's local-thread extension scope. Never leave NVAPI state enabled for
+// another pipeline or a Unity plugin sharing this device/thread.
+struct RayExtensionScope
+{
+    ID3D12Device* device = nullptr;
+    explicit RayExtensionScope(ID3D12Device* d, bool enabled)
+    {
+        if (!enabled) return;
+        const NvAPI_Status status = NvAPI_D3D12_SetNvShaderExtnSlotSpaceLocalThread(d, Device::kRayExtensionSlot, Device::kRayExtensionSpace);
+        if (status != NVAPI_OK) fail("ray reordering extension setup failed: %d", (int)status);
+        device = d;
+    }
+    ~RayExtensionScope()
+    {
+        if (device) NvAPI_D3D12_SetNvShaderExtnSlotSpaceLocalThread(device, ~0u, 0);
+    }
+    void reset()
+    {
+        if (!device) return;
+        const NvAPI_Status status = NvAPI_D3D12_SetNvShaderExtnSlotSpaceLocalThread(device, ~0u, 0);
+        device = nullptr;
+        if (status != NVAPI_OK) fail("ray reordering extension reset failed: %d", (int)status);
+    }
+};
 } // namespace
 
 RayPipelineDesc standardRayPipeline(std::string library, std::vector<std::string> rayGen)
@@ -31,6 +56,7 @@ RayPipelineDesc standardRayPipeline(std::string library, std::vector<std::string
 
 RayPipeline::RayPipeline(Device& device, ShaderLibrary& shaders, const RayPipelineDesc& desc) : m_device(device)
 {
+    m_threadReordering = desc.threadReordering;
     const std::vector<uint8_t> dxil = readBinaryFile(shaders.directory() / (desc.library + ".dxil"));
 
     // Every export once; hit groups import from them. Names must outlive CreateStateObject.
@@ -84,9 +110,14 @@ RayPipeline::RayPipeline(Device& device, ShaderLibrary& shaders, const RayPipeli
     sub.push_back({ D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE, &global });
     D3D12_STATE_OBJECT_DESC so{ D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE, (UINT)sub.size(), sub.data() };
     const auto t0 = std::chrono::steady_clock::now();
-    check(device.d3d()->CreateStateObject(&so, IID_PPV_ARGS(&m_state)), ("CreateStateObject " + desc.library).c_str());
+    {
+        RayExtensionScope extension(device.d3d(), m_threadReordering);
+        check(device.d3d()->CreateStateObject(&so, IID_PPV_ARGS(&m_state)), ("CreateStateObject " + desc.library).c_str());
+        extension.reset();
+    }
     m_createMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     m_state->SetName(wide(desc.library).c_str());
+    if (m_threadReordering) logf("RayPipeline: thread reordering active for %s\n", desc.library.c_str());
 
     // Shader table: ray generation records (each 64 B aligned), then the miss and hit tables.
     ComPtr<ID3D12StateObjectProperties> props;
@@ -189,13 +220,21 @@ void RayPipeline::dispatch(ID3D12GraphicsCommandList7* cmd, uint32_t rayGen, uin
     const D3D12_DISPATCH_RAYS_DESC d = dispatchDesc(rayGen, width, height, depth);
     if (width == 0 || height == 0 || depth == 0) return;
     cmd->SetPipelineState1(m_state.Get());
-    cmd->DispatchRays(&d);
+    if (m_threadReordering) cmd->SetComputeRootDescriptorTable(Device::kRayExtensionRoot, m_device.rayExtensionUav());
+    gpuDispatchRays(cmd, &d);
 }
 
 void RayPipeline::dispatchIndirect(ID3D12GraphicsCommandList7* cmd, ID3D12Resource* arguments, uint64_t offset) const
 {
     cmd->SetPipelineState1(m_state.Get());
-    cmd->ExecuteIndirect(m_indirect.Get(), 1, arguments, offset, nullptr, 0);
+    if (m_threadReordering) cmd->SetComputeRootDescriptorTable(Device::kRayExtensionRoot, m_device.rayExtensionUav());
+    // Compact lists leave empty capacity chunks. Use Width as the GPU command
+    // count: MaxCommandCount clamps every positive width to one and skips zero
+    // without a CPU readback. Empty indirect DXR launches stalled the async GI
+    // queue at full-resolution 1440p even though the same rays dispatched
+    // directly, or the nonempty commands alone, completed normally.
+    gpuExecuteIndirect(cmd, m_indirect.Get(), 1, arguments, offset, arguments,
+        offset + offsetof(D3D12_DISPATCH_RAYS_DESC, Width));
 }
 
 namespace
@@ -208,7 +247,30 @@ RayPipeline& RayPipeline::get(Device& device, ShaderLibrary& shaders, const RayP
 {
     std::lock_guard lock(g_pipelineMutex);
     auto& slot = g_pipelines[{ &device, desc.library }];
-    if (!slot) slot = std::make_unique<RayPipeline>(device, shaders, desc);
+    if (!slot)
+    {
+        RayPipelineDesc resolved = desc;
+        char hairReference[2]{};
+        GetEnvironmentVariableA("UNX_RAY_HAIR_REFERENCE", hairReference, sizeof hairReference);
+        if (hairReference[0] == '1' && resolved.library.ends_with(".HAIR0")) resolved.library.back() = '1';
+        const bool hasReorderVariant = desc.library.starts_with("Passes/Reflection/ReflectionLumenTrace") ||
+            desc.library.starts_with("Passes/Reflection/RefractionLumenTrace.") ||
+            desc.library.starts_with("Passes/GI/Lumen/LgTrace") ||
+            desc.library.starts_with("Passes/GI/LumenRadianceCacheTrace") ||
+            desc.library.starts_with("Passes/GI/LumenTranslucencyVolumeTrace") ||
+            desc.library.starts_with("Passes/SurfaceCache/CardRadiosityTrace") || desc.library == "RayTracing/Tests/TraceTest";
+        if (hasReorderVariant)
+        {
+            // Process-local reference switch for complete-frame A/B runs.
+            char reference[8]{};
+            GetEnvironmentVariableA("UNX_RAY_REORDER", reference, sizeof reference);
+            // Opt-in only: the complete Bathhouse frame regressed with the
+            // current post-traversal hints. Keep the portable path as default.
+            resolved.threadReordering = device.caps().nvapiThreadReordering && (reference[0] == '1' || reference[0] == '2');
+            resolved.library += resolved.threadReordering ? (reference[0] == '2' ? ".REORDER2" : ".REORDER1") : ".REORDER0";
+        }
+        slot = std::make_unique<RayPipeline>(device, shaders, resolved);
+    }
     return *slot;
 }
 

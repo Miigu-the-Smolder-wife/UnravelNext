@@ -161,8 +161,8 @@ WaterSunMapOutput WaterSunMap::record(RenderGraph& g, ShaderLibrary& shaders, ui
                       std::memcpy(&k[4], dr.medium, 16);
                       c.graphicsConstants(k, 9);
                       const uint32_t groups = (std::min(dr.capacity, dr.knownTriangles) + 31) / 32;
-                      if (dr.meshArgs.valid()) c.cmd->ExecuteIndirect(meshSignature, 1, c.resource(dr.meshArgs), dr.meshArgsOffset, nullptr, 0);
-                      else c.cmd->DispatchMesh(std::min(65535u, groups), (groups + 65534) / 65535, 1);
+                      if (dr.meshArgs.valid()) gpuExecuteIndirect(c.cmd, meshSignature, 1, c.resource(dr.meshArgs), dr.meshArgsOffset, nullptr, 0);
+                      else gpuDispatchMesh(c.cmd, std::min(65535u, groups), (groups + 65534) / 65535, 1);
                   }
               });
     // Caustics (WaterCaustics.hlsl): the map's texels' refracted sunlight splatted onto the slices.
@@ -177,7 +177,7 @@ WaterSunMapOutput WaterSunMap::record(RenderGraph& g, ShaderLibrary& shaders, ui
                   const uint32_t k[4] = { 0, 0, c.uav(overflow), 4 };  // ViewGridClear: the counter words only
                   c.cmd->SetPipelineState(counterClear);
                   c.computeConstants(k, 4);
-                  c.cmd->Dispatch(1, 1, 1);
+                  gpuDispatch(c.cmd, 1, 1, 1);
               });
     ID3D12PipelineState* zero = shaders.compute("Passes/Water/WaterCausticsClear");
     ID3D12PipelineState* splat = shaders.compute("Passes/Water/WaterCaustics");
@@ -192,14 +192,14 @@ WaterSunMapOutput WaterSunMap::record(RenderGraph& g, ShaderLibrary& shaders, ui
                   const uint32_t words = levelWords * kCausticSlices, k[4] = { 0, 0, c.uav(levels), words };  // ViewGridClear: the counter words only
                   c.cmd->SetPipelineState(counterClear);
                   c.computeConstants(k, 4);
-                  c.cmd->Dispatch(std::max(1u, (words + 63) / 64), 1, 1);
+                  gpuDispatch(c.cmd, std::max(1u, (words + 63) / 64), 1, 1);
               });
     g.addPass("w.sun map caustics clear", QueueType::Graphics, [&](PassBuilder& b) { b.use(caustics, Use::UavCompute); },
               [=](PassContext& c) {
                   const uint32_t k[4] = { c.uav(caustics), nc, kCausticSlices, 0 };
                   c.cmd->SetPipelineState(zero);
                   c.computeConstants(k, 4);
-                  c.cmd->Dispatch((nc + 7) / 8, (nc + 7) / 8, kCausticSlices);
+                  gpuDispatch(c.cmd, (nc + 7) / 8, (nc + 7) / 8, kCausticSlices);
               });
     g.addPass("w.sun map caustics", QueueType::Graphics,
               [&](PassBuilder& b) {
@@ -216,7 +216,7 @@ WaterSunMapOutput WaterSunMap::record(RenderGraph& g, ShaderLibrary& shaders, ui
                   c.cmd->SetPipelineState(splat);
                   c.computeConstants(k, 8);
                   const uint32_t blocks = (n + 1) / 2;  // one thread per 2 x 2 block of map texels (WaterCaustics.hlsl)
-                  c.cmd->Dispatch((blocks + 7) / 8, (blocks + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (blocks + 7) / 8, (blocks + 7) / 8, 1);
               });
     g.addPass("w.sun map caustics pull", QueueType::Graphics,
               [&](PassBuilder& b) {
@@ -227,7 +227,7 @@ WaterSunMapOutput WaterSunMap::record(RenderGraph& g, ShaderLibrary& shaders, ui
                   const uint32_t k[4] = { c.uav(caustics), nc, kCausticSlices, c.uav(levels) };
                   c.cmd->SetPipelineState(pull);
                   c.computeConstants(k, 4);
-                  c.cmd->Dispatch((nc + 7) / 8, (nc + 7) / 8, kCausticSlices);
+                  gpuDispatch(c.cmd, (nc + 7) / 8, (nc + 7) / 8, kCausticSlices);
               });
     return out;
 }

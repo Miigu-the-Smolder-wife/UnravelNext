@@ -123,7 +123,7 @@ void particleShadows(FramePassContext& fc, const ViewResources& main)
                   c.cmd->SetPipelineState(shaders.compute("Passes/FX/FxShadow.STEP0"));
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
-                  c.cmd->Dispatch((uint32_t)((texels + 255) / 256), 1, 1);
+                  gpuDispatch(c.cmd, (uint32_t)((texels + 255) / 256), 1, 1);
               });
     g.addPass("fx.shadow.splat", QueueType::Graphics,
               [=](PassBuilder& b) {
@@ -139,7 +139,7 @@ void particleShadows(FramePassContext& fc, const ViewResources& main)
                   c.cmd->SetPipelineState(shaders.compute("Passes/FX/FxShadow.STEP1"));
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
-                  c.cmd->Dispatch((threads + 255) / 256, 1, 1);
+                  gpuDispatch(c.cmd, (threads + 255) / 256, 1, 1);
               });
     fc.resources.particleShadowParams = params;
     fc.resources.particleShadowMap = map;

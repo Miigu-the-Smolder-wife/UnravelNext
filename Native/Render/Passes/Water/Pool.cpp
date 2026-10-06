@@ -126,7 +126,11 @@ Pool::~Pool()
         if (r) m_device.deferRelease(r);
     for (auto& u : m_sourceUpload) m_device.deferRelease(u);
     for (auto& u : m_statsReadback) m_device.deferRelease(u);
-    for (uint32_t srv : m_sourceSrv) m_device.descriptors().freeResource(srv);
+    // The source views are still referenced by submitted frames, just like
+    // their upload buffers. Reusing a slot earlier redirects an old dispatch.
+    if (!m_sourceSrv.empty()) m_device.deferCall([device = &m_device, views = std::move(m_sourceSrv)] {
+        for (uint32_t srv : views) device->descriptors().freeResource(srv);
+    });
 }
 
 void Pool::toSamples(const PoolDesc& desc, const PoolPlacement& placement, double x, double z, float& u, float& v)
@@ -171,6 +175,7 @@ bool Pool::contains(const PoolDesc& desc, const PoolPlacement& placement, double
 void Pool::setState(const std::vector<float>& etaPhi)
 {
     if (etaPhi.size() != kSamples * 2) fail("pool: a state has %llu floats, expected %llu", (unsigned long long)etaPhi.size(), (unsigned long long)(kSamples * 2));
+    m_pristineEquilibrium = false;
     if (m_stateUpload) m_device.deferRelease(m_stateUpload);
     m_stateUpload = makeBuffer(m_device, kSamples * 8, D3D12_HEAP_TYPE_UPLOAD, L"pool state upload");
     void* mapped = nullptr;
@@ -192,8 +197,11 @@ void Pool::evolve(RenderGraph& g, const Refs& r, float dt, uint32_t sourceSrv, u
     // spectral state itself is never round-tripped (PoolEvolve).
     const bool increment = sourceCount > 0 || replace || meanShift != 0;
     const uint32_t flags = (increment ? 1u : 0u) | (replace ? 2u : 0u);
-    auto constants = [=](PassContext& c) {
-        uint32_t k[24] = { c.uav(modes), c.uav(spectrum), c.uav(field), c.uav(accum), 0, c.uav(previous), c.srv(twiddles), 0, sourceSrv, sourceCount };
+    enum : uint32_t { Modes = 1, Spectrum = 2, Accum = 4, Input = 8, Twiddles = 16, Table = 32 };
+    auto constants = [=](PassContext& c, uint32_t access) {
+        uint32_t k[24] = { access & Modes ? c.uav(modes) : UINT32_MAX, access & Spectrum ? c.uav(spectrum) : UINT32_MAX,
+                          UINT32_MAX, access & Accum ? c.uav(accum) : UINT32_MAX, 0, UINT32_MAX,
+                          access & Twiddles ? c.srv(twiddles) : UINT32_MAX, 0, sourceSrv, sourceCount };
         std::memcpy(&k[4], &dt, 4);
         std::memcpy(&k[7], &d.depth, 4);
         std::memcpy(&k[10], &hx, 4);
@@ -206,27 +214,77 @@ void Pool::evolve(RenderGraph& g, const Refs& r, float dt, uint32_t sourceSrv, u
         std::memcpy(&k[17], &d.sizeX, 4);
         std::memcpy(&k[18], &d.sizeZ, 4);
         k[19] = flags;
-        k[20] = c.uav(input);
-        k[21] = c.srv(table);
+        k[20] = access & Input ? c.uav(input) : UINT32_MAX;
+        k[21] = access & Table ? c.srv(table) : UINT32_MAX;
         c.computeConstants(k, 24);
     };
-    auto uses = [&](PassBuilder& pb) {
-        pb.use(modes, Use::UavCompute); pb.use(input, Use::UavCompute); pb.use(spectrum, Use::UavCompute); pb.use(field, Use::UavCompute);
-        pb.use(accum, Use::UavCompute); pb.use(previous, Use::UavCompute); pb.use(twiddles, Use::SrvCompute); pb.use(table, Use::SrvCompute);
-    };
-    auto pass = [&](const char* name, const char* kernel, uint32_t groups) {
+    auto pass = [&](const char* name, const char* kernel, uint32_t groups, uint32_t access) {
         ID3D12PipelineState* pso = m_shaders.compute(kernel);
-        g.addPass(name, QueueType::Graphics, uses, [=](PassContext& c) { c.cmd->SetPipelineState(pso); constants(c); c.cmd->Dispatch(groups, 1, 1); });
+        // Each kernel declares only the buffers it addresses. Marking every
+        // basin resource writable here serialized unrelated accesses and flushed
+        // the output/previous field even during source and spectral-only work.
+        g.addPass(name, QueueType::Graphics,
+                  [=](PassBuilder& pb) {
+                      if (access & Modes) pb.use(modes, Use::UavCompute);
+                      if (access & Spectrum) pb.use(spectrum, Use::UavCompute);
+                      if (access & Accum) pb.use(accum, Use::UavCompute);
+                      if (access & Input) pb.use(input, Use::UavCompute);
+                      if (access & Twiddles) pb.use(twiddles, Use::SrvCompute);
+                      if (access & Table) pb.use(table, Use::SrvCompute);
+                  },
+                  [=](PassContext& c) { c.cmd->SetPipelineState(pso); constants(c, access); gpuDispatch(c.cmd, groups, 1, 1); });
     };
-    if (sourceCount) pass("pool sources", "Passes/Water/PoolSplat", sourceCount);
+    if (sourceCount) pass("pool sources", "Passes/Water/PoolSplat", sourceCount, Accum);
     if (increment)
     {
-        pass("pool forward rows", "Passes/Water/PoolRows", kN);
-        pass("pool forward columns", "Passes/Water/RippleForwardColumns", kN);  // same slots: spectrum P[0].y, twiddles P[1].z
+        pass("pool forward rows", "Passes/Water/PoolRows", kN, Spectrum | Accum | Twiddles | Input);
+        pass("pool forward columns", "Passes/Water/RippleForwardColumns", kN, Spectrum | Twiddles);  // same slots: spectrum P[0].y, twiddles P[1].z
     }
-    pass("pool evolve", "Passes/Water/PoolEvolve", uint32_t((kSamples + 255) / 256));
-    pass("pool inverse rows", "Passes/Water/RippleInverseRows", kN);
-    pass("pool inverse columns", "Passes/Water/PoolColumns", kQ);
+    static const bool compactSpectrum = [] {
+        char setting[8]{}; GetEnvironmentVariableA("UNX_POOL_COMPACT_SPECTRUM", setting, sizeof setting);
+        return setting[0] != '0';
+    }();
+    pass("pool evolve", compactSpectrum ? "Passes/Water/PoolEvolve.SPECTRUM0" : "Passes/Water/PoolEvolve.SPECTRUM1", uint32_t((kSamples + 255) / 256),
+         Modes | Table | Spectrum);
+    if (compactSpectrum)
+    {
+        ID3D12PipelineState* inverseRows = m_shaders.compute("Passes/Water/PoolInverseRows");
+        g.addPass("pool inverse rows", QueueType::Graphics,
+                  [&](PassBuilder& pb) { pb.use(modes, Use::SrvCompute); pb.use(spectrum, Use::UavCompute); pb.use(twiddles, Use::SrvCompute); },
+                  [=](PassContext& c) {
+                      uint32_t k[12] = { c.srv(modes), c.uav(spectrum), 0, 0, 0, 0, c.srv(twiddles) };
+                      std::memcpy(&k[10], &hx, 4); std::memcpy(&k[11], &hz, 4);
+                      c.cmd->SetPipelineState(inverseRows); c.computeConstants(k, 12); gpuDispatch(c.cmd, kN, 1, 1);
+                  });
+    }
+    else pass("pool inverse rows", "Passes/Water/RippleInverseRows", kN, Spectrum | Twiddles);
+    static const bool transposeEnabled = [] {
+        char setting[8]{}; GetEnvironmentVariableA("UNX_POOL_TRANSPOSE", setting, sizeof setting);
+        return setting[0] == '1';
+    }();
+    BufferRef columns = spectrum;
+    if (transposeEnabled)
+    {
+        columns = g.createBuffer({ "pool transposed spectrum", uint64_t(kQ) * (kN + 1) * 16, 0 });
+    ID3D12PipelineState* transpose = m_shaders.compute("Passes/Water/WaterTranspose");
+    g.addPass("pool inverse transpose", QueueType::Graphics,
+              [&](PassBuilder& pb) { pb.use(spectrum, Use::SrvCompute); pb.use(columns, Use::UavCompute); },
+              [=](PassContext& c) {
+                  const uint32_t k[8] = { c.srv(spectrum), c.uav(columns), kQ, kN, kN + 1, kN + 1, 0, 0 };
+                  c.cmd->SetPipelineState(transpose); c.computeConstants(k, 8);
+                  gpuDispatch(c.cmd, (kQ + 15) / 16, (kN + 15) / 16, 1);
+              });
+    }
+    ID3D12PipelineState* inverse = m_shaders.compute(transposeEnabled ? "Passes/Water/PoolColumns.TRANSPOSE1" : "Passes/Water/PoolColumns.TRANSPOSE0");
+    g.addPass("pool inverse columns", QueueType::Graphics,
+              [&](PassBuilder& pb) {
+                  pb.use(columns, Use::SrvCompute); pb.use(twiddles, Use::SrvCompute);
+                  pb.use(field, Use::UavCompute); pb.use(accum, Use::UavCompute); pb.use(previous, Use::UavCompute);
+              },
+              [=](PassContext& c) {
+                  const uint32_t k[8] = { 0, c.srv(columns), c.uav(field), c.uav(accum), 0, c.uav(previous), c.srv(twiddles), 0 };
+                  c.cmd->SetPipelineState(inverse); c.computeConstants(k, 8); gpuDispatch(c.cmd, kQ, 1, 1);
+              });
 }
 
 PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& placement, double time, float frameDt, const std::vector<PoolSource>& sources)
@@ -244,6 +302,7 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
             fail("pool: source %zu at (%.6g, %.6g) lies outside the basin (samples %.6g, %.6g)", i, sources[i].x, sources[i].z, u, v);
         const float s[8] = { u, v, sources[i].radius, sources[i].impulse, sources[i].volume, 0, 0, 0 };
         std::memcpy(mapped + 32 * i, s, 32);
+        if (sources[i].impulse != 0 || sources[i].volume != 0) m_pristineEquilibrium = false;
     }
     // Every persistent resource is imported once (the graph orders passes by resource node).
     auto import = [&](ID3D12Resource* r, const char* name) { return g.importBuffer(r, { name, r->GetDesc().Width, 0 }); };
@@ -280,7 +339,7 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
                       const uint32_t k[8] = { c.uav(modes), 0, c.uav(field), c.uav(accum), 0, c.uav(previous), 0, 0 };
                       c.cmd->SetPipelineState(clear);
                       c.computeConstants(k, 8);
-                      c.cmd->Dispatch(uint32_t((kSamples + 255) / 256), 1, 1);
+                      gpuDispatch(c.cmd, uint32_t((kSamples + 255) / 256), 1, 1);
                   });
         m_initialised = true;
     }
@@ -294,7 +353,11 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
     }
     // The interval since the last evolution: beyond one frame (the basin was not recorded), first to time - frameDt.
     double gap = m_started ? time - m_time : 0.0;
-    if (gap > double(frameDt) * (1 + 1e-6) + 1e-9)
+    // PoolClear establishes the exact zero fixed point. Rotation, damping and
+    // inverse FFTs of that field cannot create a wave. Once any forcing or state
+    // replacement occurs, retain the complete evolution for the basin's lifetime.
+    if (m_pristineEquilibrium) {}
+    else if (gap > double(frameDt) * (1 + 1e-6) + 1e-9)
     {
         evolve(g, refs, float(gap - double(frameDt)), 0, 0, 0.0f, replace);
         gap = frameDt;
@@ -324,14 +387,14 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
                       const uint32_t k[4] = { c.srv(field), c.uav(stats), 0, 0 };
                       c.cmd->SetPipelineState(rows);
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch(kQ, 1, 1);
+                      gpuDispatch(c.cmd, kQ, 1, 1);
                   });
         g.addPass("pool stats reduce", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(stats, Use::UavCompute); },
                   [=](PassContext& c) {
                       const uint32_t k[4] = { 0, c.uav(stats), 0, 0 };
                       c.cmd->SetPipelineState(reduce);
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                   });
         const uint32_t ring = uint32_t(m_statsReadback.size()), writeSlot = uint32_t(m_records % ring), readSlot = uint32_t((m_records + 1) % ring);
         ID3D12Resource* rb = m_statsReadback[writeSlot].Get();
@@ -365,7 +428,7 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
         ID3D12PipelineState* grid = m_shaders.compute("Passes/Water/PoolIndices");
         g.addPass("pool grid indices", QueueType::Graphics,
                   [&](PassBuilder& pb) { pb.use(indices, Use::UavCompute); pb.onSubmitted([this](Queue&, uint64_t) { m_indicesReady = true; }); },
-                  [=](PassContext& c) { const uint32_t k[4] = {c.uav(indices), 0, 0, 0}; c.computeConstants(k, 4); c.cmd->SetPipelineState(grid); c.cmd->Dispatch(uint32_t((kVertices + 255) / 256), 1, 1); });
+                  [=](PassContext& c) { const uint32_t k[4] = {c.uav(indices), 0, 0, 0}; c.computeConstants(k, 4); c.cmd->SetPipelineState(grid); gpuDispatch(c.cmd, uint32_t((kVertices + 255) / 256), 1, 1); });
     }
     const BufferRef vertices = g.createBuffer({ "pool surface vertices", kSamples * 32, 0 }), velocities = g.createBuffer({ "pool surface velocities", kSamples * 16, 0 }),
                     draw = g.createBuffer({ "pool surface draw", 16, 0 });
@@ -393,7 +456,7 @@ PoolOutput Pool::record(RenderGraph& g, uint64_t frame, const PoolPlacement& pla
                   std::memcpy(&k[16], &hz, 4);
                   c.cmd->SetPipelineState(mesh);
                   c.computeConstants(k, 20);
-                  c.cmd->Dispatch(uint32_t((kSamples + 63) / 64), 1, 1);
+                  gpuDispatch(c.cmd, uint32_t((kSamples + 63) / 64), 1, 1);
               });
 
     PoolOutput out;

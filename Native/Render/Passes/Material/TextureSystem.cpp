@@ -1,8 +1,11 @@
 #include "unx/material/TextureSystem.h"
 
 #include "unx/core/Log.h"
+#include "unx/core/Jobs.h"
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
@@ -80,9 +83,19 @@ struct Image
 
 // Destination texel i of a dimension n -> max(1, n / 2) covers source [i f, (i + 1) f), f = n / dn: weights of the
 // covered source texels (fractional at the ends when n is odd). Sums to 1.
-std::vector<std::vector<std::pair<uint32_t, double>>> boxWeights(uint32_t n, uint32_t dn)
+struct BoxWeights
 {
-    std::vector<std::vector<std::pair<uint32_t, double>>> out(dn);
+    // A mip step n -> max(1, n / 2) overlaps at most three source texels,
+    // including odd extents. Keep each axis in one allocation.
+    std::pair<uint32_t, double> values[3];
+    uint32_t count = 0;
+    const auto* begin() const { return values; }
+    const auto* end() const { return values + count; }
+};
+
+std::vector<BoxWeights> boxWeights(uint32_t n, uint32_t dn)
+{
+    std::vector<BoxWeights> out(dn);
     const double f = (double)n / dn;
     for (uint32_t i = 0; i < dn; ++i)
     {
@@ -90,7 +103,7 @@ std::vector<std::vector<std::pair<uint32_t, double>>> boxWeights(uint32_t n, uin
         for (uint32_t j = (uint32_t)std::floor(lo); j < n && j < hi; ++j)
         {
             const double overlap = std::min(hi, j + 1.0) - std::max(lo, (double)j);
-            if (overlap > 0) out[i].push_back({ j, overlap / f });
+            if (overlap > 0) out[i].values[out[i].count++] = { j, overlap / f };
         }
     }
     return out;
@@ -481,6 +494,8 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
     const scene::Scene* s = gpuScene.source();
     if (!s) fail("M textures: the GPU scene has no source scene");
     if (m_device == &device && m_source == s && m_revision == gpuScene.revision()) return;
+    const auto syncStart = std::chrono::steady_clock::now();
+    const auto elapsedMs = [](auto start) { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(); };
     m_device = &device;
     m_source = s;
     m_revision = gpuScene.revision();
@@ -505,6 +520,8 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
     DescriptorHeaps& heaps = device.descriptors();
     if (fingerprint != m_fingerprint)
     {
+        const double identityMs = elapsedMs(syncStart);
+        double chainsMs = 0, uploadWaitMs = 0;
         clear();
         m_fingerprint = fingerprint;
         m_textures.resize(s->textures.size());
@@ -576,17 +593,44 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
             cl.list->Barrier(1, &g);
             staging->Unmap(0, nullptr);
             const uint64_t fence = device.submit(cl);
+            const auto waitStart = std::chrono::steady_clock::now();
             device.queue(QueueType::Graphics).waitCpu(fence);
+            uploadWaitMs += elapsedMs(waitStart);
             batch.clear();
             batchBytes = 0;
         };
 
-        // Scene textures (kind 0) and the cut-out coverage of alpha-tested base colours (kind 1).
-        for (uint32_t job = 0; job < 2 * (uint32_t)s->textures.size(); ++job)
+        // Cook/hash/cache I/O is independent per image. Keep only four results
+        // ahead of the upload batch, so startup parallelism has bounded memory.
+        constexpr uint32_t kCookAhead = 4;
+        std::array<MipChain, kCookAhead> prepared;
+        std::vector<uint8_t> needsCoverage(s->textures.size(), 0);
+        for (const auto& material : s->materials)
+            if (material.alphaCutoff > 0 && material.baseColorTexture < needsCoverage.size())
+                needsCoverage[material.baseColorTexture] = 1;
+        std::vector<uint32_t> cookJobs;
+        for (uint32_t texture = 0; texture < s->textures.size(); ++texture)
         {
-            const uint32_t i = job >> 1, kind = job & 1;
+            cookJobs.push_back(texture * 2);
+            if (needsCoverage[texture]) cookJobs.push_back(texture * 2 + 1);
+        }
+        const uint32_t jobs = (uint32_t)cookJobs.size();
+        // Scene textures (kind 0) and the cut-out coverage of alpha-tested base colours (kind 1).
+        for (uint32_t job = 0; job < jobs; ++job)
+        {
+            if (job % kCookAhead == 0)
+            {
+                const auto cookStart = std::chrono::steady_clock::now();
+                Jobs::instance().parallelFor(std::min(kCookAhead, jobs - job), [&](uint32_t ahead) {
+                    const uint32_t next = cookJobs[job + ahead], texture = next >> 1, coverage = next & 1;
+                    prepared[ahead] = g_chainProvider ? g_chainProvider(*s, texture, coverage) :
+                        coverage == 0 ? buildMipChain(*s, texture) : buildCoverageChain(*s, texture);
+                });
+                chainsMs += elapsedMs(cookStart);
+            }
+            const uint32_t i = cookJobs[job] >> 1, kind = cookJobs[job] & 1;
             Pending p;
-            p.chain = g_chainProvider ? g_chainProvider(*s, i, kind) : kind == 0 ? buildMipChain(*s, i) : buildCoverageChain(*s, i);
+            p.chain = std::move(prepared[job % kCookAhead]);
             if (p.chain.levels.empty()) continue;
             if (kind == 0) m_slopeRange[i] = p.chain.slopeRange;
             D3D12_RESOURCE_DESC d{};
@@ -638,6 +682,8 @@ void TextureSystem::sync(Device& device, const GpuScene& gpuScene)
             batch.push_back(std::move(p));
         }
         flush();
+        logf("texture startup: %zu textures, identity %.1f ms, chains %.1f ms, upload waits %.1f ms, total %.1f ms\n",
+            s->textures.size(), identityMs, chainsMs, uploadWaitMs, elapsedMs(syncStart));
     }
 
     // Material table (always rebuilt: cheap, and material parameters may change with any upload).

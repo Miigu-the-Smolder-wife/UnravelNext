@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: MODE=0,1
+// unx-variants: MODE=0,1 LOCAL=1,0 REUSE=1,0
 // Fragment shadow visibility for the coverage layer (S request 20260926_S_fragment_visibility; INTERFACES 7.3 v1.41;
 // COVERAGE_REDESIGN 4.3): the sun and local-light visibility of the thin fragments (grass blades, leaves, wires) that sit
 // in front of a pixel's band A surface, for M's coverage composite.
@@ -32,6 +32,12 @@
 #include "Passes/Shadow/ShadowVisibility.hlsli"
 #include "Passes/Visibility/CoverageTiles.hlsli"
 #include "Passes/Atmosphere/CloudShadowCommon.hlsli"
+#ifndef LOCAL
+#define LOCAL 1
+#endif
+#ifndef REUSE
+#define REUSE 1
+#endif
 
 ShadowSrvs fragmentSrvs()
 {
@@ -69,6 +75,9 @@ float fragmentCloudT(float3 p) { return P[4].z != 0xFFFFFFFFu ? cloudSunTransmit
 uint localSlots(ShadowSrvs s, uint2 px, float3 p, float3 n, float deviceDepth)
 {
     uint local = 0xFFFFFF00u;
+#if !LOCAL
+    return local;
+#else
     if (P[2].w == 0xFFFFFFFFu) return local;
     FroxelSrvs f;
     f.lights = P[2].w;
@@ -93,6 +102,7 @@ uint localSlots(ShadowSrvs s, uint2 px, float3 p, float3 n, float deviceDepth)
         local = (local & ~(0xFFu << (8 * ordinal))) | ((uint)round(saturate(v) * 255.0) << (8 * ordinal));
     }
     return local;
+#endif
 }
 
 [numthreads(64, 1, 1)]
@@ -108,6 +118,7 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
     const uint2 range = ranges.Load(int3(px, 0));
     if (range.x == 0 && range.y == 0xFFFFFFFFu) return;  // no records: M reads nothing here
     const float dNear = asfloat(range.x), dFar = asfloat(range.y);
+    const bool singleDepth = REUSE && range.x == range.y;
     const float3 pNear = worldFromDepth(float2(px), dNear), pFar = worldFromDepth(float2(px), dFar);
     const float footprint = pixelFootprint(dNear);
     // The band A surface the fragments stand on (its plane settles fragments lying on it; none: free air).
@@ -122,18 +133,29 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
     if (cls == VSM_REGION_LIT)
     {
         const float cloudT = fragmentCloudT(pNear);  // (the layer's shadow does not change over the pixel's fragments)
+        if (singleDepth)
+        {
+            // All four original sample positions are exactly pNear here.
+            // Reuse the byte; retain the original four evaluations otherwise.
+            const uint value = (uint)round(saturate(fragmentSunT(s, pNear, footprint) * cloudT) * 255.0);
+            sun = value * 0x01010101u;
+        }
+        else
+        {
         [unroll] for (uint k = 0; k < 4; ++k)
         {
             const float z = lerp(linearDepth(dNear), linearDepth(dFar), k / 3.0);
             const float3 p = lerp(pNear, pFar, (z - linearDepth(dNear)) / max(linearDepth(dFar) - linearDepth(dNear), 1e-30));
             sun |= (uint)round(saturate(fragmentSunT(s, p, footprint) * cloudT) * 255.0) << (8 * k);
         }
+        }
     }
     else if (cls == VSM_REGION_MIXED)
         pair = 1;
     // Local receivers: the band A surface's normal where the fragments stand on it, else facing the camera.
     const float3 n = dSurface > 0 ? surfaceNormal : normalize(g_cameraPosition - pNear);
-    const uint localNear = localSlots(s, px, pNear, n, dNear), localFar = localSlots(s, px, pFar, n, dFar);
+    const uint localNear = localSlots(s, px, pNear, n, dNear);
+    const uint localFar = singleDepth ? localNear : localSlots(s, px, pFar, n, dFar);
     RWStructuredBuffer<uint3> output = ResourceDescriptorHeap[P[0].w];
     output[px.y * g_viewWidth + px.x] = uint3(sun, (localNear & 0xFFFFFF00u) | pair, localFar & 0xFFFFFF00u);
     const uint pixels = WaveActiveCountBits(true), pairs = WaveActiveCountBits(pair != 0);

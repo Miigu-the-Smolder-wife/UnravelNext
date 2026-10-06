@@ -110,11 +110,14 @@ struct UpscaleState
         const bool all = !scene[0] || sceneFormat != format;
         if (!all && sceneWidth[slot] == w && sceneHeight[slot] == h) return;
         device = &d;
+        ComPtr<ID3D12Resource> replacement[2];
+        for (uint32_t k = 0; k < 2; ++k)
+            if (all || k == slot) replacement[k] = internalTexture(d, w, h, format, k ? L"M previous scene colour 1" : L"M previous scene colour 0", "M previous scene colour");
         for (uint32_t k = 0; k < 2; ++k)
         {
             if (!all && k != slot) continue;
             if (scene[k]) d.deferRelease(scene[k]);
-            scene[k] = internalTexture(d, w, h, format, k ? L"M previous scene colour 1" : L"M previous scene colour 0", "M previous scene colour");
+            scene[k] = std::move(replacement[k]);
             sceneWidth[k] = w;
             sceneHeight[k] = h;
         }
@@ -132,19 +135,21 @@ struct UpscaleState
     void makeGuide(Device& d, uint32_t k, uint32_t w, uint32_t h)
     {
         static const wchar_t* const guideNames[kRingSlots] = { L"M upscale guide 0", L"M upscale guide 1 (kept)", L"M upscale guide 2 (kept)", L"M upscale guide 3" };
+        auto replacement = internalTexture(d, w, h, DXGI_FORMAT_R10G10B10A2_UNORM, guideNames[k], "M upscale guide");
         if (guide[k]) d.deferRelease(guide[k]);
-        guide[k] = internalTexture(d, w, h, DXGI_FORMAT_R10G10B10A2_UNORM, guideNames[k], "M upscale guide");
+        guide[k] = std::move(replacement);
         guideWidth[k] = w;
         guideHeight[k] = h;
     }
     void makePair(Device& d, uint32_t k, uint32_t w, uint32_t h)
     {
-        if (flicker[k]) d.deferRelease(flicker[k]);
-        flicker[k] = internalTexture(d, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, k ? L"M upscale flickering history 1" : L"M upscale flickering history 0",
+        auto newFlicker = internalTexture(d, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, k ? L"M upscale flickering history 1" : L"M upscale flickering history 0",
                                      "M upscale flickering history");
-        if (thin[k]) d.deferRelease(thin[k]);
-        thin[k] = internalTexture(d, w, h, DXGI_FORMAT_R8_UNORM, k ? L"M upscale thin coverage history 1" : L"M upscale thin coverage history 0",
+        auto newThin = internalTexture(d, w, h, DXGI_FORMAT_R8_UNORM, k ? L"M upscale thin coverage history 1" : L"M upscale thin coverage history 0",
                                   "M upscale thin coverage history");
+        if (flicker[k]) d.deferRelease(flicker[k]);
+        if (thin[k]) d.deferRelease(thin[k]);
+        flicker[k] = std::move(newFlicker); thin[k] = std::move(newThin);
         pairWidth[k] = w;
         pairHeight[k] = h;
     }
@@ -153,14 +158,27 @@ struct UpscaleState
     {
         if (guide[0] && guideRing == withRing) return;
         device = &d;
+        ComPtr<ID3D12Resource> newGuide[kRingSlots], newFlicker[2], newThin[2];
+        for (uint32_t k = 0; k < kRingSlots; ++k)
+            if (ringSlotUsed(k, withRing)) newGuide[k] = internalTexture(d, w, h, DXGI_FORMAT_R10G10B10A2_UNORM, L"M upscale guide", "M upscale guide");
+        for (uint32_t k = 0; k < 2; ++k)
+        {
+            newFlicker[k] = internalTexture(d, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, L"M upscale flickering history", "M upscale flickering history");
+            newThin[k] = internalTexture(d, w, h, DXGI_FORMAT_R8_UNORM, L"M upscale thin coverage history", "M upscale thin coverage history");
+        }
         for (uint32_t k = 0; k < kRingSlots; ++k)
         {
             if (guide[k]) d.deferRelease(guide[k]);
-            guide[k].Reset();
-            guideWidth[k] = guideHeight[k] = 0;
-            if (ringSlotUsed(k, withRing)) makeGuide(d, k, w, h);
+            guide[k] = std::move(newGuide[k]);
+            guideWidth[k] = guide[k] ? w : 0; guideHeight[k] = guide[k] ? h : 0;
         }
-        for (uint32_t k = 0; k < 2; ++k) makePair(d, k, w, h);
+        for (uint32_t k = 0; k < 2; ++k)
+        {
+            if (flicker[k]) d.deferRelease(flicker[k]);
+            if (thin[k]) d.deferRelease(thin[k]);
+            flicker[k] = std::move(newFlicker[k]); thin[k] = std::move(newThin[k]);
+            pairWidth[k] = w; pairHeight[k] = h;
+        }
         guideRing = withRing;
         fresh = true;  // (the guides hold nothing: the frame is a reset)
     }
@@ -198,15 +216,19 @@ struct UpscaleState
         desc.SampleDesc.Count = 1;
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         static const wchar_t* const names[kRingSlots] = { L"M upscale history 0", L"M upscale history 1 (kept)", L"M upscale history 2 (kept)", L"M upscale history 3" };
+        ComPtr<ID3D12Resource> replacement[kRingSlots];
+        for (uint32_t k = 0; k < kRingSlots; ++k)
+        {
+            if (!ringSlotUsed(k, withRing)) continue;
+            check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
+                                                    IID_PPV_ARGS(&replacement[k])),
+                  "M upscale history");
+            replacement[k]->SetName(names[k]);
+        }
         for (uint32_t k = 0; k < kRingSlots; ++k)
         {
             if (history[k]) d.deferRelease(history[k]);
-            history[k].Reset();
-            if (!ringSlotUsed(k, withRing)) continue;
-            check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
-                                                    IID_PPV_ARGS(history[k].ReleaseAndGetAddressOf())),
-                  "M upscale history");
-            history[k]->SetName(names[k]);
+            history[k] = std::move(replacement[k]);
         }
         width = w;
         height = h;
@@ -222,7 +244,8 @@ bool tsrOn(FramePassContext& fc) { return !fc.quality.has("output.upscale_tsr") 
 // reference's r.TSR.History.ScreenPercentage, 100 .. 200; back to the output's size where a texture cannot be that large).
 void historySize(FramePassContext& fc, uint32_t W, uint32_t H, uint32_t& hw, uint32_t& hh)
 {
-    const double percent = tsrOn(fc) && fc.quality.has("output.upscale_tsr_history_percent") ? fc.quality.number("output.upscale_tsr_history_percent") : 100.0;
+    const double percent = tsrOn(fc) ? (fc.frame.postExtended.enabled ? fc.frame.postExtended.tsrHistoryPercent :
+        fc.quality.has("output.upscale_tsr_history_percent") ? fc.quality.number("output.upscale_tsr_history_percent") : 100.0) : 100.0;
     if (!(percent >= 100 && percent <= 200)) fail("output.upscale_tsr_history_percent must be in [100, 200]");
     hw = (uint32_t)std::ceil((double)W * percent / 100.0);
     hh = (uint32_t)std::ceil((double)H * percent / 100.0);
@@ -243,8 +266,8 @@ LensProjection upscaleLens(FramePassContext& fc, const ViewResources& view)
 {
     LensProjection lens;
     if (!upscaleActive(fc, view) || !tsrOn(fc)) return lens;
-    const double d = fc.quality.has("output.lens_panini_d") ? fc.quality.number("output.lens_panini_d") : 0.0;
-    const double s = fc.quality.has("output.lens_panini_s") ? fc.quality.number("output.lens_panini_s") : 0.0;
+    const double d = fc.frame.postExtended.enabled ? fc.frame.postExtended.paniniD : fc.quality.has("output.lens_panini_d") ? fc.quality.number("output.lens_panini_d") : 0.0;
+    const double s = fc.frame.postExtended.enabled ? fc.frame.postExtended.paniniS : fc.quality.has("output.lens_panini_s") ? fc.quality.number("output.lens_panini_s") : 0.0;
     if (!(d >= 0 && d <= 4) || !(s >= -1 && s <= 1)) fail("output.lens_panini_d %g in [0, 4], output.lens_panini_s %g in [-1, 1]", d, s);
     if (!(d > 0.01)) return lens;  // (the reference: on above 0.01)
     const float4x4& proj = fc.frame.upscale.proj;
@@ -357,7 +380,7 @@ void keepSceneColor(FramePassContext& fc, const ViewResources& view, TextureRef 
                   c.cmd->SetPipelineState(pso);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 12);
-                  c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (w + 7) / 8, (h + 7) / 8, 1);
               });
     s.sceneFresh = false;
 }
@@ -411,7 +434,7 @@ UpscaleMotion upscaleMotion(FramePassContext& fc, const ViewResources& view)
                       const uint32_t k[4] = { c.uav(status), 4, 0, 0 };
                       c.cmd->SetPipelineState(clear);
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                   });
     }
     g.addPass("m.upscale.motion", QueueType::Graphics,
@@ -474,7 +497,7 @@ UpscaleMotion upscaleMotion(FramePassContext& fc, const ViewResources& view)
                   c.cmd->SetPipelineState(motionPso);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 44);
-                  c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (w + 7) / 8, (h + 7) / 8, 1);
               });
     // (the surface the vectors are of: the layers' depth where a layer has the pixel)
     const TextureRef motionDepth = layerMotion ? trackedDepth : depth;
@@ -656,7 +679,8 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
             reprojectedFlicker = g.createTexture(TextureDesc{ "m.tsr.reprojected flicker", w, h, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM });
             moireError = g.createTexture(TextureDesc{ "m.tsr.moire error", w, h, 1, 1, DXGI_FORMAT_R16_FLOAT });
         }
-        ID3D12PipelineState* flickerPso = flickering ? fc.shaders.compute("Passes/Shading/TsrFlicker") : nullptr;
+        const bool waveOperations = fc.quality.has("output.upscale_tsr_wave_operations") && fc.quality.boolean("output.upscale_tsr_wave_operations");
+        ID3D12PipelineState* flickerPso = flickering ? fc.shaders.compute(waveOperations ? "Passes/Shading/TsrFlickerWave" : "Passes/Shading/TsrFlicker") : nullptr;
         // output.upscale_tsr_thin_geometry (the reference's r.TSR.ThinGeometryDetection): TsrThin.hlsl - the coverage
         // layer's thin fragments and pixel-wide lines of depth relax the shading rejection
         const bool thinGeometry = fc.quality.has("output.upscale_tsr_thin_geometry") && fc.quality.boolean("output.upscale_tsr_thin_geometry");
@@ -696,9 +720,8 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
         ID3D12PipelineState* clearPso = shaders.compute("Passes/Shading/TsrClear");
         ID3D12PipelineState* dilatePso = shaders.compute("Passes/Shading/TsrDilate");
         ID3D12PipelineState* decimatePso = shaders.compute("Passes/Shading/TsrDecimate");
-        // At 720p/960p retain the original path unless every optional input
-        // matches the measured all-input class. Availability follows the exact
-        // bindings below, including both textures of resurrection.
+        // At 720p/960p use the measured moire/thin/layer class, with or
+        // without resurrection. Availability follows the exact bindings below.
         const uint32_t rejectionOptionals =
             (flickering && moireError.valid() ? detail::TsrRejectMoire : 0u) |
             (thinGeometry && relaxation.valid() ? detail::TsrRejectThin : 0u) |
@@ -723,7 +746,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       const uint32_t k[4] = { c.uav(scatter), w, h, 0 };
                       c.cmd->SetPipelineState(clearPso);
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (w + 7) / 8, (h + 7) / 8, 1);
                   });
         g.addPass("m.tsr.dilate", QueueType::Graphics,
                   [&](PassBuilder& b) {
@@ -741,7 +764,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       c.cmd->SetPipelineState(dilatePso);
                       c.bindFrameConstants(cb);
                       c.computeConstants(k, 12);
-                      c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (w + 7) / 8, (h + 7) / 8, 1);
                   });
         g.addPass("m.tsr.decimate", QueueType::Graphics,
                   [&](PassBuilder& b) {
@@ -784,7 +807,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       c.cmd->SetPipelineState(decimatePso);
                       c.bindFrameConstants(cb);
                       c.computeConstants(k, 40);
-                      c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (w + 7) / 8, (h + 7) / 8, 1);
                   });
         if (canResurrect)
             g.addPass("m.tsr.resurrect", QueueType::Graphics,
@@ -799,7 +822,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                           const uint32_t k[8] = { c.srv(src), c.srv(reprojected), c.srv(resurrectedGuide), c.srv(decimateMask), c.uav(resurrectionMeasure), w, h, 0 };
                           c.cmd->SetPipelineState(resurrectPso);
                           c.computeConstants(k, 8);
-                          c.cmd->Dispatch((w + 15) / 16, (h + 15) / 16, 1);
+                          gpuDispatch(c.cmd, (w + 15) / 16, (h + 15) / 16, 1);
                       });
         if (thinGeometry)
             g.addPass("m.tsr.thin", QueueType::Graphics,
@@ -821,7 +844,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                           c.cmd->SetPipelineState(thinPso);
                           c.bindFrameConstants(cb);
                           c.computeConstants(k, 20);
-                          c.cmd->Dispatch((w + 15) / 16, (h + 15) / 16, 1);
+                          gpuDispatch(c.cmd, (w + 15) / 16, (h + 15) / 16, 1);
                       });
         if (flickering)
             g.addPass("m.tsr.flicker", QueueType::Graphics,
@@ -840,7 +863,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                           c.cmd->SetPipelineState(flickerPso);
                           c.bindFrameConstants(cb);
                           c.computeConstants(k, 12);
-                          c.cmd->Dispatch((w + 15) / 16, (h + 15) / 16, 1);
+                          gpuDispatch(c.cmd, (w + 15) / 16, (h + 15) / 16, 1);
                       });
         const uint32_t rejectionBegin = g.passCount();
         const TextureRef rejectionPrefix = fusedRejection
@@ -856,7 +879,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                           const uint32_t k[8] = { c.srv(src), c.srv(reprojected), c.uav(rejectionPrefix), w, h, 0, 0, 0 };
                           c.cmd->SetPipelineState(rejectPrefixPso);
                           c.computeConstants(k, 8);
-                          c.cmd->Dispatch((w + 25) / 16, (h + 25) / 16, 1);
+                          gpuDispatch(c.cmd, (w + 25) / 16, (h + 25) / 16, 1);
                       });
         g.addPass("m.tsr.reject", QueueType::Graphics,
                   [&](PassBuilder& b) {
@@ -885,7 +908,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                                                fusedRejection ? c.srv(rejectionPrefix) : none, 0 };
                       c.cmd->SetPipelineState(rejectPso);
                       c.computeConstants(k, 16);
-                      c.cmd->Dispatch((w + 15) / 16, (h + 15) / 16, 1);
+                      gpuDispatch(c.cmd, (w + 15) / 16, (h + 15) / 16, 1);
                   });
         // Preserve the existing profiler meaning: rejection includes preparation
         // and its barrier, not merely the shorter tail kernel.
@@ -899,7 +922,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       const uint32_t k[4] = { c.srv(aaInput), c.uav(aa), w, h };
                       c.cmd->SetPipelineState(aaPso);
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (w + 7) / 8, (h + 7) / 8, 1);
                   });
         g.addPass("m.upscale", QueueType::Graphics,
                   [&](PassBuilder& b) {
@@ -925,7 +948,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       std::memcpy(&k[36], lensConstants, sizeof lensConstants);
                       c.cmd->SetPipelineState(updatePso);
                       c.computeConstants(k, 48);
-                      c.cmd->Dispatch((HW + 7) / 8, (HH + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (HW + 7) / 8, (HH + 7) / 8, 1);
                   });
         if (!resolvePso) return output;
         // the history above the output resolution, filtered down (TsrResolve.hlsl)
@@ -939,7 +962,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                       const uint32_t k[8] = { c.srv(output), c.uav(resolved), W, H, HW, HH, 0, 0 };
                       c.cmd->SetPipelineState(resolvePso);
                       c.computeConstants(k, 8);
-                      c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (W + 7) / 8, (H + 7) / 8, 1);
                   });
         return resolved;
     }
@@ -959,7 +982,7 @@ TextureRef temporalUpscale(FramePassContext& fc, const ViewResources& view, Text
                   c.cmd->SetPipelineState(pso);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 16);
-                  c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (W + 7) / 8, (H + 7) / 8, 1);
               });
     return output;
 }

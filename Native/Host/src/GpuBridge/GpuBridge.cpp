@@ -136,6 +136,9 @@ struct GpuBridgeHost::Impl
     uint64_t nextResource = 0, queueWaits = 0, cpuWaits = 0, graphicsTicket = 0;
     std::array<uint64_t, 3> counts{};
     bool accepting = true, faulted = false, removed = false, uma = false;
+    // Diagnostic only: isolate cross-queue GPU contention without dropping any work.
+    ComPtr<ID3D12Fence> diagnosticSerialFence;
+    uint64_t diagnosticSerialValue = 0;
     HRESULT lastError = S_OK;
 
     Impl(ID3D12Device* d, ID3D12CommandQueue* graphicsQueue, ID3D12Fence* graphicsFence, uint64_t generation) : device(d), graph(generation)
@@ -145,6 +148,9 @@ struct GpuBridgeHost::Impl
         sameDevice(graphicsFence);
         queues[0] = graphicsQueue;
         fences[0] = graphicsFence;
+        wchar_t diagnosticSerial[8]{};
+        if (GetEnvironmentVariableW(L"UNX_DIAGNOSTIC_SERIAL_BRIDGE", diagnosticSerial, 8) && diagnosticSerial[0] == L'1')
+            check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&diagnosticSerialFence)), "Create diagnostic serial fence");
         ComPtr<IDXGIFactory4> factory;
         check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)), "Create the GPU budget query");
         check(factory->EnumAdapterByLuid(device->GetAdapterLuid(), IID_PPV_ARGS(&adapter)), "Find the GPU adapter");
@@ -354,6 +360,13 @@ struct GpuBridgeHost::Impl
             pending.lifetimes.emplace_back(static_cast<IUnknown*>(request.lifetime_objects[n]));
         }
         waits(queues[request.queue].Get(), pending.plan);
+        if (diagnosticSerialFence)
+        {
+            // Submission admission holds mutex, so this orders all previously
+            // submitted graphics work before this module's compute/copy work.
+            check(queues[0]->Signal(diagnosticSerialFence.Get(), ++diagnosticSerialValue), "Diagnostic graphics serial signal");
+            check(queues[request.queue]->Wait(diagnosticSerialFence.Get(), diagnosticSerialValue), "Diagnostic module serial wait");
+        }
         submissions.push_back(std::move(pending));
         auto& tracked = submissions.back();
         ID3D12CommandList* lists[]{ commands };
@@ -478,6 +491,10 @@ struct GpuBridgeHost::Impl
             pending.fence = { graph.generation(), 0, 0, 0 };
             pending.borrowed = borrowed;
             waits(queues[0].Get(), pending.plan);
+            if (diagnosticSerialFence)
+                for (uint32_t q = 1; q < 3; ++q)
+                    if (const auto value = graph.submitted(q))
+                        check(queues[0]->Wait(fences[q].Get(), value), "Diagnostic graphics serial wait");
             submissions.push_back(std::move(pending));
             pendingGraphics = &submissions.back();
             graphicsLock = std::move(lock);  // held until commitGraphics: no other submission may interleave with this plan

@@ -357,7 +357,9 @@ RoundPool::~RoundPool()
                                               m_centre, m_output, m_tableUpload })
         if (r) m_device.deferRelease(r);
     for (auto& u : m_sourceUpload) m_device.deferRelease(u);
-    for (uint32_t srv : m_sourceSrv) m_device.descriptors().freeResource(srv);
+    if (!m_sourceSrv.empty()) m_device.deferCall([device = &m_device, views = std::move(m_sourceSrv)] {
+        for (uint32_t srv : views) device->descriptors().freeResource(srv);
+    });
 }
 
 bool RoundPool::contains(const RoundPoolDesc& desc, const RoundPoolPlacement& placement, double x, double z)
@@ -390,7 +392,7 @@ void RoundPool::evolve(RenderGraph& g, const Refs& r, float dt, uint32_t sourceS
     };
     auto pass = [&](const char* name, const char* kernel, uint32_t groups) {
         ID3D12PipelineState* pso = m_shaders.compute(kernel);
-        g.addPass(name, QueueType::Graphics, uses, [=](PassContext& c) { c.cmd->SetPipelineState(pso); constants(c); c.cmd->Dispatch(groups, 1, 1); });
+        g.addPass(name, QueueType::Graphics, uses, [=](PassContext& c) { c.cmd->SetPipelineState(pso); constants(c); gpuDispatch(c.cmd, groups, 1, 1); });
     };
     if (sourceCount) pass("round sources", "Passes/Water/RoundSplat", sourceCount);
     if (increment)
@@ -474,7 +476,7 @@ RoundPoolOutput RoundPool::record(RenderGraph& g, uint64_t frame, const RoundPoo
                       std::memcpy(&k[10], &d.radius, 4);
                       c.cmd->SetPipelineState(clear);
                       c.computeConstants(k, 20);
-                      c.cmd->Dispatch(groups, 1, 1);
+                      gpuDispatch(c.cmd, groups, 1, 1);
                   });
         m_initialised = true;
     }
@@ -509,7 +511,7 @@ RoundPoolOutput RoundPool::record(RenderGraph& g, uint64_t frame, const RoundPoo
                   std::memcpy(&k[12], axis, 16);
                   c2.cmd->SetPipelineState(mesh);
                   c2.computeConstants(k, 16);
-                  c2.cmd->Dispatch(kTheta / 8, (kRings - 1 + 7) / 8, 1);
+                  gpuDispatch(c2.cmd, kTheta / 8, (kRings - 1 + 7) / 8, 1);
               });
     RoundPoolOutput out;
     out.field = refs.field;

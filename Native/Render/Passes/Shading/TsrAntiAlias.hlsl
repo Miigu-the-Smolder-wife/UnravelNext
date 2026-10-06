@@ -58,19 +58,31 @@ void main(uint2 id : SV_DispatchThreadID)
         const float2 uvMin = 0.5 * texel, uvMax = 1.0 - 0.5 * texel;
         bool minP = false, maxP = false, minN = false, maxN = false;
         float lengthP = ITERATIONS, lengthN = ITERATIONS;
-        [unroll] for (int i = 0; i < ITERATIONS; ++i)
+        [loop] for (int i = 0; i < ITERATIONS; ++i)
         {
             const float2 step = float2(browse) * texel * (float)(i + 1);
-            const float sampleP = input.SampleLevel(g_linearClamp, min(kernelUv + step, uvMax), 0).r;
-            const float sampleN = input.SampleLevel(g_linearClamp, max(kernelUv - step, uvMin), 0).r;
-            const bool stopMinP = sampleP < lumaMin && !maxP, stopMaxP = sampleP > lumaMax && !minP;
-            const bool stopMinN = sampleN < lumaMin && !maxN, stopMaxN = sampleN > lumaMax && !minN;
-            minP = minP || stopMinP;
-            maxP = maxP || stopMaxP;
-            minN = minN || stopMinN;
-            maxN = maxN || stopMaxN;
+            // Once an edge end is latched its classification cannot change.
+            // Preserve the original lengths without fetching past that end.
+            if (!minP && !maxP)
+            {
+                const float sampleP = input.SampleLevel(g_linearClamp, min(kernelUv + step, uvMax), 0).r;
+                minP = sampleP < lumaMin;
+                maxP = sampleP > lumaMax;
+            }
+            if (!minN && !maxN)
+            {
+                const float sampleN = input.SampleLevel(g_linearClamp, max(kernelUv - step, uvMin), 0).r;
+                minN = sampleN < lumaMin;
+                maxN = sampleN > lumaMax;
+            }
             lengthP -= (minP || maxP) ? 1.0 : 0.0;
             lengthN -= (minN || maxN) ? 1.0 : 0.0;
+            if ((minP || maxP) && (minN || maxN))
+            {
+                lengthP -= float(ITERATIONS - 1 - i);
+                lengthN -= float(ITERATIONS - 1 - i);
+                break;
+            }
         }
         const bool brighter = edgeLuma > c;
         const bool incrementP = brighter ? maxP : minP, incrementN = brighter ? maxN : minN;

@@ -457,12 +457,6 @@ Device::Device(const DeviceOptions& options) : m_options(options)
     if (m_caps.bindingTier < D3D12_RESOURCE_BINDING_TIER_3) fail("resource binding tier 3 is required");
     if (m_caps.heapTier < D3D12_RESOURCE_HEAP_TIER_2) fail("resource heap tier 2 is required (transient aliasing of mixed resources)");
 
-    if (m_options.debugLayer && SUCCEEDED(m_device.As(&m_infoQueue)))
-    {
-        DWORD cookie = 0;
-        m_infoQueue->RegisterMessageCallback(debugMessage, D3D12_MESSAGE_CALLBACK_FLAG_NONE, &m_debugErrors, &cookie);
-    }
-
     if (NvAPI_Initialize() == NVAPI_OK)
     {
         m_caps.nvapi = true;
@@ -487,13 +481,31 @@ Device::Device(const DeviceOptions& options) : m_options(options)
                           : std::make_unique<Queue>(m_device.Get(), (QueueType)q, m_options.queuePriority);
     m_descriptors = std::make_unique<DescriptorHeaps>(m_device.Get());
 
-    D3D12_ROOT_PARAMETER1 params[2]{};
+    D3D12_ROOT_PARAMETER1 params[3]{};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[0].Constants = { 0, 0, kRootConstantCount };
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[1].Descriptor = { 1, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE };
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    D3D12_DESCRIPTOR_RANGE1 rayExtension{};
+    if (m_caps.nvapiThreadReordering)
+    {
+        rayExtension.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        rayExtension.NumDescriptors = 1;
+        rayExtension.BaseShaderRegister = kRayExtensionSlot;
+        rayExtension.RegisterSpace = kRayExtensionSpace;
+        rayExtension.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
+        params[kRayExtensionRoot].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[kRayExtensionRoot].DescriptorTable = { 1, &rayExtension };
+        params[kRayExtensionRoot].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        m_rayExtensionUav = m_descriptors->allocateResource();
+        D3D12_UNORDERED_ACCESS_VIEW_DESC nullView{};
+        nullView.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        nullView.Buffer.NumElements = 1;
+        nullView.Buffer.StructureByteStride = 256;  // NvShaderExtnStruct, SDK requires a null resource
+        m_device->CreateUnorderedAccessView(nullptr, nullptr, &nullView, m_descriptors->resourceCpu(m_rayExtensionUav));
+    }
     D3D12_STATIC_SAMPLER_DESC samplers[6]{};
     auto sampler = [&](uint32_t reg, D3D12_FILTER filter, D3D12_TEXTURE_ADDRESS_MODE mode, uint32_t aniso = 1, D3D12_COMPARISON_FUNC cmp = D3D12_COMPARISON_FUNC_NONE) {
         D3D12_STATIC_SAMPLER_DESC& s = samplers[reg];
@@ -513,7 +525,7 @@ Device::Device(const DeviceOptions& options) : m_options(options)
     sampler(5, D3D12_FILTER_ANISOTROPIC, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, 16);
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC rs{};
     rs.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    rs.Desc_1_1.NumParameters = 2;
+    rs.Desc_1_1.NumParameters = m_caps.nvapiThreadReordering ? 3 : 2;
     rs.Desc_1_1.pParameters = params;
     rs.Desc_1_1.NumStaticSamplers = 6;
     rs.Desc_1_1.pStaticSamplers = samplers;
@@ -522,6 +534,12 @@ Device::Device(const DeviceOptions& options) : m_options(options)
     if (FAILED(D3D12SerializeVersionedRootSignature(&rs, &blob, &error)))
         fail("root signature: %s", error ? (const char*)error->GetBufferPointer() : "?");
     check(m_device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&m_rootSignature)), "CreateRootSignature");
+    // A host enables its debug layer before creating the shared device. Observe
+    // that layer too; enabling one after adopting the host device is illegal.
+    // Register only after construction succeeds: the host can outlive this wrapper.
+    if ((m_options.debugLayer || external) && SUCCEEDED(m_device.As(&m_infoQueue)))
+        m_debugCallbackRegistered = SUCCEEDED(m_infoQueue->RegisterMessageCallback(
+            debugMessage, D3D12_MESSAGE_CALLBACK_FLAG_NONE, &m_debugErrors, &m_debugCallbackCookie));
 }
 
 Device::~Device()
@@ -529,6 +547,8 @@ Device::~Device()
     waitIdle();
     collectGarbage();
     drainDebugMessages();
+    // The host's device can outlive this wrapper and its callback context.
+    if (m_debugCallbackRegistered) m_infoQueue->UnregisterMessageCallback(m_debugCallbackCookie);
 }
 
 CommandList Device::acquireCommandList(QueueType type)
@@ -543,7 +563,9 @@ CommandList Device::acquireCommandList(QueueType type)
             if (pool[i].retireValue <= done)
             {
                 cl = std::move(pool[i]);
-                pool.erase(pool.begin() + (ptrdiff_t)i);
+                // Pool order carries no submission dependency; the retire fence does.
+                if (i + 1 != pool.size()) pool[i] = std::move(pool.back());
+                pool.pop_back();
                 break;
             }
         }
@@ -607,11 +629,16 @@ void Device::collectGarbage()
     std::vector<std::function<void()>> calls;
     {
         std::lock_guard lock(m_garbageMutex);
+        if (m_garbage.empty()) return;
+        // One conservative snapshot covers this collection. Work completing after
+        // it remains queued until the next collection, with the same lifetime rule.
+        uint64_t completed[kQueueTypeCount];
+        for (uint32_t q = 0; q < kQueueTypeCount; ++q) completed[q] = m_queues[q]->completed();
         while (!m_garbage.empty())
         {
             Deferred& d = m_garbage.front();
             bool done = true;
-            for (uint32_t q = 0; q < kQueueTypeCount; ++q) done = done && m_queues[q]->completed() >= d.fence[q];
+            for (uint32_t q = 0; q < kQueueTypeCount; ++q) done = done && completed[q] >= d.fence[q];
             if (!done) break;
             if (d.call) calls.push_back(std::move(d.call));
             m_garbage.pop_front();

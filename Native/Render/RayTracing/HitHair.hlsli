@@ -48,9 +48,13 @@ RtHairHit rtHairFirst(uint params, float3 origin, float3 direction, float reach,
 // The frame's density parameters: word 22 of the local-light data's header (RayScene::recordHair).
 uint rtHairParams(RtSceneSrvs scene)
 {
+#if defined(HAIR) && !HAIR
+    return UNX_NONE; // selected only when this frame has no ray-traced density volume
+#else
     if (scene.pad == 0xFFFFFFFFu) return 0xFFFFFFFFu;
     ByteAddressBuffer header = ResourceDescriptorHeap[scene.pad];
     return header.Load(88);
+#endif
 }
 // The translucency volume the hits take their indirect light from: word 23 (UNX_NONE: none).
 uint rtHairIndirect(RtSceneSrvs scene)

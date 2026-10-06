@@ -240,7 +240,7 @@ VolumeOutput VolumePass::recordImpl(const fx::ParticleRenderInputs* particlesIn,
                       c.cmd->SetPipelineState(pso);
                       c.bindFrameConstants(frameConstants);
                       c.computeConstants(p.data(), 8);
-                      c.cmd->Dispatch(gx, gy, 1);
+                      gpuDispatch(c.cmd, gx, gy, 1);
                   });
     };
     const BufferRef inputBuffers[] = { in.posAge[0], in.posAge[1], in.velocity[0], in.velocity[1], in.dynamic[0], in.dynamic[1], in.emitters, in.programs,

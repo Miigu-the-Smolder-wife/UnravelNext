@@ -1,5 +1,6 @@
 # Owner: R. ARCHITECTURE 2.5.
 [gi]
+defer_hit_lighting = true          # exact trace continuations: cache misses alone run material and local-light shading
 rays_per_frame = 500000
 cache_entries = 200000
 cache_octahedral_texels = 8        # 8 x 8 per entry

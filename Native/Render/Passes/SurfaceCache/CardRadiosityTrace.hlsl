@@ -1,5 +1,5 @@
 // unx-kernel: lib_6_6 main
-// unx-variants: SKY=0,1
+// unx-variants: SKY=0,1 HAIR=0,1 REORDER=0,1,2
 // r.card.radiosity.trace (CardLighting.hlsli): one ray generation thread per trace texel of the frame's radiosity list -
 // 64 of a listed tile: 2 x 2 probes (CL_PROBE_SPACING texels apart) x 4 x 4 rays over the probe's hemisphere, uniform in
 // solid angle, jittered per probe and update. The probe stands on one texel of its 4 x 4, chosen by the page's temporal
@@ -42,10 +42,64 @@
 #include "RayTracing/HitHair.hlsli"
 #include "RayTracing/HitFarField.hlsli"
 
+#ifndef HIT_LIGHTING_STAGE
+#define HIT_LIGHTING_STAGE 0
+#endif
+#include "RayTracing/HitLightingQueue.hlsli"
+#if HIT_LIGHTING_STAGE != 1
+float3 cardUncachedLighting(RtSceneSrvs scene, RtHit hit, RayDesc ray, uint thread)
+{
+    // no card: the hit's direct light through the material's constants
+    RtSurface s = rtSurface(scene, hit, ray.Origin, ray.Direction);
+    GpuMaterial m = loadMaterial(s.material);
+    if ((m.classFlags & MATERIAL_EMISSIVE_VISIBLE_ONLY) != 0) m.emissive = 0;
+    g_rtHitCone = 0.37;  // (a ray of the 4 x 4 hemisphere map: a cone of about 20 degrees half angle)
+    const float bias = 1e-3 + 2e-4 * distance(s.position, g_cameraPosition);
+    RtHitLighting L = (RtHitLighting)0;
+    const float4 e = lhiIrradiance(lhiSources(P[0].x), s.position, s.normal, thread * 9781u + P[0].z * 26699u);
+    // (past the mesh cards' end, where no source answers: the sky's light on the hit - the far field)
+    L.irradiance = e.a > 0 ? e.rgb : giFarSkyIrradiance(s.position, s.normal, lhiRules(P[0].x).farStart);
+    L.specularRadiance = e.rgb / 3.14159265;
+    const float3 l = normalize(g_sunDirection);
+    if (dot(s.normal, l) > 0 || rtHitTransmits(m))
+    {
+        const float3 e0 = giSunIlluminance(s.position);
+        if (any(e0 > 0))
+        {
+            RayDesc sr;
+            sr.Origin = s.position + (dot(s.geometricNormal, l) > 0 ? 1.0 : -1.0) * s.geometricNormal * bias;
+            sr.Direction = l;
+            sr.TMin = 0;
+            sr.TMax = giRayLength();
+            // (the sun through the Glass on the way: what the panes leave of it - RayShaders.hlsli rtShadowTransmittance)
+            const float3 through = rtShadowTransmittance(scene, sr, RT_MASK_HIT_SHADOW | RT_MASK_FAR);
+            L.sunIlluminance = e0 * through;
+            L.sunVisibility = any(through > 0) ? 1.0 : 0.0;
+        }
+    }
+    L.local = rtHitLocalSample(scene, s, m, -ray.Direction, hit.t * 0.74, bias, thread * 9781u + P[0].z * 26699u);
+    return rtHitRadiance(m, s.normal, -ray.Direction, L, 0.74);
+}
+#endif
+void cardStoreTrace(uint2 out2, float3 radiance)
+{
+    RWTexture2D<float3> trace = ResourceDescriptorHeap[P[4].x];
+    const float cap = asfloat(P[4].y);
+    const float brightest = max(radiance.r, max(radiance.g, radiance.b)) * g_exposure;
+    if (cap > 0 && brightest > cap) radiance *= cap / brightest;
+    if (any(isnan(radiance)) || any(isinf(radiance))) radiance = 0;
+    trace[out2] = max(radiance, 0.0) * CL_RADIANCE_SCALE;
+}
+
 [shader("raygeneration")]
 void CardRadiosityTraceGen()
 {
-    const uint thread = DispatchRaysIndex().x + P[4].z;
+    uint thread = DispatchRaysIndex().x + P[4].z;
+#if HIT_LIGHTING_STAGE == 2
+    RtHit queuedHit;
+    RayDesc queuedRay;
+    hitLightingLoad(P[8].x, thread, thread, queuedHit, queuedRay);
+#endif
     const uint index = thread >> 6, t = thread & 63u;
     ByteAddressBuffer select = ResourceDescriptorHeap[P[0].y];
     if (index >= min(select.Load(clSelectContext(1) + CL_SELECT_TILES), P[5].z)) return;
@@ -64,6 +118,9 @@ void CardRadiosityTraceGen()
     const McTexel texel = mcPageTexel(f, page, card, probe * CL_PROBE_SPACING + clProbeTexelOffset(temporalIndex));
     RWTexture2D<float3> trace = ResourceDescriptorHeap[P[4].x];
     const uint2 out2 = uint2(page.atlasRect.xy) + traceCoord;
+#if HIT_LIGHTING_STAGE == 2
+    cardStoreTrace(out2, cardUncachedLighting(rtScene(), queuedHit, queuedRay, thread));
+#else
     trace[out2] = 0;
     if (!texel.valid) return;
     RayDesc ray;
@@ -115,7 +172,7 @@ void CardRadiosityTraceGen()
     else if (hit.instance == RT_INSTANCE_FAR) radiance = rtFarRadiance(scene, hit, ray.Origin, ray.Direction, true);  // (raytracing.far_field)
     else if (hit.instance != RT_INSTANCE_EMITTER)  // (a light's own surface: the direct light carries it)
     {
-        const RtSurface s = rtSurface(scene, hit, ray.Origin, ray.Direction);
+        RtSurface s = rtSurfaceGeometry(scene, hit, ray.Origin, ray.Direction);
         // (the back of a one-sided surface: no light. rtSurface turns the normals of a back-face hit toward the ray's side)
         GpuMaterial m = loadMaterial(s.material);
         if (s.frontFace || (m.classFlags & MATERIAL_TWO_SIDED) != 0)
@@ -126,40 +183,15 @@ void CardRadiosityTraceGen()
             if (cards.valid) radiance = lhiFoliageFinal(lhiRules(P[0].x), f, m, s.sceneInstance, s.position, s.geometricNormal, cards.final);
             else
             {
-                // no card: the hit's direct light through the material's constants
-                if ((m.classFlags & MATERIAL_EMISSIVE_VISIBLE_ONLY) != 0) m.emissive = 0;
-                g_rtHitCone = 0.37;  // (a ray of the 4 x 4 hemisphere map: a cone of about 20 degrees half angle)
-                const float bias = 1e-3 + 2e-4 * distance(s.position, g_cameraPosition);
-                RtHitLighting L = (RtHitLighting)0;
-                const float4 e = lhiIrradiance(lhiSources(P[0].x), s.position, s.normal, thread * 9781u + P[0].z * 26699u);
-                // (past the mesh cards' end, where no source answers: the sky's light on the hit - the far field)
-                L.irradiance = e.a > 0 ? e.rgb : giFarSkyIrradiance(s.position, s.normal, lhiRules(P[0].x).farStart);
-                L.specularRadiance = e.rgb / 3.14159265;
-                const float3 l = normalize(g_sunDirection);
-                if (dot(s.normal, l) > 0 || rtHitTransmits(m))
-                {
-                    const float3 e0 = giSunIlluminance(s.position);
-                    if (any(e0 > 0))
-                    {
-                        RayDesc sr;
-                        sr.Origin = s.position + (dot(s.geometricNormal, l) > 0 ? 1.0 : -1.0) * s.geometricNormal * bias;
-                        sr.Direction = l;
-                        sr.TMin = 0;
-                        sr.TMax = giRayLength();
-                        // (the sun through the Glass on the way: what the panes leave of it - RayShaders.hlsli rtShadowTransmittance)
-                        const float3 through = rtShadowTransmittance(scene, sr, RT_MASK_HIT_SHADOW | RT_MASK_FAR);
-                        L.sunIlluminance = e0 * through;
-                        L.sunVisibility = any(through > 0) ? 1.0 : 0.0;
-                    }
-                }
-                L.local = rtHitLocalSample(scene, s, m, -ray.Direction, hit.t * 0.74, bias, thread * 9781u + P[0].z * 26699u);
-                radiance = rtHitRadiance(m, s.normal, -ray.Direction, L, 0.74);
+#if HIT_LIGHTING_STAGE == 1
+                hitLightingEnqueue(P[8].x, thread, hit, ray);
+                return;
+#else
+                radiance = cardUncachedLighting(scene, hit, ray, thread);
+#endif
             }
         }
     }
-    const float cap = asfloat(P[4].y);
-    const float brightest = max(radiance.r, max(radiance.g, radiance.b)) * g_exposure;
-    if (cap > 0 && brightest > cap) radiance *= cap / brightest;
-    if (any(isnan(radiance)) || any(isinf(radiance))) radiance = 0;
-    trace[out2] = max(radiance, 0.0) * CL_RADIANCE_SCALE;
+    cardStoreTrace(out2, radiance);
+#endif
 }

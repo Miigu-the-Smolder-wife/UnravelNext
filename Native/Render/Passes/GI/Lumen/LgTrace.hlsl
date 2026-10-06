@@ -1,5 +1,5 @@
 // unx-kernel: lib_6_6 main
-// unx-variants: SKY=0,1
+// unx-variants: SKY=0,1 HAIR=0,1 REORDER=0,1,2
 // gi.lumen, r.gi.lg.trace: the probes' rays (DispatchRays over the trace atlas: thread = probe atlas coordinate x 8 +
 // trace texel). The trace's direction: its texel and level from LgGenerateRays.hlsl (level 1: 8 x 8 map, level 0:
 // 16 x 16), the point inside the texel from this frame's ray index of the probe's tile, through the equal-area sphere
@@ -54,6 +54,7 @@
 #include "Passes/GI/Lumen/LgCommon.hlsli"
 #include "Passes/SurfaceCache/CardLighting.hlsli"
 #include "Passes/GI/Lumen/LgRadianceCache.hlsli"
+#include "Passes/GI/Lumen/LgTraceCache.hlsli"
 #include "Passes/GI/LumenHitIndirect.hlsli"
 #include "RayTracing/HitLocalSample.hlsli"
 #include "RayTracing/HitHair.hlsli"
@@ -69,11 +70,161 @@ float lgBias(float3 p) { return 1e-3 + 2e-4 * distance(p, g_cameraPosition); }
 // ray tracing pull-back bias is 8 cm).
 #define LG_SCREEN_PULLBACK 0.08
 
+#ifndef HIT_LIGHTING_STAGE
+#define HIT_LIGHTING_STAGE 0
+#endif
+#include "RayTracing/HitLightingQueue.hlsli"
+#if SKY == SKY_ATMOSPHERE
+#define LG_HIT_LIGHTING_QUEUE P[1].y
+#else
+#define LG_HIT_LIGHTING_QUEUE P[2].y
+#endif
+#if HIT_LIGHTING_STAGE != 1
+float3 lgSurfaceLighting(RtSceneSrvs scene, RtHit hit, RayDesc r, uint2 coord, uint2 atlas, float4 positionSpeed,
+                         float footprintPerMetre, uint seed, out bool moving, out uint statClass)
+{
+    float3 radiance = 0;
+    moving = false; statClass = 0;
+    Texture2D<float> probeDepth = ResourceDescriptorHeap[P[10].w];
+    GpuInstance inst;
+    GpuMesh mesh;
+    RtInstance ri;
+    RtTriangle tri;
+    const RtSurface s = rtSurfaceParts(scene, hit, r.Origin, r.Direction, inst, mesh, ri, tri);
+    // the hit's speed: its object-space point through the instance's previous transform (deformed meshes: the
+    // instance's motion alone)
+    {
+        const float3 w = rtBary(hit.barycentrics);
+        float3 previous = s.position;
+        if ((ri.flags & RT_INSTANCE_DEFORMED) == 0)
+        {
+            const float3 object = loadVertex(mesh, tri.meshVertex.x).position * w.x + loadVertex(mesh, tri.meshVertex.y).position * w.y +
+                                  loadVertex(mesh, tri.meshVertex.z).position * w.z;
+            previous = transformPoint(inst.prevObjectToWorld, object);
+        }
+        const float hitSpeed = distance(s.position, previous);
+        moving = abs(positionSpeed.w - hitSpeed) / max(probeDepth[atlas], 1.0) > asfloat(P[4].w);
+    }
+    GpuMaterial m = loadMaterial(s.material);
+    const float footprint = hit.t * footprintPerMetre;
+    if ((P[3].w & 8) == 0)
+    {
+        m = rtHitMaterialSeen(m, s, r.Direction, footprint, dot(s.normal, r.Direction));
+        rtHitDecals(scene, s, footprint, m);
+    }
+    // (the emission of a visible-only emissive is not light for GI: INTERFACES v1.92)
+    if ((m.classFlags & MATERIAL_EMISSIVE_VISIBLE_ONLY) != 0) m.emissive = 0;
+    const bool twoSided = (m.classFlags & MATERIAL_TWO_SIDED) != 0;
+    if (s.frontFace || twoSided)
+    {
+        RtHitLighting L = (RtHitLighting)0;
+        bool fromCards = false;  // (the cards' direct light holds the sun and the local lights: the hit adds neither)
+        if (P[5].x != 0xFFFFFFFFu)
+        {
+            const float3 face = dot(s.geometricNormal, r.Direction) > 0 ? -s.geometricNormal : s.geometricNormal;
+            const ClSample cards = clReadCardsAt(mcFrame(P[5].x), s.sceneInstance, s.position, face, CL_READ_IRRADIANCE, (P[4].y & 4u) != 0, 0.5 * footprint, coord);
+            if (cards.valid)
+            {
+                L.irradiance = cards.direct + cards.indirect;
+                L.specularRadiance = L.irradiance / LG_PI;  // (the lobe at the hit sees the cards' light as uniform)
+                fromCards = true;
+            }
+            statClass = cards.valid ? 3u : 1u;
+        }
+        // indirect light at a hit without cards: the world cache, only with gi.lumen_hit_fallback (P[4].y bit 1 clear;
+        // read only; experiment 512, attribution: none - one bounce)
+        if (!fromCards && (P[4].y & 2u) == 0 && (P[3].w & 512u) == 0)
+        {
+            ByteAddressBuffer cache = ResourceDescriptorHeap[P[0].x];
+            const GiHeader h = giHeader(cache);
+            const float3 mirror = reflect(r.Direction, s.normal);
+            // gi.bounce_visibility (GI_P1_FLAGS bit 6; as GiTrace's fallback read and the reflection hits'): only cells
+            // whose anchor sees the hit count. A footprint-level cell is metres wide for a long ray: the lobby's floor
+            // and the sunlit ground outside share one, anchored inside or outside by the order of the first frames -
+            // without the rule the probes' hits read daylight or not from run to run (lobby GI layer 22-28 warm or
+            // 41-65 grey-blue with the same settings [measured 2026-10-02]).
+            g_giStrictVisibility = (cache.Load(GI_P1_FLAGS) & 64u) != 0;
+            giCacheLightingAt(cache, h, s.position, s.normal, mirror, giLevelForSize(h, footprint), L.irradiance, L.specularRadiance);
+            g_giStrictVisibility = false;
+        }
+        // ... or the frame's volume / irradiance probes (no world cache: P[4].y bit 1)
+        bool indirectFound = false;
+        if (!fromCards && (P[4].y & 2u) != 0)
+        {
+            const float4 e = lhiIrradiance(lhiSources(P[5].x), s.position, s.normal, seed);
+            L.irradiance += e.rgb;
+            L.specularRadiance += e.rgb / LG_PI;  // (the lobe at the hit sees that light as uniform, as the cards')
+            indirectFound = e.a > 0;
+        }
+        if (!fromCards && !indirectFound) L.irradiance += giFarSkyIrradiance(s.position, s.normal, float(P[4].y >> 16));
+        const float3 l = normalize(g_sunDirection);
+        const float cosSun = dot(s.normal, l);
+        if (!fromCards && (cosSun > 0 || rtHitTransmits(m)) && (P[3].w & 16) == 0)
+        {
+            const float3 e0 = giSunIlluminance(s.position);
+            if (any(e0 > 0))
+            {
+                RayDesc sr;
+                sr.Origin = s.position + (dot(s.geometricNormal, l) > 0 ? 1.0 : -1.0) * s.geometricNormal * lgBias(s.position);
+                // (toward the disk's centre: the same ray every frame - a hit without cards is a deforming surface,
+                // and a random point of the disk would put one-sample noise into the probe)
+                sr.Direction = l;
+                sr.TMin = 0;
+                sr.TMax = giRayLength();
+                // (the sun through the Glass on the way: what the panes leave of it - RayShaders.hlsli rtShadowTransmittance)
+                const float3 through = rtShadowTransmittance(scene, sr, RT_MASK_HIT_SHADOW | RT_MASK_FAR);
+                L.sunIlluminance = e0 * through;
+                L.sunVisibility = any(through > 0) ? 1.0 : 0.0;
+            }
+        }
+        // a hit without cards: one local-light sample (HitLocalSample.hlsli; experiment 128: none, as the reference)
+        if (!fromCards && (P[3].w & 128) == 0) L.local = rtHitLocalSample(scene, s, m, -r.Direction, footprint, lgBias(s.position), seed);
+        radiance = rtHitRadiance(m, s.normal, -r.Direction, L, footprintPerMetre);
+        // a leaf lit from its cards: the other side's light through it (LumenHitIndirect.hlsli)
+        if (fromCards)
+            radiance += lhiFoliageThrough(lhiRules(P[5].x), mcFrame(P[5].x), m, s.sceneInstance, s.position,
+                                          dot(s.geometricNormal, r.Direction) > 0 ? -s.geometricNormal : s.geometricNormal);
+    }
+    // lumen.skylight_leaking (LumenHitIndirect.hlsli; 0 by default: nothing)
+    radiance += lhiSkyLeaking(lhiRules(P[5].x), r.Direction, hit.t);
+    return radiance;
+}
+#endif
+void lgStoreTrace(uint2 coord, uint2 atlas, uint2 probePixel, RayDesc r, float3 radiance, float distanceToHit,
+                  bool isHit, bool moving, bool reachedCache, uint statClass)
+{
+    Texture2D<float> probeDepth = ResourceDescriptorHeap[P[10].w];
+    RWTexture2D<float4> traceRadiance = ResourceDescriptorHeap[P[0].z];
+    RWTexture2D<uint> traceWord = ResourceDescriptorHeap[P[0].w];
+    if (!all(radiance == radiance) || any(radiance < 0)) radiance = 0;
+#if SKY == SKY_ATMOSPHERE
+    // atmosphere.fog.on_gi_rays (FogVolume.hlsli fogOverGiRay; off by default): the fog between the probe and what its ray
+    // met - a hit, or the sky (the radiance cache's answer holds its own rays' light).
+    if (!reachedCache)
+        radiance = fogOverGiRay((float2(probePixel) + 0.5) / float2(g_viewWidth, g_viewHeight), probeDepth[atlas], r.Origin, r.Direction,
+                                isHit ? distanceToHit : 65536.0, radiance);
+#endif
+    // Experiment 2097152 (statistics): the hit's surface-cache read class as a colour of exposed value 1 - red: no card
+    // read, blue: its cards read; rays without a surface hit (sky, emitters, back faces): 0.
+    // The GI layer's channel means then give the cosine-weighted shares.
+    if ((P[3].w & 2097152u) != 0)
+        radiance = float3(statClass == 1u ? 1.0 : 0.0, statClass == 2u ? 1.0 : 0.0, statClass == 3u ? 1.0 : 0.0) / max(g_exposure, 1e-20);
+    traceRadiance[coord] = float4(min(radiance * g_exposure, 64000.0), 1);
+    traceWord[coord] = lgEncodeTrace(min(distanceToHit, giRayLength()), isHit, moving, reachedCache);
+}
+
 [shader("raygeneration")]
 void LgTraceGen()
 {
     // (the atlas is traced in bands of rows, each its own DispatchRays: P[11].w = the band's first row - or, compacted,
     // over the list of the texels that need a ray: P[11].w = the dispatch's first entry)
+#if HIT_LIGHTING_STAGE == 2
+    uint sourceCoord;
+    RtHit queuedHit;
+    RayDesc queuedRay;
+    hitLightingLoad(LG_HIT_LIGHTING_QUEUE, DispatchRaysIndex().x + P[11].w, sourceCoord, queuedHit, queuedRay);
+    const uint2 coord = uint2(sourceCoord & 0xFFFFu, sourceCoord >> 16);
+#else
     uint2 coord = DispatchRaysIndex().xy + uint2(0, P[11].w);
     if ((P[4].y & 8u) != 0)
     {
@@ -81,6 +232,7 @@ void LgTraceGen()
         const uint entry = traceList.Load(16 + 4 * (DispatchRaysIndex().x + P[11].w));
         coord = uint2(entry & 0xFFFFu, entry >> 16);
     }
+#endif
     const uint2 atlas = coord / LG_TRACE_RES, texel = coord % LG_TRACE_RES;
     const uint probe = lgProbeIndex(atlas);
     ByteAddressBuffer adaptive = ResourceDescriptorHeap[P[10].z];
@@ -111,6 +263,14 @@ void LgTraceGen()
     g_rtHitCone = tan(coneHalfAngle);
 
     const RtSceneSrvs scene = rtScene();
+#if HIT_LIGHTING_STAGE == 2
+    const uint seed = giRandom(coord.x * 9781u + coord.y * 6271u + lgFrame() * 26699u);
+    bool moving;
+    uint statClass;
+    const float3 radiance = lgSurfaceLighting(scene, queuedHit, queuedRay, coord, atlas, positionSpeed,
+        footprintPerMetre, seed, moving, statClass);
+    lgStoreTrace(coord, atlas, probePixel, queuedRay, radiance, queuedHit.t, true, moving, false, statClass);
+#else
     const float bias = lgBias(positionSpeed.xyz);
     RayDesc r;
     r.Direction = lgSphere(uv);
@@ -127,22 +287,12 @@ void LgTraceGen()
         r.TMin = max(lgTraceDistance(screened) - LG_SCREEN_PULLBACK, 0.0);
     }
     // The far field: A's radiance cache (the position is the probe's, as marked by LgRcMark).
-    // Its answer for this ray is taken before the ray: where no probe around both sees the ray's start and holds its
-    // direction (LumenRadianceCache.hlsli, probe occlusion) the ray runs its full length.
-    LrcCoverage coverage = (LrcCoverage)0;
-    float4 cached = 0;
-    if (P[5].y != 0xFFFFFFFFu)
-    {
-        const LrcParams rc = lrcParams(P[5].y);
-        coverage = lrcCoverageChecked(rc, P[5].z, positionSpeed.xyz, lgRcDither(atlas));
-        if (coverage.valid)
-        {
-            cached = lrcSample(rc, P[5].z, P[5].w, P[11].z, coverage, positionSpeed.xyz, r.Direction, lrcSeenFrom(rc, coverage, r.Origin, r.Direction));
-            coverage.valid = cached.a > 0;
-        }
-        if (coverage.valid) r.TMax = min(r.TMax, coverage.minTraceDistance);
-    }
-    const RtHit hit = rtTraceClosest(scene, r, RAY_FLAG_NONE, RT_MASK_GI | RT_MASK_EMITTER | RT_MASK_FAR);
+    // A near hit needs no directional cache answer. A near miss still performs
+    // every original visibility/alpha test before the cache may end the ray.
+    LrcCoverage coverage;
+    float4 cached;
+    const RtHit hit = lgTraceCache(scene, r, P[5].y, P[5].z, P[5].w, P[11].z, probe, positionSpeed.xyz,
+                                  lgRcDither(atlas), lgRcPrepared(), (P[4].y & LG_PROBE_CACHE_NEAR_FIRST) != 0, coverage, cached);
     const uint seed = giRandom(coord.x * 9781u + coord.y * 6271u + lgFrame() * 26699u);
 
     float3 radiance = 0;
@@ -167,7 +317,7 @@ void LgTraceGen()
         const LrcParams rc = lrcParams(P[5].y);
         radiance = cached.rgb;
         reachedCache = true;
-        distanceToHit = P[11].z != 0xFFFFFFFFu ? lrcSampleDistance(rc, P[5].z, P[11].z, coverage, positionSpeed.xyz, r.Direction) : r.TMax;
+        distanceToHit = P[11].z != 0xFFFFFFFFu ? lgRcSampleDistance(rc, P[5].z, P[11].z, coverage, probe, positionSpeed.xyz, r.Direction, lgRcPrepared()) : r.TMax;
     }
     else if (hit.t < 0)
     {
@@ -194,121 +344,13 @@ void LgTraceGen()
     {
         isHit = true;
         distanceToHit = hit.t;
-        GpuInstance inst;
-        GpuMesh mesh;
-        RtInstance ri;
-        RtTriangle tri;
-        const RtSurface s = rtSurfaceParts(scene, hit, r.Origin, r.Direction, inst, mesh, ri, tri);
-        // the hit's speed: its object-space point through the instance's previous transform (deformed meshes: the
-        // instance's motion alone)
-        {
-            const float3 w = rtBary(hit.barycentrics);
-            float3 previous = s.position;
-            if ((ri.flags & RT_INSTANCE_DEFORMED) == 0)
-            {
-                const float3 object = loadVertex(mesh, tri.meshVertex.x).position * w.x + loadVertex(mesh, tri.meshVertex.y).position * w.y +
-                                      loadVertex(mesh, tri.meshVertex.z).position * w.z;
-                previous = transformPoint(inst.prevObjectToWorld, object);
-            }
-            const float hitSpeed = distance(s.position, previous);
-            moving = abs(positionSpeed.w - hitSpeed) / max(probeDepth[atlas], 1.0) > asfloat(P[4].w);
-        }
-        GpuMaterial m = loadMaterial(s.material);
-        const float footprint = hit.t * footprintPerMetre;
-        if ((P[3].w & 8) == 0)
-        {
-            m = rtHitMaterialSeen(m, s, r.Direction, footprint, dot(s.normal, r.Direction));
-            rtHitDecals(scene, s, footprint, m);
-        }
-        // (the emission of a visible-only emissive is not light for GI: INTERFACES v1.92)
-        if ((m.classFlags & MATERIAL_EMISSIVE_VISIBLE_ONLY) != 0) m.emissive = 0;
-        const bool twoSided = (m.classFlags & MATERIAL_TWO_SIDED) != 0;
-        if (s.frontFace || twoSided)
-        {
-            RtHitLighting L = (RtHitLighting)0;
-            bool fromCards = false;  // (the cards' direct light holds the sun and the local lights: the hit adds neither)
-            if (P[5].x != 0xFFFFFFFFu)
-            {
-                const float3 face = dot(s.geometricNormal, r.Direction) > 0 ? -s.geometricNormal : s.geometricNormal;
-                const ClSample cards = clReadCardsAt(mcFrame(P[5].x), s.sceneInstance, s.position, face, CL_READ_IRRADIANCE, (P[4].y & 4u) != 0, 0.5 * footprint, coord);
-                if (cards.valid)
-                {
-                    L.irradiance = cards.direct + cards.indirect;
-                    L.specularRadiance = L.irradiance / LG_PI;  // (the lobe at the hit sees the cards' light as uniform)
-                    fromCards = true;
-                }
-                statClass = cards.valid ? 3u : 1u;
-            }
-            // indirect light at a hit without cards: the world cache, only with gi.lumen_hit_fallback (P[4].y bit 1 clear;
-            // read only; experiment 512, attribution: none - one bounce)
-            if (!fromCards && (P[4].y & 2u) == 0 && (P[3].w & 512u) == 0)
-            {
-                ByteAddressBuffer cache = ResourceDescriptorHeap[P[0].x];
-                const GiHeader h = giHeader(cache);
-                const float3 mirror = reflect(r.Direction, s.normal);
-                // gi.bounce_visibility (GI_P1_FLAGS bit 6; as GiTrace's fallback read and the reflection hits'): only cells
-                // whose anchor sees the hit count. A footprint-level cell is metres wide for a long ray: the lobby's floor
-                // and the sunlit ground outside share one, anchored inside or outside by the order of the first frames -
-                // without the rule the probes' hits read daylight or not from run to run (lobby GI layer 22-28 warm or
-                // 41-65 grey-blue with the same settings [measured 2026-10-02]).
-                g_giStrictVisibility = (cache.Load(GI_P1_FLAGS) & 64u) != 0;
-                giCacheLightingAt(cache, h, s.position, s.normal, mirror, giLevelForSize(h, footprint), L.irradiance, L.specularRadiance);
-                g_giStrictVisibility = false;
-            }
-            // ... or the frame's volume / irradiance probes (no world cache: P[4].y bit 1)
-            bool indirectFound = false;
-            if (!fromCards && (P[4].y & 2u) != 0)
-            {
-                const float4 e = lhiIrradiance(lhiSources(P[5].x), s.position, s.normal, seed);
-                L.irradiance += e.rgb;
-                L.specularRadiance += e.rgb / LG_PI;  // (the lobe at the hit sees that light as uniform, as the cards')
-                indirectFound = e.a > 0;
-            }
-            if (!fromCards && !indirectFound) L.irradiance += giFarSkyIrradiance(s.position, s.normal, float(P[4].y >> 16));
-            const float3 l = normalize(g_sunDirection);
-            const float cosSun = dot(s.normal, l);
-            if (!fromCards && (cosSun > 0 || rtHitTransmits(m)) && (P[3].w & 16) == 0)
-            {
-                const float3 e0 = giSunIlluminance(s.position);
-                if (any(e0 > 0))
-                {
-                    RayDesc sr;
-                    sr.Origin = s.position + (dot(s.geometricNormal, l) > 0 ? 1.0 : -1.0) * s.geometricNormal * lgBias(s.position);
-                    // (toward the disk's centre: the same ray every frame - a hit without cards is a deforming surface,
-                    // and a random point of the disk would put one-sample noise into the probe)
-                    sr.Direction = l;
-                    sr.TMin = 0;
-                    sr.TMax = giRayLength();
-                    // (the sun through the Glass on the way: what the panes leave of it - RayShaders.hlsli rtShadowTransmittance)
-                    const float3 through = rtShadowTransmittance(scene, sr, RT_MASK_HIT_SHADOW | RT_MASK_FAR);
-                    L.sunIlluminance = e0 * through;
-                    L.sunVisibility = any(through > 0) ? 1.0 : 0.0;
-                }
-            }
-            // a hit without cards: one local-light sample (HitLocalSample.hlsli; experiment 128: none, as the reference)
-            if (!fromCards && (P[3].w & 128) == 0) L.local = rtHitLocalSample(scene, s, m, -r.Direction, footprint, lgBias(s.position), seed);
-            radiance = rtHitRadiance(m, s.normal, -r.Direction, L, footprintPerMetre);
-            // a leaf lit from its cards: the other side's light through it (LumenHitIndirect.hlsli)
-            if (fromCards)
-                radiance += lhiFoliageThrough(lhiRules(P[5].x), mcFrame(P[5].x), m, s.sceneInstance, s.position,
-                                              dot(s.geometricNormal, r.Direction) > 0 ? -s.geometricNormal : s.geometricNormal);
-        }
-        // lumen.skylight_leaking (LumenHitIndirect.hlsli; 0 by default: nothing)
-        radiance += lhiSkyLeaking(lhiRules(P[5].x), r.Direction, hit.t);
-    }
-    if (!all(radiance == radiance) || any(radiance < 0)) radiance = 0;
-#if SKY == SKY_ATMOSPHERE
-    // atmosphere.fog.on_gi_rays (FogVolume.hlsli fogOverGiRay; off by default): the fog between the probe and what its ray
-    // met - a hit, or the sky (the radiance cache's answer holds its own rays' light).
-    if (!reachedCache)
-        radiance = fogOverGiRay((float2(probePixel) + 0.5) / float2(g_viewWidth, g_viewHeight), probeDepth[atlas], r.Origin, r.Direction,
-                                isHit ? distanceToHit : 65536.0, radiance);
+#if HIT_LIGHTING_STAGE == 1
+        hitLightingEnqueue(LG_HIT_LIGHTING_QUEUE, coord.x | (coord.y << 16), hit, r);
+        return;
+#else
+        radiance = lgSurfaceLighting(scene, hit, r, coord, atlas, positionSpeed, footprintPerMetre, seed, moving, statClass);
 #endif
-    // Experiment 2097152 (statistics): the hit's surface-cache read class as a colour of exposed value 1 - red: no card
-    // read, blue: its cards read; rays without a surface hit (sky, emitters, back faces): 0.
-    // The GI layer's channel means then give the cosine-weighted shares.
-    if ((P[3].w & 2097152u) != 0)
-        radiance = float3(statClass == 1u ? 1.0 : 0.0, statClass == 2u ? 1.0 : 0.0, statClass == 3u ? 1.0 : 0.0) / max(g_exposure, 1e-20);
-    traceRadiance[coord] = float4(min(radiance * g_exposure, 64000.0), 1);
-    traceWord[coord] = lgEncodeTrace(min(distanceToHit, giRayLength()), isHit, moving, reachedCache);
+    }
+    lgStoreTrace(coord, atlas, probePixel, r, radiance, distanceToHit, isHit, moving, reachedCache, statClass);
+#endif
 }

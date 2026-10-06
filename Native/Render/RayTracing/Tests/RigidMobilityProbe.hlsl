@@ -1,5 +1,6 @@
 // unx-kernel: cs_6_6 main
 #include "Bindless.hlsli"
+#include "Passes/Common/Deformation.hlsli"
 [numthreads(64, 1, 1)]
 void main(uint i : SV_DispatchThreadID)
 {
@@ -19,5 +20,14 @@ void main(uint i : SV_DispatchThreadID)
         { id = q.CommittedInstanceID(); distance = q.CommittedRayT(); }
     }
     RWByteAddressBuffer output = ResourceDescriptorHeap[P[0].z];
+    const GpuInstance inst = loadInstance(object);
+    const bool referenceStill = inst.morph == UNX_NONE && (inst.flags & (INSTANCE_SKINNED | INSTANCE_WIND)) == 0 &&
+        all(inst.objectToWorld[0] == inst.prevObjectToWorld[0]) && all(inst.objectToWorld[1] == inst.prevObjectToWorld[1]) &&
+        all(inst.objectToWorld[2] == inst.prevObjectToWorld[2]);
+    if (deformInstanceStillAt(object) != referenceStill || deformInstanceStill(inst) != referenceStill) id = 0xFFFFFFF0u;
+    GpuInstance gpuWritten = inst;
+    gpuWritten.morphPad = 0x5354494Cu; // a template's old proof is not authoritative in the GPU-owned range
+    gpuWritten.prevObjectToWorld[0].w = gpuWritten.objectToWorld[0].w + 1;
+    if (instanceTransformStill(g_instanceCount, gpuWritten)) id = 0xFFFFFFF0u;
     output.Store2(i * 8, uint2(id, asuint(distance)));
 }

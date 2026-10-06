@@ -1,5 +1,6 @@
 #pragma once
 #include "unx/render/D3D12.h"
+#include "unx/render/GpuWorkload.h"
 #include "unx/render/Descriptors.h"
 
 #include <array>
@@ -112,6 +113,8 @@ public:
     // The single bindless root signature: 32 root constants (b0), a root CBV (b1), static samplers s0-s5,
     // heaps directly indexed. Every compute and mesh pipeline uses it.
     ID3D12RootSignature* rootSignature() const { return m_rootSignature.Get(); }
+    D3D12_GPU_DESCRIPTOR_HANDLE rayExtensionUav() const { return m_descriptors->resourceGpu(m_rayExtensionUav); }
+    static constexpr uint32_t kRayExtensionRoot = 2, kRayExtensionSlot = 0, kRayExtensionSpace = 31;
     static constexpr uint32_t kRootConstantCount = 48;  // b0 = uint4 P[12] (Bindless.hlsli; v1.62: P[8..11] added for the frame-global SRVs of the fragment kernels)
 
     // Command lists come from a pool; submit() executes and recycles them once the queue fence passes.
@@ -133,10 +136,13 @@ private:
     ComPtr<IDXGIAdapter4> m_adapter;
     ComPtr<ID3D12Device10> m_device;
     ComPtr<ID3D12InfoQueue1> m_infoQueue;
+    DWORD m_debugCallbackCookie = 0;
+    bool m_debugCallbackRegistered = false;
     DeviceCaps m_caps;
     std::array<std::unique_ptr<Queue>, kQueueTypeCount> m_queues;
     std::unique_ptr<DescriptorHeaps> m_descriptors;
     ComPtr<ID3D12RootSignature> m_rootSignature;
+    uint32_t m_rayExtensionUav = UINT32_MAX;  // null descriptor, owned for the device heap's lifetime
     std::mutex m_poolMutex;
     std::array<std::vector<CommandList>, kQueueTypeCount> m_pool;
     struct Deferred

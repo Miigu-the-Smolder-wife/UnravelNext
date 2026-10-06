@@ -83,7 +83,10 @@ void main(uint2 id : SV_DispatchThreadID)
     map[id] = value;
 }
 #elif STEP == 1
-groupshared float4 gs_sum[1024];
+// Ping-pong the scan stages. Each stage reads only the previous bank, so
+// a single barrier publishes its result; no read-before-overwrite barrier.
+// Keep the original Hillis-Steele addition order (including chunk carry).
+groupshared float4 gs_sum[2][1024];
 
 [numthreads(1024, 1, 1)]
 void main(uint3 gid : SV_GroupID, uint t : SV_GroupIndex)
@@ -94,17 +97,18 @@ void main(uint3 gid : SV_GroupID, uint t : SV_GroupIndex)
     for (uint c0 = 0; c0 < width; c0 += 1024)
     {
         const uint x = c0 + t;
-        gs_sum[t] = x < width ? map[uint2(x, row)] : 0;
+        gs_sum[0][t] = x < width ? map[uint2(x, row)] : 0;
         GroupMemoryBarrierWithGroupSync();
+        uint bank = 0;
         for (uint s = 1; s < 1024; s <<= 1)  // Hillis-Steele: a fixed combination order (deterministic)
         {
-            const float4 o = t >= s ? gs_sum[t - s] : 0;
+            const float4 o = t >= s ? gs_sum[bank][t - s] : 0;
+            gs_sum[bank ^ 1][t] = gs_sum[bank][t] + o;
             GroupMemoryBarrierWithGroupSync();
-            gs_sum[t] += o;
-            GroupMemoryBarrierWithGroupSync();
+            bank ^= 1;
         }
-        if (x < width) map[uint2(x, row)] = carry + gs_sum[t];
-        carry += gs_sum[1023];
+        if (x < width) map[uint2(x, row)] = carry + gs_sum[bank][t];
+        carry += gs_sum[bank][1023];
         GroupMemoryBarrierWithGroupSync();
     }
 }

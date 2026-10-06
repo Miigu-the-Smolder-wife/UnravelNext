@@ -129,10 +129,10 @@ int main(int argc, char** argv)
                                      b.use(countWord, Use::UavCompute);
                                  },
                                  [=](PassContext& c) {
-                                     uint32_t k[8] = { c.srv(source), range.lightUav, range.countUav, range.first, 0, fxCount, 0, 0 };
+                                     uint32_t k[8] = { c.srv(source), range.lightUav, range.countUav, range.first, 0, fxCount, (uint32_t)sizeof(gpu::Light), 0 };
                                      c.cmd->SetPipelineState(pso);
                                      c.computeConstants(k, 8);
-                                     c.cmd->Dispatch((uint32_t)(records.size() * 20 + 63) / 64, 1, 1);
+                                     c.cmd->Dispatch((uint32_t)(records.size() * (sizeof(gpu::Light) / 4) + 63) / 64, 1, 1);
                                  });
                 rt::RayScene& rays = rt::RayScene::get(fc);
                 rays.record(fc);

@@ -21,6 +21,34 @@ struct ViewTable
     std::vector<std::pair<D3D12_GPU_VIRTUAL_ADDRESS, ResolveOutputs>> views;
 };
 
+struct ResolveFeatures
+{
+    const GpuScene* scene = nullptr;
+    uint32_t revision = UINT32_MAX;
+    bool simple = false;
+    bool select(const GpuScene& current)
+    {
+        if (scene == &current && revision == current.revision()) return simple;
+        scene = &current; revision = current.revision();
+        const scene::Scene* source = current.source();
+        simple = source && !current.anyEye();
+        if (source) for (const auto& material : source->materials)
+            if (material.cls == scene::MaterialClass::Cut || material.cls == scene::MaterialClass::Terrain || material.heightTexture != scene::kNone)
+            { simple = false; break; }
+        char trace[2]{};
+        if (GetEnvironmentVariableA("UNX_RESOLVE_TRACE", trace, sizeof trace) == 1 && trace[0] == '1')
+        {
+            logf("M resolve variant: revision %u, %zu materials, simple %u; anisotropic %u, eye %u, height %u\n",
+                revision, current.materials().size(), simple ? 1u : 0u, current.anyAnisotropic() ? 1u : 0u,
+                current.anyEye() ? 1u : 0u, current.anyHeight() ? 1u : 0u);
+            if (source) for (const auto& material : source->materials)
+                if (material.cls == scene::MaterialClass::Cut || material.cls == scene::MaterialClass::Terrain || material.heightTexture != scene::kNone)
+                    logf("M resolve special input: %s, class %u, height %u\n", material.name.c_str(), uint32_t(material.cls), material.heightTexture);
+        }
+        return simple;
+    }
+};
+
 struct Signature
 {
     ComPtr<ID3D12CommandSignature> dispatch;
@@ -211,10 +239,13 @@ void resolve(FramePassContext& fc, ViewResources& view)
     o.tileArgs = fc.graph.createBuffer({ "m.tile args", (uint64_t)o.totalsOffset() + kShadeClassCount * 4, 0 });
 
     ID3D12PipelineState* begin = fc.shaders.compute("Passes/Material/ResolveBegin");
-    const ResolveDebug& debug = fc.state<ResolveDebug>("M.resolveDebug");
+    ResolveDebug& debug = fc.state<ResolveDebug>("M.resolveDebug");
     // Planar reflection views with R's mirror mask (v1.22) use the PLANAR_MASK variant; other views compile none of it.
     const bool planarMask = view.view.planarTileMask.valid() || view.view.planarMask.valid();
-    const std::string kernelName = std::string("Passes/Material/Resolve.DEBUG") + (debug.buffer.valid() ? "1" : "0") + ".PLANAR_MASK" + (planarMask ? "1" : "0");
+    const bool simpleResolve = fc.state<ResolveFeatures>("M.resolveFeatures").select(fc.scene) && !debug.forceFullKernel;
+    debug.usedSimpleKernel = simpleResolve;
+    const std::string kernelName = std::string(simpleResolve ? "Passes/Material/ResolveSimple.DEBUG" : "Passes/Material/Resolve.DEBUG") +
+        (debug.buffer.valid() ? "1" : "0") + ".PLANAR_MASK" + (planarMask ? "1" : "0");
     ID3D12PipelineState* kernel = fc.shaders.compute(kernelName.c_str());
     const BufferRef debugBuffer = debug.buffer;
     const BufferRef args = o.tileArgs;
@@ -227,7 +258,7 @@ void resolve(FramePassContext& fc, ViewResources& view)
                          const uint32_t k[4] = { c.uav(args), argEntries, 0, 0 };
                          c.cmd->SetPipelineState(begin);
                          c.computeConstants(k, 4);
-                         c.cmd->Dispatch((argEntries + 31) / 32, 1, 1);
+                         gpuDispatch(c.cmd, (argEntries + 31) / 32, 1, 1);
                      });
 
     const ViewResources v = view;
@@ -287,7 +318,7 @@ void resolve(FramePassContext& fc, ViewResources& view)
                          c.cmd->SetPipelineState(kernel);
                          c.bindFrameConstants(cb);
                          c.computeConstants(k, 28);
-                         c.cmd->Dispatch(o.tilesX, o.tilesY, 1);
+                         gpuDispatch(c.cmd, o.tilesX, o.tilesY, 1);
                      });
 
     ViewTable& table = fc.state<ViewTable>("M.views");

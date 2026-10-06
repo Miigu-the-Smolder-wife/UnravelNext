@@ -251,9 +251,12 @@ static float halton(uint32_t index, uint32_t base)
 void FrameRenderer::setupUpscale(FrameContext& frame)
 {
     frame.upscale = FrameContext::Upscale{};
-    const int64_t maxHeight = m_quality.has("output.render_height_max") ? m_quality.integer("output.render_height_max") : 0;
-    const double scale = m_quality.has("output.render_scale") ? m_quality.number("output.render_scale") : 1.0;
-    const int64_t minHeight = m_quality.has("output.render_scale_min_height") ? m_quality.integer("output.render_scale_min_height") : 0;
+    const auto& look = frame.postExtended;
+    const int64_t maxHeight = look.enabled ? look.renderHeightMax : m_quality.has("output.render_height_max") ? m_quality.integer("output.render_height_max") : 0;
+    const double scale = look.enabled ? look.renderScale : m_quality.has("output.render_scale") ? m_quality.number("output.render_scale") : 1.0;
+    const int64_t minHeight = look.enabled ? look.renderScaleMinHeight : m_quality.has("output.render_scale_min_height") ? m_quality.integer("output.render_scale_min_height") : 0;
+    const double lensD = look.enabled ? look.paniniD : m_quality.has("output.lens_panini_d") ? m_quality.number("output.lens_panini_d") : 0.0;
+    const bool lensRequested = lensD > 0.01;
     if (!(scale > 0 && scale <= 1)) fail("output.render_scale must be in (0, 1]");
     ViewDesc& v = frame.mainView;
     // Internal height: the output's x render_scale (outputs of at least render_scale_min_height), at most render_height_max
@@ -261,7 +264,7 @@ void FrameRenderer::setupUpscale(FrameContext& frame)
     // native image) and debug buffer views (they show the view's own buffers pixel for pixel) stay native)
     uint32_t h = v.height == 0 || (int64_t)v.height < minHeight ? v.height : std::max(8u, (uint32_t)std::lround((double)v.height * scale));
     if (maxHeight > 0) h = std::min(h, (uint32_t)maxHeight);
-    if (maxHeight < 0 || v.kind != gpu::ViewKind::Main || h >= v.height || v.width == 0 || frame.outputLinearHdr ||
+    if (maxHeight < 0 || v.kind != gpu::ViewKind::Main || (h >= v.height && !lensRequested) || v.width == 0 || frame.outputLinearHdr ||
         (m_quality.has("debug.view") && m_quality.string("debug.view") != "none"))
     {
         m_upscaleValid = false;
@@ -453,7 +456,12 @@ ViewResources FrameRenderer::record(RenderGraph& graph, const FrameContext& in, 
     tracks::particleLightCapacity(m_trackState, m_scene);  // A3: before the imports and every frame constants
     FrameResources resources;
     // output.async_compute_passes: the named passes on the async compute queue (RenderGraph::setAsyncPasses).
-    graph.setAsyncPasses(m_quality.has("output.async_compute_passes") ? m_quality.strings("output.async_compute_passes") : std::vector<std::string>{});
+    auto asyncPasses = m_quality.has("output.async_compute_passes") ? m_quality.strings("output.async_compute_passes") : std::vector<std::string>{};
+    const int64_t asyncLighting = m_quality.has("output.async_lighting") ? m_quality.integer("output.async_lighting") : 0;
+    if (asyncLighting < 0 || asyncLighting > 2) fail("output.async_lighting must be 0, 1 or 2");
+    if (asyncPasses.empty() && asyncLighting == 1) asyncPasses = { "r.gi.lg.*", "r.gi.sao*" };
+    if (asyncPasses.empty() && asyncLighting == 2) asyncPasses = { "r.gi.*", "r.card.*" };
+    graph.setAsyncPasses(std::move(asyncPasses));
     FrameServices services;
     FramePassContext fc{ m_device, graph, m_shaders, m_quality, m_scene, frame, resources, services,
                          [this, &frame, &fc](const ViewDesc& v) { return allocateFrameConstants(frame, v, &fc); }, &m_trackState, m_framesInFlight };

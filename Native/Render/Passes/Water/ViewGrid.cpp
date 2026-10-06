@@ -353,7 +353,7 @@ ViewGridOutput ViewGrid::record(RenderGraph& g, uint64_t frame, const OceanOutpu
                       std::memcpy(&k[8], texels, 12);
                       c.cmd->SetPipelineState(bounds);
                       c.computeConstants(k, 12);
-                      c.cmd->Dispatch((size + 7) / 8, (size + 7) / 8, 3);
+                      gpuDispatch(c.cmd, (size + 7) / 8, (size + 7) / 8, 3);
                   });
     }
     ID3D12Resource* readback = m_boundsReadback[writeSlot].Get();
@@ -394,7 +394,7 @@ ViewGridOutput ViewGrid::record(RenderGraph& g, uint64_t frame, const OceanOutpu
             scatterConstants(c, k);
             c.cmd->SetPipelineState(scatter);
             c.computeConstants(k, 12);
-            c.cmd->Dispatch(groupsX, groupsY, 1);
+            gpuDispatch(c.cmd, groupsX, groupsY, 1);
         });
     if (l.nearLevels)
     {
@@ -412,10 +412,10 @@ ViewGridOutput ViewGrid::record(RenderGraph& g, uint64_t frame, const OceanOutpu
                       c.cmd->SetPipelineState(clear);  // ViewGridClear: the counts only
                       const uint32_t k[4] = { 0, 0, c.uav(firstList), 4 };
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                       const uint32_t d[4] = { 0, 0, drawnUavFixed, 4 };
                       c.computeConstants(d, 4);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                   });
         ID3D12PipelineState* adaptive = m_shaders.compute("Passes/Water/ViewGridAdaptive");
         ID3D12PipelineState* args = m_shaders.compute("Passes/Water/ViewGridAdaptiveArgs");
@@ -433,7 +433,7 @@ ViewGridOutput ViewGrid::record(RenderGraph& g, uint64_t frame, const OceanOutpu
                               const uint32_t k[4] = { c.uav(in), c.uav(levelArgs), kNearBlocks, c.uav(outList) };
                               c.cmd->SetPipelineState(args);
                               c.computeConstants(k, 4);
-                              c.cmd->Dispatch(1, 1, 1);
+                              gpuDispatch(c.cmd, 1, 1, 1);
                           });
             g.addPass("view grid near level", QueueType::Graphics,
                       [&](PassBuilder& pb) {
@@ -451,8 +451,8 @@ ViewGridOutput ViewGrid::record(RenderGraph& g, uint64_t frame, const OceanOutpu
                           k[15] = top ? 1u : 0u;
                           c.cmd->SetPipelineState(adaptive);
                           c.computeConstants(k, 16);
-                          if (top) c.cmd->Dispatch(rectWidth, rectWidth, 1);
-                          else c.cmd->ExecuteIndirect(signature, 1, c.resource(levelArgs), 0, nullptr, 0);
+                          if (top) gpuDispatch(c.cmd, rectWidth, rectWidth, 1);
+                          else gpuExecuteIndirect(c.cmd, signature, 1, c.resource(levelArgs), 0, nullptr, 0);
                       });
         }
     }
@@ -464,7 +464,7 @@ ViewGridOutput ViewGrid::record(RenderGraph& g, uint64_t frame, const OceanOutpu
                   const uint32_t k[8] = { c.uav(counters), c.uav(big), c.uav(prefix), kBigCapacity, width, height, c.uav(arguments), 0 };
                   c.cmd->SetPipelineState(bigScan);
                   c.computeConstants(k, 8);
-                  c.cmd->Dispatch(1, 1, 1);
+                  gpuDispatch(c.cmd, 1, 1, 1);
               });
     ID3D12PipelineState* bigRaster = m_shaders.compute("Passes/Water/ViewGridBigRaster");
     ID3D12CommandSignature* signature = m_dispatch.Get();
@@ -477,7 +477,7 @@ ViewGridOutput ViewGrid::record(RenderGraph& g, uint64_t frame, const OceanOutpu
                   const uint32_t k[8] = { c.srv(counters), c.srv(big), c.srv(prefix), kBigCapacity, width, height, c.uav(keys), 0 };
                   c.cmd->SetPipelineState(bigRaster);
                   c.computeConstants(k, 8);
-                  c.cmd->ExecuteIndirect(signature, 1, c.resource(arguments), 0, nullptr, 0);
+                  gpuExecuteIndirect(c.cmd, signature, 1, c.resource(arguments), 0, nullptr, 0);
               });
     ID3D12PipelineState* resolve = m_shaders.compute("Passes/Water/ViewGridResolve");
     if (diagnostics) out.error = g.createTexture(TextureDesc{ "view grid error", width, height, 1, 1, DXGI_FORMAT_R32_FLOAT });
@@ -492,7 +492,7 @@ ViewGridOutput ViewGrid::record(RenderGraph& g, uint64_t frame, const OceanOutpu
                   const uint32_t k[8] = { paramSrv, 0, c.srv(keys), c.srv(displacement), c.srv(slopes), c.uav(surface), c.uav(depth), diagnostics ? c.uav(error) : 0 };
                   c.cmd->SetPipelineState(resolve);
                   c.computeConstants(k, 8);
-                  c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (width + 7) / 8, (height + 7) / 8, 1);
               });
     return out;
 }

@@ -122,7 +122,7 @@ TextureRef lumenShortRangeAO(FramePassContext& fc, const ViewResources& view)
                   c.cmd->SetPipelineState(search);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 16);
-                  c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (w + 7) / 8, (h + 7) / 8, 1);
               });
 
     auto import = [&](ComPtr<ID3D12Resource>& t, const char* name, DXGI_FORMAT format) {
@@ -160,7 +160,7 @@ TextureRef lumenShortRangeAO(FramePassContext& fc, const ViewResources& view)
                   c.cmd->SetPipelineState(filter);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 16);
-                  c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (W + 7) / 8, (H + 7) / 8, 1);
               });
     return output;
 }

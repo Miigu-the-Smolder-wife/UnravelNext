@@ -16,15 +16,22 @@
 #define EXPOSURE_LOG2_MIN -8.0   // ShadingCommon.hlsli shExposureHistogram, Exposure.h kExposureLog2Min / Step
 #define EXPOSURE_LOG2_STEP 0.5
 
-[numthreads(1, 1, 1)]
-void main()
+groupshared uint gs_histogram[EXPOSURE_BINS];
+
+[numthreads(64, 1, 1)]
+void main(uint index : SV_GroupIndex)
 {
     ByteAddressBuffer histogram = ResourceDescriptorHeap[P[0].x];
+    gs_histogram[index] = histogram.Load(4 * index);
+    GroupMemoryBarrierWithGroupSync();
+    // Keep the metering arithmetic and its accumulation order unchanged while
+    // issuing the histogram loads together and reusing them for the second pass.
+    if (index != 0) return;
     RWByteAddressBuffer correction = ResourceDescriptorHeap[P[0].y];
     const float targetGrey = asfloat(P[0].z), cutLow = asfloat(P[0].w), cutHigh = asfloat(P[1].x);
     const float evUsed = asfloat(P[1].y), compensation = asfloat(P[1].z);
     float total = 0;
-    [loop] for (uint b = 0; b < EXPOSURE_BINS; ++b) total += (float)histogram.Load(4 * b);
+    [loop] for (uint b = 0; b < EXPOSURE_BINS; ++b) total += (float)gs_histogram[b];
     if (!(total > 0))
     {
         correction.Store4(0, uint4(asuint(1.0), asuint(evUsed), 0, 0));  // nothing metered: the frame as rendered
@@ -34,7 +41,7 @@ void main()
     float below = 0, sum = 0, weight = 0;
     [loop] for (uint k = 0; k < EXPOSURE_BINS; ++k)
     {
-        const float c = (float)histogram.Load(4 * k), a = max(below, lo), z = min(below + c, hi);
+        const float c = (float)gs_histogram[k], a = max(below, lo), z = min(below + c, hi);
         if (z > a)
         {
             sum += (z - a) * (EXPOSURE_LOG2_MIN + (k + 0.5) * EXPOSURE_LOG2_STEP);

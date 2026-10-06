@@ -62,6 +62,7 @@ int main()
             std::array<std::shared_ptr<std::vector<uint8_t>>, 2> results;
             test.trackState.beginRecord();
             test.run([&](FramePassContext& fc) {
+                const auto frameConstants = fc.frameConstantsFor(test.frame.mainView);
                 for (uint32_t variant = 0; variant < 2; ++variant)
                 {
                     rays[variant]->record(fc);
@@ -69,10 +70,10 @@ int main()
                     const auto output = fc.graph.createBuffer({ "rigid hits", count * 2 * 8, 0 });
                     fc.graph.addPass("rigid probe", QueueType::Compute,
                         [&](PassBuilder& b) { rays[variant]->declareTraversal(b); b.use(output, Use::UavCompute); b.keep(); },
-                        [&, output, variant](PassContext& c) {
+                        [&, output, variant, frameConstants](PassContext& c) {
                             uint32_t srvs[8]; rays[variant]->rootConstants(srvs);
                             const uint32_t k[8] = { srvs[0], srvs[1], c.uav(output), count, std::bit_cast<uint32_t>(originX), 0, 0, 0 };
-                            c.cmd->SetPipelineState(fc.shaders.compute("RayTracing/Tests/RigidMobilityProbe")); c.computeConstants(k, 8); c.cmd->Dispatch((count * 2 + 63) / 64, 1, 1);
+                            c.cmd->SetPipelineState(fc.shaders.compute("RayTracing/Tests/RigidMobilityProbe")); c.bindFrameConstants(frameConstants); c.computeConstants(k, 8); c.cmd->Dispatch((count * 2 + 63) / 64, 1, 1);
                         });
                     results[variant] = test.readbackBuffer(fc, output, count * 2 * 8);
                 }

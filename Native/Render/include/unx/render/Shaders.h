@@ -2,8 +2,10 @@
 #include "unx/render/Device.h"
 
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -42,8 +44,8 @@ class ShaderLibrary
 public:
     ShaderLibrary(Device& device, std::filesystem::path directory);
 
-    ID3D12PipelineState* compute(const std::string& kernel);
-    ID3D12PipelineState* mesh(const std::string& name, const MeshPipelineDesc& desc);
+    ID3D12PipelineState* compute(std::string_view kernel);
+    ID3D12PipelineState* mesh(std::string_view name, const MeshPipelineDesc& desc);
 
     // Creates the given compute kernels in parallel (cold start path). Returns wall time.
     void createAll(const std::vector<std::string>& computeKernels);
@@ -56,7 +58,14 @@ private:
     Device& m_device;
     std::filesystem::path m_directory;
     std::mutex m_mutex;
-    std::unordered_map<std::string, ComPtr<ID3D12PipelineState>> m_pipelines;
+    struct NameHash
+    {
+        using is_transparent = void;
+        size_t operator()(std::string_view name) const noexcept { return std::hash<std::string_view>{}(name); }
+    };
+    // Own keys on insertion, but never allocate a temporary string for a cached
+    // pipeline lookup (most callers pass long kernel path literals every frame).
+    std::unordered_map<std::string, ComPtr<ID3D12PipelineState>, NameHash, std::equal_to<>> m_pipelines;
     PipelineStats m_stats;
 };
 } // namespace unx::render

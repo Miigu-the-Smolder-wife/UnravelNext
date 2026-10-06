@@ -177,6 +177,7 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
                                  ID3D12CommandSignature* dispatchSignature, const char* instance, const MegaLightsOptions& options)
 {
     MegaLightsFrame ml;
+    ml.coverageTiles = options.coverageTiles;
 #if UNX_M_HAS_RAYTRACING
     if (!fc.quality.boolean("shading.mega_lights") || !fc.trackState) return ml;
     const FrameResources r = fc.resources;
@@ -260,14 +261,14 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 8);
                   c.cmd->SetPipelineState(tilesBegin);
-                  c.cmd->Dispatch(1, 1, 1);
+                  gpuDispatch(c.cmd, 1, 1, 1);
                   D3D12_GLOBAL_BARRIER gb{ D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
                                            D3D12_BARRIER_ACCESS_UNORDERED_ACCESS };
                   D3D12_BARRIER_GROUP group{ D3D12_BARRIER_TYPE_GLOBAL, 1 };
                   group.pGlobalBarriers = &gb;
                   c.cmd->Barrier(1, &group);
                   c.cmd->SetPipelineState(tilesPso);
-                  c.cmd->Dispatch(dsTilesX, dsTilesY, 1);
+                  gpuDispatch(c.cmd, dsTilesX, dsTilesY, 1);
               });
     const TextureRef channels = options.channels;
     ID3D12PipelineState* samplePso = fc.shaders.compute(areaLights ? "Passes/Shading/MegaLightsSample.AREA1" : "Passes/Shading/MegaLightsSample.AREA0");
@@ -307,7 +308,7 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
                   c.cmd->SetPipelineState(samplePso);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 24);
-                  c.cmd->ExecuteIndirect(dispatchSignature, 1, c.resource(tileList), 0, nullptr, 0);
+                  gpuExecuteIndirect(c.cmd, dispatchSignature, 1, c.resource(tileList), 0, nullptr, 0);
               });
 
     // (an instance whose rays start elsewhere than at its surface: the hair records')
@@ -345,7 +346,7 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
                       const uint32_t k[4] = { c.uav(traceList), 0, 0, 0 };
                       c.cmd->SetPipelineState(resetPso);
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                   });
         g.addPass("m.ml.compact", QueueType::Compute,
                   [&](PassBuilder& b) {
@@ -358,7 +359,7 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
                       c.cmd->SetPipelineState(compactPso);
                       c.bindFrameConstants(cb);
                       c.computeConstants(k, 8);
-                      c.cmd->Dispatch((sampleW + 7) / 8, (sampleH + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (sampleW + 7) / 8, (sampleH + 7) / 8, 1);
                   });
         g.addPass("m.ml.compact.args", QueueType::Compute,
                   [&](PassBuilder& b) {
@@ -370,7 +371,7 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
                                                kTraceDesc, kRaysPerDispatch, traceChunks, 1, kTraceDesc, 0, 0, 0 };
                       c.cmd->SetPipelineState(sizesPso);
                       c.computeConstants(k, 12);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                   });
     }
     g.addPass("m.ml.trace", QueueType::Compute,
@@ -442,7 +443,7 @@ MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view
                       c.cmd->SetPipelineState(hairPso);
                       c.bindFrameConstants(cb);
                       c.computeConstants(k, 12);
-                      c.cmd->Dispatch((dsW * gridX + 7) / 8, (dsH * gridY + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (dsW * gridX + 7) / 8, (dsH * gridY + 7) / 8, 1);
                   });
     }
 #else
@@ -489,7 +490,7 @@ void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureR
                   c.cmd->SetPipelineState(buildPso);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 8);
-                  c.cmd->Dispatch((tilesX + 7) / 8, (tilesY + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (tilesX + 7) / 8, (tilesY + 7) / 8, 1);
               });
     g.addPass("m.ml.sets.filter", QueueType::Compute,
               [&](PassBuilder& b) {
@@ -502,7 +503,7 @@ void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureR
                   c.cmd->SetPipelineState(filterPso);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 4);
-                  c.cmd->Dispatch((tilesX + 7) / 8, (tilesY + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (tilesX + 7) / 8, (tilesY + 7) / 8, 1);
               });
 
     }
@@ -535,9 +536,11 @@ void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureR
     ml.historyConfidence = confidence;
     const float ratio = ml.exposureRatio;
     ID3D12PipelineState* temporalPso = fc.shaders.compute("Passes/Shading/MegaLightsTemporal");
+    const BufferRef coverageTiles = ml.coverageTiles;
     g.addPass("m.ml.temporal", QueueType::Compute,
               [&](PassBuilder& b) {
                   for (TextureRef t : { resolvedDiffuse, resolvedSpecular, depth, gbuffer, materialWord }) b.use(t, Use::SrvCompute);
+                  if (coverageTiles.valid()) b.use(coverageTiles, Use::SrvCompute);
                   if (hist)
                       for (TextureRef t : { prevDiffuse, prevSpecular, prevMoments, prevFrames, prevDepth }) b.use(t, Use::SrvCompute);
                   if (hasVis)
@@ -555,12 +558,12 @@ void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureR
                                            hist ? c.srv(prevDiffuse) : none, hist ? c.srv(prevSpecular) : none, hist ? c.srv(prevMoments) : none, hist ? c.srv(prevFrames) : none,
                                            hist ? c.srv(prevDepth) : none, hasVis ? c.srv(visId) : none, hasVis ? c.srv(clusters) : none, c.srv(materialWord),
                                            c.uav(outDiffuse), c.uav(outSpecular), c.uav(outMoments), c.uav(outFrames),
-                                           c.uav(outDepth), c.uav(confidence), 0, 0,
+                                           c.uav(outDepth), c.uav(confidence), coverageTiles.valid() ? c.srv(coverageTiles) : none, 0,
                                            asUint(s.temporal ? s.maxFrames : 1.0f), asUint(s.minFramesMiss), asUint(s.distanceThreshold), asUint(s.clampScale) };
                   c.cmd->SetPipelineState(temporalPso);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 28);
-                  c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (W + 7) / 8, (H + 7) / 8, 1);
               });
     ml.lighting = g.createTexture({ "m.ml lighting", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
     if (demodulated) ml.lightingSpecular = g.createTexture({ "m.ml lighting specular", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
@@ -582,7 +585,7 @@ void megaLightsDenoise(FramePassContext& fc, const ViewResources& view, TextureR
                   c.cmd->SetPipelineState(spatialPso);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 24);
-                  c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (W + 7) / 8, (H + 7) / 8, 1);
               });
 }
 
@@ -622,7 +625,7 @@ void megaLightsSubsurface(FramePassContext& fc, const ViewResources& view, Textu
                          {
                              k[25] = band.firstTile;  // P[6].y
                              c.computeConstants(k, 28);
-                             c.cmd->ExecuteIndirect(dispatchSignature, 1, args, band.argsOffset, nullptr, 0);
+                             gpuExecuteIndirect(c.cmd, dispatchSignature, 1, args, band.argsOffset, nullptr, 0);
                          }
                      });
 }

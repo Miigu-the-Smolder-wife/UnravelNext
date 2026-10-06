@@ -11,7 +11,16 @@ int main(int argc, char** argv)
 {
     try
     {
-        const bool timing = argc == 2 && std::strcmp(argv[1], "--timing") == 0;
+        bool timing = false, wave = false;
+        bool waveKernel = false;
+        uint32_t rangeMask = 0;
+        for (int i = 1; i < argc; ++i) {
+            if (std::strcmp(argv[i], "--timing") == 0) timing = true;
+            else if (std::strcmp(argv[i], "--wave") == 0 || std::strcmp(argv[i], "--scalar-reference") == 0) wave = true;
+            else if (std::strcmp(argv[i], "--wave-kernel") == 0) {wave=true;waveKernel=true;}
+            else if (std::strcmp(argv[i], "--ranges") == 0 && i+1<argc) {rangeMask=(uint32_t)std::stoul(argv[++i]);wave=true;}
+            else fail("unknown argument %s", argv[i]);
+        }
         if (timing) requireGpuLock("temporal packed-code A/B");
         TestFrame test(!timing, !timing);
         GpuProfiler profiler(test.device, 1, 64);
@@ -19,6 +28,19 @@ int main(int argc, char** argv)
         scene::Scene scene;
         scene.materials.emplace_back(); scene.cameras.emplace_back();
         test.setScene(scene);
+        if (wave && !timing)
+        {
+            std::shared_ptr<std::vector<uint8_t>> topology;
+            test.run([&](FramePassContext& fc) {
+                const auto out = fc.graph.createTexture({"wave topology",16,16,1,1,DXGI_FORMAT_R32G32B32A32_UINT});
+                fc.graph.addPass("wave topology",QueueType::Compute,[&](PassBuilder& b){b.use(out,Use::UavCompute);},
+                    [&,out](PassContext& c){const uint32_t k[]={c.uav(out)};c.computeConstants(k,1);
+                        c.cmd->SetPipelineState(fc.shaders.compute("Passes/Shading/Tests/WaveTopology"));c.cmd->Dispatch(1,1,1);});
+                topology=test.readback(fc,out);
+            });
+            const auto* words=reinterpret_cast<const uint32_t*>(topology->data());
+            for(uint32_t i=0;i<16;++i)logf("wave topology group %u lane %u left %u right %u lanes %u\n",i,words[i*4],words[i*4+1],words[i*4+2],words[i*4+3]);
+        }
         const char* names[3] = {"TsrResurrect", "TsrFlicker", "TsrThin"};
         uint64_t checkedPixels = 0;
         for (const auto [w, h] : std::array<std::pair<uint32_t, uint32_t>, 4>{{{1, 1}, {17, 31}, {257, 35}, {1920, 1080}}})
@@ -81,7 +103,10 @@ int main(int argc, char** argv)
                                     k[12] = seed & 4u ? c.srv(in[0]) : UINT32_MAX; k[13] = bits(0.05f);
                                     k[14] = bits(0.2f); k[15] = bits(0.05f); k[16] = bits(0.25f);
                                 }
-                                const std::string kernel = std::string("Passes/Shading/") + (variant ? "" : "Tests/") + names[shader] + (variant ? "" : "Reference");
+                                const std::string kernel = waveKernel && shader == 1 && variant ? "Passes/Shading/TsrFlickerWave" :
+                                    rangeMask && shader == 1 && variant ? "Passes/Shading/Tests/TsrFlickerRanges.RANGE_MASK"+std::to_string(rangeMask) :
+                                    wave && shader == 1 && !variant ? "Passes/Shading/TsrFlickerScalar" :
+                                    std::string("Passes/Shading/") + (variant ? "" : "Tests/") + names[shader] + (variant ? "" : "Reference");
                                 c.cmd->SetPipelineState(fc.shaders.compute(kernel)); c.bindFrameConstants(view.frameConstants);
                                 c.computeConstants(k, 20); c.cmd->Dispatch((w + 15) / 16, (h + 15) / 16, 1);
                             });

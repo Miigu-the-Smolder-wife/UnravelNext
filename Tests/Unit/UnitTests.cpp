@@ -256,6 +256,140 @@ UNX_TEST(graph_cross_queue_sync)
     CHECK(g.stats().commandLists == 3);
 }
 
+UNX_TEST(graph_dominated_wait_does_not_split_producer)
+{
+    RenderGraph g(testDevice());
+    g.setAsyncCompute(true);
+    runFrames(g, [](RenderGraph& graph) {
+        auto make = [&](const char* name) { return graph.createTexture({name, 16, 16, 1, 1, DXGI_FORMAT_R32_FLOAT}); };
+        const auto a = make("early"), b = make("late"), x = make("x"), y = make("y");
+        touchPass(graph, "early producer", QueueType::Graphics, {}, {a});
+        touchPass(graph, "late producer", QueueType::Graphics, {}, {b});
+        touchPass(graph, "wait for late", QueueType::Compute, {b}, {x});
+        touchPass(graph, "early already complete", QueueType::Compute, {a}, {y});
+        graph.addPass("keep outputs", QueueType::Compute,
+            [&](PassBuilder& p) { p.use(x, Use::SrvCompute); p.use(y, Use::SrvCompute); p.keep(); }, [](PassContext&) {});
+    });
+    CHECK(g.stats().crossQueueSyncs == 1);
+    CHECK(g.stats().commandLists == 2);
+    CHECK(g.stats().planReused);
+}
+
+UNX_TEST(graph_uav_release_allows_independent_readers_and_keeps_writers_ordered)
+{
+    auto& device = testDevice();
+    ID3D12PipelineState* touch = shaders().compute("Passes/Test/Touch");
+    for (bool overwrite : { false, true })
+    {
+        RenderGraph graph(device); graph.setAsyncCompute(true);
+        D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_READBACK };
+        D3D12_RESOURCE_DESC1 desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; desc.Width = 64 * 16;
+        desc.Height = desc.DepthOrArraySize = desc.MipLevels = 1; desc.SampleDesc.Count = 1;
+        desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12Resource> readback;
+        check(device.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNDEFINED,
+            nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&readback)), "reader release readback");
+        ComPtr<ID3D12Fence> gate;
+        check(device.d3d()->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate)), "reader release gate");
+        struct OpenGate { ID3D12Fence* fence; ~OpenGate() { fence->Signal(1); } } open{ gate.Get() };
+        check(device.queue(QueueType::Compute).get()->Wait(gate.Get(), 1), "hold compute reader");
+        const auto source = graph.createTexture({ "shared UAV result", 64, 1, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+        const auto delayed = graph.createTexture({ "delayed read result", 64, 1, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+        const auto output = graph.createBuffer({ "independent read result", 64 * 16, 0 });
+        touchPass(graph, "graphics producer", QueueType::Graphics, {}, { source });
+        touchPass(graph, "delayed compute reader", QueueType::Compute, { source }, { delayed });
+        graph.addPass("independent graphics reader", QueueType::Graphics,
+            [&](PassBuilder& b) { b.use(source, Use::SrvCompute); b.use(output, Use::UavCompute); },
+            [=](PassContext& c) {
+                uint32_t k[16]{}; k[0] = k[1] = 1; k[2] = 9; k[4] = c.srv(source); k[12] = c.uav(output); k[14] = 2;
+                c.cmd->SetPipelineState(touch); c.computeConstants(k, 16); c.cmd->Dispatch(1, 1, 1);
+            });
+        if (overwrite)
+            graph.addPass("later graphics overwrite", QueueType::Graphics,
+                [&](PassBuilder& b) { b.use(source, Use::UavCompute); b.keep(); },
+                [=](PassContext& c) {
+                    uint32_t k[16]{}; k[1] = 1; k[2] = 123; k[12] = c.uav(source);
+                    c.cmd->SetPipelineState(touch); c.computeConstants(k, 16); c.cmd->Dispatch(1, 1, 1);
+                });
+        graph.addPass("read independent result", QueueType::Graphics,
+            [&](PassBuilder& b) { b.use(output, Use::CopySrc); b.keep(); },
+            [=](PassContext& c) { c.cmd->CopyBufferRegion(readback.Get(), 0, c.resource(output), 0, 64 * 16); });
+        graph.addPass("keep delayed result", QueueType::Compute,
+            [&](PassBuilder& b) { b.use(delayed, Use::SrvCompute); b.keep(); }, [](PassContext&) {});
+        graph.execute(nullptr);
+        const auto limit = std::chrono::steady_clock::now() + std::chrono::milliseconds(overwrite ? 30 : 1000);
+        while (device.queue(QueueType::Graphics).completed() < graph.lastFence(QueueType::Graphics) && std::chrono::steady_clock::now() < limit) Sleep(1);
+        const bool finished = device.queue(QueueType::Graphics).completed() >= graph.lastFence(QueueType::Graphics);
+        check(gate->Signal(1), "release compute reader");
+        device.waitIdle();
+        CHECK(finished != overwrite); // a read proceeds; a later write must still wait
+        const float* data = nullptr;
+        check(readback->Map(0, nullptr, (void**)&data), "reader release map");
+        bool correct = true;
+        for (uint32_t i = 0; i < 64; ++i)
+            correct = correct && data[4*i] == 9 && data[4*i+1] == 2*float(i) && data[4*i+2] == 0 && data[4*i+3] == 2;
+        readback->Unmap(0, nullptr);
+        CHECK(correct);
+    }
+}
+
+UNX_TEST(graph_independent_chains_preserve_read_before_overwrite)
+{
+    // Two independent chains share frontiers. Each buffer is filled, copied,
+    // overwritten, then copied again: both the old and new values must survive.
+    // This catches lost WAR edges and aliasing within a concurrently live wave.
+    RenderGraph graph(testDevice());
+    constexpr uint32_t words = 1u << 18, chains = 8;
+    const uint64_t bytes = uint64_t(words) * 4;
+    D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_READBACK };
+    D3D12_RESOURCE_DESC1 desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Width = bytes * chains * 2;
+    desc.Height = desc.DepthOrArraySize = desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> readback;
+    check(testDevice().d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNDEFINED,
+          nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(&readback)), "independent chains readback");
+    ID3D12PipelineState* fill = shaders().compute("Passes/Test/FillBuffer");
+    for (uint32_t frame = 0; frame < 3; ++frame)
+    {
+        for (uint32_t chain = 0; chain < chains; ++chain)
+        {
+            const BufferRef buffer = graph.createBuffer({ "independent buffer", bytes, 0 });
+            for (uint32_t version = 0; version < 2; ++version)
+            {
+                const uint32_t seed = 0xA53700u + chain * 131 + version * 19;
+                graph.addPass("chain fill", QueueType::Graphics,
+                    [&](PassBuilder& b) { b.use(buffer, Use::UavCompute); },
+                    [=](PassContext& c) {
+                        const uint32_t k[4] = { c.uav(buffer), words, seed, 0 };
+                        c.cmd->SetPipelineState(fill); c.computeConstants(k, 4); c.cmd->Dispatch(words / 64, 1, 1);
+                    });
+                ID3D12Resource* dst = readback.Get();
+                const uint64_t offset = (chain * 2 + version) * bytes;
+                graph.addPass("chain copy", QueueType::Graphics,
+                    [&](PassBuilder& b) { b.use(buffer, Use::CopySrc); b.keep(); },
+                    [=](PassContext& c) { c.cmd->CopyBufferRegion(dst, offset, c.resource(buffer), 0, bytes); });
+            }
+        }
+        graph.execute(nullptr);
+        testDevice().queue(QueueType::Graphics).waitCpu(graph.lastFence(QueueType::Graphics));
+        const uint32_t* data = nullptr;
+        check(readback->Map(0, nullptr, (void**)&data), "independent chains map");
+        size_t wrong = 0;
+        for (uint32_t chain = 0; chain < chains; ++chain)
+            for (uint32_t version = 0; version < 2; ++version)
+                for (uint32_t i = 0; i < words; ++i)
+                    wrong += data[(chain * 2 + version) * words + i] != (i ^ (0xA53700u + chain * 131 + version * 19));
+        readback->Unmap(0, nullptr);
+        CHECK(wrong == 0);
+    }
+    logf("    independent chains: %u GPU words retained across reads, overwrites and plan reuse; %u barrier batches\n",
+         words * chains * 2 * 3, graph.stats().barrierBatches);
+}
+
 UNX_TEST(graph_views_of_reused_transients)
 {
     // A transient whose consumer was culled in earlier frames: when the consumer is live again, the recompiled plan
@@ -605,6 +739,10 @@ UNX_TEST(graph_aliased_buffers_keep_their_writes)
                           pb.keep();
                       },
                       [](PassContext&) {});
+            // Fix the lifetime boundary without issuing a GPU barrier: otherwise
+            // the dependency scheduler correctly runs the independent fills in
+            // one wave and allocates separate memory, bypassing this alias test.
+            g.addPass("alias lifetime boundary", QueueType::Graphics, [](PassBuilder& pb) { pb.keep(); }, [](PassContext&) {});
             if (mode == 0) fill("fill b", b, 0x5A5A5A5Au, {});
             else
             {
@@ -702,6 +840,7 @@ UNX_TEST(graph_alias_reuse_waits_for_readers)
                           pb.use(d, Use::CopyDst);
                       },
                       [=](PassContext& ctx) { ctx.cmd->CopyBufferRegion(ctx.resource(d), 0, ctx.resource(a), 0, bytes); });
+        g.addPass("alias lifetime boundary", QueueType::Graphics, [](PassBuilder& pb) { pb.keep(); }, [](PassContext&) {});
         ID3D12Resource* src = source.Get();
         if (mode == 1)
             g.addPass("upload b", QueueType::Graphics, [&](PassBuilder& pb) { pb.use(b, Use::CopyDst); },

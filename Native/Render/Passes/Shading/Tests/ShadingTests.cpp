@@ -2209,6 +2209,33 @@ void testCoverageComposite(TestFrame& tf, Report& report)
             }
             else withLayer = tf.readback(fc, v.color);
         });
+    // The multi-round reference and one-dispatch continuation must preserve the
+    // full-float composite, including stacks with multiple sorted runs.
+    std::shared_ptr<std::vector<uint8_t>> fusedLayer;
+    tf.quality.applyOverride("shading.coverage_fused_rounds=true");
+    tf.run([&](FramePassContext& fc) {
+        ViewResources v = tf.mainView(fc, W, H, 0);
+        v.color = fc.graph.createTexture({ "m.test.coverage fused", W, H, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT });
+        tf.vis.record(fc, v);
+        tracks::materialResolve(fc, v);
+        layer.install(fc.graph, v);
+        tracks::shading(fc, v);
+        fusedLayer = tf.readback(fc, v.color);
+    });
+    tf.quality.applyOverride("shading.coverage_fused_rounds=false");
+    size_t fusedMismatch = 0;
+    for (uint32_t y = 0; y < H; ++y)
+        for (uint32_t x = 0; x < W; ++x)
+        {
+            const float4 originalPixel = texelOf<float4>(*withLayer, W, x, y), fusedPixel = texelOf<float4>(*fusedLayer, W, x, y);
+            if (std::memcmp(&originalPixel, &fusedPixel, sizeof originalPixel) != 0)
+            {
+                if (fusedMismatch < 8) logf("  fused difference (%u,%u): original %.9g %.9g %.9g %.9g, fused %.9g %.9g %.9g %.9g\n",
+                    x, y, originalPixel.x, originalPixel.y, originalPixel.z, originalPixel.w, fusedPixel.x, fusedPixel.y, fusedPixel.z, fusedPixel.w);
+                ++fusedMismatch;
+            }
+        }
+    report(fusedMismatch == 0, "heavy rounds: fused continuation is bit-identical", (double)fusedMismatch, 0);
     tf.frame.outputLinearHdr = false;
 
     // CPU composite.

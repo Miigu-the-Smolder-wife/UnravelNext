@@ -464,7 +464,7 @@ private:
                              c.cmd->SetPipelineState(pso);
                              c.bindFrameConstants(constants);
                              c.computeConstants(k, 16);
-                             c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                             gpuDispatch(c.cmd, (W + 7) / 8, (H + 7) / 8, 1);
                          });
     }
 
@@ -486,7 +486,7 @@ private:
                       const uint32_t k[4] = { c.uav(buf), 0, 0, 0 };
                       c.cmd->SetPipelineState(args);
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                   });
 
         const TextureRef overlay = g.createTexture(TextureDesc{ "debug.overlay", W, H, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT });
@@ -532,11 +532,11 @@ private:
                       c.graphicsConstants(k, 8);
                       ID3D12Resource* args = c.resource(buf);
                       c.cmd->SetPipelineState(triangles);
-                      c.cmd->ExecuteIndirect(sig, 1, args, kArgsTriangles, nullptr, 0);
+                      gpuExecuteIndirect(c.cmd, sig, 1, args, kArgsTriangles, nullptr, 0);
                       c.cmd->SetPipelineState(lines);
-                      c.cmd->ExecuteIndirect(sig, 1, args, kArgsLines, nullptr, 0);
+                      gpuExecuteIndirect(c.cmd, sig, 1, args, kArgsLines, nullptr, 0);
                       c.cmd->SetPipelineState(glyphs);
-                      c.cmd->ExecuteIndirect(sig, 1, args, kArgsGlyphs, nullptr, 0);
+                      gpuExecuteIndirect(c.cmd, sig, 1, args, kArgsGlyphs, nullptr, 0);
                   });
 
         const TextureRef colour = view.color;
@@ -558,7 +558,7 @@ private:
                       const uint32_t k[8] = { c.srv(overlay), c.srv(copy), c.uav(colour), linear ? 1u : 0u, W, H, 0, 0 };
                       c.cmd->SetPipelineState(composite);
                       c.computeConstants(k, 8);
-                      c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (W + 7) / 8, (H + 7) / 8, 1);
                   });
 
         Slot& slot = m_slots[m_frame % m_slots.size()];

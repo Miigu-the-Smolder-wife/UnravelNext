@@ -14,16 +14,20 @@
 #include "Passes/Shading/HalfRound.hlsli"
 #include "Passes/Shading/LocalExposure.hlsli"
 
-groupshared float3 s_tile[20][20];
+#ifndef POST_TILE_SIZE
+#define POST_TILE_SIZE 8
+#endif
+#define POST_SOURCE_SIZE (2 * POST_TILE_SIZE + 4)
+groupshared float3 s_tile[POST_SOURCE_SIZE][POST_SOURCE_SIZE];
 
-[numthreads(8, 8, 1)]
+[numthreads(POST_TILE_SIZE, POST_TILE_SIZE, 1)]
 void main(uint2 id : SV_DispatchThreadID, uint2 local : SV_GroupThreadID, uint2 group : SV_GroupID, uint flat : SV_GroupIndex)
 {
     Texture2D<float4> src = ResourceDescriptorHeap[P[0].x];
     uint sw, sh;
     src.GetDimensions(sw, sh);
     // the tile covers source texels 16 group - 2 .. 16 group + 17 (clamped at the borders)
-    const int2 origin = int2(group) * 16 - 2;
+    const int2 origin = int2(group) * (2 * POST_TILE_SIZE) - 2;
     const int2 hi = int2(sw, sh) - 1;
     LeParams le = (LeParams)0;
     le.grid = P[1].x;
@@ -34,9 +38,9 @@ void main(uint2 id : SV_DispatchThreadID, uint2 local : SV_GroupThreadID, uint2 
     le.detail = asfloat(P[2].z);
     le.blend = asfloat(P[2].w);
     le.logMiddleGrey = asfloat(P[3].x);
-    for (uint i = flat; i < 400; i += 64)
+    for (uint i = flat; i < POST_SOURCE_SIZE * POST_SOURCE_SIZE; i += POST_TILE_SIZE * POST_TILE_SIZE)
     {
-        const int2 t = int2(i % 20, i / 20);
+        const int2 t = int2(i % POST_SOURCE_SIZE, i / POST_SOURCE_SIZE);
         const int2 at = clamp(origin + t, int2(0, 0), hi);
         float3 value = src.Load(int3(at, 0)).rgb;
         if (le.grid != 0xFFFFFFFFu) value *= leScale(le, value, (float2(at) + 0.5) / float2(sw, sh), 0.0);

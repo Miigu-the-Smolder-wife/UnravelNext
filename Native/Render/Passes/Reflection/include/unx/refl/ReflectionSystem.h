@@ -30,6 +30,13 @@ struct ScreenTraceInputs
     TextureRef prevColor;  // ViewResources::prevSceneColor (output resolution); invalid = no history
 };
 
+// Same-input validation of the spatial estimator; default selects cached rays.
+struct ReflectionReuseDebug
+{
+    bool forceUncachedRays = false;
+    bool usedCachedRays = false;
+};
+
 struct ReflectionSettings  // from Config/quality/reflection.toml
 {
     float kHalfAngle = 0;        // radians: narrow-lobe half-angle at or above which the K path applies

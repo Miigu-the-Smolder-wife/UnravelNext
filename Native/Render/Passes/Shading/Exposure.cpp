@@ -93,6 +93,11 @@ Params params(const QualityConfig& q, const FrameContext& frame)
     p.targetGrey = (float)q.number("shading.exposure_target_grey");
     p.tauUp = (float)q.number("shading.exposure_adapt_brighter_seconds");
     p.tauDown = (float)q.number("shading.exposure_adapt_darker_seconds");
+    if (frame.postExtended.enabled)
+    {
+        p.tauUp = frame.postExtended.exposureBrighterSeconds;
+        p.tauDown = frame.postExtended.exposureDarkerSeconds;
+    }
     p.cutLow = (float)q.number("shading.exposure_cut_dark");
     p.cutHigh = (float)q.number("shading.exposure_cut_bright");
     p.centreSigma = (float)q.number("shading.exposure_centre_sigma");
@@ -216,7 +221,7 @@ BufferRef exposureMeter(FramePassContext& fc, const ExposureHistogram& h)
                                                   u(p.minEv), u(p.maxEv), 0, 0 };
                          c.cmd->SetPipelineState(meter);
                          c.computeConstants(k, 12);
-                         c.cmd->Dispatch(1, 1, 1);
+                         gpuDispatch(c.cmd, 1, 1, 1);
                      });
     return correction;
 }
@@ -249,7 +254,7 @@ ExposureHistogram exposureHistogram(FramePassContext& fc)
                              const uint32_t k[4] = { c.uav(buffer), kBins, 0, 0 };
                              c.cmd->SetPipelineState(clear);
                              c.computeConstants(k, 4);
-                             c.cmd->Dispatch(1, 1, 1);
+                             gpuDispatch(c.cmd, 1, 1, 1);
                          });
     }
     return h;
@@ -277,7 +282,7 @@ void exposureReadback(FramePassContext& fc, const ExposureHistogram& h)
                          const uint32_t k[4] = { c.uav(buffer), kBins, 0, 0 };
                          c.cmd->SetPipelineState(clear);
                          c.computeConstants(k, 4);
-                         c.cmd->Dispatch(1, 1, 1);
+                         gpuDispatch(c.cmd, 1, 1, 1);
                      });
     s.slotFrame[slot] = fc.frame.frameIndex;
 }

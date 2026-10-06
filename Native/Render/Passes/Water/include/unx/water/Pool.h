@@ -131,5 +131,6 @@ private:
     std::vector<uint32_t> m_sourceSrv;
     double m_time = 0;
     bool m_started = false, m_initialised = false, m_stateDirty = false;
+    bool m_pristineEquilibrium = true; // exact initial zero field, before any state replacement or nonzero source
 };
 } // namespace unx::water

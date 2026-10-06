@@ -30,8 +30,8 @@ void giPreviousSurface(uint visIdSrv, uint visibleClustersSrv, uint2 pixel, floa
     if (visId == VIS_NONE) return;
     const GpuVisibleCluster vc = loadVisibleCluster(visibleClustersSrv, visVisibleCluster(visId));
     instance = vc.instance + 1;
+    if (deformInstanceStillAt(vc.instance)) return;  // the point itself (no matrix or vertex loads with a CPU proof)
     const GpuInstance inst = loadInstance(vc.instance);
-    if (deformInstanceStill(inst)) return;  // the point itself (no vertex loads)
     const GpuMesh mesh = loadMesh(inst.mesh);
 #if UNX_CLUSTER_STREAM
     DeformedVertex d0, d1, d2;

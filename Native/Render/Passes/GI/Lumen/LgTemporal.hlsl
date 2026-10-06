@@ -34,10 +34,18 @@ uint lgPackKeyNormal(float3 n)
     return (uint)round(e.x * 32767.0) | ((uint)round(e.y * 32767.0) << 15);
 }
 
-[numthreads(8, 8, 1)]
-void main(uint3 id : SV_DispatchThreadID)
+struct LgTemporalData
 {
-    if (any(id.xy >= lgViewSize())) return;
+    bool valid, hasHistory, backfaceOn;
+    LgSurface s;
+    float4 fresh;
+    float3 freshSpecular, outBackface, historyD, historyS;
+    float frames, fast, distanceThreshold, historyAlpha;
+};
+LgTemporalData temporalData(uint2 id)
+{
+    LgTemporalData result = (LgTemporalData)0;
+    if (any(id.xy >= lgViewSize())) return result;
     Texture2D<float4> newDiffuse = ResourceDescriptorHeap[P[1].x];
     Texture2D<float4> newSpecular = ResourceDescriptorHeap[P[1].y];
     RWTexture2D<float4> diffuseOut = ResourceDescriptorHeap[P[1].z];
@@ -55,7 +63,7 @@ void main(uint3 id : SV_DispatchThreadID)
             RWTexture2D<float4> backfaceOut = ResourceDescriptorHeap[P[11].x];
             backfaceOut[id.xy] = 0;
         }
-        return;
+        return result;
     }
     float3 outBackface = 0;
     if (backfaceOn)
@@ -155,6 +163,52 @@ void main(uint3 id : SV_DispatchThreadID)
             }
         }
     }
+    result.valid = true; result.s = s; result.fresh = fresh;
+    result.freshSpecular = freshSpecular; result.outBackface = outBackface;
+    result.historyD = historyD; result.historyS = historyS;
+    result.frames = frames; result.fast = fast; result.distanceThreshold = distanceThreshold;
+    result.historyAlpha = historyAlpha; result.hasHistory = hasHistory; result.backfaceOn = backfaceOn;
+    return result;
+}
+// Short-history pixels share the exact reconstructed neighbour surfaces. The
+// four-pixel halo covers the unchanged 5x5 filter with two-pixel tap spacing.
+// Mature groups skip reconstruction entirely. No lower precision or fewer taps.
+#include "Passes/GI/Lumen/LgTemporalTile.h"
+#define LG_TEMPORAL_SIDE (LG_TEMPORAL_TILE + 8)
+groupshared float4 gTemporalPosition[LG_TEMPORAL_SIDE * LG_TEMPORAL_SIDE];
+groupshared float3 gTemporalNormal[LG_TEMPORAL_SIDE * LG_TEMPORAL_SIDE];
+groupshared uint gTemporalFilter;
+[numthreads(LG_TEMPORAL_TILE, LG_TEMPORAL_TILE, 1)]
+void main(uint2 id : SV_DispatchThreadID, uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : SV_GroupIndex)
+{
+    const LgTemporalData value = temporalData(id);
+    if (lane == 0) gTemporalFilter = 0;
+    GroupMemoryBarrierWithGroupSync();
+    if (value.valid && value.frames < 4 && value.fresh.a > 0) InterlockedOr(gTemporalFilter, 1);
+    GroupMemoryBarrierWithGroupSync();
+    if (gTemporalFilter != 0)
+    {
+        for (uint i = lane; i < LG_TEMPORAL_SIDE * LG_TEMPORAL_SIDE; i += LG_TEMPORAL_TILE * LG_TEMPORAL_TILE)
+        {
+            const int2 q = int2(group * LG_TEMPORAL_TILE) + int2(i % LG_TEMPORAL_SIDE, i / LG_TEMPORAL_SIDE) - 4;
+            LgSurface sample = (LgSurface)0;
+            if (all(q >= 0) && all(q < int2(lgViewSize()))) sample = lgSurface(uint2(q));
+            gTemporalPosition[i] = float4(sample.position, sample.valid ? 1.0 : 0.0);
+            gTemporalNormal[i] = sample.normal;
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (!value.valid) return;
+    const LgSurface s = value.s;
+    const float4 fresh = value.fresh;
+    const float3 freshSpecular = value.freshSpecular;
+    const float frames = value.frames, fast = value.fast, distanceThreshold = value.distanceThreshold;
+    const bool lit = fresh.a > 0, hasHistory = value.hasHistory, backfaceOn = value.backfaceOn;
+    const float3 historyD = value.historyD, historyS = value.historyS, outBackface = value.outBackface;
+    const float historyAlpha = value.historyAlpha;
+    Texture2D<float4> newDiffuse = ResourceDescriptorHeap[P[1].x], newSpecular = ResourceDescriptorHeap[P[1].y];
+    RWTexture2D<float4> diffuseOut = ResourceDescriptorHeap[P[1].z], specularOut = ResourceDescriptorHeap[P[1].w];
+    float3 outDiffuse, outSpecular;
     // A pixel whose history is short (a cut's first frames, a disocclusion: under 4 frames) would show its one frame's
     // estimate at a large share - a jittered place among its probes: its new value is the mean of this frame's estimates
     // on its own surface around it (5 x 5 taps 2 pixels apart: the same plane within the history's distance threshold,
@@ -174,7 +228,12 @@ void main(uint3 id : SV_DispatchThreadID)
                 if (any(q < 0) || any(q >= (int2)lgViewSize())) continue;
                 const float4 d = newDiffuse[q];
                 if (!(d.a > 0)) continue;
-                const LgSurface n = lgSurface((uint2)q);
+                const uint2 at = uint2(int2(local) + 4 + int2(tx, ty) * 2);
+                const uint cell = at.y * LG_TEMPORAL_SIDE + at.x;
+                LgSurface n = (LgSurface)0;
+                n.valid = gTemporalPosition[cell].w != 0;
+                n.position = gTemporalPosition[cell].xyz;
+                n.normal = gTemporalNormal[cell];
                 if (!n.valid || dot(n.normal, s.normal) < 0.9) continue;
                 if (abs(dot(float4(n.position, -1), plane)) > distanceThreshold * max(s.depth, 1e-3)) continue;
                 sumDiffuse += d.rgb;

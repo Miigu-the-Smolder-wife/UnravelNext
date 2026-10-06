@@ -1,5 +1,5 @@
 // unx-kernel: cs_6_6 main
-// unx-variants: PART=1,2 AREA=0,1
+// unx-variants: PART=1,2 AREA=0,1 FUSED=0,1
 // Coverage composite, stage F2 (CoverageShade.hlsli): heavy round r (P[5].y; COV_ROUNDS dispatches a frame), one group of
 // 32 threads per open heavy pixel (round 0: every heavy pixel; round r: active list r % 2, which round r - 1 filled).
 //   1. The next COV_ROUND fragments nearer first, merged from the pixel's sorted runs: each lane holds the heads of runs
@@ -42,9 +42,9 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
     const uint h = roundIndex == 0 ? g : lists.Load(4 * ((roundIndex % 2) * capacity + g));
     const uint base = 4 * h * COVH_WORDS;
     const uint4 rec0 = heavy.Load4(base);        // pixel, segment, count, runs
-    const uint4 rec1 = heavy.Load4(base + 16);   // cursors, covered, used, done
-    const uint4 rec2 = heavy.Load4(base + 32);   // sum rgb, last depth
-    const uint lastVisId = heavy.Load(base + 48);
+    uint4 rec1 = heavy.Load4(base + 16);   // cursors, covered, used, done
+    uint4 rec2 = heavy.Load4(base + 32);   // sum rgb, last depth
+    uint lastVisId = heavy.Load(base + 48);
     const uint2 pixel = uint2(rec0.x & 0xFFFFu, rec0.x >> 16);
 #if PART == 2
     const uint4 probeRecord = covProbeFetch(pixel / COV_TILE_PX, lane);
@@ -54,6 +54,13 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
     Texture2D<float> bandDepth = ResourceDescriptorHeap[P[1].z];
     const uint bandA = asuint(bandDepth[pixel]);
 
+#if FUSED
+    // A pixel owns its cursors and composite state. Keep the same 32-fragment
+    // arithmetic and reduction order, continuing in this group instead of
+    // compacting it into another global dispatch after every round.
+    [loop] for (uint iteration = 0; iteration < COV_ROUNDS; ++iteration)
+    {
+#endif
     // 1. Merge the next COV_ROUND fragments from the runs.
     uint2 mine = COV_KEY_AFTER_ALL;
     uint taken = 0;
@@ -133,6 +140,24 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
     // 3. The pixel's state; an open pixel to the next round.
     const uint lastDepth = taken > 0 ? gs_depth[taken - 1] : rec2.w;
     const uint lastVis = taken > 0 ? gs_visId[taken - 1] : lastVisId;
+#if FUSED
+    if (lane == 0)
+    {
+        heavy.Store3(base + 20, uint3(covered, asuint(usedNext), done ? 1u : 0u));
+        heavy.Store4(base + 32, uint4(asuint(sum), lastDepth));
+        heavy.Store(base + 48, lastVis);
+    }
+    if (done || iteration + 1 == COV_ROUNDS) return;
+    // All lanes finish reading this round's shared keys before the next round
+    // overwrites them; each lane's UAV cursor updates are visible on re-entry.
+    AllMemoryBarrierWithGroupSync();
+    // Retain the reference's float32 store/load rounding boundary; carrying the
+    // values only in registers lets DXC contract arithmetic across rounds.
+    rec1 = heavy.Load4(base + 16);
+    rec2 = heavy.Load4(base + 32);
+    lastVisId = heavy.Load(base + 48);
+    }
+#else
     if (lane != 0) return;
     heavy.Store3(base + 20, uint3(covered, asuint(usedNext), done ? 1u : 0u));
     heavy.Store4(base + 32, uint4(asuint(sum), lastDepth));
@@ -141,4 +166,5 @@ void main(uint3 gid : SV_GroupID, uint lane : SV_GroupIndex)
     uint slot;
     state.InterlockedAdd(4 * (COVS_OPEN + (roundIndex + 1) % 2), 1, slot);
     lists.Store(4 * (((roundIndex + 1) % 2) * capacity + slot), h);
+#endif
 }

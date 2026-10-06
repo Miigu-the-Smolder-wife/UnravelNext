@@ -242,6 +242,21 @@ PostParams frameParams(FramePassContext& fc)
 {
     PostParams p = params(fc.quality);
     const PostSettingsDesc& s = fc.frame.post;
+    const auto& e = fc.frame.postExtended;
+    if (e.enabled)
+    {
+        p.curve = uint32_t(e.toneCurve); p.levels = uint32_t(e.bloomLevels);
+        p.grain = e.grain; p.sharpen = e.sharpen;
+        p.localExposure = e.localExposure != 0;
+        p.leHighlight = e.localHighlight; p.leShadow = e.localShadow; p.leDetail = e.localDetail;
+        p.leBlend = e.localBlend; p.leMiddleGreyBias = e.localMiddleGreyBias; p.leKernelPercent = e.localKernelPercent;
+        if (p.leHighlight == 1 && p.leShadow == 1 && p.leDetail == 1) p.localExposure = false;
+        p.fringe = e.fringe; p.fringeStart = e.fringeStart;
+        p.flare.intensity = e.flareIntensity; p.flare.bokehSize = e.flareBokehSize;
+        p.flare.threshold = e.flareThreshold; p.flare.halo = e.flareHalo; p.flare.blades = uint32_t(e.flareBlades);
+        p.flare.tint[0] = e.flareTintR; p.flare.tint[1] = e.flareTintG; p.flare.tint[2] = e.flareTintB;
+        p.flare.on = e.lensFlare != 0 && e.flareIntensity > 0 && e.flareBokehSize > 0 && (e.flareTintR > 0 || e.flareTintG > 0 || e.flareTintB > 0);
+    }
     if (std::isfinite(s.bloomStrength)) p.bloom = s.bloomStrength;
     if (std::isfinite(s.vignette)) p.vignette = s.vignette;
     if (p.bloom < 0 || p.bloom > 1 || p.vignette < 0 || p.vignette > 1)
@@ -322,7 +337,6 @@ struct GradeState
     {
         if (lut && size == n) return;
         device = &d;
-        if (lut) d.deferRelease(lut);
         D3D12_HEAP_PROPERTIES heap{ D3D12_HEAP_TYPE_DEFAULT };
         D3D12_RESOURCE_DESC1 desc{};
         desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
@@ -332,9 +346,12 @@ struct GradeState
         desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
         desc.SampleDesc.Count = 1;
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        ComPtr<ID3D12Resource> replacement;
         check(d.d3d()->CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, nullptr, nullptr, 0, nullptr,
-                                                IID_PPV_ARGS(lut.ReleaseAndGetAddressOf())),
+                                                IID_PPV_ARGS(&replacement)),
               "M combined grading LUT");
+        if (lut) d.deferRelease(lut);
+        lut = std::move(replacement);
         lut->SetName(L"M combined grading LUT");
         size = n;
         key.clear();
@@ -344,7 +361,8 @@ struct GradeState
 // The combined LUT of this frame's grading under the chain's curve and display peak; its build passes when it is stale.
 TextureRef gradeLut(FramePassContext& fc, const ColorGradingDesc& grade, uint32_t curve, float peak, D3D12_GPU_VIRTUAL_ADDRESS cb, uint32_t& sizeOut)
 {
-    const int64_t size = fc.quality.has("shading.post_grading_lut_size") ? fc.quality.integer("shading.post_grading_lut_size") : 32;
+    const int64_t size = fc.frame.postExtended.enabled ? fc.frame.postExtended.gradingLutSize :
+        fc.quality.has("shading.post_grading_lut_size") ? fc.quality.integer("shading.post_grading_lut_size") : 32;
     if (size < 8 || size > 64) fail("shading.post_grading_lut_size %lld: in [8, 64]", (long long)size);
     if (!(grade.temperature >= 1667 && grade.temperature <= 25000) || !(grade.shadowsMax > 0) || !(grade.highlightsMax > grade.highlightsMin))
         fail("colour grading: temperature in [1667, 25000] K, shadows max > 0, highlights max > highlights min");
@@ -406,7 +424,7 @@ TextureRef gradeLut(FramePassContext& fc, const ColorGradingDesc& grade, uint32_
                       c.cmd->SetPipelineState(pso);
                       c.bindFrameConstants(cb);
                       c.computeConstants(k, 40);
-                      c.cmd->Dispatch((n + 3) / 4, (n + 3) / 4, (n + 3) / 4);
+                      gpuDispatch(c.cmd, (n + 3) / 4, (n + 3) / 4, (n + 3) / 4);
                   });
     }
     g.addPass("m.post.grade.curve", QueueType::Graphics,
@@ -419,7 +437,7 @@ TextureRef gradeLut(FramePassContext& fc, const ColorGradingDesc& grade, uint32_
                   c.cmd->SetPipelineState(pso);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 8);
-                  c.cmd->Dispatch((n + 3) / 4, (n + 3) / 4, (n + 3) / 4);
+                  gpuDispatch(c.cmd, (n + 3) / 4, (n + 3) / 4, (n + 3) / 4);
               });
     return lut;
 }
@@ -494,7 +512,7 @@ PostLocalExposure localExposureInputs(FramePassContext& fc, TextureRef hdr, cons
                   const uint32_t k[8] = { c.srv(hdr), c.uav(grid), c.uav(mean), 0, w, h, 0, 0 };
                   c.cmd->SetPipelineState(gridPso);
                   c.computeConstants(k, 8);
-                  c.cmd->Dispatch(gx, gy, 1);
+                  gpuDispatch(c.cmd, gx, gy, 1);
               });
     // the reference's Gaussian radius: kernel percent / 100 x width / 2, here in tiles
     const float radius = p.leKernelPercent * 0.01f * 0.5f * (float)w / (float)kTile;
@@ -507,7 +525,7 @@ PostLocalExposure localExposureInputs(FramePassContext& fc, TextureRef hdr, cons
                   const uint32_t k[8] = { c.srv(mean), c.uav(blurred), gx, gy, asUint(radius), 0, 0, 0 };
                   c.cmd->SetPipelineState(blurPso);
                   c.computeConstants(k, 8);
-                  c.cmd->Dispatch((gx + 7) / 8, (gy + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (gx + 7) / 8, (gy + 7) / 8, 1);
               });
     return le;
 }
@@ -539,6 +557,8 @@ TextureRef postBloomTail(FramePassContext& fc, TextureRef hdr, uint32_t levelCou
             const TextureRef src = l == 0 ? hdr : levels[l - 1], dst = levels[l];
             const TextureDesc dd = g.desc(dst);
             const bool first = l == 0 && localExposure.valid();
+            const uint32_t groupSize = first && dd.width >= 256 && dd.height >= 128 ? 16u : 8u;
+            ID3D12PipelineState* downKernel = groupSize == 16 ? fc.shaders.compute("Passes/Shading/PostDownsampleLarge") : down;
             const PostLocalExposure le = localExposure;
             g.addPass("m.post.down", QueueType::Graphics,
                       [&](PassBuilder& b) {
@@ -556,9 +576,9 @@ TextureRef postBloomTail(FramePassContext& fc, TextureRef hdr, uint32_t levelCou
                                                    first ? c.srv(le.grid) : 0xFFFFFFFFu, first ? c.srv(le.blurred) : 0xFFFFFFFFu, asUint(le.uvScale[0]), asUint(le.uvScale[1]),
                                                    asUint(le.highlight), asUint(le.shadow), asUint(le.detail), asUint(le.blend),
                                                    asUint(le.logMiddleGrey), 0, 0, 0 };
-                          c.cmd->SetPipelineState(down);
+                          c.cmd->SetPipelineState(downKernel);
                           c.computeConstants(k, 16);
-                          c.cmd->Dispatch((dd.width + 7) / 8, (dd.height + 7) / 8, 1);
+                          gpuDispatch(c.cmd, (dd.width + groupSize - 1) / groupSize, (dd.height + groupSize - 1) / groupSize, 1);
                       });
         }
         // Image-based lens flares (PostFlare.hlsl), from the 1/8 level as the down chain left it (before the levels are
@@ -584,7 +604,7 @@ TextureRef postBloomTail(FramePassContext& fc, TextureRef hdr, uint32_t levelCou
                           const uint32_t k[8] = { c.srv(source), c.uav(spread), sourceDesc.width, sourceDesc.height, asUint(lf.threshold), asUint(radius), lf.blades, 0 };
                           c.cmd->SetPipelineState(spreadPso);
                           c.computeConstants(k, 8);
-                          c.cmd->Dispatch((sourceDesc.width + 7) / 8, (sourceDesc.height + 7) / 8, 1);
+                          gpuDispatch(c.cmd, (sourceDesc.width + 7) / 8, (sourceDesc.height + 7) / 8, 1);
                       });
             g.addPass("m.post.flare.ghosts", QueueType::Graphics,
                       [&](PassBuilder& b) {
@@ -606,7 +626,7 @@ TextureRef postBloomTail(FramePassContext& fc, TextureRef hdr, uint32_t levelCou
                           }
                           c.cmd->SetPipelineState(ghostPso);
                           c.computeConstants(k, 40);
-                          c.cmd->Dispatch((flareDesc.width + 7) / 8, (flareDesc.height + 7) / 8, 1);
+                          gpuDispatch(c.cmd, (flareDesc.width + 7) / 8, (flareDesc.height + 7) / 8, 1);
                       });
             *flareOut = ghosts;
         }
@@ -626,7 +646,7 @@ TextureRef postBloomTail(FramePassContext& fc, TextureRef hdr, uint32_t levelCou
                           const uint32_t k[8] = { c.srv(src), c.uav(dst), dd.width, dd.height, asUint(weight), 0, 0, 0 };
                           c.cmd->SetPipelineState(up);
                           c.computeConstants(k, 8);
-                          c.cmd->Dispatch((dd.width + 7) / 8, (dd.height + 7) / 8, 1);
+                          gpuDispatch(c.cmd, (dd.width + 7) / 8, (dd.height + 7) / 8, 1);
                       });
         }
         return levels.front();
@@ -724,7 +744,7 @@ void postChain(FramePassContext& fc, const ViewResources& view, TextureRef hdr)
                   c.cmd->SetPipelineState(final);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 48);
-                  c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (w + 7) / 8, (h + 7) / 8, 1);
               });
 }
 

@@ -1,5 +1,7 @@
 # Owner: M (M session, INTERFACES v1.2). ARCHITECTURE 2.4, 2.10, 2.11.
 [shading]
+coverage_fused_rounds = true      # continue a heavy pixel's identical 32-fragment rounds in one dispatch
+water_planar_stable_masks = true # fixed mask storage; the projected rectangle still bounds every dispatch and read
 tonemap = "pbr_neutral"           # Khronos PBR Neutral (INTERFACES 8.4)
 emissive_area_lights = false      # 14.1b (L2b): constant-emission surfaces of non-skinned instances become quadtree area lights
                                   # for the diffuse direct light (first frame exact, no cache cold start); no shadows yet (14.3)

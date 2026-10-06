@@ -19,9 +19,11 @@ void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer
 {
     RWStructuredBuffer<uint3> results = ResourceDescriptorHeap[P[0].y];
     Texture2D<uint4> probeTexture = ResourceDescriptorHeap[P[0].w];
-    float probeSpacing;
-    int2 probeCount;
-    const GiProbeFootprint footprint = giProbeFootprint(probeTexture, j.pixel, j.s.normal, j.s.linearDepth, probeSpacing, probeCount);
+    float probeSpacing = 0;
+    int2 probeCount = 0;
+    GiProbeFootprint footprint = (GiProbeFootprint)0;
+    if (j.mode == REFL_G)
+        footprint = giProbeFootprint(probeTexture, j.pixel, j.s.normal, j.s.linearDepth, probeSpacing, probeCount);
     uint seed = j.seed;
     float3 sumL = 0, sumG = 0;
     float nearest = 65000;  // the lobe's nearest hit (as ReflectionCombine)
@@ -88,7 +90,11 @@ void reflTraceInline(ReflJob j, uint job, RtSceneSrvs scene, RWByteAddressBuffer
     // (branches, not selects: the library's mode is a compile constant, and the other mode's lookup then leaves the kernel)
     float3 gbar = 0;
     if (j.mode == REFL_G) gbar = sumC / nC;  // (reflLobeControl's mean)
-    else if (valid == 0) gbar = giProbeFootprintRadiance(probeTexture, footprint, probeCount, reflect(-j.s.view, j.s.normal), j.lobe, P[3].w);
+    else if (valid == 0)
+    {
+        footprint = giProbeFootprint(probeTexture, j.pixel, j.s.normal, j.s.linearDepth, probeSpacing, probeCount);
+        gbar = giProbeFootprintRadiance(probeTexture, footprint, probeCount, reflect(-j.s.view, j.s.normal), j.lobe, P[3].w);
+    }
     const float3 total = reflLobeEstimate(sumL, sumG, valid, gbar);
     results[job] = reflPackResult(total, valid > 0 ? nearest : 0, motion);
     if (jobLayersUav != UNX_NONE)

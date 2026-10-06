@@ -165,7 +165,7 @@ OceanHeightOutput OceanHeight::record(RenderGraph& g, const OceanOutput& fields,
                       k[2] = margin;
                       k[14] = level;
                       c.computeConstants(k, 16);
-                      c.cmd->Dispatch((quads + 7) / 8, (quads + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (quads + 7) / 8, (quads + 7) / 8, 1);
                   }
               });
     ID3D12PipelineState* resolve = m_shaders.compute("Passes/Water/OceanHeightResolve");
@@ -181,7 +181,7 @@ OceanHeightOutput OceanHeight::record(RenderGraph& g, const OceanOutput& fields,
                   k[2] = c.uav(keys);
                   c.cmd->SetPipelineState(resolve);
                   c.computeConstants(k, 16);
-                  c.cmd->Dispatch(kN / 8, kN / 8, d.levels);
+                  gpuDispatch(c.cmd, kN / 8, kN / 8, d.levels);
               });
     ID3D12PipelineState* bound = m_shaders.compute("Passes/Water/OceanHeightBounds");
     for (uint32_t m = 0; m < kMips; ++m)
@@ -192,7 +192,7 @@ OceanHeightOutput OceanHeight::record(RenderGraph& g, const OceanOutput& fields,
                       const uint32_t k[16] = { 0, c.uav(height), dst, d.levels, 0, 0, 0, 0, 0, 0, 0, 0, 0, src, m, 0 };
                       c.cmd->SetPipelineState(bound);
                       c.computeConstants(k, 16);
-                      c.cmd->Dispatch((size + 7) / 8, (size + 7) / 8, d.levels);
+                      gpuDispatch(c.cmd, (size + 7) / 8, (size + 7) / 8, d.levels);
                   });
     }
     return { height, bounds, params, folds };

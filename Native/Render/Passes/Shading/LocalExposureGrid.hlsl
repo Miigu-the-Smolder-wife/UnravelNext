@@ -22,11 +22,13 @@ void main(uint3 tile : SV_GroupID, uint2 local : SV_GroupThreadID, uint flat : S
     }
     GroupMemoryBarrierWithGroupSync();
     Texture2D<float4> image = ResourceDescriptorHeap[P[0].x];
-    const uint2 origin = tile.xy * LE_TILE + local * 16u;
+    const uint2 origin = tile.xy * LE_TILE;
     for (uint j = 0; j < 8; ++j)
         for (uint i = 0; i < 8; ++i)
         {
-            const uint2 pixel = origin + uint2(i, j) * 2u;
+            // Adjacent lanes fetch adjacent samples instead of separate 16x16
+            // blocks. The integer histogram sees exactly the same sample set.
+            const uint2 pixel = origin + (local + uint2(i, j) * 8u) * 2u;
             if (any(pixel >= P[1].xy)) continue;
             const float logLum = log2(leLuminance(image.Load(int3(pixel, 0)).rgb));
             const float at = leBucketPosition(logLum) * (LE_DEPTH - 1);

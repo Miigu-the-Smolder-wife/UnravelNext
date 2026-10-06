@@ -202,7 +202,7 @@ TextureRef recordWaterMedia(FramePassContext& fc, const ViewResources& main, Buf
                   ctx.cmd->SetPipelineState(pso);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 20);
-                  ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
+                  gpuDispatch(ctx.cmd, grid.gridX, grid.gridY, 1);
               });
     return slices;
 }
@@ -460,7 +460,12 @@ uint64_t froxelListBound(const FroxelGridCpu& g, const ViewDesc& view, const std
             total += nx * ny;
         }
     }
-    return total;
+    // FroxelScan rounds each list to an even entry count so packed uint16
+    // stores do not share a word across lists. A nonempty odd list needs one
+    // extra entry. There are at most min(total pairs, froxels) such lists.
+    // The unpadded pair bound alone can underallocate even a one-light scene.
+    const uint64_t froxels = uint64_t(g.gridX) * g.gridY * g.slices;
+    return total + std::min(total, froxels);
 }
 
 uint64_t froxelListBytes(const FroxelGridCpu& grid, uint64_t capacity)
@@ -533,7 +538,7 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
                   const uint32_t k[8] = { ctx.uav(lights), grid.gridX, grid.gridY, grid.slices, grid.tilePx, nearBits, farBits, capacity };
                   ctx.cmd->SetPipelineState(pb);
                   ctx.computeConstants(k, 8);
-                  ctx.cmd->Dispatch(1, 1, 1);
+                  gpuDispatch(ctx.cmd, 1, 1, 1);
               });
     // Count, scan (two levels), fill: every list is allocated and stored within this frame (RENDERER_REDESIGN_V2 14.1).
     auto cullInputs = [&](PassBuilder& b) {
@@ -554,7 +559,7 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
                   ctx.cmd->SetPipelineState(pc);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 12);
-                  ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
+                  gpuDispatch(ctx.cmd, grid.gridX, grid.gridY, 1);
               });
     chain.add("s.froxel.scan.blocks" + suffix,
               [&](PassBuilder& b) { b.use(lights, Use::UavCompute); b.use(blockSums, Use::UavCompute); b.use(sceneAlloc, Use::UavCompute); },
@@ -562,7 +567,7 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
                   const uint32_t k[4] = { ctx.uav(lights), ctx.uav(blockSums), (uint32_t)froxels, ctx.uav(sceneAlloc) };
                   ctx.cmd->SetPipelineState(ps0);
                   ctx.computeConstants(k, 4);
-                  ctx.cmd->Dispatch(blocks, 1, 1);
+                  gpuDispatch(ctx.cmd, blocks, 1, 1);
               });
     chain.add("s.froxel.scan.top" + suffix,
               [&](PassBuilder& b) { b.use(lights, Use::UavCompute); b.use(blockSums, Use::UavCompute); },
@@ -570,7 +575,7 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
                   const uint32_t k[4] = { ctx.uav(lights), ctx.uav(blockSums), blocks, 0 };
                   ctx.cmd->SetPipelineState(ps1);
                   ctx.computeConstants(k, 4);
-                  ctx.cmd->Dispatch(1, 1, 1);
+                  gpuDispatch(ctx.cmd, 1, 1, 1);
               });
     chain.flush("s.froxel.count" + suffix);
     g.addPass("s.froxel.lists" + suffix, QueueType::Compute,
@@ -587,7 +592,7 @@ BufferRef recordLists(FramePassContext& fc, const ViewResources& view, uint32_t 
                   ctx.cmd->SetPipelineState(pl);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 12);
-                  ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
+                  gpuDispatch(ctx.cmd, grid.gridX, grid.gridY, 1);
               });
     return lights;
 }
@@ -617,7 +622,7 @@ TextureRef recordReaders(FramePassContext& fc, const ViewResources& view, bool f
                   ctx.cmd->SetPipelineState(pd);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 8);
-                  ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
+                  gpuDispatch(ctx.cmd, grid.gridX, grid.gridY, 1);
               });
     return readers;
 }
@@ -789,25 +794,25 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
                   [&](PassBuilder& b) { b.use(work, Use::UavCompute); },
                   [=](PassContext& ctx) {
                       const uint32_t k[4] = { ctx.uav(work), 0, 0, 0 };
-                      ctx.cmd->SetPipelineState(begin); ctx.computeConstants(k, 4); ctx.cmd->Dispatch(1, 1, 1);
+                      ctx.cmd->SetPipelineState(begin); ctx.computeConstants(k, 4); gpuDispatch(ctx.cmd, 1, 1, 1);
                   });
         g.addPass("s.froxel.queue.prepare" + suffix, QueueType::Compute,
                   [&](PassBuilder& b) { inputs(b); b.use(work, Use::UavCompute); b.use(air, Use::UavCompute); },
                   [=](PassContext& ctx) {
                       ctx.cmd->SetPipelineState(prepare); bind(ctx, ctx.uav(work), ctx.uav(air));
-                      ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
+                      gpuDispatch(ctx.cmd, grid.gridX, grid.gridY, 1);
                   });
         g.addPass("s.froxel.queue.args" + suffix, QueueType::Compute,
                   [&](PassBuilder& b) { b.use(work, Use::UavCompute); b.use(workArgs, Use::UavCompute); },
                   [=](PassContext& ctx) {
                       const uint32_t k[4] = { ctx.uav(work), ctx.uav(workArgs), 0, 0 };
-                      ctx.cmd->SetPipelineState(args); ctx.computeConstants(k, 4); ctx.cmd->Dispatch(1, 1, 1);
+                      ctx.cmd->SetPipelineState(args); ctx.computeConstants(k, 4); gpuDispatch(ctx.cmd, 1, 1, 1);
                   });
         g.addPass("s.froxel.queue.integrate" + suffix, QueueType::Compute,
                   [&](PassBuilder& b) { inputs(b); b.use(work, Use::SrvCompute); b.use(workArgs, Use::IndirectArgs); b.use(air, Use::UavCompute); },
                   [=](PassContext& ctx) {
                       ctx.cmd->SetPipelineState(integrate); bind(ctx, ctx.srv(work), ctx.uav(air));
-                      ctx.cmd->ExecuteIndirect(signature, 1, ctx.resource(workArgs), 0, nullptr, 0);
+                      gpuExecuteIndirect(ctx.cmd, signature, 1, ctx.resource(workArgs), 0, nullptr, 0);
                   });
     }
     g.addPass("s.froxel.integrate" + suffix, QueueType::Compute,
@@ -818,7 +823,7 @@ TextureRef recordIntegration(FramePassContext& fc, const ViewResources& view, Bu
               },
               [=](PassContext& ctx) {
                   ctx.cmd->SetPipelineState(pi); bind(ctx, 0xFFFFFFFFu, queued ? ctx.srv(air) : 0xFFFFFFFFu);
-                  ctx.cmd->Dispatch(grid.gridX, grid.gridY, 1);
+                  gpuDispatch(ctx.cmd, grid.gridX, grid.gridY, 1);
               });
     if (!shadows) tracks::pending("S.froxels: sun shadows of the air (shadowPages not recorded this frame)");
     return volume;
@@ -1604,7 +1609,7 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
                       ctx.cmd->SetPipelineState(ps);
                       ctx.bindFrameConstants(constants);
                       ctx.computeConstants(k, 48);
-                      ctx.cmd->Dispatch((f.gridX + 3) / 4, (f.gridY + 3) / 4, (f.gridZ + 3) / 4);
+                      gpuDispatch(ctx.cmd, (f.gridX + 3) / 4, (f.gridY + 3) / 4, (f.gridZ + 3) / 4);
                   });
     // (the cloud's statistics, where the columns march the frame's cloud: the capped sun paths are counted there)
     const BufferRef cloudStats = f.cloudSteps != 0 ? fc.resources.cloudStats : BufferRef{};
@@ -1638,7 +1643,7 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
                   ctx.cmd->SetPipelineState(pi);
                   ctx.bindFrameConstants(constants);
                   ctx.computeConstants(k, 32);
-                  ctx.cmd->Dispatch((f.gridX + 7) / 8, (f.gridY + 7) / 8, 1);
+                  gpuDispatch(ctx.cmd, (f.gridX + 7) / 8, (f.gridY + 7) / 8, 1);
                   // (a planar view's record: its volume is this frame's transient)
                   if (!primary) record->write(frameIndex, true, viewWidth, viewHeight, ctx.srv(integrated));
               });
@@ -1666,7 +1671,7 @@ TextureRef recordFogVolume(FramePassContext& fc, const ViewResources& main, Buff
                       ctx.cmd->SetPipelineState(pd);
                       ctx.bindFrameConstants(constants);
                       ctx.computeConstants(k, 4);
-                      ctx.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                      gpuDispatch(ctx.cmd, (w + 7) / 8, (h + 7) / 8, 1);
                   });
         fc.resources.fogDebug = view;
     }

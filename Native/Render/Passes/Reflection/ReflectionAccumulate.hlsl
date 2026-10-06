@@ -82,11 +82,11 @@ void main(uint2 pixel : SV_DispatchThreadID)
     {
         // The pixel's point one frame ago: barycentric in its triangle, previous-tick vertices. An instance that did not
         // move or deform (deformInstanceStill) keeps the point: no triangle or vertex loads (most pixels of a frame).
-        const GpuInstance inst = loadInstance(instance);
         float3 prevPosition = s.position;
         float3 prevNormal = s.normal;
-        if (!deformInstanceStill(inst))
+        if (!deformInstanceStillAt(instance))
         {
+            const GpuInstance inst = loadInstance(instance);
             const GpuMesh mesh = loadMesh(inst.mesh);
 #if UNX_CLUSTER_STREAM
             DeformedVertex d0, d1, d2;

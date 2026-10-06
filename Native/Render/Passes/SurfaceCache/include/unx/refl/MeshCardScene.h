@@ -319,6 +319,9 @@ private:
     std::vector<McPageTableGpu> m_pageTableGpu;
     Dirty m_dirty;
     std::vector<Request> m_requests;
+    // update() scratch; selection and capture order are unchanged across reuse.
+    std::vector<Request> m_chosenRequests, m_hiResRequests;
+    std::vector<uint32_t> m_dirtyCaptureCards;
     std::vector<McFeedback> m_feedback;             // setFeedback's elements, taken by the next update
     uint32_t m_feedbackSamples = 1;
     uint32_t m_feedbackFrame = 0;                   // setFeedback calls so far: the unlocked pages' clock

@@ -15,6 +15,9 @@
 // pixel without its own ray first takes the rays of its block and of the three blocks on its side (the bilinear set),
 // whatever its roughness.
 #include "Passes/Reflection/ReflectionReuse.hlsli"
+#ifndef REUSE_CACHED_RAYS
+#define REUSE_CACHED_RAYS 0
+#endif
 
 // The traced pixel of q's block (q itself at factor 1) and its mode word; false: the block traced nothing.
 bool blockRay(Texture2D<uint> modes, int2 q, int2 size, out int2 traced, out uint word)
@@ -66,6 +69,9 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
     StructuredBuffer<uint3> results = ResourceDescriptorHeap[P[0].y];
     Texture2D<float> depth = ResourceDescriptorHeap[P[0].z];
     Texture2D<uint2> gbuffer = ResourceDescriptorHeap[P[0].w];
+#if REUSE_CACHED_RAYS
+    ByteAddressBuffer rayCache = ResourceDescriptorHeap[P[4].w];
+#endif
     const float cap = asfloat(P[3].y), range = asfloat(P[3].z);
     const uint frame = P[1].w;
     g_reflWords = P[4].x;  // (M's material word: the top layer's roughness, ReflectionInternal.hlsli; UNX_NONE: none)
@@ -98,7 +104,14 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
         // this pixel's own ray under the same weight (never dropped)
         float3 ownDir;
         float ownPdf;
+#if REUSE_CACHED_RAYS
+        const float4 ownRay = hasOwn ? asfloat(rayCache.Load4(reflJob(m) * 16u)) : float4(0, 0, 0, 0);
+        ownDir = ownRay.xyz;
+        ownPdf = ownRay.w;
+        if (hasOwn && ownPdf > 0)
+#else
         if (hasOwn && reuseRay(s, pixel, frame, asfloat(P[3].w), ownDir, ownPdf))
+#endif
         {
             weight = max(reuseGgxD(a2, saturate(dot(s.normal, normalize(s.view + ownDir)))) / ownPdf, 1e-3);
             sum *= weight;
@@ -119,11 +132,21 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
             uint mq;
             if (!blockRay(modes, q, int2(size), traced, mq) || all(traced == int2(pixel))) continue;
             q = traced;
-            const ReflSurface t = reflSurface(depth, gbuffer, uint2(q));
-            if (!t.valid) continue;
             float3 dir;
             float pdf;
+#if REUSE_CACHED_RAYS
+            const float d0 = depth.Load(int3(q, 0));
+            const float4 ray = asfloat(rayCache.Load4(reflJob(mq) * 16u));
+            if (!(d0 > 0) || !(ray.w > 0)) continue;
+            const float3 position = worldFromDepth(float2(q), d0);
+            dir = ray.xyz;
+            pdf = ray.w;
+#else
+            const ReflSurface t = reflSurface(depth, gbuffer, uint2(q));
+            if (!t.valid) continue;
             if (!reuseRay(t, uint2(q), frame, asfloat(P[3].w), dir, pdf)) continue;
+            const float3 position = t.position;
+#endif
             const uint3 r = results[reflJob(mq)];
             const float d = min(reflResultDistance(r), ownDistance);
             if (!hasFallback)
@@ -132,7 +155,7 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
                 fallbackDistance = d;
                 hasFallback = true;
             }
-            const float3 toHit = t.position + dir * d - s.position;
+            const float3 toHit = position + dir * d - s.position;
             const float reach = length(toHit);
             const float3 seen = reach > 0 ? toHit / reach : dir;
             if (dot(seen, s.normal) <= 0) continue;  // (under this pixel's horizon: not a direction of its lobe)

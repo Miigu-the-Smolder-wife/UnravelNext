@@ -37,13 +37,35 @@
 #define MIN_BLEND 0.05
 #define ENCODING_ERROR (1.0 / 127.0)
 #define MAX_COUNT 20.0
+#ifndef TSR_WAVE_RANGES
+#define TSR_WAVE_RANGES 0
+#endif
+#ifndef TSR_PACKED_RANGES
+// Keep stage 4's float clamp box: reassociating that decode changes rare
+// history quantization thresholds. Stages 3b, 5 and 6 retain exact code values.
+#define TSR_PACKED_RANGES 13
+#endif
 
-groupshared uint gLH[CELLS];   // input luma, history luma
-groupshared uint gGB[CELLS];   // previous gradient (snorm), the clamped input's 3 x 3 range
-groupshared uint gAB[CELLS];   // stage 1 clamps; stage 3b: the history in the relaxed box, the relaxation; later: gradient variation, is-flicker
-groupshared uint gCD[CELLS];   // stage 2 clamps; stage 5: energy/rejection medians
-groupshared uint gF[CELLS];    // filtered input, filtered history
-groupshared uint gE[CELLS];    // raw energy/rejection; stage 6: updated history/current gradient
+// Stage domains shrink with the filter halo. Reuse the original input storage
+// for ranges/energy, then refill it for the final update; no quantization changes.
+// At TILE=16 the four buffers occupy 15,456 bytes instead of 27,744 bytes.
+groupshared uint gLH[CELLS];
+groupshared uint gAB[(SIDE - 2) * (SIDE - 2)];
+groupshared uint gCD[(SIDE - 4) * (SIDE - 4)];
+groupshared uint gF[(SIDE - 6) * (SIDE - 6)];
+uint compactCell(uint i, uint margin)
+{
+    return (i / SIDE - margin) * (SIDE - 2 * margin) + (i % SIDE - margin);
+}
+#define AB(i) gAB[compactCell(i, 1)]
+#define CD(i) gCD[compactCell(i, 2)]
+#define FILTERED(i) gF[compactCell(i, 3)]
+// Neighbourhood loops already hold two-dimensional coordinates. Address the
+// compact tiles directly instead of flattening to SIDE and dividing by SIDE
+// again for every tap. Margins ensure the coordinates stay in the same row.
+#define AB_AT(c) gAB[((c).y - 1) * (SIDE - 2) + (c).x - 1]
+#define CD_AT(c) gCD[((c).y - 2) * (SIDE - 4) + (c).x - 2]
+#define FILTERED_AT(c) gF[((c).y - 3) * (SIDE - 6) + (c).x - 3]
 
 uint pack2(float a, float b) { return (uint)(saturate(a) * 65535.0 + 0.5) | ((uint)(saturate(b) * 65535.0 + 0.5) << 16); }
 float2 unpack2(uint v) { return float2(v & 0xFFFFu, v >> 16) * (1.0 / 65535.0); }
@@ -61,10 +83,30 @@ void sort3(inout float2 a, inout float2 b, inout float2 c)
     c = hi;
 }
 float2 median3(float2 a, float2 b, float2 c) { return max(min(a, b), min(max(a, b), c)); }
+void sortCodes3(inout uint2 a, inout uint2 b, inout uint2 c)
+{
+    const uint2 lo=min(a,min(b,c)), hi=max(a,max(b,c)), mid=a+b+c-lo-hi;
+    a=lo;b=mid;c=hi;
+}
+uint2 medianCodes3(uint2 a,uint2 b,uint2 c){return max(min(a,b),min(max(a,b),c));}
 
 [numthreads(TILE, TILE, 1)]
-void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : SV_GroupIndex)
+void main(uint2 group : SV_GroupID, uint lane : SV_GroupIndex)
 {
+    const uint2 local = uint2(lane % TILE, lane / TILE);
+#if TSR_WAVE_RANGES
+    // Keep the device's texture-friendly 2D quad layout. Resolve neighbours once,
+    // before any lane leaves the halo loops. Check logical thread identities so
+    // linear, quad and unsupported wave layouts all retain exact scalar results.
+    const uint wl = WaveGetLaneIndex(), wc = WaveGetLaneCount();
+    const uint linearLeft = max(wl, 1u) - 1, linearRight = min(wl + 1, wc - 1);
+    const uint quadLeft = (wl & 1u) ? wl - 1 : (wl >= 3 ? wl - 3 : wl);
+    const uint quadRight = min((wl & 1u) ? wl + 3 : wl + 1, wc - 1);
+    const bool linearOrder = WaveReadLaneAt(lane, linearLeft) + 1 == lane && WaveReadLaneAt(lane, linearRight) == lane + 1;
+    const bool quad = WaveReadLaneAt(lane, quadLeft) + 1 == lane && WaveReadLaneAt(lane, quadRight) == lane + 1;
+    const bool shareRange = lane > 0 && lane + 1 < TILE * TILE && (linearOrder || quad);
+    const uint leftLane = linearOrder ? linearLeft : quadLeft, rightLane = linearOrder ? linearRight : quadRight;
+#endif
     const int2 size = int2(P[1].zw);
     const int2 origin = int2(group) * TILE - BORDER;
     Texture2D<float4> colour = ResourceDescriptorHeap[P[0].x];
@@ -80,7 +122,6 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
         c = all(isfinite(c)) ? max(c, 0.0) : float3(0, 0, 0);
         const float4 h = historyTexture.Load(int3(p, 0));
         gLH[i] = pack2(dot(tsrLinearToMeasure(c), float3(1, 1, 1) / 3.0), h.r * h.r);
-        gGB[i] = pack2(h.g, 0);  // (the gradient's code as stored: g x 127 / 255 + 127 / 255)
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -88,31 +129,64 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     for (i = lane; i < CELLS; i += TILE * TILE)
     {
         const int2 c = int2(i % SIDE, i / SIDE);
-        if (!inMargin(c, 1)) continue;
         uint2 lo = 0xFFFFu, hi = 0;
+#if TSR_WAVE_RANGES
+        // Three vertical LDS reads per lane; adjacent columns exchange their
+        // exact integer extrema in the wave. All lanes participate before the
+        // halo predicate. Wave edges retain the scalar path, including partial
+        // waves and the non-power-of-two tile pitch.
+        const uint2 a = codes2(gLH[cellIndex(int2(c.x, max(c.y - 1, 0)))]);
+        const uint2 b = codes2(gLH[i]);
+        const uint2 d = codes2(gLH[cellIndex(int2(c.x, min(c.y + 1, SIDE - 1)))]);
+        const uint2 vl = min(a, min(b, d)), vh = max(a, max(b, d));
+        const uint2 ll = WaveReadLaneAt(vl, leftLane), rl = WaveReadLaneAt(vl, rightLane);
+        const uint2 lh = WaveReadLaneAt(vh, leftLane), rh = WaveReadLaneAt(vh, rightLane);
+        if (!inMargin(c, 1)) continue;
+        if (shareRange) { lo = min(vl, min(ll, rl)); hi = max(vh, max(lh, rh)); }
+        else
+#else
+        if (!inMargin(c, 1)) continue;
+#endif
+        {
         [unroll] for (int k = 0; k < 9; ++k)
         {
             const uint2 v = codes2(gLH[cellIndex(c + int2(k % 3, k / 3) - 1)]);
             lo = min(lo, v);
             hi = max(hi, v);
         }
+        }
         const uint2 own = codes2(gLH[i]);
-        gAB[i] = packCodes2(clamp(own.yx, lo, hi));  // history into the input's range, input into the history's
+        AB(i) = packCodes2(clamp(own.yx, lo, hi));  // history into the input's range, input into the history's
     }
     GroupMemoryBarrierWithGroupSync();
     for (i = lane; i < CELLS; i += TILE * TILE)
     {
         const int2 c = int2(i % SIDE, i / SIDE);
-        if (!inMargin(c, 2)) continue;
         uint2 lo = 0xFFFFu, hi = 0;
+#if TSR_WAVE_RANGES
+        const int2 q = clamp(c, 1, SIDE - 2);
+        const uint2 a = codes2(AB_AT(int2(q.x, max(q.y - 1, 1))));
+        const uint2 b = codes2(AB_AT(q));
+        const uint2 d = codes2(AB_AT(int2(q.x, min(q.y + 1, SIDE - 2))));
+        const uint2 vl = min(a, min(b, d)), vh = max(a, max(b, d));
+        const uint2 ll = WaveReadLaneAt(vl, leftLane), rl = WaveReadLaneAt(vl, rightLane);
+        const uint2 lh = WaveReadLaneAt(vh, leftLane), rh = WaveReadLaneAt(vh, rightLane);
+        if (!inMargin(c, 2)) continue;
+        if (shareRange) { lo = min(vl, min(ll, rl)); hi = max(vh, max(lh, rh)); }
+        else
+#else
+        if (!inMargin(c, 2)) continue;
+#endif
+        {
         [unroll] for (int k = 0; k < 9; ++k)
         {
-            const uint2 v = codes2(gAB[cellIndex(c + int2(k % 3, k / 3) - 1)]);
+            const uint2 v = codes2(AB_AT(c + int2(k % 3, k / 3) - 1));
             lo = min(lo, v);
             hi = max(hi, v);
         }
+        }
         const uint2 own = codes2(gLH[i]);
-        gCD[i] = packCodes2(clamp(own, lo, hi));  // the clamped input, the clamped history
+        CD(i) = packCodes2(clamp(own, lo, hi));  // the clamped input, the clamped history
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -126,13 +200,13 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
         [unroll] for (int k = 0; k < 9; ++k)
         {
             const int2 o = int2(k % 3, k / 3) - 1;
-            const float2 v = unpack2(gCD[cellIndex(c + o)]);
+            const float2 v = unpack2(CD_AT(c + o));
             blurred += v * ((o.x == 0 ? 0.5 : 0.25) * (o.y == 0 ? 0.5 : 0.25));
             lo = min(lo, v.x);
             hi = max(hi, v.x);
         }
-        gF[i] = pack2(blurred.x, blurred.y);
-        gGB[i] = (gGB[i] & 0xFFFFu) | (pack2(0, hi - lo) & 0xFFFF0000u);
+        FILTERED(i) = pack2(blurred.x, blurred.y);
+        gLH[i] = pack2(0, hi - lo);  // original inputs are no longer read until stage 6
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -142,13 +216,25 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     {
         const int2 c = int2(i % SIDE, i / SIDE);
         if (!inMargin(c, 4)) continue;
+        #if (TSR_PACKED_RANGES & 1)
+        uint2 lowCode=0xFFFFu, highCode=0;
+        #else
         float2 lo = 1, hi = 0;
+        #endif
         [unroll] for (int k = 0; k < 9; ++k)
         {
-            const float2 v = unpack2(gF[cellIndex(c + int2(k % 3, k / 3) - 1)]);
+            #if (TSR_PACKED_RANGES & 1)
+            const uint2 v=codes2(FILTERED_AT(c+int2(k%3,k/3)-1));
+            lowCode=min(lowCode,v);highCode=max(highCode,v);
+            #else
+            const float2 v = unpack2(FILTERED_AT(c + int2(k % 3, k / 3) - 1));
             lo = min(lo, v);
             hi = max(hi, v);
+            #endif
         }
+        #if (TSR_PACKED_RANGES & 1)
+        const float2 lo=float2(lowCode)*(1.0/65535.0), hi=float2(highCode)*(1.0/65535.0);
+        #endif
         float weight = 0;
         if (thin)
         {
@@ -156,7 +242,7 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
             weight = relaxationTexture.Load(int3(clamp(origin + c, 0, size - 1), 0));
             weight = weight > 1.0 / 127.0 ? weight : 0.0;
         }
-        gAB[i] = pack2(clamp(unpack2(gF[i]).y, lerp(lo.x, lo.y, weight), lerp(hi.x, hi.y, weight)), weight);
+        AB(i) = pack2(clamp(unpack2(FILTERED(i)).y, lerp(lo.x, lo.y, weight), lerp(hi.x, hi.y, weight)), unpack2(gLH[i]).y);
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -165,22 +251,39 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     {
         const int2 c = int2(i % SIDE, i / SIDE);
         if (!inMargin(c, 5)) continue;
-        const bool relaxed = unpack2(gAB[i]).y > 0;
+        bool relaxed = false;
+        if (thin)
+        {
+            Texture2D<float> relaxationTexture = ResourceDescriptorHeap[P[2].y];
+            relaxed = relaxationTexture.Load(int3(clamp(origin + c, 0, size - 1), 0)) > 1.0 / 127.0;
+        }
+        #if (TSR_PACKED_RANGES & 2)
+        uint lowCode=0xFFFFu, highCode=0;
+        #else
         float lo = 1, hi = 0;
+        #endif
         [unroll] for (int k = 0; k < 9; ++k)
         {
             const uint ni = cellIndex(c + int2(k % 3, k / 3) - 1);
-            const float v = relaxed ? unpack2(gAB[ni]).x : unpack2(gF[ni]).x;
+            #if (TSR_PACKED_RANGES & 2)
+            const uint v=(relaxed?AB(ni):FILTERED(ni))&0xFFFFu;
+            lowCode=min(lowCode,v);highCode=max(highCode,v);
+            #else
+            const float v = relaxed ? unpack2(AB(ni)).x : unpack2(FILTERED(ni)).x;
             lo = min(lo, v);
             hi = max(hi, v);
+            #endif
         }
-        const float range = unpack2(gGB[i]).y;
+        #if (TSR_PACKED_RANGES & 2)
+        const float lo=float(lowCode)*(1.0/65535.0), hi=float(highCode)*(1.0/65535.0);
+        #endif
+        const float range = unpack2(AB(i)).y;
         const float clampError = max(q, range * (filteringWeight * 0.25)) + q;
-        const float2 filtered = unpack2(gF[i]);
+        const float2 filtered = unpack2(FILTERED(i));
         const float clamped = clamp(filtered.y, lo - clampError, hi + clampError);
         const float delta = max(abs(filtered.x - filtered.y), range * filteringWeight + q * 2.0 * filteringWeight);
         const float energy = abs(clamped - filtered.y);
-        gE[i] = pack2(energy, saturate(1.0 - energy / delta));
+        gLH[i] = pack2(energy, saturate(1.0 - energy / delta));
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -189,18 +292,46 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     {
         const int2 c = int2(i % SIDE, i / SIDE);
         if (!inMargin(c, 6)) continue;
+        #if (TSR_PACKED_RANGES & 4)
+        uint2 lows[3], mids[3], highs[3];
+        #else
         float2 lows[3], mids[3], highs[3];
+        #endif
         [unroll] for (int x = -1; x <= 1; ++x)
         {
-            float2 a = unpack2(gE[cellIndex(c + int2(x, -1))]), b = unpack2(gE[cellIndex(c + int2(x, 0))]), d = unpack2(gE[cellIndex(c + int2(x, 1))]);
+            #if (TSR_PACKED_RANGES & 4)
+            uint2 a=codes2(gLH[cellIndex(c+int2(x,-1))]),b=codes2(gLH[cellIndex(c+int2(x,0))]),d=codes2(gLH[cellIndex(c+int2(x,1))]);
+            sortCodes3(a,b,d);
+            #else
+            float2 a = unpack2(gLH[cellIndex(c + int2(x, -1))]), b = unpack2(gLH[cellIndex(c + int2(x, 0))]), d = unpack2(gLH[cellIndex(c + int2(x, 1))]);
             sort3(a, b, d);
+            #endif
             lows[x + 1] = a;
             mids[x + 1] = b;
             highs[x + 1] = d;
         }
+        #if (TSR_PACKED_RANGES & 4)
+        const uint2 m=medianCodes3(max(lows[0],max(lows[1],lows[2])),medianCodes3(mids[0],mids[1],mids[2]),min(highs[0],min(highs[1],highs[2])));
+        CD(i)=packCodes2(m);
+        #else
         const float2 m = median3(max(lows[0], max(lows[1], lows[2])), median3(mids[0], mids[1], mids[2]), min(highs[0], min(highs[1], highs[2])));
         // Stage 3 consumed the clamps; its barrier precedes this reuse.
-        gCD[i] = pack2(m.x, m.y);
+        CD(i) = pack2(m.x, m.y);
+        #endif
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    // The median pass has finished reading energy. Refill the original inputs
+    // cooperatively so the plus-shaped range has the same border/rounding as 0.
+    for (i = lane; i < CELLS; i += TILE * TILE)
+    {
+        const int2 c = int2(i % SIDE, i / SIDE);
+        if (!inMargin(c, 6)) continue;
+        const int2 p = clamp(origin + c, 0, size - 1);
+        float3 value = colour.Load(int3(p, 0)).rgb;
+        value = all(isfinite(value)) ? max(value, 0.0) : float3(0, 0, 0);
+        const float4 history = historyTexture.Load(int3(p, 0));
+        gLH[i] = pack2(dot(tsrLinearToMeasure(value), float3(1, 1, 1) / 3.0), history.r * history.r);
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -210,16 +341,34 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     {
         const int2 c = int2(i % SIDE, i / SIDE);
         if (!inMargin(c, 7)) continue;
-        const bool relaxed = unpack2(gAB[i]).y > 0;
+        bool relaxed = false;
+        if (thin)
+        {
+            Texture2D<float> relaxationTexture = ResourceDescriptorHeap[P[2].y];
+            relaxed = relaxationTexture.Load(int3(clamp(origin + c, 0, size - 1), 0)) > 1.0 / 127.0;
+        }
+        #if (TSR_PACKED_RANGES & 8)
+        uint energyCode=0, blendCode=0xFFFFu;
+        #else
         float filteredEnergy = 0, clampBlend = 1;
+        #endif
         [unroll] for (int k = 0; k < 9; ++k)
         {
-            const float2 v = unpack2(gCD[cellIndex(c + int2(k % 3, k / 3) - 1)]);
+            #if (TSR_PACKED_RANGES & 8)
+            const uint2 v=codes2(CD_AT(c+int2(k%3,k/3)-1));
+            energyCode=max(energyCode,v.x);blendCode=min(blendCode,v.y);
+            #else
+            const float2 v = unpack2(CD_AT(c + int2(k % 3, k / 3) - 1));
             filteredEnergy = max(filteredEnergy, v.x);
             clampBlend = min(clampBlend, v.y);
+            #endif
         }
-        const float2 filtered = unpack2(gF[i]);
-        const float2 gradientRange = unpack2(gGB[i]);
+        #if (TSR_PACKED_RANGES & 8)
+        const float filteredEnergy=float(energyCode)*(1.0/65535.0), clampBlend=float(blendCode)*(1.0/65535.0);
+        #endif
+        const float2 filtered = unpack2(FILTERED(i));
+        const float oldGradient = historyTexture.Load(int3(clamp(origin + c, 0, size - 1), 0)).g;
+        const float2 gradientRange = float2(unpack2(pack2(oldGradient, 0)).x, unpack2(AB(i)).y);
         const float delta = max(abs(filtered.x - filtered.y), gradientRange.y * filteringWeight + q * 2.0 * filteringWeight);
         const float rejection = saturate(1.0 - filteredEnergy / delta);
         const float2 own = unpack2(gLH[i]);
@@ -238,10 +387,10 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
         // (thin geometry: its residual flicker is that small)
         if (relaxed && (abs(gradient) > THIN_GRADIENT || abs(previousGradient) > THIN_GRADIENT)) withinError = false;
         const float flicker = sameSign || withinError || cut ? 0.0 : 1.0;
-        gAB[i] = pack2(min(abs(previousGradient), abs(gradient)) * flicker, flicker);
+        AB(i) = pack2(min(abs(previousGradient), abs(gradient)) * flicker, flicker);
         // Stage 5 consumed raw energy/rejection. Keep medians in gCD intact
         // while adjacent cells still read them in this stage.
-        gE[i] = pack2(updated, gradient * 0.5 + 0.5);
+        FILTERED(i) = pack2(updated, gradient * 0.5 + 0.5);
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -251,11 +400,11 @@ void main(uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : 
     const int2 cell = int2(local) + BORDER;
     float2 contribution = 0;  // the gradient variation and the flicker, dilated over 5 x 5
     [unroll] for (int y = -2; y <= 2; ++y)
-        [unroll] for (int x = -2; x <= 2; ++x) contribution = max(contribution, unpack2(gAB[cellIndex(cell + int2(x, y))]));
+        [unroll] for (int x = -2; x <= 2; ++x) contribution = max(contribution, unpack2(AB_AT(cell + int2(x, y))));
     const uint ci = cellIndex(cell);
-    const float2 state = unpack2(gE[ci]);
+    const float2 state = unpack2(FILTERED(ci));
     const float updated = state.x, gradient = state.y * 2.0 - 1.0;
-    const float flicker = unpack2(gAB[ci]).y;
+    const float flicker = unpack2(AB(ci)).y;
     const float4 history = historyTexture.Load(int3(pixel, 0));
     Texture2D<float2> decimateMask = ResourceDescriptorHeap[P[0].z];
     Texture2D<float4> info = ResourceDescriptorHeap[P[0].w];

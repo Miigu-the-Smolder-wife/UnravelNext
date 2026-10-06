@@ -64,8 +64,8 @@ float3 previousPointOf(uint visId, uint visibleClustersSrv, float3 p)
 {
     if (visId == VIS_NONE) return p;
     const GpuVisibleCluster vc = loadVisibleCluster(visibleClustersSrv, visVisibleCluster(visId));
+    if (deformInstanceStillAt(vc.instance)) return p;
     const GpuInstance inst = loadInstance(vc.instance);
-    if (deformInstanceStill(inst)) return p;  // the point itself (no vertex loads)
     const GpuMesh mesh = loadMesh(inst.mesh);
 #if UNX_CLUSTER_STREAM
     DeformedVertex d0, d1, d2;

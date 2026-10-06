@@ -1,10 +1,15 @@
 // unx-kernel: lib_6_6 main
+// unx-variants: REORDER=0,1,2
 // RayScene correctness test (Tests/RayScene.cpp): closest hit over both TLASes, hit identity, surface reconstruction and
 // visibility rays, compared with a CPU brute-force intersector. Closest-hit rays include the emitter instance (only
 // present with raytracing.emitters; its hit reports RT_INSTANCE_EMITTER, the light index and flag bit 3); visibility
 // rays never see it (the lights have no body).
 // P[0] = { rays SRV (TestRay), results UAV (TestResult), ray count, 0 }; P[6], P[7] = RtSceneSrvs.
 #include "RayTracing/RayShaders.hlsli"
+#include "RayTracing/HitLightingQueue.hlsli"
+#ifndef HIT_LIGHTING_TEST_STAGE
+#define HIT_LIGHTING_TEST_STAGE 0
+#endif
 
 struct TestRay
 {
@@ -28,7 +33,16 @@ struct TestResult
 [shader("raygeneration")]
 void TraceTestGen()
 {
-    const uint i = DispatchRaysIndex().x;
+    uint i = DispatchRaysIndex().x;
+#if HIT_LIGHTING_TEST_STAGE == 1
+    i += P[1].y; // bounded source batch; source identity remains global
+#endif
+#if HIT_LIGHTING_TEST_STAGE == 2
+    RtHit queuedHit;
+    RayDesc queuedRay;
+    uint3 continuation;
+    hitLightingLoadContext(P[0].w, i + P[1].x, i, queuedHit, queuedRay, continuation);
+#endif
     if (i >= P[0].z) return;
     StructuredBuffer<TestRay> rays = ResourceDescriptorHeap[P[0].x];
     RWStructuredBuffer<TestResult> results = ResourceDescriptorHeap[P[0].y];
@@ -39,7 +53,19 @@ void TraceTestGen()
     d.Direction = r.direction;
     d.TMin = 0;
     d.TMax = r.tMax;
+#if HIT_LIGHTING_TEST_STAGE == 2
+    d = queuedRay;
+    const RtHit h = queuedHit;
+#else
     const RtHit h = rtTraceClosest(s, d, RAY_FLAG_NONE, RT_MASK_ALL);
+#if HIT_LIGHTING_TEST_STAGE == 1
+    if (h.t >= 0)
+    {
+        hitLightingEnqueue(P[0].w, i, h, d, uint3(i * 9781u, 17u, 23u));
+        return;
+    }
+#endif
+#endif
     TestResult o;
     o.t = h.t;
     o.sceneInstance = UNX_NONE;

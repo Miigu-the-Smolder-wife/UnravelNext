@@ -301,6 +301,41 @@ RtSurface rtSurface(RtSceneSrvs s, RtHit h, float3 origin, float3 direction)
     return rtSurfaceParts(s, h, origin, direction, inst, mesh, ri, tri);
 }
 
+// A final-radiance card lookup only needs identity, position and the geometric normal.
+// Defer interpolated normals, texture coordinates and optional vertex streams until a
+// missing card actually needs material lighting. Keep the same positions and cross
+// product as rtSurfaceParts, including winding and deformed world-space vertices.
+RtSurface rtSurfaceGeometry(RtSceneSrvs s, RtHit h, float3 origin, float3 direction)
+{
+    RtGeometry g;
+    const RtInstance ri = rtResolve(s, h, g);
+    const GpuInstance inst = loadInstance(ri.sceneInstance);
+    const GpuMesh mesh = loadMesh(inst.mesh);
+    const RtTriangle tri = rtTriangle(s, g, h.primitive);
+    float3 p0, p1, p2;
+    if ((ri.flags & RT_INSTANCE_DEFORMED) != 0)
+    {
+        StructuredBuffer<RtDeformedVertex> d = ResourceDescriptorHeap[s.deformed];
+        p0 = d[ri.vertexBase + tri.poolIndex.x].position;
+        p1 = d[ri.vertexBase + tri.poolIndex.y].position;
+        p2 = d[ri.vertexBase + tri.poolIndex.z].position;
+    }
+    else
+    {
+        p0 = transformPoint(inst.objectToWorld, loadVertex(mesh, tri.meshVertex.x).position);
+        p1 = transformPoint(inst.objectToWorld, loadVertex(mesh, tri.meshVertex.y).position);
+        p2 = transformPoint(inst.objectToWorld, loadVertex(mesh, tri.meshVertex.z).position);
+    }
+    RtSurface o = (RtSurface)0;
+    o.material = instanceMaterial(inst, loadSubmesh(mesh.submeshOffset + g.submesh), g.submesh);
+    o.sceneInstance = ri.sceneInstance;
+    o.position = origin + direction * h.t;
+    o.frontFace = h.frontFace != 0;
+    o.geometricNormal = normalize(cross(p1 - p0, p2 - p0));
+    if (!o.frontFace) o.geometricNormal = -o.geometricNormal;
+    return o;
+}
+
 // Alpha test of a hit candidate (any-hit). INTERFACES 8.1: opaque when baseColor texture alpha >= alphaCutoff.
 bool rtAlphaOpaque(RtSceneSrvs s, uint instance, uint geometry, uint primitive, float2 barycentrics)
 {

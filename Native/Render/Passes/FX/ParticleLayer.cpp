@@ -262,7 +262,7 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
                       c.cmd->SetPipelineState(pso);
                       c.bindFrameConstants(frameConstants);
                       c.computeConstants(p.data(), 8);
-                      c.cmd->Dispatch(groupCount, 1, 1);
+                      gpuDispatch(c.cmd, groupCount, 1, 1);
                   });
     };
     const BufferRef inputBuffers[] = { in.posAge[0], in.posAge[1], in.velocity[0], in.velocity[1], in.dynamic[0], in.dynamic[1], in.emitters, in.programs,
@@ -318,7 +318,7 @@ ParticleLayerOutput ParticleLayerPass::record(ParticleSystem& particles, RenderG
                       c.cmd->SetPipelineState(ribbonPso);
                       c.bindFrameConstants(frameConstants);
                       c.computeConstants(p.data(), 12);
-                      c.cmd->Dispatch(rangeCount, 1, 1);
+                      gpuDispatch(c.cmd, rangeCount, 1, 1);
                   });
         dispatch("fx.layer.strips", "Passes/FX/FxLayerStrips.STEP1", groups(ribbons, 256), [=](PassBuilder& b) {
             b.use(ribbonLinks, Use::UavCompute);

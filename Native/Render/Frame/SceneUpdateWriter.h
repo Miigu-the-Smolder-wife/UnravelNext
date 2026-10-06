@@ -21,6 +21,7 @@ public:
     void append(uint32_t target, uint32_t first, const void* rows, uint32_t count)
     {
         if (count == 0) return;
+        m_targetMask |= 1u << target;
         for (uint32_t k = 0; k < count; ++k)
         {
             const uint32_t header = target << 28 | (first + k);
@@ -31,6 +32,7 @@ public:
     }
 
     uint32_t count() const { return m_count; }
+    uint32_t targetMask() const { return m_targetMask; }
 
     // Runtime mirrors may end partway through the final 16-byte row. Preserve
     // the old zero-filled tail without reading past the mirror allocation.
@@ -50,5 +52,6 @@ private:
     uint8_t* m_headers;
     uint8_t* m_payload;
     uint32_t m_count = 0;
+    uint32_t m_targetMask = 0;
 };
 } // namespace unx::render::detail

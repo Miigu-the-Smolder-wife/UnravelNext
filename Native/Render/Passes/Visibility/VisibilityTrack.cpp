@@ -20,6 +20,7 @@
 #include "unx/render/Tracks.h"
 
 #include "VisibilityInternal.h"
+#include "StreamFrustum.h"
 #include "unx/clusterbuilder/ClusterBuilder.h"
 #include "unx/clusterbuilder/ClusterHierarchy.h"
 #include "unx/clusterbuilder/ClusterStream.h"
@@ -593,7 +594,7 @@ void prepareCullScene(FramePassContext& fc, State& s, D3D12_GPU_VIRTUAL_ADDRESS 
                       c.cmd->SetPipelineState(pso);
                       c.bindFrameConstants(frameConstants);
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch(groups, 1, 1);
+                      gpuDispatch(c.cmd, groups, 1, 1);
                   });
     }
     if (s.skinCount > 0)
@@ -607,7 +608,7 @@ void prepareCullScene(FramePassContext& fc, State& s, D3D12_GPU_VIRTUAL_ADDRESS 
                       c.cmd->SetPipelineState(pso);
                       c.bindFrameConstants(frameConstants);
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch(groups, 1, 1);
+                      gpuDispatch(c.cmd, groups, 1, 1);
                   });
     }
 }
@@ -1081,8 +1082,8 @@ void cullPass(FramePassContext& fc, State& s, const Run& r, const std::string& n
                                  c.bindFrameConstants(r.frameConstants);
                                  c.computeConstants(k, kCullConstants);
                              }
-                             if (direct) c.cmd->Dispatch(steps[i].groupsX, steps[i].groupsY, 1);
-                             else c.cmd->ExecuteIndirect(sig, 1, c.resource(r.args), steps[i].argWord * 4, nullptr, 0);
+                             if (direct) gpuDispatch(c.cmd, steps[i].groupsX, steps[i].groupsY, 1);
+                             else gpuExecuteIndirect(c.cmd, sig, 1, c.resource(r.args), steps[i].argWord * 4, nullptr, 0);
                          }
                      });
 }
@@ -1118,7 +1119,7 @@ void tileCoarsePass(FramePassContext& fc, Run& r, const std::vector<CullView>& v
                          const uint32_t k[4] = { viewsSrv, c.srv(mask), c.uav(coarse), words };
                          c.cmd->SetPipelineState(pso);
                          c.computeConstants(k, 4);
-                         c.cmd->Dispatch(groups, viewCount, 1);
+                         gpuDispatch(c.cmd, groups, viewCount, 1);
                      });
 }
 
@@ -1145,8 +1146,8 @@ void planarTileMask(FramePassContext& fc, Run& r, const ViewDesc& view)
                       const uint32_t k[8] = { mode == 1 ? c.srv(mask) : kNone, c.uav(bits), width, height, tilesX, words, kPlanarTilePx, 0 };
                       c.cmd->SetPipelineState(pso);
                       c.computeConstants(k, 8);
-                      if (mode == 0) c.cmd->Dispatch((words + 63) / 64, 1, 1);
-                      else c.cmd->Dispatch(tilesX, tilesY, 1);
+                      if (mode == 0) gpuDispatch(c.cmd, (words + 63) / 64, 1, 1);
+                      else gpuDispatch(c.cmd, tilesX, tilesY, 1);
                   });
     }
     chain.flush(r.prefix + "planar.tiles");
@@ -1284,8 +1285,8 @@ void rasterBinPasses(FramePassContext& fc, State& s, const Run& r, const RasterB
                              c.cmd->SetPipelineState(pso);
                              c.bindFrameConstants(r.frameConstants);
                              c.computeConstants(k, 44);
-                             if (indirect) c.cmd->ExecuteIndirect(sig, 1, c.resource(rb.args), kRbArgEntries * 4, nullptr, 0);
-                             else c.cmd->Dispatch(mode == 0 ? (kRbHeaderWords + 63) / 64 : 1, 1, 1);
+                             if (indirect) gpuExecuteIndirect(c.cmd, sig, 1, c.resource(rb.args), kRbArgEntries * 4, nullptr, 0);
+                             else gpuDispatch(c.cmd, mode == 0 ? (kRbHeaderWords + 63) / 64 : 1, 1, 1);
                          });
     }
 }
@@ -1326,7 +1327,7 @@ void softwareRasterPasses(FramePassContext& fc, State& s, const Run& r, const Ra
                              k[11] = height;
                              c.cmd->SetPipelineState(clear);
                              c.computeConstants(k, 12);
-                             c.cmd->Dispatch(std::min(groups, 65535u), (groups + 65534) / 65535, 1);
+                             gpuDispatch(c.cmd, std::min(groups, 65535u), (groups + 65534) / 65535, 1);
                          });
     }
     ID3D12PipelineState* raster = fc.shaders.compute("Passes/Visibility/VisRasterSw.MODE1");
@@ -1348,7 +1349,7 @@ void softwareRasterPasses(FramePassContext& fc, State& s, const Run& r, const Ra
                              const uint32_t k[16] = { c.srv(r.visible), c.srv(rb.sorted), c.uav(r.state), l, phase, r.cfg.capVisible, r.viewsSrv, c.srv(rb.bins),
                                                       c.uav(words), c.srv(depth), width, height, mirrored, r.pageTable, 0, 0 };
                              c.computeConstants(k, 16);
-                             c.cmd->ExecuteIndirect(sig, 1, c.resource(rb.args), (kRbArgSw + 3 * l) * 4, nullptr, 0);
+                             gpuExecuteIndirect(c.cmd, sig, 1, c.resource(rb.args), (kRbArgSw + 3 * l) * 4, nullptr, 0);
                          }
                      });
     MeshPipelineDesc d;
@@ -1375,7 +1376,7 @@ void softwareRasterPasses(FramePassContext& fc, State& s, const Run& r, const Ra
                          const uint32_t k[4] = { c.srv(words), width, 0, 0 };
                          c.cmd->SetPipelineState(resolve);
                          c.graphicsConstants(k, 4);
-                         c.cmd->DispatchMesh(1, 1, 1);
+                         gpuDispatchMesh(c.cmd, 1, 1, 1);
                      });
 }
 
@@ -1446,7 +1447,7 @@ void rasterPass(FramePassContext& fc, State& s, const Run& r, ViewResources& vie
                              const uint32_t k[4] = { c.srv(planarMask), 0, 0, 0 };
                              c.cmd->SetPipelineState(fillPso);
                              c.graphicsConstants(k, 4);
-                             c.cmd->DispatchMesh(1, 1, 1);
+                             gpuDispatchMesh(c.cmd, 1, 1, 1);
                          }
                          c.bindFrameConstants(frameConstants);
                          for (uint32_t l = 0; l < kAListCount; ++l)  // bands B and C: empty lists or the coverage layer
@@ -1455,8 +1456,8 @@ void rasterPass(FramePassContext& fc, State& s, const Run& r, ViewResources& vie
                                                      r.pageTable };
                              c.cmd->SetPipelineState(pso[l]);
                              c.graphicsConstants(k, 8);
-                             if (rb.valid()) c.cmd->ExecuteIndirect(sig, 1, c.resource(rb.args), (kRbArgHw + 3 * l) * 4, nullptr, 0);
-                             else c.cmd->ExecuteIndirect(sig, 1, c.resource(r.args), (kArgMesh + 3 * l) * 4, nullptr, 0);
+                             if (rb.valid()) gpuExecuteIndirect(c.cmd, sig, 1, c.resource(rb.args), (kRbArgHw + 3 * l) * 4, nullptr, 0);
+                             else gpuExecuteIndirect(c.cmd, sig, 1, c.resource(r.args), (kArgMesh + 3 * l) * 4, nullptr, 0);
                          }
                      });
 }
@@ -1478,7 +1479,7 @@ void resolveDepthTies(FramePassContext& fc, State& s, const Run& r, const ViewRe
                   [=, &shaders](PassContext& c) {
                       const uint32_t k[8] = { c.uav(winners), c.uav(args), c.srv(run.state), run.cfg.capVisible, width, height, 0, 0 };
                       c.cmd->SetPipelineState(shaders.compute("Passes/Visibility/DepthTieInit")); c.computeConstants(k, 8);
-                      c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (width + 7) / 8, (height + 7) / 8, 1);
                   });
     ID3D12CommandSignature* signature = s.meshSignature.Get();
     const auto frameConstants = view.frameConstants;
@@ -1520,7 +1521,7 @@ void resolveDepthTies(FramePassContext& fc, State& s, const Run& r, const ViewRe
                                   mode == 0 ? c.uav(winners) : c.srv(winners), c.srv(depth), width, 0,
                                   mode == 0 ? c.srv(vis) : kNone, 0, 0, 0 };
                               c.cmd->SetPipelineState(pipelines[list - firstList]); c.graphicsConstants(k, 16);
-                              c.cmd->ExecuteIndirect(signature, 1, c.resource(args), list * 12ull, nullptr, 0);
+                              gpuExecuteIndirect(c.cmd, signature, 1, c.resource(args), list * 12ull, nullptr, 0);
                           }
                       });
     }
@@ -1562,7 +1563,7 @@ void hizPasses(FramePassContext& fc, const Hiz& h, TextureRef hizRef, TextureRef
                       k[10] = h0;
                       c.cmd->SetPipelineState(pso);
                       c.computeConstants(k, 12);
-                      c.cmd->Dispatch((w0 + 15) / 16, (h0 + 15) / 16, 1);
+                      gpuDispatch(c.cmd, (w0 + 15) / 16, (h0 + 15) / 16, 1);
                   });
     }
     chain.flush("v.hiz." + tag);
@@ -1986,8 +1987,8 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       constants(c, k, (indirect && !fromList) ? uses & ~kUseArgs : uses, false);  // indirect: the args are read as arguments here
                       c.cmd->SetPipelineState(pso);
                       c.computeConstants(k, 28);
-                      if (indirect) c.cmd->ExecuteIndirect(dispatchSig, 1, c.resource(fromList ? list : run.args), argWord * 4, nullptr, 0);
-                      else c.cmd->Dispatch(groupsX, groupsY, 1);
+                      if (indirect) gpuExecuteIndirect(c.cmd, dispatchSig, 1, c.resource(fromList ? list : run.args), argWord * 4, nullptr, 0);
+                      else gpuDispatch(c.cmd, groupsX, groupsY, 1);
                   });
     };
     const uint32_t coverUse = cover.valid() ? (uint32_t)kUseCover : 0u;
@@ -2057,8 +2058,8 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       c.bindFrameConstants(frameConstants);
                       c.cmd->SetPipelineState(rasterPso);
                       c.graphicsConstants(k, 32);
-                      if (fromBins) c.cmd->ExecuteIndirect(meshSig, 1, c.resource(binArgs), (kCovArgDraw + 3 * (uint32_t)bucket) * 4, nullptr, 0);
-                      else c.cmd->ExecuteIndirect(meshSig, 1, c.resource(run.args), kArgCovMesh * 4, nullptr, 0);
+                      if (fromBins) gpuExecuteIndirect(c.cmd, meshSig, 1, c.resource(binArgs), (kCovArgDraw + 3 * (uint32_t)bucket) * 4, nullptr, 0);
+                      else gpuExecuteIndirect(c.cmd, meshSig, 1, c.resource(run.args), kArgCovMesh * 4, nullptr, 0);
                   });
     };
     if (!binned) addClusterRaster(-1);
@@ -2116,8 +2117,8 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                           c.cmd->SetPipelineState(pso);
                           c.bindFrameConstants(frameConstants);
                           c.computeConstants(k, 28);
-                          if (indirect) c.cmd->ExecuteIndirect(dispatchSig, 1, c.resource(binArgs), argWord * 4, nullptr, 0);
-                          else c.cmd->Dispatch(groupsX, 1, 1);
+                          if (indirect) gpuExecuteIndirect(c.cmd, dispatchSig, 1, c.resource(binArgs), argWord * 4, nullptr, 0);
+                          else gpuDispatch(c.cmd, groupsX, 1, 1);
                       });
         };
         bin("bins.begin", 0, (kCovBinHeaderWords + 63) / 64, 0, kBinArgs, 0);
@@ -2161,7 +2162,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                           c.cmd->SetPipelineState(swPso);
                           c.bindFrameConstants(frameConstants);
                           c.computeConstants(k, 32);
-                          c.cmd->ExecuteIndirect(dispatchSig, 1, c.resource(binArgs), (kCovArgDraw + 3 * bucket) * 4, nullptr, 0);
+                          gpuExecuteIndirect(c.cmd, dispatchSig, 1, c.resource(binArgs), (kCovArgDraw + 3 * bucket) * 4, nullptr, 0);
                       });
         };
         for (uint32_t bucket = 0; bucket < buckets; ++bucket)
@@ -2211,7 +2212,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       {
                           k[24] = l;  // COV_RASTER_LIST
                           c.graphicsConstants(k, 32);
-                          c.cmd->ExecuteIndirect(meshSig, 1, c.resource(run.args), (kArgCovTMesh + 3 * (l - kListTBack)) * 4, nullptr, 0);
+                          gpuExecuteIndirect(c.cmd, meshSig, 1, c.resource(run.args), (kArgCovTMesh + 3 * (l - kListTBack)) * 4, nullptr, 0);
                       }
                   });
     // B10 strand hair (E's FrameResources::hairSegments / hairBodies): one mesh group per 32 segments, the same pixel
@@ -2251,17 +2252,22 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       c.bindFrameConstants(frameConstants);
                       c.cmd->SetPipelineState(hairPso);
                       c.graphicsConstants(k, 24);
-                      if (groups > 0) c.cmd->DispatchMesh(std::min(groups, 65535u), (groups + 65534) / 65535, 1);
+                      if (groups > 0) gpuDispatchMesh(c.cmd, std::min(groups, 65535u), (groups + 65534) / 65535, 1);
                   });
     }
     // GPU triangle streams (W's water and fluid surfaces, FrameResources::triangleStreams, v1.60): see-through records, one
     // mesh group per 32 triangles of each stream's capacity (the live count comes from its draw arguments on the GPU).
     const std::vector<TriangleStream>& streams = fc.resources.triangleStreams;
     if (streams.size() > kMaxTriangleStreams) fail("V: %zu triangle streams (at most %u)", streams.size(), kMaxTriangleStreams);
+    const bool streamCull = !fc.quality.has("visibility.stream_frustum_cull") || fc.quality.boolean("visibility.stream_frustum_cull");
     for (uint32_t slot = 0; slot < (uint32_t)streams.size(); ++slot)
     {
         const TriangleStream st = streams[slot];
         if (!st.vertices.valid() || !st.drawArgs.valid() || st.maxTriangles == 0) continue;
+        // Camera motion changes the submitted work, not the graph's resource
+        // topology. Keep the pass to reuse its plan and allocations at the edge
+        // of the view, and skip only the culled draw.
+        const bool streamVisible = !streamCull || streamInView(st, view.view);
         // v1.64: a water-layer stream gives records only in the layer's edge pixels (its interior is the layer's sample).
         const bool edgeOnly = st.layer == 1;
         const TextureRef waterVis = view.waterVis, waterDepth = view.waterDepth, bandADepth = view.depth;
@@ -2292,6 +2298,7 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       if (hiz.valid()) b.use(hiz, Use::SrvGraphics);
                   },
                   [=](PassContext& c) {
+                      if (!streamVisible) return;
                       uint32_t k[31];
                       constants(c, k, 0, false);  // the stream inputs take P[3].xyz
                       k[3] = c.uav(stream);
@@ -2316,8 +2323,8 @@ void coveragePasses(FramePassContext& fc, State& s, const Run& r, ViewResources&
                       c.bindFrameConstants(frameConstants);
                       c.cmd->SetPipelineState(streamPso);
                       c.graphicsConstants(k, 31);
-                      if (st.meshArgs.valid()) c.cmd->ExecuteIndirect(meshSig, 1, c.resource(st.meshArgs), st.meshArgsOffset, nullptr, 0);
-                      else c.cmd->DispatchMesh(std::min(groups, 65535u), (groups + 65534) / 65535, 1);
+                      if (st.meshArgs.valid()) gpuExecuteIndirect(c.cmd, meshSig, 1, c.resource(st.meshArgs), st.meshArgsOffset, nullptr, 0);
+                      else gpuDispatchMesh(c.cmd, std::min(groups, 65535u), (groups + 65534) / 65535, 1);
                   });
     }
     // v1.73: other tracks append coverage records here (W's ocean edges), before the count.
@@ -2697,7 +2704,7 @@ void translucentLayer(FramePassContext& fc, State& s, const Run& r, ViewResource
             const uint32_t k[12] = { c.srv(run.visible), c.srv(run.lists), c.srv(run.state), l, 1, run.cfg.capVisible, run.viewsSrv, 0, extra[0], 0, 0, 0 };
             c.cmd->SetPipelineState(pso[mode][l - kListTBack]);
             c.graphicsConstants(k, 12);
-            c.cmd->ExecuteIndirect(sig, 1, c.resource(run.args), (kArgMesh + 3 * l) * 4, nullptr, 0);
+            gpuExecuteIndirect(c.cmd, sig, 1, c.resource(run.args), (kArgMesh + 3 * l) * 4, nullptr, 0);
         }
     };
     ID3D12PipelineState* clearPso = fc.shaders.compute("Passes/Visibility/TranslucentClass.MODE0");
@@ -2706,7 +2713,7 @@ void translucentLayer(FramePassContext& fc, State& s, const Run& r, ViewResource
                   const uint32_t k[8] = { kNone, kNone, kNone, c.uav(count), kNone, width, height, 0 };
                   c.cmd->SetPipelineState(clearPso);
                   c.computeConstants(k, 8);
-                  c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (width + 7) / 8, (height + 7) / 8, 1);
               });
     chain.flush("v.translucent.clear");
     g.addPass("v.translucent.count", QueueType::Graphics,
@@ -2758,7 +2765,7 @@ void translucentLayer(FramePassContext& fc, State& s, const Run& r, ViewResource
                   c.cmd->SetPipelineState(classPso);
                   c.bindFrameConstants(frameConstants);
                   c.computeConstants(k, 8);
-                  c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (width + 7) / 8, (height + 7) / 8, 1);
               });
     view.translucentVis = vis;
     view.translucentDepth = linear;
@@ -2774,9 +2781,11 @@ void translucentLayer(FramePassContext& fc, State& s, const Run& r, ViewResource
 void waterLayer(FramePassContext& fc, State& s, const Run& r, ViewResources& view)
 {
     std::vector<uint32_t> slots;
+    std::vector<bool> visible;
     const std::vector<TriangleStream>& streams = fc.resources.triangleStreams;
     const float4 clip = view.view.clipPlane;
     const bool clipped = clip.x != 0 || clip.y != 0 || clip.z != 0 || clip.w != 0;
+    const bool streamCull = !fc.quality.has("visibility.stream_frustum_cull") || fc.quality.boolean("visibility.stream_frustum_cull");
     for (uint32_t slot = 0; slot < (uint32_t)streams.size(); ++slot)
     {
         const TriangleStream& st = streams[slot];
@@ -2787,6 +2796,7 @@ void waterLayer(FramePassContext& fc, State& s, const Run& r, ViewResources& vie
             if (clip.x * middle.x + clip.y * middle.y + clip.z * middle.z + clip.w <= 0.02f) continue;
         }
         slots.push_back(slot);
+        visible.push_back(!streamCull || streamInView(st, view.view));
     }
     // v1.73: W's view-grid ocean (main view): merged into the same layer (COV_OCEAN_ID).
     const bool mainView = view.view.kind == gpu::ViewKind::Main && view.viewId == 0;
@@ -2855,19 +2865,20 @@ void waterLayer(FramePassContext& fc, State& s, const Run& r, ViewResources& vie
                   c.cmd->SetPipelineState(pso);
                   for (size_t k = 0; k < drawn.size(); ++k)
                   {
+                      if (!visible[k]) continue;
                       const TriangleStream& st = drawn[k];
                       const uint32_t groups = (std::min(st.maxTriangles, st.knownTriangleCount) + 31) / 32;
                       const uint32_t kc[8] = { c.srv(st.vertices), c.srv(st.drawArgs), st.maxTriangles, slots[k], viewsSrv, st.indices.valid() ? c.srv(st.indices) : kNone, 0, 0 };
                       c.graphicsConstants(kc, 8);
-                      if (st.meshArgs.valid()) c.cmd->ExecuteIndirect(meshSig, 1, c.resource(st.meshArgs), st.meshArgsOffset, nullptr, 0);
-                      else c.cmd->DispatchMesh(std::min(groups, 65535u), (groups + 65534) / 65535, 1);
+                      if (st.meshArgs.valid()) gpuExecuteIndirect(c.cmd, meshSig, 1, c.resource(st.meshArgs), st.meshArgsOffset, nullptr, 0);
+                      else gpuDispatchMesh(c.cmd, std::min(groups, 65535u), (groups + 65534) / 65535, 1);
                   }
                   if (oceanPso)
                   {
                       const uint32_t kc[4] = { c.srv(oceanDepth), 0, 0, 0 };
                       c.cmd->SetPipelineState(oceanPso);
                       c.graphicsConstants(kc, 4);
-                      c.cmd->DispatchMesh(1, 1, 1);
+                      gpuDispatchMesh(c.cmd, 1, 1, 1);
                   }
               });
     if (oceanDepth.valid())
@@ -2905,8 +2916,8 @@ void waterLayer(FramePassContext& fc, State& s, const Run& r, ViewResources& vie
                           c.cmd->SetPipelineState(epso);
                           c.bindFrameConstants(frameConstants);
                           c.computeConstants(k, 8);
-                          if (mode == 0) c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
-                          else c.cmd->Dispatch(1, 1, 1);
+                          if (mode == 0) gpuDispatch(c.cmd, (width + 7) / 8, (height + 7) / 8, 1);
+                          else gpuDispatch(c.cmd, 1, 1, 1);
                       });
         }
         view.oceanEdgePixels = list;
@@ -3059,14 +3070,14 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                              const uint32_t k[8] = { viewsSrv, viewCount, c.srv(mask), c.srv(atlasSlots), c.uav(swArgs), c.uav(swPages), c.uav(swSlots), swCapacity };
                              c.cmd->SetPipelineState(begin);
                              c.computeConstants(k, 8);
-                             c.cmd->Dispatch(1, 1, 1);
+                             gpuDispatch(c.cmd, 1, 1, 1);
                              D3D12_GLOBAL_BARRIER gb{ D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
                                                       D3D12_BARRIER_ACCESS_UNORDERED_ACCESS };
                              D3D12_BARRIER_GROUP group{ D3D12_BARRIER_TYPE_GLOBAL, 1 };
                              group.pGlobalBarriers = &gb;
                              c.cmd->Barrier(1, &group);  // (the pages count from the emptied arguments)
                              c.cmd->SetPipelineState(pages);
-                             if (maskWords > 0) c.cmd->Dispatch((maskWords + 63) / 64, viewCount, 1);
+                             if (maskWords > 0) gpuDispatch(c.cmd, (maskWords + 63) / 64, viewCount, 1);
                          });
     }
     cullPhase(fc, s, r, 1);
@@ -3096,14 +3107,14 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                              c.bindFrameConstants(r.frameConstants);
                              c.cmd->SetPipelineState(clear);
                              c.computeConstants(k, 16);
-                             c.cmd->ExecuteIndirect(dispatchSig, 1, c.resource(swArgs), kDsaClear * 4, nullptr, 0);
+                             gpuExecuteIndirect(c.cmd, dispatchSig, 1, c.resource(swArgs), kDsaClear * 4, nullptr, 0);
                              D3D12_GLOBAL_BARRIER gb{ D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_UNORDERED_ACCESS,
                                                       D3D12_BARRIER_ACCESS_UNORDERED_ACCESS };
                              D3D12_BARRIER_GROUP group{ D3D12_BARRIER_TYPE_GLOBAL, 1 };
                              group.pGlobalBarriers = &gb;
                              c.cmd->Barrier(1, &group);  // (the raster's atomics start from the cleared pages)
                              c.cmd->SetPipelineState(raster);
-                             c.cmd->ExecuteIndirect(dispatchSig, 1, c.resource(r.args), (kArgMesh + 3 * kListSw) * 4, nullptr, 0);
+                             gpuExecuteIndirect(c.cmd, dispatchSig, 1, c.resource(r.args), (kArgMesh + 3 * kListSw) * 4, nullptr, 0);
                          });
     };
 
@@ -3259,7 +3270,7 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                              std::memcpy(&k[16], pixelConstants, sizeof pixelConstants);
                              c.cmd->SetPipelineState(pso[l]);
                              c.graphicsConstants(k, 32);
-                             c.cmd->ExecuteIndirect(sig, 1, c.resource(r.args), (kArgMesh + 3 * l) * 4, nullptr, 0);
+                             gpuExecuteIndirect(c.cmd, sig, 1, c.resource(r.args), (kArgMesh + 3 * l) * 4, nullptr, 0);
                          }
                          if (proxyPso && phase == 1)
                          {
@@ -3269,14 +3280,14 @@ void rasterizeDepth(FramePassContext& fc, const DepthRasterRequest& request)
                                                       req.cullMask.valid() ? c.srv(req.cullMask) : kNone, 0, 0, 0 };
                              c.cmd->SetPipelineState(proxyPso);
                              c.graphicsConstants(k, 16);
-                             c.cmd->ExecuteIndirect(sig, 1, c.resource(r.args), kArgProxies * 4, nullptr, 0);
+                             gpuExecuteIndirect(c.cmd, sig, 1, c.resource(r.args), kArgProxies * 4, nullptr, 0);
                          }
                          if (merge)  // the software rasteriser's pages into their tiles' slots, under the depth test
                          {
                              const uint32_t k[8] = { c.srv(swSlots), swCapacity, req.cullTilePx, req.atlasTilesPerRow, atlasWidth | atlasHeight << 16, c.srv(swDepth), 0, 0 };
                              c.cmd->SetPipelineState(merge);
                              c.graphicsConstants(k, 8);
-                             c.cmd->ExecuteIndirect(sig, 1, c.resource(swArgs), kDsaMerge * 4, nullptr, 0);
+                             gpuExecuteIndirect(c.cmd, sig, 1, c.resource(swArgs), kDsaMerge * 4, nullptr, 0);
                          }
                          if (stats.readback) c.cmd->CopyBufferRegion(stats.readback, stats.offset, c.resource(r.state), 0, kStateWords * 4);
                      });

@@ -85,7 +85,9 @@ void main(uint2 tile : SV_GroupID, uint2 local : SV_GroupThreadID)
             if (!t.valid) continue;
             const float off = abs(dot(t.position - s.position, s.normal)) / max(s.linearDepth, 1e-4);
             const float planeWeight = exp2(-asfloat(P[3].y) * off * off);
+            if (planeWeight == 0) continue;
             const float normalWeight = 1 - saturate(acos(saturate(dot(s.normal, t.normal))) / lobe);
+            if (normalWeight == 0) continue;
             const float3 v = reuseToFilter(accumulated.Load(int3(q, 0)).rgb, range);
             const float luminanceWeight = lerp(exp2(-abs(centreLuminance - reuseLuminance(v)) / max(deviation, 1e-3)), 1.0, young);
             const float w = planeWeight * normalWeight * luminanceWeight;

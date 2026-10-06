@@ -28,6 +28,7 @@ struct MegaLightsFrame
     uint32_t previous = 0, next = 1;
     bool historyValid = false;
     BufferRef sets;        // the persistent tile sets (previous frame's until m.ml.sets.filter rewrites them)
+    BufferRef coverageTiles; // optional V coverage headers: an empty tile has no lighting surface
     TextureRef prevDepth;  // the previous frame's view depth (invalid without history)
     float exposureRatio = 1;
     // m.ml.temporal's outputs, the spatial step's inputs (megaLightsSubsurface runs that step again on one class's tiles)
@@ -54,6 +55,7 @@ struct MegaLightsOptions
     // instance whose surface is not the vis buffer's (the coverage layer's nearest fragment). Empty: the view's vis id
     // gives the instance, and a view without one tests no channel.
     TextureRef channels;
+    BufferRef coverageTiles;
 };
 MegaLightsFrame megaLightsSample(FramePassContext& fc, const ViewResources& view, TextureRef materialWord, bool areaLights, uint32_t ltcSrv,
                                  ID3D12CommandSignature* dispatchSignature, const char* instance = nullptr, const MegaLightsOptions& options = {});

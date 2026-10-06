@@ -53,7 +53,7 @@ public:
     std::string string(std::string_view key) const;
     std::vector<std::string> strings(std::string_view key) const;
     std::vector<double> numbers(std::string_view key) const;
-    bool has(std::string_view key) const { return m_values.count(std::string(key)) != 0; }
+    bool has(std::string_view key) const { return m_values.find(key) != m_values.end(); }
 
     std::string canonical() const;  // sorted "key = value" lines
     std::string hash() const;       // SHA-256 hex of canonical()
@@ -69,7 +69,8 @@ private:
         std::mutex mutex;
         std::set<std::string> keys;
     };
-    std::map<std::string, Value> m_values;
+    // Keep canonical lexicographic order while looking up borrowed key strings.
+    std::map<std::string, Value, std::less<>> m_values;
     std::string m_origin;
     std::unique_ptr<ReadLog> m_read = std::make_unique<ReadLog>();
 };

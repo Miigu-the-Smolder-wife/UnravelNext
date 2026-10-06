@@ -340,6 +340,9 @@ bool encodeLevel(DXGI_FORMAT source, uint32_t width, uint32_t height, const uint
 MipChain textureChain(const scene::Scene& s, uint32_t index, uint32_t kind)
 {
     if (index >= s.textures.size()) fail("cook: texture %u of %zu", index, s.textures.size());
+    // No alpha-tested consumer means no coverage chain. Do not hash/read the
+    // entire source image a second time just to cache an empty result.
+    if (kind == 1 && !useOf(s, index).alphaTested) return {};
     const auto t0 = std::chrono::steady_clock::now();
     const bool bc7 = bc7Available();
     const Key key = keyOf(s, index, kind, bc7);

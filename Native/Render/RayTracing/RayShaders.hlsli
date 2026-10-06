@@ -20,6 +20,7 @@
 #ifndef UNX_RT_RAYSHADERS_HLSLI
 #define UNX_RT_RAYSHADERS_HLSLI
 #include "RayTracing/RayScene.hlsli"
+#include "RayTracing/RayReorder.hlsli"
 
 RtSceneSrvs rtScene() { return rtSceneSrvs(P[6], P[7]); }
 
@@ -251,6 +252,7 @@ RtHit rtTraceClosest(RtSceneSrvs s, RayDesc ray, uint rayFlags, uint mask)
     RaytracingAccelerationStructure staticTlas = ResourceDescriptorHeap[s.tlasStatic];
     TraceRay(staticTlas, rayFlags, mask, 0, 0, 0, ray, h);
     h.pad = 0;
+    rtReorderHit(h, ray);
     return h;
 }
 

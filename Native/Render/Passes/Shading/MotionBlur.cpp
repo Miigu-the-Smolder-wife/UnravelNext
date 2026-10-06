@@ -183,7 +183,7 @@ TextureRef velocityPass(FramePassContext& fc, const ViewResources& view, const R
                   c.cmd->SetPipelineState(pso);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 20);
-                  c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (w + 7) / 8, (h + 7) / 8, 1);
               });
     return velocity;
 }
@@ -209,7 +209,7 @@ void gatherPasses(FramePassContext& fc, const ViewResources& view, TextureRef sr
                   const uint32_t k[4] = { c.srv(velocity), c.uav(tiles), w, h };
                   c.cmd->SetPipelineState(tileMax);
                   c.computeConstants(k, 4);
-                  c.cmd->Dispatch(tw, th, 1);
+                  gpuDispatch(c.cmd, tw, th, 1);
               });
     g.addPass("m.motion.neighbour", QueueType::Graphics,
               [&](PassBuilder& b) {
@@ -220,7 +220,7 @@ void gatherPasses(FramePassContext& fc, const ViewResources& view, TextureRef sr
                   const uint32_t k[4] = { c.srv(tiles), c.uav(neighbour), tw, th };
                   c.cmd->SetPipelineState(neighbourMax);
                   c.computeConstants(k, 4);
-                  c.cmd->Dispatch((tw + 7) / 8, (th + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (tw + 7) / 8, (th + 7) / 8, 1);
               });
     const TextureRef depth = view.depth;
     const uint32_t frame = (uint32_t)fc.frame.frameIndex;
@@ -237,7 +237,7 @@ void gatherPasses(FramePassContext& fc, const ViewResources& view, TextureRef sr
                   c.cmd->SetPipelineState(gather);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 12);
-                  c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (w + 7) / 8, (h + 7) / 8, 1);
               });
 }
 
@@ -282,7 +282,7 @@ void rotationPasses(FramePassContext& fc, const ViewResources& view, TextureRef 
                   c.cmd->SetPipelineState(fill);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 24);
-                  c.cmd->Dispatch((r.mapWidth + 7) / 8, (r.mapHeight + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (r.mapWidth + 7) / 8, (r.mapHeight + 7) / 8, 1);
               });
     g.addPass("m.motion.rotation.scan", QueueType::Graphics, [&](PassBuilder& b) { b.use(map, Use::UavCompute); },
               [=](PassContext& c) {
@@ -290,7 +290,7 @@ void rotationPasses(FramePassContext& fc, const ViewResources& view, TextureRef 
                   constants(k, 0, c.uav(map), 0, gpu::kNone, gpu::kNone);
                   c.cmd->SetPipelineState(scan);
                   c.computeConstants(k, 24);
-                  c.cmd->Dispatch(r.mapHeight, 1, 1);
+                  gpuDispatch(c.cmd, r.mapHeight, 1, 1);
               });
     g.addPass("m.motion.rotation", QueueType::Graphics,
               [&](PassBuilder& b) {
@@ -309,7 +309,7 @@ void rotationPasses(FramePassContext& fc, const ViewResources& view, TextureRef 
                   c.cmd->SetPipelineState(read);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 24);
-                  c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (w + 7) / 8, (h + 7) / 8, 1);
               });
 }
 } // namespace
@@ -365,8 +365,8 @@ void motionBlurUpscaled(FramePassContext& fc, const ViewResources& view, Texture
     const float shutter = shutterOf(fc);
     // the reference's MotionBlurMax (percent of the screen's width a blur may span, 5), its quality's tap count (16 at
     // r.MotionBlurQuality 4) and r.MotionBlur.HalfResGather
-    const double maxPercent = fc.quality.has("shading.motion_blur_max_percent") ? fc.quality.number("shading.motion_blur_max_percent") : 5.0;
-    const int64_t samples = fc.quality.has("shading.motion_blur_samples") ? fc.quality.integer("shading.motion_blur_samples") : 16;
+    const double maxPercent = fc.frame.postExtended.enabled ? fc.frame.postExtended.motionMaxPercent : fc.quality.has("shading.motion_blur_max_percent") ? fc.quality.number("shading.motion_blur_max_percent") : 5.0;
+    const int64_t samples = fc.frame.postExtended.enabled ? fc.frame.postExtended.motionSamples : fc.quality.has("shading.motion_blur_samples") ? fc.quality.integer("shading.motion_blur_samples") : 16;
     const bool halfGather = !fc.quality.has("shading.motion_blur_half_res_gather") || fc.quality.boolean("shading.motion_blur_half_res_gather");
     // the rotation stage on the upscaled image: the output view's unjittered matrices, the exposure centred as the gather's
     const bool rotationOn = !fc.quality.has("shading.motion_blur_after_upscale_rotation") || fc.quality.boolean("shading.motion_blur_after_upscale_rotation");
@@ -444,7 +444,7 @@ void motionBlurUpscaled(FramePassContext& fc, const ViewResources& view, Texture
                   c.cmd->SetPipelineState(flattenPso);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 28);
-                  c.cmd->Dispatch(tw, th, 1);
+                  gpuDispatch(c.cmd, tw, th, 1);
               });
     g.addPass("m.motion.tile gather", QueueType::Graphics,
               [&](PassBuilder& b) {
@@ -456,7 +456,7 @@ void motionBlurUpscaled(FramePassContext& fc, const ViewResources& view, Texture
                   c.cmd->SetPipelineState(gatherPso);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 8);
-                  c.cmd->Dispatch((tw + 7) / 8, (th + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (tw + 7) / 8, (th + 7) / 8, 1);
               });
     g.addPass("m.motion.half colour", QueueType::Graphics,
               [&](PassBuilder& b) {
@@ -468,7 +468,7 @@ void motionBlurUpscaled(FramePassContext& fc, const ViewResources& view, Texture
                   c.cmd->SetPipelineState(halfPso);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 8);
-                  c.cmd->Dispatch((hw + 7) / 8, (hh + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (hw + 7) / 8, (hh + 7) / 8, 1);
               });
     // the two gathers: each takes the 16 x 16 pixel groups of its own classes (MotionApply.hlsl), together every pixel
     const uint32_t gx = (W + kFilterTile - 1) / kFilterTile, gy = (H + kFilterTile - 1) / kFilterTile;
@@ -489,7 +489,7 @@ void motionBlurUpscaled(FramePassContext& fc, const ViewResources& view, Texture
                                                asUint(lens.tanX), asUint(lens.tanY), asUint(lens.d), asUint(lens.s), asUint(lens.scale), 0, 0, 0 };
                       c.cmd->SetPipelineState(pso);
                       c.computeConstants(k, 24);
-                      c.cmd->Dispatch(gx, gy, 1);
+                      gpuDispatch(c.cmd, gx, gy, 1);
                   });
     }
     if (rotation.active)
@@ -525,7 +525,7 @@ void distortion(FramePassContext& fc, const ViewResources& view, TextureRef src,
                   c.cmd->SetPipelineState(pso);
                   c.bindFrameConstants(cb);
                   c.computeConstants(k, 8);
-                  c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (w + 7) / 8, (h + 7) / 8, 1);
               });
 }
 } // namespace unx::render::shading

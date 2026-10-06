@@ -29,6 +29,11 @@
 
 #define BOUNDARY_ITERATIONS 3
 
+// The 3x3 depth/velocity neighbourhood is shared by the 8x8 output tile.
+// Keep full precision and the existing tie-breaking/edge-following rules.
+groupshared float gs_depth[10][10];
+groupshared float2 gs_motion[10][10];
+
 // The device depth error of one pixel's size in the world at that depth (the depth of a point two pixel radii further).
 float pixelDeviceZError(float deviceZ)
 {
@@ -115,12 +120,21 @@ float2 reprojectionBoundary(int2 side, float lengthP, float lengthN, bool increm
 }
 
 [numthreads(8, 8, 1)]
-void main(uint2 id : SV_DispatchThreadID)
+void main(uint2 id : SV_DispatchThreadID, uint2 group : SV_GroupID, uint2 local : SV_GroupThreadID, uint lane : SV_GroupIndex)
 {
     const int2 size = int2(P[1].zw);
-    if (any(int2(id) >= size)) return;
     Texture2D<float> depth = ResourceDescriptorHeap[P[0].x];
     Texture2D<float2> motion = ResourceDescriptorHeap[P[0].y];
+    for (uint i = lane; i < 100; i += 64)
+    {
+        const uint2 t = uint2(i % 10, i / 10);
+        const int2 at = clamp(int2(group * 8 + t) - 1, 0, size - 1);
+        gs_depth[t.y][t.x] = depth.Load(int3(at, 0));
+        gs_motion[t.y][t.x] = motion.Load(int3(at, 0));
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (any(int2(id) >= size)) return;
+    const int2 tile = int2(local) + 1;
     Texture2D<float2> previousDepth = ResourceDescriptorHeap[P[0].z];
     RWTexture2D<float2> dilated = ResourceDescriptorHeap[P[0].w];
     RWTexture2D<float4> info = ResourceDescriptorHeap[P[1].x];
@@ -133,7 +147,7 @@ void main(uint2 id : SV_DispatchThreadID)
     [unroll] for (int k = 0; k < 9; ++k)
     {
         const int2 o = int2(k % 3, k / 3) - 1;
-        z[k] = depth.Load(int3(clamp(int2(id) + o, 0, size - 1), 0));
+        z[k] = gs_depth[tile.y + o.y][tile.x + o.x];
         // (the centre first among equals: reversed Z, the largest is the closest)
         if (z[k] > closest || (z[k] == closest && k == 4))
         {
@@ -146,7 +160,7 @@ void main(uint2 id : SV_DispatchThreadID)
     float depthError;
     const bool onSurface = depthBilaterals(z[4], z[5], z[3], z[7], z[1], 1.0, weights, depthError);
     const int2 from = clamp(int2(id) + offset, 0, size - 1);
-    const float2 own = motion.Load(int3(id, 0)), vector = motion.Load(int3(from, 0));
+    const float2 own = gs_motion[tile.y][tile.x], vector = gs_motion[tile.y + offset.y][tile.x + offset.x];
     const float2 previousSample = previousDepth.Load(int3(from, 0));
     const float previousView = previousSample.x;
     const float previousZ = previousView > 0 ? g_nearPlane / previousView : 0.0;
@@ -156,7 +170,7 @@ void main(uint2 id : SV_DispatchThreadID)
     if (field)
     {
         // the jacobian of the pixel's own vector (input pixels per input pixel)
-#define VELOCITY(x, y) (motion.Load(int3(clamp(int2(id) + int2(x, y), 0, size - 1), 0)) * float2(size))
+#define VELOCITY(ox, oy) (gs_motion[tile.y + (oy)][tile.x + (ox)] * float2(size))
         const float2 vC = own * float2(size);
         float2 dx = 0, dy = 0;
         bool valid = all(abs(own) < 1.5);  // (a point behind the previous camera has no vector: UpscaleMotion's (2, 2))

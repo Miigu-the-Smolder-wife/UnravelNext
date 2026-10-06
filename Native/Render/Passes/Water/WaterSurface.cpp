@@ -65,7 +65,7 @@ struct SurfaceState
     uint8_t* readbackMapped = nullptr;
     uint32_t tableSrv[kRing] = {};
     uint64_t frame[kRing] = { UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX }, last = UINT64_MAX;
-    uint32_t planarStream[kRing][kPlanarMax] = {};  // each ring frame's candidate k -> stream index (the counts' owner)
+    uint64_t planarTopology[kRing][kPlanarMax] = {}; // persistent owner of each delayed coverage row
     uint32_t planarViews[kRing] = {};
     ~SurfaceState()
     {
@@ -188,6 +188,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
     unused.planar = 0;
     WaterSurfaceDebug& debug = mainView ? fc.state<WaterSurfaceDebug>("W.surface.debug") : unused;
     const uint32_t ring = uint32_t(fc.frame.frameIndex % kRing);
+    std::fill(std::begin(st.planarTopology[ring]), std::end(st.planarTopology[ring]), 0);
     const bool shadeEdges = !mainView && !recordPass;  // (WaterInterior.hlsl P[7].w: no records to shade the layer's edges)
 
     // The refraction source: band A's shaded radiance without the particle layer (M keeps it in bandARadiance), copied
@@ -214,7 +215,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                           const uint32_t k[4] = { c.srv(prev), c.uav(next), w2, h2 };
                           c.cmd->SetPipelineState(mips);
                           c.computeConstants(k, 4);
-                          c.cmd->Dispatch((w2 + 7) / 8, (h2 + 7) / 8, 1);
+                          gpuDispatch(c.cmd, (w2 + 7) / 8, (h2 + 7) / 8, 1);
                       });
             levels.push_back(next);
         }
@@ -226,7 +227,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                   const uint32_t k[4] = { 0, 0, c.uav(stats), kStatBytes / 4 };  // ViewGridClear: the counter words only
                   c.cmd->SetPipelineState(clear);
                   c.computeConstants(k, 4);
-                  c.cmd->Dispatch(1, 1, 1);
+                  gpuDispatch(c.cmd, 1, 1, 1);
               });
     TextureRef status, marchImage;
     if (debug.status && interiorPass)
@@ -241,7 +242,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                       const uint32_t k[4] = { c.uav(status), W, H, 0 };
                       c.cmd->SetPipelineState(zero);
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (W + 7) / 8, (H + 7) / 8, 1);
                   });
         debug.status = false;
     }
@@ -320,9 +321,16 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
             iy1 = std::min((int)H, (iy1 + 63) / 64 * 64);
             PlanarUse u{ p.stream, (uint32_t)planar.size(), { (uint32_t)ix0, (uint32_t)iy0, (uint32_t)(ix1 - ix0), (uint32_t)(iy1 - iy0) }, plane };
             const uint32_t rw = u.rect[2], rh = u.rect[3], k = u.k;
-            const TextureRef scratch = g.createTexture(TextureDesc{ "w.planar scratch", rw, rh, 1, 1, DXGI_FORMAT_R8_UINT });
-            const TextureRef tiles = g.createTexture(TextureDesc{ "w.planar tile mask", (rw + 7) / 8, (rh + 7) / 8, 1, 1, DXGI_FORMAT_R8_UINT });
-            u.mask = g.createTexture(TextureDesc{ "w.planar mask", rw, rh, 1, 1, DXGI_FORMAT_R8_UINT });
+            // Rotation changes the projected rectangle every few frames. Keep
+            // backing storage stable: all mask writers and consumers bound their
+            // integer loads by u.rect or the reflection view's rw/rh, so unused
+            // capacity is neither dispatched nor sampled. Reflection resolution,
+            // its projection and the exact mask/apron remain unchanged.
+            const bool stableMasks = !fc.quality.has("shading.water_planar_stable_masks") || fc.quality.boolean("shading.water_planar_stable_masks");
+            const uint32_t maskW = stableMasks ? W : rw, maskH = stableMasks ? H : rh;
+            const TextureRef scratch = g.createTexture(TextureDesc{ "w.planar scratch", maskW, maskH, 1, 1, DXGI_FORMAT_R8_UINT });
+            const TextureRef tiles = g.createTexture(TextureDesc{ "w.planar tile mask", (maskW + 7) / 8, (maskH + 7) / 8, 1, 1, DXGI_FORMAT_R8_UINT });
+            u.mask = g.createTexture(TextureDesc{ "w.planar mask", maskW, maskH, 1, 1, DXGI_FORMAT_R8_UINT });
             const TextureRef mask = u.mask;
             uint32_t k0[16] = {};
             std::memcpy(&k0[4], &plane, 16);
@@ -345,7 +353,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                           c.cmd->SetPipelineState(pass0);
                           c.bindFrameConstants(mainCb);
                           c.computeConstants(kk, 16);
-                          c.cmd->Dispatch((rw + 7) / 8, (rh + 7) / 8, 1);
+                          gpuDispatch(c.cmd, (rw + 7) / 8, (rh + 7) / 8, 1);
                       });
             g.addPass("w.planar mask apron", QueueType::Graphics,
                       [&](PassBuilder& b) {
@@ -360,12 +368,28 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                           c.cmd->SetPipelineState(pass1);
                           c.bindFrameConstants(mainCb);
                           c.computeConstants(kk, 16);
-                          c.cmd->Dispatch((rw + 7) / 8, (rh + 7) / 8, 1);
+                          gpuDispatch(c.cmd, (rw + 7) / 8, (rh + 7) / 8, 1);
                       });
-            const bool known = history && st.planarStream[doneRing][k] == p.stream;
-            st.planarStream[ring][k] = p.stream;
-            const double pixels = known ? counts[12 + k] : 0;
-            if (debug.planar == 1 || !known || pixels * kPlanarSavedNs > kPlanarFixedNs + pixels * kPlanarPixelNs)
+            const uint64_t topology = r.triangleStreams[p.stream].fixedTopologyId;
+            // Stream and candidate indices are packed again every frame. A basin
+            // that enters/leaves the visible set must not rename another basin's
+            // delayed coverage. A recreated topology must start without history.
+            uint32_t priorSlot = kPlanarMax;
+            if (history && topology)
+                for (uint32_t i = 0; i < kPlanarMax; ++i)
+                    if (st.planarTopology[doneRing][i] == topology) { priorSlot = i; break; }
+            const bool known = priorSlot != kPlanarMax;
+            const double pixels = known ? counts[12 + priorSlot] : 0;
+            static const bool tracePlanar = [] { char value[8]{}; GetEnvironmentVariableA("UNX_PLANAR_TRACE", value, sizeof value); return value[0] == '1'; }();
+            if (tracePlanar)
+                logf("PLANAR_TRACE frame=%llu candidate=%u stream=%u topology=%llu history=%u priorSlot=%u known=%u pixels=%.0f rect=%ux%u\n",
+                     (unsigned long long)fc.frame.frameIndex, k, p.stream, (unsigned long long)topology, history ? 1u : 0u,
+                     priorSlot, known ? 1u : 0u, pixels, rw, rh);
+            st.planarTopology[ring][k] = topology;
+            // The ray path already supplies full reflections. Unknown coverage
+            // is not evidence that an extra camera saves work: keep those rays
+            // until the completed mask proves the camera is worthwhile.
+            if (debug.planar == 1 || (known && pixels * kPlanarSavedNs > kPlanarFixedNs + pixels * kPlanarPixelNs))
             {
                 ViewDesc d = ViewDesc::planarReflection(view.view, plane, u.rect[0], u.rect[1], rw, rh);
                 d.planarMask = mask;
@@ -525,9 +549,9 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                       c.cmd->SetPipelineState(heads);
                       const uint32_t a[4] = { 0, 0, c.uav(jobList), 4 }, s[4] = { 0, 0, c.uav(samples), 4 };  // the heads only
                       c.computeConstants(a, 4);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                       c.computeConstants(s, 4);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                   });
     };
     // After a band's or round's shading pass: the apply dispatch's size, R's rays, the apply pass (pixels: band A radiance
@@ -542,7 +566,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                       const uint32_t k[4] = { c.uav(samples), c.uav(applyArgs), sampleCapacity, 0 };
                       c.cmd->SetPipelineState(argsKernel);
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                   });
         fc.services.traceRefractions(fc, jobList, results, jobs);
         const bool pixels = !recordRadiance.valid();
@@ -568,7 +592,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                                               pixels ? none : c.uav(recordRadiance) };
                       c.cmd->SetPipelineState(applyKernel);
                       c.computeConstants(k, 8);
-                      c.cmd->ExecuteIndirect(signature, 1, c.resource(applyArgs), 0, nullptr, 0);
+                      gpuExecuteIndirect(c.cmd, signature, 1, c.resource(applyArgs), 0, nullptr, 0);
                   });
     };
     uint32_t rounds = 0;
@@ -613,7 +637,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                               c.cmd->SetPipelineState(seaKernel);
                               c.bindFrameConstants(cb);
                               c.computeConstants(k, 32);
-                              c.cmd->Dispatch((W + 7) / 8, (rows + 7) / 8, 1);
+                              gpuDispatch(c.cmd, (W + 7) / 8, (rows + 7) / 8, 1);
                           });
             if (anyStreams)
                 g.addPass("w.surface.interior", QueueType::Graphics,
@@ -645,7 +669,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                               c.cmd->SetPipelineState(kernel);
                               c.bindFrameConstants(cb);
                               c.computeConstants(k, 32);
-                              c.cmd->Dispatch((W + 7) / 8, (rows + 7) / 8, 1);
+                              gpuDispatch(c.cmd, (W + 7) / 8, (rows + 7) / 8, 1);
                           });
             if (rays) traceAndApply(BufferRef{});
         }
@@ -691,7 +715,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                           c.bindFrameConstants(cb);
                           c.computeConstants(k, 32);
                           if (rays) dispatchLinear(c.cmd, (roundSize + 63) / 64);
-                          else c.cmd->ExecuteIndirect(signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
+                          else gpuExecuteIndirect(c.cmd, signature, 1, c.resource(special), 4, nullptr, 0);  // header words 1..3
                       });
             if (rays) traceAndApply(radiance);
         }
@@ -759,7 +783,7 @@ void waterSurface(FramePassContext& fc, ViewResources& view)
                           c.cmd->SetPipelineState(lineKernel);
                           c.bindFrameConstants(cb);
                           c.computeConstants(k, 8 + 8 * (uint32_t)lines.size());
-                          c.cmd->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+                          gpuDispatch(c.cmd, (W + 7) / 8, (H + 7) / 8, 1);
                       });
         }
     }

@@ -17,6 +17,11 @@
 #include "Passes/GI/LumenRadianceCache.hlsli"
 
 groupshared float4 g_irradiance[LRC_IRRADIANCE_RES * LRC_IRRADIANCE_RES];
+// All normals integrate the same probe. Decode directions and fetch radiance
+// cooperatively in bounded tiles; retain the texel order of each integral.
+#define IRRADIANCE_TILE 256u
+groupshared float3 g_direction[IRRADIANCE_TILE];
+groupshared float4 g_radiance[IRRADIANCE_TILE];
 
 [numthreads(8, 8, 1)]
 void main(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID)
@@ -31,31 +36,45 @@ void main(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID)
         ByteAddressBuffer traces = ResourceDescriptorHeap[P[0].z];
         slot = traces.Load(trace * 16 + 12) & 0xFFFFFFu;
     }
-    if (work && all(tid.xy < LRC_IRRADIANCE_RES))
+    if (!work) return;  // group-uniform, before any barrier
+    Texture2D<float4> atlas = ResourceDescriptorHeap[P[0].w];
+    const uint res = p.probeResolution;
+    const uint2 base = lrcAtlasCoord(p, slot) * p.finalResolution + 1;
+    const uint lane = tid.x + tid.y * 8;
+    const bool integrates = all(tid.xy < LRC_IRRADIANCE_RES);
+    const float3 normal = lrcUvToDirection((float2(tid.xy) + 0.5) / float(LRC_IRRADIANCE_RES));
+    float3 sum = 0;
+    float held = 0, total = 0;
+    for (uint first = 0; first < res * res; first += IRRADIANCE_TILE)
     {
-        Texture2D<float4> atlas = ResourceDescriptorHeap[P[0].w];
-        const uint res = p.probeResolution;
-        const uint2 base = lrcAtlasCoord(p, slot) * p.finalResolution + 1;
-        const float3 normal = lrcUvToDirection((float2(tid.xy) + 0.5) / float(LRC_IRRADIANCE_RES));
-        float3 sum = 0;
-        float held = 0, total = 0;
-        for (uint y = 0; y < res; ++y)
-            for (uint x = 0; x < res; ++x)
+        const uint count = min(IRRADIANCE_TILE, res * res - first);
+        for (uint i = lane; i < count; i += 64u)
+        {
+            const uint2 texel = uint2((first + i) % res, (first + i) / res);
+            g_direction[i] = lrcUvToDirection((float2(texel) + 0.5) / float(res));
+            g_radiance[i] = atlas[base + texel];
+        }
+        GroupMemoryBarrierWithGroupSync();
+        if (integrates)
+            for (uint i = 0; i < count; ++i)
             {
-                const float c = dot(lrcUvToDirection((float2(x, y) + 0.5) / float(res)), normal);
+                const float c = dot(g_direction[i], normal);
                 if (!(c > 0)) continue;
-                const float4 v = atlas[base + uint2(x, y)];  // (rgb x a, a)
+                const float4 v = g_radiance[i];  // (rgb x a, a)
                 sum += v.rgb * c;
                 held += v.a * c;
                 total += c;
             }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (integrates)
+    {
         float4 e = float4(0, 0, 0, 0);
         if (held > 1e-4 && total > 0) e = float4(sum * (LRC_PI * LRC_IRRADIANCE_SCALE / (held * LRC_RADIANCE_SCALE)), saturate(held / total));
         if (any(isnan(e)) || any(isinf(e))) e = float4(0, 0, 0, 0);
         g_irradiance[tid.x + tid.y * LRC_IRRADIANCE_RES] = e;
     }
     GroupMemoryBarrierWithGroupSync();
-    if (!work) return;
     // the interior texel a bordered texel shows (LumenRadianceCacheFilter.hlsl's store: across an edge of the map the
     // neighbour is the same edge's texel mirrored about the edge's centre)
     int2 s = int2(tid.xy) - 1;

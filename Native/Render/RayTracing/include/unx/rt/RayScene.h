@@ -286,6 +286,7 @@ private:
     uint32_t m_streamVertices[64] = {};
     bool m_streamIndexed[64] = {};
     bool m_streamAllowsUpdate[64] = {};
+    bool m_streamFastTrace[64] = {};
     uint64_t m_streamPoolGeneration = 0;
     struct StreamBuilt
     {
@@ -293,6 +294,7 @@ private:
         uint32_t triangles = 0;
         uint32_t vertices = 0;
         bool indexed = false;
+        bool fastTrace = false;
     };
     StreamBuilt m_streamBuilt[64] = {}; // committed only after the owning command list was submitted
     std::vector<Stream> m_streamsNow;
@@ -497,6 +499,10 @@ private:
         std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometries;  // the owner's full mesh
     };
     std::vector<ExactSlot> m_exact;
+    // Selection scratch; indices keep the existing hit-ranked choice and slot order.
+    std::vector<uint32_t> m_exactWanted, m_exactOwnerIndex;
+    std::vector<uint8_t> m_exactPlaced;
+    std::vector<std::pair<uint32_t, uint32_t>> m_exactChanged;
     uint32_t m_exactMinHits = 0;
     Buffer m_exactCounts, m_exactZero;     // uint per deformed instance (UAV), and zeros to clear it
     uint32_t m_exactCountsUav = 0xFFFFFFFFu;

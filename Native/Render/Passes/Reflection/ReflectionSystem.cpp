@@ -1,3 +1,4 @@
+#include "unx/rt/HitLightingQueue.h"
 #include "unx/refl/ReflectionSystem.h"
 #include "unx/render/HistoryResize.h"
 #include "unx/render/SortedPrefix.h"
@@ -241,12 +242,7 @@ ReflectionSystem::ReflectionSystem(Device& device, ShaderLibrary& shaders, const
     m_arguments->SetName(L"R reflection dispatch arguments");
     uint8_t image[kArgumentsBytes] = {};
     // (only the pipelines of the path that runs: reflection.lumen_only never makes the older path's state objects)
-    for (int v = 0; v < 2 && m_settings.lumenOnly; ++v)
-    {
-        const D3D12_DISPATCH_RAYS_DESC desc =
-            rt::RayPipeline::get(device, shaders, rt::standardRayPipeline(kLumenTraceLibrary[v], { "ReflectionLumenTraceGen" })).dispatchDesc(0, 0, 1, 1);
-        std::memcpy(image + kLumenDescOffset + v * kDescStride, &desc, sizeof desc);
-    }
+    // Lumen shader tables come from the frame-selected immutable pipeline.
     for (int v = 0; v < 2 && !m_settings.lumenOnly; ++v)
     {
         const D3D12_DISPATCH_RAYS_DESC desc = rt::RayPipeline::get(device, shaders, rt::standardRayPipeline(kTraceLibrary[v], { "ReflectionTraceGen" })).dispatchDesc(0, 0, 1, 1);
@@ -573,7 +569,7 @@ ScreenTraceInputs ReflectionSystem::screenTraceInputs(FramePassContext& fc, View
                              const uint32_t k[8] = { c.srv(depth), c.uav(atlas), level, 0, width, height, 0, 0 };
                              c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionHzb"));
                              c.computeConstants(k, 8);
-                             c.cmd->Dispatch((lw + 7) / 8, (lh + 7) / 8, 1);
+                             gpuDispatch(c.cmd, (lw + 7) / 8, (lh + 7) / 8, 1);
                          });
     }
     m_screenInputs.hzb = atlas;
@@ -708,38 +704,15 @@ void ReflectionSystem::recordRefraction(FramePassContext& fc, BufferRef jobs, Bu
     const std::vector<uint32_t> materials = streamMaterials(fc);
     const bool lumenOnly = m_settings.lumenOnly;
     const char* const* refractLibrary = lumenOnly ? kLumenRefractLibrary : kRefractLibrary;
-    rt::RayPipeline& pipeline = rt::RayPipeline::get(fc.device, fc.shaders, rt::standardRayPipeline(refractLibrary[in.variant], { "RefractionGen" }));
-    if (!m_refractTemplate)
-    {
-        D3D12_HEAP_PROPERTIES up{ D3D12_HEAP_TYPE_UPLOAD };
-        D3D12_RESOURCE_DESC1 d{};
-        d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        d.Width = 2 * kDescStride;
-        d.Height = d.DepthOrArraySize = d.MipLevels = 1;
-        d.SampleDesc.Count = 1;
-        d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        check(m_device.d3d()->CreateCommittedResource3(&up, D3D12_HEAP_FLAG_NONE, &d, D3D12_BARRIER_LAYOUT_UNDEFINED, nullptr, nullptr, 0, nullptr,
-                                                       IID_PPV_ARGS(&m_refractTemplate)),
-              "R refraction dispatch template");
-        uint8_t* m = nullptr;
-        D3D12_RANGE none{ 0, 0 };
-        check(m_refractTemplate->Map(0, &none, reinterpret_cast<void**>(&m)), "map R refraction template");
-        for (int v = 0; v < 2; ++v)
-        {
-            const D3D12_DISPATCH_RAYS_DESC desc =
-                rt::RayPipeline::get(fc.device, fc.shaders, rt::standardRayPipeline(refractLibrary[v], { "RefractionGen" })).dispatchDesc(0, 0, 1, 1);
-            std::memcpy(m + v * kDescStride, &desc, sizeof desc);
-        }
-        m_refractTemplate->Unmap(0, nullptr);
-    }
+    const std::string refractKernel = std::string(refractLibrary[in.variant]) + (lumenOnly ? (in.rays->hairParams().valid() ? ".HAIR1" : ".HAIR0") : "");
+    rt::RayPipeline& pipeline = rt::RayPipeline::get(fc.device, fc.shaders, rt::standardRayPipeline(refractKernel, { "RefractionGen" }));
     // The dispatch size from the list's header (an empty list launches nothing): template copy -> count -> indirect rays.
     const BufferRef args = g.createBuffer(BufferDesc{ "R refraction dispatch", kDescStride, 0 });
-    ID3D12Resource* templ = m_refractTemplate.Get();
-    const uint32_t variant = (uint32_t)in.variant;
+    ID3D12Resource* templ = pipeline.dispatchTemplate();
     ID3D12PipelineState* countPso = fc.shaders.compute("Passes/Reflection/RefractionArgs");
     g.addPass("r.refract.template", QueueType::Graphics,
               [&](PassBuilder& b) { b.use(args, Use::CopyDst); },
-              [args, templ, variant](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(args), 0, templ, variant * kDescStride, kDescStride); });
+              [args, templ](PassContext& c) { c.cmd->CopyBufferRegion(c.resource(args), 0, templ, 0, kDescStride); });
     g.addPass("r.refract.count", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(args, Use::UavCompute);
@@ -749,7 +722,7 @@ void ReflectionSystem::recordRefraction(FramePassContext& fc, BufferRef jobs, Bu
                   const uint32_t k[4] = { c.uav(args), c.srv(jobs), maxJobs, (uint32_t)offsetof(D3D12_DISPATCH_RAYS_DESC, Width) };
                   c.cmd->SetPipelineState(countPso);
                   c.computeConstants(k, 4);
-                  c.cmd->Dispatch(1, 1, 1);
+                  gpuDispatch(c.cmd, 1, 1, 1);
               });
     uint8_t* table = m_streamTableMapped + (in.frameIndex % 4) * (kStreamTableWords * 4);
     const uint32_t tableSrv = m_streamTableSrv[in.frameIndex % 4];
@@ -850,6 +823,11 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const bool lumenOnly = s.lumenOnly;  // ... with the Lumen trace as its only world rays (ReflectionLumenTrace.hlsl)
     // the lobe tail's share that is not sampled, as the trace, its screen traces and the resolve's replays read it
     const uint32_t samplingBias16 = lumen ? (uint32_t)std::lround(s.lumenSamplingBias * 65535.0f) : 0u;
+    auto& reuseDebug = fc.state<ReflectionReuseDebug>("R.reuse.debug");
+    const bool cacheReuseRays = !reuseDebug.forceUncachedRays && lumen &&
+        ((s.lumenReconstruction && s.lumenReconstructionSamples > 0 && s.lumenReconstructionRadius > 1) || s.lumenDownsample > 1);
+    reuseDebug.usedCachedRays = cacheReuseRays;
+    const BufferRef reuseRays = cacheReuseRays ? g.createBuffer({ "R reflection reuse rays", uint64_t(width) * height * 16, 0 }) : BufferRef{};
     const bool layers = s.layers && !lumen;
     const BufferRef jobLayers = layers ? g.createBuffer({ "R reflection job layers", (uint64_t)width * height * 24, 0 }) : BufferRef{};  // REFL_LAYER_JOB_BYTES
     const BufferRef args = g.importBuffer(m_arguments.Get(), { "R reflection dispatch arguments", (uint64_t)kMaxBands * kArgumentsBytes, 0 });
@@ -1083,19 +1061,20 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       const uint32_t k[4] = { c.uav(history), width, height, 0 };
                       c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionHistoryClear"));
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (width + 7) / 8, (height + 7) / 8, 1);
                   });
     g.addPass("r.refl.begin", QueueType::Compute,
               [&](PassBuilder& b) {
                   b.use(reflection, Use::UavCompute);
                   b.use(args, Use::UavCompute);
                   b.use(planarCounts, Use::UavCompute);
+                  if (reuseRays.valid()) b.use(reuseRays, Use::UavCompute);
               },
               [&shaders, reflection, args, planarCounts, tilesX, tilesY, height](PassContext& c) {
                   const uint32_t k[8] = { c.uav(reflection), c.uav(args), tilesX, tilesY, height, c.uav(planarCounts), 0, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionBegin"));
                   c.computeConstants(k, 8);
-                  c.cmd->Dispatch((std::max(tilesX, kCandidatesMax) + 7) / 8, (tilesY + 7) / 8, 1);
+                  gpuDispatch(c.cmd, (std::max(tilesX, kCandidatesMax) + 7) / 8, (tilesY + 7) / 8, 1);
               });
     uint32_t spacingLog2 = 0;  // reflection.g_sample_spacing_px bound (1, 2, 4 or 8)
     while ((2u << spacingLog2) <= s.maxSpacing && spacingLog2 < 3) ++spacingLog2;
@@ -1124,8 +1103,8 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   }
               },
               [&shaders, depth, gbuffer, lobes, history, modes, jobs, args, reflection, s, focal, width, height, tilesX, tilesY, frameConstants, planarSrv,
-               planarOffset, planarCounts, planarViews, viewCount = planar.views, spacingLog2, lumen, words, downsampleWord, roughSpecularValid = main.giRoughSpecular.valid()](PassContext& c) {
-                  uint32_t k[32] = { c.srv(depth), c.srv(gbuffer), lobes.valid() && !lumen ? c.srv(lobes) : 0xFFFFFFFFu, c.srv(history),
+               planarOffset, planarCounts, planarViews, viewCount = planar.views, spacingLog2, lumen, words, downsampleWord, reuseRays, samplingBias16, roughSpecularValid = main.giRoughSpecular.valid()](PassContext& c) {
+                  uint32_t k[36] = { c.srv(depth), c.srv(gbuffer), lobes.valid() && !lumen ? c.srv(lobes) : 0xFFFFFFFFu, c.srv(history),
                                      c.uav(modes), c.uav(jobs), c.uav(args), c.uav(reflection),
                                      asU(s.kHalfAngle), asU(s.mirrorRoughness), asU(focal), height,
                                      width, height, planarSrv, planarOffset, c.uav(planarCounts), spacingLog2,
@@ -1138,10 +1117,12 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   k[28] = words.valid() ? c.srv(words) : 0xFFFFFFFFu;
                   k[29] = downsampleWord;
                   k[30] = asU(s.lumenMaxRoughnessFoliage);
-                  c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionClassify"));
-                  c.computeConstants(k, 32);
+                  k[31] = reuseRays.valid() ? c.uav(reuseRays) : 0xFFFFFFFFu;
+                  k[32] = asU(samplingBias16 / 65535.0f);
+                  c.cmd->SetPipelineState(shaders.compute(reuseRays.valid() ? "Passes/Reflection/ReflectionClassifyCached" : "Passes/Reflection/ReflectionClassify"));
+                  c.computeConstants(k, 36);
                   c.bindFrameConstants(frameConstants);
-                  c.cmd->Dispatch(tilesX, tilesY, 1);
+                  gpuDispatch(c.cmd, tilesX, tilesY, 1);
               });
     g.addPass("r.refl.jobs", QueueType::Compute,
               [&](PassBuilder& b) {
@@ -1154,7 +1135,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   const uint32_t k[12] = { c.uav(modes), c.uav(jobs), c.uav(args), 0, width, height, tilesX, tilesY, c.uav(reflection), height, 0, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionJobs"));
                   c.computeConstants(k, 12);
-                  c.cmd->Dispatch(tilesX, tilesY, 1);
+                  gpuDispatch(c.cmd, tilesX, tilesY, 1);
               });
     // Mask aprons (v1.28): 3 x 3 dilation of each view's mirror pixels as value 2, tile masks from the dilated masks.
     for (uint32_t v = 0; v < planar.views; ++v)
@@ -1170,7 +1151,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       const uint32_t k[4] = { c.uav(mask), c.uav(tileMask), w, h };
                       c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionPlanarApron"));
                       c.computeConstants(k, 4);
-                      c.cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (w + 7) / 8, (h + 7) / 8, 1);
                   });
     }
     // The reflection cameras (their masks come from the classification and the aprons above).
@@ -1270,7 +1251,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                                            kArgumentsBytes, jobBand, hitsUseCards ? c.srv(cardFrame) : 0xFFFFFFFFu, 0 };
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionArgs"));
                   c.computeConstants(k, 16);
-                  c.cmd->Dispatch(1, 1, 1);
+                  gpuDispatch(c.cmd, 1, 1, 1);
               });
 
     uint32_t scene[8];
@@ -1282,8 +1263,26 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
     const bool atmosphere = fr.transmittanceLut.valid() && fr.multiScatterLut.valid() && fr.skyViewLut.valid() && fr.aerialPerspective.valid();
     const TextureRef luts[4] = { fr.transmittanceLut, fr.multiScatterLut, fr.skyViewLut, fr.aerialPerspective };
     const int variant = atmosphere ? 0 : 1;
+    const bool deferredHitLighting = lumenOnly && !hairParams.valid() && rt::hitLightingStorageFits(uint64_t(width) * height) &&
+        (!fc.quality.has("gi.defer_hit_lighting") || fc.quality.boolean("gi.defer_hit_lighting"));
+    const std::string traceKernel = deferredHitLighting ? "Passes/Reflection/ReflectionLumenTraceMinimal.SKY" + std::to_string(variant) :
+        lumenOnly ? std::string(kLumenTraceLibrary[variant]) + (hairParams.valid() ? ".HAIR1" : ".HAIR0") : kTraceLibrary[variant];
     rt::RayPipeline& pipeline = rt::RayPipeline::get(
-        fc.device, shaders, rt::standardRayPipeline(lumenOnly ? kLumenTraceLibrary[variant] : kTraceLibrary[variant], { lumenOnly ? "ReflectionLumenTraceGen" : "ReflectionTraceGen" }));
+        fc.device, shaders, rt::standardRayPipeline(traceKernel, { lumenOnly ? "ReflectionLumenTraceGen" : "ReflectionTraceGen" }));
+    rt::RayPipeline* lightingPipeline = deferredHitLighting ? &rt::RayPipeline::get(fc.device, shaders,
+        rt::standardRayPipeline("Passes/Reflection/ReflectionLumenTraceLighting.SKY" + std::to_string(variant), { "ReflectionLumenTraceGen" })) : nullptr;
+    const rt::HitLightingQueue hitLighting = deferredHitLighting ?
+        rt::beginHitLightingQueue(fc, "r.refl.hitlighting", width * height, kBand / 3, *lightingPipeline) : rt::HitLightingQueue{};
+    if (lumenOnly)
+    {
+        ID3D12Resource* templ = pipeline.dispatchTemplate();
+        g.addPass("r.refl.lumen.template", QueueType::Graphics, [&](PassBuilder& b) { b.use(args, Use::CopyDst); },
+            [=](PassContext& c) {
+                for (uint32_t band = 0; band < kMaxBands; ++band)
+                    c.cmd->CopyBufferRegion(c.resource(args), uint64_t(band) * kArgumentsBytes + kLumenDescOffset + variant * kDescStride,
+                        templ, 0, offsetof(D3D12_DISPATCH_RAYS_DESC, Width));
+            });
+    }
     const float3 sky = m_skyRadiance, sun = m_sunIlluminance;
     const float rayLength = (float)fc.quality.number("gi.ray_length_m");
     const uint32_t frame = (uint32_t)fc.frame.frameIndex;
@@ -1409,7 +1408,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionScreenTrace"));
                           c.computeConstants(k, 36);
                           c.bindFrameConstants(frameConstants);
-                          c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                          gpuDispatch(c.cmd, (width + 7) / 8, (height + 7) / 8, 1);
                       });
         }
     }
@@ -1434,7 +1433,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           const uint32_t k[4] = { c.uav(traceList), 0, 0, 0 };
                           c.cmd->SetPipelineState(shaders.compute("RayTracing/CompactDispatch.MODE0"));
                           c.computeConstants(k, 4);
-                          c.cmd->Dispatch(1, 1, 1);
+                          gpuDispatch(c.cmd, 1, 1, 1);
                       });
             g.addPass("r.refl.lumen.compact", QueueType::Compute,
                       [&](PassBuilder& b) {
@@ -1447,7 +1446,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           const uint32_t k[8] = { c.srv(modes), c.srv(jobs), c.srv(reflection), c.uav(traceList), width, height, height, jobCapacity };
                           c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionCompactTraces"));
                           c.computeConstants(k, 8);
-                          c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                          gpuDispatch(c.cmd, (width + 7) / 8, (height + 7) / 8, 1);
                       });
             // (the bands' description widths from the list's count: band b takes its entries [b x kLumenBand, ...))
             g.addPass("r.refl.lumen.args", QueueType::Compute,
@@ -1460,7 +1459,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                                                    kArgumentsBytes, kLumenBand, lumenBands, 2, kDescStride, 0, 0, 0 };
                           c.cmd->SetPipelineState(shaders.compute("RayTracing/CompactDispatch.MODE1"));
                           c.computeConstants(k, 12);
-                          c.cmd->Dispatch(1, 1, 1);
+                          gpuDispatch(c.cmd, 1, 1, 1);
                       });
         }
         else
@@ -1470,7 +1469,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                                                   kArgumentsBytes, kLumenBand, lumenBands, 0 };
                           c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionLumenArgs"));
                           c.computeConstants(k, 8);
-                          c.cmd->Dispatch(1, 1, 1);
+                          gpuDispatch(c.cmd, 1, 1, 1);
                       });
         const bool sceneColour = screenTraces && s.lumenSceneColorAtHit;
         const FrameContext::Upscale& up = fc.frame.upscale;
@@ -1484,9 +1483,11 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
         if (!streams.empty()) ensureStreamTable(m_device, m_streamTable, m_streamTableMapped, m_streamTableSrv);
         uint8_t* streamTable = streams.empty() ? nullptr : m_streamTableMapped + (fc.frame.frameIndex % 4) * (kStreamTableWords * 4);
         const uint32_t streamTableSrv = streams.empty() ? 0xFFFFFFFFu : m_streamTableSrv[fc.frame.frameIndex % 4];
-        g.addPass("r.refl.lumen.trace", QueueType::Compute,
+        auto addTrace = [&](const char* name, rt::RayPipeline* selected, BufferRef dispatch, bool lighting) {
+        g.addPass(name, QueueType::Compute,
                   [&](PassBuilder& b) {
-                      b.use(args, Use::IndirectArgs);
+                      b.use(dispatch, Use::IndirectArgs);
+                      if (hitLighting.valid()) b.use(hitLighting.records, lighting ? Use::SrvGraphics : Use::UavGraphics);
                       b.use(jobs, Use::SrvGraphics);
                       if (compactTraces) b.use(traceList, Use::SrvGraphics);
                       b.use(results, Use::UavGraphics);
@@ -1504,11 +1505,11 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       if (atmosphere)
                           for (const TextureRef& t : luts) b.use(t, Use::SrvGraphics);
                   },
-                  [&pipeline, traceList, compactTraces, streams, materials, streamTable, streamTableSrv, jobs, results, depth, gbuffer, cardFrame, hitsUseCards, prevColor, prevW, prevH, sceneColour, screenContinue, exactCounts, luts, atmosphere, sky, sun,
+                  [selected, dispatch, lighting, hitLighting, deferredHitLighting, traceList, compactTraces, streams, materials, streamTable, streamTableSrv, jobs, results, depth, gbuffer, cardFrame, hitsUseCards, prevColor, prevW, prevH, sceneColour, screenContinue, exactCounts, luts, atmosphere, sky, sun,
                    rayLength, frame, scene, samplingBias16, s, frameConstants, argumentResource, variant, timestamps, firstTick, lumenBands, words, historyDepth, ratio = up.exposureRatio,
                    prevViewProj = up.prevViewProj](PassContext& c) {
                       c.bindFrameConstants(frameConstants);
-                      c.cmd->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, firstTick);
+                      if (!lighting) c.cmd->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, firstTick);
                       uint32_t k[48] = {};
                       k[0] = c.srv(jobs);
                       k[1] = c.uav(results);
@@ -1519,10 +1520,11 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       for (int i = 0; i < 4; ++i) k[8 + i] = atmosphere ? c.srv(luts[i]) : 0xFFFFFFFFu;
                       // (ReflectionLumenTrace.hlsl RL_TRACE_LIST: the sky word its variant leaves free)
                       if (compactTraces) k[atmosphere ? 4 : 8] = c.srv(traceList);
+                      if (hitLighting.valid()) k[atmosphere ? 5 : 9] = lighting ? c.srv(hitLighting.records) : c.uav(hitLighting.records);
                       k[12] = asU(sun.x), k[13] = asU(sun.y), k[14] = asU(sun.z);
                       if (atmosphere)
                       {
-                          if (streamTable) fillStreamTable(c, streamTable, streams, materials);
+                          if (streamTable && !lighting) fillStreamTable(c, streamTable, streams, materials);
                           k[12] = streamTableSrv;  // (ReflectionLumenTrace.hlsl SKY0: P[3].x)
                       }
                       k[15] = exactCounts.valid() ? c.uav(exactCounts) : 0xFFFFFFFFu;
@@ -1539,14 +1541,24 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       std::memcpy(&k[24], scene, sizeof scene);
                       for (int r = 0; r < 4; ++r)
                           for (int col = 0; col < 4; ++col) k[32 + 4 * r + col] = asU(prevViewProj.m[r][col]);
-                      for (uint32_t band = 0; band < lumenBands; ++band)
+                      for (uint32_t band = 0; band < (lighting ? hitLighting.chunks : lumenBands); ++band)
                       {
-                          k[19] = (band & 0xFFu) | (cosThreshold << 8) | (samplingBias16 << 16);
+                          k[19] = ((lighting ? 0u : band) & 0xFFu) | (cosThreshold << 8) | (samplingBias16 << 16);
+                          if (lighting) k[atmosphere ? 6 : 10] = band * hitLighting.chunkRays;
                           c.computeConstants(k, 48);
-                          pipeline.dispatchIndirect(c.cmd, argumentResource, (uint64_t)band * kArgumentsBytes + kLumenDescOffset + variant * kDescStride);
+                          const uint64_t offset = lighting ? uint64_t(band) * rt::RayPipeline::kDispatchDescStride :
+                              uint64_t(band) * kArgumentsBytes + kLumenDescOffset + variant * kDescStride;
+                          selected->dispatchIndirect(c.cmd, c.resource(dispatch), offset);
                       }
-                      c.cmd->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, firstTick + 1);
+                      if (lighting || !deferredHitLighting) c.cmd->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, firstTick + 1);
                   });
+        };
+        addTrace("r.refl.lumen.trace", &pipeline, args, false);
+        if (deferredHitLighting)
+        {
+            rt::prepareHitLightingQueue(fc, "r.refl.hitlighting", hitLighting);
+            addTrace("r.refl.hitlighting", lightingPipeline, hitLighting.arguments, true);
+        }
     }
     else
     {
@@ -1594,7 +1606,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionSceneColorAtHit"));
                           c.computeConstants(k, 32);
                           c.bindFrameConstants(frameConstants);
-                          c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                          gpuDispatch(c.cmd, (width + 7) / 8, (height + 7) / 8, 1);
                       });
         }
     }
@@ -1613,7 +1625,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                                                kArgumentsBytes, kBand, slotBands, kInlineBand };
                       c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionRayArgs"));
                       c.computeConstants(k, 16);
-                      c.cmd->Dispatch(1, 1, 1);
+                      gpuDispatch(c.cmd, 1, 1, 1);
                   });
     };
     rayArgs("r.refl.rayargs", 0);
@@ -1633,7 +1645,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       c.bindFrameConstants(frameConstants);
                       // (rows of kSlotRowGroups groups: 2^22 slots are 65536 groups, one over a dispatch dimension's limit)
                       const uint32_t groups = surfaceCacheClear ? (n + 63) / 64 : 1;
-                      c.cmd->Dispatch(std::min(groups, kSlotRowGroups), (groups + kSlotRowGroups - 1) / kSlotRowGroups, 1);
+                      gpuDispatch(c.cmd, std::min(groups, kSlotRowGroups), (groups + kSlotRowGroups - 1) / kSlotRowGroups, 1);
                   });
         for (uint32_t table = 0; table < 2; ++table)
             g.addPass(table ? "r.sc.update.probes" : "r.sc.update.cells", QueueType::Compute, [&](PassBuilder& b) { b.use(surfaceCache, Use::UavCompute); },
@@ -1643,7 +1655,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           c.computeConstants(k, 4);
                           c.bindFrameConstants(frameConstants);
                           const uint32_t groups = ((table ? n / 4 : n) + 63) / 64;
-                          c.cmd->Dispatch(std::min(groups, kSlotRowGroups), (groups + kSlotRowGroups - 1) / kSlotRowGroups, 1);
+                          gpuDispatch(c.cmd, std::min(groups, kSlotRowGroups), (groups + kSlotRowGroups - 1) / kSlotRowGroups, 1);
                       });
         rt::RayPipeline& surfaceCacheLight = rt::RayPipeline::get(
             fc.device, shaders, rt::standardRayPipeline(kSurfaceCacheLightLibrary[variant], { "SurfaceCacheSeedGen", "SurfaceCacheCellsGen", "SurfaceCacheProbesGen" }));
@@ -1754,7 +1766,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   c.cmd->SetPipelineState(shaders.compute(kShadeKernel[variant][batchCorners]));
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
-                  c.cmd->ExecuteIndirect(dispatchSignature, 1, argumentResource, kShadeArgsOffset, nullptr, 0);
+                  gpuExecuteIndirect(c.cmd, dispatchSignature, 1, argumentResource, kShadeArgsOffset, nullptr, 0);
               });
     rayArgs("r.refl.shadowargs", 1);
     rt::RayPipeline& shadowPipeline = rt::RayPipeline::get(fc.device, shaders, rt::standardRayPipeline(kShadowLibrary, { "ReflectionShadowGen" }));
@@ -1785,7 +1797,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionPenumbra"));
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
-                  c.cmd->ExecuteIndirect(dispatchSignature, 1, argumentResource, kPenumbraArgsOffset, nullptr, 0);
+                  gpuExecuteIndirect(c.cmd, dispatchSignature, 1, argumentResource, kPenumbraArgsOffset, nullptr, 0);
               });
     g.addPass("r.refl.combine", QueueType::Compute,
               [&](PassBuilder& b) {
@@ -1798,7 +1810,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionCombine"));
                   c.computeConstants(k, 32);
                   c.bindFrameConstants(frameConstants);
-                  c.cmd->ExecuteIndirect(dispatchSignature, 1, argumentResource, kCombineArgsOffset, nullptr, 0);
+                  gpuExecuteIndirect(c.cmd, dispatchSignature, 1, argumentResource, kCombineArgsOffset, nullptr, 0);
                   c.cmd->EndQuery(timestamps, D3D12_QUERY_TYPE_TIMESTAMP, firstTick + 1);
               });
     }  // (!lumenOnly)
@@ -1840,7 +1852,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                   c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionResolve"));
                   c.computeConstants(k, 24);
                   c.bindFrameConstants(frameConstants);
-                  c.cmd->Dispatch(tilesX, tilesY, 1);
+                  gpuDispatch(c.cmd, tilesX, tilesY, 1);
               });
     if (layers)
     {
@@ -1876,7 +1888,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                               c.cmd->SetPipelineState(shaders.compute("Passes/Reconstruct/LayerDenoise"));
                               c.computeConstants(k, 12);
                               c.bindFrameConstants(frameConstants);
-                              c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                              gpuDispatch(c.cmd, (width + 7) / 8, (height + 7) / 8, 1);
                           });
                 newStochastic = outS;
                 newResidual = outR;
@@ -1929,7 +1941,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                           c.cmd->SetPipelineState(shaders.compute("Passes/Reconstruct/LayerTemporal"));
                           c.computeConstants(k, 24);
                           c.bindFrameConstants(frameConstants);
-                          c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                          gpuDispatch(c.cmd, (width + 7) / 8, (height + 7) / 8, 1);
                       });
             newStochastic = nextS;
             newResidual = nextR;
@@ -1954,7 +1966,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                                                mirrorLobe ? 1u : 0u, 0, 0 };
                       c.cmd->SetPipelineState(shaders.compute("Passes/Reconstruct/LayerCompose"));
                       c.computeConstants(k, 12);
-                      c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (width + 7) / 8, (height + 7) / 8, 1);
                   });
     }
     else if (lumen)
@@ -1998,18 +2010,20 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       b.use(gbuffer, Use::SrvCompute);
                       b.use(reflection, Use::SrvCompute);
                       b.use(resolved, Use::UavCompute);
+                      if (reuseRays.valid()) b.use(reuseRays, Use::SrvCompute);
                       if (words.valid()) b.use(words, Use::SrvCompute);
                       if (snap.valid()) b.use(snap, Use::SrvCompute);
                   },
-                  [&shaders, modes, results, depth, gbuffer, reflection, resolved, width, height, tilesX, tilesY, frameConstants, reuseFrame, s, samplingBias16, words, snap, downsampleWord](PassContext& c) {
+                  [&shaders, modes, results, depth, gbuffer, reflection, resolved, reuseRays, width, height, tilesX, tilesY, frameConstants, reuseFrame, s, samplingBias16, words, snap, downsampleWord](PassContext& c) {
                       const uint32_t k[20] = { c.srv(modes), c.srv(results), c.srv(depth), c.srv(gbuffer), c.srv(reflection), c.uav(resolved), height, reuseFrame,
                                                width, height, s.lumenReconstructionSamples, s.lumenReconstruction ? 0u : 1u,
                                                asU(s.lumenReconstructionRadius), asU(s.lumenMaxRayIntensity), asU(s.lumenTonemapRange),
-                                               asU(samplingBias16 / 65535.0f), words.valid() ? c.srv(words) : 0xFFFFFFFFu, snap.valid() ? c.srv(snap) : 0xFFFFFFFFu, downsampleWord, 0 };
-                      c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionReuseResolve"));
+                                               asU(samplingBias16 / 65535.0f), words.valid() ? c.srv(words) : 0xFFFFFFFFu, snap.valid() ? c.srv(snap) : 0xFFFFFFFFu, downsampleWord,
+                                               reuseRays.valid() ? c.srv(reuseRays) : 0xFFFFFFFFu };
+                      c.cmd->SetPipelineState(shaders.compute(reuseRays.valid() ? "Passes/Reflection/ReflectionReuseResolveCached" : "Passes/Reflection/ReflectionReuseResolve"));
                       c.computeConstants(k, 20);
                       c.bindFrameConstants(frameConstants);
-                      c.cmd->Dispatch(tilesX, tilesY, 1);
+                      gpuDispatch(c.cmd, tilesX, tilesY, 1);
                   });
         g.addPass("r.refl.reuse.temporal", QueueType::Compute,
                   [&](PassBuilder& b) {
@@ -2041,7 +2055,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionReuseTemporal"));
                       c.computeConstants(k, 24);
                       c.bindFrameConstants(frameConstants);
-                      c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (width + 7) / 8, (height + 7) / 8, 1);
                   });
         g.addPass("r.refl.reuse.filter", QueueType::Compute,
                   [&](PassBuilder& b) {
@@ -2065,7 +2079,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionReuseFilter"));
                       c.computeConstants(k, 24);
                       c.bindFrameConstants(frameConstants);
-                      c.cmd->Dispatch(tilesX, tilesY, 1);
+                      gpuDispatch(c.cmd, tilesX, tilesY, 1);
                   });
     }
     else if (main.visId.valid() && main.visibleClusters.valid())
@@ -2121,7 +2135,7 @@ void ReflectionSystem::record(FramePassContext& fc, ViewResources& main, rt::Ray
                       c.cmd->SetPipelineState(shaders.compute("Passes/Reflection/ReflectionAccumulate"));
                       c.computeConstants(k, 20);
                       c.bindFrameConstants(frameConstants);
-                      c.cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                      gpuDispatch(c.cmd, (width + 7) / 8, (height + 7) / 8, 1);
                   });
     }
     // One copy into this frame's read-back slot (read framesInFlight later): candidate pixel counts, timestamps (trace,
