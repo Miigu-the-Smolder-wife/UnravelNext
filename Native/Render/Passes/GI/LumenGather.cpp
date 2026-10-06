@@ -543,11 +543,11 @@ void GiSystem::recordLumen(FramePassContext& fc, ViewResources& view, BufferRef 
     const bool atmosphere = fr.transmittanceLut.valid() && fr.multiScatterLut.valid() && fr.skyViewLut.valid() && fr.aerialPerspective.valid();
     const TextureRef luts[4] = { fr.transmittanceLut, fr.multiScatterLut, fr.skyViewLut, fr.aerialPerspective };
     const uint32_t traceCapacity = traceX * traceY;
-    // Hit lighting is its own ray stage when deferred. Keep its chunk at the
-    // monolithic worst-case budget: one surface hit can still launch the sun
-    // and local-light shadow rays. The traversal stage must not inherit that
-    // factor after those rays have been split out.
-    const uint32_t lightingChunk = std::max(1u, L.raysPerDispatch / 3u);
+    // Hit lighting is its own ray stage when deferred. A queued surface hit can
+    // launch at most the sun and one sampled local-light shadow ray, so budget
+    // this stage for two rays per thread. The primary traversal is in the
+    // preceding stage and must not be charged here again.
+    const uint32_t lightingChunk = std::max(1u, L.raysPerDispatch / 2u);
     const uint32_t deferredCapacity = L.compactTraces ? std::min(traceCapacity, 1u << 20) : traceCapacity;
     const bool deferred = L.hitSurfaceCache && fc.resources.cards.valid() && !hairParams.valid() &&
         rt::hitLightingStorageFits(deferredCapacity) &&
