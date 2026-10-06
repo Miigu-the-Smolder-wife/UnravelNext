@@ -22,8 +22,8 @@ groupshared uint gs_new[64];
 [numthreads(8, 8, 1)]
 void main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
-    const uint2 atlas = group.xy;
-    const uint probe = lgProbeIndex(atlas);
+    const uint probe = group.x;
+    const uint2 atlas = lgAtlasCoord(probe);
     ByteAddressBuffer adaptive = ResourceDescriptorHeap[P[10].z];
     Texture2D<float> probeDepth = ResourceDescriptorHeap[P[10].w];
     Texture2D<float4> probePosition = ResourceDescriptorHeap[P[11].y];
